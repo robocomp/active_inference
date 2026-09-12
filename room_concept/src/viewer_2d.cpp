@@ -860,13 +860,17 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points,
         return item;
     });
 
-    const Eigen::Vector2f robot_xy = robot_pose.translation();
+    const Eigen::Vector2f robot_xy = (canvas_from_map_ * robot_pose).translation();
 
     for (size_t i = 0; i < n; ++i)
     {
         const auto& t = *shown[i];
-        rgb_corner_items_[i]->setPos(t.p_room_meas.x(), t.p_room_meas.y());
-        rgb_model_items_[i]->setPos(t.p_room.x(), t.p_room.y());
+        // p_room_meas / p_room are 3-D room points; only their (x, y) is drawn, so the 2-D
+        // room<-map transform is applied to head<2>() rather than to the 3-vector.
+        const Eigen::Vector2f meas_c  = canvas_from_map_ * Eigen::Vector2f(t.p_room_meas.head<2>());
+        const Eigen::Vector2f model_c = canvas_from_map_ * Eigen::Vector2f(t.p_room.head<2>());
+        rgb_corner_items_[i]->setPos(meas_c.x(), meas_c.y());
+        rgb_model_items_[i]->setPos(model_c.x(), model_c.y());
         rgb_corner_line_items_[i]->setLine(t.p_room.x(), t.p_room.y(),
                                            t.p_room_meas.x(), t.p_room_meas.y());
         rgb_corner_robot_line_items_[i]->setLine(robot_xy.x(), robot_xy.y(),
@@ -1003,8 +1007,13 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         return item;
     });
 
-    const Eigen::Matrix2f R = robot_pose.linear();
-    const Eigen::Vector2f t = robot_pose.translation();
+    // Room frame, like every other layer (see set_canvas_from_map). A detection is in the ROBOT
+    // frame and rides the composed pose; a model corner is already in the MAP frame and is carried
+    // directly. Getting only one of the two would draw the pair apart by the frame difference, which
+    // is exactly the residual this overlay exists to show.
+    const Eigen::Affine2f pose_c = canvas_from_map_ * robot_pose;
+    const Eigen::Matrix2f R = pose_c.linear();
+    const Eigen::Vector2f t = pose_c.translation();
 
     for (size_t i = 0; i < n; ++i)
     {
@@ -1013,7 +1022,7 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         // Detected: transform from robot frame to world using display pose
         const Eigen::Vector2f det_world = R * m.detected + t;
         // Predicted: use known model world position (exact, no lag)
-        const Eigen::Vector2f pred_world = m.model_world;
+        const Eigen::Vector2f pred_world = canvas_from_map_ * m.model_world;
 
         corner_detected_items_[i]->setPos(det_world.x(), det_world.y());
         corner_predicted_items_[i]->setPos(pred_world.x(), pred_world.y());

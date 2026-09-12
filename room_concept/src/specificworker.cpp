@@ -33,6 +33,8 @@
 #include <chrono>
 #include <random>
 #include <stdexcept>
+#include <QElapsedTimer>
+#include <QCoreApplication>
 #include <fstream>
 #include <unordered_set>
 #include <QDir>
@@ -145,6 +147,39 @@ void SpecificWorker::initialize()
 {
     GenericWorker::initialize();
 
+    // ── STARTUP PHASES: TIMED, AND THE WINDOW STAYS ALIVE THROUGH THEM ───────────────────────────
+    // initialize() runs on the GUI THREAD, so every millisecond spent in it is a millisecond the
+    // window cannot paint, resize or respond — the agent looks hung from the moment it appears until
+    // the first estimate lands. Two things here, and they are deliberately together:
+    //   · each phase's cost is appended to tmp/startup_timing.csv, so "which part is slow" stops
+    //     being a guess. Nothing in this agent measured startup at all; compute_timing.csv only
+    //     begins once compute() is already ticking.
+    //   · processEvents() is pumped at each boundary, so the window paints and stays responsive
+    //     across the slow phases instead of after them. Safe at these points: the DSR update signals
+    //     are not connected until later in this function, so no graph slot can re-enter here, and the
+    //     compute timer has not started.
+    QElapsedTimer init_timer, phase_timer;
+    init_timer.start();
+    phase_timer.start();
+    std::ofstream startup_csv("tmp/startup_timing.csv", std::ios::out | std::ios::trunc);
+    if (startup_csv.is_open())
+    {
+        startup_csv.imbue(std::locale::classic());
+        startup_csv << "phase,ms,cumulative_ms\n";
+    }
+    const auto phase = [&](const char* name)
+    {
+        const auto ms = phase_timer.restart();
+        if (startup_csv.is_open())
+            startup_csv << name << ',' << ms << ',' << init_timer.elapsed() << '\n' << std::flush;
+        if (ms > 200)
+            qInfo().noquote() << QString("[startup] %1 took %2 ms (cumulative %3 ms) — the window is "
+                                         "blocked for the duration of any phase on this thread")
+                                     .arg(name).arg(ms).arg(init_timer.elapsed());
+        QCoreApplication::processEvents();
+    };
+    phase("generic_worker");
+
     // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att>();
     qInfo() << "Ignoring DSR RGBD payload attributes cam_rgb/cam_depth in local graph updates";
@@ -154,6 +189,7 @@ void SpecificWorker::initialize()
 
     // ── Load all config (agent + RoomConcept + EpistemicController params) ──
     rc::load_room_config(configLoader, params, room_concept_, epistemic_controller_);
+    phase("load_config");
 
     // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──
     rt_api_ = G->get_rt_api();
@@ -172,6 +208,7 @@ void SpecificWorker::initialize()
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
         [this] { trigger_graph_layout_twopi(); });
     lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
+    phase("ingestors");
     // No source switch any more: the producer no longer writes the imu_* attributes, so a "dsr"
     // option would select a path with nothing on it — a dead config of exactly the kind this
     // codebase keeps rediscovering. The escape hatch is git, not a flag that cannot work.
@@ -308,7 +345,9 @@ void SpecificWorker::initialize()
     else
         initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
+    phase("room_model");
     room_concept_.set_seed_pose_file(pose_path);
+    phase("seed_pose");
 
     // The DSR graph viewer is OPTIONAL now: the layout GUI lives in its own top-level window
     // (see RoomViewer), so the agent runs with Agent.graph=false (no DSRViewer created). When a
@@ -329,6 +368,7 @@ void SpecificWorker::initialize()
     // AFTER the viewer exists. Registering this beside the ingestor setup (where the camera calib
     // is otherwise configured) put it before make_unique, so the `if (viewer_)` was false and the
     // handler was never installed — a Reset that silently cleared only half the evidence.
+    phase("viewer_window");   // the window EXISTS from here; everything after this is visible hang time
     viewer_->set_camera_reset_handler([this]
     {
         mp_pool_.reset();
@@ -385,6 +425,7 @@ void SpecificWorker::initialize()
 
     // LiDAR is pumped synchronously from compute() (no ingest thread); just start the localizer.
     room_concept_.start();
+    phase("localiser_thread");
 
     // ── Presence coordinator ────────────────────────────────────────────────
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
