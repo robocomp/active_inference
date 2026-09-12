@@ -120,6 +120,11 @@ class Viewer2D : public QObject
             bool have_loc;
             bool is_initialized;
             bool has_room_polygon;
+            /// The wall map has a polygon of its own. The model-room rectangle is then redundant AND
+            /// misleading: it is drawn centred on the SCENE ORIGIN, which is only where the room sits
+            /// after the one-shot re-anchor — before that it stands beside the real layout as a
+            /// second, wrong room. One layout on the canvas, and it is the estimate.
+            bool wall_polygon_ready = false;
             float room_width;
             float room_length;
             Eigen::Affine2f loc_pose;    // Raw localization pose (no forward projection)

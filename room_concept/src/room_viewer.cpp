@@ -354,6 +354,16 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         room_l = s[1];
     }
 
+    // The wall map draws the layout as soon as it has one, and the model rect then comes off the
+    // canvas. Kept until then because update_estimated_room_rect() performs the only fit_view() in
+    // Estimate mode, so the first frames still need it to put the scene at a readable scale.
+    if (have_loc and room_concept_ != nullptr and room_concept_->estimating())
+    {
+        last_wall_view_ = loc_res->wall_view;
+        have_wall_view_ = true;
+    }
+    const bool wall_poly_ready = have_wall_view_ and last_wall_view_.polygon.verts.size() >= 3;
+
     viewer_2d_->update_frame({
         .lidar_points     = lidar_for_canvas,
         .display_pose     = pose_for_draw,
@@ -362,6 +372,7 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         .have_loc         = have_loc,
         .is_initialized   = room_concept_ && room_concept_->is_initialized(),
         .has_room_polygon = has_room_polygon_,
+        .wall_polygon_ready = wall_poly_ready,
         .room_width       = room_w,
         .room_length      = room_l,
         .loc_pose         = loc_pose,

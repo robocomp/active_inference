@@ -2182,23 +2182,17 @@ namespace rc
                                                    "merges, re-derivations or wall updates — the map is now GIVEN.")
                                                 .arg(pub.verts.size()).arg(w_hi - w_lo, 0, 'f', 3).arg(h_hi - h_lo, 0, 'f', 3)
                                                 .arg(poly.worst_corner_sigma, 0, 'f', 4);
-                    // ── AND THE MODEL ROOM IS RE-SEEDED FROM THE LAYOUT WE JUST MEASURED ─────────
-                    // The model's rectangle state (width, length, x, y, phi) had been carrying the
-                    // FIRST SCAN's OBB ever since initialisation: in Estimate mode the model is not
-                    // optimised, so nothing ever pulled it onto the walls that are the actual
-                    // estimate, and the 2-D canvas drew the two superimposed — the inert seed box in
-                    // magenta over the live wall map. That is the discrepancy a viewer sees and
-                    // reasonably reads as a broken estimate.
-                    // The re-anchor immediately above put the map frame's origin on the layout's
-                    // Manhattan bbox centre with theta0 = 0, so the published polygon is centred and
-                    // axis-aligned by construction and its bbox IS the model's rectangle.
-                    if (model_ != nullptr)
-                    {
-                        model_->init_from_state(w_hi - w_lo, h_hi - h_lo, 0.f, 0.f, 0.f, params.wall_height);
-                        model_->update_polygon_vertices(poly.verts);
-                        qInfo().noquote() << QString("[room][wall-slam] model room re-seeded from the frozen layout: %1 x %2 m at the origin")
-                                                 .arg(w_hi - w_lo, 0, 'f', 3).arg(h_hi - h_lo, 0, 'f', 3);
-                    }
+                    // ⚠ DO NOT re-init the model here. init_from_state() REGISTERS torch parameters
+                    // (robot_pos, robot_theta, half_extents) and a torch::nn::Module refuses a second
+                    // registration of the same name — calling it on a live model aborts the process
+                    // with "Parameter 'robot_pos' already defined", which is exactly what happened the
+                    // first time this ran. The model does not need re-seeding anyway:
+                    // update_polygon_vertices() already refreshes its geometry and half_extents from
+                    // the wall polygon every frame, by design, without touching the pose tensors.
+                    // The magenta box was never a stale MODEL — it was the viewer drawing that bbox
+                    // centred on the scene origin (see Viewer2D::update_estimated_room_rect), which is
+                    // only where the room is after the re-anchor. It is now dropped once the wall map
+                    // has a polygon of its own.
                 }
             }
             if (model_ != nullptr and model_->has_state())

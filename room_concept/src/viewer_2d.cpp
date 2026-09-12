@@ -427,8 +427,9 @@ void Viewer2D::update_frame(const FrameData& fd)
     // them when the frame carries no result). This call also performs the ONLY fit_view() in Estimate
     // mode, so gating it on have_loc left the canvas at the view's construction scale of one scene
     // unit per pixel — a 6 m room drawn 6 px wide, which is the blank the run used to start with.
-    if (not fd.has_room_polygon and fd.room_width > 0.f and fd.room_length > 0.f)
-        update_estimated_room_rect(fd.room_width, fd.room_length, false);
+    if (fd.room_width > 0.f and fd.room_length > 0.f)
+        update_estimated_room_rect(fd.room_width, fd.room_length,
+                                   fd.has_room_polygon or fd.wall_polygon_ready);
     else if (polygon_item_ == nullptr and estimated_room_item_ == nullptr and not fd.lidar_points.empty())
         // Nothing with an extent exists yet — not even a seed box. Frame the robot and its scan so
         // the first sweep is readable rather than a handful of pixels around the origin.
