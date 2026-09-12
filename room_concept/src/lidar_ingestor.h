@@ -129,6 +129,10 @@ public:
     /// the likelihood test accepted.
     std::atomic<float> measured_ceiling_z_{0.f};
     std::atomic<int>   measured_ceiling_pts_{0};
+    /// The ceiling plane's own SPREAD in metres, floored at the histogram's resolution — an honest
+    /// uncertainty for the height, not a standard error. See update_ceiling_cap for why a leaky
+    /// histogram's count must not be treated as a sample size. 0 = never measured.
+    std::atomic<float> measured_ceiling_sigma_{0.f};
 private:
     // Startup geometry-check state (ingest thread only; re-armed by start()).
     bool  geom_check_done_ = false;

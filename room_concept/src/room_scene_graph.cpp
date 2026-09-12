@@ -264,9 +264,26 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
                 {
                     G_->add_or_modify_attrib_local<room_height_att>(rn.value(), mz);
+                    // ⚠ OWED: PUBLISH THE UNCERTAINTY BESIDE THE VALUE, so the ceiling becomes a belief
+                    //   on the room node and not just a number. RoomConcept already carries it
+                    //   (measured_ceiling_sigma(), the plane's spread from LidarIngestor), and the
+                    //   camera's mount fit can REFINE it: solving the mount from floor corners alone
+                    //   and from ceiling corners alone differs by exactly the ceiling's error, with a
+                    //   measured gain of -0.81 (ricoh) / -0.99 (zed) mm per mm. A refinement needs a
+                    //   prior WITH A WIDTH, which is why the second number has to be shared and not
+                    //   only logged.
+                    //   It needs ONE line in cortex, and the user owns that reinstall (CLAUDE.md):
+                    //       REGISTER_TYPE(room_height_sigma, float, false)
+                    //   in core/include/dsr/core/types/type_checking/dsr_attr_name.h. Then here:
+                    //       G_->add_or_modify_attrib_local<room_height_sigma_att>(
+                    //           rn.value(), room_concept_->measured_ceiling_sigma());
+                    //   Until that lands the width exists in-process and in the log only, so nothing
+                    //   outside this agent can weigh the ceiling against anything else.
                     G_->update_node(rn.value());
                     qInfo() << "[room] room_height republished:" << published_room_height_ << "m ->" << mz
-                            << "m (the LiDAR's ceiling; every agent reading the attribute follows)";
+                            << "m +/-" << room_concept_->measured_ceiling_sigma()
+                            << "m (the LiDAR's ceiling; every agent reading the attribute follows —"
+                            << "the sigma is NOT yet on the node, see the note above)";
                     published_room_height_ = mz;
                 }
                 ceiling_disagree_frames_ = 0;

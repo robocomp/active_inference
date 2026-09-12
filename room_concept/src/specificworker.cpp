@@ -2124,6 +2124,11 @@ void SpecificWorker::pump_calib_channels()
                 "[imgedge] wall-ceiling contour re-projected: room_height %.4f -> %.4f m (%s;"
                 " the scenario states %.4f)", ic.room_height, want,
                 mz > 1.5f ? "MEASURED by the LiDAR" : "stated in the scenario", params.room_height);
+            if (mz > 1.5f)
+                qInfo().noquote() << QString::asprintf(
+                    "         its uncertainty is +/- %.3f m — the ceiling corners' z now carries that,"
+                    " and the mount's height can no longer silently absorb it",
+                    room_concept_.measured_ceiling_sigma());
             ic.room_height = want;
             image_edge_source_->set_config(ic);
         }
@@ -2382,8 +2387,14 @@ void SpecificWorker::compute()
     // attribute is not rewritten every frame) and pump_image_edges projects the wall-ceiling contour
     // at it instead of at the stated constant.
     if (lidar_ingestor_)
+    {
         room_concept_.set_measured_ceiling(
             lidar_ingestor_->measured_ceiling_z_.load(std::memory_order_relaxed));
+        // The width travels with the value. A consumer that may REFINE this number needs to know how
+        // much it is allowed to move, and one that only draws it can ignore the second number.
+        room_concept_.set_measured_ceiling_sigma(
+            lidar_ingestor_->measured_ceiling_sigma_.load(std::memory_order_relaxed));
+    }
     auto init_time = std::chrono::steady_clock::now();
     // MICROSECONDS, not milliseconds. These were qint64 *_ms read off QElapsedTimer::elapsed(),
     // which is integer ms — and every stage here is sub-millisecond, so every section column in

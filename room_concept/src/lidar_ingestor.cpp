@@ -363,7 +363,42 @@ void LidarIngestor::update_ceiling_cap(bool startup)
         chi = exp_ceil + 0.4f;
     }
     clo = std::max(clo, params_->LIDAR_HIGH_MIN_HEIGHT + 0.2f);
-    const auto [ceil_z, ceil_cnt] = peak_in(geom_hist_, clo, chi);
+    const auto [peak_z, ceil_cnt] = peak_in(geom_hist_, clo, chi);
+    // ── SUB-BIN CENTRE AND AN HONEST SPREAD ──────────────────────────────────────────────────────
+    // The peak BIN is 2 cm wide, and a ceiling read to 2 cm is not good enough to hand a camera: the
+    // mount's height parameter reads this number directly, and 14 cm of error in it was being charged
+    // to the camera's mount (2026-09-12). The count-weighted mean over the bins that straddle the
+    // peak resolves it below the bin, and Sheppard's correction removes the binning's own contribution
+    // to the spread.
+    // ★★★ AND THE SPREAD IS THE UNCERTAINTY — **NOT** spread/sqrt(n). geom_hist_ is LEAKY: its counts
+    //     are the same physical plane seen again every scan, exponentially forgotten, so n is an
+    //     effective weight and not a number of independent samples. Dividing by its root would claim
+    //     a tenth of a millimetre on a surface whose returns are centimetres apart, which is the
+    //     clustering error this codebase has paid for more than once. What limits this measurement is
+    //     how flat the plane is and where the sensor thinks it is, and that does not shrink with more
+    //     scans of the same room.
+    float ceil_z = peak_z, ceil_sigma = GEOM_BIN;
+    {
+        constexpr int kHalf = 3;                       // +/- 6 cm: a ceiling plane's returns, not a room
+        double w = 0, wz = 0, wzz = 0;
+        for (int b = 0; b < static_cast<int>(geom_hist_.size()); ++b)
+        {
+            const float z = GEOM_Z_LO + (b + 0.5f) * GEOM_BIN;
+            if (std::abs(z - peak_z) > kHalf * GEOM_BIN) continue;
+            const double n = geom_hist_[b];
+            if (not (n > 0)) continue;
+            w += n; wz += n * z; wzz += n * static_cast<double>(z) * z;
+        }
+        if (w > 0)
+        {
+            const double m = wz / w;
+            const double var = std::max(0.0, wzz / w - m * m - GEOM_BIN * GEOM_BIN / 12.0);
+            ceil_z = static_cast<float>(m);
+            // Floored at the bin's own resolution: a spread that comes out smaller than the grid it
+            // was measured on is the grid, not the plane.
+            ceil_sigma = std::max(static_cast<float>(std::sqrt(var)), GEOM_BIN / std::sqrt(12.f));
+        }
+    }
     const float cfg_max = params_->LIDAR_HIGH_MAX_HEIGHT;
 
     // Median horizontal radius of the returns in a z-window, from the joint (z,r) histogram. This is the
@@ -460,11 +495,15 @@ void LidarIngestor::update_ceiling_cap(bool startup)
                                  params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
         measured_ceiling_z_.store(ceil_z, std::memory_order_relaxed);
         measured_ceiling_pts_.store(ceil_cnt, std::memory_order_relaxed);
+        measured_ceiling_sigma_.store(ceil_sigma, std::memory_order_relaxed);
         if (log_now(verdict))
-        std::println("[CeilingCheck] CEILING at body z = {:.2f} m ({} pts): r_peak={:.2f} m matches the "
-                     "annulus prediction {:.2f} m (inner edge {:.2f} m) better than the wall {:.2f} m "
-                     "-> high band capped at {:.2f} m.",
-                     ceil_z, ceil_cnt, r_peak, pred_ceiling, r_in, pred_wall, high_max_z_);
+        std::println("[CeilingCheck] CEILING at body z = {:.3f} +/- {:.3f} m ({} pts, peak bin {:.2f}): "
+                     "r_peak={:.2f} m matches the annulus prediction {:.2f} m (inner edge {:.2f} m) "
+                     "better than the wall {:.2f} m -> high band capped at {:.2f} m. The sigma is the "
+                     "plane's SPREAD, not spread/sqrt(n): a leaky histogram holds the same plane over "
+                     "and over, so n is a weight and not a sample count.",
+                     ceil_z, ceil_sigma, ceil_cnt, peak_z, r_peak, pred_ceiling, r_in, pred_wall,
+                     high_max_z_);
     }
     else if (ceil_cnt >= 400 and spatial_ok)   // strong z-peak but at the wall range → wall-top, keep it
     {

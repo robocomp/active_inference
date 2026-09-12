@@ -1722,9 +1722,23 @@ private:
     // ring by which shape the measured radius fits. Read by the scene graph, which publishes it on
     // the room node, and by the image-edge module, which projects the wall-ceiling contour.
     std::atomic<float> measured_ceiling_m_{0.f};
+    std::atomic<float> measured_ceiling_sigma_m_{0.f};
 public:
     [[nodiscard]] float measured_ceiling() const noexcept { return measured_ceiling_m_.load(std::memory_order_relaxed); }
     void set_measured_ceiling(float z) noexcept { measured_ceiling_m_.store(z, std::memory_order_relaxed); }
+    /// The ceiling measurement's own uncertainty, metres (the plane's spread, NOT a standard error —
+    /// see LidarIngestor::update_ceiling_cap). 0 = never measured.
+    ///
+    /// ★ CARRIED SO THE HEIGHT CAN BE RE-MEASURED LATER, not for display. The camera's mount fit reads
+    ///   the ceiling directly: solve it from floor corners alone and from ceiling corners alone and the
+    ///   two disagree by exactly the ceiling's error, with a gain measured at -0.81 (ricoh) and -0.99
+    ///   (zed) millimetres of apparent mount height per millimetre of ceiling (2026-09-12). So the
+    ///   camera can refine this number, and a refinement needs a prior with a width — a value alone
+    ///   cannot say how much it may move.
+    [[nodiscard]] float measured_ceiling_sigma() const noexcept
+    { return measured_ceiling_sigma_m_.load(std::memory_order_relaxed); }
+    void set_measured_ceiling_sigma(float s) noexcept
+    { measured_ceiling_sigma_m_.store(s, std::memory_order_relaxed); }
 private:
     bool wall_reanchored_ = false;
     std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)
