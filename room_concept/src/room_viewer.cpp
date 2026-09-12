@@ -354,10 +354,16 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         room_l = s[1];
     }
 
-    // The wall map draws the layout as soon as it has one, and the model rect then comes off the
-    // canvas. Kept until then because update_estimated_room_rect() performs the only fit_view() in
-    // Estimate mode, so the first frames still need it to put the scene at a readable scale.
-    if (have_loc and room_concept_ != nullptr and room_concept_->estimating())
+    // ── THE CACHE ONLY EVER TAKES A VIEW THAT HAS SOMETHING IN IT ────────────────────────────────
+    // UpdateResult::wall_view is filled in wall_slam_after_solve, which runs downstream of the pose
+    // solve — and the prediction early-exit skips that. Measured on the first frozen-layout run: with
+    // the map fixed and correct the early exit took 2612 of 2622 frames (99.6%), so nearly every
+    // result carried an EMPTY wall view. Caching it unconditionally overwrote the good map with
+    // nothing 99.6% of the time, which is why the overlay vanished and the magenta model rect — which
+    // comes off the canvas as soon as the wall map has a polygon — stayed up.
+    // A stale map is honest here (the walls are frozen; they are not moving), an empty one is not.
+    if (have_loc and room_concept_ != nullptr and room_concept_->estimating()
+        and (not loc_res->wall_view.walls.empty() or loc_res->wall_view.polygon.verts.size() >= 3))
     {
         last_wall_view_ = loc_res->wall_view;
         have_wall_view_ = true;
@@ -396,11 +402,7 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     // would put them somewhere the LiDAR never saw.
     if (room_concept_ != nullptr and room_concept_->estimating())
     {
-        if (have_loc)
-        {
-            last_wall_view_ = loc_res->wall_view;
-            have_wall_view_ = true;
-        }
+        // (the cache was already refreshed above, under the not-empty guard)
         const std::vector<wallseg::WallSegment> no_segments;
         viewer_2d_->draw_wall_map(have_loc ? last_wall_view_.segments : no_segments,
                                   last_wall_view_.walls,

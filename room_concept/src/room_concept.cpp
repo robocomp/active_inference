@@ -2103,6 +2103,42 @@ namespace rc
             wall_stat_frames_ = wall_stat_assoc_ = wall_stat_segs_ = wall_stat_twins_ = wall_stat_births_ = 0;
             wall_stat_deaths_ = 0; wall_stat_contained_ = 0;
         }
+        // ── DO THE RETURNS FALL SHORT OF THE WALL WE FITTED TO THEM? ────────────────────────
+        // One row per associated segment: the median signed perpendicular residual of its returns
+        // about the wall, in the map frame. Positive = the returns sit on the room side, i.e. short
+        // of the fitted wall. This is the systematic component the paper's corner floor represents,
+        // and it was only ever measured offline (the harness prints it per wall; the live agent had
+        // nothing) or inferred indirectly from recovered room dimensions.
+        //
+        // ⚠ IT LIVES HERE, in the per-frame observe stage, and NOT in wall_slam_after_solve, because
+        // that runs downstream of the pose solve and the prediction early-exit skips it. Measured on
+        // the first frozen-layout run: with the map fixed and right, the early exit took 2612 of 2622
+        // frames — 99.6% — so every writer inside after_solve fell to one row every few seconds and
+        // this log went dark at exactly the moment it became worth reading. It also carries its own
+        // tick: sharing layout_trace_tick_ meant its flush condition stopped advancing too, so rows
+        // were written and never reached the disk.
+        if (not last_wall_frame_.assoc.empty())
+        {
+            if (not resid_csv_.is_open())
+            {
+                std::filesystem::create_directories("tmp");
+                resid_csv_.open("tmp/wall_residual.csv", std::ios::out | std::ios::trunc);
+                if (resid_csv_.is_open())
+                {
+                    resid_csv_.imbue(std::locale::classic());
+                    resid_csv_ << "frame,ts_ms,wall_id,npts,pda,resid_med_m\n";
+                }
+            }
+            if (resid_csv_.is_open())
+            {
+                for (const auto& a : last_wall_frame_.assoc)
+                    if (a.resid_n > 0)
+                        resid_csv_ << resid_tick_ << ',' << wall_frame_ts_ << ',' << a.wall_id
+                                   << ',' << a.resid_n << ',' << a.pda << ',' << a.resid_med << '\n';
+                if ((++resid_tick_ % 20u) == 0) resid_csv_.flush();
+            }
+        }
+
         if (wall_map_.walls.size() > 64 and wall_map_.walls.size() % 32 == 0)
             qWarning() << "[room][wall-slam]" << wall_map_.walls.size()
                        << "walls — far more than a room has. If they are twins of a few real ones,"
@@ -2193,6 +2229,35 @@ namespace rc
                     // centred on the scene origin (see Viewer2D::update_estimated_room_rect), which is
                     // only where the room is after the re-anchor. It is now dropped once the wall map
                     // has a polygon of its own.
+                    //
+                    // ── IS THE FROZEN ROOM ACTUALLY AXIS-ALIGNED? ───────────────────────────────
+                    // The re-anchor above rotates the whole map by theta0, so every wall should land
+                    // on a multiple of 90 deg and the room should sit square to the axes. That is an
+                    // ASSERTION about theta0, not a fact: it is estimated from the segments, and if
+                    // it is off by d degrees when this one-shot fires, the room is left tilted by d
+                    // for ever — the re-anchor never runs again, and under the freeze theta0 cannot
+                    // correct it either. So the residual tilt is printed per wall and as a worst
+                    // case, because a viewer looking at a tilted cloud in an axis-aligned frame can
+                    // see that something is wrong but not which of the two is responsible.
+                    {
+                        float worst_tilt = 0.f;
+                        QStringList phis;
+                        for (const auto& w : wall_map_.walls)
+                        {
+                            const float deg = w.phi * 180.f / static_cast<float>(M_PI);
+                            float off = std::fmod(std::fabs(deg), 90.f);
+                            if (off > 45.f) off = 90.f - off;
+                            worst_tilt = std::max(worst_tilt, off);
+                            phis << QString("w%1 %2deg(off %3)").arg(w.id).arg(deg, 0, 'f', 2).arg(off, 0, 'f', 2);
+                        }
+                        qWarning().noquote()
+                            << QString("[room][wall-slam] frozen frame check: theta0 %1 deg (born %2), "
+                                       "worst wall tilt off axis %3 deg | %4")
+                                   .arg(wall_map_.theta0 * 180.f / static_cast<float>(M_PI), 0, 'f', 2)
+                                   .arg(wall_map_.theta0_born ? "yes" : "NO")
+                                   .arg(worst_tilt, 0, 'f', 2)
+                                   .arg(phis.join(", "));
+                    }
                 }
             }
             if (model_ != nullptr and model_->has_state())
@@ -2261,34 +2326,6 @@ namespace rc
                       << (poly.closed ? 1 : 0) << ',' << (poly.publishable ? 1 : 0) << ','
                       << poly.worst_corner_sigma << ',' << (map_ready_.load() ? 1 : 0) << "\n";
             wall_csv_.flush();
-        }
-
-        // ── DO THE RETURNS FALL SHORT OF THE WALL WE FITTED TO THEM? ────────────────────────
-        // One row per associated segment: the median signed perpendicular residual of its returns
-        // about the wall, in the map frame. Positive = the returns sit on the room side, i.e. short
-        // of the fitted wall. This is the systematic component the paper's corner floor represents,
-        // and it was only ever measured offline (the harness prints it per wall; the live agent had
-        // nothing) or inferred indirectly from recovered room dimensions.
-        if (not last_wall_frame_.assoc.empty())
-        {
-            if (not resid_csv_.is_open())
-            {
-                std::filesystem::create_directories("tmp");
-                resid_csv_.open("tmp/wall_residual.csv", std::ios::out | std::ios::trunc);
-                if (resid_csv_.is_open())
-                {
-                    resid_csv_.imbue(std::locale::classic());
-                    resid_csv_ << "frame,ts_ms,wall_id,npts,pda,resid_med_m\n";
-                }
-            }
-            if (resid_csv_.is_open())
-            {
-                for (const auto& a : last_wall_frame_.assoc)
-                    if (a.resid_n > 0)
-                        resid_csv_ << layout_trace_tick_ << ',' << wall_frame_ts_ << ',' << a.wall_id
-                                   << ',' << a.resid_n << ',' << a.pda << ',' << a.resid_med << '\n';
-                if ((layout_trace_tick_ % 20u) == 0) resid_csv_.flush();
-            }
         }
 
         // ── THE PUBLISHED LAYOUT, WITH THE UNCERTAINTY ATTACHED TO IT ────────────────────────
