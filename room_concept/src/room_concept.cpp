@@ -2188,6 +2188,48 @@ namespace rc
                       << poly.worst_corner_sigma << ',' << (map_ready_.load() ? 1 : 0) << "\n";
             wall_csv_.flush();
         }
+
+        // ── THE PUBLISHED LAYOUT, WITH THE UNCERTAINTY ATTACHED TO IT ────────────────────────
+        // etc/wall_slam.csv above records only the WORST corner sigma, which cannot be checked
+        // against anything: grading a layout's uncertainty needs each vertex and the sigma claimed
+        // for it, so the two can be matched to ground truth one-to-one. The offline harness has
+        // written this trace for a while (RunConfig::poly_csv) and the live agent never did, which
+        // is why every calibration number so far comes from simulated observations. Same columns and
+        // same semantics as the harness, so one analysis script reads both.
+        // Semicolon-separated because the vertex list keeps its commas; classic locale because this
+        // machine runs es_ES and a comma decimal separator would make it unreadable (CLAUDE.md).
+        if (not layout_csv_.is_open())
+        {
+            std::filesystem::create_directories("tmp");
+            layout_csv_.open("tmp/layout_trace.csv", std::ios::out | std::ios::trunc);
+            if (layout_csv_.is_open())
+            {
+                layout_csv_.imbue(std::locale::classic());
+                layout_csv_ << "# frame;ts_ms;est_x,est_y,est_th;verts;corner_sigma;edge_sigma_d;closed,publishable\n";
+            }
+        }
+        if (layout_csv_.is_open() and not poly.verts.empty())
+        {
+            const auto st = (model_ != nullptr and model_->has_state()) ? model_->get_state()
+                                                                       : Eigen::Matrix<float, 5, 1>::Zero().eval();
+            layout_csv_ << layout_trace_tick_++ << ';' << wall_frame_ts_ << ';'
+                        << st[2] << ',' << st[3] << ',' << st[4] << ';';
+            for (std::size_t i = 0; i < poly.verts.size(); ++i)
+                layout_csv_ << (i ? " " : "") << poly.verts[i].x() << ',' << poly.verts[i].y();
+            layout_csv_ << ';';
+            for (std::size_t i = 0; i < poly.corners.size(); ++i)
+                layout_csv_ << (i ? " " : "") << poly.corners[i].sigma;
+            layout_csv_ << ';';
+            // Per-edge sigma_d comes from the wall the edge belongs to: 1/sqrt(Lambda_dd).
+            for (std::size_t i = 0; i < poly.wall_of_edge.size(); ++i)
+            {
+                const auto* w = wall_map_.find(poly.wall_of_edge[i]);
+                const float lam = (w != nullptr) ? w->information(1, 1) : 0.f;
+                layout_csv_ << (i ? " " : "") << ((lam > 1e-9f) ? 1.f / std::sqrt(lam) : -1.f);
+            }
+            layout_csv_ << ';' << (poly.closed ? 1 : 0) << ',' << (poly.publishable ? 1 : 0) << '\n';
+            if ((layout_trace_tick_ % 20u) == 0) layout_csv_.flush();
+        }
     }
 
     void RoomConcept::reanchor_map_frame(const Eigen::Vector2f& c, float rot)
