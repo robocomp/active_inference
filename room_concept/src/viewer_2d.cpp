@@ -1182,15 +1182,35 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     // Ghosts of the last published outlines: a settled map draws one line, a churning one draws a
     // fan. Sampled rather than kept per frame, so the trail spans seconds of estimation, not
     // milliseconds of redraw.
-    constexpr int kGhosts = 6;
-    if (polygon.closed and polygon.verts.size() >= 3 and (++wall_ghost_tick_ % 15) == 0)
+    //
+    // A ghost is only meaningful as the JITTER OF ONE HYPOTHESIS. Two rules keep it that way, both
+    // of them learnt from a live run where the trail became a cloud of stale outlines the map had
+    // already abandoned:
+    //  - the trail EXPIRES. Ghosts were pushed only while the polygon closed, so a map that stopped
+    //    closing — exactly what happens during a re-derive storm — froze its last six outlines on
+    //    the canvas for ever, and they read as current layouts because nothing above them moved.
+    //  - a TOPOLOGY CHANGE clears it. When the vertex count changes the map has replaced its
+    //    hypothesis, not refined it; the old outlines are then a different room and averaging them
+    //    by eye is worse than seeing nothing. (Same-count drift still accumulates — that is churn,
+    //    and churn is what the layer is for.)
+    constexpr int   kGhosts    = 6;
+    constexpr qint64 kGhostMs  = 5000;   // a ghost older than this describes a map that is gone
+    const qint64 now_ghost_ms = QDateTime::currentMSecsSinceEpoch();
+    if (polygon.closed and polygon.verts.size() >= 3)
     {
-        QPolygonF g;
-        for (const auto& v : polygon.verts) g << QPointF(v.x(), v.y());
-        g << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
-        wall_ghosts_.push_back(std::move(g));
-        while (wall_ghosts_.size() > kGhosts) wall_ghosts_.pop_front();
+        if (not wall_ghosts_.empty() and wall_ghosts_.back().nverts != polygon.verts.size())
+            wall_ghosts_.clear();
+        if ((++wall_ghost_tick_ % 15) == 0)
+        {
+            QPolygonF g;
+            for (const auto& v : polygon.verts) g << QPointF(v.x(), v.y());
+            g << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
+            wall_ghosts_.push_back({std::move(g), now_ghost_ms, polygon.verts.size()});
+            while (wall_ghosts_.size() > kGhosts) wall_ghosts_.pop_front();
+        }
     }
+    while (not wall_ghosts_.empty() and now_ghost_ms - wall_ghosts_.front().ms > kGhostMs)
+        wall_ghosts_.pop_front();
     resize_pool(wall_ghost_items_, wall_ghosts_.size(), [&]() {
         auto* item = agv_->scene.addPolygon(QPolygonF(), QPen(QColor(200, 0, 200, 60), 0.03), QBrush(Qt::NoBrush));
         item->setZValue(8);
@@ -1198,9 +1218,13 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     });
     for (size_t i = 0; i < wall_ghosts_.size(); ++i)
     {
-        // oldest faintest: the fade IS the age
-        const int alpha = 25 + static_cast<int>(45.0 * (static_cast<double>(i) / std::max<size_t>(1, kGhosts - 1)));
-        wall_ghost_items_[i]->setPolygon(wall_ghosts_[i]);
+        // Faded by its AGE IN SECONDS, not by its place in the queue: with the queue draining on a
+        // timer the two are no longer the same thing, and it is the age that the reader is being
+        // told. A ghost about to expire is nearly invisible, so the trail thins out instead of
+        // vanishing a whole outline at a time.
+        const double age = static_cast<double>(now_ghost_ms - wall_ghosts_[i].ms) / kGhostMs;
+        const int alpha = std::clamp(static_cast<int>(70.0 * (1.0 - age)), 10, 70);
+        wall_ghost_items_[i]->setPolygon(wall_ghosts_[i].poly);
         wall_ghost_items_[i]->setPen(QPen(QColor(200, 0, 200, alpha), 0.03));
     }
 

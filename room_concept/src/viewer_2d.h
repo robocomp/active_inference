@@ -278,7 +278,11 @@ class Viewer2D : public QObject
         // draw the same edge twice.
         std::vector<QGraphicsLineItem*>       wall_chain_items_;
         std::vector<QGraphicsPolygonItem*>    wall_ghost_items_;
-        std::deque<QPolygonF>                 wall_ghosts_;
+        /// One past published outline, with the time it was taken and the vertex count it had.
+        /// The timestamp expires it (a trail must not outlive the map it describes) and the count
+        /// detects a re-derive, after which the older outlines belong to a hypothesis that is gone.
+        struct Ghost { QPolygonF poly; qint64 ms = 0; size_t nverts = 0; };
+        std::deque<Ghost>                     wall_ghosts_;
         QGraphicsSimpleTextItem*              wall_hud_item_ = nullptr;
         int                                   wall_ghost_tick_ = 0;
         QGraphicsPolygonItem* polygon_item_         = nullptr;

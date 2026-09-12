@@ -152,6 +152,11 @@ private:
     // blinking out — which, in Estimate mode, is the entire picture.
     rc::RoomConcept::UpdateResult::WallView last_wall_view_;
     bool                     have_wall_view_ = false;
+    /// Last pose the localiser actually reported for the ROBOT, held for frames that carry no
+    /// result. Mutable because best_available_pose() is const and is the single place every drawing
+    /// path asks for the pose. See its body for why the room model's pose is not a substitute.
+    mutable Eigen::Affine2f  last_robot_pose_ = Eigen::Affine2f::Identity();
+    mutable bool             have_robot_pose_ = false;
     rc::EpistemicController* epistemic_    = nullptr;
 
     QPointer<Custom_widget>      custom_widget_;

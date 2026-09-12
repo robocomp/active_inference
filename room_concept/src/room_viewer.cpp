@@ -316,15 +316,20 @@ Eigen::Affine2f RoomViewer::best_available_pose(
     const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc) const
 {
     if (have_loc)
-        return loc_res->robot_pose;
-    if (room_concept_ && room_concept_->is_initialized())
     {
-        const auto s = room_concept_->get_current_state();
-        Eigen::Affine2f p = Eigen::Affine2f::Identity();
-        p.translation() = Eigen::Vector2f(s[2], s[3]);
-        p.linear() = Eigen::Rotation2Df(s[4]).toRotationMatrix();
-        return p;
+        last_robot_pose_ = loc_res->robot_pose;
+        have_robot_pose_ = true;
+        return loc_res->robot_pose;
     }
+    // Without a result, HOLD THE LAST ROBOT POSE. This used to fall back to get_current_state()[2..4],
+    // which is the ROOM MODEL's x, y, phi — a different rigid body, not a stale version of this one.
+    // In Estimate mode the model room is not optimised, so it drifts away from the wall landmarks
+    // that are the estimate: measured in Webots room 2 at about 3 deg and 40 cm at a far corner.
+    // Every point of the scan is drawn through this transform, so substituting the room's pose for
+    // the robot's swings the whole cloud off the walls that produced it. A stale robot pose is wrong
+    // by however far the robot has moved since; the room's pose is wrong by an unrelated quantity.
+    if (have_robot_pose_)
+        return last_robot_pose_;
     return Eigen::Affine2f::Identity();
 }
 
