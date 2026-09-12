@@ -105,16 +105,23 @@ constexpr double kRad2Deg = 180.0 / M_PI;
 //                 answer, and no argument can.
 //               ★ The closure's 3.2% parallax band is a statement about the camera-vs-camera
 //                 DIFFERENCE, not about this. Do not carry it over.
+//   6 ceiling_z the ROOM's ceiling height, which is where a WallCeiling corner's z comes from
+//               (image_edge_source.cpp puts it at cfg_.room_height, a hand-set constant the LiDAR
+//               cannot reach). Perturbing it moves the POINT, not the camera: dP/ddelta = z_robot on
+//               ceiling rows and exactly ZERO on floor rows. That asymmetry is what separates it
+//               from the mount height, whose column is the same direction on EVERY row -- so two
+//               families of corners seen by one lens identify two parameters that look alike.
 int          g_probe = -1;          ///< -1 = the live 3-parameter model, unchanged
 float        g_probe_sigma = 0.f;   ///< the candidate's prior sigma, so it stays in prior-sigma units
 int          g_skip_vertex = -9999; ///< leave-one-CORNER-out: the corner is the sample unit
 std::int64_t g_win_lo = 0, g_win_hi = 0;   ///< 0,0 = no window filter
 
-constexpr int kProbeCount = 6;
+constexpr int kProbeCount = 7;
 const char* probe_name(int i)
 { return i == 0 ? "roll" : i == 1 ? "t_lateral" : i == 2 ? "t_depth" : i == 3 ? "NULL-control"
-       : i == 4 ? "LIDAR_yaw" : i == 5 ? "LIDAR_pitch" : "?"; }
-const char* probe_unit(int i) { return (i == 0 or i >= 4) ? "deg" : i == 3 ? "-" : "m"; }
+       : i == 4 ? "LIDAR_yaw" : i == 5 ? "LIDAR_pitch" : i == 6 ? "ceiling_z" : "?"; }
+const char* probe_unit(int i)
+{ return (i == 0 or i == 4 or i == 5) ? "deg" : i == 3 ? "-" : "m"; }
 
 /// One replayable row. Everything the agent wrote that the rebuild needs, and nothing else.
 struct Row
@@ -581,6 +588,11 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
                 const Eigen::Vector3f axis = (g_probe == 4) ? Eigen::Vector3f(0.f, 0.f, 1.f)
                                                             : Eigen::Vector3f(1.f, 0.f, 0.f);
                 col = o.P * (Rr * axis.cross(p - c.ctx.lidar_t_robot));
+            }
+            else if (g_probe == 6)
+            {
+                // ZERO on a floor row, and that is the entire content of the parameter.
+                if (r.ceiling) col = o.P * (Rr * Eigen::Vector3f(0.f, 0.f, 1.f));
             }
             else if (g_probe == 3)
             {
@@ -1457,7 +1469,7 @@ int main(int argc, char** argv)
             {
                 // A LiDAR rotation about the WRONG centre is a DIFFERENT parameter, not an
                 // approximation of this one, so it refuses rather than assuming the robot origin.
-                if (pi >= 4 and not c.ctx.lidar_known)
+                if ((pi == 4 or pi == 5) and not c.ctx.lidar_known)
                 {
                     std::printf("    %-12s REFUSED: the sidecar carries no lidar_t_robot, and the"
                                 " rotation centre IS the parameter\n", probe_name(pi));
@@ -1466,11 +1478,11 @@ int main(int argc, char** argv)
                 g_probe = pi;
                 // A rotation is asked on pitch/yaw's own prior and a translation on height's, so the
                 // candidate is asked on the same terms as the parameter it would sit beside.
-                g_probe_sigma = (pi == 0 or pi >= 4) ? c.ctx.sigma_pitch
+                g_probe_sigma = (pi == 0 or pi == 4 or pi == 5) ? c.ctx.sigma_pitch
                               : (pi == 3) ? 1.f : c.ctx.sigma_height;
                 bool refused = false; std::string why;
                 const CamResult r = solve_leg(c, base_leg, sigma_px, fixed_cov, refused, why);
-                const double sc  = (pi == 0 or pi >= 4) ? g_probe_sigma * kRad2Deg
+                const double sc  = (pi == 0 or pi == 4 or pi == 5) ? g_probe_sigma * kRad2Deg
                                  : (pi == 3) ? 1.0 : g_probe_sigma;
                 const double val = -r.sol.p(3) * sc, sig = r.sol.sigma(3) * sc;
                 std::printf("    %-12s %+9.4f %-3s ± %.4f (%6.2f σ) | chi2/dof %.4f (%+.4f)"
