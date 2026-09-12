@@ -4783,7 +4783,18 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         in.boundary_prior  = &window_mgr_.boundary_prior;
         in.boundary_weight = boundary_weight_now();
         in.device          = get_device();
-        if (estimating())
+        // ── ONCE THE LAYOUT IS FROZEN, LOCALISE THE WAY GIVEN MODE DOES ──────────────────────────
+        // While the room is being learnt the walls ARE the estimate, so the solver takes them as
+        // landmarks, runs with no_sdf (the polygon is DERIVED from those same walls — scoring a pose
+        // against it would be scoring the walls against themselves) and needs a gauge, because the
+        // map frame is otherwise unobservable.
+        // None of those three reasons survives the freeze. The walls no longer move, so they are no
+        // longer being estimated; the polygon is no longer derived from anything live, so its SDF is
+        // an independent measurement of the pose exactly as a loaded layout's is; and the frame is
+        // pinned by the re-anchor, so there is nothing left to gauge-fix. From here the room is GIVEN
+        // in the full sense rather than in name, and the pose is solved against its SDF — the same
+        // channel, the same terms and the same constants a layout loaded from file uses.
+        if (estimating() and not wall_frozen_)
         {
             in.walls             = &wall_map_;
             in.no_sdf            = true;     // the polygon is derived from these walls: no SDF on it
