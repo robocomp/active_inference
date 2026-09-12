@@ -81,10 +81,10 @@ Viewer2D::Viewer2D(QWidget* parent, const QRectF& grid_dim, bool show_axis)
     wall_hud_item_ = agv_->scene.addSimpleText(QStringLiteral("waiting for the first scan…"));
     wall_hud_item_->setZValue(40);
     QFont hud_font = wall_hud_item_->font();
-    hud_font.setPointSizeF(0.35);
+    hud_font.setPointSizeF(kTextPt);                       // NEVER sub-point: see kTextPt in the header
     wall_hud_item_->setFont(hud_font);
     wall_hud_item_->setBrush(QBrush(QColor(90, 90, 90)));
-    wall_hud_item_->setTransform(QTransform::fromScale(1, -1));
+    { const qreal k = text_scale(0.35); wall_hud_item_->setTransform(QTransform::fromScale(k, -k)); }
     agv_->fitToScene(QRectF(-4, -3, 8, 6));
 
     // Forward all AGV signals as Viewer2D signals
@@ -1177,7 +1177,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     resize_pool(wall_label_items_, walls.size(), [&]() {
         auto* item = agv_->scene.addSimpleText("");
         item->setZValue(35);
-        QFont f = item->font(); f.setPointSizeF(0.35); item->setFont(f);
+        QFont f = item->font(); f.setPointSizeF(kTextPt); item->setFont(f);
         return item;
     });
     // Each landmark's OWN offset band. The polygon's edge bands below say the same thing, but only
@@ -1216,7 +1216,8 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
                                           .arg(sigma_d > 0.f ? QString(" sd=%1").arg(sigma_d, 0, 'f', 2) : QString())
                                           .arg(w.room_factor_dF > 4.6f ? QString(" dF=%1").arg(w.room_factor_dF, 0, 'f', 1) : ""));
         wall_label_items_[i]->setPos(mid.x(), mid.y());
-        wall_label_items_[i]->setTransform(QTransform::fromScale(1, -1));   // scene y is up
+        { const qreal k = text_scale(0.35);                                 // scene y is up
+          wall_label_items_[i]->setTransform(QTransform::fromScale(k, -k)); }
     }
 
     // Derived corners: filled when observed meeting, hollow when inferred by intersection.
@@ -1406,9 +1407,10 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     resize_pool(wall_sigma_label_items_, polygon.corners.size(), [&]() {
         auto* item = agv_->scene.addSimpleText("");
         item->setZValue(36);
-        QFont f = item->font(); f.setPointSizeF(0.28); item->setFont(f);
+        QFont f = item->font(); f.setPointSizeF(kTextPt); item->setFont(f);
         item->setBrush(QBrush(QColor(150, 50, 10)));
-        item->setTransform(QTransform::fromScale(1, -1));
+        const qreal k = text_scale(0.28);
+        item->setTransform(QTransform::fromScale(k, -k));
         return item;
     });
     constexpr float kSigmaDrawCap = 12.f;   // m — LiDAR range; beyond this the number is not a position
@@ -1454,9 +1456,10 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     {
         wall_hud_item_ = agv_->scene.addSimpleText("");
         wall_hud_item_->setZValue(40);
-        QFont f = wall_hud_item_->font(); f.setPointSizeF(0.30); wall_hud_item_->setFont(f);
+        QFont f = wall_hud_item_->font(); f.setPointSizeF(kTextPt); wall_hud_item_->setFont(f);
         wall_hud_item_->setBrush(QBrush(QColor(31, 35, 40)));
-        wall_hud_item_->setTransform(QTransform::fromScale(1, -1));
+        const qreal k = text_scale(0.30);
+        wall_hud_item_->setTransform(QTransform::fromScale(k, -k));
     }
     // Nothing to report when the estimator is not running: an emptied overlay must not leave a HUD
     // reading "walls 0  cand 0  OPEN" standing over a room that is finished and correct.

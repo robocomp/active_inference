@@ -161,17 +161,26 @@ void SpecificWorker::initialize()
     QElapsedTimer init_timer, phase_timer;
     init_timer.start();
     phase_timer.start();
-    std::ofstream startup_csv("tmp/startup_timing.csv", std::ios::out | std::ios::trunc);
-    if (startup_csv.is_open())
-    {
-        startup_csv.imbue(std::locale::classic());
-        startup_csv << "phase,ms,cumulative_ms\n";
+    {   // truncate once, then never hold the stream open — see the phase() lambda
+        std::ofstream reset("tmp/startup_timing.csv", std::ios::out | std::ios::trunc);
+        if (reset.is_open()) { reset.imbue(std::locale::classic()); reset << "phase,ms,cumulative_ms\n"; }
     }
     const auto phase = [&](const char* name)
     {
         const auto ms = phase_timer.restart();
-        if (startup_csv.is_open())
-            startup_csv << name << ',' << ms << ',' << init_timer.elapsed() << '\n' << std::flush;
+        // ⚠ OPEN-APPEND-CLOSE per row, because RoomViewer's constructor appends its own sub-phases to
+        // this same file while this function is still running. Holding a truncating stream open across
+        // that made TWO writers with independent file offsets: this one's next write landed at its own
+        // offset and overwrote the viewer's rows — which silently destroyed the two rows that mattered
+        // (viewer:custom_widget and viewer:viewer_2d, the latter being the 16-second one) and left a
+        // half-overwritten line in the file. An instrument that erases its own most important reading
+        // is worse than no instrument.
+        std::ofstream f("tmp/startup_timing.csv", std::ios::out | std::ios::app);
+        if (f.is_open())
+        {
+            f.imbue(std::locale::classic());
+            f << name << ',' << ms << ',' << init_timer.elapsed() << '\n';
+        }
         if (ms > 200)
             qInfo().noquote() << QString("[startup] %1 took %2 ms (cumulative %3 ms) — the window is "
                                          "blocked for the duration of any phase on this thread")

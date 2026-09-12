@@ -33,6 +33,27 @@ namespace DSR { class DSRGraph; }
 
 namespace rc {
 
+/// ── WHY EVERY TEXT ITEM HERE USES A REAL FONT SIZE AND A SCALED TRANSFORM ────────────────────────
+/// Scene units are METRES, so a label wants to be a few centimetres tall and the obvious way to ask
+/// for that is setPointSizeF(0.35). Do not. A point size below ≈0.375 rounds to pixelSize 0 at 96
+/// dpi, Qt cannot satisfy a zero-pixel request from its cache, and a single setFont() then walks the
+/// whole font database: MEASURED 65,028 QFontDatabasePrivate::match calls against 634 installed
+/// fonts, 16.2 SECONDS, on a 25-line standalone program with no DSR, no torch and no agent. It is
+/// once per process and CPU-bound, and it was the entire "black window for 15 seconds at startup".
+/// The sweep is a cliff, not a slope: 0.5 pt costs 0 ms, 0.35 pt costs 15,690 ms.
+///
+/// So: ask for a NORMAL point size and put the shrink in the item's own transform. The font size is
+/// in item coordinates, so scaling the item by k and multiplying the point size by 1/k is visually
+/// identical. kTextPt is that normal size; text_scale(pt) gives the k that reproduces an apparent
+/// `pt`. Keep the negative Y — scene y is up and these items carry their own flip.
+///
+/// ⚠ ALL such sites must use it, not just the one that hurt. Three of the four in this file are on
+/// DRAW paths, so fixing only the constructor moves the 16 s stall into the first frame that draws a
+/// wall label — a hang in the middle of a run instead of at startup, which is strictly worse.
+inline constexpr qreal kTextPt = 10.0;
+inline constexpr qreal text_scale(qreal apparent_pt) { return apparent_pt / kTextPt; }
+
+
 /// What the wall-SLAM estimator knows about ITSELF this frame — the HUD line's inputs.
 /// Namespace scope, not nested in Viewer2D: a nested class's default member initializers cannot be
 /// used by a default argument declared inside the same (still incomplete) enclosing class.
