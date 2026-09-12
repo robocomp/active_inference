@@ -523,6 +523,23 @@ namespace rc::wallmap
         /// The model and solver stay soft (six mutating variants measurably degraded pose and
         /// structure); only what is PUBLISHED is exactly Manhattan.
         Polygon manhattan_polygon() const;
+
+        /// Is every wall carrying an edge of this cycle BETTER EXPLAINED BY ITS MANHATTAN CLASS than
+        /// by no class at all? classify() already computes both sides: cost = ½·eps²/var, the wall's
+        /// disagreement with its class in nats, against off_cost = −log(manhattan_off_prior), the
+        /// price of the class-less component. No new constant, and nothing to tune.
+        ///
+        /// It exists because corner sigma cannot see this. With manhattan_strict a wall keeps its
+        /// nearest class however far off it is — deliberately, so a tilted side ANNEALS onto its
+        /// class as data rotates it instead of being yanked — and a wall still annealing can sit
+        /// many degrees out while all four corners are individually sharp. Measured live: wall w988
+        /// held class 2 at phi = 168.5 deg with theta0 = 0, i.e. 11.5 deg off, on 3673 points against
+        /// 74316 on the wall opposite. Corner sigma was 0.059 and the layout published. That one wall
+        /// made the long dimension 6.14 m against a true 6.000 and put the median |SDF| at 0.116 m,
+        /// because across a 4 m extent 11.5 deg sweeps +-0.4 m.
+        /// `worst_nats` returns the largest disagreement found, for the caller to report.
+        bool cycle_manhattan_converged(const Polygon& p, float* worst_nats = nullptr,
+                                       std::uint64_t* worst_wall = nullptr) const;
         /// One stored range measurement in the map frame (forward-model referee).
         struct Beam { Eigen::Vector2f o, d; float r; };
         std::vector<Beam> beams;

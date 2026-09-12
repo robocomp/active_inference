@@ -366,6 +366,26 @@ namespace rc::wallmap
         }
     }
 
+    bool WallMap::cycle_manhattan_converged(const Polygon& p, float* worst_nats,
+                                            std::uint64_t* worst_wall) const
+    {
+        const float off_cost = -std::log(std::clamp(params.manhattan_off_prior, 1e-6f, 1.f - 1e-6f));
+        float worst = 0.f;
+        std::uint64_t worst_id = 0;
+        bool ok = true;
+        for (const auto id : p.wall_of_edge)
+        {
+            const auto* w = find(id);
+            if (w == nullptr) continue;
+            const float cost = classify(w->phi).cost;
+            if (cost > worst) { worst = cost; worst_id = id; }
+            if (cost > off_cost) ok = false;
+        }
+        if (worst_nats != nullptr) *worst_nats = worst;
+        if (worst_wall != nullptr) *worst_wall = worst_id;
+        return ok;
+    }
+
     Polygon WallMap::manhattan_polygon() const
     {
         WallMap proj(*this);            // project a copy; the live model is never touched

@@ -1781,6 +1781,7 @@ private:
     bool wall_reanchored_ = false;
     /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
     /// on. From then on the layout is GIVEN: see the four guards that read it in room_concept.cpp.
+    unsigned wall_mh_log_tick_ = 0;   // rate limit for the "still annealing" line
     bool wall_frozen_ = false;
     /// The published polygon as it stood at the instant of the freeze. LOCALIZING publishes THIS,
     /// not a fresh projection: manhattan_polygon() ends in decorate(), the level-2 stage, which

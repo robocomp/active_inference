@@ -2199,7 +2199,7 @@ namespace rc
             {
                 wallgeom_csv_.imbue(std::locale::classic());
                 wallgeom_csv_ << "frame,ts_ms,wall_id,k,phi_rad,d_m,s_min,s_max,frames_seen,points_seen,"
-                                 "lodds,sigma_d,theta0,frozen,reanchored\n";
+                                 "lodds,sigma_d,theta0,frozen,reanchored,class_nats\n";
             }
         }
         if (wallgeom_csv_.is_open())
@@ -2213,7 +2213,13 @@ namespace rc
                               << w.points_seen << ',' << w.exist_lodds << ','
                               << ((lam > 1e-9f) ? 1.f / std::sqrt(lam) : -1.f) << ','
                               << wall_map_.theta0 << ',' << (wall_frozen_ ? 1 : 0) << ','
-                              << (wall_reanchored_ ? 1 : 0) << '\n';
+                              << (wall_reanchored_ ? 1 : 0) << ','
+                              // How far this wall disagrees with its own Manhattan class, in nats.
+                              // Above -log(manhattan_off_prior) (2.3 at the default 0.1) the wall is
+                              // better explained by no class at all, and the layout must not be
+                              // pinned yet. This is the column that would have shown w988 at 16 nats
+                              // while every corner sigma looked healthy.
+                              << wall_map_.classify(w.phi).cost << '\n';
             }
             if ((resid_tick_ % 20u) == 0) wallgeom_csv_.flush();
         }
@@ -2266,7 +2272,24 @@ namespace rc
         auto pub = frozen_pub_.has_value() ? *frozen_pub_ : wall_map_.manhattan_polygon();
         if (poly.closed and poly.verts.size() >= 3)
         {
-            if (poly.publishable and not wall_reanchored_)
+            // ── AND THE WALLS MUST AGREE WITH THEIR OWN CLASSES BEFORE THE FRAME IS PINNED ───────
+            // publishable is a corner-sigma test, and corner sigma cannot see a wall that is still
+            // annealing onto its Manhattan class: all four corners can be individually sharp while
+            // one wall sits 11.5 deg out (measured, wall w988 — it put the long dimension 0.14 m
+            // long and the median |SDF| at 0.116 m). Both the re-anchor and the freeze are ONE-SHOT,
+            // so pinning the frame on such a layout locks the tilt in permanently — theta0 can no
+            // longer rotate it and no re-derivation will run.
+            // The test adds no constant: classify() already prices a wall's disagreement with its
+            // class in nats against the class-less component's own prior.
+            float mh_worst = 0.f; std::uint64_t mh_wall = 0;
+            const bool mh_ok = wall_map_.cycle_manhattan_converged(poly, &mh_worst, &mh_wall);
+            if (not mh_ok and not wall_reanchored_ and (wall_mh_log_tick_++ % 100) == 0)
+                qInfo().noquote() << QString("[room][wall-slam] layout publishable but NOT pinned yet: wall %1 "
+                                             "disagrees with its Manhattan class by %2 nats (class-less costs %3). "
+                                             "Still annealing — the re-anchor and the freeze are one-shot, so they wait.")
+                                         .arg(mh_wall).arg(mh_worst, 0, 'f', 1)
+                                         .arg(-std::log(std::clamp(wall_map_.params.manhattan_off_prior, 1e-6f, 1.f - 1e-6f)), 0, 'f', 1);
+            if (poly.publishable and mh_ok and not wall_reanchored_)
             {
                 // One-shot re-anchoring to the frame the fleet expects: origin on the Manhattan-aligned
                 // bbox centre of the polygon, θ₀ = 0. Everything in the map frame moves together.
