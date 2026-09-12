@@ -43,11 +43,22 @@ public:
                                        // PREDICTED wall line. Must exceed the chronic model misfit (~0.32 m
                                        // here) or the true wall points fall outside the band and NO detection
                                        // forms (the real reason corners almost never fired). Was hardcoded 0.12.
-        float base_sigma    = 0.04f;   // meters — THE model-error term of the corner channel, added
+        float base_sigma    = 0.06f;   // meters — THE model-error term of the corner channel, added
                                        // once to Σ_det so both the association gate and the GN loss
-                                       // weight read it. Measured: a single term of 0.0375 m puts
-                                       // NIS/dof at exactly 1.0, so 0.04 is inside the calibration's
-                                       // own resolution. See the ONE-model-error note in detect().
+                                       // weight read it. See the ONE-model-error note in detect().
+                                       // ⚠ 0.04 → 0.06 from a FULL 200 m tour (102362 clean
+                                       // candidates). An earlier calibration said 0.0375, bisected
+                                       // on a quiet 4000-frame window, and shipping it left the
+                                       // channel OVERCONFIDENT: NIS/dof 1.98, gate refusing 19% of
+                                       // candidates — a worse failure than the underconfidence it
+                                       // replaced, because an overconfident gate discards the very
+                                       // corners that would correct the pose. Same run, same
+                                       // innovations, only this term differing:
+                                       //     0.04 alone   NIS 1.976  rejected 19.2%
+                                       //     0.06 alone   NIS 1.031  rejected  9.1%   ← calibrated
+                                       //     0.08 alone   NIS 0.627  rejected  1.7%
+                                       // 0.06 is the value map_sigma already carried from live data
+                                       // in 2026-07-20; the double count was the 0.04 on top of it.
         float orient_tau_deg = 20.0f;  // degrees — smooth orientation-trust scale: ori_scale = exp(−(dev/τ)²).
                                        // dev=τ → 37% weight, 2τ → 2%. Replaces the 20° hard cut.
 

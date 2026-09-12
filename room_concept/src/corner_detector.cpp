@@ -172,6 +172,14 @@ CornerDetector::DetectionResult CornerDetector::detect(
     // about half as hard as its evidence entitled it to.
     //   as built (both)      0.471        one term at 0.0375 m   1.000
     //   map_sigma dropped    0.927        base_sigma dropped     0.489
+    // ⚠ AND THE MISFIT THIS TERM ABSORBS IS NOT CONSTANT. Over a full 200 m tour the innovation's
+    // median swings between 4.3 cm and 9.6 cm in 500-frame windows, and the channel passes
+    // repeatedly through calibrated (NIS 0.77, gate 1.7%) and badly overconfident (NIS 3.9, gate
+    // 42.8%) as the robot moves through parts of the layout the trace got more or less right. It
+    // does NOT break once and stay broken — it oscillates. No scalar tracks that, so 0.06 is the
+    // value that calibrates the RUN rather than any window of it, and the principled successor is a
+    // model error that varies with the robot's state. Calibrating this on a stretch where nothing is
+    // going wrong is calibrating on the wrong population; that is how 0.0375 got shipped.
     // base_sigma is the term that stays, because Σ_det is what the LOSS weights a corner by
     // (cand.information = Σ_det⁻¹): model error has to be in there or a wall with thousands of
     // points claims a sub-millimetre corner and refuses its own re-observations. Dropping base_sigma
