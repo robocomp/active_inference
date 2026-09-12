@@ -1080,6 +1080,10 @@ public:
     /// learnt from the LiDAR replace it as soon as they close.
     void configure_room_estimate();
     bool estimating() const { return params.map_mode == Params::MapMode::Estimate; }
+    /// The learnt layout has been frozen (RoomShape.FreezeLayoutWhenPublishable): it closed, passed
+    /// the publish bar, was re-anchored, and no longer changes. From that moment the map is GIVEN in
+    /// every sense that matters to a consumer — which is why the stability test switches with it.
+    bool layout_frozen() const { return wall_frozen_; }
     /// Estimate mode: the polygon closed, was re-anchored and may be published. Given mode: always.
     bool map_ready() const { return not estimating() or map_ready_.load(); }
     /// Recovery, relocalisation, symmetry and the prediction early-exit all judge a pose against the

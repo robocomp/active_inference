@@ -191,11 +191,25 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     // median |SDF| never passes them (measured live: 0.55 m vs a 0.076 gate ⇒ publication deadlock).
     // The polygon's own publishability (every corner sharp) is the shape gate — map_ready carries
     // it — leaving pose confidence as the stability question here.
-    const bool stable   = room_concept_->estimating()
-                          ? (cov_tt < params_->STABLE_COV_TT_MAX)
-                          : ((res.iterations_used == 0)
+    // ── A FROZEN LAYOUT IS A GIVEN LAYOUT, AND IS TESTED AS ONE ──────────────────────────────────
+    // The estimate-mode branch below exists because while the walls are still landmarks the scan also
+    // contains other rooms through the doorways, so median |SDF| never passes a gate fitted to a
+    // GIVEN layout of this apartment. Once the layout is frozen that reason is gone: the shape has
+    // stopped changing, the scan is being compared against a fixed room, and the given-mode test is
+    // the applicable one. Using it here is a unification, not a new constant.
+    // It also fixes a real deadlock. Estimate mode tested pose confidence ALONE, against
+    // STABLE_COV_TT_MAX = 0.001 — a value calibrated in Given mode, where the config records it as
+    // "already passes 100%". Measured live on a correct, frozen 5.99 x 4.02 m room: cov_tt ran
+    // 0.0013 .. 0.0075, mean 0.0046, i.e. 4.6x over the gate on every frame. stable_frames_ therefore
+    // never left 0, the room node was never created, the UI never reported the room as stabilised and
+    // no consumer downstream of that node ever engaged — while the layout itself was correct to
+    // within 40 mm and had stopped moving entirely.
+    const bool map_is_given = not room_concept_->estimating() or room_concept_->layout_frozen();
+    const bool stable   = map_is_given
+                          ? ((res.iterations_used == 0)
                              && sdf_mse < params_->STABLE_SDF_MSE_MAX
-                             && cov_tt  < params_->STABLE_COV_TT_MAX);
+                             && cov_tt  < params_->STABLE_COV_TT_MAX)
+                          : (cov_tt < params_->STABLE_COV_TT_MAX);
 
     // Steady-state stability, for the object-anchor pin guard. Maintained on EVERY frame — unlike
     // stable_frames_ below, which stops being updated the moment the room node exists.
