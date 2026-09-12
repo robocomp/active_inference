@@ -204,11 +204,37 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     // never left 0, the room node was never created, the UI never reported the room as stabilised and
     // no consumer downstream of that node ever engaged — while the layout itself was correct to
     // within 40 mm and had stopped moving entirely.
-    const bool stable   = room_concept_->localizing()
-                          ? ((res.iterations_used == 0)
-                             && sdf_mse < params_->STABLE_SDF_MSE_MAX
-                             && cov_tt  < params_->STABLE_COV_TT_MAX)
-                          : (cov_tt < params_->STABLE_COV_TT_MAX);
+    // ── A LAYOUT WE BUILT OURSELVES IS STABLE BY CONSTRUCTION ────────────────────────────────────
+    // The stability test exists to answer ONE question: is the robot's pose in this room trustworthy
+    // enough to publish the room and reparent the robot under it? For a layout loaded from FILE that
+    // is a real question — the robot may start anywhere in it, or lost — and the two bars below are
+    // how it is answered.
+    // For a layout this run ESTIMATED, the question has already been answered, twice and more
+    // strictly: the polygon closed, every corner passed publish_corner_sigma, and the frame was
+    // re-anchored onto that polygon. The map was BUILT FROM this pose trajectory, so the pose is in
+    // the frame by construction; there is no relocalisation to wait for.
+    // Asking the file-layout question of it deadlocks, measured on a correct frozen 5.99 x 4.02 m
+    // room: cov_tt ran 0.0016 against a 0.001 bar (0 of 300 frames) and median |SDF| 0.116 m against
+    // 0.076 (0 of 300). Both constants were fitted to a given SVG layout of the whole apartment, and
+    // tuning them to let one room through would be fitting a threshold to a symptom.
+    // ⚠ THE 0.116 m IS NOT EXPLAINED AND IS A SEPARATE OPEN QUESTION. This room has NO furniture, so
+    // it cannot be unexplained objects, and a 1.06 m doorway in a ~20 m perimeter is ~5% of bearings
+    // — far too few to move a MEDIAN. Meanwhile the same run recovers the room to 5.99 x 4.02 m
+    // against a true 6.000 x 4.000 and the per-association residuals sit at ±0.02 m, so the walls are
+    // right to about 2 cm. A median |SDF| of 11.6 cm is inconsistent with that, which means the SDF
+    // is not being scored against the same thing the wall map fitted: a different point set (the wall
+    // segmenter works on a height BAND, and the solver samples the whole cloud), a different polygon
+    // (raw vs Manhattan-projected), or a stale one. That discrepancy is worth one measurement and is
+    // NOT resolved by this change; it is only decoupled from it.
+    // So entering LOCALIZING by freezing a learnt layout IS the stability signal. A file-given layout
+    // keeps the old test unchanged.
+    const bool stable   = room_concept_->layout_frozen()
+                          ? true
+                          : (room_concept_->estimating()
+                             ? (cov_tt < params_->STABLE_COV_TT_MAX)
+                             : ((res.iterations_used == 0)
+                                && sdf_mse < params_->STABLE_SDF_MSE_MAX
+                                && cov_tt  < params_->STABLE_COV_TT_MAX));
 
     // Steady-state stability, for the object-anchor pin guard. Maintained on EVERY frame — unlike
     // stable_frames_ below, which stops being updated the moment the room node exists.
