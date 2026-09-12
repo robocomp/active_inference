@@ -2172,6 +2172,42 @@ namespace rc
             }
         }
 
+        // ── EVERY WALL'S GEOMETRY, EVERY FRAME ───────────────────────────────────────────────
+        // A published room 6.03 x 4.00 m became 0.51 x 4.00 m within 25 frames of first passing the
+        // publish bar, with the corner sigma UNCHANGED at 0.035 through the collapse — so no existing
+        // log could say which wall moved, when, or whether its normal flipped. 6.03 = 3.27 + 2.76 and
+        // 3.27 - 2.76 = 0.51, i.e. one of the two long walls ended up on the WRONG SIDE of the origin,
+        // which is a rigid-transform question and not an estimation one. phi and d together answer it:
+        // a sign flip of d with phi unchanged is a wall that jumped across the room, while phi moving
+        // by pi with d negated is the same line re-expressed and harmless. Four walls at 20 Hz, so the
+        // file is small; it is what turns "the room collapsed" into "wall 7 did this on frame 1381".
+        if (not wallgeom_csv_.is_open())
+        {
+            std::filesystem::create_directories("tmp");
+            wallgeom_csv_.open("tmp/wall_geometry.csv", std::ios::out | std::ios::trunc);
+            if (wallgeom_csv_.is_open())
+            {
+                wallgeom_csv_.imbue(std::locale::classic());
+                wallgeom_csv_ << "frame,ts_ms,wall_id,k,phi_rad,d_m,s_min,s_max,frames_seen,points_seen,"
+                                 "lodds,sigma_d,theta0,frozen,reanchored\n";
+            }
+        }
+        if (wallgeom_csv_.is_open())
+        {
+            for (const auto& w : wall_map_.walls)
+            {
+                const float lam = w.information(1, 1);
+                wallgeom_csv_ << resid_tick_ << ',' << wall_frame_ts_ << ',' << w.id << ',' << w.k << ','
+                              << w.phi << ',' << w.d << ',' << (w.has_extent ? w.s_min : 0.f) << ','
+                              << (w.has_extent ? w.s_max : 0.f) << ',' << w.frames_seen << ','
+                              << w.points_seen << ',' << w.exist_lodds << ','
+                              << ((lam > 1e-9f) ? 1.f / std::sqrt(lam) : -1.f) << ','
+                              << wall_map_.theta0 << ',' << (wall_frozen_ ? 1 : 0) << ','
+                              << (wall_reanchored_ ? 1 : 0) << '\n';
+            }
+            if ((resid_tick_ % 20u) == 0) wallgeom_csv_.flush();
+        }
+
         if (wall_map_.walls.size() > 64 and wall_map_.walls.size() % 32 == 0)
             qWarning() << "[room][wall-slam]" << wall_map_.walls.size()
                        << "walls — far more than a room has. If they are twins of a few real ones,"
