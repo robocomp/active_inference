@@ -77,6 +77,7 @@ LIST(APPEND LIBS
 # ── Sources ────────────────────────────────────────────────────────────────────
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/mount_calibrator.cpp
   ../src/specificworker_presence.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp

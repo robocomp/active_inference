@@ -38,6 +38,7 @@
 #include "imu_ingestor.h"
 #include "camera_ingestor.h"
 #include "mount_lidar_pair.h"
+#include "mount_calibrator.h"
 #include "camera_calibration.h"
 #include <map>
 #include "image_edge_source.h"
@@ -372,74 +373,13 @@ class SpecificWorker : public GenericWorker
     static void place_triple_points_in_room(rc::ImageEdgeObs& obs, const rc::CameraIngestor& ing,
                                             const Eigen::Vector3f& pose);
 
-    // ── THE SENSOR TRIANGLE ──────────────────────────────────────────────────────────────────────
-    // Each camera's residual against the LiDAR is (camera error) + (LiDAR corner error). Differencing
-    // two of them CANCELS the LiDAR term and leaves camera-vs-camera — the loop closure, and the only
-    // statement here that needs no ground truth. Its use is ATTRIBUTION: with one camera a systematic
-    // in the LiDAR corner detector is indistinguishable from a camera mount error and would be
-    // "corrected" into the mount. Large individual residuals with a SMALL difference put the fault in
-    // the LiDAR; a large difference puts it between the cameras.
-    // Held in RADIANS, because a pixel is a different angle on each camera and the two are otherwise
-    // not comparable at all. Both mounts have identity rotation to `body`, so their u/v axes are
-    // mutually aligned and the components can be differenced directly.
-    struct CornerAngle { double du_rad = 0, dv_rad = 0; std::int64_t ts = 0; };
-    std::map<std::pair<std::string, int>, CornerAngle> loop_last_;   // (camera, vertex*2+ceiling)
-    double loop_du_sum_ = 0, loop_dv_sum_ = 0, loop_du_sq_ = 0, loop_dv_sq_ = 0;
-    long   loop_n_ = 0;
-    std::ofstream loop_csv_;
-    void loop_closure_observe(const std::string& cam, int vertex, bool ceiling,
-                              double du_rad, double dv_rad, std::int64_t ts);
-
-    rc::mount::Accum   mp_win_;      ///< resets every window; comparable with the older stage-1 fit
-    rc::camcal::Estimator mp_pool_;  ///< persistent, saved/loaded as EVIDENCE (see camera_calibration.h)
-    bool               mp_loaded_ = false;
-    std::int64_t     mp_win_start_ms_ = 0;
-    long             mp_wins_ = 0, mp_seen_ = 0, mp_paired_ = 0;
-    std::ofstream    mp_csv_;
-    Eigen::Vector4d  mp_sum_ = Eigen::Vector4d::Zero(), mp_sum2_ = Eigen::Vector4d::Zero();
-    long             mp_sum_n_ = 0;
-    void mount_pair_update(const rc::ImageEdgeObs& obs,
-                           const std::vector<rc::CornerDetector::CornerMatch>& matches,
-                           std::int64_t timestamp_ms);
-    /// Opens `etc/image_edge_pair_<cam>.csv` and writes the run-constants sidecar beside it
-    /// (`etc/image_edge_replay_<cam>.txt`: camera model, nominal mount, prior sigmas, LiDAR origin).
-    /// A row alone cannot be rebuilt under a perturbed extrinsic; with the sidecar it can, which is
-    /// what makes arm 7 four analyses of ONE drive instead of four drives. Both the driving camera
-    /// and the auxiliary channels go through here so the two files cannot drift apart.
-    /// ⚠ Reads the RT chain with timestamp 0 — main thread only (CLAUDE.md); both callers are in
-    ///   compute().
-    void open_pair_log(std::ofstream& csv, const std::string& cam, const rc::CameraIngestor& ing);
-    /// Push an accumulated mount correction (prior-sigma units) onto a camera, in radians/metres.
-    void push_mount_correction(rc::CameraIngestor& ing, const Eigen::Vector4d& applied,
-                               const std::string& cam, const char* why);
-    /// Feed a pooled mount solve back into that camera's extrinsic. Refuses an unmarginalised
-    /// solve; see the definition for why that refusal is the safety argument rather than a limit.
-    void apply_mount_solve(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
-                           const rc::mount::Accum::Solution& sol, const std::string& cam);
-    bool mount_apply_refused_logged_ = false;
-    /// Mirror a camera's measured mount into the shared body->camera RT edge. OUTPUT ONLY — nothing
-    /// here is read back by the estimator; see the definition for why, and for the one thing that
-    /// changes across a restart.
-    void publish_mount_to_graph(rc::camcal::Estimator& pool, const rc::CameraIngestor& ing,
-                                const std::string& cam);
-    /// Reconcile the nominal the evidence was measured against with the extrinsic just bound from the
-    /// graph, and decide which one the ingestor's base must be. Called once per camera, after load()
-    /// and BEFORE the resumed correction is pushed.
-    void reconcile_mount_nominal(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
-                                 const std::string& cam);
-    /// Per camera: the mount this SESSION started from, plus the last correction written. The
-    /// nominal is captured once so a later window composes `nominal x correction` and never
-    /// `edge x correction`, which would compound this function's own previous write.
-    struct MountPublishState
-    {
-        Eigen::Vector3f nominal_t = Eigen::Vector3f::Zero();   ///< rt_translation as first seen
-        Eigen::Vector3f nominal_r = Eigen::Vector3f::Zero();   ///< rt_rotation_euler_xyz as first seen
-        Eigen::Vector3f last      = Eigen::Vector3f::Zero();   ///< last correction published
-        bool have_nominal = false, have_last = false;
-        bool checked = false;      ///< the euler-convention check has run for this camera
-    };
-    std::map<std::string, MountPublishState> mount_publish_;
-    bool mount_publish_refused_logged_ = false;
+    // Camera<->LiDAR mount calibration: rc::MountCalibrator (src/mount_calibrator.{h,cpp}).
+    // Owns its accumulators, its pair logs, the per-camera publish bookkeeping and the sensor-triangle
+    // loop closure; borrows only the graph, the config and the viewer slot.
+    std::unique_ptr<rc::MountCalibrator> mount_;
+    /// Raw view of viewer_, kept in step with it, so collaborators constructed BEFORE the viewer can
+    /// still reach it later without owning it or being rebuilt when it appears.
+    rc::RoomViewer* viewer_raw_slot_ = nullptr;
     static void write_pair_row(std::ofstream& csv, const std::string& cam, std::int64_t ts,
                                const rc::mount::PairObs& pr, bool ceiling, float angle_deg,
                                float assoc_chi2, int n_rivals, float runnerup_chi2,
