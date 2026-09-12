@@ -2255,6 +2255,25 @@ void SpecificWorker::pump_image_edges()
 
     // Bind lazily and keep retrying: the camera node, its media descriptor and the RT chain all come
     // up asynchronously, and a miss here is normal for the first few seconds.
+    // ── IN ESTIMATE MODE THE ROOM POLYGON ARRIVES LATE, AND FROM THE ESTIMATOR ───────────────────
+    // room_polygon_ is loaded from the SVG in Given mode and CLEARED by configure_room_estimate(), so
+    // in Estimate mode it stayed empty for the life of the run — the bind below returns on
+    // `size() < 3` for ever and the extractor is never given anything to project. That is the whole
+    // reason no ricoh corners appear, and it reads as "bound, nothing extracted" in the [imgedge]
+    // line because the camera binds fine; it is the geometry that is missing.
+    // LOCALIZING is when a layout exists, and RoomConcept::polygon_vertices() is the frozen one it
+    // handed to the corner detector at the same moment. Taken once: after this the layout does not
+    // change, by definition of the state.
+    if (room_polygon_.size() < 3 and room_concept_.localizing()
+        and room_concept_.polygon_vertices().size() >= 3)
+    {
+        room_polygon_ = room_concept_.polygon_vertices();
+        room_polygon_offset_ = Eigen::Vector2f::Zero();   // the frozen layout IS the room frame
+        image_edge_source_->set_room_polygon(room_polygon_);
+        qInfo().noquote() << QString("[imgedge] room polygon taken from the frozen layout: %1 vertices — "
+                                     "RGB corner extraction can start").arg(room_polygon_.size());
+    }
+
     if (not image_edge_bound_)
     {
         // The room polygon and the robot-frame name are both resolved asynchronously during
