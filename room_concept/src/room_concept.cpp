@@ -2304,7 +2304,30 @@ namespace rc
                 pub  = wall_map_.manhattan_polygon();
                 map_ready_ = true;
                 wall_frozen_ = wall_map_.params.freeze_when_publishable;
-                if (wall_frozen_) frozen_pub_ = pub;   // this shape, from here on
+                if (wall_frozen_)
+                {
+                    frozen_pub_ = pub;   // this shape, from here on
+                    // ── AND THE LEARNT LAYOUT BECOMES THE CORNER DETECTOR'S MODEL ────────────────
+                    // The corner channel is gated on init_polygon_vertices_ being non-empty — that is
+                    // the GIVEN layout, filled only when a polygon is loaded from file, and
+                    // configure_room_estimate() clears it. So in Estimate mode corner tracking never
+                    // ran at all, before or after the freeze: there was no model to match detections
+                    // against, which is why no LiDAR corners appear once the room is stable.
+                    // Entering LOCALIZING is exactly when that model exists, so this is where it is
+                    // handed over. The published polygon is used, not the raw one: it is the
+                    // axis-aligned shape every other consumer sees.
+                    // ⚠ NOT via set_polygon_room(), which REPLACES model_ with a fresh Model and
+                    // would reset the window, the covariance and the pose in the middle of a run. The
+                    // model's geometry is already current — update_polygon_vertices() refreshes it
+                    // every frame — so only these two things are missing.
+                    if (pub.verts.size() >= 3)
+                    {
+                        init_polygon_vertices_ = pub.verts;
+                        corner_detector_.set_model_corners(init_polygon_vertices_);
+                        qInfo().noquote() << QString("[room][wall-slam] corner tracking armed on the frozen layout: "
+                                                     "%1 model corners").arg(init_polygon_vertices_.size());
+                    }
+                }
                 res.covariance = current_covariance;
                 qInfo() << "[room][wall-slam] polygon CLOSED and publishable:" << poly.verts.size()
                         << "vertices, worst corner sigma" << poly.worst_corner_sigma << "m. Map frame re-anchored:"
