@@ -220,6 +220,23 @@ cmake can miss appended sources. Match the prebuilt libdsr's Eigen alignment: NO
 `sizeof(optional<Eigen::Transform>)` and crash with SIGBUS/stack-smash). Grep ALL build
 dirs' `flags.make`, not just CMakeLists.
 
+**`-j32` HERE CAN OOM THE WHOLE MACHINE — cap it at `-j8`.** These are very large translation
+units (`room_concept.cpp`, `wall_map.cpp`, the selftest) and each `cc1plus` peaks in the GIGABYTES,
+not the hundreds of megabytes. Measured at a real OOM kill (2026-09-12 14:04, `journalctl -k`):
+**20 `cc1plus` holding 43.7 GB of the 60.1 GB in use, the largest one 4.88 GB.** This box has 62 GB
+and **NO SWAP**, so there is no soft failure mode — the kernel fires the global OOM killer.
+
+- **The build is not the victim; something else is.** The killer scores by `oom_score_adj`, and the
+  desktop apps carry a positive one — that run killed the user's *browser* while every compiler
+  survived. So the symptom is "an unrelated program vanished" (and a half-finished `build/` with
+  stale `CMakeFiles/Progress/*`), NOT a failed build. Do not go looking for a compile error.
+- **Two Claude sessions on one checkout double it** (see the concurrent-sessions rule) — two `-j32`
+  builds of different agents are 64 compilers against one 62 GB pool. Before a big build, check
+  `pgrep -a cc1plus`; if another build is already running, wait or drop to `-j4`.
+- **So: `make -C build -j8`** (≈11 GB peak) for normal work; `-j32` only for a small component you
+  know compiles cheaply. The wall-clock cost is small — the long TUs serialise on memory bandwidth
+  anyway — and the alternative is losing whatever else the user had open.
+
 ## Coding
 - use C++23 containers and algorithm when possible
 - use and,or and not instead of &&,|| and !
