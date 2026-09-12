@@ -39,6 +39,7 @@
 #include "camera_ingestor.h"
 #include "mount_lidar_pair.h"
 #include "mount_calibrator.h"
+#include "pose_publisher.h"
 #include "camera_calibration.h"
 #include <map>
 #include "image_edge_source.h"
@@ -377,6 +378,9 @@ class SpecificWorker : public GenericWorker
     // Owns its accumulators, its pair logs, the per-camera publish bookkeeping and the sensor-triangle
     // loop closure; borrows only the graph, the config and the viewer slot.
     std::unique_ptr<rc::MountCalibrator> mount_;
+    /// Pose publishing: rc::PosePublisher (src/pose_publisher.{h,cpp}). Owns the corrected and
+    /// predicted writers, the clamp, the jump log and the mutex that makes the two threads safe.
+    std::unique_ptr<rc::PosePublisher> pose_pub_;
     /// Raw view of viewer_, kept in step with it, so collaborators constructed BEFORE the viewer can
     /// still reach it later without owning it or being rebuilt when it appears.
     rc::RoomViewer* viewer_raw_slot_ = nullptr;
@@ -400,8 +404,6 @@ class SpecificWorker : public GenericWorker
         // POSE_CLAMP_V_MAX / POSE_CLAMP_W_MAX. One-shot, and NOT in initialize(): the robot node may
         // not have synced from the persistent server yet at that point, and a clamp taken from a node
         // that is not there is silently the config fallback for the life of the process.
-        void          apply_base_capability_to_pose_clamp();
-        bool          pose_clamp_from_capability_ = false;
 
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
         std::atomic<int> rt_corr_count_        {0};   // corrected RT publishes this window -- atomic 2026-09-03: written from the localiser thread now, read/reset from compute() on the main thread
