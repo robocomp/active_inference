@@ -1744,6 +1744,9 @@ public:
     { measured_ceiling_sigma_m_.store(s, std::memory_order_relaxed); }
 private:
     bool wall_reanchored_ = false;
+    /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
+    /// on. From then on the layout is GIVEN: see the four guards that read it in room_concept.cpp.
+    bool wall_frozen_ = false;
     std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)
     wallmap::FrameResult last_wall_frame_;
     std::string last_wall_status_;                   // last polygon status logged (log on change only)

@@ -2034,7 +2034,23 @@ namespace rc
         }
         wall_frame_ts_ = timestamp_ms;
 
-        last_wall_frame_ = wall_map_.observe(seg, pts, weights, pose, current_covariance, timestamp_ms);
+        // FROZEN: observe() still runs, because association is what feeds the residual log and the
+        // canvas, and a frozen map that cannot say how far the scan falls from it is worth nothing.
+        // But its structural and geometric state is put back exactly as it was: no births, no deaths,
+        // no splices, no extent creep, no candidate promoted while we are not looking. Restoring is
+        // used rather than a flag threaded through observe() because it cannot be partially right —
+        // whatever new mutation is added inside observe() next month is frozen too, by construction.
+        if (wall_frozen_)
+        {
+            const auto saved_walls = wall_map_.walls;
+            const auto saved_order = wall_map_.order;
+            last_wall_frame_ = wall_map_.observe(seg, pts, weights, pose, current_covariance, timestamp_ms);
+            wall_map_.walls = saved_walls;
+            wall_map_.order = saved_order;
+            wall_map_.candidates.clear();
+        }
+        else
+            last_wall_frame_ = wall_map_.observe(seg, pts, weights, pose, current_covariance, timestamp_ms);
         last_wall_segments_ = seg.segments;
         window_mgr_.newest().wall_assoc = last_wall_frame_.assoc;
 
@@ -2095,6 +2111,11 @@ namespace rc
 
     void RoomConcept::wall_slam_after_solve(UpdateResult& res)
     {
+        // Both of the map's global repair paths are off while frozen: a merge changes the wall set
+        // and a re-derivation replaces the whole cycle, which is precisely what "fixed" excludes.
+        if (wall_frozen_) { }
+        else
+        {
         wall_map_.merge_indistinguishable();
         // GLOBAL re-derivation on the bench's cadence (WallMap::Params::rederive_*): trace the
         // observed free space around the solved pose and adopt its cycle iff it explains more.
@@ -2119,6 +2140,7 @@ namespace rc
                                      << rejected << ',' << frames << ",,,,\n" << std::flush;
             }
         }
+        }
         auto poly = wall_map_.build_polygon();
         // The PUBLISHED layout: exactly Manhattan by construction — the output-stage projection
         // on a COPY (WallMap::manhattan_polygon). The raw polygon keeps every in-loop role
@@ -2141,10 +2163,43 @@ namespace rc
                 poly = wall_map_.build_polygon();
                 pub  = wall_map_.manhattan_polygon();
                 map_ready_ = true;
+                wall_frozen_ = wall_map_.params.freeze_when_publishable;
                 res.covariance = current_covariance;
                 qInfo() << "[room][wall-slam] polygon CLOSED and publishable:" << poly.verts.size()
                         << "vertices, worst corner sigma" << poly.worst_corner_sigma << "m. Map frame re-anchored:"
                         << "origin moved by (" << c.x() << "," << c.y() << ") m, rotated" << rot * 180.f / static_cast<float>(M_PI) << "deg.";
+                if (wall_frozen_)
+                {
+                    // Loud on purpose: from here the layout is an input, so every later number —
+                    // pose, residual, corner sigma — is measured against a room that no longer moves.
+                    // A silent freeze would look exactly like an estimator that simply stopped.
+                    float w_lo = 1e9f, w_hi = -1e9f, h_lo = 1e9f, h_hi = -1e9f;
+                    for (const auto& v : pub.verts)
+                    { w_lo = std::min(w_lo, v.x()); w_hi = std::max(w_hi, v.x());
+                      h_lo = std::min(h_lo, v.y()); h_hi = std::max(h_hi, v.y()); }
+                    qWarning().noquote() << QString("[room][wall-slam] LAYOUT FROZEN (RoomShape.FreezeLayoutWhenPublishable): "
+                                                   "%1 vertices, %2 x %3 m, worst corner sigma %4 m. No further births, deaths, "
+                                                   "merges, re-derivations or wall updates — the map is now GIVEN.")
+                                                .arg(pub.verts.size()).arg(w_hi - w_lo, 0, 'f', 3).arg(h_hi - h_lo, 0, 'f', 3)
+                                                .arg(poly.worst_corner_sigma, 0, 'f', 4);
+                    // ── AND THE MODEL ROOM IS RE-SEEDED FROM THE LAYOUT WE JUST MEASURED ─────────
+                    // The model's rectangle state (width, length, x, y, phi) had been carrying the
+                    // FIRST SCAN's OBB ever since initialisation: in Estimate mode the model is not
+                    // optimised, so nothing ever pulled it onto the walls that are the actual
+                    // estimate, and the 2-D canvas drew the two superimposed — the inert seed box in
+                    // magenta over the live wall map. That is the discrepancy a viewer sees and
+                    // reasonably reads as a broken estimate.
+                    // The re-anchor immediately above put the map frame's origin on the layout's
+                    // Manhattan bbox centre with theta0 = 0, so the published polygon is centred and
+                    // axis-aligned by construction and its bbox IS the model's rectangle.
+                    if (model_ != nullptr)
+                    {
+                        model_->init_from_state(w_hi - w_lo, h_hi - h_lo, 0.f, 0.f, 0.f, params.wall_height);
+                        model_->update_polygon_vertices(poly.verts);
+                        qInfo().noquote() << QString("[room][wall-slam] model room re-seeded from the frozen layout: %1 x %2 m at the origin")
+                                                 .arg(w_hi - w_lo, 0, 'f', 3).arg(h_hi - h_lo, 0, 'f', 3);
+                    }
+                }
             }
             if (model_ != nullptr and model_->has_state())
                 model_->update_polygon_vertices(poly.verts);   // in-loop consumer: RAW on purpose
@@ -2782,7 +2837,10 @@ namespace rc
             // and the post-optimization recompute_boundary_prior() below is skipped.
             // Wall-SLAM: the slot about to be dropped hands its wall observations to the map's carried
             // information — the ONLY place that information may grow (see absorb_wall_observations).
-            if (estimating() and not window_mgr_.empty()
+            // ... unless the layout is frozen. This is the ONLY place a wall's information grows,
+            // so skipping it is what actually holds the geometry still; the guards above only stop
+            // the structure from changing around it.
+            if (estimating() and not wall_frozen_ and not window_mgr_.empty()
                 and static_cast<int>(window_mgr_.size()) >= params.rfe_window_size)
             {
                 gn::Input ain; ain.params = &params; ain.walls = &wall_map_;

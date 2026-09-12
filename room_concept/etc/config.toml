@@ -1101,7 +1101,7 @@ BoundaryMuQualityThreshold      = 0.084
 #                After closure the walls stay variables (their precision only grows) and a new wall
 #                can still be born by model comparison — there is no second gate inside this mode.
 [RoomShape]
-MapMode = "given"
+MapMode = "estimate"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0
@@ -1111,6 +1111,11 @@ SensorSigma          = 0.02     # m — LiDAR range noise perpendicular to a wal
 # enters the association/merge innovation so a re-observed wall ASSOCIATES instead of birthing a
 # twin. The corner detector's map_sigma lesson; without it a live run bred 490 walls from six.
 WallMapSigmaD        = 0.04     # m
+# EXPERIMENT: hold the layout still once it first closes, is re-anchored and passes the publish bar.
+# Walls stop moving and stop gaining information, none are born or die, no re-derivation runs, and the
+# model room is re-seeded from that layout — so the localiser solves against a fixed room it measured
+# itself. Answers "does the rest behave as predicted when the map stops changing?". Off = normal SLAM.
+FreezeLayoutWhenPublishable = true
 WallMapSigmaPhiDeg   = 1.0      # deg
 SensorRange          = 15.0     # m — extent of the uniform prior on a wall's offset (Occam term)
 # ⚠ Decision constants that could not be modelled away (each is a discrete decision):

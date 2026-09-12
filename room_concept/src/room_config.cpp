@@ -97,6 +97,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ManhattanOffPrior", wm.manhattan_off_prior);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.SensorSigma", ws.sensor_sigma);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallMapSigmaD", wm.map_sigma_d);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.FreezeLayoutWhenPublishable", wm.freeze_when_publishable);
         float msp = std::numeric_limits<float>::quiet_NaN();
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallMapSigmaPhiDeg", msp);
         if (std::isfinite(msp)) wm.map_sigma_phi_rad = msp * static_cast<float>(M_PI) / 180.f;

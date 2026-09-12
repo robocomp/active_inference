@@ -81,6 +81,16 @@ namespace rc::wallmap
         float sensor_range = 15.f;          // m — extent of the uniform prior on d (Occam term)
         float birth_nats  = 4.605f;         // ln 100 — decisive Bayes factor ⚠ decision constant
         int   birth_min_frames = 2;         // a jump needs a second view (tracker-only birth)
+        // ── FREEZE THE LAYOUT once it first becomes publishable (RoomShape.FreezeLayoutWhenPublishable)
+        // An EXPERIMENT switch, not a modelling term, and off by default. It answers one question:
+        // does everything downstream behave as predicted when the map is held still? A map that has
+        // closed, been re-anchored and passed the publish bar is then treated as given — walls stop
+        // moving and stop gaining information, none are born or die, and no re-derivation runs — so
+        // the localiser is solving against a fixed room, as it does in Given mode, but against a room
+        // this run measured rather than one loaded from a file. Association and the per-association
+        // residual log keep running: with the geometry pinned, that residual stops being a post-fit
+        // statistic and becomes a real measurement of how far the scan falls from a fixed wall.
+        bool  freeze_when_publishable = false;
         int   max_candidates = 32;
         float publish_corner_sigma = 0.06f; // m — every derived corner must be this sharp to publish
         // ── The corner's IRREDUCIBLE error, the part more looking cannot remove ─────────────────
