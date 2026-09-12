@@ -1121,7 +1121,12 @@ FreezeLayoutWhenPublishable = true
 # space outside a wall, so in a plain room with an opening it is read as an alcove and the published
 # outline grows a notch that the walls themselves do not have. Set false when the room is known to be
 # a simple polygon and you want exactly what the walls say.
-EnableLevel2 = true
+EnableLevel2 = false
+# ⚠ OFF for room 2 (2026-09-12). This room IS a rectangle — the estimator gets it to a clean 4-vertex
+# 4.00 x 5.99 m with every wall within 1.6 deg of axis — and level 2 was adding an alcove on the way
+# out, which then FROZE into the published layout. The cause is not a bug in the operator: a 1.06 m
+# DOORWAY is free space immediately outside a wall, and that is indistinguishable from a recess by the
+# only evidence level 2 has. Turn it back on for a flat whose real structure needs columns and alcoves.
 WallMapSigmaPhiDeg   = 1.0      # deg
 SensorRange          = 15.0     # m — extent of the uniform prior on a wall's offset (Occam term)
 # ⚠ Decision constants that could not be modelled away (each is a discrete decision):
