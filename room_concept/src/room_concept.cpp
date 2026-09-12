@@ -565,7 +565,26 @@ namespace rc
                 if (lidar_from_buffer.has_value()) pts = lidar_from_buffer->first;
             }
             if (pts.empty()) return false;
-            std::vector<Eigen::Vector2f> placeholder = {{-10.f, -10.f}, {10.f, -10.f}, {10.f, 10.f}, {-10.f, 10.f}};
+            // ⚠ THE FALLBACK BOX MUST NEVER BE LARGER THAN THE ROOM. initialize_rect() below BIRTHS
+            // four wall landmarks on this rectangle, and a seeded wall that lies BEHIND the real one
+            // is never hit by a beam again — absence cannot refute what is occluded, and this
+            // codebase's rule is that occlusion HOLDS the belief. Those walls are then immortal: they
+            // stay in the published cycle for ever, carrying their untouched prior sigma.
+            // Measured in Webots room 2 (6.22 x 4.39 m), estimate_obb() failed and the old fixed
+            // {+-10, +-10} fallback fired: after 2300 frames the polygon still ran out to x = +-10
+            // with sigma 2.665 on one of them, while the room ITSELF was recovered to 6.18 x 3.98 m
+            // with sigma 0.021 on its well-observed corners. The shape was not misestimated, it was
+            // polluted. So the fallback is the scan's own extent, which by construction cannot sit
+            // outside the walls that produced it.
+            std::vector<Eigen::Vector2f> placeholder;
+            {
+                Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+                for (const auto& q : pts) { const Eigen::Vector2f v(q.x(), q.y()); lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+                if ((hi - lo).minCoeff() > 0.2f)
+                    placeholder = {{lo.x(), lo.y()}, {hi.x(), lo.y()}, {hi.x(), hi.y()}, {lo.x(), hi.y()}};
+                else
+                    placeholder = {{-3.f, -3.f}, {3.f, -3.f}, {3.f, 3.f}, {-3.f, 3.f}};
+            }
             PointcloudCenterEstimator estimator;
             if (const auto obb = estimator.estimate_obb(pts); obb.has_value())
             {
@@ -584,8 +603,14 @@ namespace rc
             // size. Everything after is refinement of its sides plus splice jumps.
             if (wall_map_.walls.empty())
                 wall_map_.initialize_rect(placeholder);
-            qInfo() << "[room][wall-slam] Estimate mode: origin = first pose; placeholder box from the scan's OBB"
-                    << "until the walls close.";
+            {   // Never let the fallback fire silently again — it is invisible in the map and fatal to it.
+                Eigen::Vector2f plo(1e9f, 1e9f), phi(-1e9f, -1e9f);
+                for (const auto& v : placeholder) { plo = plo.cwiseMin(v); phi = phi.cwiseMax(v); }
+                qInfo() << "[room][wall-slam] Estimate mode: origin = first pose; seed box"
+                        << (phi.x() - plo.x()) << "x" << (phi.y() - plo.y()) << "m from"
+                        << (estimator.estimate_obb(pts).has_value() ? "the scan's OBB" : "the scan EXTENT (OBB failed)")
+                        << "-- walls seeded here must lie INSIDE the room or they can never die.";
+            }
             return true;
         }
 

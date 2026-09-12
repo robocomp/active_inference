@@ -15,3 +15,11 @@ Planned:
 - `parked_rect_*.csv` — the 6 x 4.2 m room behind the passage door, robot stationary. Ground truth
   is a KNOWN RECTANGLE, so edge lengths and angles can be checked **without any frame alignment**,
   which is the one caveat every other layout comparison here carries.
+
+- `room2_parked_seedbug_*.csv` — robot parked in room 2 (6.22 x 4.39 m), 4740 frames / 242 s.
+  **Diagnostic run that found the seed-box defect.** The polygon locks at 8 vertices and never
+  resolves: four of them are the real room, four are the {+-10, +-10} m fallback seed box, one still
+  carrying its untouched prior sigma of 2.665 after four minutes. The room ITSELF is recovered well —
+  6.18 x 3.98 m against 6.22 x 4.39, with sigma 0.021-0.022 m on the two well-observed corners, so a
+  4 cm width error at about 1.8 sigma. The shape was polluted, not misestimated.
+  Superseded by the fix; keep as the "before" arm.
