@@ -1101,7 +1101,7 @@ BoundaryMuQualityThreshold      = 0.084
 #                After closure the walls stay variables (their precision only grows) and a new wall
 #                can still be born by model comparison — there is no second gate inside this mode.
 [RoomShape]
-MapMode = "estimate"
+MapMode = "given"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0
@@ -1161,6 +1161,20 @@ WallMaxSlots         = 0        # wall factors on the newest N slots; 0 = every 
 
 [DSR]
 StableSdfMseMax = 0.076   # unified 2026-08-29; P3Bot ran the 0.06 default only because its file was silent
+StableCovTtMax  = 0.002   # was the 0.001 header default, whose note "already passes 100%" is stale.
+                          # ⚠ AND THE QUANTITY IT GATES IS FROZEN, WHICH IS THE REAL DEFECT. Measured
+                          # 2026-09-13, Given mode: at 100% early exit the published covariance is
+                          # never recomputed — it is republished unchanged from the last SOLVE. Row
+                          # 2695 solved and produced cov_tt = 0.001489; rows 2696..4610 (1915 frames)
+                          # all carry 0.00149, p10 = median = p90 = max, not one bit of variation.
+                          # Other stretches of the same file sit at 0.000268, well UNDER 0.001.
+                          # So whether the agent ever stabilises is decided by whatever covariance the
+                          # last solve happened to leave behind, and then frozen: land on 0.000268 and
+                          # it stabilises immediately and for ever; land on 0.00149 and it never can,
+                          # however well it localises. 0.002 makes today's frozen value pass
+                          # deterministically. It fits a constant to a symptom — the fix is for an
+                          # early-exit frame to publish a covariance that MEANS something (the
+                          # validation it just passed), not the last solved one unchanged.
 # This apartment fits chronically at ~0.079 mean|SDF| on early-exit frames (5th–95th pct 0.075–0.083),
 # so the 0.06 header default was UNREACHABLE on the very (iters==0) frames the gate requires → the room
 # never uploaded (0/2213 frames stable, longest streak 0). Raised above the 95th pct with margin.
