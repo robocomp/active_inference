@@ -34,6 +34,20 @@ varies by \num{5}$\times$ between environments and \num{2}$\times$ between movin
 still---and argue that this is why precision must be inferred rather than tuned.
 \end{abstract}
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig/teaser}
+\caption{\textbf{The estimate is right before it is confident, and says so.} The same room, from one
+closed-loop run on a real LiDAR model. \emph{Left}, after \SI{681}{\second} parked: the geometry is
+already within \SI{15}{\milli\meter} of truth (dashed), yet every corner declares almost a metre of
+uncertainty and every edge sits at its prior, so the layout is withheld. Standing still re-observes
+the same walls from the same viewpoint, and the information those observations carry saturates.
+\emph{Right}, after a single rotation in place: the same geometry, now with corner $\sigma$ smaller by
+a factor of \num{32} and every corner under the publication gate. The estimator does not earn
+precision by waiting, and does not claim any.}
+\label{fig:teaser}
+\end{figure}
+
 \section{Introduction}
 
 Room-layout estimation is mature enough that accuracy alone no longer separates methods. What
@@ -213,6 +227,17 @@ Failures (no closed polygon) & 8 / 594 \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig/mosaic}
+\caption{\textbf{Thirty-two of the 594 annotated floor plans}, truth filled, estimate outlined, with
+the achieved IoU beneath each. The panels are ordered by IoU and sampled evenly across the corpus,
+so the population's \emph{worst} room is at the left of the top row and the sample is not a selection
+of successes. The shapes are the corpus's own: between \num{6} and \num{22} corners, with alcoves,
+wall columns and re-entrant corners that no rectangle prior would admit.}
+\label{fig:mosaic}
+\end{figure*}
 
 \subsection{Is the reported uncertainty honest?}
 \label{sec:calib}
