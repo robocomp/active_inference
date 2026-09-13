@@ -207,7 +207,11 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         "Localisation confidence, 0..1, raw and unsmoothed.\n\n"
         "Read it as a trend, not a value: what matters is whether it is recovering or decaying, and\n"
         "how it moves when the robot turns or enters a corridor. A high number is not a guarantee —\n"
-        "the localiser has been measured jumping several metres while reporting a tight sigma."));
+        "the localiser has been measured jumping several metres while reporting a tight sigma.\n\n"
+        "Scale: 0 at det(cov) = 1e-6 (lost), 1 at 1e-18 (tighter than anything measured). A healthy\n"
+        "Given-mode run sits near 0.73. If this reads exactly 1.000 and never moves, suspect the SCALE\n"
+        "rather than the estimator — that is how it behaved until 2026-09-13, when the endpoints were\n"
+        "three to seven orders away from the determinant the estimator actually produces."));
     ts_plot_rates_->set_series_tooltip("RT publish Hz", QStringLiteral(
         "How often a CORRECTED pose is published to the graph, in Hz.\n\n"
         "This is the rate consumers actually see. It should track the laser sweep rate; a drop means\n"
@@ -614,11 +618,22 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     // a stalled camera would draw a flat line at its last value, which reads as "steady" rather than
     // "stopped" — the two must not look alike.
 
-    // Localization confidence from the pose covariance determinant: small det (well-localized) → high.
-    // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10, mapped to [0,1] by /12.
-    // Plotted raw on its own fixed 0..1 axis (ts_plot_conf_) — 1 = tight, 0 = uncertain.
-    const float det_cov = std::max(1e-12f, std::abs(loc_res->covariance.determinant()));
-    const float conf = std::clamp(-std::log10(det_cov) / 12.f, 0.f, 1.f);
+    // ── LOCALISATION CONFIDENCE FROM THE POSE COVARIANCE DETERMINANT ─────────────────────────────
+    // 1 = tight, 0 = uncertain, raw and unsmoothed on its own fixed 0..1 axis.
+    // ⚠ RE-SCALED 2026-09-13 BECAUSE IT WAS PINNED AT EXACTLY 1.0. The old mapping floored det at
+    // 1e-12 and divided -log10(det) by 12, on the stated assumption that det runs 1e-8..1e-10 when
+    // well localised and 1e-4 when uncertain. Measured on a healthy Given-mode run: det = 1.4e-15 to
+    // 2.2e-15 (sigma_x 5.6 mm, sigma_y 6.2 mm, sigma_theta 0.0011 rad). That is three to seven orders
+    // below the assumed range, so the FLOOR clipped every frame before the scale ran and the plot
+    // showed a constant 1.000 — a display saturated by its own calibration, on an estimator that was
+    // working perfectly. A confidence readout that cannot fall is not a readout.
+    // The endpoints are now the measured ones: det = 1e-6 reads 0 (a pose this loose is lost —
+    // sigma ~ 1 cm x 1 cm x 1 rad), det = 1e-18 reads 1 (tighter than anything observed). Today's
+    // run lands near 0.73 and MOVES, which is the point.
+    constexpr float kDetLost  = -6.f;    // log10(det) at which confidence reads 0
+    constexpr float kDetTight = -18.f;   // log10(det) at which it reads 1
+    const float det_cov = std::max(1e-20f, std::abs(loc_res->covariance.determinant()));
+    const float conf = std::clamp((std::log10(det_cov) - kDetLost) / (kDetTight - kDetLost), 0.f, 1.f);
     if (ts_plot_conf_)
         ts_plot_conf_->add_point("confidence", conf);
 
