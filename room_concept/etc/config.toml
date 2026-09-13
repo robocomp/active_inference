@@ -163,6 +163,22 @@ LayoutDir              = "../layouts"   # the SVGs left room_concept/: a floor p
 # origin belong to the BUILDING, not to the robot reading them.
 PreserveBootstrapRoom  = false  # static-room phase: adopt the pre-seeded room/table from the bootstrap graph; do NOT delete on start or overwrite robot->room. Set false to go dynamic (localize + create room).
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
+# ── THE POSE COVARIANCE'S PREDICTION STEP, ON EARLY-EXIT FRAMES ──────────────────────────────────
+# ON 2026-09-13. current_covariance is written ONLY on the optimised path, so with this off and the
+# early exit firing on ~100% of frames it is FROZEN: measured in Given mode, rows 2696..4610 — 1915
+# consecutive frames — all carried cov_tt = 0.00149 with p10 = median = p90 = max, while other
+# stretches of the same run sat at 0.000268. Everything downstream of it froze with it: the room node
+# could never be created (its gate is cov_tt < StableCovTtMax, a comparison against a constant), and
+# the UI confidence, which is -log10(det(cov))/12, sat pinned at 1.0.
+# ⚠ IT IS BOTH HALVES OR NEITHER, and that is why this is one flag. The GROWTH half (P += the motion
+# prior's covariance, the ordinary Kalman prediction step) lives in the early-exit path; the SHRINK
+# half lives inside the polish block. Left running with the polish off on 2026-08-26 the growth ran
+# alone and the TRACK WAS LOST — sdf_mse 0.026 -> 0.461, early exit down to 21%, cov_tt peaking at
+# 7.1 rad^2. A one-sided recursion is not a recursion.
+# ⚠ res.covariance is read by the speed governor and by every concept agent's precision, so they will
+# now see a pose that gets LESS certain while it runs open-loop and recovers at each correction —
+# which is what it should have been saying all along.
+SdfPolishOnEarlyExit   = true
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
 MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # Con 20 se perdían 20 frames de Adam obligatorio
