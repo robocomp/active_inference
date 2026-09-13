@@ -15,6 +15,142 @@ class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
 namespace rc {
 
+
+// ─── the three PRAGMATIC door affordances: approach / open / cross ────────────────────────────────
+// The tunables, all PHYSICAL: a body width, a reach, two stand-offs, plus the OFFER POLICY (the one
+// decision boundary, stated as the probability it actually is, with a Schmitt band). The model that
+// turns these into preconditions is door_pragmatics.h; read its header before changing any of them.
+struct DoorPragmaticCfg
+{
+    bool  enabled              = true;
+    // ⚠ApproachStandoffM IS GONE, not renamed. Where to stand is no longer a configured distance: it is
+    // the MIDDLE of the actuation band, whose near edge is derived from this door's own width (the leaf's
+    // swept arc) and this robot's body. A fixed 1.00 m was inside the arc of a 1.00 m leaf — the robot
+    // would have been struck by the door it asked to be opened — and no single number can be right for
+    // the next door of a different width. A key that is read and ignored looks exactly like one that
+    // works, so it is deleted rather than left inert.
+    // FAR edge of the actuation band, from the aperture plane. The NEAR edge is derived (safe_standoff).
+    float actuation_reach_m    = 2.00f;
+    float cross_standoff_m     = 1.20f;  // how far PAST the aperture the cross target sits
+    float cross_clearance_m    = 0.80f;  // distance past the aperture plane that counts as fully through
+    // ★A MEASUREMENT OF THE ROBOT, not a tuning knob — and the one direction in which a doorway closes.
+    // Shadow's lateral half-width measured off the robocomp meshes is 0.2938 m per side (0.588 m across);
+    // the hull compiled into rc::RobotFootprint::shadow() is 22.2 mm NARROWER per side than the mesh it
+    // claims to come from, and on P3Bot it is a different body altogether. So this belongs in a
+    // [Platform.<robot>] overlay per the fleet config convention, NOT in a shared default.
+    // See common/robot_footprint/mesh_hull.h and ROBOT_GEOMETRY.md.
+    // ⚠The default below is Shadow's and is WRONG for any other base.
+    float robot_passage_width_m = 0.60f;
+    float passage_margin_m      = 0.10f; // clearance demanded on top of the body width
+    // Pose-uncertainty floor for door_reach_prob. Used when the pose-chain covariance is unavailable
+    // (RtCovAddChain off, or no mask fitted yet): a probability computed with σ == 0 would be a step
+    // function, i.e. exactly the distance threshold this design exists to avoid.
+    float pose_sigma_floor_m    = 0.10f;
+    // ★CLEARANCE FOR THE LEAF'S OWN SWEPT ARC — a SAFETY quantity, not a preference.
+    // A leaf hinged on a vertical aperture edge sweeps a circle of radius equal to its own width, so at
+    // 90 degrees it reaches a full `w` out from the wall plane. If it opens TOWARD the robot, anything
+    // standing closer than that is inside the arc and gets struck by the door it just asked to be opened.
+    // ★AND WE DO NOT KNOW WHICH WAY IT OPENS. `LeafState::swing` is never fitted — door_fitter.cpp sets
+    // it once from config and it stays there — so "it opens away from me" is an assumption with nothing
+    // behind it. The only safe reading of an unestimated direction is that it could come at us.
+    // Hence the minimum stand-off is DERIVED, not configured: aperture width + half the robot's body +
+    // this margin. Configuring it as a distance would be silently wrong the first time a wider door
+    // appeared; deriving it cannot be.
+    float swing_clearance_m     = 0.20f;
+    // ★THE PROVIDER'S SWING RATE, rad/s — and it is DUPLICATED, which is a defect this comment exists to
+    // make visible rather than hide. When this agent asks for a door to be opened it predicts the leaf
+    // angle as (rate x elapsed) so it is not surprised by its own action; if that prediction is FASTER
+    // than the real hinge, the agent believes the door open while it is still swinging. It used to be a
+    // literal 1.2f in request_door_actuation with a comment saying "matches the bridge's SwingRate" —
+    // which is a coupling held together by somebody remembering.
+    // ⚠MUST MATCH webots-bridge [DoorControl] SwingRate. The real fix is for the provider to ADVERTISE it:
+    // DoorControl.idsl's Capabilities carries typicalLatencySec and nothing about rate, so there is
+    // currently nothing to read. Extending the interface means regenerating the Ice stubs on both sides.
+    float actuation_swing_rate = 0.5f;   // rad/s; 90 deg in ~3.1 s
+    // ★THE WIDTH OF THE LEAF-ANGLE BELIEF WHEN THE IMAGE IS NOT RESOLVING IT. estimate_phi() refills
+    // phi_curve only from a fresh mask, and this agent's own [DoorConcept] notes record that the ADE20K
+    // posterior over a plainly visible closed door collapses 0.995 → 0.048 as the robot CLOSES on it —
+    // so the curve is typically absent at exactly the range from which `open` has to be taken. On those
+    // cycles P(passable) is marginalised over N(phi_est, this) instead of over the curve: same question,
+    // same absence of any angle threshold, weights from the belief rather than from the image. It is a
+    // PRIOR WIDTH, not a measurement — 0 disables the fallback and `open`/`cross` then appear only while
+    // the door is actively segmented. Published as door_open_prob_from_curve so the two never blur.
+    float phi_sigma_rad         = 0.25f;
+
+    // ── VALUE: what the consumer ranks these on. POLICY PLACEHOLDERS, and deliberately LOW. ────────
+    // ★An epistemic gain is a measured entropy reduction in nats. A pragmatic value is the expected free
+    // energy reduction from reaching a GOAL STATE — and nothing in this system currently wants to be on
+    // the other side of a door. So the honest value of "cross" is near zero until a mission layer asks,
+    // and these are set low on purpose: the door's offers stay VISIBLE and selectable when nothing else
+    // bids, without out-bidding the fleet's exploration. When a mission layer arrives it should WRITE
+    // these, and they should stop being config.
+    //
+    // ★★★WHOEVER REPLACES THESE: DO NOT MAKE THE PRICE A FUNCTION OF THE MEAN ALONE. IT LATCHES.
+    // The intended source is the passage history ltsm_agent accumulates per doorway — a Beta posterior
+    // over p(get through | I ask), folded from claimed crossings. That belief then GOVERNS ITS OWN
+    // SAMPLING: the price decides whether the controller claims `cross`, and a claim is the only thing
+    // that produces evidence. So a run of bad luck — two Timeouts from a door that happened to be shut —
+    // drops the price, claims stop, and NO EVIDENCE CAN EVER ARRIVE TO CORRECT IT. The belief freezes
+    // pessimistic with every instrument reading healthy, and the only cure is a human with a config
+    // override. It is the bootstrap problem again, in the form that appears AFTER everything works.
+    // The escape is the term a mean cannot express: a WIDE Beta means an uncertain doorway, and an
+    // uncertain doorway is worth trying precisely BECAUSE trying it resolves the uncertainty. Price it
+    // with the expected information gain alongside the pragmatic value — the same machinery as
+    // room_concept's information-gain explorer and the controller's epistemic planner. This is also why
+    // the history channel publishes a likelihood ratio and a conjugate posterior rather than a bare
+    // ratio: the VARIANCE is not decoration beside the mean, it is the quantity the epistemic term
+    // consumes, and a channel that published only a point estimate could not have an escape at all.
+    // (Second, weaker answer: an inferred-volatility forgetting factor — MODEL_HISTORY §3 — decays an
+    // old pessimistic posterior back toward the prior, so willingness to retry returns with time. Which
+    // is also the truth about doors: one that was shut last month says little about today. α and β are
+    // floats precisely so that slots in with no schema change.)
+    // Agreed with ltsm_agent 2026-09-12; see [[door-pragmatic-affordances]].
+    float value_approach = 0.5f;
+    float value_open     = 0.3f;
+    float value_cross    = 0.3f;
+
+    float approach_timeout_s = 60.0f;
+    float open_timeout_s     = 12.0f;   // provider latency + swing time, not a navigation budget
+    float cross_timeout_s    = 40.0f;
+
+    // Offer policy (rc::pragmatic::PragmaticAffordance::Policy): offer above `offer_prob`, withdraw below
+    // `withdraw_prob`, and only after the decision has held `stable_cycles` MEASURED cycles.
+    float offer_prob     = 0.60f;
+    float withdraw_prob  = 0.35f;
+    int   stable_cycles  = 3;
+
+    // ── THE `transitable` SELF-EDGE: door --[transitable]--> door ────────────────────────────────
+    // Asserted on the door's own node exactly while this agent believes the robot can get through it,
+    // so a consumer can ask the GRAPH rather than re-deriving passability from geometry it would have to
+    // fetch, transform and interpret for itself.
+    //
+    // ★"transitable", NOT "open", AND THE DISTINCTION IS REAL RATHER THAN COSMETIC. The belief behind
+    // this edge is `door_open_prob` = P(clear span >= the ROBOT'S passage width), so it does not say the
+    // leaf has moved — it says THIS BODY FITS. A door ajar by 20 cm is open and not transitable, and a
+    // wide doorway may be transitable for this robot and not for a larger one. Naming the edge after the
+    // quantity actually computed stops a consumer reading it as a statement about the door's mechanism.
+    // (It is also already a registered cortex edge type, so this needs no reinstall.)
+    //
+    // ★SAME DECISION SHAPE AS EVERY OTHER BOUNDARY IN THIS AGENT: a Bayesian decision on a probability
+    // with a Schmitt band and a debounce in MEASURED cycles — never a bare threshold on phi. Separate
+    // keys from the affordance offer band above because this is a different act: an affordance is an
+    // offer this agent makes, while this edge is a public ASSERTION ABOUT THE WORLD that other agents
+    // may route on, and the two do not have to become confident at the same rate.
+    float transitable_prob     = 0.60f;   // assert once P(passable) rises above this …
+    float not_transitable_prob = 0.35f;   // … and retract once it falls below THIS (must be < the above)
+    int   transitable_stable_cycles = 3;  // … and only after the decision has held this many MEASURED cycles
+
+    // ★MAY THIS AGENT ASK A PROVIDER TO MOVE A DOOR WITHOUT A HUMAN? The `open` affordance's whole point
+    // is that it can, and the consumer's claim is the trigger. Left as a switch because the request is an
+    // act in the world with a real cost when the provider is a PERSON (DoorActuator::Caps::requires_human).
+    bool  autonomous_actuation = true;
+    // Which door the PROVIDER should move, by its own advertised id. Empty ⇒ resolve BY PLACE from the
+    // pose we send, which requires the room↔world registration to be solved (door_world_registration) —
+    // measured live, root←room is NOT that transform (6.45 m and ~90.3° out), so a by-place request
+    // without a solved registration is refused locally rather than sent to open some other door.
+    std::string actuation_provider_id;
+};
+
 struct DoorConfig
 {
     // Agent convergence
@@ -120,6 +256,47 @@ struct DoorConfig
     float ai2_fe_baseline_adapt_up   = 0.005f;
     float ai2_fe_surprise_smooth     = 0.10f;
     float ai2_trunc_gate_frac    = 0.10f;
+    // ── HOW FAR THE LEAF CAN OPEN ────────────────────────────────────────────────────────────────
+    // ★90 DEGREES WAS A HARD CEILING AND REAL DOORS GO PAST IT. estimate_phi searched [0, pi/2] and
+    // CLAMPED the estimate to it, so a door standing open at ~100 degrees — swung back toward the wall,
+    // which is what a door held open actually looks like — had NO representable hypothesis, and the
+    // nearest state the model could offer was "nearly shut". Measured live 2026-09-13: a plainly open
+    // door read 10 deg. The estimator was not wrong about that door; it had nothing to be right with.
+    // 120 deg is the usual travel before a leaf meets a wall or a stop. A MODEL RANGE, not a tuning
+    // knob: widening it adds hypotheses, it does not bias the ones already there.
+    // ── LiDAR POINTS FOR THE HINGE BRANCH (bpearl) ───────────────────────────────────────────────
+    // ★THE LEAF IS GEOMETRICALLY OBVIOUS AND SEMANTICALLY INVISIBLE. Everything this agent fits comes
+    // from mask-deprojected points — i.e. only what the segmenter chose to call "door" — and measured
+    // 2026-09-13, once the door stands open that is a sliver of JAMB: overlap with the predicted leaf
+    // fell to 0.013 at every candidate angle, so the leaf-angle estimate had no evidence and parked near
+    // flush on a door open past 90 deg. A leaf swung toward the robot at ~1 m is nonetheless a large flat
+    // surface that the low bpearl dome returns cleanly, whatever any classifier calls it.
+    // Precision, not a boolean: 0 leaves the ingestor entirely dormant (no DDS participant), and a larger
+    // value weighs those rays more against the mask points in the same free energy.
+    float lidar_bpearl_precision = 1.0f;
+
+    // ── LEAF-TRACKER FORENSICS ───────────────────────────────────────────────────────────────────
+    // ★TWO FILES THAT TOGETHER RECONSTRUCT THE DECISION, not summarise it. A whole day was lost to
+    // changing the estimator and measuring afterwards: each summary number (phi, then w_sdf, then
+    // leaf_pts) answered the previous question and raised a new one, because a single scalar cannot show
+    // the SHAPE of a likelihood or the GEOMETRY of a point selection — and every failure so far has been
+    // one of those two.
+    //   phi_curve  : one row per HYPOTHESIS — every channel's raw value and the final weight, so the
+    //                curve can be plotted and its argmin/flatness/monotonicity read directly.
+    //   phi_points : one row per cycle — the selected cloud's geometry relative to the WALL PLANE, which
+    //                is the quantity that decides whether the LiDAR branch is looking at a leaf or at a
+    //                wall. A closed leaf lies IN that plane and is indistinguishable from the wall, so
+    //                the signed-distance distribution is the whole story.
+    // Throttled by cycle, not by event: an estimator that is wrong INTERMITTENTLY has to be sampled
+    // uniformly or the log records only the cycles somebody already suspected.
+    std::string phi_curve_csv_path  = "etc/door_phi_curve.csv";
+    std::string phi_points_csv_path = "etc/door_phi_points.csv";
+    int         phi_debug_every_n   = 5;    // 0 disables both
+    float phi_max_rad            = 2.0944f;   // 120 deg
+    // Angular resolution of the hypothesis grid; the step COUNT is derived from range/resolution so that
+    // widening the range cannot silently coarsen the search — that would trade the ceiling for a blur,
+    // and resolving which angle the leaf is at is the entire point.
+    float phi_step_rad           = 0.0873f;   // 5 deg
     int   ai2_gn_iters           = 4;
     float ai2_extent_std         = 0.05f;   // extent-observation noise (m) for the coverage/extent likelihood
     std::string ai2_csv_path     = "";
@@ -134,6 +311,30 @@ struct DoorConfig
     // Independent of every classifier, which is the point — the semantic posterior collapses from 0.995 to
     // 0.048 on a plainly visible closed door as the robot closes, while its jamb and lintel stay in the RGB.
     bool  rgb_contour_check = true;
+
+    // ── THE METRIC HALF OF THE CONTOUR CHANNEL, separately switchable ────────────────────────────
+    // The ZED-depth test asks the absolute question the RGB gradient cannot: is there a surface at the
+    // distance the belief predicts, with space receding behind its boundary? A photograph of a door has
+    // the borders and none of the step, so this is the half a poster cannot pass — which is why it
+    // exists and why turning it off has a real cost: a door that has genuinely GONE (carried away, or a
+    // leaf swung fully clear) loses the one channel that can say "we are looking straight through the
+    // place it is supposed to be", and removal then rests on mask absence alone, which is slower.
+    //
+    // ⚠MEASURED 2026-09-13 AND TURNED OFF IN etc/config.toml FOR THIS DEPLOYMENT. On a door the user
+    // confirmed correctly fitted (hanging from its wall, corroborated in viewer3d) this half voted to
+    // REMOVE on 489 of 489 cycles moving and 40 of 40 parked — never once positive — at a near-constant
+    // verdict of -0.52 to -0.58, driven by a stable `dbg_depth_bias_m` of -0.20 m parked / -0.25 m
+    // moving, in a band only 8 cm wide. A systematic offset that tight is a calibration disagreement,
+    // not an absence, and `DoorInstance::dbg_depth_bias_m` says so in its own comment: "a fit error, not
+    // an absence". Spending it as existence evidence made the door's survival depend entirely on the RGB
+    // contour outrunning a permanent penalty: parked the contour reads +2.65 and wins, but on the frames
+    // where YOLO goes blind it falls to +0.53, the sum turns negative, and the door is deleted. The
+    // deaths looked like YOLO blindness; blindness only removed what was MASKING the constant negative.
+    // ★So this is OFF pending a measurement of where the 20 cm lives — ZED depth bias at this range
+    // (retina already has a LiDAR-anchored depth-correction dataset for exactly this) or the check's own
+    // sampling. It is NOT a repudiation of the channel, and the default stays true so no other
+    // deployment changes behaviour underneath itself.
+    bool  contour_depth_check = true;
 
     // RoboCompDoorControl provider endpoint. Empty ⇒ the feature is off and the UI says so.
     // ⚠The webots-bridge listens on 10017 (its etc/config.toml, which is the file it is run with).
@@ -265,6 +466,9 @@ struct DoorConfig
     float bearing_along_std_m      = 3.0f;    // Bearing.AlongStdM — Σ std ALONG the ray (unknown range)
     float bearing_across_std_m     = 0.30f;   // Bearing.AcrossStdM — Σ std ACROSS the ray (bearing known)
     float bearing_yaw_std_rad      = 3.14f;   // Bearing.YawStdRad — orientation fully unknown at birth
+
+    // The three pragmatic affordances (approach / open / cross) — see DoorPragmaticCfg above.
+    DoorPragmaticCfg pragmatic{};
 };
 
 // Fill a DoorConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

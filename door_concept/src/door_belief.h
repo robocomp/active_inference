@@ -31,6 +31,7 @@
 #include <Eigen/Dense>
 
 #include "../../common/ai_belief/recursive_laplace.h"
+#include "../../common/ai_belief/lidar_ray_factor.h"   // rc::LidarRays + lidar_ray_cost
 #include "door_geometry.h"      // rc::door:: Aperture / LeafState / LeafPose — the single geometry source
 
 namespace rc
@@ -93,7 +94,22 @@ struct DoorBeliefParams
     float wall_len = 0.0f;
 
     // Temporal transition (static furniture). s tracks localisation jitter; w,h barely move.
-    float process_std_s = 0.005f;
+    // ★A DOORWAY DOES NOT MIGRATE ALONG ITS WALL, so the process noise on `s` is ZERO. This is not a
+    // freeze and not a gate: it is the generative model saying what kind of thing an aperture is. With
+    // no noise injected, the posterior precision on `s` only ever grows, the Kalman gain on it shrinks
+    // in proportion, and the mean stops being dragged — continuously, with no switch anywhere and no
+    // moment at which behaviour changes.
+    // ★IT IS THE DEGENERATE DIRECTION, which is why it matters. `s` and the leaf angle phi explain the
+    // same observations: the fit slides the aperture along the wall to keep a SWUNG leaf on the mask.
+    // Measured: r = -1.000 between the slide and the swing over 27 rows, a 34 cm slide against a 41 deg
+    // swing — one degree of freedom estimated twice by two procedures chasing each other along a
+    // degenerate valley. A 5 mm/cycle random walk on `s` is exactly the licence to do that. Removing it
+    // leaves phi as the only parameter that can absorb a swing, which is the one that physically moves.
+    // ⚠A wrong aperture is then corrected by EVIDENCE against a finite Σ — slowly, in proportion to how
+    // confident we are — or removed by the existence channel, which is the designed path for "this door
+    // is not where we think". It is never corrected by injected noise, because injected noise cannot
+    // tell a real correction from a swing it should not be absorbing.
+    float process_std_s = 0.0f;
     float process_std_w = 0.001f;
     float process_std_h = 0.001f;
 
@@ -181,6 +197,37 @@ public:
     // disappearing. It stays outside theta: the belief remains 3-DOF [s, w, h] and the shared inference
     // engine is untouched, exactly as door_geometry.h's header anticipated.
     void  set_leaf_phi(float phi) { params_.leaf.phi = phi; }
+
+    // ── THE HINGE BRANCH: free energy as a function of the leaf angle alone ──────────────────────
+    // ★THIS IS THE SAME MINIMISATION THE AGENT ALREADY DOES, RESTRICTED TO ONE COORDINATE. Nothing new
+    // is being introduced: the model has a hinge, phi is the coordinate of that hinge, and this is the
+    // surface term of the same free energy evaluated along it with [s, w, h] held. The aperture is a
+    // hole in a wall and cannot move, so holding it is not an approximation — it is the statement that
+    // only one thing in this object is articulated.
+    // ★AND IT IS THE CURE FOR THE DEGENERACY, structurally. `s` and phi explain the same observations:
+    // the fit slides the aperture along the wall to keep a swung leaf on the mask (measured r = -1.000,
+    // 34 cm of slide against 41 deg of swing). Optimising them jointly lets the pair wander that valley;
+    // optimising phi with `s` held leaves the swing nowhere to go but into the parameter that swings.
+    // Returns 0.5 * SUM d^2 / (sigma^2 + R_i) — the Gaussian surface term, in nats, comparable across
+    // angles for the SAME frame. Points are room-frame; `R` is per-point measurement variance.
+    // ⚠It can only answer about points the leaf could explain. A cloud with nothing on the leaf yields a
+    // flat curve, which is the honest output of a measurement that was not taken — not a vote for phi = 0.
+    [[nodiscard]] float phi_free_energy(const DoorFrame& f, float phi) const;
+
+    // ★THE RAY VERSION, AND IT IS THE ONE THAT CAN SEE A DOORWAY. An aperture is a HOLE: a closed leaf
+    // stops the ray at the wall plane; an open one lets it fly through into the next room. That is a fact
+    // about WHERE RAYS STOP, including the ones that do not, and no cost built from return points can
+    // express it — the through-rays' endpoints are in the next room, so a point-based selection discards
+    // exactly the evidence that distinguishes open from closed. Uses the sensor ORIGIN, which a point
+    // cloud does not carry.
+    [[nodiscard]] float phi_ray_free_energy(const rc::ai::LidarRays& rays, float phi) const;
+    [[nodiscard]] std::vector<std::pair<float, float>>
+    phi_ray_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep) const;
+
+    // Argmin over a grid, plus the whole curve so a consumer can marginalise instead of conditioning on
+    // the winner. Weights are exp(-(F - F_min)): a proper likelihood over phi, normalised by the caller.
+    [[nodiscard]] std::vector<std::pair<float, float>>
+    phi_likelihood(const DoorFrame& f, float phi_min, float phi_max, int nstep) const;
     float leaf_phi() const { return params_.leaf.phi; }
     Eigen::Vector2f leaf_centre_xy() const { return leaf_pose().centre_xy; }
     float           leaf_yaw()       const { return leaf_pose().yaw(); }

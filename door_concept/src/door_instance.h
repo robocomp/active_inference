@@ -22,6 +22,8 @@
 #include "door_model.h"        // DoorModel / DoorState
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
+#include "../../common/pragmatic_affordance/pragmatic_affordance.h" // rc::pragmatic (SHARED) — approach/open/cross
+#include "door_pragmatics.h"   // rc::door::InteractionState — the three preconditions
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (shared w/ table/chair)
 
 namespace rc {
@@ -34,6 +36,14 @@ struct DoorInstance
     // belongs to a wall, so its room→door pose is published as a wall→door RT edge (pose in the wall frame);
     // set by DoorSceneGraph::write_rt_pose once the door's centre resolves to a "wall_*" node.
     std::uint64_t wall_node_id = 0;
+    // Which node this door was last POSITIONED NEXT TO on the 2-D graph canvas. Not the same question
+    // as who its RT parent is, and that is exactly the bug it exists to close: the canvas position was
+    // computed from the ROOM while the RT edge came from a WALL, so with 30 walls laid out across the
+    // canvas the door was drawn floating beside the room with its one edge running off-screen to a
+    // distant parent. Read as "the door is disconnected from the room" — twice, by the person whose
+    // system it is — when the graph was correct the whole time. A view that contradicts the structure
+    // costs more than no view.
+    std::uint64_t canvas_anchor_id = 0;
 
     // Geometry / state container: the accepted room-frame pose + dims (leaf AND aperture).
     DoorModel  model;
@@ -76,7 +86,42 @@ struct DoorInstance
     float dbg_depth_verdict = 0.0f;   // signed, [-1,+1]
     float dbg_depth_bias_m  = 0.0f;   // mean (observed − predicted) depth, SIGNED: a fit error, not an absence
     int   dbg_depth_n       = 0;
+    // ★THE WIDTH OF THE LEAF-ANGLE POSTERIOR, and the flag that says whether ANY channel spoke this
+    // cycle. Without these, phi is a number that cannot admit ignorance: the estimator emitted an angle
+    // whether or not anything had measured one, and every consumer read it as a measurement. Measured
+    // live 2026-09-13 — the cycle reporting phi = 0 deg on a (coincidentally) shut door had zero LiDAR
+    // points and all three channel weights exactly zero. sigma near the full range means NOT MEASURED.
+    float phi_sigma    = 2.0944f;   // rad; seeded at the full range = "nothing known yet"
+    float dbg_phi_cv   = 0.0f;   // spread of the combined phi likelihood; 0 = perfectly flat
+    bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
     float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est
+    // ★IS phi_est A MEASUREMENT, OR OUR OWN REQUEST ECHOED BACK? True when the last thing to move it was
+    // the PRIOR — the commanded swing — because the image offered no resolvable hypothesis at all.
+    // This exists because of a live defect it closes. Asking a provider to open a door arms an
+    // anticipation (phi_cmd_*) so the agent is not surprised by its own action; with no curve that
+    // anticipation IS phi_est. The passability fallback then marginalises over N(phi_est, sigma), reads
+    // "wide open" at the commanded 90 degrees, and door_open_prob hits 1.0 — so the `open` affordance's
+    // completion predicate (door_open_prob >= 0.70) is satisfied BY THE REQUEST, and reports Satisfied
+    // for a door that may never have moved. That is "a protocol event is not evidence" arriving through
+    // the back door: not the provider's Delivered, but our own anticipation of it.
+    // The anticipation stays — it is right, and it is what stops the existence channel deleting a door
+    // for obeying. What must not happen is it standing in as EVIDENCE of passability. A door is open
+    // when we SEE it open.
+    bool  phi_from_command = false;
+    // ── THE HINGE BRANCH'S OWN INSTRUMENTS ──────────────────────────────────────────────────────
+    // ★WITHOUT THESE THE ESTIMATE CANNOT BE DIAGNOSED, ONLY GUESSED AT. Measured 2026-09-13: phi came out
+    // strongly bimodal — 476 rows near 0 deg, 106 piled against the 120 deg clamp — and from the logged
+    // columns alone there was no way to tell "the LiDAR branch found the leaf and it really is wide open"
+    // from "the LiDAR branch was empty and the prior jumped to the ceiling". Those two call for opposite
+    // fixes, so shipping the branch without recording which one is happening was the actual mistake.
+    int   dbg_leaf_pts = 0;     // LiDAR points selected for the hinge branch; ★0 = NOT MEASURED
+    int   dbg_leaf_off_plane = 0;  // …of which stand OFF the wall plane. A CLOSED leaf is in the
+                                   // wall plane and therefore invisible to LiDAR: only these can
+                                   // ever say the leaf is open. Near 0 with a large phi = a
+                                   // contradiction, and the angle came from somewhere else.
+    float dbg_w_sdf  = 0.0f;    // normalised weight each channel put on the WINNING angle. All three
+    float dbg_w_mask = 0.0f;    // sum to the post-prior weight, so their ratio says which channel
+    float dbg_w_edge = 0.0f;    // actually decided this cycle — the question the bimodality poses.
     // ★THE WHOLE LIKELIHOOD CURVE, NOT ONLY ITS ARGMAX. estimate_phi scores every candidate angle and
     // then throws all but the best away; the silhouette channel — the ONLY channel allowed to remove a
     // door — was then rendered at that single angle. Measured 2026-09-10 the peak support is 0.007-0.245,
@@ -256,6 +301,46 @@ struct DoorInstance
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).
     ObjectAffordance affordance;
+
+    // ── THE THREE PRAGMATIC AFFORDANCES: approach / open / cross ────────────────────────────────────
+    // Siblings of `affordance` above under the same door node, and a different KIND of offer: that one
+    // asks the controller for a LOOK that shrinks Σ, these three ask it to do something to the door.
+    // Each is preconditioned — on the wire only while this agent believes the action is possible at all
+    // (rc::pragmatic, see its header for the three rules that keeps honest). `approach` is effectively
+    // unconditional for a located door; `open` needs the robot inside the actuation zone with the
+    // aperture believed shut; `cross` needs the aperture believed passable for this robot's body.
+    rc::pragmatic::PragmaticAffordance aff_approach;
+    rc::pragmatic::PragmaticAffordance aff_open;
+    rc::pragmatic::PragmaticAffordance aff_cross;
+    bool pragmatic_inited = false;   // init() takes the node id/name, so it waits for the DSR node
+
+    // This cycle's preconditions, recomputed once and then (a) published on the door node as the
+    // affordances' completion predicates and (b) used to decide what to offer. Held on the instance so
+    // the dashboard and the CSV logs read the SAME numbers the decisions were taken on.
+    rc::door::InteractionState interaction{};
+
+    // ── THE `transitable` SELF-EDGE's decision state ────────────────────────────────────────────
+    // door --[transitable]--> door is asserted while this agent believes the ROBOT CAN GET THROUGH (see
+    // DoorPragmaticCfg: it is P(clear span >= this body's passage width), not a claim about the leaf).
+    // Two streaks rather than one so the Schmitt band has somewhere to live, counted in MEASURED cycles:
+    // a cycle that learned nothing about phi must not advance either of them, or a door nobody looked at
+    // would eventually assert or retract a public edge on the strength of not having been observed.
+    int  transitable_streak     = 0;
+    int  not_transitable_streak = 0;
+    bool transitable_asserted   = false;   // what we last WROTE, so a transition can be logged once
+
+    // ★THE SIDE THE ROBOT WAS ON WHEN THE `cross` CLAIM WAS MADE. "Crossed" is a CHANGE of side, not a
+    // position, so no static predicate on a coordinate can express it — door_crossing_progress is signed
+    // against this. Latched on the claim and only then: re-latching per cycle would make the progress
+    // measure its own input and read 0 for ever. NaN = no claim outstanding.
+    float cross_side0 = std::numeric_limits<float>::quiet_NaN();
+
+    // Door actuation, as far as the `open` affordance knows. ★`asked` is NOT `opened`: a provider's
+    // Delivered says it did what it was asked, never that the world changed (door_actuator.h). Whether
+    // the leaf moved is answered by door_open_prob, from the image, like everything else here.
+    int  actuation_requests = 0;      // how many times we have asked, this door, this run
+    bool actuation_refused  = false;  // the provider said never-ask-again (UnknownDoor / NotActuable)
+    std::string actuation_note;       // last provider state or local refusal reason, for the UI/log
 
     // ── Active-perception aids for the controller's local lock-on search ──────────
     // Detection aliveness: how recently YOLO produced a "door" mask for this instance, and the

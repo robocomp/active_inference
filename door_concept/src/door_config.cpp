@@ -97,11 +97,18 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.ai2_fe_baseline_adapt_up   = getf("DoorModel.AI2FeBaselineAdaptUp",   0.005f);
     out.ai2_fe_surprise_smooth     = getf("DoorModel.AI2FeSurpriseSmooth",    0.10f);
     out.ai2_trunc_gate_frac      = getf("DoorModel.AI2TruncGateFrac",        0.10f);
+    out.lidar_bpearl_precision   = getf("DoorModel.LidarBpearlPrecision", out.lidar_bpearl_precision);
+    out.phi_curve_csv_path       = gets("DoorModel.PhiCurveCsvPath",  out.phi_curve_csv_path);
+    out.phi_points_csv_path      = gets("DoorModel.PhiPointsCsvPath", out.phi_points_csv_path);
+    out.phi_debug_every_n        = geti("DoorModel.PhiDebugEveryN",   out.phi_debug_every_n);
+    out.phi_max_rad              = getf("DoorModel.PhiMaxRad",               out.phi_max_rad);
+    out.phi_step_rad             = getf("DoorModel.PhiStepRad",              out.phi_step_rad);
     out.ai2_gn_iters             = geti("DoorModel.AI2GnIters",              4);
     out.ai2_extent_std           = getf("DoorModel.AI2ExtentStd",            0.05f);
     out.ai2_csv_path             = gets("DoorModel.AI2CsvPath",              "");
     out.detect_probe_csv_path    = gets("DoorConcept.DetectProbeCsvPath", out.detect_probe_csv_path);
     out.rgb_contour_check        = getb("DoorConcept.RgbContourCheck", out.rgb_contour_check);
+    out.contour_depth_check      = getb("DoorConcept.ContourDepthCheck", out.contour_depth_check);
     out.door_control_endpoint    = gets("DoorConcept.DoorControlEndpoint", out.door_control_endpoint);
 
     out.rt_cov_upload                 = getb("DoorConcept.RtCovUpload",         true);
@@ -182,6 +189,66 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
                         span.z0 - out.support_select_height_margin_m, span.z1 + out.support_select_height_margin_m, decl);
         if (ok_bands)
             std::print("[manifest] door ✓ every derived z-band contains the declared body\n");
+    }
+
+    // ── the three pragmatic affordances: approach / open / cross ([DoorAffordance]) ───────────────
+    {
+        auto& pg = out.pragmatic;
+        pg.enabled               = getb("DoorAffordance.Enabled",             pg.enabled);
+        pg.actuation_reach_m     = getf("DoorAffordance.ActuationReachM",     pg.actuation_reach_m);
+        pg.cross_standoff_m      = getf("DoorAffordance.CrossStandoffM",      pg.cross_standoff_m);
+        pg.cross_clearance_m     = getf("DoorAffordance.CrossClearanceM",     pg.cross_clearance_m);
+        pg.robot_passage_width_m = getf("DoorAffordance.RobotPassageWidthM",  pg.robot_passage_width_m);
+        pg.passage_margin_m      = getf("DoorAffordance.PassageMarginM",      pg.passage_margin_m);
+        pg.pose_sigma_floor_m    = getf("DoorAffordance.PoseSigmaFloorM",     pg.pose_sigma_floor_m);
+        pg.swing_clearance_m     = getf("DoorAffordance.SwingClearanceM",    pg.swing_clearance_m);
+        pg.actuation_swing_rate  = getf("DoorAffordance.ActuationSwingRate", pg.actuation_swing_rate);
+        pg.phi_sigma_rad         = getf("DoorAffordance.PhiSigmaRad",         pg.phi_sigma_rad);
+        pg.value_approach        = getf("DoorAffordance.ValueApproach",       pg.value_approach);
+        pg.value_open            = getf("DoorAffordance.ValueOpen",           pg.value_open);
+        pg.value_cross           = getf("DoorAffordance.ValueCross",          pg.value_cross);
+        pg.approach_timeout_s    = getf("DoorAffordance.ApproachTimeoutS",    pg.approach_timeout_s);
+        pg.open_timeout_s        = getf("DoorAffordance.OpenTimeoutS",        pg.open_timeout_s);
+        pg.cross_timeout_s       = getf("DoorAffordance.CrossTimeoutS",       pg.cross_timeout_s);
+        pg.offer_prob            = getf("DoorAffordance.OfferProb",           pg.offer_prob);
+        pg.withdraw_prob         = getf("DoorAffordance.WithdrawProb",        pg.withdraw_prob);
+        pg.stable_cycles         = geti("DoorAffordance.StableCycles",        pg.stable_cycles);
+        pg.transitable_prob      = getf("DoorAffordance.TransitableProb",     pg.transitable_prob);
+        pg.not_transitable_prob  = getf("DoorAffordance.NotTransitableProb",  pg.not_transitable_prob);
+        pg.transitable_stable_cycles = geti("DoorAffordance.TransitableStableCycles",
+                                            pg.transitable_stable_cycles);
+        pg.autonomous_actuation  = getb("DoorAffordance.AutonomousActuation", pg.autonomous_actuation);
+        pg.actuation_provider_id = gets("DoorAffordance.ActuationProviderId", pg.actuation_provider_id);
+
+        // ★REFUSE AN INVERTED SCHMITT BAND AT LOAD. withdraw_prob >= offer_prob is not a band, it is a
+        // single line with the two decisions on the wrong sides of it: the affordance would be offered and
+        // withdrawn on the same probability and chatter at the compute rate, writing a node into the shared
+        // graph every few cycles. Caught here because the symptom (CRDT churn in somebody else's agent) is
+        // nowhere near the cause. See [[dsr-crdt-dot-cloud-unbounded]].
+        // The `transitable` band gets the same refusal as the offer band above, and for the same reason:
+        // an inverted band asserts and retracts on one probability, which would flap a PUBLIC edge in the
+        // shared graph at the compute rate — CRDT churn in somebody else's agent, nowhere near the cause.
+        if (pg.not_transitable_prob >= pg.transitable_prob)
+        {
+            std::print("[config] DoorAffordance.NotTransitableProb ({:.2f}) must be BELOW TransitableProb "
+                       "({:.2f}) — that is not a hysteresis band. Falling back to 0.35/0.60.\n",
+                       pg.not_transitable_prob, pg.transitable_prob);
+            pg.not_transitable_prob = 0.35f;
+            pg.transitable_prob     = 0.60f;
+        }
+        if (pg.withdraw_prob >= pg.offer_prob)
+        {
+            std::print("[config] DoorAffordance.WithdrawProb ({:.2f}) must be BELOW OfferProb ({:.2f}) — "
+                       "that is not a hysteresis band. Falling back to 0.35/0.60.\n",
+                       pg.withdraw_prob, pg.offer_prob);
+            pg.withdraw_prob = 0.35f;
+            pg.offer_prob    = 0.60f;
+        }
+        // A passage the robot cannot fit through can never be crossed, and a body width of 0 says the
+        // robot is a point — both are configuration mistakes worth a line rather than a silent behaviour.
+        if (pg.robot_passage_width_m <= 0.0f)
+            std::print("[config] DoorAffordance.RobotPassageWidthM is {:.2f} m — the robot is not a point; "
+                       "the `cross` affordance will be offered for ANY ajar door\n", pg.robot_passage_width_m);
     }
 
     return out;

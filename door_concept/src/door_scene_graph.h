@@ -27,6 +27,7 @@
 
 #include "door_config.h"       // rc::DoorConfig
 #include "door_instance.h"     // rc::DoorInstance, DoorState
+#include "door_pragmatics.h"   // rc::door::InteractionState
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
 
@@ -70,6 +71,20 @@ public:
 
     // Write the epistemic next-best-view proposal onto a door node.
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
+
+    // Publish the DOOR INTERACTION channel on the door node: the leaf angle, and the three probabilities
+    // the pragmatic affordances' completion predicates are written against (door_phi_rad, door_open_prob,
+    // door_reach_prob, door_crossing_progress).
+    //
+    // ★THESE EXIST BECAUSE A PREDICATE CAN ONLY BE WRITTEN AGAINST SOMETHING THAT IS ON THE GRAPH. The
+    // executor evaluates a contract's goal clauses against attributes of the affordance's parent — this
+    // node — so an affordance bound to a name nobody writes never satisfies and times out on every
+    // attempt. That is the failure default_contract_for() records for cabinet and door, and the reason
+    // these four names must stay in step with the contracts in door_pragmatics.h.
+    // ★AND THEY ARE PERCEPTUAL, NOT PROTOCOL. None of them is ever set from a provider's reply: a door
+    // provider's `Delivered` means it did what it was asked, never that the leaf moved. door_open_prob
+    // comes from the image, marginalised over the leaf-angle posterior, like every other belief here.
+    void write_interaction_state(DSR::Node& node, const rc::door::InteractionState& st);
 
     // Flat triangle list (room frame): top slab + 4 legs.
     static std::vector<float> make_door_mesh(const DoorState& s);

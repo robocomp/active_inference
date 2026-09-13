@@ -295,4 +295,104 @@ bool DoorBelief::self_test()
     return ok;
 }
 
+
+// ─── the hinge branch ────────────────────────────────────────────────────────────────────────────
+float DoorBelief::phi_free_energy(const DoorFrame& f, float phi) const
+{
+    if (f.points.empty())
+        return 0.0f;
+    // A const method that must evaluate the SDF at a DIFFERENT leaf angle: copy the params rather than
+    // mutate ours. The copy is three floats and a pose; the alternative is a mutable member that makes
+    // every caller wonder whether the object changed underneath them.
+    DoorBelief probe(state_, params_);
+    probe.set_leaf_phi(phi);
+    const float s2 = probe.sigma2();
+    double acc = 0.0;
+    for (std::size_t i = 0; i < f.points.size(); ++i)
+    {
+        const float d = probe.sdf_panel(f.points[i], probe.state_);
+        const float r = (i < f.R.size()) ? f.R[i] : 0.0f;
+        acc += 0.5 * static_cast<double>(d) * d / std::max(1e-6f, s2 + r);
+    }
+    // ★PER POINT, NOT SUMMED — 1600 RAYS ON ONE LEAF ARE NOT 1600 INDEPENDENT OBSERVATIONS. They are one
+    // flat surface sampled 1600 times, and the rays are as correlated as the surface is rigid. Summing
+    // multiplies the evidence by however many happened to land, which is a property of the sensor's
+    // geometry and the robot's distance, not of the door.
+    // ★MEASURED, AND IT BROKE THE ESTIMATOR IN A VERY SPECIFIC WAY. With the sum, the free-energy
+    // difference between NEIGHBOURING angles ran to hundreds of nats, so exp(-(F - F_min)) was 1 at the
+    // argmin and numerically 0 everywhere else: the likelihood was a delta function. The mixture then had
+    // no middle — either the SDF's argmin survived the prior and won outright, or its weight at the
+    // chosen angle was exactly zero and the mask channel took over and pulled the leaf back to flush.
+    // That is the bimodal estimate seen live: 476 rows near 0 deg, 106 piled against the 120 deg clamp,
+    // almost nothing between, with w_sdf logged as either ~0.9 or exactly 0.0000 and never in between.
+    // It got WORSE as the robot approached and the ray count rose 1183 -> 1660.
+    // Dividing by the count makes the curve's sharpness a property of how well the surface FITS rather
+    // than of how many rays hit it, which is the honest reading when they all lie on one plane.
+    // ⚠THIS IS THE CHEAP CORRECTION, NOT THE COMPLETE ONE. The principled treatment is the common-mode
+    // marginalisation this codebase already applies to correlated mask points (Woodbury, not a sigma
+    // floor): the shared surface error belongs in a common-mode term, and what remains per point is the
+    // genuinely independent part. The mean is that idea taken at its crudest — n_eff = 1 — which is
+    // conservative in the right direction: it under-claims evidence rather than over-claiming it.
+    return static_cast<float>(acc / static_cast<double>(f.points.size()));
+}
+
+std::vector<std::pair<float, float>>
+DoorBelief::phi_likelihood(const DoorFrame& f, float phi_min, float phi_max, int nstep) const
+{
+    std::vector<std::pair<float, float>> out;
+    if (nstep < 2 or f.points.empty())
+        return out;   // no evidence ⇒ an EMPTY curve, which the caller must read as "not measured"
+    out.reserve(static_cast<std::size_t>(nstep));
+    std::vector<float> F;
+    F.reserve(static_cast<std::size_t>(nstep));
+    float fmin = std::numeric_limits<float>::max();
+    for (int i = 0; i < nstep; ++i)
+    {
+        const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(i) / (nstep - 1);
+        const float fe  = phi_free_energy(f, phi);
+        F.push_back(fe);
+        fmin = std::min(fmin, fe);
+    }
+    // exp(-(F - F_min)) — shifted so the best hypothesis is 1 and the rest fall off by their excess free
+    // energy in nats. The shift is a normalisation, not a threshold: it cancels in any ratio the consumer
+    // forms, and it keeps the exponential from underflowing on a cloud with many points.
+    for (int i = 0; i < nstep; ++i)
+    {
+        const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(i) / (nstep - 1);
+        out.emplace_back(phi, std::exp(-(F[static_cast<std::size_t>(i)] - fmin)));
+    }
+    return out;
+}
+
+
+float DoorBelief::phi_ray_free_energy(const rc::ai::LidarRays& rays, float phi) const
+{
+    DoorBelief probe(state_, params_);
+    probe.set_leaf_phi(phi);
+    // Per RAY (the shared cost divides), for the same reason phi_free_energy is per point: how many rays
+    // happen to fall on a door is a property of the sensor and the stand-off, not of the door.
+    return rc::ai::lidar_ray_cost<DoorBelief::N, DoorBelief, DoorBeliefState>(probe, probe.state_, rays);
+}
+
+std::vector<std::pair<float, float>>
+DoorBelief::phi_ray_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep) const
+{
+    std::vector<std::pair<float, float>> out;
+    if (nstep < 2 or rays.endpoints.empty() or rays.precision <= 0.0f)
+        return out;   // no rays ⇒ an EMPTY curve = NOT MEASURED, never a vote for any angle
+    std::vector<float> F; F.reserve(static_cast<std::size_t>(nstep));
+    float fmin = std::numeric_limits<float>::max();
+    for (int i = 0; i < nstep; ++i)
+    {
+        const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(i) / (nstep - 1);
+        const float fe  = phi_ray_free_energy(rays, phi);
+        F.push_back(fe); fmin = std::min(fmin, fe);
+    }
+    out.reserve(static_cast<std::size_t>(nstep));
+    for (int i = 0; i < nstep; ++i)
+        out.emplace_back(phi_min + (phi_max - phi_min) * static_cast<float>(i) / (nstep - 1),
+                         std::exp(-(F[static_cast<std::size_t>(i)] - fmin)));
+    return out;
+}
+
 }  // namespace rc

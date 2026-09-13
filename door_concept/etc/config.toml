@@ -124,15 +124,35 @@ DetectProbeCsvPath = "etc/detect_probe.csv"
 # count of 0 means NOT MEASURED and is not the same as a verdict of 0.
 RgbContourCheck = true
 
+# ── THE METRIC (ZED DEPTH) HALF OF THAT CHANNEL — OFF, 2026-09-13, ON MEASUREMENT ──────────────────
+# The depth test asks whether there is a surface at the distance the belief predicts. On a door
+# CONFIRMED correctly fitted (hanging from its wall, corroborated in viewer3d) it voted to REMOVE on
+# 489/489 cycles moving and 40/40 parked — never once positive — at a near-constant -0.52..-0.58,
+# driven by a depth bias pinned at -0.20 m parked / -0.25 m moving inside an 8 cm band. That is a
+# systematic calibration disagreement, not an absence, and door_instance.h already calls it "a fit
+# error, not an absence" in the comment on the very field it comes from.
+# ★WHAT IT COST: the door's survival came to depend on the RGB contour outrunning a permanent penalty.
+# Parked, the contour reads +2.65 and wins easily. On the frames where YOLO goes blind it falls to
+# +0.53, the sum goes negative, and the door is deleted — three times in one six-minute run. The deaths
+# READ as YOLO blindness; blindness only removed what had been masking a constant negative.
+# ⚠WHAT TURNING IT OFF COSTS: a door that has genuinely gone loses the one channel that can say "we are
+# looking straight through the place it is supposed to be", so removal now rests on mask absence and is
+# slower. This is a hold pending a measurement of where the 20 cm lives — ZED depth bias at this range
+# (retina has a LiDAR-anchored depth-correction dataset for exactly this) or the check's own sampling.
+ContourDepthCheck = false
+
 # DOOR ACTUATION — ask a provider to open/close a door (RoboCompDoorControl), from the strip UI buttons.
 # ★A CAPABILITY, NOT A SIMULATOR. The provider may be the Webots supervisor, home automation, or a
 # person asked over TTS; on the real robot there is no Webots, so this must never be a dependency on one.
 # ⚠ENDPOINT: webots-bridge listens on 10017 (etc/config.toml, the file it is actually run with). An
 #   older note recorded 10008; the bridge's own config comment documents that disagreement and says
 #   10017 wins. Empty string disables the feature and the UI says so.
-# ⚠The bridge currently reports canActuate = FALSE: its [DoorControl] Doors list is commented out, which
-#   is the honest answer for a world whose doors are scenery. The buttons stay DISABLED until that list
-#   names real actuable hinge DEFs — deliberately, so a button never offers what always fails.
+# ✅The bridge reports canActuate = TRUE. Its [DoorControl] Doors list was enabled 2026-09-09 with the
+#   loaded world checked rather than the names trusted: piso.wbt carries `DEF DOOR_0 Door` and
+#   `DEF DOOR_1 Door`, and the bridge advertises only DEFs that actually resolve. Verified 2026-09-12
+#   that the live process is `bin/Webots2Robocomp etc/config.toml`, i.e. the file that sets the list —
+#   the bridge's own header used to name the other file, which is why this note said FALSE for weeks.
+#   The buttons are live; they still disable themselves whenever no door is believed.
 DoorControlEndpoint = "doorcontrol:tcp -h localhost -p 10017"
 
 StateEps = 0.04             # Σ|Δstate| threshold between cycles for convergence (m+rad)
@@ -149,6 +169,120 @@ SupportSelectHeightMarginM = 0.25 # extra Z margin above door height when select
 RtCovUpload = true          # upload the door pose covariance (rt_covariance_att, 6×6 SE3) onto the room→door RT edge from the belief Σ
 RtCovScale = 1.0            # var = RtCovScale · Σ_ii; calibrate toward NEES≈1
 RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
+
+[DoorAffordance]
+# ── THE THREE PRAGMATIC AFFORDANCES: approach / open / cross ────────────────────────────────────────
+# Siblings of the epistemic `aff_door_N` under the same door node, and a different KIND of offer: that
+# one asks the controller for a LOOK that shrinks Σ, these ask it to DO something to the door. Each is
+# published only while this agent believes the action is possible at all — a door you cannot reach cannot
+# be opened, a door that is shut cannot be crossed. Those are not low-value offers, they are NOT OFFERS.
+#   aff_door_N_approach  always, for a located door. Completion predicate = door_reach_prob.
+#   aff_door_N_open      while the robot is in the actuation zone AND the aperture is believed shut.
+#                        Claiming it makes THIS agent ask a provider (webots-bridge DoorControl) to move
+#                        the leaf. Completion predicate = door_open_prob — never the provider's reply.
+#   aff_door_N_cross     while the aperture is believed passable for this robot's body. Completion
+#                        predicate = door_crossing_progress, signed against the side held at claim time.
+# ★The model is in src/door_pragmatics.h and the protocol in common/pragmatic_affordance — read the first
+#  before changing anything here: none of these preconditions is a threshold, and the two Prob keys below
+#  are a Bayesian decision on a probability (same shape as Existence.RemovalProb), not a cutoff on a
+#  distance or an angle.
+Enabled = true
+
+# Physical geometry. All four are MEASUREMENTS or CAPABILITIES, not tuning knobs.
+# ★THE ACTUATION ZONE IS A BAND [near, far], and only the FAR edge is configured.
+# NEAR edge is DERIVED per door: aperture width + half the robot's body + SwingClearanceM. A leaf hinged
+# on the aperture edge sweeps a circle of its own width, so at 90 deg it reaches a full width out from the
+# wall plane — and `LeafState::swing` is never fitted, so we cannot claim it opens away from us. A robot
+# inside that arc is struck by the door it just asked to be opened. Measured 2026-09-13 on the live door:
+# w = 1.00 m, body 0.60 m, clearance 0.20 m  ->  near edge 1.50 m. The retired ApproachStandoffM was 1.00 m,
+# i.e. INSIDE the arc, and the old disc-shaped zone kept `open` on offer as the robot got closer still.
+ActuationReachM   = 2.00     # far edge: beyond this a request is not unambiguously about THIS door
+SwingClearanceM   = 0.20     # margin on top of the swept arc and the body half-width
+# The provider's hinge speed, rad/s. ⚠MUST MATCH webots-bridge [DoorControl] SwingRate (0.5 as of
+# 2026-09-13, ~3.1 s for 90 deg). This agent predicts the leaf angle as (rate x elapsed) while a swing is
+# in flight so it is not surprised by its own request; predicting FASTER than the real hinge means
+# believing the door open while it is still moving. DoorControl.idsl does not advertise the rate, so the
+# duplication is forced — advertising it is the real fix.
+ActuationSwingRate = 0.5
+CrossStandoffM    = 1.20     # how far PAST the aperture the cross target sits
+CrossClearanceM   = 0.80     # distance past the aperture plane that counts as fully through
+# ★THE ROBOT'S OWN BODY, in the one direction in which a doorway closes. Shadow's lateral half-width
+# measured off the robocomp meshes is 0.2938 m per side (0.588 m across); the hull compiled into
+# rc::RobotFootprint::shadow() is 22.2 mm NARROWER per side than the mesh it claims to come from, and on
+# P3Bot it is a different body altogether. ⚠This value is SHADOW's — move it into a [Platform.<robot>]
+# overlay before running on anything else. See common/robot_footprint/mesh_hull.h and ROBOT_GEOMETRY.md.
+RobotPassageWidthM = 0.60
+PassageMarginM     = 0.10    # clearance demanded on top of the body width
+# σ floor for door_reach_prob. With σ == 0, P(d ≤ R) is exactly the distance threshold this design avoids.
+PoseSigmaFloorM    = 0.10
+# Width of the leaf-angle belief when the image is not currently resolving it. estimate_phi() refills
+# phi_curve only from a fresh mask, and [DoorConcept].RgbContourCheck above records why that matters: the
+# ADE20K posterior over a plainly visible closed door falls 0.995 → 0.138 → 0.048 as the robot CLOSES on
+# it. So the curve is typically absent at exactly the range from which `open` must be taken; on those
+# cycles P(passable) marginalises over N(phi_est, this) instead. A PRIOR WIDTH, not a measurement.
+# 0 disables the fallback — `open`/`cross` then appear only while the door is actively segmented.
+PhiSigmaRad        = 0.25
+
+# Offer policy: the ONE decision boundary, stated as the probability it actually is, with a Schmitt band
+# so a precondition hovering at its boundary cannot chatter a node in and out of the shared graph.
+OfferProb     = 0.60         # offer once P(precondition) rises above this …
+WithdrawProb  = 0.35         # … and withdraw once it falls below THIS (must be < OfferProb; refused at load)
+StableCycles  = 3            # … and only after the decision has held this many MEASURED cycles
+
+# ── THE `transitable` SELF-EDGE: door --[transitable]--> door ──────────────────────────────────────
+# Asserted on the door's own node while this agent believes the robot can get through it, so another
+# agent can ask the GRAPH instead of re-deriving passability from geometry it would have to fetch,
+# transform and interpret for itself — three chances to derive it differently from us.
+# ★"transitable", NOT "open", and the distinction is real. The belief is P(clear span >= THIS ROBOT'S
+# passage width), so the edge says "this body fits", not "the leaf has moved": a door ajar by 20 cm is
+# open and not transitable, and a doorway passable for this robot may not be for a larger one. Naming it
+# after the quantity actually computed stops a consumer reading it as a claim about the door's mechanism.
+# ★A SELF-EDGE rather than an attribute because `update_node` is a whole-node replace on both sync
+# engines: a peer refreshing this node from a stale copy would silently revert or destroy a flag. Same
+# reasoning that put the affordance execution claim on an edge.
+# ★UNMEASURED HOLDS: on a cycle where nothing measured the aperture, neither band advances and the edge
+# is left as it is. "We did not look" is not "it is shut" — door_open_prob publishes -1 for NOT MEASURED
+# for exactly that reason, since 0 there is a real answer meaning "believed shut".
+# ⚠`transitable` is already a registered cortex edge type, so this needs NO reinstall — and it currently
+# has ZERO users anywhere in active_inference: door_concept is its first writer and nothing reads it yet.
+TransitableProb          = 0.60   # assert once P(passable) rises above this …
+NotTransitableProb       = 0.35   # … and retract once it falls below THIS (must be < the above; refused at load)
+TransitableStableCycles  = 3      # … and only after the decision has held this many MEASURED cycles
+
+# ★VALUE — POLICY PLACEHOLDERS, DELIBERATELY LOW, AND NOT A MEASUREMENT. An epistemic gain is a measured
+# entropy reduction in nats. A pragmatic value is the expected free energy reduction from reaching a GOAL
+# STATE, and nothing in this system currently wants to be on the other side of a door — so the honest
+# value of "cross" is near zero until a mission layer asks for it. These are set low on purpose: the
+# door's offers stay VISIBLE and selectable when nothing else bids, without out-bidding the fleet's
+# exploration. When a mission layer arrives it should WRITE these and they should stop being config.
+# (approach's value additionally decays with P(reach): approaching a door you are already at is worth
+#  nothing, which is what stops a complete→re-offer→complete ping-pong at the doorway.)
+# ★★★AND WHEN THESE STOP BEING CONFIG, THE REPLACEMENT MUST NOT BE A FUNCTION OF THE MEAN ALONE — it
+# latches. The price gates the claim, the claim is the only source of evidence, so a pessimistic belief
+# stops the sampling that could correct it and freezes with every instrument healthy. Price it with the
+# expected information gain too: a wide posterior means an uncertain doorway, and an uncertain doorway is
+# worth trying BECAUSE trying it resolves the uncertainty. Full reasoning at DoorPragmaticCfg in
+# src/door_config.h — read it before replacing these three numbers.
+ValueApproach = 0.5
+ValueOpen     = 0.3
+ValueCross    = 0.3
+
+ApproachTimeoutS = 60.0
+OpenTimeoutS     = 12.0      # provider latency + swing time, not a navigation budget
+CrossTimeoutS    = 40.0
+
+# ★MAY THIS AGENT ASK A PROVIDER TO MOVE A DOOR WITHOUT A HUMAN? The `open` affordance's whole point is
+# that it can, and the consumer's claim is the trigger. Kept as a switch because the request is an act in
+# the world with a real cost when the provider is a PERSON (DoorActuator::Caps::requires_human).
+AutonomousActuation = true
+# Which door the PROVIDER should move, by its own advertised id. Empty ⇒ resolve BY PLACE from the pose we
+# send, which needs the room↔world registration solved (etc/door_world_registration.csv, fed by the strip
+# buttons). ⚠Measured live: root←room is NOT that transform — 6.45 m and ~90.3° out — so a by-place
+# request without a solved registration is refused LOCALLY rather than sent to open some other door.
+# ✅The bridge CAN actuate: its [DoorControl] Doors list is enabled and resolves DOOR_0/DOOR_1 in
+# piso.wbt (see [DoorConcept].DoorControlEndpoint above). So the remaining obstacle to an autonomous
+# `open` is identity, not capability — name an id here, or donate one correspondence with a button press.
+ActuationProviderId = ""
 
 [Tracker]
 # Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.

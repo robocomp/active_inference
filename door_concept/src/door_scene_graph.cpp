@@ -441,4 +441,33 @@ void DoorSceneGraph::write_epistemic_proposal(DSR::Node& node, const EpistemicPr
     G_->update_node(node);
 }
 
+
+// ─── the door INTERACTION channel ────────────────────────────────────────────────────────────────
+void DoorSceneGraph::write_interaction_state(DSR::Node& node, const rc::door::InteractionState& st)
+{
+    // ★UNMEASURED IS PUBLISHED AS AN OUT-OF-RANGE SENTINEL, NOT AS ZERO. A predicate reads whatever is on
+    // the node, so a stale probability would let a contract satisfy itself on a cycle the agent learned
+    // nothing. But ZERO IS NOT NEUTRAL EITHER, which is the mistake this replaces: 0 is also exactly what
+    // a genuinely SHUT door, a robot genuinely far away, and a crossing genuinely not started all read —
+    // so "not measured" and "measured, and the answer is no" became the same number. That is the same
+    // conflation the existence channel draws a hard line through ("never looked at" is not "looked at and
+    // empty"), and this agent's own estimate_phi already has the right idiom: support_at returns -1 for a
+    // hypothesis that cannot be resolved, commented "Not a score of zero."
+    // ★It matters MOST in the durable record. passage_open_prob is copied into etc/passages.csv and read
+    // back months later; a 0 there that might mean either "shut" or "we could not tell" is a corrupted
+    // row that nothing downstream can repair.
+    // Every sentinel is outside its quantity's own range, so it can never be a legitimate reading, and
+    // every contract predicate (>= 0.90, >= 0.70) still fails on it — which is the conservative behaviour
+    // the old zero was chosen for, kept, without the ambiguity it bought it with.
+    constexpr float kUnmeasured = -1.0f;   // for [0,1] probabilities and the [0, pi/2] angle
+    // ⚠crossing progress is signed: -1 is a LEGITIMATE reading (back where the claim started), so its
+    // sentinel has to sit outside [-1,+1] instead.
+    constexpr float kUnmeasuredSigned = -2.0f;
+    G_->add_or_modify_attrib_local<door_phi_rad_att>          (node, st.phi_known    ? st.phi_rad  : kUnmeasured);
+    G_->add_or_modify_attrib_local<door_open_prob_att>        (node, st.p_open_known ? st.p_open   : kUnmeasured);
+    G_->add_or_modify_attrib_local<door_reach_prob_att>       (node, st.p_reach_known? st.p_reach  : kUnmeasured);
+    G_->add_or_modify_attrib_local<door_crossing_progress_att>(node, st.crossing_known ? st.crossing_progress
+                                                                                       : kUnmeasuredSigned);
+}
+
 }  // namespace rc

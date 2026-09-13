@@ -21,6 +21,8 @@
 #include <cmath>
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"     // rc::RgbIngestor (leaf-tracker pixels)
+#include "../../common/contour_edge/contour_edge_check.h"  // rc::edges::PreparedFrame / contour_edge_support
 
 #include <cstdint>
 #include <fstream>
@@ -263,6 +265,29 @@ public:
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
     void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
+
+    // ★THE LEAF TRACKER NEEDS PIXELS, NOT JUST MASKS. estimate_phi scored each candidate angle by the
+    // overlap between the predicted leaf and the semantic "door" mask — which works while the leaf fills
+    // the aperture and fails completely once it swings out of it, because the mask then covers the FRAME
+    // and the leaf is somewhere else entirely. Measured 2026-09-13 on a plainly open door: overlap 0.013
+    // at EVERY angle, so the estimate drifted to where the residual noise was faintest and parked at
+    // 10 deg on a door standing open past 90.
+    // An open leaf is a large surface with strong boundaries and no useful label, so the evidence that
+    // survives is GRADIENT. Giving the fitter the RGB lets the same contour statistic that already
+    // audits the door's existence also DRIVE the angle — one measurement, two consumers, instead of a
+    // channel that could only ever say "your angle is wrong" after the fact.
+    // Non-owning; may be null, in which case the tracker falls back to mask overlap alone.
+    void set_rgb_source(const rc::RgbIngestor* rgb) { rgb_src_ = rgb; }
+
+    // The newest low-LiDAR sweep, already in the ROOM frame. Staged once per cycle by the worker; the
+    // hinge branch selects from it per door. Copy-free: the ingestor owns the storage for the cycle.
+    // ★THE ORIGIN IS NOT OPTIONAL. A LiDAR return is not a point, it is "the ray from HERE in this
+    // direction stopped at range r". Without the origin the only question askable is "is this endpoint on
+    // the door", and a ray that flew THROUGH an open doorway has its endpoint in the next room — from the
+    // endpoint alone it is indistinguishable from any other far-away point. From the origin it is the
+    // evidence: that ray traversed the aperture, and a closed leaf would have stopped it.
+    void set_leaf_points(const std::vector<Eigen::Vector3f>& pts, const Eigen::Vector3f& origin)
+    { leaf_pts_ = &pts; leaf_origin_ = origin; }
     // Room-frame XY a NEWLY born instance's model should cold-start at (from the tracker's detection).
     // The room→door RT written at birth is not reliably composable the same cycle, so without this the
     // model would start at 0,0; consumed once by ensure_instance.
@@ -309,6 +334,9 @@ private:
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
+    Eigen::Vector3f                leaf_origin_ = Eigen::Vector3f::Zero();   // bpearl centre, room frame
+    const std::vector<Eigen::Vector3f>* leaf_pts_ = nullptr;   // bpearl sweep, room frame (set_leaf_points)
+    const rc::RgbIngestor*         rgb_src_     = nullptr;   // leaf-tracker contour evidence (set_rgb_source)
     DSR::InnerGaussianAPI*         gaussian_    = nullptr;   // Part B: chain covariance (set_chain_cov_source)
     std::string                    chain_src_frame_;
     bool                           chain_cov_enabled_ = false;
@@ -332,6 +360,8 @@ private:
     bool            have_prev_cam_ = false;
     std::chrono::steady_clock::time_point prev_cam_tp_{};
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
+    std::ofstream                  phi_curve_csv_;      // one row per HYPOTHESIS (leaf-tracker forensics)
+    std::ofstream                  phi_points_csv_;     // one row per cycle: the selected cloud's geometry
 };
 
 }  // namespace rc

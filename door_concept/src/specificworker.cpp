@@ -423,6 +423,15 @@ void SpecificWorker::initialize()
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle/table).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
+    // The leaf tracker's second evidence channel: the same RGB the contour check already audits
+    // existence with, now also driving the ANGLE. Wired here because the ingestor is the worker's.
+    fitter_->set_rgb_source(rgb_ingestor_.get());
+
+    // ★CREATED HERE, ON THE MAIN THREAD, AFTER THE GRAPH IS UP — the media-plane consumer rule. The
+    // ingestor itself discovers the sensor node lazily inside pump() and stays dormant (no DDS
+    // participant at all) while its precision gate is 0, so this costs nothing when switched off.
+    lidar_ingestor_ = std::make_unique<rc::ConceptLidarIngestor>(G, inner_eigen_.get(),
+        [this] { return rc::LidarGates{0.0f, 0.0f, cfg_.lidar_bpearl_precision}; });
 
     // Build rc::EpistemicPlanner (Σ-based D-optimal NBV) with the configured stand-off.
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
@@ -628,6 +637,11 @@ void SpecificWorker::initialize()
         act_state->setToolTip(QStringLiteral("state of the last door request"));
         door_act_open_btn_ = open_btn; door_act_close_btn_ = close_btn; door_act_state_ = act_state;
 
+        // ★THE BUTTON AND THE `open` AFFORDANCE SHARE ONE REQUEST PATH (request_door_actuation). They
+        // used to be one path and one lambda because there was only the button; the moment an affordance
+        // could also ask, the frame resolution, the by-place refusal, the registration donation and the
+        // phi anticipation all had to exist exactly once, or the autonomous path would quietly differ
+        // from the one anybody had ever tested.
         const auto fire = [this](bool open)
         {
             const auto target = nearest_door_for_actuation();
@@ -636,91 +650,27 @@ void SpecificWorker::initialize()
                 if (door_act_state_) door_act_state_->setText(QStringLiteral("no door believed"));
                 return;
             }
-            // world←room. ★THE FRAME IS CALLED `root` HERE, not `world`. Asking for "world" returned
-            // nullopt, the code fell back to identity, and ROOM coordinates went out labelled as world:
-            // door_3 at (-490, 4610) mm against DOOR_0 at (-3583, 7166) mm is 4.0 m apart, and the
-            // bridge resolves an unquoted doorId by place within 400 mm — so it answered UnknownDoor,
-            // which reads as a broken interface rather than a frame-name typo. "world" is kept as a
-            // fallback for a graph that does name it that way.
-            // ★PREFER THE LEARNED REGISTRATION over root←room. The DSR's root is NOT the provider's
-            // world frame here — measured on the door_3 ↔ DOOR_1 correspondence, they are 6.45 m apart
-            // and rotated ~90.3°, so root←room resolves fine and is simply the wrong transform. It is
-            // kept as a fallback for a deployment where the two ARE the same frame.
-            Eigen::Matrix4d world_T_room = Eigen::Matrix4d::Identity();
-            bool have_tf = false;
-            if (const auto reg = door_registration_.world_T_room(); reg.has_value())
-            { world_T_room = *reg; have_tf = true; }
-            else if (inner_eigen_)
-                for (const char* frame : {"root", "world"})
-                    if (const auto m = inner_eigen_->get_transformation_matrix(frame, "room", 0); m.has_value())
-                    { world_T_room = m.value().matrix(); have_tf = true; break; }
-
-            // ★REFUSE LOCALLY rather than send coordinates we know are wrong. A request built on a
-            // missing transform can only be rejected — or, far worse, match SOME other door within
-            // 400 mm and open it. Not asking is the safe failure, and it says why.
-            // Only the PLACE path needs the transform. With an explicit provider id the pose is
-            // informational and a missing transform is not a reason to refuse.
-            const bool by_place = not (door_actuation_pick_ and door_actuation_pick_->currentIndex() > 0);
-            if (by_place and not have_tf)
+            rc::DoorInstance* inst = nullptr;
+            for (auto& [id, candidate] : fitter_->instances())
+                if (candidate.node_name == target->name)
+                { inst = &candidate; break; }
+            if (inst == nullptr)
             {
-                if (door_act_state_)
-                    door_act_state_->setText(QStringLiteral("⚠ no room→world registration — use a door id first"));
-                std::println("door_concept: [actuator] not sending: matching by place needs a root<-room "
-                             "transform, which does not resolve. Choose an advertised id instead.");
+                if (door_act_state_) door_act_state_->setText(QStringLiteral("door vanished"));
                 return;
             }
-
             std::string provider_id;
             if (door_actuation_pick_ and door_actuation_pick_->currentIndex() > 0)
                 provider_id = door_actuation_pick_->currentText().toStdString();
-            door_pending_ = door_actuator_.request(target->name, target->xy, target->yaw, target->width_m,
-                                                   open, world_T_room,
-                                                   open ? "robot needs to pass through"
-                                                        : "robot has passed through",
-                                                   provider_id);
-            // ★A SUCCESSFUL BY-NAME REQUEST IS A LABELLED CORRESPONDENCE, and it is free. The operator
-            // has just asserted "the door I believe here is the one you call DOOR_1" — a pair of poses
-            // in the two frames, produced as a side effect of pressing a button. Two such pairs pin the
-            // rigid transform outright, which is what makes the autonomous (by place) path possible at
-            // all: a robot deciding on its own to open a door has nobody to pick a name from a list.
-            if (not provider_id.empty() and door_pending_.has_value() and not door_pending_->settled)
-                for (const auto& d : door_actuator_.caps().doors)
-                    if (d.id == provider_id)
-                    {
-                        // The pair carries BOTH yaws, so a one-pair fit can recover rotation and the
-                        // result is identical after a restart instead of silently assuming none.
-                        door_registration_.add({target->xy, d.xy_mm / 1000.0f, target->name, d.id,
-                                                target->yaw, d.angle},
-                                               "etc/door_world_registration.csv");
-                        const auto& f = door_registration_.solve();
-                        std::println("door_concept: [registration] {} pair(s) -> theta {:+.3f} rad "
-                                     "t ({:+.3f}, {:+.3f}) m, residual {:.3f} m{}",
-                                     f.n_pairs, f.theta, f.t.x(), f.t.y(), f.residual_m,
-                                     f.provisional ? "  ⚠PROVISIONAL (one pair: rotation from yaws)" : "");
-                        break;
-                    }
-            // ★ARM THE ANTICIPATION. The request we just issued is a prediction about the world: from
-            // now until the swing completes, the leaf angle is a known function of time. Handing that to
-            // the estimator is what stops the agent being surprised by its own action — the silhouette
-            // follows the leaf instead of staying in the doorway it has left.
-            if (door_pending_.has_value() and not door_pending_->settled)
-                for (auto& [id, inst] : fitter_->instances())
-                    if (inst.node_name == target->name)
-                    {
-                        inst.phi_cmd_from   = inst.phi_est;
-                        inst.phi_cmd_to     = open ? static_cast<float>(M_PI) / 2.0f : 0.0f;
-                        inst.phi_cmd_rate   = 1.2f;   // matches the bridge's DoorControl.SwingRate
-                        inst.phi_cmd_t0     = std::chrono::steady_clock::now();
-                        inst.phi_cmd_active = true;
-                        std::println("door_concept: [phi] anticipating {} swing {:.2f} -> {:.2f} rad "
-                                     "at {:.2f} rad/s", inst.node_name, inst.phi_cmd_from,
-                                     inst.phi_cmd_to, inst.phi_cmd_rate);
-                        break;
-                    }
+
+            std::string why;
+            const bool sent = request_door_actuation(*inst, open, provider_id,
+                                                      open ? "robot needs to pass through"
+                                                           : "robot has passed through", why);
             if (door_act_state_)
-                door_act_state_->setText(door_pending_.has_value()
-                    ? QString::fromStdString(target->name + ": " + door_pending_->state)
-                    : QStringLiteral("no provider"));
+                door_act_state_->setText(sent and door_pending_.has_value()
+                    ? QString::fromStdString(inst->node_name + ": " + door_pending_->state)
+                    : QString::fromStdString(why.empty() ? "no provider" : why));
         };
         QObject::connect(open_btn,  &QPushButton::clicked, strip_window_, [fire]{ fire(true);  });
         QObject::connect(close_btn, &QPushButton::clicked, strip_window_, [fire]{ fire(false); });
@@ -885,8 +835,41 @@ void SpecificWorker::refresh_belief_inspector()
             for (int j = 0; j < N; ++j)
                 c.cov[i * N + j] = S(i, j);
 
-        // No discrete orientation ambiguity: the containing wall fixes the door's yaw (c.modes stays empty).
+        // ── THE HINGE, AS ITS OWN ROW ────────────────────────────────────────────────────────────
+        // phi is not in Σ — it is the articulated coordinate, minimised in its own branch with the
+        // aperture held — so it gets a DOF row with sigma 0 and no σ*, which is the honest rendering of
+        // "estimated, but we do not yet publish a covariance for it". ⚠That zero is a PLACEHOLDER, not a
+        // claim of certainty; when the hinge branch grows a posterior width this is where it goes.
+        c.dofs.push_back({"phi", "rad", inst.phi_est, 0.0f, -1.0f});
 
+        // ── WHICH CHANNEL CHOSE THE ANGLE, as a footer bar group ─────────────────────────────────
+        // ★THE NUMBER THAT ACTUALLY DIAGNOSES THIS AGENT NOW. The leaf angle is decided by a mixture of
+        // three likelihoods — LiDAR surface (SDF), semantic mask overlap, RGB contour — and which of them
+        // is deciding is invisible from the angle alone. It is exactly what was needed and missing
+        // tonight: a phi of 17.8 deg on a door standing open reads identically whether the SDF found the
+        // leaf and was outvoted, or was silent and the mask walked the estimate back to flush. Those two
+        // want opposite fixes, and one of them (a summed free energy making the SDF curve a delta, so its
+        // weight was either ~0.9 or exactly 0) took a CSV column to see at all.
+        // Drawn as a discrete posterior because that is what it is: the normalised contribution each
+        // channel made to the winning hypothesis. All three at 0 ⇒ nothing measured the angle this cycle.
+        {
+            const float wsum = inst.dbg_w_sdf + inst.dbg_w_mask + inst.dbg_w_edge;
+            if (wsum > 1e-9f)
+            {
+                c.modes.push_back({"phi evidence", "lidar", inst.dbg_w_sdf  / wsum});
+                c.modes.push_back({"phi evidence", "mask",  inst.dbg_w_mask / wsum});
+                c.modes.push_back({"phi evidence", "edge",  inst.dbg_w_edge / wsum});
+            }
+        }
+
+        // No discrete orientation ambiguity: the containing wall fixes the door's yaw.
+
+        // ★`model` is the card's free-text tag; the hinge branch's evidence COUNT goes here because a
+        // free energy computed over zero points is not a small free energy, it is not a measurement —
+        // and the gauge strip has no way to say that on its own.
+        c.model = inst.dbg_leaf_pts > 0
+                ? std::format("hinge: {} lidar pts", inst.dbg_leaf_pts)
+                : std::string("hinge: NO lidar pts");
         c.s.fe          = inst.dbg_energy;
         c.s.fe_baseline = inst.fe_baseline;
         c.s.fe_surprise = inst.fe_surprise;
@@ -1023,13 +1006,12 @@ void SpecificWorker::compute()
     if (not G or not rt_api_)
         return;
 
-    // Refresh room node id if not yet found
+    // Which room are we in? Follows ltsm_agent's `current` edge and LETS GO of a room we have left.
+    // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
+    // write are all parented by it.
+    step_room_following();
     if (room_node_id_ == 0)
-    {
-        const auto rooms = G->get_nodes_by_type("room");
-        if (rooms.empty()) return;
-        room_node_id_ = rooms.front().id();
-    }
+        return;
 
     // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
     // pushed by update_node_attr_signal — see the connect block in initialize().
@@ -1041,6 +1023,11 @@ void SpecificWorker::compute()
     ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
 
     refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
+    // Low LiDAR sweep in the ROOM frame — the hinge branch's evidence. Main thread (reads the graph).
+    if (lidar_ingestor_ and lidar_ingestor_->pump() and lidar_ingestor_->bpearl_fresh())
+        fitter_->set_leaf_points(lidar_ingestor_->sweep_bpearl_room(),
+                                 lidar_ingestor_->origin_bpearl_room());
+
     fitter_->update_ego_motion();   // robot/camera speed → "be-still-to-update" gate (once per cycle)
     mask_ingestor_->refresh();
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
@@ -1050,6 +1037,17 @@ void SpecificWorker::compute()
     for (const auto& node : door_nodes)
         if (node.name().starts_with("door"))
             process_door_node(node);
+
+    // ── The three PRAGMATIC affordances: approach / open / cross ──────────────────────────────────
+    // ★DELIBERATELY OUTSIDE the loop above. process_door_node() bails early on a stale or young
+    // instance, and a cycle that cannot compute a precondition must SAY so rather than be skipped:
+    // rc::pragmatic holds a standing offer on an unmeasured cycle and withdraws it only on a MEASURED
+    // one, which is only possible if it is called on every cycle. Skipping instead would leave the
+    // consumer ranking a price nobody refreshed — the frozen-gain defect the epistemic path already
+    // paid for once (see common/epistemic_step's header).
+    if (cfg_.pragmatic.enabled)
+        for (auto& [door_id, inst] : fitter_->instances())
+            step_pragmatic_affordances(inst);
 
     // Overall compute()-cycle rate: counts every cycle, prints "Epoch time = …ms. Fps = N" once a
     // second (FPSCounter::print is throttled and self-counting).
@@ -1083,7 +1081,16 @@ void SpecificWorker::compute()
 void SpecificWorker::retire_instance(std::uint64_t id)
 {
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+    {
         it->second.affordance.remove();
+        // ★ALL FOUR, or the pragmatic ones leak. Deleting the door node drops its RT edge but NOT its
+        // affordance children, and rc::owned::remove_stale_affordances only runs at startup and shutdown
+        // — so between those an orphaned `aff_door_1_open` would sit in the shared graph, offered, with
+        // nothing alive behind it. Four agents already shipped exactly this (TIER B).
+        it->second.aff_approach.remove();
+        it->second.aff_open.remove();
+        it->second.aff_cross.remove();
+    }
     fitter_->forget_node(id);
     G->delete_node(id);
 }
@@ -2154,7 +2161,13 @@ void SpecificWorker::update_existence_beliefs()
         // predicts, and does the world recede behind its boundary — so it is absolute where the RGB
         // statistic is relative, and it needs no control to refute.
         rc::edges::ContourDepthScore depth{};
-        if (cfg_.rgb_contour_check and depth_ingestor_ and not depth_ingestor_->frame().empty()
+        // ★contour_depth_check gates ONLY this half. Left off, `depth` stays default-constructed with
+        // n_samples == 0, so every consumer below reduces to RGB-only by its own existing logic: the
+        // summed verdict becomes edge.excess alone, and the depth-stands-alone branch cannot fire. No
+        // separate "disabled" path to keep in step — which is the point of gating the measurement
+        // rather than the integration.
+        if (cfg_.rgb_contour_check and cfg_.contour_depth_check
+            and depth_ingestor_ and not depth_ingestor_->frame().empty()
             and sil.contour.face.valid())
         {
             rc::edges::ContourDepthParams dp;
@@ -2388,7 +2401,25 @@ void SpecificWorker::update_existence_beliefs()
             // consequences of the door being there — so letting each contribute a full observation's
             // worth would count one fact twice. Both are dimensionless and bounded, so the sum is well
             // defined, and one confident observation still bounds the cycle.
-            const float verdict = edge.excess + depth.verdict;
+            // ★CONFIRM-ONLY: this channel may RAISE the belief and never lower it, and that asymmetry is
+            // stated, not tuned. A contour that MATCHES is evidence the door is there. A contour that does
+            // NOT match is evidence our POSE is wrong — the leaf is not at the angle we drew it at — which
+            // is a fit error and none of the existence channel's business. The channel was introduced for
+            // exactly the first job: positive evidence that stops a blind detector from removing a door.
+            // ★MEASURED, AND IT IS NOT A SMALL EFFECT. With the leaf tracked to its true ~97 deg the
+            // contour scores a foreshortened quad out in the room against copies of itself displaced
+            // along a wall that is no longer behind it, and the excess flips sign nearly every cycle:
+            // -2.35 +0.85 -5.80 -5.68 +2.40 +1.11 -4.29 ... -7.48 over consecutive frames, up to 7.5 nats
+            // from ONE frame against a band only 8 wide. The silhouette channel was healthy throughout
+            // (free_eff 0, occ 92, detector firing) — the belief was being thrown across its whole range
+            // by a measurement with no notion of its own reliability.
+            // ⚠THE PROPER FIX IS PRECISION, NOT A CLAMP: the excess is a difference of means whose own
+            // spread across the control placements is discarded, so a wild measurement and a confident
+            // one currently weigh the same. Returning that spread and weighting by it would let a noisy
+            // contour contribute little in BOTH directions, which is strictly better than refusing one
+            // direction. This asymmetry is the honest interim: it cannot make the door immortal — the
+            // silhouette channel still removes, and it is the one with a detectability model.
+            const float verdict = std::max(0.0f, edge.excess) + depth.verdict;
             const rc::exist::Evidence ev_rgb =
                 rc::exist::contour_evidence(verdict, std::max(inst.dbg_edge_n, depth.n_samples), sm);
             inst.existence.integrate(ev_rgb, 1.0f);
@@ -2581,6 +2612,9 @@ void SpecificWorker::update_existence_beliefs()
                               it->second.model.state().cx, it->second.model.state().cy, &it->second,
                               std::format("L {:.2f}", L));
             it->second.affordance.remove();
+            it->second.aff_approach.remove();   // and the three pragmatic siblings — see retire_instance
+            it->second.aff_open.remove();
+            it->second.aff_cross.remove();
         }
         fitter_->forget_node(id);
         G->delete_node(id);
@@ -2602,22 +2636,13 @@ void SpecificWorker::process_door_node(const DSR::Node& node)
             if (ts_cov_plot_) ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(  0, 190, 255), 1.1f);
             if (ts_res_plot_) ts_res_plot_->add_series(inst.node_name + "_res", QColor(170,  80, 255), 1.1f);
         }
-        // Canvas position — viewer randomizes pos_x/pos_y if absent.
-        if (not G->get_attrib_by_name<pos_x_att>(node).has_value())
-        {
-            auto n_mut = node;
-            float rpx = 200.f, rpy = 200.f;
-            if (room_node_id_ != 0)
-                if (const auto rn = G->get_node(room_node_id_); rn.has_value())
-                {
-                    rpx = G->get_attrib_by_name<pos_x_att>(rn.value()).value_or(200.f);
-                    rpy = G->get_attrib_by_name<pos_y_att>(rn.value()).value_or(200.f);
-                }
-            G->add_or_modify_attrib_local<pos_x_att>(n_mut, rpx + 150.f);
-            G->add_or_modify_attrib_local<pos_y_att>(n_mut, rpy +  50.f);
-            G->update_node(n_mut);
-        }
+        place_door_on_canvas(node, inst);
     }
+
+    // The RT parent is resolved lazily — a door is born hanging from the room and moves under a wall_*
+    // node as soon as one is near enough. Re-place it when that happens, or the canvas keeps drawing it
+    // where its FIRST parent was.
+    place_door_on_canvas(node, inst);
 
     ++inst.processed_cycles;
     const auto observation = fitter_->observe(inst, node);
@@ -2815,6 +2840,682 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
                         hooks);
 }
 
+
+// ═══ THE THREE PRAGMATIC AFFORDANCES: approach / open / cross ════════════════════════════════════
+//
+// See door_pragmatics.h for the model and common/pragmatic_affordance for the protocol. What lives here
+// is the wiring: measure the preconditions, publish them on the door node so the contracts have
+// something to hold a predicate against, offer or withdraw each affordance, and — the one side effect
+// this agent has on the world — ask a provider to move the leaf when the consumer claims `open`.
+
+// What the agent believes about INTERACTING with one door, this cycle. Every field carries its own
+// `*_known`: "could not compute" is a different fact from "computed and it is false", and conflating
+// the two is how a standing offer gets withdrawn by a missing input.
+rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::DoorInstance& inst) const
+{
+    rc::door::InteractionState st;
+    const auto& pg = cfg_.pragmatic;
+    // A bearing-only hypothesis has no located aperture — there is nothing to approach, open or cross
+    // yet, only a direction to look in. That is the epistemic affordance's job, and it already has it.
+    if (not inst.ai2_initialized or inst.is_bearing_hypothesis)
+        return st;
+
+    const auto& ap = inst.aperture;
+    st.phi_rad       = inst.phi_est;
+    st.phi_known     = true;
+    st.clear_width_m = rc::door::clear_width(ap.w, inst.phi_est);
+
+    // ── P(passable) ──────────────────────────────────────────────────────────────────────────────
+    // MARGINALISED over the leaf-angle posterior, never read off its argmax: measured 2026-09-10 the
+    // phi support curve is nearly flat (peak 0.007–0.245), so its argmax is noise, and a parameter the
+    // data does not identify must not be allowed to decide whether an affordance exists.
+    const float needed = pg.robot_passage_width_m + pg.passage_margin_m;
+    if (const auto p = rc::door::passable_prob(inst.phi_curve, ap.w, needed); p.has_value())
+    {
+        st.p_open = *p;
+        st.p_open_known = true;
+        st.p_open_from_curve = true;
+    }
+    else if (pg.phi_sigma_rad > 0.0f and not inst.phi_from_command)
+    {
+        // ★NOT REACHED WHILE phi_est IS OUR OWN COMMAND. See DoorInstance::phi_from_command: with no
+        // curve AND an armed anticipation, marginalising over N(phi_est, sigma) would report the door
+        // wide open because we ASKED for it to be, satisfy the `open` contract's own completion
+        // predicate, and return Satisfied for a leaf that may not have moved. p_open_known then stays
+        // false, write_interaction_state publishes the neutral 0, and `open` can only complete on a real
+        // observation — or time out, which is the honest outcome when nobody ever saw the door open.
+        // ★NO CURVE THIS CYCLE IS THE NORMAL CASE AT THE MOMENT IT MATTERS, which is why this branch is
+        // not a fallback but part of the design. estimate_phi() clears phi_curve and refills it only from
+        // a fresh mask — and this agent's own config records that the ADE20K posterior over a plainly
+        // visible closed door collapses 0.995 → 0.048 as the robot CLOSES on it. So the door stops being
+        // segmented exactly when the robot is in the actuation zone: read off the curve alone, `open`
+        // would vanish at the only range from which it can be taken.
+        // What stands in is the BELIEF about the angle, which is maintained across cycles: phi_est is a
+        // rate-limited posterior mean carrying estimate_phi's own persistence prior. Its width is not
+        // tracked, so it is supplied (phi_sigma_rad) and the SAME passability question is asked under a
+        // discretised Gaussian about phi_est. Still a marginalisation, still no angle threshold — the
+        // difference from the branch above is only where the weights come from, and the published
+        // door_open_prob_from_curve flag says which so the two can never be confused in a log.
+        std::vector<std::pair<float, float>> prior_curve;
+        prior_curve.reserve(17);
+        for (int i = -8; i <= 8; ++i)
+        {
+            const float z   = 0.25f * static_cast<float>(i);            // ±2σ in quarter-σ steps
+            const float phi = std::clamp(inst.phi_est + z * pg.phi_sigma_rad,
+                                          0.0f, static_cast<float>(M_PI) * 0.5f);
+            prior_curve.emplace_back(phi, std::exp(-0.5f * z * z));
+        }
+        if (const auto p = rc::door::passable_prob(prior_curve, ap.w, needed); p.has_value())
+        {
+            st.p_open = *p;
+            st.p_open_known = true;
+            st.p_open_from_curve = false;
+        }
+    }
+
+    // ── P(the robot is in the actuation zone), and which SIDE it is on ───────────────────────────
+    if (not inner_eigen_)
+        return st;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    if (not rtb.has_value())
+        return st;   // ALWAYS check the optional (CLAUDE.md); no pose ⇒ nothing below is knowable
+    const Eigen::Vector2f robot(static_cast<float>(rtb.value()(0, 3)),
+                                 static_cast<float>(rtb.value()(1, 3)));
+    const Eigen::Vector2f centre = ap.centre_xy();
+    const Eigen::Vector2f normal = ap.across_u();
+    const Eigen::Vector2f delta  = robot - centre;
+
+    st.robot_side    = normal.dot(delta);      // signed distance to the aperture PLANE
+    st.robot_range_m = delta.norm();
+
+    // σ of that range: the door's own along-wall uncertainty projected onto the radial direction, plus
+    // the robot↔door pose-chain uncertainty. The floor is what keeps this a probability rather than a
+    // step function — with σ == 0, P(d ≤ R) is exactly the distance threshold this design avoids.
+    const Eigen::Vector2f radial = st.robot_range_m > 1e-4f ? Eigen::Vector2f(delta / st.robot_range_m)
+                                                             : normal;
+    const float sigma_s  = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0)));  // θ = [s,w,h]
+    const float var_door = std::pow(radial.dot(ap.wall_u) * sigma_s, 2.0f);
+    const float var_pose = radial.x() * radial.x() * inst.chain_cov_xx
+                         + radial.y() * radial.y() * inst.chain_cov_yy;
+    const float sigma    = std::sqrt(var_door
+                                     + std::max(var_pose, pg.pose_sigma_floor_m * pg.pose_sigma_floor_m));
+    // ★THE ACTUATION ZONE IS A BAND. Near edge = the leaf's own swept arc: a door hinged on the aperture
+    // edge reaches a full aperture-width out from the wall plane at 90 degrees, and since `LeafState::swing`
+    // is NEVER FITTED (door_fitter sets it from config and it stays there) we cannot claim it opens away
+    // from us. A robot inside that arc is struck by the door it just asked to be opened. Far edge = beyond
+    // it a request is not unambiguously about THIS door. Both edges are physical; the old disc modelled
+    // only the far one, so `open` stayed on offer right up against the leaf — failing toward the danger.
+    const float d_min = rc::door::safe_standoff(ap.w, pg);
+    const float d_max = std::max(pg.actuation_reach_m, d_min + 0.30f);   // a band, never empty
+    st.safe_standoff_m = d_min;
+    st.p_reach       = rc::door::prob_in_band(st.robot_range_m, d_min, d_max, sigma);
+    st.p_reach_known = true;
+    st.range_sigma_m = sigma;
+
+    // ── crossing progress, signed against the side latched when the claim was made ───────────────
+    // "Crossed" is a CHANGE of side, not a position, so it is only defined while a claim is outstanding.
+    // Outside one it stays 0 and unknown, and write_interaction_state publishes the neutral 0.
+    if (std::isfinite(inst.cross_side0))
+    {
+        const float sgn = inst.cross_side0 < 0.0f ? -1.0f : +1.0f;
+        st.crossing_progress = std::clamp(-sgn * st.robot_side
+                                          / std::max(1e-3f, pg.cross_clearance_m), -1.0f, 1.0f);
+        st.crossing_known = true;
+    }
+    return st;
+}
+
+void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
+{
+    if (not G or not scene_graph_)
+        return;
+    auto node_opt = G->get_node(inst.node_id);
+    if (not node_opt.has_value())
+        return;   // the door node is gone this cycle; del_node_slot will reset the affordances
+
+    const auto& pg = cfg_.pragmatic;
+    if (not inst.pragmatic_inited)
+    {
+        const rc::pragmatic::PragmaticAffordance::Policy pol{.offer_prob    = pg.offer_prob,
+                                                              .withdraw_prob = pg.withdraw_prob,
+                                                              .stable_cycles = pg.stable_cycles};
+        inst.aff_approach.init(G, inst.node_id, inst.node_name, "approach", pol);
+        inst.aff_open    .init(G, inst.node_id, inst.node_name, "open",     pol);
+        inst.aff_cross   .init(G, inst.node_id, inst.node_name, "cross",    pol);
+        inst.pragmatic_inited = true;
+    }
+
+    // Measure once, publish once, decide on exactly what was published. The dashboard, the log and the
+    // three offers therefore cannot disagree about which cycle they are describing.
+    inst.interaction = compute_interaction_state(inst);
+    const auto& st = inst.interaction;
+    scene_graph_->write_interaction_state(node_opt.value(), st);
+    G->update_node(node_opt.value());
+
+    // The public assertion about this doorway, decided on the SAME measurement the offers below use.
+    step_transitable_edge(inst, st);
+
+    const bool located = st.phi_known and st.p_reach_known;   // a real aperture AND a robot pose
+
+    // A node appearing or disappearing changes the graph's shape, so the viewer's layout has to be
+    // recomputed — the same reason the epistemic step has an on_affordance_created hook.
+    const bool had_any = inst.aff_approach.is_offered() or inst.aff_open.is_offered()
+                      or inst.aff_cross.is_offered();
+
+    // ── approach ─────────────────────────────────────────────────────────────────────────────────
+    // ★UNCONDITIONAL (p = 1) for a located door: a door can always be walked up to. What falls away as
+    // the robot arrives is its VALUE, not its availability — approaching a door you are already at is
+    // worth nothing, and saying so as a value rather than as a withdrawal is what stops the
+    // complete→re-offer→complete ping-pong a preconditioned version would produce at the doorway. Its
+    // completion predicate is door_reach_prob, which IS `open`'s precondition: "approach succeeded" and
+    // "open became possible" are one measurement, not two numbers that can drift apart.
+    {
+        rc::pragmatic::Offer o;
+        o.known = located;
+        o.p     = 1.0f;
+        // Stand in the MIDDLE of the actuation band: furthest from both failure modes (inside the leaf's
+        // arc on one side, too far to be about this door on the other) and so the most tolerant of the
+        // pose error that put us there. ★NOT ApproachStandoffM when that is inside the arc — a configured
+        // distance cannot know how wide this particular door is.
+        const float d_stand = 0.5f * (st.safe_standoff_m
+                                      + std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f));
+        const auto pose = rc::door::front_pose(inst.aperture, st.robot_side, d_stand);
+        o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
+        o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f);
+        o.contract = rc::door::approach_contract(pg);
+        o.why      = std::format("a located door can always be approached (P(reach)={:.2f} ⇒ value {:.3f})",
+                                 st.p_reach, o.value);
+        inst.aff_approach.update(o);
+    }
+
+    // ── open ─────────────────────────────────────────────────────────────────────────────────────
+    // Possible when the robot is believed to be IN the actuation zone AND the aperture is believed NOT
+    // passable. Both halves are needed: offering "open" from across the room is a request the consumer
+    // would have to chain by itself, and offering it for a door already standing open is asking for a
+    // no-op. The product is the joint probability under the two independent beliefs — no gate on either.
+    {
+        rc::pragmatic::Offer o;
+        o.known = located and st.p_open_known and not cfg_.door_control_endpoint.empty();
+        o.p     = st.p_reach * std::clamp(1.0f - st.p_open, 0.0f, 1.0f);
+        if (inst.actuation_refused)
+        {
+            // ★A REFUSAL IS INFORMATION, and this kind is permanent: UnknownDoor / NotActuable mean never
+            // ask again. Keeping the affordance on the wire would advertise an action that can only fail,
+            // and an impossible offer with a plausible price is worse than silence.
+            o.p   = 0.0f;
+            o.why = "the provider cannot actuate this door: " + inst.actuation_note;
+        }
+        else
+            o.why = std::format("P(in reach)={:.2f} × P(shut)={:.2f}{}", st.p_reach,
+                                 1.0f - st.p_open, st.p_open_from_curve ? "" : " (phi from the belief, no curve)");
+        const float d_stand = 0.5f * (st.safe_standoff_m
+                                      + std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f));
+        const auto pose = rc::door::front_pose(inst.aperture, st.robot_side, d_stand);
+        // Orient policy: the (x,y) is informational — the consumer does not navigate, it turns to face
+        // the leaf and waits for the world to change. The YAW is the part that acts.
+        o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
+        o.value    = pg.value_open;
+        o.contract = rc::door::open_contract(pg);
+        inst.aff_open.update(o);
+    }
+
+    // ── cross ────────────────────────────────────────────────────────────────────────────────────
+    // Possible exactly while the aperture is believed passable for THIS robot's body. The target is on
+    // the far side and the heading carries the robot through; completion is the change of side.
+    {
+        rc::pragmatic::Offer o;
+        o.known = located and st.p_open_known;
+        o.p     = st.p_open;
+        const auto pose = rc::door::through_pose(inst.aperture, st.robot_side, pg.cross_standoff_m);
+        o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
+        o.value    = pg.value_cross;
+        o.contract = rc::door::cross_contract(pg);
+        o.why      = std::format("P(passable)={:.2f} — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body",
+                                 st.p_open, st.clear_width_m, st.phi_rad,
+                                 pg.robot_passage_width_m + pg.passage_margin_m);
+        inst.aff_cross.update(o);
+    }
+
+    if (const bool has_any = inst.aff_approach.is_offered() or inst.aff_open.is_offered()
+                          or inst.aff_cross.is_offered(); has_any != had_any)
+        trigger_graph_layout_twopi();
+
+    // ── the side effects of a claim ──────────────────────────────────────────────────────────────
+    // ★ONE-SHOTS, taken from the affordance rather than recomputed from the flags. `open` has a real
+    // effect in the world; firing it per cycle while the claim stands would queue a request per cycle.
+    if (inst.aff_open.consume_claim())
+    {
+        // ★PROTOCOL INVARIANT 2: ACT ON WHAT THE CONSUMER IS EXECUTING, NOT ON OUR LATEST PUBLICATION.
+        // We refresh the `open` pose every cycle while the offer stands, so by the time a claim lands the
+        // consumer may have accepted an earlier one — and asking a provider to swing a leaf is an act in
+        // the world, not a measurement to be retried. The claim carries the pose it is actually driving
+        // to after its own repairs; if that is a DIFFERENT proposal from the one now published
+        // (executing_epoch < epistemic_target_epoch) we do not know which doorway geometry the robot has
+        // committed to, and a door request built on the wrong one can open a different door. So: log it
+        // and wait for the consumer to adopt the current epoch, which it owns the decision to do.
+        if (inst.aff_open.claim_is_stale())
+        {
+            inst.actuation_note = "consumer accepted an older proposal; not asking until it catches up";
+            std::print("door_concept: [open] {} claimed on epoch {} while we publish {} — NOT sending a "
+                       "door request: we cannot tell which geometry the robot committed to\n",
+                       inst.node_name, inst.aff_open.claim().has_value() ? inst.aff_open.claim()->epoch : -1,
+                       inst.aff_open.epoch());
+        }
+        else if (not pg.autonomous_actuation)
+        {
+            inst.actuation_note = "autonomous actuation is disabled (DoorAffordance.AutonomousActuation)";
+            std::print("door_concept: [open] {} was CLAIMED but autonomous actuation is off — "
+                       "the request must come from the strip button\n", inst.node_name);
+        }
+        else
+        {
+            std::string why;
+            if (request_door_actuation(inst, /*open=*/true, pg.actuation_provider_id,
+                                        "robot needs to pass through", why))
+                std::print("door_concept: [open] {} claimed → asked the provider to OPEN it "
+                           "(request {} of this run)\n", inst.node_name, inst.actuation_requests);
+            else
+            {
+                inst.actuation_note = why;
+                std::print("door_concept: [open] {} claimed but the request was refused LOCALLY: {}\n",
+                           inst.node_name, why);
+            }
+        }
+    }
+    if (inst.aff_open.consume_completion())
+        std::print("door_concept: [open] {} finished, outcome = {} (P(passable) is now {:.2f}{})\n",
+                   inst.node_name, rc::affordance::to_string(inst.aff_open.outcome()),
+                   st.p_open, st.p_open_known ? "" : ", unmeasured");
+
+    if (inst.aff_cross.consume_claim())
+    {
+        // ★LATCH THE SIDE, ONCE, HERE. door_crossing_progress is signed against it, so re-latching per
+        // cycle would make the measure its own input and read 0 for ever — the crossing could never
+        // complete and the contract would always time out.
+        //
+        // ★AND LATCH IT AGAINST THE CONSUMER'S OWN TARGET WHERE WE HAVE IT (protocol invariant 2: the
+        // producer measures progress against executing_target_*, NEVER against its own latest
+        // publication). The through-pose we published says which side we EXPECT the robot to end up on;
+        // the claim says which side it is actually driving to, after its own repairs. If the consumer
+        // repaired our target to the opposite side of the aperture — which it may legitimately do when
+        // ours is unreachable — then progress signed against our expectation would count the crossing
+        // backwards and the contract could only ever time out. With no edge (a pre-rollout consumer) we
+        // fall back to the robot's measured side, which is what this did before.
+        inst.cross_side0 = st.robot_side;
+        if (const auto& c = inst.aff_cross.claim(); c.has_value())
+        {
+            const Eigen::Vector2f n = inst.aperture.across_u();
+            const Eigen::Vector2f centre = inst.aperture.centre_xy();
+            const float target_side = n.dot(Eigen::Vector2f(c->x, c->y) - centre);
+            // The robot must END on the far side of the plane from where it starts. If the consumer's
+            // committed target is on the SAME side as the robot, this claim is not a crossing at all.
+            if (target_side * st.robot_side > 0.0f)
+                std::print("door_concept: [cross] ⚠{} claimed, but the consumer is driving to "
+                           "({:.2f},{:.2f}), which is on the robot's OWN side of the aperture "
+                           "(side {:+.2f} vs robot {:+.2f}) — this claim cannot complete as a crossing\n",
+                           inst.node_name, c->x, c->y, target_side, st.robot_side);
+        }
+        std::print("door_concept: [cross] {} claimed from side {:+.2f} m — through-pose ({:.2f},{:.2f})\n",
+                   inst.node_name, inst.cross_side0,
+                   rc::door::through_pose(inst.aperture, st.robot_side, pg.cross_standoff_m).x,
+                   rc::door::through_pose(inst.aperture, st.robot_side, pg.cross_standoff_m).y);
+    }
+    if (inst.aff_cross.consume_completion())
+    {
+        std::print("door_concept: [cross] {} finished, outcome = {} (progress {:+.2f})\n",
+                   inst.node_name, rc::affordance::to_string(inst.aff_cross.outcome()),
+                   st.crossing_progress);
+        inst.cross_side0 = std::numeric_limits<float>::quiet_NaN();
+    }
+    if (inst.aff_approach.consume_completion())
+        std::print("door_concept: [approach] {} finished, outcome = {} (P(reach)={:.2f})\n",
+                   inst.node_name, rc::affordance::to_string(inst.aff_approach.outcome()), st.p_reach);
+}
+
+// ─── ONE request path: ask a provider to move a door ─────────────────────────────────────────────
+//
+// Called by the strip buttons AND by the `open` affordance when the consumer claims it. Everything that
+// can go wrong about frames, identity and anticipation is decided here, once.
+//
+// ★NOTHING IN HERE EVER CONCLUDES THAT A DOOR IS OPEN. `Delivered` means the provider did what it was
+// asked, not that the world changed; that stays a perceptual question, answered by door_open_prob from
+// the image. Wiring a protocol event into a belief is the mistake the affordance work spent a month
+// removing.
+bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open,
+                                             const std::string& provider_id,
+                                             const std::string& purpose, std::string& why)
+{
+    why.clear();
+    if (cfg_.door_control_endpoint.empty())
+    { why = "no DoorControl endpoint configured"; return false; }
+
+    // ★THE APERTURE, NOT THE LEAF. What a provider is asked to move is identified by the DOORWAY — the
+    // static hole in the wall — and the leaf is the part that moves. At phi == 0 the two coincide
+    // exactly, so this is identical to the previous behaviour today, and it stops the quoted pose
+    // wandering by w/2 the moment a leaf actually swings, which is precisely when we ask again.
+    const auto& ap        = inst.aperture;
+    const Eigen::Vector2f xy = ap.centre_xy();
+    const float yaw       = ap.yaw();
+    const float width_m   = ap.w;
+
+    // world←room. ★THE FRAME IS CALLED `root` HERE, not `world`: asking for "world" returned nullopt,
+    // the old code fell back to identity, and ROOM coordinates went out labelled as world — 4 m from the
+    // provider's own door, which it correctly answered UnknownDoor to. That reads as a broken interface
+    // rather than a frame-name typo.
+    // ★PREFER THE LEARNED REGISTRATION over root←room. Measured on the door_3 ↔ DOOR_1 correspondence the
+    // DSR root is NOT the provider's world frame — they are 6.45 m apart and rotated ~90.3°, so root←room
+    // resolves fine and is simply the wrong transform. It is kept as a fallback for a deployment where
+    // the two ARE the same frame.
+    Eigen::Matrix4d world_T_room = Eigen::Matrix4d::Identity();
+    bool have_tf = false;
+    if (const auto reg = door_registration_.world_T_room(); reg.has_value())
+    { world_T_room = *reg; have_tf = true; }
+    else if (inner_eigen_)
+        for (const char* frame : {"root", "world"})
+            if (const auto m = inner_eigen_->get_transformation_matrix(frame, "room", 0); m.has_value())
+            { world_T_room = m.value().matrix(); have_tf = true; break; }
+
+    // ★REFUSE LOCALLY rather than send coordinates we know are wrong. Only the PLACE path needs the
+    // transform: with an explicit provider id the pose is informational and a missing transform is not a
+    // reason to refuse. Without one, a request built on a missing transform can only be rejected — or,
+    // far worse, match SOME OTHER door within the provider's 400 mm radius and open that instead.
+    // Not asking is the safe failure, and it says why.
+    const bool by_place = provider_id.empty();
+    if (by_place and not have_tf)
+    {
+        why = "matching by place needs a root←room transform, which does not resolve — "
+              "name a provider door id (DoorAffordance.ActuationProviderId, or the strip picker)";
+        return false;
+    }
+
+    door_pending_ = door_actuator_.request(inst.node_name, xy, yaw, width_m, open, world_T_room,
+                                            purpose, provider_id);
+    if (not door_pending_.has_value())
+    { why = "no provider"; return false; }
+    ++inst.actuation_requests;
+    inst.actuation_note = door_pending_->state;
+
+    // ★A REFUSAL IS INFORMATION, AND THE KINDS DIFFER (door_actuator.h). UnknownDoor / NotActuable mean
+    // never ask again, and the `open` affordance reads this to stop offering an action that can only
+    // fail. TemporarilyBusy and Declined are NOT latched: "later" and "a person said no this time" are
+    // different beliefs from "this door cannot be actuated", and collapsing them into one would retire a
+    // perfectly good affordance on a transient.
+    if (door_pending_->settled)
+    {
+        const auto& st = door_pending_->state;
+        if (st.find("UnknownDoor") != std::string::npos or st.find("NotActuable") != std::string::npos)
+        {
+            inst.actuation_refused = true;
+            std::print("door_concept: [actuator] {} is NOT ACTUABLE by this provider ({}) — "
+                       "the `open` affordance will stop being offered for it\n", inst.node_name, st);
+        }
+    }
+
+    // ★A SUCCESSFUL BY-NAME REQUEST IS A LABELLED CORRESPONDENCE, and it is free. The operator has just
+    // asserted "the door I believe here is the one you call DOOR_1" — a pair of poses in the two frames,
+    // produced as a side effect of pressing a button. Two such pairs pin the rigid transform outright,
+    // which is what makes the autonomous (by place) path possible at all: a robot deciding on its own to
+    // open a door has nobody to pick a name from a list.
+    if (not provider_id.empty() and not door_pending_->settled)
+        for (const auto& d : door_actuator_.caps().doors)
+            if (d.id == provider_id)
+            {
+                // The pair carries BOTH yaws, so a one-pair fit can recover rotation and the result is
+                // identical after a restart instead of silently assuming none.
+                door_registration_.add({xy, d.xy_mm / 1000.0f, inst.node_name, d.id, yaw, d.angle},
+                                       "etc/door_world_registration.csv");
+                const auto& f = door_registration_.solve();
+                std::println("door_concept: [registration] {} pair(s) -> theta {:+.3f} rad "
+                             "t ({:+.3f}, {:+.3f}) m, residual {:.3f} m{}",
+                             f.n_pairs, f.theta, f.t.x(), f.t.y(), f.residual_m,
+                             f.provisional ? "  ⚠PROVISIONAL (one pair: rotation from yaws)" : "");
+                break;
+            }
+
+    // ★ARM THE ANTICIPATION. The request just issued is a prediction about the world: from now until the
+    // swing completes, the leaf angle is a known function of time. Handing that to the estimator is what
+    // stops the agent being surprised by its own action — with phi pinned, the predicted silhouette
+    // stayed in the doorway the leaf had just left, all 420 samples went dark, and the existence channel
+    // deleted the door BECAUSE it obeyed. The command enters as a PRIOR on phi, never as a licence to
+    // suppress evidence: the estimate is still scored against the image every cycle and can refute it.
+    if (not door_pending_->settled)
+    {
+        inst.phi_cmd_from   = inst.phi_est;
+        inst.phi_cmd_to     = open ? static_cast<float>(M_PI) / 2.0f : 0.0f;
+        inst.phi_cmd_rate   = cfg_.pragmatic.actuation_swing_rate;   // MUST match the bridge; see the config
+        inst.phi_cmd_t0     = std::chrono::steady_clock::now();
+        inst.phi_cmd_active = true;
+        std::println("door_concept: [phi] anticipating {} swing {:.2f} -> {:.2f} rad at {:.2f} rad/s",
+                     inst.node_name, inst.phi_cmd_from, inst.phi_cmd_to, inst.phi_cmd_rate);
+    }
+    return true;
+}
+
+
+// ═══ WHICH ROOM ARE WE IN — follow `current`, and let go of the room we leave ════════════════════
+
+std::optional<std::uint64_t> SpecificWorker::resolve_current_room() const
+{
+    if (not G) return std::nullopt;
+    // `current` is ltsm_agent's ONE output into the live graph: robot --[current]--> room. Read it by
+    // EDGE TYPE rather than by walking from a robot node we would have to identify by name — the robot
+    // node is "Shadow" on one platform and something else on the next, and a name is a second source of
+    // truth that drifts. The destination's TYPE is the check that matters.
+    std::optional<std::uint64_t> found;
+    int n_room_edges = 0;
+    for (const auto& e : G->get_edges_by_type("current"))
+    {
+        const auto dst = G->get_node(e.to());
+        if (not dst.has_value() or dst.value().type() != "room")
+            continue;                       // a `current` edge to something that is not a room is not ours to read
+        ++n_room_edges;
+        found = e.to();
+    }
+    // ★TWO `current` EDGES IS AMBIGUOUS, AND GUESSING IS WORSE THAN WAITING. It would mean the owner is
+    // mid-write or two writers exist; either way picking one at random could let go of a room we are
+    // still in. Report nothing, which the caller treats as "no information", not as a release.
+    if (n_room_edges > 1)
+    {
+        static int warned = 0;
+        if (warned++ % 120 == 0)
+            std::print("door_concept: [room] {} `current` edges point at rooms — ambiguous, not following "
+                       "any of them until exactly one remains\n", n_room_edges);
+        return std::nullopt;
+    }
+    return found;
+}
+
+void SpecificWorker::step_room_following()
+{
+    if (not G) return;
+    const auto current = resolve_current_room();
+
+    // ★ABSENCE OF A `current` EDGE IS NOT A RELEASE, and this is the whole backward-compatibility
+    // contract. Nothing in today's fleet publishes that edge, so `current` is nullopt everywhere and this
+    // function must behave exactly as the old latch did — otherwise shipping it would make every agent
+    // let go of every room on the first cycle. "Nobody has told me where I am" and "I have been told I am
+    // somewhere else" are different facts and only the second one releases anything.
+    if (not current.has_value())
+    {
+        if (room_node_id_ == 0)                       // the legacy first-resolution path, unchanged
+        {
+            const auto rooms = G->get_nodes_by_type("room");
+            if (not rooms.empty())
+                room_node_id_ = rooms.front().id();
+        }
+        return;
+    }
+
+    if (room_node_id_ == *current)
+        return;                                        // already following it; the common case
+
+    if (room_node_id_ == 0)
+    {
+        room_node_id_ = *current;
+        std::print("door_concept: [room] following `current` → room node {}\n", room_node_id_);
+        return;
+    }
+
+    // We are anchored to one room and told we are in another. LET GO.
+    release_room(room_node_id_, *current);
+}
+
+void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)
+{
+    std::print("door_concept: [room] LET GO — `current` moved {} → {}. Releasing {} door(s) that belong "
+               "to the room we have left; the new room's doors will be re-earned from scratch.\n",
+               old_room, new_room, fitter_ ? fitter_->instances().size() : 0u);
+
+    // Our own nodes, through our own teardown path — which drops the epistemic affordance AND the three
+    // pragmatic ones, then the door node (whose RT edge goes with it). Collected first: retire_instance
+    // erases from the map we would otherwise be iterating.
+    if (fitter_)
+    {
+        std::vector<std::uint64_t> leaving;
+        leaving.reserve(fitter_->instances().size());
+        for (const auto& [id, inst] : fitter_->instances())
+        {
+            leaving.push_back(id);
+            // ★A door being released is NOT a door that stopped existing. Log it as a release so the
+            // phantom/death record is not polluted with removals that carry no evidence about the world:
+            // the existence belief that justified this door is still perfectly valid, we are simply no
+            // longer the agent looking at that room.
+            log_tracker_event("RELEASE", id, inst.model.state().cx, inst.model.state().cy,
+                              std::format("room {} -> {}", old_room, new_room));
+        }
+        for (const auto id : leaving)
+            retire_instance(id);
+    }
+
+    // ★GHOSTS ARE ROOM-LOCAL AND MUST NOT CROSS. A ghost is "a door was removed at this (x,y), let it
+    // take its old name if it comes back there" — in ROOM coordinates. Carried into a different room's
+    // frame, the same (x,y) is a different physical place, and the first door detected near it would
+    // silently inherit another room's identity.
+    ghosts_.clear();
+
+    // ⚠KNOWN GAP, STATED RATHER THAN PAPERED OVER: etc/door_identities.csv maps name ↔ APERTURE PLACE
+    // and has NO room key. Two rooms have their own origins, so a door at the same coordinates in each
+    // is indistinguishable in that table, and cross-room identity is therefore NOT supported yet. We
+    // deliberately do NOT write the released room's doors into it here (that would actively create the
+    // collision), and we do not clear the on-disk table (a restart in the old room still recovers).
+    // ltsm_agent's passage node is the right long-term home for a doorway's identity across rooms.
+    if (not identities_.empty())
+        std::print("door_concept: [identity] ⚠the identity table is not room-keyed ({} entries); "
+                   "door names are NOT carried across a room change\n", identities_.size());
+
+    room_node_id_ = new_room;
+    // ★DROP THE OLD POLYGON BEFORE PICKING UP THE NEW ONE. The containment prior is the path that can
+    // remove a door without any sensor evidence, so a single cycle evaluated against the walls of the
+    // room we have just left is a cycle in which every door in the new room is "outside the room".
+    // Emptying it first makes has_room_polygon() false, which disables the prior rather than running it
+    // on the wrong walls — the fail-safe direction.
+    fitter_->set_room_geometry(Eigen::Vector2f::Zero(), {});
+    refresh_room_geometry();         // and pick the new one up in the same cycle
+}
+
+
+// Put the door on the 2-D graph canvas NEXT TO ITS ACTUAL RT PARENT, and keep it there when the parent
+// changes. ★The canvas is a picture of the structure, so it must be anchored to the same node the
+// structure is: this used to place every door relative to the ROOM while the RT edge came from a WALL,
+// which drew the door floating beside the room with its single edge disappearing off-screen toward a
+// wall somewhere else in the layout. It reads as "the door is not connected to the room" — and the only
+// way to find out otherwise is to trace the RT chain by hand, which nobody should have to do to trust a
+// diagram. No-op unless the anchor actually changed, so it costs one attribute read per cycle.
+void SpecificWorker::place_door_on_canvas(const DSR::Node& node, rc::DoorInstance& inst)
+{
+    if (not G) return;
+    // The RT parent, as the graph states it — not as we remember it.
+    std::uint64_t anchor = 0;
+    for (const auto& e : G->get_edges_to_id(node.id()))
+        if (e.type() == "RT") { anchor = e.from(); break; }
+    if (anchor == 0)
+        anchor = room_node_id_;            // pre-wall: a door is born hanging from the room
+    if (anchor == 0 or anchor == inst.canvas_anchor_id)
+        return;
+
+    float px = 200.f, py = 200.f;
+    if (const auto an = G->get_node(anchor); an.has_value())
+    {
+        px = G->get_attrib_by_name<pos_x_att>(an.value()).value_or(200.f);
+        py = G->get_attrib_by_name<pos_y_att>(an.value()).value_or(200.f);
+    }
+    auto n_mut = node;
+    G->add_or_modify_attrib_local<pos_x_att>(n_mut, px + 90.f);
+    G->add_or_modify_attrib_local<pos_y_att>(n_mut, py + 60.f);
+    G->update_node(n_mut);
+    inst.canvas_anchor_id = anchor;
+    trigger_graph_layout_twopi();
+}
+
+
+// ─── door --[transitable]--> door ────────────────────────────────────────────────────────────────
+//
+// A SELF-EDGE on the door's own node, present exactly while this agent believes the robot can get
+// through. It exists so a consumer can ask the GRAPH whether a doorway is passable instead of fetching
+// the door's geometry, the leaf angle and the robot's own width and re-deriving the answer — which is
+// three transforms and a model each, and three chances to derive it differently from us.
+//
+// ★WHY A SELF-EDGE AND NOT AN ATTRIBUTE. An attribute would ride on `update_node`, which is a WHOLE-NODE
+// REPLACE on both sync engines: any writer refreshing this node from a stale copy silently reverts — or
+// destroys — a flag another writer had just set. That is the same reasoning that put the affordance
+// protocol's execution claim on an edge rather than on the affordance node, and it applies here for the
+// same mechanical reason. An edge is its own object with its own key, so asserting and retracting it
+// cannot race the door's per-cycle geometry republish.
+//
+// ★"transitable", NOT "open". The belief is P(clear span >= THIS ROBOT'S passage width), so the edge says
+// "this body fits", not "the leaf has moved". A door ajar by 20 cm is open and not transitable. Naming it
+// after the quantity actually computed is what stops a consumer reading it as a claim about the mechanism.
+//
+// ★UNMEASURED HOLDS. p_open_known == false means nothing measured the aperture this cycle — a different
+// fact from "measured, and it is shut", and the two must not share a code path. Neither streak advances
+// and the edge is left exactly as it is. Today's sentinel work is the same lesson from the other end:
+// door_open_prob publishes -1 for NOT MEASURED precisely because 0 is a real answer ("believed shut"),
+// and an absence encoded as a legitimate value is indistinguishable from that value.
+void SpecificWorker::step_transitable_edge(rc::DoorInstance& inst, const rc::door::InteractionState& st)
+{
+    if (not G)
+        return;
+    const auto& pg = cfg_.pragmatic;
+
+    // HOLD on an unmeasured cycle — see the header comment. Not a gate on the belief: a gate on whether
+    // there IS one this cycle.
+    if (not st.p_open_known)
+        return;
+
+    const bool yes = st.p_open >= pg.transitable_prob;
+    const bool no  = st.p_open <  pg.not_transitable_prob;
+    // Inside the Schmitt band NEITHER streak grows, so a probability hovering at the boundary holds
+    // whatever was last decided rather than flapping a public edge at the compute rate.
+    inst.transitable_streak     = yes ? inst.transitable_streak + 1 : 0;
+    inst.not_transitable_streak = no  ? inst.not_transitable_streak + 1 : 0;
+
+    if (not inst.transitable_asserted and inst.transitable_streak >= pg.transitable_stable_cycles)
+    {
+        auto edge = DSR::Edge::create<transitable_edge_type>(inst.node_id, inst.node_id);
+        if (G->insert_or_assign_edge(edge))
+        {
+            inst.transitable_asserted = true;
+            std::print("door_concept: [transitable] {} ASSERTED — P(passable)={:.3f} held {} measured "
+                       "cycles (clear span {:.2f} m at phi={:.1f} deg vs {:.2f} m of body)\n",
+                       inst.node_name, st.p_open, inst.transitable_streak, st.clear_width_m,
+                       st.phi_rad * 180.0f / static_cast<float>(M_PI),
+                       pg.robot_passage_width_m + pg.passage_margin_m);
+        }
+        else
+            std::print("door_concept: [transitable] {} could NOT assert the edge (node {} missing?)\n",
+                       inst.node_name, inst.node_id);
+    }
+    else if (inst.transitable_asserted and inst.not_transitable_streak >= pg.transitable_stable_cycles)
+    {
+        G->delete_edge(inst.node_id, inst.node_id, "transitable");
+        inst.transitable_asserted = false;
+        std::print("door_concept: [transitable] {} RETRACTED — P(passable)={:.3f} held {} measured "
+                   "cycles below {:.2f} (clear span {:.2f} m at phi={:.1f} deg)\n",
+                   inst.node_name, st.p_open, inst.not_transitable_streak, pg.not_transitable_prob,
+                   st.clear_width_m, st.phi_rad * 180.0f / static_cast<float>(M_PI));
+    }
+}
+
 // ─── DSR helpers ─────────────────────────────────────────────────────────────
 
 
@@ -2859,8 +3560,16 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [door_id, inst] : fitter_->instances())
+    {
         if (inst.affordance.node_id() == id)
             inst.affordance.on_node_deleted(id);
+        // The three pragmatic siblings, same reason: a node deleted by anybody else (the startup sweep,
+        // an operator, the LTSM let-go rule) must leave this agent believing it is absent, or update()
+        // keeps refreshing an id that is gone and the affordance is never re-offered.
+        inst.aff_approach.on_node_deleted(id);
+        inst.aff_open.on_node_deleted(id);
+        inst.aff_cross.on_node_deleted(id);
+    }
 
     if (fitter_->instances().count(id))
     {

@@ -72,6 +72,8 @@
 
 #include "door_semantic_field.h"   // rc::SemanticProbField
 #include "door_actuator.h"          // rc::DoorActuator (RoboCompDoorControl client)
+#include "door_pragmatics.h"        // rc::door::InteractionState + the three contracts
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"   // rc::ConceptLidarIngestor (SHARED)
 #include "door_world_registration.h" // rc::DoorWorldRegistration (room→world from named doors)
 #include "../../common/rgb_ingestor/rgb_ingestor.h"
 #include "../../common/rgb_ingestor/depth_ingestor.h"   // rc::RgbIngestor (SHARED media-plane RGB)
@@ -134,6 +136,32 @@ private:
                           const rc::EpistemicProposal& prop);
     int  nbv_obstacle_count_ = 0;   // obstacles fed to the last plan (0 ⇒ the walls never reached it)
     void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
+
+    // ── The three PRAGMATIC door affordances: approach / open / cross ─────────────────────────────
+    // Siblings of the epistemic `aff_door_N` under the same door node, and a different KIND of offer:
+    // that one asks for a LOOK that shrinks Σ, these ask the consumer to DO something to the door. Each
+    // is offered only while this agent believes the action is possible — see door_pragmatics.h for the
+    // three preconditions and why none of them is a threshold.
+    //
+    // ★RUN FOR EVERY LIVE INSTANCE, EVERY CYCLE, from compute() and NOT from process_door_node(). That
+    // function bails early on a stale or young instance, and a cycle that cannot compute a precondition
+    // must SAY so (rc::pragmatic::Offer::known == false) rather than be skipped: a skipped cycle neither
+    // refreshes nor withdraws a standing offer, leaving the consumer ranking a frozen price.
+    void step_pragmatic_affordances(rc::DoorInstance& inst);
+    rc::door::InteractionState compute_interaction_state(const rc::DoorInstance& inst) const;
+
+    // Assert / retract the `transitable` SELF-EDGE on a door's own node from the passability belief.
+    // door --[transitable]--> door, present exactly while we believe this robot can get through it.
+    // See DoorPragmaticCfg for why the edge is named after the robot fitting rather than the leaf moving.
+    void step_transitable_edge(rc::DoorInstance& inst, const rc::door::InteractionState& st);
+
+    // ★THE ONE REQUEST PATH. The strip buttons and the `open` affordance both come through here, so the
+    // frame handling, the registration donation and the phi anticipation exist once. Returns false with
+    // `why` filled when the request is refused LOCALLY — no provider, or no transform to build a
+    // by-place request from. Refusing locally is the safe failure: a request built on a missing
+    // transform can only be rejected, or (far worse) match some OTHER door within 400 mm and open it.
+    bool request_door_actuation(rc::DoorInstance& inst, bool open, const std::string& provider_id,
+                                const std::string& purpose, std::string& why);
     // ── Identity re-acquisition ───────────────────────────────────────────────
     // A door that is removed leaves a GHOST: its name and the belief it had converged to. A later detection
     // landing within Existence.ReacquireRadiusM of a ghost is the SAME physical door coming back, so it takes
@@ -170,7 +198,41 @@ private:
     void note_identity(const std::string& name, const Eigen::Vector2f& ap);   // upsert by PLACE, then save
     const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;
     void remember_live_identities();                                   // shutdown: persist the doors still alive
+    // Place the door on the 2-D graph canvas beside its ACTUAL RT parent (a wall_* once resolved, the
+    // room before that), and follow the parent when it changes. See the definition for the misleading
+    // picture this closes.
+    void place_door_on_canvas(const DSR::Node& node, rc::DoorInstance& inst);
+
     void refresh_room_geometry();         // load the room delimiting polygon into the fitter (containment pose prior)
+
+    // ── WHICH ROOM ARE WE IN? (the `current` edge, owned by ltsm_agent) ───────────────────────────
+    // ★THE ROOM MUST BE FOLLOWED, NOT LATCHED. This agent used to take `get_nodes_by_type("room").front()`
+    // once and keep it for ever, re-resolving only if that node was DELETED. During a room handover BOTH
+    // rooms exist at the same time — that overlap is deliberate, it is the only window in which the seam
+    // between the two frames is measurable — so `front()` is arbitrary and the latch never let go. The
+    // agent then stayed anchored to the OLD room, which is not a cosmetic error:
+    //   · a door detected in the new room is created as a child of the old one and its RT edge is
+    //     published in the old room's frame, i.e. wrong by the whole inter-room seam (metres);
+    //   · the room-containment prior then loads the OLD polygon, finds every new-room door outside it,
+    //     and removes it at OutOfRoomGain per frame — a path that bypasses the sensor channel entirely,
+    //     so nothing can rescue it. The visible symptom is doors flickering in and out in the new room,
+    //     which looks nothing like a room-tracking bug.
+    // (This is the write-once room memo the fleet audit lists as still open in nine agents; this is one.)
+    //
+    // Returns the room the `current` edge points at, or nullopt when NO such edge exists anywhere.
+    // ★nullopt is NOT "no room" and must never be treated as a release — see step_room_following.
+    std::optional<std::uint64_t> resolve_current_room() const;
+
+    // Follow `current`, and LET GO of the room we leave. Called once per cycle before anything reads
+    // room_node_id_.
+    void step_room_following();
+
+    // ★THE LET-GO RULE (agreed with ltsm_agent 2026-09-12; belongs in CONCEPT_AGENT_LIFECYCLE.md beside
+    // REMOVE). An agent anchored to a room that is no longer the current one lets that room go: it stops
+    // fitting and removes ITS OWN nodes through its own cleanup path. Nobody deletes anybody else's
+    // nodes — a stranger deleting an affordance mid-execution is the stranded-Completed-for-ever defect
+    // the fleet already paid for once, and only the owner knows the protocol state.
+    void release_room(std::uint64_t old_room, std::uint64_t new_room);
     // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
     // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The
     // same attribute trio table/cabinet/refrigerator already consume, so this is one more reader, not a
@@ -235,6 +297,9 @@ private:
     // Primary-input stream-gate bookkeeping (mirrors table_concept). All main-thread (FSM hooks).
 
     rc::DoorConfig                                         cfg_;
+    // The low bpearl dome, via the SHARED media-plane ingestor five other concept agents already use.
+    // It is the only source in this agent that can see a leaf the segmenter has stopped labelling.
+    std::unique_ptr<rc::ConceptLidarIngestor>               lidar_ingestor_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::DoorFitter>                    fitter_;   // active-inference fit core (owns instances)
     rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
