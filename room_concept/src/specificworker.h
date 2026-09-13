@@ -40,6 +40,7 @@
 #include "mount_lidar_pair.h"
 #include "mount_calibrator.h"
 #include "pose_publisher.h"
+#include "calib_channels.h"
 #include "camera_calibration.h"
 #include <map>
 #include "image_edge_source.h"
@@ -144,16 +145,9 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::ImuIngestor>   imu_ingestor_;
         // RGB edge alignment (ImageEdge.enable). Null unless the feature is switched on, so the
         // whole subsystem — subscriber, thread, extraction — costs exactly nothing when off.
-        std::unique_ptr<rc::CameraIngestor> camera_ingestor_;
-        std::unique_ptr<rc::ImageEdgeSource> image_edge_source_;
-        bool         image_edge_bound_ = false;      // bind_camera() succeeded (retried until it does)
         std::int64_t last_image_edge_ms_ = 0;
-        std::int64_t last_image_edge_log_ms_ = 0;
         // Previous localizer result, for the ego-motion twist that feeds the dt nuisance column.
         // Differencing two published poses is a real measurement and needs no graph read.
-        Eigen::Vector3f image_edge_prev_pose_ = Eigen::Vector3f::Zero();
-        std::int64_t    image_edge_prev_ts_   = 0;
-        void pump_image_edges();                     // extraction, once per compute() tick
 
         // ── LiDAR stream gate on Waiting→Operating ─────────────────────────────
         // Without LiDAR the localizer can never stabilize, so Operating would be a lie. True when the
@@ -198,9 +192,7 @@ class SpecificWorker : public GenericWorker
         // Room contour AS HANDED TO THE LOCALIZER (already recentred when RECENTER_ROOM_POLYGON).
         // The viewer/camera overlay must reuse THIS, not re-load the SVG, or it would draw the
         // outline in the un-shifted frame.
-        std::vector<Eigen::Vector2f> room_polygon_;
         // Old-frame coordinates of the new origin; zero when no recentring was applied.
-        Eigen::Vector2f room_polygon_offset_ = Eigen::Vector2f::Zero();
         void initialize_room_model_from_svg();
         void save_robot_pose_on_exit() const;
 
@@ -337,27 +329,7 @@ class SpecificWorker : public GenericWorker
     // The driving camera keeps the members below; every OTHER camera in ImageEdge.calibCameras gets
     // one of these — its own ingestor, its own extraction, its own evidence file. Calibration and
     // driving are different jobs and need not use the same sensor.
-    struct CalibChannel
-    {
-        std::string                          name;
-        std::unique_ptr<rc::CameraIngestor>  ingestor;
-        std::unique_ptr<rc::ImageEdgeSource> source;
-        rc::camcal::Estimator                calib;
-        /// This channel's own pair rows. ★ Auxiliary channels wrote NONE before 2026-09-02: they
-        /// accumulated evidence but left no replayable record, so arm 7's attribution table — which
-        /// needs BOTH cameras' mount solves under one injection — could not be replayed offline from
-        /// a single drive. One file per camera, exactly like the evidence file beside it.
-        std::ofstream                        csv;
-        bool                                 bound = false, loaded = false;
-        long                                 pairs = 0;
-        /// Last time this channel's solve was pushed to the Calib window (ms, WALL clock). Same
-        /// 5 s cadence as the driving camera's block, so the two columns are read at the same age.
-        /// Wall clock and not the frame stamp on purpose: the push must happen even on a tick where
-        /// no frame arrived, or a channel resuming its evidence from disk would never show it.
-        std::int64_t                         viz_ms = 0;
-    };
-    std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
-    void pump_calib_channels();
+    // CalibChannel now lives in rc::CalibChannels, with the rest of the RGB plumbing.
     /// Cost of the two per-tick camera pumps, in nanoseconds accumulated between reports. They run
     /// whether or not the optimiser will, so at 100% early exit they ARE the CPU.
     qint64 pump_ns_edge_ = 0, pump_ns_calib_ = 0;
@@ -381,6 +353,10 @@ class SpecificWorker : public GenericWorker
     /// Pose publishing: rc::PosePublisher (src/pose_publisher.{h,cpp}). Owns the corrected and
     /// predicted writers, the clamp, the jump log and the mutex that makes the two threads safe.
     std::unique_ptr<rc::PosePublisher> pose_pub_;
+    /// The RGB channels: rc::CalibChannels (src/calib_channels.{h,cpp}). Owns the driving camera and
+    /// every calibration-only camera, their extractors, evidence and pair logs, and the room polygon
+    /// they project.
+    std::unique_ptr<rc::CalibChannels> calib_;
     /// Raw view of viewer_, kept in step with it, so collaborators constructed BEFORE the viewer can
     /// still reach it later without owning it or being rebuilt when it appears.
     rc::RoomViewer* viewer_raw_slot_ = nullptr;
