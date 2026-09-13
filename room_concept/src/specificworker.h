@@ -41,6 +41,7 @@
 #include "mount_calibrator.h"
 #include "pose_publisher.h"
 #include "calib_channels.h"
+#include "ground_truth_log.h"
 #include "camera_calibration.h"
 #include <map>
 #include "image_edge_source.h"
@@ -121,9 +122,6 @@ class SpecificWorker : public GenericWorker
         std::int64_t last_imu_sim_ts_ = 0;    // dedup: the graph re-signals on unrelated attribute writes
         std::uint64_t last_robot_ref_speed_timestamp_ = 0;
         std::uint64_t last_robot_current_speed_timestamp_ = 0;
-        float last_robot_adv_speed_  = 0.f;   // robot-frame forward velocity (m/s), updated from DSR
-        float last_robot_side_speed_ = 0.f;   // robot-frame lateral velocity (m/s)
-        float last_robot_rot_speed_  = 0.f;   // robot-frame angular velocity (rad/s)
         // Last COMMANDED velocity seen on the robot node, mirrored so every odometry sample can be
         // labelled with the command in force when it was produced. Selecting "zero command" rows is
         // the whole basis of a rest-noise measurement, and a command sampled later would label the
@@ -357,6 +355,8 @@ class SpecificWorker : public GenericWorker
     /// every calibration-only camera, their extractors, evidence and pair logs, and the room polygon
     /// they project.
     std::unique_ptr<rc::CalibChannels> calib_;
+    /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
+    std::unique_ptr<rc::GroundTruthLog> gt_log_;
     /// Raw view of viewer_, kept in step with it, so collaborators constructed BEFORE the viewer can
     /// still reach it later without owning it or being rebuilt when it appears.
     rc::RoomViewer* viewer_raw_slot_ = nullptr;
@@ -365,16 +365,8 @@ class SpecificWorker : public GenericWorker
                                float assoc_chi2, int n_rivals, float runnerup_chi2,
                                const Eigen::Vector3f& corr);
 
-    double gt_sum_diff_c_ = 0, gt_sum_diff_s_ = 0;   ///< circular accumulators for est - gt
-    double gt_sum_sum_c_  = 0, gt_sum_sum_s_  = 0;   ///< and for est + gt
-    long   gt_n_ = 0;
-    long   gt_report_at_ = 200;
-    void   gt_convention_report(float est_th, float gt_th);
         // conclusions got drawn by hand on 2026-08-22.
         // Gated on the attributes EXISTING, so on the real robot nothing is written at all.
-        std::ofstream gt_csv_;
-        bool          gt_csv_open_attempted_ = false;
-        void          log_ground_truth(const rc::RoomConcept::UpdateResult &res);
         // ── THE POSE CLAMP TAKES ITS BOUND FROM THE ROBOT, ONCE ──────────────────────────────────
         // Reads robot_max_linear_speed / robot_max_rot_speed off the robot node and installs them as
         // POSE_CLAMP_V_MAX / POSE_CLAMP_W_MAX. One-shot, and NOT in initialize(): the robot node may
