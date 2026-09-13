@@ -55,15 +55,17 @@ namespace rc
                                                 const RoomConcept::Params& params,
                                                 const torch::Tensor& points_robot,
                                                 const torch::Tensor& pose_theta,
-                                                const Model::SdfQueryResult& query)
+                                                const Model::SdfQueryResult& query,
+                                                const std::vector<DoorAperture>* doors_robot)
         {
-            return weights_from_normals(params, points_robot, pose_theta, query.closest_normals);
+            return weights_from_normals(params, points_robot, pose_theta, query.closest_normals, doors_robot);
         }
 
         torch::Tensor weights_from_normals(const RoomConcept::Params& params,
                                            const torch::Tensor& points_robot,
                                            const torch::Tensor& pose_theta,
-                                           const torch::Tensor& normals_in)
+                                           const torch::Tensor& normals_in,
+                                           const std::vector<DoorAperture>* doors_robot)
         {
             auto weights = torch::ones({points_robot.size(0)}, points_robot.options());
             bool any_weighting = false;
@@ -109,6 +111,39 @@ namespace rc
                 incidence_weights = incidence_weights.clamp_min(params.incidence_angle_min_weight);
                 weights = weights * incidence_weights;
                 any_weighting = true;
+            }
+
+            // ── A BEAM THAT WENT THROUGH AN OPEN DOOR MEASURED THE NEXT ROOM ────────────────────
+            // The apertures arrive already in the ROBOT frame, so the beam origin is the origin here.
+            // Weight is 1 - p_open, the door's own marginalised belief: a closed door keeps its returns
+            // at full weight, because a closed door IS a wall surface and its returns are wall evidence.
+            // ⚠ WHAT THIS DOES AND DOES NOT DO. These weights are normalised to mean 1 on the last
+            // line, so the door term is RELATIVE — it moves the fit away from through-the-door returns
+            // and toward real wall returns, which is exactly what a weighted least squares needs, and
+            // it is scale-free because sigma_obs sets the scale. It does NOT reduce the REPORTED
+            // sdf_mse, which is a separate unweighted reduction over the same points: an open door
+            // will still show up there until that reduction is given the same weights.
+            if (doors_robot != nullptr and not doors_robot->empty())
+            {
+                auto pts_cpu = points_robot.index({torch::indexing::Slice(),
+                                                   torch::indexing::Slice(0, 2)}).detach().to(torch::kCPU).contiguous();
+                const auto acc = pts_cpu.accessor<float, 2>();
+                auto door_w = torch::ones({points_robot.size(0)}, torch::kFloat32);
+                auto dacc = door_w.accessor<float, 1>();
+                const Eigen::Vector2f origin(0.f, 0.f);
+                int discounted = 0;
+                for (long i = 0; i < pts_cpu.size(0); ++i)
+                {
+                    const float w = DoorApertures::weight(*doors_robot, origin,
+                                                          Eigen::Vector2f(acc[i][0], acc[i][1]));
+                    dacc[i] = w;
+                    if (w < 1.f) ++discounted;
+                }
+                if (discounted > 0)
+                {
+                    weights = weights * door_w.to(points_robot.options());
+                    any_weighting = true;
+                }
             }
 
             if (!any_weighting)

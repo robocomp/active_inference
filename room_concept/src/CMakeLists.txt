@@ -83,6 +83,7 @@ LIST(APPEND SOURCES
   ../src/pose_publisher.cpp
   ../src/calib_channels.cpp
   ../src/ground_truth_log.cpp
+  ../src/door_apertures.cpp
   ../src/specificworker_presence.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
