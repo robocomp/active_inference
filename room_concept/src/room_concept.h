@@ -9,7 +9,8 @@
 #include <thread>
 #include <mutex>
 
-#include "door_apertures.h"   // DoorAperture — the snapshot below, and no cycle: it knows nothing of us
+#include "door_apertures.h"
+#include "layout_estimator.h"   // DoorAperture — the snapshot below, and no cycle: it knows nothing of us
 #include <condition_variable>
 #include <atomic>
 #include <variant>
@@ -1111,7 +1112,10 @@ public:
     /// was re-derivation storms that destroyed a correct map on 2026-09-12. Whatever that channel
     /// proposes must be adopted the way the level-2 operators are — priced against what it explains,
     /// on a frozen population — never accepted because a residual was large.
-    enum class LayoutState { Searching, Localizing };
+    /// The two states are named ONCE, in layout_estimator.h, so the estimation half and the
+    /// localisation half cannot drift apart on what they mean. See that header for the split and for
+    /// what still has to move.
+    using LayoutState = LayoutEstimator::State;
     LayoutState layout_state() const
     { return (not estimating() or wall_frozen_) ? LayoutState::Localizing : LayoutState::Searching; }
     bool searching()  const { return layout_state() == LayoutState::Searching; }

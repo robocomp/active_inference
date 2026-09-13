@@ -504,16 +504,16 @@ void CalibChannels::pump_image_edges()
 
     void CalibChannels::start()
     {
-        // ⚠ REVIEW 2026-09-13: THIS IS THE ONE RUN-TIME DIFFERENCE THE EXTRACTION INTRODUCED, found by
-        //   two reviewers independently. The baseline started ONLY the driving ingestor here and left
-        //   each calibration channel to be started lazily inside pump_calib_channels(), after its
-        //   bind_camera() succeeded. That lazy start is still there and CameraIngestor::start() is
-        //   idempotent, so nothing double-starts — but a calibration camera that is CONFIGURED AND
-        //   NEVER BINDABLE now costs a live ingest thread (1 Hz descriptor discovery plus frame
-        //   drain/convert) for the whole run, from Operating-enter rather than from first bind.
+        // ── ONLY THE DRIVING CAMERA STARTS HERE, AS IT ALWAYS DID ───────────────────────────────
+        // The extraction briefly started every calibration channel from this point too. That was the
+        // single run-time difference the review found, and it is reverted: each auxiliary channel is
+        // started lazily inside pump_calib_channels() once its own bind_camera() succeeds. The
+        // difference is not academic — a camera that is CONFIGURED BUT NEVER BINDABLE (wrong node
+        // name, a sensor this robot does not have) would otherwise cost a live ingest thread doing
+        // 1 Hz descriptor discovery and frame drain for the entire run, and the fleet's own note on
+        // that failure is that a media plane for a sensor the robot lacks bridges for ever.
+        // Starting a reader before there is anything to read is not free and buys nothing.
         if (camera_ingestor_) camera_ingestor_->start();
-        for (auto& chp : calib_channels_)
-            if (chp->ingestor) chp->ingestor->start();
     }
 
     void CalibChannels::stop()
