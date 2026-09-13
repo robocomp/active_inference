@@ -343,6 +343,15 @@ add_library(ai_common::geometry ALIAS ai_common_geometry)
 add_library(ai_common_affordance STATIC
   affordance_manager/affordance_manager.cpp
   object_affordance/object_affordance.cpp
+  # PRODUCER, third of the family — named, PRECONDITIONED affordances (door: approach / open / cross).
+  # On the wire only while the producer believes the action is possible at all, which object_affordance
+  # has no notion of: its one node per object is epistemic and exists whenever the object does.
+  # ⚠ADD A UNIT HERE ONLY ONCE IT COMPILES. This one writes `aff_kind_att`, and while that attribute was
+  # still waiting on a cortex reinstall its presence in this target broke the build for EVERY agent
+  # linking ai_common_affordance rather than only the one being edited — measured 2026-09-12, it blocked
+  # a live room_concept run. It was compiled from door_concept/src/CMakeLists.txt until the reinstall
+  # landed, and moved here after.
+  pragmatic_affordance/pragmatic_affordance.cpp
 )
 ai_common_defaults(ai_common_affordance)
 target_link_libraries(ai_common_affordance PUBLIC ai_common_core)

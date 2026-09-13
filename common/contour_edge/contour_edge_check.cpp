@@ -93,28 +93,42 @@ std::vector<std::vector<cv::Point>> make_side_controls(const std::vector<cv::Poi
     return out;
 }
 
-ContourEdgeScore contour_edge_support(const cv::Mat& img,
+PreparedFrame prepare_frame(const cv::Mat& img)
+{
+    PreparedFrame p;
+    if (img.empty())
+        return p;
+    cv::Mat gray;
+    if (img.channels() == 3) cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    else                     gray = img;
+    // Light blur before Sobel: without it the score is dominated by sensor/compression noise, which is
+    // uniform across the frame and would therefore wash out the very contrast this is built on.
+    cv::Mat blurred;
+    cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
+    cv::Sobel(blurred, p.gx, CV_32F, 1, 0, 3);
+    cv::Sobel(blurred, p.gy, CV_32F, 0, 1, 3);
+    // The frame's own gradient level, as the unit `excess` is measured in. Mean |grad| over the whole
+    // image: cheap, and it tracks scene contrast, exposure and blur together — which is precisely what
+    // has to be divided out for "this boundary is stronger than usual" to mean the same thing in a dim
+    // corridor and a bright room. ★Computed HERE, once per frame, because it does not depend on the
+    // polygon: recomputing it per hypothesis is what made a 25-way angle search unaffordable.
+    cv::Mat mag;
+    cv::magnitude(p.gx, p.gy, mag);
+    p.frame_ref = static_cast<float>(cv::mean(mag)[0]);
+    return p;
+}
+
+ContourEdgeScore contour_edge_support(const PreparedFrame& prep,
                                       const std::vector<cv::Point>& poly,
                                       const std::vector<std::vector<cv::Point>>& controls)
 {
     ContourEdgeScore out;
-    if (img.empty() or poly.size() < 3)
+    if (not prep.valid() or poly.size() < 3)
         return out;
-
-    cv::Mat gray;
-    if (img.channels() == 3)
-        cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-    else
-        gray = img;
-    // Light blur before Sobel: without it the score is dominated by sensor/compression noise, which is
-    // uniform across the frame and would therefore wash out the very contrast this is built on.
-    cv::Mat blurred, gx, gy;
-    cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
-    cv::Sobel(blurred, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(blurred, gy, CV_32F, 0, 1, 3);
+    out.frame_ref = prep.frame_ref;
 
     int n_true = 0;
-    out.s_true = mean_across_boundary_gradient(gx, gy, poly, n_true);
+    out.s_true = mean_across_boundary_gradient(prep.gx, prep.gy, poly, n_true);
     out.n_samples = n_true;
     if (n_true == 0)
         return out;   // nothing measured — the caller must not read this as "no support"
@@ -124,28 +138,26 @@ ContourEdgeScore contour_edge_support(const cv::Mat& img,
     for (const auto& c : controls)
     {
         int n_c = 0;
-        const float s = mean_across_boundary_gradient(gx, gy, c, n_c);
+        const float s = mean_across_boundary_gradient(prep.gx, prep.gy, c, n_c);
         if (n_c > 0) { ctl_acc += s; ++ctl_n; }
     }
     out.s_control  = ctl_n > 0 ? static_cast<float>(ctl_acc / ctl_n) : 0.0f;
     out.n_controls = ctl_n;
-
-    // The frame's own gradient level, as the unit `excess` is measured in. Mean |grad| over the whole
-    // image: cheap, and it tracks scene contrast, exposure and blur together — which is precisely what
-    // has to be divided out for "this boundary is stronger than usual" to mean the same thing in a dim
-    // corridor and a bright room.
-    cv::Mat mag;
-    cv::magnitude(gx, gy, mag);
-    out.frame_ref = static_cast<float>(cv::mean(mag)[0]);
-    out.excess = (ctl_n > 0 and out.frame_ref > 1e-3f)
-                 ? (out.s_true - out.s_control) / out.frame_ref
-                 : 0.0f;   // no controls, or a frame with no gradient at all ⇒ says nothing
-
-    // Neutral 0.5 when there are no usable controls: with nothing to compare against, this frame says
+    out.excess = (ctl_n > 0) ? (out.s_true - out.s_control) / out.frame_ref
+                             : 0.0f;   // no controls ⇒ says nothing
+    // Neutral 0.5 when there are no usable controls: with nothing to compare against this frame says
     // nothing, and saying nothing must look different from saying "no".
-    const float denom = out.s_true + out.s_control;
-    out.support = (ctl_n > 0 and denom > 1e-6f) ? (out.s_true / denom) : 0.5f;
+    out.support = (ctl_n > 0 and (out.s_true + out.s_control) > 1e-6f)
+                  ? out.s_true / (out.s_true + out.s_control) : 0.5f;
     return out;
+}
+
+// The original one-shot entry point, now a thin wrapper so the two cannot drift apart.
+ContourEdgeScore contour_edge_support(const cv::Mat& img,
+                                      const std::vector<cv::Point>& poly,
+                                      const std::vector<std::vector<cv::Point>>& controls)
+{
+    return contour_edge_support(prepare_frame(img), poly, controls);
 }
 
 }   // namespace rc::edges

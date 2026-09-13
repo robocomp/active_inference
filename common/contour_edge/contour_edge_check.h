@@ -77,6 +77,32 @@ struct ContourEdgeScore
                                                     const std::vector<cv::Point>& poly,
                                                     const std::vector<std::vector<cv::Point>>& controls);
 
+// ─── SCORING MANY HYPOTHESES AGAINST ONE FRAME ───────────────────────────────────────────────────
+// ★THE WHOLE-FRAME GRADIENT IS PER-FRAME, NOT PER-POLYGON. contour_edge_support above blurs, runs two
+// Sobels and takes the mean magnitude over the ENTIRE image on every call — correct for one contour,
+// ruinous for a search. Scoring a door's leaf at 25 candidate opening angles would recompute that 25
+// times a cycle for a result that is identical every time.
+// So: prepare once, score many. This exists because the leaf ANGLE is estimated by comparing hypotheses,
+// and until now the only per-hypothesis evidence was silhouette overlap against the semantic mask —
+// which fails exactly when the door is OPEN, because the mask then covers the frame while the leaf has
+// swung out of it. An open leaf is a large surface with strong boundaries and no useful label: gradient
+// is the evidence that survives, and it has to be affordable per hypothesis to be usable as one.
+struct PreparedFrame
+{
+    cv::Mat gx, gy;            // Sobel derivatives of the blurred grey image
+    float   frame_ref = 0.0f;  // mean |grad| over the whole frame — the scale `excess` is expressed in
+    [[nodiscard]] bool valid() const { return not gx.empty() and frame_ref > 1e-3f; }
+};
+
+// Blur + Sobel + frame reference, once. `gray` may be CV_8UC1 or CV_8UC3.
+[[nodiscard]] PreparedFrame prepare_frame(const cv::Mat& gray);
+
+// Same statistic as contour_edge_support, against an already-prepared frame. Identical arithmetic —
+// the one-shot version is implemented in terms of this, so the two cannot drift apart.
+[[nodiscard]] ContourEdgeScore contour_edge_support(const PreparedFrame& prep,
+                                                    const std::vector<cv::Point>& poly,
+                                                    const std::vector<std::vector<cv::Point>>& controls);
+
 // Build control polygons by shifting `poly` sideways by ±k widths of its own bounding box. Sideways
 // only: a door's neighbours along the wall are the honest comparison, while shifting vertically would
 // straddle floor and ceiling and compare against a different kind of surface entirely.

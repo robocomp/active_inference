@@ -54,6 +54,87 @@ struct LidarRays
     int   max_steps   = 64;      // sphere-trace iteration cap
 };
 
+// ─── First-hit range COST (the same march, as a scalar objective) ───────────────────────────────
+// ★THE FACTOR BELOW RETURNS NORMAL EQUATIONS; THIS RETURNS THE OBJECTIVE ITSELF. A belief that optimises
+// one coordinate over a GRID — a door's hinge angle, say — needs to COMPARE hypotheses, and (Id, bd) does
+// not compare: it is the local linearisation about one state. Same march, same robust weight, same
+// residual, evaluated rather than differentiated, so the two can never disagree about what is being
+// minimised.
+// ★AND IT IS THE MEASUREMENT A DOORWAY ACTUALLY MAKES. An aperture is a HOLE: a closed leaf stops the ray
+// at the wall plane, an open one lets it fly through into the next room. That difference lives in WHERE
+// THE RAY STOPS — including the rays that do not stop — and it is invisible to any cost built from return
+// points alone, because the through-rays' endpoints are somewhere else entirely. e = t - rho_obs is
+// signed and says which way the model is wrong: positive, the model let a ray through that was stopped;
+// negative, the model stopped a ray that flew on.
+template <int N, class Model, class State>
+[[nodiscard]] float lidar_ray_cost(const Model& m, const State& s, const LidarRays& rays)
+{
+    if (rays.precision <= 0.0f or rays.endpoints.empty())
+        return 0.0f;
+    const float tcap = std::min(rays.max_range_m, 1e9f);
+    const auto sdf_min = [&](const Eigen::Vector3f& p, int& prim)
+    {
+        float d = m.sdf_prim(p, s, 0); prim = 0;
+        for (int k = 1; k < m.n_prims(); ++k)
+        { const float dk = m.sdf_prim(p, s, k); if (dk < d) { d = dk; prim = k; } }
+        return d;
+    };
+    double acc = 0.0;
+    int    used = 0;
+    for (const auto& ep : rays.endpoints)
+    {
+        const Eigen::Vector3f dir = ep - rays.origin;
+        const float rho_obs = dir.norm();
+        if (rho_obs < 1e-3f) continue;
+        const Eigen::Vector3f u = dir / rho_obs;
+        float t = 0.0f; int prim = 0; bool hit = false;
+        for (int it = 0; it < rays.max_steps and t < tcap; ++it)
+        {
+            const float d = sdf_min(rays.origin + t * u, prim);
+            if (d < rays.surf_eps_m) { hit = true; break; }
+            t += std::max(d, rays.surf_eps_m);
+        }
+        // ★A MODEL THAT PREDICTS NO HIT IS A PREDICTION, NOT A MISSING MEASUREMENT. The ray is expected to
+        // fly past everything the model knows about, so the honest predicted range is the march cap: if
+        // the sensor DID stop it, that is a real, large residual — which is precisely how an open-leaf
+        // hypothesis is refuted by a door that is in fact shut. Skipping these rays would make every
+        // "open" hypothesis unfalsifiable, since its rays mostly predict no hit.
+        // ★★★A BEAM MODEL, NOT A ROBUST SQUARED RESIDUAL — AND THE DIFFERENCE IS WHY THIS FUNCTION
+        // EXISTS. A Cauchy (or any robust) kernel COMPRESSES large residuals by design: that is what
+        // makes it robust. But for the question "did this ray get through, or was it stopped?" the entire
+        // signal LIVES in large residuals, so the kernel destroys exactly the information being sought.
+        // Measured 2026-09-13 on a door: with c = 0.05 m every ray saturated identically and the
+        // likelihood was perfectly flat (the weight sat at 1/25 across 25 hypotheses); raising c to the
+        // aperture width, 1.0 m, only moved the saturation point — "stopped 2.8 m early" scored 0.44 and
+        // "flew 4 m past" scored 0.47, still indistinguishable. No value of c fixes it, because both
+        // outcomes are far beyond any c that also tolerates sensor noise.
+        // The right statistic is the standard range-sensor beam model, which is also what this fleet
+        // already uses for silhouettes (rc::exist's occupancy/free log-odds):
+        //   model predicts a hit at t  ⇒  p(rho) = (1-w_u)·N(rho; t, sigma) + w_u·U
+        //   model predicts no hit      ⇒  p(rho) =                            w_u·U
+        // A hypothesis that puts a surface where the ray actually stopped scores the Gaussian peak; one
+        // that predicts free space there, or a block where the ray flew on, falls to the uniform floor.
+        // The gap between those is a FIXED amount per ray that ACCUMULATES over hundreds of rays instead
+        // of saturating — which is what makes hundreds of rays decisive rather than 0.7% of flat.
+        // ★w_u is the share of returns the model cannot be expected to explain (the far wall seen through
+        // an open doorway, the floor, a person). It is what stops an unexplained ray from being read as a
+        // refutation: unexplained is the uniform floor, not minus infinity.
+        const float sig  = rays.robust_c_m;            // range noise scale (m) — reused, now as sigma
+        const float w_u  = 0.2f;                       // unexplained-return share
+        const float uni  = 1.0f / std::max(1e-3f, tcap);
+        double p = w_u * uni;
+        if (hit)
+        {
+            const float e = t - rho_obs;
+            p += (1.0 - w_u) * std::exp(-0.5 * (e * e) / (sig * sig))
+                 / (sig * 2.5066282746f);              // sqrt(2*pi)
+        }
+        acc += -std::log(std::max(p, 1e-12));
+        ++used;
+    }
+    return used > 0 ? static_cast<float>(acc / used) : 0.0f;   // PER RAY: see the door's phi_free_energy
+}
+
 // ─── First-hit range factor (sphere-trace the model's own SDF → GN normal equations) ─────────────
 
 // Generic first-hit range factor. Templated on the belief model so it reuses the model's own SDF; N is the
