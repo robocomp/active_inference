@@ -2041,6 +2041,25 @@ namespace rc
         derived_polygon_.clear();
     }
 
+    std::vector<Eigen::Vector3f> RoomConcept::filter_through_door(
+        const std::vector<Eigen::Vector3f>& points_robot, int* removed) const
+    {
+        if (removed != nullptr) *removed = 0;
+        if (doors_robot_.empty() or points_robot.empty()) return points_robot;
+        std::vector<Eigen::Vector3f> kept;
+        kept.reserve(points_robot.size());
+        const Eigen::Vector2f origin(0.f, 0.f);
+        for (const auto& p : points_robot)
+        {
+            // Any crossing at all drops the point from the DRAWING. The SDF keeps the continuous
+            // weight — a half-open door discounts by half there — but a canvas cannot draw half a
+            // point, and "is it removing them?" is the question this view exists to answer.
+            if (DoorApertures::weight(doors_robot_, origin, p.head<2>()) >= 1.f) kept.push_back(p);
+            else if (removed != nullptr) ++(*removed);
+        }
+        return kept;
+    }
+
     torch::Tensor RoomConcept::door_point_weights(const torch::Tensor& points_robot) const
     {
         if (doors_robot_.empty() or not points_robot.defined() or points_robot.size(0) == 0)

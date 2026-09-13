@@ -88,6 +88,22 @@ namespace rc
         /// holding and that is a bug worth seeing rather than a cost worth paying.
         long resolves() const { return resolves_; }
 
+        /// Why a door did NOT become an aperture. Written to tmp/door_filter.csv once per refresh,
+        /// one row per door node, because this pipeline has four places to fail silently — the node
+        /// is not found, its subtype is not "door", its belief says shut, or the room<-door chain
+        /// does not resolve — and from the outside all four look identical: the scan is not filtered.
+        struct Tally
+        {
+            int objects = 0;        ///< object nodes seen
+            int named_door = 0;     ///< ... named door_*
+            int subtype_ok = 0;     ///< ... with object_subtype == "door"
+            int believed_open = 0;  ///< ... whose door_open_prob is in (0,1]
+            int no_width = 0;       ///< ... rejected for a missing/absurd width_m
+            int no_transform = 0;   ///< ... whose room<-door chain did not resolve
+            int emitted = 0;        ///< ... that became an aperture this cycle
+        };
+        const Tally& tally() const { return tally_; }
+
         /// The weight this scan point keeps, given where the beam came from. Room frame, both.
         /// 1 when no aperture lies between them; the product of (1 - p_open) over those that do, so
         /// two open doors in line discount once each rather than cancelling.
@@ -101,5 +117,6 @@ namespace rc
         /// refresh() for the one case that forces a re-walk).
         std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> cache_;
         long resolves_ = 0;
+        Tally tally_;
     };
 }   // namespace rc

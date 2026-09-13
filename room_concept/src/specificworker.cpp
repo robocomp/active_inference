@@ -164,6 +164,39 @@ void SpecificWorker::compute()
                                      .arg(open_doors.size()).arg(which.isEmpty() ? " -" : which)
                                      .arg(doors_.resolves());
         }
+        // ── WHY A DOOR DID NOT BECOME AN APERTURE ───────────────────────────────────────────────
+        // Four stages can fail silently here and from the outside all four look the same: the scan is
+        // not filtered. One row per refresh naming the count at each stage, so the answer is read
+        // rather than guessed.
+        {
+            static std::ofstream dcsv;
+            if (not dcsv.is_open())
+            {
+                std::filesystem::create_directories("tmp");
+                dcsv.open("tmp/door_filter.csv", std::ios::out | std::ios::trunc);
+                if (dcsv.is_open())
+                {
+                    dcsv.imbue(std::locale::classic());
+                    dcsv << "ts_ms,objects,named_door,subtype_ok,believed_open,no_width,no_transform,"
+                            "emitted,resolves,door,p_open,ax,ay,bx,by\n";
+                }
+            }
+            if (dcsv.is_open())
+            {
+                const auto& t = doors_.tally();
+                const auto row = [&](const char* name, float p, float ax, float ay, float bx, float by)
+                {
+                    dcsv << now_ms << ',' << t.objects << ',' << t.named_door << ',' << t.subtype_ok
+                         << ',' << t.believed_open << ',' << t.no_width << ',' << t.no_transform
+                         << ',' << t.emitted << ',' << doors_.resolves() << ',' << name << ','
+                         << p << ',' << ax << ',' << ay << ',' << bx << ',' << by << '\n';
+                };
+                if (open_doors.empty()) row("-", -1.f, 0.f, 0.f, 0.f, 0.f);
+                for (const auto& d : open_doors)
+                    row(d.name.c_str(), d.p_open, d.a.x(), d.a.y(), d.b.x(), d.b.y());
+                dcsv.flush();
+            }
+        }
         room_concept_.set_door_apertures(std::move(open_doors));
     }
 
@@ -238,6 +271,22 @@ void SpecificWorker::compute()
         const auto& [lidar_from_buffer] = lidar_ingestor_->buffer().read_last();
         if (lidar_from_buffer.has_value())
             lidar_for_canvas = lidar_from_buffer->first;
+    }
+
+    // ── THE FILTER, MADE VISIBLE ────────────────────────────────────────────────────────────────
+    // The canvas draws what the SDF keeps. If a door is open and the returns beyond it are still on
+    // screen, the filter is not working — which is a stronger and faster test than any log line, and
+    // it is why this is done here rather than left to a CSV.
+    {
+        int removed = 0;
+        lidar_for_canvas = room_concept_.filter_through_door(lidar_for_canvas, &removed);
+        static int last_removed = -1;
+        if (removed != last_removed and (removed > 0 or last_removed > 0))
+        {
+            last_removed = removed;
+            qInfo().noquote() << QString("[room][doors] %1 scan point(s) dropped from the canvas as "
+                                         "through-the-door returns").arg(removed);
+        }
     }
 
     const bool on_gui_thread = (QThread::currentThread() == this->thread());

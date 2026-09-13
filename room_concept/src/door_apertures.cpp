@@ -38,15 +38,19 @@ namespace rc
     {
         std::vector<DoorAperture> out;
         std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> kept;
+        tally_ = Tally{};
 
         // Doors are generic `object` nodes named door_* carrying object_subtype == "door"
         // (door_scene_graph.cpp). Every get_nodes_by_type("object") here MUST keep that filter, or a
         // fridge becomes a doorway.
         for (const auto& n : G.get_nodes_by_type("object"))
         {
+            ++tally_.objects;
             if (not n.name().starts_with("door")) continue;
+            ++tally_.named_door;
             const auto sub = G.get_attrib_by_name<object_subtype_att>(n);
             if (not sub.has_value() or sub.value() != "door") continue;
+            ++tally_.subtype_ok;
 
             // ── THE CHEAP HALF: the door's own belief, read every cycle ──────────────────────────
             // Unmeasured publishes a sentinel outside [0,1], which means "no evidence" and weighs as
@@ -54,6 +58,7 @@ namespace rc
             const auto p = G.get_attrib_by_name<door_open_prob_att>(n);
             const float p_open = (p.has_value() and std::isfinite(p.value())
                                   and p.value() > 0.f and p.value() <= 1.f) ? p.value() : 0.f;
+            if (p_open > 0.f) ++tally_.believed_open;
             if (p_open <= 0.f)
             {
                 // Shut, or never measured. Its segment stays in the cache if we already have one —
@@ -67,15 +72,16 @@ namespace rc
             if (it == cache_.end())
             {
                 const auto w = G.get_attrib_by_name<width_m_att>(n);
-                if (not w.has_value() or not std::isfinite(w.value()) or w.value() <= 0.f) continue;
+                if (not w.has_value() or not std::isfinite(w.value()) or w.value() <= 0.f)
+                { ++tally_.no_width; continue; }
 
                 // room <- door, latest (ts == 0). Returns nullopt at any missing link in the chain
                 // rather than throwing, so a door whose wall has gone is simply not an aperture yet —
                 // check the optional, never dereference it (CLAUDE.md, and still true).
                 const auto T = inner.get_transformation_matrix(room_frame, n.name());
-                if (not T.has_value()) continue;
+                if (not T.has_value()) { ++tally_.no_transform; continue; }
                 const Eigen::Matrix4d M = T.value().matrix();
-                if (not M.allFinite()) continue;
+                if (not M.allFinite()) { ++tally_.no_transform; continue; }
 
                 const Eigen::Vector2f c(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)));
                 // The door's own x axis is the wall tangent (phi == 0 yaw == wall tangent,
@@ -100,6 +106,7 @@ namespace rc
             ap.p_open = p_open;
             ap.id = n.id();
             ap.name = n.name();
+            ++tally_.emitted;
             out.push_back(std::move(ap));
         }
         // Doors that left the graph leave the cache with them; nothing here expires on a timer.

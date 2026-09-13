@@ -1456,6 +1456,15 @@ private:
    /// which makes every consumer fall back to the plain unweighted reduction, i.e. exactly the
    /// behaviour of a room without doors.
    torch::Tensor door_point_weights(const torch::Tensor& points_robot) const;
+
+public:
+   /// The scan with every through-an-open-door return REMOVED, robot frame in and out. The canvas
+   /// draws this so the filter is visible: if a door is open and the points beyond it are still on
+   /// screen, the filter is not working, and that is a stronger test than any log line.
+   /// `removed` gets the count. No open door ⇒ the input is returned unchanged.
+   std::vector<Eigen::Vector3f> filter_through_door(const std::vector<Eigen::Vector3f>& points_robot,
+                                                    int* removed = nullptr) const;
+private:
    mutable std::mutex object_anchors_mutex_;
    std::vector<ObjectAnchorObs> latest_object_anchors_;
 
