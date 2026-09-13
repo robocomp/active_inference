@@ -4132,7 +4132,36 @@ namespace rc
         auto pose_xy = newest.pose.index({torch::indexing::Slice(0, 2)});
         auto pose_th = newest.pose.index({torch::indexing::Slice(2, 3)});
         const auto sdf_pred = model_->sdf_at_pose(points_tensor, pose_xy, pose_th);
-        const float mean_sdf_pred = torch::mean(torch::abs(sdf_pred)).item<float>();
+        // ── THE GATE'S OWN STATISTIC GETS THE DOOR WEIGHTS TOO ──────────────────────────────────
+        // This is a MEAN, and a mean is what outliers own. The reported sdf_mse is a median and was
+        // already weighted, so it fell to 7 mm the moment the door filter came on — while this number
+        // stayed at 0.2 and the gate never opened, giving zero early exits with the robot standing
+        // still. A few hundred returns three metres beyond an open doorway do that to a mean and
+        // barely touch a median; weighting one and not the other made the two disagree about the same
+        // scan. Same weights, same points, both statistics.
+        // sum(w*|sdf|) / sum(w): with no open door the weights are undefined and this is exactly the
+        // plain mean it replaces.
+        float mean_sdf_pred = torch::mean(torch::abs(sdf_pred)).item<float>();
+        if (const auto dw = door_point_weights(points_tensor); dw.defined() and dw.numel() == sdf_pred.numel())
+        {
+            const auto a = torch::abs(sdf_pred).detach().to(torch::kCPU).to(torch::kFloat32);
+            const auto w = dw.to(torch::kCPU).to(torch::kFloat32);
+            const float wsum = torch::sum(w).item<float>();
+            if (wsum > 1e-6f)
+            {
+                // ⚠ BOTH VALUES ARE KEPT, because this is a DECISION variable and a gate cannot be
+                // audited by the statistic it already truncated (the assoc_chi2 lesson). If the
+                // aperture geometry or p_open is ever wrong, the discount would blind the gate in
+                // that direction and a genuinely bad pose would pass as good; the only way to see
+                // that is to have both numbers side by side. ee_metric_unweighted_ is recorded
+                // beside the one the gate uses, so "would it have decided differently?" is answered
+                // from the log rather than argued.
+                ee_metric_unweighted_ = mean_sdf_pred;
+                mean_sdf_pred = torch::sum(a * w).item<float>() / wsum;
+                ee_door_discount_ = 1.f - wsum / static_cast<float>(w.numel());
+            }
+        }
+        else { ee_metric_unweighted_ = mean_sdf_pred; ee_door_discount_ = 0.f; }
         // Record the decision variable whether or not we early-exit — on an Adam frame this is the
         // value that TRIGGERED optimization (it exceeded the trust threshold). update() reads it back.
         last_early_exit_metric_ = mean_sdf_pred;
@@ -4385,6 +4414,8 @@ namespace rc
         res.sdf_mse = weighted_median_abs_sdf(sdf_pred, door_point_weights(points_tensor));
         res.pred_sdf_median = res.sdf_mse;   // on this path they are the same quantity
         res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
+        res.early_exit_metric_unweighted = ee_metric_unweighted_;   // what it would have been with the door in
+        res.door_discount = ee_door_discount_;
         res.sdf_polished = sdf_polished_this_cycle_;   // the calibrator counts this as a correction
         // (No res.covariance assignment here: this path already publishes current_covariance further
         //  down. Adding a second one was redundant — and it was how the growth step below reached

@@ -747,6 +747,12 @@ public:
         // boost). NaN when the early-exit gate wasn't evaluated this frame (warmup / no odometry /
         // prior not ok / manual-reset settle). See try_prediction_early_exit().
         float early_exit_metric = std::numeric_limits<float>::quiet_NaN();
+        /// The same criterion WITHOUT the open-door weighting, and the fraction of the scan's weight
+        /// those doors removed. The gate decides on early_exit_metric; these two exist so that
+        /// decision can be second-guessed from a log — a gate audited only by the statistic it
+        /// already truncated cannot be audited at all.
+        float early_exit_metric_unweighted = std::numeric_limits<float>::quiet_NaN();
+        float door_discount = 0.f;
         /// True when the SDF polish moved the pose on this cycle. The calibrator reads it as "a
         /// correction happened", which on early-exit cycles it now is.
         bool  sdf_polished = false;
@@ -1452,6 +1458,11 @@ private:
    /// thread. Kept as a member rather than passed down through a dozen signatures: every consumer of
    /// the observation weights is inside this class's own update cycle.
    std::vector<DoorAperture> doors_robot_;
+   /// The early-exit criterion as it would have been WITHOUT the door weighting, and the fraction of
+   /// the scan's weight the doors removed. The gate decides on the weighted value; these two say what
+   /// that cost, so a discount that is silently blinding the gate is visible instead of inferred.
+   float ee_metric_unweighted_ = 0.f;
+   float ee_door_discount_ = 0.f;
    /// Per-point door weight for a robot-frame scan, or an undefined tensor when no door is open —
    /// which makes every consumer fall back to the plain unweighted reduction, i.e. exactly the
    /// behaviour of a room without doors.
