@@ -170,7 +170,7 @@ class SpecificWorker : public GenericWorker
         // old Qt::QueuedConnection marshal to the main thread, and compute()'s own redundant call, are
         // both removed -- see the FIX notes at set_on_result_ready and in compute()). Returns true iff
         // it actually published this call. Takes publish_mutex_, shared with publish_predicted_tick().
-        bool maybe_publish_corrected_pose();
+
 
         // FIX 2026-09-04: publish a dead-reckoned pose on EVERY IMU sample (~100 Hz on this robot,
         // vs the lidar-paced ~20 Hz of maybe_publish_corrected_pose), so the graph is never more than
@@ -181,7 +181,7 @@ class SpecificWorker : public GenericWorker
         // publish_mutex_: a real correction landing mid-tick must never be overwritten by a stale
         // prediction, and the two run on different threads (localizer vs imu-ingest) so this is a
         // genuine race, not a formality. Wired from ImuIngestor::set_on_new_sample() in initialize().
-        void publish_predicted_tick(std::int64_t imu_ts_ms);
+
 
         // ── Localizer ──────────────────────────────────────────────────────────
         rc::RoomConcept room_concept_;
@@ -244,8 +244,7 @@ class SpecificWorker : public GenericWorker
         // predict-publish injects). Both writers now run on DIFFERENT threads, serialized by
         // publish_mutex_ (NOT thread-affinity -- that assumption held only until the predicted writer
         // existed). type: 0=corrected, 1=predicted.
-        void log_pose_trace(int type, std::int64_t valid_ts_ms,
-                            const Eigen::Affine2f& pose, float innov_norm);
+
 
         // ── APPEND-ONLY RECORD OF LOCALISER DISCONTINUITIES (etc/pose_jumps.csv) ─────────────────
         // ★IT IS APPEND-ONLY BECAUSE THAT IS THE ENTIRE POINT. pose_trace.csv is truncated on every
@@ -317,8 +316,6 @@ class SpecificWorker : public GenericWorker
     ///   depth even where depth exists: the height is exact while ZED depth carries a measured
     ///   ~0.4% bias. It is also what the 2-D canvas needs to draw a camera corner beside its LiDAR
     ///   one, which until now it silently skipped for want of a range.
-    static void place_triple_points_in_room(rc::ImageEdgeObs& obs, const rc::CameraIngestor& ing,
-                                            const Eigen::Vector3f& pose);
 
     // Camera<->LiDAR mount calibration: rc::MountCalibrator (src/mount_calibrator.{h,cpp}).
     // Owns its accumulators, its pair logs, the per-camera publish bookkeeping and the sensor-triangle
@@ -364,10 +361,6 @@ class SpecificWorker : public GenericWorker
     /// Raw view of viewer_, kept in step with it, so collaborators constructed BEFORE the viewer can
     /// still reach it later without owning it or being rebuilt when it appears.
     rc::RoomViewer* viewer_raw_slot_ = nullptr;
-    static void write_pair_row(std::ofstream& csv, const std::string& cam, std::int64_t ts,
-                               const rc::mount::PairObs& pr, bool ceiling, float angle_deg,
-                               float assoc_chi2, int n_rivals, float runnerup_chi2,
-                               const Eigen::Vector3f& corr);
 
         // conclusions got drawn by hand on 2026-08-22.
         // Gated on the attributes EXISTING, so on the real robot nothing is written at all.
@@ -378,7 +371,7 @@ class SpecificWorker : public GenericWorker
         // that is not there is silently the config fallback for the life of the process.
 
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
-        void update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thread);
+
 
         std::atomic<bool> shutting_down_{false};
 

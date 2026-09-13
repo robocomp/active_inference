@@ -140,24 +140,19 @@ void SpecificWorker::initialize()
     // The mount calibrator borrows the viewer SLOT, not the viewer: it is constructed here, long
     // before RoomViewer exists, and reads through the pointer whenever it needs to display.
     mount_ = std::make_unique<rc::MountCalibrator>(G, params, &viewer_raw_slot_);
-    // ⚠ REVIEW 2026-09-13 (three reviewers, independently): rt_api_ IS NULL HERE. It is assigned a
-    //   few lines below, so PosePublisher::rt_api_ is nullptr for the life of the process and is also
-    //   blind to the HISTORY_SIZE = 25 tuning applied after that. INERT TODAY — pose_publisher.cpp
-    //   never dereferences the member; it publishes through scene_graph_, which gets its own RT_API
-    //   correctly after the assignment. Left as found because this review does not change behaviour.
-    //   The hazard is that the constructor signature ASSERTS the dependency is satisfied: the first
-    //   line in that class to use its injected RT API segfaults. Fix by dropping the parameter or by
-    //   constructing below the assignment — do not fix by "just adding a null check".
-    pose_pub_ = std::make_unique<rc::PosePublisher>(G, rt_api_.get(), params, room_concept_,
+    // No RT_API here: it is assigned further down, so passing it at this point handed the publisher a
+    // permanent nullptr behind a signature that claimed otherwise (found in review, 2026-09-13). The
+    // publisher writes through RoomSceneGraph, which gets the RT_API after the assignment.
+    pose_pub_ = std::make_unique<rc::PosePublisher>(G, params, room_concept_,
                                                     &viewer_raw_slot_, shutting_down_);
-    // ⚠ REVIEW 2026-09-13: this lambda dereferences gt_log_, which is constructed on the NEXT line.
-    //   Safe as written — nothing can publish in between (the localiser thread and the graph slots
-    //   both start much later) — but it is the same shape as the set_scene_graph-inside-a-lambda bug
-    //   that made this agent publish nothing all evening. If either statement ever moves, this is a
-    //   null deref on the first corrected pose.
-    pose_pub_->set_on_corrected_published([this](const rc::RoomConcept::UpdateResult& res) { gt_log_->log_ground_truth(res); });
     calib_ = std::make_unique<rc::CalibChannels>(G, params, room_concept_, *mount_, &viewer_raw_slot_);
     gt_log_ = std::make_unique<rc::GroundTruthLog>(G, room_concept_, shutting_down_);
+    // AFTER gt_log_ exists. The lambda captures `this` and dereferences gt_log_, so registering it
+    // first left a window in which a corrected publish would have null-dereferenced. Nothing could
+    // publish in that window today, which is exactly what made the same shape survive review once
+    // already — the hand-over goes after the thing it hands over, not before it.
+    pose_pub_->set_on_corrected_published([this](const rc::RoomConcept::UpdateResult& res)
+                                          { gt_log_->log_ground_truth(res); });
     phase("load_config");
 
     // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──

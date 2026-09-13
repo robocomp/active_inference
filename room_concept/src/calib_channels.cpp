@@ -527,8 +527,11 @@ void CalibChannels::pump_image_edges()
         //       same guard read the owning unique_ptr and was a true guard. Unreachable today: the
         //       only caller is pump_image_edges(), which returns on its own null camera_ingestor_,
         //       and request_shutdown() runs on the GUI thread and then _Exit()s, so no compute tick
-        //       can interleave. It is safe by a property of SHUTDOWN, not by construction. One line
-        //       closes it for good: mount_.set_driving_ingestor(nullptr).
+        //       can interleave — safe by a property of SHUTDOWN, not by construction. Closed below.
+        // The calibrator holds a RAW pointer to the driving ingestor (handed over in configure()), so
+        // it is told BEFORE the object goes. Its own `not driving_` guard is then a true guard again,
+        // as it was at the baseline where it read the owning unique_ptr.
+        mount_.set_driving_ingestor(nullptr);
         camera_ingestor_.reset();          // drop the RGB readers before the graph goes
         for (auto& chp : calib_channels_) chp->ingestor.reset();
     }

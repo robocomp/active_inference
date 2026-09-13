@@ -34,9 +34,15 @@ namespace rc
     class PosePublisher
     {
     public:
-        PosePublisher(std::shared_ptr<DSR::DSRGraph> graph, DSR::RT_API* rt, RoomConfig& params,
+        /// ⚠ NO RT_API PARAMETER, DELIBERATELY. One was passed until 2026-09-13 and was always null:
+        /// the worker injected rt_api_.get() before assigning it. Nothing here needs it — this class
+        /// publishes through RoomSceneGraph, which holds the RT_API and receives it after the
+        /// assignment. A null member behind a constructor signature that claims the dependency is
+        /// satisfied is worse than no member: it reads as wired. If this class ever needs the RT API,
+        /// add the parameter back AND construct below the worker's assignment.
+        PosePublisher(std::shared_ptr<DSR::DSRGraph> graph, RoomConfig& params,
                       RoomConcept& room, RoomViewer** viewer, const std::atomic<bool>& shutting_down)
-            : G(std::move(graph)), rt_api_(rt), params(params), room_concept_(room),
+            : G(std::move(graph)), params(params), room_concept_(room),
               viewer_slot_(viewer), shutting_down_(shutting_down) {}
 
         /// The scene graph is built after this object, so it is handed over rather than injected.
@@ -68,10 +74,6 @@ namespace rc
         RoomViewer* viewer() const { return viewer_slot_ != nullptr ? *viewer_slot_ : nullptr; }
 
         std::shared_ptr<DSR::DSRGraph> G;
-        /// ⚠ ALWAYS NULL — see the construction site in specificworker_startup.cpp. It is injected
-        /// before the worker assigns its own rt_api_, so this member never receives one. Nothing in
-        /// this class reads it today; anything that starts to, segfaults. Reviewed 2026-09-13.
-        DSR::RT_API*    rt_api_ = nullptr;
         RoomConfig&     params;
         RoomConcept&    room_concept_;
         RoomSceneGraph* scene_graph_ = nullptr;
