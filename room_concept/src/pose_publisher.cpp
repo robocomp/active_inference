@@ -443,12 +443,18 @@ bool PosePublisher::maybe_publish_corrected_pose()
     {
         // Refuse rather than dereference. A missing hand-over is a wiring mistake, not a runtime
         // condition, so it must say so once and loudly instead of dying inside the callee.
-        static bool warned = false;
-        if (not warned)
+        // LOUD AND REPEATED, not once. Warned once, this silence is indistinguishable from a healthy
+        // agent that simply has not converged: the publish path just returns, so there is no RT edge,
+        // no pose trace, no ground-truth row and no scene-graph update — and the stability counter
+        // sits at 0/30 with every one of its own terms passing. That cost an hour on 2026-09-13.
+        static std::int64_t last_ms = 0;
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        if (now - last_ms > 2000)
         {
-            warned = true;
-            qCritical() << "[pose] no scene graph: set_scene_graph() was never called, so no pose can "
-                           "be published. This is a construction-order bug in SpecificWorker::initialize().";
+            last_ms = now;
+            qCritical() << "[pose] NO SCENE GRAPH — set_scene_graph() was never called, so NOTHING is "
+                           "being published: no RT edge, no trace, no room node, and stable_frames_ "
+                           "cannot move. Construction-order bug in SpecificWorker::initialize().";
         }
         return false;
     }
