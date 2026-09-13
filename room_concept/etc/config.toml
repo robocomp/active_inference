@@ -163,22 +163,6 @@ LayoutDir              = "../layouts"   # the SVGs left room_concept/: a floor p
 # origin belong to the BUILDING, not to the robot reading them.
 PreserveBootstrapRoom  = false  # static-room phase: adopt the pre-seeded room/table from the bootstrap graph; do NOT delete on start or overwrite robot->room. Set false to go dynamic (localize + create room).
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
-# ── THE POSE COVARIANCE'S PREDICTION STEP, ON EARLY-EXIT FRAMES ──────────────────────────────────
-# ON 2026-09-13. current_covariance is written ONLY on the optimised path, so with this off and the
-# early exit firing on ~100% of frames it is FROZEN: measured in Given mode, rows 2696..4610 — 1915
-# consecutive frames — all carried cov_tt = 0.00149 with p10 = median = p90 = max, while other
-# stretches of the same run sat at 0.000268. Everything downstream of it froze with it: the room node
-# could never be created (its gate is cov_tt < StableCovTtMax, a comparison against a constant), and
-# the UI confidence, which is -log10(det(cov))/12, sat pinned at 1.0.
-# ⚠ IT IS BOTH HALVES OR NEITHER, and that is why this is one flag. The GROWTH half (P += the motion
-# prior's covariance, the ordinary Kalman prediction step) lives in the early-exit path; the SHRINK
-# half lives inside the polish block. Left running with the polish off on 2026-08-26 the growth ran
-# alone and the TRACK WAS LOST — sdf_mse 0.026 -> 0.461, early exit down to 21%, cov_tt peaking at
-# 7.1 rad^2. A one-sided recursion is not a recursion.
-# ⚠ res.covariance is read by the speed governor and by every concept agent's precision, so they will
-# now see a pose that gets LESS certain while it runs open-loop and recovers at each correction —
-# which is what it should have been saying all along.
-SdfPolishOnEarlyExit   = true
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
 MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # Con 20 se perdían 20 frames de Adam obligatorio
@@ -1178,19 +1162,19 @@ WallMaxSlots         = 0        # wall factors on the newest N slots; 0 = every 
 [DSR]
 StableSdfMseMax = 0.076   # unified 2026-08-29; P3Bot ran the 0.06 default only because its file was silent
 StableCovTtMax  = 0.002   # was the 0.001 header default, whose note "already passes 100%" is stale.
-                          # ⚠ AND THE QUANTITY IT GATES IS FROZEN, WHICH IS THE REAL DEFECT. Measured
-                          # 2026-09-13, Given mode: at 100% early exit the published covariance is
-                          # never recomputed — it is republished unchanged from the last SOLVE. Row
-                          # 2695 solved and produced cov_tt = 0.001489; rows 2696..4610 (1915 frames)
-                          # all carry 0.00149, p10 = median = p90 = max, not one bit of variation.
-                          # Other stretches of the same file sit at 0.000268, well UNDER 0.001.
-                          # So whether the agent ever stabilises is decided by whatever covariance the
-                          # last solve happened to leave behind, and then frozen: land on 0.000268 and
-                          # it stabilises immediately and for ever; land on 0.00149 and it never can,
-                          # however well it localises. 0.002 makes today's frozen value pass
-                          # deterministically. It fits a constant to a symptom — the fix is for an
-                          # early-exit frame to publish a covariance that MEANS something (the
-                          # validation it just passed), not the last solved one unchanged.
+                          # ⚠ AND WHAT IT GATES GOES FLAT WHENEVER THE SOLVER DOES. current_covariance
+                          # is written ONLY on the optimised path (since 2026-08-26; the prediction
+                          # step on early-exit frames is gated off by SdfPolishOnEarlyExit, which
+                          # pairs growth with the polish's shrink and must not run one-sided). While
+                          # solves happen it varies normally — 2067 distinct values over 4610 rows —
+                          # but a frozen layout early-exits on ~100% of frames, and then it holds the
+                          # last solved value indefinitely: measured 2026-09-13, rows 2696..4610 all
+                          # carried 0.00149 after the last solve at row 2695, while other stretches of
+                          # the same run sat at 0.000268. The stability gate then compares against a
+                          # number that has stopped moving, so whether the agent ever reaches ROOM
+                          # STABLE is decided by whatever the last solve happened to leave behind.
+                          # 0.002 clears today's value. It fits a constant to a symptom: the real fix
+                          # is for an early-exit frame to say what it has actually established.
 # This apartment fits chronically at ~0.079 mean|SDF| on early-exit frames (5th–95th pct 0.075–0.083),
 # so the 0.06 header default was UNREACHABLE on the very (iters==0) frames the gate requires → the room
 # never uploaded (0/2213 frames stable, longest streak 0). Raised above the 95th pct with margin.
