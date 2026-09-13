@@ -87,14 +87,25 @@ was over-broad. Verified against `cortex/api/dsr_api.cpp` + `dsr_inner_eigen_api
   itself; the crash mode is a CALLER doing `.value()`/`->` on the nullopt
   (`bad_optional_access`). ALWAYS check the optional. Asking `zed<-room` when `room` is
   gone safely returns `nullopt`.
-- **The one real cliff: `InnerEigenAPI`'s ts==0 cache.** `get_transformation_matrix` with
-  `timestamp==0` sets `use_cache=true` and reads/writes an UNLOCKED `std::map` cache +
-  `node_map`; the invalidation slots (`remove_cache_entry`) erase the same maps. No mutex.
-  So the ts==0 path is safe ONLY single-threaded per instance. It's safe today because all
-  our ts==0 calls (static `robot->zed`/`robot->ricoh` extrinsics, latest-pose viewer read)
-  run on the main thread and the invalidation slots are `Qt::QueuedConnection` onto that
-  same thread. A real timestamp (`ts!=0`) → `use_cache=false` → touches NO cache → fully
-  thread-safe.
+- **`InnerEigenAPI`'s ts==0 cache: THE CLIFF IS GONE, THE OWNERSHIP RULE IS NOT.** ⚠ RE-VERIFIED
+  2026-09-13 against the installed `/usr/local/include/dsr/api/dsr_inner_eigen_api.h`, which now
+  carries `mutable std::mutex cache_mutex` guarding that cache. The paragraph this replaces said the
+  map was unlocked and that ts==0 was safe only single-threaded per instance; that was true when it
+  was written and is **no longer true**. The lock is taken in two short sections and deliberately
+  NEVER across the tree walk (holding it there would establish cache→graph ordering and deadlock
+  against graph→cache), so two threads can both miss and both compute the same transform: duplicated
+  work, no corruption.
+  **What remains is a rule about OWNERSHIP, not about which thread calls.** The invalidation slots
+  are `Qt::QueuedConnection` and fire on the thread that OWNS the instance, so share the instance the
+  MAIN thread owns. An instance created on a raw `std::thread` has no Qt event loop, its slots never
+  fire, and its cache serves stale transforms for ever — trading a crash for a silent correctness
+  bug, which is the worse of the two. (retina still creates per-thread instances to dodge the old
+  race; that workaround is now the hazard rather than the cure.)
+  A real timestamp (`ts!=0`) still bypasses the cache entirely.
+  ★ The lesson worth more than the fact: this file said "verified against cortex source 2026-07-11"
+  and was believed for two months after cortex changed underneath it. A note that cites its own
+  verification date is not the same as a note that is still true — re-read the header, it is installed
+  locally and takes ten seconds.
 
 **Rules for putting graph work on a worker thread** (e.g. a ZED/LiDAR YOLO worker):
 1. Reads/writes/`update_node` are fine off-thread.

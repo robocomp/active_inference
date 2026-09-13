@@ -33,10 +33,12 @@ namespace rc
         }
     }   // namespace
 
-    std::vector<DoorAperture> DoorApertures::read_from_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,
-                                                             const std::string& room_frame)
+    std::vector<DoorAperture> DoorApertures::refresh(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,
+                                                     const std::string& room_frame)
     {
         std::vector<DoorAperture> out;
+        std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> kept;
+
         // Doors are generic `object` nodes named door_* carrying object_subtype == "door"
         // (door_scene_graph.cpp). Every get_nodes_by_type("object") here MUST keep that filter, or a
         // fridge becomes a doorway.
@@ -46,37 +48,62 @@ namespace rc
             const auto sub = G.get_attrib_by_name<object_subtype_att>(n);
             if (not sub.has_value() or sub.value() != "door") continue;
 
-            const auto w = G.get_attrib_by_name<width_m_att>(n);
-            if (not w.has_value() or not std::isfinite(w.value()) or w.value() <= 0.f) continue;
+            // ── THE CHEAP HALF: the door's own belief, read every cycle ──────────────────────────
+            // Unmeasured publishes a sentinel outside [0,1], which means "no evidence" and weighs as
+            // closed. Clamping it instead of rejecting it would turn a sentinel into a confident claim.
+            const auto p = G.get_attrib_by_name<door_open_prob_att>(n);
+            const float p_open = (p.has_value() and std::isfinite(p.value())
+                                  and p.value() > 0.f and p.value() <= 1.f) ? p.value() : 0.f;
+            if (p_open <= 0.f)
+            {
+                // Shut, or never measured. Its segment stays in the cache if we already have one —
+                // the aperture does not move, so a door that shuts and reopens costs no second walk.
+                if (const auto it = cache_.find(n.id()); it != cache_.end()) kept.insert(*it);
+                continue;
+            }
 
-            // room <- door. ts == 0: main thread only, and it returns nullopt at any missing link in
-            // the chain rather than throwing — a door parented to a wall that has gone is simply not
-            // an aperture this cycle.
-            const auto T = inner.get_transformation_matrix(room_frame, n.name());
-            if (not T.has_value()) continue;
-            const Eigen::Matrix4d M = T.value().matrix();
-            if (not M.allFinite()) continue;
+            // ── THE EXPENSIVE HALF: walked ONCE per door, not once per cycle ─────────────────────
+            auto it = cache_.find(n.id());
+            if (it == cache_.end())
+            {
+                const auto w = G.get_attrib_by_name<width_m_att>(n);
+                if (not w.has_value() or not std::isfinite(w.value()) or w.value() <= 0.f) continue;
 
-            const Eigen::Vector2f c(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)));
-            // The door's own x axis is the wall tangent (phi == 0 yaw == wall tangent, door_geometry.h),
-            // so the aperture spans width_m along it, centred on the node.
-            const Eigen::Vector2f u(static_cast<float>(M(0, 0)), static_cast<float>(M(1, 0)));
-            if (u.norm() < 1e-6f) continue;
-            const Eigen::Vector2f dir = u.normalized() * (0.5f * w.value());
+                // room <- door, latest (ts == 0). Returns nullopt at any missing link in the chain
+                // rather than throwing, so a door whose wall has gone is simply not an aperture yet —
+                // check the optional, never dereference it (CLAUDE.md, and still true).
+                const auto T = inner.get_transformation_matrix(room_frame, n.name());
+                if (not T.has_value()) continue;
+                const Eigen::Matrix4d M = T.value().matrix();
+                if (not M.allFinite()) continue;
 
+                const Eigen::Vector2f c(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)));
+                // The door's own x axis is the wall tangent (phi == 0 yaw == wall tangent,
+                // door_geometry.h), so the aperture spans width_m along it, centred on the node.
+                const Eigen::Vector2f u(static_cast<float>(M(0, 0)), static_cast<float>(M(1, 0)));
+                if (u.norm() < 1e-6f) continue;
+                const Eigen::Vector2f dir = u.normalized() * (0.5f * w.value());
+                ++resolves_;
+                qInfo().noquote() << QString("[room][doors] aperture resolved for %1: (%2,%3)-(%4,%5), "
+                                             "width %6 m — walked once, reused from here")
+                                         .arg(QString::fromStdString(n.name()))
+                                         .arg((c - dir).x(), 0, 'f', 2).arg((c - dir).y(), 0, 'f', 2)
+                                         .arg((c + dir).x(), 0, 'f', 2).arg((c + dir).y(), 0, 'f', 2)
+                                         .arg(w.value(), 0, 'f', 2);
+                it = cache_.emplace(n.id(), std::make_pair(c - dir, c + dir)).first;
+            }
+
+            kept.insert(*it);
             DoorAperture ap;
-            ap.a = c - dir;
-            ap.b = c + dir;
+            ap.a = it->second.first;
+            ap.b = it->second.second;
+            ap.p_open = p_open;
             ap.id = n.id();
             ap.name = n.name();
-            // Unmeasured publishes a sentinel (a large negative), so anything outside [0,1] means
-            // "no evidence" and weighs as closed. Clamping instead of rejecting would turn a sentinel
-            // into a confident claim.
-            const auto p = G.get_attrib_by_name<door_open_prob_att>(n);
-            ap.p_open = (p.has_value() and std::isfinite(p.value()) and p.value() >= 0.f and p.value() <= 1.f)
-                            ? p.value() : 0.f;
             out.push_back(std::move(ap));
         }
+        // Doors that left the graph leave the cache with them; nothing here expires on a timer.
+        cache_.swap(kept);
         return out;
     }
 

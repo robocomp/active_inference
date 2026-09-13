@@ -26,15 +26,24 @@
 //   invariant that lets the RT edge key on it — and its yaw is the wall tangent. So the opening is
 //   the segment  centre +- (width_m / 2) * (cos yaw, sin yaw).
 //
-// ⚠ READ ON THE MAIN THREAD ONLY. read_from_graph() resolves the room<-door chain through
-//   InnerEigenAPI with timestamp 0, whose cache is unlocked and single-threaded per instance
-//   (CLAUDE.md). The result is a small immutable snapshot handed to the localiser thread, exactly as
-//   the object anchors are.
+// ⚠ THREADING, CHECKED AGAINST THE INSTALLED CORTEX HEADER ON 2026-09-13 — NOT against this repo's
+//   CLAUDE.md, which still describes the older contract and is now wrong on this point.
+//   dsr_inner_eigen_api.h carries `mutable std::mutex cache_mutex` guarding the ts == 0 transform
+//   cache, so that path is no longer a corruption hazard and a SINGLE instance may be called from
+//   several threads. The lock is held in two short sections and never across the tree walk, so two
+//   threads can both miss and both compute the same transform: duplicated work, no corruption.
+//   The rule that remains is about OWNERSHIP, not about which thread calls: the invalidation slots
+//   are Qt::QueuedConnection and fire on the thread that owns the instance, so use the one owned by
+//   the main thread. An instance created on a raw std::thread has no event loop, never receives an
+//   invalidation, and serves stale transforms for ever — which trades a crash for a silent
+//   correctness bug, the worse of the two.
 
 #include <Eigen/Dense>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace DSR { class DSRGraph; class InnerEigenAPI; }
@@ -51,18 +60,46 @@ namespace rc
         std::string     name;
     };
 
+    /// ── THE TRANSFORM IS RARE; THE ATTRIBUTE READ IS NOT ────────────────────────────────────────
+    /// Two facts decide the shape of this class, and together they make the expensive half almost
+    /// never run:
+    ///   · door_open_prob and width_m are ordinary attribute reads — serialised by DSRGraph's own
+    ///     shared_mutex, safe from any thread, no cache involved.
+    ///   · the APERTURE DOES NOT MOVE WHEN THE LEAF SWINGS (door_concept's invariant). A door's
+    ///     segment is therefore constant for as long as its wall is, so it is resolved ONCE, the
+    ///     first time that door is open, and reused from then on.
+    /// So the per-cycle cost of a room whose doors are shut is a handful of attribute reads and
+    /// nothing else: no transform walk, no cache touched, nothing to hand across a thread boundary.
+    /// The chain is only walked when a door's own belief says it is open and we have no segment for
+    /// it yet — which happens once per door per run, not once per cycle.
     class DoorApertures
     {
     public:
-        /// MAIN THREAD ONLY (ts == 0 inner_eigen). Returns every door of the current room as an
-        /// aperture segment; an empty result simply means no door is known, and every weight is 1.
-        static std::vector<DoorAperture> read_from_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,
-                                                         const std::string& room_frame);
+        /// Refresh from the graph. Safe from any thread PROVIDED `inner` is the instance owned by the
+        /// main thread (see the threading note above); it is called from compute() here because that
+        /// is where that instance lives, not because the call site must be there.
+        /// Returns the apertures currently worth discounting (p_open > 0). All doors shut ⇒ empty,
+        /// and empty costs the scan nothing at all.
+        std::vector<DoorAperture> refresh(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,
+                                          const std::string& room_frame);
+
+        /// How many chain walks have actually been performed since construction. Expected to settle
+        /// at "one per door that has ever been open" — if it climbs with time, the cache is not
+        /// holding and that is a bug worth seeing rather than a cost worth paying.
+        long resolves() const { return resolves_; }
 
         /// The weight this scan point keeps, given where the beam came from. Room frame, both.
         /// 1 when no aperture lies between them; the product of (1 - p_open) over those that do, so
         /// two open doors in line discount once each rather than cancelling.
         static float weight(const std::vector<DoorAperture>& apertures,
                             const Eigen::Vector2f& beam_origin, const Eigen::Vector2f& hit);
+
+    private:
+        /// Door node id -> its aperture segment in the room frame, resolved once. Nothing here
+        /// expires on a timer: a segment is dropped when its door leaves the graph, and re-resolved
+        /// if the door's wall is re-parented (which changes the node's RT edge, not this cache — see
+        /// refresh() for the one case that forces a re-walk).
+        std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> cache_;
+        long resolves_ = 0;
     };
 }   // namespace rc
