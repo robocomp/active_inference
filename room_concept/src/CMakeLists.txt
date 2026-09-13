@@ -78,6 +78,7 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_slots.cpp
+  ../src/specificworker_startup.cpp
   ../src/mount_calibrator.cpp
   ../src/pose_publisher.cpp
   ../src/calib_channels.cpp

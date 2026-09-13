@@ -162,7 +162,6 @@ class SpecificWorker : public GenericWorker
         // ── Compute-loop pacing / timing telemetry (worker-owned) ──────────────
         std::atomic<bool> operating_compute_queued_{false};
         std::int64_t      last_affordance_monitor_ms_ = 0;
-        std::int64_t      last_dsr_publish_try_ms_    = 0;
         std::int64_t      last_compute_timing_log_ms_ = 0;
         std::string pose_file_path() const;
 
@@ -217,35 +216,25 @@ class SpecificWorker : public GenericWorker
         // ── DSR scene-graph writer (robot-pose RT, room/wall/affordance nodes) ──
         std::unique_ptr<DSR::RT_API>            rt_api_;          // worker-owned, injected
         std::unique_ptr<rc::RoomSceneGraph> scene_graph_;
-        std::int64_t last_dsr_published_ts_ms_ = 0;
 
         // Kinematic clamp state (see the clamp block in maybe_publish_corrected_pose). The clamp is
         // relative to what was actually PUBLISHED last, not to the optimizer's previous output, because
         // the invariant it enforces is about the stream consumers see.
-        std::optional<Eigen::Affine2f> last_published_pose_;
-        std::int64_t                   last_published_ts_ms_ = 0;
-        long                           pose_clamp_hits_      = 0;
         // The localiser's PRE-CLAMP estimate for the last published frame (room frame, x/y/theta).
         // The predictor builds each prediction on the previous CORRECTED estimate, so
         // pred[k] - est[k-1] is exactly the sensor increment for this interval -- the motion the
         // clamp must let through untouched. Differencing two consecutive PREDICTIONS instead looks
         // equivalent but is not: it evaluates to increment + innovation[k-1], which would smuggle
         // the previous frame's correction through unbounded. See the clamp block.
-        std::optional<Eigen::Vector3f> last_published_est_;
 
         // Shared between maybe_publish_corrected_pose() (localizer thread) and publish_predicted_tick()
         // (imu-ingest thread): both read/write last_published_pose_/_ts_ms_/_est_ above and both call
         // into scene_graph_, so both must hold this for their whole critical section.
-        std::mutex publish_mutex_;
         // The corrected twist from the last REAL publish (see the FIX note on maybe_publish_corrected_
         // pose in specificworker.cpp), cached here so publish_predicted_tick() has something to
         // extrapolate with between lidar cycles without recomputing it.
-        float last_pub_adv_  = 0.f;
-        float last_pub_side_ = 0.f;
-        float last_pub_rot_  = 0.f;
         // Covariance from the last REAL publish, reused as-is for predicted ticks (not grown with
         // dt yet -- a known simplification; see the FIX note in publish_predicted_tick()).
-        Eigen::Matrix3f last_published_cov_ = Eigen::Matrix3f::Identity();
 
 
         // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (~20 Hz, localizer thread, via
@@ -255,8 +244,6 @@ class SpecificWorker : public GenericWorker
         // predict-publish injects). Both writers now run on DIFFERENT threads, serialized by
         // publish_mutex_ (NOT thread-affinity -- that assumption held only until the predicted writer
         // existed). type: 0=corrected, 1=predicted.
-        std::ofstream pose_trace_;
-        bool          pose_trace_open_attempted_ = false;
         void log_pose_trace(int type, std::int64_t valid_ts_ms,
                             const Eigen::Affine2f& pose, float innov_norm);
 
@@ -276,17 +263,6 @@ class SpecificWorker : public GenericWorker
         // ★Compared only against the previous point of the SAME type: a corrected pose following a
         // predicted one is entitled to step, and that is a correction, not a discontinuity.
         // Runs on both writer threads, serialized by publish_mutex_ exactly as pose_trace_ is.
-        struct TracePoint
-        {
-            std::int64_t wall_ms = 0, valid_ts_ms = 0;
-            float x = 0.f, y = 0.f, th = 0.f, innov = 0.f;
-            bool  set = false;
-        };
-        std::ofstream pose_jump_log_;
-        bool          pose_jump_log_attempted_ = false;
-        bool          pose_jump_no_capability_warned_ = false;
-        std::int64_t  pose_jump_run_id_ = 0;          // distinguishes runs inside one appended file
-        TracePoint    prev_trace_[2];                 // indexed by type: 0 corrected, 1 predicted
 
         // Per-tick compute-timing CSV (etc/compute_timing.csv): exposes WHERE compute() stalls (viewer
         // vs dsr vs loc_fetch) so we can see why the corrected publish drops below the optimizer rate.
@@ -357,6 +333,9 @@ class SpecificWorker : public GenericWorker
     std::unique_ptr<rc::CalibChannels> calib_;
     /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
     std::unique_ptr<rc::GroundTruthLog> gt_log_;
+    // ⚠ NOTHING of a collaborator's state may be kept here after it moves. A copy left behind is
+    // written by the worker and read by nobody, which is exactly how the commanded twist silently
+    // became zero mid-refactor: it compiles, and the regression only shows at run time.
     /// Raw view of viewer_, kept in step with it, so collaborators constructed BEFORE the viewer can
     /// still reach it later without owning it or being rebuilt when it appears.
     rc::RoomViewer* viewer_raw_slot_ = nullptr;
@@ -374,8 +353,6 @@ class SpecificWorker : public GenericWorker
         // that is not there is silently the config fallback for the life of the process.
 
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
-        std::atomic<int> rt_corr_count_        {0};   // corrected RT publishes this window -- atomic 2026-09-03: written from the localiser thread now, read/reset from compute() on the main thread
-        std::int64_t rt_rate_window_start_ms_ = 0;
         void update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thread);
 
         std::atomic<bool> shutting_down_{false};
