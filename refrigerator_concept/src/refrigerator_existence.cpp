@@ -4,6 +4,9 @@
 
 #include "refrigerator_existence.h"
 
+#include "../../common/contour_edge/contour_edge_check.h"    // rc::edges — the classifier-free RGB check
+#include "../../common/contour_edge/contour_depth_check.h"   // rc::edges — its metric half
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -232,6 +235,88 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Concep
                 const float vss = cfg_.verify_surprise_smooth;
                 inst.verify_surprise = (1.0f - vss) * inst.verify_surprise + vss * verify;
                 inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;
+            }
+        }
+
+        // ── CONTOUR channel (classifier-free) — RGB/DEPTH clock ─────────────────────────────────────────
+        // ★THIS IS THE ONLY CHANNEL THAT STILL CARRIES INFORMATION WHEN THE DETECTOR GOES BLIND, which is
+        // the failure that deletes objects that are plainly there. Every other channel above ends at a
+        // classifier: the silhouette channel asks whether YOLO painted "refrigerator" on these pixels, and
+        // when the robot closes in and the network's label collapses, "no mask here" is charged as ABSENCE
+        // of the fridge rather than absence of the label. Measured on door_concept 2026-09-09, P(door) over
+        // a plainly visible door fell 0.995 → 0.138 → 0.048 on approach while the network called it `wall`
+        // at 0.676 — confident absence at exactly the range where the object filled the frame.
+        //
+        // Two questions, no network in either:
+        //   RGB   — is there an intensity boundary along the projected face, more than there is along the
+        //           same face slid sideways along the wall? A relative statistic, because gradient has no
+        //           absolute scale, so it NEEDS the null and stays silent without one.
+        //   DEPTH — is there a surface at the distance the belief predicts, with space behind its edge?
+        //           An absolute statistic, because metres are metres. It needs no null, and it is the half
+        //           that can say "we are looking straight through where the fridge is supposed to be".
+        // Both are bounded and dimensionless, so they SUM, and the sum passes through one tanh — which is
+        // the common-mode treatment they need, being two consequences of the same fact.
+        if (cfg_.contour_check_enabled and frames_fresh_
+            and ((rgb_frame_ != nullptr and not rgb_frame_->empty())
+                 or (depth_frame_ != nullptr and not depth_frame_->empty())))
+        {
+            const int fc = (rgb_frame_ != nullptr and not rgb_frame_->empty()) ? rgb_frame_->cols
+                         : (depth_frame_ != nullptr ? depth_frame_->cols : 0);
+            const int fr = (rgb_frame_ != nullptr and not rgb_frame_->empty()) ? rgb_frame_->rows
+                         : (depth_frame_ != nullptr ? depth_frame_->rows : 0);
+            const auto cs = fitter.compute_contour_set(inst, frame_stamp_ms_, fc, fr);
+            float verdict = 0.0f;
+            int   n_used  = 0;
+
+            if (cs.face.valid() and rgb_frame_ != nullptr and not rgb_frame_->empty())
+            {
+                std::vector<std::vector<cv::Point>> ctl;
+                ctl.reserve(cs.controls.size());
+                for (const auto& c : cs.controls)
+                    ctl.push_back(c.px);
+                const auto es = rc::edges::contour_edge_support(*rgb_frame_, cs.face.px, ctl);
+                // ★THE GATE IS HERE, NOT INSIDE contour_evidence, because it is THIS channel's own
+                // precondition: with no surviving control the RGB statistic has no scale and means
+                // nothing. `excess` and not `support` — the ratio form discards magnitude, and a
+                // near-blank region then produces a confident-looking refutation out of no measurement
+                // at all (it deleted a live door that way on 2026-09-09).
+                if (es.n_samples > 0 and es.n_controls > 0)
+                {
+                    verdict += es.excess;
+                    n_used   = std::max(n_used, es.n_samples);
+                    inst.dbg_ex_edge_excess = es.excess;
+                    inst.dbg_ex_edge_n      = es.n_samples;
+                }
+            }
+            if (cs.face.valid() and depth_frame_ != nullptr and not depth_frame_->empty())
+            {
+                rc::edges::ContourDepthParams dp;
+                // σ_d from the belief's OWN position uncertainty, not a constant: a fridge whose centre is
+                // poorly known must not be judged against its predicted depth as if it were pinned. The
+                // relative term is the stereo camera's, whose error grows with range.
+                const auto& P = inst.ai2_belief.covariance();
+                dp.sigma_depth_m = std::sqrt(std::max(1e-4f, static_cast<float>(P(0, 0) + P(1, 1))));
+                dp.depth_scale_x = (fc > 0) ? static_cast<float>(depth_frame_->cols) / fc : 1.0f;
+                dp.depth_scale_y = (fr > 0) ? static_cast<float>(depth_frame_->rows) / fr : 1.0f;
+                const auto ds = rc::edges::contour_depth_support(*depth_frame_, cs.face, cs.controls, dp);
+                if (ds.n_samples > 0)
+                {
+                    verdict += ds.verdict;
+                    n_used   = std::max(n_used, ds.n_samples);
+                    inst.dbg_ex_depth_verdict = ds.verdict;
+                    inst.dbg_ex_depth_bias_m  = ds.mean_bias_m;
+                    inst.dbg_ex_depth_n       = ds.n_samples;
+                }
+            }
+
+            // n_used == 0 ⇒ nothing was measured ⇒ contour_evidence HOLDs. Not measured and refuted must
+            // not look alike to the belief, which is the mistake that deleted a door in plain view.
+            const rc::exist::Evidence ev_c = rc::exist::contour_evidence(verdict, n_used, sm);
+            inst.dbg_ex_contour_dL = ev_c.log_odds_delta;
+            if (ev_c.n_reached > 0)
+            {
+                inst.existence.integrate(ev_c, 1.0f);
+                integrated = true;
             }
         }
 

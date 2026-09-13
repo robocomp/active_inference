@@ -143,6 +143,7 @@ void SpecificWorker::request_shutdown()
     // raw pointer). Mirrors bottle_concept.
     lidar_ingestor_.reset();
     rgb_ingestor_.reset();
+    depth_ingestor_.reset();
 
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
     // destruct later with the rest of the object can fault inside DSR. Mirrors bottle_concept.
@@ -280,7 +281,12 @@ void SpecificWorker::initialize()
     // ZED RGB media-plane consumer for appearance-based FRONT (door) detection. Dormant (no DDS participant)
     // unless RefrigeratorConcept.FrontDetectEnabled. Subscriber comes up lazily on the compute/main thread once
     // the "zed" node + media descriptor exist (media-plane consumer pattern).
-    rgb_ingestor_ = std::make_unique<rc::RefrigeratorRgbIngestor>(G, cfg_);
+    camera_planes_wanted_ = cfg_.front_detect_enabled or cfg_.contour_check_enabled;
+    rgb_ingestor_   = std::make_unique<rc::RgbIngestor>(G, &camera_planes_wanted_, "zed");
+    // The DEPTH plane, for the metric half of the classifier-free contour channel: "is there a surface at
+    // the distance I predict, with space behind its edge?" — the question that separates a fridge from a
+    // fridge-shaped region of a wall, which no amount of RGB gradient can.
+    depth_ingestor_ = std::make_unique<rc::DepthIngestor>(G, &camera_planes_wanted_, "zed");
 
     // rc::EpistemicPlanner owns the BELIEF half of the NBV (Σ, ΔI, the adequacy gap); the SENSOR half — where
     // the detector can actually fire — comes from the camera model it is handed each cycle in step_epistemic().
@@ -426,6 +432,8 @@ void SpecificWorker::compute()
         if (rgb_ingestor_->fresh())
             fitter_->set_rgb_frame(rgb_ingestor_->frame(), rgb_ingestor_->stamp_ms());
     }
+    if (depth_ingestor_)
+        depth_ingestor_->pump();
 
     // Robot/camera ego-motion (transform chain) → the "be-still-to-update" confirm-only gate. Once per cycle,
     // BEFORE the instance loop so every run_inference this cycle reads the current robot speed (matches chair).
@@ -449,6 +457,20 @@ void SpecificWorker::compute()
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
     if (cfg_.existence_removal_enabled)
+    {
+        // The camera planes for the classifier-free contour channel. Borrowed for the duration of the call
+        // and read on THIS thread only — a cv::Mat copy is a refcounted shallow handle, so one crossing a
+        // thread boundary would have to be deep-copied (CLAUDE.md). `fresh` is the RGB clock: the contour is
+        // scored against those pixels and pinned to their stamp, so re-scoring a frame already scored would
+        // charge the same observation twice.
+        const bool cam_fresh = (rgb_ingestor_ and rgb_ingestor_->fresh())
+                            or (depth_ingestor_ and depth_ingestor_->fresh());
+        const cv::Mat* rgb_f   = rgb_ingestor_   ? &rgb_ingestor_->frame()   : nullptr;
+        const cv::Mat* depth_f = depth_ingestor_ ? &depth_ingestor_->frame() : nullptr;
+        const std::uint64_t cam_stamp = (rgb_ingestor_ and rgb_ingestor_->stamp_ms() > 0)
+                                      ? rgb_ingestor_->stamp_ms()
+                                      : (depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0);
+        existence_->set_camera_frames(rgb_f, depth_f, cam_stamp, cam_fresh);
         existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_,
             [this](std::uint64_t id, const rc::RefrigeratorInstance& inst)
             {   // shadow-mode death record (§4.2) — p_detect here says whether this was a CONFIDENT
@@ -457,6 +479,7 @@ void SpecificWorker::compute()
                                   inst.model.state().cx, inst.model.state().cy, &inst,
                                   std::format("L {:.2f}", inst.existence.logodds()));
             });
+    }
 
     // "Is this really a fridge?" soft SINGLETON + plausibility→existence decay → retire mis-detections. The
     // worker sees ALL instances, so mutual inhibition + the removal decision live here (not in the fitter). It

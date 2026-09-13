@@ -50,7 +50,8 @@
 #include "refrigerator_instance.h"    // rc::RefrigeratorInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                          // rc::ConceptLidarIngestor (YOLO-independent LiDAR)
-#include "refrigerator_rgb_ingestor.h"                            // rc::RefrigeratorRgbIngestor (ZED RGB for door detection)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"                 // rc::RgbIngestor  — the SHARED ZED RGB consumer
+#include "../../common/rgb_ingestor/depth_ingestor.h"               // rc::DepthIngestor — its metric sibling
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/birth_fragment/birth_fragment.h"       // rc::BirthFragment — the probation burst
 #include "refrigerator_scene_graph.h" // rc::RefrigeratorSceneGraph (DSR node/RT I/O)
@@ -281,7 +282,14 @@ private:
     // cycle — one graph walk feeding both the birth filter and the existence occupancy discount, so the two
     // can never disagree about who is where.
     std::vector<rc::exclusion::Claim> foreign_claims_;
-    std::unique_ptr<rc::RefrigeratorRgbIngestor>              rgb_ingestor_;     // ZED RGB media plane for door detection
+    // ★MIGRATED to the shared ingestor. This agent carried a private copy that was byte-identical to
+    // common/rgb_ingestor once the object noun was substituted — which is how a media-plane fix lands in
+    // two places out of three. The shared header had already named this agent as one to point here.
+    std::unique_ptr<rc::RgbIngestor>                          rgb_ingestor_;     // ZED RGB media plane
+    std::unique_ptr<rc::DepthIngestor>                        depth_ingestor_;   // ZED depth (CV_32F m, NaN = no return)
+    // One flag for both planes: either consumer is reason enough to bring the camera up. Its ADDRESS is
+    // handed to the ingestors, so it must outlive them — a member, never a temporary.
+    bool                                                      camera_planes_wanted_ = false;
     std::unique_ptr<rc::RefrigeratorSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 

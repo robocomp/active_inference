@@ -365,6 +365,18 @@ FridgeFilterLog = false     # log per-instance plausibility / plaus_evidence / e
 # even when the robot is too close for YOLO (uses the belief's own box, not the mask). NEEDS LIVE TUNING: the edge
 # metric is lighting/texture dependent — FrontMinConfidence gates how decisive a face margin must be to count.
 FrontDetectEnabled = true   # master switch: subscribe to ZED RGB media plane + run detect_front/resolve_front
+
+# ─── Classifier-free EXISTENCE channel (common/contour_edge) ───────────────────────────────────────────
+# The channel that still carries information when the DETECTOR goes blind — which is the failure that
+# removes fridges that are plainly there. Every other existence channel here ends at YOLO, so when the
+# robot closes in and the label collapses, "no mask on these pixels" is charged as absence of the FRIDGE
+# rather than absence of the LABEL. (Measured on door_concept 2026-09-09: P(door) 0.995 → 0.138 → 0.048 on
+# approach while the network called it `wall` at 0.676.)
+# Two questions, no network in either — RGB: is there a boundary along the projected face, more than along
+# the same face slid sideways along the wall? DEPTH: is there a surface at the predicted distance, with
+# space behind its edge? The second is what separates a fridge from a fridge-shaped region of a wall.
+# Brings up the ZED RGB + DEPTH media planes; logged per cycle as ct_* in ai2_log.csv.
+ContourCheckEnabled = true
 FrontMinFaceAreaPx = 900.0  # min projected face area (px²) to score for door-ness (rejects tiny grazing slivers)
 FrontMinConfidence = 0.10   # min door-ness margin (max−second)/(max+eps) for a cue to be emitted (else nullopt)
 FrontLog = true             # log each adopted door-mode flip / accepted appearance cue. ON for the door-cue

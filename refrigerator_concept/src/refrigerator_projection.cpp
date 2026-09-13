@@ -414,6 +414,65 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
     return out;
 }
 
+// ─── The classifier-free CONTOUR channel's geometry ───────────────────────────────────────────────
+
+// The believed box's most visible vertical face + the null it is scored against. See the header.
+rc::edges::ContourSet RefrigeratorProjection::compute_contour_set(const RefrigeratorInstance& inst,
+                                                                  std::uint64_t stamp_ms,
+                                                                  int frame_cols, int frame_rows)
+{
+    rc::edges::ContourSet out;
+    if (not inner_eigen_)
+        return out;
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return out;
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return out;
+    }
+    // Pinned to the FRAME's capture stamp — the contour is compared against those pixels. (ts = 0 would
+    // ask for the current pose, which is a different instant and reads as a belief error.)
+    const auto Mopt = room_T_zed_matrix(stamp_ms);
+    if (not Mopt.has_value())
+        return out;
+    const Eigen::Matrix4d room_T_zed = Mopt.value();
+    const Eigen::Matrix4d zed_T_room = room_T_zed.inverse();
+    const Eigen::Vector3d cam_pos_room = room_T_zed.block<3, 1>(0, 3);
+
+    const float W = static_cast<float>(camera_api_->get_width());
+    const float H = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or H <= 0.f)
+        return out;
+    // The projected pixel coords are in the CameraAPI's INTRINSIC frame. If the delivered image is a
+    // different size the two disagree silently — the contour lands somewhere plausible but wrong, and the
+    // channel reads it as the object having moved. detect_front already carries this scale; so must this.
+    const float sx = (frame_cols > 0) ? static_cast<float>(frame_cols) / W : 1.0f;
+    const float sy = (frame_rows > 0) ? static_cast<float>(frame_rows) / H : 1.0f;
+
+    const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
+    {
+        const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
+        if (Pc.y() <= 0.20) return std::nullopt;                       // behind / at the image plane
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+        if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
+        rc::edges::ProjectedVertex v;
+        v.px = cv::Point2f(static_cast<float>(uv.x()) * sx, static_cast<float>(uv.y()) * sy);
+        // The ZED depth plane stores the camera-frame FORWARD coordinate, not the Euclidean norm
+        // (retina deprojects with `py = depth`). A norm here would read high off-axis and look exactly
+        // like a fridge believed slightly too far away.
+        v.depth_m = static_cast<float>(Pc.y());
+        return v;
+    };
+
+    const auto& s = inst.ai2_belief.state();
+    rc::edges::BoxFootprint box;
+    box.cx = s.cx; box.cy = s.cy; box.yaw = s.yaw;
+    box.w  = s.w;  box.d  = s.h;                 // ★`h` here is the footprint DEPTH; the HEIGHT is `H`
+    box.z_min = 0.0f; box.z_max = s.H;                 // ai2_belief state names the height H
+    return rc::edges::project_box_face(box, cam_pos_room, project);
+}
+
 // ─── Appearance-based FRONT (door) detection ──────────────────────────────────────────────────────
 
 // Project the FITTED box's 4 vertical side faces into the live ZED RGB, warp each visible face to an upright

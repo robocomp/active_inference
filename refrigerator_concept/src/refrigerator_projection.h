@@ -26,6 +26,8 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_camera_api.h>
 
+#include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet — shared silhouette + its null
+
 #include "refrigerator_instance.h"      // rc::RefrigeratorInstance, RefrigeratorState, rc::FrontCue
 #include "../../common/mask_ingestor/mask_ingestor.h"
 
@@ -115,6 +117,28 @@ public:
     // or nullopt if <2 faces qualify / the RGB is empty / the extrinsic is unavailable / confidence < the gate.
     // stamp_ms pins the room→body extrinsic hop to the frame's capture time. Uses OpenCV (projection unit only).
     std::optional<FrontCue> detect_front(const RefrigeratorState& s, const cv::Mat& rgb, std::uint64_t stamp_ms);
+
+    // ── The CLASSIFIER-FREE contour channel's geometry ───────────────────────────────────────────────
+    // The believed box's most visible vertical face, projected into the ZED, plus the null it is scored
+    // against: the same face slid ±1/±1.6 of its own width along the SUPPORT PLANE in 3-D and
+    // reprojected. Construction is shared (common/contour_edge/contour_edge_project.h) — the trap it
+    // encodes (a control displaced in IMAGE pixels stops being a like-for-like comparison as soon as the
+    // object leaves the surface its neighbours are made of) cost door_concept a live door, and is not
+    // door-specific.
+    //
+    // ★PINNED TO THE FRAME'S CAPTURE STAMP, like detect_front and unlike compute_silhouette_existence.
+    // The contour is compared against THOSE pixels, so it must be where the object was when they were
+    // taken; at 1 m/s a 100 ms lag is 10 cm, which at close range is tens of pixels of pure bias — and
+    // the channel would read it as the belief being wrong rather than as the clock being wrong.
+    //
+    // Returns an empty face when the camera/transform are unavailable or a corner falls behind the
+    // camera: NOT MEASURED, which a caller must never read as a refutation.
+    // `frame_cols/rows`: the size of the image the contour will be scored against. Passed rather than
+    // remembered, because the CameraAPI's intrinsic size and the delivered frame's need not agree, and a
+    // silent mismatch puts the contour somewhere plausible but wrong — which the channel would read as
+    // the object having moved rather than as a scaling bug.
+    rc::edges::ContourSet compute_contour_set(const RefrigeratorInstance& inst, std::uint64_t stamp_ms,
+                                              int frame_cols, int frame_rows);
 
     // Config knobs for detect_front: minimum projected face area (px²) to score, and the minimum door-ness
     // margin (confidence) below which the cue is suppressed (returned as nullopt). Set once from config.

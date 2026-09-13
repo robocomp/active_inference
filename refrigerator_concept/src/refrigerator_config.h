@@ -285,6 +285,10 @@ struct RefrigeratorConfig
     // winning face's bearing into the belief's sequential-Bayes door-mode resolver (RefrigeratorBelief::resolve_front).
     // Because it uses the belief's own box (not YOLO's mask) it keeps working when the robot is too close for YOLO.
     bool  front_detect_enabled   = true;    // master switch: subscribe to ZED RGB + run detect_front/resolve_front
+    // The classifier-free existence channel: score the believed silhouette against the RGB's own gradient
+    // and against the DEPTH plane's agreement with the predicted range. Independent of front_detect —
+    // either one alone is reason enough to bring the camera planes up.
+    bool  contour_check_enabled  = true;
     float front_min_face_area_px = 900.0f;  // min projected face area (px²) to score for door-ness
     float front_min_confidence   = 0.10f;   // min door-ness margin (max−second)/(max+eps) for detect_front to emit
     bool  front_log              = false;    // log each adopted door-mode flip / accepted cue

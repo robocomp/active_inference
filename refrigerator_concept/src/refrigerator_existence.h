@@ -22,6 +22,8 @@
 #include <vector>
 #include <memory>
 
+#include <opencv2/core.hpp>
+
 #include <dsr/api/dsr_api.h>
 
 #include "refrigerator_config.h"      // rc::RefrigeratorConfig
@@ -39,6 +41,17 @@ public:
     // The detector's operating envelope (min/max projected fill). Set once from config; shared with the
     // epistemic planner so the viewpoint we ASK for and the absence we BELIEVE use the same model.
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+    // ── The classifier-free CONTOUR channel's inputs ────────────────────────────────────────────────
+    // The ZED frames for THIS cycle, set by the worker before update_and_remove. Both optional: with no
+    // RGB the gradient half stays silent, with no depth the metric half does, and with neither the whole
+    // channel abstains — which is not the same as it refuting, and the code below keeps them distinct.
+    //
+    // ⚠BORROWED, NOT OWNED, and only for the duration of the call. The ingestors outlive it and this all
+    // runs on the main thread; a cv::Mat handed across a thread boundary would have to be DEEP-COPIED
+    // (a cv::Mat copy is a refcounted shallow handle — see CLAUDE.md). Nothing here writes to them.
+    void set_camera_frames(const cv::Mat* rgb, const cv::Mat* depth, std::uint64_t stamp_ms, bool fresh)
+    { rgb_frame_ = rgb; depth_frame_ = depth; frame_stamp_ms_ = stamp_ms; frames_fresh_ = fresh; }
 
     // The other concepts' standing claims on room space, refreshed by the caller once per cycle (one graph
     // walk shared with the birth path). SHARED policy: a junior instance's occupancy is discounted by how
@@ -61,6 +74,11 @@ public:
 private:
     rc::detect::DetectorEnvelope det_env_{};
     const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
+
+    const cv::Mat* rgb_frame_       = nullptr;   // borrowed, this cycle only — see set_camera_frames
+    const cv::Mat* depth_frame_     = nullptr;   // CV_32F metres, NaN = no return
+    std::uint64_t  frame_stamp_ms_  = 0;
+    bool           frames_fresh_    = false;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     const RefrigeratorConfig&             cfg_;

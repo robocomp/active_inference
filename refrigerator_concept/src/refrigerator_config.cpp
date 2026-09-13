@@ -206,6 +206,7 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
 
     // ─── Appearance-based FRONT (door) detection + yaw resolver ────────────────
     out.front_detect_enabled   = getb("RefrigeratorConcept.FrontDetectEnabled",   true);
+    out.contour_check_enabled  = getb("RefrigeratorConcept.ContourCheckEnabled", true);
     out.front_min_face_area_px = getf("RefrigeratorConcept.FrontMinFaceAreaPx",    900.0f);
     out.front_min_confidence   = getf("RefrigeratorConcept.FrontMinConfidence",    0.10f);
     out.front_log              = getb("RefrigeratorConcept.FrontLog",              false);

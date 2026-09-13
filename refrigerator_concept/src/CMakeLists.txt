@@ -24,7 +24,11 @@ LIST(APPEND SOURCES
   ../src/refrigerator_existence.cpp
   ../src/refrigerator_fitter.cpp
   ../src/refrigerator_projection.cpp
-  ../src/refrigerator_rgb_ingestor.cpp
+  ../../common/rgb_ingestor/rgb_ingestor.cpp
+  ../../common/rgb_ingestor/depth_ingestor.cpp
+  ../../common/contour_edge/contour_edge_check.cpp
+  ../../common/contour_edge/contour_edge_project.cpp
+  ../../common/contour_edge/contour_depth_check.cpp
   ../src/refrigerator_lidar_range_channel.cpp
   ../src/refrigerator_model.cpp
   ../src/refrigerator_belief.cpp
@@ -38,8 +42,9 @@ LIST(APPEND SOURCES
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 
 # OpenCV — appearance-based FRONT (door) detection (RefrigeratorProjection::detect_front + the ZED RGB ingestor).
-# Confined to refrigerator_projection.cpp / refrigerator_rgb_ingestor.cpp; the pure-Eigen belief stays OpenCV-free.
-# Nothing under common/ includes <opencv2/...>, so this stays component-local.
+# Confined to refrigerator_projection.cpp, the shared rgb/depth ingestors and common/contour_edge; the
+# pure-Eigen belief stays OpenCV-free. ⚠common/contour_edge DOES include <opencv2/...>, which breaks the old
+# "nothing under common/ includes OpenCV" invariant — any component linking it must pull OpenCV in, as here.
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})

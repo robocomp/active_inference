@@ -167,7 +167,7 @@ public:
     void clear_lidar_sweep() { lidar_channel_.clear(); }
 
     // ZED RGB frame for appearance-based FRONT (door) detection. The worker pushes the newest decoded BGR frame
-    // (RefrigeratorRgbIngestor) each cycle a NEW one arrived; run_inference then projects the fitted box into it
+    // (rc::RgbIngestor, shared) each cycle a NEW one arrived; run_inference then projects the fitted box into it
     // (RefrigeratorProjection::detect_front) and folds the door-ness cue into the belief (resolve_front). Cleared
     // at cycle start so a stalled stream never re-integrates a stale appearance. Deep-copied (thread-boundary-safe).
     void set_rgb_frame(const cv::Mat& bgr, std::uint64_t stamp_ms)
@@ -178,6 +178,11 @@ public:
     // RefrigeratorProjection; see rc::SilhouetteExistence in refrigerator_projection.h. Called from update_existence.
     SilhouetteExistence compute_silhouette_existence(const RefrigeratorInstance& inst)
     { return projection_->compute_silhouette_existence(inst); }
+
+    // The classifier-free contour channel's geometry (shared construction; see refrigerator_projection.h).
+    rc::edges::ContourSet compute_contour_set(const RefrigeratorInstance& inst, std::uint64_t stamp_ms,
+                                              int frame_cols, int frame_rows)
+    { return projection_->compute_contour_set(inst, stamp_ms, frame_cols, frame_rows); }
 
     // Unassigned peripheral detections this cycle, for the ai2 log. Set by the worker after
     // process_ricoh_bearings; the fitter owns the CSV, so the count has to reach it.

@@ -1103,6 +1103,13 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
+                 // Classifier-free contour channel (common/contour_edge). ★A COUNT OF 0 MEANS NOT
+                 // MEASURED, which is a different state from a verdict of 0, and only these columns can
+                 // tell them apart: ct_en==0 = no RGB/no surviving control, ct_dn==0 = no depth read.
+                 // ct_bias is SIGNED (observed − predicted depth, m) — a low verdict with a large bias
+                 // is a FIT error, not an absence, and that distinction is the whole reason it is logged.
+                 // ORDER MATTERS: these sit here because the row below emits them here.
+                 << "ct_exc,ct_en,ct_v,ct_bias,ct_dn,ct_dL,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
                  << "omega_w,omega_yaw,tau_w,tau_yaw,"   // HISTORY: inferred log-volatility + retention (frames)   // existence-removal + verification-gate diag
                  // DETECTOR-ENVELOPE CALIBRATION. min_fill/max_fill/soft are an admitted PRIOR, never measured,
@@ -1148,6 +1155,9 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
              << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
              << inst.existence_debounce.streak << ','
+             << inst.dbg_ex_edge_excess << ',' << inst.dbg_ex_edge_n << ','
+             << inst.dbg_ex_depth_verdict << ',' << inst.dbg_ex_depth_bias_m << ','
+             << inst.dbg_ex_depth_n << ',' << inst.dbg_ex_contour_dL << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
              << inst.ai2_belief.log_volatility()(3) << ',' << inst.ai2_belief.log_volatility()(5) << ','

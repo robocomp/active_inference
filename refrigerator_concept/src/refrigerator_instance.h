@@ -241,6 +241,13 @@ struct RefrigeratorInstance
     // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
     // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
     float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;
+    // Classifier-free contour channel (common/contour_edge). ★n == 0 means NOT MEASURED, which is a
+    // different state from a verdict of 0 and must stay distinguishable in the log — conflating the two
+    // is how "no measurement" gets read as "refuted".
+    float dbg_ex_edge_excess   = 0.0f;  int dbg_ex_edge_n  = 0;   // RGB: excess over its own controls
+    float dbg_ex_depth_verdict = 0.0f;  int dbg_ex_depth_n = 0;   // depth: signed, [-1,+1]
+    float dbg_ex_depth_bias_m  = 0.0f;                            // mean (observed − predicted) depth, SIGNED
+    float dbg_ex_contour_dL    = 0.0f;                            // what the two together contributed
 
     // ── Predicted in-image refrigerator ROI (current model projected through the camera extrinsic) ───────
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the refrigerator in the frame)
