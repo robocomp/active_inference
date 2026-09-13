@@ -162,7 +162,13 @@ void SpecificWorker::initialize()
     rt_api_->HISTORY_SIZE = 25;
     scene_graph_ = std::make_unique<rc::RoomSceneGraph>(
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
-        [this] { trigger_graph_layout_twopi(); });
+        [this] { trigger_graph_layout_twopi();
+    // ⚠ THE PUBLISHER CANNOT PUBLISH WITHOUT THIS. PosePublisher is constructed before the scene
+    // graph exists (it is built with the config, this is built after the graph ids resolve), so the
+    // scene graph is handed over here. Declaring the seam and forgetting this line segfaulted on the
+    // first corrected publish, with this=0x0 inside RoomSceneGraph::update — the fourth time in this
+    // refactor that the failure was a connection not made rather than code not moved.
+    pose_pub_->set_scene_graph(scene_graph_.get()); });
     lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
     phase("ingestors");
     // No source switch any more: the producer no longer writes the imu_* attributes, so a "dsr"

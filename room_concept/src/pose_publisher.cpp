@@ -439,6 +439,19 @@ bool PosePublisher::maybe_publish_corrected_pose()
     }
 
     // Publish (corrected pose → robot↔room RT) at the optimizer rate.
+    if (scene_graph_ == nullptr)
+    {
+        // Refuse rather than dereference. A missing hand-over is a wiring mistake, not a runtime
+        // condition, so it must say so once and loudly instead of dying inside the callee.
+        static bool warned = false;
+        if (not warned)
+        {
+            warned = true;
+            qCritical() << "[pose] no scene graph: set_scene_graph() was never called, so no pose can "
+                           "be published. This is a construction-order bug in SpecificWorker::initialize().";
+        }
+        return false;
+    }
     scene_graph_->update(*loc_res, pub_adv, pub_side, pub_rot);
     last_published_pose_ = loc_res->robot_pose;
     // Cache for publish_predicted_tick(): the twist and covariance an IMU-rate tick should extrapolate
@@ -522,6 +535,7 @@ void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms)
     // reading this between two real corrections currently sees the same sigma the last real one
     // reported, not an inflated one reflecting the extra dead-reckoned distance since. Revisit if a
     // consumer needs "how much am I trusting this specific sample" rather than just the freshest pose.
+    if (scene_graph_ == nullptr) return;
     scene_graph_->dsr_publish_predicted_pose(predicted, last_published_cov_,
                                              static_cast<std::uint64_t>(imu_ts_ms));
     log_pose_trace(/*type=predicted*/1, imu_ts_ms, predicted, 0.f);
