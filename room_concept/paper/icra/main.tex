@@ -20,18 +20,20 @@ A robot that estimates the layout of a room usually reports geometry and little 
 consumers---planners, scene graphs, other agents---must then decide how far to trust it, with nothing
 to go on. We present an online room-layout estimator whose reported uncertainty is calibrated against
 ground truth, and which uses that uncertainty as a decision variable: it gates which corners are
-published, and it is what the robot acts to reduce. Parameters, structure (how many walls there are)
-and viewpoint selection are all obtained by minimising one variational free energy, so the same
-quantity in nats prices the data fit, the model complexity and the next observation. On 594 annotated
+published, and it is what the robot acts to reduce. Parameters, structure (how many walls there are) and
+viewpoint selection are obtained by minimising one variational free energy; the formulation is what
+lets the data fit, the model complexity and the value of the next observation be priced in a single
+currency, and the calibrated uncertainty is what the robot then acts on. On 594 annotated
 floor plans the estimator reaches \num{0.983} mean IoU, and---the claim of the paper---a corner it
 declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within its declared
 \SI{6}{\centi\meter} in \SI{86}{\percent} of cases, against \SI{3.6}{\centi\meter} and
 \SI{64}{\percent} for corners it withholds. Holding the system to that standard proved diagnostic:
 it exposed three distinct precision defects in three different modules, all instances of uncertainty
 that averages away past an error that does not, one of them in a module the instrument was not
-measuring. We show that no scalar precision can be correct for this problem---the irreducible error
-varies by \num{5}$\times$ between environments and \num{2}$\times$ between moving and standing
-still---and argue that this is why precision must be inferred rather than tuned.
+measuring. A single global precision is insufficient for this problem: the irreducible error varies by
+\num{5}$\times$ between environments and by \num{2}$\times$ between moving and standing still, so a
+constant tuned in one setting is wrong in the next and precision has to be inferred rather than
+tuned.
 \end{abstract}
 
 \section{Introduction}
@@ -143,6 +145,17 @@ against layout ground truth, which is the gap this paper addresses. Our position
 parametric: we keep a covariance rather than a coverage set, because a joint estimator and a
 downstream consumer both need one, and we check it.
 
+\textbf{What the two literatures leave open.} Layout methods are evaluated on geometric
+accuracy; none of them calibrates a \emph{per-corner} uncertainty against the error it actually makes,
+so a consumer is given a shape and no basis for trusting any part of it more than another. Active
+SLAM and next-best-view methods do consume a covariance, but they inherit whichever one the estimator
+produces and rarely ask whether that covariance predicts the realised error --- an acquisition policy
+driven by an over-confident covariance will stop moving precisely where it should not. The two gaps
+are the same gap seen from opposite sides. Our contribution joins them: we calibrate the layout's
+uncertainty against ground truth, and then use the calibrated quantity for both jobs it is fit for ---
+as the criterion that decides which geometry may be published, and as the objective the robot moves to
+reduce.
+
 \section{Generative Model}
 
 A room is a cyclic sequence of wall landmarks. Wall $w$ is a line in Hesse normal form,
@@ -201,9 +214,10 @@ to 18 ground-truth corners.
 
 \textbf{We state plainly what this does and does not measure.} Our observations are \emph{simulated
 from the annotated polygon}: a range sensor is driven through the annotated room and the estimator
-never sees a photograph. \textbf{The IoU in Table~\ref{tab:iou} is therefore not comparable with
-single-image layout methods evaluated on the same corpus}, which solve a harder problem---recovering
-shape from appearance---and should not be scored against these numbers in either direction. What the
+never sees a photograph. Because the returns are synthesised from the annotated polygons, this
+experiment evaluates geometric inference and uncertainty calibration rather than appearance-based
+layout recognition, and Table~\ref{tab:iou} is not comparable with single-image methods evaluated on
+the same corpus. What the
 594 rooms do provide is the \emph{shape distribution of real buildings}: real aspect ratios, real
 sizes, and non-convex plans with up to 18 corners, in place of a generator's idea of a room. The
 quantity under test here is the estimator's geometry and, in \S\ref{sec:calib}, its uncertainty---
@@ -253,7 +267,8 @@ true error is flat at about \SI{2}{\centi\meter} across every band of declared $
 claiming \SI{1}{\centi\meter} is no more accurate than one claiming \SI{5}{\centi\meter}, and the
 declared uncertainty ranks corners without predicting their error. The measured floor is
 \SI{0.019}{\meter}, against a simulated sensor of \SI{0.020}{\meter} per return. Adding it as a
-variance term---not a clamp---calibrates the bound at almost no cost in yield.
+variance term---not a clamp---brings the declared $\sigma$ into agreement with the error that
+occurs, at almost no cost in yield.
 
 \begin{figure*}[t]
 \centering
@@ -263,7 +278,8 @@ plans: declared $\sigma$ against the error it actually made. \emph{Left}, propag
 walls' statistical uncertainty: the red median is flat, so a corner claiming \SI{1}{\centi\meter} is
 no more accurate than one claiming \SI{5}{\centi\meter}, and the cloud sits far above
 $\mathrm{error}=\sigma$ at the tight end. \emph{Right}, with the irreducible term of
-\eqref{eq:corner}: the median tracks the diagonal and the bound holds. The dotted line is the
+\eqref{eq:corner}: the median tracks the diagonal and the declared $\sigma$ predicts the
+realised error. The dotted line is the
 publication gate.}
 \label{fig:calib}
 \end{figure*}
@@ -271,7 +287,10 @@ publication gate.}
 \begin{table}[t]
 \centering
 \caption{Calibration of the published corner $\sigma$ against ground truth. 4344 matched corners.
-$\sigma$ is the largest-axis standard deviation, so this tests a bound.}
+$\sigma$ is the largest-axis standard deviation of the corner's covariance. The columns are
+therefore empirical coverage, $P(\lVert e \rVert_2 \le k\sigma)$ for $k=1,2,3$ --- not a bound: a
+standard deviation makes no containment guarantee, and what is being tested is whether the declared
+$\sigma$ predicts the error that actually occurs.}
 \label{tab:calib}
 \begin{tabular}{lccccc}
 \toprule
@@ -286,7 +305,8 @@ $\sigma_m=\SI{0.02}{\meter}$ & \textbf{65.3\%} & \textbf{85.0\%} & \textbf{91.2\
 \textbf{The actionable claim.} Publication is gated at $\sigma \le \SI{6}{\centi\meter}$. A corner the
 system declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within the
 \SI{6}{\centi\meter} it claims in \SI{86.1}{\percent} of cases; a corner it withholds has a median
-error of \SI{3.6}{\centi\meter} and satisfies the same bound only \SI{63.7}{\percent} of the time.
+error of \SI{3.6}{\centi\meter} and meets the same criterion only \SI{63.7}{\percent} of the
+time.
 The gate discriminates, and the number it gates on now means something.
 
 \subsection{The real-sensor split}
@@ -448,8 +468,8 @@ through every doorway, a median \SI{57}{\percent} of returns fall outside the ro
 still leaves \SI{50}{\percent} outside, because corridors and stairwells are unannotated. No
 granularity makes the annotation and the observation describe the same region, so this corpus---and,
 we expect, any room-annotated building corpus---cannot grade a method that models a \emph{bounded}
-room. We report it rather than quoting the \num{0.14} IoU it yields, which measures the task
-mismatch and not the estimator.
+room. The \num{0.14} IoU the corpus yields under these conditions measures that
+mismatch rather than the estimator, and we report the mismatch instead.
 Finally, the pose-covariance defect of \S\ref{sec:notconstant} is measured but not fixed; the cure we
 argue for---a per-wall offset state with the measured prior---is future work.
 
