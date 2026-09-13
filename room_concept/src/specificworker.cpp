@@ -179,6 +179,9 @@ void SpecificWorker::compute()
             //   Printing converted/delivered per camera is what makes the throttle falsifiable —
             //   a ratio of 1.00 means it never fired, and no CPU number would have said so.
             QString conv;
+            // ⚠ REVIEW 2026-09-13: DEAD since the CalibChannels extraction — the line below is built
+            //   by calib_->convert_stats_line(), whose output was verified byte-identical to this.
+            //   Left in place by a review that changes nothing; delete it with the next real edit.
             const auto add_conv = [&conv](const std::string &name, std::pair<long, long> st)
             {
                 conv += QString(" %1 %2/%3").arg(QString::fromStdString(name))

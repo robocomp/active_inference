@@ -504,6 +504,13 @@ void CalibChannels::pump_image_edges()
 
     void CalibChannels::start()
     {
+        // ⚠ REVIEW 2026-09-13: THIS IS THE ONE RUN-TIME DIFFERENCE THE EXTRACTION INTRODUCED, found by
+        //   two reviewers independently. The baseline started ONLY the driving ingestor here and left
+        //   each calibration channel to be started lazily inside pump_calib_channels(), after its
+        //   bind_camera() succeeded. That lazy start is still there and CameraIngestor::start() is
+        //   idempotent, so nothing double-starts — but a calibration camera that is CONFIGURED AND
+        //   NEVER BINDABLE now costs a live ingest thread (1 Hz descriptor discovery plus frame
+        //   drain/convert) for the whole run, from Operating-enter rather than from first bind.
         if (camera_ingestor_) camera_ingestor_->start();
         for (auto& chp : calib_channels_)
             if (chp->ingestor) chp->ingestor->start();
@@ -511,12 +518,27 @@ void CalibChannels::pump_image_edges()
 
     void CalibChannels::stop()
     {
+        // ⚠ REVIEW 2026-09-13, TWO NOTES.
+        //   (a) the baseline never destroyed the auxiliary ingestors at shutdown; this does. Benign,
+        //       but it is not verbatim either.
+        //   (b) MountCalibrator::driving_ is a RAW pointer into camera_ingestor_, handed over in
+        //       configure(), and is NOT cleared here — so after this it dangles, and the guard in
+        //       mount_pair_update() (`not driving_`) can no longer detect it, where at baseline that
+        //       same guard read the owning unique_ptr and was a true guard. Unreachable today: the
+        //       only caller is pump_image_edges(), which returns on its own null camera_ingestor_,
+        //       and request_shutdown() runs on the GUI thread and then _Exit()s, so no compute tick
+        //       can interleave. It is safe by a property of SHUTDOWN, not by construction. One line
+        //       closes it for good: mount_.set_driving_ingestor(nullptr).
         camera_ingestor_.reset();          // drop the RGB readers before the graph goes
         for (auto& chp : calib_channels_) chp->ingestor.reset();
     }
 
     void CalibChannels::set_room_polygon(std::vector<Eigen::Vector2f> poly, const Eigen::Vector2f& offset)
     {
+        // ⚠ REVIEW 2026-09-13: this pushes the polygon into image_edge_source_ below, which the
+        //   baseline did only later, on bind, inside pump_image_edges(). Same VALUE (the bind path
+        //   still re-sets it); only the timing is earlier. Recorded because it is behaviour, not
+        //   mechanics.
         room_polygon_ = std::move(poly);
         room_polygon_offset_ = offset;
         if (image_edge_source_ and room_polygon_.size() >= 3)

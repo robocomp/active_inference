@@ -68,6 +68,9 @@ namespace rc
         RoomViewer* viewer() const { return viewer_slot_ != nullptr ? *viewer_slot_ : nullptr; }
 
         std::shared_ptr<DSR::DSRGraph> G;
+        /// ⚠ ALWAYS NULL — see the construction site in specificworker_startup.cpp. It is injected
+        /// before the worker assigns its own rt_api_, so this member never receives one. Nothing in
+        /// this class reads it today; anything that starts to, segfaults. Reviewed 2026-09-13.
         DSR::RT_API*    rt_api_ = nullptr;
         RoomConfig&     params;
         RoomConcept&    room_concept_;

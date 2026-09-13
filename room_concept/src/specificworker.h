@@ -333,6 +333,31 @@ class SpecificWorker : public GenericWorker
     std::unique_ptr<rc::CalibChannels> calib_;
     /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
     std::unique_ptr<rc::GroundTruthLog> gt_log_;
+    // ── REVIEW 2026-09-13, FOUR REVIEWERS AGAINST THE 951e464 BASELINE ───────────────────────────
+    // The extraction came out behaviour-preserving: 22 of 34 moved bodies byte-identical, 5
+    // mechanical-only, every remaining difference deliberate and listed in the commits. No function
+    // was silently dropped; every member removed from this header reappears in exactly ONE new header
+    // with the same initialiser; all 254 long string literals, every params.X read and every output
+    // file survive; the imbue(locale::classic()) count is 8 before and 8 after, so the locale rule
+    // holds. No duplicated live state remains here — the names shared with the collaborator headers
+    // are borrowed references, not copies.
+    // WHAT THE REVIEW LEFT STANDING, deliberately unfixed because that pass changed nothing:
+    //   · SIX METHOD DECLARATIONS BELOW HAVE NO DEFINITION ANYWHERE — maybe_publish_corrected_pose,
+    //     publish_predicted_tick, log_pose_trace, update_rt_rate_readout, place_triple_points_in_room
+    //     and write_pair_row all moved to collaborators. Nothing calls them on `this`, so there is no
+    //     link error; the hazard is that this header still ADVERTISES that the worker publishes poses,
+    //     writes the trace and places triple points. A future edit calling one compiles and fails to
+    //     link, or passes review looking correct.
+    //   · MUCH OF THE COMMENTARY BELOW describes state that is now in pose_publisher.h,
+    //     mount_calibrator.h or ground_truth_log.h — the clamp, the pose trace, the append-only jump
+    //     log, mp_win_/mp_pool_, the gt heading convention. The members are gone; the prose is not.
+    //     Read it as history. Following it would invite re-adding exactly the copies the warning
+    //     above this line forbids.
+    //   · three members are dead and were ALREADY dead at the baseline, so they are not refactor
+    //     damage: last_imu_sim_ts_, last_image_edge_ms_, self_target_active_ (0 readers, 0 writers).
+    //   · shutting_down_ is declared AFTER pose_pub_ and gt_log_, which hold a reference to it, so on
+    //     a real destructor run they would outlive their referent. Moot only because request_shutdown()
+    //     ends in std::_Exit and no destructor body ever runs.
     // ⚠ NOTHING of a collaborator's state may be kept here after it moves. A copy left behind is
     // written by the worker and read by nobody, which is exactly how the commanded twist silently
     // became zero mid-refactor: it compiles, and the regression only shows at run time.
