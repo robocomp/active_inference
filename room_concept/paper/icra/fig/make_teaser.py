@@ -45,15 +45,39 @@ for ax, (fr, title) in zip(axes, WANT):
                  + ("  (publishable)" if worst <= BAR else "  (withheld)"),
                  fontsize=7.4, color="#1f2328", pad=4)
     ax.set_aspect("equal"); ax.axis("off")
-    ax.set_xlim(-4.2, 4.2); ax.set_ylim(-3.0, 3.0)
+    ax.set_xlim(-4.4, 4.4); ax.set_ylim(-3.3, 3.3)
 
-# the truth rectangle, dashed, on both panels — it is the same room throughout
-for ax in axes:
-    ax.add_patch(MPoly([(-TRUTH_W/2, -TRUTH_H/2), (TRUTH_W/2, -TRUTH_H/2),
-                        (TRUTH_W/2, TRUTH_H/2), (-TRUTH_W/2, TRUTH_H/2)], closed=True,
+# ── TRUTH IS DRAWN IN EACH PANEL'S OWN FRAME, AND THAT IS NOT A FUDGE ────────────────────────────
+# The map frame is GAUGE-FREE while the layout is being estimated: its origin is wherever the robot
+# started and its orientation is whatever theta0 currently is, and the re-anchor rotates the whole map
+# between these two frames — measured here, the long axis lies along x in the left panel and along y
+# in the right. A single fixed truth rectangle therefore crosses the estimate at 90 degrees in one of
+# the two panels, which is a defect of the DRAWING, not of the estimate.
+# What the paper claims is frame-invariant — edge lengths and corner angles — so the truth rectangle
+# is placed at each panel's own centroid and orientation, taken from the estimate's longest edge. The
+# reader then compares shape and size, which is exactly the quantity being claimed, instead of an
+# absolute placement that carries no meaning before the frame is anchored.
+import math
+def truth_in_panel_frame(V, w, h):
+    best, bi = -1.0, 0
+    for i in range(len(V)):
+        a, b = V[i], V[(i + 1) % len(V)]
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d > best: best, bi = d, i
+    a, b = V[bi], V[(bi + 1) % len(V)]
+    th = math.atan2(b[1] - a[1], b[0] - a[0])
+    cx = sum(p[0] for p in V) / len(V)
+    cy = sum(p[1] for p in V) / len(V)
+    c, s2 = math.cos(th), math.sin(th)
+    return [(cx + c * dx - s2 * dy, cy + s2 * dx + c * dy)
+            for dx, dy in ((-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2))]
+
+for ax, (fr, _t) in zip(axes, WANT):
+    V, _C, _E = parse(rows[fr])
+    ax.add_patch(MPoly(truth_in_panel_frame(V, TRUTH_W, TRUTH_H), closed=True,
                        facecolor="none", edgecolor="#31465c", lw=0.8, ls=(0, (4, 3)), zorder=5))
 fig.subplots_adjust(left=0.01, right=0.99, top=0.86, bottom=0.02, wspace=0.02)
-fig.text(0.5, 0.015, "dashed: ground truth 6.000 $\\times$ 4.000 m   ·   discs: per-corner $\\sigma$, "
+fig.text(0.5, 0.015, "dashed: ground truth 6.000 $\\times$ 4.000 m, drawn in each panel's own frame   ·   discs: per-corner $\\sigma$, "
                      "to scale   ·   bands: per-edge offset $\\sigma_d$",
          ha="center", fontsize=6.3, color="#31465c")
 fig.savefig("paper/icra/fig/teaser.pdf")

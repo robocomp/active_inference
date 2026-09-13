@@ -34,6 +34,15 @@ varies by \num{5}$\times$ between environments and \num{2}$\times$ between movin
 still---and argue that this is why precision must be inferred rather than tuned.
 \end{abstract}
 
+\section{Introduction}
+
+Room-layout estimation is mature enough that accuracy alone no longer separates methods. What
+separates them for a robot is whether the estimate can be \emph{acted on}: whether a planner can tell
+a wall that is known to a centimetre from one that is a guess, whether a scene graph should commit a
+corner to shared memory, whether the robot should look again before deciding. All of these are
+questions about uncertainty, and almost no layout system answers them with a number that has been
+checked.
+
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{fig/teaser}
@@ -47,15 +56,6 @@ a factor of \num{32} and every corner under the publication gate. The estimator 
 precision by waiting, and does not claim any.}
 \label{fig:teaser}
 \end{figure}
-
-\section{Introduction}
-
-Room-layout estimation is mature enough that accuracy alone no longer separates methods. What
-separates them for a robot is whether the estimate can be \emph{acted on}: whether a planner can tell
-a wall that is known to a centimetre from one that is a guess, whether a scene graph should commit a
-corner to shared memory, whether the robot should look again before deciding. All of these are
-questions about uncertainty, and almost no layout system answers them with a number that has been
-checked.
 
 This is not an oversight of presentation. An uncertainty that is never validated tends to be wrong, and
 wrong in a way that is invisible: an estimator that overstates its error is merely timid, while one
