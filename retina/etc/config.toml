@@ -308,6 +308,7 @@ azimuth_tune_deg      = 0.0   # tune in DEGREES: extra yaw on room_T_ricoh over 
 # ordering WITHIN a strip. Making it metric needs an anchor: a per-strip least-squares fit of
 # (a,b) in log space against the helios points Ricoh.mask_depth already reprojects into the
 # panorama. See src/depth_processor.h.
+
 [RicohDepth]
 enabled             = true    # ON 2026-08-02 (user) — restart, then use the popup's "Depth" toggle
 model_path          = "models/yolo26/yolo26l-depth.onnx"
@@ -385,6 +386,7 @@ overlay_alpha       = 0.65    # popup blend weight of the depth ramp over the pa
 # deliberately excludes them — that is the residual working, not an error. The interesting failure is
 # bright STRUCTURE: a whole wall tilting, or the floor shading off with range, means the room model
 # itself is wrong. Red = the belief predicts farther than measured, blue = nearer.
+
 [ZedDepth]
 enabled     = true
 decimate    = 2      # ray-cast on a 1/N grid and upsample (NEAREST — the envelope has real depth
@@ -416,6 +418,7 @@ MessageSizeMax = "20004800"
 # ★ ORDER OF OPERATIONS: logger BEFORE map. tau/decay_r/insert_min_dist_m are OUTPUTS of
 # tools/place_eval, not inputs to it. So: log_queries=true → drive → place_eval → write the measured
 # numbers back here WITH provenance → build_map=true.
+
 [PlaceMemory]
 enabled            = false
 model_path         = "models/dinov2/dinov2_vits14_reg_448x224.onnx"
@@ -503,6 +506,7 @@ sector_soft        = 0.0    # ★ 0 = hard sector bins. > 0 = raised-cosine wind
 # on the same row, against range_m measured from ZED depth at the peak pixel.
 # ★One row per semantic frame INCLUDING frames where nothing was found — a detections-only log starts
 # at the moment of success and cannot show a detection appearing.
+
 [DoorApproach]
 enabled = true
 path    = "etc/door_approach.csv"
@@ -517,8 +521,9 @@ label   = "door"            # must be an ADE20K class the loaded model exposes (
 # ★It must be allowed to DENY: "ran, found nothing" is evidence and weighs as much as a detection.
 #   The log records eligible/ran/n separately so a denial is never confused with never having asked.
 # Default OFF until the per-call cost on this box is measured with the real execution provider.
+
 [DoorSpecialist]
-enabled     = true
+enabled     = false       # OFF 2026-09-13 (user): do not load the door model; flip back to re-enable
 model_path  = "models/doors/doors_yolo11s_end2end.onnx"
 input_size  = 640
 # ⚠CPU. An 8th CUDA session aborted retina outright on the specialist's first inference:
