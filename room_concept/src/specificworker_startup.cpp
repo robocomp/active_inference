@@ -168,6 +168,9 @@ void SpecificWorker::initialize()
     // never shared -- see dsr_api.h), and this agent is the sole writer of the robot<->room RT edge,
     // so this is the only place that needs it.
     rt_api_->HISTORY_SIZE = 25;
+    // One InnerEigenAPI, owned by this thread. See the member's comment for why a per-thread instance
+    // is the wrong answer even though the cache is now locked.
+    inner_eigen_ = G->get_inner_eigen_api();
     scene_graph_ = std::make_unique<rc::RoomSceneGraph>(
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
         [this] { trigger_graph_layout_twopi(); });

@@ -41,6 +41,7 @@
 #include "mount_calibrator.h"
 #include "pose_publisher.h"
 #include "calib_channels.h"
+#include "door_apertures.h"
 #include "ground_truth_log.h"
 #include "camera_calibration.h"
 #include <map>
@@ -330,6 +331,13 @@ class SpecificWorker : public GenericWorker
     std::unique_ptr<rc::CalibChannels> calib_;
     /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
     std::unique_ptr<rc::GroundTruthLog> gt_log_;
+    /// Open doorways, refreshed from the graph in compute() and handed to the localiser as a snapshot.
+    /// The InnerEigenAPI instance is created ONCE and owned by this (main) thread, so its queued
+    /// invalidation slots actually fire — a per-thread instance on a raw std::thread never receives
+    /// one and serves stale transforms for ever (dsr_inner_eigen_api.h).
+    rc::DoorApertures doors_;
+    std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
+    std::int64_t last_door_scan_ms_ = 0;
     // ── REVIEW 2026-09-13, FOUR REVIEWERS AGAINST THE 951e464 BASELINE ───────────────────────────
     // The extraction came out behaviour-preserving: 22 of 34 moved bodies byte-identical, 5
     // mechanical-only, every remaining difference deliberate and listed in the commits. No function

@@ -138,6 +138,35 @@ void SpecificWorker::compute()
     qint64 t_health_us = 0;
     bool   did_publish = false;   // a corrected RT block was published this tick (for compute_timing.csv)
 
+    // ── OPEN DOORWAYS, AT THE RATE A DOOR ACTUALLY MOVES ────────────────────────────────────────
+    // 1 Hz, not the 20 Hz of the scan. Two different things change at two different rates: the
+    // APERTURE is static — door_concept's invariant is that it does not move when the leaf swings, so
+    // its segment is resolved once per door and cached — while door_open_prob changes over SECONDS, at
+    // the speed of a door. Reading the graph at scan rate would be 20 Hz of get_nodes_by_type plus a
+    // transform walk per door to watch a quantity that moves once a second.
+    // The staleness this buys is bounded and harmless: a door caught mid-swing is weighted as it was
+    // up to a second ago. Because the weight is continuous (1 - p_open) that is a slightly wrong
+    // weight for one second, not a wrong decision — which is the advantage of having no threshold in
+    // there at all.
+    if (inner_eigen_ and (last_door_scan_ms_ == 0 or now_ms - last_door_scan_ms_ >= 1000))
+    {
+        last_door_scan_ms_ = now_ms;
+        auto open_doors = doors_.refresh(*G, *inner_eigen_, "room");
+        static std::size_t last_n = std::numeric_limits<std::size_t>::max();
+        if (open_doors.size() != last_n)
+        {
+            last_n = open_doors.size();
+            QString which;
+            for (const auto& d : open_doors)
+                which += QString(" %1(p=%2)").arg(QString::fromStdString(d.name)).arg(d.p_open, 0, 'f', 2);
+            qInfo().noquote() << QString("[room][doors] %1 open aperture(s) now discounting the scan:%2"
+                                         " | chain walks so far %3")
+                                     .arg(open_doors.size()).arg(which.isEmpty() ? " -" : which)
+                                     .arg(doors_.resolves());
+        }
+        room_concept_.set_door_apertures(std::move(open_doors));
+    }
+
     if (last_affordance_monitor_ms_ == 0 || now_ms - last_affordance_monitor_ms_ >= 200)
     {
         QElapsedTimer section_timer;

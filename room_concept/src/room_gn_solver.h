@@ -174,6 +174,11 @@ namespace rc::gn
         // by their carried information (WallPriorFactor / Theta0PriorFactor), and tied to θ₀ by the
         // hierarchical Manhattan factor (RoomWallFactor). Written back by solve().
         wallmap::WallMap*                         walls = nullptr;
+        /// Open doorways of this room, ALREADY IN THE ROBOT FRAME, as RoomConcept rebuilds them once
+        /// per scan. Passed through to the observation weights so this backend and the Adam/L-BFGS
+        /// path discount a through-the-door return identically — the whole reason those weights have
+        /// one definition (room_obs_weights.h). Null ⇒ no door term.
+        const std::vector<DoorAperture>*          doors_robot = nullptr;
         // Estimate mode: the polygon is DERIVED from the walls, so an SDF factor on it would count the
         // same points twice. The wall point factors replace it.
         bool                                      no_sdf = false;

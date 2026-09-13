@@ -8,6 +8,8 @@
 #include <limits>
 #include <thread>
 #include <mutex>
+
+#include "door_apertures.h"   // DoorAperture — the snapshot below, and no cycle: it knows nothing of us
 #include <condition_variable>
 #include <atomic>
 #include <variant>
@@ -1387,6 +1389,22 @@ public:
         latest_object_anchors_ = std::move(anchors);
     }
 
+    /// ── OPEN DOORWAYS, IN THE ROOM FRAME ────────────────────────────────────────────────────────
+    /// Written by the worker (main thread, where the shared InnerEigenAPI lives) and read by the
+    /// localisation thread once per scan. Same shape as the object anchors above and for the same
+    /// reason: a small immutable snapshot crosses the boundary, never the graph itself.
+    /// Empty is the normal state — every door shut, or none known — and costs the scan nothing.
+    void set_door_apertures(std::vector<DoorAperture> doors)
+    {
+        std::scoped_lock lk(door_apertures_mutex_);
+        latest_door_apertures_ = std::move(doors);
+    }
+    std::vector<DoorAperture> door_apertures() const
+    {
+        std::scoped_lock lk(door_apertures_mutex_);
+        return latest_door_apertures_;
+    }
+
     // Process noise covariance (diagonal [x, y, theta])
     Eigen::Vector3f process_noise = {0.01f, 0.01f, 0.01f};
 
@@ -1428,6 +1446,16 @@ private:
    mutable std::mutex image_edges_mutex_;
    ImageEdgeObs       latest_image_edges_;
    std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()
+   mutable std::mutex door_apertures_mutex_;
+   std::vector<DoorAperture> latest_door_apertures_;          ///< room frame, from the worker
+   /// The same apertures carried into the ROBOT frame, rebuilt once per scan on the localisation
+   /// thread. Kept as a member rather than passed down through a dozen signatures: every consumer of
+   /// the observation weights is inside this class's own update cycle.
+   std::vector<DoorAperture> doors_robot_;
+   /// Per-point door weight for a robot-frame scan, or an undefined tensor when no door is open —
+   /// which makes every consumer fall back to the plain unweighted reduction, i.e. exactly the
+   /// behaviour of a room without doors.
+   torch::Tensor door_point_weights(const torch::Tensor& points_robot) const;
    mutable std::mutex object_anchors_mutex_;
    std::vector<ObjectAnchorObs> latest_object_anchors_;
 
@@ -2219,6 +2247,40 @@ private:
     static float median_abs_sdf(const torch::Tensor &sdf_vals)
     {
         return torch::median(torch::abs(sdf_vals)).item<float>();
+    }
+
+    /// ── THE SAME MEDIAN, WITH THE DOOR WEIGHTS ──────────────────────────────────────────────────
+    /// A beam that went through an open doorway measured the next room; it must not inflate the
+    /// number we report for THIS room. The fit already discounts those returns (see
+    /// weights_from_normals), but the reported sdf_mse is a separate reduction and would keep
+    /// counting them — which is the whole complaint: opening a door made the SDF rise.
+    /// This is the ordinary weighted median — the value at which cumulative weight crosses half the
+    /// total — so a point behind a certainly-open door contributes NOTHING, one behind a half-open
+    /// door contributes half, and nothing anywhere decides whether a door is "open enough".
+    /// Empty or all-equal weights reproduce torch::median exactly, so a room with no open door
+    /// reports precisely what it reported before.
+    static float weighted_median_abs_sdf(const torch::Tensor &sdf_vals, const torch::Tensor &weights)
+    {
+        if (not weights.defined() or weights.numel() != sdf_vals.numel())
+            return median_abs_sdf(sdf_vals);
+        const auto a = torch::abs(sdf_vals).detach().to(torch::kCPU).contiguous();
+        const auto w = weights.detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
+        const auto aa = a.accessor<float, 1>();
+        const auto wa = w.accessor<float, 1>();
+        std::vector<std::pair<float, float>> v;
+        v.reserve(static_cast<size_t>(a.numel()));
+        double total = 0.0;
+        for (long i = 0; i < a.numel(); ++i)
+            if (wa[i] > 0.f and std::isfinite(aa[i])) { v.emplace_back(aa[i], wa[i]); total += wa[i]; }
+        if (v.empty() or total <= 0.0) return median_abs_sdf(sdf_vals);   // every return discounted
+        std::sort(v.begin(), v.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
+        double acc = 0.0;
+        for (const auto &[val, wt] : v)
+        {
+            acc += wt;
+            if (acc >= 0.5 * total) return val;
+        }
+        return v.back().first;
     }
 
     // Fit metric at the model's CURRENT pose.

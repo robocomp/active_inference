@@ -2041,6 +2041,25 @@ namespace rc
         derived_polygon_.clear();
     }
 
+    torch::Tensor RoomConcept::door_point_weights(const torch::Tensor& points_robot) const
+    {
+        if (doors_robot_.empty() or not points_robot.defined() or points_robot.size(0) == 0)
+            return {};
+        auto pts = points_robot.index({torch::indexing::Slice(),
+                                       torch::indexing::Slice(0, 2)}).detach().to(torch::kCPU).contiguous();
+        const auto acc = pts.accessor<float, 2>();
+        auto w = torch::ones({pts.size(0)}, torch::kFloat32);
+        auto wa = w.accessor<float, 1>();
+        const Eigen::Vector2f origin(0.f, 0.f);
+        bool any = false;
+        for (long i = 0; i < pts.size(0); ++i)
+        {
+            wa[i] = DoorApertures::weight(doors_robot_, origin, Eigen::Vector2f(acc[i][0], acc[i][1]));
+            if (wa[i] < 1.f) any = true;
+        }
+        return any ? w : torch::Tensor{};   // nothing crossed an open door: report the plain median
+    }
+
     void RoomConcept::wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
                                         std::int64_t timestamp_ms)
     {
@@ -2073,7 +2092,8 @@ namespace rc
                     na[k][0] = c * nrm[k].x() - s * nrm[k].y();
                     na[k][1] = s * nrm[k].x() + c * nrm[k].y();
                 }
-                const auto w = weights_from_normals(params, P, torch::tensor({pose.z()}, torch::kFloat32), N)
+                const auto w = weights_from_normals(params, P, torch::tensor({pose.z()}, torch::kFloat32), N,
+                                                    &doors_robot_)
                                    .to(torch::kCPU).contiguous();
                 auto wa = w.accessor<float, 1>();
                 for (size_t k = 0; k < idx.size(); ++k) weights(idx[k]) = wa[k];
@@ -3057,6 +3077,31 @@ namespace rc
         }
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
 
+        // ── OPEN DOORWAYS, CARRIED INTO THE ROBOT FRAME ONCE PER SCAN ───────────────────────────
+        // The worker writes the apertures in ROOM coordinates (it owns the shared InnerEigenAPI); the
+        // scan is in ROBOT coordinates, and so is every consumer of the observation weights. Carrying
+        // the two or three segments across once here is cheaper than carrying thousands of points the
+        // other way, and it makes the beam origin the origin, so the weight function needs no pose.
+        // The pose used is the newest window slot's, i.e. the linearisation point — which is exactly
+        // right, because these weights are detached constants AT that point by contract.
+        // Empty snapshot (every door shut, or none known) ⇒ empty here ⇒ no cost at all downstream.
+        doors_robot_.clear();
+        if (const auto doors_room = door_apertures(); not doors_room.empty() and not window_mgr_.empty())
+        {
+            auto np = window_mgr_.newest().pose.detach().to(torch::kCPU);
+            const auto npa = np.accessor<float, 1>();
+            const Eigen::Rotation2Df R_inv(-npa[2]);
+            const Eigen::Vector2f t(npa[0], npa[1]);
+            doors_robot_.reserve(doors_room.size());
+            for (const auto& d : doors_room)
+            {
+                DoorAperture r = d;
+                r.a = R_inv * (d.a - t);
+                r.b = R_inv * (d.b - t);
+                doors_robot_.push_back(std::move(r));
+            }
+        }
+
         // ===== WALL-SLAM OBSERVATION (Estimate mode) =====
         if (estimating())
         {
@@ -3418,7 +3463,11 @@ namespace rc
             model_->robot_theta.data().copy_(torch::tensor({phi},
                 torch::TensorOptions().device(get_device())));
 
-            res.sdf_mse = compute_sdf_median_abs(points_tensor, *model_);
+            // Weighted by the doors: a return that came through an open doorway measured the next
+            // room and must not inflate this room's reported fit. No open door ⇒ undefined weights ⇒
+            // the plain median, byte-for-byte what this line produced before.
+            res.sdf_mse = weighted_median_abs_sdf(model_->sdf(points_tensor),
+                                                  door_point_weights(points_tensor));
 
             // Store localization quality so future frames can quality-gate the boundary prior
             // (Solutions B & C): when this slot becomes the oldest it carries its own sdf_mse.
@@ -4236,7 +4285,7 @@ namespace rc
                 if (q.sdf.defined() and q.sdf.size(0) > 0 and q.grad.defined())
                 {
                     const auto w = build_observation_weights(*model_, params, points_tensor,
-                                                             pose_th, q);
+                                                             pose_th, q, &doors_robot_);
                     const auto d_cpu = q.sdf.detach().to(torch::kCPU).contiguous();
                     const auto g_cpu = q.grad.detach().to(torch::kCPU).contiguous();
                     const auto w_cpu = w.detach().to(torch::kCPU).contiguous();
@@ -4314,7 +4363,7 @@ namespace rc
         // Boundary*QualityThresholds and boundary_weight_now) were recalibrated by kMedianOverMeanAbs
         // when this changed. The mean is still what the early-exit GATE tests, and it is reported
         // unchanged as early_exit_metric below — that field's name says what it holds.
-        res.sdf_mse = torch::median(torch::abs(sdf_pred)).item<float>();
+        res.sdf_mse = weighted_median_abs_sdf(sdf_pred, door_point_weights(points_tensor));
         res.pred_sdf_median = res.sdf_mse;   // on this path they are the same quantity
         res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
         res.sdf_polished = sdf_polished_this_cycle_;   // the calibrator counts this as a correction
@@ -4885,6 +4934,9 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         // pinned by the re-anchor, so there is nothing left to gauge-fix. From here the room is GIVEN
         // in the full sense rather than in name, and the pose is solved against its SDF — the same
         // channel, the same terms and the same constants a layout loaded from file uses.
+        // Door apertures go to BOTH regimes: a through-the-door return is just as wrong for the
+        // wall landmarks as for the room's SDF.
+        in.doors_robot = &doors_robot_;
         if (searching())
         {
             in.walls             = &wall_map_;

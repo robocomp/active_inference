@@ -76,7 +76,7 @@ namespace rc::gn
                 if (not q.sdf.defined() or q.sdf.size(0) == 0) return 0.f;
 
                 const auto w = build_observation_weights(*in_.model, *in_.params, points_,
-                                                         theta_tensor(x), q);
+                                                         theta_tensor(x), q, in_.doors_robot);
                 const auto sdf_cpu  = q.sdf.detach().to(torch::kCPU).contiguous();
                 const auto grad_cpu = q.grad.detach().to(torch::kCPU).contiguous();
                 const auto w_cpu    = w.detach().to(torch::kCPU).contiguous();
