@@ -56,7 +56,13 @@ def _rotation_degrees(f0, f1, drop_last=2):
         while d < -_mrot.pi: d += 2 * _mrot.pi
         tot += abs(d)
     return _mrot.degrees(tot)
-_FA, _FB = 12999, 13478
+# ⚠ PANEL B IS 13477, NOT 13478. The tail of this log is not uniformly sampled: dt is ~50 ms
+# everywhere until 13477, then 29 917 ms to 13478 and 43 227 ms to 13479. Frame 13478 therefore sits
+# on the far side of a THIRTY-SECOND hole, so any rotation measured across it is a lower bound on
+# unsampled motion, not a measurement. 13477 is the FIRST frame the layout is publishable
+# (corner sigma 0.0480 m under the 0.06 m gate) and it is 55 ms after its predecessor, so the
+# interval 12999..13477 is fully sampled and the turn below is exact.
+_FA, _FB = 12999, 13477
 WANT = [(_FA, f"parked, {_parked_seconds(_FA):.0f} s"),
         (_FB, f"after turning {_rotation_degrees(_FA, _FB):.0f}$^\\circ$ on the spot")]
 print(f"  labels: parked {_parked_seconds(_FA):.1f} s | rotation {_rotation_degrees(_FA,_FB):.1f} deg")
@@ -72,12 +78,26 @@ print(f"  labels: parked {_parked_seconds(_FA):.1f} s | rotation {_rotation_degr
 # lengths, corner sigma, the truth comparison) is invariant to that rotation. What the pair then shows
 # is the only thing that actually differs between the two frames — the uncertainty.
 import math as _mm
+def _long_edge_index(V):
+    # ⚠ NOT argmax over every edge. A rectangle's edges 0 and 2 are the SAME wall direction 180 deg
+    # apart, and whichever is momentarily longer wins the argmax, so the frame flipped by 180 deg
+    # from frame to frame. That is invisible for the room (a rectangle is 180-deg symmetric) and
+    # fatal for a heading arrow. Tracked over 480 frames the old rule produced 22.9 "turns" of pure
+    # flipping. Restricting the choice to the first two edges ties the DIRECTION to the vertex
+    # order, which is stable: over the same 480 frames edge 0->1 moves continuously with exactly one
+    # jump, at the re-anchor, where it is real.
+    if len(V) < 3: return 0
+    e0 = _mm.hypot(V[1][0] - V[0][0], V[1][1] - V[0][1])
+    e1 = _mm.hypot(V[2][0] - V[1][0], V[2][1] - V[1][1])
+    return 0 if e0 >= e1 else 1
+
+def canonical_angle(V):
+    bi = _long_edge_index(V)
+    a, b = V[bi], V[(bi + 1) % len(V)]
+    return -_mm.atan2(b[1] - a[1], b[0] - a[0])
+
 def canonical(V):
-    best, bi = -1.0, 0
-    for i in range(len(V)):
-        a, b = V[i], V[(i + 1) % len(V)]
-        d = _mm.hypot(b[0] - a[0], b[1] - a[1])
-        if d > best: best, bi = d, i
+    bi = _long_edge_index(V)
     a, b = V[bi], V[(bi + 1) % len(V)]
     th = -_mm.atan2(b[1] - a[1], b[0] - a[0])
     cx = sum(p[0] for p in V) / len(V); cy = sum(p[1] for p in V) / len(V)
@@ -122,6 +142,30 @@ for ax, (fr, title) in zip(axes, WANT):
                 ha="center", va="center", rotation=0 if horiz else 90, zorder=8,
                 bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.85))
 
+    # ── THE ROBOT, AND WHICH WAY IT FACES ──────────────────────────────────────────────────────
+    # Drawn because the pair claims a ROTATION and a reader cannot see one in a room that does not
+    # move. Footprint radius 0.32 m is the circumscribed robot_footprint_radius from etc/config.toml.
+    # The pose is rotated by the SAME canonical angle as the room, so the arrow shows the robot's
+    # bearing RELATIVE TO THE ROOM -- which is frame-free, and is the only orientation this run can
+    # honestly report: the map frame is gauge-free and the log carries no ground-truth robot pose, so
+    # an absolute heading would be a number about our own gauge, not about the robot.
+    # Both panels are canonicalised on the room's long wall, and the truth rectangle is drawn on that
+    # same wall, so the angle printed below is equally the bearing with respect to ground truth.
+    _rx, _ry, _rth = [float(v) for v in rows[fr][2].split(",")]
+    _ca = canonical_angle(parse(rows[fr])[0])
+    _px, _py = canonical(parse(rows[fr])[0])((_rx, _ry))
+    _h = _rth + _ca
+    ax.add_patch(Circle((_px, _py), 0.32, facecolor="#1f2328", alpha=0.18, edgecolor="#1f2328",
+                        lw=0.6, zorder=7))
+    ax.annotate("", xy=(_px + 0.95 * _mm.cos(_h), _py + 0.95 * _mm.sin(_h)), xytext=(_px, _py),
+                arrowprops=dict(arrowstyle="-|>", color="#1f2328", lw=1.1,
+                                shrinkA=0, shrinkB=0, mutation_scale=6), zorder=8)
+    _bear = _mm.degrees((_h + _mm.pi) % (2 * _mm.pi) - _mm.pi)
+    ax.text(_px, _py - 0.62, f"{_bear:+.0f}$^\\circ$", fontsize=4.6, color="#1f2328",
+            ha="center", va="top", zorder=8,
+            bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="none", alpha=0.85))
+
+
     worst = max(C)
     ax.set_title(f"{title}\nworst corner $\\sigma$ = {worst:.3f} m"
                  + ("  (publishable)" if worst <= BAR else "  (withheld)"),
@@ -141,11 +185,7 @@ for ax, (fr, title) in zip(axes, WANT):
 # absolute placement that carries no meaning before the frame is anchored.
 import math
 def truth_in_panel_frame(V, w, h):
-    best, bi = -1.0, 0
-    for i in range(len(V)):
-        a, b = V[i], V[(i + 1) % len(V)]
-        d = math.hypot(b[0] - a[0], b[1] - a[1])
-        if d > best: best, bi = d, i
+    bi = _long_edge_index(V)          # same stable rule as canonical(); see the note there
     a, b = V[bi], V[(bi + 1) % len(V)]
     th = math.atan2(b[1] - a[1], b[0] - a[0])
     cx = sum(p[0] for p in V) / len(V)

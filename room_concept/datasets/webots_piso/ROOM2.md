@@ -25,7 +25,7 @@ a variable is not a statement about which surface it describes; check the walls.
    layout comparison in this work has to align first, and alignment absorbs the global pose error;
    here it does not arise.
 2. **A 4-corner answer is the CORRECT answer**, so it separates two hypotheses that the piso run
-   confounds: if the estimator recovers 6.22 x 4.39 with honest sigma, the machinery is sound and the
+   confounds: if the estimator recovers 6.000 x 4.000 with honest sigma, the machinery is sound and the
    20-vertex flat's collapse to a rectangle is about exploration (who drives). If it does not, the
    fault is upstream of driving.
 3. **Standing still is the point, not a compromise.** We measured that at rest the POSE covariance
@@ -35,13 +35,14 @@ a variable is not a statement about which surface it describes; check the walls.
 
 ## Two caveats at the scale we are measuring (sigma is ~4.7 cm here)
 
-- **The south edge carries a 3 cm ambiguity.** The generator extends room 2 "south to y = 9.20 so it
-  overlaps the apartment polygon by ~3 cm"; the real inner face is the apartment's north wall at
-  y = 9.231..9.256. So the true height is **4.36-4.39 m**, not a single number.
+- ⚠ The two caveats below were written for the RETRACTED 6.22 x 4.39 floor-slab figure and are kept
+  only to explain why that number existed. They do NOT apply to the wall-solid truth at the top of
+  this file, which is exact: the slab extends under the walls and its south edge overlaps the
+  apartment polygon by ~3 cm, which is where "4.36-4.39 m" came from.
 - **The south wall is about a degree off-axis** (y = 9.256 at its west end, 9.231 at its east), so a
   perfectly Manhattan estimate is not the right answer and a ~1 deg tilt there is truth, not error.
 
-Width, 6.22 m, has neither problem and is the cleanest single number to check.
+Width, **6.000 m** from the wall solids, is the cleanest single number to check.
 
 ## Pre-registered predictions, before the run
 
@@ -65,6 +66,14 @@ Width, 6.22 m, has neither problem and is the cleanest single number to check.
 **657 seconds**, through five associated segments per frame, moving by one part in ten thousand.
 One rotation in place dropped corner sigma **33x** to 0.0283 and sigma_d to 0.0096, while the
 geometry moved by millimetres.
+
+⚠ **THE TAIL OF THIS LOG IS NOT UNIFORMLY SAMPLED.** dt is ~50 ms up to frame 13477 and then
+**29 917 ms** to 13478 and **43 227 ms** to 13479. The 0.0283 / 33x figures come from those last
+frames, i.e. from the far side of a 30-second hole, so they are the converged value and NOT the
+effect of the turn alone. Measured where the log is actually sampled, the turn is **319 deg over
+24.5 s** and takes corner sigma 0.9885 -> **0.0480** (21x) at frame 13477, which is also the FIRST
+frame the layout is publishable. The paper quotes 13477 for exactly this reason. Anything computed
+across 13477->13478 is a lower bound on unsampled motion, not a measurement.
 
 So the estimator had the room correct and **refused to claim precision it had not earned from
 motion**. That is the epistemic claim demonstrated in a closed loop rather than argued: repeated
