@@ -63,9 +63,16 @@ def _rotation_degrees(f0, f1, drop_last=2):
 # (corner sigma 0.0480 m under the 0.06 m gate) and it is 55 ms after its predecessor, so the
 # interval 12999..13477 is fully sampled and the turn below is exact.
 _FA, _FB = 12999, 13477
+# ⚠ NO ROTATION FIGURE HERE, AND THIS IS NOT AN OVERSIGHT. The third column of this CSV is labelled
+# est_x,est_y,est_th and is NOT the robot pose: it is get_state()[2..4], the ROOM MODEL's x, y, phi
+# (commit 1b7d513, "the layout trace's pose column is the ROOM MODEL, not the robot" -- this run was
+# written by a binary predating that header fix). Every robot quantity derived from it was wrong: a
+# drawn robot, its bearing, "319 deg on the spot", a 4.4 cm excursion. The run carries no robot pose
+# anywhere, so the size of the turn cannot be recovered from it and is therefore not claimed.
+# The elapsed time IS real -- it comes from the ts_ms column.
 WANT = [(_FA, f"parked, {_parked_seconds(_FA):.0f} s"),
-        (_FB, f"after turning {_rotation_degrees(_FA, _FB):.0f}$^\\circ$ on the spot")]
-print(f"  labels: parked {_parked_seconds(_FA):.1f} s | rotation {_rotation_degrees(_FA,_FB):.1f} deg")
+        (_FB, "after a turn in place")]
+print(f"  labels: parked {_parked_seconds(_FA):.1f} s | panel B = first publishable frame")
 # ⚠ GENERATED AT THE SIZE IT IS PLACED AT. This figure sits at \columnwidth (~3.5 in); drawn at
 # 7.16 in it was scaled to 49% and every label rendered at half its nominal size, which is why the
 # text could not be read. Matplotlib points are only points if the figure is not resized afterwards.
@@ -141,35 +148,6 @@ for ax, (fr, title) in zip(axes, WANT):
         ax.text(mx_, my_, f"{length:.3f} m  ({err_mm:+.0f} mm)", fontsize=4.6, color="#31465c",
                 ha="center", va="center", rotation=0 if horiz else 90, zorder=8,
                 bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.85))
-
-    # ── THE ROBOT, AND WHICH WAY IT FACES ──────────────────────────────────────────────────────
-    # Drawn because the pair claims a ROTATION and a reader cannot see one in a room that does not
-    # move. ⚠ The disc is drawn AREA-EQUIVALENT to the true footprint, r = sqrt(0.2182/pi) = 0.2635 m,
-    # NOT at the 0.32 m robot_footprint_radius from config. That config number is the CIRCUMSCRIBED
-    # radius — the centre-to-corner distance of a roughly rectangular body (ROBOT_GEOMETRY.md: area
-    # 0.2182 m^2, inscribed 0.2300, circumscribed 0.3278) — so a disc drawn at it covers 1.55x the
-    # floor the robot actually occupies and reads as a much bigger machine. A clearance radius and a
-    # drawing radius are different quantities; using the planner's for a picture overstates the robot.
-    # The pose is rotated by the SAME canonical angle as the room, so the arrow shows the robot's
-    # bearing RELATIVE TO THE ROOM -- which is frame-free, and is the only orientation this run can
-    # honestly report: the map frame is gauge-free and the log carries no ground-truth robot pose, so
-    # an absolute heading would be a number about our own gauge, not about the robot.
-    # Both panels are canonicalised on the room's long wall, and the truth rectangle is drawn on that
-    # same wall, so the angle printed below is equally the bearing with respect to ground truth.
-    _rx, _ry, _rth = [float(v) for v in rows[fr][2].split(",")]
-    _ca = canonical_angle(parse(rows[fr])[0])
-    _px, _py = canonical(parse(rows[fr])[0])((_rx, _ry))
-    _h = _rth + _ca
-    ax.add_patch(Circle((_px, _py), 0.2635, facecolor="#1f2328", alpha=0.18, edgecolor="#1f2328",
-                        lw=0.6, zorder=7))
-    ax.annotate("", xy=(_px + 0.95 * _mm.cos(_h), _py + 0.95 * _mm.sin(_h)), xytext=(_px, _py),
-                arrowprops=dict(arrowstyle="-|>", color="#1f2328", lw=1.1,
-                                shrinkA=0, shrinkB=0, mutation_scale=6), zorder=8)
-    _bear = _mm.degrees((_h + _mm.pi) % (2 * _mm.pi) - _mm.pi)
-    ax.text(_px, _py - 0.62, f"{_bear:+.0f}$^\\circ$", fontsize=4.6, color="#1f2328",
-            ha="center", va="top", zorder=8,
-            bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="none", alpha=0.85))
-
 
     worst = max(C)
     ax.set_title(f"{title}\nworst corner $\\sigma$ = {worst:.3f} m"

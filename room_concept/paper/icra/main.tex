@@ -53,9 +53,10 @@ declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies 
 it exposed three distinct precision defects in three different modules, all instances of uncertainty
 that averages away past an error that does not, one of them in a module the instrument was not
 measuring. A single global precision is insufficient for this problem: the irreducible error varies by
-\num{5}$\times$ between the two settings we can measure it in and by \num{2}$\times$ between moving
-and standing still, so a constant calibrated in one setting need not remain calibrated in another,
-and precision has to be inferred rather than tuned.
+\num{5}$\times$ between the two settings we can measure it in, and the calibration of the channel
+that carries it differs between standing still and moving (Fig.~\ref{fig:motion}), so a constant
+calibrated in one setting need not remain calibrated in another, and precision should be inferred
+rather than tuned.
 \end{abstract}
 
 \section{Introduction}
@@ -72,12 +73,11 @@ checked.
 \includegraphics[width=\columnwidth]{fig/teaser}
 \caption{\textbf{The estimate is right before it is confident, and says so.} One closed-loop run; the
 same room in both panels, same scale, long axis horizontal. Pale band: ground truth, each dimension
-carrying its measured value and signed error. Discs: per-corner $\sigma$, to scale. The robot is drawn
-to scale, with its heading and its bearing relative to the room. \emph{Left}, parked for
-\SI{665}{\second}: the geometry is already within \SI{15}{\milli\meter} of truth, yet every corner
+carrying its measured value and signed error. Discs: per-corner $\sigma$, to scale. \emph{Left}, parked for
+\SI{665}{\second}: the geometry is already within \SI{13}{\milli\meter} of truth, yet every corner
 declares almost a metre of uncertainty and the layout is withheld. \emph{Right}, the first publishable
-frame, after turning \SI{319}{\degree} on the spot: the geometry moves by at most
-\SI{19}{\milli\meter} while corner $\sigma$ falls by a factor of \num{21}. The estimator does not earn
+frame, after a turn in place: the geometry moves by at most \SI{6}{\milli\meter}, and stays within
+\SI{19}{\milli\meter} of truth, while corner $\sigma$ falls by a factor of \num{21}. The estimator does not earn
 precision by waiting, and does not claim any.}
 \label{fig:teaser}
 \end{figure}
@@ -110,9 +110,9 @@ That is the property we exploit.
   with more observation from the error that does not, and a measurement of both terms on real sensor
   data (\S\ref{sec:unc}).
   \item Evidence that a single global precision is insufficient for this problem: the irreducible
-  component differs by \num{5}$\times$ between the two settings we measure it in and by
-  \num{2}$\times$ between motion states, which suggests systematic error is context-dependent rather
-  than captured by a fixed scalar (\S\ref{sec:notconstant}).
+  component differs by \num{5}$\times$ between the two settings we measure it in, and the channel
+  carrying it is calibrated only while the robot moves, which suggests systematic error is
+  context-dependent rather than captured by a fixed scalar (\S\ref{sec:notconstant}).
   \item Three precision defects found by calibration, including one localised in a module the
   statistic was not measuring---offered as evidence that a free-energy formulation is useful
   diagnostically, not only descriptively.
@@ -234,8 +234,8 @@ rather than tune it, and \S\ref{sec:notconstant} shows why it cannot be a consta
 We evaluate at three levels, and they establish different things. \S\ref{sec:geom} tests geometric
 inference and uncertainty calibration on \num{594} real room shapes, with observations simulated from
 the annotations. \S\ref{sec:real} validates the noise decomposition itself on real Matterport depth,
-which is what licenses the simulated sensor used in the first level. \S\ref{sec:webots} closes the
-loop in simulation with a LiDAR sensor model, which is where uncertainty drives action. No experiment
+which is what licenses the simulated sensor used in the first level. \S\ref{sec:webots} runs the estimator online in simulation with a LiDAR sensor model, where the
+uncertainty gates publication as it is produced. No experiment
 here runs on a physical robot, and we are explicit throughout about which claim rests on which level.
 
 \subsection{Geometric generality: 594 annotated floor plans}
@@ -457,7 +457,9 @@ averages down cannot produce an offset that does not. That is what sets up the n
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{fig/motion_nis}
-\caption{\textbf{The channel is calibrated only while the robot moves.} $\nis$ per rotation band
+\caption{\textbf{The channel is calibrated only while the robot moves.} Bands cover \num{21839} of
+the \num{126008} logged candidates, the ones whose frame carries a resolved rotation rate; $n$ is
+shown per band. $\nis$ per rotation band
 over a \SI{200}{\meter} tour, with the pose-induced corner uncertainty $\sigma_{\mathrm{pred}}$
 overlaid. Three independent bands of genuine motion sit at \numrange{0.90}{0.97}. At rest
 $\sigma_{\mathrm{pred}}$ collapses while the innovation grows, and under fast rotation the
@@ -484,20 +486,20 @@ and---the outcome we were actually watching---if the pose channel's known parked
 extends to the layout channel, the declared $\sigma$ will fall below the realised error while the
 robot is stationary and keep falling the longer it sits.
 
-It did not. Table~\ref{tab:webots} reports the run: \SI{665}{\second} parked, then a
-\SI{319}{\degree} turn on the spot.
+It did not. Table~\ref{tab:webots} reports the run: \SI{665}{\second} parked, then a turn in place.
 
 \begin{table}[t]
 \centering
-\caption{Closed loop, Webots, real LiDAR model, \SI{719}{\second}. Ground truth is the world's wall
-solids; $\sigma$ is the worst corner of the published polygon.}
+\caption{Closed loop, Webots, LiDAR sensor model. Ground truth is the world's wall solids;
+$\sigma$ is the worst corner of the published polygon. The run is \SI{762}{\second} long; each column
+is labelled with its time.}
 \label{tab:webots}
 \begin{tabular}{lccc}
 \toprule
- & parked, frame 0 & parked, \SI{665}{\second} & after the turn \\
+ & \SI{0}{\second} & \SI{665}{\second} & \SI{689}{\second} \\
 \midrule
 long edge   & \SI{5.994}{\meter} & \SI{5.995}{\meter} & \SI{5.994}{\meter} \\
-short edge  & \SI{4.015}{\meter} & \SI{4.012}{\meter} & \SI{4.019}{\meter} \\
+short edge  & \SI{4.016}{\meter} & \SI{4.013}{\meter} & \SI{4.019}{\meter} \\
 worst corner $\sigma$ & \SI{0.988}{\meter} & \SI{0.989}{\meter} & \textbf{\SI{0.048}{\meter}} \\
 worst edge $\sigma_d$ & \SI{0.500}{\meter} & \SI{0.500}{\meter} & \SI{0.019}{\meter} \\
 \bottomrule
@@ -506,22 +508,24 @@ worst edge $\sigma_d$ & \SI{0.500}{\meter} & \SI{0.500}{\meter} & \SI{0.019}{\me
 
 \emph{The geometry was already accurate before the uncertainty became small.} Standing still, the
 estimate was already
-$\SI{5.994}{\meter} \times \SI{4.015}{\meter}$---within \SI{6}{\milli\meter} and \SI{15}{\milli\meter} of truth---while
+$\SI{5.994}{\meter} \times \SI{4.016}{\meter}$---within \SI{6}{\milli\meter} and \SI{16}{\milli\meter} of truth---while
 the worst corner declared almost a metre of uncertainty and every edge offset sat at exactly its
 \SI{0.500}{\meter} prior. Over \SI{665}{\second} and \num{13000} frames, with five wall segments
 associating per frame, the worst corner $\sigma$ moved from \SI{0.9882}{\meter} to \SI{0.9885}{\meter} and
 the edge prior did not move at all (four of \num{53284} logged edge values departed from
-\SI{0.500}{\meter}). A \SI{319}{\degree} turn on the spot, over the next \SI{24.5}{\second}, then
-dropped the worst corner $\sigma$ by a factor of \num{21}, to \SI{0.048}{\meter}, while the geometry
-moved by millimetres. The third column is the \emph{first} frame the layout is publishable; $\sigma$
-keeps falling afterwards, to \SI{0.029}{\meter} a minute later, but the log is sampled at
+\SI{0.500}{\meter}). A turn in place, over the next \SI{24.5}{\second}, then dropped the worst corner
+$\sigma$ by a factor of \num{21}, to \SI{0.048}{\meter}, while the geometry moved by millimetres. We
+do not quote the size of that turn: this run logs the room model's pose, not the robot's, so the
+rotation it performed is not recoverable from it. The third column is the \emph{first} frame the layout is publishable; $\sigma$
+keeps falling afterwards, to \SI{0.031}{\meter} at \SI{719}{\second} and \SI{0.029}{\meter} at the
+end of the run, but the log is sampled at
 \SI{50}{\milli\second} only up to that frame and has a \SI{30}{\second} gap immediately after it, so
 the turn is quoted to where it can be measured rather than to where it looks largest.
 
 Two things this run cannot show. The map frame is \emph{gauge-free}---its origin and orientation are
 wherever the estimator put them---and the log carries no ground-truth robot pose, so we report the
-robot's bearing relative to the room, which is frame-free, and no absolute heading error, which would
-describe our own gauge rather than the robot. For the same reason both panels of Fig.~\ref{fig:teaser}
+no heading error at all, which would describe our own gauge rather than the robot. For the same
+reason both panels of Fig.~\ref{fig:teaser}
 are drawn with the long axis horizontal: the re-anchor rotates the frame between them, and every
 quantity claimed here---edge lengths, corner $\sigma$, the comparison with truth---is invariant to
 that rotation.
@@ -542,8 +546,11 @@ comparison informative.
 \subsection{Why a single global precision is insufficient}
 \label{sec:notconstant}
 
-On the robot we log, for every corner candidate at the association gate, the innovation and each term
-of its covariance: \num{126008} candidates over a \SI{200}{\meter} tour. Normalised innovation
+In the same simulator, driving a \SI{200}{\meter} tour of a \num{20}-corner apartment, we log for
+every corner candidate at the association gate the innovation and each term of its covariance:
+\num{126008} candidates. The reference layout here is traced from the building's floor plan rather
+than read from the world, because that world's walls are meshes rather than parametrised solids; it
+is therefore an imperfect map of a kind a deployed robot is often given, which is the point. Normalised innovation
 squared ($\nis$, divided by its two degrees of freedom) equals 1 when a covariance matches the error
 it claims.
 
@@ -567,9 +574,12 @@ observations that carry no new information about it.
 
 Combined with Table~\ref{tab:real}, the systematic term measures \SI{1.8}{\centi\meter} against a
 carefully annotated building and \SI{9.5}{\centi\meter} against a hand-traced layout---a factor of
-\num{5} for the same sensor and the same estimator---and varies by a factor of \num{2} between
+\num{5} between the two, measured by different instruments against different ground truths, and the
+\SI{1.8}{\centi\meter} is itself an upper bound because it includes the slice registration---and it
+varies by a factor of \num{2} between
 standing still and moving, because in motion the per-wall offsets partially cancel in the pose
-solution. These are two settings rather than a sample of environments, so the factor bounds the
+solution---the \nis{} of Fig.~\ref{fig:motion} is \num{0.90}--\num{0.97} in motion against
+\num{1.65} at rest. These are two settings rather than a sample of environments, so the factor bounds the
 variation we can demonstrate rather than estimating its spread: a constant calibrated in one setting
 need not remain calibrated in another, and one calibrated while the robot moves need not hold when it
 stops. This is the argument for representing the offset as an inferred state
@@ -578,11 +588,12 @@ with a prior rather than a compiled-in number.
 \subsection{Calibration as a diagnostic}
 
 Requiring precisions to mean what they say found three defects of one kind---uncertainty that
-averages down past an error that does not. In the layout channel the systematic term was absent
-(Table~\ref{tab:calib}). In the localisation channel it was present twice under two names, making the
-channel \num{2.1}$\times$ too timid; removing the duplicate and measuring the survivor moved $\nis$
-from \num{0.47} to \num{1.03}. In the pose estimator it is absent again, and was found by an
-instrument pointed at the layout. We regard the third as the strongest evidence that the formulation
+averages down past an error that does not, in three distinct places. In the \emph{layout} corner
+$\sigma$ of Table~\ref{tab:calib} the systematic term was absent. In the \emph{corner detector's}
+covariance it was present twice under two names for one quantity, making that channel
+\num{2.1}$\times$ too timid; removing the duplicate and measuring the survivor moved $\nis$ from
+\num{0.47} to \num{1.03}. In the \emph{pose} covariance of Fig.~\ref{fig:motion} it is absent again,
+and was found by an instrument pointed at the layout. We regard the third as the strongest evidence that the formulation
 does work rather than description: nothing in a pipeline of separately-tuned heuristics depends on a
 precision being right, so nothing in it would have flagged any of the three.
 

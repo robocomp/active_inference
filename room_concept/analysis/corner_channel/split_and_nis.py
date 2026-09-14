@@ -93,6 +93,10 @@ def main(probe_path, trace_path=None):
 
     # ── 1. NIS ────────────────────────────────────────────────────────────────────────────────
     acc = [r for r in rows if r[G] in ("0", "0.0")]
+    DX, DY = idx["det_x"], idx["det_y"]
+    by_det = defaultdict(dict)
+    for r in acc:
+        by_det[int(r[F])][int(r[M])] = (float(r[DX]), float(r[DY]))
     nis_all = [float(r[D2]) / 2.0 for r in acc]
     print(f"1. NIS/dof overall: {sum(nis_all)/len(nis_all):.3f}  (n={len(nis_all)}, target 1.0)")
 
@@ -117,17 +121,31 @@ def main(probe_path, trace_path=None):
               "(the probe file carries no pose; the band table needs it)")
 
     # ── 2 + 3. stationary stretches ───────────────────────────────────────────────────────────
-    still = set()
-    if pose:
-        rate = rates_from_pose(pose)
-        dt = 0.05
-        for f, (dth_deg, dxy) in rate.items():
-            if dxy / dt < STILL_V and math.radians(dth_deg) / dt < STILL_W:
-                still.add(f)
-        how = f"pose, |v|<{STILL_V} m/s and |w|<{STILL_W} rad/s"
-    else:
-        print("\n   ! stationary detection needs pose; supply layout_trace.csv")
-        return
+    # ★ STILLNESS IS RECOVERED FROM THE DETECTIONS, NOT FROM A POSE COLUMN. The probe carries no
+    # pose, and the file that would bridge frame->timestamp (layout_trace.csv) is not always written.
+    # Fitting a rigid transform between consecutive frames' shared corner detections gives the
+    # inter-frame motion directly: if the best-fit rotation is under 0.25 deg and the translation
+    # under 5 mm, the robot did not move between those frames. This needs nothing but the probe, and
+    # it is measured rather than asserted -- which matters here, because the one pose column this
+    # pipeline does log is the ROOM MODEL's, not the robot's (commit 1b7d513), and reading it as the
+    # robot's is exactly the error that put a wrong rotation figure into a paper figure.
+    def kabsch_still(a, b):
+        sh = [k for k in by_det.get(a, {}) if k in by_det.get(b, {})]
+        if len(sh) < 3:
+            return False
+        P = [by_det[a][k] for k in sh]; Q = [by_det[b][k] for k in sh]
+        pcx = sum(x for x, _ in P)/len(P); pcy = sum(y for _, y in P)/len(P)
+        qcx = sum(x for x, _ in Q)/len(Q); qcy = sum(y for _, y in Q)/len(Q)
+        sxx = sum((x-pcx)*(u-qcx) for (x, _), (u, _) in zip(P, Q))
+        sxy = sum((x-pcx)*(v-qcy) for (x, _), (_, v) in zip(P, Q))
+        syx = sum((y-pcy)*(u-qcx) for (_, y), (u, _) in zip(P, Q))
+        syy = sum((y-pcy)*(v-qcy) for (_, y), (_, v) in zip(P, Q))
+        th = math.atan2(sxy - syx, sxx + syy)
+        return abs(math.degrees(th)) < 0.25 and math.hypot(qcx-pcx, qcy-pcy) < 0.005
+
+    still = {f for a, f in zip(frames, frames[1:]) if kabsch_still(a, f)}
+    how = "rigid fit between consecutive frames' shared detections (<0.25 deg, <5 mm)"
+
     stretches, cur = [], []
     for f in frames:
         if f in still:
@@ -138,7 +156,8 @@ def main(probe_path, trace_path=None):
     if len(cur) >= MIN_STRETCH: stretches.append(cur)
     print(f"\n2. stationary stretches ({how}): {len(stretches)} of >={MIN_STRETCH} frames")
     if not stretches:
-        print("   none -- this run cannot support the repeat/scatter split. Re-run the tour with stops.")
+        print("   none -- this run cannot support the repeat/scatter split.")
+        print("   The tour needs deliberate stops of >= 30 s; re-run it.")
         return
 
     by_f = defaultdict(dict)

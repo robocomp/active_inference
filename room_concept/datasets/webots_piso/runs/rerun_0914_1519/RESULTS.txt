@@ -1,0 +1,17 @@
+148249 candidate rows over 13520 frames [0..13519]  from datasets/webots_piso/runs/rerun_0914_1519/corner_probe.csv
+  rejected by the gate: 25183 (17.0%) -- NIS below is over ACCEPTED rows and is censored by the gate
+
+1. NIS/dof overall: 0.751  (n=123066, target 1.0)
+   no layout_trace.csv given -> no rotation bands (the probe file carries no pose; the band table needs it)
+
+2. stationary stretches (rigid fit between consecutive frames' shared detections (<0.25 deg, <5 mm)): 12 of >=25 frames
+   139 corner-stretch pairs
+   repeats (bias)  median 0.0634 m
+   scatters (noise) median 0.0064 m
+   ratio 9.9x   bias exceeds scatter in 97% of pairs
+
+3. viewpoint test -- is the repeatable part attached to the WALL or the VIEWPOINT?
+   15 corners seen in >=3 stretches
+   within-stretch scatter  0.0069 m
+   between-stretch spread  0.0636 m   (9.3x within)
+   -> VIEWPOINT-attached: a map offset is ruled out
