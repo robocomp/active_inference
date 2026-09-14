@@ -22,24 +22,29 @@
 \BIBdecl
 
 \bibitem{liu2018floornet}
-C.~Liu, J.~Wu, and Y.~Furukawa, ``{F}loor{N}et: A unified framework for
-  floorplan reconstruction from 3{D} scans,'' 2018.
+C.~Liu, J.~Wu, and Y.~Furukawa, ``{FloorNet}: A unified framework for floorplan
+  reconstruction from {3D} scans,'' in \emph{European Conference on Computer
+  Vision (ECCV)}, 2018.
 
 \bibitem{chenfloorsp}
 J.~Chen, C.~Liu, J.~Wu, and Y.~Furukawa, ``Floor-{SP}: Inverse {CAD} for
-  floorplans by sequential room-wise shortest path.''
+  floorplans by sequential room-wise shortest path,'' in \emph{IEEE/CVF
+  International Conference on Computer Vision (ICCV)}, 2019.
 
 \bibitem{chen2022heat}
 J.~Chen, Y.~Qian, and Y.~Furukawa, ``{HEAT}: Holistic edge attention
-  transformer for structured reconstruction,'' 2022.
+  transformer for structured reconstruction,'' in \emph{IEEE/CVF Conference on
+  Computer Vision and Pattern Recognition (CVPR)}, 2022.
 
 \bibitem{yue2023roomformer}
 Y.~Yue, T.~Kontogianni, K.~Schindler, and F.~Engelmann, ``Connecting the dots:
-  Floorplan reconstruction using two-level queries,'' 2023.
+  Floorplan reconstruction using two-level queries,'' in \emph{IEEE/CVF
+  Conference on Computer Vision and Pattern Recognition (CVPR)}, 2023.
 
 \bibitem{xufrinet}
 H.~Xu, J.~Xu, Z.~Huang, P.~Xu, H.~Huang, and R.~Hu, ``{FRI}-{N}et: Floorplan
-  reconstruction via room-wise implicit representation.''
+  reconstruction via room-wise implicit representation,'' in \emph{European
+  Conference on Computer Vision (ECCV)}, 2024.
 
 \bibitem{su2023slibonet}
 J.-W. Su, K.-Y. Tung, C.-H. Peng, P.~Wonka, and H.-K. Chu, ``{SLIBO}-{N}et:
@@ -48,8 +53,9 @@ J.-W. Su, K.-Y. Tung, C.-H. Peng, P.~Wonka, and H.-K. Chu, ``{SLIBO}-{N}et:
   Systems (NeurIPS)}, 2023.
 
 \bibitem{liu2024polyroom}
-Y.~Liu, L.~Zhu, X.~Ma, H.~Ye, X.~Gao, X.~Zheng, and S.~Shen, ``{P}oly{R}oom:
-  Room-aware transformer for floorplan reconstruction,'' 2024.
+Y.~Liu, L.~Zhu, X.~Ma, H.~Ye, X.~Gao, X.~Zheng, and S.~Shen, ``{PolyRoom}:
+  Room-aware transformer for floorplan reconstruction,'' in \emph{European
+  Conference on Computer Vision (ECCV)}, 2024.
 
 \bibitem{liu2025cage}
 Y.~Liu, C.~Liu, B.~Wang, W.~Jiao, B.~Wu, L.~Fan, Y.~Chen, F.~Li, and B.~Xiong,
@@ -63,27 +69,31 @@ J.~Chen, R.~Deng, and Y.~Furukawa, ``{P}oly{D}iffuse: Polygonal shape
   Neural Information Processing Systems (NeurIPS)}, 2023.
 
 \bibitem{phung2026raster2seq}
-H.~Phung and H.~Averbuch-Elor, ``{R}aster2{S}eq: Polygon sequence generation
-  for floorplan reconstruction,'' 2026.
+H.~Phung and H.~Averbuch-Elor, ``{Raster2Seq}: Polygon sequence generation for
+  floorplan reconstruction,'' in \emph{ACM SIGGRAPH}, 2026.
 
 \bibitem{ye2025floorsam}
 H.~Ye, H.~Wang, Y.~Zhang, J.~Xiao, Y.~Jin, J.~Liu, W.-A. Zhang, U.~Sychou,
   A.~Tuzikov, V.~Sobolevskii, V.~Zakharov, B.~Sokolov, and M.~Fu,
   ``{F}loor{SAM}: {SAM}-guided floorplan reconstruction with semantic-geometric
-  fusion,'' 2025.
+  fusion,'' 2025, arXiv:2509.15750.
 
 \bibitem{hu2021mvlayoutnet}
-Z.~Hu, B.~Duan, Y.~Zhang, M.~Sun, and J.~Huang, ``{MVL}ayout{N}et: 3{D} layout
-  reconstruction with multi-view panoramas,'' 2021.
+Z.~Hu, B.~Duan, Y.~Zhang, M.~Sun, and J.~Huang, ``{MVLayoutNet}: {3D} layout
+  reconstruction with multi-view panoramas,'' in \emph{Proceedings of the 30th
+  ACM International Conference on Multimedia (ACM MM)}, 2022.
 
 \bibitem{su2022gprnet}
 J.-W. Su, C.-H. Peng, P.~Wonka, and H.-K. Chu, ``{GPR}-{N}et: Multi-view layout
-  estimation via a geometry-aware panorama registration network,'' 2022.
+  estimation via a geometry-aware panorama registration network,'' in
+  \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition
+  Workshops (CVPRW), OmniCV}, 2023.
 
 \bibitem{wangpsmnet}
 H.~Wang, W.~Hutchcroft, Y.~Li, Z.~Wan, I.~Boyadzhiev, Y.~Tian, and S.~B. Kang,
   ``{PSMN}et: Position-aware stereo merging network for room layout
-  estimation.''
+  estimation,'' in \emph{IEEE/CVF Conference on Computer Vision and Pattern
+  Recognition (CVPR)}, 2022.
 
 \bibitem{solarte2022mlc}
 B.~Solarte, C.-H. Wu, Y.-C. Liu, Y.-H. Tsai, and M.~Sun, ``360-{MLC}:
@@ -93,26 +103,31 @@ B.~Solarte, C.-H. Wu, Y.-C. Liu, Y.-H. Tsai, and M.~Sun, ``360-{MLC}:
 
 \bibitem{solarte2024raycasting}
 B.~Solarte, C.-H. Wu, J.-C. Jhang, J.~Lee, Y.-H. Tsai, and M.~Sun,
-  ``Self-training room layout estimation via geometry-aware ray-casting,''
-  2024.
+  ``Self-training room layout estimation via geometry-aware ray-casting,'' in
+  \emph{European Conference on Computer Vision (ECCV)}, 2024.
 
 \bibitem{hutchcroftcovispose}
 W.~Hutchcroft, Y.~Li, I.~Boyadzhiev, Z.~Wan, H.~Wang, and S.~B. Kang,
   ``{C}o{V}is{P}ose: Co-visibility pose transformer for wide-baseline relative
-  pose estimation in 360$^\circ$ indoor panoramas.''
+  pose estimation in 360$^\circ$ indoor panoramas,'' in \emph{European
+  Conference on Computer Vision (ECCV)}, 2022.
 
 \bibitem{lambertsalve}
 J.~Lambert, Y.~Li, I.~Boyadzhiev, L.~Wixson, M.~Narayana, W.~Hutchcroft,
   J.~Hays, F.~Dellaert, and S.~B. Kang, ``{SALV}e: Semantic alignment
-  verification for floorplan reconstruction from sparse panoramas.''
+  verification for floorplan reconstruction from sparse panoramas,'' in
+  \emph{European Conference on Computer Vision (ECCV)}, 2022.
 
 \bibitem{howardjenkins2019unconstrained}
 H.~Howard-Jenkins, S.~Li, and V.~Prisacariu, ``Thinking outside the box:
-  Generation of unconstrained 3{D} room layouts,'' 2019.
+  Generation of unconstrained 3{D} room layouts,'' in \emph{Asian Conference on
+  Computer Vision (ACCV)}, 2018.
 
 \bibitem{fayyazsanaviu2rle}
 P.~Fayyazsanavi, Z.~Wan, W.~Hutchcroft, I.~Boyadzhiev, Y.~Li, J.~Kosecka, and
-  S.~B. Kang, ``{U2RLE}: Uncertainty-guided 2-stage room layout estimation.''
+  S.~B. Kang, ``{U2RLE}: Uncertainty-guided 2-stage room layout estimation,''
+  in \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition
+  Workshops (CVPRW)}, 2023.
 
 \bibitem{bieri2025houselayout3d}
 V.~Bieri, M.-J. Rakotosaona, K.~Tateno, F.~Engelmann, and L.~Guibas,
@@ -122,45 +137,53 @@ V.~Bieri, M.-J. Rakotosaona, K.~Tateno, F.~Engelmann, and L.~Guibas,
 
 \bibitem{solarte2022dfpe}
 B.~Solarte, Y.-C. Liu, C.-H. Wu, Y.-H. Tsai, and M.~Sun, ``360-{DFPE}:
-  Leveraging monocular 360-layouts for direct floor plan estimation,'' 2022.
+  Leveraging monocular 360-layouts for direct floor plan estimation,''
+  \emph{IEEE Robotics and Automation Letters}, vol.~7, no.~4, pp. 8746--8753,
+  2022.
 
 \bibitem{avetisyan2024scenescript}
 A.~Avetisyan, C.~Xie, H.~Howard-Jenkins, T.-Y. Yang, S.~Aroudj, S.~Patra,
   F.~Zhang, D.~Frost, L.~Holland, C.~Orme, J.~Engel, E.~Miller, R.~Newcombe,
-  and V.~Balntas, ``{S}cene{S}cript: Reconstructing scenes with an
-  autoregressive structured language model,'' 2024.
+  and V.~Balntas, ``{SceneScript}: Reconstructing scenes with an autoregressive
+  structured language model,'' in \emph{European Conference on Computer Vision
+  (ECCV)}, 2024.
 
 \bibitem{luperto2020exploration}
 M.~Luperto, L.~Fochetta, and F.~Amigoni, ``Exploration of indoor environments
-  predicting the layout of partially observed rooms,'' 2020.
+  predicting the layout of partially observed rooms,'' in \emph{Proceedings of
+  the 20th International Conference on Autonomous Agents and MultiAgent Systems
+  (AAMAS)}, 2021, pp. 836--843.
 
 \bibitem{ericson2024floorist}
 L.~Ericson and P.~Jensfelt, ``Beyond the frontier: Predicting unseen walls from
-  occupancy grids by learning from floor plans,'' 2024.
+  occupancy grids by learning from floor plans,'' \emph{IEEE Robotics and
+  Automation Letters}, 2024.
 
 \bibitem{ho2025mapex}
 C.~Ho, S.~Kim, B.~Moon, A.~Parandekar, N.~Harutyunyan, C.~Wang, K.~Sycara,
-  G.~Best, and S.~Scherer, ``{M}ap{E}x: Indoor structure exploration with
-  probabilistic information gain from global map predictions,'' 2025.
+  G.~Best, and S.~Scherer, ``{MapEx}: Indoor structure exploration with
+  probabilistic information gain from global map predictions,'' in \emph{IEEE
+  International Conference on Robotics and Automation (ICRA)}, 2025, pp.
+  13\,074--13\,080.
 
 \bibitem{wang2025cogniplan}
 Y.~Wang, H.~He, J.~Liang, Y.~Cao, R.~Chakraborty, and G.~Sartoretti,
-  ``{C}ogni{P}lan: Uncertainty-guided path planning with conditional generative
-  layout prediction,'' 2025.
+  ``{CogniPlan}: Uncertainty-guided path planning with conditional generative
+  layout prediction,'' in \emph{Conference on Robot Learning (CoRL)}, 2025.
 
 \bibitem{luperto2024mapcompleteness}
 M.~Luperto, M.~M. Ferrara, G.~Boracchi, and F.~Amigoni, ``Estimating map
-  completeness in robot exploration,'' 2024.
+  completeness in robot exploration,'' 2024, arXiv:2406.13482.
 
 \bibitem{ahmed2023aslamreview}
 M.~F. Ahmed, K.~Masood, V.~Fremont, and I.~Fantoni, ``Active {SLAM}: A review
-  on last decade,'' 2023.
+  on last decade,'' \emph{Sensors}, vol.~23, no.~19, p. 8097, 2023.
 
 \bibitem{placed2023survey}
 J.~A. Placed, J.~Strader, H.~Carrillo, N.~Atanasov, V.~Indelman, L.~Carlone,
   and J.~A. Castellanos, ``A survey on active simultaneous localization and
   mapping: State of the art and new frontiers,'' \emph{IEEE Transactions on
-  Robotics}, 2023.
+  Robotics}, vol.~39, no.~3, pp. 1686--1705, 2023.
 
 \bibitem{placed2022enough}
 J.~A. Placed and J.~A. Castellanos, ``Enough is enough: Towards autonomous
@@ -169,7 +192,8 @@ J.~A. Placed and J.~A. Castellanos, ``Enough is enough: Towards autonomous
 
 \bibitem{poggiuncertainty}
 M.~Poggi, F.~Aleotti, F.~Tosi, and S.~Mattoccia, ``On the uncertainty of
-  self-supervised monocular depth estimation.''
+  self-supervised monocular depth estimation,'' in \emph{IEEE/CVF Conference on
+  Computer Vision and Pattern Recognition (CVPR)}, 2020.
 
 \bibitem{jarzabek2022uncertainty}
 M.~Jarz{\k{a}}bek-Rychard and H.-G. Maas, ``Uncertainty modeling for point
@@ -184,9 +208,10 @@ Y.~Liu, A.~Obukhov, J.~D. Wegner, and K.~Schindler, ``{P}oint2{B}uilding:
   Journal of Photogrammetry and Remote Sensing}, vol. 215, pp. 351--368, 2024.
 
 \bibitem{zou2021manhattan}
-C.~Zou \emph{et~al.}, ``Manhattan room layout reconstruction from a single
-  360$^\circ$ image: A comparative study of state-of-the-art methods,''
-  \emph{International Journal of Computer Vision}, 2021.
+C.~Zou, J.-W. Su, C.-H. Peng, A.~Colburn, Q.~Shan, P.~Wonka, H.-K. Chu, and
+  D.~Hoiem, ``Manhattan room layout reconstruction from a single 360$^\circ$
+  image: A comparative study of state-of-the-art methods,'' \emph{International
+  Journal of Computer Vision}, vol. 129, no.~5, pp. 1410--1431, 2021.
 
 \bibitem{chang2017matterport3d}
 A.~Chang, A.~Dai, T.~Funkhouser, M.~Halber, M.~Nie{\ss}ner, M.~Savva, S.~Song,
