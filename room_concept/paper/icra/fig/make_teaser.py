@@ -134,9 +134,25 @@ for ax, (fr, _t) in zip(axes, WANT):
                        alpha=0.75, zorder=0.5, joinstyle="miter"))
     ax.add_patch(MPoly(T, closed=True, facecolor="none", edgecolor="#31465c", lw=0.7,
                        ls=(0, (3, 2.4)), zorder=6))
-fig.subplots_adjust(left=0.005, right=0.995, top=0.83, bottom=0.075, wspace=0.02)
-fig.text(0.5, 0.015, "pale band: ground truth  ·  discs: per-corner $\\sigma$, to scale  ·  both panels drawn long-axis horizontal",
-         ha="center", fontsize=5.2, color="#31465c")
+fig.subplots_adjust(left=0.005, right=0.995, top=0.83, bottom=0.115, wspace=0.02)
+# ── THE LEGEND MUST FIT INSIDE THE FIGURE, AND ONE LINE DID NOT ───────────────────────
+# At 5.2 pt this legend was ~3.6 in of text inside a 3.46 in figure, so it ran off BOTH sides and
+# lost a character at each end ("ale band … horizonta"). matplotlib neither clips nor warns: text
+# placed with fig.text is simply drawn outside the canvas and cropped by the PDF media box, so it
+# looks correct in every check except the one that matters. Two lines fit with margin to spare, and
+# the assertion before savefig now fails the build rather than shipping a clipped legend again.
+_LEG = ["pale band: ground truth   ·   discs: per-corner $\\sigma$, drawn to scale",
+        "both panels: the same room, the same scale, long axis horizontal"]
+for _i, _s in enumerate(_LEG):
+    fig.text(0.5, 0.058 - 0.046 * _i, _s, ha="center", fontsize=5.0, color="#31465c")
+
+fig.canvas.draw()
+_W, _H = fig.get_size_inches() * fig.dpi
+for _t in fig.texts:
+    _bb = _t.get_window_extent(fig.canvas.get_renderer())
+    assert _bb.x0 >= 2 and _bb.x1 <= _W - 2, (
+        f"figure text runs off the canvas: {_t.get_text()!r} spans "
+        f"{_bb.x0:.0f}..{_bb.x1:.0f} of 0..{_W:.0f} px")
 fig.savefig("paper/icra/fig/teaser.pdf")
 print("wrote paper/icra/fig/teaser.pdf")
 for fr, t in WANT:

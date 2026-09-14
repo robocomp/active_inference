@@ -334,28 +334,44 @@ publication gate.}
 
 \begin{table}[t]
 \centering
-\caption{Calibration of the published corner $\sigma$ against ground truth. 4344 matched corners
-from 586 rooms. Intervals are \num{2000}-sample bootstraps resampling \emph{rooms}, not corners:
-corners of one room share its walls, its trajectory and its annotation, so a corner-level interval
-would be far too narrow. The last row is a single global precision calibrated on this same corpus.
-$\sigma$ is the largest-axis standard deviation of the corner's covariance. The columns are
-therefore empirical coverage, $P(\lVert e \rVert_2 \le k\sigma)$ for $k=1,2,3$ --- not a bound: a
-standard deviation makes no containment guarantee, and what is being tested is whether the declared
-$\sigma$ predicts the error that actually occurs.}
+% ── CAPTION SHORT, EXPLANATION IN A NOTE ────────────────────────────────────────────────────────
+% IEEEtran sets TABLE captions in small caps. That is the house style and it suits a short title, but
+% this caption was a nine-line paragraph, so the whole explanation rendered in small caps and read as
+% shouting. The rule is structural, not cosmetic: a table caption gets a title, and anything the
+% reader needs in order to interpret the numbers goes in a note below the rules, in normal type.
+\caption{Calibration of the published corner $\sigma$}
 \label{tab:calib}
+% tabcolsep 6pt x 2 x 6 columns = 72pt of padding alone, which put this tabular 67.8pt OVER the
+% column and let it run into the margin. Narrower padding plus \footnotesize fits it with room left.
+\setlength{\tabcolsep}{2pt}
+\footnotesize
 \begin{tabular}{lccccc}
 \toprule
-& $\le 1\sigma$ & $\le 2\sigma$ & $\le 3\sigma$ & publishable & claim holds \\
+& $\le 1\sigma$ & $\le 2\sigma$ & $\le 3\sigma$ & publish & holds \\
 \midrule
-no $\sigma_m$              & 46.7\% & 70.5\% & 81.2\% & 89.0\% & 85.8\% \\
-$\sigma_m=\SI{0.02}{\meter}$ & \textbf{65.3\%} & \textbf{85.0\%} & \textbf{91.2\%} & 89.0\% & 86.1\% \\
-\emph{95\% CI, by room} & \footnotesize{[62.7, 67.9]} & \footnotesize{[83.2, 86.8]}
-                        & \footnotesize{[89.9, 92.4]} & \footnotesize{[87.8, 90.4]}
-                        & \footnotesize{[84.2, 87.8]} \\
+no $\sigma_m$                & 46.7\% & 70.5\% & 81.2\% & 89.0\% & 85.8\% \\
+$\sigma_m=\SI{2}{\centi\meter}$ & \textbf{65.3\%} & \textbf{85.0\%} & \textbf{91.2\%} & 89.0\% & 86.1\% \\
+\emph{95\% CI, by room} & \scriptsize{[62.7, 67.9]} & \scriptsize{[83.2, 86.8]}
+                             & \scriptsize{[89.9, 92.4]} & \scriptsize{[87.8, 90.4]}
+                             & \scriptsize{[84.2, 87.8]} \\
 \midrule
-single global $\sigma_c$   & 65.3\% & --- & --- & 100\% & --- \\
+global $\sigma_c$ (fitted) & 65.3\% & --- & --- & 100\% & --- \\
 \bottomrule
 \end{tabular}
+
+\vspace{2pt}
+\begin{minipage}{\columnwidth}
+\footnotesize
+\num{4344} matched corners from \num{586} rooms. $\sigma$ is the largest-axis standard deviation of
+the corner's covariance, so the first three columns are empirical coverage,
+$P(\lVert e \rVert_2 \le k\sigma)$ --- \emph{not} a bound: a standard deviation makes no containment
+guarantee, and what is tested is whether the declared $\sigma$ predicts the error that occurs.
+\emph{publish} is the fraction of corners passing the \SI{6}{\centi\meter} gate and \emph{holds} the
+fraction whose claim is borne out. Intervals are \num{2000}-sample bootstraps resampling
+\emph{rooms}, not corners: corners of one room share its walls, its trajectory and its annotation, so
+a corner-level interval would be far too narrow. The last row is a single global precision calibrated
+on this same corpus.
+\end{minipage}
 \end{table}
 
 \textbf{One global precision cannot do this job.} The last row of Table~\ref{tab:calib} is the
@@ -397,12 +413,13 @@ of \SI{7.5}{\milli\meter}).
 \centering
 \caption{The two components, measured on real depth against annotated walls.}
 \label{tab:real}
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{lSS}
 \toprule
 & {median (\si{\meter})} & {p90} \\
 \midrule
 scatter about the fitted wall (averages down) & 0.0149 & 0.0382 \\
-fitted wall vs.\ annotated wall (does not) & 0.0181 & 0.0572 \\
+fitted vs.\ annotated wall (does not) & 0.0181 & 0.0572 \\
 \bottomrule
 \end{tabular}
 \end{table}
