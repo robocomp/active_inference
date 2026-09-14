@@ -11,9 +11,16 @@ UPPER bound on our offset, exactly as the Matterport 1.8 cm is.
 
 ## What will be reported, whatever the values
 
-1. **NIS/dof at the corner association gate**, over the whole tour, and binned by per-frame |Δθ| into
-   the SAME bands as Fig. 4: `<0.25`, `0.25–0.5`, `0.5–1`, `1–2`, `2–4` deg/frame. Report **n per
-   band**. A band with n < 100 is reported and labelled underpowered; it is not dropped.
+1. **NIS/dof at the corner association gate**, reported for BOTH populations — every candidate, and
+   the subset the gate accepts — and split by motion state using the rigid-fit stillness test in
+   `analysis/corner_channel/split_and_nis.py`. Report n for each.
+   ⚠ Amended 2026-09-14: this originally said "the same bands as Fig. 4". That figure has since been
+   dropped from the paper, because its claim did not reproduce. There is also no frame-to-timestamp
+   bridge in the logs, so per-frame rotation *rate* bands are not computable; the stillness split is,
+   and needs no pose column at all.
+   ⚠ Do NOT use the `sigma_pred` column of `corner_nis.csv` for any motion-state comparison. It is
+   `s_pred_sum / s_terms_n`, a running mean over the tour, so it is flat by construction. Use the
+   per-candidate `sprd_*` terms in the probe.
 2. **The repeat/scatter decomposition of the corner innovation at stationary frames.** For each corner
    observed over a stationary stretch: the per-corner MEAN innovation is the part that *repeats*, the
    spread about it is the part that *scatters*. Report both, their ratio, and the fraction of corners

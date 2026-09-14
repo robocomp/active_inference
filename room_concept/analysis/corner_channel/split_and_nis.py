@@ -185,6 +185,35 @@ def main(probe_path, trace_path=None):
     print(f"   ratio {med(bs)/med(ns):.1f}x   bias exceeds scatter in "
           f"{100*sum(1 for p in pairs if p[2] > p[3])/len(pairs):.0f}% of pairs")
 
+    # ── NIS and sigma_pred, PER CANDIDATE, from the probe alone ───────────────────────────────
+    # ⚠ DO NOT USE corner_nis.csv's sigma_pred COLUMN FOR THIS. It is T.s_pred_sigma(), which is
+    # s_pred_sum / s_terms_n -- a running mean over the whole tour to that point (corner_detector.h).
+    # It cannot respond to motion state: it is flat BY CONSTRUCTION, and splitting it by stillness
+    # measures only where in the tour the stops happened to fall. A draft of this paper reported that
+    # flatness as a finding. The per-candidate term is sprd_xx/xy/yy in the probe, below.
+    # ⚠ AND THE GATE CENSORS NIS. d2 is the statistic the association gate tests, so quoting one
+    # population without the other picks a side: pre-gate includes the mis-associations the gate
+    # exists to reject, accepted-only is conditioned on having passed. Both are printed.
+    def sig_major(r):
+        a, b, c = float(r[PXX]), float(r[PXY]), float(r[PYY])
+        tr, det = a + c, a * c - b * b
+        disc = max(tr * tr / 4.0 - det, 0.0)
+        return math.sqrt(max(tr / 2.0 + math.sqrt(disc), 0.0))
+    PXX, PXY, PYY = idx["sprd_xx"], idx["sprd_xy"], idx["sprd_yy"]
+    med = lambda a: sorted(a)[len(a) // 2] if a else float("nan")
+    print(f"\n2b. NIS and sigma_pred by motion state, per candidate (no pose column used)")
+    print(f"   {'population':>22} {'n':>8} {'NIS/dof':>9} {'sigma_pred med':>15}")
+    for lab, sel in (("pre-gate, still",  [r for r in rows if int(r[F]) in still]),
+                     ("pre-gate, moving", [r for r in rows if int(r[F]) not in still]),
+                     ("accepted, still",  [r for r in acc  if int(r[F]) in still]),
+                     ("accepted, moving", [r for r in acc  if int(r[F]) not in still])):
+        if not sel: continue
+        print(f"   {lab:>22} {len(sel):8d} {sum(float(r[D2]) for r in sel)/2.0/len(sel):9.3f}"
+              f" {med([sig_major(r) for r in sel]):15.4f}")
+    sp_still = med([sig_major(r) for r in acc if int(r[F]) in still])
+    print(f"   -> sigma_pred at rest {sp_still:.4f} m against a repeatable innovation of "
+          f"{med(bs):.4f} m: the pose covariance carries no term the size of the bias")
+
     print(f"\n3. viewpoint test -- is the repeatable part attached to the WALL or the VIEWPOINT?")
     per_k = defaultdict(list)
     for sid, k, bias, noise, mx, my in pairs:

@@ -53,9 +53,10 @@ declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies 
 it exposed three distinct precision defects in three different modules, all instances of uncertainty
 that averages away past an error that does not, one of them in a module the instrument was not
 measuring. A single global precision is insufficient for this problem: the part of the error that does not
-average is most of an order of magnitude larger than the part that does, and it depends on the
-viewpoint rather than on the map---so a constant calibrated in one setting need not remain calibrated
-in another, and precision should be inferred rather than tuned.
+average is several times larger than the part that does, it depends on the viewpoint rather than on
+the map, and the precision declared for it is smaller than it---so a constant calibrated under one
+condition need not remain calibrated under another, and precision should be inferred rather than
+tuned.
 \end{abstract}
 
 \section{Introduction}
@@ -107,10 +108,11 @@ That is the property we exploit.
   why.
   \item A propagation from returns to corner covariance that separates the error that averages down
   with more observation from the error that does not, and a measurement of both terms on real sensor
-  data (\S\ref{sec:unc}).
+  data (\S\ref{sec:real}).
   \item Evidence that a single global precision is insufficient for this problem: the non-averaging
-  part of the error is most of an order of magnitude larger than the averaging part, and it is
-  viewpoint-dependent rather than a property of the map (\S\ref{sec:notconstant}).
+  part of the error is several times larger than the averaging part, it is viewpoint-dependent rather
+  than a property of the map, and the declared pose precision does not cover it
+  (\S\ref{sec:notconstant}).
   \item Three precision defects found by calibration, including one localised in a module the
   statistic was not measuring---offered as evidence that a free-energy formulation is useful
   diagnostically, not only descriptively.
@@ -224,7 +226,7 @@ down.} What remains when the statistics are exhausted is systematic---the offset
 wall and the real surface, identical on every look from a given viewpoint---and it is what
 $\sigma_m$ represents. Omitting it produces an estimator that grows arbitrarily confident about a
 corner whose error is bounded below; double-counting it produces one that is timid. We measure it
-rather than tune it, and \S\ref{sec:notconstant} shows why it cannot be a constant.
+rather than tune it, and \S\ref{sec:notconstant} shows why a constant does not suffice.
 
 \section{Experiments}
 \label{sec:exp}
@@ -468,9 +470,10 @@ angles are invariant to the map frame}, so the estimate can be scored with no ri
 other layout comparison in this literature must align first, and alignment absorbs the global pose
 error into the score. Here it does not arise. We pre-registered the predictions before the run: the
 polygon closes on four corners, the recovered width falls within two declared $\sigma$ of truth,
-and---the outcome we were actually watching---if the pose channel's known parked-covariance defect
-extends to the layout channel, the declared $\sigma$ will fall below the realised error while the
-robot is stationary and keep falling the longer it sits.
+and---the outcome we were actually watching---if the pose channel's known defect, a covariance that
+omits the repeatable part of the error (\S\ref{sec:notconstant}), extends to the layout channel, the
+declared $\sigma$ will fall below the realised error while the robot is stationary and keep falling
+the longer it sits.
 
 It did not. Table~\ref{tab:webots} reports the run: \SI{665}{\second} parked, then a turn in place.
 
@@ -558,11 +561,21 @@ averages. It is a repeatable, viewpoint-dependent error that the model represent
 standing still accumulates confidence against it from observations that carry no new information
 about it.
 
+\emph{The declared precision does not cover this.} Over the same stationary stretches the
+pose-induced term $\sigma_{\text{pred}}$ has a median of \SI{0.046}{\meter} against a repeatable
+innovation of \SI{0.057}{\meter}: the pose covariance carries no term the size of the bias. The
+$\nis$ this produces depends on which population is asked, and we report both rather than choosing:
+over every candidate it is \num{2.51} at rest and \num{2.28} in motion, and over the
+\SI{73}{\percent} the association gate accepts, \num{0.75} and \num{0.80}. Neither sits at \num{1};
+the total is too large before the gate and too small after it, and in both cases its pose term is
+smaller than the bias it must cover.
+
 \emph{How much of this is one run.} The magnitude is run-dependent: two tours of this environment,
 analysed by the same script, give repeat/scatter ratios of \num{5.6} and \num{8.7}, with the repeating
-term between \SI{4}{\centi\meter} and \SI{6}{\centi\meter}. What is stable is the shape---most of an
-order of magnitude between the two parts, the bias dominating in \SIrange{92}{97}{\percent} of
-pairs---and that is what the argument uses. A single number here would be a worse claim than the
+term between \SI{4}{\centi\meter} and \SI{6}{\centi\meter}---the variation a viewpoint-attached error
+predicts, since each tour stops at different viewpoints. What is stable is the shape---a factor of six
+to nine between the two parts, the bias dominating in \SI{97}{\percent} of pairs in this run---and
+that is what the argument uses. A single number here would be a worse claim than the
 ratio. This is the argument for representing the offset as an inferred state
 with a prior rather than a compiled-in number.
 
@@ -573,7 +586,8 @@ averages down past an error that does not, in three distinct places. In the \emp
 $\sigma$ of Table~\ref{tab:calib} the systematic term was absent. In the \emph{corner detector's}
 covariance it was present twice under two names for one quantity, making that channel
 \num{2.1}$\times$ too timid; removing the duplicate and measuring the survivor moved $\nis$ from
-\num{0.47} to \num{1.03}. In the \emph{pose} covariance feeding $\sigma_{\text{pred}}$ it is absent again,
+\num{0.47} to \num{1.03} over accepted candidates on the tour it was measured on. In the \emph{pose}
+covariance feeding $\sigma_{\text{pred}}$ it is absent again,
 and was found by an instrument pointed at the layout. We regard the third as the strongest evidence that the formulation
 does work rather than description: nothing in a pipeline of separately-tuned heuristics depends on a
 precision being right, so nothing in it would have flagged any of the three.
@@ -581,7 +595,7 @@ precision being right, so nothing in it would have flagged any of the three.
 \section{Limitations}
 \label{sec:limits}
 
-Observations in \S\ref{sec:exp} are simulated from the annotated polygons; \S\ref{sec:real} validates
+Observations in \S\ref{sec:geom} and \S\ref{sec:calib} are simulated from the annotated polygons; \S\ref{sec:real} validates
 the noise model but not the full pipeline on recorded data. We attempted a full pipeline evaluation on
 MP3D-FPE~\cite{solarte2022dfpe} and report a negative result we believe is useful to others. Because
 it annotates \emph{rooms inside open-plan buildings} while a \SI{360}{\degree} depth sensor sees
