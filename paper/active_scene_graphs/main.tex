@@ -277,6 +277,24 @@ This work & $\bullet$ & $\bullet$ & $\bullet$ & $\bullet$ & $\bullet$ \\
 
 \section{Definition: the Active Scene Graph}\label{sec:def}
 
+Fig.~\ref{fig:viewer} shows a live \asg\ as its viewer agent draws it, with the graph's strata
+pulled apart vertically so that the structure is visible: the robot at the bottom, the room with
+its walls and doors above it, the object instances above that, their parts, and at the top the
+meta-concepts that group instances into a kitchen or a dining set. Every element in the figure is a
+node with a posterior behind it, and every line is a typed edge.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig/asg_viewer}
+\caption{A live Active Scene Graph, captured from the fleet's viewer agent during a run in the
+simulated apartment. The strata (robot, room, instances, parts, meta-concepts) are separated
+vertically. The room is a polygon of walls with three doors; the instances are tables, chairs,
+cabinets, a refrigerator and a bottle, each drawn from its own belief; the two rings at the top are
+meta-concepts, a kitchen and a dining set, that group instances by their spatial relations. Lines
+are the graph's edges, most of them \texttt{RT} transforms from the room frame.}
+\label{fig:viewer}
+\end{figure}
+
 \subsection{Nodes are concepts}
 
 A node $n$ is a tuple $(c,\,\mu_n,\,\Sigma_n,\,\Pi_n,\,\ell_n,\,a_n)$ consisting of a class $c$, a
