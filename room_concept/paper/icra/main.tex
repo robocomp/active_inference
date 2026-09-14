@@ -286,7 +286,10 @@ publication gate.}
 
 \begin{table}[t]
 \centering
-\caption{Calibration of the published corner $\sigma$ against ground truth. 4344 matched corners.
+\caption{Calibration of the published corner $\sigma$ against ground truth. 4344 matched corners
+from 586 rooms. Intervals are \num{2000}-sample bootstraps resampling \emph{rooms}, not corners:
+corners of one room share its walls, its trajectory and its annotation, so a corner-level interval
+would be far too narrow. The last row is a single global precision calibrated on this same corpus.
 $\sigma$ is the largest-axis standard deviation of the corner's covariance. The columns are
 therefore empirical coverage, $P(\lVert e \rVert_2 \le k\sigma)$ for $k=1,2,3$ --- not a bound: a
 standard deviation makes no containment guarantee, and what is being tested is whether the declared
@@ -298,9 +301,32 @@ $\sigma$ predicts the error that actually occurs.}
 \midrule
 no $\sigma_m$              & 46.7\% & 70.5\% & 81.2\% & 89.0\% & 85.8\% \\
 $\sigma_m=\SI{0.02}{\meter}$ & \textbf{65.3\%} & \textbf{85.0\%} & \textbf{91.2\%} & 89.0\% & 86.1\% \\
+\emph{95\% CI, by room} & \footnotesize{[62.7, 67.9]} & \footnotesize{[83.2, 86.8]}
+                        & \footnotesize{[89.9, 92.4]} & \footnotesize{[87.8, 90.4]}
+                        & \footnotesize{[84.2, 87.8]} \\
+\midrule
+single global $\sigma_c$   & 65.3\% & --- & --- & 100\% & --- \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\textbf{One global precision cannot do this job.} The last row of Table~\ref{tab:calib} is the
+obvious alternative: a single $\sigma_c$ fitted to this very corpus, chosen so that it reproduces our
+$1\sigma$ coverage exactly ($\sigma_c=\SI{0.0317}{\meter}$). It is therefore calibrated as favourably
+as the data allow --- and it is useless for the task. Being constant it has rank correlation zero with
+the realised error by construction, and under the \SI{6}{\centi\meter} gate it publishes
+\SI{100}{\percent} of corners, because every corner carries the same number and the gate has nothing
+to separate. A scalar can be calibrated \emph{on average} and still be unable to tell one corner from
+another, which is the distinction this paper is about.
+
+\textbf{What $\sigma$ is, and is not, good for.} Between the two gate classes the separation is clean
+and survives the room-level interval: published corners have a median error of
+\SI{0.0202}{\meter} (CI \SIrange{0.0185}{0.0220}{\meter}) against \SI{0.0364}{\meter}
+(CI \SIrange{0.0312}{0.0446}{\meter}) for withheld ones, and the intervals do not overlap. Ranking
+\emph{within} a class is weaker: the Spearman correlation between declared $\sigma$ and realised error
+is \num{0.125} (CI \numrange{0.088}{0.161})--- significantly positive, but small. We report it
+because it bounds the claim honestly: this $\sigma$ is a trustworthy \emph{decision variable} for the
+publish/withhold question it is used for, not a fine-grained ordering of corners by accuracy.
 
 \textbf{The actionable claim.} Publication is gated at $\sigma \le \SI{6}{\centi\meter}$. A corner the
 system declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within the
