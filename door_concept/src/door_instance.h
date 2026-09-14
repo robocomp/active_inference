@@ -92,6 +92,15 @@ struct DoorInstance
     // live 2026-09-13 — the cycle reporting phi = 0 deg on a (coincidentally) shut door had zero LiDAR
     // points and all three channel weights exactly zero. sigma near the full range means NOT MEASURED.
     float phi_sigma    = 2.0944f;   // rad; seeded at the full range = "nothing known yet"
+    // ★THE MEASUREMENT THAT DECIDES WHETHER THE MODEL OR THE SELECTION IS AT FAULT. At phi = 0 (a shut
+    // leaf, flush in the aperture) a correct model + correct selection should EXPLAIN nearly every ray in
+    // the doorway column. If it explains almost none, the rays are not landing on the modelled leaf and
+    // no change to the likelihood can help. dbg_ray_signed0 says which way they miss: negative = stopping
+    // SHORT of the leaf (floor, step, frame in the way), positive = flying PAST it (the leaf is not where
+    // the model puts it, or is not there at all).
+    int   dbg_ray_hit0 = 0;        // rays for which the model at phi=0 predicts ANY hit
+    int   dbg_ray_expl0 = 0;       // …of which the measured range matches, within tolerance
+    float dbg_ray_signed0 = 0.0f;  // mean signed (predicted - measured) over the predicted hits, m
     float dbg_phi_cv   = 0.0f;   // spread of the combined phi likelihood; 0 = perfectly flat
     bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
     float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est

@@ -395,4 +395,37 @@ DoorBelief::phi_ray_likelihood(const rc::ai::LidarRays& rays, float phi_min, flo
     return out;
 }
 
+
+DoorBelief::RayExplain DoorBelief::phi_ray_explain(const rc::ai::LidarRays& rays, float phi, float tol_m) const
+{
+    RayExplain out;
+    if (rays.endpoints.empty())
+        return out;
+    DoorBelief probe(state_, params_);
+    probe.set_leaf_phi(phi);
+    const float tcap = rays.max_range_m;
+    double acc = 0.0; int n = 0;
+    for (const auto& ep : rays.endpoints)
+    {
+        const Eigen::Vector3f dir = ep - rays.origin;
+        const float rho = dir.norm();
+        if (rho < 1e-3f) continue;
+        const Eigen::Vector3f u = dir / rho;
+        float t = 0.0f; bool hit = false;
+        for (int it = 0; it < rays.max_steps and t < tcap; ++it)
+        {
+            const float d = probe.sdf_prim(rays.origin + t * u, probe.state_, 0);
+            if (d < rays.surf_eps_m) { hit = true; break; }
+            t += std::max(d, rays.surf_eps_m);
+        }
+        if (not hit) continue;              // the model predicts nothing here: not a hit to explain
+        ++out.n_hit;
+        const float e = t - rho;            // + ⇒ the ray flew PAST; - ⇒ it stopped SHORT of the model
+        acc += e; ++n;
+        if (std::abs(e) < tol_m) ++out.n_explained;
+    }
+    out.mean_signed_m = n > 0 ? static_cast<float>(acc / n) : 0.0f;
+    return out;
+}
+
 }  // namespace rc

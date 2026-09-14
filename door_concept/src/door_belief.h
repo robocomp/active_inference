@@ -221,6 +221,22 @@ public:
     // exactly the evidence that distinguishes open from closed. Uses the sensor ORIGIN, which a point
     // cloud does not carry.
     [[nodiscard]] float phi_ray_free_energy(const rc::ai::LidarRays& rays, float phi) const;
+
+    // ── THE MEASUREMENT BEFORE THE MODEL CHANGE ──────────────────────────────────────────────────
+    // ★HOW MANY OF THESE RAYS DOES THE MODEL ACTUALLY EXPLAIN, at a given angle? With a leaf-only model
+    // a CLOSED door should already be decisive: nearly every ray in the aperture column should stop ON
+    // the leaf, giving a large free-energy gap against any open hypothesis. Measured 2026-09-13 it was
+    // flat instead — which means the selected rays are NOT stopping on the modelled leaf, and that is a
+    // selection or geometry fault that no change to the likelihood can repair. Suspects, unverified: the
+    // bpearl is a DOWNWARD DOME (ROBOT_GEOMETRY.md), so most of its rays toward a door 2-3 m away may hit
+    // the floor first; the aperture's s or floor_z may be out by more than sigma; the real doorway may
+    // have a step. `helios`, the plane that sees the leaf at mid-height where the lever arm from the
+    // hinge is the full width, is not used for phi at all.
+    // ★`mean_signed` says WHERE they stop instead: negative ⇒ the return is SHORTER than the model
+    // predicts (something in front — floor, step, frame), positive ⇒ the ray flew PAST the leaf. Those
+    // are different faults with different fixes, and a count alone cannot tell them apart.
+    struct RayExplain { int n_hit = 0; int n_explained = 0; float mean_signed_m = 0.0f; };
+    [[nodiscard]] RayExplain phi_ray_explain(const rc::ai::LidarRays& rays, float phi, float tol_m) const;
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_ray_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep) const;
 

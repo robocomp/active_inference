@@ -1,0 +1,50 @@
+# ltsm_agent, MEMORY GRAPH ONLY -- one graph on domain 2, no live fleet.
+#
+# Use this to work on the long-term memory graph offline: it seeds domain 2 from ltsm_root.json and
+# never touches domain 0, so it cannot disturb a running fleet and does not need one to be up.
+# etc/config.toml is the real thing (both domains).
+#
+# TWO quirks of the generated code make this file look inconsistent. Both are load-bearing:
+#
+# 1. The GRAPH is declared in an [Agent.ltsm] sub-table, not in the flat single-instance form,
+#    because the flat form files the graph under the key "" and this agent looks its graphs up BY
+#    NAME. (genericworker.cpp, the surNames.empty() branch.)
+#
+# 2. The VIEWER flags are flat under [Agent] anyway, because setupViewer's prefix is
+#    `"Agent"` and only becomes `"Agent.<name>"` when Graphs.size() > 1
+#    (generated/genericworker.cpp:228-230). With a single graph it reads Agent.tree / Agent.graph /
+#    Agent.2d, and a missing key THROWS (ConfigLoader.tpp:11) from inside a Qt event handler --
+#    which surfaces only as "Qt has caught an exception thrown from an event handler".
+#
+# So: sub-table for the graph, flat keys for the viewer. Do not "tidy" either into the other.
+
+[Agent]
+id   = 19
+name = "ltsm_agent"
+# Viewer flags for the single-graph case -- see quirk 2 above.
+tree  = false
+graph = true
+2d    = false
+
+[Agent.ltsm]
+configFile = "ltsm_root.json"
+domain     = 2
+tree       = false
+graph      = true
+2d         = false
+
+[Period]
+Compute   = 1000
+Emergency = 500
+
+[Component.Debug]
+Verbose = true
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+[SelfTest]
+probe = false

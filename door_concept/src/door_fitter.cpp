@@ -673,7 +673,8 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
                  // geometrically indistinguishable from the wall itself and LiDAR can only ever see an
                  // OPEN one. A high off_plane with a low phi, or a low one with a high phi, is a
                  // contradiction the angle alone cannot show.
-                 << "leaf_pts,w_sdf,w_mask,w_edge,phi_sigma,phi_measured,off_plane,phi_cv\n";
+                 << "leaf_pts,w_sdf,w_mask,w_edge,phi_sigma,phi_measured,off_plane,phi_cv,"
+                 << "ray_hit0,ray_expl0,ray_signed0\n";
     }
     const auto& s = inst.ai2_belief.state();
     const Eigen::Vector2f c = inst.ai2_belief.center_xy();   // APERTURE centre (see DoorBelief) — unchanged by phi
@@ -686,7 +687,9 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << inst.leaf.phi << ','
              << inst.dbg_leaf_pts << ',' << inst.dbg_w_sdf << ',' << inst.dbg_w_mask << ','
              << inst.dbg_w_edge << ',' << inst.phi_sigma << ',' << (inst.phi_measured ? 1 : 0) << ','
-             << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_cv << '\n';
+             << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_cv << ','
+             << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ','
+             << inst.dbg_ray_signed0 << '\n';
     ai2_csv_.flush();
 }
 
@@ -1106,6 +1109,15 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         // Now the beam model's RANGE NOISE sigma, not a robust scale: how precisely a return
         // locates a surface. The LiDAR's own noise, not the door's size.
         rays.robust_c_m  = 0.05f;
+        // ★THE DIAGNOSTIC, TAKEN BEFORE ANY MODEL CHANGE. Tolerance is 3 sigma of the range noise: a ray
+        // that stops within that of where a SHUT leaf would be is explained by one. On a closed door this
+        // ratio should be near 1; anything near 0 says the selection is not looking at the leaf.
+        {
+            const auto ex = inst.ai2_belief.phi_ray_explain(rays, 0.0f, 3.0f * rays.robust_c_m);
+            inst.dbg_ray_hit0     = ex.n_hit;
+            inst.dbg_ray_expl0    = ex.n_explained;
+            inst.dbg_ray_signed0  = ex.mean_signed_m;
+        }
         inst.dbg_leaf_pts       = static_cast<int>(rays.endpoints.size());
         inst.dbg_leaf_off_plane = off;
     }

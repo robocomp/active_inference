@@ -272,5 +272,8 @@ private:
     int           canvas_drawn_ = 0;               // present() calls in the window
     std::uint64_t canvas_last_stamp_ = 0;          // to count DISTINCT staged frames
     int           canvas_fed_ = 0;
+    // ★WHAT THE SCENE RENDERS TO, not what was staged into it. See Viewer2D::paint_probe.
+    std::uint32_t canvas_paint_hash_ = 0;          // last heartbeat's off-screen render hash
+    int           canvas_paint_static_ = 0;        // consecutive heartbeats with an IDENTICAL hash
     DisplaySnapshot snapshot_;
 };

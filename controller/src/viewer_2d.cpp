@@ -8,6 +8,9 @@
 #include <QPen>
 #include <QPainterPath>
 #include <QPolygonF>
+#include <QHash>
+#include <QImage>
+#include <QPixmap>
 
 #include <algorithm>
 #include <cmath>
@@ -136,6 +139,25 @@ public:
     ControllerGraphicViewer(QWidget *parent, const QRectF &dim, bool draw_axis)
         : AbstractGraphicViewer(parent, dim, draw_axis)
     {
+        // ── A STALE PIXEL MUST NOT BE REPRESENTABLE ──────────────────────────────────────────────
+        // The base viewer leaves the view on BoundingRectViewportUpdate with NO background brush.
+        // Both halves of that are how a frozen canvas becomes SILENT:
+        //   · BoundingRectViewportUpdate repaints only the accumulated dirty rect and lets Qt scroll
+        //     the viewport by BLITTING, so a repaint that never comes leaves the previous frame's
+        //     pixels sitting where they were copied to. Measured 2026-09-10: the canvas held one
+        //     image for >30 s, byte-identical, while fed=24 Hz / drawn=31 Hz / items 2900..2960 all
+        //     said the scene was being rebuilt — and what was on screen was the room, the route and
+        //     the occupancy REPEATED at a 179 px horizontal pitch, i.e. several old paints stacked
+        //     at the offsets the view had scrolled through. Not one of them was current.
+        //   · with the brush left at Qt::NoBrush nothing erases the viewport, so a frame that draws
+        //     NOTHING (a non-finite item transform poisons the QPainter and every later draw call in
+        //     that paintEvent silently becomes a no-op) leaves the last good frame on screen for
+        //     ever. The failure looks exactly like a healthy canvas that stopped receiving data.
+        // Full updates + an opaque background make the whole viewport be erased and redrawn from the
+        // scene every paint, so what is on screen is always THIS frame or blank — never a ghost.
+        // It costs nothing here: present() already forces one full viewport update per frame.
+        setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+        setBackgroundBrush(QBrush(QColor(255, 255, 255)));
     }
 
 protected:
@@ -761,6 +783,16 @@ bool Viewer2D::eventFilter(QObject *watched, QEvent *event)
     if (agv_ == nullptr or watched != agv_->viewport())
         return QObject::eventFilter(watched, event);
 
+    // ★★★COUNT THE PAINTS. This is the one bit paint_probe() could not supply: grab() renders through
+    // QWidget::render(), which calls paintEvent DIRECTLY and bypasses the repaint manager entirely —
+    // so a live hash proves the SCENE and the paint CODE are healthy and says nothing about whether
+    // the normal repaint cycle is still running. Counting the real QEvent::Paint here splits the last
+    // two candidates: ~31 Hz beside a frozen screen means the paints happen and the FLUSH to the
+    // screen is the fault; ~0 means viewport()->update() is being dropped before a paintEvent is ever
+    // sent, and no amount of calling update() harder will help. Never consumes the event.
+    if (event->type() == QEvent::Paint)
+        ++paint_events_;
+
     // Pick radius in METRES, not pixels: the scene is in metres and the view zooms, so a pixel radius
     // would grab a different amount of world at every zoom level.
     constexpr float pick_radius_m = 0.18f;
@@ -883,6 +915,79 @@ int Viewer2D::scene_item_count() const
 void Viewer2D::force_repaint()
 {
     if (agv_ and agv_->viewport()) agv_->viewport()->update();
+}
+
+int Viewer2D::force_synchronous_repaint()
+{
+    if (agv_ == nullptr or agv_->viewport() == nullptr)
+        return kRecoveryNoViewer;
+
+    // ── THREE LEVERS, WEAKEST FIRST, AND EACH ONE IS ALSO THE EXPERIMENT ──────────────────────────
+    // They are ordered by how much of Qt's cached state they invalidate, so WHICH one works names the
+    // fault: repaint() only skips the scheduling; hide/show re-runs the whole visibility and clip
+    // computation. Nothing here is a retry of the same thing at a different rate.
+    QWidget *vp = agv_->viewport();
+
+    // 1. Synchronous repaint: bypasses the repaint manager's SCHEDULING, but still goes through the
+    //    same markDirty() clipping. If this lands, only the queued update was being lost.
+    const int before_repaint = paint_events_;
+    vp->repaint();
+    if (paint_events_ > before_repaint)
+        return kRecoveryRepaint;
+
+    // 2. hide/show: forces Qt to recompute the widget's visibility, clip rect and obscured-by-sibling
+    //    state from scratch, and marks the whole widget dirty on show. This is the lever that cures a
+    //    viewport Qt has wrongly decided is fully covered — the state visible_w/visible_h reports.
+    const int before_cycle = paint_events_;
+    vp->hide();
+    vp->show();
+    vp->update();
+    if (paint_events_ > before_cycle)
+        return kRecoveryVisibilityCycle;
+
+    return kRecoveryFailed;
+}
+
+Viewer2D::PaintProbe Viewer2D::paint_probe()
+{
+    PaintProbe probe;
+    if (agv_ == nullptr or agv_->viewport() == nullptr)
+        return probe;
+
+    const QTransform t = agv_->transform();
+    probe.scale = t.m11();
+    // ★★★DRAINED AFTER THE GRAB, NOT BEFORE. Read here and zeroed at the END of this function, because
+    // grab() below delivers a paint event of its OWN: draining first leaked that one into the next
+    // window and every heartbeat then reported exactly 1 paint (0.199 Hz at a 5 s window) whether or
+    // not the repaint cycle was alive — which ALSO kept the zero-paint alarm below from ever firing.
+    // The instrument was measuring itself. Measured 2026-09-11, cost one more freeze to notice.
+    probe.paint_events = paint_events_;
+    probe.updates_enabled = agv_->viewport()->updatesEnabled();
+    probe.viewport_visible = agv_->viewport()->isVisible();
+    probe.viewport_w = agv_->viewport()->width();
+    probe.viewport_h = agv_->viewport()->height();
+    // ★WHAT QT THINKS IS ON SCREEN. If this is EMPTY while the widget is visible and sized, Qt believes
+    // the viewport is entirely obscured, and paintAndFlush() then clips its dirty region to nothing —
+    // every update() is discarded before a paint event is ever sent, silently and for ever. That is
+    // the one state in which calling update() harder is provably useless, and nothing else reports it.
+    const QRect vis = agv_->viewport()->visibleRegion().boundingRect();
+    probe.visible_w = vis.width();
+    probe.visible_h = vis.height();
+    probe.finite_transform = std::isfinite(t.m11()) and std::isfinite(t.m12())
+                         and std::isfinite(t.m21()) and std::isfinite(t.m22())
+                         and std::isfinite(t.dx())  and std::isfinite(t.dy());
+
+    // ★THE ONLY END-TO-END TEST OF THE PAINT PATH. grab() runs the widget's OWN paintEvent into an
+    // off-screen pixmap, so this hash is what the scene actually renders TO, independently of
+    // whether that render ever reaches the screen. It splits the two halves the item count cannot:
+    //   hash CHANGING while the screen is frozen => the scene paints fine and the flush is the fault;
+    //   hash FROZEN                              => the paint itself is drawing nothing, and
+    //                                               finite_transform says whether a NaN is why.
+    const QImage img = agv_->viewport()->grab().toImage().convertToFormat(QImage::Format_RGB32);
+    probe.pixel_hash = static_cast<std::uint32_t>(
+        qHashBits(img.constBits(), static_cast<std::size_t>(img.sizeInBytes()), 0));
+    paint_events_ = 0;   // discard the paint grab() just caused; see the note above
+    return probe;
 }
 
 void Viewer2D::set_lidar_stall_banner(bool visible, float seconds)

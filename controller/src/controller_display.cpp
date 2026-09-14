@@ -474,9 +474,45 @@ void ControllerDisplay::present()
         {
             const double secs = (now_ms - canvas_hb_ms_) / 1000.0;
             const int items = viewer_2d_ ? viewer_2d_->scene_item_count() : -1;
+            const auto probe = viewer_2d_ ? viewer_2d_->paint_probe() : rc::Viewer2D::PaintProbe{};
+            if (probe.pixel_hash == canvas_paint_hash_) ++canvas_paint_static_;
+            else                                        canvas_paint_static_ = 0;
+            canvas_paint_hash_ = probe.pixel_hash;
             std::println("[canvas] fed {:.1f} Hz (pipeline staging frames), drawn {:.1f} Hz "
                          "(present consuming them), snapshot age {:.2f} s, scene items {}",
                          canvas_fed_ / secs, canvas_drawn_ / secs, age / 1000.0, items);
+            // ★SAY IT AT THE MOMENT IT HAPPENS. A canvas that is being fed and rebuilt but renders
+            // the SAME pixels twice running is the failure that reads as "the viewer is fine, the
+            // data stopped" — and it is not that. Naming it here is what makes it findable without
+            // an operator noticing the picture is old.
+            // ★★★THE VIEWPORT IS NOT BEING ASKED TO PAINT AT ALL. present() calls force_repaint() every
+            // frame, so paint_events ~= drawn. Zero means update() is dropped on the way in — the one
+            // state where calling update() harder is provably useless. repaint() is tried once, and
+            // whether it lands is the measurement that says which side of the widget the loss is on.
+            int recovery = -1;
+            if (probe.paint_events == 0 and canvas_drawn_ > 0 and viewer_2d_)
+            {
+                recovery = viewer_2d_->force_synchronous_repaint();
+                const char *verdict =
+                    recovery == rc::Viewer2D::kRecoveryRepaint
+                        ? "a synchronous repaint() DID land, so only the queued update was being lost"
+                    : recovery == rc::Viewer2D::kRecoveryVisibilityCycle
+                        ? "only a hide/show landed, so Qt's clip / obscured-by-sibling state for this "
+                          "widget was WRONG and every update() was being clipped to nothing"
+                        : "NEITHER a repaint() nor a hide/show landed -- the loss is not in this widget";
+                std::println("[canvas] NO PAINT EVENTS: {} present() calls in {:.0f} s asked the viewport to "
+                             "repaint and Qt sent it none (updates_enabled={}, visible={}, viewport {}x{}, "
+                             "visibleRegion {}x{}). {}.",
+                             canvas_drawn_, secs, probe.updates_enabled, probe.viewport_visible,
+                             probe.viewport_w, probe.viewport_h, probe.visible_w, probe.visible_h, verdict);
+            }
+            if (canvas_paint_static_ > 0 and canvas_fed_ > 0)
+                std::println("[canvas] NOT RENDERING: the scene is being fed and rebuilt, but the "
+                             "viewport has rendered identical pixels for {} heartbeats ({:.0f} s). "
+                             "view transform {}, scale {:.1f} px/unit.",
+                             canvas_paint_static_ + 1, (canvas_paint_static_ + 1) * secs,
+                             probe.finite_transform ? "finite" : "NON-FINITE (a NaN reached it)",
+                             probe.scale);
             if (not canvas_csv_open_)
             {
                 canvas_csv_.open("canvas_health.csv", std::ios::out | std::ios::trunc);
@@ -487,13 +523,39 @@ void ControllerDisplay::present()
                                    "# items= objects in the scene; changing => it IS being rebuilt\n"
                                    "# fed~0 => perception. drawn~0 => the GUI thread. both healthy and a\n"
                                    "# static view => a REPAINT fault, which is what force_repaint targets.\n"
-                                   "t_ms,fed_hz,drawn_hz,snapshot_age_s,scene_items\n";
+                                   "# paint_hash    = hash of an OFF-SCREEN render of the viewport. It is the only\n"
+                                   "#                 column that says the scene turned into PIXELS; items only says it\n"
+                                   "#                 was rebuilt. Frozen hash => the draw is empty. Live hash beside a\n"
+                                   "#                 frozen screen => the draw is fine and the flush is the fault.\n"
+                                   "# paint_static  = consecutive 5 s heartbeats with the SAME hash. >1 while fed>0 is\n"
+                                   "#                 the freeze, named at the moment it happens.\n"
+                                   "# finite_xform  = 0 means a non-finite coordinate reached the view transform, which\n"
+                                   "#                 makes every draw call in the frame a silent no-op.\n"
+                                   "# paint_hz      = REAL QEvent::Paint deliveries to the viewport. paint_hash comes from\n"
+                                   "#                 grab(), which calls paintEvent directly and bypasses the repaint\n"
+                                   "#                 manager, so it cannot see this. ~drawn_hz beside a frozen screen =>\n"
+                                   "#                 the paints happen and the FLUSH is the fault; ~0 => update() is being\n"
+                                   "#                 dropped before any paintEvent is sent.\n"
+                                   "# vis_w/vis_h   = Qt's own visibleRegion() for the viewport. ZERO while the widget is\n"
+                                   "#                 visible and sized means Qt believes it is fully obscured and is\n"
+                                   "#                 discarding every update() unpainted. This is the column that names\n"
+                                   "#                 a zero-paint freeze.\n"
+                                   "# recovery      = which lever got it painting again: 1 repaint() (only the queued\n"
+                                   "#                 update was lost), 2 hide/show (Qt's clip/obscured state was wrong),\n"
+                                   "#                 0 neither, -1 not attempted (the viewport was painting normally).\n"
+                                   "t_ms,fed_hz,drawn_hz,snapshot_age_s,scene_items,paint_hash,paint_static,finite_xform,"
+                                   "view_scale,paint_hz,updates_enabled,vp_w,vp_h,vis_w,vis_h,recovery\n";
                 canvas_csv_open_ = true;
             }
             if (canvas_csv_.is_open())
             {
                 canvas_csv_ << now_ms << ',' << canvas_fed_ / secs << ',' << canvas_drawn_ / secs
-                            << ',' << age / 1000.0 << ',' << items << '\n';
+                            << ',' << age / 1000.0 << ',' << items
+                            << ',' << probe.pixel_hash << ',' << canvas_paint_static_
+                            << ',' << (probe.finite_transform ? 1 : 0) << ',' << probe.scale
+                            << ',' << probe.paint_events / secs << ',' << (probe.updates_enabled ? 1 : 0)
+                            << ',' << probe.viewport_w << ',' << probe.viewport_h
+                            << ',' << probe.visible_w << ',' << probe.visible_h << ',' << recovery << '\n';
                 canvas_csv_.flush();
             }
             canvas_hb_ms_ = now_ms; canvas_drawn_ = 0; canvas_fed_ = 0;

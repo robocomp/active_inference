@@ -1,5 +1,6 @@
-#include <genericworker.h>   // FIRST: DSR's signal emitter is not self-contained
-
+// NOTE: no genericworker.h here, deliberately. It drags in dsr_gui.h -> QMainWindow, and this
+// file is also linked into the offline bench (wall_slam_selftest), which has no Qt Widgets.
+// Only pose_publisher.cpp needs that include, for DSR's signal emitter.
 #include "door_apertures.h"
 
 #include <dsr/api/dsr_api.h>

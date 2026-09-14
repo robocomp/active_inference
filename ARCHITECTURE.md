@@ -416,8 +416,20 @@ Unique across the shared graph; a collision is a CRDT actor clash → SIGSEGV in
 
 ```
 room=5  robot=6  table=7  controller=8  retina=9  bottle=10  kinova=11  self_calib=12
-human=13  residual=14  door=15  scene_graph_viewer=16  chair=20  cabinet=21
-refrigerator=22  ring_metaconcept=23          next free: 17-19, 24+
+human=13  residual=14  door=15  scene_graph_viewer=16  hood=17  viewer3d=18  ltsm_agent=19
+chair=20  cabinet=21  refrigerator=22  ring_metaconcept=23  kitchen_metaconcept=24
+                                              next free: 25+
+```
+
+### DDS domains
+
+Also unique-by-convention, and just as easy to clash on. FastDDS maps domain `d` to port
+`7400 + 250*d`, which is the quickest way to tell from the outside which plane a process is on
+(`ss -lunp | grep pid=<pid>`).
+
+```
+0 = the shared DSR working graph     2 = the long-term spatial memory plane (ltsm_agent)
+1 = isolated standalone runs         7 = the zero-copy media plane
 ```
 
 ### Frames and units

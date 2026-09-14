@@ -203,6 +203,10 @@ set_target_properties(corner_gather_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${C
 add_executable(wall_slam_selftest EXCLUDE_FROM_ALL
   ../tools/wall_slam_selftest.cpp
   ../src/room_gn_solver.cpp
+  # room_concept.cpp gained a dependency on DoorApertures when the open-door scan filter landed
+  # (2026-09-13). The bench links room_concept.cpp, so it needs this too — the harness is a second
+  # consumer of that file and a new .cpp in the agent is a link error here, silently, until built.
+  ../src/door_apertures.cpp
   ../src/room_model.cpp
   ../src/room_concept.cpp
   ../src/object_anchor_factor.cpp

@@ -20,6 +20,7 @@
 #include "controller_runtime_types.h"
 #include "lidar_buffer_types.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -86,6 +87,40 @@ class Viewer2D : public QObject
     // it demonstrably does not — scene rebuilt, panel updating, view static — this is the one lever
     // that does not depend on knowing why. It costs one viewport update per frame at 30 Hz.
     void force_repaint();
+    // ── DID THE SCENE ACTUALLY RENDER? ───────────────────────────────────────────────────────────
+    // scene_item_count() says the scene is being REBUILT; it cannot say the rebuild produced pixels.
+    // A canvas frozen for >30 s with fed/drawn/items all healthy (measured 2026-09-10) is exactly the
+    // case those three cannot name. paint_probe() renders the viewport off-screen through its own
+    // paintEvent and hashes the result, so a frozen hash means the DRAW is empty and a live hash
+    // beside a frozen screen means the draw is fine and the flush is not. finite_transform is the
+    // first thing to suspect when the hash freezes: one non-finite coordinate reaching an item makes
+    // QPainter's world transform non-finite, after which every draw call in that frame is a silent
+    // no-op. Called once per heartbeat (5 s), never per frame.
+    struct PaintProbe
+    {
+        std::uint32_t pixel_hash = 0;
+        bool  finite_transform = true;
+        double scale = 0.0;              // view m11: pixels per scene unit
+        // ★Real QEvent::Paint deliveries to the viewport since the last probe. See the counter in
+        // eventFilter for why this, and not the hash, is what names the remaining fault.
+        int   paint_events = 0;
+        bool  updates_enabled = true;    // a false here would make every update() a silent no-op
+        bool  viewport_visible = true;
+        int   viewport_w = 0;
+        int   viewport_h = 0;
+        // Qt's own idea of how much of the viewport is on screen. Zero while the widget is visible and
+        // sized means Qt thinks it is fully obscured, and every update() is then discarded unpainted.
+        int   visible_w = 0;
+        int   visible_h = 0;
+    };
+    [[nodiscard]] PaintProbe paint_probe();
+    // Try to get a starved viewport painting again. Returns which lever worked, which is the
+    // measurement that names the fault — see the implementation.
+    static constexpr int kRecoveryNoViewer       = -2;
+    static constexpr int kRecoveryFailed         =  0;
+    static constexpr int kRecoveryRepaint        =  1;   // scheduling only
+    static constexpr int kRecoveryVisibilityCycle =  2;  // Qt's clip/obscured state was wrong
+    int force_synchronous_repaint();
     void update_target_marker(float x, float y, bool visible);
     // ── AN ORIENT HAS NOTHING TO DRAW AS A PLACE ────────────────────────────────────────────────
     // A Reach shows up on this view as a marker somewhere else and a path leading to it. An Orient is
@@ -152,6 +187,7 @@ private:
     QGraphicsEllipseItem *target_marker_ = nullptr;
     QGraphicsLineItem    *orient_ray_ = nullptr;      // the bearing the producer asked for
     QGraphicsPathItem    *orient_arc_ = nullptr;      // what is still to be turned
+    int paint_events_ = 0;                          // QEvent::Paint deliveries, drained by paint_probe()
     std::vector<QGraphicsLineItem *> robot_traj_items_;
     std::optional<Eigen::Vector2f> last_robot_pos_;
 

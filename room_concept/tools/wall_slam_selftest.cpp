@@ -1069,12 +1069,22 @@ namespace
                     {
                         const float a = 2.f * kPi * static_cast<float>(b) / static_cast<float>(NB);
                         const Eigen::Vector2f dir(std::cos(a), std::sin(a));
-                        // range predicted by the MODEL's own boundary
-                        float r_pred = R.map.params.sensor_range; int hit = -1;
+                        // WHERE THE BEAM WOULD STOP — and the estimated polygon is NOT an occluder.
+                        // It was, and that made the planner blind beyond its own hypothesis: in a
+                        // room longer than one scan the first OBB encloses only the near part, every
+                        // predicted beam died on it, every candidate scored 0, and the robot never
+                        // moved (measured on an 18.4 m Matterport corridor: best_sc = −1 at every
+                        // replan, run over at frame 63, 33% of the room ever seen). Unknown space
+                        // BEYOND the current estimate is precisely where the information is; only
+                        // MATTER occludes, and matter is what the grid holds. The polygon crossing
+                        // is still found, because a beam that reaches a wall tells that wall
+                        // something — but it no longer stops the beam from being cast.
+                        float r_wall = R.map.params.sensor_range; int hit = -1;
                         for (size_t e = 0; e < poly.verts.size(); ++e)
                             if (const auto t = rc::corner_visibility::ray_segment_t(
                                     v, dir, poly.verts[e], poly.verts[(e + 1) % poly.verts.size()]);
-                                t and *t > 1e-3f and *t < r_pred) { r_pred = *t; hit = static_cast<int>(e); }
+                                t and *t > 1e-3f and *t < r_wall) { r_wall = *t; hit = static_cast<int>(e); }
+                        const float r_pred = R.map.params.sensor_range;
                         // Every cell the beam would cross — and it STOPS at the first matter the
                         // grid already holds, not only at the polygon. Predicting through the
                         // boundary alone made furniture invisible to the planner while it stays
@@ -1103,18 +1113,45 @@ namespace
                             if (occl_pred and fg.is_occupied(i, j)) { blocked = true; break; }
                         }
                         // what the returning point would tell the wall it lands on — only if it gets there
-                        if (not blocked and hit >= 0 and static_cast<size_t>(hit) < poly.wall_of_edge.size())
+                        if (not blocked and hit >= 0 and r_wall < r_pred
+                            and static_cast<size_t>(hit) < poly.wall_of_edge.size())
                         {
                             const auto* w = R.map.find(poly.wall_of_edge[static_cast<size_t>(hit)]);
                             if (w != nullptr)
                             {
-                                const Eigen::Vector2f q = v + dir * r_pred;
+                                const Eigen::Vector2f q = v + dir * r_wall;
                                 const float sc_ = w->tangent().dot(q);
                                 Eigen::Vector2f h(sc_, -1.f);
                                 J[w->id] += (h * h.transpose()) / sig2;
                             }
                         }
                     }
+                    // ── DWELL: the walls' OWN information, not only the cells' ───────────────────
+                    // The grid term pays for resolving unknown SPACE, and it stops paying the moment
+                    // a cell is known — so a planner driven by it alone leaves as soon as a region
+                    // is no longer uncertain, and wall precision needs the opposite: repeated views
+                    // of the same wall at a good incidence. Measured on twenty real Matterport
+                    // layouts where coverage is saturated at 0.997 for both planners, that cost the
+                    // EIG arm 0.019 mean IoU and 0.11 m of Hausdorff against the older score.
+                    // The fix is not a dwell bonus — it is scoring the posterior we are actually
+                    // judged on. A wall's (φ, d) is Gaussian with information Λ, so a look that adds
+                    // J reduces its entropy by exactly ½·ln(det(Λ+J)/det(Λ)) nats: the standard
+                    // Gaussian information gain, commensurable with the cells' nats, needing no
+                    // weight. It decays as Λ grows, so a wall pays for a second look and less for a
+                    // tenth — dwell with diminishing returns, which is what dwell should be.
+                    // A wall carrying no information yet has an improper prior and is skipped:
+                    // the ratio is not defined, not infinite. WS_NO_DWELL=1 removes the term.
+                    if (std::getenv("WS_NO_DWELL") == nullptr)
+                        for (const auto& [wid, Jw] : J)
+                        {
+                            const auto* w = R.map.find(wid);
+                            if (w == nullptr) continue;
+                            const Eigen::Matrix2f L0 = w->information;
+                            const float d0 = L0.determinant();
+                            if (not std::isfinite(d0) or d0 <= 1e-9f) continue;
+                            const float d1 = (L0 + Jw).determinant();
+                            if (std::isfinite(d1) and d1 > d0) gain += 0.5f * std::log(d1 / d0);
+                        }
                     // corners: the model's own σ, recomputed with the information the look would add
                     for (const auto& c : poly.corners)
                     {
@@ -1240,6 +1277,21 @@ namespace
                                              : (1.f + 0.10f * (v - tru.head<2>()).norm()));
                         cands.emplace_back(sc, v);
                     }
+                if (dbg_plan and f <= 1)
+                {
+                    int nfree = 0; float mx = 0.f; int npos = 0;
+                    const auto pol2 = R.map.build_polygon();
+                    for (int i = 0; i < ex.nx; i += 2) for (int j = 0; j < ex.ny; j += 2)
+                        if (ex.is_free(i, j)) { ++nfree; const float g = eig_of(ex.at(i, j));
+                                                if (g > 0.f) ++npos; mx = std::max(mx, g); }
+                    const auto sc_ = ex.cell_of(tru.head<2>());
+                    std::printf("[eig] start cell (%d,%d) is_free=%d | astar to best: %zu cells\n",
+                                sc_.first, sc_.second, static_cast<int>(ex.is_free(sc_.first, sc_.second)),
+                                cands.empty() ? 0 : ex.astar(tru.head<2>(), cands.front().second).size());
+                    std::printf("[eig] f=%d fgrid_ready=%d poly_closed=%d verts=%zu | candidates %d, with gain>0: %d, max %.4f\n",
+                                f, static_cast<int>(R.map.fgrid.ready()), static_cast<int>(pol2.closed),
+                                pol2.verts.size(), nfree, npos, mx);
+                }
                 std::sort(cands.begin(), cands.end(),
                           [](const auto& a, const auto& b) { return a.first > b.first; });
                 if (cands.size() > 16) cands.resize(16);
@@ -1262,6 +1314,15 @@ namespace
                 // all in view — and only after the map has had a chance to exist.
                 quiet_frames = (f > 60 and path.empty()) ? quiet_frames + 1 : 0;
                 if (quiet_frames >= 3 and closed_now) { R.frames = f + 1; break; }
+                if (dbg_plan and f == 0)
+                {
+                    int nfree = 0;
+                    for (int i = 0; i < ex.nx; ++i) for (int j = 0; j < ex.ny; ++j) if (ex.is_free(i, j)) ++nfree;
+                    const auto pol = R.map.build_polygon();
+                    std::printf("[plan0] start=(%.2f,%.2f) inside_room=%d  ex grid %dx%d free=%d  poly closed=%d verts=%zu\n",
+                                tru.x(), tru.y(), static_cast<int>(rc::corner_visibility::point_in_polygon(tru.head<2>(), room)),
+                                ex.nx, ex.ny, nfree, static_cast<int>(pol.closed), pol.verts.size());
+                }
                 if (dbg_plan)
                     std::printf("[plan] f=%4d targets=%zu frontiers=%zu best_sc=%.3f best_v=(%.2f,%.2f) "
                                 "here=(%.2f,%.2f) path=%zu quiet=%d\n",
@@ -2474,6 +2535,42 @@ int main()
         int n_rooms = 50;
         { int v = 0; if (std::from_chars(rooms_env, rooms_env + std::strlen(rooms_env), v).ec == std::errc{} and v > 0) n_rooms = v; }
         std::printf("\n8. %d random rooms (wall column, alcove, corner column, spur)\n", n_rooms);
+        // ── REAL LAYOUTS (WS_LAYOUTS=<file>) ─────────────────────────────────────────────────────
+        // One polygon per line, "name;x,y x,y …", metres, CCW, written by the MatterportLayout
+        // exporter. These are annotated floor plans of real rooms — 6 to 22 corners, real aspect
+        // ratios, real sizes — in place of the generator's rectangle-plus-features. The generator
+        // fakes a shape DISTRIBUTION; this is the distribution. Parsed with std::from_chars because
+        // this machine runs es_ES and strtof would stop at the decimal point (CLAUDE.md).
+        std::vector<std::pair<std::string, Poly>> real_layouts;
+        if (const char* lp = std::getenv("WS_LAYOUTS"))
+        {
+            std::ifstream in(lp);
+            std::string line;
+            while (std::getline(in, line))
+            {
+                const auto semi = line.find(';');
+                if (semi == std::string::npos) continue;
+                Poly p;
+                const char* c = line.data() + semi + 1;
+                const char* e = line.data() + line.size();
+                while (c < e)
+                {
+                    while (c < e and (*c == ' ')) ++c;
+                    float x = 0.f, y = 0.f;
+                    auto r1 = std::from_chars(c, e, x);
+                    if (r1.ec != std::errc{}) break;
+                    c = r1.ptr; if (c < e and *c == ',') ++c;
+                    auto r2 = std::from_chars(c, e, y);
+                    if (r2.ec != std::errc{}) break;
+                    c = r2.ptr;
+                    p.emplace_back(x, y);
+                }
+                if (p.size() >= 4) real_layouts.emplace_back(line.substr(0, semi), std::move(p));
+            }
+            if (real_layouts.empty()) { std::printf("    WS_LAYOUTS: no polygons read from %s\n", lp); return 1; }
+            n_rooms = static_cast<int>(real_layouts.size());
+            std::printf("    WS_LAYOUTS: %d real layouts from %s\n", n_rooms, lp);
+        }
         struct Feat { int kind; Eigen::Vector2f lo, hi; };   // 0 column, 1 alcove, 2 corner, 3 spur
         static const char* kind_name[4] = {"wall column", "alcove", "corner column", "spur"};
         int found[4] = {0, 0, 0, 0}, total[4] = {0, 0, 0, 0};
@@ -2522,7 +2619,7 @@ int main()
                 if (convex and U(0.f, 1.f) < 0.35f) corner[k] = U(0.3f, 0.8f);
             }
             Poly room;
-            for (int w = 0; w < NW; ++w)
+            for (int w = 0; w < NW and real_layouts.empty(); ++w)
             {
                 const int wp = (w + NW - 1) % NW;
                 if (corner[w] > 0.f)
@@ -2566,10 +2663,27 @@ int main()
                     s += wid + U(0.5f, 1.5f);
                 }
             }
+            std::string room_name;
+            if (not real_layouts.empty())
+            {
+                room_name = real_layouts[static_cast<size_t>(r)].first;
+                room = real_layouts[static_cast<size_t>(r)].second;
+                feats.clear();          // no feature annotations on a real layout: score the SHAPE
+            }
             // A start pose well inside: the deepest interior point of a coarse scan of the room.
-            Eigen::Vector2f start(W * 0.5f, H * 0.5f); float best_clear = -1.f;
-            for (float x = 0.5f; x < W; x += 0.25f)
-                for (float y = 0.5f; y < H; y += 0.25f)
+            // ⚠ THE WINDOW MUST BE THE ROOM'S OWN. The generated rooms all sit in [0,W]x[0,H], so
+            // this scanned that box — and a real annotated layout does not: room 14 of the
+            // MatterportLayout batch spans x −8.29..10.14, y −2.98..1.59, the scan missed almost all
+            // of it, and the best point it could find lay within the explorer's 0.35 m clearance of
+            // a wall. Explorer::astar returns {} when the START cell is not free, so every one of
+            // the sixteen candidate viewpoints was unreachable, the robot never moved, and the run
+            // ended at frame 63 having seen 33% of the room. The planner was blameless: its scores
+            // were 83 candidates, all positive, max 398 nats.
+            Eigen::Vector2f blo = room.front(), bhi = room.front();
+            for (const auto& v : room) { blo = blo.cwiseMin(v); bhi = bhi.cwiseMax(v); }
+            Eigen::Vector2f start = 0.5f * (blo + bhi); float best_clear = -1.f;
+            for (float x = blo.x() + 0.25f; x < bhi.x(); x += 0.25f)
+                for (float y = blo.y() + 0.25f; y < bhi.y(); y += 0.25f)
                 {
                     const Eigen::Vector2f q(x, y);
                     if (not rc::corner_visibility::point_in_polygon(q, room)) continue;
@@ -2656,6 +2770,10 @@ int main()
                 if (miss < 0.33f) ++found[f.kind];
                 fs += fmt(" %s:%.2f", kind_name[f.kind], miss);
             }
+            if (not real_layouts.empty())
+                std::printf("    room %-3d %-46s corners %2zu  IoU %.3f  cover %.2f excl %.2f  Hausdorff %.3f m  walls %2zu\n",
+                            r, room_name.c_str(), room.size(), iou_r, coverage, seen_but_excluded, h_r, Rr.map.walls.size());
+            else
             std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu furn %zu  IoU %.3f  cover %.2f excl %.2f  Hausdorff %.3f m  walls %2zu |%s\n",
                         r, W, H, ell ? "L  " : "rect", feats.size(), furniture.size(), iou_r, coverage,
                         seen_but_excluded, h_r, Rr.map.walls.size(), fs.c_str());
