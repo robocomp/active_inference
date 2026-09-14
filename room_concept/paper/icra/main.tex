@@ -107,7 +107,9 @@ That is the property we exploit.
 \begin{enumerate}
   \item An online layout estimator whose per-corner and per-edge uncertainty is \emph{validated
   against ground truth} on 594 annotated floor plans, and is \emph{actionable}: it gates publication
-  and drives exploration (\S\ref{sec:exp}).
+  and is the quantity the explorer acts to reduce (\S\ref{sec:exp}). We also report where that
+  buys nothing: against a heuristic explorer on the same corpus the difference is null, and we say
+  why.
   \item A propagation from returns to corner covariance that separates the error that averages down
   with more observation from the error that does not, and a measurement of both terms on real sensor
   data (\S\ref{sec:unc}).
@@ -278,6 +280,26 @@ of successes. The shapes are the corpus's own: between \num{6} and \num{22} corn
 wall columns and re-entrant corners that no rectangle prior would admit.}
 \label{fig:mosaic}
 \end{figure*}
+
+\textbf{Does the epistemic term earn its place?} The explorer scores viewpoints by expected
+information gain. To test whether that objective is what produces the accuracy above, we re-ran all
+594 rooms with the epistemic term replaced by the frontier-and-coverage heuristic it superseded,
+holding the estimator, the sensor model, the per-room seeds and the \num{900}-frame budget fixed.
+\emph{The two are indistinguishable.} Paired over the 583 rooms both arms complete, the mean IoU
+difference is \num{-0.0007} (95\% CI $[-0.0019, +0.0004]$, bootstrap over rooms), the heuristic
+winning 263 rooms to 251; hard failures are 8 against 6; and the median frame at which the map first
+becomes publishable differs by \num{6} frames (95\% CI $[-14, +28]$). Splitting by ground-truth
+corner count recovers no difference in any band.
+
+We report this because it bounds our own claim, and because the reason for the null is instructive.
+Every room in this corpus ran to the frame cap in both arms: the room sizes are such that
+\num{900} frames of any reasonable policy eventually sees every wall, so the \emph{final} map cannot
+separate the policies, and an objective cannot be graded on an endpoint its own budget has saturated.
+What the experiment supports is that the uncertainty is consumed---it gates publication, and the
+explorer reads it. What it rules out is a claim we might otherwise have made: on rooms of this size,
+the epistemic objective buys no measurable accuracy or speed over a simple heuristic. Whether it pays
+under a tighter budget, or in the larger multi-room environments where a policy has room to waste
+time, is not tested here.
 
 \subsection{Is the reported uncertainty honest?}
 \label{sec:calib}
