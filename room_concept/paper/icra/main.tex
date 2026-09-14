@@ -70,28 +70,17 @@ checked.
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{fig/teaser}
-\caption{\textbf{The estimate is right before it is confident, and says so.} The same room, from one
-closed-loop run on a real LiDAR model. The pale band is ground truth and each dimension carries its
-measured value and signed error: \SI{5}{\milli\meter} on a \SI{6}{\meter} wall is \SI{0.08}{\percent},
-too fine to draw at any scale that also fits the room, so the agreement is shown and the discrepancy
-is stated. Both panels are drawn with the long axis horizontal; the map frame is gauge-free and the
-re-anchor rotates it between the two, but every quantity here---edge lengths, corner $\sigma$, the
-comparison with truth---is invariant to that rotation, so what differs between the panels is only the
-uncertainty. \emph{Left}, after \SI{665}{\second} parked: the
-geometry is already within \SI{15}{\milli\meter} of truth, yet every corner declares almost a metre of
-uncertainty and every edge sits at its prior, so the layout is withheld. Standing still re-observes
-the same walls from the same viewpoint, and the information those observations carry saturates.
-\emph{Right}, the first frame at which the layout becomes publishable, after turning
-\SI{319}{\degree} on the spot: \SI{24.5}{\second} later, the geometry has moved by at most
-\SI{19}{\milli\meter} while corner $\sigma$ has fallen by a factor of \num{21}, under the gate. The
-robot is drawn to scale with its heading, and its bearing relative to the room---equivalently to
-ground truth, since the truth rectangle lies on the same wall---is printed beneath it: it turns from
-\SI{-4}{\degree} to \SI{141}{\degree} while its centre stays inside a \SI{4.4}{\centi\meter} disc and
-returns to the same spot in the room to within \SI{1}{\milli\meter}. That bearing is the only
-orientation this run can honestly report: the map frame is gauge-free and the log carries no
-ground-truth robot pose, so an absolute heading would describe our own gauge rather than the robot.
-What the rotation changes is not the room, which does not move, but the precision. The estimator does not earn
-precision by waiting, and does not claim any.}
+\caption{\textbf{The estimate is right before it is confident, and says so.} One closed-loop run;
+the same room in both panels, at the same scale, long axis horizontal. Pale band: ground truth, each
+dimension carrying its measured value and signed error. Discs: per-corner $\sigma$, to scale. The
+robot is drawn to scale with its heading, labelled with its bearing relative to the room.
+\emph{Left}, parked for \SI{665}{\second}: the geometry is already within \SI{15}{\milli\meter} of
+truth, yet every corner declares almost a metre of uncertainty and every edge sits at its prior, so
+the layout is withheld---standing still re-observes the same walls from the same viewpoint, and that
+evidence saturates. \emph{Right}, the first frame at which the layout becomes publishable, after
+turning \SI{319}{\degree} on the spot: the geometry moves by at most \SI{19}{\milli\meter} while
+corner $\sigma$ falls by a factor of \num{21}. The estimator does not earn precision by waiting, and
+does not claim any.}
 \label{fig:teaser}
 \end{figure}
 
@@ -531,6 +520,14 @@ moved by millimetres. The third column is the \emph{first} frame the layout is p
 keeps falling afterwards, to \SI{0.029}{\meter} a minute later, but the log is sampled at
 \SI{50}{\milli\second} only up to that frame and has a \SI{30}{\second} gap immediately after it, so
 the turn is quoted to where it can be measured rather than to where it looks largest.
+
+Two things this run cannot show. The map frame is \emph{gauge-free}---its origin and orientation are
+wherever the estimator put them---and the log carries no ground-truth robot pose, so we report the
+robot's bearing relative to the room, which is frame-free, and no absolute heading error, which would
+describe our own gauge rather than the robot. For the same reason both panels of Fig.~\ref{fig:teaser}
+are drawn with the long axis horizontal: the re-anchor rotates the frame between them, and every
+quantity claimed here---edge lengths, corner $\sigma$, the comparison with truth---is invariant to
+that rotation.
 
 This is the generative model's own arithmetic rather than a policy. A stationary robot observes the
 same walls from the same viewpoint; the observations are not independent, so the information they
