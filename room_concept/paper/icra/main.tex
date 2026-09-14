@@ -8,13 +8,25 @@
 \newcommand{\nis}{\ensuremath{\mathrm{NIS}}}
 
 % ── CAMERA-READY SWITCH ───────────────────────────────────────────────────────────────────────────
-% \camerareadyfalse reveals the funding acknowledgement below. It MUST stay false for the anonymous
+% \camerareadytrue reveals the funding acknowledgement below. It MUST stay false for the anonymous
 % submission: the grants name the Junta de Extremadura and a POCTEP regional programme, which
 % identifies the institution to any reviewer in the field as surely as a letterhead would. Reviewers
 % do read acknowledgements, and this is the most common way a double-blind submission de-anonymises
 % itself. Flip it for the final version only.
 \newif\ifcameraready
 \camerareadyfalse
+
+% ── PAGE BUDGET: WHAT THE CAMERA-READY VERSION WILL COST US ───────────────────────────────────────
+% The limit is 8 pages. This blind draft is 7 and its text stops 301 pt up the right column of p7,
+% so roughly 1.2 pages are still free. But the final version is LONGER than what we can see here,
+% and the growth lands at the two ends of the paper:
+%   - the author block replaces two anonymous lines with names, two affiliations and an e-mail line;
+%   - the funding paragraph above appears (7 lines), pushing the bibliography down by its own height.
+% MEASURED, not estimated: a test build with \camerareadytrue and a representative 5-author, two-
+% affiliation block moved the end of the paper down by 37 pt (~3.5 lines) and stayed on 7 pages.
+% So reserve 37 pt at the end of p8 and the usable budget for NEW material is ~1583 pt of single
+% column ≈ 144 lines ≈ 2.4 columns. Re-measure after adding anything: a figure that reflows a float
+% can cost a page on its own, and the 29 references still missing a venue/year will each grow a line.
 
 \begin{document}
 
