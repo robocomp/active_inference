@@ -164,7 +164,7 @@ void PosePublisher::log_pose_trace(int type, std::int64_t valid_ts_ms,
     // comment, both asserted that the base declares no maximum linear speed. That was WRONG and the
     // error was mine: SVD48VBase config_diferential.toml has always carried `maxLinSpeed`, and a
     // grep pattern of mine failed to match the key. Both bounds have been published all along
-    // (maxLinSpeed, now 1500 mm/s; maxRotSpeed 2 rad/s), so the linear check was never inert.
+    // (maxLinSpeed, now 1000 mm/s; maxRotSpeed 2 rad/s), so the linear check was never inert.
     // The independent-bounds design below is kept anyway, because it is right for a robot that
     // declares only one -- but it was not, as claimed, necessary here.
     // ★EITHER BOUND ALONE WOULD HAVE CAUGHT WHAT WAS SEEN. Both 2026-09-10 events carried 43.6 and
