@@ -55,7 +55,9 @@ Park in the room, motors on, zero command, hands off. Log 5 minutes.
 - [ ] ≥ **100 m** travelled
 - [ ] ≥ **3 stops of ≥ 30 s**, robot completely still
       ⚠ the repeat/scatter split is measured ONLY over stationary stretches. No stops → no result.
-- [ ] rotation at **several different rates**, slow and fast — not one constant-speed loop
+- [ ] **see the same corners from several different places** — the viewpoint test needs corners
+      observed in ≥ 3 separate stops, so vary where you stop, not just how you drive between stops
+- [ ] rotation at several rates, slow and fast — not one constant-speed loop
 - [ ] every wall seen, including ones only visible from far away
 
 ---
@@ -78,26 +80,31 @@ Park in the room, motors on, zero command, hands off. Log 5 minutes.
 
 ```
 D=datasets/real_apartment/$(date +%m%d_%H%M); mkdir -p $D
-cp tmp/corner_probe.csv  $D/corner_probe.csv
-cp tmp/layout_trace.csv  $D/layout_trace.csv
+cp tmp/corner_probe.csv $D/     # ESSENTIAL — every number in the paper comes from this one
+cp tmp/corner_nis.csv   $D/     # per-frame stats
+cp etc/pose_trace.csv   $D/     # the only log carrying the ROBOT's pose; gives the tour length
 cp layouts/<the MRPT svg> $D/
 ```
 
-- [ ] both CSVs copied
+- [ ] the three CSVs copied
 - [ ] MRPT SVG copied, with its stated precision (≤ 2–3 cm) written down
 - [ ] `motion_calib` debug log copied
 - [ ] one line of notes: date · robot · room · tour length · were constants re-derived?
 
-⚠ **Both CSVs are required.** `corner_probe.csv` carries no pose, so without `layout_trace.csv` there
-are no rotation bands and no stationary stretches — i.e. no headline number, and the run is wasted.
+⚠ **Do not look for `tmp/layout_trace.csv`.** This build does not write it (it was 0 bytes after the
+2026-09-14 tour). Nothing needs it: stillness is recovered from the detections themselves, so
+`corner_probe.csv` alone produces the headline number. Its pose column was the ROOM MODEL's anyway,
+not the robot's, which is what put a wrong rotation figure into a paper figure.
 
 ---
 
 ## 7 · Analyse
 
 ```
-python3 analysis/corner_channel/split_and_nis.py $D/corner_probe.csv $D/layout_trace.csv
+python3 analysis/corner_channel/split_and_nis.py $D/corner_probe.csv | tee $D/RESULTS.txt
 ```
+
+One argument. The script needs no pose file and no reference layout.
 
 - [ ] paste the output into the run notes verbatim
 - [ ] anything quoted in the paper comes from that output and nowhere else
