@@ -111,8 +111,8 @@ That is the property we exploit.
   data (\S\ref{sec:real}).
   \item Evidence that a single global precision is insufficient for this problem: the non-averaging
   part of the error is several times larger than the averaging part, it is viewpoint-dependent rather
-  than a property of the map, and the declared pose precision does not cover it
-  (\S\ref{sec:notconstant}).
+  than a property of the map, and the declared pose precision does not cover it---measured in
+  simulation and reproduced on a physical robot (\S\ref{sec:notconstant}).
   \item Three precision defects found by calibration, including one localised in a module the
   statistic was not measuring---offered as evidence that a free-energy formulation is useful
   diagnostically, not only descriptively.
@@ -423,7 +423,7 @@ error of \SI{3.6}{\centi\meter} and meets the same criterion only \SI{63.7}{\per
 time.
 The gate discriminates, and the number it gates on now means something.
 
-\subsection{The real-sensor split}
+\subsection{The split on recorded depth}
 \label{sec:real}
 
 The decomposition in \eqref{eq:corner} claims that error separates into a part that averages away and
@@ -572,30 +572,36 @@ over every candidate it is \num{2.51} at rest and \num{2.28} in motion, and over
 the total is too large before the gate and too small after it, and in both cases its pose term is
 smaller than the bias it must cover.
 
-\emph{How much of this is one run.} The magnitude is run-dependent: two simulated tours of this
-environment, analysed by the same script, give repeat/scatter ratios of \num{5.6} and \num{8.7}---the
-variation a viewpoint-attached error predicts, since each tour stops at different viewpoints. What is
-stable is the shape, and that is what the argument uses. A single number would be a worse claim than
-the range.
+\emph{How much of this is one run.} The magnitude is run-dependent, since each tour stops at
+different viewpoints and that is exactly what a viewpoint-attached error predicts; the hardware run
+below is a second point. What is stable is the shape, and that is what the argument uses.
 
 \emph{The same measurement on a physical robot.} Everything above is simulated. We ran the same
 pipeline and the same analysis script, unmodified, on a differential-drive robot carrying a
-\num{3}-D LiDAR in an apartment-scale indoor space, over \SI{295}{\meter} in three chained sessions
-(Table~\ref{tab:realtour}). Over \num{6} stationary stretches and \num{46} corner-stretch pairs the
-repeating part has a median of \SI{0.0624}{\meter} against \SI{0.0046}{\meter} that scatters, a ratio
-of \num{13.4}, with the bias exceeding the scatter in \SI{98}{\percent} of pairs; across the \num{10}
-corners seen from three or more stretches the spread \emph{between} stretches is \SI{0.0459}{\meter}
-against \SI{0.0046}{\meter} \emph{within} one, a factor of \num{9.9}. Both verdicts are the
-simulator's. The ratio sits \emph{above} the simulated range rather than inside it, which is the
-reason for quoting a range at all: across the four tours it runs from \num{5.6} to \num{13.4} while
-the shape does not move.
+\num{3}-D LiDAR in an apartment-scale indoor space, localised against a layout obtained offline by a
+SLAM system---the imperfect map of the kind argued for above---over \SI{295}{\meter} in three
+sessions, with the estimator restarted between them (Table~\ref{tab:realtour}). Over \num{6}
+stationary stretches and \num{46} corner-stretch pairs the repeating part has a median of
+\SI{0.0624}{\meter} against \SI{0.0046}{\meter} that scatters, with the bias exceeding the scatter at
+every stop and every corner but one; across the \num{10} corners seen from three or more stretches
+the spread \emph{between} stretches is \SI{0.0459}{\meter} against \SI{0.0046}{\meter} \emph{within}
+one, a factor of \num{9.9}. Over accepted candidates $\nis$ is \num{0.836}, against \num{0.782} in
+simulation.
 
-The real sample is much thinner than the simulated one---\num{46} pairs against \num{386}---and the
-run supplied its own reason to say so. With only three stationary stretches the between-stretch
-statistic read \num{1.6}, the opposite verdict, because too few genuinely distinct viewpoints had been
-visited; deliberately stopping at different places and orientations resolved it. That is a statement
-about experimental design rather than about the data: a viewpoint-attached error cannot be detected
-without viewpoint diversity, and distance driven is no substitute for it.
+Both verdicts match the simulator's, and the replication is in the bias: \SI{0.0624}{\meter} against
+\SI{0.0574}{\meter}, agreeing to \SI{5}{\milli\meter} on a different sensor and a different map. The
+scattering part is smaller on hardware, in the direction \S\ref{sec:real} reports for a simulated
+sensor deliberately set more conservative than real depth, so the ratio---\num{13.4} against
+\num{8.7}---exceeds the simulated one for a reason that lives in its denominator rather than in the
+systematic term the argument is about.
+
+The real sample is much thinner than the simulated one---\num{46} pairs against \num{386}, six stops
+against \num{34}---and we claim no more than agreement in shape. The protocol called for deliberate
+stops at distinct places and orientations; the second session made none, and on the first session's
+three stretches alone the between-stretch statistic read \num{1.6}, the opposite verdict. The third
+session added three such stops, and nothing was collected after it. We report the sequence because it
+is the statistic's own sensitivity: a viewpoint-attached error cannot be detected without viewpoint
+diversity, and distance driven is no substitute for it.
 
 \begin{table}[t]
 \centering
@@ -603,16 +609,25 @@ without viewpoint diversity, and distance driven is no substitute for it.
 \label{tab:realtour}
 \setlength{\tabcolsep}{3pt}
 \footnotesize
-\begin{tabular}{lrrccc}
+\begin{tabular}{lrrcccc}
 \toprule
-tour & stretches & pairs & repeats & scatters & ratio \\
+tour & stops & pairs & repeats & scatters & ratio & viewpoint \\
 \midrule
-simulated, tour 1 & --- & --- & \SI{0.0403}{\meter} & \SI{0.0063}{\meter} & \num{5.6}$\times$ \\
-simulated, tour 2 & 34 & 386 & \SI{0.0574}{\meter} & \SI{0.0066}{\meter} & \num{8.7}$\times$ \\
-\textbf{physical robot} & 6 & 46 & \SI{0.0624}{\meter} & \SI{0.0046}{\meter} & \textbf{\num{13.4}$\times$} \\
+simulated      & 34 & 386 & \SI{0.0574}{\meter} & \SI{0.0066}{\meter} & \num{8.7}$\times$ & \num{6.0}$\times$ (17) \\
+physical robot & 6  & 46  & \SI{0.0624}{\meter} & \SI{0.0046}{\meter} & \num{13.4}$\times$ & \num{9.9}$\times$ (10) \\
 \bottomrule
 \end{tabular}
-\end{table} This is the argument for representing the offset as an inferred state
+
+\vspace{2pt}
+\begin{minipage}{\columnwidth}
+\footnotesize
+\emph{viewpoint} is the spread between stops divided by the spread within one, over the corners seen
+at three or more stops (count in brackets); above \num{2} it rules out a fixed map offset.
+\end{minipage}
+\end{table}
+
+A bias that repeats, follows the viewpoint and survives the move to hardware is the argument for
+representing the offset as an inferred state
 with a prior rather than a compiled-in number.
 
 \subsection{Calibration as a diagnostic}
