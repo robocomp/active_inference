@@ -144,7 +144,12 @@ for ax, (fr, title) in zip(axes, WANT):
 
     # ── THE ROBOT, AND WHICH WAY IT FACES ──────────────────────────────────────────────────────
     # Drawn because the pair claims a ROTATION and a reader cannot see one in a room that does not
-    # move. Footprint radius 0.32 m is the circumscribed robot_footprint_radius from etc/config.toml.
+    # move. ⚠ The disc is drawn AREA-EQUIVALENT to the true footprint, r = sqrt(0.2182/pi) = 0.2635 m,
+    # NOT at the 0.32 m robot_footprint_radius from config. That config number is the CIRCUMSCRIBED
+    # radius — the centre-to-corner distance of a roughly rectangular body (ROBOT_GEOMETRY.md: area
+    # 0.2182 m^2, inscribed 0.2300, circumscribed 0.3278) — so a disc drawn at it covers 1.55x the
+    # floor the robot actually occupies and reads as a much bigger machine. A clearance radius and a
+    # drawing radius are different quantities; using the planner's for a picture overstates the robot.
     # The pose is rotated by the SAME canonical angle as the room, so the arrow shows the robot's
     # bearing RELATIVE TO THE ROOM -- which is frame-free, and is the only orientation this run can
     # honestly report: the map frame is gauge-free and the log carries no ground-truth robot pose, so
@@ -155,7 +160,7 @@ for ax, (fr, title) in zip(axes, WANT):
     _ca = canonical_angle(parse(rows[fr])[0])
     _px, _py = canonical(parse(rows[fr])[0])((_rx, _ry))
     _h = _rth + _ca
-    ax.add_patch(Circle((_px, _py), 0.32, facecolor="#1f2328", alpha=0.18, edgecolor="#1f2328",
+    ax.add_patch(Circle((_px, _py), 0.2635, facecolor="#1f2328", alpha=0.18, edgecolor="#1f2328",
                         lw=0.6, zorder=7))
     ax.annotate("", xy=(_px + 0.95 * _mm.cos(_h), _py + 0.95 * _mm.sin(_h)), xytext=(_px, _py),
                 arrowprops=dict(arrowstyle="-|>", color="#1f2328", lw=1.1,
