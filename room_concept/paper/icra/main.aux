@@ -2,6 +2,9 @@
 \providecommand\hyper@newdestlabel[2]{}
 \providecommand\HyField@AuxAddToFields[1]{}
 \providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {The estimate is right before it is confident, and says so.} The same room, from one closed-loop run on a real LiDAR model. The pale band is ground truth; the estimate lies inside its width throughout, the two differing by \SI {5}{} and \SI {12}{\milli \meter }, which is why a hairline would be hidden under the estimate's own stroke. \emph  {Left}, after \SI {681}{\second } parked: the geometry is already within \SI {15}{\milli \meter } of truth, yet every corner declares almost a metre of uncertainty and every edge sits at its prior, so the layout is withheld. Standing still re-observes the same walls from the same viewpoint, and the information those observations carry saturates. \emph  {Right}, after a single rotation in place: the same geometry, now with corner $\sigma $ smaller by a factor of \num {32} and every corner under the publication gate. The estimator does not earn precision by waiting, and does not claim any.}}{1}{figure.1}\protected@file@percent }
+\newlabel{fig:teaser}{{1}{1}{\textbf {The estimate is right before it is confident, and says so.} The same room, from one closed-loop run on a real LiDAR model. The pale band is ground truth; the estimate lies inside its width throughout, the two differing by \SI {5}{} and \SI {12}{\milli \meter }, which is why a hairline would be hidden under the estimate's own stroke. \emph {Left}, after \SI {681}{\second } parked: the geometry is already within \SI {15}{\milli \meter } of truth, yet every corner declares almost a metre of uncertainty and every edge sits at its prior, so the layout is withheld. Standing still re-observes the same walls from the same viewpoint, and the information those observations carry saturates. \emph {Right}, after a single rotation in place: the same geometry, now with corner $\sigma $ smaller by a factor of \num {32} and every corner under the publication gate. The estimator does not earn precision by waiting, and does not claim any}{figure.1}{}}
 \citation{liu2018floornet}
 \citation{chenfloorsp}
 \citation{chen2022heat}
@@ -25,8 +28,6 @@
 \citation{bieri2025houselayout3d}
 \citation{solarte2022dfpe}
 \citation{avetisyan2024scenescript}
-\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {II}Related Work}{1}{section.2}\protected@file@percent }
 \citation{luperto2020exploration}
 \citation{ericson2024floorist}
 \citation{ho2025mapex}
@@ -38,29 +39,39 @@
 \citation{poggiuncertainty}
 \citation{jarzabek2022uncertainty}
 \citation{liu2024point2building}
+\@writefile{toc}{\contentsline {section}{\numberline {II}Related Work}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {III}Generative Model}{2}{section.3}\protected@file@percent }
 \citation{zou2021manhattan}
 \citation{chang2017matterport3d}
-\@writefile{toc}{\contentsline {section}{\numberline {III}Generative Model}{2}{section.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {IV}What a Layout Estimate Is Worth}{2}{section.4}\protected@file@percent }
-\newlabel{sec:unc}{{IV}{2}{What a Layout Estimate Is Worth}{section.4}{}}
-\newlabel{eq:corner}{{2}{2}{What a Layout Estimate Is Worth}{equation.4.2}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {V}Experiments}{2}{section.5}\protected@file@percent }
-\newlabel{sec:exp}{{V}{2}{Experiments}{section.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Geometric generality: 594 annotated floor plans}{2}{subsection.5.1}\protected@file@percent }
-\citation{solarte2022dfpe}
 \@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Layout accuracy, 594 annotated floor plans, one run.}}{3}{table.1}\protected@file@percent }
 \newlabel{tab:iou}{{I}{3}{Layout accuracy, 594 annotated floor plans, one run}{table.1}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Calibration of the published corner $\sigma $ against ground truth. 4344 matched corners. $\sigma $ is the largest-axis standard deviation, so this tests a bound.}}{3}{table.2}\protected@file@percent }
-\newlabel{tab:calib}{{II}{3}{Calibration of the published corner $\sigma $ against ground truth. 4344 matched corners. $\sigma $ is the largest-axis standard deviation, so this tests a bound}{table.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {IV}What a Layout Estimate Is Worth}{3}{section.4}\protected@file@percent }
+\newlabel{sec:unc}{{IV}{3}{What a Layout Estimate Is Worth}{section.4}{}}
+\newlabel{eq:corner}{{2}{3}{What a Layout Estimate Is Worth}{equation.4.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {V}Experiments}{3}{section.5}\protected@file@percent }
+\newlabel{sec:exp}{{V}{3}{Experiments}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Geometric generality: 594 annotated floor plans}{3}{subsection.5.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Calibration of the published corner $\sigma $ against ground truth. 4344 matched corners from 586 rooms. Intervals are \num {2000}-sample bootstraps resampling \emph  {rooms}, not corners: corners of one room share its walls, its trajectory and its annotation, so a corner-level interval would be far too narrow. The last row is a single global precision calibrated on this same corpus. $\sigma $ is the largest-axis standard deviation of the corner's covariance. The columns are therefore empirical coverage, $P(\lVert e \rVert _2 \le k\sigma )$ for $k=1,2,3$ --- not a bound: a standard deviation makes no containment guarantee, and what is being tested is whether the declared $\sigma $ predicts the error that actually occurs.}}{3}{table.2}\protected@file@percent }
+\newlabel{tab:calib}{{II}{3}{Calibration of the published corner $\sigma $ against ground truth. 4344 matched corners from 586 rooms. Intervals are \num {2000}-sample bootstraps resampling \emph {rooms}, not corners: corners of one room share its walls, its trajectory and its annotation, so a corner-level interval would be far too narrow. The last row is a single global precision calibrated on this same corpus. $\sigma $ is the largest-axis standard deviation of the corner's covariance. The columns are therefore empirical coverage, $P(\lVert e \rVert _2 \le k\sigma )$ for $k=1,2,3$ --- not a bound: a standard deviation makes no containment guarantee, and what is being tested is whether the declared $\sigma $ predicts the error that actually occurs}{table.2}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Is the reported uncertainty honest?}{3}{subsection.5.2}\protected@file@percent }
 \newlabel{sec:calib}{{\mbox  {V-B}}{3}{Is the reported uncertainty honest?}{subsection.5.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}The real-sensor split}{3}{subsection.5.3}\protected@file@percent }
-\newlabel{sec:real}{{\mbox  {V-C}}{3}{The real-sensor split}{subsection.5.3}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces The two components, measured on real depth against annotated walls.}}{3}{table.3}\protected@file@percent }
-\newlabel{tab:real}{{III}{3}{The two components, measured on real depth against annotated walls}{table.3}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Why no scalar precision can be correct}{3}{subsection.5.4}\protected@file@percent }
-\newlabel{sec:notconstant}{{\mbox  {V-D}}{3}{Why no scalar precision can be correct}{subsection.5.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-E}}Calibration as a diagnostic}{3}{subsection.5.5}\protected@file@percent }
+\citation{solarte2022dfpe}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \textbf  {Thirty-two of the 594 annotated floor plans}, truth filled, estimate outlined, with the achieved IoU beneath each. The panels are ordered by IoU and sampled evenly across the corpus, so the population's \emph  {worst} room is at the left of the top row and the sample is not a selection of successes. The shapes are the corpus's own: between \num {6} and \num {22} corners, with alcoves, wall columns and re-entrant corners that no rectangle prior would admit.}}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:mosaic}{{2}{4}{\textbf {Thirty-two of the 594 annotated floor plans}, truth filled, estimate outlined, with the achieved IoU beneath each. The panels are ordered by IoU and sampled evenly across the corpus, so the population's \emph {worst} room is at the left of the top row and the sample is not a selection of successes. The shapes are the corpus's own: between \num {6} and \num {22} corners, with alcoves, wall columns and re-entrant corners that no rectangle prior would admit}{figure.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces The two components, measured on real depth against annotated walls.}}{4}{table.3}\protected@file@percent }
+\newlabel{tab:real}{{III}{4}{The two components, measured on real depth against annotated walls}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}The real-sensor split}{4}{subsection.5.3}\protected@file@percent }
+\newlabel{sec:real}{{\mbox  {V-C}}{4}{The real-sensor split}{subsection.5.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Closed loop on a real sensor: the claim, demonstrated}{4}{subsection.5.4}\protected@file@percent }
+\newlabel{sec:webots}{{\mbox  {V-D}}{4}{Closed loop on a real sensor: the claim, demonstrated}{subsection.5.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \textbf  {Is the declared uncertainty honest?} Every matched corner of 594 annotated floor plans: declared $\sigma $ against the error it actually made. \emph  {Left}, propagating only the walls' statistical uncertainty: the red median is flat, so a corner claiming \SI {1}{\centi \meter } is no more accurate than one claiming \SI {5}{\centi \meter }, and the cloud sits far above $\mathrm  {error}=\sigma $ at the tight end. \emph  {Right}, with the irreducible term of \eqref  {eq:corner}: the median tracks the diagonal and the declared $\sigma $ predicts the realised error. The dotted line is the publication gate.}}{5}{figure.3}\protected@file@percent }
+\newlabel{fig:calib}{{3}{5}{\textbf {Is the declared uncertainty honest?} Every matched corner of 594 annotated floor plans: declared $\sigma $ against the error it actually made. \emph {Left}, propagating only the walls' statistical uncertainty: the red median is flat, so a corner claiming \SI {1}{\centi \meter } is no more accurate than one claiming \SI {5}{\centi \meter }, and the cloud sits far above $\mathrm {error}=\sigma $ at the tight end. \emph {Right}, with the irreducible term of \eqref {eq:corner}: the median tracks the diagonal and the declared $\sigma $ predicts the realised error. The dotted line is the publication gate}{figure.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \textbf  {The channel is calibrated only while the robot moves.} $\ensuremath  {\mathrm  {NIS}}$ per rotation band over a \SI {200}{\meter } tour, with the pose-induced corner uncertainty $\sigma _{\mathrm  {pred}}$ overlaid. Three independent bands of genuine motion sit at \numrange {0.90}{0.97}. At rest $\sigma _{\mathrm  {pred}}$ collapses while the innovation grows, and under fast rotation the innovation grows again---two distinct mechanisms bracketing a correctly calibrated middle.}}{5}{figure.4}\protected@file@percent }
+\newlabel{fig:motion}{{4}{5}{\textbf {The channel is calibrated only while the robot moves.} $\nis $ per rotation band over a \SI {200}{\meter } tour, with the pose-induced corner uncertainty $\sigma _{\mathrm {pred}}$ overlaid. Three independent bands of genuine motion sit at \numrange {0.90}{0.97}. At rest $\sigma _{\mathrm {pred}}$ collapses while the innovation grows, and under fast rotation the innovation grows again---two distinct mechanisms bracketing a correctly calibrated middle}{figure.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Closed loop, Webots, real LiDAR model, \SI {719}{\second }. Ground truth is the world's wall solids; $\sigma $ is the worst corner of the published polygon.}}{5}{table.4}\protected@file@percent }
+\newlabel{tab:webots}{{IV}{5}{Closed loop, Webots, real LiDAR model, \SI {719}{\second }. Ground truth is the world's wall solids; $\sigma $ is the worst corner of the published polygon}{table.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-E}}Why no scalar precision can be correct}{5}{subsection.5.5}\protected@file@percent }
+\newlabel{sec:notconstant}{{\mbox  {V-E}}{5}{Why no scalar precision can be correct}{subsection.5.5}{}}
 \citation{solarte2022dfpe}
 \bibstyle{IEEEtran}
 \bibdata{refs}
@@ -68,13 +79,6 @@
 \bibcite{chenfloorsp}{2}
 \bibcite{chen2022heat}{3}
 \bibcite{yue2023roomformer}{4}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {Is the declared uncertainty honest?} Every matched corner of 594 annotated floor plans: declared $\sigma $ against the error it actually made. \emph  {Left}, propagating only the walls' statistical uncertainty: the red median is flat, so a corner claiming \SI {1}{\centi \meter } is no more accurate than one claiming \SI {5}{\centi \meter }, and the cloud sits far above $\mathrm  {error}=\sigma $ at the tight end. \emph  {Right}, with the irreducible term of \eqref  {eq:corner}: the median tracks the diagonal and the bound holds. The dotted line is the publication gate.}}{4}{figure.1}\protected@file@percent }
-\newlabel{fig:calib}{{1}{4}{\textbf {Is the declared uncertainty honest?} Every matched corner of 594 annotated floor plans: declared $\sigma $ against the error it actually made. \emph {Left}, propagating only the walls' statistical uncertainty: the red median is flat, so a corner claiming \SI {1}{\centi \meter } is no more accurate than one claiming \SI {5}{\centi \meter }, and the cloud sits far above $\mathrm {error}=\sigma $ at the tight end. \emph {Right}, with the irreducible term of \eqref {eq:corner}: the median tracks the diagonal and the bound holds. The dotted line is the publication gate}{figure.1}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \textbf  {The channel is calibrated only while the robot moves.} $\ensuremath  {\mathrm  {NIS}}$ per rotation band over a \SI {200}{\meter } tour, with the pose-induced corner uncertainty $\sigma _{\mathrm  {pred}}$ overlaid. Three independent bands of genuine motion sit at \numrange {0.90}{0.97}. At rest $\sigma _{\mathrm  {pred}}$ collapses while the innovation grows, and under fast rotation the innovation grows again---two distinct mechanisms bracketing a correctly calibrated middle.}}{4}{figure.2}\protected@file@percent }
-\newlabel{fig:motion}{{2}{4}{\textbf {The channel is calibrated only while the robot moves.} $\nis $ per rotation band over a \SI {200}{\meter } tour, with the pose-induced corner uncertainty $\sigma _{\mathrm {pred}}$ overlaid. Three independent bands of genuine motion sit at \numrange {0.90}{0.97}. At rest $\sigma _{\mathrm {pred}}$ collapses while the innovation grows, and under fast rotation the innovation grows again---two distinct mechanisms bracketing a correctly calibrated middle}{figure.2}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {VI}Limitations}{4}{section.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{4}{section.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{References}{4}{section*.1}\protected@file@percent }
 \bibcite{xufrinet}{5}
 \bibcite{su2023slibonet}{6}
 \bibcite{liu2024polyroom}{7}
@@ -88,6 +92,11 @@
 \bibcite{solarte2022mlc}{15}
 \bibcite{solarte2024raycasting}{16}
 \bibcite{hutchcroftcovispose}{17}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-F}}Calibration as a diagnostic}{6}{subsection.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {VI}Limitations}{6}{section.6}\protected@file@percent }
+\newlabel{sec:limits}{{VI}{6}{Limitations}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{6}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{References}{6}{section*.1}\protected@file@percent }
 \bibcite{lambertsalve}{18}
 \bibcite{howardjenkins2019unconstrained}{19}
 \bibcite{fayyazsanaviu2rle}{20}
@@ -107,4 +116,4 @@
 \bibcite{liu2024point2building}{34}
 \bibcite{zou2021manhattan}{35}
 \bibcite{chang2017matterport3d}{36}
-\gdef \@abspage@last{5}
+\gdef \@abspage@last{7}

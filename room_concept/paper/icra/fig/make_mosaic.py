@@ -1,5 +1,10 @@
 import re, matplotlib
 matplotlib.use("Agg")
+# ⚠ TYPE 42 (TrueType), NOT matplotlib's DEFAULT TYPE 3. IEEE/PaperCept forbid Type 3 fonts outright
+# and the automated checker rejects on them; every figure in this paper was Type 3 until 2026-09-14.
+# It is one line here and a resubmission if it is missed.
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MPoly
 

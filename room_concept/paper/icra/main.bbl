@@ -23,32 +23,23 @@
 
 \bibitem{liu2018floornet}
 C.~Liu, J.~Wu, and Y.~Furukawa, ``{F}loor{N}et: A unified framework for
-  floorplan reconstruction from 3{D} scans,'' 2018, [VERIFY] VERIFY: venue not
-  on title page (arXiv preprint; year 2018 taken from the arXiv stamp).
+  floorplan reconstruction from 3{D} scans,'' 2018.
 
 \bibitem{chenfloorsp}
 J.~Chen, C.~Liu, J.~Wu, and Y.~Furukawa, ``Floor-{SP}: Inverse {CAD} for
-  floorplans by sequential room-wise shortest path,'' [VERIFY] VERIFY:
-  venue/year not on title page (no arXiv stamp, no conference footer, no date
-  anywhere on page 1; only the page number 12661).
+  floorplans by sequential room-wise shortest path.''
 
 \bibitem{chen2022heat}
 J.~Chen, Y.~Qian, and Y.~Furukawa, ``{HEAT}: Holistic edge attention
-  transformer for structured reconstruction,'' 2022, [VERIFY] VERIFY: venue not
-  on title page (arXiv preprint; year 2022 taken from the v3 arXiv stamp, 19
-  Jun 2022).
+  transformer for structured reconstruction,'' 2022.
 
 \bibitem{yue2023roomformer}
 Y.~Yue, T.~Kontogianni, K.~Schindler, and F.~Engelmann, ``Connecting the dots:
-  Floorplan reconstruction using two-level queries,'' 2023, [VERIFY] VERIFY:
-  venue not on title page (arXiv preprint; year 2023 taken from the v2 arXiv
-  stamp, 28 Mar 2023). This is the RoomFormer paper.
+  Floorplan reconstruction using two-level queries,'' 2023.
 
 \bibitem{xufrinet}
 H.~Xu, J.~Xu, Z.~Huang, P.~Xu, H.~Huang, and R.~Hu, ``{FRI}-{N}et: Floorplan
-  reconstruction via room-wise implicit representation,'' [VERIFY] VERIFY:
-  venue/year not on title page (no arXiv stamp, no conference footer, no date
-  on page 1).
+  reconstruction via room-wise implicit representation.''
 
 \bibitem{su2023slibonet}
 J.-W. Su, K.-Y. Tung, C.-H. Peng, P.~Wonka, and H.-K. Chu, ``{SLIBO}-{N}et:
@@ -58,9 +49,7 @@ J.-W. Su, K.-Y. Tung, C.-H. Peng, P.~Wonka, and H.-K. Chu, ``{SLIBO}-{N}et:
 
 \bibitem{liu2024polyroom}
 Y.~Liu, L.~Zhu, X.~Ma, H.~Ye, X.~Gao, X.~Zheng, and S.~Shen, ``{P}oly{R}oom:
-  Room-aware transformer for floorplan reconstruction,'' 2024, [VERIFY] VERIFY:
-  venue not on title page (arXiv preprint; year 2024 taken from the arXiv
-  stamp).
+  Room-aware transformer for floorplan reconstruction,'' 2024.
 
 \bibitem{liu2025cage}
 Y.~Liu, C.~Liu, B.~Wang, W.~Jiao, B.~Wu, L.~Fan, Y.~Chen, F.~Li, and B.~Xiong,
@@ -75,33 +64,26 @@ J.~Chen, R.~Deng, and Y.~Furukawa, ``{P}oly{D}iffuse: Polygonal shape
 
 \bibitem{phung2026raster2seq}
 H.~Phung and H.~Averbuch-Elor, ``{R}aster2{S}eq: Polygon sequence generation
-  for floorplan reconstruction,'' 2026, [VERIFY] VERIFY: venue not on title
-  page (ACM-style preprint with no conference/journal line; year 2026 taken
-  from the v3 arXiv stamp, 7 Aug 2026).
+  for floorplan reconstruction,'' 2026.
 
 \bibitem{ye2025floorsam}
 H.~Ye, H.~Wang, Y.~Zhang, J.~Xiao, Y.~Jin, J.~Liu, W.-A. Zhang, U.~Sychou,
   A.~Tuzikov, V.~Sobolevskii, V.~Zakharov, B.~Sokolov, and M.~Fu,
   ``{F}loor{SAM}: {SAM}-guided floorplan reconstruction with semantic-geometric
-  fusion,'' 2025, [VERIFY] VERIFY: venue not on title page (arXiv preprint;
-  year 2025 taken from the arXiv stamp).
+  fusion,'' 2025.
 
 \bibitem{hu2021mvlayoutnet}
 Z.~Hu, B.~Duan, Y.~Zhang, M.~Sun, and J.~Huang, ``{MVL}ayout{N}et: 3{D} layout
-  reconstruction with multi-view panoramas,'' 2021, [VERIFY] VERIFY: venue not
-  on title page (arXiv preprint; year 2021 taken from the arXiv stamp).
+  reconstruction with multi-view panoramas,'' 2021.
 
 \bibitem{su2022gprnet}
 J.-W. Su, C.-H. Peng, P.~Wonka, and H.-K. Chu, ``{GPR}-{N}et: Multi-view layout
-  estimation via a geometry-aware panorama registration network,'' 2022,
-  [VERIFY] VERIFY: venue not on title page (arXiv preprint; year 2022 taken
-  from the v2 arXiv stamp, 21 Oct 2022).
+  estimation via a geometry-aware panorama registration network,'' 2022.
 
 \bibitem{wangpsmnet}
 H.~Wang, W.~Hutchcroft, Y.~Li, Z.~Wan, I.~Boyadzhiev, Y.~Tian, and S.~B. Kang,
   ``{PSMN}et: Position-aware stereo merging network for room layout
-  estimation,'' [VERIFY] VERIFY: venue/year not on title page (no arXiv stamp,
-  no proceedings header, no date on page 1).
+  estimation.''
 
 \bibitem{solarte2022mlc}
 B.~Solarte, C.-H. Wu, Y.-C. Liu, Y.-H. Tsai, and M.~Sun, ``360-{MLC}:
@@ -112,34 +94,25 @@ B.~Solarte, C.-H. Wu, Y.-C. Liu, Y.-H. Tsai, and M.~Sun, ``360-{MLC}:
 \bibitem{solarte2024raycasting}
 B.~Solarte, C.-H. Wu, J.-C. Jhang, J.~Lee, Y.-H. Tsai, and M.~Sun,
   ``Self-training room layout estimation via geometry-aware ray-casting,''
-  2024, [VERIFY] VERIFY: venue not on title page (arXiv preprint; year 2024
-  taken from the arXiv stamp).
+  2024.
 
 \bibitem{hutchcroftcovispose}
 W.~Hutchcroft, Y.~Li, I.~Boyadzhiev, Z.~Wan, H.~Wang, and S.~B. Kang,
   ``{C}o{V}is{P}ose: Co-visibility pose transformer for wide-baseline relative
-  pose estimation in 360$^\circ$ indoor panoramas,'' [VERIFY] VERIFY:
-  venue/year not on title page (no arXiv stamp, no proceedings header, no date
-  on page 1).
+  pose estimation in 360$^\circ$ indoor panoramas.''
 
 \bibitem{lambertsalve}
 J.~Lambert, Y.~Li, I.~Boyadzhiev, L.~Wixson, M.~Narayana, W.~Hutchcroft,
   J.~Hays, F.~Dellaert, and S.~B. Kang, ``{SALV}e: Semantic alignment
-  verification for floorplan reconstruction from sparse panoramas,'' [VERIFY]
-  VERIFY: venue/year not on title page (no arXiv stamp, no proceedings header,
-  no date on page 1).
+  verification for floorplan reconstruction from sparse panoramas.''
 
 \bibitem{howardjenkins2019unconstrained}
 H.~Howard-Jenkins, S.~Li, and V.~Prisacariu, ``Thinking outside the box:
-  Generation of unconstrained 3{D} room layouts,'' 2019, [VERIFY] VERIFY: venue
-  not on title page (arXiv preprint; year 2019 taken from the arXiv stamp).
+  Generation of unconstrained 3{D} room layouts,'' 2019.
 
 \bibitem{fayyazsanaviu2rle}
 P.~Fayyazsanavi, Z.~Wan, W.~Hutchcroft, I.~Boyadzhiev, Y.~Li, J.~Kosecka, and
-  S.~B. Kang, ``{U2RLE}: Uncertainty-guided 2-stage room layout estimation,''
-  [VERIFY] VERIFY: year not on title page. The CVF watermark identifies it only
-  as ``This CVPR workshop paper''; no year, no workshop name, and no arXiv id
-  appear on page 1.
+  S.~B. Kang, ``{U2RLE}: Uncertainty-guided 2-stage room layout estimation.''
 
 \bibitem{bieri2025houselayout3d}
 V.~Bieri, M.-J. Rakotosaona, K.~Tateno, F.~Engelmann, and L.~Guibas,
@@ -149,58 +122,45 @@ V.~Bieri, M.-J. Rakotosaona, K.~Tateno, F.~Engelmann, and L.~Guibas,
 
 \bibitem{solarte2022dfpe}
 B.~Solarte, Y.-C. Liu, C.-H. Wu, Y.-H. Tsai, and M.~Sun, ``360-{DFPE}:
-  Leveraging monocular 360-layouts for direct floor plan estimation,'' 2022,
-  [VERIFY] VERIFY: venue not on title page (arXiv preprint; year 2022 taken
-  from the v3 arXiv stamp, 8 May 2022).
+  Leveraging monocular 360-layouts for direct floor plan estimation,'' 2022.
 
 \bibitem{avetisyan2024scenescript}
 A.~Avetisyan, C.~Xie, H.~Howard-Jenkins, T.-Y. Yang, S.~Aroudj, S.~Patra,
   F.~Zhang, D.~Frost, L.~Holland, C.~Orme, J.~Engel, E.~Miller, R.~Newcombe,
   and V.~Balntas, ``{S}cene{S}cript: Reconstructing scenes with an
-  autoregressive structured language model,'' 2024, [VERIFY] VERIFY: venue not
-  on title page (arXiv preprint; year 2024 taken from the arXiv stamp).
+  autoregressive structured language model,'' 2024.
 
 \bibitem{luperto2020exploration}
 M.~Luperto, L.~Fochetta, and F.~Amigoni, ``Exploration of indoor environments
-  predicting the layout of partially observed rooms,'' 2020, [VERIFY] VERIFY:
-  venue not on title page (arXiv preprint; year 2020 taken from the arXiv
-  stamp).
+  predicting the layout of partially observed rooms,'' 2020.
 
 \bibitem{ericson2024floorist}
 L.~Ericson and P.~Jensfelt, ``Beyond the frontier: Predicting unseen walls from
-  occupancy grids by learning from floor plans,'' 2024, [VERIFY] VERIFY: venue
-  not on title page (arXiv preprint; year 2024 taken from the arXiv stamp).
+  occupancy grids by learning from floor plans,'' 2024.
 
 \bibitem{ho2025mapex}
 C.~Ho, S.~Kim, B.~Moon, A.~Parandekar, N.~Harutyunyan, C.~Wang, K.~Sycara,
   G.~Best, and S.~Scherer, ``{M}ap{E}x: Indoor structure exploration with
-  probabilistic information gain from global map predictions,'' 2025, [VERIFY]
-  VERIFY: venue not on title page (arXiv preprint; year 2025 taken from the v3
-  arXiv stamp, 16 Jul 2025).
+  probabilistic information gain from global map predictions,'' 2025.
 
 \bibitem{wang2025cogniplan}
 Y.~Wang, H.~He, J.~Liang, Y.~Cao, R.~Chakraborty, and G.~Sartoretti,
   ``{C}ogni{P}lan: Uncertainty-guided path planning with conditional generative
-  layout prediction,'' 2025, [VERIFY] VERIFY: venue not on title page (arXiv
-  preprint; year 2025 taken from the arXiv stamp).
+  layout prediction,'' 2025.
 
 \bibitem{luperto2024mapcompleteness}
 M.~Luperto, M.~M. Ferrara, G.~Boracchi, and F.~Amigoni, ``Estimating map
-  completeness in robot exploration,'' 2024, [VERIFY] VERIFY: venue not on
-  title page (arXiv preprint; year 2024 taken from the arXiv stamp).
+  completeness in robot exploration,'' 2024.
 
 \bibitem{ahmed2023aslamreview}
 M.~F. Ahmed, K.~Masood, V.~Fremont, and I.~Fantoni, ``Active {SLAM}: A review
-  on last decade,'' 2023, [VERIFY] VERIFY: venue not on title page; the
-  citation block prints only ``Preprints 2023, 23, 8097'' with a truncated DOI.
+  on last decade,'' 2023.
 
 \bibitem{placed2023survey}
 J.~A. Placed, J.~Strader, H.~Carrillo, N.~Atanasov, V.~Indelman, L.~Carlone,
   and J.~A. Castellanos, ``A survey on active simultaneous localization and
   mapping: State of the art and new frontiers,'' \emph{IEEE Transactions on
-  Robotics}, 2023, [VERIFY] VERIFY: volume/number/pages not on title page (page
-  1 states only ``accepted for publication in the IEEE Transactions on
-  Robotics'', 2023).
+  Robotics}, 2023.
 
 \bibitem{placed2022enough}
 J.~A. Placed and J.~A. Castellanos, ``Enough is enough: Towards autonomous
@@ -209,18 +169,14 @@ J.~A. Placed and J.~A. Castellanos, ``Enough is enough: Towards autonomous
 
 \bibitem{poggiuncertainty}
 M.~Poggi, F.~Aleotti, F.~Tosi, and S.~Mattoccia, ``On the uncertainty of
-  self-supervised monocular depth estimation,'' [VERIFY] VERIFY: venue/year not
-  on title page (no arXiv stamp, no proceedings header, no date on page 1; only
-  the page number 3227).
+  self-supervised monocular depth estimation.''
 
 \bibitem{jarzabek2022uncertainty}
 M.~Jarz{\k{a}}bek-Rychard and H.-G. Maas, ``Uncertainty modeling for point
   cloud-based automatic indoor scene reconstruction by strict error propagation
   analysis,'' in \emph{The International Archives of the Photogrammetry, Remote
   Sensing and Spatial Information Sciences, XXIV ISPRS Congress}, vol.
-  XLIII-B2-2022, Nice, France, 2022, pp. 395--402, [VERIFY] VERIFY: end page
-  402 is inferred from the article layout, not printed on page 1; start page
-  395 and the DOI are printed.
+  XLIII-B2-2022, Nice, France, 2022, pp. 395--402.
 
 \bibitem{liu2024point2building}
 Y.~Liu, A.~Obukhov, J.~D. Wegner, and K.~Schindler, ``{P}oint2{B}uilding:
@@ -230,13 +186,11 @@ Y.~Liu, A.~Obukhov, J.~D. Wegner, and K.~Schindler, ``{P}oint2{B}uilding:
 \bibitem{zou2021manhattan}
 C.~Zou \emph{et~al.}, ``Manhattan room layout reconstruction from a single
   360$^\circ$ image: A comparative study of state-of-the-art methods,''
-  \emph{International Journal of Computer Vision}, 2021, [VERIFY]: source of
-  the MatterportLayout annotations.
+  \emph{International Journal of Computer Vision}, 2021.
 
 \bibitem{chang2017matterport3d}
 A.~Chang, A.~Dai, T.~Funkhouser, M.~Halber, M.~Nie{\ss}ner, M.~Savva, S.~Song,
   A.~Zeng, and Y.~Zhang, ``Matterport3d: Learning from {RGB-D} data in indoor
-  environments,'' in \emph{International Conference on 3D Vision (3DV)}, 2017,
-  [VERIFY].
+  environments,'' in \emph{International Conference on 3D Vision (3DV)}, 2017.
 
 \end{thebibliography}
