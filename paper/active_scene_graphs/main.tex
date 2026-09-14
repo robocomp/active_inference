@@ -503,8 +503,9 @@ shipped in a running fleet, which makes them demanding baselines rather than con
 
 The platforms are a Webots simulation of a two-room apartment running the same component code as
 the robots; Shadow, a differential-drive robot with a 360$^\circ$ LiDAR, a stereo camera and a
-panoramic camera; and P3Bot, a second differential-drive robot with a different LiDAR and no
-panoramic camera. The fleet of agents is identical on all three, and only the robot concept differs.
+panoramic camera; and P3Bot, an omnidirectional mobile manipulator carrying two Kinova Gen3 arms and
+its own LiDAR. The fleet of agents is identical on all three, and only the robot concept differs:
+the base kinematics, the sensor mounts and the arms are properties of that one node.
 
 \subsection{R2: the uncertainty is consumed}\label{sec:eval:r2}
 
