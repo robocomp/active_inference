@@ -22,7 +22,10 @@ def parse(p):
     return verts, csig, esig
 
 WANT = [(12999, "parked, 681 s"), (13478, "after one rotation in place")]
-fig, axes = plt.subplots(1, 2, figsize=(7.16, 2.75))
+# ⚠ GENERATED AT THE SIZE IT IS PLACED AT. This figure sits at \columnwidth (~3.5 in); drawn at
+# 7.16 in it was scaled to 49% and every label rendered at half its nominal size, which is why the
+# text could not be read. Matplotlib points are only points if the figure is not resized afterwards.
+fig, axes = plt.subplots(1, 2, figsize=(3.46, 2.35))
 for ax, (fr, title) in zip(axes, WANT):
     V, C, E = parse(rows[fr])
     ax.add_patch(MPoly(V, closed=True, facecolor="#f6f2ea", edgecolor="none", zorder=0))
@@ -43,9 +46,9 @@ for ax, (fr, title) in zip(axes, WANT):
     worst = max(C)
     ax.set_title(f"{title}\nworst corner $\\sigma$ = {worst:.3f} m"
                  + ("  (publishable)" if worst <= BAR else "  (withheld)"),
-                 fontsize=7.4, color="#1f2328", pad=4)
+                 fontsize=6.0, color="#1f2328", pad=3)
     ax.set_aspect("equal"); ax.axis("off")
-    ax.set_xlim(-4.4, 4.4); ax.set_ylim(-3.3, 3.3)
+    ax.set_xlim(-4.3, 4.3); ax.set_ylim(-3.4, 3.4)
 
 # ── TRUTH IS DRAWN IN EACH PANEL'S OWN FRAME, AND THAT IS NOT A FUDGE ────────────────────────────
 # The map frame is GAUGE-FREE while the layout is being estimated: its origin is wherever the robot
@@ -74,12 +77,19 @@ def truth_in_panel_frame(V, w, h):
 
 for ax, (fr, _t) in zip(axes, WANT):
     V, _C, _E = parse(rows[fr])
-    ax.add_patch(MPoly(truth_in_panel_frame(V, TRUTH_W, TRUTH_H), closed=True,
-                       facecolor="none", edgecolor="#31465c", lw=0.8, ls=(0, (4, 3)), zorder=5))
-fig.subplots_adjust(left=0.01, right=0.99, top=0.86, bottom=0.02, wspace=0.02)
-fig.text(0.5, 0.015, "dashed: ground truth 6.000 $\\times$ 4.000 m, drawn in each panel's own frame   ·   discs: per-corner $\\sigma$, "
-                     "to scale   ·   bands: per-edge offset $\\sigma_d$",
-         ha="center", fontsize=6.3, color="#31465c")
+    T = truth_in_panel_frame(V, TRUTH_W, TRUTH_H)
+    # A WIDE PALE BAND, UNDER the estimate, not a hairline on top of it. Truth and estimate differ by
+    # 5 and 12 mm here — far less than the estimate's own stroke width at this scale — so a dashed
+    # line drawn over it is simply invisible, which read as "the ground truth is missing". Drawn as a
+    # band, the estimate is seen lying INSIDE the truth, and the fact that it fits within the band's
+    # width is exactly the result the panel exists to show.
+    ax.add_patch(MPoly(T, closed=True, facecolor="none", edgecolor="#8aa4c8", lw=4.0,
+                       alpha=0.75, zorder=0.5, joinstyle="miter"))
+    ax.add_patch(MPoly(T, closed=True, facecolor="none", edgecolor="#31465c", lw=0.7,
+                       ls=(0, (3, 2.4)), zorder=6))
+fig.subplots_adjust(left=0.005, right=0.995, top=0.83, bottom=0.075, wspace=0.02)
+fig.text(0.5, 0.015, "pale band: ground truth, each panel's own frame  ·  discs: per-corner $\\sigma$, to scale",
+         ha="center", fontsize=5.2, color="#31465c")
 fig.savefig("paper/icra/fig/teaser.pdf")
 print("wrote paper/icra/fig/teaser.pdf")
 for fr, t in WANT:

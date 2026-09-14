@@ -49,8 +49,10 @@ checked.
 \centering
 \includegraphics[width=\columnwidth]{fig/teaser}
 \caption{\textbf{The estimate is right before it is confident, and says so.} The same room, from one
-closed-loop run on a real LiDAR model. \emph{Left}, after \SI{681}{\second} parked: the geometry is
-already within \SI{15}{\milli\meter} of truth (dashed), yet every corner declares almost a metre of
+closed-loop run on a real LiDAR model. The pale band is ground truth; the estimate lies inside its
+width throughout, the two differing by \SI{5}{} and \SI{12}{\milli\meter}, which is why a hairline
+would be hidden under the estimate's own stroke. \emph{Left}, after \SI{681}{\second} parked: the
+geometry is already within \SI{15}{\milli\meter} of truth, yet every corner declares almost a metre of
 uncertainty and every edge sits at its prior, so the layout is withheld. Standing still re-observes
 the same walls from the same viewpoint, and the information those observations carry saturates.
 \emph{Right}, after a single rotation in place: the same geometry, now with corner $\sigma$ smaller by
@@ -212,8 +214,7 @@ We evaluate on 594 room annotations from \textbf{MatterportLayout}~\cite{zou2021
 Manhattan room-layout annotations on Matterport3D~\cite{chang2017matterport3d} panoramas, spanning 6
 to 18 ground-truth corners.
 
-\textbf{We state plainly what this does and does not measure.} Our observations are \emph{simulated
-from the annotated polygon}: a range sensor is driven through the annotated room and the estimator
+\textbf{What this measures.} The observations are \emph{simulated from the annotated polygon}: a range sensor is driven through the annotated room and the estimator
 never sees a photograph. Because the returns are synthesised from the annotated polygons, this
 experiment evaluates geometric inference and uncertainty calibration rather than appearance-based
 layout recognition, and Table~\ref{tab:iou} is not comparable with single-image methods evaluated on
@@ -433,9 +434,9 @@ arrives at once. The final estimate is \SI{5.996}{\meter} and \SI{4.005}{\meter}
 the $\sigma$ the system declared for them.
 
 The same run shows the opposite behaviour in the pose channel, where correlated evidence does shrink
-the covariance while the robot is parked. We report that as a measured defect in \S\ref{sec:limits}
-rather than hide the asymmetry: it is the same question asked of two channels, and only one of them
-answers it correctly.
+the covariance while the robot is parked. We report that as a measured defect in \S\ref{sec:limits}: it is the same
+question asked of two channels, and only one of them answers it correctly, which is what makes the
+comparison informative.
 
 \subsection{Why no scalar precision can be correct}
 \label{sec:notconstant}
