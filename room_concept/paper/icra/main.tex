@@ -7,6 +7,15 @@
 \sisetup{detect-weight=true,detect-family=true}
 \newcommand{\nis}{\ensuremath{\mathrm{NIS}}}
 
+% ── CAMERA-READY SWITCH ───────────────────────────────────────────────────────────────────────────
+% \camerareadyfalse reveals the funding acknowledgement below. It MUST stay false for the anonymous
+% submission: the grants name the Junta de Extremadura and a POCTEP regional programme, which
+% identifies the institution to any reviewer in the field as surely as a letterhead would. Reviewers
+% do read acknowledgements, and this is the most common way a double-blind submission de-anonymises
+% itself. Flip it for the final version only.
+\newif\ifcameraready
+\camerareadyfalse
+
 \begin{document}
 
 \title{Calibrated Uncertainty for Active Room-Layout Estimation}
@@ -511,6 +520,30 @@ such an uncertainty can be maintained online, that it can be validated against g
 and that it is useful precisely because something depends on it. The discipline of making precisions
 honest is not bookkeeping: it exposed three defects, and it showed that the quantity everyone tunes
 as a constant is not one.
+
+\section*{Acknowledgements}
+
+% ── DOUBLE-ANONYMOUS: NOTHING HERE MAY IDENTIFY THE AUTHORS ────────────────────────────────────────
+% Funding bodies, grant numbers, institutions and colleagues by name go in at CAMERA-READY, not now —
+% they are the usual way an acknowledgements section breaks a blind review. The AI disclosure below
+% does NOT identify anyone and IEEE requires it to be here, so it stays in the anonymous submission.
+\ifcameraready
+This work was co-funded by the FEDER Project 0124\_EUROAGE\_MAS\_4\_E under the POCTEP Programme
+2021--2027, and by the R\&D\&i project PID2022-137344OB-C31, supported by
+MICIU/AEI/10.13039/501100011033 and ``FEDER, Una manera de hacer Europa''. Additional co-funding was
+provided by the European Union through the European Regional Development Fund (85\%) and by the Junta
+de Extremadura (Grant GR24194). The managing authority is the Ministerio de Hacienda (Spain). This
+work was also supported by the SWEET Project, a Horizon Europe Marie Sk\l{}odowska-Curie action
+(Agreement No.\ 101168792).
+\fi
+
+The authors used a large language model (Anthropic's Claude) as a writing and analysis assistant. Its
+contributions were: generating the figures from the authors' own experimental data, by scripts that
+are part of the submitted artefact; performing the bootstrap analysis of
+Table~\ref{tab:calib}; drafting \S\ref{sec:webots}; and copy-editing throughout. Every number reported
+in this paper was produced by the authors' own experiments and was checked against the recorded run
+data; the model generated no data and performed no experiment. The authors take full responsibility
+for the content, including all claims and their supporting evidence.
 
 \balance
 \bibliographystyle{IEEEtran}
