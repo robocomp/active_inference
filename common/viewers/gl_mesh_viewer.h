@@ -21,6 +21,7 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPainter>
+#include <QSurfaceFormat>
 #include <QVector3D>
 #include <QWheelEvent>
 
@@ -42,6 +43,10 @@ public:
 		resize(720, 720);
 		setWindowTitle("mesh");
 		setFocusPolicy(Qt::StrongFocus);
+		// Ask for a depth buffer explicitly rather than trusting the platform default.
+		QSurfaceFormat fmt = format();
+		fmt.setDepthBufferSize(24);
+		setFormat(fmt);
 	}
 
 	~GLMeshViewer() override
@@ -137,6 +142,12 @@ protected:
 
 	void paintGL() override
 	{
+		// ★Re-arm depth EVERY frame, before the clear. The QPainter overlay at the end of this function
+		// disables GL_DEPTH_TEST on the shared context, so enabling it once in initializeGL holds only for
+		// the first frame: from the second repaint on, triangles land in file order and back faces paint
+		// over front ones — the mesh reads inside out.
+		glEnable(GL_DEPTH_TEST);
+		glDepthMask(GL_TRUE);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		if(not program_.isLinked())
 			return;

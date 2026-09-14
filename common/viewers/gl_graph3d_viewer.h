@@ -203,6 +203,8 @@ protected:
 		// visible plate around it.
 		if(light_bg_) glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
 		else          glClearColor(0.085f, 0.095f, 0.115f, 1.0f);
+		glEnable(GL_DEPTH_TEST);   // the QPainter overlay below disables it; re-arm every frame (see gl_mesh_viewer.h)
+		glDepthMask(GL_TRUE);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		const float aspect = static_cast<float>(std::max(1, width())) / static_cast<float>(std::max(1, height()));

@@ -192,6 +192,8 @@ protected:
 
 	void paintGL() override
 	{
+		glEnable(GL_DEPTH_TEST);   // the QPainter overlay below disables it; re-arm every frame (see gl_mesh_viewer.h)
+		glDepthMask(GL_TRUE);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		if(not program_.isLinked())
 			return;
