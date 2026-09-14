@@ -60,10 +60,21 @@ Park in the room, motors on, zero command, hands off. Log 5 minutes.
 
 ---
 
-## 6 · Save — IMMEDIATELY, before anything restarts the agent
+## 6 · Save — STOP THE AGENT FIRST, then copy
 
-⚠ `room_concept.h` opens the probe with `std::ios::trunc`. **The next start of the agent destroys the
-run.** This is exactly how the paper's original tour was lost. Leaving the agent running is fine.
+- [ ] **Stop the agent** (SIGTERM / Ctrl-C — never `kill -9`; it owns nodes in the shared graph)
+- [ ] confirm it is stopped: `pgrep -x room_concept` returns nothing
+- [ ] only then copy
+
+⚠ **Two ways to lose the run, and we hit both in one afternoon.**
+
+1. **Copying while it still runs gives you a partial tour.** Done on 2026-09-14: the copy caught the
+   first third, and every number moved when the full log was analysed — 148k candidates became 300k,
+   12 stationary stretches became 34, the ratio went 9.9 to 8.7. One claim reversed outright and had
+   to be withdrawn from the paper. A partial log looks completely normal; nothing warns you.
+2. **Starting the agent again destroys the previous run.** `room_concept.h` opens the probe with
+   `std::ios::trunc`. This is how the paper's original tour was lost, along with the numbers that had
+   already been published from it.
 
 ```
 D=datasets/real_apartment/$(date +%m%d_%H%M); mkdir -p $D

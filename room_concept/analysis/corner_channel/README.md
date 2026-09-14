@@ -22,7 +22,9 @@ stretches — i.e. no headline number. Save both or the run is wasted.
 
 1. Run the tour. Include **deliberate stops of >= 30 s** — the repeat/scatter split is measured only
    over stationary stretches, so a tour without stops produces nothing.
-2. **Immediately, before anything else starts the agent again:**
+2. **Stop the agent first** (SIGTERM, never `kill -9`), check `pgrep -x room_concept` is empty, and
+   only then copy. Copying a running agent gives a partial tour that looks entirely normal — on
+   2026-09-14 it produced a claim that reversed once the full log was read. Then:
    ```
    D=datasets/<place>/<run>; mkdir -p $D
    cp tmp/corner_probe.csv  $D/corner_probe.csv
@@ -42,4 +44,6 @@ stretches — i.e. no headline number. Save both or the run is wasted.
   "calibrated"; the script prints the rejection fraction next to every NIS so this cannot be read
   past.
 - **A truncated final line.** A log copied while the agent is still writing ends mid-row. The reader
-  drops any row whose field count is wrong rather than parsing a short row into silent nonsense.
+  drops any row whose field count is wrong rather than parsing a short row into silent nonsense. That
+  guard makes a partial log SAFE TO PARSE, which is not the same as safe to quote: it will analyse
+  cleanly and give you numbers for a fraction of the tour with no indication that is what they are.
