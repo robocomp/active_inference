@@ -26,7 +26,40 @@ def parse(p):
     esig  = [float(x) for x in p[5].split()]
     return verts, csig, esig
 
-WANT = [(12999, "parked, 681 s"), (13478, "after one rotation in place")]
+# ── THE TWO PANEL TITLES ARE COMPUTED FROM THE RUN, NOT TYPED ──────────────────────────────────
+# The hand-typed pair said "parked, 681 s" and "after one rotation in place". Both were wrong:
+# frame 12999 is at 664.8 s, not 681, and the robot turns 320 deg between the panels, not 360.
+# A number typed into a caption cannot be re-checked when the run is regenerated, so both are now
+# derived from the file. Definitions:
+#   parked  = how long the robot has been within 5 cm and 5 deg of its pose at the panel-A frame
+#   rotated = the SUM OF |d theta| between the panels, which is what a rotation costs the robot,
+#             excluding the last two frames -- those are the RE-ANCHOR (92 deg + 138 deg of heading
+#             and 277 mm + 739 mm of position, in two single steps). That is the map frame moving,
+#             not the robot, and counting it as motion would inflate the figure by 230 deg.
+import math as _mrot
+def _pose(fr):
+    return [float(v) for v in rows[fr][2].split(",")]
+def _parked_seconds(fr):
+    ref, k = _pose(fr), fr
+    while (k - 1) in rows:
+        v = _pose(k - 1)
+        dth = abs(v[2] - ref[2]); dth = min(dth, 2 * _mrot.pi - dth)
+        if _mrot.dist(v[:2], ref[:2]) > 0.05 or _mrot.degrees(dth) > 5: break
+        k -= 1
+    return (int(rows[fr][1]) - int(rows[k][1])) / 1000.0
+def _rotation_degrees(f0, f1, drop_last=2):
+    ks = [k for k in sorted(rows) if f0 <= k <= f1][:-drop_last or None]
+    tot = 0.0
+    for a, b in zip(ks, ks[1:]):
+        d = _pose(b)[2] - _pose(a)[2]
+        while d >  _mrot.pi: d -= 2 * _mrot.pi
+        while d < -_mrot.pi: d += 2 * _mrot.pi
+        tot += abs(d)
+    return _mrot.degrees(tot)
+_FA, _FB = 12999, 13478
+WANT = [(_FA, f"parked, {_parked_seconds(_FA):.0f} s"),
+        (_FB, f"after turning {_rotation_degrees(_FA, _FB):.0f}$^\\circ$ on the spot")]
+print(f"  labels: parked {_parked_seconds(_FA):.1f} s | rotation {_rotation_degrees(_FA,_FB):.1f} deg")
 # ⚠ GENERATED AT THE SIZE IT IS PLACED AT. This figure sits at \columnwidth (~3.5 in); drawn at
 # 7.16 in it was scaled to 49% and every label rendered at half its nominal size, which is why the
 # text could not be read. Matplotlib points are only points if the figure is not resized afterwards.
