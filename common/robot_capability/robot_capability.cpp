@@ -28,6 +28,7 @@ BaseCapability read_base_capability(DSR::DSRGraph &graph, std::uint64_t robot_id
     cap.max_linear_decel_mps2 = graph.get_attrib_by_name<robot_max_linear_decel_att>(*node);
     cap.wheel_radius_m        = graph.get_attrib_by_name<robot_wheel_radius_att>(*node);
     cap.axes_length_m         = graph.get_attrib_by_name<robot_axes_length_att>(*node);
+    cap.wheel_base_m          = graph.get_attrib_by_name<robot_wheel_base_att>(*node);
     cap.holonomic             = graph.get_attrib_by_name<robot_holonomic_att>(*node);
 
     // A published ZERO is not a capability, it is a producer that read a key it could not parse. Treat it
@@ -49,6 +50,7 @@ BaseCapability read_base_capability(DSR::DSRGraph &graph, std::uint64_t robot_id
     drop_nonpositive(cap.max_linear_decel_mps2, "robot_max_linear_decel");
     drop_nonpositive(cap.wheel_radius_m,        "robot_wheel_radius");
     drop_nonpositive(cap.axes_length_m,         "robot_axes_length");
+    drop_nonpositive(cap.wheel_base_m,          "robot_wheel_base");
     return cap;
 }
 
@@ -95,8 +97,8 @@ void log_base_capability(const BaseCapability &cap, const PolicyAudit &audit, co
     block += QStringLiteral("  rot speed     %1 rad/s\n").arg(num(cap.max_rot_speed_rps));
     block += QStringLiteral("  linear accel  %1 m/s^2\n").arg(num(cap.max_linear_accel_mps2));
     block += QStringLiteral("  linear decel  %1 m/s^2\n").arg(num(cap.max_linear_decel_mps2));
-    block += QStringLiteral("  wheel radius  %1 m       track %2 m\n")
-                 .arg(num(cap.wheel_radius_m), num(cap.axes_length_m));
+    block += QStringLiteral("  wheel radius  %1 m       track %2 m       wheelbase %3 m\n")
+                 .arg(num(cap.wheel_radius_m), num(cap.axes_length_m), num(cap.wheel_base_m));
     block += QStringLiteral("  holonomic     %1\n")
                  .arg(cap.holonomic.has_value() ? (*cap.holonomic ? "true (lateral DOF)" : "false (no lateral DOF)")
                                                 : "(absent)");

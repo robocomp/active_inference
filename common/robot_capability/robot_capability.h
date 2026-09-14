@@ -33,7 +33,7 @@
  * ★ALL SI. That base config is in mm and mm/s; robot_concept converts on publish, so everything here
  * is m, m/s, m/s^2, rad/s. `maxRotSpeed` is the one field already in rad/s in the source file.
  *
- * ⚠ Requires the six `robot_max_*` / `robot_wheel_radius` / `robot_axes_length` REGISTER_TYPE lines in
+ * ⚠ Requires the `robot_max_*` / `robot_wheel_radius` / `robot_axes_length` / `robot_wheel_base` REGISTER_TYPE lines in
  * cortex. Until cortex is reinstalled this header does not compile — the same gate the producer is
  * behind (robot_concept commit e4a5d95).
  */
@@ -53,12 +53,13 @@ namespace rc
 // ── WHAT THE HARDWARE CAN DO ──────────────────────────────────────────────────────────────────────
 // Measured values, for orientation when reading a log (2026-08-29, both real files):
 //                      Shadow / Differential      P3Bot / Omnidirectional
-//   linear speed       0.9 m/s                    0.7 m/s
+//   linear speed       1.0 m/s                    0.7 m/s
 //   rot speed          2.0 rad/s                  1.5 rad/s
 //   linear accel       0.5 m/s^2                  0.35 m/s^2
 //   linear decel       1.0 m/s^2                  1.0 m/s^2
 //   wheel radius       0.100 m                    0.080 m
 //   axes length        0.518 m                    0.475 m
+//   wheel base         (absent)                   0.270 m
 //   holonomic          false                      true
 struct BaseCapability
 {
@@ -68,6 +69,7 @@ struct BaseCapability
     std::optional<float> max_linear_decel_mps2;
     std::optional<float> wheel_radius_m;
     std::optional<float> axes_length_m;
+    std::optional<float> wheel_base_m;            // front-rear axle distance; omni base only
     // Derived by the producer from the base config's `baseType`, never declared by hand: the base
     // component already says "Differential"/"Omnidirectional" and always did.
     std::optional<bool>  holonomic;
@@ -79,7 +81,8 @@ struct BaseCapability
     {
         return max_linear_speed_mps.has_value() or max_rot_speed_rps.has_value()
             or max_linear_accel_mps2.has_value() or max_linear_decel_mps2.has_value()
-            or wheel_radius_m.has_value() or axes_length_m.has_value() or holonomic.has_value();
+            or wheel_radius_m.has_value() or axes_length_m.has_value() or wheel_base_m.has_value()
+            or holonomic.has_value();
     }
 };
 
