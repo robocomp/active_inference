@@ -351,12 +351,16 @@ void SpecificWorker::initialize()
 		if (const auto v = num(kv, "maxDeceleration")) max_linear_decel_ = *v / 1000.f;
 		if (const auto v = num(kv, "wheelRadius"))    wheel_radius_     = *v / 1000.f;
 		if (const auto v = num(kv, "axesLength"))     axes_length_      = *v / 1000.f;
+		// Only the omnidirectional file carries it: a mecanum IK needs track AND wheelbase, a
+		// differential one only the track, so on Shadow it stays absent.
+		if (const auto v = num(kv, "distAxes"))       wheel_base_       = *v / 1000.f;
 
 		qInfo() << "[Agent] base" << QString::fromStdString(base_config_path)
 		        << ": holonomic=" << (holonomic_.has_value() ? (*holonomic_ ? "true" : "false") : "?")
 		        << " v_max=" << (max_linear_speed_ ? *max_linear_speed_ : -1.f) << "m/s"
 		        << " w_max=" << (max_rot_speed_ ? *max_rot_speed_ : -1.f) << "rad/s"
-		        << " track=" << (axes_length_ ? *axes_length_ : -1.f) << "m";
+		        << " track=" << (axes_length_ ? *axes_length_ : -1.f) << "m"
+		        << " wheelbase=" << (wheel_base_ ? *wheel_base_ : -1.f) << "m";
 	}
 	if (scenario_name_.empty())
 		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
@@ -795,7 +799,11 @@ void SpecificWorker::check_robot_identity()
 	// node, same one-shot timing, and it needs the graph to be up for exactly the same reason.
 	// ⚠ update_node is a WHOLE-NODE write: an attribute absent from the copy is ERASED (see
 	//   dsr-node-attr-erasure-hazard). Re-fetch, add, write back — never write a stale copy.
-	if (not scenario_name_.empty() or holonomic_.has_value() or max_linear_speed_.has_value())
+	// Any ONE parsed value is reason to write: gating on a single key would silently drop the rest
+	// whenever that key was missing from the base file.
+	if (not scenario_name_.empty() or holonomic_.has_value() or max_linear_speed_.has_value()
+	    or max_rot_speed_.has_value() or max_linear_accel_.has_value() or max_linear_decel_.has_value()
+	    or wheel_radius_.has_value() or axes_length_.has_value() or wheel_base_.has_value())
 	{
 		if (auto n = G->get_node(robot_name); n.has_value())
 		{
@@ -817,6 +825,7 @@ void SpecificWorker::check_robot_identity()
 			if (max_linear_decel_) G->add_or_modify_attrib_local<robot_max_linear_decel_att>(n.value(), *max_linear_decel_);
 			if (wheel_radius_)     G->add_or_modify_attrib_local<robot_wheel_radius_att>(n.value(), *wheel_radius_);
 			if (axes_length_)      G->add_or_modify_attrib_local<robot_axes_length_att>(n.value(), *axes_length_);
+			if (wheel_base_)       G->add_or_modify_attrib_local<robot_wheel_base_att>(n.value(), *wheel_base_);
 			if (rc::safe_update_node(*G, n.value()))
 				qInfo() << "[graph] scenario_name =" << QString::fromStdString(scenario_name_)
 				        << "| robot_holonomic ="
