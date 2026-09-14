@@ -46,7 +46,7 @@ are) are inferred by minimising a variational free energy; viewpoint selection m
 corresponding expected free energy, whose epistemic term reduces to expected information gain under
 the Gaussian model. The shared currency is what lets the data fit, the model complexity and the value
 of the next observation be compared at all, and the calibrated uncertainty is what the robot acts on. On 594 annotated
-floor plans the estimator reaches \num{0.983} mean IoU, and---the claim of the paper---a corner it
+floor plans the estimator reaches \num{0.983} mean IoU, and---our central result---a corner it
 declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within its declared
 \SI{6}{\centi\meter} in \SI{86}{\percent} of cases, against \SI{3.6}{\centi\meter} and
 \SI{64}{\percent} for corners it withholds. Holding the system to that standard proved diagnostic:
@@ -96,7 +96,7 @@ is adopted when it pays for its own description length, priced in nats on the sa
 fit, rather than by a merge threshold. \emph{Where to look next} is the epistemic term of the expected
 free energy, so the robot moves to reduce the uncertainty that is currently blocking it from
 committing to a layout. Because all three are denominated in the same currency, every precision in
-the model is load-bearing: get one wrong and the comparisons it feeds are priced in a corrupt unit.
+the model carries weight: get one wrong and the comparisons it feeds are priced in a corrupt unit.
 That is the property we exploit.
 
 \emph{Contributions.}
@@ -109,13 +109,13 @@ That is the property we exploit.
   \item A propagation from returns to corner covariance that separates the error that averages down
   with more observation from the error that does not, and a measurement of both terms on real sensor
   data (\S\ref{sec:unc}).
-  \item Evidence that a scalar precision cannot be calibrated for this problem: the irreducible
-  component varies by \num{5}$\times$ across environments and \num{2}$\times$ between motion states,
-  which we argue is a general property of map-relative estimation rather than a quirk of our system
-  (\S\ref{sec:notconstant}).
+  \item Evidence that a single global precision is insufficient for this problem: the irreducible
+  component differs by \num{5}$\times$ between the two settings we measure it in and by
+  \num{2}$\times$ between motion states, which suggests systematic error is context-dependent rather
+  than captured by a fixed scalar (\S\ref{sec:notconstant}).
   \item Three precision defects found by calibration, including one localised in a module the
-  statistic was not measuring---offered as evidence that a free-energy formulation earns its keep
-  diagnostically, not just descriptively.
+  statistic was not measuring---offered as evidence that a free-energy formulation is useful
+  diagnostically, not only descriptively.
 \end{enumerate}
 
 \section{Related Work}
@@ -290,7 +290,8 @@ rectangle prior would admit.}
 information gain. To test whether that objective is what produces the accuracy above, we re-ran all
 594 rooms with the epistemic term replaced by the frontier-and-coverage heuristic it superseded,
 holding the estimator, the sensor model, the per-room seeds and the \num{900}-frame budget fixed.
-\emph{The two are indistinguishable.} Paired over the 583 rooms both arms complete, the mean IoU
+\emph{We find no statistically detectable difference under this evaluation.} Paired over the 583
+rooms both arms complete, the mean IoU
 difference is \num{-0.0007} (95\% CI $[-0.0019, +0.0004]$, bootstrap over rooms), the heuristic
 winning 263 rooms to 251; hard failures are 8 against 6; and the median frame at which the map first
 becomes publishable differs by \num{6} frames (95\% CI $[-14, +28]$). Splitting by ground-truth
@@ -306,7 +307,7 @@ the epistemic objective buys no measurable accuracy or speed over a simple heuri
 under a tighter budget, or in the larger multi-room environments where a policy has room to waste
 time, is not tested here.
 
-\subsection{Is the reported uncertainty honest?}
+\subsection{Is the reported uncertainty calibrated?}
 \label{sec:calib}
 
 For every room we take the final published polygon and match its corners one-to-one to the truth
@@ -326,14 +327,15 @@ occurs, at almost no cost in yield.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{fig/calibration}
-\caption{\textbf{Is the declared uncertainty honest?} Every matched corner of 594 annotated floor
-plans: declared $\sigma$ against the error it actually made. \emph{Left}, propagating only the
-walls' statistical uncertainty: the red median is flat, so a corner claiming \SI{1}{\centi\meter} is
-no more accurate than one claiming \SI{5}{\centi\meter}, and the cloud sits far above
-$\mathrm{error}=\sigma$ at the tight end. \emph{Right}, with the irreducible term of
-\eqref{eq:corner}: the median tracks the diagonal and the declared $\sigma$ predicts the
-realised error. The dotted line is the
-publication gate.}
+\caption{\textbf{Does the declared uncertainty track the realised error?} All \num{4344} matched
+corners from the \num{586} annotated floor plans that produced a closed polygon: declared $\sigma$
+against the error it actually made. \emph{Left}, propagating only the walls' statistical uncertainty:
+the red median is flat, so a corner claiming \SI{1}{\centi\meter} is no more accurate than one
+claiming \SI{5}{\centi\meter}, and the cloud sits far above $\mathrm{error}=\sigma$ at the tight end.
+\emph{Right}, with the irreducible term of \eqref{eq:corner}: the median tracks the diagonal, so the
+declared $\sigma$ is substantially more informative about the realised error and supports the
+publication decision --- though, as the text reports, it remains weak as a fine-grained ranking. The
+dotted line is the publication gate.}
 \label{fig:calib}
 \end{figure*}
 
@@ -401,7 +403,7 @@ is \num{0.125} (CI \numrange{0.088}{0.161})--- significantly positive, but small
 because it bounds the claim honestly: this $\sigma$ is a trustworthy \emph{decision variable} for the
 publish/withhold question it is used for, not a fine-grained ordering of corners by accuracy.
 
-\emph{The gate is a tolerance, not a tuned parameter.} The \SI{6}{\centi\meter} bound is the
+\emph{The gate is a tolerance, not a tuned parameter.} The \SI{6}{\centi\meter} gate is the
 downstream consumer's requirement---the clearance a planner in this stack needs a corner to be good
 to---and was fixed before this evaluation rather than chosen on it. Nothing here turns on the value:
 sweeping it, the median error of published corners is flat at \SIrange{1.99}{2.04}{\centi\meter} for
@@ -444,9 +446,10 @@ fitted vs.\ annotated wall (does not) & 0.0181 & 0.0572 \\
 \end{tabular}
 \end{table}
 
-Two consequences. First, the simulated sensor used in \S\ref{sec:exp} is honest, indeed slightly
-conservative: real depth scatters at \SI{1.5}{\centi\meter} against the \SI{2.0}{\centi\meter}
-simulated, so the calibration above rests on a noise model that does not flatter it. Second, the
+Two consequences. First, the simulated sensor model is consistent with, and slightly more
+conservative than, the real-depth measurements: real depth scatters at \SI{1.5}{\centi\meter} against
+the \SI{2.0}{\centi\meter} simulated, so the calibration above rests on a noise model that does not
+flatter it. Second, the
 systematic component is not explained by independent sensor noise alone: it survives at
 \SI{1.8}{\centi\meter} in data whose per-return scatter is \SI{1.5}{\centi\meter}, and scatter that
 averages down cannot produce an offset that does not. That is what sets up the next result.
@@ -465,7 +468,7 @@ innovation grows again---two distinct mechanisms bracketing a correctly calibrat
 \subsection{Closed-loop simulation with a LiDAR sensor model}
 \label{sec:webots}
 
-The experiments so far establish that the declared uncertainty is honest
+The experiments so far establish that the declared uncertainty is calibrated
 (\S\ref{sec:calib}) and that its two components are real on real depth (\S\ref{sec:real}). Neither
 shows the estimator \emph{using} them while it runs. This experiment does, on a robot driving a
 simulated LiDAR in closed loop, in a room whose ground truth is exact.
@@ -501,7 +504,8 @@ worst edge $\sigma_d$ & \SI{0.500}{\meter} & \SI{0.500}{\meter} & \SI{0.019}{\me
 \end{tabular}
 \end{table}
 
-\emph{The shape was right before the confidence was.} Standing still, the estimate was already
+\emph{The geometry was already accurate before the uncertainty became small.} Standing still, the
+estimate was already
 $\SI{5.994}{\meter} \times \SI{4.015}{\meter}$---within \SI{6}{\milli\meter} and \SI{15}{\milli\meter} of truth---while
 the worst corner declared almost a metre of uncertainty and every edge offset sat at exactly its
 \SI{0.500}{\meter} prior. Over \SI{665}{\second} and \num{13000} frames, with five wall segments
@@ -546,7 +550,7 @@ it claims.
 Recovering inter-frame motion from the predicted corners themselves (a rigid fit between consecutive
 frames, so no pose log is needed) reveals that $\nis$ depends on what the robot is \emph{doing}
 rather than on where it is (Fig.~\ref{fig:motion}). \emph{While the robot moves, the channel is
-calibrated}: \num{0.90}, \num{0.97} and \num{0.92} across three independent rotation bands. It
+calibrated}: \num{0.90}, \num{0.97} and \num{0.92} across three distinct rotation-rate bands. It
 departs from \num{1} only at the extremes---\num{1.65} at rest and \num{1.88} under fast
 rotation---and the detection covariance is flat throughout
 ($\sigma_{\text{det}} = \SI{0.043}{\meter}$), so neither departure belongs to the corner channel.
@@ -603,9 +607,9 @@ argue for---a per-wall offset state with the measured prior---is future work.
 
 A layout estimate that a robot can act on needs an uncertainty a robot can check. We have shown that
 such an uncertainty can be maintained online, that it can be validated against ground truth at scale,
-and that it is useful precisely because something depends on it. The discipline of making precisions
-honest is not bookkeeping: it exposed three defects, and it showed that the quantity everyone tunes
-as a constant is not one.
+and that it becomes useful once something downstream depends on it. Requiring precisions to be
+calibrated was not bookkeeping: it exposed three defects, and it showed that a quantity commonly
+treated as a constant is not one.
 
 \section*{Acknowledgements}
 

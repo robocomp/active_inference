@@ -150,14 +150,14 @@ A.~Avetisyan, C.~Xie, H.~Howard-Jenkins, T.-Y. Yang, S.~Aroudj, S.~Patra,
 
 \bibitem{luperto2020exploration}
 M.~Luperto, L.~Fochetta, and F.~Amigoni, ``Exploration of indoor environments
-  predicting the layout of partially observed rooms,'' in \emph{Proceedings of
-  the 20th International Conference on Autonomous Agents and MultiAgent Systems
-  (AAMAS)}, 2021, pp. 836--843.
+  through predicting the layout of partially observed rooms,'' in
+  \emph{Proceedings of the 20th International Conference on Autonomous Agents
+  and MultiAgent Systems (AAMAS)}, 2021, pp. 836--843.
 
 \bibitem{ericson2024floorist}
 L.~Ericson and P.~Jensfelt, ``Beyond the frontier: Predicting unseen walls from
   occupancy grids by learning from floor plans,'' \emph{IEEE Robotics and
-  Automation Letters}, 2024.
+  Automation Letters}, vol.~9, no.~8, pp. 6832--6839, 2024.
 
 \bibitem{ho2025mapex}
 C.~Ho, S.~Kim, B.~Moon, A.~Parandekar, N.~Harutyunyan, C.~Wang, K.~Sycara,
@@ -172,8 +172,9 @@ Y.~Wang, H.~He, J.~Liang, Y.~Cao, R.~Chakraborty, and G.~Sartoretti,
   layout prediction,'' in \emph{Conference on Robot Learning (CoRL)}, 2025.
 
 \bibitem{luperto2024mapcompleteness}
-M.~Luperto, M.~M. Ferrara, G.~Boracchi, and F.~Amigoni, ``Estimating map
-  completeness in robot exploration,'' 2024, arXiv:2406.13482.
+M.~Luperto, M.~M. Ferrara, M.~Princisgh, G.~Boracchi, and F.~Amigoni,
+  ``Estimating map completeness in robot exploration,'' \emph{Autonomous
+  Robots}, vol.~50, no.~1, p.~6, 2026.
 
 \bibitem{ahmed2023aslamreview}
 M.~F. Ahmed, K.~Masood, V.~Fremont, and I.~Fantoni, ``Active {SLAM}: A review
@@ -187,8 +188,8 @@ J.~A. Placed, J.~Strader, H.~Carrillo, N.~Atanasov, V.~Indelman, L.~Carlone,
 
 \bibitem{placed2022enough}
 J.~A. Placed and J.~A. Castellanos, ``Enough is enough: Towards autonomous
-  uncertainty-driven stopping criteria,'' in \emph{11th IFAC Symposium on
-  Intelligent Autonomous Vehicles (IAV)}, 2022.
+  uncertainty-driven stopping criteria,'' \emph{IFAC-PapersOnLine}, vol.~55,
+  no.~14, pp. 126--132, 2022.
 
 \bibitem{poggiuncertainty}
 M.~Poggi, F.~Aleotti, F.~Tosi, and S.~Mattoccia, ``On the uncertainty of
@@ -200,7 +201,7 @@ M.~Jarz{\k{a}}bek-Rychard and H.-G. Maas, ``Uncertainty modeling for point
   cloud-based automatic indoor scene reconstruction by strict error propagation
   analysis,'' in \emph{The International Archives of the Photogrammetry, Remote
   Sensing and Spatial Information Sciences, XXIV ISPRS Congress}, vol.
-  XLIII-B2-2022, Nice, France, 2022, pp. 395--402.
+  XLIII-B2-2022, Nice, France, 2022, pp. 395--400.
 
 \bibitem{liu2024point2building}
 Y.~Liu, A.~Obukhov, J.~D. Wegner, and K.~Schindler, ``{P}oint2{B}uilding:
@@ -216,6 +217,7 @@ C.~Zou, J.-W. Su, C.-H. Peng, A.~Colburn, Q.~Shan, P.~Wonka, H.-K. Chu, and
 \bibitem{chang2017matterport3d}
 A.~Chang, A.~Dai, T.~Funkhouser, M.~Halber, M.~Nie{\ss}ner, M.~Savva, S.~Song,
   A.~Zeng, and Y.~Zhang, ``Matterport3d: Learning from {RGB-D} data in indoor
-  environments,'' in \emph{International Conference on 3D Vision (3DV)}, 2017.
+  environments,'' in \emph{International Conference on 3D Vision (3DV)}, 2017,
+  pp. 667--676.
 
 \end{thebibliography}
