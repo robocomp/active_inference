@@ -144,6 +144,11 @@ add_executable(gn_selftest EXCLUDE_FROM_ALL
   ../src/room_gn_solver.cpp
   ../src/room_model.cpp
   ../src/room_concept.cpp
+  # ⚠ room_concept.cpp calls into the door-aperture filter, so this target needs it too. It was added
+  # to wall_slam_selftest on 2026-09-13 and not here, which left gn_selftest unlinkable — invisible,
+  # because both selftests are EXCLUDE_FROM_ALL and neither runs in the normal build. If you add a
+  # source to one selftest, check the other.
+  ../src/door_apertures.cpp
   ../src/object_anchor_factor.cpp
   ../src/image_edge_factor.cpp
   ../src/image_edge_source.cpp
