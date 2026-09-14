@@ -70,17 +70,15 @@ checked.
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{fig/teaser}
-\caption{\textbf{The estimate is right before it is confident, and says so.} One closed-loop run;
-the same room in both panels, at the same scale, long axis horizontal. Pale band: ground truth, each
-dimension carrying its measured value and signed error. Discs: per-corner $\sigma$, to scale. The
-robot is drawn to scale with its heading, labelled with its bearing relative to the room.
-\emph{Left}, parked for \SI{665}{\second}: the geometry is already within \SI{15}{\milli\meter} of
-truth, yet every corner declares almost a metre of uncertainty and every edge sits at its prior, so
-the layout is withheld---standing still re-observes the same walls from the same viewpoint, and that
-evidence saturates. \emph{Right}, the first frame at which the layout becomes publishable, after
-turning \SI{319}{\degree} on the spot: the geometry moves by at most \SI{19}{\milli\meter} while
-corner $\sigma$ falls by a factor of \num{21}. The estimator does not earn precision by waiting, and
-does not claim any.}
+\caption{\textbf{The estimate is right before it is confident, and says so.} One closed-loop run; the
+same room in both panels, same scale, long axis horizontal. Pale band: ground truth, each dimension
+carrying its measured value and signed error. Discs: per-corner $\sigma$, to scale. The robot is drawn
+to scale, with its heading and its bearing relative to the room. \emph{Left}, parked for
+\SI{665}{\second}: the geometry is already within \SI{15}{\milli\meter} of truth, yet every corner
+declares almost a metre of uncertainty and the layout is withheld. \emph{Right}, the first publishable
+frame, after turning \SI{319}{\degree} on the spot: the geometry moves by at most
+\SI{19}{\milli\meter} while corner $\sigma$ falls by a factor of \num{21}. The estimator does not earn
+precision by waiting, and does not claim any.}
 \label{fig:teaser}
 \end{figure}
 
@@ -101,7 +99,7 @@ committing to a layout. Because all three are denominated in the same currency, 
 the model is load-bearing: get one wrong and the comparisons it feeds are priced in a corrupt unit.
 That is the property we exploit.
 
-\textbf{Contributions.}
+\emph{Contributions.}
 \begin{enumerate}
   \item An online layout estimator whose per-corner and per-edge uncertainty is \emph{validated
   against ground truth} on 594 annotated floor plans, and is \emph{actionable}: it gates publication
@@ -122,7 +120,7 @@ That is the property we exploit.
 
 \section{Related Work}
 
-\textbf{Floor-plan reconstruction from complete scans.} A large family of methods recovers a floor
+\emph{Floor-plan reconstruction from complete scans.} A large family of methods recovers a floor
 plan from an accumulated point cloud or density image, from the early unified
 formulation~\cite{liu2018floornet} and its shortest-path successor~\cite{chenfloorsp} through
 attention and query-based architectures~\cite{chen2022heat,yue2023roomformer}, room-wise implicit and
@@ -135,7 +133,7 @@ properties distinguish them from our setting: they are offline, so no decision i
 estimate is still uncertain; and the number of corners is chosen by a search with hand-set costs
 rather than by a likelihood, so there is no quantity in which structure and data fit are commensurate.
 
-\textbf{Panoramic room layout.} Single- and multi-view layout estimation recovers room shape from
+\emph{Panoramic room layout.} Single- and multi-view layout estimation recovers room shape from
 $360^\circ$ imagery~\cite{hu2021mvlayoutnet,su2022gprnet,wangpsmnet}, with self-training and
 multi-view consistency removing the need for per-scene labels~\cite{solarte2022mlc,
 solarte2024raycasting}, and related work registering panoramas or verifying their
@@ -148,7 +146,7 @@ membership and shape while the scene is still incomplete. Autoregressive scene
 description~\cite{avetisyan2024scenescript} likewise produces structure from a walkthrough, as
 language rather than as a belief with a covariance.
 
-\textbf{Exploration that predicts structure.} A complementary line predicts unobserved layout to
+\emph{Exploration that predicts structure.} A complementary line predicts unobserved layout to
 drive exploration---room shape from partial observation~\cite{luperto2020exploration}, walls beyond
 the frontier learned from floor plans~\cite{ericson2024floorist}, information gain from global map
 predictions~\cite{ho2025mapex}, and generative layout prediction for
@@ -157,14 +155,14 @@ finished~\cite{luperto2024mapcompleteness}. These share our premise that a layou
 inform where to go next; the predicted structure is used to \emph{score} viewpoints rather than to be
 published with an uncertainty a downstream consumer must trust.
 
-\textbf{Active SLAM.} Surveys of the field~\cite{ahmed2023aslamreview,placed2023survey} formalise
+\emph{Active SLAM.} Surveys of the field~\cite{ahmed2023aslamreview,placed2023survey} formalise
 viewpoint selection by information-theoretic utility, and the question of whether the usual
 uncertainty criteria are the right ones has itself been raised~\cite{placed2022enough}. Our selection
 rule is the epistemic term of an expected free energy, which coincides with information gain under a
 Gaussian model; the contribution here is not the rule but that the precision it consumes has been
 verified, so the gain it predicts is a gain that exists.
 
-\textbf{Uncertainty and calibration.} Uncertainty estimation is well studied in dense depth
+\emph{Uncertainty and calibration.} Uncertainty estimation is well studied in dense depth
 prediction, where predicted confidence can be compared against realised error~\cite{poggiuncertainty},
 and in photogrammetric modelling~\cite{jarzabek2022uncertainty,liu2024point2building}. To our
 knowledge no online room-layout estimator reports a per-corner covariance that has been validated
@@ -172,7 +170,7 @@ against layout ground truth, which is the gap this paper addresses. Our position
 parametric: we keep a covariance rather than a coverage set, because a joint estimator and a
 downstream consumer both need one, and we check it.
 
-\textbf{What the two literatures leave open.} Layout methods are evaluated on geometric
+\emph{What the two literatures leave open.} Layout methods are evaluated on geometric
 accuracy; none of them calibrates a \emph{per-corner} uncertainty against the error it actually makes,
 so a consumer is given a shape and no basis for trusting any part of it more than another. Active
 SLAM and next-best-view methods do consume a covariance, but they inherit whichever one the estimator
@@ -195,14 +193,14 @@ F = \underbrace{-\log p(z \mid x, \Phi)}_{\text{accuracy}} + \underbrace{D_{\mat
 which under a Gaussian $q$ reduces to the sparse nonlinear least-squares problem we solve by
 Gauss--Newton over the window.
 
-\textbf{Structure as model comparison.} The number of walls is not fixed. A candidate structural
+\emph{Structure as model comparison.} The number of walls is not fixed. A candidate structural
 change---birth, death, or the splice of a new edge into the cycle---is a different model $m'$, and is
 adopted when $F(m') < F(m)$. The complexity term charges each additional edge a fixed description
 length: with a room of radius $R$ discretised at resolution $c$, an edge costs
 $\ln 4 + \ln(2R/c)$ nats to name. There is no merge threshold and no minimum wall length; a thin
 partition survives exactly when the returns that support it pay for the nats it costs.
 
-\textbf{Action.} A viewpoint $v$ is scored by the expected information gain
+\emph{Action.} A viewpoint $v$ is scored by the expected information gain
 $\mathbb{E}_{o}\!\left[H(x,\Phi) - H(x,\Phi \mid o)\right]$, predicted through the model's own
 forward sensor: beams are cast against the current belief, and each wall's expected Fisher
 contribution $J_w(v)$ gives a Gaussian gain $\tfrac{1}{2}\ln\left(\det(\Lambda_w + J_w)/\det
@@ -223,7 +221,7 @@ $1/\sin\theta$ between the walls, so a shallow corner is correctly reported as u
 bisector without any angle test.
 
 The term that matters for this paper is the last one. The first two shrink as $1/N$ with the returns
-behind each wall: observe longer and they go to zero. \textbf{The true error does not follow them
+behind each wall: observe longer and they go to zero. \emph{The true error does not follow them
 down.} What remains when the statistics are exhausted is systematic---the offset between the mapped
 wall and the real surface, identical on every look from a given viewpoint---and it is what
 $\sigma_m$ represents. Omitting it produces an estimator that grows arbitrarily confident about a
@@ -243,11 +241,11 @@ here runs on a physical robot, and we are explicit throughout about which claim 
 \subsection{Geometric generality: 594 annotated floor plans}
 \label{sec:geom}
 
-We evaluate on 594 room annotations from \textbf{MatterportLayout}~\cite{zou2021manhattan}, the
+We evaluate on 594 room annotations from MatterportLayout~\cite{zou2021manhattan}, the
 Manhattan room-layout annotations on Matterport3D~\cite{chang2017matterport3d} panoramas, spanning 6
 to 18 ground-truth corners.
 
-\textbf{What this measures.} The observations are \emph{simulated from the annotated polygon}: a range sensor is driven through the annotated room and the estimator
+\emph{What this measures.} The observations are \emph{simulated from the annotated polygon}: a range sensor is driven through the annotated room and the estimator
 never sees a photograph. Because the returns are synthesised from the annotated polygons, this
 experiment evaluates geometric inference and uncertainty calibration rather than appearance-based
 layout recognition, and Table~\ref{tab:iou} is not comparable with single-image methods evaluated on
@@ -288,7 +286,7 @@ rectangle prior would admit.}
 \label{fig:mosaic}
 \end{figure*}
 
-\textbf{Does the epistemic term earn its place?} The explorer scores viewpoints by expected
+\emph{Does the epistemic term earn its place?} The explorer scores viewpoints by expected
 information gain. To test whether that objective is what produces the accuracy above, we re-ran all
 594 rooms with the epistemic term replaced by the frontier-and-coverage heuristic it superseded,
 holding the estimator, the sensor model, the per-room seeds and the \num{900}-frame budget fixed.
@@ -369,23 +367,18 @@ global $\sigma_c$ (fitted) & 65.3\% & --- & --- & 100\% & --- \\
 \vspace{2pt}
 \begin{minipage}{\columnwidth}
 \footnotesize
-\num{4344} matched corners from \num{586} rooms: the \num{8} rooms that produced no closed polygon
-have no corners to match and are excluded here, leaving \num{586} of the \num{594}. The last row is a
-deliberately favourable comparison --- the scalar is fitted \emph{post hoc} on this same corpus so
-that its \num{1}$\sigma$ coverage matches ours exactly, information our own estimate never gets.
-$\sigma$ is the largest-axis standard deviation of
-the corner's covariance, so the first three columns are empirical coverage,
-$P(\lVert e \rVert_2 \le k\sigma)$ --- \emph{not} a bound: a standard deviation makes no containment
-guarantee, and what is tested is whether the declared $\sigma$ predicts the error that occurs.
-\emph{publish} is the fraction of corners passing the \SI{6}{\centi\meter} gate and \emph{holds} the
-fraction whose claim is borne out. Intervals are \num{2000}-sample bootstraps resampling
-\emph{rooms}, not corners: corners of one room share its walls, its trajectory and its annotation, so
-a corner-level interval would be far too narrow. The last row is a single global precision calibrated
-on this same corpus.
+\num{4344} matched corners, from the \num{586} of \num{594} rooms that closed a polygon --- the other
+\num{8} have no corners to match. \emph{publish} is the fraction passing the \SI{6}{\centi\meter}
+gate, \emph{holds} the fraction whose claim is borne out. The first three columns are empirical
+coverage, $P(\lVert e \rVert_2 \le k\sigma)$ --- \emph{not} a bound, since a standard deviation makes
+no containment guarantee. Intervals are \num{2000}-sample bootstraps resampling \emph{rooms}, not
+corners, which share a room's walls and trajectory. The last row is a deliberately favourable
+baseline: one global $\sigma_c$ fitted \emph{post hoc} on this same corpus so its \num{1}$\sigma$
+coverage matches ours exactly.
 \end{minipage}
 \end{table}
 
-\textbf{One global precision cannot do this job.} The last row of Table~\ref{tab:calib} is the
+\emph{One global precision cannot do this job.} The last row of Table~\ref{tab:calib} is the
 obvious alternative: a single $\sigma_c$ fitted to this very corpus, chosen so that it reproduces our
 $1\sigma$ coverage exactly ($\sigma_c=\SI{0.0317}{\meter}$). It is therefore calibrated as favourably
 as the data allow --- and it is still insufficient for the task. Being constant, it provides no
@@ -399,7 +392,7 @@ fitted to reach. The scalar is perfectly well calibrated \emph{on average} and g
 what it cannot do is vary. A scalar can be calibrated \emph{on average} and still be unable to tell one corner from
 another, which is the distinction this paper is about.
 
-\textbf{What $\sigma$ is, and is not, good for.} Between the two gate classes the separation is clean
+\emph{What $\sigma$ is, and is not, good for.} Between the two gate classes the separation is clean
 and survives the room-level interval: published corners have a median error of
 \SI{0.0202}{\meter} (CI \SIrange{0.0185}{0.0220}{\meter}) against \SI{0.0364}{\meter}
 (CI \SIrange{0.0312}{0.0446}{\meter}) for withheld ones, and the intervals do not overlap. Ranking
@@ -408,7 +401,7 @@ is \num{0.125} (CI \numrange{0.088}{0.161})--- significantly positive, but small
 because it bounds the claim honestly: this $\sigma$ is a trustworthy \emph{decision variable} for the
 publish/withhold question it is used for, not a fine-grained ordering of corners by accuracy.
 
-\textbf{The gate is a tolerance, not a tuned parameter.} The \SI{6}{\centi\meter} bound is the
+\emph{The gate is a tolerance, not a tuned parameter.} The \SI{6}{\centi\meter} bound is the
 downstream consumer's requirement---the clearance a planner in this stack needs a corner to be good
 to---and was fixed before this evaluation rather than chosen on it. Nothing here turns on the value:
 sweeping it, the median error of published corners is flat at \SIrange{1.99}{2.04}{\centi\meter} for
@@ -419,7 +412,7 @@ not of where the cut is placed. Below \SI{2}{\centi\meter} the gate is vacuous i
 direction: the smallest declared $\sigma$ in the corpus is \SI{0.0203}{\meter}, so a
 \SI{2}{\centi\meter} gate publishes nothing.
 
-\textbf{The actionable claim.} Publication is gated at $\sigma \le \SI{6}{\centi\meter}$. A corner the
+\emph{The actionable claim.} Publication is gated at $\sigma \le \SI{6}{\centi\meter}$. A corner the
 system declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within the
 \SI{6}{\centi\meter} it claims in \SI{86.1}{\percent} of cases; a corner it withholds has a median
 error of \SI{3.6}{\centi\meter} and meets the same criterion only \SI{63.7}{\percent} of the
@@ -430,7 +423,7 @@ The gate discriminates, and the number it gates on now means something.
 \label{sec:real}
 
 The decomposition in \eqref{eq:corner} claims that error separates into a part that averages away and
-a part that does not. We measure both on \textbf{MP3D-FPE}~\cite{solarte2022dfpe}, which provides
+a part that does not. We measure both on MP3D-FPE~\cite{solarte2022dfpe}, which provides
 real Matterport depth with camera trajectories and per-room annotated corners. Slicing the depth to a
 horizontal band and fitting each annotated wall from the returns that land on it gives both terms
 directly (588 segments, 120 rooms; the slice registers to the annotations with a median modal offset
@@ -479,7 +472,7 @@ simulated LiDAR in closed loop, in a room whose ground truth is exact.
 
 The room is a rectangle of $\SI{6.000}{\meter} \times \SI{4.000}{\meter}$, taken from the wall solids of the world rather
 than from any fitted model, with a \SI{1.06}{\meter} doorway in one wall. A rectangle is the useful
-test here for a reason that is methodological rather than geometric: \textbf{edge lengths and corner
+test here for a reason that is methodological rather than geometric: \emph{edge lengths and corner
 angles are invariant to the map frame}, so the estimate can be scored with no rigid alignment. Every
 other layout comparison in this literature must align first, and alignment absorbs the global pose
 error into the score. Here it does not arise. We pre-registered the predictions before the run: the
@@ -508,7 +501,7 @@ worst edge $\sigma_d$ & \SI{0.500}{\meter} & \SI{0.500}{\meter} & \SI{0.019}{\me
 \end{tabular}
 \end{table}
 
-\textbf{The shape was right before the confidence was.} Standing still, the estimate was already
+\emph{The shape was right before the confidence was.} Standing still, the estimate was already
 $\SI{5.994}{\meter} \times \SI{4.015}{\meter}$---within \SI{6}{\milli\meter} and \SI{15}{\milli\meter} of truth---while
 the worst corner declared almost a metre of uncertainty and every edge offset sat at exactly its
 \SI{0.500}{\meter} prior. Over \SI{665}{\second} and \num{13000} frames, with five wall segments
@@ -552,7 +545,7 @@ it claims.
 
 Recovering inter-frame motion from the predicted corners themselves (a rigid fit between consecutive
 frames, so no pose log is needed) reveals that $\nis$ depends on what the robot is \emph{doing}
-rather than on where it is (Fig.~\ref{fig:motion}). \textbf{While the robot moves, the channel is
+rather than on where it is (Fig.~\ref{fig:motion}). \emph{While the robot moves, the channel is
 calibrated}: \num{0.90}, \num{0.97} and \num{0.92} across three independent rotation bands. It
 departs from \num{1} only at the extremes---\num{1.65} at rest and \num{1.88} under fast
 rotation---and the detection covariance is flat throughout
