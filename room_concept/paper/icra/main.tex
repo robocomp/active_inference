@@ -235,8 +235,10 @@ We evaluate at three levels, and they establish different things. \S\ref{sec:geo
 inference and uncertainty calibration on \num{594} real room shapes, with observations simulated from
 the annotations. \S\ref{sec:real} validates the noise decomposition itself on real Matterport depth,
 which is what licenses the simulated sensor used in the first level. \S\ref{sec:webots} runs the estimator online in simulation with a LiDAR sensor model, where the
-uncertainty gates publication as it is produced. No experiment
-here runs on a physical robot, and we are explicit throughout about which claim rests on which level.
+uncertainty gates publication as it is produced, and \S\ref{sec:notconstant} closes with the same
+measurement repeated on a physical robot. No \emph{closed-loop} experiment runs on hardware---the
+layout accuracy, the calibration and the closed loop are all simulated---and we are explicit
+throughout about which claim rests on which level.
 
 \subsection{Geometric generality: 594 annotated floor plans}
 \label{sec:geom}
@@ -570,13 +572,47 @@ over every candidate it is \num{2.51} at rest and \num{2.28} in motion, and over
 the total is too large before the gate and too small after it, and in both cases its pose term is
 smaller than the bias it must cover.
 
-\emph{How much of this is one run.} The magnitude is run-dependent: two tours of this environment,
-analysed by the same script, give repeat/scatter ratios of \num{5.6} and \num{8.7}, with the repeating
-term between \SI{4}{\centi\meter} and \SI{6}{\centi\meter}---the variation a viewpoint-attached error
-predicts, since each tour stops at different viewpoints. What is stable is the shape---a factor of six
-to nine between the two parts, the bias dominating in \SI{97}{\percent} of pairs in this run---and
-that is what the argument uses. A single number here would be a worse claim than the
-ratio. This is the argument for representing the offset as an inferred state
+\emph{How much of this is one run.} The magnitude is run-dependent: two simulated tours of this
+environment, analysed by the same script, give repeat/scatter ratios of \num{5.6} and \num{8.7}---the
+variation a viewpoint-attached error predicts, since each tour stops at different viewpoints. What is
+stable is the shape, and that is what the argument uses. A single number would be a worse claim than
+the range.
+
+\emph{The same measurement on a physical robot.} Everything above is simulated. We ran the same
+pipeline and the same analysis script, unmodified, on a differential-drive robot carrying a
+\num{3}-D LiDAR in an apartment-scale indoor space, over \SI{295}{\meter} in three chained sessions
+(Table~\ref{tab:realtour}). Over \num{6} stationary stretches and \num{46} corner-stretch pairs the
+repeating part has a median of \SI{0.0624}{\meter} against \SI{0.0046}{\meter} that scatters, a ratio
+of \num{13.4}, with the bias exceeding the scatter in \SI{98}{\percent} of pairs; across the \num{10}
+corners seen from three or more stretches the spread \emph{between} stretches is \SI{0.0459}{\meter}
+against \SI{0.0046}{\meter} \emph{within} one, a factor of \num{9.9}. Both verdicts are the
+simulator's. The ratio sits \emph{above} the simulated range rather than inside it, which is the
+reason for quoting a range at all: across the four tours it runs from \num{5.6} to \num{13.4} while
+the shape does not move.
+
+The real sample is much thinner than the simulated one---\num{46} pairs against \num{386}---and the
+run supplied its own reason to say so. With only three stationary stretches the between-stretch
+statistic read \num{1.6}, the opposite verdict, because too few genuinely distinct viewpoints had been
+visited; deliberately stopping at different places and orientations resolved it. That is a statement
+about experimental design rather than about the data: a viewpoint-attached error cannot be detected
+without viewpoint diversity, and distance driven is no substitute for it.
+
+\begin{table}[t]
+\centering
+\caption{The repeat/scatter split, simulated and on hardware}
+\label{tab:realtour}
+\setlength{\tabcolsep}{3pt}
+\footnotesize
+\begin{tabular}{lrrccc}
+\toprule
+tour & stretches & pairs & repeats & scatters & ratio \\
+\midrule
+simulated, tour 1 & --- & --- & \SI{0.0403}{\meter} & \SI{0.0063}{\meter} & \num{5.6}$\times$ \\
+simulated, tour 2 & 34 & 386 & \SI{0.0574}{\meter} & \SI{0.0066}{\meter} & \num{8.7}$\times$ \\
+\textbf{physical robot} & 6 & 46 & \SI{0.0624}{\meter} & \SI{0.0046}{\meter} & \textbf{\num{13.4}$\times$} \\
+\bottomrule
+\end{tabular}
+\end{table} This is the argument for representing the offset as an inferred state
 with a prior rather than a compiled-in number.
 
 \subsection{Calibration as a diagnostic}
@@ -595,8 +631,11 @@ precision being right, so nothing in it would have flagged any of the three.
 \section{Limitations}
 \label{sec:limits}
 
-Observations in \S\ref{sec:geom} and \S\ref{sec:calib} are simulated from the annotated polygons; \S\ref{sec:real} validates
-the noise model but not the full pipeline on recorded data. We attempted a full pipeline evaluation on
+Observations in \S\ref{sec:geom} and \S\ref{sec:calib} are simulated from the annotated polygons;
+\S\ref{sec:real} validates the noise model but not the full pipeline on recorded data, and the
+hardware run of \S\ref{sec:notconstant} measures one channel rather than closing the loop. Layout
+accuracy has not been measured on a physical robot, and doing so needs a surveyed reference we do not
+have. We attempted a full pipeline evaluation on
 MP3D-FPE~\cite{solarte2022dfpe} and report a negative result we believe is useful to others. Because
 it annotates \emph{rooms inside open-plan buildings} while a \SI{360}{\degree} depth sensor sees
 through every doorway, a median \SI{57}{\percent} of returns fall outside the room being scored
