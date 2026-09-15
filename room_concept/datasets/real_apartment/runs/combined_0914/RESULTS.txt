@@ -1,0 +1,25 @@
+182595 candidate rows over 20168 frames [0..20167]  from /home/robolab/experiments_icra/real_apartment_COMBINADO/corner_probe.csv
+  rejected by the gate: 37950 (20.8%) -- NIS below is over ACCEPTED rows and is censored by the gate
+
+1. NIS/dof overall: 0.836  (n=144645, target 1.0)
+   no layout_trace.csv given -> no rotation bands (the probe file carries no pose; the band table needs it)
+
+2. stationary stretches (rigid fit between consecutive frames' shared detections (<0.25 deg, <5 mm)): 6 of >=25 frames
+   46 corner-stretch pairs
+   repeats (bias)  median 0.0624 m
+   scatters (noise) median 0.0046 m
+   ratio 13.4x   bias exceeds scatter in 98% of pairs
+
+2b. NIS and sigma_pred by motion state, per candidate (no pose column used)
+               population        n   NIS/dof  sigma_pred med
+          pre-gate, still    45188     2.135          0.0249
+         pre-gate, moving   137407     2.125          0.0630
+          accepted, still    34637     0.831          0.0266
+         accepted, moving   110008     0.838          0.0694
+   -> sigma_pred at rest 0.0266 m against a repeatable innovation of 0.0624 m: the pose covariance carries no term the size of the bias
+
+3. viewpoint test -- is the repeatable part attached to the WALL or the VIEWPOINT?
+   10 corners seen in >=3 stretches
+   within-stretch scatter  0.0046 m
+   between-stretch spread  0.0459 m   (9.9x within)
+   -> VIEWPOINT-attached: a map offset is ruled out

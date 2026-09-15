@@ -548,7 +548,7 @@ it claims.
 
 Recovering inter-frame motion from the detections themselves---a rigid fit between consecutive
 frames, so no pose log is needed---lets the population be split by what the robot is \emph{doing}.
-Over \num{34} stationary stretches and \num{386} corner-stretch pairs, decomposing the innovation for
+Over \num{34} stationary stretches (\num{23} physical stops; one moving frame ends a stretch) and \num{386} corner-stretch pairs, decomposing the innovation for
 a fixed corner separates two parts cleanly: the part that \emph{repeats} has a median of
 \SI{0.0574}{\meter} and the part that \emph{scatters} \SI{0.0066}{\meter}, a ratio of \num{8.7}, with
 the bias exceeding the scatter in \SI{97}{\percent} of pairs. Averaging removes the second and cannot
@@ -582,24 +582,29 @@ pipeline and the same analysis script, unmodified, on a differential-drive robot
 SLAM system---the imperfect map of the kind argued for above---over \SI{295}{\meter} in three
 sessions, with the estimator restarted between them (Table~\ref{tab:realtour}). Over \num{6}
 stationary stretches and \num{46} corner-stretch pairs the repeating part has a median of
-\SI{0.0624}{\meter} against \SI{0.0046}{\meter} that scatters, with the bias exceeding the scatter at
-every stop and every corner but one; across the \num{10} corners seen from three or more stretches
-the spread \emph{between} stretches is \SI{0.0459}{\meter} against \SI{0.0046}{\meter} \emph{within}
-one, a factor of \num{9.9}. Over accepted candidates $\nis$ is \num{0.836}, against \num{0.782} in
-simulation.
+\SI{0.0624}{\meter} against \SI{0.0046}{\meter} that scatters, with the bias exceeding the scatter in
+all pairs but one. The viewpoint test is weaker than its numbers suggest. The six stretches are
+three physical stops, two of them split by a single moving frame, so grouped by stop only one corner
+is seen from three or more and the pre-registered test is not supported by this run. Relaxed, post
+hoc, to corners seen from two stops, \num{8} corners give a spread \emph{between} stops of
+\SI{0.0607}{\meter} against \SI{0.0102}{\meter} \emph{within} one, a factor of \num{5.9}.
+Over accepted candidates $\nis$ is \num{0.836}, against \num{0.782} in simulation.
 
-Both verdicts match the simulator's, and the replication is in the bias: \SI{0.0624}{\meter} against
+Both verdicts point the way the simulator's do, and the replication is in the bias: \SI{0.0624}{\meter} against
 \SI{0.0574}{\meter}, agreeing to \SI{5}{\milli\meter} on a different sensor and a different map. The
 scattering part is smaller on hardware, in the direction \S\ref{sec:real} reports for a simulated
 sensor deliberately set more conservative than real depth, so the ratio---\num{13.4} against
 \num{8.7}---exceeds the simulated one for a reason that lives in its denominator rather than in the
 systematic term the argument is about.
 
-The real sample is much thinner than the simulated one---\num{46} pairs against \num{386}, six stops
-against \num{34}---and we claim no more than agreement in shape. The protocol called for deliberate
-stops at distinct places and orientations; the second session made none, and on the first session's
-three stretches alone the between-stretch statistic read \num{1.6}, the opposite verdict. The third
-session added three such stops, and nothing was collected after it. We report the sequence because it
+The real sample is much thinner than the simulated one---\num{46} pairs against \num{386}, three
+stops against \num{23}---and we claim no more than agreement in shape. Its stationary time, about
+\SI{36}{\second}, is also below the \SI{60}{\second} our pre-registration required for any
+motion-state claim, so none is made on hardware. The protocol called for deliberate
+stops at distinct places and orientations; the second session made none, and the first session's
+three stretches, which are one stop, gave a between-stretch statistic of \num{1.6}: from a single
+place the bias repeats, as a viewpoint-attached error predicts. The third session added two short
+stops, and nothing was collected after it. We report the sequence because it
 is the statistic's own sensitivity: a viewpoint-attached error cannot be detected without viewpoint
 diversity, and distance driven is no substitute for it.
 
@@ -613,16 +618,20 @@ diversity, and distance driven is no substitute for it.
 \toprule
 tour & stops & pairs & repeats & scatters & ratio & viewpoint \\
 \midrule
-simulated      & 34 & 386 & \SI{0.0574}{\meter} & \SI{0.0066}{\meter} & \num{8.7}$\times$ & \num{6.0}$\times$ (17) \\
-physical robot & 6  & 46  & \SI{0.0624}{\meter} & \SI{0.0046}{\meter} & \num{13.4}$\times$ & \num{9.9}$\times$ (10) \\
+simulated      & 23 (34) & 386 & \SI{0.0574}{\meter} & \SI{0.0066}{\meter} & \num{8.7}$\times$ & \num{6.0}$\times$ (17) \\
+physical robot & 3 (6)  & 46  & \SI{0.0624}{\meter} & \SI{0.0046}{\meter} & \num{13.4}$\times$ & \num{5.9}$\times$ (8)$^\dagger$ \\
 \bottomrule
 \end{tabular}
 
 \vspace{2pt}
 \begin{minipage}{\columnwidth}
 \footnotesize
-\emph{viewpoint} is the spread between stops divided by the spread within one, over the corners seen
-at three or more stops (count in brackets); above \num{2} it rules out a fixed map offset.
+\emph{stops} are physical stops, with the stationary stretches they contain in brackets; pairs, repeats,
+scatters and ratio are per stretch, as pre-registered. \emph{viewpoint} is the spread between
+stretches divided by the spread within one, over the corners seen in three or more (count in brackets);
+above \num{2} it rules out a fixed map offset. $^\dagger$Post hoc, by stop, over corners seen at two
+or more of the three; per stretch it reads \num{9.9}$\times$ (10), but those stretches are not
+separate viewpoints.
 \end{minipage}
 \end{table}
 
