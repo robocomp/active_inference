@@ -18,6 +18,8 @@
  */
 #include "genericworker.h"
 
+#include <QSettings>
+
 // ##################################################################################################
 // ⚠ THIS GENERATED FILE HAS BEEN HAND-PATCHED. DO NOT RE-RUN robocompdsl WITHOUT RE-APPLYING IT.
 //
@@ -101,6 +103,7 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 */
 GenericWorker::~GenericWorker()
 {
+	save_window_settings();
     // ############################################################################################
     // HAND-PATCHED. The generated body was:
     //
@@ -235,4 +238,63 @@ void GenericWorker::initialize(){
             windows.emplace(name, std::move(window));
         }
     }
+
+    if (auto *application = QCoreApplication::instance(); application != nullptr)
+    {
+        QObject::connect(application, &QCoreApplication::aboutToQuit, this, [this]() {
+            save_window_settings();
+        });
+    }
+
+    QTimer::singleShot(0, this, [this]() {
+        restore_window_settings();
+    });
 };
+
+    void GenericWorker::restore_window_settings()
+    {
+        QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+        for (const auto &[name, window] : windows)
+        {
+            if (window == nullptr)
+                continue;
+
+            settings.beginGroup(settings_group_name(name, agent_id));
+
+            const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
+            if (!geometry.isEmpty())
+                window->restoreGeometry(geometry);
+
+            const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
+            if (!state.isEmpty())
+                window->restoreState(state, kWindowStateVersion);
+
+            settings.endGroup();
+        }
+    }
+
+    void GenericWorker::save_window_settings() const
+    {
+        QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+        for (const auto &[name, window] : windows)
+        {
+            if (window == nullptr)
+                continue;
+
+            settings.beginGroup(settings_group_name(name, agent_id));
+            settings.setValue(QStringLiteral("geometry"), window->saveGeometry());
+            settings.setValue(QStringLiteral("state"), window->saveState(kWindowStateVersion));
+            settings.endGroup();
+        }
+
+        settings.sync();
+    }
+
+    QString GenericWorker::settings_group_name(const std::string& graph_name, int agent_id)
+    {
+        const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
+                                                        : QString::fromStdString(graph_name);
+        return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
+    }

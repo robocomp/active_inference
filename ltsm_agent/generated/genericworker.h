@@ -75,6 +75,12 @@ protected:
 	std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> graph_viewers;
 	std::unordered_map<std::string, std::unique_ptr<QMainWindow>> windows;
 	std::shared_ptr<DSR::DSRViewer> setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent);
+	// Window geometry + dock state per graph window, in QSettings("RoboComp", <agent_name>) under
+	// windows/<agent id>/<graph name>. Same block the rest of the fleet's generated workers carry.
+	void restore_window_settings();
+	void save_window_settings() const;
+	static constexpr int kWindowStateVersion = 1;
+	static QString settings_group_name(const std::string& graph_name, int agent_id);
 
 
 
