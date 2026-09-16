@@ -811,18 +811,11 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // this frame's absence over a stale posterior — evidence carried forward under the name of a
     // measurement that was never taken. An empty curve is the honest state and the consumer handles it.
     inst.phi_curve.clear();
-    if (not inst.ai2_initialized or not camera_api_ or not mask_ingestor_)
+    if (not inst.ai2_initialized)
         return;
-    const auto Mopt = room_T_zed_matrix();
-    if (not Mopt.has_value())
-        return;
-    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
-    const float W    = static_cast<float>(camera_api_->get_width());
-    const float Himg = static_cast<float>(camera_api_->get_height());
-    if (W <= 0.f or Himg <= 0.f)
-        return;
-
-    const auto& pkt = mask_ingestor_->packet();
+    // ★NO CAMERA PRECONDITION. This used to return when the camera, its pose or the mask stream was
+    // missing — so a door out of the camera's view could not have its leaf angle estimated at all, even
+    // with LiDAR rays passing straight through its aperture. The leaf angle is a LiDAR quantity now.
 
     // Where the command says the leaf should be right now. Pure prediction from our own request.
     const auto now = std::chrono::steady_clock::now();
@@ -874,169 +867,17 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         have_prior = true;
     }
 
-    // Door-labelled pixel cells, same hashing as the silhouette channel (a cell absorbs mask jitter).
-    constexpr float CELL = 6.0f;
-    const auto key = [&](float col, float row) -> std::int64_t
-    {
-        return (static_cast<std::int64_t>(std::floor(col / CELL)) << 32)
-             ^ (static_cast<std::int64_t>(std::floor(row / CELL)) & 0xffffffffLL);
-    };
-    std::unordered_set<std::int64_t> door_cells;
-    if (pkt.valid)
-        for (const auto& sl : pkt.slices)
-        {
-            if (sl.label != "door") continue;
-            const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
-            const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
-            for (std::size_t i = b; i < e; ++i)
-                door_cells.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
-        }
+    // ─── THE CAMERA DOES NOT SCORE THE LEAF ANGLE (removed 2026-09-14) ─────────────────────────────
+    // ★The semantic "door" mask labels the doorway FRAME, not the leaf. Once the leaf swings out of the
+    // aperture the mask still covers the opening, so mask overlap kept voting "shut" on an open door.
+    // Measured live 2026-09-14, door_19, robot driven through it: at the chosen angle the mask supplied
+    // 0.166 of the weight against the LiDAR's 0.038, phi parked at 5 deg, door_open_prob fell to 8e-27,
+    // and room_concept could not register the crossing. The contour channel meant to rescue it
+    // contributed 0.000 over the whole run.
+    // ★AND THE MASK WAS A PRECONDITION: with no door pixels every hypothesis was skipped, the curve came
+    // out empty, and the LiDAR likelihood below was never consulted. The camera stays what it is good at:
+    // EXISTENCE evidence (compute_silhouette_existence). The leaf angle comes from where rays stop.
 
-    // ★PRECISION ALONE DOES NOT IDENTIFY PHI — it must also EXPLAIN THE MASK.
-    // The first version scored only "what fraction of the predicted leaf lands on door pixels". A leaf
-    // rotated to 45 deg projects to a narrow band that still falls INSIDE the real door's mask, so it
-    // scored ~1.0 while explaining a third of it. Measured 2026-09-09 on a door that was SHUT: support
-    // 0.97-0.99 at every angle from 5 to 70 deg, i.e. a likelihood flat in phi, so the argmax picked
-    // noise — and the silhouette was then projected out into the room, occ went to 0, and the door was
-    // removed for being where the model had wrongly put it.
-    // So the score is an INTERSECTION OVER UNION between the projected leaf and the door mask: a pose
-    // that covers part of the mask is penalised for the part it leaves unexplained, exactly as one that
-    // spills outside is penalised for the part that is not door. Only the pose that accounts for the
-    // whole observation wins.
-    // ⚠A genuine partial mask (32.5% of them are sub-metre fragments, measured) caps IoU for EVERY
-    // pose including the true one — but it caps them all, so the ARGMAX is still right, and the low
-    // absolute value correctly reports that the frame did not resolve phi well.
-    // Rasterise the projected leaf FACE and compare it with the mask as a REGION.
-    //
-    // ★WHY NOT A SAMPLED SCORE — both previous attempts failed for the same reason, and neither failure
-    // was about doors:
-    //   1. hit/seen, then hit/total: measured only PRECISION (what fraction of the prediction lands on
-    //      door pixels). A leaf rotated to 45 deg projects a narrow band INSIDE the real mask and scores
-    //      ~1.0 while explaining a third of it. Measured on a SHUT door: 0.97-0.99 at every angle from
-    //      5 to 70 deg — a likelihood flat in phi, so the argmax picked noise.
-    //   2. IoU between a 9x13 = 117-sample point set and a mask of thousands of pixels. At CELL = 6 px a
-    //      31042-pixel mask occupies ~860 cells while the prediction can occupy at most 117, so
-    //      IoU <= 117/860 ~ 0.14 whatever phi is. The 0.18-0.25 band observed was the SAMPLING DENSITY,
-    //      not the door. I read it as "the mask is 4x the model area", which was wrong: the fit is fine
-    //      (w 0.76-0.86, h 2.04-2.09 against an observed mask height of 2.08 m).
-    // Both compared a sparse prediction against a dense observation. The comparison has to be dense on
-    // BOTH sides or the number describes the instrument.
-    //
-    // So: fill the projected quad into a mask image at the same resolution as the door pixels, and take
-    // region IoU. No sampling grid, no cell hashing, no cap, and no tuned constant — the score is 1 when
-    // the predicted leaf and the observed door coincide and falls away as either spills outside the
-    // other. That is what makes phi identifiable if it is identifiable at all.
-    const int RW = static_cast<int>(W), RH = static_cast<int>(Himg);
-    cv::Mat door_img(RH, RW, CV_8UC1, cv::Scalar(0));
-    long door_px = 0;
-    // ★THIS DOOR'S MASK, NOT ALL DOOR-NESS IN THE FRAME. Filling every slice labelled `door` put
-    // fragments and any second door into the UNION, so the denominator grew while the intersection
-    // could not: measured, the best score was 0.245, implying a denominator of ~6.2 m^2 — three doors'
-    // worth — against a model of 1.52 m^2. That both depressed the score and FLATTENED it, which is
-    // fatal for the one measurement whose whole job is to be peaked. When the tracker has assigned a
-    // slice to this instance, that slice is the observation; only with no assignment do we fall back to
-    // every door slice, because then we genuinely do not know which one is ours.
-    const int assigned = inst.assigned_mask_idx;
-    if (pkt.valid)
-        for (std::size_t si = 0; si < pkt.slices.size(); ++si)
-        {
-            const auto& sl = pkt.slices[si];
-            if (sl.label != "door") continue;
-            if (assigned >= 0 and static_cast<int>(si) != assigned) continue;
-            const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
-            const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
-            for (std::size_t k = b; k < e; ++k)
-            {
-                const int c = static_cast<int>(pkt.mask_pixels[k].x());
-                const int r = static_cast<int>(pkt.mask_pixels[k].y());
-                if (c < 0 or r < 0 or c >= RW or r >= RH) continue;
-                if (door_img.at<std::uint8_t>(r, c) == 0) { door_img.at<std::uint8_t>(r, c) = 255; ++door_px; }
-            }
-        }
-
-    // ★ONE PROJECTION, TWO CHANNELS. The mask-overlap and the contour score MUST be computed on the same
-    // quad or they are answering about different geometry, and a mixture of the two would be nonsense.
-    // Returns an empty vector when the pose is unprojectable from here (a corner behind the camera, or
-    // off-frame) — which is "cannot be seen", never "refuted".
-    const auto leaf_quad_px = [&](float phi) -> std::vector<cv::Point>
-    {
-        door::LeafState ls = inst.leaf;
-        ls.phi = phi;
-        const door::LeafPose L = door::leaf_pose(inst.aperture, ls);
-        const float half_h = L.half_h, cz = L.centre_z;
-        const std::array<std::pair<float,float>,4> corners{{
-            {-L.half_w, cz - half_h}, { L.half_w, cz - half_h},
-            { L.half_w, cz + half_h}, {-L.half_w, cz + half_h}}};
-        std::vector<cv::Point> quad;
-        quad.reserve(4);
-        for (const auto& [lx, lz] : corners)
-        {
-            const Eigen::Vector3f P = door::leaf_point(L, lx, 0.0f, lz);
-            const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(P.x(), P.y(), P.z(), 1.0);
-            if (Pc.y() <= 0.20) return {};
-            const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return {};
-            quad.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-        }
-        return quad;
-    };
-
-    const auto support_at = [&](float phi) -> float
-    {
-        if (door_px == 0)
-            return -1.0f;   // no door mask at all: this frame cannot resolve phi. Not a score of zero.
-        door::LeafState ls = inst.leaf;
-        ls.phi = phi;
-        const door::LeafPose L = door::leaf_pose(inst.aperture, ls);
-
-        // The leaf face as a QUAD, projected. Corner order is a closed loop so fillConvexPoly gets a
-        // rectangle and not a bow-tie whose interior is meaningless.
-        const float half_h = L.half_h, cz = L.centre_z;
-        const std::array<std::pair<float,float>,4> corners{{
-            {-L.half_w, cz - half_h}, { L.half_w, cz - half_h},
-            { L.half_w, cz + half_h}, {-L.half_w, cz + half_h}}};
-        std::vector<cv::Point> quad;
-        quad.reserve(4);
-        for (const auto& [lx, lz] : corners)
-        {
-            const Eigen::Vector3f P = door::leaf_point(L, lx, 0.0f, lz);
-            const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(P.x(), P.y(), P.z(), 1.0);
-            if (Pc.y() <= 0.20) return -1.0f;          // a corner behind the camera: pose unprojectable
-            const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return -1.0f;
-            quad.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-        }
-
-        // Rasterise into the same lattice as the mask, then count. Clipped to the image on both sides,
-        // so a pose half out of frame is judged only where BOTH are defined — it cannot win by hiding.
-        cv::Mat pred_img(RH, RW, CV_8UC1, cv::Scalar(0));
-        cv::fillConvexPoly(pred_img, quad, cv::Scalar(255), cv::LINE_8);
-        const long pred_px = cv::countNonZero(pred_img);
-        if (pred_px == 0)
-            return -1.0f;
-        cv::Mat inter_img;
-        cv::bitwise_and(pred_img, door_img, inter_img);
-        const long inter = cv::countNonZero(inter_img);
-        const long uni   = pred_px + door_px - inter;
-        return uni > 0 ? static_cast<float>(inter) / static_cast<float>(uni) : -1.0f;
-    };
-
-    // 1-D search over the physically possible range. Coarse then refined: the leaf swings one way only
-    // (swing sets which), and phi is bounded by the aperture.
-    // ★best_s is the RAW image support; best_score carries the prior bonus and is used ONLY to choose.
-    // Reporting the bonused value as `phi_support` produced 1.018 in the log — a fraction above 1, which
-    // is the kind of impossible number that reveals a quantity has been contaminated by something it
-    // should never contain.
-    float best_phi = inst.phi_est, best_s = -1.0f, best_score = -1.0f;
-    // ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them. A door opens past 90 deg
-    // — it swings back toward the wall — and the old hard-coded pi/2 ceiling left such a door with no
-    // representable hypothesis, so the estimate collapsed toward "nearly shut". Deriving NSTEP keeps the
-    // angular resolution fixed as the range widens instead of trading the ceiling for a coarser search.
-    // ★THE FRAME IS PREPARED ONCE FOR ALL HYPOTHESES. The gradient images and the frame's own mean
-    // gradient do not depend on which angle we are testing, and recomputing them per candidate is what
-    // made a contour-driven angle search unaffordable (a full blur + two Sobels + a whole-image mean,
-    // 25 times a cycle). Empty when no RGB source is wired, and every consumer below degrades to the
-    // mask-overlap-only behaviour rather than to a refutation.
     // ─── THE HINGE BRANCH: free energy over phi alone, against LiDAR points on the leaf ──────────
     // ★THE SAME MINIMISATION THE AGENT ALREADY RUNS, RESTRICTED TO THE ONE ARTICULATED COORDINATE. The
     // aperture is held because a hole in a wall cannot move, so the swing has nowhere to go but into the
@@ -1084,7 +925,15 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
             // a slab through the aperture, which is the shape of the thing being asked about.
             const float lateral = std::abs(ap.wall_u.dot(closest - c));
             const float perp    = std::abs(ap.across_u().dot(closest - c));
-            if (lateral > 0.5f * ap.w + 0.10f or perp > reach) continue;
+            // ★THE JAMB BAND IS NOW EVIDENCE, NOT DILUTION (widened 0.10 -> 0.40 m, 2026-09-16).
+            // Under the leaf-only model a ray hitting the wall beside the doorway predicted the same
+            // range at every phi: it cancelled in F - F_min and merely shrank the differences the
+            // informative rays produced, which is why this margin was cut to 10 cm. The field model has
+            // a WALL, and the wall is what pins the depth nuisance — the live returns sit a tight
+            // +0.112 m nearer than the modelled leaf, and it is the jamb rays that measure that offset.
+            // Cutting them out would leave the nuisance determined only by the rays whose angle we are
+            // trying to infer, which is the degeneracy this whole channel exists to avoid.
+            if (lateral > 0.5f * ap.w + 0.40f or perp > reach) continue;
             // Height band applies to the RETURN only when it stopped inside the band; a ray that flew
             // through is kept whatever height it ended at, because where it ended is the whole point.
             const bool stopped_near = (p.head<2>() - c).norm() <= reach;
@@ -1127,170 +976,69 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         inst.dbg_leaf_off_plane = 0;
     }
 
-    bool measured = false;   // did ANY channel contribute a likelihood this cycle? (see the mix below)
-    std::vector<float> raw_mask, raw_edge, raw_prior, raw_phi;
-    rc::edges::PreparedFrame prep;
-    if (rgb_src_ and not rgb_src_->frame().empty())
-        prep = rc::edges::prepare_frame(rgb_src_->frame());
-
+    // ─── THE CURVE: LiDAR likelihood × the swing prior ─────────────────────────────────────────────
+    // ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them (a door opens past 90 deg).
     const float PHI_MIN = 0.0f;
     const float PHI_MAX = std::max(0.1f, cfg_.phi_max_rad);
     const int   NSTEP   = std::clamp(
         static_cast<int>(std::lround(PHI_MAX / std::max(0.01f, cfg_.phi_step_rad))) + 1, 5, 64);
-    // ★KEEP THE CURVE. The argmax below is still what `phi_est` tracks — it is the leaf pose everything
-    // DRAWS and reports — but the silhouette channel marginalises the absence over this whole curve
-    // rather than conditioning on the winner. See DoorInstance::phi_curve for why: the peak support
-    // measured 0.007-0.245, so the winner is chosen from a likelihood that is essentially flat, and
-    // rendering the leaf at it deleted a door that was plainly there. An unprojectable candidate
-    // (support < 0) is simply not a member of the curve — that is "this pose cannot be seen from here",
-    // not "this pose is refuted", and the two must not be conflated.
-    inst.phi_curve.reserve(NSTEP);
-    for (int i = 0; i < NSTEP; ++i)
+
+    std::vector<float> lidar(static_cast<std::size_t>(NSTEP), 0.0f);
+    if (not rays.endpoints.empty())
     {
-        const float phi = PHI_MIN + (PHI_MAX - PHI_MIN) * i / (NSTEP - 1);
-        const float sc = support_at(phi);
-        // ★A HYPOTHESIS THE MASK CANNOT SEE IS NOT A REFUTED ONE. sc < 0 means "unprojectable from here"
-        // (a corner behind the camera, the quad off-frame) and those are skipped, as before. But sc == 0
-        // — projectable and simply not overlapping the mask — is the NORMAL state of a correct
-        // hypothesis once the leaf has swung out of the doorway, and it used to be the end of the story.
-        // The contour asks the other question: is there a BOUNDARY in the image where this angle says
-        // the leaf's edge should be? That is what an open leaf still offers.
-        if (sc < 0.0f) continue;
-        // ★THE NULL IS THE APERTURE, NOT A PATCH OF BLANK WALL — this is EXPLAINING AWAY, and it is the
-        // difference between a question that can distinguish an open door and one that cannot.
-        // The likelihood we want is a ratio against the model WITHOUT the leaf:
-        //     L(phi) ∝ p(image boundaries | aperture AND leaf at phi) / p(image boundaries | aperture)
-        // The aperture is a known, permanent cause of edges — a hole between two differently lit rooms,
-        // with a jamb down each side — and it is the STRONGEST edge structure in the scene. Scoring a
-        // leaf hypothesis against displaced blank wall therefore made the aperture itself the evidence:
-        // measured 2026-09-13 on a door that had just been opened, the contour read +2.1 at phi = 8 deg
-        // and -2.0 at 47 deg, confidently corroborating a shut leaf, because at phi ≈ 0 the leaf quad
-        // lies exactly on the doorway and inherits every edge the doorway has.
-        // Against the aperture as null, a leaf at phi = 0 explains NOTHING the aperture does not already
-        // explain, so it earns zero evidence — not by a special case but because the ratio is 1. A leaf
-        // at 100 deg earns evidence only where there is a real tilted boundary the doorway cannot account
-        // for. That is the question the model should be asking, asked against the right null.
-        float ec = 0.0f;
-        if (prep.valid())
-            if (const auto q = leaf_quad_px(phi); q.size() == 4)
-                if (const auto null_q = leaf_quad_px(0.0f); null_q.size() == 4)
-                {
-                    const auto es = rc::edges::contour_edge_support(prep, q, {null_q});
-                    if (es.n_samples > 0 and es.n_controls > 0)
-                        ec = std::max(0.0f, es.excess);   // no better than the aperture alone ⇒ explains nothing
-                }
-        // ★THE PRIOR MULTIPLIES THE LIKELIHOOD; IT DOES NOT ADD A BONUS TO IT.
-        // It used to be `+ 0.02 * exp(-|dphi|/0.2)`, described as breaking ties "and only ties". Against a
-        // likelihood whose peak measured 0.02-0.23 that bonus is not a tie-break, it is noise, and the
-        // argmax of a nearly-flat curve is then noise too. A flat likelihood must LEAVE THE PRIOR
-        // STANDING — that is the whole content of the word prior — and only a genuinely peaked one may
-        // move it. Multiplying is what does that, with no constant to choose: the two shapes decide.
-        const float d = (phi - phi_prior) / sigma_phi;
-        // The two likelihood terms are kept SEPARATE here and mixed after the loop, because they live on
-        // different scales (overlap is a fraction in [0,1]; contour excess is in units of the frame's own
-        // mean gradient) and the only honest way to weigh them without inventing a conversion constant is
-        // to normalise each across the hypotheses and give them one vote each. See the mixing below.
-        raw_mask.push_back(sc);
-        raw_edge.push_back(ec);
-        raw_prior.push_back(std::exp(-0.5f * d * d));
-        raw_phi.push_back(phi);
+        // ★THE FULL-FIELD RESPONSE, NOT THE PER-RAY MEAN (2026-09-16). See DoorBelief::phi_field_likelihood
+        // for why the beam model could not see an open door and why the sum needs the nuisance. Measured
+        // live the same day: the old channel went FLAT (cv 0.038, w_sdf 0.0393) with the door standing
+        // open and the robot in the doorway, and sigma_phi GREW from 0.199 to 0.647 rad as the ray count
+        // rose 71 -> 918 — a likelihood whose width increases with evidence.
+        rc::DoorBelief::FieldNuisance nz;   // defaults span the measured +0.112 m offset
+        const auto c = inst.ai2_belief.phi_field_likelihood(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
+        for (std::size_t k = 0; k < lidar.size() and k < c.size(); ++k)
+            lidar[k] = c[k].second;
+    }
+    const double lsum = std::accumulate(lidar.begin(), lidar.end(), 0.0);
+
+    // ★A FLAT LIKELIHOOD IS NOT A MEASUREMENT, AND NO LIKELIHOOD IS A FLAT ONE, NOT A ZERO ONE. Bayes says a
+    // measurement that was not taken contributes a CONSTANT, so the posterior equals the prior and its
+    // width grows with the predict step above — "I have not seen the leaf" is a wide posterior, never a
+    // default angle. What decides "measured" is whether the hypotheses were DISTINGUISHED: the spread
+    // of the likelihood across them, not its sum (a uniform curve sums to 1).
+    // ⚠ A tenth of the mean (coefficient of variation) is where a shape is barely distinguishable from
+    // uniform. It gates only the MEASURED FLAG, i.e. whether ignorance accumulates — never the estimate.
+    bool measured = false;
+    {
+        double cv = 0.0;
+        if (lsum > 1e-12)
+        {
+            const double mu = lsum / static_cast<double>(lidar.size());
+            double v = 0.0;
+            for (const float x : lidar) v += (x - mu) * (x - mu);
+            cv = std::sqrt(v / static_cast<double>(lidar.size())) / mu;   // 0 ⇒ perfectly flat
+        }
+        measured = (cv > 0.10);
+        inst.dbg_phi_cv = static_cast<float>(cv);
     }
 
-    // ─── MIX THE TWO CHANNELS ────────────────────────────────────────────────────────────────────
-    // ★NORMALISE EACH, THEN ADD — one vote each, and no conversion constant to tune. Each channel is
-    // turned into a distribution over the hypotheses it can speak about, so a channel that is FLAT
-    // contributes a uniform term and cannot bias the argmax, and a channel that is SILENT (sums to zero)
-    // drops out entirely rather than dragging every hypothesis to zero.
-    // ★ADDED, NOT MULTIPLIED, and that is the whole point. A product lets either channel VETO: the mask
-    // term is zero for every correct hypothesis once the leaf leaves the doorway, so multiplying would
-    // reproduce exactly the blindness this is meant to cure. Addition says "either kind of evidence can
-    // support an angle", which is the truth — overlap when the leaf is in the aperture, a boundary in the
-    // image when it has swung out.
+    // ★THE PRIOR MULTIPLIES THE LIKELIHOOD; IT DOES NOT ADD A BONUS TO IT. A flat likelihood must leave the
+    // prior standing, and only a peaked one may move it.
+    inst.phi_curve.reserve(static_cast<std::size_t>(NSTEP));
+    float best_w = -1.0f;
+    for (int k = 0; k < NSTEP; ++k)
     {
-        // ★THE SDF CURVE IS THE PRIMARY CHANNEL WHEN IT EXISTS. It is the only one that measures the leaf
-        // as a SURFACE rather than as a label or a boundary, so it is the only one that keeps working
-        // when the segmenter stops calling the open leaf a door. The image channels stay in the mixture:
-        // they are what remains when the leaf is out of the LiDAR's band, and an empty SDF curve means
-        // "not measured" — a flat contribution — never a vote for phi = 0.
-        std::vector<float> raw_sdf(raw_phi.size(), 0.0f);
-        if (not rays.endpoints.empty())
+        const float  phi   = PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1);
+        const float  d     = (phi - phi_prior) / sigma_phi;
+        const double prior = std::exp(-0.5 * d * d);
+        const double s_n   = lsum > 1e-12 ? lidar[static_cast<std::size_t>(k)] / lsum : 0.0;
+        const float  w     = static_cast<float>((measured ? s_n : 1.0) * prior);
+        inst.phi_curve.emplace_back(phi, w);
+        if (w > best_w)
         {
-            const auto curve = inst.ai2_belief.phi_ray_likelihood(rays, PHI_MIN, PHI_MAX, NSTEP);
-            for (std::size_t k = 0; k < raw_phi.size() and k < curve.size(); ++k)
-                raw_sdf[k] = curve[k].second;
+            best_w = w;
+            inst.dbg_w_sdf = static_cast<float>(s_n * prior);
         }
-
-        const double ss = std::accumulate(raw_sdf.begin(),  raw_sdf.end(),  0.0);
-        const double sm = std::accumulate(raw_mask.begin(), raw_mask.end(), 0.0);
-        const double se = std::accumulate(raw_edge.begin(), raw_edge.end(), 0.0);
-        // ★★★NO LIKELIHOOD IS A FLAT LIKELIHOOD, NOT A ZERO ONE. THIS IS THE WHOLE BUG, FOUR TIMES OVER.
-        // When every channel is silent the three normalised terms are each 0, so the posterior weight was
-        // 0 at every angle — an EMPTY curve — and the code below then fell through to a special case that
-        // assigned phi_est from the prior and left the curve empty for its consumers. The result is an
-        // estimator that CANNOT SAY "I do not know": it emits a number, and every consumer (the
-        // silhouette, the contour, door_open_prob, the UI, the affordances) reads that number as a
-        // measurement. Verified live 2026-09-13: the one cycle reporting phi = 0 deg had leaf_pts = 0 and
-        // all three weights exactly 0 — the door happened to be shut, so the failure wore the right
-        // answer and looked like a success.
-        // Bayes already says what to do: a measurement that was not taken contributes a CONSTANT
-        // likelihood, so the posterior equals the prior. Then "unmeasured" is not a special case and not
-        // a default value — it is a WIDE posterior, which is a thing the estimate can carry and its
-        // consumers can see. (Same lesson as the -1 sentinels: 0 is a real answer, and an absence that
-        // encodes as one is indistinguishable from it.)
-        // ★A FLAT LIKELIHOOD IS NOT A MEASUREMENT. This used to ask whether any channel produced
-        // non-zero weights — and a perfectly uniform curve sums to 1, so it passed, and every
-        // uninformative cycle was booked as evidence. What matters is whether the hypotheses were
-        // DISTINGUISHED: the spread of the combined likelihood across them. A uniform curve has a
-        // coefficient of variation of 0 however large its sum.
-        // The test is on the shape, not on a magnitude, so it needs no scale and no tuned constant.
-        {
-            std::vector<double> lik(raw_phi.size(), 0.0);
-            double lsum = 0.0;
-            for (std::size_t k = 0; k < raw_phi.size(); ++k)
-            {
-                const double a = sm > 1e-9 ? raw_mask[k] / sm : 0.0;
-                const double b = se > 1e-9 ? raw_edge[k] / se : 0.0;
-                const double c = ss > 1e-9 ? raw_sdf[k]  / ss : 0.0;
-                lik[k] = a + b + c; lsum += lik[k];
-            }
-            double cv = 0.0;
-            if (lsum > 1e-12 and not lik.empty())
-            {
-                const double mu = lsum / static_cast<double>(lik.size());
-                double v = 0.0;
-                for (const double x : lik) v += (x - mu) * (x - mu);
-                cv = std::sqrt(v / static_cast<double>(lik.size())) / mu;   // 0 ⇒ perfectly flat
-            }
-            // A tenth of the mean is a shape barely distinguishable from uniform; below it nothing was
-            // resolved. It gates only the MEASURED FLAG (and therefore whether ignorance accumulates) —
-            // never the estimate itself, which continues to use whatever the curve says.
-            measured = (cv > 0.10);
-            inst.dbg_phi_cv = static_cast<float>(cv);
-        }
-        for (std::size_t k = 0; k < raw_phi.size(); ++k)
-        {
-            const double m_n = sm > 1e-9 ? raw_mask[k] / sm : 0.0;
-            const double e_n = se > 1e-9 ? raw_edge[k] / se : 0.0;
-            const double s_n = ss > 1e-9 ? raw_sdf[k] / ss : 0.0;
-            const double lik = measured ? (s_n + m_n + e_n) : 1.0;   // flat ⇒ posterior = prior
-            const float  w   = static_cast<float>(lik * raw_prior[k]);
-            inst.phi_curve.emplace_back(raw_phi[k], w);
-            if (w > best_score)
-            {
-                best_score = w; best_s = raw_mask[k]; best_phi = raw_phi[k];
-                // Which channel actually chose this angle — recorded at the winner, not averaged over
-                // the curve, because the winner is the only hypothesis that has any consequence.
-                inst.dbg_w_sdf  = static_cast<float>(s_n * raw_prior[k]);
-                inst.dbg_w_mask = static_cast<float>(m_n * raw_prior[k]);
-                inst.dbg_w_edge = static_cast<float>(e_n * raw_prior[k]);
-            }
-        }
-        // best_s is reported as phi_support and must stay what it always was: the raw IMAGE OVERLAP at
-        // the winning angle. It is now possible for a hypothesis to win on contour alone with zero
-        // overlap — which is exactly the open-door case — so a zero here no longer means "nothing won".
-        if (best_score > 0.0f and best_s <= 0.0f)
-            best_s = 1e-6f;   // won on contour: not a measurement of overlap, but not "nothing seen"
     }
+    inst.dbg_w_mask = 0.0f;   // kept in the log schema; the camera no longer votes on phi
+    inst.dbg_w_edge = 0.0f;
 
     // ─── COLLAPSE THE POSTERIOR: a MEAN and a WIDTH, always, with no special cases ────────────────
     // ★THE WIDTH IS THE POINT. A point estimate with no width cannot distinguish "the leaf is flush" from
@@ -1323,11 +1071,10 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
             inst.phi_sigma = PHI_MAX - PHI_MIN;
         }
         inst.phi_measured = measured;
-        // phi_support keeps its meaning: the raw IMAGE OVERLAP at the angle we are claiming. It is NOT
-        // the confidence in phi — that is phi_sigma now — and a low value here with a tight sigma simply
-        // means the angle was decided by LiDAR or contour rather than by the mask.
-        const float sup = support_at(inst.phi_est);
-        inst.phi_support = (std::isfinite(sup) and sup >= 0.0f) ? sup : 0.0f;
+        // phi_support was the camera mask overlap at the claimed angle. The camera no longer scores the
+        // leaf, so there is nothing to report: -1 (outside the [0,1] range of an overlap), never 0, which
+        // would read as "the mask saw no leaf here".
+        inst.phi_support = -1.0f;
     }
 
     inst.phi_est = std::clamp(inst.phi_est, PHI_MIN, PHI_MAX);

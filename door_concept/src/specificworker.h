@@ -233,6 +233,23 @@ private:
     // nodes — a stranger deleting an affordance mid-execution is the stranded-Completed-for-ever defect
     // the fleet already paid for once, and only the owner knows the protocol state.
     void release_room(std::uint64_t old_room, std::uint64_t new_room);
+
+    // ── ENTRY MIRRORS: the door a PROTO-ROOM was entered through ───────────────────────────────────
+    // room_concept births a proto-room (a `room` with a `proto` self-edge) when the robot crosses a door into
+    // space the current room does not explain; its frame is that door's aperture. This step hangs a mirror
+    // `door_N` from it (DoorSceneGraph::create_entry_mirror) — see there for why it is a mirror and not a
+    // second instance. ★`current` stays on the old room while the room is proto, so the SOURCE instance stays
+    // alive and remains the one belief about the physical door; the mirror only copies its interaction channel.
+    // Which door: by PLACE — the proto-room's origin lies on the crossed aperture by construction, so the source
+    // is the instance whose aperture contains that origin. No attribute names it, so none can go stale.
+    // A mirror dies with its proto-room or its source; a mirror deleted by anybody else is re-born next cycle.
+    struct EntryMirror
+    {
+        std::uint64_t node_id   = 0;
+        std::uint64_t source_id = 0;
+    };
+    std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
+    void step_entry_mirrors();
     // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
     // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The
     // same attribute trio table/cabinet/refrigerator already consume, so this is one more reader, not a

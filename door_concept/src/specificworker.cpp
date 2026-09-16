@@ -32,6 +32,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room:: current_room / is_proto / is_proto_mirror
 
 #include "../../common/detectability/detectability.h"   // rc::detect — the YOLO inverse model
 #include "../../common/contour_edge/contour_edge_check.h"   // rc::edges — classifier-free check
@@ -390,9 +391,8 @@ void SpecificWorker::initialize()
     remove_owned_door_nodes();
 
     // Resolve room node
-    const auto rooms = G->get_nodes_by_type("room");
-    if (not rooms.empty())
-        room_node_id_ = rooms.front().id();
+    if (const auto room = rc::room::current_room(*G); room.has_value())
+        room_node_id_ = *room;
     else
         qWarning() << "door_concept: no room node found at startup";
 
@@ -423,9 +423,6 @@ void SpecificWorker::initialize()
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle/table).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
-    // The leaf tracker's second evidence channel: the same RGB the contour check already audits
-    // existence with, now also driving the ANGLE. Wired here because the ingestor is the worker's.
-    fitter_->set_rgb_source(rgb_ingestor_.get());
 
     // ★CREATED HERE, ON THE MAIN THREAD, AFTER THE GRAPH IS UP — the media-plane consumer rule. The
     // ingestor itself discovers the sensor node lazily inside pump() and stays dormant (no DDS
@@ -1013,6 +1010,9 @@ void SpecificWorker::compute()
     if (room_node_id_ == 0)
         return;
 
+    // Hang a mirror of the crossed door from every proto-room (and drop mirrors whose room or source is gone).
+    step_entry_mirrors();
+
     // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
     // pushed by update_node_attr_signal — see the connect block in initialize().
     poll_affordance_protocol();
@@ -1035,7 +1035,7 @@ void SpecificWorker::compute()
     // Doors are generic `object` nodes named "door_*" (schema migration); filter by name prefix.
     const auto door_nodes = G->get_nodes_by_type("object");
     for (const auto& node : door_nodes)
-        if (node.name().starts_with("door"))
+        if (node.name().starts_with("door") and not rc::room::is_proto_mirror(*G, node))   // a mirror is not a belief
             process_door_node(node);
 
     // ── The three PRAGMATIC affordances: approach / open / cross ──────────────────────────────────
@@ -1732,9 +1732,9 @@ void SpecificWorker::refresh_room_geometry()
     {
         // Latched room id went stale (room_concept recreated the room on relocalization). Re-resolve so the
         // containment prior recovers instead of silently reading a dead node forever.
-        const auto rooms = G->get_nodes_by_type("room");
-        if (rooms.empty()) { room_node_id_ = 0; return; }
-        room_node_id_ = rooms.front().id();
+        const auto room_opt = rc::room::current_room(*G);
+        if (not room_opt.has_value()) { room_node_id_ = 0; return; }
+        room_node_id_ = *room_opt;
         room = G->get_node(room_node_id_);
         if (not room.has_value()) return;
     }
@@ -3339,9 +3339,9 @@ void SpecificWorker::step_room_following()
     {
         if (room_node_id_ == 0)                       // the legacy first-resolution path, unchanged
         {
-            const auto rooms = G->get_nodes_by_type("room");
-            if (not rooms.empty())
-                room_node_id_ = rooms.front().id();
+            // ★Not rooms.front(): with a proto-room in the graph that is a coin toss (unordered_set).
+            if (const auto room = rc::room::current_room(*G); room.has_value())
+                room_node_id_ = *room;
         }
         return;
     }
@@ -3358,6 +3358,117 @@ void SpecificWorker::step_room_following()
 
     // We are anchored to one room and told we are in another. LET GO.
     release_room(room_node_id_, *current);
+}
+
+// ═══ ENTRY MIRRORS — the door a proto-room was entered through ════════════════════════════════════
+
+void SpecificWorker::step_entry_mirrors()
+{
+    if (not G or not fitter_ or not scene_graph_ or not inner_eigen_)
+        return;
+
+    // 1. Retire mirrors whose proto-room, source instance or own node is gone. A proto-room that was
+    //    PROMOTED (edge removed) also ends its mirror: promotion is when the door becomes a real instance there.
+    for (auto it = entry_mirrors_.begin(); it != entry_mirrors_.end();)
+    {
+        const auto& [room_id, mir] = *it;
+        const bool room_ok   = G->get_node(room_id).has_value() and rc::room::is_proto(*G, room_id);
+        const bool source_ok = fitter_->instances().contains(mir.source_id) and G->get_node(mir.source_id).has_value();
+        const bool mirror_ok = G->get_node(mir.node_id).has_value();
+        if (room_ok and source_ok and mirror_ok)
+        {
+            ++it;
+            continue;
+        }
+        if (mirror_ok)
+            G->delete_node(mir.node_id);
+        std::print("door_concept: [proto] entry mirror {} retired (proto-room {} {}, source {} {}, node {})\n",
+                   mir.node_id, room_id, room_ok ? "ok" : "gone/promoted",
+                   mir.source_id, source_ok ? "ok" : "gone", mirror_ok ? "deleted" : "already gone");
+        it = entry_mirrors_.erase(it);
+    }
+
+    // 2. Birth: one mirror per proto-room, from the instance whose aperture CONTAINS the proto-room origin.
+    //    room_concept puts that origin at the centre of the crossed aperture, read from THIS agent's door node,
+    //    so for the right door the origin sits on its aperture segment and for every other door it does not.
+    //    The containment test is geometric identity, not a tuned gate: along the aperture within the door's own
+    //    half-width, across it within the same half-width (the fit may have refined the door since the
+    //    proto-room froze its frame).
+    for (const auto& room : G->get_nodes_by_type("room"))
+    {
+        if (not rc::room::is_proto(*G, room.id()) or entry_mirrors_.contains(room.id()))
+            continue;
+
+        std::optional<DSR::Node> best;
+        Mat::RTMat best_T;
+        double best_d = std::numeric_limits<double>::max();
+        for (const auto& [door_id, inst] : fitter_->instances())
+        {
+            const auto dn = G->get_node(door_id);
+            if (not dn.has_value() or rc::room::is_proto_mirror(*G, dn.value()))
+                continue;
+            // proto <- door, through the robot (both rooms hang from it). ts==0 on the main-thread instance.
+            const auto T = inner_eigen_->get_transformation_matrix(room.name(), dn->name(), 0);
+            if (not T.has_value())
+                continue;
+            // The proto origin in the DOOR frame: x along the aperture, y across it.
+            const Eigen::Vector3d o = T->inverse().translation();
+            const double half_w = 0.5 * G->get_attrib_by_name<width_m_att>(dn.value()).value_or(cfg_.door_prior_w_m);
+            if (std::abs(o.x()) > half_w or std::abs(o.y()) > half_w)
+                continue;
+            if (const double d = o.head<2>().norm(); d < best_d)
+            {
+                best_d = d;
+                best = dn;
+                best_T = T.value();
+            }
+        }
+        if (not best.has_value())
+        {
+            static int miss = 0;
+            if (miss++ % 60 == 0)
+                std::print("door_concept: [proto] proto-room '{}' id={} has no door of ours on its origin yet "
+                           "(RT not written, or the crossed door is not an instance)\n", room.name(), room.id());
+            continue;
+        }
+
+        const Eigen::Matrix3d R = best_T.rotation();
+        // R = Rx(a)Ry(b)Rz(c) — cortex's rt_rotation_euler_xyz. Closed form, NOT Eigen::eulerAngles (see
+        // room_concept/src/mount_calibrator.cpp for the decomposition it silently picks otherwise).
+        const Eigen::Vector3f euler(static_cast<float>(std::atan2(-R(1, 2), R(2, 2))),
+                                    static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),
+                                    static_cast<float>(std::atan2(-R(0, 1), R(0, 0))));
+        const Eigen::Vector3f t = best_T.translation().cast<float>();
+        const auto names = reserved_names();
+        if (const auto id = scene_graph_->create_entry_mirror(room, best.value(), t, euler, names); id != 0)
+            entry_mirrors_[room.id()] = EntryMirror{id, best->id()};
+    }
+
+    // 3. Refresh the interaction channel from the source — the one belief about this door.
+    //    Re-read the mirror node every time: update_node writes the WHOLE copy, so a stale copy would erase
+    //    whatever anybody else added since.
+    for (const auto& [room_id, mir] : entry_mirrors_)
+    {
+        const auto src = G->get_node(mir.source_id);
+        auto dst = G->get_node(mir.node_id);
+        if (not src.has_value() or not dst.has_value())
+            continue;
+        bool changed = false;
+        if (const auto v = G->get_attrib_by_name<door_open_prob_att>(src.value()); v.has_value()
+            and G->get_attrib_by_name<door_open_prob_att>(dst.value()) != v)
+        {
+            G->add_or_modify_attrib_local<door_open_prob_att>(dst.value(), v.value());
+            changed = true;
+        }
+        if (const auto v = G->get_attrib_by_name<door_phi_rad_att>(src.value()); v.has_value()
+            and G->get_attrib_by_name<door_phi_rad_att>(dst.value()) != v)
+        {
+            G->add_or_modify_attrib_local<door_phi_rad_att>(dst.value(), v.value());
+            changed = true;
+        }
+        if (changed)
+            G->update_node(dst.value());
+    }
 }
 
 void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)
@@ -3537,6 +3648,8 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
         return;
     if (not node_opt.value().name().starts_with("door"))
         return;
+    if (rc::room::is_proto_mirror(*G, node_opt.value()))
+        return;   // an entry mirror under a proto-room — never a fitted instance (see step_entry_mirrors)
 
     fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }

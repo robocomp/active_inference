@@ -85,15 +85,9 @@ DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, cons
     return best;
 }
 
-std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                              std::uint64_t room_node_id,
-                                                              std::string_view preferred_name,
-                                                              std::span<const std::string> reserved_names)
+std::string DoorSceneGraph::next_door_name(std::string_view preferred_name,
+                                           std::span<const std::string> reserved_names) const
 {
-    auto room_opt = G_->get_node(room_node_id);
-    if (not room_opt.has_value())
-        return 0;
-
     // Auto-name: one past the highest "door_<N>" that is LIVE OR REMEMBERED. Doors are now generic `object`
     // nodes named "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
     int max_n = 0;
@@ -120,8 +114,20 @@ std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector
         bump(nm);
     // RE-ACQUISITION: a door that flickered out and came back keeps its name, so downstream consumers see the
     // same object rather than a fresh one. (The DSR id necessarily changes — the old node was deleted.)
-    const std::string name = preferred_free ? std::string(preferred_name)
-                                            : "door_" + std::to_string(max_n + 1);
+    return preferred_free ? std::string(preferred_name)
+                          : "door_" + std::to_string(max_n + 1);
+}
+
+std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
+                                                              std::uint64_t room_node_id,
+                                                              std::string_view preferred_name,
+                                                              std::span<const std::string> reserved_names)
+{
+    auto room_opt = G_->get_node(room_node_id);
+    if (not room_opt.has_value())
+        return 0;
+
+    const std::string name = next_door_name(preferred_name, reserved_names);
 
     // Generic `object` node named "door_*"; class carried in object_subtype ("door"). Every
     // get_nodes_by_type("object") MUST therefore be paired with a starts_with("door") filter.
@@ -176,6 +182,57 @@ std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector
                name, id_opt.value(), centroid_room.x(), centroid_room.y(),
                parent_id, wall.ok ? "wall" : "room");
     return id_opt.value();
+}
+
+std::uint64_t DoorSceneGraph::create_entry_mirror(const DSR::Node& proto_room,
+                                                  const DSR::Node& source_door,
+                                                  const Eigen::Vector3f& t_proto_source,
+                                                  const Eigen::Vector3f& euler_xyz_proto_source,
+                                                  std::span<const std::string> reserved_names)
+{
+    const std::string name = next_door_name({}, reserved_names);
+    DSR::Node m = DSR::Node::create<object_node_type>(name);
+
+    // Geometry and appearance are the SOURCE's, copied once: the mirror is the same physical door. Only the
+    // interaction channel (door_open_prob / door_phi_rad) is refreshed afterwards, by the worker.
+    G_->add_or_modify_attrib_local<width_m_att> (m, G_->get_attrib_by_name<width_m_att>(source_door).value_or(cfg_.door_prior_w_m));
+    G_->add_or_modify_attrib_local<depth_m_att> (m, G_->get_attrib_by_name<depth_m_att>(source_door).value_or(cfg_.door_thickness_m));
+    G_->add_or_modify_attrib_local<height_m_att>(m, G_->get_attrib_by_name<height_m_att>(source_door).value_or(cfg_.door_prior_h_m));
+    G_->add_or_modify_attrib_local<mesh_path_att>(m, std::string("door_concept/meshes/door.obj"));
+    G_->add_or_modify_attrib_local<mesh_texture_path_att>(m, std::string("door_concept/meshes/door_basecolor.jpg"));
+    G_->add_or_modify_attrib_local<object_subtype_att>(m, std::string("door"));
+    if (const auto v = G_->get_attrib_by_name<door_open_prob_att>(source_door); v.has_value())
+        G_->add_or_modify_attrib_local<door_open_prob_att>(m, v.value());
+    if (const auto v = G_->get_attrib_by_name<door_phi_rad_att>(source_door); v.has_value())
+        G_->add_or_modify_attrib_local<door_phi_rad_att>(m, v.value());
+
+    // ★`parent` = the proto-room. This attribute is what rc::room::is_proto_mirror reads, and therefore what
+    //   keeps every fitting / merging / aperture-discount loop in the fleet from counting this door twice.
+    G_->add_or_modify_attrib_local<parent_att>(m, proto_room.id());
+    G_->add_or_modify_attrib_local<level_att>(m, G_->get_attrib_by_name<level_att>(proto_room).value_or(1) + 1);
+    {
+        const float rpx = G_->get_attrib_by_name<pos_x_att>(proto_room).value_or(200.f);
+        const float rpy = G_->get_attrib_by_name<pos_y_att>(proto_room).value_or(200.f);
+        G_->add_or_modify_attrib_local<pos_x_att>(m, rpx + 150.f);
+        G_->add_or_modify_attrib_local<pos_y_att>(m, rpy + 50.f);
+    }
+    rc::provenance::stamp_creation(*G_, m);
+    const auto id = G_->insert_node(m);
+    if (not id.has_value())
+        return 0;
+
+    DSR::Node parent = proto_room;   // the RT API takes a mutable node
+    rt_api_->insert_or_assign_edge_RT(parent, id.value(),
+                                      {t_proto_source.x(), t_proto_source.y(), t_proto_source.z()},
+                                      {euler_xyz_proto_source.x(), euler_xyz_proto_source.y(), euler_xyz_proto_source.z()});
+    if (relayout_)
+        relayout_();
+
+    std::print("door_concept: [proto] entry mirror '{}' id={} <- '{}' id={} under proto-room '{}' "
+               "(t=({:.2f},{:.2f},{:.2f}) yaw={:.3f})\n",
+               name, id.value(), source_door.name(), source_door.id(), proto_room.name(),
+               t_proto_source.x(), t_proto_source.y(), t_proto_source.z(), euler_xyz_proto_source.z());
+    return id.value();
 }
 
 bool DoorSceneGraph::persist_door_belief(DoorInstance& inst, std::uint64_t node_id,

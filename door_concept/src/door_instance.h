@@ -103,7 +103,7 @@ struct DoorInstance
     float dbg_ray_signed0 = 0.0f;  // mean signed (predicted - measured) over the predicted hits, m
     float dbg_phi_cv   = 0.0f;   // spread of the combined phi likelihood; 0 = perfectly flat
     bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
-    float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est
+    float phi_support  = -1.0f;   // was the camera mask overlap at phi_est; -1 since the camera stopped scoring phi (2026-09-14)
     // ★IS phi_est A MEASUREMENT, OR OUR OWN REQUEST ECHOED BACK? True when the last thing to move it was
     // the PRIOR — the commanded swing — because the image offered no resolvable hypothesis at all.
     // This exists because of a live defect it closes. Asking a provider to open a door arms an

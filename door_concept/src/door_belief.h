@@ -240,6 +240,47 @@ public:
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_ray_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep) const;
 
+    // ── THE FULL-FIELD RESPONSE (2026-09-16) — what phi_ray_likelihood could not do ───────────────
+    // ★THE BEAM MODEL ABOVE CANNOT SEE AN OPEN DOOR, and this is a property of the MODEL, not a tuning
+    // fault. Its only surface is the leaf (n_prims()==1, there is no wall). So a ray crossing an open
+    // doorway scores w_u*U under "open" (no predicted surface) and w_u*U under "shut" as well once the
+    // return lands beyond the predicted leaf — identical terms, hence a FLAT curve. Measured live
+    // 2026-09-16 with the door standing open and the robot in the doorway: cv = 0.038 across 25
+    // hypotheses (1/25 is exactly flat) and w_sdf = 0.0393, inside the 0.038..0.047 band the synthetic
+    // predicted. phi then carried nothing but our own actuation command.
+    //
+    // The cure is to model the FIELD the sensor actually reports — every ray in the doorway, whether it
+    // stops or flies through — against a wall WITH AN OPENING plus the leaf:
+    //   · ray meets a modelled surface at t : (1 - w_u - eps) N(rho; t, sigma) + w_u U[0,t) + eps U(t,cap]
+    //   · ray leaves through the opening    : (1 - w_u) U(t_ap, cap] + w_u U[0, t_ap)
+    // Now "shut" PREDICTS a return at the leaf and is REFUTED by a ray that flew 2 m past it, which the
+    // leaf-only model had no way to express.
+    //
+    // ★SUMMED, NOT AVERAGED — and that is only safe WITH the nuisance below. Summing is what lets
+    // evidence accumulate (the per-ray mean is why sigma_phi GREW from 0.199 to 0.647 rad as the ray
+    // count rose 71 -> 918: inert rays diluted the informative ones, so more evidence FLATTENED the
+    // curve). But a sum turns any unmodelled structure into certainty: the synthetic picked the wrong
+    // angle by 38 nats until the nuisance was added.
+    //
+    // ★THE NUISANCE IS MEASURED, NOT ASSUMED. The live residual against the modelled leaf is a tight
+    // +0.112 m (n=618 shut-consistent rows, sd 0.031, p25..p95 = +0.110..+0.118) — the returns stop
+    // ~11 cm NEARER than the model, consistent with a leaf modelled 5 cm thick sitting mid-wall in a
+    // ~22 cm wall. The prototype's {0, 3, 6} cm grid could not reach it. `depth` spans that offset and
+    // is marginalised out; `lat` does the same for the aperture's along-wall placement.
+    struct FieldNuisance
+    {
+        float depth_lo = -0.20f, depth_hi = 0.20f;   // wall/leaf offset across the wall (m)
+        int   depth_n  = 9;
+        float lat_lo   = -0.06f, lat_hi   = 0.06f;   // aperture placement along the wall (m)
+        int   lat_n    = 3;
+        float w_unexp  = 0.10f;   // P(return short of the model: a person, clutter, the frame)
+        float eps_beyond = 0.03f; // P(return beyond it: a miss, a reflective surface)
+        int   max_rays = 400;     // stride-subsampled; cost is nstep * depth_n * lat_n * rays
+    };
+    [[nodiscard]] std::vector<std::pair<float, float>>
+    phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
+                         const FieldNuisance& nz) const;
+
     // Argmin over a grid, plus the whole curve so a consumer can marginalise instead of conditioning on
     // the winner. Weights are exp(-(F - F_min)): a proper likelihood over phi, normalised by the caller.
     [[nodiscard]] std::vector<std::pair<float, float>>

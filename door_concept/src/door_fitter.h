@@ -21,7 +21,6 @@
 #include <cmath>
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
-#include "../../common/rgb_ingestor/rgb_ingestor.h"     // rc::RgbIngestor (leaf-tracker pixels)
 #include "../../common/contour_edge/contour_edge_check.h"  // rc::edges::PreparedFrame / contour_edge_support
 
 #include <cstdint>
@@ -232,9 +231,10 @@ public:
     // nothing" from "never looked".
     // `field` may be null / invalid, in which case the silhouette's field_* accumulators stay 0 and the
     // existence channel is bit-for-bit what it was before this channel existed.
-    // ★M1 — PHI AS A REAL DOF. Estimated per cycle by scoring candidate leaf angles against the door
-    // mask actually present in the image, with the agent's own actuation command as the prior. Returns
-    // the chosen phi and writes phi_est / phi_support onto the instance. Must run BEFORE the leaf pose
+    // ★M1 — PHI AS A REAL DOF. Estimated per cycle by scoring candidate leaf angles against the LiDAR rays
+    // that cross the doorway (where they stop, and where they fly through), with the agent's own actuation
+    // command as the prior. The camera does NOT score phi (removed 2026-09-14: the door mask labels the
+    // frame, not the leaf). Writes phi_est / phi_sigma / phi_curve onto the instance. Must run BEFORE the leaf pose
     // is read, since every projection downstream is built from it.
     void estimate_phi(DoorInstance& inst);
 
@@ -266,18 +266,6 @@ public:
     // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
     void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
 
-    // ★THE LEAF TRACKER NEEDS PIXELS, NOT JUST MASKS. estimate_phi scored each candidate angle by the
-    // overlap between the predicted leaf and the semantic "door" mask — which works while the leaf fills
-    // the aperture and fails completely once it swings out of it, because the mask then covers the FRAME
-    // and the leaf is somewhere else entirely. Measured 2026-09-13 on a plainly open door: overlap 0.013
-    // at EVERY angle, so the estimate drifted to where the residual noise was faintest and parked at
-    // 10 deg on a door standing open past 90.
-    // An open leaf is a large surface with strong boundaries and no useful label, so the evidence that
-    // survives is GRADIENT. Giving the fitter the RGB lets the same contour statistic that already
-    // audits the door's existence also DRIVE the angle — one measurement, two consumers, instead of a
-    // channel that could only ever say "your angle is wrong" after the fact.
-    // Non-owning; may be null, in which case the tracker falls back to mask overlap alone.
-    void set_rgb_source(const rc::RgbIngestor* rgb) { rgb_src_ = rgb; }
 
     // The newest low-LiDAR sweep, already in the ROOM frame. Staged once per cycle by the worker; the
     // hinge branch selects from it per door. Copy-free: the ingestor owns the storage for the cycle.
@@ -336,7 +324,6 @@ private:
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
     Eigen::Vector3f                leaf_origin_ = Eigen::Vector3f::Zero();   // bpearl centre, room frame
     const std::vector<Eigen::Vector3f>* leaf_pts_ = nullptr;   // bpearl sweep, room frame (set_leaf_points)
-    const rc::RgbIngestor*         rgb_src_     = nullptr;   // leaf-tracker contour evidence (set_rgb_source)
     DSR::InnerGaussianAPI*         gaussian_    = nullptr;   // Part B: chain covariance (set_chain_cov_source)
     std::string                    chain_src_frame_;
     bool                           chain_cov_enabled_ = false;
