@@ -78,14 +78,14 @@
         "links": [
           {
             "src": "200",
-            "dst": "300",
+            "dst": "201",
             "label": "RT",
             "linkAttribute": {
               "rt_translation": {
                 "type": 3,
                 "value": [
-                  -2.0,
-                  -0.4,
+                  0,
+                  0,
                   0.0
                 ]
               },
@@ -94,10 +94,39 @@
                 "value": [
                   0.0,
                   0.0,
-                  -0.0
+                  0
                 ]
               }
             }
+          },
+          {
+            "src": "200",
+            "dst": "300",
+            "label": "RT",
+            "linkAttribute": {
+              "rt_translation": {
+                "type": 3,
+                "value": [
+                  -4.512755932642323,
+                  0.9772583549919194,
+                  0.0
+                ]
+              },
+              "rt_rotation_euler_xyz": {
+                "type": 3,
+                "value": [
+                  0.0,
+                  0.0,
+                  -0.3
+                ]
+              }
+            }
+          },
+          {
+            "src": "200",
+            "dst": "300",
+            "label": "current",
+            "linkAttribute": {}
           },
           {
             "src": "200",
@@ -107,8 +136,8 @@
               "rt_translation": {
                 "type": 3,
                 "value": [
-                  0.6559428728911677,
-                  -0.8122431578679389,
+                  1.2041508059726889,
+                  -0.7937385189565416,
                   0.0
                 ]
               },
@@ -117,17 +146,17 @@
                 "value": [
                   0.0,
                   0.0,
-                  -0.6
+                  0.4
                 ]
               }
             }
           }
         ]
       },
-      "300": {
-        "id": "300",
-        "name": "room_0",
-        "type": "room",
+      "201": {
+        "id": "201",
+        "name": "body",
+        "type": "body",
         "attribute": {
           "level": {
             "type": 1,
@@ -141,22 +170,54 @@
             "type": 2,
             "value": 0.0
           },
+          "width_m": {
+            "type": 2,
+            "value": 0.47
+          },
+          "depth_m": {
+            "type": 2,
+            "value": 0.47
+          },
+          "parent": {
+            "type": 7,
+            "value": "200"
+          }
+        },
+        "links": []
+      },
+      "300": {
+        "id": "300",
+        "name": "room",
+        "type": "room",
+        "attribute": {
+          "level": {
+            "type": 1,
+            "value": 2
+          },
+          "pos_x": {
+            "type": 2,
+            "value": -80.0
+          },
+          "pos_y": {
+            "type": 2,
+            "value": 0.0
+          },
           "delimiting_polygon_x": {
             "type": 3,
             "value": [
-              -3.0,
-              3.0,
-              3.0,
-              -3.0
+              -4.0,
+              4.0,
+              4.0,
+              -4.0
             ]
           },
           "delimiting_polygon_y": {
             "type": 3,
             "value": [
-              -2.0,
-              -2.0,
-              2.0,
-              2.0
+              -2.5,
+              -2.5,
+              2.5,
+              2.5
             ]
           },
           "room_height": {
@@ -166,10 +227,6 @@
           "timestamp_creation": {
             "type": 7,
             "value": "1789200000000"
-          },
-          "color": {
-            "type": 0,
-            "value": "Green"
           },
           "parent": {
             "type": 7,
@@ -202,14 +259,14 @@
           },
           {
             "src": "300",
-            "dst": "340",
+            "dst": "312",
             "label": "RT",
             "linkAttribute": {
               "rt_translation": {
                 "type": 3,
                 "value": [
-                  -1.0,
-                  0.8,
+                  0.0,
+                  2.5,
                   0.0
                 ]
               },
@@ -218,7 +275,7 @@
                 "value": [
                   0.0,
                   0.0,
-                  0.0
+                  3.141592653589793
                 ]
               }
             }
@@ -236,7 +293,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": -80.0
+            "value": -20.0
           },
           "pos_y": {
             "type": 2,
@@ -265,7 +322,7 @@
                 "type": 3,
                 "value": [
                   0.0,
-                  -2.0,
+                  -2.5,
                   0.0
                 ]
               },
@@ -287,7 +344,7 @@
               "rt_translation": {
                 "type": 3,
                 "value": [
-                  3.0,
+                  4.0,
                   0.0,
                   0.0
                 ]
@@ -304,36 +361,13 @@
           },
           {
             "src": "301",
-            "dst": "312",
-            "label": "RT",
-            "linkAttribute": {
-              "rt_translation": {
-                "type": 3,
-                "value": [
-                  0.0,
-                  2.0,
-                  0.0
-                ]
-              },
-              "rt_rotation_euler_xyz": {
-                "type": 3,
-                "value": [
-                  0.0,
-                  0.0,
-                  3.141592653589793
-                ]
-              }
-            }
-          },
-          {
-            "src": "301",
             "dst": "313",
             "label": "RT",
             "linkAttribute": {
               "rt_translation": {
                 "type": 3,
                 "value": [
-                  -3.0,
+                  -4.0,
                   0.0,
                   0.0
                 ]
@@ -361,7 +395,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": -20.0
+            "value": 40.0
           },
           "pos_y": {
             "type": 2,
@@ -369,15 +403,11 @@
           },
           "width_m": {
             "type": 2,
-            "value": 6.0
+            "value": 8.0
           },
           "height_m": {
             "type": 2,
             "value": 3.0
-          },
-          "mesh_path": {
-            "type": 0,
-            "value": "room_concept/meshes/wall.obj"
           },
           "timestamp_creation": {
             "type": 7,
@@ -401,7 +431,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": 40.0
+            "value": 100.0
           },
           "pos_y": {
             "type": 2,
@@ -409,15 +439,11 @@
           },
           "width_m": {
             "type": 2,
-            "value": 4.0
+            "value": 5.0
           },
           "height_m": {
             "type": 2,
             "value": 3.0
-          },
-          "mesh_path": {
-            "type": 0,
-            "value": "room_concept/meshes/wall.obj"
           },
           "timestamp_creation": {
             "type": 7,
@@ -465,7 +491,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": 100.0
+            "value": 160.0
           },
           "pos_y": {
             "type": 2,
@@ -473,15 +499,11 @@
           },
           "width_m": {
             "type": 2,
-            "value": 6.0
+            "value": 8.0
           },
           "height_m": {
             "type": 2,
             "value": 3.0
-          },
-          "mesh_path": {
-            "type": 0,
-            "value": "room_concept/meshes/wall.obj"
           },
           "timestamp_creation": {
             "type": 7,
@@ -489,7 +511,7 @@
           },
           "parent": {
             "type": 7,
-            "value": "301"
+            "value": "300"
           }
         },
         "links": []
@@ -505,7 +527,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": 160.0
+            "value": 220.0
           },
           "pos_y": {
             "type": 2,
@@ -513,15 +535,11 @@
           },
           "width_m": {
             "type": 2,
-            "value": 4.0
+            "value": 5.0
           },
           "height_m": {
             "type": 2,
             "value": 3.0
-          },
-          "mesh_path": {
-            "type": 0,
-            "value": "room_concept/meshes/wall.obj"
           },
           "timestamp_creation": {
             "type": 7,
@@ -532,7 +550,31 @@
             "value": "301"
           }
         },
-        "links": []
+        "links": [
+          {
+            "src": "313",
+            "dst": "331",
+            "label": "RT",
+            "linkAttribute": {
+              "rt_translation": {
+                "type": 3,
+                "value": [
+                  1.0,
+                  -6.123233995736766e-17,
+                  0.0
+                ]
+              },
+              "rt_rotation_euler_xyz": {
+                "type": 3,
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            }
+          }
+        ]
       },
       "330": {
         "id": "330",
@@ -545,7 +587,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": 220.0
+            "value": -260.0
           },
           "pos_y": {
             "type": 2,
@@ -567,58 +609,6 @@
             "type": 2,
             "value": 2.0
           },
-          "passage_seq": {
-            "type": 1,
-            "value": 1
-          },
-          "passage_datetime": {
-            "type": 0,
-            "value": "2026-09-13T10:15:00.000+0200"
-          },
-          "passage_crossed": {
-            "type": 4,
-            "value": true
-          },
-          "passage_passable": {
-            "type": 4,
-            "value": true
-          },
-          "passage_open_prob": {
-            "type": 2,
-            "value": 0.91
-          },
-          "passage_llr": {
-            "type": 2,
-            "value": 2.302585
-          },
-          "passage_clear_span_m": {
-            "type": 2,
-            "value": 0.98
-          },
-          "passage_body_width_m": {
-            "type": 2,
-            "value": 0.62
-          },
-          "passage_open_requested": {
-            "type": 4,
-            "value": false
-          },
-          "passage_open_answer": {
-            "type": 0,
-            "value": ""
-          },
-          "passage_outcome": {
-            "type": 0,
-            "value": ""
-          },
-          "passage_duration_s": {
-            "type": 2,
-            "value": 4.2
-          },
-          "passage_episode_cut": {
-            "type": 4,
-            "value": false
-          },
           "timestamp_creation": {
             "type": 7,
             "value": "1789200000000"
@@ -630,38 +620,38 @@
         },
         "links": []
       },
-      "340": {
-        "id": "340",
-        "name": "table_1",
+      "331": {
+        "id": "331",
+        "name": "door_3",
         "type": "object",
         "attribute": {
           "level": {
             "type": 1,
-            "value": 3
+            "value": 5
           },
           "pos_x": {
             "type": 2,
-            "value": -260.0
+            "value": -200.0
           },
           "pos_y": {
             "type": 2,
-            "value": 70.0
+            "value": 210.0
           },
           "object_subtype": {
             "type": 0,
-            "value": "table"
+            "value": "door"
           },
           "width_m": {
             "type": 2,
-            "value": 1.2
+            "value": 0.9
           },
           "depth_m": {
             "type": 2,
-            "value": 0.8
+            "value": 0.05
           },
           "height_m": {
             "type": 2,
-            "value": 0.75
+            "value": 2.0
           },
           "timestamp_creation": {
             "type": 7,
@@ -669,14 +659,14 @@
           },
           "parent": {
             "type": 7,
-            "value": "300"
+            "value": "313"
           }
         },
         "links": []
       },
       "400": {
         "id": "400",
-        "name": "room_1",
+        "name": "room_2",
         "type": "room",
         "attribute": {
           "level": {
@@ -685,7 +675,7 @@
           },
           "pos_x": {
             "type": 2,
-            "value": -200.0
+            "value": -140.0
           },
           "pos_y": {
             "type": 2,
@@ -693,21 +683,15 @@
           },
           "delimiting_polygon_x": {
             "type": 3,
-            "value": [
-              -2.5,
-              2.5,
-              2.5,
-              -2.5
-            ]
+            "value": []
           },
           "delimiting_polygon_y": {
             "type": 3,
-            "value": [
-              -2.0,
-              -2.0,
-              2.0,
-              2.0
-            ]
+            "value": []
+          },
+          "room_id": {
+            "type": 7,
+            "value": "2"
           },
           "room_height": {
             "type": 2,
@@ -715,15 +699,85 @@
           },
           "timestamp_creation": {
             "type": 7,
-            "value": "1789200600000"
-          },
-          "color": {
-            "type": 0,
-            "value": "Green"
+            "value": "1789200900000"
           },
           "parent": {
             "type": 7,
             "value": "200"
+          }
+        },
+        "links": [
+          {
+            "src": "400",
+            "dst": "400",
+            "label": "proto",
+            "linkAttribute": {}
+          },
+          {
+            "src": "400",
+            "dst": "402",
+            "label": "RT",
+            "linkAttribute": {
+              "rt_translation": {
+                "type": 3,
+                "value": [
+                  -1.1638898561555435,
+                  1.6372461235815554,
+                  0.0
+                ]
+              },
+              "rt_rotation_euler_xyz": {
+                "type": 3,
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "402": {
+        "id": "402",
+        "name": "door_2",
+        "type": "object",
+        "attribute": {
+          "level": {
+            "type": 1,
+            "value": 3
+          },
+          "pos_x": {
+            "type": 2,
+            "value": -80.0
+          },
+          "pos_y": {
+            "type": 2,
+            "value": 70.0
+          },
+          "object_subtype": {
+            "type": 0,
+            "value": "door"
+          },
+          "width_m": {
+            "type": 2,
+            "value": 0.9
+          },
+          "depth_m": {
+            "type": 2,
+            "value": 0.05
+          },
+          "height_m": {
+            "type": 2,
+            "value": 2.0
+          },
+          "timestamp_creation": {
+            "type": 7,
+            "value": "1789200900000"
+          },
+          "parent": {
+            "type": 7,
+            "value": "400"
           }
         },
         "links": []

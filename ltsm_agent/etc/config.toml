@@ -29,8 +29,11 @@ name = "ltsm_agent"
 [Agent.dsr]
 configFile = ""
 domain     = 0
+# NO VIEWER for the working graph: robot_concept already shows it. With all three views false,
+# setupViewer returns nullptr and GenericWorker::initialize builds no window for this graph -- the
+# graph itself is still joined and read. Only the LTSM memory window comes up.
 tree       = false
-graph      = true
+graph      = false
 2d         = false
 
 [Agent.ltsm]
@@ -51,7 +54,9 @@ Compute   = 1000
 Emergency = 500
 
 [Component.Debug]
-Verbose = true
+# false suppresses qDebug ONLY (the re-emit handler in generated/genericworker.cpp); qInfo/qWarning,
+# including the [seed] and [eviction] lines, still print.
+Verbose = false
 
 [Ice]
 Warn.Connections = "0"
@@ -65,3 +70,21 @@ MessageSizeMax = "20004800"
 # test for the whole point of this agent -- see the agent_dual_dsr note in the README.
 [SelfTest]
 probe = false
+
+# ── Live passage (src/passage_live.h) ───────────────────────────────────────────────────────────
+# When room_concept births a PROTO-ROOM on a door crossing and door_concept mirrors the crossed door
+# under it, keep ONE `metaconcept` passage_<n> in the LIVE graph with a `match` edge to each door
+# (entry mirror ↔ the current room's nearest door), deleted when either door goes. Owned live passages
+# are removed on a graceful exit and swept at startup. Absent key ⇒ OFF.
+[LivePassage]
+enabled = true
+
+# ── Promotion (proto-room → current) ─────────────────────────────────────────────────────────────
+# ltsm_agent decides room IDENTITY. Each cycle, for every proto-room: P(the robot's whole footprint is
+# past the crossed aperture) = Φ((s − r_body)/σ_s), from the robot→proto RT edge and its pose covariance,
+# r_body from the `body` node. When P ≥ decision_prob: remove `proto`, move `current`, copy BOTH rooms to
+# memory (passage matching the two door faces), and DELETE the old room from the working memory.
+# ⚠ decision_prob is a DECISION LEVEL on a continuous belief (the one flagged threshold on this path).
+[Promotion]
+enabled       = true
+decision_prob = 0.95

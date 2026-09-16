@@ -43,6 +43,20 @@ the live fleet.
    room IS the stability signal; LTSM does not evaluate a stability criterion of its own (no
    thresholds here — CLAUDE.md).
 
+## Startup seed (before any eviction)
+
+On `initialize()`, every room in the working memory that memory does not hold yet gets a room node
+in memory with its floor, walls and existing doors (`RoomEviction::seed_from_working_memory`). It uses
+the same `r<idx>_` prefixes as the transaction below, memoised per live room id, so when that room is
+evicted later `twin()` fills the seeded nodes; `twin()` also removes an existing node's old RT edge when
+the new parent differs, so a door that moved to another wall between seed and eviction is re-parented,
+never given two RT parents. `config_stage.toml` asserts the seed (`[seed][stage]`) before the eviction.
+
+★ **Seam direction, fixed 2026-09-14.** Phase 3 used to write `seam` = T(new←old) on the memory edge
+old→new, but an RT edge carries the CHILD's pose in the PARENT's frame, so the edge must hold
+`seam⁻¹`. The stage's memory-composition assertion was failing by 6.23 m (exactly `seam⁻¹·door`); only
+a seam that is a pure 180° rotation (an involution) would have hidden it.
+
 ## Trigger
 
 On the live graph: **more than one `room`-typed node reachable by `RT` from the robot node.**

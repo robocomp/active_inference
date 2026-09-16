@@ -1,0 +1,93 @@
+# config_stage_proto.toml — the LIVE PASSAGE and proto-room handling, offline.
+#
+# Fixture etc/stage_proto_room.json (tools/make_proto_stage_fixture.py) on the private domain 3: the
+# apartment with `current`, a proto-room room_2 hung from the robot, and door_concept's entry mirror
+# door_2 under it. Asserts over three cycles: one passage door_1<->door_2, `current` unchanged, no
+# eviction, the proto-room kept out of memory, and the passage deleted when the mirror goes.
+# Eviction is ARMED (stage_check off) precisely to prove a proto-room does not trigger it.
+#
+# Derived from config_stage.toml; everything below the first line of that file's header applies.
+# ltsm_agent — OFFLINE EVICTION STAGE. Two graphs, two domains, NEITHER of them the live fleet.
+#
+#   [Agent.dsr ]  a SYNTHETIC live graph, seeded from etc/stage_two_rooms.json on domain 3.
+#   [Agent.ltsm]  long-term spatial memory, seeded from ltsm_root.json on domain 2.
+#
+# WHY. Eviction fires when the robot carries two RT edges, one to the room it is leaving and one to
+# the room it has just localised in. room_concept cannot produce that yet — it creates a single node
+# named "room" and adopts any room-typed node it finds — so the whole transaction would be
+# untestable until that half lands. This config supplies the shape instead: the fixture is the live
+# graph at the instant of the hand-over. See ../EVICTION.md and tools/make_stage_fixture.py.
+#
+# Domain 3 is nobody's, so this CANNOT disturb a running fleet and does not need one. Going live is
+# then a config change and nothing else: point [Agent.dsr] back at configFile = "" / domain = 0.
+
+[Agent]
+id   = 19
+name = "ltsm_agent"
+
+[Agent.dsr]
+# A NON-EMPTY configFile makes this agent the domain's OWNER (it seeds the graph) instead of a
+# joiner that requests it over DDS and qFatal()s after 15 s if nobody answers.
+configFile = "etc/stage_proto_room.json"
+domain     = 3
+tree       = false
+graph      = true
+2d         = false
+
+[Agent.ltsm]
+configFile = "ltsm_root.json"
+domain     = 2
+tree       = false
+graph      = true
+2d         = false
+
+[Period]
+Compute   = 1000
+Emergency = 500
+
+[Component.Debug]
+Verbose = true
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+[SelfTest]
+# The domain-isolation probe of step 1. OFF here: it writes a node per cycle into memory, which
+# would just add noise to the eviction log. etc/config_selftest.toml is where it lives.
+probe = false
+
+[Eviction]
+# ARMED HERE, because "live" is the fixture on domain 3. It stays FALSE in etc/config.toml until
+# room_concept can actually hand over two rooms.
+enabled = true
+# Assert the outcome rather than just print it: the door's pose must round-trip through the seam,
+# and the MEMORY graph's own RT chain must reproduce the pose measured on the live one. A failure
+# is fatal, so a broken transaction cannot pass quietly.
+stage_check = false
+# The leak reaper for nodes whose owner was not running to let them go. OFF: with no other agent on
+# domain 3 the whole fixture looks orphaned, and reaping it would destroy the evidence the check
+# needs. Arm it only against a real graph.
+backstop_sweep = false
+
+[Memory]
+# Long-term memory that restarts from zero is not memory. OFF here so each stage run starts from a
+# known-empty graph and the assertions mean the same thing every time; the point of the flag is that
+# arming it is a decision, not a discovery. Saves at the eviction fence + on a graceful exit, via a
+# temp file and an atomic rename, keeping the previous generation as .prev.
+persist      = false
+persist_path = "etc/ltsm_memory.json"
+
+[Passages]
+# Where judgement episodes are appended. The CSV is the DURABLE record — the Betas in the memory
+# graph are derived from it and recomputable if that graph is ever lost — so it is append-only by
+# design. A repeated stage run therefore appends the fixture's episode again, which is harmless for
+# the assertions but means `crossed_rows` in the audit counts runs, not doorways. Delete the file to
+# start the count over.
+csv_path = "etc/passages.csv"
+
+[LivePassage]
+enabled     = true
+stage_check = true

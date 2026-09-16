@@ -4,6 +4,7 @@ LIST(APPEND SOURCES
   ../src/room_eviction.cpp
   ../src/memory_store.cpp
   ../src/passage_harvest.cpp
+  ../src/passage_live.cpp
 )
 
 # Headers set
@@ -12,6 +13,7 @@ LIST(APPEND HEADERS
   ../src/room_eviction.h
   ../src/memory_store.h
   ../src/passage_harvest.h
+  ../src/passage_live.h
 )
 
 LIST(APPEND LIBS ${LIBS})

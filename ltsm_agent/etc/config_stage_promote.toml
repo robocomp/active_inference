@@ -1,0 +1,74 @@
+# config_stage_promote.toml — PROMOTION of a proto-room, offline.
+#
+# Fixture etc/stage_promote.json (tools/make_proto_stage_fixture.py --promote) on the private domain 3:
+# the robot 1.2 m past the crossed aperture of proto-room room_2 (σ 5 cm). Asserts: room_2 promoted and
+# current; the apartment's room/floor/walls/doors deleted from the working memory; memory holds r0_room
+# (walls all under r0_floor) and r2_room_2 hanging from it, with passage matching r0_door_1 ↔ r2_door_2;
+# memory's seam reproduces the live geometry; the live passage dies with door_1.
+# ⚠ Memory is on domain 2 like the live config: never run this while a live ltsm_agent is up.
+
+[Agent]
+id   = 19
+name = "ltsm_agent"
+
+[Agent.dsr]
+# A NON-EMPTY configFile makes this agent the domain's OWNER (it seeds the graph) instead of a
+# joiner that requests it over DDS and qFatal()s after 15 s if nobody answers.
+configFile = "etc/stage_promote.json"
+domain     = 3
+tree       = false
+graph      = true
+2d         = false
+
+[Agent.ltsm]
+configFile = "ltsm_root.json"
+domain     = 2
+tree       = false
+graph      = true
+2d         = false
+
+[Period]
+Compute   = 1000
+Emergency = 500
+
+[Component.Debug]
+Verbose = true
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+[SelfTest]
+# The domain-isolation probe of step 1. OFF here: it writes a node per cycle into memory, which
+# would just add noise to the eviction log. etc/config_selftest.toml is where it lives.
+probe = false
+
+[Eviction]
+# OFF: only the promotion path moves rooms here.
+enabled = false
+[Memory]
+# Long-term memory that restarts from zero is not memory. OFF here so each stage run starts from a
+# known-empty graph and the assertions mean the same thing every time; the point of the flag is that
+# arming it is a decision, not a discovery. Saves at the eviction fence + on a graceful exit, via a
+# temp file and an atomic rename, keeping the previous generation as .prev.
+persist      = false
+persist_path = "etc/ltsm_memory.json"
+
+[Passages]
+# Where judgement episodes are appended. The CSV is the DURABLE record — the Betas in the memory
+# graph are derived from it and recomputable if that graph is ever lost — so it is append-only by
+# design. A repeated stage run therefore appends the fixture's episode again, which is harmless for
+# the assertions but means `crossed_rows` in the audit counts runs, not doorways. Delete the file to
+# start the count over.
+csv_path = "etc/passages.csv"
+
+[LivePassage]
+enabled     = true
+stage_check = false
+
+[Promotion]
+enabled       = true
+decision_prob = 0.95
+stage_check   = true

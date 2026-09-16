@@ -4,20 +4,22 @@
  */
 #include "room_eviction.h"
 
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto
+
 #include <QDebug>
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <deque>
+#include <cmath>
+#include <Eigen/Dense>
 #include <utility>
 #include <format>
 
 namespace ltsm
 {
 
-namespace
-{
 // A door in this fleet is an `object` node carrying object_subtype == "door" — there IS a `door`
 // node type registered in cortex and NOBODY uses it, so get_nodes_by_type("door") returns nothing.
 // (door_scene_graph.cpp:128-137.) The name check is the belt to that braces.
@@ -28,6 +30,8 @@ bool is_door(DSR::DSRGraph &g, const DSR::Node &n)
     return n.name().starts_with("door_");
 }
 
+namespace
+{
 std::string trailing_index(const std::string &name)
 {
     auto it = name.end();
@@ -58,9 +62,15 @@ std::optional<DSR::Node> RoomEviction::robot_node() const
 
 std::vector<DSR::Node> RoomEviction::rooms_under_robot(const DSR::Node &robot) const
 {
+    // ★ PROTO-ROOMS ARE NOT ROOMS HERE. room_concept births a proto-room (a `room` with a `proto`
+    // self-edge) on a door crossing and hangs it from the robot exactly like a real one; its identity
+    // is unresolved and `current` stays on the room it came from. Counting it would make detect() see
+    // two rooms and EVICT the apartment on the next cycle, and would stop ensure_current_edge() from
+    // placing `current` on the one real room. It becomes a room when promotion removes the edge.
     std::vector<DSR::Node> rooms;
     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot, "RT"))
-        if (const auto child = live_->get_node(e.to()); child.has_value() and child->type() == "room")
+        if (const auto child = live_->get_node(e.to());
+            child.has_value() and child->type() == "room" and not rc::room::is_proto(*live_, child->id()))
             rooms.push_back(child.value());
     return rooms;
 }
@@ -113,16 +123,47 @@ std::optional<Candidate> RoomEviction::detect() const
 //////////////////////////////////////////////////////////////////////////////////////////////////
 std::uint64_t RoomEviction::room_index(const DSR::Node &room) const
 {
-    if (const auto id = live_->get_attrib_by_name<room_id_att>(room); id.has_value())
-        return id.value();
-    if (const auto digits = trailing_index(room.name()); not digits.empty())
+    // MEMOISED. room_concept names its one room plain "room", with no room_id and no digits, so it
+    // lands on the counter below -- and an unmemoised counter hands the SAME room a different index
+    // every time it is asked (seed → r0_, its eviction → r1_), which duplicates it in memory.
+    if (const auto it = index_of_.find(room.id()); it != index_of_.end())
+        return it->second;
+
+    const auto compute = [&]() -> std::uint64_t
     {
-        std::uint64_t v = 0;
-        // from_chars, never stoull/atoi: these machines run es_ES and CLAUDE.md is explicit.
-        if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
-            return v;
-    }
-    return next_index_++;
+        if (const auto id = live_->get_attrib_by_name<room_id_att>(room); id.has_value())
+            return id.value();
+        if (const auto digits = trailing_index(room.name()); not digits.empty())
+        {
+            std::uint64_t v = 0;
+            // from_chars, never stoull/atoi: these machines run es_ES and CLAUDE.md is explicit.
+            if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
+                return v;
+        }
+        // The counter must not reuse an index memory already holds (a persisted generation, or a
+        // room indexed earlier in this run), or two different rooms would share a prefix.
+        for (const auto &r : mem_->get_nodes_by_type("room"))
+            if (const auto i = mem_->get_attrib_by_name<room_id_att>(r); i.has_value())
+                next_index_ = std::max(next_index_, i.value() + 1);
+        for (const auto &[_, i] : index_of_)
+            next_index_ = std::max(next_index_, i + 1);
+        return next_index_++;
+    };
+    const auto idx = compute();
+    index_of_.emplace(room.id(), idx);
+    return idx;
+}
+
+std::optional<DSR::Node> RoomEviction::remembered(const DSR::Node &live_room) const
+{
+    for (const auto &r : mem_->get_nodes_by_type("room"))
+        if (const auto i = mem_->get_attrib_by_name<room_id_att>(r);
+            i.has_value() and r.name() == std::format("r{}_{}", i.value(), live_room.name()))
+        {
+            index_of_.try_emplace(live_room.id(), i.value());   // its eviction must reuse this prefix
+            return r;
+        }
+    return {};
 }
 
 std::map<std::string, DSR::Attribute> RoomEviction::rt_attrs(const Mat::RTMat &t)
@@ -150,6 +191,10 @@ std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint6
     auto attrs = src.attrs();
     attrs.erase(parent_str.data());
     attrs.erase(level_str.data());
+    // `collapsed` is a VIEWER default (room_concept seeds it on the floor to fold the wall fan in the
+    // busy live view). Copied into memory it folds r<k>_floor's walls away, and the doors that hang from
+    // them are drawn detached from the room -- memory's view exists to show exactly that structure.
+    attrs.erase(collapsed_str.data());
 
     const int parent_level = [&]
     {
@@ -163,6 +208,13 @@ std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint6
     if (auto existing = mem_->get_node(mem_name); existing.has_value())
     {
         auto &e = existing.value();
+        // RE-PARENT, never a second RT parent. The seed hangs a room's nodes where the live graph
+        // had them at startup; if the room is restructured before its eviction (a door moved to
+        // another wall) the caller's new edge would otherwise sit BESIDE the old one, and the RT tree
+        // stops being a tree. Delete first: update_node below rewrites `parent` anyway.
+        if (const auto old_parent = mem_->get_attrib_by_name<parent_att>(e);
+            old_parent.has_value() and old_parent.value() != mem_parent_id)
+            mem_->delete_edge(old_parent.value(), e.id(), "RT");
         for (auto &[k, v] : attrs) e.attrs()[k] = v;
         mem_->add_or_modify_attrib_local<parent_att>(e, mem_parent_id);
         mem_->add_or_modify_attrib_local<level_att>(e, parent_level + 1);
@@ -187,7 +239,7 @@ std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint6
 bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_id,
                                 const std::string &prefix, std::uint64_t room_idx,
                                 const std::map<std::string, DSR::Attribute> &root_edge_attrs,
-                                IdMap &map, Outcome &out)
+                                IdMap &map, Outcome &out, Scope scope)
 {
     struct Item { std::uint64_t live_id, mem_parent; std::map<std::string, DSR::Attribute> edge_attrs; };
     std::deque<Item> q{{live_id, mem_parent_id, root_edge_attrs}};
@@ -214,11 +266,17 @@ bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_
             if (mem_->insert_or_assign_edge(std::move(edge))) ++out.edges_copied;
         }
 
+        // STRUCTURE stops at a door: what hangs below one (its affordances) is not the room's shape.
+        if (scope == Scope::Structure and is_door(*live_, src.value())) continue;
+
         for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(src.value(), "RT"))
         {
             const auto child = live_->get_node(e.to());
             if (not child.has_value()) continue;
             if (child->type() == "robot" or child->type() == "root") continue;   // never climb out
+            if (scope == Scope::Structure and child->type() != "floor" and child->type() != "wall"
+                and not is_door(*live_, child.value()))
+                continue;
             q.push_back({e.to(), mem_id.value(), e.attrs()});
         }
     }
@@ -295,16 +353,22 @@ Outcome RoomEviction::evict(const Candidate &cand)
     const auto new_room_live = live_->get_node(cand.new_room_id);
     if (not new_room_live.has_value()) { out.reason = "the new room vanished mid-eviction"; return out; }
 
-    const auto mem_new_room = twin(new_room_live.value(), out.mem_old_room_id, new_prefix, new_idx);
-    if (not mem_new_room.has_value()) { out.reason = "could not write the new room's stub"; return out; }
-    out.mem_new_room_id = mem_new_room.value();
-    {
-        auto e = DSR::Edge::create<RT_edge_type>(out.mem_old_room_id, out.mem_new_room_id, rt_attrs(out.seam));
-        mem_->insert_or_assign_edge(std::move(e));
-        // The `exit` edge is NOT here: it hangs off the doorway node below, because a room pair can
-        // have more than one door and only the doorway says which hole was crossed. This RT edge
-        // carries the seam and nothing else.
-    }
+    // ★ WHOLE SUBTREE, not only a stub: after a PROMOTION the old room is deleted from the live graph
+    // and door_concept retires the entry mirror with its source, so this is the only moment the new
+    // room's side of the crossed door can be remembered. For a room with nothing under it yet (the
+    // two-room stage) the subtree IS the stub.
+    // ★ INVERSE on the root edge. An RT edge parent→child carries the CHILD's pose in the PARENT's
+    // frame, i.e. T(room_old <- room_new) = seam⁻¹. Writing the seam itself put memory's r1_room 6.23 m
+    // off on the stage fixture; only a seam that is a 180° rotation would have hidden it.
+    // The `exit` edge is NOT on this RT edge: it hangs off the passage node below, because a room pair
+    // can have more than one door and only the passage says which hole was crossed.
+    IdMap new_map;
+    if (not copy_subtree(cand.new_room_id, out.mem_old_room_id, new_prefix, new_idx,
+                         rt_attrs(out.seam.inverse()), new_map, out))
+        return out;
+    out.mem_new_room_id = new_map.at(cand.new_room_id);
+    hang_walls_on_floor(map);
+    hang_walls_on_floor(new_map);
 
     // ── 4. THE DOOR, ONCE PER SIDE ─────────────────────────────────────────────────────────────
     // The crossed door is the one nearest the robot in the room it is leaving: an argmin over the
@@ -313,6 +377,12 @@ Outcome RoomEviction::evict(const Candidate &cand)
     for (const auto &[live_id, _] : map)
         if (const auto n = live_->get_node(live_id); n.has_value() and is_door(*live_, n.value()))
             doors.push_back(n.value());
+
+    // THE DOOR PAIR, WHEN KNOWN, IS NOT RE-GUESSED: a promotion hands over the pair the live passage
+    // matched while the room was proto (entry mirror ↔ the current room's door). Otherwise, the door
+    // nearest the robot in the room being left.
+    if (cand.old_door_id != 0 and map.contains(cand.old_door_id))
+        std::erase_if(doors, [&](const DSR::Node &d) { return d.id() != cand.old_door_id; });
 
     if (not doors.empty())
     {
@@ -406,6 +476,16 @@ Outcome RoomEviction::evict(const Candidate &cand)
                     mem_->insert_or_assign_edge(std::move(m));
                     auto x = DSR::Edge::create<exit_edge_type>(doorway_id, out.mem_new_room_id);
                     mem_->insert_or_assign_edge(std::move(x));
+
+                    // THE SECOND FACE: the new room's own door node for the same hole (the entry mirror,
+                    // copied with the new room's subtree above). Two `match` edges into one passage.
+                    if (const auto nf = new_map.find(cand.new_door_id); cand.new_door_id != 0 and nf != new_map.end())
+                    {
+                        auto m2 = DSR::Edge::create<match_edge_type>(doorway_id, nf->second);
+                        mem_->insert_or_assign_edge(std::move(m2));
+                        if (const auto nn = mem_->get_node(nf->second); nn.has_value())
+                            out.mem_door_new = nn->name();
+                    }
                 }
             }
         }
@@ -421,13 +501,258 @@ Outcome RoomEviction::evict(const Candidate &cand)
             return out;
         }
 
+    for (const auto &[live_id, mem_id] : new_map)
+        if (not mem_->get_node(mem_id).has_value())
+        {
+            out.reason = std::format("memory lost node {} right after writing it", mem_id);
+            return out;
+        }
+
     archived_.insert(cand.old_room_id);
+
+    // PROMOTE IN PLACE: same node id, the `proto` self-edge removed (room_concept's contract). Before the
+    // flip, so no reader ever sees `current` pointing at a room still marked proto.
+    if (cand.promote)
+        out.promoted = live_->delete_edge(cand.new_room_id, cand.new_room_id, "proto")
+                       or not live_->get_edge(cand.new_room_id, cand.new_room_id, "proto").has_value();
+
     live_->delete_edge(cand.robot_id, cand.old_room_id, "current");
     auto cur = DSR::Edge::create<current_edge_type>(cand.robot_id, cand.new_room_id);
     out.current_flipped = live_->insert_or_assign_edge(std::move(cur));
-    out.ok = out.current_flipped;
-    if (not out.ok) out.reason = "the copy landed but the `current` edge could not be written";
+    out.ok = out.current_flipped and (not cand.promote or out.promoted);
+    if (not out.ok)
+    {
+        out.reason = "the copy landed but the `current` edge / proto promotion could not be written";
+        return out;
+    }
+
+    // THE OLD ROOM LEAVES THE WORKING MEMORY. Decided 2026-09-14 (user): ltsm deletes it, after the copy
+    // is verified and the fence has moved. Owners that follow `current` (door_concept's release_room) will
+    // already be letting their own nodes go; this removes whatever is left, room_concept's room/floor/walls
+    // included.
+    if (cand.remove_old)
+        out.live_removed = remove_live_room(cand.old_room_id);
     return out;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+void RoomEviction::hang_walls_on_floor(const IdMap &map)
+{
+    auto ie = live_->get_inner_eigen_api();
+    for (const auto &[live_id, mem_id] : map)
+    {
+        const auto wall = live_->get_node(live_id);
+        if (not wall.has_value() or wall->type() != "wall") continue;
+        const auto live_parent = live_->get_attrib_by_name<parent_att>(wall.value());
+        if (not live_parent.has_value()) continue;
+        const auto room = live_->get_node(live_parent.value());
+        if (not room.has_value() or room->type() != "room") continue;       // already under a floor
+
+        // The floor of THAT room, among the nodes copied with it.
+        std::optional<DSR::Node> floor;
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(room.value(), "RT"))
+            if (const auto c = live_->get_node(e.to()); c.has_value() and c->type() == "floor" and map.contains(c->id()))
+                floor = c;
+        if (not floor.has_value()) continue;                                  // no floor: the room is the only parent there is
+
+        const auto t = ie->get_transformation_matrix(floor->name(), wall->name());
+        if (not t.has_value()) continue;
+        const auto mem_floor = map.at(floor->id());
+        const auto mem_room  = map.at(room->id());
+
+        mem_->delete_edge(mem_room, mem_id, "RT");
+        auto e = DSR::Edge::create<RT_edge_type>(mem_floor, mem_id, rt_attrs(t.value()));
+        mem_->insert_or_assign_edge(std::move(e));
+        if (auto w = mem_->get_node(mem_id); w.has_value())
+        {
+            mem_->add_or_modify_attrib_local<parent_att>(w.value(), mem_floor);
+            if (const auto f = mem_->get_node(mem_floor); f.has_value())
+                mem_->add_or_modify_attrib_local<level_att>(w.value(), mem_->get_node_level(f.value()).value_or(0) + 1);
+            mem_->update_node(w.value());
+        }
+    }
+}
+
+int RoomEviction::remove_live_room(std::uint64_t room_id)
+{
+    const auto room = live_->get_node(room_id);
+    const std::string name = room.has_value() ? room->name() : std::string("<gone>");
+    int removed = sweep_orphans(room_id, "the room it hung from was promoted away");
+    if (live_->delete_node(room_id)) ++removed;
+    qInfo() << "[eviction] removed room" << QString::fromStdString(name) << "from the working memory ("
+            << removed << "node(s))";
+    return removed;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Promotion evidence
+//////////////////////////////////////////////////////////////////////////////////////////////////
+std::vector<PromotionReading> RoomEviction::promotion_evidence(double body_radius) const
+{
+    std::vector<PromotionReading> out;
+    const auto robot = robot_node();
+    if (not robot.has_value()) return out;
+    auto rt = live_->get_rt_api();
+
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot.value(), "RT"))
+    {
+        const auto proto = live_->get_node(e.to());
+        if (not proto.has_value() or proto->type() != "room" or not rc::room::is_proto(*live_, proto->id()))
+            continue;
+
+        PromotionReading r;
+        r.proto_id = proto->id();
+        r.proto_name = proto->name();
+        r.body_radius = body_radius;
+
+        // E = T(robot <- proto), the edge as written; its covariance is over (x, y, yaw) of E, in the
+        // PARENT (robot) frame -- cortex's convention, and what room_concept propagates into.
+        const auto E = rt->get_edge_RT_as_rtmat(e);
+        const auto C = rt->get_edge_RT_covariance(e);
+        if (not E.has_value()) { r.why_not = "no pose on the robot->proto edge"; out.push_back(r); continue; }
+        // ★ NO COVARIANCE ⇒ NO DECISION. Φ of a zero width is a step function, i.e. a hidden threshold on
+        // the mean; a pose that does not say how well it is known cannot say the robot is surely inside.
+        if (not C.has_value()) { r.why_not = "no pose covariance on the robot->proto edge"; out.push_back(r); continue; }
+
+        const Eigen::Vector2d te(E->translation().x(), E->translation().y());
+        const double th = std::atan2(E->rotation()(1, 0), E->rotation()(0, 0));
+        // Robot in the proto frame: t = -R(th)^T te. Jacobian w.r.t. (te, th):
+        //   ∂t/∂te = -R(-th),   ∂t/∂th = R'(-th)·te,  R'(a) = [[-sin a, -cos a], [cos a, -sin a]].
+        const double c = std::cos(-th), s = std::sin(-th);
+        Eigen::Matrix2d Rm;  Rm  << c, -s, s, c;
+        Eigen::Matrix2d dR;  dR  << -s, -c, c, -s;
+        const Eigen::Vector2d t = -Rm * te;
+        Eigen::Matrix<double, 2, 3> J;
+        J.leftCols<2>() = -Rm;
+        J.col(2) = dR * te;
+        static constexpr int slot[3] = {0, 1, 5};   // SE(2) inside the 6x6 SE(3) block [x y z rx ry rz]
+        Eigen::Matrix3d S;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                S(i, j) = (*C)(slot[i], slot[j]);
+        const Eigen::Matrix2d St = J * S * J.transpose();
+
+        r.s = t.y();                                   // +y is OUTWARD from the room left behind
+        r.sigma_s = std::sqrt(std::max(St(1, 1), 0.));
+        if (not (r.sigma_s > 0.)) { r.why_not = "zero pose variance across the aperture"; out.push_back(r); continue; }
+        r.p_inside = 0.5 * std::erfc(-((r.s - body_radius) / r.sigma_s) / std::sqrt(2.));
+        r.valid = true;
+        out.push_back(r);
+    }
+    return out;
+}
+
+std::optional<Candidate> RoomEviction::promotion_candidate(const PromotionReading &reading) const
+{
+    const auto robot = robot_node();
+    const auto cur = rc::room::current_edge_room(*live_);
+    if (not robot.has_value() or not cur.has_value()) return {};     // no fence to move: nothing to promote from
+    const auto old_room = live_->get_node(cur.value());
+    const auto new_room = live_->get_node(reading.proto_id);
+    if (not old_room.has_value() or not new_room.has_value()) return {};
+    if (archived_.contains(old_room->id())) return {};
+
+    Candidate c;
+    c.robot_id      = robot->id();
+    c.robot_name    = robot->name();
+    c.old_room_id   = old_room->id();
+    c.old_room_name = old_room->name();
+    c.new_room_id   = new_room->id();
+    c.new_room_name = new_room->name();
+    c.old_birth_ms  = live_->get_attrib_by_name<timestamp_creation_att>(old_room.value()).value_or(0ULL);
+    c.new_birth_ms  = live_->get_attrib_by_name<timestamp_creation_att>(new_room.value()).value_or(0ULL);
+    c.promote    = true;
+    c.remove_old = true;
+    c.p_inside   = static_cast<float>(reading.p_inside);
+    return c;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Startup seed
+//////////////////////////////////////////////////////////////////////////////////////////////////
+SeedOutcome RoomEviction::seed_from_working_memory()
+{
+    SeedOutcome so;
+    const auto mem_root = mem_->get_node("root");
+    if (not mem_root.has_value()) return so;
+
+    // Oldest first, so when the working memory holds more than one room (a hand-over in progress)
+    // the later ones hang off the earlier one exactly as an eviction would place them. A room with
+    // no birth stamp sorts first; the order only decides who is the anchor, never what is copied.
+    auto rooms = live_->get_nodes_by_type("room");
+    const auto birth = [this](const DSR::Node &n)
+    { return live_->get_attrib_by_name<timestamp_creation_att>(n).value_or(0ULL); };
+    std::ranges::stable_sort(rooms, [&](const auto &a, const auto &b) { return birth(a) < birth(b); });
+
+    auto ie = live_->get_inner_eigen_api();
+    std::optional<std::pair<std::string, std::uint64_t>> anchor;   // (live name, memory id)
+
+    for (const auto &room : rooms)
+    {
+        // A proto-room's identity is still undecided (that decision is this agent's, later); writing it
+        // into long-term memory now would remember a room that may turn out to be the one we are in.
+        if (rc::room::is_proto(*live_, room.id()))
+        {
+            ++so.rooms_proto;
+            continue;
+        }
+        ++so.rooms_seen;
+
+        // ★ ALREADY REMEMBERED ⇒ LEAVE IT. Memory's copy may carry what perception cannot rebuild
+        // (the passage history, a seam measured at a crossing); a startup snapshot must not overwrite
+        // it. Identity is the name until place recognition exists -- with persistence off (the
+        // default) memory starts empty and this never fires; with it on, a DIFFERENT room that
+        // room_concept happens to name the same would be taken for the remembered one.
+        if (const auto known = remembered(room); known.has_value())
+        {
+            ++so.rooms_known;
+            so.rooms.emplace_back(room.name(), known->name());
+            if (not anchor.has_value()) anchor.emplace(room.name(), known->id());
+            continue;
+        }
+
+        const std::uint64_t idx = room_index(room);
+        const std::string prefix = std::format("r{}_", idx);
+
+        // WHERE IT HANGS. The first room sits on memory's root. Any further room hangs off the first,
+        // its pose in that room's frame read through the live RT tree -- the same measurement the
+        // eviction's seam is. No chain between them (a room not linked to the robot yet) ⇒ root, and
+        // the eviction re-parents it when it measures the seam.
+        std::uint64_t parent = mem_root->id();
+        auto edge = rt_attrs(Mat::RTMat::Identity());
+        if (anchor.has_value())
+        {
+            if (const auto t = ie->get_transformation_matrix(anchor->first, room.name()); t.has_value())
+            {
+                parent = anchor->second;
+                edge = rt_attrs(t.value());
+            }
+            else
+                qWarning() << "[seed] no RT chain" << QString::fromStdString(anchor->first) << "<-"
+                           << QString::fromStdString(room.name())
+                           << "-- hanging it on memory's root until an eviction measures the seam";
+        }
+
+        IdMap map;
+        Outcome out;
+        if (not copy_subtree(room.id(), parent, prefix, idx, edge, map, out, Scope::Structure))
+        {
+            qWarning() << "[seed] could not write" << QString::fromStdString(room.name())
+                       << "into memory:" << QString::fromStdString(out.reason);
+            continue;
+        }
+
+        hang_walls_on_floor(map);
+        ++so.rooms_created;
+        so.nodes += out.nodes_copied;
+        for (const auto &[live_id, _] : map)
+            if (const auto n = live_->get_node(live_id); n.has_value() and is_door(*live_, n.value()))
+                ++so.doors;
+        const std::string mem_name = prefix + room.name();
+        so.rooms.emplace_back(room.name(), mem_name);
+        if (not anchor.has_value()) anchor.emplace(room.name(), map.at(room.id()));
+    }
+    return so;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -451,7 +776,7 @@ bool RoomEviction::ensure_current_edge()
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
-int RoomEviction::sweep_orphans(std::uint64_t room_id)
+int RoomEviction::sweep_orphans(std::uint64_t room_id, std::string_view why)
 {
     // BACKSTOP ONLY. Everything here should have been removed by its OWNER when the room stopped
     // being current; what is left belongs to an agent that is not running. Deepest first, so no
@@ -466,7 +791,8 @@ int RoomEviction::sweep_orphans(std::uint64_t room_id)
         if (id != room_id)
             victims.emplace_back(id, live_->get_node_level(n.value()).value_or(0));
         for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(n.value(), "RT"))
-            q.push_back(e.to());
+            if (const auto c = live_->get_node(e.to()); c.has_value() and c->type() != "robot" and c->type() != "root")
+                q.push_back(e.to());
     }
     std::ranges::sort(victims, [](const auto &a, const auto &b) { return a.second > b.second; });
 
@@ -477,9 +803,8 @@ int RoomEviction::sweep_orphans(std::uint64_t room_id)
         const std::string name = n.has_value() ? n->name() : std::string("<gone>");
         if (live_->delete_node(id))
         {
-            qWarning() << "[eviction backstop] removed orphan" << QString::fromStdString(name)
-                       << "id" << static_cast<qulonglong>(id) << "level" << level
-                       << "— its owner was not running to let it go";
+            qInfo().noquote() << QString::fromStdString(std::format(
+                "[eviction] removed {} id {} level {} -- {}", name, id, level, why));
             ++removed;
         }
     }

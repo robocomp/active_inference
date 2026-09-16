@@ -32,6 +32,7 @@ bin/ltsm_agent etc/config.toml            # both domains; needs the fleet up (se
 bin/ltsm_agent etc/config_selftest.toml   # + the isolation regression test
 bin/ltsm_agent etc/config_solo.toml       # memory graph only, no fleet needed, cannot disturb one
 bin/ltsm_agent etc/config_stage.toml      # + EVICTION, against a synthetic live graph on domain 3
+bin/ltsm_agent etc/config_stage_proto.toml # + LIVE PASSAGE / proto-room, synthetic graph on domain 3
 ```
 
 `config_stage.toml` is how eviction is developed and regression-tested **before `room_concept` can
@@ -40,7 +41,9 @@ hand over two rooms**: the `dsr` graph is seeded from `etc/stage_two_rooms.json`
 nobody's, so it cannot reach the fleet. Going live is a config change and nothing else.
 
 Paths in the config go straight to `QFile`, so they resolve against the **CWD** — always run from
-the component root. Two windows come up: `ltsm_agent-19|dsr` and `ltsm_agent-19|ltsm`.
+the component root. With `etc/config.toml` only the memory window comes up (`ltsm_agent-19|ltsm`);
+the working graph has no viewer here because `robot_concept` already shows it. The test configs
+still open `ltsm_agent-19|dsr` too, since on their private domains nothing else shows that graph.
 
 Stop with SIGTERM / Ctrl-C, **never `kill -9`**.
 
@@ -77,6 +80,37 @@ Stop with SIGTERM / Ctrl-C, **never `kill -9`**.
   `insert_node<Node&&>` (`cortex/api/dsr_api.cpp:597-598`) — so the rvalue form is an undefined
   reference at LINK time, with no compile error to point at the call. Pass an lvalue.
   `insert_or_assign_edge(std::move(e))` is fine: `Edge` has the `<DSR::Edge>` instantiation too.
+- **On startup the working memory is SEEDED into long-term memory.** Every `room` node in the live
+  graph that memory does not already hold is written into memory as `r<idx>_<name>` with its
+  STRUCTURE — floor, walls and every door that exists at that moment, under the same RT chain, so each
+  door keeps its pose in its room's frame. Furniture and affordances are not copied (the eviction
+  copies what is really there at the fence). Read-only on the live graph and NOT gated on
+  `[Eviction] enabled`. A second room present at startup hangs off the first with its pose read through
+  the live tree. ★ "Already held" is decided BY NAME (`r<room_id>_<live name>`) — the only identity key
+  until place recognition exists. With persistence off (default) memory starts empty and every room is
+  written; with it on, a different room that `room_concept` happens to name the same (today every room
+  is literally `room`) would be taken for the remembered one. The seed and a later eviction share one
+  memoised room numbering, so the eviction FILLS the seeded nodes rather than duplicating them.
+- **Window size, dock layout and graph ZOOM are persisted** in `~/.config/RoboComp/ltsm_agent.conf`
+  under `windows/<agent id>/<graph name>`. Geometry/state come from the same `save/restore_window_settings`
+  block the rest of the fleet's generated workers carry (ported into `generated/genericworker.cpp`,
+  which lacked it). The zoom is ours (`SpecificWorker::save/restore_graph_zoom`) and is kept ONLY when
+  the user chose it (wheel or drag); "Fit graph to view" hands the view back to auto-fit and the key is
+  removed on exit. Restoring it needs two workarounds for cortex's `GraphViewer`, both explained at
+  the call site: a synthetic wheel notch to set its private `user_framed_` latch, and a second apply
+  after the refit already in flight, whose timer lambda (`graph_viewer.cpp:52-56`) ignores that latch.
+- **Proto-rooms are not rooms to this agent until promoted.** A `room` with a `proto` self-edge
+  (room_concept's provisional room after a door crossing) is ignored by eviction, by
+  `ensure_current_edge` and by the startup seed — `current` stays on the room the robot came from. While
+  it exists, `src/passage_live.{h,cpp}` (`[LivePassage] enabled`) keeps ONE live `metaconcept`
+  `passage_<n>` matching door_concept's entry mirror under the proto-room to the current room's nearest
+  door, and deletes it when either door goes. ltsm_agent runs no presence monitor, so ownership is
+  enforced in code: stale sweep at startup, removal on graceful exit, LIVE graph only.
+  ⚠ The stage configs use memory domain 2 like the live config: never run one while a live ltsm_agent
+  is up (same domain, same agent id).
+- **The memory view is re-laid out with graphviz `twopi`** whenever a memory node is added or deleted
+  (coalesced 100 ms). The viewer-only `collapsed` flag room_concept puts on the floor is NOT copied into
+  memory, so walls — and the doors hanging from them — stay visible.
 - **Memory persistence exists but is OFF.** `[Memory] persist = false` — armed, the graph is written
   at the eviction fence and on a graceful exit (`src/memory_store.{h,cpp}`: temp file + atomic
   `rename`, previous generation kept as `.prev`). Left off because there is nothing yet whose value

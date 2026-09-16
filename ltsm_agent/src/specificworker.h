@@ -33,8 +33,11 @@
 #include "room_eviction.h"
 #include "memory_store.h"
 #include "passage_harvest.h"
+#include "passage_live.h"
 
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -115,6 +118,9 @@ private:
 	// Moving a departed room into memory. DISARMED by default: it is armed on the offline stage
 	// (etc/config_stage.toml, a synthetic live graph on domain 3) and stays off against the real
 	// fleet until room_concept can hand over two rooms.
+	// The object itself exists whenever the live graph does: the STARTUP SEED (rooms of the working
+	// memory that memory does not hold yet) always runs through it, because seed and eviction must
+	// share its room numbering. Only step_eviction() is gated on eviction_enabled.
 	std::unique_ptr<ltsm::RoomEviction> evictor;
 	bool eviction_enabled  = false;
 	bool eviction_stage_check = false;   // assert the outcome instead of only printing it
@@ -134,10 +140,61 @@ private:
 
 	/// One eviction attempt, once per compute cycle. Returns false when there was nothing to do.
 	bool step_eviction();
+	/// Everything after a successful evict(): log, passage fold, persistence save, backstop.
+	void finish_eviction(const ltsm::Outcome &out, const ltsm::Candidate &cand);
+
+	// ── Promotion (proto-room → current room) ─────────────────────────────────────────────────
+	// ltsm decides room IDENTITY: a proto-room the robot's whole footprint is confidently past the crossed
+	// aperture of becomes THE room -- proto edge removed, `current` moved, both rooms copied into memory
+	// with the two doors matched through a memory passage, the old room deleted from the working memory.
+	// [Promotion] enabled (absent ⇒ OFF), decision_prob = the one flagged decision level.
+	bool   promotion_enabled = false;
+	bool   promotion_stage_check = false;
+	double promotion_decision_prob = 0.95;
+	int    promotions_done = 0;
+	int    promotion_cycles_ = 0;
+	ltsm::Outcome   last_promotion_;          ///< for the stage assertions
+	ltsm::Candidate last_promotion_cand_;
+	Mat::Vector3d   door_in_new_before_{0, 0, 0};   ///< live: old door in the new room's frame, pre-promotion
+	bool step_promotion();
+	/// r_body = half the larger footprint side of the `body` node (width_m/depth_m) -- the same definition
+	/// room_concept uses for its crossing test. nullopt when the graph does not say.
+	std::optional<double> body_radius() const;
+	void check_promotion(bool promoted_this_cycle);
 	/// The stage assertions: the door round-trips through the seam, and MEMORY's own RT chain
 	/// reproduces the pose measured on the live graph. qFatal on failure -- a broken transaction
 	/// must not pass quietly.
 	void check_eviction(const ltsm::Outcome &out, const ltsm::Candidate &cand);
+	/// Stage assertion for the startup seed: every live room is in memory, and every door's pose in its
+	/// room's frame composed through MEMORY's RT tree equals the one read off the live graph.
+	void check_seed(const ltsm::SeedOutcome &so);
+
+	// ── Graph-view ZOOM, persisted beside the generated geometry/state ─────────────────────────
+	// The generated save/restore_window_settings() keep each window's size and dock layout; the
+	// zoom of its graph view is not part of either blob, so it is stored here as `graph_zoom` in the
+	// same QSettings group. Only a zoom the USER chose is kept -- see restore_graph_zoom().
+	void restore_graph_zoom();
+	void save_graph_zoom() const;
+	bool eventFilter(QObject *watched, QEvent *event) override;
+	std::unordered_map<std::string, bool> graph_user_framed_;      ///< graph name → zoom is the user's
+	std::unordered_map<const QObject *, std::string> viewport_graph_;   ///< viewport → graph name
+
+	// ── Memory-view relayout ──────────────────────────────────────────────────────────────────
+	// twopi over the memory graph whenever a node is ADDED or DELETED (not on attribute churn).
+	// Coalesced, so a seed or an eviction writing a dozen nodes lays out once.
+	QTimer memory_layout_timer_;
+	std::unordered_set<std::uint64_t> memory_known_ids_;
+	void setup_memory_layout();
+
+	// ── Live passage (src/passage_live.h) ─────────────────────────────────────────────────────
+	// The proto-room's entry door matched to the current room's door by one live `passage_<n>`.
+	// [LivePassage] enabled; absent ⇒ OFF, like everything that writes the shared graph here.
+	std::unique_ptr<ltsm::PassageLive> live_passage;
+	bool live_passage_stage_check = false;
+	bool live_passage_swept_ = false;       ///< the post-sync stale sweep ran (first compute cycle)
+	int  live_cycles_ = 0;
+	/// Stage assertions for etc/config_stage_proto.toml. qFatal on failure.
+	void check_live_passage(const ltsm::PassageLive::Step &st);
 
 signals:
 	//void customSignal();

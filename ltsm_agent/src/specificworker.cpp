@@ -18,6 +18,20 @@
  */
 #include "specificworker.h"
 
+#include <QAction>
+#include <QSettings>
+#include <QWheelEvent>
+#include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
+
+namespace
+{
+DSR::GraphViewer *graph_view_of(const std::shared_ptr<DSR::DSRViewer> &viewer)
+{
+    return viewer ? qobject_cast<DSR::GraphViewer *>(viewer->get_widget(DSR::DSRViewer::view::graph))
+                  : nullptr;
+}
+}   // namespace
+
 #include <cmath>
 #include <format>
 
@@ -64,6 +78,11 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
 	std::cout << "Destroying SpecificWorker" << std::endl;
+	// Graceful exit (SIGTERM/SIGINT, never kill -9): let go of the live passages this agent owns.
+	if (live_passage)
+		if (const int n = live_passage->remove_owned(); n > 0)
+			std::cout << "[passage] removed " << n << " owned live passage(s) on shutdown" << std::endl;
+	save_graph_zoom();   // the views still exist here; GenericWorker's destructor saves the geometry
 	// Last chance to write: a graceful stop (SIGTERM/SIGINT, never kill -9) runs this. A SIGKILL
 	// does not, which is why the fence save above is the primary one and this is only a backstop.
 	if (store) store->save("graceful shutdown");
@@ -80,6 +99,12 @@ void SpecificWorker::initialize()
     // MUST come first: GenericWorker::initialize() is what builds one QMainWindow + DSRViewer per
     // entry of Graphs, so removing it leaves the agent running with no UI at all.
     GenericWorker::initialize();
+
+    // Queued AFTER GenericWorker's own singleShot(0) restore of the window geometry, so the view is
+    // re-zoomed at its final size.
+    QTimer::singleShot(0, this, [this]() { restore_graph_zoom(); });
+    if (auto *app = QCoreApplication::instance(); app != nullptr)
+        connect(app, &QCoreApplication::aboutToQuit, this, [this]() { save_graph_zoom(); });
 
     // Bind the graphs BY NAME, and fail legibly if a name is missing. Graphs is keyed by the
     // [Agent.<name>] sub-table names, EXCEPT in the single-instance form (no sub-tables at all),
@@ -165,9 +190,75 @@ void SpecificWorker::initialize()
                        "launch and everything accumulated is lost on exit. [Memory] persist = true "
                        "arms it.";
     }
+    // The memory view re-lays itself out (twopi) on every node birth/death, from here on -- so the seed
+    // below is laid out too.
+    setup_memory_layout();
+
+    if (G_dsr)
+        evictor = std::make_unique<ltsm::RoomEviction>(G_dsr, G_ltsm);
+
+    promotion_enabled = G_dsr and flag("Promotion.enabled");
+    promotion_stage_check = flag("Promotion.stage_check");
+    if (configLoader.exists("Promotion.decision_prob"))
+        promotion_decision_prob = configLoader.get<double>("Promotion.decision_prob");
+    if (promotion_enabled and promotion_stage_check)
+    {
+        // ★ FIXTURE MANIPULATION, domain 3 only: the pose covariance a JSON-seeded edge cannot carry
+        // (see tools/make_proto_stage_fixture.py). σ = 5 cm in x/y, 0.02 rad in yaw, robot (PARENT) frame.
+        const auto robot = G_dsr->get_node("Shadow");
+        const auto proto = G_dsr->get_node("room_2");
+        Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+        cov(0, 0) = cov(1, 1) = 0.05 * 0.05;
+        cov(5, 5) = 0.02 * 0.02;
+        if (not robot.has_value() or not proto.has_value()
+            or not G_dsr->get_rt_api()->insert_or_assign_edge_RT_covariance(
+                   robot.value(), proto->id(), DSR::RT_API::CovarianceKind::Pose, cov))
+            qFatal("[promotion][stage] could not write the fixture's pose covariance on Shadow->room_2");
+    }
+    if (promotion_enabled)
+        qInfo() << "[ltsm_agent] PROMOTION ARMED -- a proto-room the robot is past the doorway of (P >="
+                << promotion_decision_prob << ") becomes current; the old room goes to memory and is REMOVED"
+                   " from the working memory";
+
+    // ── Live passage ────────────────────────────────────────────────────────────────────────
+    // Constructed with the LIVE graph only: it can never see (or sweep) memory's own passage_N.
+    if (G_dsr and flag("LivePassage.enabled"))
+    {
+        live_passage = std::make_unique<ltsm::PassageLive>(G_dsr);
+        live_passage_stage_check = flag("LivePassage.stage_check");
+        const int stale = live_passage->sweep_stale();
+        qInfo() << "[ltsm_agent] LIVE PASSAGE ARMED -- proto-room entry doors are matched to the current"
+                   " room's door; swept" << stale << "stale live passage(s) from a previous run";
+    }
+
+    // ── Startup seed ────────────────────────────────────────────────────────────────────────
+    // Every room in the working memory that long-term memory does not hold yet gets a room node in
+    // memory, with its floor, walls and the doors that exist now. The live graph is fully synced by
+    // the time we get here (the DSRGraph constructor blocks until the server has sent it), so "what
+    // exists now" is the fleet's current belief, not a half-received graph. Read-only on the live
+    // graph; it moves no `current` edge and releases nothing, so it is not gated behind eviction.
+    if (evictor)
+    {
+        const auto so = evictor->seed_from_working_memory();
+        std::string listing;
+        for (const auto &[live, mem] : so.rooms) listing += std::format(" {}→{}", live, mem);
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[seed] working memory holds {} room(s): {} already remembered, {} written to memory "
+            "({} nodes, {} door(s)).{}",
+            so.rooms_seen, so.rooms_known, so.rooms_created, so.nodes, so.doors, listing));
+        if (so.rooms_seen == 0)
+            qInfo() << "[seed] no room in the working memory yet -- nothing to remember. (room_concept"
+                       " not up, or its layout has not converged.)";
+        if (so.rooms_created > 0 and store)
+        {
+            store->mark_dirty();
+            store->save("startup seed");
+        }
+        if (eviction_stage_check) check_seed(so);
+    }
+
     if (eviction_enabled and G_dsr and G_ltsm)
     {
-        evictor = std::make_unique<ltsm::RoomEviction>(G_dsr, G_ltsm);
         passages = std::make_unique<ltsm::PassageHarvest>(
             G_dsr, G_ltsm,
             configLoader.exists("Passages.csv_path") ? configLoader.get<std::string>("Passages.csv_path")
@@ -196,7 +287,26 @@ void SpecificWorker::compute()
     // fitted room, so crossing its doors fires no eviction). Harvesting only at the fence would miss
     // nearly every crossing the robot makes.
     if (passages) passages->poll();
-    if (evictor) step_eviction();
+    if (evictor and eviction_enabled) step_eviction();
+
+    if (live_passage)
+    {
+        // The initialize() sweep can run before a crashed run's leftovers finish syncing; sweep once
+        // more on the first cycle (CLAUDE.md, startup stale-sweep).
+        if (not std::exchange(live_passage_swept_, true))
+            live_passage->sweep_stale();
+        const auto st = live_passage->step();
+        ++live_cycles_;
+        if (live_passage_stage_check) check_live_passage(st);
+    }
+
+    // AFTER the live passage step: the promotion reads the door pair that step matched.
+    if (promotion_enabled and evictor)
+    {
+        const bool promoted = step_promotion();
+        ++promotion_cycles_;
+        if (promotion_stage_check) check_promotion(promoted);
+    }
 
     if (not probe_enabled)
         return;
@@ -251,7 +361,14 @@ bool SpecificWorker::step_eviction()
                    << QString::fromStdString(cand->old_room_name);
         return false;
     }
+    finish_eviction(out, cand.value());
+    if (eviction_stage_check) check_eviction(out, cand.value());
+    return true;
+}
 
+void SpecificWorker::finish_eviction(const ltsm::Outcome &out, const ltsm::Candidate &cand_ref)
+{
+    const auto *cand = &cand_ref;
     ++evictions_done;
     const Mat::Vector3d t = out.seam.translation();
     const double yaw = std::atan2(out.seam.rotation()(1, 0), out.seam.rotation()(0, 0));
@@ -272,8 +389,6 @@ bool SpecificWorker::step_eviction()
         if (const auto dw = G_ltsm->get_node(out.mem_doorway); dw.has_value())
             passages->fold_into(dw->id(), out.door_name);
 
-    if (eviction_stage_check) check_eviction(out, cand.value());
-
     // THE FENCE IS THE SAVE POINT. The copy is verified and `current` has moved, so this is the one
     // instant the memory graph is provably consistent -- and it coincides with the only thing that
     // durably changes it. See MemoryStore for why this is not a change counter.
@@ -285,11 +400,103 @@ bool SpecificWorker::step_eviction()
 
     // The owners let their own nodes go now that their room is no longer current. The sweep is the
     // backstop for owners that are not running to do it -- never the normal path.
-    if (eviction_backstop)
+    if (eviction_backstop and not cand->remove_old)
         if (const int reaped = evictor->sweep_orphans(cand->old_room_id); reaped > 0)
             qWarning() << "[eviction] backstop reaped" << reaped
                        << "node(s) nobody was alive to let go";
-    return true;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Promotion
+//////////////////////////////////////////////////////////////////////////////////////////////////
+std::optional<double> SpecificWorker::body_radius() const
+{
+    if (const auto body = G_dsr->get_node("body"); body.has_value())
+    {
+        const auto w = G_dsr->get_attrib_by_name<width_m_att>(body.value());
+        const auto d = G_dsr->get_attrib_by_name<depth_m_att>(body.value());
+        if (w.has_value() and d.has_value()) return 0.5 * std::max(w.value(), d.value());
+    }
+    return std::nullopt;
+}
+
+bool SpecificWorker::step_promotion()
+{
+    const auto r_body = body_radius();
+    if (not r_body.has_value())
+    {
+        static bool warned = false;
+        if (not std::exchange(warned, true))
+            qWarning() << "[promotion] no `body` node with width_m/depth_m in the live graph -- cannot tell "
+                          "whether the robot's footprint is past the doorway, so nothing is promoted";
+        return false;
+    }
+
+    for (const auto &r : evictor->promotion_evidence(r_body.value()))
+    {
+        if (not r.valid)
+        {
+            qInfo().noquote() << QString::fromStdString(std::format(
+                "[promotion] {}: no evidence -- {}", r.proto_name, r.why_not));
+            continue;
+        }
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[promotion] {}: s={:+.2f} m past the aperture (r_body={:.2f}, σ={:.3f}) → P(inside)={:.3f}"
+            "  (promote at ≥ {:.2f})", r.proto_name, r.s, r.body_radius, r.sigma_s, r.p_inside,
+            promotion_decision_prob));
+
+        // ⚠ DECISION LEVEL (Promotion.decision_prob) -- the one threshold on this path, and flagged as such.
+        // Promotion is an ACT on a belief: it deletes a room from the working memory. The belief itself is
+        // continuous (Φ under the pose covariance, no gate); acting on it needs a level, exactly like
+        // room_concept's ProtoRoom.BirthProb. Repeated cycles are NOT fused: they are the same pose belief
+        // re-read, and adding them up would manufacture confidence from one measurement.
+        if (r.p_inside < promotion_decision_prob) continue;
+
+        auto cand = evictor->promotion_candidate(r);
+        if (not cand.has_value())
+        {
+            qWarning() << "[promotion]" << QString::fromStdString(r.proto_name)
+                       << "is ready but there is no `current` room to promote it from";
+            continue;
+        }
+        if (live_passage)
+            if (const auto pair = live_passage->pair_for(r.proto_id); pair.has_value())
+                std::tie(cand->old_door_id, cand->new_door_id) = pair.value();
+
+        // Measured on the LIVE graph before anything moves: the old door as the new room sees it. After the
+        // transaction the old room is gone, so this is the only independent reference the stage has.
+        if (cand->old_door_id != 0)
+            if (const auto d = G_dsr->get_node(cand->old_door_id); d.has_value())
+                if (const auto t = G_dsr->get_inner_eigen_api()->get_transformation_matrix(cand->new_room_name, d->name());
+                    t.has_value())
+                    door_in_new_before_ = t->translation();
+
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[promotion] PROMOTING {} (P(inside)={:.3f}) over {}; crossed door {} ↔ {}",
+            cand->new_room_name, r.p_inside, cand->old_room_name,
+            cand->old_door_id ? G_dsr->get_node(cand->old_door_id).transform([](const auto &n){ return n.name(); }).value_or("?") : "<nearest>",
+            cand->new_door_id ? G_dsr->get_node(cand->new_door_id).transform([](const auto &n){ return n.name(); }).value_or("?") : "<none>"));
+
+        const auto out = evictor->evict(cand.value());
+        if (not out.ok)
+        {
+            qWarning() << "[promotion] NOT DONE:" << QString::fromStdString(out.reason);
+            continue;
+        }
+        ++promotions_done;
+        finish_eviction(out, cand.value());
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[promotion] DONE #{}: {} is now current; {} copied to memory and removed from the working memory "
+            "({} live nodes); memory passage '{}' matches {} ↔ {}",
+            promotions_done, cand->new_room_name, cand->old_room_name, out.live_removed,
+            out.mem_doorway.empty() ? "<none>" : out.mem_doorway,
+            out.mem_door_old.empty() ? "<none>" : out.mem_door_old,
+            out.mem_door_new.empty() ? "<none>" : out.mem_door_new));
+        last_promotion_ = out;
+        last_promotion_cand_ = cand.value();
+        return true;                                   // one per cycle
+    }
+    return false;
 }
 
 void SpecificWorker::check_eviction(const ltsm::Outcome &out, const ltsm::Candidate &cand)
@@ -474,6 +681,371 @@ void SpecificWorker::check_eviction(const ltsm::Outcome &out, const ltsm::Candid
     qInfo() << "[eviction][stage] PASS -- memory holds" << static_cast<int>(G_ltsm->size())
             << "nodes, the live graph still holds the old room, `current` is on"
             << QString::fromStdString(cand.new_room_name);
+}
+
+void SpecificWorker::check_seed(const ltsm::SeedOutcome &so)
+{
+    // Two independent computations again: the live RT chain (door <- wall <- floor <- room) against
+    // MEMORY's chain over the copied edges. Only memory's side goes through the copy, so a dropped
+    // edge or a re-parenting slip shows up as a disagreement, not as a value checked against itself.
+    const auto fail = [](const std::string &what) { qFatal("[seed][stage] %s", what.c_str()); };
+
+    if (so.rooms_seen + so.rooms_proto != static_cast<int>(G_dsr->get_nodes_by_type("room").size()))
+        fail("the seed did not see every live room");
+    if (so.rooms_created != so.rooms_seen) fail("the stage's memory starts empty, so every room must be written");
+
+    // The live room a node belongs to: climb `parent` until a room. Through the robot every room
+    // reaches every door, so reachability alone cannot say which room owns a door.
+    const auto owning_room = [this](DSR::Node n) -> std::string
+    {
+        for (int hops = 0; hops < 32; ++hops)
+        {
+            if (n.type() == "room") return n.name();
+            const auto p = G_dsr->get_attrib_by_name<parent_att>(n);
+            if (not p.has_value()) return {};
+            const auto up = G_dsr->get_node(p.value());
+            if (not up.has_value()) return {};
+            n = up.value();
+        }
+        return {};
+    };
+
+    auto live_ie = G_dsr->get_inner_eigen_api();
+    auto mem_ie  = G_ltsm->get_inner_eigen_api();
+    int doors_checked = 0;
+    for (const auto &[live_room, mem_room] : so.rooms)
+    {
+        if (not G_ltsm->get_node(mem_room).has_value())
+            fail(std::format("{} is not in memory as {}", live_room, mem_room));
+        const std::string prefix = mem_room.substr(0, mem_room.size() - live_room.size());
+
+        for (const auto &obj : G_dsr->get_nodes_by_type("object"))
+        {
+            if (not obj.name().starts_with("door") or owning_room(obj) != live_room) continue;
+            const auto live_t = live_ie->get_transformation_matrix(live_room, obj.name());
+            const auto mem_t  = mem_ie->get_transformation_matrix(mem_room, prefix + obj.name());
+            if (not live_t.has_value()) fail(std::format("live graph has no chain {} <- {}", live_room, obj.name()));
+            if (not mem_t.has_value())
+                fail(std::format("door {} was not seeded into {} (or has no RT chain there)", obj.name(), mem_room));
+            const double e = (mem_t->translation() - live_t->translation()).norm();
+            qInfo().noquote() << QString::fromStdString(std::format(
+                "[seed][stage] {}{} in {}: memory ({:+.6f},{:+.6f}) vs live ({:+.6f},{:+.6f})  err={:.2e} m",
+                prefix, obj.name(), mem_room, mem_t->translation().x(), mem_t->translation().y(),
+                live_t->translation().x(), live_t->translation().y(), e));
+            if (e > 1e-4) fail(std::format("seeded door pose disagrees by {:.4f} m", e));
+            ++doors_checked;
+        }
+    }
+    if (doors_checked == 0) fail("the fixture has a door and none was checked");
+
+    // EVERY WALL comes over, and none arrives folded: doors hang from walls, so a missing or collapsed
+    // wall draws the door detached from its room in memory's view (seen live 2026-09-14).
+    for (const auto &[live_room, mem_room] : so.rooms)
+    {
+        const std::string prefix = mem_room.substr(0, mem_room.size() - live_room.size());
+        for (const auto &w : G_dsr->get_nodes_by_type("wall"))
+            if (owning_room(w) == live_room and not G_ltsm->get_node(prefix + w.name()).has_value())
+                fail(std::format("wall {} of {} is missing from memory", w.name(), live_room));
+    }
+    for (const auto &n : G_ltsm->get_nodes())
+        if (G_ltsm->get_attrib_by_name<collapsed_att>(n).has_value())
+            fail(std::format("{} arrived in memory with the viewer's `collapsed` flag", n.name()));
+    if (doors_checked != so.doors) fail(std::format("{} door(s) seeded but {} checked", so.doors, doors_checked));
+
+    // Structure only: every `object` that came over must be a door -- no furniture.
+    for (const auto &n : G_ltsm->get_nodes_by_type("object"))
+        if (n.name().find("door") == std::string::npos)
+            fail(std::format("the seed copied furniture ({}) -- it must copy structure only", n.name()));
+
+    // Two rooms ⇒ the later one hangs off the earlier, its pose measured through the live tree.
+    if (so.rooms.size() >= 2)
+    {
+        const auto &[a_live, a_mem] = so.rooms[0];
+        const auto &[b_live, b_mem] = so.rooms[1];
+        const auto live_t = live_ie->get_transformation_matrix(a_live, b_live);
+        const auto mem_t  = mem_ie->get_transformation_matrix(a_mem, b_mem);
+        if (not live_t.has_value() or not mem_t.has_value()) fail("no chain between the two seeded rooms");
+        const double e = (mem_t->translation() - live_t->translation()).norm();
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[seed][stage] {} in {}: memory vs live err={:.2e} m", b_mem, a_mem, e));
+        if (e > 1e-4) fail(std::format("the two seeded rooms are {:.4f} m off their live relation", e));
+    }
+    qInfo() << "[seed][stage] PASS --" << so.rooms_created << "room(s)," << doors_checked << "door(s)";
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Live passage stage check (etc/config_stage_proto.toml, fixture etc/stage_proto_room.json)
+//////////////////////////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::check_live_passage(const ltsm::PassageLive::Step &st)
+{
+    const auto fail = [](const std::string &what) { qFatal("[passage][stage] %s", what.c_str()); };
+
+    // Cycle 1 creates; cycle 2 must be a no-op (idempotent); cycle 3 removes the mirror and checks the
+    // passage goes with it. The fixture is the only graph this manipulation is allowed on (domain 3).
+    const auto passages = live_passage->owned();
+    const auto current_targets = [this]()
+    {
+        std::vector<std::string> out;
+        for (const auto &e : G_dsr->get_edges_by_type("current"))
+            if (const auto n = G_dsr->get_node(e.to()); n.has_value()) out.push_back(n->name());
+        return out;
+    };
+
+    if (live_cycles_ <= 2)
+    {
+        if (passages.size() != 1) fail(std::format("cycle {}: {} live passages, expected 1", live_cycles_, passages.size()));
+        const auto matches = DSR::DSRGraph::get_node_edges_by_type(passages.front(), "match");
+        if (matches.size() != 2) fail(std::format("the passage has {} match edges, expected 2", matches.size()));
+        std::vector<std::string> ends;
+        for (const auto &e : matches)
+            if (const auto n = G_dsr->get_node(e.to()); n.has_value()) ends.push_back(n->name());
+        std::ranges::sort(ends);
+        // door_1 is the apartment door at the crossing; door_3 is the far distractor the argmin must reject.
+        if (ends != std::vector<std::string>{"door_1", "door_2"})
+            fail(std::format("the passage matches {} ↔ {}, expected door_1 ↔ door_2",
+                             ends.size() > 0 ? ends[0] : "?", ends.size() > 1 ? ends[1] : "?"));
+        if (not DSR::DSRGraph::get_node_edges_by_type(passages.front(), "RT").empty())
+            fail("the live passage has an RT edge -- it must stay out of the metric tree");
+        if (live_cycles_ == 2 and (st.created != 0 or st.rematched != 0 or st.deleted != 0))
+            fail("the second cycle changed the passage -- the step is not idempotent");
+
+        if (current_targets() != std::vector<std::string>{"room"})
+            fail("`current` moved off the apartment while the new room is proto");
+        if (evictions_done != 0) fail("a proto-room triggered an eviction");
+        for (const auto &n : G_ltsm->get_nodes())
+            if (n.name().find("room_2") != std::string::npos)
+                fail(std::format("the proto-room reached long-term memory as {}", n.name()));
+        if (not G_ltsm->get_node("r0_room").has_value()) fail("the apartment was not seeded into memory");
+        qInfo() << "[passage][stage] cycle" << live_cycles_ << "OK -- one passage, door_1 <-> door_2,"
+                << "`current` on the apartment, no eviction";
+
+        if (live_cycles_ == 2)
+        {
+            // ★ FIXTURE MANIPULATION, domain 3 only: the mirror disappears (door_concept retired it).
+            const auto mirror = G_dsr->get_node("door_2");
+            if (not mirror.has_value() or not G_dsr->delete_node(mirror->id()))
+                fail("could not remove the mirror door from the fixture");
+        }
+        return;
+    }
+    if (live_cycles_ == 3)
+    {
+        if (st.deleted != 1 or not passages.empty())
+            fail(std::format("the mirror is gone but {} passage(s) remain (deleted={})", passages.size(), st.deleted));
+        qInfo() << "[passage][stage] PASS -- the passage died with its door; memory holds"
+                << static_cast<int>(G_ltsm->size()) << "nodes and no proto-room";
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Promotion stage check (etc/config_stage_promote.toml, fixture etc/stage_promote.json)
+//////////////////////////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::check_promotion(bool promoted_this_cycle)
+{
+    const auto fail = [](const std::string &what) { qFatal("[promotion][stage] %s", what.c_str()); };
+
+    if (promotion_cycles_ == 1)
+    {
+        if (not promoted_this_cycle or promotions_done != 1)
+            fail("the robot is 1.2 m past the doorway with σ 5 cm and nothing was promoted");
+        const auto &out = last_promotion_;
+
+        // ── LIVE ─────────────────────────────────────────────────────────────────────────────────
+        const auto r2 = G_dsr->get_node("room_2");
+        if (not r2.has_value()) fail("the promoted room vanished");
+        if (G_dsr->get_edge(r2->id(), r2->id(), "proto").has_value()) fail("room_2 is still proto");
+        const auto cur = G_dsr->get_edges_by_type("current");
+        if (cur.size() != 1 or cur.front().to() != r2->id()) fail("`current` is not (only) on room_2");
+        for (const char *gone : {"room", "floor", "wall_0", "wall_1", "wall_2", "wall_3", "door_1", "door_3"})
+            if (G_dsr->get_node(gone).has_value())
+                fail(std::format("{} is still in the working memory", gone));
+        if (not G_dsr->get_node("Shadow").has_value() or not G_dsr->get_node("body").has_value())
+            fail("removing the old room took the robot with it");
+
+        // ── MEMORY ───────────────────────────────────────────────────────────────────────────────
+        const auto mr = G_ltsm->get_node("r0_room");
+        const auto mn = G_ltsm->get_node("r2_room_2");
+        if (not mr.has_value() or not mn.has_value()) fail("memory lacks r0_room or r2_room_2");
+        if (not G_ltsm->get_edge(mr->id(), mn->id(), "RT").has_value()) fail("r2_room_2 does not hang from r0_room");
+        if (not G_ltsm->get_node("r2_door_2").has_value()) fail("the new room's door (entry mirror) is not in memory");
+
+        // Every wall hangs from the floor -- wall_2 hangs from the ROOM in the fixture, on purpose.
+        const auto mfloor = G_ltsm->get_node("r0_floor");
+        if (not mfloor.has_value()) fail("r0_floor missing");
+        for (int i = 0; i < 4; ++i)
+        {
+            const auto w = G_ltsm->get_node(std::format("r0_wall_{}", i));
+            if (not w.has_value()) fail(std::format("r0_wall_{} missing", i));
+            if (G_ltsm->get_attrib_by_name<parent_att>(w.value()).value_or(0) != mfloor->id()
+                or not G_ltsm->get_edge(mfloor->id(), w->id(), "RT").has_value()
+                or G_ltsm->get_edge(mr->id(), w->id(), "RT").has_value())
+                fail(std::format("r0_wall_{} does not hang (only) from r0_floor", i));
+        }
+
+        // The passage: two faces of one hole, frameless, exiting to the new room.
+        const auto pass = G_ltsm->get_node(out.mem_doorway);
+        if (not pass.has_value()) fail("no memory passage");
+        std::vector<std::string> faces;
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pass.value(), "match"))
+            if (const auto n = G_ltsm->get_node(e.to()); n.has_value()) faces.push_back(n->name());
+        std::ranges::sort(faces);
+        if (faces != std::vector<std::string>{"r0_door_1", "r2_door_2"})
+            fail(std::format("memory passage matches {} faces, expected r0_door_1 and r2_door_2", faces.size()));
+        if (not DSR::DSRGraph::get_node_edges_by_type(pass.value(), "RT").empty()) fail("memory passage has an RT edge");
+
+        // GEOMETRY, two independent computations each:
+        //  (a) r0_door_1 composed in memory into r2_room_2's frame vs the LIVE reading taken before promotion;
+        //  (b) the mirror r2_door_2 composed into r0_room's frame lands 4 cm from door_1 -- the fixture's offset.
+        auto ie = G_ltsm->get_inner_eigen_api();
+        const auto a = ie->get_transformation_matrix("r2_room_2", "r0_door_1");
+        const auto b = ie->get_transformation_matrix("r0_room", "r2_door_2");
+        const auto d1 = ie->get_transformation_matrix("r0_room", "r0_door_1");
+        if (not a.has_value() or not b.has_value() or not d1.has_value()) fail("memory cannot compose across the seam");
+        const double ea = (a->translation() - door_in_new_before_).norm();
+        const double eb = std::fabs((b->translation() - d1->translation()).head<2>().norm() - 0.04);
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[promotion][stage] r0_door_1 in r2_room_2: memory vs live err={:.2e} m; r2_door_2 vs r0_door_1 "
+            "offset {:.4f} m (fixture 0.04)", ea, (b->translation() - d1->translation()).head<2>().norm()));
+        if (ea > 1e-4) fail(std::format("memory's seam disagrees with the live graph by {:.4f} m", ea));
+        if (eb > 1e-3) fail("the two faces of the door do not coincide through the seam");
+        // (c) a wall that hung from the ROOM live keeps its pose after re-hanging under the floor.
+        const auto w2 = ie->get_transformation_matrix("r0_room", "r0_wall_2");
+        if (not w2.has_value() or (w2->translation() - Mat::Vector3d(0.0, 2.5, 0.0)).norm() > 1e-4)
+            fail("r0_wall_2 moved when it was re-hung under the floor");
+        qInfo() << "[promotion][stage] cycle 1 OK";
+        return;
+    }
+    if (promotion_cycles_ == 2)
+    {
+        if (promoted_this_cycle or promotions_done != 1) fail("a second promotion happened");
+        if (live_passage and not live_passage->owned().empty())
+            fail("the live passage outlived the old room's door");
+        qInfo() << "[promotion][stage] PASS -- room_2 is current, the apartment is in memory only, memory holds"
+                << static_cast<int>(G_ltsm->size()) << "nodes";
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Memory-view relayout
+//////////////////////////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::setup_memory_layout()
+{
+    const auto it = graph_viewers.find("ltsm");
+    if (it == graph_viewers.end()) return;
+    auto *gv = graph_view_of(it->second);
+    if (gv == nullptr) return;
+
+    for (const auto &n : G_ltsm->get_nodes()) memory_known_ids_.insert(n.id());
+
+    // UI debounce, not a model threshold: a burst of inserts (the seed, an eviction) lays out once.
+    static constexpr int kLayoutCoalesceMs = 100;
+    memory_layout_timer_.setSingleShot(true);
+    connect(&memory_layout_timer_, &QTimer::timeout, gv, [gv]() { gv->compute_layout("twopi"); });
+
+    // QUEUED (CLAUDE.md): never run a slot on a DDS reader thread. update_node_signal also fires for
+    // plain updates -- including the pos_x/pos_y that compute_layout itself writes back -- so only an
+    // id not seen before counts as an ADDITION; that is also what stops the layout re-triggering itself.
+    connect(G_ltsm.get(), &DSR::DSRGraph::update_node_signal, this,
+            [this](std::uint64_t id, const std::string &, DSR::SignalInfo)
+            {
+                if (memory_known_ids_.insert(id).second) memory_layout_timer_.start(kLayoutCoalesceMs);
+            },
+            Qt::QueuedConnection);
+    connect(G_ltsm.get(), &DSR::DSRGraph::del_node_signal, this,
+            [this](std::uint64_t id, DSR::SignalInfo)
+            {
+                if (memory_known_ids_.erase(id) > 0) memory_layout_timer_.start(kLayoutCoalesceMs);
+            },
+            Qt::QueuedConnection);
+    memory_layout_timer_.start(kLayoutCoalesceMs);   // the seeded root / a restored generation
+}
+
+void SpecificWorker::restore_graph_zoom()
+{
+    QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+    for (const auto &[name, viewer] : graph_viewers)
+    {
+        auto *gv = graph_view_of(viewer);
+        if (gv == nullptr) continue;
+
+        // Track whether the zoom on screen is the USER's. Only that one is worth restoring: the view
+        // refits itself to the whole graph until the user zooms or pans, and saving an automatic fit
+        // would freeze next run's view at a scale nobody chose. Wheel / left-drag hands the view to
+        // the user (the same two gestures GraphViewer itself counts); its "Fit graph to view" menu
+        // action hands it back.
+        graph_user_framed_[name] = false;
+        viewport_graph_[gv->viewport()] = name;
+        gv->viewport()->installEventFilter(this);
+        for (auto *action : gv->findChildren<QAction *>())
+            if (action->text().contains(QStringLiteral("Fit graph")))
+                connect(action, &QAction::triggered, this, [this, name]() { graph_user_framed_[name] = false; });
+
+        settings.beginGroup(settings_group_name(name, agent_id));
+        bool ok = false;
+        const double zoom = settings.value(QStringLiteral("graph_zoom")).toDouble(&ok);
+        settings.endGroup();
+        if (not ok or zoom <= 0.) continue;      // never saved (or saved while auto-fitting)
+
+        // ★ WHY A SYNTHETIC WHEEL EVENT. GraphViewer refits the viewport on every graph change unless
+        // its PRIVATE `user_framed_` is set, and only a wheel event or a drag sets it
+        // (cortex gui/viewers/graph_viewer/graph_viewer.cpp:97-122). A bare setTransform() would be
+        // thrown away by the next refit, ~150 ms later. One wheel notch marks the view as user-framed
+        // (and zooms by 10%, which the setTransform below overwrites). The clean fix is a public
+        // "set user view" in cortex's GraphViewer; this avoids needing a cortex reinstall for it.
+        const QPointF centre(gv->viewport()->rect().center());
+        QWheelEvent notch(centre, gv->viewport()->mapToGlobal(centre), QPoint(), QPoint(0, 120),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(gv->viewport(), &notch);
+
+        // The layout is not the one the zoom was saved on (memory is rebuilt every launch), so centre
+        // on the graph as it is now rather than on a stale scene point.
+        const auto apply = [gv, zoom]()
+        {
+            gv->setTransform(QTransform::fromScale(zoom, zoom));
+            gv->centerOn(gv->scene.itemsBoundingRect().center());
+        };
+        apply();
+        // ★ AND ONCE MORE, after the refit that may already be IN FLIGHT. The latch stops new refits
+        // from being scheduled, but a refit timer armed BEFORE it (the startup seed inserts nodes just
+        // before this runs) still fires, and its timeout lambda refits without checking the latch
+        // (cortex graph_viewer.cpp:52-56; only schedule_refit() checks it). Measured: 2.5 restored,
+        // 1.033 on screen 500 ms later. The timer is single-shot at 150 ms (graph_viewer.cpp:92), so
+        // re-applying after twice that lands after it. Fixing that lambda in cortex makes this redundant.
+        static constexpr int kCortexRefitCoalesceMs = 150;
+        QTimer::singleShot(2 * kCortexRefitCoalesceMs, gv, apply);
+        graph_user_framed_[name] = true;
+        qInfo() << "[ltsm_agent] restored graph zoom" << zoom << "on" << QString::fromStdString(name);
+    }
+}
+
+void SpecificWorker::save_graph_zoom() const
+{
+    QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+    for (const auto &[name, viewer] : graph_viewers)
+    {
+        const auto *gv = graph_view_of(viewer);
+        if (gv == nullptr) continue;
+        settings.beginGroup(settings_group_name(name, agent_id));
+        const auto framed = graph_user_framed_.find(name);
+        if (framed != graph_user_framed_.end() and framed->second)
+            settings.setValue(QStringLiteral("graph_zoom"), gv->transform().m11());
+        else
+            settings.remove(QStringLiteral("graph_zoom"));   // auto-fit: next run auto-fits too
+        settings.endGroup();
+    }
+    settings.sync();
+}
+
+bool SpecificWorker::eventFilter(QObject *watched, QEvent *event)
+{
+    if (const auto it = viewport_graph_.find(watched); it != viewport_graph_.end())
+    {
+        const bool wheel = event->type() == QEvent::Wheel;
+        const bool drag  = event->type() == QEvent::MouseMove
+                           and (static_cast<QMouseEvent *>(event)->buttons() & Qt::LeftButton);
+        if (wheel or drag) graph_user_framed_[it->second] = true;
+    }
+    return GenericWorker::eventFilter(watched, event);   // observe only, never consume
 }
 
 void SpecificWorker::emergency()

@@ -121,7 +121,9 @@ def build_room(base, name, size, birth, robot_rt, with_contents):
     link(200, base, "RT", se2(robot_rt.x, robot_rt.y, robot_rt.yaw))
     if not with_contents:
         return
-    node(base+1, "floor", "floor", {"timestamp_creation": A(U64, str(birth))}, parent=base, level=3)
+    # collapsed=true exactly as room_concept seeds it: memory must NOT inherit it (walls would fold away).
+    node(base+1, "floor", "floor", {"collapsed": A(BOOL, True),
+                                    "timestamp_creation": A(U64, str(birth))}, parent=base, level=3)
     link(base, base+1, "RT", se2(0, 0, 0))
     for i, (wname, mid, yaw, L) in enumerate(walls(poly)):
         wid = base + 10 + i
@@ -170,16 +172,17 @@ build_room(400, "room_1", ROOM1, BIRTH1, RT_ROBOT_ROOM1, with_contents=False)
 # stamps alone and then PLACE the first one itself -- the bootstrap path, which is also what a
 # fleet starting with a single room hits.
 
-out = os.path.join(os.path.dirname(__file__), "..", "etc", "stage_two_rooms.json")
-with open(out, "w") as f:
-    json.dump({"DSRModel": {"symbols": sym}}, f, indent=2)
-    f.write("\n")
+if __name__ == "__main__":   # importable: make_proto_stage_fixture.py reuses the helpers above
+    out = os.path.join(os.path.dirname(__file__), "..", "etc", "stage_two_rooms.json")
+    with open(out, "w") as f:
+        json.dump({"DSRModel": {"symbols": sym}}, f, indent=2)
+        f.write("\n")
 
-print(f"wrote {os.path.normpath(out)}  ({len(sym)} nodes)")
-print()
-print("GROUND TRUTH for the self-test (metres, radians):")
-print(f"  RT robot->room_0        {RT_ROBOT_ROOM0}")
-print(f"  RT robot->room_1        {RT_ROBOT_ROOM1}")
-print(f"  seam  T(room_1<-room_0) {SEAM}")
-print(f"  door_1 in room_0        ({DOOR_IN_ROOM0[0]:+.6f}, {DOOR_IN_ROOM0[1]:+.6f})")
-print(f"  door_1 in room_1        ({DOOR_IN_ROOM1[0]:+.6f}, {DOOR_IN_ROOM1[1]:+.6f})")
+    print(f"wrote {os.path.normpath(out)}  ({len(sym)} nodes)")
+    print()
+    print("GROUND TRUTH for the self-test (metres, radians):")
+    print(f"  RT robot->room_0        {RT_ROBOT_ROOM0}")
+    print(f"  RT robot->room_1        {RT_ROBOT_ROOM1}")
+    print(f"  seam  T(room_1<-room_0) {SEAM}")
+    print(f"  door_1 in room_0        ({DOOR_IN_ROOM0[0]:+.6f}, {DOOR_IN_ROOM0[1]:+.6f})")
+    print(f"  door_1 in room_1        ({DOOR_IN_ROOM1[0]:+.6f}, {DOOR_IN_ROOM1[1]:+.6f})")
