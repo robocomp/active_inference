@@ -1831,3 +1831,15 @@ ObjectAnchorSubtypes = ["table"]   # no refrigerator here; the lab's tables are 
 #   direction: the high band then merely excludes wall it could have used.
 RoomHeight          = 2.4
 LidarHighMaxHeight  = 2.0
+
+# ── PROTO-ROOM (2026-09-14) ─────────────────────────────────────────────────────────────────────────
+# When the robot goes through one of this room's OPEN doors, room_concept births `room_<k>`: a `room` node
+# with a `proto` self-edge (identity unresolved — ltsm_agent's call), hanging from the robot, frame = the
+# crossed aperture (frozen), no polygon. door_concept hangs an entry-mirror door from it; ltsm_agent links
+# the two doors with a live `passage_<n>`. See src/door_crossing.h (the evidence) and
+# room_scene_graph.cpp step_proto_room (the birth). Enabled=false restores the single-room agent exactly.
+[ProtoRoom]
+Enabled   = true
+# ⚠ DECISION LEVEL on p_cross (log-odds fusion of door_open_prob and the pose's "footprint is past the
+# aperture, within its span"). The one threshold in this path; p_cross itself has no gate.
+BirthProb = 0.95

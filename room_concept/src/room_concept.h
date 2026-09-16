@@ -1088,7 +1088,42 @@ public:
     /// Estimate mode: no layout. The first scan seeds a placeholder box (viewers only); the walls
     /// learnt from the LiDAR replace it as soon as they close.
     void configure_room_estimate();
-    bool estimating() const { return params.map_mode == Params::MapMode::Estimate; }
+    /// SEARCHING vs LOCALIZING is normally fixed by RoomShape.MapMode at load. It is NOT fixed for
+    /// the run: crossing out of this room through one of its doors puts the agent back into
+    /// estimation for the space it entered (begin_room_estimation). `params.map_mode` is never
+    /// written after config load — the runtime half is a separate atomic — so no reader of params
+    /// races with the transition.
+    bool estimating() const
+    { return runtime_estimate_.load(std::memory_order_relaxed) or params.map_mode == Params::MapMode::Estimate; }
+
+    /// ── LOCALIZING (a given layout) → SEARCHING (learn the one we just walked into) ──────────────
+    /// Called when the robot is judged to have crossed out of this room (room_scene_graph's
+    /// step_proto_room). Every field it touches belongs to the LOCALISER thread, which is the thread
+    /// that calls it: step_proto_room runs inside RoomSceneGraph::update, itself called from
+    /// PosePublisher::maybe_publish_corrected_pose, which pose_publisher.h declares to be the
+    /// localiser thread. So this is an inline transition, not a deferred one.
+    ///
+    /// ★ IT DOES NOT NEED TO SWITCH RECOVERY OFF — THAT FALLS OUT. Recovery, relocalisation, the
+    /// symmetry check and the prediction early-exit all gate on map_guided_checks_allowed() →
+    /// map_ready(), which in estimate mode is map_ready_, and configure_room_estimate() clears it.
+    /// Entering SEARCHING *is* leaving the relocalisation branch; there is no second switch, and a
+    /// second switch would be a place for the two halves to disagree.
+    ///
+    /// ★ THE GAUGE DOES NOT MOVE. The internal frame stays where it was — it is only a gauge, and the
+    /// walls of the new room are estimated in it. What is published is the proto-room's frame, a
+    /// constant transform of it, and reanchor_map_frame's one-shot move is absorbed into that
+    /// constant (take_pending_reanchor) so no consumer is ever teleported.
+    /// `why` is logged verbatim; pass what decided it, not a category.
+    void begin_room_estimation(std::string_view why);
+
+    /// ── THE RE-ANCHOR, FOR WHOEVER PUBLISHES A FRAME DERIVED FROM THE INTERNAL ONE ───────────────
+    /// reanchor_map_frame moves the internal gauge once, when the learnt polygon first closes, and it
+    /// rewrites every internal quantity to match. A frame published as a fixed transform of the
+    /// internal one (the proto-room) would therefore JUMP unless it absorbs the same move — measured
+    /// at 92 deg and 0.74 m in a single frame, which is a teleport to every consumer holding it.
+    /// So the moves are accumulated here as T_new_old and handed over exactly once. Localiser thread.
+    /// Returns false (and leaves `T` untouched) when nothing is pending.
+    bool take_pending_reanchor(Eigen::Affine2f& T);
 
     /// ── THE TWO STATES THIS AGENT IS EVER IN ─────────────────────────────────────────────────────
     /// SEARCHING   the layout is unknown and is being estimated. The walls ARE the estimate: they are
@@ -1415,6 +1450,16 @@ public:
         return latest_door_apertures_;
     }
 
+    /// ── P(THE ROBOT IS OUTSIDE THIS ROOM, THROUGH A DOOR) ──────────────────────────────────────
+    /// Written by the scene graph (door_crossing.h), read by recovery. The SDF misfit is evidence of a
+    /// LOST pose only to the extent this room is expected to explain the scan; past a doorway it is not,
+    /// and snapping the pose back inside would undo a real crossing. So recovery weighs the misfit by
+    /// (1 - p). Both sides run on the LOCALISER thread today (step_proto_room writes it from inside
+    /// maybe_publish_corrected_pose; recovery reads it in the same update). Atomic so that stays true
+    /// if a writer ever moves. It is NOT a hand-off between threads — do not add a queue for it.
+    void set_outside_prob(float p) { outside_prob_.store(std::clamp(p, 0.f, 1.f)); }
+    float outside_prob() const { return outside_prob_.load(); }
+
     // Process noise covariance (diagonal [x, y, theta])
     Eigen::Vector3f process_noise = {0.01f, 0.01f, 0.01f};
 
@@ -1457,6 +1502,13 @@ private:
    ImageEdgeObs       latest_image_edges_;
    std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()
    mutable std::mutex door_apertures_mutex_;
+   std::atomic<float> outside_prob_{0.f};
+   /// Set by begin_room_estimation; never cleared for the life of the run (a room learnt is not
+   /// un-learnt by walking back). Read by estimating() from any thread, hence atomic.
+   std::atomic<bool>  runtime_estimate_{false};
+   /// Accumulated, un-consumed re-anchor (T_new_old). Localiser thread only; see take_pending_reanchor.
+   Eigen::Affine2f    pending_reanchor_ = Eigen::Affine2f::Identity();
+   bool               has_pending_reanchor_ = false;
    std::vector<DoorAperture> latest_door_apertures_;          ///< room frame, from the worker
    /// The same apertures carried into the ROBOT frame, rebuilt once per scan on the localisation
    /// thread. Kept as a member rather than passed down through a dozen signatures: every consumer of
@@ -1971,6 +2023,7 @@ private:
     mutable std::mutex motion_ingress_debug_mutex_;
     MotionIngressDebug motion_ingress_debug_;
    void init_debug_log();
+   void init_recovery_log();   // always on, independent of DebugLog
     MotionIngressDebug get_motion_ingress_debug() const;
 
 

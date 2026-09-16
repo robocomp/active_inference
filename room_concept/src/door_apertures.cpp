@@ -2,6 +2,7 @@
 // file is also linked into the offline bench (wall_slam_selftest), which has no Qt Widgets.
 // Only pose_publisher.cpp needs that include, for DSR's signal emitter.
 #include "door_apertures.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto_mirror
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -51,6 +52,9 @@ namespace rc
             ++tally_.named_door;
             const auto sub = G.get_attrib_by_name<object_subtype_att>(n);
             if (not sub.has_value() or sub.value() != "door") continue;
+            // An ENTRY MIRROR under a proto-room is the same physical doorway as a door already here;
+            // discounting it too would weigh the same beams twice (w = (1 - p_open)^2).
+            if (rc::room::is_proto_mirror(G, n)) continue;
             ++tally_.subtype_ok;
 
             // ── THE CHEAP HALF: the door's own belief, read every cycle ──────────────────────────

@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <ranges>
 #include "room_scene_graph.h"
+#include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
+#include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
 
 #include <array>
 #include <charconv>
@@ -18,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <locale>          // std::locale::classic — CSV must not acquire a comma separator
 #include <print>
 #include <string>
 #include <string_view>
@@ -25,6 +28,7 @@
 #include <vector>
 
 #include <QString>
+#include <QDateTime>
 #include <QtCore/qdebug.h>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 #include "../../common/affordance_protocol/affordance_protocol.h"   // write_contract, Contract::orient
@@ -325,6 +329,8 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 ceiling_disagree_frames_ = 0;
             }
         }
+        if (params_->PROTO_ROOM_ENABLED)
+            step_proto_room(res);   // crossing evidence → recovery weighting, and the proto-room's one-time birth
         if (write_rt)
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
@@ -358,7 +364,8 @@ void RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pos
 // before the timestamped ring-buffer write. Called by both the corrected and predicted paths.
 void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                                          const Eigen::Matrix3f& covariance,
-                                         std::uint64_t timestamp_ms)
+                                         std::uint64_t timestamp_ms,
+                                         std::uint64_t child_override)
 {
     if (!G_ || !rt_api_) return;
 
@@ -371,6 +378,36 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // freshness-as-precision path already treats as growing uncertainty). Observed 2026-07-21: a
     // singular Hessian (cond_num sentinel 1e8) produced a NaN pose that reached the graph and made
     // the robot vanish from the canvas; downstream agents had no way to tell.
+    // ── AFTER A CROSSING THE PROTO-ROOM IS THE PRIMARY CHILD ─────────────────────────────────────
+    // `robot_pose` is a pose in the space being estimated now, not in the room this agent was given,
+    // so robot→room is no longer a fact about the world. Re-dispatch onto the proto-room and return;
+    // the room's own edge was stamped `valid=false` once, at the crossing, and is never touched again.
+    if (child_override == 0 and room_rt_retired_)
+    {
+        if (proto_room_id_ == 0 or not G_->get_node(proto_room_id_).has_value())
+        {
+            // Losing the proto-room after retiring the room leaves nowhere truthful to publish. Say so
+            // loudly and write NOTHING: an aged edge is a condition consumers already handle, whereas a
+            // fresh pose in the wrong frame is one they cannot detect.
+            static std::int64_t last_ms = 0;
+            const auto now = QDateTime::currentMSecsSinceEpoch();
+            if (now - last_ms > 2000)
+            {
+                last_ms = now;
+                qCritical() << "[room][proto] the room's RT is retired but the proto-room node is gone —"
+                            << "publishing no pose at all rather than one in a frame nobody can name."
+                            << "proto_id=" << proto_room_id_;
+            }
+            return;
+        }
+        const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
+        Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
+        A.topLeftCorner<2, 2>() = T_proto_room.linear();
+        write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
+                            proto_room_id_);
+        return;
+    }
+
     const bool pose_finite = robot_pose.matrix().allFinite() and covariance.allFinite();
     if (not pose_finite)
     {
@@ -415,7 +452,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         check_init_graph_is_valid();
     }
 
-    if (room_node_created_ && !G_->get_node(dsr_room_id_).has_value())
+    if (child_override == 0 && room_node_created_ && !G_->get_node(dsr_room_id_).has_value())
     {
         qWarning() << "dsr_update_pose: cached room node missing, resetting room state"
                    << "room_id=" << dsr_room_id_;
@@ -444,7 +481,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         return;
     }
     const uint64_t parent_id = dsr_robot_id_;
-    const uint64_t child_id  = dsr_room_id_;
+    const uint64_t child_id  = child_override != 0 ? child_override : dsr_room_id_;
 
     auto parent_opt = G_->get_node(parent_id);
     if (!parent_opt.has_value()) return;
@@ -703,6 +740,291 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         return;
     }
 
+    // ── THE PROTO-ROOM RIDES ON THE SAME POSE ─────────────────────────────────────────────────────
+    // Its frame is a CONSTANT transform of this room's (T_room_proto_), so the robot's pose in it is that
+    // constant composed with this very estimate, and its covariance is this one rotated into its axes
+    // (theta is unchanged by a fixed rotation). Same timestamp, same writer: the two edges can never
+    // disagree about when or where the robot was.
+    if (child_override == 0 and proto_room_id_ != 0)
+    {
+        if (not G_->get_node(proto_room_id_).has_value())
+        {
+            qWarning() << "[room][proto] proto-room node" << proto_room_id_ << "vanished — forgetting it";
+            proto_room_id_ = 0;
+        }
+        else
+        {
+            const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
+            Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
+            A.topLeftCorner<2, 2>() = T_proto_room.linear();
+            write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
+                                proto_room_id_);
+        }
+    }
+
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// PROTO-ROOM — see the declaration in room_scene_graph.h and door_crossing.h for the model.
+void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
+{
+    if (!G_ or !room_node_created_ or dsr_robot_id_ == 0)
+        return;
+    // ONE ROW PER UPDATE, WHATEVER PATH THE IMPL TAKES. The run is driven by hand and nobody is
+    // reading the terminal, so a branch that returns early must still say so in the file — otherwise
+    // "the agent stopped" and "the code returned somewhere I forgot to log" look the same afterwards.
+    ProtoRow row;
+    step_proto_room_impl(res, row);
+    write_proto_row(res, row);
+}
+
+void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& res, ProtoRow& row)
+{
+
+    const Eigen::Vector2f xy = res.robot_pose.translation();
+    const Eigen::Matrix2f cov_xy = res.covariance.topLeftCorner<2, 2>();
+    // The WHOLE footprint must be past the line: half the larger body dimension.
+    const float r_body = 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+
+    // ── After birth: how far outside are we? Only the crossed line matters now — the robot may walk
+    //    anywhere in the new space, so the aperture-span term no longer applies.
+    if (proto_room_id_ != 0)
+    {
+        // ★ ABSORB ANY GAUGE MOVE FIRST. When the new room's polygon closes the estimator re-anchors the
+        //   internal frame once and rewrites every internal quantity into it. T_room_proto_ and the two
+        //   aperture quantities below are expressed in that frame, so they must move with it — otherwise
+        //   the published proto frame teleports (what this design exists to prevent) AND the crossing
+        //   geometry silently starts measuring from the wrong place.
+        if (Eigen::Affine2f T_new_old; room_concept_->take_pending_reanchor(T_new_old))
+        {
+            T_room_proto_ = T_new_old * T_room_proto_;
+            proto_centre_ = T_new_old * proto_centre_;
+            proto_n_out_  = (T_new_old.linear() * proto_n_out_).normalized();
+            row.event = "reanchor";
+        }
+        const float sig_s = std::sqrt(proto_n_out_.dot(cov_xy * proto_n_out_) + 1e-8f);
+        const float s = (xy - proto_centre_).dot(proto_n_out_);
+        room_concept_->set_outside_prob(rc::crossing::phi((s - r_body) / sig_s));
+        row.door  = proto_door_;
+        row.s     = s;
+        row.sig_s = sig_s;
+        row.p_past = rc::crossing::phi((s - r_body) / sig_s);
+        return;
+    }
+
+    // ── Before birth: the best crossing over this room's open apertures.
+    const auto apertures = room_concept_->door_apertures();
+    const auto polygon   = room_concept_->nominal_room_polygon();
+    rc::crossing::Crossing best;
+    const rc::DoorAperture* best_ap = nullptr;
+    for (const auto& ap : apertures)
+        if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body); c.valid and c.p_cross > best.p_cross)
+        {
+            best = c;
+            best_ap = &ap;
+        }
+    room_concept_->set_outside_prob(best_ap ? rc::crossing::fuse(best_ap->p_open, best.p_past) : 0.f);
+    row.n_apert = static_cast<int>(apertures.size());
+    if (best_ap == nullptr)
+        return;   // row keeps NaN across the aperture columns; n_apert says whether any were offered
+    row.door    = best_ap->name;
+    row.p_open  = best_ap->p_open;
+    row.p_past  = best.p_past;
+    row.p_span  = best.p_span;
+    row.p_geom  = best.p_geom;
+    row.p_cross = best.p_cross;
+    row.s       = best.s;
+    row.u       = best.u;
+    row.sig_s   = best.sig_s;
+    row.sig_t   = best.sig_t;
+    row.span_w  = best.span_w;
+
+    // ⚠ DECISION LEVEL (ProtoRoom.BirthProb) — the one threshold in this path; see room_config.h.
+    if (best.p_cross < params_->PROTO_ROOM_BIRTH_PROB)
+        return;
+
+    // ── Birth. Frame = the crossed aperture, frozen: x along a→b, +y outward.
+    //    Right-handed: tangent × n_out must be +z, otherwise flip the tangent (the aperture's a/b order is
+    //    whatever door_concept's yaw made it, and a left-handed frame would mirror everything in it).
+    Eigen::Vector2f x_axis = best.tangent;
+    const Eigen::Vector2f y_axis = best.n_out;
+    if (x_axis.x() * y_axis.y() - x_axis.y() * y_axis.x() < 0.f)
+        x_axis = -x_axis;
+    Eigen::Affine2f T = Eigen::Affine2f::Identity();
+    T.linear().col(0) = x_axis;
+    T.linear().col(1) = y_axis;
+    T.translation()   = best.centre;
+
+    // Name: room_<k>, one past the highest room_<k> in the graph (the room itself is plain "room").
+    std::uint64_t k = 1;
+    for (const auto& r : G_->get_nodes_by_type("room"))
+        if (const std::string_view nm = r.name(); nm.starts_with("room_"))
+        {
+            std::uint64_t v = 0;
+            const auto digits = nm.substr(5);
+            if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
+                k = std::max(k, v);
+        }
+    ++k;
+    const std::string name = "room_" + std::to_string(k);
+
+    DSR::Node proto = DSR::Node::create<room_node_type>(name);
+    G_->add_or_modify_attrib_local<room_id_att>(proto, k);
+    // No delimiting polygon: nothing is known about this room's extent yet, and an absent attribute says
+    // so. (An empty or invented polygon would be read as a room — the controller plans against whatever
+    // it is handed.)
+    if (const auto rn = G_->get_node(dsr_room_id_); rn.has_value())
+    {
+        if (const auto h = G_->get_attrib_by_name<room_height_att>(rn.value()); h.has_value())
+            G_->add_or_modify_attrib_local<room_height_att>(proto, h.value());
+        if (const auto l = G_->get_attrib_by_name<level_att>(rn.value()); l.has_value())
+            G_->add_or_modify_attrib_local<level_att>(proto, l.value());
+        G_->add_or_modify_attrib_local<pos_x_att>(proto, G_->get_attrib_by_name<pos_x_att>(rn.value()).value_or(0.f) + 250.f);
+        G_->add_or_modify_attrib_local<pos_y_att>(proto, G_->get_attrib_by_name<pos_y_att>(rn.value()).value_or(0.f));
+    }
+    G_->add_or_modify_attrib_local<parent_att>(proto, dsr_robot_id_);
+    rc::provenance::stamp_creation(*G_, proto);
+    const auto id = G_->insert_node(proto);
+    if (not id.has_value())
+    {
+        qWarning() << "[room][proto] failed to insert proto-room node" << QString::fromStdString(name);
+        return;
+    }
+    // The `proto` self-edge: identity unresolved. Promotion (ltsm_agent's decision) removes it, same id.
+    if (not G_->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(id.value(), id.value())))
+        qWarning() << "[room][proto] could not write the proto self-edge on" << QString::fromStdString(name);
+
+    proto_room_id_ = id.value();
+    T_room_proto_  = T;
+    proto_centre_  = best.centre;
+    proto_n_out_   = best.n_out;
+    proto_door_    = best_ap->name;
+    row.event      = "born";
+    // Terminal gets one line per one-shot transition and nothing else — the run is driven by hand and
+    // the numbers are in tmp/proto_room.csv, which is the record meant to be read.
+    qInfo().noquote() << QString("[room][proto] %1 BORN through %2 — see tmp/proto_room.csv")
+                             .arg(QString::fromStdString(name)).arg(QString::fromStdString(best_ap->name));
+    // ── THE HAND-OVER, IN THIS ORDER ────────────────────────────────────────────────────────────────
+    // 1. Stamp the room's RT edge while it still holds the last pose that was true of it. Do it BEFORE
+    //    retiring, so the mark and the last honest pose belong to the same edge state.
+    mark_room_rt_not_current();
+    // 2. From here the proto-room is the primary child (see write_robot_room_rt).
+    room_rt_retired_ = true;
+    // 3. And the agent goes back to estimating. This is the point of the whole path: crossing a doorway
+    //    and losing the pose look identical from inside a room — SDF misfit up, pose degraded — so the
+    //    agent must not try to relocalise its way out of a room it is no longer in. Entering SEARCHING
+    //    turns the map-guided checks off because there is no map, not because a flag says so.
+    room_concept_->begin_room_estimation(
+        "crossed " + best_ap->name + " at p_cross=" + std::to_string(best.p_cross));
+    trigger_layout_();
+    // The RT edge follows on this frame's pose write (write_robot_room_rt), which runs right after this.
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// tmp/proto_room.csv — see the ProtoRow comment in the header for the contract.
+namespace
+{
+    /// The only free-text field in the row is a door name, which comes from another agent. One comma in
+    /// it would shift every column after it silently — the reader would parse, and be wrong. Names have
+    /// never contained one; this costs nothing and removes the possibility rather than relying on that.
+    std::string csv_safe(const std::string& v)
+    {
+        if (v.find_first_of(",\"\n\r") == std::string::npos)
+            return v;
+        std::string out = v;
+        std::ranges::replace_if(out, [](char c) { return c == ',' or c == '"' or c == '\n' or c == '\r'; }, '_');
+        return out;
+    }
+}   // namespace
+
+void RoomSceneGraph::write_proto_row(const rc::RoomConcept::UpdateResult& res, const ProtoRow& row)
+{
+    if (not proto_csv_.is_open())
+    {
+        ::mkdir("tmp", 0755);
+        proto_csv_.open("tmp/proto_room.csv", std::ios::out | std::ios::trunc);
+        if (not proto_csv_)
+        {
+            static bool said = false;
+            if (not said) { said = true; qWarning() << "[room][proto] cannot open tmp/proto_room.csv —"
+                                                    << "this run will leave no record."; }
+            return;
+        }
+        // ⚠ LC_NUMERIC. Qt calls setlocale(LC_ALL, "") and these machines run es_ES.UTF-8, where the
+        // decimal separator is a COMMA — which in a CSV is the field separator. The C++ stream locale
+        // is independent of the C one and stays "C", but imbue it explicitly rather than rely on
+        // nobody ever calling std::locale::global. See CLAUDE.md.
+        proto_csv_.imbue(std::locale::classic());
+        proto_csv_ << "ts_ms,wall_ms,event,x,y,theta,sig_x,sig_y,sig_theta,"
+                      "n_apert,door,p_open,p_past,p_span,p_geom,p_cross,birth_prob,"
+                      "s,u,sig_s,sig_t,span_w,outside_prob,"
+                      "proto_id,retired,estimating,searching,map_ready,"
+                      "sdf_mse,pred_sdf_median,misfit_raw,misfit_weighted,iters,cond,diverged,"
+                      "proto_x,proto_y,proto_theta\n";
+    }
+
+    const Eigen::Vector2f xy = res.robot_pose.translation();
+    const Eigen::Matrix2f R  = res.robot_pose.linear();
+    const float theta = std::atan2(R(1, 0), R(0, 0));
+    const float op    = room_concept_->outside_prob();
+    // ★ THE SAME EXPRESSION RECOVERY USES, not a re-derivation of it. This column exists to audit that
+    //   branch, and a column that computes the quantity its own way cannot refute the code it audits.
+    const float misfit_raw = std::max(res.sdf_mse, res.pred_sdf_median);
+
+    const Eigen::Vector2f pt = T_room_proto_.translation();
+    const float p_theta = std::atan2(T_room_proto_.linear()(1, 0), T_room_proto_.linear()(0, 0));
+
+    proto_csv_ << res.timestamp_ms << ','
+               << QDateTime::currentMSecsSinceEpoch() << ','
+               << row.event << ','
+               << xy.x() << ',' << xy.y() << ',' << theta << ','
+               << std::sqrt(res.covariance(0, 0)) << ',' << std::sqrt(res.covariance(1, 1)) << ','
+               << std::sqrt(res.covariance(2, 2)) << ','
+               << row.n_apert << ',' << csv_safe(row.door) << ','
+               << row.p_open << ',' << row.p_past << ',' << row.p_span << ','
+               << row.p_geom << ',' << row.p_cross << ',' << params_->PROTO_ROOM_BIRTH_PROB << ','
+               << row.s << ',' << row.u << ',' << row.sig_s << ',' << row.sig_t << ','
+               << row.span_w << ',' << op << ','
+               << proto_room_id_ << ',' << (room_rt_retired_ ? 1 : 0) << ','
+               << (room_concept_->estimating() ? 1 : 0) << ',' << (room_concept_->searching() ? 1 : 0) << ','
+               << (room_concept_->map_ready() ? 1 : 0) << ','
+               << res.sdf_mse << ',' << res.pred_sdf_median << ','
+               << misfit_raw << ',' << misfit_raw * (1.f - op) << ','
+               << res.iterations_used << ',' << res.condition_number << ','
+               << (res.diverged ? 1 : 0) << ','
+               << pt.x() << ',' << pt.y() << ',' << p_theta << '\n';
+    // Flushed every row on purpose: the interesting run is the one that ends in a crash or a kill, and
+    // a buffered tail is exactly the part that would be missing. ~20 Hz of one short line is nothing.
+    proto_csv_.flush();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Retire this agent's robot→room RT edge: `valid = false`, written exactly once.
+// ⚠ THE WRITE-BACK HAZARD IS REAL HERE AND IS ACCEPTED ON PURPOSE. get_edge → add attribute →
+// insert_or_assign_edge re-publishes the edge's rt_timestamps / rt_head_index ring as of the fetch,
+// which is why the twist attributes above are written BEFORE the timestamped RT write and never after.
+// This call is safe from that only because it is the LAST write this edge will ever receive: nothing
+// re-publishes a ring state that no future write will correct. If a caller ever un-retires an edge,
+// this stops being true — re-stamp `valid = true` through the same path and write the ring after it.
+void RoomSceneGraph::mark_room_rt_not_current()
+{
+    if (!G_ or dsr_robot_id_ == 0 or dsr_room_id_ == 0)
+        return;
+    auto edge = G_->get_edge(dsr_robot_id_, dsr_room_id_, "RT");
+    if (not edge.has_value())
+    {
+        qWarning() << "[room][proto] no robot->room RT edge to retire (robot=" << dsr_robot_id_
+                   << "room=" << dsr_room_id_ << ") — consumers will see it age instead.";
+        return;
+    }
+    G_->add_or_modify_attrib_local<valid_att>(edge.value(), false);
+    if (not G_->insert_or_assign_edge(edge.value()))
+    {
+        qWarning() << "[room][proto] could not stamp valid=false on the robot->room RT edge;"
+                   << "it will go stale unmarked.";
+        return;
+    }
+    qInfo() << "[room][proto] robot->room RT RETIRED (valid=false).";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -721,9 +1043,11 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
         polygon_y.push_back(vertex.y());
     }
 
-    if (const auto room_nodes = G_->get_nodes_by_type("room"); !room_nodes.empty())
+    // ★Not room_nodes.front(): get_nodes_by_type is hash-ordered, and a proto-room must never be adopted
+    //   as THE room (rc::room::current_room skips it).
+    if (const auto adopted = rc::room::current_room(*G_); adopted.has_value())
     {
-        dsr_room_id_ = room_nodes.front().id();
+        dsr_room_id_ = adopted.value();
         room_node_created_ = true;
         stable_frames_ = 0;
         // Idempotent polygon write: a room node ADOPTED here (persisted from a prior session, or created bare by

@@ -195,6 +195,13 @@ struct RoomConfig
     // rows -- fatal for any autocorrelation question, since the aliasing invents correlation at one
     // rate and destroys it at another. Off by default; it is an instrument, not telemetry.
     bool        ODOM_SAMPLE_LOG = false;        // config: RoomConcept.OdomSampleLog
+    /// ProtoRoom.*: birth of a provisional room when the robot crosses one of this room's open doors
+    /// (room_scene_graph.cpp step_proto_room). Enabled=false restores the single-room agent exactly.
+    bool        PROTO_ROOM_ENABLED    = true;   // config: ProtoRoom.Enabled
+    /// ⚠ A DECISION LEVEL, NOT A MODEL TERM: the proto-room is born when p_cross (door_crossing.h) reaches
+    /// this. p_cross itself is a continuous posterior with no gate inside; turning it into the discrete act
+    /// of creating a node needs a loss-based decision level, and this is it. Flagged per CLAUDE.md.
+    float       PROTO_ROOM_BIRTH_PROB = 0.95f;  // config: ProtoRoom.BirthProb
     /// Where the calibration WINDOW is kept between runs. Evidence (episodes + closed pivots), never
     /// the fitted parameters — restoring a fitted value as a prior mean is the ratchet that walked
     /// the gyro bias to the wrong sign. Delete the file, or press Reset in the calibration window,

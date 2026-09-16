@@ -29,6 +29,7 @@
 #include <memory>
 #include <vector>
 
+#include <string>
 #include <Eigen/Dense>
 
 #include <genericworker.h>                 // DSR API + generated node/attr type tags
@@ -139,9 +140,71 @@ public:
 
 private:
     void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
+    // `child_override` = 0 writes robot→(this agent's room). Non-zero writes robot→that node instead, with
+    // `robot_pose`/`covariance` already expressed in ITS frame — used for the proto-room, whose frame is a
+    // fixed transform of the room's, so the same inversion / Jacobian / twist-adjoint code applies unchanged.
     void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                              const Eigen::Matrix3f& covariance,
-                             std::uint64_t timestamp_ms);
+                             std::uint64_t timestamp_ms,
+                             std::uint64_t child_override = 0);
+
+    // ── PROTO-ROOM: space the room does not explain, entered through one of its open doors ───────────
+    // Born once, when p_cross (door_crossing.h) reaches ProtoRoom.BirthProb. A `room` node `room_<k>` with a
+    // `proto` SELF-edge — room IDENTITY is unresolved (ltsm_agent's call); this agent owns its GEOMETRY.
+    // ★ITS FRAME IS THE CROSSED APERTURE, FROZEN AT BIRTH: origin at the aperture centre, x along a→b, +y away
+    //   from this room's interior. It never moves, so a consumer holding it is never teleported, and the
+    //   seam to this room is exact by construction (T_room_proto_ is a constant). Its RT edge from the robot
+    //   is this room's pose composed with that constant, written on every pose write.
+    // Not removed while this agent runs (first test: topology only); owned cleanup reaps it with the room.
+    void step_proto_room(const rc::RoomConcept::UpdateResult& res);
+    std::uint64_t   proto_room_id_ = 0;
+    Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
+    Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
+    Eigen::Vector2f proto_n_out_{0.f, 1.f};                         ///< its outward normal, room frame
+
+    // ── THE ROLES INVERT AT THE CROSSING ────────────────────────────────────────────────────────────
+    // Before: this agent's room is the published child and the proto-room rides along as a constant
+    // offset. After: the robot is somewhere this room does not explain and the pose being solved is a
+    // pose in the NEW space, so writing it into robot→room would publish a number that means nothing.
+    // The proto-room becomes the primary child and the room's RT edge is RETIRED — stamped `valid=false`
+    // once and never written again.
+    // ★ RETIRED, NOT DELETED. The room node, its doors and ltsm's `current` edge all stay: identity is
+    //   ltsm_agent's call, and deleting the room here would take door_concept's doors with it.
+    // ★ WHY AN EXPLICIT MARK. A producer that simply stops writing is indistinguishable from one that
+    //   died, and the freshness-as-precision readers would just watch it age. `valid=false` says the
+    //   producer is alive and has deliberately stopped — a different fact, and the one a consumer needs.
+    //   ABSENT still means valid: every other RT edge in the fleet carries no such attribute, so readers
+    //   must use value_or(true) and only ever see `false` because someone wrote it on purpose.
+    bool room_rt_retired_ = false;
+    void mark_room_rt_not_current();
+    std::string     proto_door_;                                    ///< the aperture it was born through
+
+    // ── THE EXPERIMENT'S OWN RECORD: tmp/proto_room.csv, ONE ROW PER POSE UPDATE ────────────────────
+    // The run is driven by hand on a joystick, so nothing that only reaches the terminal is observed.
+    // Everything needed to say what happened — and, when nothing happens, WHICH term held it back —
+    // goes here instead.
+    // ★ ONE WRITER (the localiser thread) and one row per update, whatever path was taken: the row is
+    //   written by step_proto_room's single exit, so an early return is a row with a reason, never a
+    //   missing row. A gap in ts_ms therefore means the AGENT stopped, not that the code took a branch
+    //   that forgot to log — the two are indistinguishable in a file only written on the happy path.
+    // ★ ABSENCE IS NaN, NEVER 0 OR -1. Every aperture column is a probability, a distance or a sigma,
+    //   and 0 is a legal reading of all three: `p_open=0` is "door_concept says shut", which is DATA.
+    //   No aperture offered this frame writes NaN across them, with n_apert saying why. Read it with
+    //   value-or-NaN semantics and assert through the parse.
+    // ★ ts_ms is the POSE timestamp, so this joins to pose_trace and the localiser log. wall_ms joins
+    //   to tmp/crossing.csv (per-APERTURE detail), which stamps wall clock.
+    struct ProtoRow
+    {
+        static constexpr float NA = std::numeric_limits<float>::quiet_NaN();
+        const char* event = "";     ///< "", "born", "reanchor" — one-shot transitions
+        int         n_apert = 0;    ///< apertures offered this frame; 0 = door_concept published none
+        std::string door;           ///< the selected one (post-birth: the one crossed)
+        float p_open = NA, p_past = NA, p_span = NA, p_geom = NA, p_cross = NA;
+        float s = NA, u = NA, sig_s = NA, sig_t = NA, span_w = NA;
+    };
+    void step_proto_room_impl(const rc::RoomConcept::UpdateResult& res, ProtoRow& row);
+    void write_proto_row(const rc::RoomConcept::UpdateResult& res, const ProtoRow& row);
+    std::ofstream proto_csv_;
     void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
     float published_room_height_ = 0.f;   // what the room node currently says the ceiling is
     int   ceiling_disagree_frames_ = 0;   // hysteresis before rewriting a shared attribute

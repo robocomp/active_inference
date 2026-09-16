@@ -394,29 +394,38 @@ namespace rc
             << "\n";
         debug_log_.flush();
         qInfo() << "Debug log writing to" << QString::fromStdString(debug_log_path_);
+    }
 
-        // Loss/recovery episode log — one row per search, independent of debug_log_enabled because it
+    void RoomConcept::init_recovery_log()
+    {
+        // Loss/recovery episode log — one row per search. ALWAYS ON, deliberately NOT behind DebugLog: it
         // is low-volume (66 rows in a 708k-frame run) and it is the only record of what recovery did.
+        // ★It used to be opened INSIDE init_debug_log(), after that function's `if (!debug_log_enabled)
+        //  return;` — so with DebugLog=false (the committed default) it never opened, while this comment
+        //  claimed the opposite. No episode was recorded from 2026-08-29 to 2026-09-16, the exact window
+        //  in which relocalisation was reported as flipping the pose.
+        ::mkdir("tmp", 0755);
+        ::mkdir("tmp/sdf_localizer", 0755);
+        const std::time_t tt = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm tm_local{};
+        localtime_r(&tt, &tm_local);
+        char ts_buf[32];
+        std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d_%H-%M-%S", &tm_local);
+        recovery_log_path_ = std::string("tmp/sdf_localizer/recovery_") + ts_buf + ".csv";
+        recovery_log_.open(recovery_log_path_, std::ios::out | std::ios::trunc);
+        if (not recovery_log_.is_open())
         {
-            recovery_log_path_ = debug_log_path_;
-            const auto slash = recovery_log_path_.find_last_of('/');
-            const std::string dir = (slash == std::string::npos) ? std::string()
-                                                                 : recovery_log_path_.substr(0, slash + 1);
-            const std::string stem = (slash == std::string::npos) ? recovery_log_path_
-                                                                  : recovery_log_path_.substr(slash + 1);
-            recovery_log_path_ = dir + "recovery_" + (stem.rfind("log_", 0) == 0 ? stem.substr(4) : stem);
-            recovery_log_.open(recovery_log_path_, std::ios::out | std::ios::trunc);
-            if (recovery_log_.is_open())
-            {
-                recovery_log_ << "ts_ms,trigger,n_lidar,"
-                                 "inc_x,inc_y,inc_theta,inc_loss,good_thr,"
-                                 "stage,best_x,best_y,best_theta,best_loss,"
-                                 "topk_best,topk_worst,ess,cov_xx,cov_yy,cov_tt,"
-                                 "n_evals,jump_m,jump_rad,success,duration_ms,beta,n_points\n";
-                recovery_log_.flush();
-                qInfo() << "Recovery episode log writing to" << QString::fromStdString(recovery_log_path_);
-            }
+            qWarning() << "Recovery episode log could not be opened:" << QString::fromStdString(recovery_log_path_);
+            return;
         }
+        recovery_log_.imbue(std::locale::classic());
+        recovery_log_ << "ts_ms,trigger,n_lidar,"
+                         "inc_x,inc_y,inc_theta,inc_loss,good_thr,"
+                         "stage,best_x,best_y,best_theta,best_loss,"
+                         "topk_best,topk_worst,ess,cov_xx,cov_yy,cov_tt,"
+                         "n_evals,jump_m,jump_rad,success,duration_ms,beta,n_points\n";
+        recovery_log_.flush();
+        qInfo() << "Recovery episode log writing to" << QString::fromStdString(recovery_log_path_);
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::get_last_result() const
@@ -779,6 +788,7 @@ namespace rc
 
     void RoomConcept::run()
     {
+        init_recovery_log();
         init_debug_log();
         rerun_frame_counter_ = 0;
 
@@ -1113,7 +1123,9 @@ namespace rc
                 // gates compute_seed_error, which returns a median — so feeding it a mean made
                 // recovery fire on a signal running some 15-20% high, i.e. earlier than the
                 // threshold says. Comparing like with like restores the documented meaning.
-                const float avg_sdf_err = std::max(res.sdf_mse, res.pred_sdf_median);
+                // ★Weighted by P(still inside): past an open doorway the room no longer owes the scan an
+                //   explanation, so its misfit stops being evidence of a lost pose (see set_outside_prob).
+                const float avg_sdf_err = std::max(res.sdf_mse, res.pred_sdf_median) * (1.f - outside_prob());
                 if (map_guided_checks_allowed() and recovery_.check(avg_sdf_err, res.iterations_used,
                                     params.recovery_loss_threshold, params.recovery_consecutive_count))
                 {
@@ -2041,6 +2053,41 @@ namespace rc
         derived_polygon_.clear();
     }
 
+    void RoomConcept::begin_room_estimation(std::string_view why)
+    {
+        // Idempotent: the crossing evidence that calls this keeps arriving, and a second reset would
+        // throw away walls already learnt in the new space.
+        if (estimating() and not wall_frozen_)
+            return;
+
+        const bool was_given = not estimating();
+        runtime_estimate_.store(true, std::memory_order_relaxed);
+        wall_frozen_ = false;          // layout_state() is Localizing while this is set, whatever the mode
+        configure_room_estimate();     // fresh WallMap, map_ready_ = false, derived polygon gone
+
+        // ⚠ NOT RESET HERE, and deliberately: the camera-calibration channels were handed the OLD room's
+        // polygon at startup (calib_->set_room_polygon in specificworker_startup) and this class has no
+        // handle on them. They will keep projecting the apartment until the new polygon closes. Harmless
+        // for a topology run; wire it before trusting a camera-derived number taken past a doorway.
+        qInfo().noquote()
+            << QString("[room][layout] LOCALIZING -> SEARCHING (%1). %2 The map-guided checks — recovery, "
+                       "relocalisation, symmetry, prediction early-exit — are now off because there is no "
+                       "map to judge against, and stay off until the new polygon closes and is re-anchored.")
+                   .arg(QString::fromStdString(std::string(why)))
+                   .arg(was_given ? "The given layout is no longer fitted."
+                                  : "The learnt layout has been un-frozen.");
+    }
+
+    bool RoomConcept::take_pending_reanchor(Eigen::Affine2f& T)
+    {
+        if (not has_pending_reanchor_)
+            return false;
+        T = pending_reanchor_;
+        pending_reanchor_     = Eigen::Affine2f::Identity();
+        has_pending_reanchor_ = false;
+        return true;
+    }
+
     std::vector<Eigen::Vector3f> RoomConcept::filter_through_door(
         const std::vector<Eigen::Vector3f>& points_robot, int* removed) const
     {
@@ -2624,6 +2671,17 @@ namespace rc
             }
         }
         wall_map_.reanchor(c, rot);
+
+        // ★ THE PUBLISHED FRAME MUST NOT MOVE WITH THE GAUGE. Everything above rewrote the INTERNAL
+        // frame, which is only a gauge and is nobody else's business. But a frame published as a fixed
+        // transform of it — the proto-room — would move with it, and that is a teleport to every
+        // consumer holding it: one re-anchor was measured at 92 deg and 0.74 m in a single frame.
+        // So hand the publisher the same move to absorb. p_new = Rm*(p - c) ⇒ T_new_old below.
+        Eigen::Affine2f T_new_old = Eigen::Affine2f::Identity();
+        T_new_old.linear()        = Rm.toRotationMatrix();
+        T_new_old.translation()   = -(Rm * c);
+        pending_reanchor_         = T_new_old * pending_reanchor_;   // compose, never overwrite
+        has_pending_reanchor_     = true;
     }
 
     void RoomConcept::set_polygon_room(const std::vector<Eigen::Vector2f>& polygon_vertices)

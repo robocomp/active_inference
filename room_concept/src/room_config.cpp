@@ -33,6 +33,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomSampleLog", p.ODOM_SAMPLE_LOG);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ProtoRoom.Enabled", p.PROTO_ROOM_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ProtoRoom.BirthProb", p.PROTO_ROOM_BIRTH_PROB);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "RoomConcept.CalibStateFile", p.CALIB_STATE_FILE);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
