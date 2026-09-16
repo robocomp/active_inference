@@ -1,4 +1,5 @@
 #include "zed_source.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <chrono>
 #include <print>
@@ -96,8 +97,8 @@ std::optional<PerceptionFrame> ZedSource::operator()()
     if (inner_eigen_ && graph_ && scene_)
     {
         std::string room_name, robot_name;
-        if (const auto rooms = graph_->get_nodes_by_type("room"); !rooms.empty())
-            room_name = rooms.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            room_name = room->name();
         if (const auto robots = graph_->get_nodes_by_type("robot"); !robots.empty())
             robot_name = robots.front().name();
         if (auto T = scene_->room_T_zed_extrapolated(inner_eigen_.get(), room_name, robot_name, stamp);

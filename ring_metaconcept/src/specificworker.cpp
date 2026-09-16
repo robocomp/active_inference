@@ -34,6 +34,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <QTimer>
 #include <QCoreApplication>
@@ -329,9 +330,8 @@ void SpecificWorker::initialize()
     rc::partition_self_test();
 
     // Resolve room node (the shared frame the members live under).
-    const auto rooms = G->get_nodes_by_type("room");
-    if (not rooms.empty())
-        room_node_id_ = rooms.front().id();
+    if (const auto room = rc::room::current_room(*G); room.has_value())
+        room_node_id_ = *room;
     else
         qWarning() << "ring_metaconcept: no room node found at startup";
 }
@@ -346,9 +346,9 @@ void SpecificWorker::compute()
     // Refresh room node id if not yet found
     if (room_node_id_ == 0)
     {
-        const auto rooms = G->get_nodes_by_type("room");
-        if (rooms.empty()) return;
-        room_node_id_ = rooms.front().id();
+        const auto room = rc::room::current_room(*G);
+        if (not room.has_value()) return;
+        room_node_id_ = *room;
     }
 
     ++cycle_;

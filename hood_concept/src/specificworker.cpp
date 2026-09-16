@@ -29,6 +29,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 
@@ -262,9 +263,8 @@ void SpecificWorker::initialize()
     remove_owned_hood_nodes();
 
     // Resolve room node
-    const auto rooms = G->get_nodes_by_type("room");
-    if (not rooms.empty())
-        room_node_id_ = rooms.front().id();
+    if (const auto room = rc::room::current_room(*G); room.has_value())
+        room_node_id_ = *room;
     else
         qWarning() << "hood_concept: no room node found at startup";
 
@@ -387,9 +387,9 @@ void SpecificWorker::compute()
     // Refresh room node id if not yet found
     if (room_node_id_ == 0)
     {
-        const auto rooms = G->get_nodes_by_type("room");
-        if (rooms.empty()) return;
-        room_node_id_ = rooms.front().id();
+        const auto room = rc::room::current_room(*G);
+        if (not room.has_value()) return;
+        room_node_id_ = *room;
     }
 
     // Push the room polygon + interior centroid into the fitter (wall-flush factor). Cheap; room_concept refines it.

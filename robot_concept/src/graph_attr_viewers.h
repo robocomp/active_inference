@@ -14,6 +14,7 @@
 #define ROBOT_CONCEPT_GRAPH_ATTR_VIEWERS_H
 
 #include <QString>
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <cmath>
 #include <cstdint>
@@ -340,7 +341,7 @@ private:
 		if(robot_local_.empty())
 			return {};
 		std::string room_name, robot_name;
-		if(const auto r = g_->get_nodes_by_type("room");  not r.empty()) room_name  = r.front().name();
+		if(const auto r = rc::room::current_room_node(*g_); r.has_value()) room_name = r->name();
 		if(const auto r = g_->get_nodes_by_type("robot"); not r.empty()) robot_name = r.front().name();
 		if(room_name.empty() or robot_name.empty())
 			return {};

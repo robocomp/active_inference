@@ -1,4 +1,5 @@
 #include "scene_processor.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "rgbd_data.h"
 
@@ -136,8 +137,8 @@ std::pair<std::string, std::string> SceneProcessor::get_room_robot_names_for_com
 
     if (room_name_snapshot.empty())
     {
-        if (const auto room_nodes = graph_->get_nodes_by_type("room"); !room_nodes.empty())
-            room_name_snapshot = room_nodes.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            room_name_snapshot = room->name();
     }
 
     if (robot_name_snapshot.empty())
@@ -521,8 +522,8 @@ std::optional<SceneProcessor::RoomPolygonData> SceneProcessor::get_room_polygon_
 
     if (room_name_snapshot.empty())
     {
-        if (const auto room_nodes = graph_->get_nodes_by_type("room"); !room_nodes.empty())
-            room_name_snapshot = room_nodes.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            room_name_snapshot = room->name();
     }
 
     if (room_name_snapshot.empty())

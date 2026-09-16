@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "place_stage.h"
 
@@ -2421,8 +2422,8 @@ std::string SpecificWorker::run_depth_enrichment(const std::function<void(const 
     rc::depth::RoomGeometry fb;
     if (scene_processor)
         scene_processor->get_room_layout(fb.poly_x, fb.poly_y, fb.height);
-    if (const auto rn = G->get_nodes_by_type("room"); not rn.empty())
-        fb.room = rn.front().name();
+    if (const auto rn = rc::room::current_room_node(*G); rn.has_value())
+        fb.room = rn->name();
     if (not robot_T_ricoh_ and inner_eigen_api != nullptr and scene_processor)
     {
         // ts==0 ⇒ the InnerEigenAPI cache, which is safe only single-threaded per instance. This is

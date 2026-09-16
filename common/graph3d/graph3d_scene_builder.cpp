@@ -1,4 +1,5 @@
 #include "graph3d_scene_builder.h"
+#include "../room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -412,9 +413,9 @@ Scene SceneBuilder::build()
 	// HERE, before anything consumes it — the floor centring just below needs the polygon, and when
 	// this lived at the end of build() that centring silently saw an empty vector every frame.
 	// (`ground.z` still cannot be set until the ladder exists; pass 1b fills it in.)
-	if (const auto rooms = g_->get_nodes_by_type("room"); not rooms.empty())
+	if (const auto room_opt = rc::room::current_room_node(*g_); room_opt.has_value())
 	{
-		const auto &r  = rooms.front();
+		const auto &r  = *room_opt;
 		const auto  px = g_->get_attrib_by_name<delimiting_polygon_x_att>(r);
 		const auto  py = g_->get_attrib_by_name<delimiting_polygon_y_att>(r);
 		if (px.has_value() and py.has_value())

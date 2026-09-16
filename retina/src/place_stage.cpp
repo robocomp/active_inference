@@ -1,4 +1,5 @@
 #include "place_stage.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <genericworker.h>                       // DSR graph API
 #include <dsr/api/dsr_api.h>
@@ -69,8 +70,8 @@ PlaceStage::PlaceStage(const PlaceStageConfig& cfg, std::shared_ptr<DSR::DSRGrap
     h.model_name = std::filesystem::path(cfg_.encoder.model_path).filename().string();
     h.azimuth_tune_deg = cfg_.azimuth_tune_deg;
     if (graph_)
-        if (const auto rooms = graph_->get_nodes_by_type("room"); not rooms.empty())
-            h.room_name = rooms.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            h.room_name = room->name();
     map_.set_header(h);
 
     if (cfg_.build_map)
@@ -98,9 +99,9 @@ bool PlaceStage::robot_pose_in_room(std::uint64_t stamp,
                                     Eigen::Vector3f& pose, Eigen::Matrix3f& cov) const
 {
     if (not graph_ or not inner_) return false;
-    const auto rooms = graph_->get_nodes_by_type("room");
-    if (rooms.empty()) return false;
-    const auto& room = rooms.front();
+    const auto room_opt = rc::room::current_room_node(*graph_);
+    if (not room_opt.has_value()) return false;
+    const auto& room = *room_opt;
     const auto robots = graph_->get_nodes_by_type("robot");
     if (robots.empty()) return false;
     const auto& robot = robots.front();

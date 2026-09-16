@@ -1,4 +1,5 @@
 #include "ricoh_source.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include "scene_processor.h"
 
 #include <genericworker.h>
@@ -47,8 +48,8 @@ std::optional<PerceptionFrame> RicohSource::operator()()
     if (inner_eigen_ && graph_)
     {
         std::string room_name;
-        if (const auto rooms = graph_->get_nodes_by_type("room"); !rooms.empty())
-            room_name = rooms.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            room_name = room->name();
         if (!room_name.empty())
             if (auto T = inner_eigen_->get_transformation_matrix(room_name, "ricoh", stamp); T.has_value())
             {

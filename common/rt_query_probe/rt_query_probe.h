@@ -34,6 +34,7 @@
  * count is a lie of exactly the kind this exists to detect.
  */
 #include <atomic>
+#include "../room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -86,10 +87,10 @@ private:
     {
         if (G == nullptr or G->get_rt_api() == nullptr) return;
         const auto robots = G->get_nodes_by_type("robot");
-        const auto rooms  = G->get_nodes_by_type("room");
-        if (robots.empty() or rooms.empty()) return;
-        auto e = G->get_rt_api()->get_edge_RT(robots.front(), rooms.front().id());
-        if (not e.has_value()) e = G->get_rt_api()->get_edge_RT(rooms.front(), robots.front().id());
+        const auto room   = rc::room::current_room_node(*G);
+        if (robots.empty() or not room.has_value()) return;
+        auto e = G->get_rt_api()->get_edge_RT(robots.front(), room->id());
+        if (not e.has_value()) e = G->get_rt_api()->get_edge_RT(*room, robots.front().id());
         if (not e.has_value()) return;
         const auto tv = G->get_attrib_by_name<rt_translation_velocity_att>(e.value());
         const auto rv = G->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(e.value());

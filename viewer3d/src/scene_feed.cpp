@@ -1,4 +1,5 @@
 #include "scene_feed.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "voxel_opengl_viewer.h"
 
@@ -104,8 +105,8 @@ std::optional<SceneFeed::RoomPolygonData> SceneFeed::get_room_polygon_from_graph
 
     if (room_name_snapshot.empty())
     {
-        if (const auto room_nodes = graph_->get_nodes_by_type("room"); !room_nodes.empty())
-            room_name_snapshot = room_nodes.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            room_name_snapshot = room->name();
     }
 
     if (room_name_snapshot.empty())
@@ -722,8 +723,8 @@ std::pair<std::string, std::string> SceneFeed::room_robot_names()
         robot_node_name_.clear();
 
     if (room_node_name_.empty())
-        if (const auto rooms = graph_->get_nodes_by_type("room"); not rooms.empty())
-            room_node_name_ = rooms.front().name();
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+            room_node_name_ = room->name();
     if (robot_node_name_.empty())
         if (const auto robots = graph_->get_nodes_by_type("robot"); not robots.empty())
             robot_node_name_ = robots.front().name();

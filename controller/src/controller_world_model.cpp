@@ -1,4 +1,5 @@
 #include "controller_world_model.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <algorithm>
 #include <cmath>
@@ -38,10 +39,10 @@ bool ControllerWorldModel::refresh_graph_state()
 
     if (graph_state_.room_name.empty())
     {
-        if (const auto room_nodes = graph_->get_nodes_by_type("room"); !room_nodes.empty())
+        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
         {
-            graph_state_.room_id = room_nodes.front().id();
-            graph_state_.room_name = room_nodes.front().name();
+            graph_state_.room_id = room->id();
+            graph_state_.room_name = room->name();
         }
     }
     else if (!graph_->get_node(graph_state_.room_id).has_value())

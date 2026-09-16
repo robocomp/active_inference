@@ -6,6 +6,7 @@
 // keyword macro (dsr_api.h via graph_publisher.h, and <QtGlobal>), otherwise the empty `emit` macro
 // mangles TBB's profiling.h and it fails to compile.
 #include "yolo_processor.h"   // SegDetection
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include "yolo_human.h"       // rc::human_pose::PoseDetection, BODY18_FROM_COCO
 #include "yolo_semantic.h"    // rc::semantic::SemanticMap (graded posteriors)
 
@@ -432,15 +433,15 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     float rt_gap_s = -1.0f;   // spacing between the two newest RT blocks in this replica (block density)
     if (params_.MASK_MOTION_ENABLED and frame_ts_ms > 0)
     {
-        const auto room_nodes  = G_->get_nodes_by_type("room");
+        const auto room_node   = rc::room::current_room_node(*G_);
         const auto robot_nodes = G_->get_nodes_by_type("robot");
-        if (not room_nodes.empty() and not robot_nodes.empty())
+        if (room_node.has_value() and not robot_nodes.empty())
         {
             // The dynamic localization RT edge is robot→room (robot-rooted bootstrap; room_concept
             // dsr_update_pose writes parent=robot, child=room). Try that first, then the reverse.
-            auto edge = G_->get_rt_api()->get_edge_RT(robot_nodes.front(), room_nodes.front().id());
+            auto edge = G_->get_rt_api()->get_edge_RT(robot_nodes.front(), room_node->id());
             if (not edge.has_value())
-                edge = G_->get_rt_api()->get_edge_RT(room_nodes.front(), robot_nodes.front().id());
+                edge = G_->get_rt_api()->get_edge_RT(*room_node, robot_nodes.front().id());
             if (edge.has_value())
             {
                 if (auto ts = G_->get_attrib_by_name<rt_timestamps_att>(edge.value()); ts.has_value())
