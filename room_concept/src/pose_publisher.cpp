@@ -305,8 +305,19 @@ bool PosePublisher::maybe_publish_corrected_pose()
     // difference must reference -- never the clamped pose, which no predictor ever sees.
     const Eigen::Affine2f est_pre_clamp = loc_res->robot_pose;
 
+    // ★ RELOCALISATION IS NOT MOTION. A committed relocalisation (a search that moved the pose, a rival-mode
+    //   switch) is a discrete change of belief about WHERE the robot is, not a correction the robot could have
+    //   driven, so bounding it by the speed limit only publishes a pose that crawls across the room for
+    //   seconds through places the robot never was. The first result of a new relocalisation epoch passes
+    //   UNCLAMPED; the baselines below are then rewritten from it, so the clamp is back in force on the very
+    //   next frame, measured against the new pose.
+    const bool relocalised = loc_res->reloc_epoch != last_published_reloc_epoch_;
+    if (relocalised and last_published_pose_.has_value())
+        qInfo() << "[pose-clamp] relocalisation epoch" << loc_res->reloc_epoch
+                << "— publishing the new pose unclamped, clamp re-armed from the next frame";
+
     bool clamp_fired = false;
-    if (params.POSE_CLAMP_ENABLED and last_published_pose_.has_value()
+    if (params.POSE_CLAMP_ENABLED and not relocalised and last_published_pose_.has_value()
         and last_published_ts_ms_ > 0 and loc_res->timestamp_ms > last_published_ts_ms_)
     {
         const float dt = static_cast<float>(loc_res->timestamp_ms - last_published_ts_ms_) / 1000.f;
@@ -475,6 +486,7 @@ bool PosePublisher::maybe_publish_corrected_pose()
         est_pre_clamp.translation().x(), est_pre_clamp.translation().y(),
         std::atan2(est_pre_clamp.linear()(1, 0), est_pre_clamp.linear()(0, 0)));
     last_published_ts_ms_ = loc_res->timestamp_ms;
+    last_published_reloc_epoch_ = loc_res->reloc_epoch;
     last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
 
     ++rt_corr_count_;

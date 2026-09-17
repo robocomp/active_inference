@@ -51,6 +51,12 @@ namespace rc
         static void  set_ref(RoomConcept& r, const Eigen::Vector3f& p) { r.rival_ref_pose_ = p; r.rival_ref_valid_ = true; }
         static bool  confirmed(RoomConcept& r) { return r.last_search_confirmed_incumbent_; }
         static bool  moved(RoomConcept& r) { return r.last_search_moved_; }
+        static std::uint64_t epoch(RoomConcept& r) { return r.reloc_epoch_.load(); }
+        static void  step8(RoomConcept& r, const RoomConcept::UpdateResult& res, const std::vector<Eigen::Vector3f>& pts)
+        { r.relocalisation_step(res, pts); }
+        static void  force_searching_with_map_ready(RoomConcept& r)
+        { r.runtime_estimate_.store(true); r.map_ready_.store(true); r.wall_frozen_ = false; }
+        static bool  searching(RoomConcept& r) { return r.searching(); }
         static float track_var(RoomConcept& r) { return r.track_var_ln_s_; }
         static std::vector<Eigen::Vector2f> poly(RoomConcept& r) { return r.current_room_polygon(); }
         static bool  explains(RoomConcept& r, float s) { return r.explains_like_tracking(s); }
@@ -362,7 +368,7 @@ int main()
     {
         const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
         std::mt19937 rng(777);
-        int switches = 0, first_switch = -1, final_ok = 0, runs = 20;
+        int switches = 0, first_switch = -1, final_ok = 0, runs = 20, epoch_mismatch = 0;
         for (int run = 0; run < runs; ++run)
         {
             rc::RoomConcept rcn;
@@ -384,6 +390,7 @@ int main()
             Eigen::Vector3f committed = wrong;
             const Eigen::Vector3f step(0.03f, 0.f, 0.02f);   // per frame, robot frame
             int local_switches = 0;
+            const auto epoch0 = Acc::epoch(rcn);
             for (int f = 0; f < 150; ++f)
             {
                 truth = compose(truth, step);
@@ -403,18 +410,19 @@ int main()
                 }
             }
             switches += local_switches;
+            if (Acc::epoch(rcn) - epoch0 != static_cast<std::uint64_t>(local_switches)) ++epoch_mismatch;
             if (near_or_twin(room, committed, truth, 0.30f, 10.f)
                 and (room_idx == 0 or near(committed, truth, 0.30f, 10.f))) ++final_ok;
         }
-        std::printf("  %-52s switches=%d (%s), first at frame %d, final pose ok %d/%d\n", label, switches,
-                    expect_switch ? "expect >=runs, no flip-back" : "expect 0", first_switch, final_ok, runs);
+        std::printf("  %-52s switches=%d (%s), first at frame %d, final pose ok %d/%d, clamp releases != switches in %d runs (expect 0)\n", label, switches,
+                    expect_switch ? "expect >=runs, no flip-back" : "expect 0", first_switch, final_ok, runs, epoch_mismatch);
     }
 
     // C: door OPENING with the robot inside — a large through-door sector, pose CORRECT.
     {
         const auto& room = all_rooms[1];
         std::mt19937 rng(4242);
-        int searches = 0, moved = 0, frames = 0;
+        int searches = 0, moved = 0, frames = 0, released = 0;
         for (int run = 0; run < 10; ++run)
         {
             rc::RoomConcept rcn;
@@ -422,6 +430,7 @@ int main()
             const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
             rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
             Acc::reset(rcn);
+            const auto epoch0 = Acc::epoch(rcn);
             for (int f = 0; f < 60; ++f, ++frames)
             {
                 const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng, f < 10 ? 6.f : 100.f);
@@ -438,9 +447,10 @@ int main()
                         ++moved;
                 }
             }
+            released += static_cast<int>(Acc::epoch(rcn) - epoch0);
         }
-        std::printf("  %-52s searches=%d over %d frames, pose MOVED %d times (expect 0)\n",
-                    "C door opens (200° through-door), robot inside", searches, frames, moved);
+        std::printf("  %-52s searches=%d over %d frames, pose MOVED %d times (expect 0), clamp released %d times (expect 0)\n",
+                    "C door opens (200° through-door), robot inside", searches, frames, moved, released);
     }
 
     // F: end-to-end kidnap. Robot tracked correctly, then carried elsewhere; the committed pose is stale.
@@ -449,7 +459,7 @@ int main()
     {
         const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
         std::mt19937 rng(31337u + static_cast<unsigned>(room_idx));
-        int ok = 0, fired = 0, frames_sum = 0, runs = 15;
+        int ok = 0, fired = 0, frames_sum = 0, runs = 15, right_without_release = 0;
         for (int run = 0; run < runs; ++run)
         {
             rc::RoomConcept rcn;
@@ -504,6 +514,7 @@ int main()
             if (f_fire >= 0) { ++fired; frames_sum += f_fire + 1; }
             const bool right = near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f);
             if (right) ++ok;
+            if (right and Acc::epoch(rcn) == 0) ++right_without_release;
             else if (std::getenv("RELOC_DUMP") != nullptr)
             {
                 const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
@@ -513,8 +524,8 @@ int main()
                             std::sqrt(Acc::track_var(rcn)), std::exp(Acc::track_mu(rcn)));
             }
         }
-        std::printf("  F kidnap end-to-end %-32s fired %d/%d (after %.1f frames), final pose right %d/%d\n",
-                    room.name.c_str(), fired, runs, fired > 0 ? static_cast<double>(frames_sum) / fired : std::nan(""), ok, runs);
+        std::printf("  F kidnap end-to-end %-32s fired %d/%d (after %.1f frames), final pose right %d/%d, right but clamp never released %d (expect 0)\n",
+                    room.name.c_str(), fired, runs, fired > 0 ? static_cast<double>(frames_sum) / fired : std::nan(""), ok, runs, right_without_release);
     }
 
     // G: planner mode disambiguation. Committed pose = the mirror of the truth in the notched room, truth carried
@@ -552,6 +563,91 @@ int main()
         const Eigen::Vector3f t_n(2.0f, 2.0f, 0.2f);
         run_g(notch, Eigen::Vector3f(8.f - t_n.x(), t_n.y(), wrap(kPi - t_n.z())), t_n,
               "notched: mirror vs truth (expect max near a notch view)");
+    }
+
+    // H: END TO END THROUGH update(). The earlier cases drive the relocaliser's pieces directly and never run
+    //    update(), so they could not see that a commit written only to the model tensors is re-predicted from
+    //    last_update_result on the next frame and silently undone — which is what happened live (09-17).
+    //    Given layout: warm up tracking, kidnap, keep feeding scans; the pose must reach the truth AND stay.
+    //    Then the live failure's configuration: SEARCHING with the map ready must never relocalise.
+    {
+        const auto& room = all_rooms[2];
+        std::mt19937 rng(2024);
+        int right = 0, stayed = 0, runs = 8, gate_violations = 0;
+        std::uint64_t epochs_max = 0;
+        std::int64_t ts = 1000;
+        for (int run = 0; run < runs; ++run)
+        {
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f start = random_pose(room.poly, rng, 1.0f);
+            Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
+            while ((truth.head<2>() - start.head<2>()).norm() < 2.0f) truth = random_pose(room.poly, rng, 1.0f);
+            rcn.set_robot_pose(start.x(), start.y(), start.z(), false);
+            auto frame = [&](const Eigen::Vector3f& at)
+            {
+                const auto pts = to3(synth_scan(room.poly, at, 360, 0.02f, 0.30f, rng));
+                ts += 50;
+                // A zero-velocity odometry stream covering the frame, like the parked robot's. WITHOUT odometry the
+                // measured prior is invalid, the prediction falls back to the model tensors, and a commit that
+                // forgets last_update_result looks correct — this harness first passed with that bug in it.
+                std::vector<rc::OdometryReading> odom;
+                for (std::int64_t t = ts - 100; t <= ts; t += 10)
+                {
+                    rc::OdometryReading o;
+                    o.source_ts_ms = t; o.recv_ts_ms = t;
+                    o.var_adv = 1e-4f; o.var_side = 1e-4f;
+                    odom.push_back(o);
+                }
+                const auto res = rcn.update(rc::LidarData{pts, ts}, {}, odom);
+                Acc::step8(rcn, res, pts);
+            };
+            for (int f = 0; f < 60; ++f) frame(start);           // tracking at `start`
+            const auto e_warm = Acc::epoch(rcn);
+            for (int f = 0; f < 40; ++f)                         // kidnapped: the scans now come from `truth`
+            {
+                const auto e_before = Acc::epoch(rcn);
+                frame(truth);
+                if (std::getenv("RELOC_H_TRACE") != nullptr and Acc::epoch(rcn) != e_before)
+                {
+                    const auto s2 = rcn.get_current_state();
+                    std::printf("      H run%d f%d epoch %llu: now (%.2f,%.2f,%.0f°) truth (%.2f,%.2f,%.0f°) moved=%d rivals=%zu\n",
+                                run, f, static_cast<unsigned long long>(Acc::epoch(rcn)), s2[2], s2[3], s2[4] * 180. / kPi,
+                                truth.x(), truth.y(), truth.z() * 180. / kPi, Acc::moved(rcn) ? 1 : 0, Acc::rivals(rcn).size());
+                }
+            }
+            if (std::getenv("RELOC_H_TRACE") != nullptr and e_warm != 0)
+                std::printf("      H run%d: %llu relocalisations during WARM-UP\n", run, static_cast<unsigned long long>(e_warm));
+            auto st = rcn.get_current_state();
+            const bool ok_now = near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f);
+            if (ok_now) ++right;
+            for (int f = 0; f < 40; ++f) frame(truth);           // and it must STAY there
+            st = rcn.get_current_state();
+            if (ok_now and near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f)) ++stayed;
+            epochs_max = std::max(epochs_max, Acc::epoch(rcn));
+            if (std::getenv("RELOC_DUMP") != nullptr and not ok_now)
+                std::printf("    H MISS run%d: est (%.2f,%.2f,%.0f°) truth (%.2f,%.2f,%.0f°) start (%.2f,%.2f,%.0f°) epochs=%llu\n",
+                            run, st[2], st[3], st[4] * 180. / kPi, truth.x(), truth.y(), truth.z() * 180. / kPi,
+                            start.x(), start.y(), start.z() * 180. / kPi, static_cast<unsigned long long>(Acc::epoch(rcn)));
+
+            // SEARCHING with the map ready (estimate mode, freeze off): feed the kidnapped scans; nothing may fire.
+            Acc::force_searching_with_map_ready(rcn);
+            const auto e0 = Acc::epoch(rcn);
+            const auto before = rcn.get_current_state();
+            const Eigen::Vector3f elsewhere = random_pose(room.poly, rng, 1.0f);
+            for (int f = 0; f < 10; ++f)
+            {
+                const auto pts = to3(synth_scan(room.poly, elsewhere, 360, 0.02f, 0.30f, rng));
+                rc::RoomConcept::UpdateResult fake;
+                fake.ok = true; fake.sdf_mse = 1.0f; fake.pred_sdf_median = 1.0f;   // a terrible fit
+                Acc::step8(rcn, fake, pts);
+            }
+            const auto after = rcn.get_current_state();
+            if (not Acc::searching(rcn) or Acc::epoch(rcn) != e0 or (after - before).norm() > 1e-6f) ++gate_violations;
+        }
+        std::printf("  H kidnap THROUGH update() (notched)                 pose right %d/%d, stayed right %d/%d; "
+                    "most relocalisations in one run %llu (expect 1); searching+map-ready relocalised in %d runs (expect 0)\n",
+                    right, runs, stayed, runs, static_cast<unsigned long long>(epochs_max), gate_violations);
     }
 
     // D / E: healthy residual stream with turn spikes, then a kidnap.

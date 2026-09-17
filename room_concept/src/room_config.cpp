@@ -40,6 +40,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocLostSMin", room_concept.params.reloc_lost_s_min);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocLostSMax", room_concept.params.reloc_lost_s_max);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RelocLegacyGridSearch", room_concept.params.reloc_legacy_grid_search);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RelocEnabled", room_concept.params.reloc_enabled);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomSampleLog", p.ODOM_SAMPLE_LOG);

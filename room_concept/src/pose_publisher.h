@@ -92,6 +92,7 @@ namespace rc
         std::int64_t                   last_published_ts_ms_ = 0;
         long                           pose_clamp_hits_      = 0;
         std::optional<Eigen::Vector3f> last_published_est_;
+        std::uint64_t                  last_published_reloc_epoch_ = 0;   // see UpdateResult::reloc_epoch
 
         /// Serialises the two writer threads over every shared member below and above it.
         std::mutex publish_mutex_;

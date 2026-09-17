@@ -765,17 +765,13 @@ namespace rc
     bool RoomConcept::validate_seed_pose(const std::vector<Eigen::Vector3f>& pts)
     {
         pending_seed_validation_ = false;
-        if (pts.empty() or model_ == nullptr or not model_->has_state())
+        if (pts.empty() or model_ == nullptr or not model_->has_state() or not params.reloc_enabled)
             return true;
         search_trigger_ = "seed_validation";
         if (not grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4)))
         {
             qWarning() << "[RoomConcept] Seed validation: the search could not run; keeping the saved pose.";
             return true;
-        }
-        if (last_search_moved_)
-        {
-            window_mgr_.clear(); reset_stride_state();
         }
         return false;
     }
@@ -907,7 +903,12 @@ namespace rc
                     validate_seed_pose(lidar_high.first);
 
                 const auto t_update_start_ = std::chrono::high_resolution_clock::now();
-                const auto res = update(lidar_high, vel_snap, odom_snap);
+                auto res = update(lidar_high, vel_snap, odom_snap);
+                // Stamped HERE, before this result is stored: a relocalisation in section 8 below advances
+                // the epoch AFTER this frame is published, so the jump — and the new epoch — ride on the
+                // NEXT result, the first one that actually carries the new pose. Seed validation above runs
+                // before update(), so its jump is already in this result and so is its epoch.
+                res.reloc_epoch = reloc_epoch_.load(std::memory_order_relaxed);
                 update_ms = std::chrono::duration<float, std::milli>(
                     std::chrono::high_resolution_clock::now() - t_update_start_).count();
 
@@ -1076,36 +1077,8 @@ namespace rc
                 if (res.ok && on_result_ready_)
                     on_result_ready_();
 
-                // ===== 8. RELOCALISATION: lost belief + rival modes =================
-            // ONE mechanism (see Params, "Relocalisation"; reloc_search.h). It replaces three that fought:
-            // the RecoveryManager (10 bad frames + 60-frame cooldown, reset by every symmetry flip), the
-            // map-trust relocaliser (never enabled) and the periodic symmetry check, which teleported a LOST
-            // robot to a mirror image on 74 of 80 checks (09-12) and on a door OPENING with the robot 1.6 m
-            // inside (09-16) — both judged a median, which cannot tell "wrong pose" from "unmodelled view".
-            //
-            // Gated on map_guided_checks_allowed() (= map_ready): entering SEARCHING for a proto-room clears
-            // it, which is how the agent LEAVES relocalisation; and after the room is retired nothing here may
-            // write the robot→room pose again (mark_room_rt_not_current's ring must stay the edge's last write).
-            // Armed for the whole run, as before: a robot picked up after the room is stable must still recover.
-            if (map_guided_checks_allowed())
-            {
-                // Rivals first: they are scored on THIS scan against the pose update() just committed.
-                step_rival_modes(lidar_high.first);
-
-                // s is the worse of the post-fit residual and the prediction error — kept from the old
-                // trigger for the reason recorded there: Adam re-solving a chronically wrong prediction every
-                // frame makes the post-fit number alone look healthy. Both are MEDIAN |SDF| in metres.
-                const float s = std::max(res.sdf_mse, res.pred_sdf_median);
-                const float p_lost = update_lost_belief(s, outside_prob());
-                if (p_lost >= 0.5f)   // ⚠ the equal-cost Bayes decision, flagged
-                    relocalise_from_belief(lidar_high.first, s, p_lost);
-            }
-            else
-            {
-                if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
-                rival_ref_valid_ = false;
-                reset_lost_belief();
-            }
+                // ===== 8. RELOCALISATION: lost belief + rival modes (see relocalisation_step) =====
+                relocalisation_step(res, lidar_high.first);
 
                 wait_period = std::chrono::milliseconds(0);
 
@@ -1404,7 +1377,18 @@ namespace rc
         last_search_confirmed_incumbent_ = false;
         last_search_moved_ = false;
         if (params.reloc_legacy_grid_search)
-            return legacy_grid_search_pose(lidar_points, grid_resolution);
+        {
+            // The legacy lattice commits into the model tensors itself; route its result through the same
+            // discrete-jump commit so the prediction base, window and publisher clamp all follow it.
+            const bool ok = legacy_grid_search_pose(lidar_points, grid_resolution);
+            if (model_ != nullptr and model_->has_state())
+            {
+                const auto st = model_->get_state();
+                commit_relocalised_pose(Eigen::Vector3f(st[2], st[3], st[4]), current_covariance);
+                last_search_moved_ = true;
+            }
+            return ok;
+        }
         if (model_ == nullptr or not model_->has_state() or lidar_points.empty())
             return false;
 
@@ -1481,13 +1465,48 @@ namespace rc
         ep.jump_rad = std::abs(std::remainder(top.pose.z() - incumbent.z(), 2.f * static_cast<float>(M_PI)));
         ep.success = true;
 
-        // Did the search CONFIRM the pose it was handed? The same χ² merge test the search uses to decide two
-        // polished seeds are one mode, against the committed mode's covariance.
+        // Did the search CONFIRM the pose it was handed? It did when the incumbent belongs to the top mode's BASIN:
+        //   (1) polishing the incumbent reaches the top mode — same local optimum, by the χ² merge the search uses
+        //       for two seeds, under the pair's combined covariance; and
+        //   (2) that polish never left the incumbent's own basin. A basin of ℓ is as wide as the likelihood's noise
+        //       scale: σ_sdf in translation, and in rotation σ_sdf / (median range of the scan) — the turn that
+        //       moves the scan's typical point by σ_sdf. No new constant: both come from the model and the data.
+        // Both halves are needed, each measured in reloc_selftest when it was missing:
+        //   • without (1), comparing the raw incumbent against the top mode's single-scan Σ (1–2 cm) read a same-
+        //     place re-find a few cm off the window's estimate as a MOVE — 4 no-op relocalisations in one run of H,
+        //     each clearing the window and releasing the publisher's clamp;
+        //   • without (2), a stale pose METRES away polished all the way into the top mode and "confirmed" it —
+        //     F kidnaps left uncorrected (rect 15 → 13 of 15).
         {
-            Eigen::Vector3f d = top.pose - incumbent;
-            d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
-            const float chi2 = d.dot(top.cov.ldlt().solve(d));
-            last_search_confirmed_incumbent_ = std::isfinite(chi2) and chi2 < rp.chi2_merge;
+            const auto inc_pol = rc::reloc::polish(poly, pts2, incumbent, rp, reloc_raster_.extent());
+            auto chi2_of = [](Eigen::Vector3f d, const Eigen::Matrix3f& S)
+            {
+                d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+                const float c = d.dot(S.ldlt().solve(d));
+                return std::isfinite(c) ? c : std::numeric_limits<float>::infinity();
+            };
+            const bool same_optimum = inc_pol.pose.allFinite()
+                and chi2_of(top.pose - inc_pol.pose, top.cov + inc_pol.cov) < rp.chi2_merge;
+
+            std::vector<float> ranges;
+            ranges.reserve(pts2.size());
+            for (const auto& q : pts2) ranges.push_back(q.norm());
+            float r_med = 1.f;
+            if (not ranges.empty())
+            {
+                const auto mid = ranges.begin() + static_cast<std::ptrdiff_t>(ranges.size() / 2);
+                std::ranges::nth_element(ranges, mid);
+                r_med = std::max(*mid, rp.sigma_sdf);
+            }
+            Eigen::Matrix3f basin = Eigen::Matrix3f::Zero();
+            basin(0, 0) = basin(1, 1) = rp.sigma_sdf * rp.sigma_sdf;
+            basin(2, 2) = (rp.sigma_sdf / r_med) * (rp.sigma_sdf / r_med);
+            Eigen::Matrix3f S_travel = basin + inc_pol.cov;
+            if (current_covariance.allFinite()) S_travel += current_covariance;
+            const bool stayed_in_basin = inc_pol.pose.allFinite()
+                and chi2_of(inc_pol.pose - incumbent, S_travel) < rp.chi2_merge;
+
+            last_search_confirmed_incumbent_ = same_optimum and stayed_in_basin;
         }
 
         // MOVE ONLY IF THE NEW MODE EXPLAINS THE SCAN THE WAY TRACKING DOES. A search always finds SOME pose:
@@ -1523,15 +1542,10 @@ namespace rc
         }
         ep.cov_xx = cov(0, 0); ep.cov_yy = cov(1, 1); ep.cov_tt = cov(2, 2);
 
-        model_->robot_pos = torch::tensor({top.pose.x(), top.pose.y()},
-            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
-        model_->robot_theta = torch::tensor({top.pose.z()},
-            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
-        smoothed_pose_            = top.pose;
-        has_smoothed_pose_        = true;
-        needs_orientation_search_ = false;
-        tracking_step_count_      = 0;
-        current_covariance        = cov;
+        // A search that CONFIRMED the pose commits nothing: the window's estimate of that same basin, built over
+        // many scans, is better than one scan's polish, and writing the polish over it would be a needless jump.
+        if (last_search_moved_)
+            commit_relocalised_pose(top.pose, cov);
 
         // The other modes are CARRIED, not discarded: step_rival_modes scores them on every following scan.
         rivals_.clear();
@@ -1547,6 +1561,81 @@ namespace rc
                 .arg(top.pose.x(), 0, 'f', 2).arg(top.pose.y(), 0, 'f', 2).arg(top.pose.z() * 57.2958f, 0, 'f', 0)
                 .arg(top.weight, 0, 'f', 2).arg(rivals_.size()).arg(res.duration_ms, 0, 'f', 1);
         return true;
+    }
+
+    void RoomConcept::commit_relocalised_pose(const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov)
+    {
+        const auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true);
+        model_->robot_pos   = torch::tensor({pose.x(), pose.y()}, opts);
+        model_->robot_theta = torch::tensor({pose.z()}, opts);
+        model_->has_prediction  = false;
+        model_->robot_prev_pose = std::nullopt;
+        // ★ THE PREDICTION BASE. build_motion_prior_selection() predicts the next frame from
+        //   last_update_result.robot_pose, NOT from the model tensors. Writing only the tensors — what this commit
+        //   did until 2026-09-17 — let the very next frame re-predict from the OLD pose and silently undo the
+        //   relocalisation; live, 2277 consecutive "successful" searches each committed and were each discarded.
+        if (last_update_result.ok)
+        {
+            last_update_result.robot_pose.translation() = pose.head<2>();
+            last_update_result.robot_pose.linear() = Eigen::Rotation2Df(pose.z()).toRotationMatrix();
+            last_update_result.state[2] = pose.x();
+            last_update_result.state[3] = pose.y();
+            last_update_result.state[4] = pose.z();
+            last_update_result.covariance = cov;
+        }
+        smoothed_pose_            = pose;
+        has_smoothed_pose_        = true;
+        last_good_pose_           = pose;
+        last_good_pose_valid_     = true;
+        needs_orientation_search_ = false;
+        tracking_step_count_      = 0;
+        current_covariance        = cov;
+        // The window's slots and boundary prior belong to the abandoned trajectory; keeping them would pull the
+        // solve straight back to it.
+        window_mgr_.clear(); reset_stride_state();
+        reloc_epoch_.fetch_add(1, std::memory_order_relaxed);   // release the publisher's clamp for this jump
+    }
+
+    void RoomConcept::relocalisation_step(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points)
+    {
+        // ONE mechanism (see Params, "Relocalisation"; reloc_search.h). It replaces three that fought:
+        // the RecoveryManager (10 bad frames + 60-frame cooldown, reset by every symmetry flip), the
+        // map-trust relocaliser (never enabled) and the periodic symmetry check, which teleported a LOST
+        // robot to a mirror image on 74 of 80 checks (09-12) and on a door OPENING with the robot 1.6 m
+        // inside (09-16) — both judged a median, which cannot tell "wrong pose" from "unmodelled view".
+        //
+        // ARMED ONLY AGAINST A FIXED LAYOUT: map ready AND not SEARCHING (a given layout, or an estimated one
+        // that has been frozen). While SEARCHING, the walls are estimated FROM this pose's own trajectory, so:
+        //   • there is no independent map to be lost against — a misfit is as much the map's error as the pose's;
+        //   • the solver fixes the gauge by pinning the first window slot to the origin until a boundary prior
+        //     exists, so a relocalisation's window clear is not a jump but a reset of the map frame.
+        // Measured live 2026-09-17 (Webots Room2, estimate mode, FreezeLayoutWhenPublishable=false): the first
+        // search moved the pose 3.25 m to the symmetric twin, the gauge snapped it to exactly (0,0,0) in a map
+        // built in the old frame, the search re-fired every frame for 4 s, and the wall map collapsed 4 → 2.
+        // With the freeze ON, Searching and map-ready never overlap, which is why those runs were clean.
+        //
+        // map_ready also keeps the older contract: entering SEARCHING for a proto-room clears it, which is how the
+        // agent LEAVES relocalisation, and after the room is retired nothing here may write the robot→room pose
+        // again (mark_room_rt_not_current's ring must stay the edge's last write).
+        if (params.reloc_enabled and map_guided_checks_allowed() and not searching())
+        {
+            // Rivals first: they are scored on THIS scan against the pose update() just committed.
+            step_rival_modes(lidar_points);
+
+            // s is the worse of the post-fit residual and the prediction error — kept from the old trigger for the
+            // reason recorded there: Adam re-solving a chronically wrong prediction every frame makes the post-fit
+            // number alone look healthy. Both are MEDIAN |SDF| in metres.
+            const float s = std::max(res.sdf_mse, res.pred_sdf_median);
+            const float p_lost = update_lost_belief(s, outside_prob());
+            if (p_lost >= 0.5f)   // ⚠ the equal-cost Bayes decision, flagged
+                relocalise_from_belief(lidar_points, s, p_lost);
+        }
+        else
+        {
+            if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
+            rival_ref_valid_ = false;
+            reset_lost_belief();
+        }
     }
 
     void RoomConcept::publish_rival_snapshot()
@@ -1656,10 +1745,7 @@ namespace rc
         const bool ran = grid_search_initial_pose(lidar_points, 0.5f, static_cast<float>(M_PI_4));
         pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();
         if (ran and last_search_moved_)
-        {
-            window_mgr_.clear(); reset_stride_state();
             reset_lost_belief();
-        }
         else if (ran and last_search_confirmed_incumbent_ and log_tracking_emission(s) > log_broad_emission(s))
             reset_lost_belief();          // the pose was fine and so is its fit: a false alarm
         else
@@ -1756,15 +1842,8 @@ namespace rc
         for (auto& rv : rivals_) rv.llr -= llr;          // ratios are now against the new pose
         rivals_.push_back({cur, -llr});                  // the old pose becomes a rival, needing the same margin back
 
-        model_->robot_pos = torch::tensor({new_pose.x(), new_pose.y()},
-            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
-        model_->robot_theta = torch::tensor({new_pose.z()},
-            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
-        smoothed_pose_       = new_pose;
-        has_smoothed_pose_   = true;
-        tracking_step_count_ = 0;
-        rival_ref_pose_      = new_pose;
-        window_mgr_.clear(); reset_stride_state();
+        commit_relocalised_pose(new_pose, current_covariance);
+        rival_ref_pose_ = new_pose;
         reset_lost_belief();
         publish_rival_snapshot();
     }

@@ -282,6 +282,7 @@ public:
         float reloc_lost_s_min         = 0.01f;  // m — support of the lost emission (log-uniform)
         float reloc_lost_s_max         = 5.0f;   // m
         bool  reloc_legacy_grid_search = false;  // A/B: true = the pre-09-16 4-stage lattice for the commit
+        bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (lost, mode_switch, seed_validation)
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 
         // ===== Optimizer Selection =====
@@ -711,6 +712,11 @@ public:
     struct UpdateResult
     {
         bool ok = false;
+        /// Relocalisation epoch this result belongs to. It advances each time relocalisation COMMITS a
+        /// discrete pose jump (a search that moved the pose, a rival-mode switch). The pose publisher lets
+        /// the first result of a new epoch through its kinematic clamp, so the jump lands in one frame
+        /// instead of being slewed at the robot's speed limit, and clamps again from the next frame on.
+        std::uint64_t reloc_epoch = 0;
         // Set when the SDF optimization produced a non-finite pose and this result is a dead-reckoned
         // FALLBACK, not a fix. Consumers must treat it as such (its covariance is inflated to match).
         bool diverged = false;
@@ -1601,6 +1607,14 @@ private:
    /// Fire the search from the lost belief and fold its outcome back into the belief.
    void  relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost);
    bool  last_search_moved_ = false;
+   /// Commit a relocalised pose as a DISCRETE JUMP: model tensors, the prediction base (last_update_result —
+   /// the next frame predicts from it, not from the tensors), smoothing, last-good pose, window and stride
+   /// state, and the publisher's clamp-release epoch. Every relocalisation that moves the pose goes through here.
+   void  commit_relocalised_pose(const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov);
+   /// Section 8 of the localisation loop, one frame: rival modes, the lost belief, and the search it fires.
+   /// A method (not inline in run()) so tools/reloc_selftest can drive it through the real update().
+   void  relocalisation_step(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points);
+   std::atomic<std::uint64_t> reloc_epoch_{0};   // see UpdateResult::reloc_epoch
    /// A carried rival mode: its pose and its log-likelihood ratio against the committed pose.
    struct RivalMode { Eigen::Vector3f pose; float llr = 0.f; };
    std::vector<RivalMode> rivals_;
