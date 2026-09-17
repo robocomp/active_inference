@@ -242,8 +242,12 @@ std::string YoloProcessor::normalize_yolo_label(const std::string& label) const
     std::string normalized = label;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (normalized == "dining table")
+    // "coffee table" / "range hood" are names in the open-vocabulary household export
+    // (tools/export_yoloe_household.py); consumers key on "table" and "hood".
+    if (normalized == "dining table" or normalized == "coffee table")
         return "table";
+    if (normalized == "range hood")
+        return "hood";
     if (normalized == "tv")
         return "monitor";
     return normalized;
@@ -370,16 +374,27 @@ cv::Mat YoloProcessor::compose_detection_canvas(const cv::Mat& rgb_frame,
 
         if (!detection.mask.empty())
         {
-            cv::Mat color_layer(canvas.size(), CV_8UC3, color);
+            // ★Blend inside the bbox, not over the whole frame. A mask is frame-sized but zero outside
+            // its bbox, and the full-frame version cost O(frame) PER DETECTION (a colour layer, a
+            // threshold, a blend, a contour trace): on the ricoh panorama with the echo cache redrawing
+            // every strip's detections it took the render tick to 142 ms (7 Hz) and starved compute(),
+            // which shares the Qt thread. The full frame is still used when the bbox leaves the canvas —
+            // a 360 detection wrapping the seam has mask pixels outside its (unwrapped) bbox.
+            const cv::Rect frame_rect(0, 0, canvas.cols, canvas.rows);
+            const bool roi_ok = detection.mask.size() == canvas.size()
+                and (detection.bbox & frame_rect) == detection.bbox and detection.bbox.area() > 0;
+            const cv::Rect roi = roi_ok ? detection.bbox : frame_rect;
+            cv::Mat canvas_roi = canvas(roi);
+
             cv::Mat mask_bin;
-            cv::threshold(detection.mask, mask_bin, 127, 255, cv::THRESH_BINARY);
+            cv::threshold(detection.mask(roi), mask_bin, 127, 255, cv::THRESH_BINARY);
             cv::Mat blended;
-            cv::addWeighted(canvas, 0.55, color_layer, 0.45, 0.0, blended);
-            blended.copyTo(canvas, mask_bin);
+            cv::addWeighted(canvas_roi, 0.55, cv::Mat(canvas_roi.size(), CV_8UC3, color), 0.45, 0.0, blended);
+            blended.copyTo(canvas_roi, mask_bin);
 
             std::vector<std::vector<cv::Point>> contours;
             cv::findContours(mask_bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-            cv::drawContours(canvas, contours, -1, color, 1, cv::LINE_AA);
+            cv::drawContours(canvas_roi, contours, -1, color, 1, cv::LINE_AA);
         }
 
         cv::rectangle(canvas, detection.bbox, color, 2);

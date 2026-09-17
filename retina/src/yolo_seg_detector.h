@@ -10,6 +10,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct SegDetection
@@ -127,4 +128,7 @@ private:
                                       int pad_top) const;
     [[nodiscard]] static float iou(const cv::Rect2f& a, const cv::Rect2f& b) noexcept;
     [[nodiscard]] static std::vector<std::string> default_class_names();
+public:
+    // Parses Ultralytics' ONNX `names` metadata ("{0: 'person', 1: 'bicycle'}"); empty on malformed input.
+    [[nodiscard]] static std::vector<std::string> parse_names_metadata(std::string_view text);
 };

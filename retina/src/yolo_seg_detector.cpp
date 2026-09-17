@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <print>
 #include <span>
 #include <stdexcept>
+#include <system_error>
 
 YoloSegDetector::YoloSegDetector(const std::string& model_path,
                                  const std::vector<std::string>& class_names,
@@ -22,8 +24,6 @@ YoloSegDetector::YoloSegDetector(const std::string& model_path,
     , iou_thresh_(iou_thresh)
     , input_size_(input_size)
 {
-    class_names_ = class_names.empty() ? default_class_names() : class_names;
-
     try
     {
         env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "YoloSegDetector");
@@ -57,8 +57,28 @@ YoloSegDetector::YoloSegDetector(const std::string& model_path,
             output_names_cstr_.push_back(output_names_.back());
         }
 
+        // Class table: explicit argument > the model's own `names` metadata > COCO-80. The metadata is
+        // what makes an open-vocabulary export (tools/export_yoloe_household.py) usable at all: its
+        // class ids index a vocabulary chosen at export time, so a hardcoded table would mislabel every mask.
+        std::string names_source = "argument";
+        class_names_ = class_names;
+        if (class_names_.empty())
+        {
+            const Ort::ModelMetadata meta = session_->GetModelMetadata();
+            const auto names_meta = meta.LookupCustomMetadataMapAllocated("names", allocator);
+            if (names_meta)
+                class_names_ = parse_names_metadata(names_meta.get());
+            names_source = "model metadata";
+        }
+        if (class_names_.empty())
+        {
+            class_names_ = default_class_names();
+            names_source = "COCO default (model has no names metadata)";
+        }
+
         std::cout << "[YoloSegDetector] Loaded: " << model_path
-                  << "  inputs=" << n_in << "  outputs=" << n_out << '\n';
+                  << "  inputs=" << n_in << "  outputs=" << n_out
+                  << "  classes=" << class_names_.size() << " from " << names_source << '\n';
     }
     catch (const Ort::Exception& e)
     {
@@ -443,6 +463,39 @@ std::vector<SegDetection> YoloSegDetector::detect(const cv::Mat& image, bool is_
     }
 
     return results;
+}
+
+std::vector<std::string> YoloSegDetector::parse_names_metadata(std::string_view text)
+{
+    // Ultralytics writes a Python dict literal: {0: 'person', 1: 'dining table', ...}. A name holding an
+    // apostrophe is emitted with double quotes, so the closing quote is whichever one opened the name.
+    // Ids are parsed with std::from_chars (locale-independent; see CLAUDE.md on es_ES).
+    std::vector<std::string> names;
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        const std::size_t digit = text.find_first_of("0123456789", pos);
+        if (digit == std::string_view::npos)
+            break;
+        std::size_t id = 0;
+        const auto [id_end, ec] = std::from_chars(text.data() + digit, text.data() + text.size(), id);
+        if (ec != std::errc{})
+            return {};
+        const std::size_t open = text.find_first_of("'\"", static_cast<std::size_t>(id_end - text.data()));
+        if (open == std::string_view::npos)
+            return {};
+        const std::size_t close = text.find(text[open], open + 1);
+        if (close == std::string_view::npos)
+            return {};
+        if (id >= names.size())
+            names.resize(id + 1);
+        names[id] = std::string(text.substr(open + 1, close - open - 1));
+        pos = close + 1;
+    }
+    // A gap (an id never named) would silently label masks "" — refuse the table instead.
+    if (std::ranges::any_of(names, [](const std::string& n) { return n.empty(); }))
+        return {};
+    return names;
 }
 
 std::vector<std::string> YoloSegDetector::default_class_names()

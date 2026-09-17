@@ -73,7 +73,11 @@ Verbose = false
 # (see README "TensorRT version lock"). Set false to run on the CUDA EP only — version-independent,
 # same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
 use_trt =true
-model_path = "models/yolo26/yolo26x-seg.onnx"    # L (was yolo26x-seg): lighter seg to lift compute toward the 24 Hz RGB feed
+# YOLOE-26x open-vocabulary seg with a HOUSEHOLD vocabulary frozen in at export (tools/export_yoloe_household.py;
+# class names come from the ONNX metadata). Same output layout as yolo26x-seg. Rollback: "models/yolo26/yolo26x-seg.onnx".
+# accepted_labels below is deliberately UNCHANGED: door/cabinet/hood are in the vocabulary but already arrive as
+# ADE20K semantic masks — whitelisting them here too would hand those agents two masks per object per frame.
+model_path = "models/yolo26/yoloe-26x-seg-household.onnx"
 conf_thresh = 0.25          # min class confidence to ACCEPT a seg detection/mask (argmax score floor); raise to reject weak masks
 iou_thresh  = 0.45          # NMS IoU: dedupe overlapping same-class boxes above this
 second_best_margin = 0.0    # if top class is NOT in accepted_labels but the runner-up IS and within this margin, adopt the runner-up (0 = off; try 0.10 to recover near-tie furniture)

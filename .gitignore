@@ -28,6 +28,8 @@ __pycache__/
 *.onnx
 *.pt
 *.engine
+# YOLOE export scratch: .pt + CLIP text encoder (retina/tools/export_yoloe_household.py)
+retina/models/yolo26/_yoloe_work/
 
 # Run artifacts + scratch edits/backups
 # Per-component run logs (chair's ai2_log.csv, ring_metaconcept's ring_fit.csv, …).
