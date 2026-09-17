@@ -1527,6 +1527,8 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     // Always update robot state so mark_and_refresh uses the correct position.
     epistemic_->set_robot_state(res.robot_pose, res.covariance);
+    if (room_concept_ != nullptr)
+        planner.set_pose_hypotheses(room_concept_->pose_hypotheses());
 
     // Mirror the exploration DRIVE into the localiser CSV every cycle, whether or not anything
     // completed. The drive is a continuous quantity (the scoring prior's precision decaying as

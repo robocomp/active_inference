@@ -435,27 +435,6 @@ PoseClampVMax          = 0.7    # m/s
 PoseClampWMax          = 0.8    # rad/s
 PoseClampMaxDt         = 0.5    # s; longer gap => skip the clamp (stream restart / long silence)
 
-# ── 180° symmetry-flip guard (harden against spurious flips) ───────────────────
-# The optimizer periodically tests whether rotating the robot 180° fits the room
-# better. Evidence accumulates leakily and must cross a confidence-scaled threshold
-# before the pose is actually flipped. Raising the base threshold makes a flip
-# require MORE sustained contrary evidence → harder to flip on a momentary
-# tight-turn degeneracy. (Header default 0.02; doubled here.)
-SymmetryFlipEvidenceThresh = 0.04
-# SDF mse below which a frame counts as a "good fit" and builds the flip-inertia streak (which grows
-# the flip threshold). Header default 0.02 was UNREACHABLE here — this room fits chronically at ~0.32 m
-# mean SDF (mse ≈ 0.10), so the streak stayed 0 and a minutes-stable pose had ZERO flip protection and
-# flipped on a transient 0.184 evidence spike. Raised to 0.12 (> chronic mse) so a STABLE pose builds
-# the streak → the threshold climbs toward ~0.44 → transient near-symmetric flips are rejected.
-# Companion knobs (header defaults shown) — raise the first two / lower the leak to
-# harden further:
-#   SymmetryFlipMinImprovement = 0.005  # per-check loss advantage to count as evidence
-#   SymmetryEvidenceLeak       = 0.6    # per-check retention (<1 → blips decay; lower = harder)
-#   SymmetryConfidenceGain     = 0.05   # extra threshold per established frame
-# One row per symmetry check (loss/evidence/threshold/streak + which candidate would win),
-# written to tmp/sdf_localizer/symmetry_check_<ts>.csv — use this to catch a flip in the act.
-SymmetryDebugCsv = true
-
 # ── Selección de optimizador ──────────────────────────────────────────────────
 # "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
 # "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)
@@ -563,22 +542,23 @@ EigenvalueClampBoundaryMax      = 500.0  # techo autovalores precisión (evita o
 # to shed cores; watch t_adam_ms in optimizer_timing.csv. Try 1 vs 2.
 BoundaryQualitySigma  = 0.10   # m — σ_q for the continuous obs-quality weight w=1/(1+(sdf/σ_q)²)
 
-# ── Recovery ──────────────────────────────────────────────────────────────────
-# UNITS CHANGED 2026-07-29. sdf_mse is MEDIAN |SDF| IN METRES (it is not a mean and not squared);
-# the recovery trigger used to sqrt() it, i.e. the square root of a length. This threshold is now
-# compared to it DIRECTLY, in metres. 0.45-under-sqrt == 0.2025 m, so 0.20 here reproduces exactly
-# the behaviour that 0.45 gave before -- this is NOT a retune.
-# DO NOT 'restore' 0.45, and do not read the old note below as an argument against 0.20: the 0.2
-# that once fired on normal turns was 0.2 in the old sqrt units, i.e. 0.04 m -- 5x tighter than this.
-RecoveryLossThreshold    = 0.20  # median|sdf| > this (m) => bad frame. Also DERIVES the grid-search
-                                 # success bar (GridSearchGoodFactor x this), so a search that claims
-                                 # success cannot leave a pose recovery instantly calls lost again.
-GridSearchGoodFactor     = 0.5   # search must halve the 'lost' error before reporting success
-RecoveryConsecutiveCount = 10    # Frames malos consecutivos para recovery.
-                                  # Anterior 3 reseteaba la ventana cada ~30 f.
-RecoveryCooldownFrames   = 60    # Frames sin detection tras recovery (default 30).
-                                  # 60 garantiza que W llega a 10 antes de que
-                                  # el detector vuelva a estar activo.
+# ── Relocalisation (2026-09-16) ────────────────────────────────────────────────
+# ONE mechanism replaces RecoveryLossThreshold/RecoveryConsecutiveCount/RecoveryCooldownFrames,
+# GridSearch*, the Symmetry* flip check and HierPrecReloc*: three relocalisers that fought. The
+# symmetry check teleported a LOST robot to a mirror image on 74 of 80 checks (09-12) and fired on a
+# door OPENING with the robot 1.6 m inside (09-16), resetting the recovery counter each time.
+# Now: a mixture search (src/reloc_search.h — robust likelihood, yaws from wall structure, ~15-20 ms)
+# fired by a lost/tracking HMM belief, and the rival modes it finds are CARRIED and only take over
+# after out-explaining the pose by Wald's SPRT bound log((1-a)/a), a = RelocHazard.
+# Offline A/B on 300 injected kidnappings (tools/reloc_selftest): right basin 300/300 vs 235/300.
+# Every episode is logged to tmp/sdf_localizer/recovery_<ts>.csv (always on).
+RelocOutlierFrac       = 0.30   # clutter / through-door fraction of wall-band points ⚠ modelling constant
+RelocWallOffsetSigma   = 0.03   # m — per-wall common-mode error marginalised out of each mode's covariance
+RelocBodyClearance     = 0.30   # m — robot body radius: no pose hypothesis closer to a wall
+RelocHazard            = 0.001  # per-frame P(kidnap / silent loss): HMM transition AND the SPRT error rate
+RelocTrackSMedian      = 0.034  # m — prior median |SDF| while tracking (measured p50, optimizer_timing 09-16)
+RelocTrackLogSigma     = 0.30   # prior spread of ln s while tracking (p99/p50 = 0.069/0.034); learnt online
+RelocLegacyGridSearch  = false  # A/B: true = the pre-09-16 4-stage lattice commits the pose instead
 
 # ── Pesos de gradiente adaptativos por velocidad ──────────────────────────────
 VelocityAdaptiveWeights  = false # OFF con LBFGS: escalar grad post-backward corrompe
@@ -1076,7 +1056,6 @@ TorchNumThreads         = 1   # intra-op CPU threads for the Torch forward pass.
                               #   108 ms of a 131 ms optimised frame, so the Torch path now runs a
                               #   forward pass on optimised frames only. Two intra-op threads were
                               #   sized for work that no longer happens.
-SymmetryGoodFitMse      = 0.101
 
 
 # ── 2026-08-29: the last drift pairs, merged ───────────────────────────────────────────────────
@@ -1319,6 +1298,8 @@ TargetObstacleClearance = 0.55  # same clearance, from object/obstacle footprint
                             # footprint radius (0.32 m) — 0.19 m under the controller's requirement, so
                             # room routinely proposed targets the controller refused to settle at.
 AngularDominanceRatio = 50.0 # σ²_θ / max(σ²_x, σ²_y) threshold to trigger rotate-in-place
+ModeDisambiguation    = false # 2026-09-16: drive where the localiser's rival pose modes predict DIFFERENT scans.
+                              # OFF until run live — it changes where the robot goes. Offline check: reloc_selftest G.
 WTravelCost        = 0.5    # NATS per unit (distance / room_diagonal), SUBTRACTED from the score.
                             # Travel distance is a COST in expected free energy, not a reward — the
                             # controller already scores affordances as (gain - lambda*dist) and this

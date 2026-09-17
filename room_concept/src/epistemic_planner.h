@@ -1,5 +1,6 @@
 #pragma once
 
+#include "reloc_search.h"
 #include <vector>
 #include <optional>
 #include <chrono>
@@ -44,6 +45,15 @@ public:
         float target_obstacle_clearance = 0.55f;  // ... and to object/obstacle footprints (m)
 
         float angular_dominance_ratio = 50.0f; // σ²_θ / max(σ²_x, σ²_y) threshold
+        // MODE DISAMBIGUATION (2026-09-16). When the localiser carries rival pose modes (reloc_search.h), go
+        // where they PREDICT DIFFERENT SCANS: J(v) = Σ_k w_c·w_k·D_k(v), D_k the expected log-likelihood ratio
+        // of a 64-ray scan taken at v under the committed pose vs rival k, each ray capped at the outlier
+        // model's log(1/ε) so one ray cannot dominate. Scored as MARGINAL over staying put and net of travel.
+        // A truly symmetric room gives J ≡ 0 everywhere and the planner falls through, correctly not moving.
+        // ⚠ Default OFF: it changes where the robot drives and has only been checked offline.
+        bool  mode_disambiguation = false;
+        float mode_scan_sigma     = 0.15f;   // m — range noise of a predicted ray (= RoomConcept SigmaSdf)
+        float mode_outlier_frac   = 0.30f;   // ε of the per-ray cap (= RoomConcept RelocOutlierFrac)
         // TRAVEL COST, subtracted in the same nats currency as the information terms:
         //   score −= w_travel_cost · (distance / room_diagonal)
         // Distance is a COST in expected free energy, never a reward — the consuming controller
@@ -170,6 +180,10 @@ public:
     /// Replace the list of occupied object/obstacle footprints used to exclude
     /// candidate targets.  Typically refreshed every compute cycle from the DSR graph.
     void set_obstacle_footprints(std::vector<ObstacleFootprint> footprints);
+    /// Rival pose modes carried by the localiser (empty = unambiguous). Committed pose = set_robot_state's.
+    void set_pose_hypotheses(std::vector<rc::reloc::PoseHypothesis> hypotheses) { hypotheses_ = std::move(hypotheses); }
+    /// Expected information (nats) a scan at `viewpoint` gives about WHICH mode is right — see Params.
+    float mode_disambiguation_nats(const Eigen::Vector2f& viewpoint) const;
 
 
     // ---- Target selection (public API) ----
@@ -363,6 +377,7 @@ private:
     mutable bool grid_dirty_ = true;
     mutable bool mask_dirty_ = true;   // observability mask needs a rebuild (bounds/polygon changed)
 
+    std::vector<rc::reloc::PoseHypothesis> hypotheses_;
     Eigen::Affine2f robot_pose_ = Eigen::Affine2f::Identity();
     Eigen::Matrix3f robot_cov_ = Eigen::Matrix3f::Identity();
     bool robot_state_set_ = false;

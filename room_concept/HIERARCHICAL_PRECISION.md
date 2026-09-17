@@ -202,6 +202,11 @@ RoomConcept.HierPrecSigmaV2         = 1.0      # prior scale on the map_trust st
 
 ## 6. Downstream use — FE-native relocalization on map-trust collapse
 
+> **REMOVED 2026-09-16.** This trigger (never enabled live), the `RecoveryManager` and the periodic symmetry
+> check were replaced by ONE relocaliser: a mixture search (`src/reloc_search.h`) fired by a three-state
+> tracking/lost/mismatch belief, with rival modes carried and switched by SPRT. The config keys below no
+> longer exist. See `RoomConcept::Params` "Relocalisation" and `tools/reloc_selftest.cpp`. Kept as history.
+
 The `map_trust` belief earns its keep by *driving an action*: when `exp(u_b_)` collapses below a floor
 for a few frames, the map no longer explains the robot, so we run the **existing** 3-stage hierarchical
 `grid_search_initial_pose` (the same action `RecoveryManager` takes) — but triggered by the inferred

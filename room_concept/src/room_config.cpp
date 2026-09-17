@@ -25,11 +25,21 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_required<int>(cl, "RoomConcept.WindowSize", room_concept.params.rfe_window_size);
     rc::ConfigLoaderUtils::load_required<int>(cl, "RoomConcept.MaxLidarPoints", room_concept.params.max_lidar_points);
     rc::ConfigLoaderUtils::load_required<int>(cl, "RoomConcept.MaxLidarOldSlot", room_concept.params.rfe_max_lidar_per_old_slot);
-    rc::ConfigLoaderUtils::load_required<float, double>(cl, "RoomConcept.RecoveryLossThreshold", room_concept.params.recovery_loss_threshold);
-    rc::ConfigLoaderUtils::load_required<int>(cl, "RoomConcept.RecoveryConsecutiveCount", room_concept.params.recovery_consecutive_count);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GridSearchGoodFactor", room_concept.params.grid_search_good_factor);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GridSearchWallMargin", room_concept.params.grid_search_wall_margin);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.GridSearchMaxSamples", room_concept.params.grid_search_max_samples);
+    // Relocalisation (reloc_search.h; RoomConcept::Params "Relocalisation"). Replaced 2026-09-16:
+    // RecoveryLossThreshold, RecoveryConsecutiveCount, RecoveryCooldownFrames, GridSearch*, Symmetry*,
+    // HierPrecReloc* and HierPrecEeDthetaMin no longer exist — a leftover key is ignored, so delete it.
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocOutlierFrac", room_concept.params.reloc_outlier_frac);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocWallOffsetSigma", room_concept.params.reloc_wall_offset_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocBodyClearance", room_concept.params.reloc_body_clearance);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RelocMaxPoints", room_concept.params.reloc_max_points);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RelocMaxModes", room_concept.params.reloc_max_modes);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocHazard", room_concept.params.reloc_hazard);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocTrackSMedian", room_concept.params.reloc_track_s_median);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocTrackLogSigma", room_concept.params.reloc_track_log_sigma);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RelocTrackMemoryFrames", room_concept.params.reloc_track_memory_frames);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocLostSMin", room_concept.params.reloc_lost_s_min);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RelocLostSMax", room_concept.params.reloc_lost_s_max);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RelocLegacyGridSearch", room_concept.params.reloc_legacy_grid_search);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomSampleLog", p.ODOM_SAMPLE_LOG);
@@ -221,26 +231,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecGGain", room_concept.params.hier_prec_g_gain);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecLrV", room_concept.params.hier_prec_lr_v);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecSigmaV2", room_concept.params.hier_prec_sigma_v2);
-
-    // FE-native relocalization on map-trust collapse (HIERARCHICAL_PRECISION.md) — default OFF.
-    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.HierPrecRelocEnabled", room_concept.params.hier_prec_reloc_enabled);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecRelocFloor", room_concept.params.hier_prec_reloc_floor);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.HierPrecRelocConsecutive", room_concept.params.hier_prec_reloc_consecutive);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.HierPrecRelocCooldownFrames", room_concept.params.hier_prec_reloc_cooldown_frames);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecEeDthetaMin", room_concept.params.hier_prec_ee_dtheta_min);
-
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RecoveryCooldownFrames", room_concept.params.recovery_cooldown_frames);
-
-    // 180° symmetry-flip robustness (leaky evidence + confidence-scaled threshold).
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryCheckInterval", room_concept.params.symmetry_check_interval);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryFlipMinImprovement", room_concept.params.symmetry_flip_min_improvement);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryEvidenceLeak", room_concept.params.symmetry_evidence_leak);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryFlipEvidenceThresh", room_concept.params.symmetry_flip_evidence_thresh);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryConfidenceGain", room_concept.params.symmetry_confidence_gain);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryConfidenceCap", room_concept.params.symmetry_confidence_cap);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryGoodFitMse", room_concept.params.symmetry_good_fit_mse);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryConfidenceDecay", room_concept.params.symmetry_confidence_decay);
-    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SymmetryDebugCsv", room_concept.params.symmetry_debug_csv);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.VelocityAdaptiveWeights", room_concept.params.velocity_adaptive_weights);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.LinearVelocityThreshold", room_concept.params.linear_velocity_threshold);
@@ -515,12 +505,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             b("CalibPivotEnabled",          ov.calib_pivot_enabled);
             b("OdomSampleLog",              ov.odom_sample_log);
             // Drift keys — see PlatformOverlay in the header for why they are here.
-            f("RecoveryLossThreshold",             ov.recovery_loss_threshold);
             f("PredictionTrustFactor",             ov.prediction_trust_factor);
             f("RotationSdfCoupling",               ov.rotation_sdf_coupling);
             f("BoundaryHessianQualityThreshold",   ov.boundary_hessian_quality_threshold);
             f("BoundaryMuQualityThreshold",        ov.boundary_mu_quality_threshold);
-            f("SymmetryGoodFitMse",                ov.symmetry_good_fit_mse);
             f("GnLossRelTol",                      ov.gn_loss_rel_tol);
             i("GnMaxIters",                        ov.gn_max_iters);
             i("TorchNumThreads",                   ov.torch_num_threads);
@@ -692,6 +680,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.TargetWallMargin", ep.target_wall_margin);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.TargetObstacleClearance", ep.target_obstacle_clearance);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.AngularDominanceRatio", ep.angular_dominance_ratio);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.ModeDisambiguation", ep.mode_disambiguation);
     // WExploration (a far-is-better distance BONUS) is gone — the sign was wrong and produced a
     // corner-to-corner oscillation. Travel distance is a cost; see Params::w_travel_cost.
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WTravelCost", ep.w_travel_cost);
@@ -771,12 +760,10 @@ std::vector<std::string> RoomConfig::apply_platform_to(const std::string& robot,
     set(ov.sdf_safe,                epistemic.params.sdf_safe,            "SdfSafe");
     set(ov.sdf_danger,              epistemic.params.sdf_danger,          "SdfDanger");
     // Drift keys — same mechanism, different reason. See PlatformOverlay in the header.
-    set(ov.recovery_loss_threshold,         rp.recovery_loss_threshold,               "RecoveryLossThreshold");
     set(ov.prediction_trust_factor,         rp.prediction_trust_factor,               "PredictionTrustFactor");
     set(ov.rotation_sdf_coupling,           rp.rotation_sdf_coupling,                 "RotationSdfCoupling");
     set(ov.boundary_hessian_quality_threshold, rp.boundary_hessian_quality_threshold,    "BoundaryHessianQualityThreshold");
     set(ov.boundary_mu_quality_threshold,   rp.boundary_mu_quality_threshold,         "BoundaryMuQualityThreshold");
-    set(ov.symmetry_good_fit_mse,           rp.symmetry_good_fit_mse,                 "SymmetryGoodFitMse");
     set(ov.gn_loss_rel_tol,                 rp.gn_loss_rel_tol,                       "GnLossRelTol");
     set(ov.gn_max_iters,                    rp.gn_max_iters,                          "GnMaxIters");
     set(ov.torch_num_threads,               rp.torch_num_threads,                     "TorchNumThreads");

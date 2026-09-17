@@ -204,6 +204,67 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
 }
 
 // ===========================================================================
+// Mode disambiguation
+// ===========================================================================
+namespace
+{
+    /// Range to the polygon boundary along a ray from `o` (inside) with world direction `a`. Max range if none.
+    float ray_to_polygon(const std::vector<Eigen::Vector2f>& poly, const Eigen::Vector2f& o, float a, float max_r)
+    {
+        const Eigen::Vector2f dir(std::cos(a), std::sin(a));
+        float best = max_r;
+        for (std::size_t k = 0; k < poly.size(); ++k)
+        {
+            const Eigen::Vector2f e = poly[(k + 1) % poly.size()] - poly[k];
+            const float den = dir.x() * e.y() - dir.y() * e.x();
+            if (std::abs(den) < 1e-9f) continue;
+            const Eigen::Vector2f w = poly[k] - o;
+            const float s = (w.x() * e.y() - w.y() * e.x()) / den;
+            const float t = (w.x() * dir.y() - w.y() * dir.x()) / den;
+            if (s > 1e-4f and t >= 0.f and t <= 1.f) best = std::min(best, s);
+        }
+        return best;
+    }
+}
+
+float EpistemicPlanner::mode_disambiguation_nats(const Eigen::Vector2f& viewpoint) const
+{
+    if (hypotheses_.empty() or room_corners_.size() < 3) return 0.f;
+    const Eigen::Vector2f tc = robot_pose_.translation();
+    const Eigen::Matrix2f Rc = robot_pose_.linear();
+    const float thc = std::atan2(Rc(1, 0), Rc(0, 0));
+    // The SAME commanded displacement, expressed in the robot frame, lands each hypothesis somewhere else.
+    const Eigen::Vector2f d_robot = Rc.transpose() * (viewpoint - tc);
+    const float max_r = (room_max_ - room_min_).norm() + 1.f;
+    const float cap = std::log(1.f / std::max(params.mode_outlier_frac, 1e-3f));
+    const float inv_2s2 = 1.f / (2.f * params.mode_scan_sigma * params.mode_scan_sigma);
+    constexpr int kRays = 64;
+
+    // weights: committed has llr 0; rival k has its own llr
+    double z = 1.0;
+    for (const auto& h : hypotheses_) z += std::exp(static_cast<double>(h.llr));
+    const double w_c = 1.0 / z;
+
+    double J = 0.0;
+    for (const auto& h : hypotheses_)
+    {
+        const float ck = std::cos(h.pose.z()), sk = std::sin(h.pose.z());
+        const Eigen::Vector2f vk = h.pose.head<2>() + Eigen::Vector2f(ck * d_robot.x() - sk * d_robot.y(),
+                                                                       sk * d_robot.x() + ck * d_robot.y());
+        double D = 0.0;
+        for (int j = 0; j < kRays; ++j)
+        {
+            const float beta = -static_cast<float>(M_PI) + 2.f * static_cast<float>(M_PI) * j / kRays;
+            const float rc = ray_to_polygon(room_corners_, viewpoint, thc + beta, max_r);
+            const float rk = ray_to_polygon(room_corners_, vk, h.pose.z() + beta, max_r);
+            D += std::min(cap, (rc - rk) * (rc - rk) * inv_2s2);
+        }
+        J += w_c * (std::exp(static_cast<double>(h.llr)) / z) * D;
+    }
+    return static_cast<float>(J);
+}
+
+// ===========================================================================
 // Angular dominance check
 // ===========================================================================
 bool EpistemicPlanner::is_angular_dominated() const
@@ -346,6 +407,33 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
     // Dirty-flagged, so this is a no-op on all but the cycles where the room geometry changed.
     if (mask_dirty_)
         self.refresh_observable_mask();
+
+    // MODE DISAMBIGUATION before anything else: while the localiser is unsure WHICH pose it is in, every other
+    // score is computed in a frame that may be wrong. Marginal over staying put, net of travel; J ≡ 0 (a truly
+    // symmetric room, or modes the room cannot tell apart from anywhere) falls through to normal behaviour.
+    if (params.mode_disambiguation and not hypotheses_.empty())
+    {
+        const float here = mode_disambiguation_nats(robot_pos());
+        const float room_diag = std::max(1e-3f, (room_max_ - room_min_).norm());
+        std::optional<Target> best;
+        for (const auto& p : generate_candidates())
+        {
+            const float gain = mode_disambiguation_nats(p) - here;
+            if (gain <= 0.f) continue;
+            Target t;
+            t.position = p;
+            t.distance = (p - robot_pos()).norm();
+            t.eigenvector_score = gain;
+            t.score = gain - params.w_travel_cost * (t.distance / room_diag);
+            if (t.score > 0.f and (not best or t.score > best->score)) best = t;
+        }
+        if (best)
+        {
+            self.cell_scores_.clear();
+            self.ior_cells_.clear();
+            return {*best};
+        }
+    }
 
     if (is_angular_dominated())
     {

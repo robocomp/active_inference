@@ -90,12 +90,10 @@ struct RoomConfig
         // merge change no running behaviour and to make the divergence VISIBLE side by side —
         // not because anyone decided a robot needs its own value. Collapse them into the shared
         // section once each pair has been judged; every one removed is a real simplification.
-        std::optional<float> recovery_loss_threshold;
         std::optional<float> prediction_trust_factor;
         std::optional<float> rotation_sdf_coupling;
         std::optional<float> boundary_hessian_quality_threshold;
         std::optional<float> boundary_mu_quality_threshold;
-        std::optional<float> symmetry_good_fit_mse;
         std::optional<float> gn_loss_rel_tol;
         std::optional<int> gn_max_iters;
         std::optional<int> torch_num_threads;

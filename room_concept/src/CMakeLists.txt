@@ -89,6 +89,7 @@ LIST(APPEND SOURCES
   ../src/svg_room_loader.cpp
   ../src/room_concept.cpp
   ../src/room_gn_solver.cpp
+  ../src/reloc_search.cpp
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
@@ -144,6 +145,7 @@ add_executable(gn_selftest EXCLUDE_FROM_ALL
   ../src/room_gn_solver.cpp
   ../src/room_model.cpp
   ../src/room_concept.cpp
+  ../src/reloc_search.cpp   # room_concept.cpp calls into it (2026-09-16)
   # ⚠ room_concept.cpp calls into the door-aperture filter, so this target needs it too. It was added
   # to wall_slam_selftest on 2026-09-13 and not here, which left gn_selftest unlinkable — invisible,
   # because both selftests are EXCLUDE_FROM_ALL and neither runs in the normal build. If you add a
@@ -172,6 +174,8 @@ add_executable(mp3d_replay EXCLUDE_FROM_ALL
   ../src/room_gn_solver.cpp
   ../src/room_model.cpp
   ../src/room_concept.cpp
+  ../src/door_apertures.cpp   # missing since the 09-13 door filter: this target had not linked since
+  ../src/reloc_search.cpp   # room_concept.cpp calls into it (2026-09-16)
   ../src/object_anchor_factor.cpp
   ../src/image_edge_factor.cpp
   ../src/image_edge_source.cpp
@@ -184,6 +188,31 @@ add_executable(mp3d_replay EXCLUDE_FROM_ALL
 target_include_directories(mp3d_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(mp3d_replay ${LIBS})
 set_target_properties(mp3d_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── reloc_selftest ────────────────────────────────────────────────────────────
+# Offline A/B of relocalisation on INJECTED lost-robot episodes (flip, mirror, drift, uniform kidnap):
+# today's grid_search_initial_pose() vs rc::reloc::search(). EXCLUDE_FROM_ALL. Build and run with:
+#   make -C build reloc_selftest && ../bin/reloc_selftest
+add_executable(reloc_selftest EXCLUDE_FROM_ALL
+  ../tools/reloc_selftest.cpp
+  ../src/reloc_search.cpp
+  ../src/epistemic_planner.cpp
+  ../src/room_gn_solver.cpp
+  ../src/room_model.cpp
+  ../src/room_concept.cpp
+  ../src/door_apertures.cpp
+  ../src/object_anchor_factor.cpp
+  ../src/image_edge_factor.cpp
+  ../src/image_edge_source.cpp
+  ../src/corner_detector.cpp
+  ../src/wall_segmenter.cpp
+  ../src/wall_map.cpp
+  ../src/pointcloud_center_estimator.cpp
+  ../src/rerun_logger.cpp
+)
+target_include_directories(reloc_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(reloc_selftest ${LIBS})
+set_target_properties(reloc_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
 # ── corner_gather_test ────────────────────────────────────────────────────────
 # Offline check that the layout-wide explain-away removes a perpendicular face from a wall fit
@@ -214,6 +243,7 @@ add_executable(wall_slam_selftest EXCLUDE_FROM_ALL
   ../src/door_apertures.cpp
   ../src/room_model.cpp
   ../src/room_concept.cpp
+  ../src/reloc_search.cpp   # room_concept.cpp calls into it (2026-09-16)
   ../src/object_anchor_factor.cpp
   ../src/image_edge_factor.cpp
   ../src/image_edge_source.cpp

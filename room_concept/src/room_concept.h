@@ -1,5 +1,6 @@
 #pragma once
 #include <utility>   // std::exchange
+#include <array>
 
 #include <memory>
 #include <vector>
@@ -64,6 +65,7 @@
 #include "image_edge_factor.h"
 #include "se2_preintegration.h"
 #include "motion_calibration.h"
+#include "reloc_search.h"
 
 namespace rc
 {
@@ -125,15 +127,6 @@ public:
         float hier_prec_lr_v      = 0.02f;  // v-step size (slow hyper-state)
         float hier_prec_sigma_v2  = 1.0f;   // prior scale on the map_trust state v
 
-        // ===== FE-native relocalization when map-trust collapses (HIERARCHICAL_PRECISION.md) =====
-        // When the higher-level belief exp(u_b_) drops below a floor for a few frames, the map no longer
-        // explains the robot → run the existing hierarchical grid search (same action as RecoveryManager,
-        // which is kept as an independent raw-sdf backstop). Requires hier_prec_boundary_enabled. OFF by default.
-        bool  hier_prec_reloc_enabled        = false;
-        float hier_prec_reloc_floor          = 0.10f; // exp(u_b_) below this = map-trust collapse
-        int   hier_prec_reloc_consecutive    = 3;     // frames below floor before firing (debounce)
-        int   hier_prec_reloc_cooldown_frames= 30;    // frames suppressed after a fire
-        float hier_prec_ee_dtheta_min        = 0.15f; // rad (|Δθ| over window) gating the early-exit nudge
 
         // ===== Far-point distance weighting =====
         // Far points have a longer lever arm for orientation correction and are
@@ -180,11 +173,6 @@ public:
 
         // ===== Differential Test (A/B comparison) =====
         bool differential_test_enabled = false;  // Enable shadow single-step evaluator for RFE vs baseline comparison
-
-        // ===== Recovery Detection ===
-        // Trigger grid search when full Adam keeps returning high loss
-        float recovery_loss_threshold = 0.3f;  // final_loss above this = bad localization
-        int recovery_consecutive_count = 3;    // How many bad frames before triggering recovery
 
         // ===== Velocity-Adaptive Gradient Weights =====
         // Adjust optimization emphasis based on current motion profile
@@ -265,44 +253,35 @@ public:
         //  learner they configured — A/B'd and rejected, see compute_motion_covariance.)
                                                       // (more permissive than boundary_hessian_quality_threshold)
 
-        // ===== Recovery =====
-        int recovery_cooldown_frames = 30;     // Frames to skip detection after recovery
         int manual_reset_skip_frames = 5;      // Frames to skip optimization after manual pose set
 
-        // ===== Periodic 180° symmetry flip check =====
-        // Every N optimizer-frames test whether rotating the robot by 180° gives
-        // lower SDF FE than the current pose.  Disabled once the room is stable.
-        // Set to 0 to disable.
-        int   symmetry_check_interval       = 5;     // optimizer-frames between checks (small → can
-                                                     // integrate evidence across a momentary turn)
-        float symmetry_flip_min_improvement = 0.005f; // BASE per-check loss advantage to count as evidence
-        // Leaky evidence accumulation + confidence-scaled threshold so a long-correct track requires
-        // SUSTAINED contrary evidence to flip (not a momentary tight-turn degeneracy). Each check adds
-        // (loss_cur - best_loss - min_improvement) to flip_evidence with a leak; flip when it exceeds
-        // threshold = base × (1 + confidence_gain × min(good_fit_streak, cap)). good_fit_streak counts
-        // consecutive frames whose SDF is below symmetry_good_fit_mse (the track is "established").
-        float symmetry_evidence_leak        = 0.6f;   // per-check retention (<1 → momentary blips decay)
-        float symmetry_flip_evidence_thresh = 0.02f;  // base evidence to cross before flipping
-        float symmetry_confidence_gain      = 0.05f;  // threshold growth per established frame
-        int   symmetry_confidence_cap       = 200;    // streak cap (~10-20 s) so threshold can't run away
-        float symmetry_good_fit_mse         = 0.02f;  // SDF below this ⇒ a "good fit" frame (streak++)
-        // Streak DECAYS (not resets) on a bad frame so a momentary tight-turn degradation only dents the
-        // established confidence; only sustained bad fit (truly lost) erodes it. cap/decay ≈ bad frames
-        // to fully lose confidence (200/8 ≈ 25 frames ≈ ~1.3 s @19 Hz).
-        int   symmetry_confidence_decay     = 8;
-        // Trial CSV: one row per symmetry check (not just when a flip fires), so a flip event
-        // can be traced back to the evidence/threshold trajectory that led to it. Independent
-        // of debug_log_enabled — cheap (1 row / symmetry_check_interval frames).
-        bool  symmetry_debug_csv            = true;
-
-        // ===== Grid Search / Orientation Search =====
-        float grid_search_wall_margin = 0.3f;        // meters from room walls
-        int grid_search_max_samples = 150;            // Lidar subsample for grid evaluation
-        // Success bar as a FRACTION of recovery_loss_threshold, not an absolute. A search that reports
-        // success must leave a pose recovery will not instantly call lost again, or the two loop
-        // forever; deriving the bar makes that un-driftable. 0.5 ⇒ the search must halve the error
-        // recovery considers "lost" before it claims to have solved anything.
-        float grid_search_good_factor = 0.5f;
+        // ===== Relocalisation (reloc_search.h) =====
+        // ONE mechanism replaces the RecoveryManager (10 bad frames + 60-frame cooldown), the map-trust
+        // relocaliser and the periodic symmetry check — three relocalisers that fought each other: the
+        // symmetry check flipped a LOST robot on 74 of 80 checks (09-12) and reset the recovery counter
+        // every time, and it fired on a door OPENING with the robot 1.6 m inside (09-16).
+        //
+        // LOST BELIEF. A two-state HMM filter on s = median |SDF| (the worse of the post-fit residual and
+        // the prediction error, as before). Tracking emission: log-normal in s, LEARNT online from the
+        // frames it explains; lost emission: log-uniform over [reloc_lost_s_min, reloc_lost_s_max]. The
+        // per-frame transition probability is the kidnap hazard. Search when P(lost) ≥ ½.
+        // RIVAL MODES. The search returns a mixture; the non-committed modes are carried, moved with the
+        // robot's own motion, and scored against the committed pose on every scan. A rival takes over only
+        // when its accumulated log-likelihood ratio passes Wald's SPRT bound log((1−α)/α) with α = the
+        // hazard — so a symmetric twin (ratio ≡ 0) can never flip-flop, and a genuinely better mode wins
+        // in as few scans as its evidence allows.
+        float reloc_outlier_frac       = 0.30f;  // ε — clutter / through-door fraction ⚠ modelling constant
+        float reloc_wall_offset_sigma  = 0.03f;  // m — per-wall common-mode error marginalised from mode Σ
+        float reloc_body_clearance     = 0.30f;  // m — robot body radius; no pose closer to a wall
+        int   reloc_max_points         = 150;    // wall-band subsample for the lattice
+        int   reloc_max_modes          = 4;      // mixture budget
+        float reloc_hazard             = 1e-3f;  // per-frame P(kidnap / silent loss) — the HMM transition AND α
+        float reloc_track_s_median     = 0.034f; // m — prior median of s when tracking (measured p50, 09-16)
+        float reloc_track_log_sigma    = 0.30f;  // prior spread of ln s when tracking (p99/p50 = 0.069/0.034)
+        int   reloc_track_memory_frames= 200;    // forgetting timescale of the learnt tracking emission
+        float reloc_lost_s_min         = 0.01f;  // m — support of the lost emission (log-uniform)
+        float reloc_lost_s_max         = 5.0f;   // m
+        bool  reloc_legacy_grid_search = false;  // A/B: true = the pre-09-16 4-stage lattice for the commit
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 
         // ===== Optimizer Selection =====
@@ -1220,6 +1199,15 @@ public:
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                    float grid_resolution = 0.5f,  // meters
                                    float angle_resolution = M_PI_4);  // 45 degrees
+    /// The pre-2026-09-16 4-stage lattice, kept verbatim as the CONTROL arm of tools/reloc_selftest and
+    /// behind params.reloc_legacy_grid_search. Delete once the mixture search has run live.
+    bool legacy_grid_search_pose(const std::vector<Eigen::Vector3f>& lidar_points, float grid_resolution);
+    /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
+    std::vector<rc::reloc::PoseHypothesis> pose_hypotheses() const
+    {
+        std::scoped_lock lk(rival_snapshot_mutex_);
+        return rival_snapshot_;
+    }
 
     Eigen::Matrix<float,5,1> get_current_state() const
     {
@@ -1583,39 +1571,53 @@ private:
    float flip_prev_x_ = 0.f, flip_prev_y_ = 0.f, flip_prev_th_ = 0.f;
    bool  flip_prev_valid_ = false;
 
-   // ===== Recovery Manager =====
-   struct RecoveryManager
+   friend struct RelocSelftestAccess;   // tools/reloc_selftest.cpp drives the belief and the rivals directly
+   // ===== Relocalisation state (see Params, "Relocalisation") =====
+   // Three-state HMM filter over {TRACKING, LOST, MISMATCH} and the online tracking emission of ln s.
+   // LOST and MISMATCH (the view changed: a door opened, furniture moved, the map is off) emit s
+   // identically, so s alone cannot separate them — the SEARCH is the experiment that does: after a kidnap
+   // some pose explains the scan the way tracking does; in a changed view none can.
+   enum BeliefState : std::size_t { kTrack = 0, kLost = 1, kMismatch = 2 };
+   std::array<double, 3> belief_{1.0, 0.0, 0.0};
+   bool  belief_init_       = false;
+   float lost_logodds_      = std::numeric_limits<float>::quiet_NaN();   // logit P(LOST) — for the logs
+   float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params
+   float track_var_ln_s_    = std::numeric_limits<float>::quiet_NaN();
+   /// Filter one frame's s; returns P(LOST). `outside` (P past a doorway) mixes the evidence away.
+   float update_lost_belief(float s, float outside);
+   void  reset_lost_belief();                       // → TRACKING (after a move, or at start)
+   void  set_belief_mismatch();                     // → MISMATCH (a search found nothing better to move to)
+   /// `extra_var` ADDS to the learnt spread of ln s (never replaces it): the steady-state filter's fit and a
+   /// freshly polished single-scan pose's fit are different quantities, and the second carries pose error too.
+   double log_tracking_emission(float s, double extra_var = 0.0);
+   double log_broad_emission(float s) const;
+   /// True when a FRESH pose (a search mode, a rival) whose median |SDF| is s is better explained as TRACKING
+   /// than as a broad misfit. Its spread is the learnt one plus the prior population spread of ln s.
+   bool  explains_like_tracking(float s)
    {
-       int consecutive_bad_frames = 0;
-       int cooldown = 0;
-
-       /// Returns true if recovery should be triggered now. `avg_sdf_err` must be the WORST of the
-       /// prediction error and the post-fit residual — see the call site for why watching only the
-       /// post-fit number misses the case the operator actually sees.
-       ///
-       /// NOTE there is deliberately no `iterations_used <= 0` guard any more. It used to skip every
-       /// early-exit frame on the assumption that sdf_mse was stale then; it is not — the early-exit
-       /// path sets res.sdf_mse itself (room_concept.cpp, `res.sdf_mse = mean_sdf_pred`). The guard
-       /// made recovery structurally blind in exactly the regime where a silent mislocalization lives:
-       /// a 180°-flipped pose in a symmetric room is SDF-ambiguous, so it early-exits every frame, so
-       /// recovery never accumulated a single bad frame and could never fire.
-       bool check(float avg_sdf_err, int /*iterations_used*/,
-                  float threshold, int consecutive_count)
-       {
-           if (cooldown > 0) { --cooldown; return false; }
-           if (avg_sdf_err > threshold)
-           {
-               ++consecutive_bad_frames;
-               return consecutive_bad_frames >= consecutive_count;
-           }
-           consecutive_bad_frames = 0;
-           return false;
-       }
-       void on_recovery_done(int cooldown_frames)
-       { consecutive_bad_frames = 0; cooldown = cooldown_frames; }
-       void reset() { consecutive_bad_frames = 0; cooldown = 0; }
-   };
-   RecoveryManager recovery_;
+       const double prior_var = static_cast<double>(params.reloc_track_log_sigma) * params.reloc_track_log_sigma;
+       return log_tracking_emission(s, prior_var) > log_broad_emission(s);
+   }
+   /// Fire the search from the lost belief and fold its outcome back into the belief.
+   void  relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost);
+   bool  last_search_moved_ = false;
+   /// A carried rival mode: its pose and its log-likelihood ratio against the committed pose.
+   struct RivalMode { Eigen::Vector3f pose; float llr = 0.f; };
+   std::vector<RivalMode> rivals_;
+   mutable std::mutex rival_snapshot_mutex_;
+   std::vector<rc::reloc::PoseHypothesis> rival_snapshot_;   // copy for the main thread (scene graph → planner)
+   void publish_rival_snapshot();
+   Eigen::Vector3f rival_ref_pose_ = Eigen::Vector3f::Zero();   // committed pose rivals were last moved with
+   bool            rival_ref_valid_ = false;
+   /// Move rivals with the robot's motion, score them against the committed pose, switch when SPRT passes.
+   void step_rival_modes(const std::vector<Eigen::Vector3f>& lidar_points);
+   // Likelihood raster for the current room polygon, rebuilt when the polygon changes.
+   rc::reloc::LikelihoodRaster reloc_raster_;
+   std::vector<Eigen::Vector2f> reloc_raster_poly_;
+   rc::reloc::Params reloc_params() const;
+   std::vector<Eigen::Vector2f> current_room_polygon() const;
+   bool  last_search_confirmed_incumbent_ = false;   // the last search's top mode WAS the pose it was handed
+   float pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();   // for the episode row
 
    // ===== Loss/recovery episode log =====
    // One row per grid_search_initial_pose() call, written wherever it returns. The per-frame debug log
@@ -1632,12 +1634,12 @@ private:
    struct SearchEpisode
    {
        std::int64_t ts_ms = 0;
-       const char*  trigger = "unknown";   // recovery | map_trust | seed | manual
+       const char*  trigger = "unknown";   // lost | mode_switch | seed | seed_validation | manual
        int          n_lidar = 0;
        float        incumbent_x = 0.f, incumbent_y = 0.f, incumbent_theta = 0.f;
        float        incumbent_loss = std::numeric_limits<float>::quiet_NaN();
        float        good_thr = 0.f;
-       int          stage = -1;            // 0 = yaw sweep, 1 = local lattice, 2 = coarse global, 3 = fine
+       int          stage = -1;            // legacy: 0 yaw sweep, 1 local, 2 coarse, 3 fine · 10 = mixture search
        float        best_x = 0.f, best_y = 0.f, best_theta = 0.f;
        float        best_loss = std::numeric_limits<float>::quiet_NaN();
        float        topk_best = std::numeric_limits<float>::quiet_NaN();   // Stage-2 candidate spread:
@@ -1653,6 +1655,14 @@ private:
        float        duration_ms = 0.f;
        float        beta = std::numeric_limits<float>::quiet_NaN();   // softmax temperature actually used
        int          n_points = 0;                                     // N behind the median's std error
+       // ── mixture search (reloc_search.h); NaN / 0 on the legacy lattice ──
+       int          n_modes = 0;
+       float        mode_entropy = std::numeric_limits<float>::quiet_NaN();   // nats over mode weights
+       float        top_weight = std::numeric_limits<float>::quiet_NaN();
+       float        second_weight = std::numeric_limits<float>::quiet_NaN();
+       int          n_yaws = 0;
+       int          n_segments = 0;                                   // 0 ⇒ yaws came from the uniform sweep
+       float        p_lost = std::numeric_limits<float>::quiet_NaN(); // belief that fired it (lost trigger)
    };
    // Why the next grid search was invoked. Set by the caller immediately before the call; the search
    // itself has no way to know, and "which trigger fires most and which of them actually resolve" is
@@ -1846,7 +1856,6 @@ private:
     unsigned nis_log_tick_ = 0;      // row counter for tmp/corner_nis.csv
     std::ofstream nis_csv_;          // corner-NIS diagnostics (see the writer for the columns)
     std::ofstream resid_csv_;        // tmp/wall_residual.csv — per-association point-to-wall residual
-    std::int64_t symmetry_last_log_ms_ = 0;   // rate limit: the CSV keeps every check
     unsigned resid_tick_ = 0;        // its own row counter: the layout trace's stalls when the solve early-exits
     std::ofstream wallgeom_csv_;     // tmp/wall_geometry.csv — every wall's (phi, d, extent) every frame
     std::ofstream layout_csv_;       // tmp/layout_trace.csv — the PUBLISHED polygon + its per-corner
@@ -1931,9 +1940,6 @@ private:
    // and CUDA warmup curve. Opened lazily on the first update; gated by params.optimizer_timing_csv.
    std::ofstream      opt_csv_;
    bool               opt_csv_open_attempted_ = false;
-   // Per-symmetry-check trial CSV (loc-thread only; no lock). Gated by params.symmetry_debug_csv.
-   std::ofstream      symmetry_csv_;
-   bool               symmetry_csv_open_attempted_ = false;
 
    std::ofstream      flip_csv_;   // one row per detected ~180° flip (tmp/sdf_localizer/flips_<ts>.csv)
    bool               flip_csv_open_attempted_ = false;
@@ -1972,9 +1978,6 @@ private:
    void write_corner_stats_csv();
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
-   int                symmetry_check_counter_ = 0;
-   float              symmetry_flip_evidence_ = 0.f;  // leaky accumulator of contrary-orientation evidence
-   int                good_fit_streak_        = 0;    // consecutive good-SDF frames (track establishment)
    bool               rerun_room_polygon_sent_ = false;
    std::vector<float> last_adam_losses_;    // per-iteration losses from last Adam/LBFGS run
    float              last_loss_init_  = 0.f;  // loss before first step
@@ -1983,18 +1986,11 @@ private:
    float              u_b_             = 0.f;  // boundary log-precision posterior; exp(u_b_) = ⟨π⟩ = boundary_weight
    bool               u_b_init_        = false;// lazily seeded to g(v) on first use / after a recovery reset
    float              map_trust_v_     = 0.f;  // Option-A slow hyper-state v; g(v)=u0+g_gain·v predicts u_b_
-   int                map_trust_low_streak_     = 0;  // consecutive frames exp(u_b_) < hier_prec_reloc_floor
-   int                map_trust_reloc_cooldown_ = 0;  // frames left suppressing a map-trust relocalization
    /// Stage-1 boundary-precision inference: one fast step on u_b_ (from the boundary residual r_b, using
    /// the post-optimization posterior covariance sigma_x for the tr(Λ_b Σ) term) plus one slow step on the
    /// map_trust hyper-state v. No-op unless params.hier_prec_boundary_enabled. Call once per frame after
    /// the window pose has converged.
    void               update_boundary_hyperprecision(const Eigen::Matrix3f &sigma_x);
-   /// Close the rotation early-exit gap: on an early-exit frame with large |dtheta|, nudge u_b_ down using a
-   /// SURROGATE residual r_ee=(mean_sdf_pred/sigma_sdf)² (no boundary factor is evaluated on early-exit), so a
-   /// degrading rotation that keeps early-exiting can still collapse map-trust. Fast-only (leaves v to the
-   /// optimized path). No-op unless hier_prec_boundary_enabled && hier_prec_reloc_enabled.
-   void               nudge_map_trust_early_exit(float mean_sdf_pred, float dtheta);
    /// Append one row to etc/hier_prec.csv (lazy-opened). src ∈ {opt, ee, reloc}. Loc-thread only, no lock.
    void               log_hier_prec_row(const char *src, float r_b, float quad, float trace, bool reloc_fired);
    WindowManager::LossBreakdown last_loss_breakdown_;  // FE term breakdown after last Adam

@@ -181,6 +181,10 @@ using mean absolute boundary distance. If both fits are almost tied, it keeps th
 
 ### 4.3 Global grid search
 
+> **Superseded 2026-09-16** by the mixture search in `src/reloc_search.h` (robust likelihood, yaws from wall
+> structure, batched lattice, EM-polished modes, Laplace mode weights). The staged lattice below survives only
+> as `legacy_grid_search_pose()` — the control arm of `tools/reloc_selftest` and `RelocLegacyGridSearch`.
+
 `grid_search_initial_pose(...)` runs a staged search:
 
 1. Symmetry flips at the current position.
@@ -669,6 +673,16 @@ There are two safety gates:
 This prevents contaminated scans from creating overconfident anchors.
 
 ## 16. Recovery and symmetry handling
+
+> **Superseded 2026-09-16.** Both mechanisms below were DELETED: they fought — the symmetry check teleported a
+> lost robot to a mirror image on 74 of 80 checks (09-12), fired on a door opening with the robot 1.6 m inside
+> (09-16), and reset the recovery counter on every flip. Replacement (`room_concept.cpp` section 8):
+> - a three-state HMM belief {TRACKING, LOST, MISMATCH} on median |SDF|, tracking emission learnt online;
+> - P(LOST) ≥ ½ fires the mixture search; the pose MOVES only if the new mode fits the way tracking does,
+>   otherwise the belief goes to MISMATCH (the view changed; nothing to relocalise to);
+> - the search's other modes are carried and scored every scan; a rival takes over only past Wald's SPRT
+>   bound log((1−α)/α), α = `RelocHazard`, so an exact twin never flips and a real one wins in a few scans.
+> Offline validation: `make -C build reloc_selftest && ../bin/reloc_selftest`. The text below is history.
 
 The thread contains two mechanisms to escape bad local minima.
 

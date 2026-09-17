@@ -363,7 +363,8 @@ namespace rc
             << ",ml_odom_noise_trans"
             << ",ml_bias_x,ml_bias_y,ml_bias_theta"
             << ",early_exit_metric"
-            << ",recovery_bad,recovery_cooldown,search_active"
+            // recovery_bad/recovery_cooldown RENAMED 09-16 (same positions): the RecoveryManager is gone.
+            << ",lost_logodds,n_rivals,search_active"
             // ★ APPENDED 08-16, AT THE END, ON BOTH WRITERS TOGETHER. This file's history is the
             // reason for that discipline: a group once declared mid-header while both writers emitted
             // it LAST mislabelled every column from slot_poses_pre onward. New columns go at the tail
@@ -423,7 +424,8 @@ namespace rc
                          "inc_x,inc_y,inc_theta,inc_loss,good_thr,"
                          "stage,best_x,best_y,best_theta,best_loss,"
                          "topk_best,topk_worst,ess,cov_xx,cov_yy,cov_tt,"
-                         "n_evals,jump_m,jump_rad,success,duration_ms,beta,n_points\n";
+                         "n_evals,jump_m,jump_rad,success,duration_ms,beta,n_points,"
+                         "n_modes,mode_entropy,top_weight,second_weight,n_yaws,n_segments,p_lost\n";
         recovery_log_.flush();
         qInfo() << "Recovery episode log writing to" << QString::fromStdString(recovery_log_path_);
     }
@@ -753,36 +755,28 @@ namespace rc
         return true;
     }
 
-    /// Accept-or-relocalize check for a seeded pose. Returns true when the pose stands, false when it
-    /// was rejected and the global grid search was run in its place.
+    /// Seeded-pose check. Returns true when no search could run (the seed stands by default), false when
+    /// the mixture search ran — whatever it concluded, the yaw is then resolved and the caller must not
+    /// run its own yaw-ambiguity pass on top.
     ///
-    /// The bar is params.recovery_loss_threshold — deliberately the SAME "this fit means we are lost"
-    /// number the runtime RecoveryManager uses, rather than a new knob. Units match: both are metres
-    /// (median |SDF| in both, since the units were unified), and both sit far above a converged fit and far
-    /// below a real mislocalization.
+    /// There is no pass/fail bar any more (it was RecoveryLossThreshold). The saved pose is a SEED of the
+    /// search: it is polished and scored alongside every structural hypothesis, so it stands exactly when
+    /// it is the best-supported mode — and a stale file loses to the mode that explains the scan.
     bool RoomConcept::validate_seed_pose(const std::vector<Eigen::Vector3f>& pts)
     {
         pending_seed_validation_ = false;
-        if (pts.empty() || model_ == nullptr)
+        if (pts.empty() or model_ == nullptr or not model_->has_state())
             return true;
-
-        const float seed_err = evaluate_pose_fit(pts);
-        if (std::isfinite(seed_err) && seed_err <= params.recovery_loss_threshold)
+        search_trigger_ = "seed_validation";
+        if (not grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4)))
         {
-            qInfo() << "[RoomConcept] Seed pose accepted: mean|sdf| =" << seed_err << "m (bar"
-                    << params.recovery_loss_threshold << "m).";
+            qWarning() << "[RoomConcept] Seed validation: the search could not run; keeping the saved pose.";
             return true;
         }
-
-        qWarning() << "[RoomConcept] Seed pose REJECTED: mean|sdf| =" << seed_err << "m exceeds"
-                   << params.recovery_loss_threshold << "m — the saved pose does not explain the scan."
-                   << "Running grid search...";
-        search_trigger_ = "seed_validation";
-        if (!grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4)))
-            qWarning() << "[RoomConcept] Grid search after seed rejection did not reach a good fit;"
-                       << "keeping its best candidate. Recovery will retry if it stays bad.";
-        window_mgr_.clear(); reset_stride_state();
-        symmetry_check_counter_ = 0;
+        if (last_search_moved_)
+        {
+            window_mgr_.clear(); reset_stride_state();
+        }
         return false;
     }
 
@@ -923,14 +917,6 @@ namespace rc
                     opt_earlyexit_count_.fetch_add(1, std::memory_order_relaxed);
                 opt_update_us_sum_.fetch_add(static_cast<std::uint64_t>(update_ms * 1000.0f),
                                              std::memory_order_relaxed);
-
-                // Track-establishment confidence for the symmetry-flip threshold: grow on a good fit,
-                // DECAY (not reset) on a bad one so a momentary tight-turn degradation doesn't collapse
-                // the inertia that protects a long-correct orientation.
-                if (res.sdf_mse < params.symmetry_good_fit_mse)
-                    good_fit_streak_ = std::min(good_fit_streak_ + 1, params.symmetry_confidence_cap);
-                else
-                    good_fit_streak_ = std::max(0, good_fit_streak_ - params.symmetry_confidence_decay);
 
                 // Lean per-update timing CSV (loc-thread only): distribution + CUDA warmup curve.
                 if (params.optimizer_timing_csv)
@@ -1090,227 +1076,35 @@ namespace rc
                 if (res.ok && on_result_ready_)
                     on_result_ready_();
 
-                // ===== 8. RECOVERY DETECTION =====
-            // Relocalization (this, the map-trust reloc below, and the symmetry check) stays armed for
-            // the WHOLE run, not just until the room node stabilizes. There used to be a
-            // set_relocalization_enabled() hook to disarm it once stable; it never had a call site, so
-            // always-on is the behaviour that has actually run and been validated, and it is the one we
-            // want: a robot that is picked up and moved after the room is stable still needs to recover,
-            // and this is the backstop for a bad startup seed that validate_seed_pose let through.
+                // ===== 8. RELOCALISATION: lost belief + rival modes =================
+            // ONE mechanism (see Params, "Relocalisation"; reloc_search.h). It replaces three that fought:
+            // the RecoveryManager (10 bad frames + 60-frame cooldown, reset by every symmetry flip), the
+            // map-trust relocaliser (never enabled) and the periodic symmetry check, which teleported a LOST
+            // robot to a mirror image on 74 of 80 checks (09-12) and on a door OPENING with the robot 1.6 m
+            // inside (09-16) — both judged a median, which cannot tell "wrong pose" from "unmodelled view".
+            //
+            // Gated on map_guided_checks_allowed() (= map_ready): entering SEARCHING for a proto-room clears
+            // it, which is how the agent LEAVES relocalisation; and after the room is retired nothing here may
+            // write the robot→room pose again (mark_room_rt_not_current's ring must stay the edge's last write).
+            // Armed for the whole run, as before: a robot picked up after the room is stable must still recover.
+            if (map_guided_checks_allowed())
             {
-                // res.sdf_mse is ALREADY median |SDF| in metres — see its declaration. It used to be
-                // sqrt()'d here, which is the square root of a length: dimensionally meaningless, and
-                // it made the effective trigger 0.2025 m while the number in the config read 0.45.
-                // RecoveryLossThreshold is now that same 0.2 m directly.
-                //
-                // Judge on the WORST of the prediction error and the post-fit residual. The post-fit
-                // residual ALONE was the bug the operator hit: after the layout is repositioned, the
-                // prediction is chronically wrong (the plotted `pred |SDF|` sits ~0.5, far above the
-                // opt threshold) but Adam re-solves it from scratch every frame, so the post-fit number
-                // looks healthy and the bad-frame counter resets — the search never fires, even though
-                // the belief plainly does not explain the world. early_exit_metric is exactly the curve
-                // shown in the UI, so what the operator sees and what arms recovery are now the same
-                // signal.
-                //
-                // Turn safety: a hard turn legitimately spikes the prediction error. Two things absorb
-                // that — the metric is only compared against a threshold well above normal turn
-                // transients, and RecoveryConsecutiveCount (10) requires it to persist. If turns start
-                // triggering, that count is the dial, not the threshold.
-                // Both arguments are MEDIAN |SDF| (2026-08-13). Watching the worse of the post-fit
-                // residual and the prediction error is deliberate and is kept; what changed is that
-                // the second one is now res.pred_sdf_median rather than res.early_exit_metric, which
-                // is a MEAN. RecoveryLossThreshold is a median bar — it is the same constant that
-                // gates compute_seed_error, which returns a median — so feeding it a mean made
-                // recovery fire on a signal running some 15-20% high, i.e. earlier than the
-                // threshold says. Comparing like with like restores the documented meaning.
-                // ★Weighted by P(still inside): past an open doorway the room no longer owes the scan an
-                //   explanation, so its misfit stops being evidence of a lost pose (see set_outside_prob).
-                const float avg_sdf_err = std::max(res.sdf_mse, res.pred_sdf_median) * (1.f - outside_prob());
-                if (map_guided_checks_allowed() and recovery_.check(avg_sdf_err, res.iterations_used,
-                                    params.recovery_loss_threshold, params.recovery_consecutive_count))
-                {
-                    qWarning() << "[LocThread] Recovery triggered after" << recovery_.consecutive_bad_frames
-                               << "bad frames. avg_sdf_err=" << avg_sdf_err << "m"
-                               << "Running grid search...";
-                    const auto& pts = lidar_high.first;
-                    search_trigger_ = "recovery";
-                    grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
-                    window_mgr_.clear(); reset_stride_state();
-                    recovery_.on_recovery_done(params.recovery_cooldown_frames);
-                    symmetry_check_counter_ = 0;
-                }
+                // Rivals first: they are scored on THIS scan against the pose update() just committed.
+                step_rival_modes(lidar_high.first);
+
+                // s is the worse of the post-fit residual and the prediction error — kept from the old
+                // trigger for the reason recorded there: Adam re-solving a chronically wrong prediction every
+                // frame makes the post-fit number alone look healthy. Both are MEDIAN |SDF| in metres.
+                const float s = std::max(res.sdf_mse, res.pred_sdf_median);
+                const float p_lost = update_lost_belief(s, outside_prob());
+                if (p_lost >= 0.5f)   // ⚠ the equal-cost Bayes decision, flagged
+                    relocalise_from_belief(lidar_high.first, s, p_lost);
             }
-
-                // ===== 8b. FE-NATIVE RELOCALIZATION (map-trust collapse) =========
-            // Runs the SAME hierarchical grid search as recovery above, but triggered by the higher-level
-            // map-trust belief exp(u_b_) collapsing (the map no longer explains the robot) rather than a raw
-            // sdf threshold. u_b_ was just updated this frame (optimized path) or nudged (early-exit rotation),
-            // so it is current here. Coexists with recovery_ (independent backstop). See HIERARCHICAL_PRECISION.md.
-            if (params.hier_prec_reloc_enabled && params.hier_prec_boundary_enabled && map_guided_checks_allowed())
+            else
             {
-                if (map_trust_reloc_cooldown_ > 0)
-                    --map_trust_reloc_cooldown_;
-                else
-                {
-                    const float map_trust = std::exp(u_b_);
-                    map_trust_low_streak_ = (map_trust < params.hier_prec_reloc_floor)
-                                          ? map_trust_low_streak_ + 1 : 0;
-                    if (map_trust_low_streak_ >= params.hier_prec_reloc_consecutive)
-                    {
-                        qWarning() << "[reloc] map_trust collapsed exp(u_b)=" << map_trust << "for"
-                                   << map_trust_low_streak_ << "frames — running grid search...";
-                        log_hier_prec_row("reloc", 0.f, 0.f, 0.f, /*reloc_fired=*/true);
-                        const auto& pts = lidar_high.first;
-                        search_trigger_ = "map_trust";
-                        grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
-                        window_mgr_.clear(); reset_stride_state();
-                        u_b_init_ = false;   // reseed u_b_ to g(v) on the next boundary update
-                        map_trust_v_ = 0.f;  // fresh full trust after relocating
-                        map_trust_low_streak_ = 0;
-                        map_trust_reloc_cooldown_ = params.hier_prec_reloc_cooldown_frames;
-                        symmetry_check_counter_ = 0;
-                    }
-                }
-            }
-
-                // ===== 9. PERIODIC SYMMETRY CHECK ================================
-            // Uses res.sdf_mse as reference (already computed this frame).
-            // Tests all four pose symmetries that a polygonal room may have:
-            //   rot180  : (-x, -y,  θ+π)   — 180° rotation
-            //   refl_y  : (-x,  y,  π−θ)   — Y-axis reflection  ← most common failure
-            //   refl_x  : ( x, -y,   −θ)   — X-axis reflection
-            //   rot180_y: (-x,  y,  θ+π)   — combined rot+refl (same as rot180 ∘ refl_y)
-            if (params.symmetry_check_interval > 0
-                && res.iterations_used > 0 && map_guided_checks_allowed())
-            {
-                ++symmetry_check_counter_;
-                if (symmetry_check_counter_ >= params.symmetry_check_interval)
-                {
-                    symmetry_check_counter_ = 0;
-                    const auto cur  = model_->get_state();
-                    const float cx  = cur[2], cy = cur[3], cth = cur[4];
-                    const auto& pts = lidar_high.first;
-
-                    // Subsample (reuse grid-search budget)
-                    std::vector<Eigen::Vector3f> sample;
-                    const int stride = std::max(1,
-                        static_cast<int>(pts.size()) / params.grid_search_max_samples);
-                    sample.reserve(pts.size() / stride + 1);
-                    for (size_t i = 0; i < pts.size(); i += stride)
-                        sample.push_back(pts[i]);
-                    const torch::Tensor pts_t = points_to_tensor_xyz(sample, get_device());
-
-                    const float loss_cur = res.sdf_mse;
-
-                    // Evaluate all symmetry candidates. MUST use the same reduction as loss_cur above
-                    // (median |SDF|, metres): this was mean(sdf²) in m² while loss_cur was already in
-                    // metres, so every candidate scored ~14x "better" than the current pose no matter
-                    // how correct that pose was, and `advantage` came out positive on every check —
-                    // the test was biased toward flipping until good_fit_streak_ grew large enough for
-                    // the confidence gain to outrun the bogus evidence.
-                    auto eval_at = [&](float nx, float ny, float nth) -> float {
-                        torch::NoGradGuard ng;
-                        auto xy = torch::tensor({nx, ny},
-                            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
-                        auto th = torch::tensor({nth},
-                            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
-                        return median_abs_sdf(model_->sdf_at_pose(pts_t, xy, th));
-                    };
-
-                    struct Candidate { const char* name; float x, y, theta, loss; };
-                    std::array<Candidate,4> cands = {{
-                        {"rot180",   -cx,  -cy,  cth + static_cast<float>(M_PI),  0.f},
-                        {"refl_y",   -cx,   cy,  static_cast<float>(M_PI) - cth,  0.f},
-                        {"refl_x",    cx,  -cy,  -cth,                             0.f},
-                        {"rot180_y", -cx,   cy,  cth + static_cast<float>(M_PI),  0.f},
-                    }};
-                    for (auto& c : cands)
-                        c.loss = eval_at(c.x, c.y, c.theta);
-
-                    // Pick the best candidate
-                    const auto* best = &cands[0];
-                    for (const auto& c : cands)
-                        if (c.loss < best->loss) best = &c;
-
-                    // Per-check advantage of the best symmetric candidate over the current pose, net of
-                    // the base margin. Positive ⇒ the flip looks better THIS check.
-                    const float advantage = (loss_cur - best->loss) - params.symmetry_flip_min_improvement;
-                    // Leaky accumulation: sustained advantage builds; a momentary tight-turn blip decays
-                    // (leak<1), and a check where the current pose is better actively drains it.
-                    symmetry_flip_evidence_ = std::max(0.f,
-                        params.symmetry_evidence_leak * symmetry_flip_evidence_ + advantage);
-                    // Threshold grows with how long the current orientation has been established → a
-                    // long-correct track demands far more sustained evidence to flip than a fresh one.
-                    const float thresh = params.symmetry_flip_evidence_thresh
-                        * (1.f + params.symmetry_confidence_gain
-                                 * static_cast<float>(std::min(good_fit_streak_, params.symmetry_confidence_cap)));
-                    const bool flip_triggered = symmetry_flip_evidence_ > thresh;
-
-                    // Trial CSV: one row per check (not just on a flip) so a flip event can be
-                    // traced back through the evidence/threshold trajectory that led to it.
-                    // Independent of debug_log_enabled — cheap, gated by symmetry_debug_csv.
-                    if (params.symmetry_debug_csv)
-                    {
-                        if (!symmetry_csv_open_attempted_)
-                        {
-                            symmetry_csv_open_attempted_ = true;
-                            ::mkdir("tmp", 0755);
-                            ::mkdir("tmp/sdf_localizer", 0755);
-                            const auto now = std::chrono::system_clock::now();
-                            const std::time_t tt = std::chrono::system_clock::to_time_t(now);
-                            std::tm tm_local{};
-                            localtime_r(&tt, &tm_local);
-                            char ts_buf[32];
-                            std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d_%H-%M-%S", &tm_local);
-                            const std::string path = std::string("tmp/sdf_localizer/symmetry_check_") + ts_buf + ".csv";
-                            symmetry_csv_.open(path, std::ios::out | std::ios::trunc);
-                            if (symmetry_csv_.is_open())
-                                symmetry_csv_ << "ts_ms,cx,cy,cth,loss_cur,best_name,best_loss,"
-                                                 "loss_rot180,loss_refl_y,loss_refl_x,loss_rot180_y,"
-                                                 "advantage,evidence,thresh,good_fit_streak,flip_triggered\n";
-                            else
-                                qWarning() << "Symmetry debug CSV could not be opened:" << QString::fromStdString(path);
-                        }
-                        if (symmetry_csv_.is_open())
-                        {
-                            symmetry_csv_ << res.timestamp_ms
-                                          << ',' << cx << ',' << cy << ',' << cth
-                                          << ',' << loss_cur
-                                          << ',' << best->name << ',' << best->loss
-                                          << ',' << cands[0].loss << ',' << cands[1].loss
-                                          << ',' << cands[2].loss << ',' << cands[3].loss
-                                          << ',' << advantage
-                                          << ',' << symmetry_flip_evidence_
-                                          << ',' << thresh
-                                          << ',' << good_fit_streak_
-                                          << ',' << (int)flip_triggered
-                                          << '\n';
-                            symmetry_csv_.flush();
-                        }
-                    }
-
-                    if (flip_triggered)
-                    {
-                        // Rate-limited to one line per 5 s. Every check already writes a row to
-                        // tmp/sdf_localizer/symmetry_check_*.csv with all four candidate losses, the
-                        // advantage, the evidence and the threshold — so nothing is lost by not
-                        // printing, and in a SYMMETRIC room (a plain rectangle) this fires on
-                        // essentially every check and buries everything else in the terminal.
-                        if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() - symmetry_last_log_ms_ > 5000)
-                        {
-                            symmetry_last_log_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-                            qWarning() << "[SymmetryCheck]" << best->name << "flip — evidence"
-                                       << symmetry_flip_evidence_ << "> thresh" << thresh
-                                       << "(streak" << good_fit_streak_ << ") — per-check detail in"
-                                       << "tmp/sdf_localizer/symmetry_check_*.csv";
-                        }
-                        set_robot_pose(best->x, best->y, best->theta);
-                        recovery_.reset();
-                        window_mgr_.clear(); reset_stride_state();
-                        symmetry_flip_evidence_ = 0.f;
-                        good_fit_streak_ = 0;   // fresh orientation — re-establish confidence from scratch
-                    }
-                }
+                if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
+                rival_ref_valid_ = false;
+                reset_lost_belief();
             }
 
                 wait_period = std::chrono::milliseconds(0);
@@ -1560,16 +1354,431 @@ namespace rc
                       << ',' << e.cov_xx << ',' << e.cov_yy << ',' << e.cov_tt
                       << ',' << e.n_evals << ',' << e.jump_m << ',' << e.jump_rad
                       << ',' << (e.success ? 1 : 0) << ',' << e.duration_ms
-                      << ',' << e.beta << ',' << e.n_points << '\n';
+                      << ',' << e.beta << ',' << e.n_points
+                      << ',' << e.n_modes << ',' << e.mode_entropy << ',' << e.top_weight << ',' << e.second_weight
+                      << ',' << e.n_yaws << ',' << e.n_segments << ',' << e.p_lost << '\n';
         recovery_log_.flush();
     }
 
+    // =========================================================================
+    //  Relocalisation: mixture search, lost belief, rival modes (reloc_search.h)
+    // =========================================================================
+    rc::reloc::Params RoomConcept::reloc_params() const
+    {
+        rc::reloc::Params rp;
+        rp.sigma_sdf         = params.sigma_sdf;
+        rp.outlier_frac      = params.reloc_outlier_frac;
+        rp.wall_offset_sigma = params.reloc_wall_offset_sigma;
+        rp.body_clearance    = params.reloc_body_clearance;
+        rp.max_points        = params.reloc_max_points;
+        rp.max_modes         = params.reloc_max_modes;
+        return rp;
+    }
+
+    std::vector<Eigen::Vector2f> RoomConcept::current_room_polygon() const
+    {
+        std::vector<Eigen::Vector2f> poly;
+        if (model_ == nullptr)
+            return poly;
+        if (model_->use_polygon and model_->polygon_vertices.defined())
+        {
+            const auto v = model_->polygon_vertices.to(torch::kCPU).contiguous();
+            const auto acc = v.accessor<float, 2>();
+            poly.reserve(static_cast<std::size_t>(v.size(0)));
+            for (int i = 0; i < v.size(0); ++i)
+                poly.emplace_back(acc[i][0], acc[i][1]);
+        }
+        else if (model_->half_extents.defined())
+        {
+            const auto he = model_->half_extents.to(torch::kCPU);
+            const float hw = he[0].item<float>(), hh = he[1].item<float>();
+            poly = {{-hw, -hh}, {hw, -hh}, {hw, hh}, {-hw, hh}};
+        }
+        return poly;
+    }
+
     bool RoomConcept::grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
-                                                  float grid_resolution,
-                                                  float /*angle_resolution*/)
+                                               float grid_resolution,
+                                               float /*angle_resolution*/)
+    {
+        last_search_confirmed_incumbent_ = false;
+        last_search_moved_ = false;
+        if (params.reloc_legacy_grid_search)
+            return legacy_grid_search_pose(lidar_points, grid_resolution);
+        if (model_ == nullptr or not model_->has_state() or lidar_points.empty())
+            return false;
+
+        SearchEpisode ep;
+        ep.ts_ms   = last_update_result.timestamp_ms;
+        ep.n_lidar = static_cast<int>(lidar_points.size());
+        ep.trigger = search_trigger_;
+        ep.stage   = 10;
+        ep.p_lost  = pending_episode_p_lost_;
+        struct EpisodeWriter
+        {
+            RoomConcept* self; SearchEpisode* e;
+            ~EpisodeWriter() { self->write_search_episode(*e); }
+        } ep_writer{this, &ep};
+        struct SearchFlag
+        {
+            std::atomic<bool>& active;
+            std::atomic<std::int64_t>& end_ms;
+            SearchFlag(std::atomic<bool>& a, std::atomic<std::int64_t>& e) : active(a), end_ms(e)
+            { active.store(true, std::memory_order_relaxed); }
+            ~SearchFlag()
+            {
+                end_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
+                active.store(false, std::memory_order_relaxed);
+            }
+        } search_flag(grid_search_active_, grid_search_end_ms_);
+
+        const auto poly = current_room_polygon();
+        if (poly.size() < 3)
+        {
+            // Same failure the legacy lattice hit as a segfault on 2026-09-12: a degenerate model mid-republish.
+            qWarning() << "[reloc] no usable room polygon (" << poly.size() << "vertices) — keeping the pose.";
+            return false;
+        }
+        const auto rp = reloc_params();
+        if (poly != reloc_raster_poly_ or not reloc_raster_.valid())
+        {
+            reloc_raster_.build(poly, rp);
+            reloc_raster_poly_ = poly;
+        }
+        if (not reloc_raster_.valid())
+            return false;
+
+        std::vector<Eigen::Vector2f> pts2;
+        pts2.reserve(lidar_points.size());
+        for (const auto& pt : lidar_points)
+            pts2.emplace_back(pt.x(), pt.y());
+
+        const auto st = model_->get_state();
+        const Eigen::Vector3f incumbent(st[2], st[3], st[4]);
+        float inc_med = std::numeric_limits<float>::quiet_NaN();
+        rc::reloc::log_likelihood(poly, pts2, incumbent, rp, reloc_raster_.extent(), &inc_med);
+        ep.incumbent_x = incumbent.x(); ep.incumbent_y = incumbent.y(); ep.incumbent_theta = incumbent.z();
+        ep.incumbent_loss = inc_med;
+
+        const auto res = rc::reloc::search(reloc_raster_, poly, pts2, {incumbent}, rp,
+                                           static_cast<std::uint32_t>(ep.ts_ms & 0xffffffff));
+        ep.n_evals = res.n_evals; ep.duration_ms = res.duration_ms;
+        ep.n_modes = static_cast<int>(res.modes.size()); ep.mode_entropy = res.entropy; ep.ess = res.ess;
+        ep.n_yaws = res.n_yaws; ep.n_segments = res.n_segments;
+        ep.n_points = std::min(rp.max_points, static_cast<int>(pts2.size()));
+        if (res.modes.empty())
+        {
+            qWarning() << "[reloc] the search returned no mode — keeping the pose.";
+            return false;
+        }
+        const auto& top = res.modes.front();
+        ep.top_weight = top.weight;
+        ep.second_weight = res.modes.size() > 1 ? res.modes[1].weight : 0.f;
+        ep.best_x = top.pose.x(); ep.best_y = top.pose.y(); ep.best_theta = top.pose.z();
+        ep.best_loss = top.median_abs;
+        ep.jump_m   = (top.pose.head<2>() - incumbent.head<2>()).norm();
+        ep.jump_rad = std::abs(std::remainder(top.pose.z() - incumbent.z(), 2.f * static_cast<float>(M_PI)));
+        ep.success = true;
+
+        // Did the search CONFIRM the pose it was handed? The same χ² merge test the search uses to decide two
+        // polished seeds are one mode, against the committed mode's covariance.
+        {
+            Eigen::Vector3f d = top.pose - incumbent;
+            d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+            const float chi2 = d.dot(top.cov.ldlt().solve(d));
+            last_search_confirmed_incumbent_ = std::isfinite(chi2) and chi2 < rp.chi2_merge;
+        }
+
+        // MOVE ONLY IF THE NEW MODE EXPLAINS THE SCAN THE WAY TRACKING DOES. A search always finds SOME pose:
+        // with a door open onto the next room, over half the returns lie beyond the walls, and the lattice
+        // happily warps them onto other walls — measured in reloc_selftest, 267 of 346 searches under a 200°
+        // through-door view moved the pose, median 1.9 m / 88°. After a real kidnap the right pose drops back
+        // to a tracking-sized residual; in a changed view NO pose does. The comparison uses the learnt tracking
+        // emission against the broad one — the same two densities the lost belief runs on, no new constant.
+        last_search_moved_ = false;
+        if (not last_search_confirmed_incumbent_ and not explains_like_tracking(top.median_abs))
+        {
+            ep.success = false;
+            rivals_.clear();
+            rival_ref_valid_ = false;
+            publish_rival_snapshot();
+            qWarning().noquote() << QString("[reloc] %1: best mode (%2 m / %3° away) leaves median |SDF| %4 m — "
+                                            "no pose explains this view; keeping the pose")
+                .arg(ep.trigger).arg(ep.jump_m, 0, 'f', 2).arg(ep.jump_rad * 57.2958f, 0, 'f', 0)
+                .arg(top.median_abs, 0, 'f', 3);
+            return true;
+        }
+        last_search_moved_ = not last_search_confirmed_incumbent_;
+
+        // Commit the top mode with the SECOND MOMENT of the whole mixture about it: Σ_k w_k (Σ_k + d_k d_kᵀ).
+        // One decisive mode ⇒ its own Laplace Σ; a symmetric twin 6 m away ⇒ metres of variance, which is the
+        // honest statement — the old commit published a fixed Identity()*0.1 on exactly these paths.
+        Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
+        for (const auto& m : res.modes)
+        {
+            Eigen::Vector3f d = m.pose - top.pose;
+            d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+            cov += m.weight * (m.cov + d * d.transpose());
+        }
+        ep.cov_xx = cov(0, 0); ep.cov_yy = cov(1, 1); ep.cov_tt = cov(2, 2);
+
+        model_->robot_pos = torch::tensor({top.pose.x(), top.pose.y()},
+            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+        model_->robot_theta = torch::tensor({top.pose.z()},
+            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+        smoothed_pose_            = top.pose;
+        has_smoothed_pose_        = true;
+        needs_orientation_search_ = false;
+        tracking_step_count_      = 0;
+        current_covariance        = cov;
+
+        // The other modes are CARRIED, not discarded: step_rival_modes scores them on every following scan.
+        rivals_.clear();
+        for (std::size_t k = 1; k < res.modes.size(); ++k)
+            rivals_.push_back({res.modes[k].pose, res.modes[k].log_weight - top.log_weight});
+        rival_ref_pose_  = top.pose;
+        rival_ref_valid_ = true;
+        publish_rival_snapshot();
+
+        if (not last_search_confirmed_incumbent_)
+            qWarning().noquote() << QString("[reloc] %1: moved %2 m / %3° to (%4, %5, %6°), w=%7, %8 rival mode(s), %9 ms")
+                .arg(ep.trigger).arg(ep.jump_m, 0, 'f', 2).arg(ep.jump_rad * 57.2958f, 0, 'f', 0)
+                .arg(top.pose.x(), 0, 'f', 2).arg(top.pose.y(), 0, 'f', 2).arg(top.pose.z() * 57.2958f, 0, 'f', 0)
+                .arg(top.weight, 0, 'f', 2).arg(rivals_.size()).arg(res.duration_ms, 0, 'f', 1);
+        return true;
+    }
+
+    void RoomConcept::publish_rival_snapshot()
+    {
+        std::vector<rc::reloc::PoseHypothesis> snap;
+        snap.reserve(rivals_.size());
+        for (const auto& rv : rivals_) snap.push_back({rv.pose, rv.llr});
+        std::scoped_lock lk(rival_snapshot_mutex_);
+        rival_snapshot_ = std::move(snap);
+    }
+
+    void RoomConcept::reset_lost_belief()
+    {
+        const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
+        belief_ = {1.0 - 2.0 * h, h, h};
+        belief_init_ = true;
+        lost_logodds_ = static_cast<float>(std::log(h / (1.0 - h)));
+    }
+
+    void RoomConcept::set_belief_mismatch()
+    {
+        const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
+        belief_ = {h, h, 1.0 - 2.0 * h};
+        belief_init_ = true;
+        lost_logodds_ = static_cast<float>(std::log(h / (1.0 - h)));
+    }
+
+    double RoomConcept::log_tracking_emission(float s, double extra_var)
+    {
+        if (not std::isfinite(track_mu_ln_s_) or not std::isfinite(track_var_ln_s_))
+        {
+            track_mu_ln_s_  = std::log(std::max(params.reloc_track_s_median, 1e-4f));
+            track_var_ln_s_ = params.reloc_track_log_sigma * params.reloc_track_log_sigma;
+        }
+        const double smin = std::max(params.reloc_lost_s_min, 1e-4f);
+        const double smax = std::max(static_cast<double>(params.reloc_lost_s_max), smin * 1.001);
+        const double ls = std::log(std::clamp(static_cast<double>(s), smin, smax));
+        const double v  = std::max(static_cast<double>(track_var_ln_s_), 1e-6) + std::max(0.0, extra_var);
+        // ONE-SIDED. s is a misfit: a fit BETTER than tracking's typical one is not evidence against tracking.
+        // A two-sided Gaussian made it so, and once the learnt spread tightened it rejected the true pose after a
+        // kidnap for fitting too WELL — measured in reloc_selftest F: 13 of 45 relocalisations refused with the
+        // true pose at s = 0.016–0.021 m against a learnt median of 0.023. Below the mode the density is held at
+        // its peak (an unnormalised tail of at most a factor 2, which cancels in every ratio this is used for).
+        const double dev = std::max(0.0, ls - static_cast<double>(track_mu_ln_s_));
+        return -0.5 * std::log(2.0 * M_PI * v) - 0.5 * dev * dev / v;
+    }
+
+    double RoomConcept::log_broad_emission(float /*s*/) const
+    {
+        const double smin = std::max(params.reloc_lost_s_min, 1e-4f);
+        const double smax = std::max(static_cast<double>(params.reloc_lost_s_max), smin * 1.001);
+        return -std::log(std::log(smax / smin));   // log-uniform density in ln s
+    }
+
+    float RoomConcept::update_lost_belief(float s, float outside)
+    {
+        if (not belief_init_)
+            reset_lost_belief();
+        if (not std::isfinite(s) or s <= 0.f)
+            return static_cast<float>(belief_[kLost]);
+
+        // PREDICT. TRACKING leaves for LOST or MISMATCH at the hazard; LOST persists (only a search or the
+        // optimiser's own re-convergence ends it, the latter at the hazard); MISMATCH ends as the view returns,
+        // on the tracking memory's timescale, and can hide a kidnap at the hazard. P(LOST) never falls below h,
+        // so a kidnap after an hour of good tracking needs the same evidence as one after a minute.
+        const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
+        const double leave = 1.0 / std::max(1, params.reloc_track_memory_frames);
+        const auto& b = belief_;
+        std::array<double, 3> pr{
+            b[kTrack] * (1.0 - 2.0 * h) + b[kLost] * h + b[kMismatch] * leave,
+            b[kTrack] * h + b[kLost] * (1.0 - h) + b[kMismatch] * h,
+            b[kTrack] * h + b[kMismatch] * (1.0 - leave - h)};
+
+        // UPDATE. Past an open doorway the room no longer owes the scan an explanation, so the misfit stops
+        // being evidence: the broad-vs-tracking log-ratio is tempered by P(still inside) — the old semantics.
+        const double w = 1.0 - std::clamp(static_cast<double>(outside), 0.0, 1.0);
+        const double lt = log_tracking_emission(s);
+        const double lb = log_tracking_emission(s) + w * (log_broad_emission(s) - lt);
+        const double top = std::max(lt, lb);
+        std::array<double, 3> post{pr[kTrack] * std::exp(lt - top), pr[kLost] * std::exp(lb - top),
+                                   pr[kMismatch] * std::exp(lb - top)};
+        const double z = post[0] + post[1] + post[2];
+        if (z > 0.0 and std::isfinite(z))
+            for (auto& x : post) x /= z;
+        else
+            post = pr;
+        belief_ = post;
+        lost_logodds_ = static_cast<float>(std::log(std::max(belief_[kLost], 1e-300) / std::max(1.0 - belief_[kLost], 1e-300)));
+
+        // LEARN the tracking emission from the frames it explains, weighted by P(TRACKING), forgetting over
+        // reloc_track_memory_frames. A lost robot or a changed view stops teaching it.
+        const double smin = std::max(params.reloc_lost_s_min, 1e-4f);
+        const double smax = std::max(static_cast<double>(params.reloc_lost_s_max), smin * 1.001);
+        const double ls = std::log(std::clamp(static_cast<double>(s), smin, smax));
+        const double a = belief_[kTrack] / std::max(1, params.reloc_track_memory_frames);
+        const double dev = ls - track_mu_ln_s_;
+        track_mu_ln_s_  = static_cast<float>(track_mu_ln_s_ + a * dev);
+        track_var_ln_s_ = static_cast<float>(std::max(1e-6, track_var_ln_s_ + a * (dev * dev - track_var_ln_s_)));
+        return static_cast<float>(belief_[kLost]);
+    }
+
+    void RoomConcept::relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost)
+    {
+        qWarning().noquote() << QString("[reloc] P(lost)=%1 at s=%2 m — mixture search").arg(p_lost, 0, 'f', 3).arg(s, 0, 'f', 3);
+        search_trigger_ = "lost";
+        pending_episode_p_lost_ = p_lost;
+        const bool ran = grid_search_initial_pose(lidar_points, 0.5f, static_cast<float>(M_PI_4));
+        pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();
+        if (ran and last_search_moved_)
+        {
+            window_mgr_.clear(); reset_stride_state();
+            reset_lost_belief();
+        }
+        else if (ran and last_search_confirmed_incumbent_ and log_tracking_emission(s) > log_broad_emission(s))
+            reset_lost_belief();          // the pose was fine and so is its fit: a false alarm
+        else
+            set_belief_mismatch();        // nothing explains this view better: not lost, the view changed
+    }
+
+    void RoomConcept::step_rival_modes(const std::vector<Eigen::Vector3f>& lidar_points)
+    {
+        if (rivals_.empty() or model_ == nullptr or not model_->has_state() or lidar_points.empty())
+            return;
+        const auto st = model_->get_state();
+        const Eigen::Vector3f cur(st[2], st[3], st[4]);
+        if (not rival_ref_valid_)
+        {
+            rival_ref_pose_ = cur;
+            rival_ref_valid_ = true;
+        }
+        // Robot-frame motion since the last step is hypothesis-independent: every mode moved the same way
+        // relative to itself. Δ = ref⁻¹ ∘ cur, then rival ← rival ∘ Δ.
+        const float cr = std::cos(rival_ref_pose_.z()), sr = std::sin(rival_ref_pose_.z());
+        const Eigen::Vector2f dw = cur.head<2>() - rival_ref_pose_.head<2>();
+        const Eigen::Vector2f d_robot(cr * dw.x() + sr * dw.y(), -sr * dw.x() + cr * dw.y());
+        const float dth = std::remainder(cur.z() - rival_ref_pose_.z(), 2.f * static_cast<float>(M_PI));
+        for (auto& rv : rivals_)
+        {
+            const float c = std::cos(rv.pose.z()), s = std::sin(rv.pose.z());
+            rv.pose.x() += c * d_robot.x() - s * d_robot.y();
+            rv.pose.y() += s * d_robot.x() + c * d_robot.y();
+            rv.pose.z()  = std::remainder(rv.pose.z() + dth, 2.f * static_cast<float>(M_PI));
+        }
+        rival_ref_pose_ = cur;
+
+        const auto poly = current_room_polygon();
+        if (poly.size() < 3)
+            return;
+        const auto rp = reloc_params();
+        if (poly != reloc_raster_poly_ or not reloc_raster_.valid())
+        {
+            reloc_raster_.build(poly, rp);
+            reloc_raster_poly_ = poly;
+        }
+        std::vector<Eigen::Vector2f> pts2;
+        const int stride = std::max(1, static_cast<int>(lidar_points.size()) / std::max(1, rp.max_points));
+        pts2.reserve(lidar_points.size() / static_cast<std::size_t>(stride) + 1);
+        for (std::size_t i = 0; i < lidar_points.size(); i += static_cast<std::size_t>(stride))
+            pts2.emplace_back(lidar_points[i].x(), lidar_points[i].y());
+
+        const float extent = reloc_raster_.extent();
+        const float ll_cur = rc::reloc::log_likelihood(poly, pts2, cur, rp, extent);
+        for (auto& rv : rivals_)
+            rv.llr += rc::reloc::log_likelihood(poly, pts2, rv.pose, rp, extent) - ll_cur;
+        // A mode carried out of the room cannot be the robot.
+        std::erase_if(rivals_, [&](const RivalMode& rv)
+            { return not std::isfinite(rv.llr) or not rc::reloc::inside_polygon(poly, rv.pose.head<2>()); });
+        publish_rival_snapshot();
+        if (rivals_.empty())
+            return;
+
+        // Wald's SPRT: switch when the accumulated ratio passes log((1−α)/α), α = the hazard. A symmetric twin
+        // (ratio ≡ 0) never passes; after a switch the old pose needs the same margin to come back, so noise
+        // around a near-tie cannot flip-flop the published pose.
+        const double alpha = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.5);
+        const float bound = static_cast<float>(std::log((1.0 - alpha) / alpha));
+        const auto best = std::ranges::max_element(rivals_, {}, &RivalMode::llr);
+        if (best->llr <= bound)
+            return;
+        // Same explain-away as the search: a rival that out-scores the pose but still leaves a misfit tracking
+        // would not produce is a warp of an unexplained view, not the robot's pose.
+        float rival_med = std::numeric_limits<float>::quiet_NaN();
+        rc::reloc::log_likelihood(poly, pts2, best->pose, rp, extent, &rival_med);
+        if (not explains_like_tracking(rival_med))
+            return;
+
+        SearchEpisode ep;
+        ep.ts_ms = last_update_result.timestamp_ms;
+        ep.trigger = "mode_switch";
+        ep.stage = 10;
+        ep.n_lidar = static_cast<int>(lidar_points.size());
+        ep.incumbent_x = cur.x(); ep.incumbent_y = cur.y(); ep.incumbent_theta = cur.z();
+        ep.best_x = best->pose.x(); ep.best_y = best->pose.y(); ep.best_theta = best->pose.z();
+        ep.jump_m = (best->pose.head<2>() - cur.head<2>()).norm();
+        ep.jump_rad = std::abs(std::remainder(best->pose.z() - cur.z(), 2.f * static_cast<float>(M_PI)));
+        ep.top_weight = static_cast<float>(1.0 / (1.0 + std::exp(-static_cast<double>(best->llr))));
+        ep.n_modes = static_cast<int>(rivals_.size()) + 1;
+        ep.success = true;
+        write_search_episode(ep);
+        qWarning().noquote() << QString("[reloc] mode switch: rival out-explained the pose by %1 nats (bound %2) — "
+                                        "moving %3 m / %4°")
+            .arg(best->llr, 0, 'f', 1).arg(bound, 0, 'f', 1).arg(ep.jump_m, 0, 'f', 2).arg(ep.jump_rad * 57.2958f, 0, 'f', 0);
+
+        const Eigen::Vector3f new_pose = best->pose;
+        const float llr = best->llr;
+        rivals_.erase(best);
+        for (auto& rv : rivals_) rv.llr -= llr;          // ratios are now against the new pose
+        rivals_.push_back({cur, -llr});                  // the old pose becomes a rival, needing the same margin back
+
+        model_->robot_pos = torch::tensor({new_pose.x(), new_pose.y()},
+            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+        model_->robot_theta = torch::tensor({new_pose.z()},
+            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+        smoothed_pose_       = new_pose;
+        has_smoothed_pose_   = true;
+        tracking_step_count_ = 0;
+        rival_ref_pose_      = new_pose;
+        window_mgr_.clear(); reset_stride_state();
+        reset_lost_belief();
+        publish_rival_snapshot();
+    }
+
+    bool RoomConcept::legacy_grid_search_pose(const std::vector<Eigen::Vector3f>& lidar_points,
+                                              float grid_resolution)
     {
         if (model_ == nullptr || lidar_points.empty())
             return false;
+        // FROZEN 2026-09-16 as the control arm of tools/reloc_selftest. Its config keys were deleted with the
+        // mechanisms that used them; the values below are the live ones at the time of freezing.
+        constexpr int   kGridSearchMaxSamples  = 150;    // was GridSearchMaxSamples
+        constexpr float kGridSearchWallMargin  = 0.30f;  // was GridSearchWallMargin
+        constexpr float kGoodThr               = 0.5f * 0.20f;   // GridSearchGoodFactor × RecoveryLossThreshold
 
         // One row per call, written wherever this returns — see RoomConcept::SearchEpisode for why the
         // per-frame log was not enough (episodes had to be inferred from window_size resets).
@@ -1660,7 +1869,7 @@ namespace rc
             // against the SAME point set, so the comparison is paired and most of the sampling noise
             // cancels. Erring high leaves the committed covariance conservative — it over-reports
             // uncertainty rather than under-reporting it, which is the safe direction for a consumer.
-            const float n_eff = std::max(1.f, static_cast<float>(params.grid_search_max_samples));
+            const float n_eff = std::max(1.f, static_cast<float>(kGridSearchMaxSamples));
             const float beta  = std::max(1e-4f, 0.79f * params.sigma_sdf / std::sqrt(n_eff));
             ep.beta = beta; ep.n_points = static_cast<int>(n_eff);
             // Effective sample size of the softmax weights, ESS = (sum w)^2 / sum w^2. ~1 => one pose
@@ -1748,7 +1957,7 @@ namespace rc
             min_x = -hw; max_x = hw;
             min_y = -hh; max_y = hh;
         }
-        const float margin = params.grid_search_wall_margin;
+        const float margin = kGridSearchWallMargin;
         min_x += margin; max_x -= margin;
         min_y += margin; max_y -= margin;
 
@@ -1762,8 +1971,8 @@ namespace rc
                 sample.push_back(lidar_points[i]);
             return points_to_tensor_xyz(sample, get_device());
         };
-        const torch::Tensor pts_coarse = make_tensor(params.grid_search_max_samples / 2);
-        const torch::Tensor pts_fine   = make_tensor(params.grid_search_max_samples);
+        const torch::Tensor pts_coarse = make_tensor(kGridSearchMaxSamples / 2);
+        const torch::Tensor pts_fine   = make_tensor(kGridSearchMaxSamples);
 
         // Success bar, DERIVED from the recovery trigger rather than set independently. The invariant
         // is that a search which reports success must leave a pose recovery will not immediately call
@@ -1771,7 +1980,7 @@ namespace rc
         // improving anything, the counter clears, the cooldown expires and it fires again. That is
         // exactly what a standalone good_thr produced. Keeping it a FRACTION of the trigger makes the
         // relationship un-driftable; grid_search_good_factor only chooses how much margin.
-        const float good_thr = params.grid_search_good_factor * params.recovery_loss_threshold;
+        const float good_thr = kGoodThr;
         ep.good_thr = good_thr;
 
         // Best pose seen so far, seeded from the pose we were handed (Stage 0 fills it in). Carried
@@ -3841,8 +4050,8 @@ namespace rc
             // Adam. The early-exit path at the bottom of try_prediction_early_exit was already
             // correct (it assigns res.early_exit_metric before logging).
             debug_log_ << ',' << last_early_exit_metric_
-                       << ',' << recovery_.consecutive_bad_frames
-                       << ',' << recovery_.cooldown
+                       << ',' << lost_logodds_
+                       << ',' << rivals_.size()
                        << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
             write_debug_tail();
 
@@ -4342,11 +4551,6 @@ namespace rc
         last_t_cov_ms_ = 0.f;
         last_t_breakdown_ms_ = 0.f;
 
-        // Rotation early-exit gap: this frame skips the optimizer, so update_boundary_hyperprecision won't
-        // run. If we're turning hard, feed the predicted-pose residual into map-trust so a degrading
-        // rotation can't silently evade the collapse trigger. No-op unless the reloc feature is enabled.
-        nudge_map_trust_early_exit(mean_sdf_pred, odometry_prior.delta_pose[2]);
-
         // ── ONE DAMPED SDF STEP, on the cycle that is about to publish without the optimizer ──────
         // This is where the drift lives. The gate's verdict is "good enough not to need a full
         // solve", and it has been implemented as "do nothing" — so on ~99% of cycles the published
@@ -4664,8 +4868,8 @@ namespace rc
                        << ',' << learned_odom_bias_.y()
                        << ',' << learned_odom_bias_.z();
             debug_log_ << ',' << res.early_exit_metric
-                       << ',' << recovery_.consecutive_bad_frames
-                       << ',' << recovery_.cooldown
+                       << ',' << lost_logodds_
+                       << ',' << rivals_.size()
                        << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
             write_debug_tail();
             debug_log_ << '\n';
@@ -4840,29 +5044,6 @@ namespace rc
         }
     }
 
-    // Rotation early-exit gap closer — see the method's header doc. Fast-only step on u_b_ using a
-    // surrogate residual so a degrading rotation that keeps early-exiting can still collapse map-trust.
-    void RoomConcept::nudge_map_trust_early_exit(float mean_sdf_pred, float dtheta)
-    {
-        if (not params.hier_prec_boundary_enabled or not params.hier_prec_reloc_enabled) return;
-        if (std::abs(dtheta) < params.hier_prec_ee_dtheta_min) return;      // only in the rotation gap
-        if (params.sigma_sdf <= 0.f) return;
-
-        // Surrogate residual: no boundary factor is evaluated on early-exit, so use the whitened
-        // predicted-pose residual as evidence that the map's explanatory precision should drop.
-        const float w    = mean_sdf_pred / params.sigma_sdf;
-        const float r_ee = w * w;
-
-        if (not u_b_init_) { u_b_ = params.hier_prec_u0 + params.hier_prec_g_gain * map_trust_v_; u_b_init_ = true; }
-        const float g_v   = params.hier_prec_u0 + params.hier_prec_g_gain * map_trust_v_;
-        constexpr float d_dim = 3.0f;
-        const float grad_u = 0.5f * std::exp(u_b_) * r_ee - 0.5f * d_dim
-                             + (u_b_ - g_v) / params.hier_prec_sigma_u2;
-        u_b_ -= params.hier_prec_lr_u * grad_u;
-        u_b_ = std::clamp(u_b_, -20.0f, 20.0f);
-        // Fast-only: leave the slow map_trust_v_ to the optimized path (real boundary evidence).
-        log_hier_prec_row("ee", r_ee, r_ee, 0.0f, /*reloc_fired=*/false);
-    }
 
     // =========================================================================
     //  Backend-shared helpers
