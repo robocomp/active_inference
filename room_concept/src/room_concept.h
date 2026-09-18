@@ -1,4 +1,5 @@
 #pragma once
+#include <unordered_map>
 #include <utility>   // std::exchange
 #include <array>
 
@@ -187,8 +188,8 @@ public:
         float weight_smoothing_alpha = 0.3f;       // EMA smoothing for weight transitions
 
         // ===== Dual-Prior Fusion (command + odometry) =====
-        // Master switch for the COMMAND (joystick / controller) channel as a motion prior. On (the
-        // default) the selection is the historical one: Fused when both channels are fresh, else
+        // Master switch for the COMMAND (joystick / controller) channel as a motion prior. On, the
+        // selection is the historical one: Fused when both channels are fresh, else
         // Measured, else Command, else FallbackZero. Off, the command channel is still COMPUTED and
         // LOGGED (cmd_* columns, cmd_valid/cmd_fresh keep their real values) but never enters the
         // prediction, so the selection collapses to Measured / FallbackZero and `motion_prior_source`
@@ -199,7 +200,16 @@ public:
         // Purpose: an open-loop command is a statement of INTENT, not of motion — the wheels may not
         // have obeyed it (slip, stall, a blocked robot). Turning it off asks what the encoder channel
         // alone is worth, which is the A/B the fusion weights were never measured against.
-        bool use_command_velocity_prior = true;
+        // DEFAULT OFF since 2026-09-18. Measured on Shadow in Webots room 2, with the LiDAR scans as
+        // the witness (range-vs-bearing profile alignment, which needs neither odometry nor the
+        // supervisor): over a 34 deg pivot the fused prediction turned 49.3 deg, a gain of 1.41 with
+        // 1.67 deg rms about it, and left 2.5 deg of permanent heading error after the pivot returned.
+        // Translation over the same recording was right to 2%, so this is the rotation-only signature
+        // of following INTENT rather than motion. The config's own note (etc/config.toml:918) had
+        // already flagged this as the test to run before blaming the wheels; P3Bot measured +1.70% and
+        // set it false. The base is well calibrated — a prior that asserts the commanded turn against
+        // a base that does not execute it is subtracting information, not adding it.
+        bool use_command_velocity_prior = false;
 
         // ===== Prior covariance model =====
         // Process noise for commanded velocity prior (open-loop, less reliable)
@@ -679,6 +689,11 @@ public:
         wallseg::Params wall_seg;              // segmenter: sensor σ, χ² levels, RANSAC budget
         wallmap::Params wall_map;              // association, birth, Manhattan prior, publish bar
         float wall_gauge_sigma_xy = 1e-3f;     // m — first-pose gauge fix (a gauge, not a model term)
+        // RoomShape.RecordWallInput — DIAGNOSTIC RECORDER (2026-09-17), default OFF. Writes, per frame, exactly
+        // what the wall step receives (robot-frame points + z + observation weights, slot pose, pose covariance,
+        // map-frame odometry delta, stride flag, timestamp) to tmp/wall_input_<unix_ms>.bin, so a live run can
+        // be replayed through the offline harness core. Read-only: changes no estimate.
+        bool  record_wall_input = false;
         float wall_gauge_sigma_theta = 1e-3f;  // rad
         int   wall_max_slots = 0;              // wall factors on the newest N slots (0 ⇒ every slot)
 
@@ -1228,6 +1243,7 @@ public:
         torch::Tensor lidar_points;     // [N, 3] stored observation (no grad)
         Eigen::Vector3f odometry_delta = Eigen::Vector3f::Zero(); // delta from prev slot
         Eigen::Matrix3f motion_cov = Eigen::Matrix3f::Identity(); // Σ_dyn
+        Eigen::Matrix3f pose_cov = Eigen::Matrix3f::Identity() * 0.1f;   // pose covariance at slot creation (publish-test marginal)
         int64_t timestamp_ms = 0;
 
         // Cached tensors (computed once at append-time, reused every Adam iteration)
@@ -1906,6 +1922,15 @@ public:
     { measured_ceiling_sigma_m_.store(s, std::memory_order_relaxed); }
 private:
     bool wall_reanchored_ = false;
+    std::ofstream wall_input_rec_;                                   // RecordWallInput (diagnostic)
+    /// Pose prior of window slot i for marginalisation: slot 0 = the solver's gauge (or the boundary prior once
+    /// valid and the window holds > 1 slot — the solve's own rule); later slots = their recorded pose covariance.
+    Eigen::Matrix3f slot_pose_precision(std::size_t i) const;
+    /// Σ over live window slots of each wall's pose-marginalised statistical information — for the PUBLISH TEST
+    /// only (build_polygon_with); never written back (the slots are absorbed as they leave the window).
+    std::unordered_map<std::uint64_t, Eigen::Matrix2f> window_wall_information() const;
+    bool          rec_stride_replace_ = false;                       // this frame's stride decision, for the recorder
+    Eigen::Vector3f rec_odom_delta_ = Eigen::Vector3f::Zero();       // this frame's map-frame odometry delta
     /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
     /// on. From then on the layout is GIVEN: see the four guards that read it in room_concept.cpp.
     unsigned wall_mh_log_tick_ = 0;   // rate limit for the "still annealing" line
@@ -2100,8 +2125,21 @@ private:
     torch::Tensor predict_Q_;   // [dim x dim] process noise
     int predict_alloc_dim_ = 0; // dimension they were allocated for
 
+public:
+    /// PUBLIC so the offline bench can exercise the REAL fusion instead of imitating it. Both depend
+    /// only on `params` and their arguments — no graph, no model_, no window — and both are called
+    /// unchanged from the live path, so what the bench measures is what the agent does. The bench
+    /// (tools/wall_slam_selftest.cpp, WS_TOUR) previously stood in a linear blend of intent and
+    /// measurement, which showed the MECHANISM but could not be evidence about this code.
     Eigen::Matrix3f compute_motion_covariance(const OdometryPrior &odometry_prior,
                                               bool is_measured_odometry = false);
+
+    /// Fuse command and measured priors into one Gaussian. Pure: it reads no member state, which is
+    /// why it can be static and why the bench can call it without standing up an agent.
+    static std::pair<Eigen::Vector3f, Eigen::Matrix3f> fuse_priors(
+        const Eigen::Vector3f &pred_cmd, const Eigen::Matrix3f &cov_cmd,
+        const Eigen::Vector3f &pred_odom, const Eigen::Matrix3f &cov_odom);
+private:
     RoomConcept::OdometryPrior compute_odometry_prior(
                     const std::vector<VelocityCommand>& velocity_history,
                     const std::pair<std::vector<Eigen::Vector3f>, std::int64_t> &lidar);
@@ -2129,11 +2167,6 @@ private:
                     const std::vector<OdometryReading>& odometry_history,
                     const std::pair<std::vector<Eigen::Vector3f>, std::int64_t> &lidar);
 
-    /// Fuse command prior and measured odometry prior into a single Gaussian
-    /// Returns: (fused_mean, fused_precision) where mean is [x, y, theta]
-    std::pair<Eigen::Vector3f, Eigen::Matrix3f> fuse_priors(
-        const Eigen::Vector3f &pred_cmd, const Eigen::Matrix3f &cov_cmd,
-        const Eigen::Vector3f &pred_odom, const Eigen::Matrix3f &cov_odom) const;
 
     PredictionState predict_step(std::shared_ptr<Model> &room,
                                   const OdometryPrior &odometry_prior,
@@ -2150,11 +2183,16 @@ private:
 
     /// Check if the predicted pose already has low SDF error and can skip Adam.
     /// Returns an UpdateResult if early exit is taken, nullopt otherwise.
+    /// `measure_only` (2026-09-17): compute the prediction diagnostics ONLY — last_pred_sdf_median_ and
+    /// last_early_exit_metric_, i.e. the "pred (SDF)" series — without growing the covariance and without
+    /// ever deciding to skip the solve. Used while the layout is still being estimated, where the early
+    /// exit must not fire (no fixed map) but the plot must still show the prediction's fit.
     std::optional<UpdateResult> try_prediction_early_exit(
         const torch::Tensor& points_tensor,
         const Eigen::Vector3f& slot_odom_delta,
         const OdometryPrior& odometry_prior,
-        std::int64_t lidar_timestamp_ms);
+        std::int64_t lidar_timestamp_ms,
+        bool measure_only = false);
 
     /// Run the Adam optimisation loop over the sliding window.
     /// Returns {last_loss, iterations_used}.

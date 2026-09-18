@@ -855,7 +855,10 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     T.linear().col(1) = y_axis;
     T.translation()   = best.centre;
 
-    // Name: room_<k>, one past the highest room_<k> in the graph (the room itself is plain "room").
+    // Name: room_<k>, one past the highest room_<k> in the graph. The first room is room_1 (see
+    // dsr_create_room_and_reparent), so the first proto is room_2 and the sequence never collides —
+    // including against a graph left over from before the rename, where the first room is plain "room":
+    // it carries no digits, the scan skips it, and k lands on 2 all the same.
     std::uint64_t k = 1;
     for (const auto& r : G_->get_nodes_by_type("room"))
         if (const std::string_view nm = r.name(); nm.starts_with("room_"))
@@ -1072,7 +1075,17 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
         return;
     }
 
-    DSR::Node room_node = DSR::Node::create<room_node_type>("room");
+    // ★ `room_1`, NOT plain "room". Rooms are a SEQUENCE now — the first room this agent localises in is
+    //   index 1, and every room discovered afterwards is `room_<k>` (step_proto_room, below). One name
+    //   shared by "the room" and "room number one" was only tenable while there could never be a second
+    //   room; the proto-room path made that false. `room_id` carries the index explicitly so nothing has
+    //   to parse the name for it — ltsm_agent's RoomEviction::room_index reads the attribute first and
+    //   falls back to the trailing digits only when it is absent. No collision with a proto: step_proto_room
+    //   takes one past the highest `room_<k>` in the graph, so the first proto born beside room_1 is room_2.
+    //   ⚠ NOTHING may go back to hard-coding this name anywhere. A room's FRAME is resolved from the graph
+    //   (rc::room::current_room_frame) exactly so a second room cannot silently break every consumer.
+    DSR::Node room_node = DSR::Node::create<room_node_type>("room_1");
+    G_->add_or_modify_attrib_local<room_id_att>(room_node, static_cast<std::uint64_t>(1));
     room_node.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
     room_node.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
     // THE CEILING, MEASURED WHEN WE HAVE ONE. Six agents read this attribute and nothing wrote it

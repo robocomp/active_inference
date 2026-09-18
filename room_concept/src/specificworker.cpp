@@ -24,6 +24,7 @@
 #include "ground_truth_log.h"
 #include <limits>
 #include "../../common/robot_capability/robot_capability.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame (the room is room_1, room_2, …)
 
 #include "image_edge_ops.h"   // xyz_from_pixel_depth(): model-aware, unlike cortex's pinhole-only version
 #include <filesystem>
@@ -151,7 +152,7 @@ void SpecificWorker::compute()
     if (inner_eigen_ and (last_door_scan_ms_ == 0 or now_ms - last_door_scan_ms_ >= 1000))
     {
         last_door_scan_ms_ = now_ms;
-        auto open_doors = doors_.refresh(*G, *inner_eigen_, "room");
+        auto open_doors = doors_.refresh(*G, *inner_eigen_, rc::room::current_room_frame(*G));
         static std::size_t last_n = std::numeric_limits<std::size_t>::max();
         if (open_doors.size() != last_n)
         {

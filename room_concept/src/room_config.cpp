@@ -111,6 +111,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.SensorSigma", ws.sensor_sigma);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallMapSigmaD", wm.map_sigma_d);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.FreezeLayoutWhenPublishable", wm.freeze_when_publishable);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.RecordWallInput", room_concept.params.record_wall_input);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.EnableLevel2", wm.enable_level2);
         float msp = std::numeric_limits<float>::quiet_NaN();
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallMapSigmaPhiDeg", msp);

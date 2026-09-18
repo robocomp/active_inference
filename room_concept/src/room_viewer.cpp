@@ -483,6 +483,24 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
             viewer_2d_->draw_room_polygon(room_verts, false);
         }
     }
+    else if (room_concept_ != nullptr and room_concept_->estimating()
+             and last_wall_view_.map_ready and last_wall_view_.polygon.verts.size() >= 3)
+    {
+        // ★PUBLISHED: SHOW THE ROOM AND THE ROBOT, NOTHING ELSE (2026-09-17). Same clean overlay the
+        // Localizing branch above uses. While estimating with the freeze OFF the layout never enters
+        // Localizing (layout_state() stays Searching by construction), so the canvas kept drawing the
+        // whole working set — wall lines, corner discs, candidate clutter — over a room that was already
+        // published. Empty inputs retire every pool in one call.
+        const std::vector<wallseg::WallSegment> none_seg;
+        const std::vector<wallmap::WallLandmark> none_walls;
+        viewer_2d_->draw_wall_map(none_seg, none_walls, rc::wallmap::Polygon{}, true, pose_for_draw,
+                                  room_concept_->params.wall_map.publish_corner_sigma, {});
+        std::vector<Eigen::Vector2f> room_verts;
+        room_verts.reserve(last_wall_view_.polygon.verts.size());
+        for (const auto& v : last_wall_view_.polygon.verts)
+            room_verts.push_back(canvas_from_map * v);
+        viewer_2d_->draw_room_polygon(room_verts, false);
+    }
     else if (room_concept_ != nullptr and room_concept_->estimating())
     {
         // (the cache was already refreshed above, under the not-empty guard)

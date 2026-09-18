@@ -214,6 +214,14 @@ namespace rc::gn
     void absorb_wall_observations(const Input& in, const RoomConcept::WindowSlot& slot,
                                   const Eigen::Vector3f& pose);
 
+    /// The (φ, d) information ONE slot gives each wall it observed, as a POSTERIOR MARGINAL, for the PUBLISH
+    /// TEST only (nothing is written). STATISTICAL scale: the factor's loss weight 0.5·σ_obs⁻²·w·pda/N_slot is
+    /// undone and the physical per-return SensorSigma used (k = 2·σ_obs²·N_slot/σ_sensor²); the systematic
+    /// part stays in corner_model_sigma. The slot's pose is Schur-complemented out against `pose_prec`.
+    std::vector<std::pair<std::uint64_t, Eigen::Matrix2f>>
+    wall_marginal_information_of_slot(const Input& in, const RoomConcept::WindowSlot& slot,
+                                      const Eigen::Vector3f& pose, const Eigen::Matrix3f* pose_prec);
+
     /// Minimise the window RFE. `poses` is in/out: one [x, y, θ] per window slot, same order as the
     /// window. The caller writes them back into the slot tensors (or discards them, in shadow mode).
     Result solve(const Input& in, std::vector<Eigen::Vector3f>& poses, const Options& opts);

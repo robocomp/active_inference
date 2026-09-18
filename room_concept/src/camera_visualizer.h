@@ -25,6 +25,7 @@
 
 #include "corner_detector.h"
 #include "image_edge_types.h"   // rc::CornerDetector::CornerMatch (matched-corner overlay)
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame (the room is room_1, room_2, …)
 
 // Forward declarations
 namespace DSR {
@@ -128,7 +129,12 @@ class CameraVisualizer : public QDialog
         std::unique_ptr<DSR::CameraAPI> camera_api_;
         std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api_;
         std::string camera_node_name_ = "zed";
-        std::string room_frame_name_ = "room";
+        // THE ROOM'S FRAME NAME, RESOLVED FROM THE GRAPH — never a literal. room_concept names its first
+        // room `room_1` and later ones `room_<k>`, so a hard-coded "room" would name a node that does not
+        // exist and every RT lookup below would answer nullopt without saying why. "" when no room is
+        // resolvable yet, which the callers already treat as "no chain this frame".
+        [[nodiscard]] std::string room_frame_name() const
+        { return graph_ ? rc::room::current_room_frame(*graph_) : std::string{}; }
 
         // ── Media-plane RGB consumer (dedicated ingest thread) ────────────────
         // media_rgb_sub_ is owned EXCLUSIVELY by the ingest thread (created in

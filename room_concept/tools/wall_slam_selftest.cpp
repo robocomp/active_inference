@@ -99,6 +99,54 @@ namespace
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
+    /// Webots Room2 as the live agent sees it: 6.00 x 4.00 m, the simplest shape there is and fully
+    /// visible from every pose. If SLAM cannot hold THIS while the robot drives, nothing else matters.
+    Poly room2()        { return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {-3.f, 2.f}}; }
+    /// The same room with a column bitten out of one side — one concave pair of corners, so the
+    /// layout is no longer fully explained from a single viewpoint and motion has to earn it.
+    Poly room2_column() { return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {0.6f, 2.f}, {0.6f, 1.2f},
+                                  {-0.6f, 1.2f}, {-0.6f, 2.f}, {-3.f, 2.f}}; }
+
+    /// A closed circuit inside `wp`, sampled at `step` metres so the reference advances at about the
+    /// speed the base can actually hold. `laps` of it makes a LONG tour: the point is to keep the
+    /// robot moving long after the layout first closes, which is exactly when the live agent fell over.
+    std::vector<Eigen::Vector3f> circuit(const std::vector<Eigen::Vector2f>& wp, float step, int laps)
+    {
+        std::vector<Eigen::Vector3f> tr;
+        for (int l = 0; l < laps; ++l)
+            for (size_t i = 0; i < wp.size(); ++i)
+            {
+                const Eigen::Vector2f& p = wp[i];
+                const Eigen::Vector2f& q = wp[(i + 1) % wp.size()];
+                const Eigen::Vector2f e = q - p;
+                const float len = e.norm(), th = std::atan2(e.y(), e.x());
+                const int n = std::max(1, static_cast<int>(len / std::max(1e-3f, step)));
+                for (int k = 0; k < n; ++k)
+                {
+                    const float u = static_cast<float>(k) / static_cast<float>(n);
+                    tr.emplace_back(p.x() + u * e.x(), p.y() + u * e.y(), th);
+                }
+            }
+        return tr;
+    }
+
+    /// A SUSTAINED IN-PLACE PIVOT at the room centre: the manoeuvre that broke the live agent, and
+    /// the one a lap-shaped tour barely exercises. The reference heading sweeps +-`amp` radians, so
+    /// the controller demands a large omega for seconds at a time and the base's acceleration limit
+    /// keeps execution behind intent for the whole of it — which is exactly when a command prior is
+    /// asserting the commanded turn against a base that has not made it.
+    std::vector<Eigen::Vector3f> pivot_path(const Eigen::Vector2f& at, float amp, int sweeps, int n_per_sweep)
+    {
+        std::vector<Eigen::Vector3f> tr;
+        for (int s = 0; s < sweeps; ++s)
+            for (int i = 0; i < n_per_sweep; ++i)
+            {
+                const float u = static_cast<float>(i) / static_cast<float>(n_per_sweep);
+                tr.emplace_back(at.x(), at.y(), (s % 2 == 0) ? (-amp + 2.f * amp * u) : (amp - 2.f * amp * u));
+            }
+        return tr;
+    }
+
     Poly l_room_notch(){ return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-2.f, 3.f}, {-2.f, 2.f}, {-4.f, 2.f}}; }
     Poly chamfer_room(){ return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 2.f}, {3.f, 3.f}, {-4.f, 3.f}}; }
 
@@ -235,9 +283,117 @@ namespace
         int frames = 0, closed_at = -1, births = 0, deaths = 0, rejected = 0;
         Eigen::Vector2f last_xy = Eigen::Vector2f::Zero();   // final robot position (map frame)
         long occluded_pts = 0;   // LiDAR returns the camera showed to be on furniture, not on a wall
+        // ROTATION GAIN: the slope of predicted-vs-true per-frame rotation, k = S(t*p) / S(t*t).
+        // ⚠ NOT a ratio of summed magnitudes: per-frame heading noise is rectified by |.| and, over a
+        // mostly-straight tour, swamps the signal — that form read 1.336 on the LEGACY teleport path,
+        // whose gain is 1.000 by construction. The regression slope is unbiased because the
+        // prediction's noise is zero-mean and the truth carries none.
+        double rot_tp = 0.0, rot_tt = 0.0;
+        float rotation_gain() const
+        { return rot_tt > 1e-9 ? static_cast<float>(rot_tp / rot_tt) : 0.f; }
     };
 
     using Boxes = std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>>;   // (lo, hi)
+
+    /// ── EXECUTED MOTION: the robot does not teleport ────────────────────────────────────────────
+    /// Three quantities the old harness collapsed into one, and whose differences are exactly where
+    /// the live faults live:
+    ///   COMMAND   what the planner asks for — a statement of INTENT,
+    ///   EXECUTION what the base actually does with it, through velocity and acceleration limits,
+    ///   MEASUREMENT what the encoders then report about the execution, with their own scale error.
+    /// The old path built odometry as `truth[k] - truth[k-1] + N(0, sigma)`: unbiased BY
+    /// CONSTRUCTION, one delta per frame, and no command channel at all. That is why a 500-room
+    /// sweep could sit at 0.97 IoU while the live agent could not hold a rectangle — the sweep was
+    /// a null test of the motion channel. Measured live 2026-09-18 on Shadow: the fused prediction
+    /// turned 49.3 deg over a true 34.0 deg pivot (gain 1.41), translation right to 2%.
+    struct BaseModel
+    {
+        // ── THE REAL BASE, not invented numbers ──────────────────────────────────────────────────
+        // From SVD48VBase/etc/config_diferential.toml (the hardware's own config). Converted to SI;
+        // `maxAcceleration`/`maxDeceleration` are labelled "mm/s" there but are accelerations, read
+        // as mm/s^2. NOTE THE ASYMMETRY: this base brakes twice as hard as it accelerates.
+        //   maxLinSpeed 1000 mm/s, maxRotSpeed 2 rad/s, maxAcceleration 500, maxDeceleration 1000,
+        //   wheelRadius 100 mm, axesLength 518 mm.
+        // ⚠ THERE IS NO ROTATIONAL ACCELERATION FIGURE IN THE FILE. For a differential base it is
+        // not free to choose: omega = (v_r - v_l)/L, so the hardest turn-rate change is the two
+        // wheels ramping opposite ways, a_rot = 2*a_lin/L = 2*0.5/0.518 = 1.93 rad/s^2. Deriving it
+        // from the geometry is the only honest option — a guessed value here IS the command/execution
+        // gap this bench exists to measure.
+        float v_max = 1.00f;    // m/s   — maxLinSpeed 1000 mm/s (a LEGAL cap, per the file's own note)
+        float w_max = 2.00f;    // rad/s — maxRotSpeed
+        float a_lin = 0.50f;    // m/s^2 — maxAcceleration 500 mm/s^2
+        float d_lin = 1.00f;    // m/s^2 — maxDeceleration 1000 mm/s^2
+        float axes_length = 0.518f;                    // m — wheel separation
+        float a_rot = 2.f * 0.50f / 0.518f;            // rad/s^2, derived (1.93)
+        float d_rot = 2.f * 1.00f / 0.518f;            // rad/s^2, derived (3.86)
+        Eigen::Vector3f vel = Eigen::Vector3f::Zero();  // (adv, side, omega) in the robot frame
+
+        /// The omnidirectional variant of the same hardware (config_omnidirectional.toml).
+        static BaseModel omni()
+        {
+            BaseModel b;
+            b.v_max = 0.70f; b.w_max = 1.50f; b.a_lin = 0.35f; b.d_lin = 1.00f;
+            b.axes_length = 0.475f;
+            b.a_rot = 2.f * b.a_lin / b.axes_length;    // 1.47
+            b.d_rot = 2.f * b.d_lin / b.axes_length;    // 4.21
+            return b;
+        }
+
+        /// Ramp toward `cmd` inside the acceleration limits, clamp to the velocity limits, and
+        /// return the BODY-frame displacement actually achieved over `dt`. The shortfall against
+        /// `cmd * dt` is the base under-executing, which is what a command prior gets wrong.
+        Eigen::Vector3f execute(const Eigen::Vector3f& cmd, float dt)
+        {
+            const auto ramp = [&](float v, float target, float acc, float dec)
+            {
+                // Slowing down, or reversing through zero, is bounded by the DECELERATION figure.
+                const bool braking = std::abs(target) < std::abs(v) or v * target < 0.f;
+                const float a = braking ? dec : acc;
+                return v + std::clamp(target - v, -a * dt, a * dt);
+            };
+            vel.x() = std::clamp(ramp(vel.x(), cmd.x(), a_lin, d_lin), -v_max, v_max);
+            vel.y() = std::clamp(ramp(vel.y(), cmd.y(), a_lin, d_lin), -v_max, v_max);
+            vel.z() = std::clamp(ramp(vel.z(), cmd.z(), a_rot, d_rot), -w_max, w_max);
+            return vel * dt;
+        }
+    };
+
+    /// What the wheels REPORT about a displacement they did make. `k_v`/`k_w` are scale errors, not
+    /// noise: a scale survives averaging and accumulates, which is the failure a zero-mean model can
+    /// never produce however many frames it runs.
+    struct EncoderModel
+    {
+        float k_v = 1.0f, k_w = 1.0f;
+        float sigma_xy = 0.005f, sigma_th = 0.3f * kPi / 180.f;
+        Eigen::Vector3f measure(const Eigen::Vector3f& body_delta, std::mt19937& rng) const
+        {
+            std::normal_distribution<float> nxy(0.f, sigma_xy), nth(0.f, sigma_th);
+            return {k_v * body_delta.x() + nxy(rng), k_v * body_delta.y() + nxy(rng),
+                    k_w * body_delta.z() + nth(rng)};
+        }
+    };
+
+    /// Proportional pursuit of a reference pose: turn toward it, and drive at a speed that falls off
+    /// with heading error. Deliberately simple — its job is to DEMAND more than the base can deliver
+    /// at the corners of the path, because that is where command and execution diverge.
+    inline Eigen::Vector3f pursue(const Eigen::Vector3f& cur, const Eigen::Vector3f& goal)
+    {
+        const Eigen::Vector2f d = goal.head<2>() - cur.head<2>();
+        const float dist = d.norm();
+        const float bearing = wrap(std::atan2(d.y(), d.x()) - cur.z());
+        if (dist > 0.05f)
+            return {1.5f * dist * std::max(0.f, std::cos(bearing)), 0.f, 2.0f * bearing};
+        return {0.f, 0.f, 2.0f * wrap(goal.z() - cur.z())};   // arrived: settle onto the reference heading
+    }
+
+    /// SE(2) composition: apply a BODY-frame delta to a world pose.
+    inline Eigen::Vector3f compose(const Eigen::Vector3f& p, const Eigen::Vector3f& body)
+    {
+        const float c = std::cos(p.z()), s = std::sin(p.z());
+        return {p.x() + c * body.x() - s * body.y(),
+                p.y() + s * body.x() + c * body.y(),
+                wrap(p.z() + body.z())};
+    }
 
     struct RunConfig
     {
@@ -254,6 +410,20 @@ namespace
         int   ceiling_rays = 180;
         const char* trace_csv = nullptr;   // per-frame precision trace (WallMap::precisions)
         const char* poly_csv  = nullptr;   // per-frame PUBLISHED layout + its per-corner/per-edge sigma
+        // ── EXECUTED MOTION ──────────────────────────────────────────────────────────────────────
+        // OFF = the legacy teleport path, kept so every stored baseline stays comparable. ON treats
+        // `truth` as a REFERENCE PATH the robot is driven along, and the executed pose becomes the
+        // truth everything is scored against.
+        bool  exec_motion = false;
+        bool  omni_base   = false;   // true = config_omnidirectional.toml instead of the differential one
+        float dt          = 0.05f;   // s per frame — the live agent's 20 Hz
+        float enc_k_v     = 1.0f;    // encoder translation scale (1.0 = perfectly calibrated)
+        float enc_k_w     = 1.0f;    // encoder rotation scale
+        // Mix the COMMAND channel into the prediction through the agent's OWN fusion —
+        // RoomConcept::compute_motion_covariance() for each channel's covariance and
+        // RoomConcept::fuse_priors() for the precision-weighted blend. This is the live
+        // UseCommandVelocityPrior path, not an imitation of it.
+        bool  use_command_prior = false;
     };
 
     /// Append one frame's precision snapshot. The file is opened once per run and imbued with the
@@ -488,21 +658,79 @@ namespace
 
         Eigen::Vector3f est = Eigen::Vector3f::Zero();
         Eigen::Vector3f prev_truth_map = to_map(truth[0]);
+        // EXECUTED MOTION state: the pose the base actually reached, and the machines that produce
+        // it. `truth` is demoted to a reference path the controller pursues.
+        Eigen::Vector3f exec_pose = truth[0];
+        BaseModel    base = cfg.omni_base ? BaseModel::omni() : BaseModel{};
+        EncoderModel enc; enc.k_v = cfg.enc_k_v; enc.k_w = cfg.enc_k_w;
+        enc.sigma_xy = cfg.odom_sigma_xy; enc.sigma_th = cfg.odom_sigma_th;
+        // A default-constructed agent used ONLY for its motion-covariance model: it owns no graph, no
+        // window and no torch model, and the two calls below read nothing but `params`.
+        RoomConcept motion_agent; motion_agent.params = params;
         if (resume) est = resume->map.walls.empty() ? est : est;   // (resume keeps the map; poses restart at the origin of the new leg)
         double se = 0.0; int n_err = 0;
 
         for (size_t f = 0; f < truth.size(); ++f)
         {
             const Poly& room = rooms_by_frame[std::min(f, rooms_by_frame.size() - 1)];
-            const Eigen::Vector3f tm = to_map(truth[f]);
-            // Odometry in the map frame with noise; prediction = previous estimate + odom.
-            Eigen::Vector3f odom = tm - prev_truth_map; odom.z() = wrap(odom.z());
-            if (f > 0) odom += Eigen::Vector3f(nxy(rng), nxy(rng), nth(rng));
+            Eigen::Vector3f world_pose = truth[f];
+            Eigen::Vector3f odom;
+            if (cfg.exec_motion)
+            {
+                // COMMAND -> EXECUTION -> MEASUREMENT, kept apart on purpose.
+                const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, truth[f]);
+                const Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+                exec_pose  = compose(exec_pose, body);
+                world_pose = exec_pose;
+                // The wheels measure the BODY delta; the agent turns that into a map-frame increment
+                // using the heading it currently BELIEVES, which is how a heading error compounds.
+                const Eigen::Vector3f meas = (f == 0) ? Eigen::Vector3f::Zero() : enc.measure(body, rng);
+                const Eigen::Vector3f want = cmd * cfg.dt;   // what was ASKED for, not what happened
+                // Body -> map using the heading the agent currently BELIEVES: that is how a heading
+                // error compounds instead of cancelling.
+                const float ce = std::cos(est.z()), se_ = std::sin(est.z());
+                const auto to_map_delta = [&](const Eigen::Vector3f& b)
+                { return Eigen::Vector3f(ce * b.x() - se_ * b.y(), se_ * b.x() + ce * b.y(), wrap(b.z())); };
+                const Eigen::Vector3f meas_map = to_map_delta(meas);
+                if (not cfg.use_command_prior) odom = meas_map;
+                else
+                {
+                    // THE AGENT'S OWN FUSION. Each channel's covariance comes from the same model the
+                    // live agent uses (cmd_noise_* vs odom_noise_*), so the command's pull is whatever
+                    // those parameters actually say — not a weight invented here.
+                    const Eigen::Vector3f cmd_map = to_map_delta(want);
+                    RoomConcept::OdometryPrior pc; pc.delta_pose = cmd_map;  pc.dt = cfg.dt; pc.is_measured = false;
+                    RoomConcept::OdometryPrior pm; pm.delta_pose = meas_map; pm.dt = cfg.dt; pm.is_measured = true;
+                    const Eigen::Matrix3f cov_cmd  = motion_agent.compute_motion_covariance(pc, false);
+                    const Eigen::Matrix3f cov_odom = motion_agent.compute_motion_covariance(pm, true);
+                    // fuse_priors works on absolute predicted poses, so offer both as `est + delta`
+                    // and take the fused prediction back off as the increment.
+                    const Eigen::Vector3f pred_cmd(est.x() + cmd_map.x(),  est.y() + cmd_map.y(),  wrap(est.z() + cmd_map.z()));
+                    const Eigen::Vector3f pred_odo(est.x() + meas_map.x(), est.y() + meas_map.y(), wrap(est.z() + meas_map.z()));
+                    const auto [fused, prec] = RoomConcept::fuse_priors(pred_cmd, cov_cmd, pred_odo, cov_odom);
+                    (void)prec;
+                    odom = {fused.x() - est.x(), fused.y() - est.y(), wrap(fused.z() - est.z())};
+                }
+            }
+            else
+            {
+                // LEGACY TELEPORT: map-frame truth delta plus zero-mean noise. Unbiased by construction.
+                const Eigen::Vector3f tm_legacy = to_map(truth[f]);
+                odom = tm_legacy - prev_truth_map; odom.z() = wrap(odom.z());
+                if (f > 0) odom += Eigen::Vector3f(nxy(rng), nxy(rng), nth(rng));
+            }
+            const Eigen::Vector3f tm = to_map(world_pose);
+            if (f > 0)
+            {
+                const double dt_true = wrap(tm.z() - prev_truth_map.z());
+                R.rot_tp += dt_true * static_cast<double>(odom.z());
+                R.rot_tt += dt_true * dt_true;
+            }
             prev_truth_map = tm;
             const Eigen::Vector3f pred = (f == 0) ? Eigen::Vector3f::Zero()
                                                   : Eigen::Vector3f(est.x() + odom.x(), est.y() + odom.y(), wrap(est.z() + odom.z()));
 
-            const auto pts = scan(room, truth[f], cfg.n_rays, cfg.scan_sigma, rng);
+            const auto pts = scan(room, world_pose, cfg.n_rays, cfg.scan_sigma, rng);
             // MODEL-FIRST: the very first scan's OBB seeds the rectangle (map frame = first pose).
             if (R.map.walls.empty())
             {
@@ -1412,6 +1640,53 @@ int main()
 #endif
     torch::set_num_threads(1);
     std::mt19937 rng(7);
+
+    // ═══ TOUR BENCH (WS_TOUR=1) ═══════════════════════════════════════════════════════════════
+    // Does SLAM hold over a LONG tour when the robot is DRIVEN rather than teleported? Runs the
+    // circuit with executed motion, sweeping the two faults the old harness could not express: a
+    // command channel mixed into the prediction (intent vs execution) and an encoder rotation
+    // scale. WS_TOUR_ROOM=column adds a concave column; WS_TOUR_LAPS sets the length.
+    if (std::getenv("WS_TOUR") != nullptr)
+    {
+        const bool column = std::getenv("WS_TOUR_ROOM") and std::string(std::getenv("WS_TOUR_ROOM")) == "column";
+        const int laps = std::getenv("WS_TOUR_LAPS") ? std::max(1, std::atoi(std::getenv("WS_TOUR_LAPS"))) : 3;
+        const Poly room = column ? room2_column() : room2();
+        const bool pivot = std::getenv("WS_TOUR_MODE") and std::string(std::getenv("WS_TOUR_MODE")) == "pivot";
+        const std::vector<Eigen::Vector2f> wp = {{-2.f, -1.2f}, {2.f, -1.2f}, {2.f, 0.8f}, {-2.f, 0.8f}};
+        const auto truth = pivot ? pivot_path({0.f, 0.f}, 0.60f, 2 * laps, 240)
+                                 : circuit(wp, 0.025f, laps);
+        if (pivot)
+            std::printf("\n=== PIVOT: %s room, %d sweeps of +-34 deg in place, %zu frames ===\n",
+                        column ? "column" : "rectangle", 2 * laps, truth.size());
+        else
+            std::printf("\n=== TOUR: %s room, %d laps, %zu frames (%.0f m of reference path) ===\n",
+                        column ? "column" : "rectangle", laps, truth.size(), truth.size() * 0.025f);
+        std::printf("%-26s %7s %7s %8s %8s %6s %6s %6s\n",
+                    "case", "IoU", "Hausd", "rmse_xy", "max_xy", "walls", "closed", "rotK");
+        struct Case { const char* name; bool exec, cmd; float k_w; };
+        const std::vector<Case> cases = {
+            {"teleport (legacy)",          false, false, 1.00f},
+            {"driven, encoders only",      true,  false, 1.00f},
+            {"driven, + COMMAND PRIOR",    true,  true,  1.00f},
+            {"driven, rot scale 1.05",     true,  false, 1.05f},
+            {"driven, rot scale 1.41",     true,  false, 1.41f},
+            {"driven, cmd prior + 1.05",   true,  true,  1.05f},
+        };
+        for (const auto& c : cases)
+        {
+            std::mt19937 trng(7);
+            RunConfig cfg; cfg.exec_motion = c.exec; cfg.use_command_prior = c.cmd; cfg.enc_k_w = c.k_w;
+            const auto R = run_loop({room}, truth, cfg, trng);
+            const Poly ew = R.poly.closed ? to_world(R.poly.verts, truth[0]) : Poly{};
+            const float iou = R.poly.closed ? polygon_iou(ew, room) : 0.f;
+            const float h   = R.poly.closed ? hausdorff(ew, room) : 9.99f;
+            std::printf("%-26s %7.3f %7.3f %8.3f %8.3f %6zu %6s %6.3f\n",
+                        c.name, iou, h, R.pose_rmse_xy, R.pose_max_xy, R.map.walls.size(),
+                        R.poly.closed ? "yes" : "NO", R.rotation_gain());
+        }
+        std::printf("\n");
+        return 0;
+    }
 
     // WS_ONLY7=1 skips the synthetic sections — iteration aid for the (slow) real-layout bench.
     if (std::getenv("WS_ONLY7") == nullptr)

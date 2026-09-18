@@ -763,6 +763,66 @@ namespace rc::gn
         }
     }
 
+    std::vector<std::pair<std::uint64_t, Eigen::Matrix2f>>
+    wall_marginal_information_of_slot(const Input& in, const RoomConcept::WindowSlot& slot,
+                                      const Eigen::Vector3f& pose, const Eigen::Matrix3f* pose_prec)
+    {
+        std::vector<std::pair<std::uint64_t, Eigen::Matrix2f>> out;
+        if (in.walls == nullptr or in.params == nullptr or slot.wall_assoc.empty()) return out;
+        const auto& P = *in.params;
+        const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
+        const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
+        const float sensor = std::max(1e-4f, P.wall_seg.sensor_sigma);
+        const float k = 2.f * P.rfe_obs_sigma * P.rfe_obs_sigma * static_cast<float>(std::max(1, n_slot)) / (sensor * sensor);
+        std::vector<std::uint64_t> ids;
+        for (const auto& a : slot.wall_assoc)
+            if (in.walls->find(a.wall_id) != nullptr and std::ranges::find(ids, a.wall_id) == ids.end())
+                ids.push_back(a.wall_id);
+        const int m = static_cast<int>(ids.size());
+        if (m == 0) return out;
+        Eigen::Matrix3f Hpp = Eigen::Matrix3f::Zero();
+        Eigen::MatrixXf Hpw = Eigen::MatrixXf::Zero(3, 2 * m);
+        Eigen::MatrixXf Hww = Eigen::MatrixXf::Zero(2 * m, 2 * m);
+        for (const auto& a : slot.wall_assoc)
+        {
+            const auto* w = in.walls->find(a.wall_id);
+            if (w == nullptr) continue;
+            const int j = static_cast<int>(std::ranges::find(ids, a.wall_id) - ids.begin());
+            LinearSystem sys(5);
+            State x(5);
+            x << pose, w->phi, w->d;
+            WallPointFactor f(0, 3, a.pts, a.weights, inv_var, P.rfe_huber_delta, n_slot, a.pda);
+            f.linearize(x, sys);
+            const Eigen::MatrixXf H = k * sys.H;
+            if (not H.allFinite()) continue;
+            Hpp += H.block<3, 3>(0, 0);
+            Hpw.block(0, 2 * j, 3, 2) += H.block(0, 3, 3, 2);
+            Hww.block(2 * j, 2 * j, 2, 2) += H.block(3, 3, 2, 2);
+        }
+        Eigen::MatrixXf S = Hww;
+        if (pose_prec != nullptr and pose_prec->allFinite())
+        {
+            const Eigen::Matrix3f A = Hpp + *pose_prec;
+            Eigen::LDLT<Eigen::Matrix3f> ldlt(A);
+            if (ldlt.info() == Eigen::Success and A.determinant() > 1e-12f)
+                S = Hww - Hpw.transpose() * ldlt.solve(Hpw);
+        }
+        Eigen::FullPivLU<Eigen::MatrixXf> lu(S);
+        const bool invertible = lu.isInvertible();
+        const Eigen::MatrixXf Sinv = invertible ? lu.inverse() : Eigen::MatrixXf();
+        for (int j = 0; j < m; ++j)
+        {
+            Eigen::Matrix2f info = S.block(2 * j, 2 * j, 2, 2);
+            if (invertible)
+            {
+                const Eigen::Matrix2f cov = Sinv.block(2 * j, 2 * j, 2, 2);
+                if (cov.allFinite() and cov.determinant() > 1e-20f) info = cov.inverse();
+            }
+            if (info.allFinite()) out.emplace_back(ids[static_cast<size_t>(j)], info);
+        }
+        return out;
+    }
+
     FactorList build_factors(const Input& in, const Layout& lay)
     {
         FactorList fs;

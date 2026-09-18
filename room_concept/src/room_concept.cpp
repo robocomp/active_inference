@@ -2414,6 +2414,51 @@ namespace rc
         return any ? w : torch::Tensor{};   // nothing crossed an open door: report the plain median
     }
 
+    Eigen::Matrix3f RoomConcept::slot_pose_precision(std::size_t i) const
+    {
+        const auto& W = window_mgr_.window;
+        if (i == 0)
+        {
+            const auto& bp = window_mgr_.boundary_prior;
+            if (bp.valid and W.size() > 1 and bp.precision.allFinite())
+                return bp.precision;
+            Eigen::Matrix3f g = Eigen::Matrix3f::Zero();
+            g(0, 0) = g(1, 1) = 1.f / (params.wall_gauge_sigma_xy * params.wall_gauge_sigma_xy);
+            g(2, 2) = 1.f / (params.wall_gauge_sigma_theta * params.wall_gauge_sigma_theta);
+            return g;
+        }
+        if (i < W.size())
+        {
+            const Eigen::Matrix3f& C = W[i].pose_cov;
+            if (C.allFinite() and C.determinant() > 1e-18f)
+                return C.inverse();
+        }
+        return Eigen::Matrix3f::Zero();
+    }
+
+    std::unordered_map<std::uint64_t, Eigen::Matrix2f> RoomConcept::window_wall_information() const
+    {
+        std::unordered_map<std::uint64_t, Eigen::Matrix2f> out;
+        if (not estimating()) return out;
+        gn::Input in; in.params = &params;
+        in.walls = const_cast<wallmap::WallMap*>(&wall_map_);   // read-only: find() and fields
+        const auto& W = window_mgr_.window;
+        for (std::size_t i = 0; i < W.size(); ++i)
+        {
+            const auto& slot = W[i];
+            if (slot.wall_assoc.empty() or not slot.pose.defined()) continue;
+            const auto p = slot.pose.detach().to(torch::kCPU);
+            const auto pa = p.accessor<float, 1>();
+            const Eigen::Matrix3f prec = slot_pose_precision(i);
+            for (const auto& [id, info] : gn::wall_marginal_information_of_slot(in, slot, Eigen::Vector3f(pa[0], pa[1], pa[2]), &prec))
+            {
+                auto [it, fresh] = out.try_emplace(id, Eigen::Matrix2f::Zero());
+                it->second += info;
+            }
+        }
+        return out;
+    }
+
     void RoomConcept::wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
                                         std::int64_t timestamp_ms)
     {
@@ -2472,6 +2517,44 @@ namespace rc
             wall_z_max_  = zs.empty() ? 0.f : zs.back();
         }
         wall_frame_ts_ = timestamp_ms;
+
+        // ── DIAGNOSTIC RECORDER (RoomShape.RecordWallInput, default OFF) ─────────────────────────────
+        // Exactly what the wall step receives this frame, so a live run can be replayed through the offline
+        // harness core and the live INPUT separated from the agent's INTEGRATION loop. Read-only.
+        // Binary, native little-endian: "WIN1" + u32 version, then per frame: i64 ts, u8 stride_replace,
+        // f32 odom[3], f32 pose[3], f32 cov[9] (row-major), u32 n, n x (f32 x, f32 y, f32 z, f32 weight).
+        if (params.record_wall_input)
+        {
+            if (not wall_input_rec_.is_open())
+            {
+                std::filesystem::create_directories("tmp");
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count();
+                wall_input_rec_.open("tmp/wall_input_" + std::to_string(ms) + ".bin", std::ios::binary | std::ios::trunc);
+                if (wall_input_rec_.is_open())
+                {
+                    const std::uint32_t version = 1;
+                    wall_input_rec_.write("WIN1", 4);
+                    wall_input_rec_.write(reinterpret_cast<const char*>(&version), sizeof(version));
+                    qInfo() << "[room][wall-slam] RecordWallInput: recording wall-step input to tmp/wall_input_" << ms << ".bin";
+                }
+            }
+            if (wall_input_rec_.is_open())
+            {
+                const auto put = [&](const auto& v) { wall_input_rec_.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+                put(static_cast<std::int64_t>(timestamp_ms));
+                put(static_cast<std::uint8_t>(rec_stride_replace_ ? 1 : 0));
+                for (int i = 0; i < 3; ++i) put(rec_odom_delta_[i]);
+                for (int i = 0; i < 3; ++i) put(pose[i]);
+                for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) put(current_covariance(r, c));
+                put(static_cast<std::uint32_t>(pts.size()));
+                for (size_t i = 0; i < pts.size(); ++i)
+                {
+                    put(pts[i].x()); put(pts[i].y()); put(points[i].z());
+                    put(weights.size() > static_cast<long>(i) ? weights(static_cast<long>(i)) : 1.f);
+                }
+            }
+        }
 
         // FROZEN: observe() still runs, because association is what feeds the residual log and the
         // canvas, and a frozen map that cannot say how far the scan falls from it is worth nothing.
@@ -2671,14 +2754,16 @@ namespace rc
             }
         }
         }
-        auto poly = wall_map_.build_polygon();
+        // ★The publish test reads carried + WINDOW information: carried holds only dropped slots, so a parked
+        // robot (window never slides) never published a fully visible room (live Room2, 09-17).
+        auto poly = wall_map_.build_polygon_with(window_wall_information());
         // The PUBLISHED layout: exactly Manhattan by construction — the output-stage projection
         // on a COPY (WallMap::manhattan_polygon). The raw polygon keeps every in-loop role
         // (re-anchor trigger and bbox, model update, status): six in-loop hard-Manhattan
         // variants were measured to degrade estimation; only what leaves the agent is projected.
         // LOCALIZING republishes the polygon it froze, rather than projecting and decorating afresh.
         // See frozen_pub_ for why: decorate() re-decides level-2 features from the grid every frame.
-        auto pub = frozen_pub_.has_value() ? *frozen_pub_ : wall_map_.manhattan_polygon();
+        auto pub = frozen_pub_.has_value() ? *frozen_pub_ : wall_map_.manhattan_polygon_with(window_wall_information());
         if (poly.closed and poly.verts.size() >= 3)
         {
             // ── AND THE WALLS MUST AGREE WITH THEIR OWN CLASSES BEFORE THE FRAME IS PINNED ───────
@@ -2709,8 +2794,8 @@ namespace rc
                 const Eigen::Vector2f c = Eigen::Rotation2Df(rot) * ((lo + hi) * 0.5f);
                 reanchor_map_frame(c, rot);
                 wall_reanchored_ = true;
-                poly = wall_map_.build_polygon();
-                pub  = wall_map_.manhattan_polygon();
+                poly = wall_map_.build_polygon_with(window_wall_information());
+                pub  = wall_map_.manhattan_polygon_with(window_wall_information());
                 map_ready_ = true;
                 wall_frozen_ = wall_map_.params.freeze_when_publishable;
                 if (wall_frozen_)
@@ -2828,9 +2913,18 @@ namespace rc
         {
             std::set<std::uint64_t> in_poly(poly.wall_of_edge.begin(), poly.wall_of_edge.end());
             res.wall_view.walls.clear();
+            // ★WITH THE WINDOW'S INFORMATION (09-17). `information` alone is what has been ABSORBED, i.e. only
+            // dropped slots: parked it is still the 0.50 m rectangle prior, so the canvas printed sd=0.50 and
+            // "not publishable" about a room that had been published at 2 cm. Display only; nothing is stored.
+            const auto win_info = window_wall_information();
             for (const auto& w : wall_map_.walls)
                 if (in_poly.contains(w.id) or wall_frame_ts_ - w.last_seen_ms <= 2000)
-                    res.wall_view.walls.push_back(w);
+                {
+                    auto wv = w;
+                    if (const auto it = win_info.find(w.id); it != win_info.end() and it->second.allFinite())
+                        wv.information += it->second;
+                    res.wall_view.walls.push_back(wv);
+                }
         }
         res.wall_view.polygon     = (pub.closed and pub.verts.size() >= 3) ? pub : poly;
         res.wall_view.seg_to_wall = last_wall_frame_.seg_to_wall;
@@ -3352,6 +3446,7 @@ namespace rc
         new_slot.lidar_points = points_tensor;
         new_slot.odometry_delta = slot_odom_delta;
         new_slot.motion_cov = slot_motion_cov;
+        new_slot.pose_cov = current_covariance;
         new_slot.timestamp_ms = lidar.second;
         // ── THE CONNECTION, missing until 2026-08-26 ──────────────────────────────────────────────
         // pump_image_edges() has been extracting contours and calling set_image_edges() every tick,
@@ -3397,6 +3492,8 @@ namespace rc
             }
         }
 
+        rec_stride_replace_ = stride_replace;   // RecordWallInput (diagnostic only)
+        rec_odom_delta_     = slot_odom_delta;
         bool window_slid = false;
         if (stride_replace)
         {
@@ -3639,7 +3736,15 @@ namespace rc
         }
 
         // ===== EARLY EXIT CHECK =====
-        if (auto early = map_guided_checks_allowed()
+        // ★NOT WHILE SEARCHING (09-17) — the relocaliser's rule (5ca93b4). The early exit trusts the prediction
+        // against a FIXED map and skips the solve; while the layout is still estimated there is no fixed map. With
+        // the room publishable on a parked full view, map_ready_ went true at t = 0 and 99-100% of solves were
+        // skipped through the first 2.9 m of driving (pose = odometry, drifted 1.4 m, map collapsed).
+        // While SEARCHING the early exit must not fire, but its MEASUREMENT still feeds the "pred (SDF)"
+        // series — separate the measurement from the decision rather than starving the instrument.
+        if (map_guided_checks_allowed() and searching())
+            (void)try_prediction_early_exit(points_tensor, slot_odom_delta, selected_prior, lidar.second, true);
+        if (auto early = (map_guided_checks_allowed() and not searching())
                              ? try_prediction_early_exit(points_tensor, slot_odom_delta, selected_prior, lidar.second)
                              : std::optional<UpdateResult>{})
         {
@@ -4409,7 +4514,8 @@ namespace rc
         const torch::Tensor& points_tensor,
         const Eigen::Vector3f& slot_odom_delta,
         const OdometryPrior& odometry_prior,
-        std::int64_t lidar_timestamp_ms)
+        std::int64_t lidar_timestamp_ms,
+        bool measure_only)
     {
         // No fast_rotation block here: the SDF quality check below already decides whether
         // the predicted pose (including theta) is accurate enough to skip Adam.
@@ -4464,7 +4570,7 @@ namespace rc
             and odometry_prior.valid and odometry_prior.covariance_eigen.allFinite())
         {
             const Eigen::Matrix3f P_grown = current_covariance + odometry_prior.covariance_eigen;
-            if (P_grown.allFinite()) current_covariance = P_grown;
+            if (P_grown.allFinite() and not measure_only) current_covariance = P_grown;   // measure_only: no state change
         }
 
         if (!params.prediction_early_exit ||
@@ -4513,6 +4619,9 @@ namespace rc
         last_early_exit_metric_ = mean_sdf_pred;
         // Same points, same pose, median instead of mean — see last_pred_sdf_median_.
         last_pred_sdf_median_ = torch::median(torch::abs(sdf_pred)).item<float>();
+        // MEASURE ONLY: the diagnostics above are the point; the decision below is not ours to take while
+        // the layout is still being estimated (there is no fixed map to trust the prediction against).
+        if (measure_only) return std::nullopt;
 
         // Widen the SDF trust threshold when the robot is rotating.
         // A theta error ε at room scale R produces SDF displacement ~R*ε.
@@ -7823,7 +7932,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
 
     std::pair<Eigen::Vector3f, Eigen::Matrix3f> RoomConcept::fuse_priors(
         const Eigen::Vector3f &pred_cmd, const Eigen::Matrix3f &cov_cmd,
-        const Eigen::Vector3f &pred_odom, const Eigen::Matrix3f &cov_odom) const
+        const Eigen::Vector3f &pred_odom, const Eigen::Matrix3f &cov_odom)
     {
         // Bayesian fusion of two Gaussian priors:
         //   Σ_fused⁻¹ = Σ_cmd⁻¹ + Σ_odom⁻¹

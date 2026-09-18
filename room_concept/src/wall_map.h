@@ -51,6 +51,7 @@
  *  already enter the solve, so carrying them too would count them twice.
  */
 #pragma once
+#include <unordered_map>
 
 #include <Eigen/Dense>
 #include <cstdint>
@@ -523,6 +524,11 @@ namespace rc::wallmap
         /// The model and solver stay soft (six mutating variants measurably degraded pose and
         /// structure); only what is PUBLISHED is exactly Manhattan.
         Polygon manhattan_polygon() const;
+        /// manhattan_polygon() with `extra` (φ, d) information added first, on a COPY — the PUBLISHED layout as
+        /// the publish test sees it (carried + live window). Without this the viewer and the decision disagree:
+        /// parked, the carried numbers are still the rectangle prior (corner sigma ~0.95 m, "not publishable")
+        /// while the room has in fact been published at 2 cm.
+        Polygon manhattan_polygon_with(const std::unordered_map<std::uint64_t, Eigen::Matrix2f>& extra) const;
 
         /// Is every wall carrying an edge of this cycle BETTER EXPLAINED BY ITS MANHATTAN CLASS than
         /// by no class at all? classify() already computes both sides: cost = ½·eps²/var, the wall's
@@ -726,6 +732,10 @@ namespace rc::wallmap
 
         /// The model's polygon: the ordered edges intersected. Never throws.
         Polygon build_polygon() const;
+        /// build_polygon() with `extra` (φ, d) information added to each wall first, on a COPY. The agent passes
+        /// the live window's information: carried `information` holds only DROPPED slots, so a parked robot —
+        /// whose window never slides — never published a fully visible room.
+        Polygon build_polygon_with(const std::unordered_map<std::uint64_t, Eigen::Matrix2f>& extra) const;
         Polygon build_from(const std::vector<std::uint64_t>& ord) const;
 
         /// One-shot gauge change: p' = R(−rot)·(p − c). Transforms every edge, candidate and θ₀.

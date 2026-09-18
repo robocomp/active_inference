@@ -757,6 +757,26 @@ namespace rc::wallmap
         return c;
     }
 
+    Polygon WallMap::manhattan_polygon_with(const std::unordered_map<std::uint64_t, Eigen::Matrix2f>& extra) const
+    {
+        if (extra.empty()) return manhattan_polygon();
+        WallMap copy = *this;
+        for (auto& w : copy.walls)
+            if (const auto it = extra.find(w.id); it != extra.end() and it->second.allFinite())
+                w.information += it->second;
+        return copy.manhattan_polygon();
+    }
+
+    Polygon WallMap::build_polygon_with(const std::unordered_map<std::uint64_t, Eigen::Matrix2f>& extra) const
+    {
+        if (extra.empty()) return build_polygon();
+        WallMap copy = *this;
+        for (auto& w : copy.walls)
+            if (const auto it = extra.find(w.id); it != extra.end() and it->second.allFinite())
+                w.information += it->second;
+        return copy.build_polygon();
+    }
+
     void WallMap::initialize_rect(const std::vector<Eigen::Vector2f>& rect_ccw)
     {
         walls.clear(); candidates.clear(); order.clear(); corner_residue.clear();

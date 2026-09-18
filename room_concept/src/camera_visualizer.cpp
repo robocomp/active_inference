@@ -584,13 +584,13 @@ std::vector<Eigen::Vector3f> CameraVisualizer::get_room_corners_3d() const
 
     if (graph_)
     {
-        if (auto room_node = graph_->get_node(room_frame_name_); room_node.has_value())
+        if (auto room_node = graph_->get_node(room_frame_name()); room_node.has_value())
         {
             if (const auto h = graph_->get_attrib_by_name<room_height_att>(room_node.value()); h.has_value())
                 room_height = h.value();
         }
 
-        if (auto polygon_from_dsr = read_room_polygon_from_dsr(graph_, room_frame_name_);
+        if (auto polygon_from_dsr = read_room_polygon_from_dsr(graph_, room_frame_name());
             polygon_from_dsr.size() >= 3)
         {
             room_polygon = std::move(polygon_from_dsr);
@@ -631,7 +631,7 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
                 continue;
 
             const auto room_T_object = inner_eigen_api_->get_transformation_matrix(
-                room_frame_name_, node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
+                room_frame_name(), node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
             if (!room_T_object.has_value())
                 continue;
 
@@ -712,7 +712,7 @@ std::vector<CameraVisualizer::WallQuad> CameraVisualizer::get_dsr_wall_quads(std
             continue;
 
         const auto room_T_wall = inner_eigen_api_->get_transformation_matrix(
-            room_frame_name_, node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
+            room_frame_name(), node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
         if (!room_T_wall.has_value())
             continue;
 
@@ -744,7 +744,7 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
     if (!graph_ || !inner_eigen_api_)
         return std::nullopt;
 
-    const auto room_node = graph_->get_node(room_frame_name_);
+    const auto room_node = graph_->get_node(room_frame_name());
     if (!room_node.has_value())
         return std::nullopt;
 
@@ -785,11 +785,11 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
     const auto tq = overlay_predict_pose_ ? DSR::RT_API::TimeQuery::Extrapolated
                                           : DSR::RT_API::TimeQuery::Interpolated;
     auto room_T_robot = inner_eigen_api_->get_transformation_matrix(
-        room_frame_name_, robot_name, frame_ts, "RT", tq, &rt_info);
+        room_frame_name(), robot_name, frame_ts, "RT", tq, &rt_info);
     if (room_T_robot.has_value()
         and std::abs(rt_info.applied_dt_ms) > static_cast<std::int64_t>(kMaxPredictHorizonS * 1000.0))
         room_T_robot = inner_eigen_api_->get_transformation_matrix(
-            room_frame_name_, robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
+            room_frame_name(), robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
     rt_probe.note(rt_info, graph_);
     const auto robot_T_zed = inner_eigen_api_->get_transformation_matrix(
         robot_name, camera_node_name_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
@@ -820,7 +820,7 @@ std::vector<Eigen::Vector2f> CameraVisualizer::project_points_to_image(
         return image_points;
     }
 
-    if (!graph_ || !graph_->get_node(room_frame_name_).has_value() || !graph_->get_node(camera_node_name_).has_value())
+    if (!graph_ || !graph_->get_node(room_frame_name()).has_value() || !graph_->get_node(camera_node_name_).has_value())
     {
         const float nan = std::numeric_limits<float>::quiet_NaN();
         for (std::size_t i = 0; i < world_points.size(); ++i)
@@ -829,7 +829,7 @@ std::vector<Eigen::Vector2f> CameraVisualizer::project_points_to_image(
     }
 
     RoomToCameraBasis basis;
-    if (!compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name_, rt_timestamp, basis))
+    if (!compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name(), rt_timestamp, basis))
     {
         const float nan = std::numeric_limits<float>::quiet_NaN();
         for (std::size_t i = 0; i < world_points.size(); ++i)
@@ -862,7 +862,7 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
     if (!camera_data_.valid)
         return;
 
-    if (!graph_ || !graph_->get_node(room_frame_name_).has_value() || !graph_->get_node(camera_node_name_).has_value())
+    if (!graph_ || !graph_->get_node(room_frame_name()).has_value() || !graph_->get_node(camera_node_name_).has_value())
         return;
 
     auto corners_3d = get_room_corners_3d();
@@ -893,7 +893,7 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         }
     }
     if (!basis_ok)
-        basis_ok = compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name_, rt_timestamp, basis);
+        basis_ok = compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name(), rt_timestamp, basis);
     if (!basis_ok)
         return;
 
