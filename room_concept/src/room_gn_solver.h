@@ -185,6 +185,12 @@ namespace rc::gn
         // First-pose gauge: while no boundary prior exists yet, nothing pins the trajectory+map to the
         // frame. A prior on slot 0 at the origin with σ_gauge does — a gauge fix, not a model term.
         bool                                      gauge_fix = false;
+        // Keep the first-pose gauge factor alive AFTER the boundary prior exists. The gauge is a
+        // CONVENTION about an unobservable direction, and it was being handed to a prior that is
+        // re-derived from the current estimate every slide and eigenvalue-capped in mixed units —
+        // i.e. handed to something that cannot hold it. Marginalisation never sees the gauge factor,
+        // so on the first window slide the anchor is simply dropped.
+        bool                                      gauge_persist = false;
         float                                     gauge_sigma_xy = 1e-3f;
         float                                     gauge_sigma_theta = 1e-3f;
         // Wall factors on the newest N slots only (0 ⇒ every slot). Older slots' observations are what

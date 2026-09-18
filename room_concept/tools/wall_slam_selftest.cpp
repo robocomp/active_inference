@@ -289,6 +289,11 @@ namespace
         // whose gain is 1.000 by construction. The regression slope is unbiased because the
         // prediction's noise is zero-mean and the truth carries none.
         double rot_tp = 0.0, rot_tt = 0.0;
+        // MAP FRAME ROTATION: the COMMON rotation of every wall since it was born. A rotation shared
+        // by all walls is the frame turning, not the shape changing — the exact statistic measured
+        // live (all four walls of a rectangle moving together, spread 0.01 deg, reaching -81 deg).
+        float map_rot_max = 0.f;
+        int   marg_real = 0, marg_total = 0;   // how many slides used a REAL marginal
         float rotation_gain() const
         { return rot_tt > 1e-9 ? static_cast<float>(rot_tp / rot_tt) : 0.f; }
     };
@@ -416,6 +421,19 @@ namespace
         // truth everything is scored against.
         bool  exec_motion = false;
         bool  omni_base   = false;   // true = config_omnidirectional.toml instead of the differential one
+        // A/B the rotational gauge (WallMap::Params::gauge_on_theta0) and the SDF term, the two
+        // things that differ between this bench and the live agent on the gauge question.
+        bool  gauge_theta0 = false;  // measured WORSE 2026-09-18; see WallMap::Params::gauge_on_theta0
+        bool  line_factor  = false;  // S-Graphs+ style line-to-line wall factor instead of per-point
+        bool  gauge_persist = false;   // keep the first-pose gauge alive across marginalisation
+        // Rotational precision of the boundary prior. 1600 = this bench's historical assertion
+        // (sigma 1.43 deg); 500 = what the agent's eigenvalue cap actually allows (sigma 2.6 deg).
+        float bp_theta_prec = 1600.f;
+        // Compute the boundary prior by Schur complement instead of asserting it, and cap its
+        // eigenvalues the way the agent does (EigenvalueClampBoundaryMax = 500).
+        bool  real_marginal = false;
+        float bp_eig_cap    = 500.f;
+        bool  with_sdf     = false;
         float dt          = 0.05f;   // s per frame — the live agent's 20 Hz
         float enc_k_v     = 1.0f;    // encoder translation scale (1.0 = perfectly calibrated)
         float enc_k_w     = 1.0f;    // encoder rotation scale
@@ -627,6 +645,10 @@ namespace
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
         apply_env_overrides(R.map.params);
+        R.map.params.gauge_on_theta0 = cfg.gauge_theta0;
+        R.map.params.wall_line_factor = cfg.line_factor or std::getenv("WS_LINE") != nullptr;
+        if (std::getenv("WS_NO_FLOOR")) R.map.params.death_floor = false;
+        if (std::getenv("WS_NO_SCHUR")) R.map.params.absorb_schur = false;
         // The forward-model referee scans every stored beam per judged decision: minutes per seed
         // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
         R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
@@ -660,6 +682,8 @@ namespace
         Eigen::Vector3f prev_truth_map = to_map(truth[0]);
         // EXECUTED MOTION state: the pose the base actually reached, and the machines that produce
         // it. `truth` is demoted to a reference path the controller pursues.
+        const float bp_theta_prec = cfg.bp_theta_prec;
+        std::unordered_map<std::uint64_t, float> wall_phi0;   // each wall's orientation at birth
         Eigen::Vector3f exec_pose = truth[0];
         BaseModel    base = cfg.omni_base ? BaseModel::omni() : BaseModel{};
         EncoderModel enc; enc.k_v = cfg.enc_k_v; enc.k_w = cfg.enc_k_w;
@@ -722,6 +746,18 @@ namespace
             const Eigen::Vector3f tm = to_map(world_pose);
             if (f > 0)
             {
+                {   // common (frame) rotation of the wall set since birth
+                    double acc = 0.0; int nw = 0;
+                    for (const auto& wl : R.map.walls)
+                    {
+                        const auto it = wall_phi0.find(wl.id);
+                        if (it == wall_phi0.end()) { wall_phi0[wl.id] = wl.phi; continue; }
+                        acc += wrap(wl.phi - it->second); ++nw;
+                    }
+                    if (nw > 0)
+                        R.map_rot_max = std::max(R.map_rot_max,
+                                                 std::abs(static_cast<float>(acc / nw)) * 180.f / kPi);
+                }
                 const double dt_true = wrap(tm.z() - prev_truth_map.z());
                 R.rot_tp += dt_true * static_cast<double>(odom.z());
                 R.rot_tt += dt_true * dt_true;
@@ -762,7 +798,7 @@ namespace
             rc::gn::Input in;
             in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
             in.device = torch::kCPU;
-            in.walls = &R.map; in.no_sdf = true; in.gauge_fix = true;
+            in.walls = &R.map; in.no_sdf = not cfg.with_sdf; in.gauge_fix = true; in.gauge_persist = cfg.gauge_persist;
 
             if (static_cast<int>(window.size()) >= cfg.window)
             {
@@ -771,12 +807,55 @@ namespace
                 // boundary anchor; the agent uses FEJ+Schur).
                 auto front_pose = window.front().pose.detach();
                 const Eigen::Vector3f fp(front_pose[0].item<float>(), front_pose[1].item<float>(), front_pose[2].item<float>());
+                // REAL MARGINALISATION (cfg.real_marginal), the thing this bench never did.
+                // Until now it ASSERTED diag(400,400,1600) — a constant the agent never gets — so
+                // FEJ+Schur had never executed in any bench run, and the one component Fable's
+                // review named as the suspect (absorb treats the dropped POSE as known while
+                // marginalize_oldest treats the WALLS as known, discarding the pose-wall rotation
+                // correlation at every slide) was untested here. Asking newest_pose_marginal() for a
+                // TWO-SLOT window {dropped, new front} is exactly the Schur complement of the dropped
+                // pose against the new front through the factors they share, which is the boundary
+                // prior's definition. Marginalise BEFORE absorbing, so the dropped slot's wall
+                // observations are counted once here and once in absorb — reproducing the agent's
+                // double-count (absorb treats the dropped POSE as known, marginalisation treats the
+                // WALLS as known) rather than quietly avoiding it.
+                Eigen::Matrix3f marg = Eigen::Vector3f(400.f, 400.f, bp_theta_prec).asDiagonal();
+                bool marg_ok = false;
+                if (cfg.real_marginal and window.size() >= 2)
+                {
+                    std::deque<RoomConcept::WindowSlot> pair2;
+                    pair2.push_back(window[0]); pair2.push_back(window[1]);
+                    auto p1 = window[1].pose.detach();
+                    std::vector<Eigen::Vector3f> pp = {fp,
+                        Eigen::Vector3f(p1[0].item<float>(), p1[1].item<float>(), p1[2].item<float>())};
+                    rc::gn::Input in2 = in;
+                    in2.window = &pair2;
+                    // NOT nullptr: build_factors dereferences boundary_prior unconditionally
+                    // (room_gn_solver.cpp:836). An INVALID prior is the right semantics anyway — this
+                    // sub-problem has no history, only the two slots and the walls they share.
+                    RoomConcept::BoundaryPrior none; none.valid = false;
+                    in2.boundary_prior = &none;
+                    in2.gauge_fix = false;
+                    const auto nm = rc::gn::newest_pose_marginal(in2, pp);
+                    if (nm.ok and nm.marginal.allFinite())
+                    {
+                        // The agent caps the marginal's eigenvalues (EigenvalueClampBoundaryMax), in
+                        // MIXED UNITS - one number for m^-2 and rad^-2 alike. Reproduced, not fixed:
+                        // the point is to match the agent, and CLAUDE.md's objection to the clamp is
+                        // a separate argument from whether it is what makes the map spin.
+                        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(nm.marginal);
+                        Eigen::Vector3f ev = es.eigenvalues().cwiseMax(0.f).cwiseMin(cfg.bp_eig_cap);
+                        marg = es.eigenvectors() * ev.asDiagonal() * es.eigenvectors().transpose();
+                        marg_ok = true;
+                    }
+                }
                 rc::gn::absorb_wall_observations(in, window.front(), fp);
                 window.pop_front();
                 auto nf = window.front().pose.detach();
                 bp.valid = true;
                 bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
-                bp.precision = Eigen::Vector3f(400.f, 400.f, 1600.f).asDiagonal();
+                bp.precision = marg;
+                R.marg_real += marg_ok ? 1 : 0; R.marg_total += 1;
             }
             window.push_back(std::move(slot));
 
@@ -1608,6 +1687,333 @@ namespace
     }
 } // namespace
 
+
+namespace {
+/// ── REPLAY THE LIVE RECORDING THROUGH THIS CORE (WS_REPLAY=<wall_input_*.bin>) ────────────────
+/// The bench drives a simulated robot through perfect ray-casts of a perfect polygon and holds the
+/// map frame to ~1.8 deg. The live agent, same solver and same unanchored gauge, turned its map
+/// -81 deg. Everything the bench does NOT have has been eliminated one at a time (command prior,
+/// encoder scale, sim clock, gauge anchoring, real FEJ+Schur marginalisation), which leaves the
+/// DATA: real returns carry a doorway, furniture, surface texture and partial occlusion that a
+/// ray-cast of a rectangle cannot. This feeds those exact returns to the same code.
+///
+/// ⚠ THE RECORDED odom_delta IS AN ACCUMULATOR, NOT A PER-FRAME DELTA. room_concept does
+/// `stride_delta_accum_ += slot_odom_delta` on every frame too small to earn a window slot (99.8% of
+/// a parked run, 91% here) and hands that RUNNING TOTAL back. Adding it to the previous estimate
+/// every frame re-integrates the same motion over and over: on a 481 s recording of a robot that
+/// moved 0.8 m and turned 34 deg it manufactured 89 m of path and 23538 deg of rotation, and every
+/// conclusion drawn from such a replay was about that artefact. The delta is relative to the pose at
+/// the last NEW slot, so that is what it adds to.
+int run_replay(const char* path)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (not f) { std::printf("replay: cannot open %s\n", path); return 1; }
+    char magic[4]; f.read(magic, 4); std::uint32_t version = 0; f.read(reinterpret_cast<char*>(&version), 4);
+    struct Frame { std::int64_t ts; bool stride; Eigen::Vector3f odom, pose; Eigen::Matrix3f cov;
+                   std::vector<Eigen::Vector2f> pts; std::vector<float> w; };
+    std::vector<Frame> F;
+    while (f)
+    {
+        Frame fr; std::uint8_t st = 0;
+        f.read(reinterpret_cast<char*>(&fr.ts), 8);
+        f.read(reinterpret_cast<char*>(&st), 1);
+        float o[3], p[3], cov[9];
+        f.read(reinterpret_cast<char*>(o), 12);
+        f.read(reinterpret_cast<char*>(p), 12);
+        f.read(reinterpret_cast<char*>(cov), 36);
+        std::uint32_t n = 0; f.read(reinterpret_cast<char*>(&n), 4);
+        if (not f or n > 200000u) break;
+        fr.stride = st != 0; fr.odom = {o[0], o[1], o[2]}; fr.pose = {p[0], p[1], p[2]};
+        for (int r2 = 0; r2 < 3; ++r2) for (int c2 = 0; c2 < 3; ++c2) fr.cov(r2, c2) = cov[r2 * 3 + c2];
+        fr.pts.reserve(n); fr.w.reserve(n);
+        bool ok = true;
+        for (std::uint32_t i = 0; i < n; ++i)
+        {
+            float q[4]; f.read(reinterpret_cast<char*>(q), 16);
+            if (not f) { ok = false; break; }
+            fr.pts.emplace_back(q[0], q[1]); fr.w.push_back(q[3]);
+        }
+        if (not ok) break;
+        F.push_back(std::move(fr));
+    }
+    if (F.size() < 10) { std::printf("replay: only %zu frames\n", F.size()); return 1; }
+    const double dur = static_cast<double>(F.back().ts - F.front().ts) / 1000.0;
+    std::printf("\n=== REPLAY %s: %zu frames, %.0f s, %.0f%% stride_replace ===\n", path, F.size(), dur,
+                100.0 * static_cast<double>(std::count_if(F.begin(), F.end(), [](const Frame& x){ return x.stride; })) / static_cast<double>(F.size()));
+
+    RunConfig cfg;
+    std::mt19937 rng(7);
+    rc::wallseg::Params sp; sp.sensor_sigma = cfg.scan_sigma;
+    rc::wallmap::WallMap map;
+    map.params.obs_sigma = 0.05f; map.params.huber_delta = 0.15f;
+    // ⚠ MATCH THE AGENT'S CONFIG, NOT THE HEADER DEFAULTS. `enable_level2` defaults TRUE in
+    // wall_map.h:175 but etc/config.toml:1107 sets EnableLevel2 = false, so a replay built from
+    // defaults runs a decoration stage the agent never runs: manhattan_polygon() calls decorate(),
+    // which latches rectangular steps out of the free grid in 0.08 m cells and adds 2 edges per
+    // step. That — not the data — produced the "6 vertices, 0.083 m side" I nearly reported as a
+    // real-data defect. A silent default/config divergence is indistinguishable from a bug.
+    map.params.enable_level2 = std::getenv("WS_REPLAY_L2") != nullptr;
+    map.params.wall_line_factor = std::getenv("WS_REPLAY_LINE") != nullptr;
+    map.params.pair_partner_active = std::getenv("WS_PARTNER") != nullptr;
+    map.params.no_gate_ratchet = std::getenv("WS_NO_RATCHET") != nullptr;
+    map.params.common_mode_gate = std::getenv("WS_CMODE") != nullptr;
+    if (std::getenv("WS_NO_SCHUR")) map.params.absorb_schur = false;
+    if (const char* e = std::getenv("WS_SAT_D"))   map.params.carry_sat_sigma_d = std::strtof(e, nullptr);
+    if (const char* e = std::getenv("WS_SAT_PHI")) map.params.carry_sat_sigma_phi = std::strtof(e, nullptr) * kPi / 180.f;
+    rc::Model model;
+    model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
+    RoomConcept::Params params;
+    params.rfe_obs_sigma = 0.05f; params.rfe_huber_delta = 0.15f;
+    params.enable_corner_tracking = false; params.object_anchor.enable = false; params.image_edge.enable = false;
+    std::deque<RoomConcept::WindowSlot> window;
+    RoomConcept::BoundaryPrior bp;
+
+    Eigen::Vector3f est = Eigen::Vector3f::Zero(), slot_base = Eigen::Vector3f::Zero();
+    std::unordered_map<std::uint64_t, float> phi0;
+    float map_rot_max = 0.f; int closed_at = -1;
+    int n_births = 0, n_deaths = 0, n_twins = 0, n_merged = 0; long n_segs = 0, n_assoc = 0;
+    const bool seed_still = std::getenv("WS_REPLAY_SEED_STILL") != nullptr;
+    std::array<long, 6> wbin_tot{}, wbin_assoc{}, wbin_frames{};
+    std::array<long, 10> dec_tot{}, dec_assoc{};
+    std::array<double, 10> dec_sigd{}; std::array<long, 10> dec_sigd_n{};
+    int healthy_run = 0, collapse_at = -1;
+    double pda_total = 0.0; int n_absorbs = 0; long n_assoc_absorbed = 0;
+    float prev_th = 0.f;
+    for (size_t k = 0; k < F.size(); ++k)
+    {
+        const Frame& fr = F[k];
+        // The accumulator is the total since the last ADMITTED slot, so it adds to THAT slot's pose,
+        // and the base may only advance AFTER a frame which admitted one has been solved. Taking it
+        // from the previous FRAME's pose (itself base + odom_{k-1}) counts the motion twice.
+        const Eigen::Vector3f pred = (k == 0) ? Eigen::Vector3f::Zero()
+            : Eigen::Vector3f(slot_base.x() + fr.odom.x(), slot_base.y() + fr.odom.y(), wrap(slot_base.z() + fr.odom.z()));
+        if (fr.pts.size() < 10) { est = pred; continue; }
+        // WS_REPLAY_SEED_STILL=1: do not seed the map from a scan taken while the robot is turning.
+        // The seed is the OBB of ONE scan, and a scan is treated as instantaneous; at 275 deg/s
+        // (this recording's p99) the sweep smears by tens of degrees, so the seed rectangle is wrong
+        // and nothing afterwards can associate against it. Tests whether the failing run is a BAD
+        // SEED rather than a motion problem.
+        if (seed_still and map.walls.empty() and k > 0)
+        {
+            const double dts = std::max(1e-3, static_cast<double>(fr.ts - F[k - 1].ts) / 1000.0);
+            const double wd = std::abs(wrap(fr.pose.z() - F[k - 1].pose.z())) * 180.0 / kPi / dts;
+            if (wd > 2.0) { est = pred; continue; }
+        }
+        if (map.walls.empty())
+        {
+            Eigen::Vector2f mu = Eigen::Vector2f::Zero();
+            for (const auto& q : fr.pts) mu += q;
+            mu /= static_cast<float>(fr.pts.size());
+            Eigen::Matrix2f C = Eigen::Matrix2f::Zero();
+            for (const auto& q : fr.pts) { const Eigen::Vector2f d = q - mu; C += d * d.transpose(); }
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig(C);
+            const Eigen::Vector2f ax = eig.eigenvectors().col(1), ay = eig.eigenvectors().col(0);
+            float a0 = 1e9f, b0 = -1e9f, a1 = 1e9f, b1 = -1e9f;
+            for (const auto& q : fr.pts)
+            { const float u = ax.dot(q - mu), v = ay.dot(q - mu); a0 = std::min(a0, u); b0 = std::max(b0, u); a1 = std::min(a1, v); b1 = std::max(b1, v); }
+            Poly rect = {mu + ax * a0 + ay * a1, mu + ax * b0 + ay * a1, mu + ax * b0 + ay * b1, mu + ax * a0 + ay * b1};
+            float a2 = 0.f;
+            for (size_t i = 0; i < rect.size(); ++i) { const auto& q = rect[i]; const auto& r2 = rect[(i + 1) % rect.size()]; a2 += q.x() * r2.y() - r2.x() * q.y(); }
+            if (a2 < 0.f) std::reverse(rect.begin(), rect.end());
+            map.initialize_rect(rect);
+        }
+        Eigen::VectorXf wv(static_cast<long>(fr.w.size()));
+        for (size_t i = 0; i < fr.w.size(); ++i) wv[static_cast<long>(i)] = fr.w[i];
+        const auto seg = rc::wallseg::segment(fr.pts, sp, rng);
+        const bool fixed_cov = std::getenv("WS_REPLAY_FIXEDCOV") != nullptr;
+        // THE RECORDED POSE COVARIANCE. The agent feeds this to the association gate as
+        // H*pose_cov*H^T; the bench asserts a fixed 1.7 deg and so can never reproduce a gate that
+        // narrows or widens with the robot's state. WS_REPLAY_FIXEDCOV=1 restores the constant.
+        const Eigen::Matrix3f pcov = (fixed_cov or not fr.cov.allFinite() or fr.cov(0, 0) <= 0.f)
+            ? Eigen::Matrix3f(Eigen::Vector3f(0.05f * 0.05f, 0.05f * 0.05f, 0.03f * 0.03f).asDiagonal())
+            : fr.cov;
+        // WS_REPLAY_NOW=1 drops the recorded per-point weights, which is what the synthetic tour
+        // bench does (it passes an EMPTY weights vector at the observe() call above). That asymmetry
+        // was uncontrolled between the two runs, so it has to be A/B'd before blaming the DATA.
+        const bool drop_w = std::getenv("WS_REPLAY_NOW") != nullptr;
+        const auto res = map.observe(seg, fr.pts, drop_w ? Eigen::VectorXf{} : wv, pred, pcov, fr.ts);
+        n_births += res.births; n_deaths += res.deaths; n_twins += res.twins_fused; n_merged += res.merged;
+        n_segs += static_cast<long>(res.seg_to_wall.size());
+        for (int v : res.seg_to_wall) if (v >= 0) ++n_assoc;
+        {   // ASSOCIATION vs ROTATION RATE. A scan is treated as taken at ONE instant; a rotating
+            // robot's sweep is not. A ray-cast bench cannot express this, so the effect is invisible
+            // there by construction — which is why it survived every synthetic test.
+            const double dt = (k > 0) ? std::max(1e-3, static_cast<double>(fr.ts - F[k - 1].ts) / 1000.0) : 1.0;
+            const double wdeg = (k > 0) ? std::abs(wrap(est.z() - prev_th)) * 180.0 / kPi / dt : 0.0;
+            const int b = wdeg < 2 ? 0 : wdeg < 5 ? 1 : wdeg < 10 ? 2 : wdeg < 20 ? 3 : wdeg < 45 ? 4 : 5;
+            wbin_tot[b] += static_cast<long>(res.seg_to_wall.size());
+            for (int v : res.seg_to_wall) if (v >= 0) ++wbin_assoc[b];
+            ++wbin_frames[b];
+            {   // WHY does association die? Dump the transition, not a hypothesis about it.
+                const size_t S = res.seg_to_wall.size();
+                size_t na = 0;
+                for (int v : res.seg_to_wall) if (v >= 0) ++na;
+                const float rate = S > 0 ? static_cast<float>(na) / static_cast<float>(S) : 1.f;
+                if (rate > 0.8f) { healthy_run++; collapse_at = -1; }
+                else if (healthy_run > 50 and collapse_at < 0)
+                {
+                    collapse_at = static_cast<int>(k);
+                    std::printf("\n  ── ASSOCIATION COLLAPSE at frame %zu (t=%.1f s), after %d healthy frames ──\n",
+                                k, static_cast<double>(fr.ts - F.front().ts) / 1000.0, healthy_run);
+                    std::printf("     walls=%zu  segments=%zu  associated=%zu\n", map.walls.size(), S, na);
+                    std::printf("     seg  chi2      dphi(deg)  dd(m)    sigma_phi(deg) sigma_d(m)\n");
+                    for (size_t si = 0; si < S and si < 10; ++si)
+                        std::printf("     %2zu   %8.2f  %+8.2f  %+7.3f   %8.3f      %7.4f\n", si,
+                                    res.seg_best_chi2[si], res.seg_best_dphi[si] * 180.f / kPi,
+                                    res.seg_best_dd[si], res.seg_best_sig_phi[si] * 180.f / kPi,
+                                    res.seg_best_sig_d[si]);
+                    std::printf("     (gate is chi2 <= 5.991; sigma columns are the FULL gate width)\n\n");
+                }
+            }
+            const int dec = static_cast<int>(std::min<size_t>(9, k * 10 / std::max<size_t>(1, F.size())));
+            dec_tot[dec] += static_cast<long>(res.seg_to_wall.size());
+            for (int v : res.seg_to_wall) if (v >= 0) ++dec_assoc[dec];
+            {   // the CARRIED precision the gate divides by: does it harden as association dies?
+                std::vector<float> sd;
+                for (const auto& wl : map.walls)
+                {
+                    const Eigen::Matrix2f c = wl.information.inverse();
+                    if (c.allFinite() and c(1, 1) > 0.f) sd.push_back(std::sqrt(c(1, 1)));
+                }
+                if (not sd.empty())
+                {
+                    std::nth_element(sd.begin(), sd.begin() + sd.size() / 2, sd.end());
+                    dec_sigd[dec] += sd[sd.size() / 2]; ++dec_sigd_n[dec];
+                }
+            }
+        }
+        prev_th = est.z();
+
+        RoomConcept::WindowSlot slot;
+        slot.pose = pose_tensor(pred);
+        slot.lidar_points = points_tensor(fr.pts);
+        slot.odometry_delta = (k == 0) ? Eigen::Vector3f::Zero() : fr.odom;
+        slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
+                                          cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
+        slot.odom_delta_tensor = torch::tensor({fr.odom.x(), fr.odom.y(), fr.odom.z()}, torch::kFloat32);
+        slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+        slot.wall_assoc = res.assoc;
+
+        rc::gn::Input in;
+        in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
+        in.device = torch::kCPU; in.walls = &map; in.no_sdf = true; in.gauge_fix = true;
+        // ⚠ HONOUR THE STRIDE FLAG. The agent creates a NEW window slot only when the robot has
+        // actually moved (WindowMinTravel 0.10 m / WindowMinTurn 0.15 rad); on every other frame it
+        // OVERWRITES the newest slot (`stride_replace`, 91-99% of frames here). Pushing every frame
+        // instead fills the window with five poses ~50 ms apart — no baseline between them, and the
+        // same observation absorbed five times as the window slides. That is a defect of the REPLAY,
+        // not of the agent, and it produced a broken layout on real data that I nearly attributed to
+        // the data itself.
+        if (fr.stride and not window.empty())
+        {
+            window.back() = std::move(slot);          // replace the newest, as stride_replace does
+        }
+        else
+        {
+            if (static_cast<int>(window.size()) >= cfg.window)
+            {
+                auto fpt = window.front().pose.detach();
+                const Eigen::Vector3f fp(fpt[0].item<float>(), fpt[1].item<float>(), fpt[2].item<float>());
+                for (const auto& aa : window.front().wall_assoc) { pda_total += aa.pda; ++n_assoc_absorbed; }
+                ++n_absorbs;
+                rc::gn::absorb_wall_observations(in, window.front(), fp);
+                window.pop_front();
+                auto nf = window.front().pose.detach();
+                bp.valid = true;
+                bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
+                bp.precision = Eigen::Vector3f(400.f, 400.f, 500.f).asDiagonal();
+            }
+            window.push_back(std::move(slot));
+        }
+        std::vector<Eigen::Vector3f> poses;
+        for (const auto& sl : window) { auto q = sl.pose.detach(); poses.emplace_back(q[0].item<float>(), q[1].item<float>(), q[2].item<float>()); }
+        rc::gn::Options opts;
+        const auto r = rc::gn::solve(in, poses, opts);
+        if (r.ok) for (size_t i = 0; i < window.size(); ++i) window[i].pose = pose_tensor(poses[i]);
+        est = poses.back();
+        if (not fr.stride) slot_base = est;   // this frame admitted a slot: the accumulator restarts here
+        map.merge_indistinguishable();
+        {   // the COMMON rotation of the wall set = the map frame turning
+            double acc = 0.0; int nw = 0;
+            for (const auto& wl : map.walls)
+            {
+                const auto it = phi0.find(wl.id);
+                if (it == phi0.end()) { phi0[wl.id] = wl.phi; continue; }
+                acc += wrap(wl.phi - it->second); ++nw;
+            }
+            if (nw > 0) map_rot_max = std::max(map_rot_max, std::abs(static_cast<float>(acc / nw)) * 180.f / kPi);
+        }
+        const auto poly = map.build_polygon();
+        if (poly.closed and closed_at < 0) closed_at = static_cast<int>(k);
+    }
+    const auto raw = map.build_polygon();
+    const auto poly = map.manhattan_polygon();
+    std::printf("  births=%d deaths=%d twins_fused=%d merged=%d | %.0f%% of segments associated\n",
+                n_births, n_deaths, n_twins, n_merged,
+                n_segs > 0 ? 100.0 * static_cast<double>(n_assoc) / static_cast<double>(n_segs) : 0.0);
+    std::printf("  RAW vertices=%zu PUBLISHED=%zu  (raw>4 = a real wall event; published>raw = level-2)\n",
+                raw.verts.size(), poly.verts.size());
+    {   // WHY is it (not) publishable? The bar is on the WORST corner; print it and the per-wall
+        // carried sigmas that feed it, so a publish failure can be told from a geometry failure.
+        std::vector<float> sp, sd;
+        for (const auto& wl : map.walls)
+        {
+            const Eigen::Matrix2f c = wl.information.inverse();
+            if (c.allFinite() and c(0, 0) > 0.f and c(1, 1) > 0.f)
+            { sp.push_back(std::sqrt(c(0, 0)) * 180.f / kPi); sd.push_back(std::sqrt(c(1, 1))); }
+        }
+        std::sort(sp.begin(), sp.end()); std::sort(sd.begin(), sd.end());
+        long fs = 0, ps = 0;
+        for (const auto& wl : map.walls) { fs += wl.frames_seen; ps += wl.points_seen; }
+        std::printf("  wall feed: frames_seen=%ld points_seen=%ld sum(pda)=%.0f over %ld assoc (mean pda %.3f) absorbs=%d\n",
+                    fs, ps, pda_total, n_assoc_absorbed,
+                    n_assoc_absorbed > 0 ? pda_total / static_cast<double>(n_assoc_absorbed) : 0.0, n_absorbs);
+        for (const auto& wl : map.walls)
+        {
+            const Eigen::Matrix2f c = wl.information.inverse();
+            std::printf("    wall %llu k=%d frames=%d pts=%d born_ms=%lld sigma_phi=%.3f deg sigma_d=%.4f m\n",
+                        static_cast<unsigned long long>(wl.id), wl.k, wl.frames_seen, wl.points_seen,
+                        static_cast<long long>(wl.born_ms),
+                        c.allFinite() and c(0,0) > 0.f ? std::sqrt(c(0,0)) * 180.f / kPi : -1.f,
+                        c.allFinite() and c(1,1) > 0.f ? std::sqrt(c(1,1)) : -1.f);
+        }
+        std::printf("  worst corner sigma=%.4f m (bar %.3f) | carried sigma_phi %.3f..%.3f deg, sigma_d %.4f..%.4f m\n",
+                    poly.worst_corner_sigma, map.params.publish_corner_sigma,
+                    sp.empty() ? -1.f : sp.front(), sp.empty() ? -1.f : sp.back(),
+                    sd.empty() ? -1.f : sd.front(), sd.empty() ? -1.f : sd.back());
+    }
+    std::printf("  walls=%zu closed_at=%d closed=%s publishable=%s vertices=%zu\n",
+                map.walls.size(), closed_at, poly.closed ? "yes" : "NO",
+                poly.publishable ? "yes" : "no", poly.verts.size());
+    if (poly.closed and poly.verts.size() >= 4)
+    {
+        std::vector<float> sides;
+        for (size_t i = 0; i < poly.verts.size(); ++i)
+            sides.push_back((poly.verts[(i + 1) % poly.verts.size()] - poly.verts[i]).norm());
+        std::sort(sides.begin(), sides.end());
+        std::printf("  side lengths: %.3f .. %.3f m (room 2 is 4.00 x 6.00)\n", sides.front(), sides.back());
+    }
+    {
+        static const char* lbl[6] = {"<2", "2-5", "5-10", "10-20", "20-45", ">45"};
+        std::printf("  association over TIME (deciles of the run):");
+        for (int d = 0; d < 10; ++d)
+            std::printf(" %.0f%%", dec_tot[d] > 0 ? 100.0 * static_cast<double>(dec_assoc[d]) / static_cast<double>(dec_tot[d]) : 0.0);
+        std::printf("\n");
+        std::printf("  carried sigma_d per decile (m):     ");
+        for (int d = 0; d < 10; ++d)
+            std::printf(" %.4f", dec_sigd_n[d] > 0 ? dec_sigd[d] / static_cast<double>(dec_sigd_n[d]) : 0.0);
+        std::printf("\n");
+        std::printf("  association vs rotation rate (deg/s):\n");
+        for (int b = 0; b < 6; ++b)
+            if (wbin_frames[b] > 0)
+                std::printf("     %-6s  %6ld frames  %5.1f%% associated\n", lbl[b], wbin_frames[b],
+                            wbin_tot[b] > 0 ? 100.0 * static_cast<double>(wbin_assoc[b]) / static_cast<double>(wbin_tot[b]) : 0.0);
+    }
+    std::printf("  MAP FRAME ROTATION (max common wall rotation): %.2f deg   <-- live agent measured -81\n", map_rot_max);
+    return 0;
+}
+}  // namespace
+
 int main()
 {
     // ── DETERMINISM. torch::set_num_threads(1) alone was NOT enough: the same command returned
@@ -1641,6 +2047,8 @@ int main()
     torch::set_num_threads(1);
     std::mt19937 rng(7);
 
+    if (const char* rp = std::getenv("WS_REPLAY")) return run_replay(rp);
+
     // ═══ TOUR BENCH (WS_TOUR=1) ═══════════════════════════════════════════════════════════════
     // Does SLAM hold over a LONG tour when the robot is DRIVEN rather than teleported? Runs the
     // circuit with executed motion, sweeping the two faults the old harness could not express: a
@@ -1662,27 +2070,33 @@ int main()
             std::printf("\n=== TOUR: %s room, %d laps, %zu frames (%.0f m of reference path) ===\n",
                         column ? "column" : "rectangle", laps, truth.size(), truth.size() * 0.025f);
         std::printf("%-26s %7s %7s %8s %8s %6s %6s %6s\n",
-                    "case", "IoU", "Hausd", "rmse_xy", "max_xy", "walls", "closed", "rotK");
-        struct Case { const char* name; bool exec, cmd; float k_w; };
+                    "case", "IoU", "Hausd", "rmse_xy", "max_xy", "walls", "closed", "mapRot");
+        // BISECT toward the live agent: the bench and the agent share the solver, the unanchored
+        // gauge and clean odometry, yet the bench holds at IoU 0.988 while the live map turned -81
+        // deg. Step the boundary prior's rotational precision from this bench's assertion (1600,
+        // sigma 1.43 deg) down to what the agent's mixed-unit eigenvalue cap actually allows
+        // (500, sigma 2.6 deg) and below, and watch the COMMON wall rotation.
+        struct Case { const char* name; float k_w; bool real_marg; float cap; };
         const std::vector<Case> cases = {
-            {"teleport (legacy)",          false, false, 1.00f},
-            {"driven, encoders only",      true,  false, 1.00f},
-            {"driven, + COMMAND PRIOR",    true,  true,  1.00f},
-            {"driven, rot scale 1.05",     true,  false, 1.05f},
-            {"driven, rot scale 1.41",     true,  false, 1.41f},
-            {"driven, cmd prior + 1.05",   true,  true,  1.05f},
+            {"asserted bp (old bench)",    1.00f, false, 500.f},
+            {"REAL marginal, cap 500",     1.00f, true,  500.f},
+            {"REAL marginal, cap 1e9",     1.00f, true,  1e9f},
+            {"REAL marginal, cap 50",      1.00f, true,   50.f},
+            {"rot 1.41, asserted bp",      1.41f, false, 500.f},
+            {"rot 1.41, REAL marginal",    1.41f, true,  500.f},
         };
         for (const auto& c : cases)
         {
             std::mt19937 trng(7);
-            RunConfig cfg; cfg.exec_motion = c.exec; cfg.use_command_prior = c.cmd; cfg.enc_k_w = c.k_w;
+            RunConfig cfg; cfg.exec_motion = true; cfg.enc_k_w = c.k_w;
+            cfg.real_marginal = c.real_marg; cfg.bp_eig_cap = c.cap;
             const auto R = run_loop({room}, truth, cfg, trng);
             const Poly ew = R.poly.closed ? to_world(R.poly.verts, truth[0]) : Poly{};
             const float iou = R.poly.closed ? polygon_iou(ew, room) : 0.f;
             const float h   = R.poly.closed ? hausdorff(ew, room) : 9.99f;
-            std::printf("%-26s %7.3f %7.3f %8.3f %8.3f %6zu %6s %6.3f\n",
+            std::printf("%-26s %7.3f %7.3f %8.3f %8.3f %6zu %6s %6.2f  %d/%d\n",
                         c.name, iou, h, R.pose_rmse_xy, R.pose_max_xy, R.map.walls.size(),
-                        R.poly.closed ? "yes" : "NO", R.rotation_gain());
+                        R.poly.closed ? "yes" : "NO", R.map_rot_max, R.marg_real, R.marg_total);
         }
         std::printf("\n");
         return 0;

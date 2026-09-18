@@ -73,6 +73,99 @@ namespace rc::wallmap
         // carried precision reaches millimetres every re-observation fails the gate (measured live:
         // 490 walls from six, all twins). The corner detector's map_sigma lesson. Enters association,
         // candidate matching and the merge — never the solver factors.
+        // Hold the map frame's absolute orientation to the reference θ₀ was born with, at gauge
+        // precision, instead of damping θ₀ toward its own current value.
+        // ⚠ DEFAULT OFF: MEASURED WORSE, 2026-09-18. The reasoning was sound — absolute orientation
+        // is a null direction of every data term, the slot-0 pin is dropped at the first window
+        // slide, and the gauge never enters marginalize_oldest — but the bench refuted the cure on a
+        // 48 m driven tour with clean odometry: IoU 0.988 -> 0.611 and pose rmse 0.015 -> 1.097 m.
+        // Welding θ₀ to a reference derived from ONE first scan forces every later pose to agree
+        // with that scan's error, and the boundary prior (which already constrains slot 0) fights
+        // it. Keeping both anchors was worse still: IoU 0.000. Kept as an A/B switch, not a fix.
+        // The negative result matters on its own: an unanchored gauge is NOT sufficient to make the
+        // map spin, because this bench has no rotational anchor either and sits at 0.988.
+        bool  gauge_on_theta0   = false;
+        // ── LINE-TO-LINE WALL FACTOR (S-Graphs+ Eq. 6 in 2-D) ───────────────────────────────────
+        // On: one residual per (slot, wall) carrying the segment fit's own information, instead of a
+        // per-point sum divided by the slot's point count. The per-point form was measured to carry
+        // 1/5000 of the returns' physical information (the publish path's own k rescale says so), so
+        // the scan could never out-vote the 2 deg Manhattan prior.
+        // ── ABSORB: SCHUR-COMPLEMENT THE POSE INSTEAD OF ASSUMING IT KNOWN ──────────────────────
+        // absorb_wall_observations kept the 2x2 wall block of the dropped slot's Hessian, which
+        // treats that slot's POSE as exact. The header called the exact Schur complement "the
+        // planned follow-up (it can only LOOSEN these numbers)" — and loosening is precisely what
+        // is needed: while the robot moves the pose is NOT known, so every window slide wrote a
+        // pose error into the wall at full confidence, and `information` only ever grows. The wall
+        // hardens around a wrong value, the association gate shuts against it permanently, and it
+        // starves until existence kills it. Measured 2026-09-18: association runs at 100% for a
+        // third of a run, collapses to 0% and NEVER recovers; the published rectangle ends up a
+        // TRIANGLE with the robot outside it. A nearly-parked run survives because it slides rarely
+        // and hardens while the pose is genuinely good.
+        // Keep a wall's class PARTNER (the opposite side of the same width) as a solver variable
+        // even when nothing associated to it this window — see the comment at make_layout.
+        // Stop `information` (the association gate's currency) accumulating. Diagnostic A/B.
+        bool  no_gate_ratchet   = false;
+        // ── SATURATE THE CARRIED WALL INFORMATION ───────────────────────────────────────────────
+        // `information` accumulates one conditional block per absorbed slot and never decays, so a
+        // wall re-observed at 10-20 Hz from nearly one pose is credited with N INDEPENDENT looks and
+        // its sigma collapses as 1/sqrt(N). The association gate divides by that sigma, so the gate
+        // RATCHETS SHUT over a run while the pose error does not shrink — measured 2026-09-18:
+        // carried sigma_d 0.50 -> 0.087 m by the decile where association went 100% -> 0% and never
+        // recovered, with the published rectangle decaying to a triangle. Suppressing the
+        // accumulation entirely (no_gate_ratchet) gives 100% association and ZERO births on both
+        // recordings — a merely-wider gate would have RAISED births — but leaves the corner sigma
+        // pinned at the birth prior so nothing is ever publishable.
+        // The honest statement is that a wall's observations share a common mode (its own flatness,
+        // range bias, registration) which no number of looks averages away, so in covariance form
+        //     Sigma_carried = Lambda_accum^-1 + diag(sigma_sat_phi^2, sigma_sat_d^2)
+        // and the information saturates at the common mode instead of diverging. Same Woodbury
+        // argument CLAUDE.md prescribes for correlated points, applied ACROSS frames rather than
+        // within one. 0 = off (the raw accumulation).
+        // Test each segment against the residual AFTER the shared pose error the OTHER segments
+        // agree on (leave-one-out), instead of against a gate inflated to cover that error. See the
+        // block at the association site in wall_map.cpp.
+        bool  common_mode_gate    = false;
+        // Weak prior on the shared correction, present only to keep the 3x3 invertible in directions
+        // the scan cannot observe. NOT the pose covariance — see the note at the estimator.
+        float cmode_prior_sigma_xy  = 1.0f;                                  // m
+        float cmode_prior_sigma_phi = 30.f * static_cast<float>(M_PI) / 180.f;  // rad
+        float carry_sat_sigma_d   = 0.0f;   // m
+        float carry_sat_sigma_phi = 0.0f;   // rad
+        bool  pair_partner_active = false;
+        // Refuse an existence death that would take the cycle below a rectangle — the same floor
+        // try_down_jumps already asserts ("never below the rectangle") and which the existence
+        // channel bypassed entirely.
+        bool  death_floor       = true;
+        // ⚠ DEFAULT OFF: MEASURED WORSE, 2026-09-18, on the synthetic driven tour — IoU 0.987 ->
+        // 0.886, pose rmse 0.015 -> 0.262 m, map-frame rotation 1.80 -> 7.37 deg. The reasoning is
+        // sound (absorb keeps the wall block of the dropped slot's Hessian, which treats that slot's
+        // POSE as exact, and the header has always named the exact Schur complement as the planned
+        // follow-up) and on the real recordings it lifts association 71% -> 87%. But it also removes
+        // carried information the CORNER SIGMA reads, so the layout stops being publishable, and on
+        // the tour it costs pose accuracy outright. Kept as an A/B switch, not a default.
+        bool  absorb_schur      = false;
+        bool  wall_line_factor  = false;
+        // The COMMON MODE a segment's returns share — range bias, the wall's own flatness,
+        // registration — which no amount of points can average away. Added to the fit covariance, it
+        // is what stops sigma collapsing as 1/sqrt(N) and keeps the association gate open; it is the
+        // Woodbury common-mode term CLAUDE.md prescribes for correlated points, not a sigma floor
+        // bolted on afterwards. Independent per-point noise still dominates for SHORT segments,
+        // which is the behaviour we want: a small gather stays uncertain.
+        // A SCAN IS NOT INSTANTANEOUS, AND THE GATE MUST KNOW. The association test compares a
+        // segment with a wall under the segment's fit covariance, the wall's carried covariance, the
+        // pose covariance and sys_cov. None of those grows when the robot TURNS — yet the scan is
+        // stamped with one pose while the sweep happens over a finite interval, so the heading that
+        // relates them is uncertain by ~omega*sigma_t. Measured live: association falls 73.8% when
+        // stationary to ~14% at 20-45 deg/s, and at this room's p99 of 275 deg/s a 50 ms mismatch is
+        // 13.75 deg. This is the covariate-driven precision CLAUDE.md asks for instead of a gate:
+        // the term vanishes when still and opens exactly as fast as the robot turns.
+        // ⚠ DEFAULT 0 (INERT): MEASURED, NO BENEFIT. On the 293 s recording it moved association
+        // 89% -> 90% but took births from 102 to 348 — opening the gate admits more marginal
+        // matches AND lets more segments reach the candidate stage. The reasoning stands and the
+        // term is kept for a future attempt; it is simply not what is wrong. Set >0 to re-enable.
+        float scan_timing_sigma_s   = 0.0f;    // s — scan/pose timing uncertainty, one LiDAR period
+        float line_common_sigma_d   = 0.010f;                              // m
+        float line_common_sigma_phi = 0.5f * static_cast<float>(M_PI) / 180.f;  // rad
         float map_sigma_d       = 0.04f;    // m
         float map_sigma_phi_rad = 1.0f * static_cast<float>(M_PI) / 180.f;
         float assoc_chi2  = 5.991f;         // χ²₂ @95% — segment↔edge and segment↔candidate gate ⚠
@@ -459,6 +552,19 @@ namespace rc::wallmap
         // measured after the pose was optimised against the points it is scored on.
         float resid_med = 0.f;
         int   resid_n   = 0;
+
+        // ── THE SEGMENT AS A LINE MEASUREMENT, in the SENSOR frame ──────────────────────────────
+        // (phi, d) of the fitted line and its Fisher information, so the solver can compare a LINE
+        // with a LINE instead of summing per-point residuals. This is S-Graphs+'s plane-to-plane
+        // constraint (Bavle et al. 2212.11770 Eq. 6) in 2-D: the N points are compressed into one
+        // measurement before they reach the graph, and the measurement carries its own covariance.
+        // Kept in the SENSOR frame on purpose — there the noise is the sensor's and nothing else,
+        // whereas a map-frame residual's covariance also depends on where the map origin happens to
+        // be. The solver transforms the WALL into this frame instead.
+        // These were already computed for the association gate and then thrown away.
+        float seg_phi = 0.f, seg_d = 0.f;
+        Eigen::Matrix2f seg_info = Eigen::Matrix2f::Zero();   // Lambda(phi, d), sensor frame
+        bool  seg_ok = false;
     };
 
     struct Corner
@@ -497,6 +603,13 @@ namespace rc::wallmap
     {
         std::vector<int>   seg_to_wall;     // per segment: index into walls, or −1
         std::vector<float> seg_pda;
+        // DIAGNOSTIC: per segment, the best wall's chi2 and WHY. Association is a two-sided test and
+        // when it fails silently there is no way to tell a wrong innovation from a shut gate.
+        std::vector<float> seg_best_chi2;      // inf = no wall was even offered
+        std::vector<float> seg_best_dphi;      // rad, innovation to that wall
+        std::vector<float> seg_best_dd;        // m
+        std::vector<float> seg_best_sig_phi;   // rad, sqrt of the gate's phi variance
+        std::vector<float> seg_best_sig_d;     // m
         std::vector<WallAssoc> assoc;       // for the newest slot (robot frame)
         int births = 0;                     // committed splices
         std::vector<BirthInfo> births_info;
@@ -609,6 +722,25 @@ namespace rc::wallmap
         bool  theta0_born = false;
         float theta0 = 0.f;
         float theta0_information = 0.f;
+        // ── THE ROTATIONAL GAUGE ────────────────────────────────────────────────────────────────
+        // Absolute orientation is a NULL DIRECTION of every data term: rotating all poses, θ₀ and
+        // all wall φ together leaves n·(Rp+t) − d unchanged, MotionFactor is relative, and
+        // RoomWallFactor is relative to θ₀ which is itself a variable. So it is fixed by CONVENTION,
+        // and the convention has to PERSIST. It did not: the slot-0 factor pinned θ at 1 mrad but is
+        // dropped the moment a boundary prior exists (room_gn_solver.cpp, "Gauge:"), the gauge never
+        // enters marginalize_oldest, and Theta0PriorFactor pulled toward θ₀'s OWN CURRENT VALUE —
+        // the "carried information is mere damping (#5)" defect the walls' prior_mu already fixed.
+        // Nothing then referenced anything fixed, and the map frame random-walked: measured live
+        // 2026-09-18, all four walls of a rectangle rotating TOGETHER (spread 0.01°) by −3.1° in a
+        // clean window and −81° over a minute, with the room's SHAPE intact the whole time, while
+        // the raw odometry measured 1.017x truth and the pose 0.952x against a LiDAR witness.
+        // This is that fixed reference: set once when θ₀ is born, re-set by the one-shot reanchor,
+        // never by a solve.
+        float theta0_gauge = 0.f;
+        bool  theta0_gauge_set = false;
+        // Previous observe() call, for the turn-rate term above.
+        std::int64_t last_obs_ts_ = 0;
+        float        last_obs_theta_ = 0.f;
         /// One frame's PRECISION SNAPSHOT — how firm the room's estimate has become, in the units
         /// each quantity is actually held in. The freezing is not one number: the direction, the
         /// individual walls, the corners they imply and the existence of each wall all settle on

@@ -245,7 +245,18 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # ⚠ The cross terms are nearly invisible at these constants (rho(y,θ) = -0.028) because that 0.02 m
 # per-frame floor = 0.089 m/√s of position random walk for a PARKED robot swamps them. Calibrating
 # sigma_* against the real odometry stream is the load-bearing next step, not a refinement.
-MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
+# ⚠ TURNED OFF 2026-09-18 TO TEST A MEASURED DEFECT. Live symptom: after a small translation the SDF
+# error grows and THE POSE DOES NOT FOLLOW. Measured in tmp/sdf_localizer/log_*.csv: the selected
+# motion prior asserts sel_cov_xx = 1.96e-6 m^2 (sigma = 1.4 mm) and sel_cov_tt = 2.59e-6 rad^2
+# (0.09 deg) PER STEP; the optimiser then runs 8 GN iterations and moves the pose by less than 1 mm
+# on 96.6% of frames (median 0.00 mm) while sdf_mse sits at 0.70 and the PUBLISHED pose sigma is 4 cm.
+# The pose is pinned to dead reckoning and no map-side improvement can outvote it — which is why the
+# common-mode gate, the line factor, the death floor and disabling re-derivation all left the symptom
+# untouched. The ASSERTED model (the path this flag falls back to) would give sigma_xy = 20 mm parked
+# and 0.01 + 0.08*0.10 = 18 mm over a 0.10 m keyframe step — about 13x looser than what preintegration
+# is producing. The note above already says "calibrating sigma_* against the real odometry stream is
+# the load-bearing next step, not a refinement"; this is that bill arriving.
+MotionPreintegration   = false  # was true; 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
                                 # 3 cm) is NULL in every moving band and +0.63 pp early exit while parked
                                 # (the only difference outside its Wilson 95% CI); cov_tt unchanged,
                                 # no boundary ratchet, timing identical. So this is kept on STRUCTURAL
@@ -1105,6 +1116,87 @@ RecordWallInput = true
 # outline grows a notch that the walls themselves do not have. Set false when the room is known to be
 # a simple polygon and you want exactly what the walls say.
 EnableLevel2 = false
+# ── THE WALL DATA TERM: one residual per (slot, wall), not one per point ──────────────────────────
+# S-Graphs+ Eq. 6 in 2-D. The segment is compressed into a fitted line with its own information
+# BEFORE the solver sees it, and the WALL is transformed into the sensor frame to meet it there.
+# Why: the per-point form weighed each return by 0.5*inv_var*pda/N_slot, and this file's own publish
+# rescale (k = 2*ObsSigma^2*N/SensorSigma^2 = 2*0.05^2*400/0.02^2) says that is 5000x below the
+# returns' physical information — so the scan could never out-vote the 2 deg Manhattan prior
+# (821 rad^-2) and the layout could not correct itself from data. The /N_slot was inherited from the
+# SDF term, which is a MEAN over points: harmless for a pose-only fit against a KNOWN map (a global
+# scalar cannot move the argmin), not harmless in a joint pose+map solve.
+# Measured 2026-09-18: synthetic 48 m driven tour IoU 0.987 -> 0.996, map-frame rotation 1.80 -> 0.35
+# deg, and under an injected 1.41 rotation error it degrades (IoU 0.152, polygon closes) instead of
+# collapsing (0.000, never closes). Real 293 s recording: association 71% -> 89%, still publishable.
+# ⚠⚠ OFF AFTER A LIVE TRIAL, 2026-09-18. The factor itself is right and the offline numbers above
+# hold — but `w->information` serves THREE masters: the solver's prior, the association gate
+# (wall_map.cpp, `cov_of(wl.information)`) and the corner sigma. Raising it to physical units
+# collapsed the gate's wall term, narrowing the gate to sys_cov alone; real segments then failed to
+# associate, became candidates, and were born as extra walls. Live symptom: the published layout
+# FLIP-FLOPPED between a rectangle and a large corner dent, 144 births in 108 s. The old, too-weak
+# information had been silently doing double duty as GATE SLACK — nothing in the code says so.
+# Separating the currencies (physical for prior_info, per-point for information) is implemented and
+# helps the failing recording a lot (2-3 walls that never closed -> 4 walls, closes, short side
+# 4.002 m) but sends births to 399 on the good one. The problem moved; it is not solved. The births
+# and candidate machinery is tuned around a data term that was 5000x too weak, so correcting the
+# term destabilises the structure layer built on the weakness — that is the real work.
+# The OFF path is verified byte-identical to the pre-change baseline (tour IoU 0.987, map rotation
+# 1.80 deg; 293 s replay 37 births / 71% associated / publishable).
+# ⚠ RE-ENABLED 2026-09-18 for the trial, because the symptom it addresses appeared live: after a
+# small translation the SDF error grew and THE POSE DID NOT FOLLOW. In Estimate mode the SDF is off
+# (the wall factors ARE the observation), so pose correction comes only from these factors, and at
+# 1/5000 of the returns' physical information they cannot out-vote odometry. The earlier live trial
+# failed for a DIFFERENT reason — the gate read the same carried information and shut — and both the
+# currency separation and CommonModeGate now remove that coupling.
+# Measured with the gate and the death floor in place: failing recording assoc 82-100% -> 98-100%,
+# sides 4.034 x 6.012 -> 4.040 x 5.992. ⚠ TRADE: on the healthy recording association drops 83-89%
+# -> 74-78% and the short side goes 4.019 -> 4.114. Watch the birth count.
+WallLineFactor = true
+# ── THE ASSOCIATION GATE MUST KNOW THE SEGMENTS SHARE ONE POSE ───────────────────────────────────
+# Every segment in a scan is measured from the same pose, so their innovations share a rank-3
+# component. The gate used only the DIAGONAL blocks of that joint covariance, i.e. it tested S
+# segments against S copies of ONE number — so there was no graded failure: when the shared error
+# crossed the gate width EVERY segment failed in the same frame, nothing was left to correct the
+# pose, and the loss was permanent. Measured at the collapse frame: dphi = -5.85, -5.76, -5.79,
+# -5.77 deg on four walls, a spread of 0.09 about a common -5.8; after removing one SE(2) transform
+# those residuals are 0.8-1.5 cm and +-0.04 deg. The segments were never the problem.
+# ON: estimate the shared (dx, dy, dphi) from the OTHER segments and test each segment against the
+# residual after it. Leave-one-out is essential or a wrong segment explains itself away. With one
+# segment it is algebraically identical to the old gate, so the parked case cannot regress.
+# Measured 2026-09-18 on two real recordings:
+#   failing run: association 100->0% for ever, 2 walls, never closed  =>  100% throughout, 4 walls,
+#                closed, 0 births (control had 15)
+#   good run:    82% assoc / 94 births / publishable  =>  93% assoc / 0 births, sides 4.015 x 5.985
+# ⚠ OPEN: the corner sigma is still derived from the monotonically accumulated `information`, and
+# under this gate it comes out looser, so `publishable` is NOT reached (0.064 m against a 0.060 bar
+# with AbsorbSchur off; 0.202 m with it on). Geometry is unaffected. Until that is fixed the layout
+# will not be re-anchored, frozen or published — a live run tests the GATE, not the publish path.
+CommonModeGate = true
+# ── GLOBAL RE-DERIVATION (re_derive) ─────────────────────────────────────────────────────────────
+# The escape hatch from a wrong local topology: every `rederive_every_frames` (40) it traces the free
+# grid's contour and proposes a whole new cycle, which the adoption judge then accepts or reverts.
+# ⚠ OFF for the 2026-09-18 trial. Measured live: the published polygon flipped 4 vertices -> 18 on 46
+# frames of ~2020 (2.3%), spaced a median of 33 frames apart — the cadence, not a coincidence — with
+# the wall map holding at EXACTLY 4 walls throughout. Four walls cannot make an 18-gon, so the extra
+# vertices are the contour proposal reaching the published polygon before the judge reverts it. On
+# those frames the short side collapsed to 0.06 m against a true 4.00. Between flips the layout was a
+# good 3.849 x 5.934 rectangle and the orientation was stable to 0.01 deg per frame.
+# The real fix is that a proposal must not be published before it is judged; this flag only removes
+# the proposer, and with it the ability to recover from a genuinely wrong cycle.
+EnableRederive = false
+# The pose Schur complement in absorb_wall_observations, added 2026-09-18. It is the honest marginal
+# and it lifted the good recording's association 71 -> 87%, but it also costs carried information,
+# which the corner sigma reads: worst corner 0.034 -> and with CommonModeGate 0.064 vs 0.202. OFF is
+# the behaviour the agent ran for months.
+AbsorbSchur = false
+# The COMMON MODE a segment's returns share — range bias, the wall's own flatness, registration —
+# added to the fit covariance so N correlated points cannot drive sigma to zero. This is the Woodbury
+# common-mode term CLAUDE.md prescribes for correlated points, NOT a sigma floor bolted on after the
+# fact: independent per-point noise still dominates for SHORT segments, so a small gather stays
+# uncertain, which is the behaviour we want. Multiplying the old factor by 5000 instead would assert
+# 400 independent looks at one wall, collapse sigma as 1/sqrt(N) and shut the association gate.
+LineCommonSigmaD      = 0.010   # m
+LineCommonSigmaPhiDeg = 0.5     # deg
 # ⚠ OFF for room 2 (2026-09-12). This room IS a rectangle — the estimator gets it to a clean 4-vertex
 # 4.00 x 5.99 m with every wall within 1.6 deg of axis — and level 2 was adding an alcove on the way
 # out, which then FROZE into the published layout. The cause is not a bug in the operator: a 1.06 m

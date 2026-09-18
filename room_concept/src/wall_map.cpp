@@ -34,6 +34,21 @@ namespace rc::wallmap
             return c;
         }
 
+        /// The carried (phi, d) covariance a consumer should use: the accumulated information
+        /// inverted, then SATURATED by the common mode repetition cannot remove (see
+        /// Params::carry_sat_sigma_*). Every reader of a wall's carried uncertainty goes through
+        /// this — the association gate, the candidate "same line" test, merge_indistinguishable and
+        /// the corner sigma — or they disagree about how well the same wall is known.
+        std::optional<Eigen::Matrix2f> carried_cov(const Eigen::Matrix2f& info,
+                                                   const rc::wallmap::Params& P)
+        {
+            auto c = cov_of(info);
+            if (not c) return c;
+            (*c)(0, 0) += P.carry_sat_sigma_phi * P.carry_sat_sigma_phi;
+            (*c)(1, 1) += P.carry_sat_sigma_d * P.carry_sat_sigma_d;
+            return c;
+        }
+
         float chi2_of(const Eigen::Vector2f& r, const Eigen::Matrix2f& S)
         {
             const float det = S.determinant();
@@ -745,6 +760,9 @@ namespace rc::wallmap
             J.col(1) =  col_d;                         // ∂p/∂d
             return J;
         };
+        // NOT saturated here: the corner already has its own "more returns cannot remove this" term
+        // (Params::corner_model_sigma, added below), so applying the carry saturation as well would
+        // charge the same systematic twice.
         const auto ca = cov_of(a.information), cb = cov_of(b.information);
         if (not ca or not cb) return c;
         Eigen::Matrix2f Sp = Ja(a, 0) * (*ca) * Ja(a, 0).transpose() + Ja(b, 1) * (*cb) * Ja(b, 1).transpose();
@@ -802,6 +820,8 @@ namespace rc::wallmap
         theta0 = walls.front().phi;
         theta0_born = true;
         theta0_information = 1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad);
+        theta0_gauge = theta0;          // the convention the map frame is held to from here on
+        theta0_gauge_set = true;
         reclassify_all();
     }
 
@@ -920,7 +940,31 @@ namespace rc::wallmap
             fr.deaths++;
             dead.push_back(w.id);
         }
-        for (auto it = dead.rbegin(); it != dead.rend(); ++it) splice_out(*it);
+        // ── THE SAME FLOOR THE PRICED PATH ALREADY ASSERTS ──────────────────────────────────────
+        // try_down_jumps refuses to shorten the cycle below a rectangle ("never below the
+        // rectangle", :1880) and pays an MDL price for every -2 jump it does make. The existence
+        // channel bypassed both: it collected every wall at the log-odds clamp and spliced it out
+        // unconditionally, so a structure change that the economy would have refused went through
+        // for free. That is how a 6.00 x 4.00 m room was published as a TRIANGLE with the robot
+        // outside it (2026-09-18): two walls starved while the pose was wrong, existence killed
+        // them here, heal_order closed the cycle, and build_from accepts a 3-cycle because its only
+        // cardinality test is `n < 3`.
+        // Absence may retire a wall as an OBSERVER; it may not redefine what a room is. A wall held
+        // back here keeps its refuted log-odds, so if the cycle later grows past four the deletion
+        // happens then — nothing is forgotten, only the structural edit is deferred to the path that
+        // prices it.
+        for (auto it = dead.rbegin(); it != dead.rend(); ++it)
+        {
+            const bool in_cycle = std::find(order.begin(), order.end(), *it) != order.end();
+            if (params.death_floor and in_cycle and order.size() <= 4)
+            {
+                if (params.debug_splice)
+                    std::printf("[death-exist] wall %llu HELD: the cycle is already at %zu edges\n",
+                                (unsigned long long)*it, order.size());
+                continue;
+            }
+            splice_out(*it);
+        }
     }
 
     void WallMap::splice_out(std::uint64_t id)
@@ -2008,13 +2052,41 @@ namespace rc::wallmap
         const int W = static_cast<int>(walls.size());
         fr.seg_to_wall.assign(static_cast<size_t>(S), -1);
         fr.seg_pda.assign(static_cast<size_t>(S), 0.f);
+        fr.seg_best_chi2.assign(static_cast<size_t>(S), std::numeric_limits<float>::infinity());
+        fr.seg_best_dphi.assign(static_cast<size_t>(S), 0.f);
+        fr.seg_best_dd.assign(static_cast<size_t>(S), 0.f);
+        fr.seg_best_sig_phi.assign(static_cast<size_t>(S), 0.f);
+        fr.seg_best_sig_d.assign(static_cast<size_t>(S), 0.f);
         fr.seg_to_candidate.assign(static_cast<size_t>(S), -1);
         fr.unexplained_points = static_cast<int>(seg.unexplained.size());
         const Eigen::Matrix2f R = rot2(pose.z());
         const Eigen::Vector2f t = pose.head<2>();
+        // ── HOW FAST IS THE ROBOT TURNING, AND THEREFORE HOW WELL DO WE KNOW THE SCAN'S HEADING ──
+        // omega from consecutive observe() calls; the resulting variance is added to the heading the
+        // gate transports. Still robot ⇒ zero extra, so nothing changes for the case that already
+        // worked; spinning robot ⇒ the gate opens by exactly what the timing mismatch can cost.
+        Eigen::Matrix3f pose_cov_eff = pose_cov;
+        if (last_obs_ts_ > 0 and timestamp_ms > last_obs_ts_)
+        {
+            const float dt = static_cast<float>(timestamp_ms - last_obs_ts_) * 1e-3f;
+            if (dt > 1e-3f and dt < 1.0f)
+            {
+                const float omega = wrap_pi(pose.z() - last_obs_theta_) / dt;
+                const float st = params.scan_timing_sigma_s;
+                pose_cov_eff(2, 2) += omega * omega * st * st;
+            }
+        }
+        last_obs_ts_ = timestamp_ms; last_obs_theta_ = pose.z();
 
         // ── Every segment in the map frame, with the covariance the association test needs ───────
-        struct SegMap { float phi = 0.f, d = 0.f; Eigen::Matrix2f Sigma = Eigen::Matrix2f::Zero(); bool ok = false; };
+        struct SegMap
+        {
+            float phi = 0.f, d = 0.f;
+            Eigen::Matrix2f Sigma = Eigen::Matrix2f::Zero();      // local + pose (today's gate)
+            Eigen::Matrix2f Sigma_loc = Eigen::Matrix2f::Zero();  // LOCAL only: fit + wall + sys_cov
+            Eigen::Matrix<float, 2, 3> H = Eigen::Matrix<float, 2, 3>::Zero();  // d(phi,d)/d(x,y,theta)
+            bool ok = false;
+        };
         std::vector<SegMap> sm(static_cast<size_t>(S));
         for (int s = 0; s < S; ++s)
         {
@@ -2025,7 +2097,9 @@ namespace rc::wallmap
             if (not cov_r) continue;
             Eigen::Matrix2f J = Eigen::Matrix2f::Identity();
             J(1, 0) = linefit::tangent_of(sm[s].phi).dot(t);
-            sm[s].Sigma = J * (*cov_r) * J.transpose() + H * pose_cov * H.transpose();
+            sm[s].Sigma_loc = J * (*cov_r) * J.transpose();   // the segment fit alone; wall + sys_cov are added per wall
+            sm[s].H = H;
+            sm[s].Sigma = sm[s].Sigma_loc + H * pose_cov_eff * H.transpose();
             sm[s].ok = sm[s].Sigma.allFinite();
             // DIRECTION EVIDENCE (update_theta0): every segment votes on the room's reference
             // direction, whatever the Manhattan gate later does with it. This is the only place
@@ -2120,20 +2194,120 @@ namespace rc::wallmap
                 }
         }
 
+        // ── COMMON-MODE MARGINALISATION ─────────────────────────────────────────────────────────
+        // Every segment in one scan shares ONE pose, so their innovations share a rank-3 component:
+        //     r_s = H_s*delta + eps_s ,  Sigma_joint = blkdiag(Sigma_s^loc) + H*Sigma_p*H'
+        // The gate used only the DIAGONAL 2x2 blocks of that, i.e. it tested S segments against S
+        // copies of one number. There is then no graded failure: when the shared error crosses the
+        // gate width EVERY segment fails in the SAME frame, nothing is left to correct the pose, and
+        // the failure is permanent. Measured 2026-09-18 at the collapse frame: dphi = -5.85, -5.76,
+        // -5.79, -5.77 deg on four walls — a spread of 0.09 deg about a common -5.8. After removing
+        // one SE(2) transform those four residuals are 0.8-1.5 cm and +-0.04 deg, i.e. the segments
+        // were never the problem.
+        // So: estimate the shared delta from the OTHER segments and test each segment against the
+        // residual after it. Leave-one-out is essential — a consensus that includes s would let a
+        // wrong segment explain itself away.
+        Eigen::Matrix3f Lam_all = Eigen::Matrix3f::Zero();
+        Eigen::Vector3f eta_all = Eigen::Vector3f::Zero();
+        std::vector<Eigen::Matrix3f> Lam_s(static_cast<size_t>(S), Eigen::Matrix3f::Zero());
+        std::vector<Eigen::Vector3f> eta_s(static_cast<size_t>(S), Eigen::Vector3f::Zero());
+        const bool cmode = params.common_mode_gate;
+        if (cmode)
+        {
+            // The pose prior keeps Lambda invertible along directions this scan cannot see (one
+            // wall, or two parallel walls, leaves a null direction — the prior is the honest answer
+            // there, not a degeneracy to guard against).
+            // ⚠ THE PRIOR ON delta MUST NOT BE THE POSE COVARIANCE. delta IS the pose error; using
+            // Sigma_p as its prior asserts "the pose is already right to within Sigma_p", which is
+            // exactly the claim that failed — the covariance is measured ~3x optimistic and the real
+            // error was 5.8 deg. A tight prior pins delta_hat at 0 and the whole construction
+            // collapses to today's gate. The prior here is deliberately WEAK: its only job is to keep
+            // Lambda invertible along directions this scan cannot see (one wall, or two parallel
+            // walls), where the honest answer is "unknown", not "zero".
+            Eigen::Matrix3f Lp = Eigen::Matrix3f::Zero();
+            const float sx = params.cmode_prior_sigma_xy, sa = params.cmode_prior_sigma_phi;
+            if (sx > 0.f and sa > 0.f)
+            { Lp(0, 0) = 1.f / (sx * sx); Lp(1, 1) = 1.f / (sx * sx); Lp(2, 2) = 1.f / (sa * sa); }
+            Lam_all = Lp;
+            for (int s = 0; s < S; ++s)
+            {
+                if (not sm[s].ok or corner_explained[static_cast<size_t>(s)] == 1) continue;
+                // Provisional pairing: the wall this segment is closest to under TODAY's test. Only
+                // used to build the consensus; the verdict below is recomputed for every wall.
+                int bw = -1; float bc = std::numeric_limits<float>::infinity();
+                for (int w = 0; w < W; ++w)
+                {
+                    const auto& wl = walls[static_cast<size_t>(w)];
+                    const auto cw = carried_cov(wl.information, params);
+                    const Eigen::Matrix2f Sm = sys_cov(params) + (cw ? (sm[s].Sigma + *cw).eval() : sm[s].Sigma);
+                    const Eigen::Vector2f r(wrap_pi(sm[s].phi - wl.phi), sm[s].d - wl.d);
+                    const float c = chi2_of(r, Sm);
+                    if (c < bc) { bc = c; bw = w; }
+                }
+                if (bw < 0 or not std::isfinite(bc)) continue;
+                // A pairing only votes in proportion to how well it already fits: a segment that
+                // matches nothing must not drag the consensus. Continuous, no cut-off.
+                const float vote = 1.f / (1.f + bc);
+                const auto& wl = walls[static_cast<size_t>(bw)];
+                const auto cw = carried_cov(wl.information, params);
+                const Eigen::Matrix2f Sloc = sys_cov(params)
+                                           + (cw ? (sm[s].Sigma_loc + *cw).eval() : sm[s].Sigma_loc);
+                const Eigen::Matrix2f Wl = Sloc.inverse();
+                if (not Wl.allFinite()) continue;
+                const Eigen::Vector2f r(wrap_pi(sm[s].phi - wl.phi), sm[s].d - wl.d);
+                Lam_s[static_cast<size_t>(s)] = vote * sm[s].H.transpose() * Wl * sm[s].H;
+                eta_s[static_cast<size_t>(s)] = vote * sm[s].H.transpose() * (Wl * r);
+                Lam_all += Lam_s[static_cast<size_t>(s)];
+                eta_all += eta_s[static_cast<size_t>(s)];
+            }
+        }
+
         // ── Association: Mahalanobis under the innovation covariance, MANY-TO-ONE, PDA ───────────
         std::vector<std::vector<float>> chi2(static_cast<size_t>(S), std::vector<float>(static_cast<size_t>(W), std::numeric_limits<float>::infinity()));
         for (int s = 0; s < S; ++s)
         {
             if (not sm[s].ok) continue;
             if (corner_explained[static_cast<size_t>(s)] == 1) continue;   // predicted, not evidence
+            // The consensus WITHOUT this segment, and the covariance of that consensus.
+            Eigen::Vector3f d_los = Eigen::Vector3f::Zero();
+            Eigen::Matrix3f P_los = Eigen::Matrix3f::Zero();
+            bool los_ok = false;
+            if (cmode)
+            {
+                const Eigen::Matrix3f Lam = Lam_all - Lam_s[static_cast<size_t>(s)];
+                const Eigen::Vector3f eta = eta_all - eta_s[static_cast<size_t>(s)];
+                const Eigen::Matrix3f P = Lam.inverse();
+                if (P.allFinite()) { P_los = P; d_los = P * eta; los_ok = d_los.allFinite(); }
+            }
             for (int w = 0; w < W; ++w)
             {
                 const auto& wl = walls[static_cast<size_t>(w)];
-                const auto cov_w = cov_of(wl.information);
-                const Eigen::Matrix2f Sm = sys_cov(params)
-                                         + (cov_w ? (sm[s].Sigma + *cov_w).eval() : sm[s].Sigma);
+                const auto cov_w = carried_cov(wl.information, params);
                 const Eigen::Vector2f r(wrap_pi(sm[s].phi - wl.phi), sm[s].d - wl.d);
-                chi2[s][w] = chi2_of(r, Sm);
+                Eigen::Matrix2f Sm;
+                Eigen::Vector2f e;
+                if (cmode and los_ok)
+                {
+                    // Test the residual AFTER the shared pose error the other segments agree on.
+                    const Eigen::Matrix2f Sloc = sys_cov(params)
+                                               + (cov_w ? (sm[s].Sigma_loc + *cov_w).eval() : sm[s].Sigma_loc);
+                    e  = r - sm[s].H * d_los;
+                    Sm = Sloc + sm[s].H * P_los * sm[s].H.transpose();
+                }
+                else
+                {
+                    e  = r;
+                    Sm = sys_cov(params) + (cov_w ? (sm[s].Sigma + *cov_w).eval() : sm[s].Sigma);
+                }
+                chi2[s][w] = chi2_of(e, Sm);
+                if (chi2[s][w] < fr.seg_best_chi2[static_cast<size_t>(s)])
+                {
+                    fr.seg_best_chi2[static_cast<size_t>(s)] = chi2[s][w];
+                    fr.seg_best_dphi[static_cast<size_t>(s)] = e(0);
+                    fr.seg_best_dd[static_cast<size_t>(s)]   = e(1);
+                    fr.seg_best_sig_phi[static_cast<size_t>(s)] = std::sqrt(std::max(0.f, Sm(0, 0)));
+                    fr.seg_best_sig_d[static_cast<size_t>(s)]   = std::sqrt(std::max(0.f, Sm(1, 1)));
+                }
             }
         }
         for (int s = 0; s < S; ++s)
@@ -2156,6 +2330,10 @@ namespace rc::wallmap
             WallAssoc a;
             a.wall_id = wl.id;
             a.pda = pda;
+            // The line measurement, sensor frame, with the information the fit actually supports.
+            a.seg_phi = sg.phi; a.seg_d = sg.d;
+            a.seg_info = sg.info_phi_d;
+            a.seg_ok = a.seg_info.allFinite() and a.seg_info(1, 1) > 0.f;
             a.pts.resize(static_cast<long>(sg.inliers.size()), 2);
             a.weights.resize(static_cast<long>(sg.inliers.size()));
             const Eigen::Vector2f tv = wl.tangent();
@@ -2279,7 +2457,7 @@ namespace rc::wallmap
             for (size_t wi = 0; wi < walls.size(); ++wi)
             {
                 const auto& wl = walls[wi];
-                const auto cov_w = cov_of(wl.information);
+                const auto cov_w = carried_cov(wl.information, params);
                 const auto cov_c = cov_of(c.information);
                 const Eigen::Matrix2f Sm = sys_cov(params) + (cov_w ? *cov_w : Eigen::Matrix2f::Zero())
                                          + (cov_c ? *cov_c : Eigen::Matrix2f::Zero());
@@ -2513,7 +2691,7 @@ namespace rc::wallmap
                 for (size_t b = a + 1; b < walls.size() and not again; ++b)
                 {
                     auto& A = walls[a]; auto& B = walls[b];
-                    const auto ca = cov_of(A.information), cb = cov_of(B.information);
+                    const auto ca = carried_cov(A.information, params), cb = carried_cov(B.information, params);
                     if (not ca or not cb) continue;
                     const Eigen::Vector2f r(wrap_pi(A.phi - B.phi), A.d - B.d);
                     const float c2 = chi2_of(r, *ca + *cb + sys_cov(params));
@@ -3638,6 +3816,10 @@ namespace rc::wallmap
             for (auto& cd : trial_.candidates) xf(cd.phi, cd.d, cd.information, &cd.s_min, &cd.s_max);
         }
         if (theta0_born) theta0 = wrap_pi(theta0 - rot);
+        // THE GAUGE MOVES WITH THE FRAME IT IS A CONVENTION ABOUT. A re-anchor rewrites the internal
+        // frame by −rot, so the fixed reference has to be rewritten by exactly the same amount or the
+        // anchor would fight the re-anchor it was never meant to notice.
+        if (theta0_gauge_set) theta0_gauge = wrap_pi(theta0_gauge - rot);
         // The histogram lives in the map frame like everything else. Rotating the map by −rot
         // rotates the quadrupled angle by −4·rot; carrying that as an offset avoids re-binning
         // (and the interpolation error a re-bin would add at every re-anchor).

@@ -502,6 +502,92 @@ namespace rc::gn
         //  |r| there), which is the exact gradient — see the note in Se2LandmarkFactor.
         //  This is the S-Graphs+ pose↔plane constraint in 2-D (Bavle et al., arXiv 2212.11770).
         // =====================================================================================
+        /// ── LINE-TO-LINE: one residual per (slot, wall), not one per point ──────────────────────
+        /// S-Graphs+ (Bavle et al., arXiv 2212.11770, Eq. 6) compresses a segment into a plane with
+        /// its own covariance BEFORE the graph sees it; only then is the map plane transformed into
+        /// the sensor frame and compared. This is that, in 2-D.
+        ///
+        /// WHY IT REPLACES THE PER-POINT SUM. WallPointFactor weighs each point by
+        /// `0.5*inv_var*pda/N_slot`, and the code's own publish-path rescale
+        /// (`wall_marginal_information_of_slot`) states the correction: k = 2*sigma_obs^2*N/sigma_s^2,
+        /// which at the live config (sigma_obs 0.05, sigma_s 0.02, N 400) is **k = 5000**. Every
+        /// LiDAR return entered the solve carrying 1/5000 of its physical information, so the scan
+        /// could not out-vote the Manhattan prior (821 rad^-2) and the layout could not correct
+        /// itself from data. The `/N_slot` came from the SDF term, which was defined as a MEAN over
+        /// points; for a pose-only fit against a KNOWN map a global scalar is harmless because it
+        /// cannot move the argmin, and it was inherited verbatim into a JOINT pose+map problem where
+        /// it is not harmless at all.
+        ///
+        /// WHY NOT SIMPLY MULTIPLY BY k. That would assert N independent measurements of one wall,
+        /// which is the correlated-points trap CLAUDE.md names: sigma would collapse as 1/sqrt(N)
+        /// with no bound, and the association gate (which reads the same carried information) would
+        /// shut. The honest statement is that a segment's returns share a common mode — range bias,
+        /// the wall's own flatness, registration — so the information saturates. That is the Woodbury
+        /// common-mode marginalisation the project already prescribes for correlated mask points,
+        /// applied here as an additive covariance on (phi, d) that no point count can shrink.
+        ///
+        /// The residual is evaluated in the SENSOR frame: there the measurement noise is the
+        /// sensor's, full stop. In the map frame it would also carry H*Sigma_pose*H^T, whose lever
+        /// arm grows with distance from a map origin that is pure convention.
+        ///   phi_w^s = phi_w - theta ,  d_w^s = d_w - n(phi_w).t
+        ///   r = ( wrap(phi_w^s - phi_seg),  d_w^s - d_seg )
+        class WallLineFactor final : public IFactor
+        {
+        public:
+            WallLineFactor(int off_pose, int off_wall, float seg_phi, float seg_d,
+                           const Eigen::Matrix2f& lambda, float huber_delta)
+                : op_(off_pose), ow_(off_wall), sphi_(seg_phi), sd_(seg_d), L_(lambda), delta_(huber_delta) {}
+
+            float evaluate(const State& x) const override
+            {
+                Eigen::Vector2f r; residual(x, r);
+                return 0.5f * huber(r) * r.dot(L_ * r);
+            }
+
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                Eigen::Vector2f r; residual(x, r);
+                const float phi_w = x(ow_);
+                const Eigen::Vector2f n(std::cos(phi_w), std::sin(phi_w));
+                const Eigen::Vector2f tv(-std::sin(phi_w), std::cos(phi_w));
+                const Eigen::Vector2f p(x(op_), x(op_ + 1));
+                // rows: (phi, d); cols: (px, py, theta, phi_w, d_w)
+                Eigen::Matrix<float, 2, 5> J = Eigen::Matrix<float, 2, 5>::Zero();
+                J(0, 2) = -1.f;  J(0, 3) = 1.f;
+                J(1, 0) = -n.x(); J(1, 1) = -n.y(); J(1, 3) = -tv.dot(p); J(1, 4) = 1.f;
+                const float u = huber(r);
+                const Eigen::Matrix2f LW = u * L_;
+                const Eigen::Matrix<float, 5, 5> H = J.transpose() * LW * J;
+                const Eigen::Matrix<float, 5, 1> b = J.transpose() * (LW * r);
+                sys.add_H(op_, op_, Eigen::MatrixXf(H.block<3, 3>(0, 0)));
+                sys.add_H(ow_, ow_, Eigen::MatrixXf(H.block<2, 2>(3, 3)));
+                sys.add_H(op_, ow_, Eigen::MatrixXf(H.block<3, 2>(0, 3)));
+                sys.add_H(ow_, op_, Eigen::MatrixXf(H.block<2, 3>(3, 0)));
+                sys.add_b(op_, Eigen::VectorXf(b.head<3>()));
+                sys.add_b(ow_, Eigen::VectorXf(b.tail<2>()));
+                return 0.5f * u * r.dot(L_ * r);
+            }
+
+        private:
+            void residual(const State& x, Eigen::Vector2f& r) const
+            {
+                const float phi_w = x(ow_), d_w = x(ow_ + 1), th = x(op_ + 2);
+                const Eigen::Vector2f n(std::cos(phi_w), std::sin(phi_w));
+                r(0) = wrap_pi(phi_w - th - sphi_);
+                r(1) = (d_w - (n.x() * x(op_) + n.y() * x(op_ + 1))) - sd_;
+            }
+            /// IRLS weight on the 2-D Mahalanobis length, so one bad segment cannot drag a wall.
+            float huber(const Eigen::Vector2f& r) const
+            {
+                const float m = std::sqrt(std::max(0.f, r.dot(L_ * r)));
+                return (m <= delta_ or m < 1e-9f) ? 1.f : delta_ / m;
+            }
+            int op_, ow_;
+            float sphi_, sd_;
+            Eigen::Matrix2f L_;
+            float delta_;
+        };
+
         class WallPointFactor final : public IFactor
         {
         public:
@@ -717,6 +803,28 @@ namespace rc::gn
             if (in.window != nullptr)
                 for (const auto& slot : *in.window)
                     for (const auto& a : slot.wall_assoc) active.insert(a.wall_id);
+            // ── KEEP THE OPPOSITE WALL A VARIABLE ────────────────────────────────────────────────
+            // A wall nothing associated to this window has NO COLUMNS, so it is frozen at whatever
+            // prior_mu says — and prior_mu was hardened by absorb_wall_observations around the pose
+            // the window had at the time. That is the last link of the measured failure chain: one
+            // shared heading error crosses the ~6 deg association gate, EVERY segment fails at once,
+            // the walls stop being variables, they starve, existence kills them, heal_order closes
+            // the cycle, and the published rectangle becomes a TRIANGLE with the robot outside it.
+            // A wall's class PARTNER (k and k+2 are the two sides of one width) is the one other
+            // wall whose observations say anything about it, so keeping the partner in the problem
+            // lets a starved side be carried by the side that is still seen.
+            if (in.walls->params.pair_partner_active and not active.empty())
+            {
+                std::set<std::uint64_t> partners;
+                for (const auto& w : in.walls->walls)
+                {
+                    if (w.k < 0 or not active.contains(w.id)) continue;
+                    const int kp = (w.k + 2) % 4;
+                    for (const auto& o : in.walls->walls)
+                        if (o.id != w.id and o.k == kp) partners.insert(o.id);
+                }
+                active.insert(partners.begin(), partners.end());
+            }
             lay.wall_off.assign(in.walls->walls.size(), -1);
             for (size_t k = 0; k < in.walls->walls.size(); ++k)
                 if (active.empty() or active.contains(in.walls->walls[k].id))
@@ -740,9 +848,71 @@ namespace rc::gn
             LinearSystem sys(5);
             State x(5);
             x << pose, w->phi, w->d;
-            WallPointFactor f(0, 3, a.pts, a.weights, inv_var, P.rfe_huber_delta, n_slot, a.pda);
-            f.linearize(x, sys);
-            const Eigen::Matrix2f block = sys.H.block<2, 2>(3, 3);
+            // THE CARRIED PRIOR MUST BE IN THE SAME CURRENCY AS THE LIVE SOLVE. If the window
+            // speaks line-to-line (full physical information) while the history is accumulated from
+            // the per-point form (1/5000 of it), a wall's past cannot hold its present and the
+            // corner sigma the publish test reads is in the wrong units.
+            // ── TWO CURRENCIES, ON PURPOSE ──────────────────────────────────────────────────
+            // `prior_info` is what the SOLVER pulls against and must be in physical units, or the
+            // line factor's data would out-vote a wall's whole history. `information` is what the
+            // ASSOCIATION GATE and the corner sigma read (wall_map.cpp: `cov_of(wl.information)`),
+            // and it must stay in the per-point currency the gate was tuned against. Feeding the
+            // physical value into both multiplied the gate's wall precision by ~5000, collapsing
+            // cov_w to nothing and narrowing the gate to sys_cov alone; real segments then failed to
+            // associate, became candidates and were born as extra walls. Measured live 2026-09-18:
+            // the published layout flip-flopped between a rectangle and a large corner dent, with
+            // 144 births in 108 s. The weak information had been doing double duty as gate slack.
+            LinearSystem sys_gate(5);
+            {
+                WallPointFactor f(0, 3, a.pts, a.weights, inv_var, P.rfe_huber_delta, n_slot, a.pda);
+                f.linearize(x, sys_gate);
+            }
+            if (in.walls->params.wall_line_factor and a.seg_ok)
+            {
+                Eigen::Matrix2f cov = a.seg_info.inverse();
+                if (not cov.allFinite()) continue;
+                const float cp = in.walls->params.line_common_sigma_phi;
+                const float cd = in.walls->params.line_common_sigma_d;
+                cov(0, 0) += cp * cp;
+                cov(1, 1) += cd * cd;
+                Eigen::Matrix2f lam = cov.inverse();
+                if (not lam.allFinite()) continue;
+                lam *= std::clamp(a.pda, 0.f, 1.f);
+                WallLineFactor fl(0, 3, a.seg_phi, a.seg_d, lam, P.rfe_huber_delta);
+                fl.linearize(x, sys);
+            }
+            else
+                sys = sys_gate;
+            // The wall's information CONDITIONAL on the pose (block) overstates what this slot
+            // knows; the MARGINAL, with the pose folded away, is the honest number:
+            //   Λ_marg = H_ww − H_wp (H_pp + Λ_pose)⁻¹ H_pw
+            // Λ_pose is the slot's own pose precision, so a slot whose pose was uncertain hands the
+            // wall proportionally less. Without it H_pp is singular (one slot cannot fix a pose) and
+            // the complement would subtract far too much.
+            const auto schur = [&](const LinearSystem& S) -> Eigen::Matrix2f
+            {
+                const Eigen::Matrix2f Hww = S.H.block<2, 2>(3, 3);
+                if (not in.walls->params.absorb_schur) return Hww;
+                Eigen::Matrix3f Hpp = S.H.block<3, 3>(0, 0);
+                Eigen::Matrix3f Lp = Eigen::Matrix3f::Zero();
+                if (slot.pose_cov.allFinite())
+                {
+                    const Eigen::Matrix3f inv = slot.pose_cov.inverse();
+                    if (inv.allFinite()) Lp = inv;
+                }
+                Hpp += Lp;
+                const Eigen::Matrix<float, 3, 2> Hpw = S.H.block<3, 2>(0, 3);
+                const Eigen::Matrix3f Hpp_inv = Hpp.inverse();
+                if (not Hpp_inv.allFinite()) return Hww;
+                Eigen::Matrix2f m = Hww - Hpw.transpose() * Hpp_inv * Hpw;
+                if (not m.allFinite()) return Hww;
+                // A marginal can only be looser, never negative-definite.
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m);
+                Eigen::Vector2f ev = es.eigenvalues().cwiseMax(0.f);
+                return es.eigenvectors() * ev.asDiagonal() * es.eigenvectors().transpose();
+            };
+            const Eigen::Matrix2f block = schur(sys);
+            const Eigen::Matrix2f block_gate = schur(sys_gate);
             if (not block.allFinite()) continue;
             // Information-form fusion (#5): the slot's own optimum for this wall is the Gauss-Newton
             // step from the linearisation, μ_slot = x_lin − H⁻¹ b, so H μ_slot = H x_lin − b. Fused
@@ -759,7 +929,16 @@ namespace rc::gn
                 if (mu_new.allFinite()) w->prior_mu = Eigen::Vector2f(wrap_pi(mu_new.x()), mu_new.y());
             }
             w->prior_info = lam_new;
-            w->information += block;   // the gating / corner-sigma precision keeps growing as before
+            // the gating / corner-sigma precision keeps growing in ITS OWN currency (see above)
+            // ── DISCRIMINATOR: is the RATCHET the cause? ────────────────────────────────────────
+            // `information` only ever grows, and the association gate divides by it
+            // (wall_map.cpp, `cov_of(wl.information)`), so the gate narrows monotonically over a run
+            // while the pose error does not shrink. Suppressing ONLY this accumulation — leaving
+            // prior_info, and therefore the solver's pull, untouched — separates "the gate ratcheted
+            // shut" from "the pose drifted out of a fixed gate". Two independent design reviews
+            // named this as the cheapest test that distinguishes them.
+            if (block_gate.allFinite() and not in.walls->params.no_gate_ratchet)
+                w->information += block_gate;
         }
     }
 
@@ -773,6 +952,11 @@ namespace rc::gn
         const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
         const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
         const float sensor = std::max(1e-4f, P.wall_seg.sensor_sigma);
+        // With the line factor the carried information is ALREADY physical — the segment fit's own
+        // Lambda, saturated by the common mode — so there is nothing to rescale. k exists only to
+        // undo the per-point form's `/N_slot` mean-normalisation.
+        // `information` is always accumulated in the per-point currency now, so the rescale that
+        // turns it into physical units is unconditional again.
         const float k = 2.f * P.rfe_obs_sigma * P.rfe_obs_sigma * static_cast<float>(std::max(1, n_slot)) / (sensor * sensor);
         std::vector<std::uint64_t> ids;
         for (const auto& a : slot.wall_assoc)
@@ -961,11 +1145,18 @@ namespace rc::gn
         {
             // Gauge: nothing pins trajectory+map until the first marginalisation has produced a
             // boundary prior. Until then slot 0 sits at the origin with σ_gauge — the first-pose gauge.
-            if (in.gauge_fix and not (in.boundary_prior != nullptr and in.boundary_prior->valid and n > 1))
+            if (in.gauge_fix and (in.gauge_persist
+                                  or not (in.boundary_prior != nullptr and in.boundary_prior->valid and n > 1)))
             {
                 Eigen::Matrix3f prec = Eigen::Matrix3f::Zero();
                 prec(0, 0) = prec(1, 1) = 1.f / (in.gauge_sigma_xy * in.gauge_sigma_xy);
-                prec(2, 2) = 1.f / (in.gauge_sigma_theta * in.gauge_sigma_theta);
+                // θ is pinned here ONLY while θ₀ is not carrying the rotational gauge. Once it is,
+                // pinning both would fix a PHYSICAL quantity — the first pose's heading relative to
+                // the walls is observable — rather than a convention, and the two anchors would
+                // fight over every rotation error instead of one of them absorbing it.
+                const bool theta0_holds_gauge =
+                    in.walls != nullptr and in.walls->params.gauge_on_theta0 and in.walls->theta0_gauge_set;
+                prec(2, 2) = theta0_holds_gauge ? 0.f : 1.f / (in.gauge_sigma_theta * in.gauge_sigma_theta);
                 fs.push_back(std::make_unique<BoundaryFactor>(idx.offset(0), Eigen::Vector3f::Zero(), prec, 1.f));
             }
             // Wall point factors: each slot's observations of each wall it associated.
@@ -979,9 +1170,30 @@ namespace rc::gn
                 {
                     const int wk = in.walls->index_of(a.wall_id);
                     if (wk < 0 or lay.wall_off[static_cast<size_t>(wk)] < 0) continue;
-                    fs.push_back(std::make_unique<WallPointFactor>(
-                        idx.offset(i), lay.wall_off[static_cast<size_t>(wk)], a.pts, a.weights,
-                        inv_var, P.rfe_huber_delta, n_slot, a.pda));
+                    if (in.walls->params.wall_line_factor and a.seg_ok)
+                    {
+                        // Fit information, SATURATED by the common mode the returns share. In
+                        // covariance form: Sigma = Lambda_fit^-1 + diag(sigma_cm_phi^2, sigma_cm_d^2),
+                        // so N points still sharpen a SHORT segment but cannot drive sigma to zero.
+                        // pda scales the whole measurement: a segment the association only half
+                        // believes contributes half a measurement, not a full one at half precision.
+                        Eigen::Matrix2f cov = a.seg_info.inverse();
+                        if (not cov.allFinite()) continue;
+                        const float cp = in.walls->params.line_common_sigma_phi;
+                        const float cd = in.walls->params.line_common_sigma_d;
+                        cov(0, 0) += cp * cp;
+                        cov(1, 1) += cd * cd;
+                        Eigen::Matrix2f lam = cov.inverse();
+                        if (not lam.allFinite()) continue;
+                        lam *= std::clamp(a.pda, 0.f, 1.f);
+                        fs.push_back(std::make_unique<WallLineFactor>(
+                            idx.offset(i), lay.wall_off[static_cast<size_t>(wk)],
+                            a.seg_phi, a.seg_d, lam, P.rfe_huber_delta));
+                    }
+                    else
+                        fs.push_back(std::make_unique<WallPointFactor>(
+                            idx.offset(i), lay.wall_off[static_cast<size_t>(wk)], a.pts, a.weights,
+                            inv_var, P.rfe_huber_delta, n_slot, a.pda));
                 }
             }
             // Carried information (what the dropped slots said) and the hierarchical Manhattan prior.
@@ -997,7 +1209,25 @@ namespace rc::gn
                 if (w.k >= 0 and w.manhattan_var > 0.f and lay.theta0 >= 0)
                     fs.push_back(std::make_unique<RoomWallFactor>(o, lay.theta0, w.k, w.manhattan_var / std::max(in.walls->params.manhattan_gain, 1e-6f)));
             }
-            if (lay.theta0 >= 0 and in.walls->theta0_information > 0.f)
+            // ── THE ROTATIONAL GAUGE, on a PERSISTENT reference ─────────────────────────────
+            // This used to be Theta0PriorFactor(θ₀, in.walls->theta0, theta0_information): mu =
+            // θ₀'s OWN CURRENT VALUE, i.e. a damper toward wherever it had already drifted, at a
+            // constant 1/(15°)² against four walls at ~820 rad⁻² each. That is the same "carried
+            // information is mere damping (#5)" defect the WallPriorFactor above already fixed by
+            // pulling toward prior_mu instead — and for θ₀ it was worse than damping, because θ₀
+            // is the only thing naming the map's absolute orientation. Absolute orientation is a
+            // NULL DIRECTION of every data term here, so it is fixed by CONVENTION; the slot-0
+            // factor did that at 1 mrad but is dropped the instant a boundary prior exists, and
+            // the gauge never enters marginalize_oldest. Between the two, nothing referenced
+            // anything fixed once the robot moved, and the map frame random-walked: −81° in a
+            // minute with the four walls turning TOGETHER (spread 0.01°) and the shape intact.
+            // Anchor θ₀ to the reference it was born with, at gauge precision. The walls stay tied
+            // to θ₀ only through the SOFT Manhattan factor above, so relative geometry is as free
+            // as it ever was; what is no longer free is the frame as a whole.
+            if (lay.theta0 >= 0 and in.walls->params.gauge_on_theta0 and in.walls->theta0_gauge_set)
+                fs.push_back(std::make_unique<Theta0PriorFactor>(
+                    lay.theta0, in.walls->theta0_gauge, 1.f / (in.gauge_sigma_theta * in.gauge_sigma_theta)));
+            else if (lay.theta0 >= 0 and in.walls->theta0_information > 0.f)
                 fs.push_back(std::make_unique<Theta0PriorFactor>(lay.theta0, in.walls->theta0, in.walls->theta0_information));
         }
 
