@@ -14,7 +14,7 @@
 #
 # WHY. Eviction fires when the robot carries two RT edges, one to the room it is leaving and one to
 # the room it has just localised in. room_concept cannot produce that yet — it creates a single node
-# named "room" and adopts any room-typed node it finds — so the whole transaction would be
+# named `room_1` and adopts any room-typed node it finds — so the whole transaction would be
 # untestable until that half lands. This config supplies the shape instead: the fixture is the live
 # graph at the instant of the hand-over. See ../EVICTION.md and tools/make_stage_fixture.py.
 #

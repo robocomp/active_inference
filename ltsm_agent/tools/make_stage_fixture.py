@@ -4,7 +4,7 @@ make_stage_fixture.py — author etc/stage_two_rooms.json, the offline two-room 
 
 WHY A FIXTURE. Eviction fires when the robot carries two RT edges, one to the room it is leaving
 and one to the room it has just localised in. `room_concept` cannot produce that yet (it creates a
-single node literally named "room" and adopts any room-typed node it finds), so the whole
+single room node -- `room_1` -- and adopts any room-typed node it finds), so the whole
 transaction would be untestable until that half lands. This file is the stand-in: a synthetic live
 graph, seeded from JSON on a PRIVATE DDS domain, shaped exactly like the real one at the instant of
 the hand-over.

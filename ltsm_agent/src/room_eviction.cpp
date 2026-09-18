@@ -123,8 +123,10 @@ std::optional<Candidate> RoomEviction::detect() const
 //////////////////////////////////////////////////////////////////////////////////////////////////
 std::uint64_t RoomEviction::room_index(const DSR::Node &room) const
 {
-    // MEMOISED. room_concept names its one room plain "room", with no room_id and no digits, so it
-    // lands on the counter below -- and an unmemoised counter hands the SAME room a different index
+    // MEMOISED. room_concept now names its first room `room_1` and writes room_id = 1, so the live fleet
+    // takes the attribute branch below and the index is stable by construction. The counter stays as the
+    // fallback for a room carrying neither (a graph from before the rename, whose room is plain "room"
+    // with no digits; an offline fixture) -- and an unmemoised counter hands the SAME room a different index
     // every time it is asked (seed → r0_, its eviction → r1_), which duplicates it in memory.
     if (const auto it = index_of_.find(room.id()); it != index_of_.end())
         return it->second;
