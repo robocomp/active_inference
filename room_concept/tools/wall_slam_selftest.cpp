@@ -2084,6 +2084,236 @@ int run_replay(const char* path)
 }
 }  // namespace
 
+
+    // ═══ ONE BOX-ESTIMATOR RUN OVER ONE ROOM ═════════════════════════════════════════════════
+    // Shared by the named ladder and the random-room sweep, so a sweep result is a statement
+    // about the same code path the ladder measures. It constructs the AGENT's channel and feeds
+    // it what RoomConcept::wall_slam_observe feeds it — nothing here re-implements the estimator.
+    struct BoxRun
+    {
+        float iou = 0.f, rms = 0.f, rms_core = 0.f, frac_out = 0.f, frac_in = 0.f, yaw_deg = 0.f;
+        double pose_err = 0.0;
+        int boxes = 0, verts = 0, proposed = 0, admitted = 0, removed = 0, truth_verts = 0;
+        rc::boxes::Layout layout;          ///< the estimate itself, for opening a tail case
+        Poly est_poly;                     ///< in WORLD coords, already gauge-aligned
+    };
+
+    inline BoxRun run_boxes(const Poly& room, unsigned seed, bool reg, int reanchor_at, int laps,
+                            const std::vector<Eigen::Vector2f>& wp)
+    {
+        BoxRun R;
+        R.truth_verts = static_cast<int>(room.size());
+        const auto truth = circuit(wp, 0.025f, laps);
+        std::mt19937 rng(seed);
+        RunConfig cfg; cfg.exec_motion = true;
+
+        BaseModel base;
+        EncoderModel enc; enc.sigma_xy = cfg.odom_sigma_xy; enc.sigma_th = cfg.odom_sigma_th;
+        Eigen::Vector3f exec_pose = truth[0], est = Eigen::Vector3f::Zero();
+        const Eigen::Vector3f origin = truth[0];
+        const auto to_map = [&](const Eigen::Vector3f& p)
+        {
+            const float c = std::cos(-origin.z()), s = std::sin(-origin.z());
+            const Eigen::Vector2f d = p.head<2>() - origin.head<2>();
+            return Eigen::Vector3f(c * d.x() - s * d.y(), s * d.x() + c * d.y(), wrap(p.z() - origin.z()));
+        };
+
+        rc::boxch::Channel ch;
+        rc::boxch::Params bp; bp.enabled = true; bp.sensor_sigma = cfg.scan_sigma;
+        ch.configure(bp);
+        rc::wallseg::Params wsp; wsp.sensor_sigma = cfg.scan_sigma;
+
+        Eigen::Matrix3f P = Eigen::Matrix3f::Zero();
+        const Eigen::Matrix3f Q = Eigen::Vector3f(enc.sigma_xy * enc.sigma_xy,
+                                                  enc.sigma_xy * enc.sigma_xy,
+                                                  enc.sigma_th * enc.sigma_th).asDiagonal();
+        Eigen::Vector2f ra_c(0.f, 0.f); float ra_rot = 0.f; bool reanchor_done = false;
+        const auto to_old = [&](const Eigen::Vector2f& p)
+        {
+            const float cr = std::cos(ra_rot), sr = std::sin(ra_rot);
+            return Eigen::Vector2f(cr * p.x() - sr * p.y() + ra_c.x(), sr * p.x() + cr * p.y() + ra_c.y());
+        };
+        std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
+
+        for (size_t f = 0; f < truth.size(); ++f)
+        {
+            const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, truth[f]);
+            const Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+            exec_pose = compose(exec_pose, body);
+            const Eigen::Vector3f meas = (f == 0) ? Eigen::Vector3f::Zero() : enc.measure(body, rng);
+            const float ce = std::cos(est.z()), se = std::sin(est.z());
+            est = (f == 0) ? Eigen::Vector3f::Zero()
+                : Eigen::Vector3f(est.x() + ce * meas.x() - se * meas.y(),
+                                  est.y() + se * meas.x() + ce * meas.y(), wrap(est.z() + meas.z()));
+            if (f > 0)
+            {
+                Eigen::Matrix3f F = Eigen::Matrix3f::Identity(), G = Eigen::Matrix3f::Identity();
+                F(0, 2) = -se * meas.x() - ce * meas.y();
+                F(1, 2) =  ce * meas.x() - se * meas.y();
+                G(0, 0) = ce; G(0, 1) = -se; G(1, 0) = se; G(1, 1) = ce;
+                P = F * P * F.transpose() + G * Q * G.transpose();
+            }
+
+            const auto pts = scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
+            if (pts.size() < 20) continue;
+
+            std::vector<Eigen::Vector3f> p3; p3.reserve(pts.size());
+            for (const auto& q : pts) p3.emplace_back(q.x(), q.y(), 0.9f);
+            const auto seg = rc::wallseg::segment(pts, wsp, rng);
+            std::vector<float> sphi, slen;
+            sphi.reserve(seg.segments.size()); slen.reserve(seg.segments.size());
+            for (const auto& sg : seg.segments)
+            { sphi.push_back(sg.phi); slen.push_back(std::abs(sg.s_max - sg.s_min)); }
+
+            if (reg and not ch.layout().empty())
+            {
+                const float gy = ch.yaw(), cg = std::cos(-gy), sg2 = std::sin(-gy);
+                const Eigen::Vector3f est_L(cg * est.x() - sg2 * est.y(),
+                                            sg2 * est.x() + cg * est.y(), wrap(est.z() - gy));
+                const auto rr = rc::boxes::register_scan(ch.layout(), pts, est_L, cfg.scan_sigma);
+                if (rr.ok)
+                {
+                    const float cb = std::cos(gy), sb = std::sin(gy);
+                    est = Eigen::Vector3f(cb * rr.pose.x() - sb * rr.pose.y(),
+                                          sb * rr.pose.x() + cb * rr.pose.y(), wrap(rr.pose.z() + gy));
+                    Eigen::Matrix3f R3 = Eigen::Matrix3f::Identity();
+                    R3.topLeftCorner<2, 2>() = Eigen::Rotation2Df(gy).toRotationMatrix();
+                    P = R3 * rr.cov * R3.transpose();
+                }
+            }
+            ch.observe(p3, est, P, sphi, slen);
+
+            if (reanchor_at > 0 and static_cast<int>(f) == reanchor_at and not reanchor_done)
+            {
+                const Eigen::Vector2f rc_c(0.37f, -0.21f); const float rc_rot = 0.11f;
+                ch.reanchor(rc_c, rc_rot);
+                const float cr = std::cos(-rc_rot), sr = std::sin(-rc_rot);
+                const Eigen::Vector2f pm = est.head<2>() - rc_c;
+                est = Eigen::Vector3f(cr * pm.x() - sr * pm.y(), sr * pm.x() + cr * pm.y(),
+                                      wrap(est.z() - rc_rot));
+                ra_c = rc_c; ra_rot = rc_rot; reanchor_done = true;
+            }
+            ch.step();
+
+            const Eigen::Vector3f tm = to_map(exec_pose);
+            for (int k = 0; k < 4; ++k)
+            {
+                const float a4 = static_cast<float>(k) * kPi * 0.5f;
+                const float ca = std::cos(a4), sa = std::sin(a4);
+                const Eigen::Vector2f eo = to_old(est.head<2>());
+                const Eigen::Vector2f r(ca * eo.x() - sa * eo.y(), sa * eo.x() + ca * eo.y());
+                perr_q[static_cast<size_t>(k)] += (r - tm.head<2>()).norm();
+            }
+            ++nperr;
+        }
+
+        const auto verts = ch.polygon();
+        Poly pw; for (const auto& v : verts) pw.push_back(to_old(v));
+        for (int k = 0; k < 4 and pw.size() >= 4; ++k)
+        {
+            const float a4 = static_cast<float>(k) * kPi * 0.5f;
+            const float ca = std::cos(a4), sa = std::sin(a4);
+            Poly rot;
+            for (const auto& v : pw) rot.push_back({ca * v.x() - sa * v.y(), sa * v.x() + ca * v.y()});
+            R.iou = std::max(R.iou, polygon_iou(to_world(rot, truth[0]), room));
+        }
+        R.boxes = ch.boxes(); R.verts = static_cast<int>(verts.size());
+        R.proposed = ch.proposed(); R.admitted = ch.admitted(); R.removed = ch.removed();
+        R.rms = ch.rms(); R.rms_core = ch.rms_core();
+        R.frac_out = ch.frac_out(); R.frac_in = ch.frac_in();
+        R.yaw_deg = ch.yaw() * 180.f / kPi;
+        R.pose_err = nperr ? *std::min_element(perr_q.begin(), perr_q.end()) / static_cast<double>(nperr) : -1.0;
+        R.layout = ch.layout();
+        {
+            float best = -1.f;
+            for (int k = 0; k < 4 and pw.size() >= 4; ++k)
+            {
+                const float a4 = static_cast<float>(k) * kPi * 0.5f;
+                const float ca = std::cos(a4), sa = std::sin(a4);
+                Poly rot;
+                for (const auto& v : pw) rot.push_back({ca * v.x() - sa * v.y(), sa * v.x() + ca * v.y()});
+                const Poly w4 = to_world(rot, truth[0]);
+                const float s4 = polygon_iou(w4, room);
+                if (s4 > best) { best = s4; R.est_poly = w4; }
+            }
+        }
+        return R;
+    }
+
+    // ── A RANDOM MANHATTAN ROOM OF A GIVEN ORDER ─────────────────────────────────────────────
+    // Built as a union of axis-aligned boxes and traced with the ESTIMATOR'S OWN Layout::polygon(),
+    // so the ground truth is Manhattan, closed and simply connected by construction rather than by
+    // my having drawn it carefully. `order` is the number of boxes: 1 is a bare rectangle, and each
+    // further box is a column carved into a wall or an alcove pushed out through one.
+    inline std::optional<std::pair<Poly, std::vector<Eigen::Vector2f>>>
+    random_room(unsigned seed, int order)
+    {
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<float> U(0.f, 1.f);
+        rc::boxes::Layout L;
+        const float W = 4.5f + 3.5f * U(rng), H = 3.5f + 2.5f * U(rng);
+        rc::boxes::Box shell;
+        shell.lo = {-0.5f * W, -0.5f * H}; shell.hi = {0.5f * W, 0.5f * H};
+        L.boxes.push_back(shell);
+
+        for (int k = 1; k < order; ++k)
+        {
+            for (int attempt = 0; attempt < 40; ++attempt)
+            {
+                rc::boxes::Box b;
+                const int face = static_cast<int>(U(rng) * 4.f) % 4;      // 0 lo.x 1 lo.y 2 hi.x 3 hi.y
+                const bool carve = U(rng) < 0.6f;
+                const float along = 0.4f + 1.1f * U(rng);                 // extent along the wall
+                const float deep  = 0.3f + 0.8f * U(rng);                 // how far in/out
+                const float t = 0.12f + 0.76f * U(rng);                   // position along the wall
+                if (face == 0 or face == 2)
+                {
+                    const float y0 = shell.lo.y() + t * (H - along);
+                    b.lo.y() = y0; b.hi.y() = y0 + along;
+                    if (face == 0) { b.lo.x() = shell.lo.x(); b.hi.x() = shell.lo.x() + (carve ? deep : 0.f); }
+                    else           { b.hi.x() = shell.hi.x(); b.lo.x() = shell.hi.x() - (carve ? deep : 0.f); }
+                    if (not carve)
+                    {
+                        if (face == 0) { b.lo.x() = shell.lo.x() - deep; b.hi.x() = shell.lo.x(); }
+                        else           { b.lo.x() = shell.hi.x(); b.hi.x() = shell.hi.x() + deep; }
+                    }
+                }
+                else
+                {
+                    const float x0 = shell.lo.x() + t * (W - along);
+                    b.lo.x() = x0; b.hi.x() = x0 + along;
+                    if (carve)
+                    {
+                        if (face == 1) { b.lo.y() = shell.lo.y(); b.hi.y() = shell.lo.y() + deep; }
+                        else           { b.hi.y() = shell.hi.y(); b.lo.y() = shell.hi.y() - deep; }
+                    }
+                    else
+                    {
+                        if (face == 1) { b.lo.y() = shell.lo.y() - deep; b.hi.y() = shell.lo.y(); }
+                        else           { b.lo.y() = shell.hi.y(); b.hi.y() = shell.hi.y() + deep; }
+                    }
+                }
+                b.positive = not carve;
+                if (not b.valid()) continue;
+                rc::boxes::Layout T = L; T.boxes.push_back(b);
+                const auto pv = T.polygon();
+                if (pv.size() < 4) continue;
+                L = T;
+                break;
+            }
+        }
+        const auto pv = L.polygon();
+        if (pv.size() < 4) return std::nullopt;
+        Poly room; for (const auto& v : pv) room.push_back(v);
+
+        // A circuit the robot can actually drive: inside the SHELL with clearance, and every
+        // waypoint verified inside the region (a carve may sit where the path would have gone).
+        const float mx = std::max(0.6f, 0.5f * W - 1.3f), my = std::max(0.5f, 0.5f * H - 1.3f);
+        std::vector<Eigen::Vector2f> wp = {{-mx, -my}, {mx, -my}, {mx, my}, {-mx, my}};
+        for (const auto& w : wp) if (not L.inside(w)) return std::nullopt;
+        return std::make_pair(room, wp);
+    }
+
 int main()
 {
     // ── DETERMINISM. torch::set_num_threads(1) alone was NOT enough: the same command returned
@@ -2141,6 +2371,104 @@ int main()
     // the agent derives the gauge from. Identical code, identical order, identical parameters. If
     // this bench passes and Webots fails, the difference is in the DATA, which is the only place
     // a difference should ever be.
+    // ═══ RANDOM ROOM SWEEP (WS_BOXES_RANDOM=N) ═══════════════════════════════════════════════
+    // N random Manhattan rooms spread over orders 1..6 (order = number of boxes: a bare rectangle
+    // plus carves and alcoves). Prints ONLY aggregates — a per-room dump is not a result.
+    // One random room, in full, so a tail case from the sweep can be OPENED rather than reported.
+    if (const char* ri = std::getenv("WS_BOXES_ROOM_IDX"))
+    {
+        const int i = std::atoi(ri);
+        const int order = 1 + (i % 6);
+        const auto gen = random_room(static_cast<unsigned>(1000 + i), order);
+        if (not gen) { std::printf("room %d: no drivable circuit\n", i); return 0; }
+        const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
+        const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
+        const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, 2, gen->second);
+        std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
+                    "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d\n",
+                    i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
+                    100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
+                    r.proposed, r.admitted, r.removed);
+        // the TRUTH polygon, so the shape can be read rather than guessed at
+        const auto& room = gen->first;
+        Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+        for (const auto& v : room) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+        std::printf("  truth bbox %.2f x %.2f m, %zu verts; circuit",
+                    hi.x() - lo.x(), hi.y() - lo.y(), room.size());
+        for (const auto& w : gen->second) std::printf(" (%.2f,%.2f)", w.x(), w.y());
+        for (const auto& b : r.layout.boxes)
+            std::printf("  %s box %.2f x %.2f m  [%6.2f %6.2f]x[%6.2f %6.2f]\n",
+                        b.positive ? "+" : "-", b.width(), b.height(),
+                        b.lo.x(), b.hi.x(), b.lo.y(), b.hi.y());
+        {
+            Eigen::Vector2f elo(1e9f, 1e9f), ehi(-1e9f, -1e9f);
+            for (const auto& v : r.est_poly) { elo = elo.cwiseMin(v); ehi = ehi.cwiseMax(v); }
+            std::printf("  est bbox (world) %.2f x %.2f m, %zu verts\n",
+                        ehi.x() - elo.x(), ehi.y() - elo.y(), r.est_poly.size());
+        }
+        std::printf("\n  truth verts:");
+        for (const auto& v : room) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+        std::printf("\n");
+        return 0;
+    }
+
+    if (const char* rn = std::getenv("WS_BOXES_RANDOM"))
+    {
+        const int N = std::max(1, std::atoi(rn));
+        const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
+        const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
+        const int laps = std::getenv("WS_TOUR_LAPS") ? std::max(1, std::atoi(std::getenv("WS_TOUR_LAPS"))) : 2;
+        std::map<int, std::vector<BoxRun>> by_order;
+        // ★ Keep the identity of every room so the tail can be REPRODUCED, not just reported.
+        // A distribution with a 0.43 in it is two different claims — "the method is 95% good" and
+        // "there is a case it cannot do" — and only the second one is actionable.
+        struct Ident { int i, order; float iou; int boxes, truth_verts, verts; };
+        std::vector<Ident> ids;
+        int skipped = 0;
+        for (int i = 0; i < N; ++i)
+        {
+            const int order = 1 + (i % 6);
+            const auto gen = random_room(static_cast<unsigned>(1000 + i), order);
+            if (not gen) { ++skipped; continue; }
+            const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, laps, gen->second);
+            by_order[order].push_back(r);
+            ids.push_back({i, order, r.iou, r.boxes, r.truth_verts, r.verts});
+        }
+        std::printf("\nRANDOM ROOM SWEEP — %d rooms, pose=%s%s, %d laps (%d skipped: no drivable circuit)\n",
+                    N, reg ? "registered" : "odometry-only",
+                    ranch ? " +RE-ANCHOR" : "", laps, skipped);
+        std::printf("  order  n   IoU med   min     p25   | boxes med(truth)  verts med(truth) | rms   out%%  in%%\n");
+        std::vector<float> all;
+        for (auto& [ord, v] : by_order)
+        {
+            auto med = [](std::vector<float> x)
+            { std::sort(x.begin(), x.end()); return x.empty() ? 0.f : x[x.size() / 2]; };
+            std::vector<float> iou, rms, fo, fi; std::vector<float> bx, vt, tv;
+            for (const auto& r : v)
+            { iou.push_back(r.iou); rms.push_back(r.rms); fo.push_back(100.f * r.frac_out);
+              fi.push_back(100.f * r.frac_in); bx.push_back(static_cast<float>(r.boxes));
+              vt.push_back(static_cast<float>(r.verts)); tv.push_back(static_cast<float>(r.truth_verts));
+              all.push_back(r.iou); }
+            std::vector<float> s = iou; std::sort(s.begin(), s.end());
+            std::printf("  %3d  %3zu   %.3f   %.3f   %.3f | %5.1f (%3d)      %5.1f (%4.1f)  | %.3f %5.1f %5.1f\n",
+                        ord, v.size(), med(iou), s.front(), s[s.size() / 4],
+                        med(bx), ord, med(vt), med(tv), med(rms), med(fo), med(fi));
+        }
+        std::sort(ids.begin(), ids.end(), [](const Ident& a, const Ident& b) { return a.iou < b.iou; });
+        std::printf("  worst 6:");
+        for (size_t k = 0; k < ids.size() and k < 6; ++k)
+            std::printf("  [i=%d ord=%d IoU=%.3f box=%d vt=%d/%d]",
+                        ids[k].i, ids[k].order, ids[k].iou, ids[k].boxes, ids[k].verts, ids[k].truth_verts);
+        std::printf("\n");
+        std::sort(all.begin(), all.end());
+        std::printf("  ALL  %3zu   med %.3f  min %.3f  p10 %.3f  p25 %.3f  frac>=0.90 %.0f%%\n\n",
+                    all.size(), all[all.size() / 2], all.front(),
+                    all[all.size() / 10], all[all.size() / 4],
+                    100.0 * static_cast<double>(std::count_if(all.begin(), all.end(),
+                        [](float x) { return x >= 0.90f; })) / static_cast<double>(all.size()));
+        return 0;
+    }
+
     if (std::getenv("WS_BOXES") != nullptr)
     {
         const std::string rname = std::getenv("WS_TOUR_ROOM") ? std::getenv("WS_TOUR_ROOM") : "rect";

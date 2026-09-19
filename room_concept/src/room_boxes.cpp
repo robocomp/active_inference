@@ -298,6 +298,24 @@ namespace rc::boxes
             }
             if (ci == start_i and cj == start_j and step > 0) break;
         }
+        // ⚠ ENFORCE CCW. The declaration promises CCW for the fleet's delimiting_polygon contract
+        // and the tracer delivered CLOCKWISE — every layout this class has ever produced, live and
+        // in the bench. It hid because polygon_iou is winding-agnostic, so no score ever moved;
+        // what it breaks is any consumer that reads winding for inside/outside or for the sign of
+        // an edge normal. Found by a random-room sweep whose TRUTH polygons came from here: all
+        // 100 had negative shoelace area.
+        // ★ A contract stated in a comment and never asserted is a guess. This one was wrong for
+        // as long as the class has existed.
+        {
+            double a2 = 0.0;
+            for (size_t i = 0; i < out.size(); ++i)
+            {
+                const auto& p = out[i];
+                const auto& q = out[(i + 1) % out.size()];
+                a2 += static_cast<double>(p.x()) * q.y() - static_cast<double>(q.x()) * p.y();
+            }
+            if (a2 < 0.0) std::reverse(out.begin(), out.end());
+        }
         return out;
     }
 
@@ -470,11 +488,24 @@ namespace rc::boxes
                 }
             }
             rms = std::sqrt(ss / static_cast<double>(pts.size()));
-            // Diagonal step. An offset no point is active on keeps its value — it is unobserved,
-            // which is the honest outcome, not a reason to move it.
+            // ── DAMPED diagonal step. An offset no point is active on keeps its value. ───────
+            // ⚠ AN ALMOST-UNOBSERVED OFFSET IS THE DANGEROUS CASE, NOT AN UNOBSERVED ONE.
+            // With H[k] ~ 0 the undamped step g/H diverges, and ONE marginally-active point is
+            // enough: random room i=99 grew a positive box 471.25 x 0.09 m reaching x = 476 m,
+            // in a room 7 m across, with no return anywhere near it. faces_observed() let it
+            // through because the face IS observed — by a single point.
+            // The cure is the prior that was always implicitly there: the offset was proposed
+            // somewhere sensible, and an uninformative face should KEEP that value rather than be
+            // dragged by one sample. lambda = 1/span^2 is a prior of sigma = the room's own size —
+            // as weak as a prior can be while still being proper, and no tuned constant.
+            double span2 = 0.0;
+            for (const auto& b : L.boxes)
+                span2 = std::max(span2, static_cast<double>(b.width() + b.height()));
+            const double lambda = 1.0 / std::max(1e-6, span2 * span2);
             for (size_t k = 0; k < n; ++k)
             {
                 if (H[k] <= 0.0) continue;
+                H[k] += lambda;
                 Box& b = L.boxes[k / 4];
                 float& o = (k % 4 == 0) ? b.lo.x() : (k % 4 == 1) ? b.lo.y() : (k % 4 == 2) ? b.hi.x() : b.hi.y();
                 o += static_cast<float>(g[k] / H[k]);
