@@ -185,6 +185,11 @@ namespace rc::boxes
         float sigma_flat   = 0.010f;  // PHYSICAL: wall flatness
         float cell         = 0.10f;   // COMPUTE: clustering / voxel resolution
         int   min_cluster  = 12;      // COMPUTE: smallest cluster worth proposing
+        /// Log-odds that a cell of the room goes unswept by any beam over a whole tour. A MODEL
+        /// parameter — the sensor's coverage statement — not a tuned bar: at 1 nat a claimed but
+        /// never-observed cell is about e:1 against, so a merge must save more than one parameter
+        /// per cell of empty space it swallows.
+        float unobserved_nats = 1.0f;
     };
     struct GrowResult
     {
@@ -207,6 +212,23 @@ namespace rc::boxes
     float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters = 10);
 
     /// One structure step over the accumulated global cloud. Returns what it did; mutates `L`.
+    /// ── WHAT THE WHOLE LAYOUT COSTS, IN NATS ─────────────────────────────────────────────────
+    /// code length + negative log-likelihood: the quantity MDL says to minimise. Admission has
+    /// always been priced this way LOCALLY — "does this one edit pay?" — and that is not the same
+    /// question as "is this description the shortest one that fits". A staircase of forty boxes can
+    /// be locally justified at every single step and globally absurd, which is exactly what the
+    /// apartamento hall produced: IoU 0.926 with 196 published vertices for 32 real walls.
+    /// Exposing the total makes a GLOBAL pass possible: try reductions, keep any that lowers it.
+    /// `free` is the observed free space in LAYOUT-frame cells. ⚠ WITHOUT IT THE COST IS BLIND
+    /// TO EMPTY CLAIMS: returns lie on walls, so a region that bulges into space the robot never
+    /// swept loses almost no likelihood while saving real parameters, and a priced merge will take
+    /// that trade every time. Measured on the apartamento hall — the layout fitted the walls to
+    /// 0.118 m with a 0.046 m pose and still scored IoU 0.541, because simplify() had merged
+    /// straight across the concavities. A claimed cell that no beam ever crossed is evidence
+    /// AGAINST the claim, at `unobserved_nats` each.
+    float mdl_cost(const Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
+                   const std::set<std::pair<int, int>>* free = nullptr);
+
     /// `free` is the observed free space, as cell coordinates on the same grid as `p.cell`, in
     /// the LAYOUT frame. Empty means "no free-space evidence", and grow() falls back to judging
     /// on returns alone — which is what it did before, and what fails on an apartment.

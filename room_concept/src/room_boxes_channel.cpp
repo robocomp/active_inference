@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <locale>
 #include <set>
 
@@ -177,9 +179,153 @@ namespace rc::boxch
         return b;
     }
 
+    int Channel::simplify()
+    {
+        if (L_.boxes.size() < 2 or cloud_.empty()) return 0;
+        rc::boxes::GrowParams gp;
+        gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat;
+        gp.cell = p_.cell; gp.min_cluster = p_.min_cluster;
+
+        // The free space, in layout-frame cells, so the cost can see an empty claim.
+        std::set<std::pair<int, int>> fl;
+        {
+            const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+            for (const auto& [k, n] : free_)
+            {
+                if (n < 1) continue;
+                const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                        (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                const Eigen::Vector2f q(cy * m.x() - sy * m.y(), sy * m.x() + cy * m.y());
+                fl.insert({static_cast<int>(std::floor(q.x() / p_.cell)),
+                           static_cast<int>(std::floor(q.y() / p_.cell))});
+            }
+        }
+        int removed = 0;
+        for (int round = 0; round < 40; ++round)
+        {
+            const float base = rc::boxes::mdl_cost(L_, cloud_, gp, &fl);
+            float best = base; rc::boxes::Layout bestL; bool have = false;
+
+            // (a) DELETE a box outright.
+            for (size_t i = 0; i < L_.boxes.size(); ++i)
+            {
+                if (L_.boxes.size() < 2) break;
+                rc::boxes::Layout T = L_;
+                T.boxes.erase(T.boxes.begin() + static_cast<long>(i));
+                if (T.polygon().size() < 4) continue;
+                rc::boxes::refit(T, cloud_, gp, 3);
+                const float cst = rc::boxes::mdl_cost(T, cloud_, gp, &fl);
+                if (cst < best) { best = cst; bestL = T; have = true; }
+            }
+            // (b) MERGE a pair into their bounding box. Unlike the free-space merge this is
+            //     PRICED rather than forbidden: swallowing a little non-free area is allowed when
+            //     the description it saves is worth more than the returns it misplaces.
+            for (size_t i = 0; i < L_.boxes.size(); ++i)
+                for (size_t j = i + 1; j < L_.boxes.size(); ++j)
+                {
+                    if (not L_.boxes[i].positive or not L_.boxes[j].positive) continue;
+                    rc::boxes::Layout T = L_;
+                    T.boxes[i].lo = L_.boxes[i].lo.cwiseMin(L_.boxes[j].lo);
+                    T.boxes[i].hi = L_.boxes[i].hi.cwiseMax(L_.boxes[j].hi);
+                    T.boxes.erase(T.boxes.begin() + static_cast<long>(j));
+                    if (T.polygon().size() < 4) continue;
+                    rc::boxes::refit(T, cloud_, gp, 3);
+                    const float cst = rc::boxes::mdl_cost(T, cloud_, gp, &fl);
+                    if (cst < best) { best = cst; bestL = T; have = true; }
+                }
+
+            if (not have) break;
+            L_ = bestL;
+            ++removed;
+        }
+        if (removed > 0)
+            L_.cov = Eigen::MatrixXf::Identity(static_cast<long>(L_.n_offsets()),
+                                               static_cast<long>(L_.n_offsets()))
+                   * (p_.sigma_flat * p_.sigma_flat);
+        n_removed_ += removed;
+        return removed;
+    }
+
+    void Channel::snap_coplanar()
+    {
+        // ── TWO FACES CLOSER THAN THE MEASUREMENT PRECISION ARE THE SAME WALL ───────────────
+        // A cover assembled from many rectangles leaves their shared faces differing by fractions
+        // of a cell, and Layout::polygon() faithfully traces every one of those steps: the region
+        // scored IoU 0.926 while the published outline carried 196 vertices against a true 32.
+        // Those are not 196 walls, they are ~32 walls and a staircase of quantisation.
+        // Clustering the offsets at the precision the data actually supports is the same operation
+        // wall_map calls merge_indistinguishable, and the tolerance is MEASURED (the current wall
+        // residual, floored at the sensor) rather than chosen.
+        if (L_.empty()) return;
+        // ⚠ THE TOLERANCE IS THE GRID, NOT THE RESIDUAL. The staircase being removed here is a
+        // QUANTISATION artefact of the cover, so the scale that defines it is the cell. Reading
+        // the measured residual instead looked more principled and was not: that residual was
+        // 0.946 m on this run, so "faces closer than the data can distinguish" became "faces
+        // within a metre", and a 60-box layout collapsed to 3 boxes and 8 vertices with IoU
+        // 0.609 -> 0.485. ★ A self-referential tolerance is only ever as good as the statistic it
+        // reads, and this one was reading a number that was itself the symptom.
+        const float tol = p_.cell;
+        auto snap_axis = [&](bool xaxis)
+        {
+            std::vector<float> vals;
+            for (const auto& b : L_.boxes)
+            { vals.push_back(xaxis ? b.lo.x() : b.lo.y()); vals.push_back(xaxis ? b.hi.x() : b.hi.y()); }
+            std::sort(vals.begin(), vals.end());
+            std::vector<float> reps;                      // cluster means, in order
+            size_t i = 0;
+            while (i < vals.size())
+            {
+                size_t j = i; double sum = 0.0;
+                while (j < vals.size() and vals[j] - vals[i] <= tol) { sum += vals[j]; ++j; }
+                reps.push_back(static_cast<float>(sum / static_cast<double>(j - i)));
+                i = j;
+            }
+            const auto nearest = [&](float v)
+            {
+                float best = v, bd = std::numeric_limits<float>::max();
+                for (float r : reps) { const float d = std::abs(r - v); if (d < bd) { bd = d; best = r; } }
+                return bd <= tol ? best : v;
+            };
+            for (auto& b : L_.boxes)
+            {
+                if (xaxis) { b.lo.x() = nearest(b.lo.x()); b.hi.x() = nearest(b.hi.x()); }
+                else       { b.lo.y() = nearest(b.lo.y()); b.hi.y() = nearest(b.hi.y()); }
+            }
+        };
+        snap_axis(true);
+        snap_axis(false);
+        // A box that collapsed to zero width is gone — `width -> 0` IS the removal event.
+        for (size_t k = L_.boxes.size(); k-- > 0;)
+            if (not L_.boxes[k].valid()) L_.boxes.erase(L_.boxes.begin() + static_cast<long>(k));
+        // Snapping makes previously-misaligned neighbours exactly coincident, so absorb any box
+        // now contained in another.
+        for (size_t a = L_.boxes.size(); a-- > 0;)
+            for (size_t b = 0; b < L_.boxes.size(); ++b)
+            {
+                if (a == b or a >= L_.boxes.size()) continue;
+                if (L_.boxes[b].lo.x() <= L_.boxes[a].lo.x() + 1e-4f and
+                    L_.boxes[b].hi.x() >= L_.boxes[a].hi.x() - 1e-4f and
+                    L_.boxes[b].lo.y() <= L_.boxes[a].lo.y() + 1e-4f and
+                    L_.boxes[b].hi.y() >= L_.boxes[a].hi.y() - 1e-4f)
+                { L_.boxes.erase(L_.boxes.begin() + static_cast<long>(a)); break; }
+            }
+        L_.cov = Eigen::MatrixXf::Identity(static_cast<long>(L_.n_offsets()),
+                                           static_cast<long>(L_.n_offsets())) * (p_.sigma_flat * p_.sigma_flat);
+    }
+
     bool Channel::rebuild_from_free()
     {
         if (free_.empty()) return false;
+        // Recompute only when the free set has grown by more than a twentieth since last time, or
+        // when there is no layout yet. Nothing is lost: an unchanged cover would be recomputed to
+        // the same answer.
+        // ⚠ THE COVER IS THE ONLY THING TRACKING EXPLORATION NOW, so it must follow it closely.
+        // At a twentieth it lagged badly: the layout stayed at whatever the robot had seen early,
+        // registration ran against a region much smaller than the room, and the pose drifted to
+        // 1.93 m with the gauge 9.9 degrees out. A hundredth costs more rebuilds and keeps the
+        // reference honest.
+        if (not L_.empty() and free_.size() < free_at_rebuild_ + free_at_rebuild_ / 100) return false;
+        free_at_rebuild_ = free_.size();
         std::set<std::pair<int, int>> F;
         // ⚠ ONE SWEEP IS ALREADY A MEASUREMENT. Requiring two was my own invention, and in a
         // large apartment traversed once it removed most of the evidence near the walls: the cover
@@ -202,7 +348,7 @@ namespace rc::boxch
             for (const auto& s : F)
             {
                 if (covered.count(s)) continue;
-                if (++tried > 400) break;
+                if (++tried > 1200) break;
                 int x0 = s.first, x1 = s.first, y0 = s.second, y1 = s.second;
                 bool moved = true;
                 while (moved)
@@ -247,6 +393,43 @@ namespace rc::boxch
         }
         if (out.empty()) return false;
 
+        // ── MERGE. A greedy cover is not a decomposition. ───────────────────────────────────
+        // Picking maximal rectangles by area gain leaves the region correct but shredded: 45 boxes
+        // and 196 published vertices for a 32-vertex hall. Two boxes may be replaced by their
+        // bounding box IFF that bbox contains no non-free cell — the region is then IDENTICAL and
+        // the description is shorter, so there is nothing to trade off and no constant to pick.
+        // Run to a fixed point, then drop any box the others already cover.
+        for (bool again = true; again; )
+        {
+            again = false;
+            for (size_t i = 0; i < out.size() and not again; ++i)
+                for (size_t j = i + 1; j < out.size() and not again; ++j)
+                {
+                    rc::boxes::Box u;
+                    u.lo = out[i].lo.cwiseMin(out[j].lo);
+                    u.hi = out[i].hi.cwiseMax(out[j].hi);
+                    bool all_free = true;
+                    for (int x = static_cast<int>(std::floor(u.lo.x() / p_.cell));
+                         x < static_cast<int>(std::floor(u.hi.x() / p_.cell)) and all_free; ++x)
+                        for (int y = static_cast<int>(std::floor(u.lo.y() / p_.cell));
+                             y < static_cast<int>(std::floor(u.hi.y() / p_.cell)) and all_free; ++y)
+                            if (not is_free(x, y)) all_free = false;
+                    if (not all_free) continue;
+                    out[i] = u;
+                    out.erase(out.begin() + static_cast<long>(j));
+                    again = true;
+                }
+        }
+        // A box wholly inside another contributes nothing but vertices.
+        for (size_t i = out.size(); i-- > 0;)
+            for (size_t j = 0; j < out.size(); ++j)
+            {
+                if (i == j) continue;
+                if (out[j].lo.x() <= out[i].lo.x() + 1e-4f and out[j].hi.x() >= out[i].hi.x() - 1e-4f and
+                    out[j].lo.y() <= out[i].lo.y() + 1e-4f and out[j].hi.y() >= out[i].hi.y() - 1e-4f)
+                { out.erase(out.begin() + static_cast<long>(i)); break; }
+            }
+
         // Into the layout frame, and keep only boxes that touch the growing union so the region
         // stays connected — a detached box would be a second apartment.
         const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
@@ -260,9 +443,38 @@ namespace rc::boxch
             N.boxes.push_back(t);
         }
         if (N.boxes.empty()) return false;
-        N.cov = Eigen::MatrixXf::Identity(static_cast<long>(N.n_offsets()),
-                                          static_cast<long>(N.n_offsets())) * (p_.sigma_flat * p_.sigma_flat);
-        L_ = N;
+        for (const auto& b : N.boxes) L_.boxes.push_back(b);      // APPEND, never replace
+        // Merge across the whole layout, older boxes included: a new box often completes a
+        // rectangle an older one only had part of.
+        {
+            const float cyb = std::cos(yaw_), syb = std::sin(yaw_);
+            for (bool again = true; again; )
+            {
+                again = false;
+                for (size_t i = 0; i < L_.boxes.size() and not again; ++i)
+                    for (size_t j = i + 1; j < L_.boxes.size() and not again; ++j)
+                    {
+                        if (not L_.boxes[i].positive or not L_.boxes[j].positive) continue;
+                        rc::boxes::Box u;
+                        u.lo = L_.boxes[i].lo.cwiseMin(L_.boxes[j].lo);
+                        u.hi = L_.boxes[i].hi.cwiseMax(L_.boxes[j].hi);
+                        bool all_free = true;
+                        for (float x = u.lo.x() + 0.5f * p_.cell; x < u.hi.x() and all_free; x += p_.cell)
+                            for (float y = u.lo.y() + 0.5f * p_.cell; y < u.hi.y() and all_free; y += p_.cell)
+                            {
+                                const Eigen::Vector2f mp(cyb * x - syb * y, syb * x + cyb * y);
+                                if (not is_free(static_cast<int>(std::floor(mp.x() / p_.cell)),
+                                                static_cast<int>(std::floor(mp.y() / p_.cell)))) all_free = false;
+                            }
+                        if (not all_free) continue;
+                        L_.boxes[i] = u;
+                        L_.boxes.erase(L_.boxes.begin() + static_cast<long>(j));
+                        again = true;
+                    }
+            }
+        }
+        L_.cov = Eigen::MatrixXf::Identity(static_cast<long>(L_.n_offsets()),
+                                           static_cast<long>(L_.n_offsets())) * (p_.sigma_flat * p_.sigma_flat);
         return true;
     }
 
@@ -341,10 +553,27 @@ namespace rc::boxch
 
         // CONSTRUCT from free space. Cheap, deterministic, and it replaces both the hull seed and
         // most of what grow() was being asked to repair.
-        if (rebuild_from_free())
+        // ⚠ THE COVER IS THE CONSTRUCTION; grow() MUST NOT SECOND-GUESS IT.
+        // rebuild_from_free() is throttled to fire only when the free set has grown materially, and
+        // the first version let step() fall through to refit+grow on every other call. grow() then
+        // re-fragmented exactly what the cover had just built: the cover produced ~18 boxes and
+        // grow() admitted 27 more on top, for 45 boxes and 196 published vertices on a 32-vertex
+        // hall. Incremental refinement is the COVER being rebuilt as free space grows — that is
+        // what makes this incremental — not a second mechanism editing its output.
+        // ⚠ CALL IT, THEN TEST. `have_cover_ or rebuild_from_free()` SHORT-CIRCUITS: once the
+        // cover existed the rebuild was never invoked again, so the layout froze at whatever the
+        // robot had seen in its first few metres and three successive fixes to the rebuild changed
+        // nothing at all. Bit-identical output across substantive edits is not a null result — it
+        // says the edited code is not on the path.
+        const bool extended = rebuild_from_free();
+        if (have_cover_ or extended)
         {
+            have_cover_ = true;
             fuse();
             if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp);
+            snap_coplanar();
+            if (std::getenv("WS_BOXES_NOSIMP") == nullptr)
+                simplify();      // measure the complexity, then force it down
             return true;
         }
 

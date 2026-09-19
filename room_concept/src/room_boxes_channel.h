@@ -36,7 +36,12 @@ namespace rc::boxch
         int   every_frames = 40;      ///< how often structure is re-examined (COMPUTE, not a bar)
         float sensor_sigma = 0.02f;   ///< PHYSICAL: LiDAR range noise perpendicular to a wall
         float sigma_flat   = 0.010f;  ///< PHYSICAL: wall flatness / line scatter between views
-        float cell         = 0.10f;   ///< COMPUTE: voxel + clustering resolution
+        /// COMPUTE: voxel + clustering resolution. ⚠ IT MUST RESOLVE THE SMALLEST FEATURE THAT
+        /// MATTERS. apartamento_layout.svg has 0.12 m fins standing on its centreline; at the old
+        /// 0.10 m a fin was barely one cell wide and could not be separated from the noise around
+        /// it. This is a RESOLUTION, not a tuning knob: it is set by the geometry to be recovered,
+        /// and the cost is quadratic in cells, so it is not free.
+        float cell         = 0.05f;
         int   min_cluster  = 12;      ///< COMPUTE: smallest cluster worth proposing
         float z_min        = 0.20f;   ///< PHYSICAL: floor rejection, in the robot's own frame
         float z_max        = 1.60f;   ///< PHYSICAL: below the ceiling — see
@@ -157,6 +162,30 @@ namespace rc::boxch
         /// not from a bounding volume. Returns then only REFINE the offsets, which is the job they
         /// are actually good at.
         bool rebuild_from_free();
+        /// ── PERIODIC GLOBAL RE-EVALUATION: MEASURE THE COMPLEXITY, THEN FORCE IT DOWN ───────
+        /// Every local rule answers "is this edit justified here?", and a staircase of forty boxes
+        /// answers YES at every step while being globally indefensible. So periodically, take the
+        /// whole layout, compute what it costs in nats (code + negative log-likelihood) and try
+        /// every reduction available — delete a box, merge a pair into their bounding box, absorb
+        /// a contained one — keeping any that LOWERS the total. A reduction is accepted when the
+        /// parameters it saves outweigh the likelihood it gives up, which is the same trade that
+        /// admits structure, run in the opposite direction.
+        ///
+        /// ⚠ It only ever accepts a STRICT decrease in box count, so it terminates and cannot
+        /// oscillate. That matters here: re-derivation storms destroyed a correct map on
+        /// 2026-09-12 because the global pass could both add and remove. This one cannot add.
+        /// Returns the number of boxes it removed.
+        int simplify();
+
+        /// Collapse faces that differ by less than the measured wall residual — they are one wall.
+        void snap_coplanar();
+        /// Free-cell count at the last rebuild. The cover is O(cells x area) and at 0.05 m a 60 m2
+        /// room is ~24000 cells, so rebuilding every structure step made one room exceed ten
+        /// minutes. The cover only changes when the EVIDENCE changes, so it is recomputed when the
+        /// free set has grown materially — not on a timer, and not every frame.
+        std::size_t free_at_rebuild_ = 0;
+        /// Once the free-space cover has built a layout, it owns it.
+        bool have_cover_ = false;
 
         Params p_;
         rc::boxes::Layout L_;

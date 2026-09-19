@@ -612,6 +612,54 @@ namespace rc::boxes
         }
     }   // namespace
 
+    float mdl_cost(const Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
+                   const std::set<std::pair<int, int>>* freecells)
+    {
+        if (L.empty()) return std::numeric_limits<float>::max();
+        const std::vector<CloudPoint> pts = condense(cloud, p);
+        if (pts.empty()) return std::numeric_limits<float>::max();
+        const float s0 = std::sqrt(p.sensor_sigma * p.sensor_sigma + p.sigma_flat * p.sigma_flat);
+        // Every box costs its four offsets at the Laplace/Occam precision log(span/sigma); a box
+        // that inherits a face from its host costs three. Same currency grow() admits in.
+        double code = 0.0;
+        for (const auto& b : L.boxes)
+        {
+            const float span = std::max(1.f, b.width() + b.height());
+            code += (b.attach >= 0 ? 3.0 : 4.0) * std::log(static_cast<double>(span) / s0);
+        }
+        // ── FREE SPACE IS EVIDENCE IN BOTH DIRECTIONS ───────────────────────────────────────
+        // Claiming space nobody has been is wrong; so is REFUSING space the beams went through.
+        // The first version charged only the former, and the asymmetry had a spectacular
+        // consequence: deleting half the room became almost free — it shed the empty-claim
+        // penalty, and the face-marginalised likelihood barely noticed — so the global
+        // simplification pass amputated the entire left half of the apartamento hall. Area 31.19
+        // against a true 60.41, everything starting at x = 0.03, the room's centreline.
+        // A cell the robot drove through and the layout excludes is exactly as much a
+        // contradiction as a cell it claims and never saw, and it is charged the same.
+        double empty = 0.0, missed = 0.0;
+        if (freecells != nullptr and not freecells->empty())
+        {
+            Eigen::Vector2f lo = L.boxes.front().lo, hi = L.boxes.front().hi;
+            for (const auto& b : L.boxes) { lo = lo.cwiseMin(b.lo); hi = hi.cwiseMax(b.hi); }
+            for (float x = lo.x() + 0.5f * p.cell; x < hi.x(); x += p.cell)
+                for (float y = lo.y() + 0.5f * p.cell; y < hi.y(); y += p.cell)
+                {
+                    if (not L.inside({x, y})) continue;
+                    if (freecells->count({static_cast<int>(std::floor(x / p.cell)),
+                                          static_cast<int>(std::floor(y / p.cell))})) continue;
+                    empty += 1.0;
+                }
+            for (const auto& k : *freecells)
+            {
+                const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p.cell,
+                                        (static_cast<float>(k.second) + 0.5f) * p.cell);
+                if (not L.inside(m)) missed += 1.0;
+            }
+        }
+        return static_cast<float>(code + (empty + missed) * static_cast<double>(p.unobserved_nats))
+             - log_likelihood_cm(L, pts, p.sigma_flat);
+    }
+
     GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
                     const std::set<std::pair<int, int>>* freecells)
     {

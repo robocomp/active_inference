@@ -44,7 +44,8 @@
 #include "room_model.h"
 #include "wall_map.h"
 #include "room_boxes.h"
-#include "room_boxes_channel.h"   // the bench runs the AGENT's channel, not a copy of it
+#include "room_boxes_channel.h"
+#include "svg_room_loader.h"   // the bench runs the AGENT's channel, not a copy of it
 #include "wall_segmenter.h"
 
 using rc::RoomConcept;
@@ -2096,6 +2097,8 @@ int run_replay(const char* path)
         int boxes = 0, verts = 0, proposed = 0, admitted = 0, removed = 0, truth_verts = 0;
         rc::boxes::Layout layout;          ///< the estimate itself, for opening a tail case
         Poly est_poly;                     ///< in WORLD coords, already gauge-aligned
+        std::vector<Eigen::Vector2f> traj_exec;   ///< where the robot ACTUALLY went (world)
+        std::vector<Eigen::Vector2f> traj_est;    ///< where it BELIEVED it was (map->world)
     };
 
     inline BoxRun run_boxes(const Poly& room, unsigned seed, bool reg, int reanchor_at, int laps,
@@ -2134,6 +2137,7 @@ int run_replay(const char* path)
             return Eigen::Vector2f(cr * p.x() - sr * p.y() + ra_c.x(), sr * p.x() + cr * p.y() + ra_c.y());
         };
         std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
+        std::vector<Eigen::Vector2f> traj_exec, traj_est;
 
         for (size_t f = 0; f < truth.size(); ++f)
         {
@@ -2205,7 +2209,10 @@ int run_replay(const char* path)
                 perr_q[static_cast<size_t>(k)] += (r - tm.head<2>()).norm();
             }
             ++nperr;
+            if (f % 12 == 0) { traj_exec.push_back(exec_pose.head<2>()); traj_est.push_back(to_old(est.head<2>())); }
         }
+        R.traj_exec = traj_exec;
+        R.traj_est = traj_est;
 
         const auto verts = ch.polygon();
         Poly pw; for (const auto& v : verts) pw.push_back(to_old(v));
@@ -2328,6 +2335,78 @@ int run_replay(const char* path)
         const float mx = std::max(0.6f, 0.5f * W - 1.3f), my = std::max(0.5f, 0.5f * H - 1.3f);
         std::vector<Eigen::Vector2f> wp = {{-mx, -my}, {mx, -my}, {mx, my}, {-mx, my}};
         for (const auto& w : wp) if (not L.inside(w)) return std::nullopt;
+        return std::make_pair(room, wp);
+    }
+
+    // ── THE REAL TARGET: layouts/apartamento_layout.svg ──────────────────────────────────────
+    // ★ It is not an apartment and it has no corridors. It is ONE LARGE CONCAVE ROOM: an 8.51 x
+    // 9.26 m hall, 60.5 m2, 32 vertices, 13 reflex — a big open space with THIN FINS projecting
+    // inward. Testing against a random stand-in was testing the wrong shape; this loads the actual
+    // polygon, so a number here is a statement about the thing we are trying to estimate.
+    //
+    // ⚠ ITS SMALLEST EDGES ARE 0.062, 0.085, 0.145 AND 0.149 m. Two consequences, both fatal
+    // today and neither a tuning matter:
+    //   · the voxel cell is 0.10 m — COARSER THAN THE SMALLEST FEATURE, so a 6 cm fin cannot be
+    //     represented at all, let alone found;
+    //   · the thinness rule refuses any box whose minor dimension is below the residual scale,
+    //     which is exactly the size of these fins. It was added to kill noise slivers lying ALONG
+    //     walls and it cannot tell them from real partitions sticking OUT of one.
+    inline std::optional<std::pair<Poly, std::vector<Eigen::Vector2f>>> apartamento_room()
+    {
+        // Parsed here rather than through SvgRoomLoader, which needs QtXml and would drag Qt into
+        // the bench for one attribute. ⚠ from_chars, never strtof: these machines run es_ES.UTF-8,
+        // where a comma is the decimal separator, and a locale-dependent reader silently truncates
+        // "8.494" to 8. The bench has no Qt so it stays in the "C" locale and the bug would hide
+        // here and appear only in the agent — see CLAUDE.md.
+        std::vector<Eigen::Vector2f> pts;
+        {
+            std::ifstream f("/home/pbustos/robocomp/components/active_inference/layouts/apartamento_layout.svg");
+            if (not f.is_open()) return std::nullopt;
+            const std::string all((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            const auto k = all.find("points=\"");
+            if (k == std::string::npos) return std::nullopt;
+            const auto e = all.find('"', k + 8);
+            const std::string body = all.substr(k + 8, e - k - 8);
+            std::vector<float> nums;
+            const char* cur = body.data();
+            const char* end = cur + body.size();
+            while (cur < end)
+            {
+                while (cur < end and (*cur == ' ' or *cur == ',' or *cur == '\n' or *cur == '\t')) ++cur;
+                if (cur >= end) break;
+                float val = 0.f;
+                const auto res = std::from_chars(cur, end, val);
+                if (res.ec != std::errc()) break;
+                nums.push_back(val);
+                cur = res.ptr;
+            }
+            for (size_t q = 0; q + 1 < nums.size(); q += 2) pts.emplace_back(nums[q], nums[q + 1]);
+        }
+        if (pts.size() < 4) return std::nullopt;
+        Eigen::Vector2f lo = pts.front(), hi = pts.front();
+        for (const auto& v : pts) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+        const Eigen::Vector2f c = 0.5f * (lo + hi);
+        Poly room;
+        for (auto& v : pts) room.push_back(v - c);
+        // CCW, so the ray-caster sees inside as inside.
+        double a2 = 0.0;
+        for (size_t i = 0; i < room.size(); ++i)
+        { const auto& p = room[i]; const auto& q = room[(i + 1) % room.size()];
+          a2 += static_cast<double>(p.x()) * q.y() - static_cast<double>(q.x()) * p.y(); }
+        if (a2 < 0.0) std::reverse(room.begin(), room.end());
+        // ⚠ A CENTRAL CIRCUIT IS NOT DRIVABLE HERE. Both fins stand on the room's VERTICAL
+        // CENTRELINE, and at x = 0 the hall is open only for y in [-2.10, +0.35] — a 2.45 m gap
+        // between the tip of the upper fin and the tip of the lower one. A generic inset rectangle
+        // drives straight through both, and the scans it produces are of a room that does not
+        // exist. This tour visits each half and crosses the centreline ONLY through that gap,
+        // twice, which is also what makes it a real test: the estimator has to discover the fins
+        // by going around them rather than by seeing them from one spot.
+        // Every leg is verified inside the polygon; 32.8 m of path.
+        (void)lo; (void)hi;
+        std::vector<Eigen::Vector2f> wp = {
+            {-3.2f, -3.2f}, {-3.2f,  2.0f}, {-0.6f,  2.0f}, {-0.6f, -1.0f},
+            { 0.6f, -1.0f}, { 0.6f,  2.0f}, { 3.2f,  2.0f}, { 3.2f, -3.2f},
+            { 0.6f, -3.2f}, { 0.6f, -1.4f}, {-0.6f, -1.4f}, {-0.6f, -3.2f}};
         return std::make_pair(room, wp);
     }
 
@@ -2527,12 +2606,33 @@ int main()
     if (const char* ri = std::getenv("WS_BOXES_ROOM_IDX"))
     {
         const int i = std::atoi(ri);
-        const int order = 1 + (i % 6);
-        const auto gen = random_room(static_cast<unsigned>(1000 + i), order);
+        const bool apt = std::getenv("WS_BOXES_STYLE")
+                     and std::string(std::getenv("WS_BOXES_STYLE")) == "apartamento";
+        const bool cor = std::getenv("WS_BOXES_STYLE")
+                     and std::string(std::getenv("WS_BOXES_STYLE")) == "corridor";
+        const int order = apt ? 32 : 1 + (i % 6);
+        const auto gen = apt ? apartamento_room()
+                       : cor ? random_apartment(static_cast<unsigned>(1000 + i), order)
+                             : random_room(static_cast<unsigned>(1000 + i), order);
         if (not gen) { std::printf("room %d: no drivable circuit\n", i); return 0; }
         const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
         const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
         const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, 2, gen->second);
+        if (const char* dp = std::getenv("WS_BOXES_DUMP"))
+        {
+            std::ofstream o(dp);
+            o.imbue(std::locale::classic());     // decimal POINT, whatever LANG says
+            const auto poly = [&](std::ofstream& f, const Poly& q)
+            { f << "["; for (size_t k = 0; k < q.size(); ++k) f << (k ? "," : "") << "[" << q[k].x() << "," << q[k].y() << "]"; f << "]"; };
+            o << "{\"iou\":" << r.iou << ",\"boxes\":" << r.boxes << ",\"verts\":" << r.verts
+              << ",\"truth_verts\":" << r.truth_verts << ",\"rms\":" << r.rms
+              << ",\"pose_err\":" << r.pose_err << ",\"truth\":";
+            poly(o, gen->first);
+            o << ",\"est\":"; poly(o, r.est_poly);
+            o << ",\"traj\":"; poly(o, r.traj_exec);
+            o << ",\"traj_est\":"; poly(o, r.traj_est);
+            o << "}\n";
+        }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
                     "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
@@ -2584,6 +2684,16 @@ int main()
         for (int i = 0; i < N; ++i)
         {
             const int order = olo + (i % nord);
+            if (std::getenv("WS_BOXES_STYLE")
+                and std::string(std::getenv("WS_BOXES_STYLE")) == "apartamento")
+            {
+                const auto ap = apartamento_room();
+                if (not ap) { ++skipped; continue; }
+                const auto r = run_boxes(ap->first, static_cast<unsigned>(7 + i), reg, ranch, laps, ap->second);
+                by_order[32].push_back(r);
+                ids.push_back({i, 32, r.iou, r.boxes, r.truth_verts, r.verts});
+                continue;
+            }
             const bool apart = std::getenv("WS_BOXES_STYLE")
                            and std::string(std::getenv("WS_BOXES_STYLE")) == "corridor";
             const auto gen = apart ? random_apartment(static_cast<unsigned>(1000 + i), order)

@@ -1114,7 +1114,7 @@ BoxEveryFrames = 40
 BoxSensorSigma = 0.02
 BoxSigmaFlat = 0.010
 # COMPUTE: voxel + clustering resolution, and the smallest cluster worth proposing.
-BoxCell = 0.10
+BoxCell = 0.05
 BoxMinCluster = 12
 # PHYSICAL, in the ROBOT frame. A 2-D layout built from 3-D returns must exclude the floor and the
 # ceiling. ⚠ The upper bound is not cosmetic: ceiling returns inside a 2-D wall SDF stopped a room
