@@ -104,6 +104,9 @@ namespace rc::wallmap
         // Keep a wall's class PARTNER (the opposite side of the same width) as a solver variable
         // even when nothing associated to it this window — see the comment at make_layout.
         // Stop `information` (the association gate's currency) accumulating. Diagnostic A/B.
+        // Add a fused twin candidate's information to the wall (the long-standing behaviour).
+        // OFF mixes currencies less but starves a notched room's wall — see the note at the call.
+        bool  twin_fuse_information = true;
         bool  no_gate_ratchet   = false;
         // ── SATURATE THE CARRIED WALL INFORMATION ───────────────────────────────────────────────
         // `information` accumulates one conditional block per absorbed slot and never decays, so a

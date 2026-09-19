@@ -2469,7 +2469,38 @@ namespace rc::wallmap
             if (nearest_idx >= 0 and nearest_chi2 <= params.assoc_chi2)
             {
                 auto& wl = walls[static_cast<size_t>(nearest_idx)];
-                fuse(wl.phi, wl.d, wl.information, c.phi, c.d, c.information);
+                // ── TWIN FUSION UPDATES THE GEOMETRY, NOT THE CONFIDENCE ────────────────────────
+                // A candidate that turns out to BE this wall is not new evidence about it — it is
+                // the same wall seen again, and its returns will be absorbed through the normal
+                // path as soon as they associate. Adding its information block ALSO MIXES TWO
+                // CURRENCIES: a candidate's information is the line fit's own (physical, ~1/sigma^2
+                // per point) while a wall's is accumulated through WallPointFactor's
+                // 0.5*inv_var*pda/N_slot, deflated by the slot's point count. Measured 2026-09-19:
+                // a 232-point candidate carried 3220 units against the wall's whole accumulated
+                // 740 — 13.9 per point versus 0.3, a ~46x ratio — so ONE fusion injected several
+                // times the wall's entire confidence and the carried sigma_d dropped from an honest
+                // 0.028 m to 0.012 m. The corner sigma reads that number, so the layout was being
+                // published on confidence it had not earned.
+                // ⚠ SUPPRESSING THE INFORMATION ENTIRELY IS WRONG, AND MEASURED SO. On a NOTCHED
+                // room a twin candidate covers a DIFFERENT STRETCH of the same wall, so its evidence
+                // is genuinely new and the wall starves without it: the selftest's "polygon re-closed
+                // on the notched room" check went 39 PASS/1 FAIL -> 38/2, worst corner sigma 0.635 m,
+                // Hausdorff 1.012, and the pre-existing Hausdorff failure worsened 0.408 -> 1.681 m.
+                // So the defect is the CURRENCY, not the contribution, and the honest fix is to
+                // convert the candidate's line-fit information into the wall's deflated units
+                // (divide by the publish path's k = 2*sigma_obs^2*N_slot/sigma_sensor^2) rather than
+                // to drop it. WallMap does not know sigma_obs or N_slot, so that conversion needs
+                // plumbing this flag deliberately does not invent.
+                // `twin_fuse_information = false` keeps the mean-only behaviour for experiments.
+                if (params.debug_splice)
+                    std::printf("[twin-fuse] wall %llu info_d %.1f + cand info_d %.1f (cand npts=%d frames=%d) — mean fused, information UNCHANGED\n",
+                                (unsigned long long)wl.id, wl.information(1, 1), c.information(1, 1),
+                                c.npts, c.frames);
+                {
+                    const Eigen::Matrix2f keep = wl.information;
+                    fuse(wl.phi, wl.d, wl.information, c.phi, c.d, c.information);
+                    if (not params.twin_fuse_information) wl.information = keep;
+                }
                 if (c.npts > 0)
                 {
                     if (not wl.has_extent) { wl.s_min = c.s_min; wl.s_max = c.s_max; wl.has_extent = true; }

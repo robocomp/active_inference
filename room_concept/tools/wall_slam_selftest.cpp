@@ -1756,6 +1756,7 @@ int run_replay(const char* path)
     map.params.wall_line_factor = std::getenv("WS_REPLAY_LINE") != nullptr;
     map.params.pair_partner_active = std::getenv("WS_PARTNER") != nullptr;
     map.params.no_gate_ratchet = std::getenv("WS_NO_RATCHET") != nullptr;
+    map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
     map.params.common_mode_gate = std::getenv("WS_CMODE") != nullptr;
     if (std::getenv("WS_NO_SCHUR")) map.params.absorb_schur = false;
     if (const char* e = std::getenv("WS_SAT_D"))   map.params.carry_sat_sigma_d = std::strtof(e, nullptr);
@@ -1778,6 +1779,10 @@ int run_replay(const char* path)
     std::array<double, 10> dec_sigd{}; std::array<long, 10> dec_sigd_n{};
     int healthy_run = 0, collapse_at = -1;
     double pda_total = 0.0; int n_absorbs = 0; long n_assoc_absorbed = 0;
+    struct AbsorbRow { int k; float info_before; int npts; float pda; int nseg;
+                       int dbirths, dtwins, dmerged, nwalls; };
+    std::vector<AbsorbRow> absorb_log;
+    int b_prev = 0, t_prev = 0, m_prev = 0;
     float prev_th = 0.f;
     for (size_t k = 0; k < F.size(); ++k)
     {
@@ -1916,6 +1921,19 @@ int run_replay(const char* path)
                 const Eigen::Vector3f fp(fpt[0].item<float>(), fpt[1].item<float>(), fpt[2].item<float>());
                 for (const auto& aa : window.front().wall_assoc) { pda_total += aa.pda; ++n_assoc_absorbed; }
                 ++n_absorbs;
+                {   // WHAT DOES ONE ABSORB ACTUALLY ADD? Track one wall's carried precision across
+                    // absorbs, with the evidence that went in, so "more evidence, less information"
+                    // is either explained or refuted instead of speculated about.
+                    const auto& W0 = map.walls.front();
+                    const float before = W0.information(1, 1);
+                    int npts = 0; float pd = 0.f; int nseg = 0;
+                    for (const auto& aa : window.front().wall_assoc)
+                        if (aa.wall_id == W0.id) { npts += static_cast<int>(aa.pts.rows()); pd += aa.pda; ++nseg; }
+                    absorb_log.push_back({n_absorbs, before, npts, pd, nseg,
+                                          n_births - b_prev, n_twins - t_prev, n_merged - m_prev,
+                                          static_cast<int>(map.walls.size())});
+                    b_prev = n_births; t_prev = n_twins; m_prev = n_merged;
+                }
                 rc::gn::absorb_wall_observations(in, window.front(), fp);
                 window.pop_front();
                 auto nf = window.front().pose.detach();
@@ -1965,6 +1983,13 @@ int run_replay(const char* path)
         std::sort(sp.begin(), sp.end()); std::sort(sd.begin(), sd.end());
         long fs = 0, ps = 0;
         for (const auto& wl : map.walls) { fs += wl.frames_seen; ps += wl.points_seen; }
+        std::printf("  wall[0] accumulation (k, info_d BEFORE, +pts, +pda, nseg, n_slot):\n");
+        for (size_t i = 0; i < absorb_log.size(); ++i)
+            if (i < 8 or i + 2 >= absorb_log.size())
+                std::printf("     %3d  info_d=%12.1f  +%4d pts  +%.2f pda  %d seg | since last: births %d twins %d merged %d | walls %d\n",
+                            absorb_log[i].k, absorb_log[i].info_before, absorb_log[i].npts,
+                            absorb_log[i].pda, absorb_log[i].nseg, absorb_log[i].dbirths,
+                            absorb_log[i].dtwins, absorb_log[i].dmerged, absorb_log[i].nwalls);
         std::printf("  wall feed: frames_seen=%ld points_seen=%ld sum(pda)=%.0f over %ld assoc (mean pda %.3f) absorbs=%d\n",
                     fs, ps, pda_total, n_assoc_absorbed,
                     n_assoc_absorbed > 0 ? pda_total / static_cast<double>(n_assoc_absorbed) : 0.0, n_absorbs);
