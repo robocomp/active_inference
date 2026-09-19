@@ -59,6 +59,7 @@
 #include "room_model.h"
 #include "corner_detector.h"
 #include "wall_map.h"
+#include "room_boxes_channel.h"   // the box layout sidecar; it reaches into nothing here
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
 #include "object_anchor_factor.h"
@@ -687,6 +688,9 @@ public:
         enum class MapMode { Given, Estimate };
         MapMode map_mode = MapMode::Given;
         wallseg::Params wall_seg;              // segmenter: sensor σ, χ² levels, RANSAC budget
+        /// The box layout sidecar. Off by default; see room_boxes_channel.h for why it is a
+        /// sidecar and not a replacement.
+        rc::boxch::Params box;
         wallmap::Params wall_map;              // association, birth, Manhattan prior, publish bar
         float wall_gauge_sigma_xy = 1e-3f;     // m — first-pose gauge fix (a gauge, not a model term)
         // RoomShape.RecordWallInput — DIAGNOSTIC RECORDER (2026-09-17), default OFF. Writes, per frame, exactly
@@ -1958,6 +1962,17 @@ private:
     std::vector<float> last_seg_z_;                  // per-segment mean z of its inliers, this frame
     float wall_z_mean_ = 0.f, wall_z_p95_ = 0.f, wall_z_max_ = 0.f;
     std::int64_t wall_frame_ts_ = 0;
+    // ── THE BOX LAYOUT SIDECAR ───────────────────────────────────────────────────────────────
+    // Runs beside the wall map on the same scan and the same pose, and publishes INSTEAD of it when
+    // RoomShape.BoxLayout is true. Off by default: the shipped wall-SLAM layout holds a 6.00 x 4.00
+    // rectangle to 2-3 mm while driving (d307c84) and is not being staked on an estimator whose
+    // bench ladder still has open rows. Nothing else in this class reads these two members.
+    rc::boxch::Channel box_channel_;
+    /// The pose covariance the last solve produced, for the sidecar to weight its returns by. One
+    /// frame stale on purpose — observe() runs before the solve, and a point's uncertainty is
+    /// better described by the previous posterior than by an identity matrix.
+    Eigen::Matrix3f box_pose_cov_ = Eigen::Matrix3f::Identity() * 1e-4f;
+
     /// Segment the newest slot's scan, associate to the walls, store the associations in the slot.
     void wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
                            std::int64_t timestamp_ms);

@@ -1093,6 +1093,35 @@ BoundaryMuQualityThreshold      = 0.084
 #                After closure the walls stay variables (their precision only grows) and a new wall
 #                can still be born by model comparison — there is no second gate inside this mode.
 [RoomShape]
+# ── THE BOX LAYOUT SIDECAR ───────────────────────────────────────────────────────────────────
+# The room as a UNION OF AXIS-ALIGNED BOXES (src/room_boxes.h). Manhattan, closure and simple
+# connectivity stop being rules to police and become IDENTITIES: no value of any parameter can
+# express a triangle, an open polygon, or two near-parallel walls meeting 14 km away.
+#
+# BoxLayout decides only WHICH polygon leaves the agent. The wall map keeps running either way, so
+# this is an A/B on the robot and the shipped estimator is always the thing to fall back to.
+# ⚠ OFF BY DEFAULT ON PURPOSE. The wall map holds a 6.00 x 4.00 rectangle to 2-3 mm while driving
+# (d307c84) and is not being staked on an estimator whose bench ladder still has open rows: over
+# 5 seeds, growth beats no-growth on 5 of 6 structured rooms but c2 is -0.007, and c4/c2w1 find
+# nothing on some seeds. Bench: WS_BOXES=1 WS_TOUR_ROOM=<rect|c1|c2|c4|w1|w2|c2w1> bin/wall_slam_selftest
+BoxLayout = true
+# COMPUTE, not a bar: how often the structure is re-examined. Between steps the channel only folds
+# returns into its voxel map, which is a few microseconds per scan.
+BoxEveryFrames = 40
+# PHYSICAL. LiDAR range noise perpendicular to a wall, and the wall's own flatness / line scatter
+# between views. These two plus the POSE covariance are the whole noise model; there is no fitted
+# sigma anywhere in the box estimator.
+BoxSensorSigma = 0.02
+BoxSigmaFlat = 0.010
+# COMPUTE: voxel + clustering resolution, and the smallest cluster worth proposing.
+BoxCell = 0.10
+BoxMinCluster = 12
+# PHYSICAL, in the ROBOT frame. A 2-D layout built from 3-D returns must exclude the floor and the
+# ceiling. ⚠ The upper bound is not cosmetic: ceiling returns inside a 2-D wall SDF stopped a room
+# stabilising while every pose diagnostic still looked healthy (8164fc3).
+BoxZMin = 0.20
+BoxZMax = 1.60
+
 MapMode = "estimate"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.

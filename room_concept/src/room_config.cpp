@@ -115,8 +115,21 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.EnableLevel2", wm.enable_level2);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.WallLineFactor", wm.wall_line_factor);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.CommonModeGate", wm.common_mode_gate);
+
+        // ── THE BOX LAYOUT SIDECAR ───────────────────────────────────────────────────────────
+        // Off by default. `BoxLayout` decides only WHICH polygon leaves the agent; the wall map
+        // keeps running either way, so this is an A/B on the robot rather than a replacement.
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxLayout", room_concept.params.box.enabled);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.BoxEveryFrames", room_concept.params.box.every_frames);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxSensorSigma", room_concept.params.box.sensor_sigma);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxSigmaFlat", room_concept.params.box.sigma_flat);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxCell", room_concept.params.box.cell);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.BoxMinCluster", room_concept.params.box.min_cluster);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxZMin", room_concept.params.box.z_min);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxZMax", room_concept.params.box.z_max);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.EnableRederive", wm.enable_rederive);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.TwinFuseInformation", wm.twin_fuse_information);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.SpanKillRespectsSupport", wm.span_kill_respects_support);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.AbsorbSchur", wm.absorb_schur);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.LineCommonSigmaD", wm.line_common_sigma_d);
         float lcp = std::numeric_limits<float>::quiet_NaN();

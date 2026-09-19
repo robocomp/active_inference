@@ -60,6 +60,10 @@ namespace rc::boxes
         /// representation forbids and polygon() silently hid by tracing only the outer boundary
         /// (w1 reported 4 vertices while holding 2 boxes). Tying them makes the detachment
         /// unrepresentable, and correctly costs the edit three parameters instead of four.
+        /// 0..3  this box's lo.x/lo.y/hi.x/hi.y equals the host's SAME face   (a carve, inward)
+        /// 4..7  this box's lo.x/lo.y/hi.x/hi.y equals the host's OPPOSITE face (an alcove, outward)
+        /// An alcove abuts the room across the wall it opens through, so its inner face IS that
+        /// wall. Same identity as the carve, same one-parameter saving, opposite direction.
         int attach = -1;
         std::uint32_t host = 0;
 
@@ -136,8 +140,16 @@ namespace rc::boxes
     ///
     /// A return lands ON a surface, so under a correct layout every return has sdf ~ 0. A cluster
     /// of returns strictly INSIDE the region is therefore evidence of matter the region does not
-    /// model — a column, a pier, an alcove wall — and proposes a NEGATIVE box. A cluster outside
-    /// proposes growing a positive one.
+    /// model — a column, a pier — and proposes a NEGATIVE box. A cluster OUTSIDE is evidence of
+    /// room the region does not cover — an alcove, a door recess, a bay — and proposes a POSITIVE
+    /// one attached across the wall it opens through.
+    /// ⚠ BOTH DIRECTIONS, AND THE SECOND WAS MISSING UNTIL 2026-09-19. grow() had exactly one
+    /// surprise test, `sdf < -3 sigma`, so it could carve and never extend: a door recess was
+    /// UNREPRESENTABLE and its returns sat outside the box inflating the residual for ever (live
+    /// Webots: a box fitted to 0.108 m still reporting rms 0.337 m). ★★★ The bench could not have
+    /// caught it — every ladder room is a rectangle with COLUMNS, so the suite exercised the one
+    /// direction that was implemented. A test suite that shares a blind spot with the code it
+    /// tests cannot reveal it; `alcove` and `bay` are on the ladder now for exactly that reason.
     ///
     /// Admission is a Bayes factor in nats, with NO tuned margin: accept iff the likelihood gained
     /// exceeds the description length of the new parameters. BF > 1, i.e. 0 nats, is canonical;

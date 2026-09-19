@@ -1,0 +1,230 @@
+#include "room_boxes_channel.h"
+
+#include <algorithm>
+#include <cmath>
+#include <locale>
+
+namespace rc::boxch
+{
+    void Channel::observe(const std::vector<Eigen::Vector3f>& pts_robot,
+                          const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov,
+                          const std::vector<float>& seg_phi, const std::vector<float>& seg_len)
+    {
+        if (not p_.enabled) return;
+        ++frames_;
+
+        // ── THE BAND. Not a tuning knob: a 2-D layout built from 3-D returns must exclude the
+        // floor and the ceiling, and a ceiling return inside a wall SDF is a documented way to
+        // stop a room stabilising while every pose diagnostic still looks healthy.
+        std::vector<Eigen::Vector2f> band;
+        band.reserve(pts_robot.size());
+        for (const auto& q : pts_robot)
+            if (q.z() >= p_.z_min and q.z() <= p_.z_max) band.emplace_back(q.x(), q.y());
+        if (band.size() < 20) return;
+
+        const float c = std::cos(pose.z()), s = std::sin(pose.z());
+
+        // ⚠ NO init_from_scan() HERE. It seeds the box AND votes on the gauge from ONE scan,
+        // using consecutive point differences — unusable on this input (see observe()'s header).
+        // The layout is created in step() instead, once the segment vote has a frame to build in,
+        // and from the FUSED cloud rather than a single view. Nothing is lost by waiting: returns
+        // are still being accumulated, in the agent's own frame, from the first scan onwards.
+
+        // ── FOLD THE SCAN IN, each return carrying the 1-sigma uncertainty of WHERE IT IS:
+        // pose translation plus the lever arm of the heading error at that range. First-order
+        // propagation of cov through p = t + R(theta) q. A point is no sharper than the pose that
+        // placed it, and saying otherwise is what let drift be spent on structure.
+        float smax = 0.f;
+        for (const auto& q : band)
+        {
+            const Eigen::Vector2f jth(-s * q.x() - c * q.y(), c * q.x() - s * q.y());
+            const Eigen::Vector2f pxth(cov(0, 2), cov(1, 2));
+            const float tr = cov(0, 0) + cov(1, 1) + cov(2, 2) * jth.squaredNorm() + 2.f * pxth.dot(jth);
+            const float sg = std::sqrt(std::max(0.f, tr) * 0.5f);
+            if (not std::isfinite(sg)) continue;
+            // ⚠ The voxel map is kept in the AGENT'S MAP FRAME, not the layout's. The gauge is
+            // still being estimated, and evidence stored in a frame that is itself moving cannot
+            // be re-read once that frame corrects itself. fuse() applies the current yaw on the
+            // way out instead, so every past frame benefits from every later vote.
+            const Eigen::Vector2f g(c * q.x() - s * q.y() + pose.x(), s * q.x() + c * q.y() + pose.y());
+            const float s0 = std::sqrt(sg * sg + p_.sensor_sigma * p_.sensor_sigma);
+            const double w = 1.0 / (static_cast<double>(s0) * s0);
+            auto& v = vmap_[{static_cast<int>(std::floor(g.x() / p_.cell)),
+                             static_cast<int>(std::floor(g.y() / p_.cell))}];
+            v.acc += w * g.cast<double>();
+            v.w   += w;
+            v.smin = std::min(v.smin, sg);
+            smax = std::max(smax, sg);
+        }
+        last_sigma_ = smax;
+
+        // ── THE GAUGE, VOTED FROM THE AGENT'S OWN WALL SEGMENTS ─────────────────────────────
+        // A fitted segment's normal is an orientation estimate that does not care what order the
+        // points arrived in, and its extent is the natural weight: a 4-metre wall should outvote a
+        // 30-centimetre fragment. Quadrupled angle, so the four indistinguishable quarter-turns
+        // coincide and average instead of cancelling.
+        for (size_t k = 0; k < seg_phi.size() and k < seg_len.size(); ++k)
+        {
+            const float w = seg_len[k];
+            if (not (w > 0.f) or not std::isfinite(seg_phi[k])) continue;
+            const double a4 = 4.0 * (static_cast<double>(seg_phi[k]) + static_cast<double>(pose.z()));
+            yaw4_cos_ += static_cast<double>(w) * std::cos(a4);
+            yaw4_sin_ += static_cast<double>(w) * std::sin(a4);
+            ++yaw_votes_;
+        }
+    }
+
+    std::vector<Eigen::Vector2f> Channel::polygon() const
+    {
+        if (L_.empty()) return {};
+        const float cy = std::cos(yaw_), sy = std::sin(yaw_);
+        std::vector<Eigen::Vector2f> out;
+        for (const auto& v : L_.polygon())
+            out.emplace_back(cy * v.x() - sy * v.y(), sy * v.x() + cy * v.y());
+        return out;
+    }
+
+    void Channel::fuse()
+    {
+        // The evidence is FUSED, never appended. A capped accumulator stops taking data partway
+        // through the run, so the map is decided by the earliest and worst-registered frames and no
+        // later view can correct them. Fusing per cell by information weight keeps every frame and
+        // bounds the set by the ROOM's size rather than the session's length.
+        // Sigma kept is the best SINGLE look at the cell, never the fused one: repeated views of a
+        // wall are correlated, and claiming sqrt(N) precision from them is the same error as
+        // [[wall-factor-5000x-too-weak]].
+        const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+        cloud_.clear();
+        cloud_.reserve(vmap_.size());
+        for (const auto& [k, v] : vmap_)
+        {
+            if (v.w <= 0.0) continue;
+            const Eigen::Vector2f m(static_cast<float>(v.acc.x() / v.w),
+                                    static_cast<float>(v.acc.y() / v.w));
+            cloud_.push_back({Eigen::Vector2f(cy * m.x() - sy * m.y(), sy * m.x() + cy * m.y()), v.smin});
+        }
+    }
+
+    void Channel::open_csv(const std::string& path)
+    {
+        csv_.open(path, std::ios::out | std::ios::trunc);
+        if (not csv_.is_open()) return;
+        // ⚠ imbue the CLASSIC locale. These machines run LANG=es_ES.UTF-8, where the decimal
+        // separator is a COMMA; a data file written under it cannot be read back by from_chars
+        // and — worse — is silently truncated by any strtof-based reader. See CLAUDE.md.
+        csv_.imbue(std::locale::classic());
+        // bw,bh are the FIRST BOX's own width and height, in the LAYOUT frame, where a box is
+        // axis-aligned by construction and the two numbers therefore mean something. w,h are the
+        // map-frame polygon's bounding box and are kept only for the viewer's sake.
+        // ⚠ THESE DIFFER WHENEVER THE GAUGE IS NON-ZERO, and quoting the wrong pair is how a
+        // 6.00 x 4.00 room tilted 17.56 deg got reported as 6.76 x 5.58 with an area of 37.71 m2.
+        // A bounding box is not a measurement of the thing it bounds.
+        csv_ << "frame,boxes,verts,w,h,bw,bh,rms,proposed,admitted,removed,last_dL,cells,sigma_pose,yaw_deg,votes,frac_out,frac_in,rms_core\n";
+    }
+
+    bool Channel::step()
+    {
+        if (not p_.enabled) return false;
+        if (L_.empty() and yaw_votes_ <= 0) return false;   // no frame yet ⇒ nothing to build in
+        if (p_.every_frames <= 0 or frames_ % static_cast<std::uint64_t>(p_.every_frames) != 0) return false;
+
+        rc::boxes::GrowParams gp;
+        gp.sensor_sigma = p_.sensor_sigma;
+        gp.sigma_flat   = p_.sigma_flat;
+        gp.cell         = p_.cell;
+        gp.min_cluster  = p_.min_cluster;
+
+        // ── ADOPT THE VOTED GAUGE ────────────────────────────────────────────────────────────
+        // Circular mean on the quadrupled angle, then back to a quarter-turn. The representative
+        // is chosen NEAREST THE INCUMBENT among the four, which is not a tie-break rule but the
+        // statement that the four are the same frame: picking the near one keeps the published
+        // polygon continuous instead of letting it snap 90 degrees between frames.
+        if (yaw_votes_ > 0 and (yaw4_cos_ != 0.0 or yaw4_sin_ != 0.0))
+        {
+            const double a = std::atan2(yaw4_sin_, yaw4_cos_) / 4.0;
+            const double q = M_PI / 2.0;
+            const double k = std::round((static_cast<double>(yaw_) - a) / q);
+            yaw_ = static_cast<float>(a + k * q);
+        }
+
+        // ── BORN IN THE VOTED FRAME, FROM THE FUSED CLOUD ───────────────────────────────────
+        // The smallest hypothesis: one box, the interval hull of everything seen so far, taken at
+        // a quantile so a handful of stray returns cannot inflate it. Manhattan, closed and simply
+        // connected by construction — there is no shape to validate.
+        if (L_.empty())
+        {
+            fuse();
+            if (cloud_.size() < static_cast<std::size_t>(gp.min_cluster)) return false;
+            std::vector<float> xs, ys;
+            xs.reserve(cloud_.size()); ys.reserve(cloud_.size());
+            for (const auto& q : cloud_) { xs.push_back(q.p.x()); ys.push_back(q.p.y()); }
+            const auto quant = [](std::vector<float>& v, float f)
+            {
+                const size_t k = std::clamp<size_t>(static_cast<size_t>(f * static_cast<float>(v.size() - 1)),
+                                                    0, v.size() - 1);
+                std::nth_element(v.begin(), v.begin() + static_cast<long>(k), v.end());
+                return v[k];
+            };
+            std::vector<float> xs2 = xs, ys2 = ys;
+            rc::boxes::Box b;
+            b.lo = {quant(xs, 0.005f), quant(ys, 0.005f)};
+            b.hi = {quant(xs2, 0.995f), quant(ys2, 0.995f)};
+            if (not b.valid()) return false;
+            L_.boxes.push_back(b);
+            L_.cov = Eigen::MatrixXf::Identity(4, 4) * (p_.sigma_flat * p_.sigma_flat);
+            qInfo_first_ = true;
+        }
+
+        bool changed = false;
+        // OPTIMISE, THEN LOOK FOR WHAT IS LEFT. Structure is only ever asked to explain a residual
+        // the continuous parameters have already been given every chance to remove. Reversing these
+        // two is what produced four 0.12-m slivers lying along the walls of a room that had none.
+        // The loop bound is the parameter budget, not a threshold.
+        for (int it = 0; it < 4; ++it)
+        {
+            fuse();
+            if (cloud_.size() < static_cast<std::size_t>(gp.min_cluster)) return changed;
+            rms_ = rc::boxes::refit(L_, cloud_, gp);
+            const auto gr = rc::boxes::grow(L_, cloud_, gp);
+            n_proposed_ += gr.proposed;
+            if (gr.admitted > 0) { ++n_admitted_; last_dL_ = gr.best_dL; changed = true; }
+            else if (gr.admitted < 0) { ++n_removed_; changed = true; }
+            else break;
+        }
+        // ── WHERE IS THE RESIDUAL? ───────────────────────────────────────────────────────────
+        {
+            long nout = 0, nin = 0, ncore = 0; double ss = 0.0;
+            const float s0 = std::sqrt(p_.sensor_sigma * p_.sensor_sigma + p_.sigma_flat * p_.sigma_flat);
+            for (const auto& q : cloud_)
+            {
+                const float dd = L_.sdf(q.p);
+                const float t = 3.f * std::sqrt(s0 * s0 + q.sigma_pose * q.sigma_pose);
+                if (dd >  t) { ++nout; continue; }     // beyond a wall: unreachable by a carve
+                if (dd < -t) { ++nin;  continue; }     // deep inside: a column would explain it
+                ss += static_cast<double>(dd) * dd; ++ncore;
+            }
+            const float n = static_cast<float>(std::max<size_t>(1, cloud_.size()));
+            frac_out_ = static_cast<float>(nout) / n;
+            frac_in_  = static_cast<float>(nin) / n;
+            rms_core_ = ncore ? static_cast<float>(std::sqrt(ss / static_cast<double>(ncore))) : 0.f;
+        }
+        if (csv_.is_open())
+        {
+            // The polygon's own extent, so SIZE is graded from the thing that is published rather
+            // than from the first box's width — with a carve, those are not the same number.
+            const auto vs = polygon();
+            Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+            for (const auto& v : vs) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+            const float bw = L_.boxes.empty() ? 0.f : L_.boxes.front().width();
+            const float bh = L_.boxes.empty() ? 0.f : L_.boxes.front().height();
+            csv_ << frames_ << ',' << L_.boxes.size() << ',' << vs.size() << ','
+                 << (vs.empty() ? 0.f : hi.x() - lo.x()) << ',' << (vs.empty() ? 0.f : hi.y() - lo.y()) << ','
+                 << bw << ',' << bh << ','
+                 << rms_ << ',' << n_proposed_ << ',' << n_admitted_ << ',' << n_removed_ << ','
+                 << last_dL_ << ',' << vmap_.size() << ',' << last_sigma_ << ','
+                 << yaw_ * 180.f / static_cast<float>(M_PI) << ',' << yaw_votes_ << ','
+                 << frac_out_ << ',' << frac_in_ << ',' << rms_core_ << '\n' << std::flush;
+        }
+        return changed;
+    }
+}   // namespace rc::boxch

@@ -384,7 +384,12 @@ namespace rc::boxes
                     case 0: b.lo.x() = hb.lo.x(); break;
                     case 1: b.lo.y() = hb.lo.y(); break;
                     case 2: b.hi.x() = hb.hi.x(); break;
-                    default: b.hi.y() = hb.hi.y(); break;
+                    case 3: b.hi.y() = hb.hi.y(); break;
+                    // an alcove's inner face IS the wall it opens through — the host's far side
+                    case 4: b.lo.x() = hb.hi.x(); break;
+                    case 5: b.lo.y() = hb.hi.y(); break;
+                    case 6: b.hi.x() = hb.lo.x(); break;
+                    default: b.hi.y() = hb.lo.y(); break;
                 }
             }
             // A box may not invert. `width -> 0` is the removal event and is priced elsewhere; here
@@ -396,6 +401,9 @@ namespace rc::boxes
             }
             // A carve cannot be larger than the thing it is carved out of. An identity, not a
             // threshold: material removed outside the room was never there to remove.
+            // A CARVE cannot be larger than the thing it is carved out of — an identity, not a
+            // threshold. ⚠ It applies to negative boxes ONLY: an alcove lies outside its host by
+            // construction, and clamping it there would collapse every outward proposal to zero.
             for (auto& b : L.boxes)
             {
                 if (b.positive or b.host >= L.boxes.size()) continue;
@@ -443,38 +451,49 @@ namespace rc::boxes
             const float mad = 1.4826f * ad[ad.size() / 2];
             ov0 = std::max(0.f, mad * mad - static_cast<float>(known / static_cast<double>(pts.size())));
         }
-        std::vector<CloudPoint> un;
+        // Both directions. Inside = matter the region does not model (a column). Outside = room
+        // the region does not cover (an alcove, a door recess). Same test, same sigma, same price.
+        std::vector<CloudPoint> un, out;
         for (const auto& q : pts)
         {
             const float s = std::sqrt(q.sigma_pose * q.sigma_pose + ov0);
-            if (B0.sdf(q.p) < -3.f * s) un.push_back(q);
+            const float dd = B0.sdf(q.p);
+            if (dd < -3.f * s) un.push_back(q);
+            else if (dd > 3.f * s) out.push_back(q);
         }
-        if (un.size() < static_cast<size_t>(p.min_cluster)) return R;
+        if (un.size() < static_cast<size_t>(p.min_cluster)
+            and out.size() < static_cast<size_t>(p.min_cluster)) return R;
 
-        // ── 2. CLUSTER THEM on a grid, 4-connected ───────────────────────────────────────────
-        std::map<std::pair<int, int>, std::vector<int>> cells;
-        for (size_t i = 0; i < un.size(); ++i)
-            cells[{static_cast<int>(std::floor(un[i].p.x() / p.cell)),
-                   static_cast<int>(std::floor(un[i].p.y() / p.cell))}].push_back(static_cast<int>(i));
-        std::map<std::pair<int, int>, int> label;
-        int nlab = 0;
-        for (const auto& [c, v] : cells)
+        // ── 2. CLUSTER, on a grid, 4-connected. One routine, used for both directions. ───────
+        const auto cluster = [&](const std::vector<CloudPoint>& src)
         {
-            if (label.count(c)) continue;
-            const int id = nlab++;
-            std::vector<std::pair<int, int>> stack{c};
-            while (not stack.empty())
+            std::map<std::pair<int, int>, std::vector<int>> cells;
+            for (size_t i = 0; i < src.size(); ++i)
+                cells[{static_cast<int>(std::floor(src[i].p.x() / p.cell)),
+                       static_cast<int>(std::floor(src[i].p.y() / p.cell))}].push_back(static_cast<int>(i));
+            std::map<std::pair<int, int>, int> label;
+            int nlab = 0;
+            for (const auto& [cc, v] : cells)
             {
-                const auto k = stack.back(); stack.pop_back();
-                if (label.count(k) or not cells.count(k)) continue;
-                label[k] = id;
-                stack.push_back({k.first + 1, k.second}); stack.push_back({k.first - 1, k.second});
-                stack.push_back({k.first, k.second + 1}); stack.push_back({k.first, k.second - 1});
+                if (label.count(cc)) continue;
+                const int id = nlab++;
+                std::vector<std::pair<int, int>> stack{cc};
+                while (not stack.empty())
+                {
+                    const auto k = stack.back(); stack.pop_back();
+                    if (label.count(k) or not cells.count(k)) continue;
+                    label[k] = id;
+                    stack.push_back({k.first + 1, k.second}); stack.push_back({k.first - 1, k.second});
+                    stack.push_back({k.first, k.second + 1}); stack.push_back({k.first, k.second - 1});
+                }
             }
-        }
-        std::vector<std::vector<Eigen::Vector2f>> groups(static_cast<size_t>(nlab));
-        for (const auto& [c, v] : cells)
-            for (int i : v) groups[static_cast<size_t>(label[c])].push_back(un[static_cast<size_t>(i)].p);
+            std::vector<std::vector<Eigen::Vector2f>> g(static_cast<size_t>(nlab));
+            for (const auto& [cc, v] : cells)
+                for (int i : v) g[static_cast<size_t>(label[cc])].push_back(src[static_cast<size_t>(i)].p);
+            return g;
+        };
+        const auto groups     = cluster(un);
+        const auto groups_out = cluster(out);
 
         // ── 2b. REMOVAL IS AN EDIT TOO, AND IT IS PRICED THE SAME WAY ───────────────────────
         // Without this, admission is a ratchet: a carve bought by early, badly-placed evidence can
@@ -613,6 +632,53 @@ namespace rc::boxes
             const float dL = (ll - base_ll) - code;
             if (dL > best_dL) { best_dL = dL; best = nb; have = true; best_widen = -1; }   // BF > 1
         }
+        // ── 3b. OUTWARD: a cluster BEYOND a wall is room the region does not cover ───────────
+        // An alcove, a door recess, a bay. The proposal is a POSITIVE box whose inner face IS the
+        // wall it opens through — one shared offset, exactly as a carve shares the face it is cut
+        // into, so it costs three free parameters and not four. Priced by the same Bayes factor:
+        // there is no separate rule for outward growth, and no constant that distinguishes it.
+        for (const auto& g : groups_out)
+        {
+            if (g.size() < static_cast<size_t>(p.min_cluster)) continue;
+            ++R.proposed;
+            Box nb;
+            nb.lo = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+            nb.hi = {-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+            for (const auto& q : g) { nb.lo = nb.lo.cwiseMin(q); nb.hi = nb.hi.cwiseMax(q); }
+            nb.positive = true;
+            const Eigen::Vector2f ctr = 0.5f * (nb.lo + nb.hi);
+
+            // Which positive box does it lie beyond, and through which of that box's faces?
+            const Box* host = nullptr; float bestd = std::numeric_limits<float>::max(); size_t hi_ = 0;
+            for (size_t bi = 0; bi < L.boxes.size(); ++bi)
+            {
+                if (not L.boxes[bi].positive) continue;
+                const float dd = sdf_box(L.boxes[bi], ctr);
+                if (dd < bestd) { bestd = dd; host = &L.boxes[bi]; hi_ = bi; }
+            }
+            if (host == nullptr) continue;
+            nb.host = static_cast<std::uint32_t>(hi_);
+            // The face it opens through is the one it is furthest beyond.
+            const float ox = ctr.x() - host->hi.x(), oxl = host->lo.x() - ctr.x();
+            const float oy = ctr.y() - host->hi.y(), oyl = host->lo.y() - ctr.y();
+            const float m = std::max(std::max(ox, oxl), std::max(oy, oyl));
+            if (m <= 0.f) continue;                       // not actually outside this box
+            if      (m == ox)  { nb.lo.x() = host->hi.x(); nb.attach = 4; }
+            else if (m == oyl) { nb.hi.y() = host->lo.y(); nb.attach = 7; }
+            else if (m == oxl) { nb.hi.x() = host->lo.x(); nb.attach = 6; }
+            else               { nb.lo.y() = host->hi.y(); nb.attach = 5; }
+            if (not nb.valid()) continue;
+
+            Layout T = L; T.boxes.push_back(nb);
+            if (not simply_connected(T)) continue;
+            refit(T, cloud, p, 3);
+            const float sig = std::sqrt(s0sq);
+            const float span = std::max(1.f, host->width() + host->height());
+            const float code = 3.f * std::log(span / sig) + std::log(4.f);
+            const float dL = (log_likelihood(T, spts) - base_ll) - code;
+            if (dL > best_dL) { best_dL = dL; best = nb; have = true; best_widen = -1; }
+        }
+
         if (have)
         {
             L = B;                                       // keep the fit the comparison was made on

@@ -2332,6 +2332,14 @@ namespace rc
         init_polygon_vertices_.clear();
         wall_map_ = wallmap::WallMap{};
         wall_map_.params = params.wall_map;
+        box_channel_.configure(params.box);
+        if (params.box.enabled) box_channel_.open_csv("etc/box_layout.csv");
+        if (params.box.enabled)
+            qInfo().noquote() << QString("[room][boxes] SIDECAR PUBLISHING: the delimiting polygon comes "
+                                         "from the box layout, not the wall map. every=%1 frames, cell=%2 m, "
+                                         "band=[%3,%4] m")
+                                     .arg(params.box.every_frames).arg(params.box.cell, 0, 'f', 2)
+                                     .arg(params.box.z_min, 0, 'f', 2).arg(params.box.z_max, 0, 'f', 2);
         wall_map_.params.obs_sigma   = params.rfe_obs_sigma;     // the wall factor's σ and knee ARE the SDF's
         wall_map_.params.huber_delta = params.rfe_huber_delta;
         map_ready_ = false;
@@ -2466,6 +2474,20 @@ namespace rc
         pts.reserve(points.size());
         for (const auto& p : points) pts.emplace_back(p.x(), p.y());
         const auto seg = wallseg::segment(pts, params.wall_seg, wall_rng_);
+
+        // The sidecar sees the robot-frame scan, the map-frame pose, that pose's covariance, and —
+        // for the Manhattan gauge — THE AGENT'S OWN FITTED WALL SEGMENTS. Reusing the segmenter
+        // here is not convenience: an estimator that reads consecutive point differences assumes
+        // an azimuthally ordered scan, which is true of a synthesised one and not of this input,
+        // and that assumption cost a confident, stable, 56-degree-wrong gauge.
+        if (box_channel_.enabled())
+        {
+            std::vector<float> sphi, slen;
+            sphi.reserve(seg.segments.size()); slen.reserve(seg.segments.size());
+            for (const auto& sg : seg.segments)
+            { sphi.push_back(sg.phi); slen.push_back(std::abs(sg.s_max - sg.s_min)); }
+            box_channel_.observe(points, pose, box_pose_cov_, sphi, slen);
+        }
 
         // Observation weights (range / incidence) — the SAME as the SDF term's, from each segment's own
         // normal, in ONE call over every claimed point so the normalisation is per slot, not per wall.
@@ -2927,6 +2949,57 @@ namespace rc
                 }
         }
         res.wall_view.polygon     = (pub.closed and pub.verts.size() >= 3) ? pub : poly;
+
+        // ── THE BOX SIDECAR PUBLISHES, IF IT IS ON ───────────────────────────────────────────
+        // Everything above ran exactly as it ships. This replaces only the polygon that leaves the
+        // agent, so an A/B on the robot is one config key and the wall map remains the thing to
+        // fall back to. The box polygon cannot have fewer than 4 vertices — the smallest
+        // representable region is one box — so the 3-vertex room that started this redesign is not
+        // rejected here, it is unrepresentable.
+        box_pose_cov_ = res.covariance;                     // for the NEXT observe()
+        if (box_channel_.enabled())
+        {
+            const bool changed = box_channel_.step();
+            const auto bverts = box_channel_.polygon();
+            if (bverts.size() >= 4)
+            {
+                wallmap::Polygon bp;
+                bp.verts = bverts;
+                bp.closed = true;
+                // A box layout is publishable as soon as it exists: it is closed, Manhattan and
+                // simply connected BY CONSTRUCTION, so there is no shape test left to pass. What
+                // remains uncertain is its SIZE, and that is carried in the corner sigmas below
+                // rather than in a boolean.
+                bp.publishable = true;
+                const auto bcov = box_channel_.layout().polygon_cov(box_channel_.params().sigma_flat);
+                bp.corners.resize(bverts.size());
+                float worst = 0.f;
+                for (size_t i = 0; i < bverts.size() and i < bcov.size(); ++i)
+                {
+                    // A vertex IS two offsets, so its covariance is a sub-block lookup — never an
+                    // intersection of two lines, which is what diverged to a corner at
+                    // (-11752, -14336) m with sigma 441051 in the representation this replaces.
+                    bp.corners[i].p = bverts[i];
+                    const float sg = std::sqrt(std::max(0.f, bcov[i].trace() * 0.5f));
+                    bp.corners[i].sigma = sg;
+                    worst = std::max(worst, sg);
+                }
+                bp.worst_corner_sigma = worst;
+                bp.status = "box layout";
+                res.wall_view.polygon = bp;
+            }
+            if (changed)
+                qInfo().noquote()
+                    << QString("[room][boxes] %1 boxes, %2 verts | rms %3 m | proposed %4 admitted %5 "
+                               "removed %6 | last dL %7 nats | %8 cells | sigma_pose %9 m")
+                           .arg(box_channel_.boxes()).arg(bverts.size())
+                           .arg(box_channel_.rms(), 0, 'f', 3)
+                           .arg(box_channel_.proposed()).arg(box_channel_.admitted())
+                           .arg(box_channel_.removed())
+                           .arg(box_channel_.last_dL(), 0, 'f', 0)
+                           .arg(box_channel_.cells())
+                           .arg(box_channel_.last_sigma(), 0, 'f', 3);
+        }
         res.wall_view.seg_to_wall = last_wall_frame_.seg_to_wall;
         res.wall_view.theta0_born = wall_map_.theta0_born;
         res.wall_view.theta0      = wall_map_.theta0;

@@ -104,6 +104,8 @@ LIST(APPEND SOURCES
   ../src/corner_detector.cpp
   ../src/wall_segmenter.cpp
   ../src/wall_map.cpp
+  ../src/room_boxes.cpp
+  ../src/room_boxes_channel.cpp
   ../src/object_anchor_factor.cpp
   ../src/object_anchor_source.cpp
   ../src/camera_ingestor.cpp
@@ -157,6 +159,8 @@ add_executable(gn_selftest EXCLUDE_FROM_ALL
   ../src/corner_detector.cpp
   ../src/wall_segmenter.cpp
   ../src/wall_map.cpp
+  ../src/room_boxes.cpp
+  ../src/room_boxes_channel.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
 )
@@ -182,6 +186,8 @@ add_executable(mp3d_replay EXCLUDE_FROM_ALL
   ../src/corner_detector.cpp
   ../src/wall_segmenter.cpp
   ../src/wall_map.cpp
+  ../src/room_boxes.cpp
+  ../src/room_boxes_channel.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
 )
@@ -207,6 +213,8 @@ add_executable(reloc_selftest EXCLUDE_FROM_ALL
   ../src/corner_detector.cpp
   ../src/wall_segmenter.cpp
   ../src/wall_map.cpp
+  ../src/room_boxes.cpp
+  ../src/room_boxes_channel.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
 )
@@ -250,6 +258,8 @@ add_executable(wall_slam_selftest EXCLUDE_FROM_ALL
   ../src/corner_detector.cpp
   ../src/wall_segmenter.cpp
   ../src/wall_map.cpp
+  ../src/room_boxes.cpp
+  ../src/room_boxes_channel.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
 )

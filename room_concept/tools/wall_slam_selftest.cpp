@@ -135,6 +135,21 @@ namespace
                                {-3.f, 2.f}, {-3.f, -1.2f}, {-2.2f, -1.2f}}; }
     Poly room2_column() { return room2_w1(); }
 
+    // ── OUTWARD FEATURES. The ladder above is six rectangles with COLUMNS — every rung needs a
+    // CARVE, so the suite exercised exactly the one growth direction grow() had implemented, and
+    // passed while outward growth did not exist at all. A door recess in Webots is what finally
+    // showed it: a box fitted to 0.108 m still reporting rms 0.337 m, because the returns beyond
+    // the wall could never be proposed for. ★★★ A test suite that shares a blind spot with the
+    // code under test cannot reveal it. These two rungs exist so that gap cannot reopen silently.
+    /// A door recess: a shallow alcove in the middle of a long wall (+4 verts).
+    Poly room2_alcove(){ return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {0.5f, 2.f}, {0.5f, 2.6f},
+                                 {-0.5f, 2.6f}, {-0.5f, 2.f}, {-3.f, 2.f}}; }
+    /// A deep bay off a short wall, plus a column on the opposite one: both directions at once,
+    /// which is the case a one-directional grow() cannot even approximate.
+    Poly room2_bay()   { return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, -0.6f}, {3.9f, -0.6f},
+                                 {3.9f, 0.6f}, {3.f, 0.6f}, {3.f, 2.f}, {0.4f, 2.f},
+                                 {0.4f, 1.2f}, {-0.4f, 1.2f}, {-0.4f, 2.f}, {-3.f, 2.f}}; }
+
     /// A closed circuit inside `wp`, sampled at `step` metres so the reference advances at about the
     /// speed the base can actually hold. `laps` of it makes a LONG tour: the point is to keep the
     /// robot moving long after the layout first closes, which is exactly when the live agent fell over.
@@ -2116,6 +2131,8 @@ int main()
                         : (rname == "w1")   ? room2_w1()
                         : (rname == "w2")   ? room2_w2()
                         : (rname == "c2w1") ? room2_c2w1()
+                        : (rname == "alcove") ? room2_alcove()
+                        : (rname == "bay")   ? room2_bay()
                         : room2();
         const std::vector<Eigen::Vector2f> wp = {{-2.f, -1.2f}, {2.f, -1.2f}, {2.f, 0.8f}, {-2.f, 0.8f}};
         const auto truth = circuit(wp, 0.025f, laps);
@@ -2322,6 +2339,8 @@ int main()
                         : (rname == "w1" or rname == "column") ? room2_w1()
                         : (rname == "w2")   ? room2_w2()
                         : (rname == "c2w1") ? room2_c2w1()
+                        : (rname == "alcove") ? room2_alcove()
+                        : (rname == "bay")   ? room2_bay()
                         : room2();
         const bool pivot = std::getenv("WS_TOUR_MODE") and std::string(std::getenv("WS_TOUR_MODE")) == "pivot";
         const std::vector<Eigen::Vector2f> wp = {{-2.f, -1.2f}, {2.f, -1.2f}, {2.f, 0.8f}, {-2.f, 0.8f}};

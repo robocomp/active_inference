@@ -108,7 +108,14 @@ namespace rc::wallmap
         // OFF mixes currencies less but starves a notched room's wall — see the note at the call.
         // A wall whose testable span falls below 2 bins is killed outright. ON spares one whose
         // surviving bins still hold POSITIVE evidence — see the note at update_existence.
-        bool  span_kill_respects_support = true;
+        // ⚠ DEFAULT OFF after a LIVE REGRESSION, 2026-09-19. Sparing a short wall from the span
+        // kill let a near-parallel pair survive in the cycle; their intersection ran away and the
+        // published layout became a 3-vertex polygon with a corner at (-11752, -14336) m and a
+        // corner sigma of 441051 — nothing renders. The span kill was, among other things, the
+        // thing that removed walls before they could form a degenerate corner. Fixing it needs the
+        // near-parallel case handled on its own terms (a corner whose sigma diverges is not a
+        // corner), not merely the kill relaxed.
+        bool  span_kill_respects_support = false;
         bool  twin_fuse_information = true;
         bool  no_gate_ratchet   = false;
         // ── SATURATE THE CARRIED WALL INFORMATION ───────────────────────────────────────────────
