@@ -1184,6 +1184,24 @@ CommonModeGate = true
 # The real fix is that a proposal must not be published before it is judged; this flag only removes
 # the proposer, and with it the ability to recover from a genuinely wrong cycle.
 EnableRederive = false
+# ── TWIN FUSION: does a fused duplicate ALSO hand over its confidence? ────────────────────────────
+# A candidate that turns out to BE an existing wall is fused into it, and fuse() adds its 2x2
+# information block. The two are NOT in the same units: a candidate's information is the line fit's
+# own (~13.9 per point, measured) while a wall's is accumulated through WallPointFactor's
+# 0.5*inv_var*pda/N_slot, deflated by the slot point count (~0.3 per point) — a ~46x mismatch. One
+# fusion then injects several times the wall's whole accumulated confidence (traced: +1611 units in
+# the absorb interval containing 5 births and a twin fusion, against ~30-50 normally), the carried
+# sigma_d reads 0.0117 m where the honest value is 0.0276 m, and the corner sigma — hence the
+# publish decision — reads that inflated number.
+# true  = the long-standing behaviour (adds the information; inflates the confidence).
+# false = fuse the MEAN only. ⚠ MEASURED WORSE on the bench's NOTCHED room, where a twin covers a
+#         genuinely different stretch of wall and the wall starves without its evidence: selftest
+#         39 PASS/1 FAIL -> 38/2, worst corner sigma 0.635 m, Hausdorff 0.408 -> 1.681 m.
+# Neither is right. The honest fix converts the candidate's block into the wall's units (divide by
+# the publish path's k = 2*sigma_obs^2*N_slot/sigma_sensor^2), which needs those threaded into
+# WallMap. ⚠ With CommonModeGate on this path may be INERT: twins_fused = 0 on both real recordings,
+# because the gate prevents the duplicate births that create twins in the first place.
+TwinFuseInformation = true
 # The pose Schur complement in absorb_wall_observations, added 2026-09-18. It is the honest marginal
 # and it lifted the good recording's association 71 -> 87%, but it also costs carried information,
 # which the corner sigma reads: worst corner 0.034 -> and with CommonModeGate 0.064 vs 0.202. OFF is

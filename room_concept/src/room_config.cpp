@@ -116,6 +116,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.WallLineFactor", wm.wall_line_factor);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.CommonModeGate", wm.common_mode_gate);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.EnableRederive", wm.enable_rederive);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.TwinFuseInformation", wm.twin_fuse_information);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.AbsorbSchur", wm.absorb_schur);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.LineCommonSigmaD", wm.line_common_sigma_d);
         float lcp = std::numeric_limits<float>::quiet_NaN();

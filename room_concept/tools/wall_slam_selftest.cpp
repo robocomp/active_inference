@@ -104,8 +104,35 @@ namespace
     Poly room2()        { return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {-3.f, 2.f}}; }
     /// The same room with a column bitten out of one side — one concave pair of corners, so the
     /// layout is no longer fully explained from a single viewpoint and motion has to earn it.
-    Poly room2_column() { return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {0.6f, 2.f}, {0.6f, 1.2f},
-                                  {-0.6f, 1.2f}, {-0.6f, 2.f}, {-3.f, 2.f}}; }
+    /// ── THE COMPLEXITY LADDER: BOTH KINDS OF COLUMN ─────────────────────────────────────────
+    /// One 6.00 x 4.00 m shell, 0.8 m square columns, in two families that cost the model
+    /// different edits — a layout estimator can be fine at one and fall over on the other:
+    ///   CORNER column  — stands in a corner, cutting it. +2 vertices, a +2 (STEP) edit.
+    ///   MID-WALL column — stands against the middle of a wall. +4 vertices, a +4 (NOTCH) edit,
+    ///                     and it creates two COLLINEAR wall stretches either side of it.
+    /// Naming: cN = N corner columns, wN = N mid-wall columns, cNwM = both.
+    /// All CCW, all Manhattan, all sharing the same outer shell, so consecutive rungs differ by
+    /// exactly one column. The estimator should climb this MONOTONICALLY; where it falls off is
+    /// the measurement that matters.
+    Poly room2_c1()  { return {{-2.2f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {-3.f, 2.f},
+                               {-3.f, -1.2f}, {-2.2f, -1.2f}}; }
+    Poly room2_c2()  { return {{-2.2f, -2.f}, {2.2f, -2.f}, {2.2f, -1.2f}, {3.f, -1.2f},
+                               {3.f, 2.f}, {-3.f, 2.f}, {-3.f, -1.2f}, {-2.2f, -1.2f}}; }
+    Poly room2_c4()  { return {{-2.2f, -2.f}, {2.2f, -2.f}, {2.2f, -1.2f}, {3.f, -1.2f},
+                               {3.f, 1.2f}, {2.2f, 1.2f}, {2.2f, 2.f}, {-2.2f, 2.f},
+                               {-2.2f, 1.2f}, {-3.f, 1.2f}, {-3.f, -1.2f}, {-2.2f, -1.2f}}; }
+    /// One mid-wall column, top wall. Historically `room2_column()`.
+    Poly room2_w1()  { return {{-3.f, -2.f}, {3.f, -2.f}, {3.f, 2.f}, {0.4f, 2.f}, {0.4f, 1.2f},
+                               {-0.4f, 1.2f}, {-0.4f, 2.f}, {-3.f, 2.f}}; }
+    /// Two mid-wall columns, opposite walls.
+    Poly room2_w2()  { return {{-3.f, -2.f}, {-0.4f, -2.f}, {-0.4f, -1.2f}, {0.4f, -1.2f}, {0.4f, -2.f},
+                               {3.f, -2.f}, {3.f, 2.f}, {0.4f, 2.f}, {0.4f, 1.2f},
+                               {-0.4f, 1.2f}, {-0.4f, 2.f}, {-3.f, 2.f}}; }
+    /// Both families at once: two corner columns and one mid-wall column.
+    Poly room2_c2w1(){ return {{-2.2f, -2.f}, {2.2f, -2.f}, {2.2f, -1.2f}, {3.f, -1.2f},
+                               {3.f, 2.f}, {0.4f, 2.f}, {0.4f, 1.2f}, {-0.4f, 1.2f}, {-0.4f, 2.f},
+                               {-3.f, 2.f}, {-3.f, -1.2f}, {-2.2f, -1.2f}}; }
+    Poly room2_column() { return room2_w1(); }
 
     /// A closed circuit inside `wp`, sampled at `step` metres so the reference advances at about the
     /// speed the base can actually hold. `laps` of it makes a LONG tour: the point is to keep the
@@ -1757,6 +1784,7 @@ int run_replay(const char* path)
     map.params.pair_partner_active = std::getenv("WS_PARTNER") != nullptr;
     map.params.no_gate_ratchet = std::getenv("WS_NO_RATCHET") != nullptr;
     map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
+    if (std::getenv("WS_NO_REDERIVE")) map.params.enable_rederive = false;
     map.params.common_mode_gate = std::getenv("WS_CMODE") != nullptr;
     if (std::getenv("WS_NO_SCHUR")) map.params.absorb_schur = false;
     if (const char* e = std::getenv("WS_SAT_D"))   map.params.carry_sat_sigma_d = std::strtof(e, nullptr);
@@ -2081,9 +2109,16 @@ int main()
     // scale. WS_TOUR_ROOM=column adds a concave column; WS_TOUR_LAPS sets the length.
     if (std::getenv("WS_TOUR") != nullptr)
     {
-        const bool column = std::getenv("WS_TOUR_ROOM") and std::string(std::getenv("WS_TOUR_ROOM")) == "column";
+        const std::string rname = std::getenv("WS_TOUR_ROOM") ? std::getenv("WS_TOUR_ROOM") : "rect";
+        const bool column = rname == "column";
         const int laps = std::getenv("WS_TOUR_LAPS") ? std::max(1, std::atoi(std::getenv("WS_TOUR_LAPS"))) : 3;
-        const Poly room = column ? room2_column() : room2();
+        const Poly room = (rname == "c1")   ? room2_c1()
+                        : (rname == "c2")   ? room2_c2()
+                        : (rname == "c4")   ? room2_c4()
+                        : (rname == "w1" or rname == "column") ? room2_w1()
+                        : (rname == "w2")   ? room2_w2()
+                        : (rname == "c2w1") ? room2_c2w1()
+                        : room2();
         const bool pivot = std::getenv("WS_TOUR_MODE") and std::string(std::getenv("WS_TOUR_MODE")) == "pivot";
         const std::vector<Eigen::Vector2f> wp = {{-2.f, -1.2f}, {2.f, -1.2f}, {2.f, 0.8f}, {-2.f, 0.8f}};
         const auto truth = pivot ? pivot_path({0.f, 0.f}, 0.60f, 2 * laps, 240)

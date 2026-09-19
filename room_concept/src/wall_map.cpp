@@ -908,8 +908,40 @@ namespace rc::wallmap
             const float testable = (first > last) ? 0.f
                 : std::min(w.s_max, w.bins_s0 + bw * static_cast<float>(last + 1))
                   - std::max(w.s_min, w.bins_s0 + bw * static_cast<float>(first));
-            if (first > last or testable < 2.f * bw)
-            { w.exist_lodds = lo_clamp; continue; }
+            // ── A SPAN RULE MUST NOT OVERRULE THE EVIDENCE ──────────────────────────────────────
+            // `testable < 2*bw` means "there is not enough of this wall left to test". For a LONG
+            // wall whose bins have all been refuted that is true and the kill is right. For a SHORT
+            // one it fires while the surviving bins are at the CONFIDENCE CLAMP. Measured 2026-09-19
+            // on the column the user added: a 1.29 m wall with bins [9.2, 9.2, -6.9, -6.9, -4.8] —
+            // two bins saturated at +9.2, 12947 points over 775 frames — was killed because the
+            // trimmed span came to 0.451 m against a 0.500 m floor. It died 49 mm short with its
+            // best evidence intact, which is why a column appears early in a run and then vanishes.
+            // The bias is structural: for a short wall seen obliquely, beams that graze its
+            // silhouette and return from the far wall are a large fraction of everything crossing
+            // its extent (that frame: sup 1.8 vs ref 13.3), so the shorter the wall the harder the
+            // geometry votes against it. Birth is priced in nats; this death was not priced at all.
+            // So: let the ledger decide. Kill on span only when nothing that survives is positive —
+            // then `exist_lodds` is negative anyway and the wall dies through the normal, priced
+            // path instead of being struck out by a geometric cutoff.
+            float best_surviving = -1e9f;
+            if (first <= last)
+                for (int b = first; b <= last; ++b)
+                    best_surviving = std::max(best_surviving, w.exist_bins[static_cast<size_t>(b)]);
+            const bool span_gone = (first > last) or
+                (testable < 2.f * bw and (not params.span_kill_respects_support or best_surviving <= 0.f));
+            if (span_gone)
+            {
+                if (params.debug_splice)
+                {
+                    std::printf("[exist-kill] wall %llu span=%.2f m (s %.2f..%.2f) bins=%d testable=%.3f < %.3f | bins:",
+                                (unsigned long long)w.id, w.s_max - w.s_min, w.s_min, w.s_max, nb, testable, 2.f * bw);
+                    for (int b = 0; b < nb; ++b) std::printf(" %.1f", w.exist_bins[static_cast<size_t>(b)]);
+                    float S = 0.f, R = 0.f;
+                    for (int b = 0; b < nb; ++b) { S += sup[static_cast<size_t>(b)]; R += ref[static_cast<size_t>(b)]; }
+                    std::printf(" | this frame sup=%.1f ref=%.1f\n", S, R);
+                }
+                w.exist_lodds = lo_clamp; continue;
+            }
             if (first > 0 or last < nb - 1)
             {
                 w.exist_bins.assign(w.exist_bins.begin() + first, w.exist_bins.begin() + last + 1);

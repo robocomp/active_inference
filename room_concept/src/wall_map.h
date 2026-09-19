@@ -106,6 +106,9 @@ namespace rc::wallmap
         // Stop `information` (the association gate's currency) accumulating. Diagnostic A/B.
         // Add a fused twin candidate's information to the wall (the long-standing behaviour).
         // OFF mixes currencies less but starves a notched room's wall — see the note at the call.
+        // A wall whose testable span falls below 2 bins is killed outright. ON spares one whose
+        // surviving bins still hold POSITIVE evidence — see the note at update_existence.
+        bool  span_kill_respects_support = true;
         bool  twin_fuse_information = true;
         bool  no_gate_ratchet   = false;
         // ── SATURATE THE CARRIED WALL INFORMATION ───────────────────────────────────────────────
