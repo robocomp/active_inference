@@ -251,3 +251,54 @@ The current estimator, as of `d307c84`, holds a rectangle to 2–3 mm while driv
 100% of frames. This redesign is justified by the *ladder*, not by the rectangle. If the cheapest
 steps (1 and 2 above) recover the ladder on their own, **the rewrite is not justified by this
 failure** and should be reconsidered — that is the outcome to hope for, not to defend against.
+
+---
+
+## Measured, 2026-09-19 — the ladder, 5 seeds, driven robot, odometry-only poses
+
+Median IoU against a **fair same-seed baseline**: the identical code with growth disabled but the
+box still refitted, so the comparison isolates *structure growth* rather than flattering the whole
+redesign against the old representation.
+
+| room | truth verts | one box | + growth | Δ | boxes found per seed |
+|---|---|---|---|---|---|
+| rect | 4 | 0.980 | **0.980** | 0.000 | 1, 1, 1, 1, 1 |
+| c1 | 6 | 0.948 | **0.959** | +0.011 | 2, 3, 2, 2, 2 |
+| c2 | 8 | 0.918 | 0.911 | −0.007 | 2, 3, 3, 3, 4 |
+| c4 | 12 | 0.858 | **0.886** | +0.028 | 1, 5, 5, 5, 1 |
+| w1 | 8 | 0.927 | **0.970** | +0.043 | 2, 2, 2, 2, 2 |
+| w2 | 12 | 0.862 | **0.914** | +0.052 | 3, 6, 3, 3, 2 |
+| c2w1 | 12 | 0.871 | **0.908** | +0.037 | 4, 4, 4, 4, 1 |
+
+**The number that matters is the first row.** `rect` has no structure to find, and the estimator
+proposes nothing and admits nothing on all five seeds. A structure rule that cannot decline is
+worthless; this is the only entry that demonstrates it can, and it should be checked before any
+positive rung is believed.
+
+### What the threshold budget actually cost
+
+Three constants were added, and none of them is a decision constant:
+
+| added | kind | why it is not tuned |
+|---|---|---|
+| `sigma_pose` per point | PHYSICAL, propagated | `F P Fᵀ + G Q Gᵀ` from the encoder model's own sigmas |
+| overdispersion `MAD² − σ̄²` | ESTIMATED from data | a scale parameter of the likelihood, not a cutoff |
+| reduced chi-square on `R.cov` | ESTIMATED from data | textbook `cost/(N−3)` |
+
+The MDL admission still has **no margin**: `dL > 0` is BF > 1, and `birth_nats = 4.605` is not
+reproduced. The one comparison constant is the `3σ` surprise test, and it now measures against a
+sigma that includes the pose and the model misfit, so it is a *definition of surprising* rather than
+a tuned gate.
+
+### Open, and stated as open
+
+* `c2` is −0.007: growth slightly hurts there.
+* `c4` and `c2w1` find nothing on 2/5 and 1/5 seeds.
+* **Under registration `c4` deadlocks.** The layout is missing four corner columns, so registration
+  drags the pose 0.161 m to put column returns onto walls, which smears the cloud so the columns can
+  never be found. Weighting the map term by its own robust misfit is the right thing to do and is
+  kept — but it did **not** break the deadlock, and should not be retried expecting one. Running the
+  poses on odometry alone avoids it entirely, which is why the structure stage is specified that way.
+* **Webots is unrun.** The critical criterion — "if it works in the bench it must work in Webots" —
+  has not been tested for this estimator, and the bench's own history warns that a stale agent
+  binary once made the bench and the agent disagree for six minutes.

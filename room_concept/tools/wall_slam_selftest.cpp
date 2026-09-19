@@ -43,6 +43,7 @@
 #include "room_gn_solver.h"
 #include "room_model.h"
 #include "wall_map.h"
+#include "room_boxes.h"
 #include "wall_segmenter.h"
 
 using rc::RoomConcept;
@@ -2099,6 +2100,209 @@ int main()
 #endif
     torch::set_num_threads(1);
     std::mt19937 rng(7);
+
+    // ═══ BOX ESTIMATOR (WS_BOXES=1) ═══════════════════════════════════════════════════════════
+    // The redesign of LAYOUT_REDESIGN.md, on the same ladder and the same driven robot, so the two
+    // representations are compared on identical data. Same source file the agent compiles, so a
+    // bench result here is a statement about the agent — which is the property that failed today
+    // when the agent binary was six minutes older than the fix the bench was passing with.
+    if (std::getenv("WS_BOXES") != nullptr)
+    {
+        const std::string rname = std::getenv("WS_TOUR_ROOM") ? std::getenv("WS_TOUR_ROOM") : "rect";
+        const int laps = std::getenv("WS_TOUR_LAPS") ? std::max(1, std::atoi(std::getenv("WS_TOUR_LAPS"))) : 3;
+        const Poly room = (rname == "c1")   ? room2_c1()
+                        : (rname == "c2")   ? room2_c2()
+                        : (rname == "c4")   ? room2_c4()
+                        : (rname == "w1")   ? room2_w1()
+                        : (rname == "w2")   ? room2_w2()
+                        : (rname == "c2w1") ? room2_c2w1()
+                        : room2();
+        const std::vector<Eigen::Vector2f> wp = {{-2.f, -1.2f}, {2.f, -1.2f}, {2.f, 0.8f}, {-2.f, 0.8f}};
+        const auto truth = circuit(wp, 0.025f, laps);
+        std::mt19937 rng(std::getenv("WS_SEED") ? static_cast<unsigned>(std::atoi(std::getenv("WS_SEED"))) : 7u);
+        RunConfig cfg; cfg.exec_motion = true;
+
+        BaseModel base;
+        EncoderModel enc; enc.sigma_xy = cfg.odom_sigma_xy; enc.sigma_th = cfg.odom_sigma_th;
+        Eigen::Vector3f exec_pose = truth[0], est = Eigen::Vector3f::Zero(), slot_base = Eigen::Vector3f::Zero();
+        const Eigen::Vector3f origin = truth[0];
+        const auto to_map = [&](const Eigen::Vector3f& p)
+        {
+            const float c = std::cos(-origin.z()), s = std::sin(-origin.z());
+            const Eigen::Vector2f d = p.head<2>() - origin.head<2>();
+            return Eigen::Vector3f(c * d.x() - s * d.y(), s * d.x() + c * d.y(), wrap(p.z() - origin.z()));
+        };
+
+        rc::boxes::Layout L;
+        rc::boxes::InitParams ip; ip.sensor_sigma = cfg.scan_sigma;
+        float yaw0 = 0.f;
+        double beta_sum = 0.0; long nreg = 0, nfail = 0;
+        // ⚠ THE CLOUD IS FUSED ONLINE, NOT APPENDED. A raw accumulator with a 200000-point cap
+        // stops taking data at frame ~555 of 1439, so the evidence is dominated by the EARLIEST
+        // frames — exactly the ones registered against the worst layout — and no later, better
+        // view can ever correct them. Fusing per 10-cm cell by information weight instead keeps
+        // every frame, keeps the set bounded by the ROOM's size rather than the run's length, and
+        // lets a good late look pull a cell off a bad early one. Sigma kept is the best single
+        // look at that cell, never the fused one: repeated views of a wall are correlated, and
+        // claiming sqrt(N) precision from them is the same error as [[wall-factor-5000x-too-weak]].
+        struct Vox { Eigen::Vector2d acc{0.0, 0.0}; double w = 0.0; float smin = 1e9f; };
+        std::map<std::pair<int, int>, Vox> vmap;
+        std::vector<rc::boxes::CloudPoint> cloud;
+        rc::boxes::GrowParams gp; gp.sensor_sigma = cfg.scan_sigma;
+        const auto fuse = [&]()
+        {
+            cloud.clear(); cloud.reserve(vmap.size());
+            for (const auto& [k, v] : vmap)
+                cloud.push_back({Eigen::Vector2f(static_cast<float>(v.acc.x() / v.w),
+                                                 static_cast<float>(v.acc.y() / v.w)), v.smin});
+        };
+        // ⚠ THE POSE COVARIANCE IS PART OF THE DATA, NOT A DIAGNOSTIC. Odometry-only poses drift,
+        // and a return placed by a drifted pose is not a sharp measurement of a wall. Propagating
+        // P through the same composition the estimate uses is what lets grow() tell a column from
+        // a smear; without it the rectangle grew a spurious box at 449161 nats. Standard
+        // differential-drive propagation, no tuning: Q is the encoder model's own sigmas.
+        Eigen::Matrix3f P = Eigen::Matrix3f::Zero();
+        const Eigen::Matrix3f Q = Eigen::Vector3f(enc.sigma_xy * enc.sigma_xy,
+                                                  enc.sigma_xy * enc.sigma_xy,
+                                                  enc.sigma_th * enc.sigma_th).asDiagonal();
+        double sig_last = 0.0; float rms = 0.f;
+        int n_prop = 0, n_adm = 0; float last_dL = 0.f;
+        std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
+
+        for (size_t f = 0; f < truth.size(); ++f)
+        {
+            const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, truth[f]);
+            const Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+            exec_pose = compose(exec_pose, body);
+            const Eigen::Vector3f meas = (f == 0) ? Eigen::Vector3f::Zero() : enc.measure(body, rng);
+            const float ce = std::cos(est.z()), se = std::sin(est.z());
+            const Eigen::Vector3f odom_delta(ce * meas.x() - se * meas.y(),
+                                             se * meas.x() + ce * meas.y(), wrap(meas.z()));
+            const Eigen::Vector3f pred = (f == 0) ? Eigen::Vector3f::Zero()
+                : Eigen::Vector3f(est.x() + odom_delta.x(), est.y() + odom_delta.y(), wrap(est.z() + odom_delta.z()));
+            (void)slot_base;
+            if (f > 0)
+            {
+                Eigen::Matrix3f F = Eigen::Matrix3f::Identity(), G = Eigen::Matrix3f::Identity();
+                F(0, 2) = -se * meas.x() - ce * meas.y();
+                F(1, 2) =  ce * meas.x() - se * meas.y();
+                G(0, 0) = ce; G(0, 1) = -se; G(1, 0) = se; G(1, 1) = ce;
+                P = F * P * F.transpose() + G * Q * G.transpose();
+            }
+
+            const auto pts = scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
+            if (pts.size() < 20) { est = pred; continue; }
+
+            if (L.empty())
+            {
+                if (const auto ini = rc::boxes::init_from_scan(pts, ip))
+                { yaw0 = ini->first; L = ini->second; est = Eigen::Vector3f(0.f, 0.f, -yaw0); }
+                continue;
+            }
+            // ── ODOMETRY ONLY, FROM A ZERO START. NO RELOCALISATION. ────────────────────────
+            // The problem is {global poses, global clouds} explained by the simplest Manhattan
+            // closed simply-connected layout. Poses come from dead reckoning alone, so structure
+            // estimation is decoupled from pose estimation and cannot be corrupted by it — and any
+            // structure the layout grows is evidence about the ROOM, never about a pose error.
+            // WS_BOXES_REG=1 re-couples them later, to measure what registration is worth.
+            if (std::getenv("WS_BOXES_REG") != nullptr)
+            {
+                const auto rr = rc::boxes::register_scan(L, pts, pred, cfg.scan_sigma);
+                if (rr.ok) { est = rr.pose; P = rr.cov; beta_sum += rr.beta; ++nreg; }
+                else { est = pred; ++nfail; }
+            }
+            else { est = pred; ++nreg; }
+
+            // Accumulate the global cloud the layout has to explain, each return carrying the
+            // 1-sigma uncertainty of WHERE IT IS — pose translation plus the lever arm of the
+            // heading error at that range. First-order propagation of P through p = t + R(th) q.
+            {
+                const float c2 = std::cos(est.z()), s2 = std::sin(est.z());
+                for (const auto& q : pts)
+                {
+                    const Eigen::Vector2f jth(-s2 * q.x() - c2 * q.y(), c2 * q.x() - s2 * q.y());
+                    const Eigen::Vector2f pxth(P(0, 2), P(1, 2));
+                    const float tr = P(0, 0) + P(1, 1)
+                                   + P(2, 2) * jth.squaredNorm() + 2.f * pxth.dot(jth);
+                    const float sg = std::sqrt(std::max(0.f, tr) * 0.5f);
+                    const Eigen::Vector2f g(c2 * q.x() - s2 * q.y() + est.x(),
+                                            s2 * q.x() + c2 * q.y() + est.y());
+                    const float s0 = std::sqrt(sg * sg + cfg.scan_sigma * cfg.scan_sigma);
+                    const double w = 1.0 / (static_cast<double>(s0) * s0);
+                    auto& v = vmap[{static_cast<int>(std::floor(g.x() / gp.cell)),
+                                    static_cast<int>(std::floor(g.y() / gp.cell))}];
+                    v.acc += w * g.cast<double>(); v.w += w; v.smin = std::min(v.smin, sg);
+                    sig_last = sg;
+                }
+            }
+            // grow() admits at most one edit per call, so run it to a fixed point: a room with
+            // four columns must be allowed to find all four from the same cloud. The loop bound
+            // is the parameter budget, not a tuning knob.
+            if (f % 200 == 0 and f > 0 and std::getenv("WS_BOXES_NOGROW") == nullptr)
+                for (int it = 0; it < 8; ++it)
+                {
+                    fuse();
+                    // OPTIMISE, THEN LOOK FOR WHAT IS LEFT. Structure is only ever asked to explain
+                    // a residual the continuous parameters have already been given every chance to
+                    // remove. Reversing these two lines is what produced the wall slivers.
+                    rms = rc::boxes::refit(L, cloud, gp);
+                    const auto gr = rc::boxes::grow(L, cloud, gp);
+                    n_prop += gr.proposed; n_adm += std::max(0, gr.admitted);
+                    if (std::getenv("WS_BOXES_DEBUG") and (gr.admitted != 0 or it == 0))
+                        std::printf("      [f=%4zu it=%d] boxes=%zu pos=%.2fx%.2f rms=%.3f "
+                                    "prop=%d adm=%+d dL=%.0f\n", f, it, L.boxes.size(),
+                                    L.boxes.front().width(), L.boxes.front().height(),
+                                    rms, gr.proposed, gr.admitted, gr.best_dL);
+                    if (gr.admitted == 0) break;
+                    last_dL = gr.best_dL;
+                }
+            // The map frame is a gauge fixed only mod 90 degrees, so the pose error must be read
+            // through the same quarter-turn the IoU is. Without this c2/c4 reported 3.465 m of
+            // "drift" that was a 90-degree relabelling of the SAME trajectory.
+            if (f % 200 == 0 and f > 0 and std::getenv("WS_BOXES_NOGROW") != nullptr)
+            { fuse(); rms = rc::boxes::refit(L, cloud, gp); }
+            const Eigen::Vector3f tm = to_map(exec_pose);
+            for (int k = 0; k < 4; ++k)
+            {
+                const float a4 = static_cast<float>(k) * kPi * 0.5f;
+                const float ca = std::cos(a4), sa = std::sin(a4);
+                const Eigen::Vector2f r(ca * est.x() - sa * est.y(), sa * est.x() + ca * est.y());
+                perr_q[static_cast<size_t>(k)] += (r - tm.head<2>()).norm();
+            }
+            ++nperr;
+        }
+
+        const auto verts = L.polygon();
+        Poly pw; for (const auto& v : verts) pw.push_back(v);
+        // The map frame is a GAUGE, determined only mod 90 degrees (see init_from_scan). Scoring
+        // against the world polygon must therefore align the two first — take the best of the four
+        // quarter-turns. This is a property of the COMPARISON; the estimate is not ambiguous.
+        float iou = 0.f;
+        Poly ew;
+        if (pw.size() >= 4)
+            for (int k = 0; k < 4; ++k)
+            {
+                const float a4 = static_cast<float>(k) * kPi * 0.5f;
+                const float ca = std::cos(a4), sa = std::sin(a4);
+                Poly rot;
+                for (const auto& v : pw) rot.push_back({ca * v.x() - sa * v.y(), sa * v.x() + ca * v.y()});
+                const Poly w4 = to_world(rot, truth[0]);
+                const float s4 = polygon_iou(w4, room);
+                if (s4 > iou) { iou = s4; ew = w4; }
+            }
+        (void)ew;
+        std::printf("BOXES %-5s truth_verts=%2zu | boxes=%zu verts=%2zu IoU=%.3f | pose_err=%.3f m"
+                    " | grow: proposed=%d admitted=%d last_dL=%.0f nats | sig=%.3f rms=%.3f m\n",
+                    rname.c_str(), room.size(), L.boxes.size(), verts.size(), iou,
+                    nperr ? *std::min_element(perr_q.begin(), perr_q.end()) / static_cast<double>(nperr) : -1.0,
+                    n_prop, n_adm, last_dL, sig_last, rms);
+        (void)beta_sum; (void)nfail;
+        for (const auto& b : L.boxes)
+            std::printf("      %s box [%6.2f %6.2f]x[%6.2f %6.2f]  %.2f x %.2f m\n",
+                        b.positive ? "+" : "-", b.lo.x(), b.hi.x(), b.lo.y(), b.hi.y(),
+                        b.width(), b.height());
+        return 0;
+    }
 
     if (const char* rp = std::getenv("WS_REPLAY")) return run_replay(rp);
 
