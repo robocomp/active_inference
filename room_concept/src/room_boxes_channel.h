@@ -121,6 +121,43 @@ namespace rc::boxch
     private:
         struct Vox { Eigen::Vector2d acc{0.0, 0.0}; double w = 0.0; float smin = 1e9f; };
 
+        /// ── FREE SPACE: THE CELLS THE BEAMS PASSED THROUGH ──────────────────────────────────
+        /// ★★★★★ THE LAYOUT IS BUILT FROM THE INSIDE OUT, NOT THE OUTSIDE IN.
+        /// The first design seeded one box = the interval HULL of the returns and let growth carve
+        /// it down. That is right when a room is nearly convex — a rectangle with columns — and
+        /// catastrophically wrong for an apartment, where the hull is a big rectangle and MOST OF
+        /// IT IS NOT THE APARTMENT. Every return then sits deep inside the hull, reads as
+        /// unexplained matter, and the estimator carves: measured on an 8-box apartment,
+        /// **74 boxes, 290 vertices against 32, IoU 0.195**.
+        /// The region the robot has actually traversed is the honest starting point, and it is
+        /// something the sensor MEASURES rather than something the hull ASSUMES: a cell a beam
+        /// passed through is free, and free space is the room. This is why the box-decomposition
+        /// literature builds from occupancy rather than from a bounding volume.
+        std::map<std::pair<int, int>, int> free_;
+        /// The robot's own cell trail — always free, and the seed's guaranteed starting point.
+        std::pair<int, int> last_cell_{0, 0};
+        bool have_cell_ = false;
+
+        /// Largest axis-aligned box of free cells containing `seed`, grown greedily one row or
+        /// column at a time. No threshold: a side stops when the next line is not free.
+        rc::boxes::Box grow_free_box(const std::pair<int, int>& seed) const;
+
+        /// ── THE LAYOUT IS A BOX COVER OF THE OBSERVED FREE SPACE ────────────────────────────
+        /// ★★★★★ Greedy local edits do not converge on apartment topology. Seeded from a hull and
+        /// asked to carve, an 8-box apartment became 74 boxes at IoU 0.195; seeded from free space
+        /// it became 17; with carves forbidden where the beams had swept, the churn simply moved
+        /// into extrusions and it became 65. Each fix was right and none of them addressed the
+        /// shape of the problem: an apartment is not a room with defects, it is a UNION, and it
+        /// should be CONSTRUCTED as one rather than whittled toward one.
+        ///
+        /// So the layout is built directly: repeatedly take the largest axis-aligned rectangle of
+        /// free cells not yet covered, and stop when the next one does not pay its own description
+        /// length. That is the same MDL that governs grow(), applied to construction instead of to
+        /// repair, and it is what the box-decomposition literature does — build from occupancy,
+        /// not from a bounding volume. Returns then only REFINE the offsets, which is the job they
+        /// are actually good at.
+        bool rebuild_from_free();
+
         Params p_;
         rc::boxes::Layout L_;
         /// ⚠ THE LAYOUT LIVES IN ITS OWN RECTILINEAR FRAME, ROTATED BY `yaw_` FROM THE AGENT'S MAP

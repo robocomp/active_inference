@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <locale>
+#include <set>
 
 namespace rc::boxch
 {
@@ -57,6 +58,33 @@ namespace rc::boxch
             smax = std::max(smax, sg);
         }
         last_sigma_ = smax;
+
+        // ── MARK THE FREE SPACE EACH BEAM SWEPT ─────────────────────────────────────────────
+        // From the sensor to just short of the return: those cells were seen through, so they are
+        // room. The last cell is NOT marked — that is where the surface is.
+        {
+            const Eigen::Vector2f o = pose.head<2>();
+            auto& fo = free_;
+            const float step = 0.5f * p_.cell;
+            for (const auto& q : band)
+            {
+                const Eigen::Vector2f g(c * q.x() - s * q.y() + pose.x(), s * q.x() + c * q.y() + pose.y());
+                const Eigen::Vector2f d = g - o;
+                const float len = d.norm();
+                if (len < 1e-3f) continue;
+                const Eigen::Vector2f u = d / len;
+                for (float t = 0.f; t < len - p_.cell; t += step)
+                {
+                    const Eigen::Vector2f m = o + u * t;
+                    ++fo[{static_cast<int>(std::floor(m.x() / p_.cell)),
+                          static_cast<int>(std::floor(m.y() / p_.cell))}];
+                }
+            }
+            last_cell_ = {static_cast<int>(std::floor(pose.x() / p_.cell)),
+                          static_cast<int>(std::floor(pose.y() / p_.cell))};
+            have_cell_ = true;
+            ++free_[last_cell_];             // the robot is where it is
+        }
 
         // ── THE GAUGE, VOTED FROM THE AGENT'S OWN WALL SEGMENTS ─────────────────────────────
         // A fitted segment's normal is an orientation estimate that does not care what order the
@@ -114,6 +142,128 @@ namespace rc::boxch
         const double x = yaw4_cos_, y = yaw4_sin_;
         yaw4_cos_ = ca * x - sa * y;
         yaw4_sin_ = sa * x + ca * y;
+    }
+
+    rc::boxes::Box Channel::grow_free_box(const std::pair<int, int>& seed) const
+    {
+        const auto is_free = [&](int x, int y)
+        {   // one sweep IS a measurement; requiring two deleted the evidence nearest the walls
+            const auto it = free_.find({x, y});
+            return it != free_.end() and it->second >= 1;
+        };
+        int x0 = seed.first, x1 = seed.first, y0 = seed.second, y1 = seed.second;
+        bool moved = true;
+        while (moved)
+        {
+            moved = false;
+            // Each side advances only if the ENTIRE next line is free — the box stays a box, and
+            // the stopping rule is "the data says no", not a tuned size.
+            bool ok = true;
+            for (int x = x0; x <= x1 and ok; ++x) ok = is_free(x, y1 + 1);
+            if (ok) { ++y1; moved = true; }
+            ok = true;
+            for (int x = x0; x <= x1 and ok; ++x) ok = is_free(x, y0 - 1);
+            if (ok) { --y0; moved = true; }
+            ok = true;
+            for (int y = y0; y <= y1 and ok; ++y) ok = is_free(x1 + 1, y);
+            if (ok) { ++x1; moved = true; }
+            ok = true;
+            for (int y = y0; y <= y1 and ok; ++y) ok = is_free(x0 - 1, y);
+            if (ok) { --x0; moved = true; }
+        }
+        rc::boxes::Box b;
+        b.lo = {static_cast<float>(x0) * p_.cell, static_cast<float>(y0) * p_.cell};
+        b.hi = {static_cast<float>(x1 + 1) * p_.cell, static_cast<float>(y1 + 1) * p_.cell};
+        return b;
+    }
+
+    bool Channel::rebuild_from_free()
+    {
+        if (free_.empty()) return false;
+        std::set<std::pair<int, int>> F;
+        // ⚠ ONE SWEEP IS ALREADY A MEASUREMENT. Requiring two was my own invention, and in a
+        // large apartment traversed once it removed most of the evidence near the walls: the cover
+        // then sat ~1 m inside them (rms 1.157 m) and the room came out at IoU 0.224. A cell a
+        // beam passed through is free; how many beams is a matter of confidence, not of fact, and
+        // confidence belongs in the weighting, not in a count.
+        for (const auto& [k, n] : free_) if (n >= 1) F.insert(k);
+        if (F.size() < 12) return false;
+
+        std::set<std::pair<int, int>> covered;
+        std::vector<rc::boxes::Box> out;
+        const auto is_free = [&](int x, int y) { return F.count({x, y}) > 0; };
+
+        for (int iter = 0; iter < 24; ++iter)
+        {
+            // The largest free rectangle containing some UNCOVERED cell. Seeds are sampled rather
+            // than exhaustive: the cover is greedy anyway, so an exact argmax buys nothing.
+            long best_area = 0; rc::boxes::Box best; bool have = false;
+            int tried = 0;
+            for (const auto& s : F)
+            {
+                if (covered.count(s)) continue;
+                if (++tried > 400) break;
+                int x0 = s.first, x1 = s.first, y0 = s.second, y1 = s.second;
+                bool moved = true;
+                while (moved)
+                {
+                    moved = false;
+                    bool ok = true;
+                    for (int x = x0; x <= x1 and ok; ++x) ok = is_free(x, y1 + 1);
+                    if (ok) { ++y1; moved = true; }
+                    ok = true;
+                    for (int x = x0; x <= x1 and ok; ++x) ok = is_free(x, y0 - 1);
+                    if (ok) { --y0; moved = true; }
+                    ok = true;
+                    for (int y = y0; y <= y1 and ok; ++y) ok = is_free(x1 + 1, y);
+                    if (ok) { ++x1; moved = true; }
+                    ok = true;
+                    for (int y = y0; y <= y1 and ok; ++y) ok = is_free(x0 - 1, y);
+                    if (ok) { --x0; moved = true; }
+                }
+                long gain = 0;
+                for (int x = x0; x <= x1; ++x)
+                    for (int y = y0; y <= y1; ++y) if (not covered.count({x, y})) ++gain;
+                if (gain > best_area)
+                {
+                    best_area = gain; have = true;
+                    best.lo = {static_cast<float>(x0) * p_.cell, static_cast<float>(y0) * p_.cell};
+                    best.hi = {static_cast<float>(x1 + 1) * p_.cell, static_cast<float>(y1 + 1) * p_.cell};
+                }
+            }
+            if (not have) break;
+            // MDL: a box costs four offsets at the Occam precision log(span/sigma). It must explain
+            // more cells than that many nats. Same currency as grow(); no new constant.
+            const float sig = std::sqrt(p_.sensor_sigma * p_.sensor_sigma + p_.sigma_flat * p_.sigma_flat);
+            const float span = std::max(1.f, best.width() + best.height());
+            const float code = 4.f * std::log(span / sig);
+            if (static_cast<float>(best_area) < code and not out.empty()) break;
+            out.push_back(best);
+            for (int x = static_cast<int>(std::floor(best.lo.x() / p_.cell));
+                 x < static_cast<int>(std::floor(best.hi.x() / p_.cell)); ++x)
+                for (int y = static_cast<int>(std::floor(best.lo.y() / p_.cell));
+                     y < static_cast<int>(std::floor(best.hi.y() / p_.cell)); ++y)
+                    covered.insert({x, y});
+        }
+        if (out.empty()) return false;
+
+        // Into the layout frame, and keep only boxes that touch the growing union so the region
+        // stays connected — a detached box would be a second apartment.
+        const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+        rc::boxes::Layout N;
+        for (const auto& b : out)
+        {
+            const Eigen::Vector2f a(cy * b.lo.x() - sy * b.lo.y(), sy * b.lo.x() + cy * b.lo.y());
+            const Eigen::Vector2f d(cy * b.hi.x() - sy * b.hi.y(), sy * b.hi.x() + cy * b.hi.y());
+            rc::boxes::Box t; t.lo = a.cwiseMin(d); t.hi = a.cwiseMax(d);
+            if (not t.valid()) continue;
+            N.boxes.push_back(t);
+        }
+        if (N.boxes.empty()) return false;
+        N.cov = Eigen::MatrixXf::Identity(static_cast<long>(N.n_offsets()),
+                                          static_cast<long>(N.n_offsets())) * (p_.sigma_flat * p_.sigma_flat);
+        L_ = N;
+        return true;
     }
 
     std::vector<Eigen::Vector2f> Channel::polygon() const
@@ -189,6 +339,15 @@ namespace rc::boxch
             yaw_ = static_cast<float>(a + k * q);
         }
 
+        // CONSTRUCT from free space. Cheap, deterministic, and it replaces both the hull seed and
+        // most of what grow() was being asked to repair.
+        if (rebuild_from_free())
+        {
+            fuse();
+            if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp);
+            return true;
+        }
+
         // ── BORN IN THE VOTED FRAME, FROM THE FUSED CLOUD ───────────────────────────────────
         // The smallest hypothesis: one box, the interval hull of everything seen so far, taken at
         // a quantile so a handful of stray returns cannot inflate it. Manhattan, closed and simply
@@ -197,6 +356,22 @@ namespace rc::boxch
         {
             fuse();
             if (cloud_.size() < static_cast<std::size_t>(gp.min_cluster)) return false;
+            // ── SEED FROM FREE SPACE, NOT FROM THE HULL ─────────────────────────────────────
+            if (have_cell_)
+            {
+                const rc::boxes::Box fb = grow_free_box(last_cell_);
+                if (fb.valid() and fb.width() > 3.f * p_.cell and fb.height() > 3.f * p_.cell)
+                {
+                    const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+                    const Eigen::Vector2f c1(cy * fb.lo.x() - sy * fb.lo.y(), sy * fb.lo.x() + cy * fb.lo.y());
+                    const Eigen::Vector2f c2(cy * fb.hi.x() - sy * fb.hi.y(), sy * fb.hi.x() + cy * fb.hi.y());
+                    rc::boxes::Box b;
+                    b.lo = c1.cwiseMin(c2); b.hi = c1.cwiseMax(c2);
+                    L_.boxes.push_back(b);
+                    L_.cov = Eigen::MatrixXf::Identity(4, 4) * (p_.sigma_flat * p_.sigma_flat);
+                    return true;
+                }
+            }
             std::vector<float> xs, ys;
             xs.reserve(cloud_.size()); ys.reserve(cloud_.size());
             for (const auto& q : cloud_) { xs.push_back(q.p.x()); ys.push_back(q.p.y()); }
@@ -227,7 +402,21 @@ namespace rc::boxch
             fuse();
             if (cloud_.size() < static_cast<std::size_t>(gp.min_cluster)) return changed;
             rms_ = rc::boxes::refit(L_, cloud_, gp);
-            const auto gr = rc::boxes::grow(L_, cloud_, gp);
+            // Free space, in the LAYOUT frame and on grow()'s grid.
+            std::set<std::pair<int, int>> fl;
+            {
+                const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+                for (const auto& [k, n] : free_)
+                {
+                    if (n < 2) continue;
+                    const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                            (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                    const Eigen::Vector2f q(cy * m.x() - sy * m.y(), sy * m.x() + cy * m.y());
+                    fl.insert({static_cast<int>(std::floor(q.x() / p_.cell)),
+                               static_cast<int>(std::floor(q.y() / p_.cell))});
+                }
+            }
+            const auto gr = rc::boxes::grow(L_, cloud_, gp, &fl);
             n_proposed_ += gr.proposed;
             if (gr.admitted > 0) { ++n_admitted_; last_dL_ = gr.best_dL; changed = true; }
             else if (gr.admitted < 0) { ++n_removed_; changed = true; }

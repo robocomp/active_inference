@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <numeric>
 #include <map>
+#include <set>
 #include <limits>
 
 namespace rc::boxes
@@ -52,10 +53,6 @@ namespace rc::boxes
             if (d.x() > d.y()) return {(p.x() - b.lo.x() < b.hi.x() - p.x()) ? -1.f : 1.f, 0.f};
             return {0.f, (p.y() - b.lo.y() < b.hi.y() - p.y()) ? -1.f : 1.f};
         }
-    }   // namespace
-
-    namespace
-    {
         /// Which SURFACE does this point's distance come from? The box that wins Layout::sdf's
         /// min/max, and within it the face nearest the point. Returned as a stable id so returns
         /// lying on one physical wall land in one group.
@@ -79,6 +76,10 @@ namespace rc::boxes
             return win * 4 + face;
         }
 
+    }   // namespace
+
+    namespace
+    {
         /// ── THE EVIDENCE ON ONE WALL IS ONE WALL'S WORTH, NOT ONE PER RETURN ────────────────
         /// sigma_flat is a SURFACE's flatness error: every return on a given wall shares it.
         /// Charging it independently per point lets N returns on one plane claim N times the
@@ -476,13 +477,21 @@ namespace rc::boxes
                 const double rw = 1.0 / (1.0 + static_cast<double>(r) * r);
                 const double w = rw / (static_cast<double>(q.sigma_pose) * q.sigma_pose);
                 ss += static_cast<double>(d) * d;
-                for (size_t k = 0; k < n; ++k)
+                // ⚠ ONLY ONE OFFSET MOVES A GIVEN POINT — the face its distance comes from. The
+                // original loop perturbed all 4*nboxes offsets per sample to discover that, which
+                // is O(order) sdf evaluations to learn something active_face() answers directly.
+                // At order 15 that is ~60x the necessary work, and it was the whole reason a
+                // 12-room high-order sweep could not finish in ten minutes.
+                const int id = active_face(L, q.p);
+                if (id < 0) continue;
+                const size_t k = static_cast<size_t>(id);
+                if (k >= n) continue;
                 {
                     Layout T = L;
                     Box& b = T.boxes[k / 4];
                     ((k % 4 == 0) ? b.lo.x() : (k % 4 == 1) ? b.lo.y() : (k % 4 == 2) ? b.hi.x() : b.hi.y()) += eps;
                     const float jk = (T.sdf(q.p) - d) / eps;
-                    if (std::abs(jk) < 1e-4f) continue;          // this offset does not move this point
+                    if (std::abs(jk) < 1e-4f) continue;
                     H[k] += w * jk * jk;
                     g[k] -= w * jk * static_cast<double>(d);
                 }
@@ -577,14 +586,14 @@ namespace rc::boxes
             const float eps = 1e-3f;
             for (const auto& q : pts)
             {
+                const int id = active_face(L, q.p);
+                if (id < 0 or static_cast<size_t>(id / 4) != bi) continue;   // not this box's face
                 const float d = L.sdf(q.p);
-                for (int k = 0; k < 4; ++k)
-                {
-                    Layout T = L;
-                    Box& b = T.boxes[bi];
-                    ((k == 0) ? b.lo.x() : (k == 1) ? b.lo.y() : (k == 2) ? b.hi.x() : b.hi.y()) += eps;
-                    if (std::abs((T.sdf(q.p) - d) / eps) > 1e-4f) ++n[static_cast<size_t>(k)];
-                }
+                const int k = id % 4;
+                Layout T = L;
+                Box& b = T.boxes[bi];
+                ((k == 0) ? b.lo.x() : (k == 1) ? b.lo.y() : (k == 2) ? b.hi.x() : b.hi.y()) += eps;
+                if (std::abs((T.sdf(q.p) - d) / eps) > 1e-4f) ++n[static_cast<size_t>(k)];
             }
             return n;
         }
@@ -603,7 +612,8 @@ namespace rc::boxes
         }
     }   // namespace
 
-    GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p)
+    GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
+                    const std::set<std::pair<int, int>>* freecells)
     {
         GrowResult R;
         if (L.empty() or cloud.size() < static_cast<size_t>(p.min_cluster)) return R;
@@ -836,6 +846,22 @@ namespace rc::boxes
                     { best_dL = dL; best = T.boxes[static_cast<size_t>(widen)]; have = true; best_widen = widen; }
                 }
                 continue;   // a cluster that touches an existing box is that box getting bigger
+            }
+
+            // ⚠ A CARVE MAY ONLY REMOVE SPACE NOBODY HAS BEEN. If the beams swept through it, it
+            // is room, and no residual argument may take it away. Free space is MEASURED; a carve
+            // is INFERRED, and the measurement wins. Without this, an 8-box apartment was cut into
+            // 74 boxes (IoU 0.195) chasing returns that were merely far from a wall the hull seed
+            // had wrongly assumed.
+            if (freecells != nullptr)
+            {
+                int nfree = 0, ncell = 0;
+                for (int gx = static_cast<int>(std::floor(nb.lo.x() / p.cell));
+                     gx <= static_cast<int>(std::floor(nb.hi.x() / p.cell)); ++gx)
+                    for (int gy = static_cast<int>(std::floor(nb.lo.y() / p.cell));
+                         gy <= static_cast<int>(std::floor(nb.hi.y() / p.cell)); ++gy)
+                    { ++ncell; if (freecells->count({gx, gy})) ++nfree; }
+                if (ncell > 0 and 2 * nfree > ncell) continue;   // mostly traversed ⇒ it is room
             }
 
             // (b) a genuinely NEW negative box: four new offsets, each coded at the Laplace/Occam

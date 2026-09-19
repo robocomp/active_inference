@@ -41,6 +41,7 @@
 
 #include <Eigen/Dense>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace rc::boxes
@@ -173,6 +174,11 @@ namespace rc::boxes
         float sigma_pose = 0.f;   ///< 1-sigma position uncertainty of this return in the map frame
     };
 
+    /// A cell the beams passed through. `free` is the evidence that it is ROOM, which is a
+    /// measurement, not an assumption — and the only thing that can stop growth from carving an
+    /// apartment into scraps or extending it into space nobody has been.
+    struct FreeCell { int x = 0, y = 0; };
+
     struct GrowParams
     {
         float sensor_sigma = 0.02f;   // PHYSICAL: range noise
@@ -201,7 +207,11 @@ namespace rc::boxes
     float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters = 10);
 
     /// One structure step over the accumulated global cloud. Returns what it did; mutates `L`.
-    GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p);
+    /// `free` is the observed free space, as cell coordinates on the same grid as `p.cell`, in
+    /// the LAYOUT frame. Empty means "no free-space evidence", and grow() falls back to judging
+    /// on returns alone — which is what it did before, and what fails on an apartment.
+    GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
+                    const std::set<std::pair<int, int>>* free = nullptr);
 
     RegisterResult register_scan(const Layout& L,
                                  const std::vector<Eigen::Vector2f>& pts_robot,

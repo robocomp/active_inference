@@ -2251,7 +2251,14 @@ int run_replay(const char* path)
         std::mt19937 rng(seed);
         std::uniform_real_distribution<float> U(0.f, 1.f);
         rc::boxes::Layout L;
-        const float W = 4.5f + 3.5f * U(rng), H = 3.5f + 2.5f * U(rng);
+        // ⚠ THE SHELL MUST GROW WITH THE ORDER. Nineteen features on a 5 m wall is not a
+        // high-order room, it is a serrated one: the features merge, the wall stops existing, and
+        // the test measures something no apartment looks like. apartamento_layout.svg is 46 m of
+        // boundary for ~15 boxes, i.e. roughly 3 m of wall per feature, so the shell is sized to
+        // keep that ratio as the order climbs.
+        const float grow = std::sqrt(static_cast<float>(std::max(1, order)) / 3.f);
+        const float W = (4.5f + 3.5f * U(rng)) * std::max(1.f, grow);
+        const float H = (3.5f + 2.5f * U(rng)) * std::max(1.f, grow);
         rc::boxes::Box shell;
         shell.lo = {-0.5f * W, -0.5f * H}; shell.hi = {0.5f * W, 0.5f * H};
         L.boxes.push_back(shell);
@@ -2295,6 +2302,16 @@ int run_replay(const char* path)
                 }
                 b.positive = not carve;
                 if (not b.valid()) continue;
+                // Reject a feature that touches another: two adjacent carves merge into one
+                // wider carve, so the room's true order would not be what the generator claims.
+                bool clash = false;
+                for (size_t q = 1; q < L.boxes.size(); ++q)
+                {
+                    const auto& e = L.boxes[q];
+                    if (b.lo.x() <= e.hi.x() + 0.25f and b.hi.x() >= e.lo.x() - 0.25f and
+                        b.lo.y() <= e.hi.y() + 0.25f and b.hi.y() >= e.lo.y() - 0.25f) { clash = true; break; }
+                }
+                if (clash) continue;
                 rc::boxes::Layout T = L; T.boxes.push_back(b);
                 const auto pv = T.polygon();
                 if (pv.size() < 4) continue;
@@ -2313,6 +2330,138 @@ int run_replay(const char* path)
         for (const auto& w : wp) if (not L.inside(w)) return std::nullopt;
         return std::make_pair(room, wp);
     }
+
+    // ── AN APARTMENT: ROOMS AND CORRIDORS, GROWN AS A TREE OF OVERLAPPING BOXES ─────────────
+    // A different SHAPE of problem from "one shell with features on its walls", and much closer to
+    // apartamento_layout.svg: 9 x 9 m, 46 m of boundary, ~15 boxes. A corridor is a long thin box
+    // joining two larger ones — exactly the geometry the thinness rule and the identifiability
+    // rule are most likely to refuse, and the reason a feature-on-a-wall sweep can look healthy
+    // while the real target does not work.
+    //
+    // Grown as a TREE (each box attached to exactly one parent, overlapping it) so the union is
+    // connected and hole-free by construction. The tour is a depth-first walk that routes through
+    // the OVERLAP of each parent/child pair — i.e. through the doorway — because a straight line
+    // between two room centres generally leaves the apartment.
+    inline std::optional<std::pair<Poly, std::vector<Eigen::Vector2f>>>
+    random_apartment(unsigned seed, int order)
+    {
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<float> U(0.f, 1.f);
+        rc::boxes::Layout L;
+        std::vector<int> parent{-1};
+        rc::boxes::Box first;
+        first.lo = {-1.8f, -1.6f}; first.hi = {1.8f, 1.6f};
+        L.boxes.push_back(first);
+
+        for (int k = 1; k < order; ++k)
+        {
+            bool placed = false;
+            for (int attempt = 0; attempt < 60 and not placed; ++attempt)
+            {
+                // ⚠ CLAMP THE INDEX, not just the read. U(rng) can return 1.0, so this lands ONE
+                // PAST the end; clamping only where the parent is read left the same out-of-range
+                // value in parent[] and in the overlap test, and the tree walk then dereferenced
+                // it. Core dump, not a wrong answer — which is the lucky version.
+                const int pi = std::min<int>(static_cast<int>(U(rng) * static_cast<float>(L.boxes.size())),
+                                             static_cast<int>(L.boxes.size()) - 1);
+                const rc::boxes::Box par = L.boxes[static_cast<size_t>(pi)];
+                const bool corridor = U(rng) < 0.45f;
+                const float len = corridor ? (2.2f + 2.6f * U(rng)) : (2.4f + 2.0f * U(rng));
+                const float wid = corridor ? (0.95f + 0.5f * U(rng)) : (2.2f + 1.8f * U(rng));
+                const int side = static_cast<int>(U(rng) * 4.f) % 4;
+                rc::boxes::Box b;
+                // overlap the parent by ~0.3 m so the two are genuinely joined, not merely touching
+                const float ov = 0.30f;
+                if (side == 0 or side == 2)   // grow in x
+                {
+                    const float y0 = par.lo.y() + U(rng) * std::max(0.01f, par.height() - wid);
+                    b.lo.y() = y0; b.hi.y() = y0 + wid;
+                    if (side == 0) { b.hi.x() = par.lo.x() + ov; b.lo.x() = b.hi.x() - len; }
+                    else           { b.lo.x() = par.hi.x() - ov; b.hi.x() = b.lo.x() + len; }
+                }
+                else                          // grow in y
+                {
+                    const float x0 = par.lo.x() + U(rng) * std::max(0.01f, par.width() - wid);
+                    b.lo.x() = x0; b.hi.x() = x0 + wid;
+                    if (side == 1) { b.hi.y() = par.lo.y() + ov; b.lo.y() = b.hi.y() - len; }
+                    else           { b.lo.y() = par.hi.y() - ov; b.hi.y() = b.lo.y() + len; }
+                }
+                if (not b.valid()) continue;
+                // It may overlap its PARENT and nothing else — an overlap with a third box closes
+                // a loop, and a loop around empty space is a HOLE, which the region cannot express.
+                bool bad = false;
+                for (size_t q = 0; q < L.boxes.size() and not bad; ++q)
+                {
+                    if (static_cast<int>(q) == pi) continue;
+                    if (b.lo.x() < L.boxes[q].hi.x() - 0.05f and b.hi.x() > L.boxes[q].lo.x() + 0.05f and
+                        b.lo.y() < L.boxes[q].hi.y() - 0.05f and b.hi.y() > L.boxes[q].lo.y() + 0.05f) bad = true;
+                }
+                if (bad) continue;
+                L.boxes.push_back(b);
+                parent.push_back(pi);
+                placed = true;
+            }
+            if (not placed) break;
+        }
+        if (std::getenv("WS_APT_PROBE")) std::fprintf(stderr, "[apt] grew %zu boxes of %d\n", L.boxes.size(), order);
+        if (L.boxes.size() < 2) return std::nullopt;
+        const auto pv = L.polygon();
+        if (pv.size() < 4) return std::nullopt;
+        Poly room; for (const auto& v : pv) room.push_back(v);
+
+        // ── THE TOUR: depth-first, through the doorways ─────────────────────────────────────
+        std::vector<std::vector<int>> kids(L.boxes.size());
+        for (size_t i = 1; i < L.boxes.size(); ++i)
+            kids[static_cast<size_t>(parent[i])].push_back(static_cast<int>(i));
+        std::vector<Eigen::Vector2f> wp;
+        // ⚠ RETURN Eigen::Vector2f EXPLICITLY, NOT auto. `0.5f * (lo + hi)` is a CwiseBinaryOp
+        // holding REFERENCES to the temporaries on that line; returning it by `auto` hands back an
+        // expression whose operands are already dead. Every waypoint came out NaN, every leg was
+        // rejected, and the sweep reported "no drivable circuit" for rooms that were perfectly
+        // fine. The rule is old and the symptom does not name it: Eigen expression templates must
+        // be evaluated into a concrete type before they leave the scope that built them.
+        const auto centre = [&](int i) -> Eigen::Vector2f
+        { return 0.5f * (L.boxes[static_cast<size_t>(i)].lo + L.boxes[static_cast<size_t>(i)].hi); };
+        const auto doorway = [&](int a, int b) -> Eigen::Vector2f
+        {
+            const auto& A = L.boxes[static_cast<size_t>(a)]; const auto& B = L.boxes[static_cast<size_t>(b)];
+            const Eigen::Vector2f lo = A.lo.cwiseMax(B.lo), hi = A.hi.cwiseMin(B.hi);
+            return 0.5f * (lo + hi);
+        };
+        std::function<void(int)> walk = [&](int i)
+        {
+            wp.push_back(centre(i));
+            for (int c : kids[static_cast<size_t>(i)])
+            {
+                wp.push_back(doorway(i, c));
+                walk(c);
+                wp.push_back(doorway(i, c));
+                wp.push_back(centre(i));
+            }
+        };
+        walk(0);
+        // Every waypoint, and the midpoint of every leg, must be inside — otherwise the robot
+        // would drive through a wall and the run would be measuring the wrong thing.
+        for (size_t i = 0; i < wp.size(); ++i)
+        {
+            if (not L.inside(wp[i]))
+            { if (std::getenv("WS_APT_PROBE")) std::fprintf(stderr, "[apt] wp %zu outside\n", i); return std::nullopt; }
+            // Sample the LEG, not just its midpoint: a leg can leave and re-enter.
+            const Eigen::Vector2f a0 = wp[i], b0 = wp[(i + 1) % wp.size()];
+            for (int t = 1; t < 8; ++t)
+                if (not L.inside(a0 + (b0 - a0) * (static_cast<float>(t) / 8.f)))
+                {
+                if (std::getenv("WS_APT_PROBE"))
+                    std::fprintf(stderr, "[apt] leg %zu leaves: (%.2f,%.2f)->(%.2f,%.2f)  in0=%d in1=%d  nwp=%zu\n",
+                                 i, a0.x(), a0.y(), b0.x(), b0.y(),
+                                 L.inside(a0) ? 1 : 0, L.inside(b0) ? 1 : 0, wp.size());
+                return std::nullopt;
+            }
+        }
+        if (wp.size() < 4) return std::nullopt;
+        return std::make_pair(room, wp);
+    }
+
 
 int main()
 {
@@ -2425,17 +2574,27 @@ int main()
         struct Ident { int i, order; float iou; int boxes, truth_verts, verts; };
         std::vector<Ident> ids;
         int skipped = 0;
+        // Order range, so the sweep can be aimed at a real target: apartamento_layout.svg has 32
+        // vertices ⇒ 14 reflex ⇒ order ~15-16. (It is Manhattan to 96.2% of boundary length at
+        // +0.871 deg; the only non-grid parts are two 0.35 m chamfer edges, which put a ceiling
+        // just under 1.0 on any box representation of it.)
+        const int olo = std::getenv("WS_BOXES_ORDER_LO") ? std::atoi(std::getenv("WS_BOXES_ORDER_LO")) : 1;
+        const int ohi = std::getenv("WS_BOXES_ORDER_HI") ? std::atoi(std::getenv("WS_BOXES_ORDER_HI")) : 6;
+        const int nord = std::max(1, ohi - olo + 1);
         for (int i = 0; i < N; ++i)
         {
-            const int order = 1 + (i % 6);
-            const auto gen = random_room(static_cast<unsigned>(1000 + i), order);
+            const int order = olo + (i % nord);
+            const bool apart = std::getenv("WS_BOXES_STYLE")
+                           and std::string(std::getenv("WS_BOXES_STYLE")) == "corridor";
+            const auto gen = apart ? random_apartment(static_cast<unsigned>(1000 + i), order)
+                                   : random_room(static_cast<unsigned>(1000 + i), order);
             if (not gen) { ++skipped; continue; }
             const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, laps, gen->second);
             by_order[order].push_back(r);
             ids.push_back({i, order, r.iou, r.boxes, r.truth_verts, r.verts});
         }
-        std::printf("\nRANDOM ROOM SWEEP — %d rooms, pose=%s%s, %d laps (%d skipped: no drivable circuit)\n",
-                    N, reg ? "registered" : "odometry-only",
+        std::printf("\nRANDOM ROOM SWEEP — %d rooms, orders %d..%d, pose=%s%s, %d laps (%d skipped: no drivable circuit)\n",
+                    N, olo, ohi, reg ? "registered" : "odometry-only",
                     ranch ? " +RE-ANCHOR" : "", laps, skipped);
         std::printf("  order  n   IoU med   min     p25   | boxes med(truth)  verts med(truth) | rms   out%%  in%%\n");
         std::vector<float> all;
@@ -2453,6 +2612,13 @@ int main()
             std::printf("  %3d  %3zu   %.3f   %.3f   %.3f | %5.1f (%3d)      %5.1f (%4.1f)  | %.3f %5.1f %5.1f\n",
                         ord, v.size(), med(iou), s.front(), s[s.size() / 4],
                         med(bx), ord, med(vt), med(tv), med(rms), med(fo), med(fi));
+        }
+        if (all.empty())
+        {
+            std::printf("  NO ROOMS PRODUCED — every generated layout was rejected (%d skipped).\n"
+                        "  A generator that rejects everything is not a strict generator, it is a\n"
+                        "  broken one; the sweep is reporting that rather than dividing by zero.\n", skipped);
+            return 0;
         }
         std::sort(ids.begin(), ids.end(), [](const Ident& a, const Ident& b) { return a.iou < b.iou; });
         std::printf("  worst 6:");
