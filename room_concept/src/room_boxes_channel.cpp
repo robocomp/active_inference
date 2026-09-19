@@ -74,6 +74,48 @@ namespace rc::boxch
         }
     }
 
+    void Channel::reanchor(const Eigen::Vector2f& c, float rot)
+    {
+        if (not p_.enabled) return;
+        const float cr = std::cos(-rot), sr = std::sin(-rot);
+        // The voxel map is keyed by position, so it has to be rebuilt, not edited in place.
+        std::map<std::pair<int, int>, Vox> nv;
+        for (const auto& [k, v] : vmap_)
+        {
+            if (v.w <= 0.0) continue;
+            const Eigen::Vector2f m(static_cast<float>(v.acc.x() / v.w) - c.x(),
+                                    static_cast<float>(v.acc.y() / v.w) - c.y());
+            const Eigen::Vector2f q(cr * m.x() - sr * m.y(), sr * m.x() + cr * m.y());
+            auto& t = nv[{static_cast<int>(std::floor(q.x() / p_.cell)),
+                          static_cast<int>(std::floor(q.y() / p_.cell))}];
+            t.acc += v.w * q.cast<double>(); t.w += v.w; t.smin = std::min(t.smin, v.smin);
+        }
+        vmap_.swap(nv);
+
+        // ⚠ AND THE BOXES MOVE TOO. The layout frame shares the map frame's ORIGIN — fuse() only
+        // rotates — so when the map origin moves, the layout origin moves with it. A corner at
+        // layout coords p has map coords R(yaw)p, and after map' = R(-rot)(map - c) with
+        // yaw' = yaw - rot:
+        //     p' = R(-yaw')R(-rot)(R(yaw)p - c) = p - R(-yaw)c
+        // a PURE TRANSLATION, which is what keeps the boxes axis-aligned through a gauge change.
+        // The first version of this rotated yaw_ and moved the voxels but left the boxes behind by
+        // |c| — and the cloud still held two offset copies of the room: 33.8% of cells outside,
+        // 32.8% inside, against 32.28%/31.89% measured live. Moving three of the four things that
+        // live in a frame is not a re-anchor.
+        const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);      // OLD yaw, before the update
+        const Eigen::Vector2f t(cy * c.x() - sy * c.y(), sy * c.x() + cy * c.y());
+        for (auto& b : L_.boxes) { b.lo -= t; b.hi -= t; }
+        yaw_ = yaw_ - rot;
+        // The gauge's accumulated evidence is a direction, and directions rotate. Turning the
+        // running quadrupled-angle sum by -4*rot keeps every past vote valid instead of throwing
+        // the session's evidence away and re-converging from the next frame.
+        const double a = -4.0 * static_cast<double>(rot);
+        const double ca = std::cos(a), sa = std::sin(a);
+        const double x = yaw4_cos_, y = yaw4_sin_;
+        yaw4_cos_ = ca * x - sa * y;
+        yaw4_sin_ = sa * x + ca * y;
+    }
+
     std::vector<Eigen::Vector2f> Channel::polygon() const
     {
         if (L_.empty()) return {};

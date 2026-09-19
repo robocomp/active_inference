@@ -3082,6 +3082,9 @@ namespace rc
 
     void RoomConcept::reanchor_map_frame(const Eigen::Vector2f& c, float rot)
     {
+        // The box sidecar lives in the map frame too, and its voxel map spans the whole session.
+        // Skipping it here leaves every accumulated return stale by this exact transform.
+        box_channel_.reanchor(c, rot);
         const Eigen::Rotation2Df Rm(-rot);
         const auto wrap = [](float a) { return std::atan2(std::sin(a), std::cos(a)); };
         const auto xf = [&](const Eigen::Vector3f& p)

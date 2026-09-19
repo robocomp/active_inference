@@ -68,6 +68,20 @@ namespace rc::boxch
                      const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov,
                      const std::vector<float>& seg_phi, const std::vector<float>& seg_len);
 
+        /// ── THE MAP FRAME MOVED ──────────────────────────────────────────────────────────────
+        /// One-shot gauge change p' = R(-rot)(p - c), the same one RoomConcept::reanchor_map_frame
+        /// applies to the window poses, the model tensors, the covariance and the wall map.
+        /// ⚠ THE SIDECAR LIVES IN THE MAP FRAME AND MUST MOVE WITH IT. Its voxel map accumulates
+        /// over the whole session, so a re-anchor that skips it leaves every past return stale by
+        /// a rigid transform while new ones arrive in the new frame — TWO OFFSET COPIES OF THE
+        /// SAME ROOM in one cloud. Measured live: 32.28% of cells more than 3 sigma outside the
+        /// region and 31.89% more than 3 sigma inside, a near-symmetric split that no real room
+        /// geometry produces, followed by extrusions chasing the ghost copy.
+        /// ★★★ THE BENCH CANNOT REPRODUCE THIS. WS_BOXES runs odometry-only with no wall map, so
+        /// it never re-anchors; the event does not exist there. That is the whole answer to "how
+        /// can it work in the bench and not here" — the bench had no such event to get wrong.
+        void reanchor(const Eigen::Vector2f& c, float rot);
+
         /// Re-examine the structure (and create the layout on the first call that can).
         /// Call once per frame; it self-throttles to `every_frames`.
         /// Returns true if the layout changed.

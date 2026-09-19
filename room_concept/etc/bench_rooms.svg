@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1281" height="1048" viewBox="0 0 1281 1048">
+<rect width="1281" height="1048" fill="white"/>
+<text x="8" y="22" font-family="monospace" font-size="16" font-weight="bold">room_concept bench ladder — parsed from tools/wall_slam_selftest.cpp</text>
+<g transform="translate(0,34)"><g transform="translate(0,0)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">rect</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">4 verts — baseline — must grow NOTHING</text>
+  <path d="M75.8,268.0 L351.8,268.0 L351.8,84.0 L75.8,84.0 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="75.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(427,0)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">c1</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">6 verts — 1 corner column</text>
+  <path d="M112.6,268.0 L351.8,268.0 L351.8,84.0 L75.8,84.0 L75.8,231.2 L112.6,231.2 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="112.6" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="112.6" cy="231.2" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(854,0)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">c2</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">8 verts — 2 corner columns</text>
+  <path d="M112.6,268.0 L315.0,268.0 L315.0,231.2 L351.8,231.2 L351.8,84.0 L75.8,84.0 L75.8,231.2 L112.6,231.2 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="112.6" cy="268.0" r="2.6" fill="#d33"/><circle cx="315.0" cy="268.0" r="2.6" fill="#d33"/><circle cx="315.0" cy="231.2" r="2.6" fill="#d33"/><circle cx="351.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="112.6" cy="231.2" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(0,338)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">c4</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">12 verts — 4 corner columns</text>
+  <path d="M112.6,268.0 L315.0,268.0 L315.0,231.2 L351.8,231.2 L351.8,120.8 L315.0,120.8 L315.0,84.0 L112.6,84.0 L112.6,120.8 L75.8,120.8 L75.8,231.2 L112.6,231.2 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="112.6" cy="268.0" r="2.6" fill="#d33"/><circle cx="315.0" cy="268.0" r="2.6" fill="#d33"/><circle cx="315.0" cy="231.2" r="2.6" fill="#d33"/><circle cx="351.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="351.8" cy="120.8" r="2.6" fill="#d33"/><circle cx="315.0" cy="120.8" r="2.6" fill="#d33"/><circle cx="315.0" cy="84.0" r="2.6" fill="#d33"/><circle cx="112.6" cy="84.0" r="2.6" fill="#d33"/><circle cx="112.6" cy="120.8" r="2.6" fill="#d33"/><circle cx="75.8" cy="120.8" r="2.6" fill="#d33"/><circle cx="75.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="112.6" cy="231.2" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(427,338)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">w1</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">8 verts — 1 mid-wall column</text>
+  <path d="M75.8,268.0 L351.8,268.0 L351.8,84.0 L232.2,84.0 L232.2,120.8 L195.4,120.8 L195.4,84.0 L75.8,84.0 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="75.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(854,338)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">w2</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">12 verts — 2 mid-wall columns</text>
+  <path d="M75.8,268.0 L195.4,268.0 L195.4,231.2 L232.2,231.2 L232.2,268.0 L351.8,268.0 L351.8,84.0 L232.2,84.0 L232.2,120.8 L195.4,120.8 L195.4,84.0 L75.8,84.0 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="75.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="195.4" cy="268.0" r="2.6" fill="#d33"/><circle cx="195.4" cy="231.2" r="2.6" fill="#d33"/><circle cx="232.2" cy="231.2" r="2.6" fill="#d33"/><circle cx="232.2" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(0,676)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#1e3a8a">c2w1</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">12 verts — 2 corner + 1 mid-wall</text>
+  <path d="M112.6,268.0 L315.0,268.0 L315.0,231.2 L351.8,231.2 L351.8,84.0 L232.2,84.0 L232.2,120.8 L195.4,120.8 L195.4,84.0 L75.8,84.0 L75.8,231.2 L112.6,231.2 Z" fill="#e8eef7" stroke="#1e3a8a" stroke-width="2.2"/><circle cx="112.6" cy="268.0" r="2.6" fill="#d33"/><circle cx="315.0" cy="268.0" r="2.6" fill="#d33"/><circle cx="315.0" cy="231.2" r="2.6" fill="#d33"/><circle cx="351.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="231.2" r="2.6" fill="#d33"/><circle cx="112.6" cy="231.2" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(427,676)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#c2410c">alcove</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">8 verts — door recess — OUTWARD</text>
+  <path d="M75.8,268.0 L351.8,268.0 L351.8,84.0 L236.8,84.0 L236.8,56.4 L190.8,56.4 L190.8,84.0 L75.8,84.0 Z" fill="#ffe9c9" stroke="#c2410c" stroke-width="2.2"/><circle cx="75.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="236.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="236.8" cy="56.4" r="2.6" fill="#d33"/><circle cx="190.8" cy="56.4" r="2.6" fill="#d33"/><circle cx="190.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/>
+</g></g><g transform="translate(854,676)"><g>
+  <rect x="1" y="1" width="425" height="336" fill="none" stroke="#ddd"/>
+  <text x="16" y="17" font-family="monospace" font-size="15" font-weight="bold" fill="#c2410c">bay</text>
+  <text x="86" y="17" font-family="monospace" font-size="12" fill="#555">12 verts — bay + column — BOTH</text>
+  <path d="M75.8,268.0 L351.8,268.0 L351.8,203.6 L393.2,203.6 L393.2,148.4 L351.8,148.4 L351.8,84.0 L232.2,84.0 L232.2,120.8 L195.4,120.8 L195.4,84.0 L75.8,84.0 Z" fill="#ffe9c9" stroke="#c2410c" stroke-width="2.2"/><circle cx="75.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="268.0" r="2.6" fill="#d33"/><circle cx="351.8" cy="203.6" r="2.6" fill="#d33"/><circle cx="393.2" cy="203.6" r="2.6" fill="#d33"/><circle cx="393.2" cy="148.4" r="2.6" fill="#d33"/><circle cx="351.8" cy="148.4" r="2.6" fill="#d33"/><circle cx="351.8" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="84.0" r="2.6" fill="#d33"/><circle cx="232.2" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="120.8" r="2.6" fill="#d33"/><circle cx="195.4" cy="84.0" r="2.6" fill="#d33"/><circle cx="75.8" cy="84.0" r="2.6" fill="#d33"/>
+</g></g></g></svg>

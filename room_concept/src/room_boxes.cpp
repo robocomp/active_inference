@@ -1,7 +1,10 @@
 #include "room_boxes.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <map>
 #include <limits>
@@ -53,6 +56,89 @@ namespace rc::boxes
 
     namespace
     {
+        /// Which SURFACE does this point's distance come from? The box that wins Layout::sdf's
+        /// min/max, and within it the face nearest the point. Returned as a stable id so returns
+        /// lying on one physical wall land in one group.
+        int active_face(const Layout& L, const Eigen::Vector2f& p)
+        {
+            if (L.boxes.empty()) return -1;
+            float d = std::numeric_limits<float>::infinity();
+            int win = -1;
+            for (size_t i = 0; i < L.boxes.size(); ++i)
+                if (L.boxes[i].positive)
+                { const float v = sdf_box(L.boxes[i], p); if (v < d) { d = v; win = static_cast<int>(i); } }
+            for (size_t i = 0; i < L.boxes.size(); ++i)
+                if (not L.boxes[i].positive)
+                { const float v = -sdf_box(L.boxes[i], p); if (v > d) { d = v; win = static_cast<int>(i); } }
+            if (win < 0) return -1;
+            const Box& b = L.boxes[static_cast<size_t>(win)];
+            const float dl = std::abs(p.x() - b.lo.x()), dr = std::abs(p.x() - b.hi.x());
+            const float db = std::abs(p.y() - b.lo.y()), dt = std::abs(p.y() - b.hi.y());
+            const float m = std::min(std::min(dl, dr), std::min(db, dt));
+            const int face = (m == dl) ? 0 : (m == db) ? 1 : (m == dr) ? 2 : 3;
+            return win * 4 + face;
+        }
+
+        /// ── THE EVIDENCE ON ONE WALL IS ONE WALL'S WORTH, NOT ONE PER RETURN ────────────────
+        /// sigma_flat is a SURFACE's flatness error: every return on a given wall shares it.
+        /// Charging it independently per point lets N returns on one plane claim N times the
+        /// information they carry, so a box covering twenty voxels beats a fixed ~18-nat code
+        /// length on arithmetic alone — room w2 made 146 proposals and admitted 17 for two
+        /// columns. Marginalising the shared offset (Woodbury, with a per-point diagonal D and
+        /// one common sigma_f) is the same cure this codebase already applies to correlated mask
+        /// points and to line_common_sigma_d:
+        ///     Sigma          = D + sigma_f^2 11^T
+        ///     d^T Sigma^-1 d = sum d_i^2/D_i - sigma_f^2 (sum d_i/D_i)^2 / (1 + sigma_f^2 sum 1/D_i)
+        ///     log|Sigma|     = log|D| + log(1 + sigma_f^2 sum 1/D_i)
+        /// A uniform offset of a whole face now costs what ONE wall costs. The per-point term is
+        /// untouched, so genuine local structure — which is not a common offset — still pays off.
+        float log_likelihood_cm(const Layout& L, const std::vector<CloudPoint>& pts, float sigma_flat)
+        {
+            const double sf2 = static_cast<double>(sigma_flat) * sigma_flat;
+            struct Acc { double s_d_over_D = 0.0, s_1_over_D = 0.0, s_d2_over_D = 0.0, log_det = 0.0; };
+            std::map<int, Acc> g;
+            for (const auto& q : pts)
+            {
+                const int id = active_face(L, q.p);
+                if (id < 0) continue;
+                const double D = std::max(1e-8, static_cast<double>(q.sigma_pose) * q.sigma_pose);
+                const double d = L.sdf(q.p);
+                auto& a = g[id];
+                a.s_d_over_D  += d / D;
+                a.s_1_over_D  += 1.0 / D;
+                a.s_d2_over_D += d * d / D;
+                a.log_det     += std::log(D);
+            }
+            double ll = 0.0;
+            for (const auto& [id, a] : g)
+            {
+                // ⚠ DO NOT MARGINALISE THE OFFSET COMPLETELY. Tried, and it is actively WRONG
+                // here: the grouping is recomputed on the CANDIDATE layout, so every new face
+                // gets its own mean removed for free and adding faces always pays. A nuisance
+                // parameter may only be integrated out of a model both hypotheses SHARE. With a
+                // finite shared sigma the incumbent's faces keep their offsets, and a new face
+                // still has to earn its description length.
+                // ★ Recorded because it looks obviously right and is not: it is the fourth
+                // principled-sounding fix in a row that did not move room w2, and the only one
+                // that would have quietly made the runaway worse on rooms with more surfaces.
+                // Choosing a finite shared sigma means claiming to know how far a wall may have
+                // apparently moved — and every value tried was wrong, because the quantity it has
+                // to cover is the POSE error, which register_scan reports as 0.003 m while the
+                // truth is 0.118 m. The degeneracy is not "small", it is TOTAL: a wall 10 cm
+                // further out and a pose 10 cm nearer predict identical returns. So the honest
+                // model gives the offset an improper prior and integrates it out, leaving
+                //     quad = sum d^2/D - (sum d/D)^2 / (sum 1/D)
+                // which is the residual AFTER removing each face's weighted mean. A pure
+                // displacement of a surface is then FREE and can never buy geometry; a column,
+                // which changes the SHAPE of the residuals rather than their mean, still pays.
+                // ★ This is why the sixteen strips existed: every one of them was buying a mean.
+                const double denom = 1.0 + sf2 * a.s_1_over_D;
+                const double quad  = a.s_d2_over_D - sf2 * a.s_d_over_D * a.s_d_over_D / denom;
+                ll -= 0.5 * (quad + a.log_det + std::log(denom));
+            }
+            return static_cast<float>(ll);
+        }
+
         /// Gaussian log-likelihood of the returns about the region's boundary. The only term
         /// structure has to beat, and it contains no tuned number: every sigma in it is physical.
         /// Each sample carries its OWN sigma, because a return placed by a pose that is uncertain
@@ -345,12 +431,32 @@ namespace rc::boxes
         for (int it = 0; it < iters; ++it)
         {
             const Layout prev = L;
+            // ── A RETURN ON STRUCTURE WE HAVE NOT MODELLED YET MUST NOT MOVE A WALL ─────────
+            // refit treated every return as a boundary point. In room c4 the four corner columns
+            // are boundaries the layout does not have, and their returns dragged the shell to
+            // 5.54 x 3.89 against a true 6.00 x 4.00 — which put 42% of cells outside the region,
+            // inflated the residual EVERYWHERE, and left the overdispersion term reading the
+            // columns as noise: 0 proposals on a room with four of them.
+            // A Cauchy weight, w = 1/(1 + (d/s)^2) with s the current robust scale, makes the
+            // likelihood heavy-tailed: a point far from the boundary stops pulling instead of
+            // pulling harder. It is not a gate — the weight is smooth, nothing is discarded, and
+            // a point that turns out to be on a wall regains its full say as the fit improves.
+            // The scale is ESTIMATED each iteration, so there is no constant here either.
+            float scale = 0.f;
+            {
+                std::vector<float> ad; ad.reserve(pts.size());
+                for (const auto& q : pts) ad.push_back(std::abs(L.sdf(q.p)));
+                std::nth_element(ad.begin(), ad.begin() + static_cast<long>(ad.size() / 2), ad.end());
+                scale = std::max(1e-4f, 1.4826f * ad[ad.size() / 2]);
+            }
             std::vector<double> H(n, 0.0), g(n, 0.0);
             double ss = 0.0;
             for (const auto& q : pts)
             {
                 const float d = L.sdf(q.p);
-                const double w = 1.0 / (static_cast<double>(q.sigma_pose) * q.sigma_pose);
+                const float r = d / scale;
+                const double rw = 1.0 / (1.0 + static_cast<double>(r) * r);
+                const double w = rw / (static_cast<double>(q.sigma_pose) * q.sigma_pose);
                 ss += static_cast<double>(d) * d;
                 for (size_t k = 0; k < n; ++k)
                 {
@@ -420,6 +526,51 @@ namespace rc::boxes
         }
         return static_cast<float>(rms);
     }
+
+    namespace
+    {
+        /// How many samples are ACTIVE on each of box `bi`'s four offsets — i.e. how many points
+        /// the offset actually moves. This is the diagonal Fisher information of that parameter,
+        /// counted rather than weighted.
+        ///
+        /// ★★★ A FACE WITH NO ACTIVE POINTS IS A WALL NOBODY HAS SEEN. refit() skips such an
+        /// offset and calls leaving it alone "the honest outcome" — it is not. Leaving it alone
+        /// PUBLISHES it, as a wall of a room, indistinguishable from one with a thousand returns
+        /// behind it. Live in Webots this produced extrusions bounded by faces no beam had ever
+        /// touched. A parameter with zero information is not identifiable, and a model must not
+        /// contain parameters its data cannot estimate: that is not a threshold, it is the
+        /// definition of an admissible model.
+        std::array<int, 4> face_support(const Layout& L, const std::vector<CloudPoint>& pts, size_t bi)
+        {
+            std::array<int, 4> n{0, 0, 0, 0};
+            const float eps = 1e-3f;
+            for (const auto& q : pts)
+            {
+                const float d = L.sdf(q.p);
+                for (int k = 0; k < 4; ++k)
+                {
+                    Layout T = L;
+                    Box& b = T.boxes[bi];
+                    ((k == 0) ? b.lo.x() : (k == 1) ? b.lo.y() : (k == 2) ? b.hi.x() : b.hi.y()) += eps;
+                    if (std::abs((T.sdf(q.p) - d) / eps) > 1e-4f) ++n[static_cast<size_t>(k)];
+                }
+            }
+            return n;
+        }
+
+        /// Every face this box does not inherit from its host must be observed.
+        bool faces_observed(const Layout& L, const std::vector<CloudPoint>& pts, size_t bi)
+        {
+            const auto n = face_support(L, pts, bi);
+            const int att = L.boxes[bi].attach;
+            for (int k = 0; k < 4; ++k)
+            {
+                if (att >= 0 and (att % 4) == k) continue;   // tied to the host: not a free parameter
+                if (n[static_cast<size_t>(k)] == 0) return false;
+            }
+            return true;
+        }
+    }   // namespace
 
     GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p)
     {
@@ -515,7 +666,7 @@ namespace rc::boxes
                 const Box& hb = L.boxes[L.boxes[bi].host < L.boxes.size() ? L.boxes[bi].host : 0];
                 const float span = std::max(1.f, hb.width() + hb.height());
                 const float code = 3.f * std::log(span / sigr) + std::log(4.f);
-                if (log_likelihood(T, pts) + code > log_likelihood(K, pts))
+                if (log_likelihood_cm(T, pts, p.sigma_flat) + code > log_likelihood_cm(K, pts, p.sigma_flat))
                 { L = T; R.admitted = -1; return R; }     // one edit per call, removal included
             }
         }
@@ -547,6 +698,16 @@ namespace rc::boxes
         // This is KISS-ICP's measured 3-sigma threshold as a variance term rather than a cutoff,
         // and it is self-limiting: while the room is badly explained nothing looks surprising, and
         // structure only becomes admissible as the continuous fit earns the precision to see it.
+        // ── A BOX THINNER THAN THE NOISE IS NOT A STRUCTURE, IT IS A RESTATEMENT OF IT ──────
+        // A strip 0.09 m thick lying along a wall is indistinguishable from that wall being
+        // 0.09 m further out: the two models predict the same returns, so the data cannot choose
+        // between them and the simpler one must win. Room w2 admitted SIXTEEN such strips
+        // (0.05 x 0.84, 2.58 x 0.13, 2.29 x 0.13, 2.52 x 0.09 ...) around a shell that was
+        // already correct to 0.01 m, and each one genuinely lowered the residual — by explaining
+        // the pose smear as geometry.
+        // The bar is the MEASURED residual scale, not a constant: below it, the thickness
+        // parameter has no identifiable sign.
+        float thin_bar = 0.f;
         float over_var = 0.f;
         {
             std::vector<float> ad;
@@ -557,11 +718,37 @@ namespace rc::boxes
             std::nth_element(ad.begin(), ad.begin() + static_cast<long>(ad.size() / 2), ad.end());
             const float mad = 1.4826f * ad[ad.size() / 2];
             over_var = std::max(0.f, mad * mad - static_cast<float>(known / static_cast<double>(pts.size())));
+            thin_bar = mad;
+        }
+        // ⚠ sigma_flat LEAVES THE PER-POINT DIAGONAL and becomes the shared term of the
+        // common-mode likelihood. Leaving it in both places charges the same physical error twice
+        // and, worse, charges the SHARED part independently — which is the over-counting itself.
+        // ⚠ THE COMMON MODE MUST CARRY THE POSE, NOT JUST THE WALL'S FLATNESS. A pose error is
+        // shared by everything seen from that pose, and after fusion it leaves a COHERENT OFFSET
+        // of a whole surface — which is exactly what a thin box lying along a wall describes.
+        // With only sigma_flat (0.01 m) shared, a 0.1 m pose smear was charged as if each voxel
+        // had wandered independently, and room w2 bought SIXTEEN strips (2.58 x 0.13, 2.52 x 0.09,
+        // 2.28 x 0.09 ...) around a shell already correct to 0.01 m. Each one genuinely lowered
+        // the residual; none of them is a wall.
+        // Sharing sigma_flat (+) the typical pose sigma makes "this surface is displaced" free,
+        // and leaves "there is a column here" — which is NOT a common offset — still paying off.
+        // Same argument as [[association-dies-by-common-mode-latch]], one level up: the thing all
+        // the residuals have in common belongs in the covariance, not in the model.
+        const float flat2 = p.sigma_flat * p.sigma_flat;
+        float common2 = flat2;
+        {
+            std::vector<float> sp; sp.reserve(pts.size());
+            for (const auto& q : pts) sp.push_back(q.sigma_pose);
+            std::nth_element(sp.begin(), sp.begin() + static_cast<long>(sp.size() / 2), sp.end());
+            const float sm = sp[sp.size() / 2];
+            common2 = flat2 + std::max(0.f, sm * sm - flat2);
         }
         std::vector<CloudPoint> spts = pts;
-        for (auto& q : spts) q.sigma_pose = std::sqrt(q.sigma_pose * q.sigma_pose + over_var);
+        for (auto& q : spts)
+            q.sigma_pose = std::sqrt(std::max(1e-8f, q.sigma_pose * q.sigma_pose - common2) + over_var
+                                     + p.sensor_sigma * p.sensor_sigma);
 
-        const float base_ll = log_likelihood(B, spts);
+        const float base_ll = log_likelihood_cm(B, spts, std::sqrt(common2));
         Box best; float best_dL = 0.f; bool have = false; int best_widen = -1;
         for (const auto& g : groups)
         {
@@ -613,7 +800,7 @@ namespace rc::boxes
                 if (simply_connected(T))
                 {
                     refit(T, cloud, p, 3);
-                    const float dL = log_likelihood(T, spts) - base_ll;
+                    const float dL = log_likelihood_cm(T, spts, std::sqrt(common2)) - base_ll;
                     if (dL > best_dL)
                     { best_dL = dL; best = T.boxes[static_cast<size_t>(widen)]; have = true; best_widen = widen; }
                 }
@@ -625,7 +812,8 @@ namespace rc::boxes
             Layout T = L; T.boxes.push_back(nb);
             if (not simply_connected(T)) continue;
             refit(T, cloud, p, 3);
-            const float ll = log_likelihood(T, spts);
+            if (not faces_observed(T, spts, T.boxes.size() - 1)) continue;   // identifiability
+            const float ll = log_likelihood_cm(T, spts, std::sqrt(common2));
             // Three FREE offsets: the attached face is the host's, already paid for. Plus
             // log(4) for which face it attached to.
             const float code = 3.f * std::log(span / sig) + std::log(4.f);
@@ -668,14 +856,16 @@ namespace rc::boxes
             else if (m == oxl) { nb.hi.x() = host->lo.x(); nb.attach = 6; }
             else               { nb.lo.y() = host->hi.y(); nb.attach = 5; }
             if (not nb.valid()) continue;
+            if (std::min(nb.width(), nb.height()) < thin_bar) continue;   // not identifiable
 
             Layout T = L; T.boxes.push_back(nb);
             if (not simply_connected(T)) continue;
             refit(T, cloud, p, 3);
+            if (not faces_observed(T, spts, T.boxes.size() - 1)) continue;   // identifiability
             const float sig = std::sqrt(s0sq);
             const float span = std::max(1.f, host->width() + host->height());
             const float code = 3.f * std::log(span / sig) + std::log(4.f);
-            const float dL = (log_likelihood(T, spts) - base_ll) - code;
+            const float dL = (log_likelihood_cm(T, spts, std::sqrt(common2)) - base_ll) - code;
             if (dL > best_dL) { best_dL = dL; best = nb; have = true; best_widen = -1; }
         }
 
@@ -799,8 +989,19 @@ namespace rc::boxes
             // against a wrong room contributes softly instead of confidently poisoning it.
             if (step.head<2>().norm() < 1e-5f and std::abs(step.z()) < 1e-6f or it == 24)
             {
+                // ⚠ MEASURE THE MISFIT AGAINST THE SENSOR, NOT AGAINST THE INFLATED WEIGHT.
+                // sig2 above is already widened to the robust scale of THESE residuals, so
+                // dividing by it makes the reduced chi-square identically ~1 and the covariance
+                // never grows — the inflation cancels itself. Room w2 then reported sigma_pose
+                // 0.022 m for a pose wrong by 0.118 m, and every downstream term that trusts that
+                // sigma (the surprise test, the overdispersion, the common mode) was working from
+                // a number five times too small. FOUR principled likelihood fixes failed to move
+                // that room because the likelihood was never the thing that was wrong.
+                // The sensor variance is the only fixed yardstick here, so the misfit is measured
+                // against it.
                 const double dof = std::max(1.0, static_cast<double>(nused) - 3.0);
-                const float chi2r = static_cast<float>(std::max(1.0, loss / (sig2 * dof)));
+                const double s_ref = static_cast<double>(sensor_sigma) * sensor_sigma;
+                const float chi2r = static_cast<float>(std::max(1.0, loss / (s_ref * dof)));
                 R.cov = H.inverse() * chi2r;
                 if (step.head<2>().norm() < 1e-5f and std::abs(step.z()) < 1e-6f) break;
             }
