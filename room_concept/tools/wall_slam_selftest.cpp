@@ -2974,11 +2974,25 @@ int main()
                 if (rr.ok)
                 {
                     const float cb = std::cos(gy), sb = std::sin(gy);
+                    const Eigen::Vector3f before = est;
                     est = Eigen::Vector3f(cb * rr.pose.x() - sb * rr.pose.y(),
                                           sb * rr.pose.x() + cb * rr.pose.y(), wrap(rr.pose.z() + gy));
                     Eigen::Matrix3f R3 = Eigen::Matrix3f::Identity();
                     R3.topLeftCorner<2, 2>() = Eigen::Rotation2Df(gy).toRotationMatrix();
                     P = R3 * rr.cov * R3.transpose();
+                    // WS_BOXES_TRACE=1: per-frame diagnostic of what registration did and against what.
+                    if (std::getenv("WS_BOXES_TRACE"))
+                    {
+                        const Eigen::Vector3f tm = to_map(exec_pose);
+                        Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+                        for (const auto& b : ch.layout().boxes) { lo = lo.cwiseMin(b.lo); hi = hi.cwiseMax(b.hi); }
+                        std::fprintf(stderr, "[trace] f=%4zu err=(%+.3f,%+.3f) shift=(%+.3f,%+.3f) beta=%.4f cost=%.4f it=%2d "
+                                     "L=[%.2f %.2f]x[%.2f %.2f] boxes=%d\n",
+                                     f, est.x() - tm.x(), est.y() - tm.y(),
+                                     est.x() - before.x(), est.y() - before.y(),
+                                     rr.beta, rr.cost, rr.iterations,
+                                     lo.x(), hi.x(), lo.y(), hi.y(), ch.boxes());
+                    }
                 }
             }
             ch.observe(p3, est, P, sphi, slen);
@@ -3000,7 +3014,19 @@ int main()
                 ra_c = rc_c; ra_rot = rc_rot;
                 reanchor_done = true;
             }
-            ch.step();
+            {
+                const int nb0 = ch.boxes();
+                ch.step();
+                if (std::getenv("WS_BOXES_TRACE") and ch.boxes() != nb0)
+                {
+                    const Eigen::Vector3f tm = to_map(exec_pose);
+                    std::fprintf(stderr, "[layout] f=%zu boxes %d->%d yaw=%.2fdeg est=(%.2f,%.2f) truth=(%.2f,%.2f)\n",
+                                 f, nb0, ch.boxes(), ch.yaw() * 180.f / kPi, est.x(), est.y(), tm.x(), tm.y());
+                    for (const auto& b : ch.layout().boxes)
+                        std::fprintf(stderr, "         %s [%6.2f %6.2f]x[%6.2f %6.2f]\n", b.positive ? "+" : "-",
+                                     b.lo.x(), b.hi.x(), b.lo.y(), b.hi.y());
+                }
+            }
 
             const Eigen::Vector3f tm = to_map(exec_pose);
             for (int k = 0; k < 4; ++k)

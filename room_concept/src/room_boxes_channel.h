@@ -199,6 +199,7 @@ namespace rc::boxch
         };
         std::vector<KeyFrame> keys_;
         std::uint64_t last_key_f_ = 0;
+        std::uint64_t structure_steps_ = 0;
         /// Re-register every keyframe against the current layout and rebuild vmap_/free_ from the
         /// corrected poses. Returns the mean correction applied, in metres.
         float reproject();
@@ -263,6 +264,7 @@ namespace rc::boxch
         std::size_t free_at_rebuild_ = 0;
         /// Once the free-space cover has built a layout, it owns it.
         bool have_cover_ = false;
+        bool   adopted_once_ = false;
 
         Params p_;
         rc::boxes::Layout L_;

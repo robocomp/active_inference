@@ -535,10 +535,17 @@ namespace rc::boxes
             // somewhere sensible, and an uninformative face should KEEP that value rather than be
             // dragged by one sample. lambda = 1/span^2 is a prior of sigma = the room's own size —
             // as weak as a prior can be while still being proper, and no tuned constant.
-            double span2 = 0.0;
-            for (const auto& b : L.boxes)
-                span2 = std::max(span2, static_cast<double>(b.width() + b.height()));
-            const double lambda = 1.0 / std::max(1e-6, span2 * span2);
+            // ⚠ THE PRIOR IS THE CELL, NOT THE ROOM. A cover face was PROPOSED at cell resolution,
+            // so that is the precision of the belief about where it is: 1/cell^2. Using 1/span^2
+            // instead — "as weak as a prior can be while still being proper" — is 0.012 against a
+            // typical H of 0.29, i.e. no damping at all, and the diagonal step is then free to fly.
+            // ★ The claim that each residual depends on exactly ONE offset is FALSE in a box's
+            // CORNER region, where d|q|/d(lo.x) = q.x/|q| is fractional. Measured on the plain
+            // rectangle: one point, 8 cm residual, Jacobian 0.0265, so step = -0.083/0.0265 =
+            // -3.0 m, kicking an interior seam three metres in a single iteration. That is the
+            // same defect as the 471 m runaway; the span prior only capped it to room scale, and
+            // 3 m is enough to destroy a 6 m room. Refit steps over 0.3 m on rect: 68 -> 0.
+            const double lambda = 1.0 / std::max(1e-6, static_cast<double>(p.cell) * p.cell);
             for (size_t k = 0; k < n; ++k)
             {
                 if (H[k] <= 0.0) continue;
@@ -1100,7 +1107,14 @@ namespace rc::boxes
                 Eigen::Vector3f J;
                 J.head<2>() = gr;
                 J(2) = gr.dot(Eigen::Vector2f(-rp.y(), rp.x()));   // d/dtheta of R(theta) q
-                const float w = 1.f / sig2;
+                // ⚠ A ROBUST KERNEL, WHICH "KINEMATIC-ICP STYLE" WAS MISSING. Without it a return
+                // that lands on structure the layout does not have enters at full precision, and
+                // when the layout is wrong the misfit points simply out-vote the odometry prior:
+                // measured at ~800:1, moving the pose 2.066 m in ONE solve. Cauchy is smooth, so
+                // nothing is discarded and a point regains its say as the fit improves — the same
+                // choice already made inside refit().
+                const float rres = d / std::sqrt(sig2);
+                const float w = (1.f / sig2) / (1.f + rres * rres);
                 H.noalias() += w * J * J.transpose();
                 g.noalias() += w * d * J;
                 loss += static_cast<double>(d) * d;

@@ -63,6 +63,52 @@ namespace rc::boxch
         }
         last_sigma_ = smax;
 
+        // ── A PROVISIONAL LAYOUT FROM THE VERY FIRST SCAN ───────────────────────────────────
+        // ⚠ WITHOUT THIS THE OPENING OF EVERY RUN IS PURE DEAD RECKONING. Registration needs a
+        // layout to register against, and the layout used to wait for the free-space cover — so
+        // the first stretch was uncorrected odometry, and on a 36 m tour of a plain rectangle that
+        // wrote the SAME TWO WALLS at several different places. Measured: the fused cloud spanned
+        // 8.13 m in a 6.00 m room, with a ghost concentration of returns at x = -1.25 where no
+        // wall exists and returns reaching x = +5.00 two metres past the right wall. Everything
+        // downstream was then a faithful description of corrupted evidence — the layout fitted it
+        // to 0.033 m, which is why no amount of re-projection or adoption judging could repair it.
+        //
+        // The seed does not need to be right, only PRESENT: it is the interval hull of one scan,
+        // and the free-space cover replaces it through the same adoption judge as soon as there is
+        // anything better (measured: hull costs 154053 nats, first real cover 10028 — adopted).
+        // Its whole job is to give frame two something to register against.
+        if (L_.empty() and yaw_votes_ > 0)
+        {
+            const double a4 = std::atan2(yaw4_sin_, yaw4_cos_);
+            const float gy = static_cast<float>(a4 / 4.0);
+            const float cg = std::cos(-gy), sg2 = std::sin(-gy);
+            std::vector<float> xs, ys;
+            xs.reserve(band.size()); ys.reserve(band.size());
+            for (const auto& q : band)
+            {
+                const Eigen::Vector2f g(c * q.x() - s * q.y() + pose.x(), s * q.x() + c * q.y() + pose.y());
+                xs.push_back(cg * g.x() - sg2 * g.y());
+                ys.push_back(sg2 * g.x() + cg * g.y());
+            }
+            const auto quant = [](std::vector<float>& v, float f)
+            {
+                const size_t k = std::clamp<size_t>(static_cast<size_t>(f * static_cast<float>(v.size() - 1)),
+                                                    0, v.size() - 1);
+                std::nth_element(v.begin(), v.begin() + static_cast<long>(k), v.end());
+                return v[k];
+            };
+            std::vector<float> xs2 = xs, ys2 = ys;
+            rc::boxes::Box b;
+            b.lo = {quant(xs, 0.01f), quant(ys, 0.01f)};
+            b.hi = {quant(xs2, 0.99f), quant(ys2, 0.99f)};
+            if (b.valid() and b.width() > 0.5f and b.height() > 0.5f)
+            {
+                yaw_ = gy;
+                L_.boxes.push_back(b);
+                L_.cov = Eigen::MatrixXf::Identity(4, 4) * (p_.sigma_flat * p_.sigma_flat);
+            }
+        }
+
         // Keep a bounded, subsampled record of the evidence in the frame it was measured in.
         if (frames_ - last_key_f_ >= 25 and keys_.size() < 200)
         {
@@ -823,6 +869,19 @@ namespace rc::boxch
                 >= rc::boxes::mdl_cost(keep, cloud_, gp, &flc))
             { L_ = keep; return false; }          // the proposal does not pay — nothing is written
         }
+        // ⚠ DISCARD THE GAUGE VOTES TAKEN AGAINST THE PROVISIONAL HULL. The seed exists so that
+        // registration has SOMETHING from frame one, and it works — but it is one scan's interval
+        // hull, so the poses it corrects are biased, and those poses feed the Manhattan vote
+        // (seg_phi + pose.z()). Kept, they sit in the accumulator for ever: measured, the gauge
+        // came out 2-3 degrees off across the featured rooms, which at 6 m misplaces the ends by
+        // 0.3 m and costs ~0.03 of IoU while rms stays at 0.019 — a perfect fit in a tilted frame.
+        // The first adopted cover is the first reference worth voting against, so the vote starts
+        // there.
+        if (not adopted_once_)
+        {
+            adopted_once_ = true;
+            yaw4_cos_ = 0.0; yaw4_sin_ = 0.0; yaw_votes_ = 0;
+        }
         L_ = cand;
         // The reference the evidence was registered against has just changed, so the evidence is
         // re-registered against it and rebuilt. Without this the adoption drags the pose instead
@@ -962,8 +1021,32 @@ namespace rc::boxch
         if (have_cover_ or extended)
         {
             have_cover_ = true;
+            // ⚠ REPAIR IS NOT CONDITIONAL ON ADOPTION. reproject() used to fire only when a new
+            // cover was adopted — so the case that most needs repair could never reach it. A plain
+            // rectangle drifts 2 m on odometry BEFORE any layout exists (registration needs a
+            // layout to register against), so the first cover is adopted already 7.99 m wide in a
+            // 6.00 m room, and from then on every fresh candidate is correctly rejected because
+            // the incumbent fits the smeared evidence well. The map was wrong and self-consistent,
+            // and nothing was allowed to touch it: y came out 4.01 against a true 4.00 while x came
+            // out 7.99 against 6.00, which is the 1.99 m pose error written into the geometry.
+            // Re-registering the keyframes against the layout and rebuilding the occupancy from
+            // the corrected poses is what pulls the early, pre-layout frames back into agreement.
+            if (keys_.size() >= 4 and (structure_steps_++ % 3) == 0) reproject();
             fuse();
             if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp);
+            if (std::getenv("WS_CLOUD_PROBE") and not cloud_.empty())
+            {
+                // Histogram the fused returns along x. A 6 m room drives 6 m of wall; if the cloud
+                // spans more, the extra is GHOST WALLS written by a drifting pose, and any layout
+                // that fits it will be that wide too.
+                std::map<int, int> hx;
+                float lo = 1e9f, hi = -1e9f;
+                for (const auto& q : cloud_)
+                { hx[static_cast<int>(std::floor(q.p.x() / 0.25f))]++; lo = std::min(lo, q.p.x()); hi = std::max(hi, q.p.x()); }
+                std::fprintf(stderr, "[cloud] x span %.2f m (%.2f..%.2f)  peaks:", hi - lo, lo, hi);
+                for (const auto& [b, n] : hx) if (n > 30) std::fprintf(stderr, " %.2f(%d)", b * 0.25f, n);
+                std::fprintf(stderr, "\n");
+            }
             snap_coplanar();
             if (std::getenv("WS_BOXES_NOSIMP") == nullptr)
                 simplify();      // measure the complexity, then force it down
