@@ -298,6 +298,23 @@ namespace rc::boxch
         return removed;
     }
 
+    bool Channel::traversable(const Eigen::Vector2f& m) const
+    {
+        const std::pair<int, int> c{static_cast<int>(std::floor(m.x() / p_.cell)),
+                                    static_cast<int>(std::floor(m.y() / p_.cell))};
+        const auto it = free_.find(c);
+        if (it == free_.end() or it->second < 1) return false;     // never swept: not floor
+        const int r = std::max(0, static_cast<int>(std::ceil(p_.body_radius / p_.cell)));
+        for (int dy = -r; dy <= r; ++dy)
+            for (int dx = -r; dx <= r; ++dx)
+            {
+                if (dx * dx + dy * dy > r * r) continue;            // a disc, as in plan_path
+                const auto v = vmap_.find({c.first + dx, c.second + dy});
+                if (v != vmap_.end() and v->second.w > 0.0) return false;
+            }
+        return true;
+    }
+
     std::vector<Eigen::Vector2f> Channel::plan_path(const Eigen::Vector2f& from_map, float horizon_m) const
     {
         last_gain_ = 0;

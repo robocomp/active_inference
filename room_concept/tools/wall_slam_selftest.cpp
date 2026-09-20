@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "corner_detector.h"
+#include "trajectory_controller.h"
 #include "corner_visibility.h"
 #include "room_concept.h"
 #include "room_gn_solver.h"
@@ -427,6 +428,21 @@ namespace
     /// Proportional pursuit of a reference pose: turn toward it, and drive at a speed that falls off
     /// with heading error. Deliberately simple — its job is to DEMAND more than the base can deliver
     /// at the corners of the path, because that is where command and execution diverge.
+    /// ── THE BENCH'S HALF OF THE AGENT'S FOLLOWER ────────────────────────────────────────────
+    /// PlainTracker takes a PathWorld and NOT a FieldWorld — by its own header, it is "structurally
+    /// incapable of querying an obstacle", because in the agent the route is kept safe by the
+    /// planner's footprint predicate, the band, and RouteFollower::repair. The bench has the first
+    /// of those (plan_path routes in configuration space at body_radius) and the spline's own
+    /// is_free feasibility pass; it has no band. So this adapter carries the geometry only.
+    struct BenchPathWorld : rc::PathWorld
+    {
+        const rc::RouteSpline* sp = nullptr;
+        float radius = 0.230f;
+        const rc::RouteSpline* route_spline() const override { return sp; }
+        float body_extent(const Eigen::Vector2f&, float) const override { return radius; }
+        float body_extent_max() const override { return radius; }
+    };
+
     inline Eigen::Vector3f pursue(const Eigen::Vector3f& cur, const Eigen::Vector3f& goal)
     {
         const Eigen::Vector2f d = goal.head<2>() - cur.head<2>();
@@ -2124,6 +2140,7 @@ int run_replay(const char* path)
         /// physically occupy. This does not stop the robot (that would change every number on the
         /// bench at once); it COUNTS, so the next person sees it in the summary line instead of
         /// having to notice it in a picture.
+        int   blocked_replans = 0;        ///< replans forced by a refused command
         int   coll_frames = 0;            ///< frames with the body overlapping a wall or outside
         int   coll_events = 0;            ///< how many separate times it entered that state
         int   out_frames  = 0;            ///< frames with the centre outside the room entirely
@@ -2218,6 +2235,54 @@ int run_replay(const char* path)
         int replans = 0, ig_gain = 0, last_plan_f = -100;
         bool explored = false;
 
+        // ── WS_COLL_PROBE: IS A CONTACT A CONTROL ERROR OR A BELIEF ERROR? ──────────────────
+        // A contact can be produced two entirely different ways and the count alone cannot tell
+        // them apart:
+        //   CONTROL — the leg is legal in truth and the robot is not on it (cut the corner,
+        //             overshot, swung wide). Fixable by the controller.
+        //   BELIEF  — the leg is legal in the map the robot HAS, and that map is displaced, so
+        //             the corridor the planner sees is not where the wall is. No controller
+        //             reading its own belief can fix that one; it is pose/layout error.
+        // So log both clearances every frame: against the TRUTH polygon, and against the layout
+        // the robot BELIEVES from the pose it BELIEVES. Plus the cross-track error, which is the
+        // controller's own residual, and the true clearance of the point it is steering AT.
+        std::ofstream cprobe;
+        if (const char* cp = std::getenv("WS_COLL_PROBE"))
+        {
+            cprobe.open(cp); cprobe.imbue(std::locale::classic());
+            cprobe << "f,tx,ty,pose_err,clr_true,in_room,clr_bel,gx,gy,g_clr_true,g_in,xtrack,"
+                      "v,w,plan_i,plan_n\n";
+        }
+        Eigen::Vector2f leg_a = exec_pose.head<2>(), leg_b = exec_pose.head<2>();
+        size_t leg_i = static_cast<size_t>(-1);
+        Eigen::Vector3f last_cmd = Eigen::Vector3f::Zero();
+        bool blocked_prev = false;      // the wall refused last frame's translation
+        int  blocked_replans = 0;
+
+        // ── THE AGENT'S OWN CONTROLLER, WHOLE ──────────────────────────────────────────────
+        // Not a tracker in isolation. TrajectoryController owns the route, builds its own ESDF from
+        // the scan, runs the blockage and alignment logic and the Plain->PD fallback, and IS the
+        // PathWorld/FieldWorld the trackers query. It is what the agent drives with and what Webots
+        // will drive with, so it is what the bench must measure.
+        // ⚠ FRAME, and it is not optional. The agent's theta has FORWARD AT +90 degrees (the
+        // tracker computes theta_fwd = theta + pi/2 and returns rot = -omega, "FRAME conversion
+        // (1/2)" and "(2/2)"), and controller_session hands compute() a pose built straight from
+        // (pos, theta) with no conversion — so the agent's theta IS that convention. The bench's
+        // compose() puts forward on +X with CCW-positive yaw. Convert both ways or the robot
+        // believes it is facing 90 degrees off and steers the wrong way: measured, 0.654 against
+        // pursue()'s 0.953 on the hall before this was right.
+        // WS_PLAIN=0 falls back to pursue() for an A/B on the same binary.
+        const bool use_follower = ig and (std::getenv("WS_PLAIN") == nullptr
+                                          or std::string(std::getenv("WS_PLAIN")) != "0");
+        rc::TrajectoryController tcontrol;
+        // The scan for a frame is taken AFTER the robot moves, so at command time the freshest
+        // cloud a real robot has is the previous one. Keep it in ROOM coordinates, which is what
+        // compute() expects — it expresses the cloud in the robot frame itself, using the pose it
+        // is handed.
+        std::vector<Eigen::Vector3f> cloud_room_prev;
+        tcontrol.set_footprint(rc::RobotFootprint::shadow());
+        bool have_route = false;
+
         for (size_t f = 0; f < truth.size(); ++f)
         {
             Eigen::Vector3f goal = truth[f];
@@ -2230,9 +2295,49 @@ int run_replay(const char* path)
                 // an EMPTY plan makes `0 >= 0` true on every frame — so through the whole
                 // bootstrap, and any time the plan ran out, it did a full BFS and frontier scan
                 // every single frame. The run could not finish inside 280 seconds.
-                const bool spent = plan.empty() or plan_i >= plan.size()
-                                or (wp_to_world(plan[plan_i]) - exec_pose.head<2>()).norm() < 0.18f;
-                if (spent and static_cast<int>(f) - last_plan_f >= 25)
+                // ── A REFUSED COMMAND IS NEWS, AND THE PLANNER HAS TO HEAR IT ────────────────
+                // With the bumper in, a robot that drives at a wall simply stops — and then went on
+                // pressing for the full 25-frame replan throttle before anyone reconsidered. It
+                // burned its budget leaning on walls: terminations fell 39/100 -> 5/100 when the
+                // physics landed, which is not the planner failing to finish, it is the planner
+                // never being told its leg was impossible.
+                // A refusal means THIS LEG IS NOT TRAVERSABLE, so the plan is void: drop it and
+                // re-plan. The cooldown is COMPUTE ONLY (a full BFS + frontier scan per frame does
+                // not finish inside the run, which is what the 25 exists for) — not a bar on when
+                // a robot is allowed to change its mind.
+                // ★ NOT DONE, and the deeper answer: a bump is an OBSERVATION. The refused cell is
+                // evidence of matter the map does not have, and feeding it to the channel as
+                // occupancy would let the next plan route around it instead of rediscovering it.
+                // That writes non-LiDAR evidence into the layout's own occupancy and needs its own
+                // experiment; this only makes the planner reconsider.
+                if (blocked_prev)
+                {
+                    plan.clear(); plan_i = 0; ++blocked_replans;
+                    have_route = false;    // and the controller is told to stop driving the old one
+                }
+                // ⚠ WHO DECIDES THE LEG IS SPENT DEPENDS ON WHO IS DRIVING. The waypoint-distance
+                // test belongs to pursue(), which consumes the plan one waypoint at a time. The
+                // follower drives the whole route in ARC LENGTH and never touches plan_i, so that
+                // test asked about a waypoint the robot had long since passed: measured, 2 replans
+                // in 2600 frames, the frontier never re-evaluated, and the hall fell to IoU 0.667.
+                // Ask the follower instead — finished() is its own statement that the route is done.
+                // ⚠ AND THE FOLLOWER MUST NOT BE ALLOWED TO OUTLIVE THE MAP EITHER. Gating the
+                // replan on finished() means committing to a whole route and re-aiming once: 2
+                // replans in 2600 frames, IoU 0.667 on the hall against pursue()'s 0.953. pursue()
+                // is not better at driving — it is just forced to ask the planner again at every
+                // waypoint, and during exploration the frontier moves under you. So the follower
+                // smooths the tracking WITHIN legs and the planner keeps its own cadence: the
+                // 25-frame throttle below IS the re-aiming interval.
+                // ★ The cost is that each rebuild calls tracker.reset(), which re-acquires the
+                // nearest point on a fresh curve. RouteFollower offers resume_at() for exactly this
+                // and its header records an 18 m mis-acquisition on a folded tour; wiring arc
+                // length through a rebuild is the next refinement, not this measurement.
+                const bool spent = use_follower
+                    ? true
+                    : (plan.empty() or plan_i >= plan.size()
+                       or (wp_to_world(plan[plan_i]) - exec_pose.head<2>()).norm() < 0.18f);
+                const int throttle = blocked_prev ? 5 : 25;
+                if (spent and static_cast<int>(f) - last_plan_f >= throttle)
                 {
                     if (plan_i < plan.size()) ++plan_i;
                     if (plan_i >= plan.size())
@@ -2240,6 +2345,19 @@ int run_replay(const char* path)
                         last_plan_f = static_cast<int>(f);
                         plan = ch.plan_path(est.head<2>());
                         plan_i = 0; ++replans; ig_gain = ch.last_gain();
+                        if (use_follower)
+                        {
+                            // set_path takes the ROOM-frame polyline and does its own smoothing,
+                            // feasibility and arc-length bookkeeping. The path starts at the robot
+                            // so the first projection is not a jump.
+                            std::vector<Eigen::Vector2f> room_path;
+                            room_path.reserve(plan.size() + 1);
+                            room_path.push_back(exec_pose.head<2>());
+                            for (const auto& w : plan) room_path.push_back(wp_to_world(w));
+                            have_route = room_path.size() >= 2;
+                            if (have_route) tcontrol.set_path(room_path);
+                            else tcontrol.stop();
+                        }
                         // ⚠ "NO FRONTIER" AND "NO MAP" LOOK IDENTICAL AND MEAN THE OPPOSITE.
                         // At frame 0 the free map is empty, so there is no frontier and the first
                         // version declared exploration COMPLETE before the robot had moved. A
@@ -2259,6 +2377,8 @@ int run_replay(const char* path)
                 if (plan_i < plan.size())
                 {
                     const Eigen::Vector2f t = wp_to_world(plan[plan_i]);
+                    if (plan_i != leg_i) { leg_a = exec_pose.head<2>(); leg_i = plan_i; }
+                    leg_b = t;
                     goal = Eigen::Vector3f(t.x(), t.y(), exec_pose.z());
                 }
                 else
@@ -2278,9 +2398,59 @@ int run_replay(const char* path)
                              tmp.x(), tmp.y(), est.x(), est.y(),
                              (est.head<2>() - tmp.head<2>()).norm(), ch.rms(), ch.layout().boxes.size());
             }
-            const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, goal);
-            const Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+            Eigen::Vector3f cmd = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, goal);
+            if (f > 0 and use_follower and have_route)
+            {
+                // The cloud goes in ROOM coordinates: compute() expresses it in the robot frame
+                // itself, for the ESDF, using the pose it is handed.
+                Eigen::Affine2f rp = Eigen::Affine2f::Identity();
+                rp.translation() = exec_pose.head<2>();
+                rp.linear() = Eigen::Rotation2Df(exec_pose.z()
+                                                 - static_cast<float>(M_PI_2)).toRotationMatrix();
+                const rc::ControlOutput out = tcontrol.compute(rp, cloud_room_prev);
+                cmd = Eigen::Vector3f(out.adv, out.side, -out.rot);   // FRAME conversion (2/2)
+            }
+            last_cmd = cmd;
+            Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+
+            // ── A WALL IS NOT A SUGGESTION ───────────────────────────────────────────────────
+            // Until 2026-09-20 this bench had NO collision model: the pose was composed from the
+            // commanded motion and nothing compared it to the room. A robot that drove through a
+            // wall kept scanning FROM OUTSIDE IT, so the LiDAR observed the room from beyond its
+            // own boundary — the sensor model was violated and the run was not a worse result, it
+            // was not a result. Measured before this: the six worst rooms of a 100-room sweep had
+            // ALL left the room (54-230 frames outside, up to 0.93 m deep); 94% of rooms under
+            // IoU 0.90 had left it. Dropping those runs moved the MEAN from 0.930 to 0.960 and the
+            // worst case from 0.009 to 0.899 — i.e. the "catastrophic tail" was the bench.
+            // ⚠ It also meant the two arms were running DIFFERENT SIMULATORS: the hand tour never
+            // leaves the room, because its waypoints were validated against the true polygon. No
+            // paired comparison between planner and tour meant anything while that was true.
+            //
+            // This is a BUMPER, not contact dynamics: the translation that would penetrate is
+            // refused, the rotation is still allowed (or the robot deadlocks nose-first at a wall
+            // and can never turn away), and the base's velocity ramp is reset so it does not lean
+            // on the wall at full speed. The refusal is also applied to the ENCODER reading, so
+            // the robot's odometry agrees that it did not move. ★ The other honest choice is wheel
+            // SLIP — wheels turn, odometry lies, pose does not change — which is what a real base
+            // does against a wall. That injects a second effect (a large odometry error exactly
+            // when the map is already stressed) and deserves its own experiment; this one keeps
+            // the robot's belief consistent so that what we measure is the planner, not the slip.
+            bool blocked = false;
+            float probe_clr = 1e9f; bool probe_in = true;
+            if (f > 0)
+            {
+                const Eigen::Vector3f probe = compose(exec_pose, body);
+                probe_in  = rc::corner_visibility::point_in_polygon(probe.head<2>(), room);
+                probe_clr = point_to_poly(probe.head<2>(), room);
+                if ((not probe_in) or probe_clr < bp.body_radius)
+                {
+                    blocked = true;
+                    body.x() = 0.f; body.y() = 0.f;          // translation refused, rotation kept
+                    base.vel.x() = 0.f; base.vel.y() = 0.f;  // and stop leaning on it
+                }
+            }
             exec_pose = compose(exec_pose, body);
+            blocked_prev = blocked;
             const Eigen::Vector3f meas = (f == 0) ? Eigen::Vector3f::Zero() : enc.measure(body, rng);
             const float ce = std::cos(est.z()), se = std::sin(est.z());
             est = (f == 0) ? Eigen::Vector3f::Zero()
@@ -2300,6 +2470,14 @@ int run_replay(const char* path)
 
             std::vector<Eigen::Vector3f> p3; p3.reserve(pts.size());
             for (const auto& q : pts) p3.emplace_back(q.x(), q.y(), 0.9f);
+            if (use_follower)
+            {
+                cloud_room_prev.clear(); cloud_room_prev.reserve(pts.size());
+                const float cw = std::cos(exec_pose.z()), sw = std::sin(exec_pose.z());
+                for (const auto& q : pts)
+                    cloud_room_prev.emplace_back(cw * q.x() - sw * q.y() + exec_pose.x(),
+                                                 sw * q.x() + cw * q.y() + exec_pose.y(), 0.9f);
+            }
             const auto seg = rc::wallseg::segment(pts, wsp, rng);
             std::vector<float> sphi, slen;
             sphi.reserve(seg.segments.size()); slen.reserve(seg.segments.size());
@@ -2337,10 +2515,16 @@ int run_replay(const char* path)
             ch.step();
 
             // ── collision instrument (see BoxRun::coll_*) ───────────────────────────────────
+            // ⚠ WITH THE BUMPER IN PLACE THIS COUNTS REFUSALS, NOT OCCUPANCY. The executed pose is
+            // legal by construction now, so testing it would report zero for ever. What is worth
+            // counting is the command the wall had to refuse: how often the robot drove at a wall,
+            // how long it kept pressing, and how deep it would have gone. Same fields, and they
+            // remain comparable with the pre-physics numbers because the old count was exactly
+            // "the pose the command produced was illegal".
             {
-                const bool in_room = rc::corner_visibility::point_in_polygon(exec_pose.head<2>(), room);
-                const float clr = point_to_poly(exec_pose.head<2>(), room);
-                const bool hit = (not in_room) or clr < bp.body_radius;
+                const bool in_room = probe_in;
+                const float clr = probe_clr;
+                const bool hit = blocked;
                 if (not in_room) ++R.out_frames;
                 if (hit)
                 {
@@ -2349,6 +2533,38 @@ int run_replay(const char* path)
                     R.coll_depth = std::max(R.coll_depth, in_room ? bp.body_radius - clr : clr);
                 }
                 was_colliding = hit;
+
+                if (cprobe.is_open())
+                {
+                    const Eigen::Vector3f tmp = to_map(exec_pose);
+                    // What the robot BELIEVES its clearance is: its own pose against its own
+                    // layout, in the layout's own frame (map -> box is R(-yaw)).
+                    float clr_bel = 1e9f;
+                    if (not ch.layout().empty())
+                    {
+                        const float cg2 = std::cos(-ch.yaw()), sg3 = std::sin(-ch.yaw());
+                        const Eigen::Vector2f ml(cg2 * est.x() - sg3 * est.y(),
+                                                 sg3 * est.x() + cg2 * est.y());
+                        clr_bel = -ch.layout().sdf(ml);      // + = inside by that much
+                    }
+                    const Eigen::Vector2f gxy = (ig and plan_i < plan.size()) ? leg_b : exec_pose.head<2>();
+                    const bool g_in = rc::corner_visibility::point_in_polygon(gxy, room);
+                    const float g_clr = point_to_poly(gxy, room);
+                    // cross-track: how far off the straight leg the robot actually is
+                    const Eigen::Vector2f ab = leg_b - leg_a;
+                    float xt = 0.f;
+                    if (ab.squaredNorm() > 1e-9f)
+                    {
+                        const float t = std::clamp((exec_pose.head<2>() - leg_a).dot(ab) / ab.squaredNorm(), 0.f, 1.f);
+                        xt = (exec_pose.head<2>() - (leg_a + t * ab)).norm();
+                    }
+                    cprobe << f << ',' << exec_pose.x() << ',' << exec_pose.y() << ','
+                           << (est.head<2>() - tmp.head<2>()).norm() << ',' << clr << ','
+                           << (in_room ? 1 : 0) << ',' << clr_bel << ',' << gxy.x() << ',' << gxy.y()
+                           << ',' << g_clr << ',' << (g_in ? 1 : 0) << ',' << xt << ','
+                           << last_cmd.x() << ',' << last_cmd.z() << ',' << plan_i << ','
+                           << plan.size() << '\n';
+                }
             }
 
             const Eigen::Vector3f tm = to_map(exec_pose);
@@ -2423,6 +2639,7 @@ int run_replay(const char* path)
             R.cp_resid_oracle = med(cp_resid_o);
         }
         R.replans = replans; R.explored = explored; R.ig_gain = ig_gain;
+        R.blocked_replans = blocked_replans;
         R.phase = ig ? ch.phase_name() : "fixed-tour";
         // ⚠ FRAMES USED, NOT FRAMES OFFERED. A run that stops on its own stopping rule is the
         // whole point of the explorer, and reporting the budget instead of the spend hides it.
@@ -2840,10 +3057,10 @@ int main()
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
                     "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d"
-                    "  | replans=%d phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
+                    "  | replans=%d(%d blk) phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
                     100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
-                    r.proposed, r.admitted, r.removed, r.replans, r.phase.c_str(),
+                    r.proposed, r.admitted, r.removed, r.replans, r.blocked_replans, r.phase.c_str(),
                     r.explored ? "yes" : "NO(frame cap)",
                     r.coll_events, r.coll_frames, r.coll_depth, r.out_frames);
         // the TRUTH polygon, so the shape can be read rather than guessed at
@@ -2942,6 +3159,7 @@ int main()
                         << ",\"cp_resid\":" << r.cp_resid << ",\"cp_chi2\":" << r.cp_chi2
                         << ",\"cp_resid_oracle\":" << r.cp_resid_oracle
                         << ",\"cp_matched_oracle\":" << r.cp_matched_oracle
+                        << ",\"blocked_replans\":" << r.blocked_replans
                         << ",\"coll_events\":" << r.coll_events
                         << ",\"coll_frames\":" << r.coll_frames
                         << ",\"coll_depth\":" << r.coll_depth

@@ -112,6 +112,18 @@ namespace rc::boxch
         { return phase_ == Phase::Explore ? "explore" : phase_ == Phase::Refine ? "refine" : "done"; }
 
         std::vector<Eigen::Vector2f> plan_path(const Eigen::Vector2f& from_map, float horizon_m = 4.0f) const;
+
+        /// ── CAN A BODY STAND HERE, IN THE ROBOT'S OWN BELIEF? ───────────────────────────────
+        /// The same configuration-space predicate `plan_path` routes on, exposed so a path
+        /// FOLLOWER can validate the curve it actually intends to drive. `RouteSpline` smooths
+        /// across the planner's polyline and is APPROXIMATING, not interpolating, so the smoothed
+        /// curve can leave the corridor the planner certified — near a 0.12 m fin that matters.
+        /// ⚠ THE ANSWER MUST COME FROM THE MAP, NEVER FROM THE TRUE ROOM. A follower handed the
+        /// truth polygon is an oracle, and it would look excellent for the same reason the
+        /// true-pose corner channel did. This reads `free_` and `vmap_` — swept floor, and no
+        /// KNOWN occupancy within `body_radius` — so it is exactly as wrong as the robot is.
+        /// `m` is a MAP-frame point (the frame `plan_path` speaks).
+        bool traversable(const Eigen::Vector2f& m) const;
         /// Worst face variance, in metres — the quantity REFINE is driving down, and the honest
         /// stopping signal: when it stops improving there is nothing left to learn about shape.
         float worst_face_sigma() const { return worst_face_sigma_; }
