@@ -2097,6 +2097,10 @@ int run_replay(const char* path)
         int boxes = 0, verts = 0, proposed = 0, admitted = 0, removed = 0, truth_verts = 0;
         rc::boxes::Layout layout;          ///< the estimate itself, for opening a tail case
         Poly est_poly;                     ///< in WORLD coords, already gauge-aligned
+        int replans = 0;                   ///< how many times the explorer chose a new target
+        bool explored = false;             ///< it ran out of frontier — the honest stopping point
+        int ig_gain = 0, frames = 0;
+        std::string phase = "-";
         std::vector<Eigen::Vector2f> traj_exec;   ///< where the robot ACTUALLY went (world)
         std::vector<Eigen::Vector2f> traj_est;    ///< where it BELIEVED it was (map->world)
     };
@@ -2139,9 +2143,78 @@ int run_replay(const char* path)
         std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
         std::vector<Eigen::Vector2f> traj_exec, traj_est;
 
+        // ── WHO CHOOSES THE TARGETS ─────────────────────────────────────────────────────────
+        // WS_BOXES_IG=1 hands the robot its own exploration: the channel plans to the frontier
+        // with the best (unknown area revealed) / (path length), over the free map IT has built,
+        // and the run ends when no frontier is left rather than when a frame budget runs out.
+        // Without it the robot follows the fixed tour, whose waypoints were validated against the
+        // TRUE polygon — information the robot does not have, and which on the apartamento hall
+        // was worth more than every algorithmic change of the day (IoU 0.229 -> 0.914).
+        const bool ig = std::getenv("WS_BOXES_IG") != nullptr;
+        std::vector<Eigen::Vector2f> plan;
+        size_t plan_i = 0;
+        int replans = 0, ig_gain = 0, last_plan_f = -100;
+        bool explored = false;
+
         for (size_t f = 0; f < truth.size(); ++f)
         {
-            const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, truth[f]);
+            Eigen::Vector3f goal = truth[f];
+            if (ig)
+            {
+                // Re-plan when the current leg is spent, or every ~2 s so a stale plan cannot
+                // outlive the map that justified it.
+                // ⚠ THROTTLE THE REPLAN ITSELF, not just the "is the leg spent" test. The first
+                // version replanned when `spent and (plan_i >= plan.size() or f % 40 == 0)`, and
+                // an EMPTY plan makes `0 >= 0` true on every frame — so through the whole
+                // bootstrap, and any time the plan ran out, it did a full BFS and frontier scan
+                // every single frame. The run could not finish inside 280 seconds.
+                const bool spent = plan.empty() or plan_i >= plan.size()
+                                or (plan[plan_i] - exec_pose.head<2>()).norm() < 0.18f;
+                if (spent and static_cast<int>(f) - last_plan_f >= 25)
+                {
+                    if (plan_i < plan.size()) ++plan_i;
+                    if (plan_i >= plan.size())
+                    {
+                        last_plan_f = static_cast<int>(f);
+                        plan = ch.plan_path(est.head<2>());
+                        plan_i = 0; ++replans; ig_gain = ch.last_gain();
+                        // ⚠ "NO FRONTIER" AND "NO MAP" LOOK IDENTICAL AND MEAN THE OPPOSITE.
+                        // At frame 0 the free map is empty, so there is no frontier and the first
+                        // version declared exploration COMPLETE before the robot had moved. A
+                        // robot with no map can always turn in place to make one, which needs no
+                        // knowledge of the room — so an empty plan is a cue to LOOK AROUND until
+                        // the map can support a decision, and only then a stopping condition.
+                        // Done means the planner has nothing left to propose: no frontier AND no
+                        // viewpoint that would improve the worst-known wall. That is the honest
+                        // stopping condition; a frame cap is not one, and 594/594 runs of the
+                        // previous explorer hitting the cap is why it measured NULL.
+                        if (plan.empty() and f > 150
+                            and ch.phase() == rc::boxch::Channel::Phase::Done) { explored = true; break; }
+                    }
+                }
+                else if (spent) ++plan_i;
+                if (plan_i < plan.size())
+                {
+                    const Eigen::Vector2f t = plan[plan_i];
+                    goal = Eigen::Vector3f(t.x(), t.y(), exec_pose.z());
+                }
+                else
+                {
+                    // Bootstrap / recovery: turn on the spot. pursue() reduces to a pure rotation
+                    // when the goal is where you already are.
+                    goal = Eigen::Vector3f(exec_pose.x(), exec_pose.y(), wrap(exec_pose.z() + 0.6f));
+                }
+            }
+            if (ig and std::getenv("WS_IG_PROBE") and f % 100 == 0)
+            {
+                const Eigen::Vector3f tmp = to_map(exec_pose);
+                std::fprintf(stderr, "[ig] f=%4zu %s plan=%zu/%zu gain=%5d | true=(%6.2f,%6.2f) "
+                                     "est=(%6.2f,%6.2f) poseerr=%.3f rms=%.3f boxes=%zu\n",
+                             f, ch.phase_name(), plan_i, plan.size(), ig_gain,
+                             tmp.x(), tmp.y(), est.x(), est.y(),
+                             (est.head<2>() - tmp.head<2>()).norm(), ch.rms(), ch.layout().boxes.size());
+            }
+            const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, goal);
             const Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
             exec_pose = compose(exec_pose, body);
             const Eigen::Vector3f meas = (f == 0) ? Eigen::Vector3f::Zero() : enc.measure(body, rng);
@@ -2230,6 +2303,9 @@ int run_replay(const char* path)
         R.frac_out = ch.frac_out(); R.frac_in = ch.frac_in();
         R.yaw_deg = ch.yaw() * 180.f / kPi;
         R.pose_err = nperr ? *std::min_element(perr_q.begin(), perr_q.end()) / static_cast<double>(nperr) : -1.0;
+        R.replans = replans; R.explored = explored; R.ig_gain = ig_gain;
+        R.phase = ig ? ch.phase_name() : "fixed-tour";
+        R.frames = static_cast<int>(truth.size());
         R.layout = ch.layout();
         {
             float best = -1.f;
@@ -2277,8 +2353,16 @@ int run_replay(const char* path)
                 rc::boxes::Box b;
                 const int face = static_cast<int>(U(rng) * 4.f) % 4;      // 0 lo.x 1 lo.y 2 hi.x 3 hi.y
                 const bool carve = U(rng) < 0.6f;
-                const float along = 0.4f + 1.1f * U(rng);                 // extent along the wall
-                const float deep  = 0.3f + 0.8f * U(rng);                 // how far in/out
+                // ⚠ NO THIN OUTWARD FINS. A carve may be narrow — a column against a wall is a real
+                // thing and the estimator has to find it — but a narrow protrusion STICKING OUT is
+                // not a room feature worth generating: it is a spike the robot can never drive
+                // around, so it is observed from one side only and is unidentifiable by
+                // construction. Keeping them in the generator meant grading the estimator on rooms
+                // whose geometry the data cannot determine. Outward features are therefore at
+                // least 0.9 m along the wall and 0.5 m deep — an alcove or a bay, something with
+                // an inside.
+                const float along = carve ? (0.4f + 1.1f * U(rng)) : (0.9f + 1.1f * U(rng));
+                const float deep  = carve ? (0.3f + 0.8f * U(rng)) : (0.5f + 0.6f * U(rng));
                 const float t = 0.12f + 0.76f * U(rng);                   // position along the wall
                 if (face == 0 or face == 2)
                 {
@@ -2634,10 +2718,12 @@ int main()
             o << "}\n";
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
-                    "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d\n",
+                    "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d"
+                    "  | replans=%d phase=%s explored=%s\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
                     100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
-                    r.proposed, r.admitted, r.removed);
+                    r.proposed, r.admitted, r.removed, r.replans, r.phase.c_str(),
+                    r.explored ? "yes" : "NO(frame cap)");
         // the TRUTH polygon, so the shape can be read rather than guessed at
         const auto& room = gen->first;
         Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
@@ -2667,6 +2753,12 @@ int main()
         const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
         const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
         const int laps = std::getenv("WS_TOUR_LAPS") ? std::max(1, std::atoi(std::getenv("WS_TOUR_LAPS"))) : 2;
+        // Every room's geometry, so a sweep can be LOOKED AT and not only summarised.
+        std::ofstream dumpall;
+        int nwritten = 0;
+        if (const char* da = std::getenv("WS_BOXES_DUMPALL"))
+        { dumpall.open(da); dumpall.imbue(std::locale::classic()); dumpall << "[\n"; }
+
         std::map<int, std::vector<BoxRun>> by_order;
         // ★ Keep the identity of every room so the tail can be REPRODUCED, not just reported.
         // A distribution with a 0.43 in it is two different claims — "the method is 95% good" and
@@ -2702,6 +2794,25 @@ int main()
             const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, laps, gen->second);
             by_order[order].push_back(r);
             ids.push_back({i, order, r.iou, r.boxes, r.truth_verts, r.verts});
+            if (dumpall.is_open())
+            {
+                const auto poly = [&](const Poly& q, int stride)
+                {
+                    dumpall << "[";
+                    int w = 0;
+                    for (size_t k = 0; k < q.size(); k += static_cast<size_t>(stride), ++w)
+                        dumpall << (w ? "," : "") << "[" << q[k].x() << "," << q[k].y() << "]";
+                    dumpall << "]";
+                };
+                dumpall << (nwritten++ ? ",\n" : "") << "{\"i\":" << i << ",\"order\":" << order
+                        << ",\"iou\":" << r.iou << ",\"boxes\":" << r.boxes
+                        << ",\"verts\":" << r.verts << ",\"tv\":" << r.truth_verts
+                        << ",\"rms\":" << r.rms << ",\"pose\":" << r.pose_err << ",\"truth\":";
+                poly(gen->first, 1);
+                dumpall << ",\"est\":"; poly(r.est_poly, 1);
+                dumpall << ",\"traj\":"; poly(r.traj_exec, std::max<int>(1, static_cast<int>(r.traj_exec.size()) / 40));
+                dumpall << "}";
+            }
         }
         std::printf("\nRANDOM ROOM SWEEP — %d rooms, orders %d..%d, pose=%s%s, %d laps (%d skipped: no drivable circuit)\n",
                     N, olo, ohi, reg ? "registered" : "odometry-only",
@@ -2730,6 +2841,7 @@ int main()
                         "  broken one; the sweep is reporting that rather than dividing by zero.\n", skipped);
             return 0;
         }
+        if (dumpall.is_open()) { dumpall << "\n]\n"; dumpall.close(); }
         std::sort(ids.begin(), ids.end(), [](const Ident& a, const Ident& b) { return a.iou < b.iou; });
         std::printf("  worst 6:");
         for (size_t k = 0; k < ids.size() and k < 6; ++k)

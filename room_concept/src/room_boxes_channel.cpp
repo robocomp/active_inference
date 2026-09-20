@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <cstdlib>
 #include <limits>
 #include <locale>
@@ -9,6 +10,7 @@
 
 namespace rc::boxch
 {
+    static constexpr float kPiF = 3.14159265358979323846f;
     void Channel::observe(const std::vector<Eigen::Vector3f>& pts_robot,
                           const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov,
                           const std::vector<float>& seg_phi, const std::vector<float>& seg_len)
@@ -60,6 +62,17 @@ namespace rc::boxch
             smax = std::max(smax, sg);
         }
         last_sigma_ = smax;
+
+        // Keep a bounded, subsampled record of the evidence in the frame it was measured in.
+        if (frames_ - last_key_f_ >= 25 and keys_.size() < 200)
+        {
+            KeyFrame kf;
+            kf.pose = pose; kf.sigma = smax;
+            kf.pts.reserve(band.size() / 3 + 1);
+            for (size_t i = 0; i < band.size(); i += 3) kf.pts.push_back(band[i]);
+            keys_.push_back(std::move(kf));
+            last_key_f_ = frames_;
+        }
 
         // ── MARK THE FREE SPACE EACH BEAM SWEPT ─────────────────────────────────────────────
         // From the sensor to just short of the return: those cells were seen through, so they are
@@ -238,12 +251,326 @@ namespace rc::boxch
             L_ = bestL;
             ++removed;
         }
-        if (removed > 0)
-            L_.cov = Eigen::MatrixXf::Identity(static_cast<long>(L_.n_offsets()),
-                                               static_cast<long>(L_.n_offsets()))
-                   * (p_.sigma_flat * p_.sigma_flat);
         n_removed_ += removed;
         return removed;
+    }
+
+    std::vector<Eigen::Vector2f> Channel::plan_path(const Eigen::Vector2f& from_map, float horizon_m) const
+    {
+        last_gain_ = 0;
+        std::vector<Eigen::Vector2f> out;
+        if (free_.empty()) return out;
+
+        // ⚠ DENSE GRID FOR THE DURATION OF THE PLAN. The free map is a std::map, and the gain
+        // term probes ~1600 neighbours per frontier cell: at O(log n) against 20000 cells that is
+        // hundreds of millions of lookups per plan, and the planner did not finish inside a
+        // 200-second run. The same data as a flat array of bytes makes every probe O(1); the map
+        // stays the authority, this is a scratch copy.
+        int lox = std::numeric_limits<int>::max(), loy = lox;
+        int hix = std::numeric_limits<int>::min(), hiy = hix;
+        for (const auto& [k, n] : free_)
+        {
+            if (n < 1) continue;
+            lox = std::min(lox, k.first);  hix = std::max(hix, k.first);
+            loy = std::min(loy, k.second); hiy = std::max(hiy, k.second);
+        }
+        if (lox > hix) return out;
+        const int W = hix - lox + 3, H = hiy - loy + 3;     // one cell of unknown margin all round
+        // ⚠ THREE STATES, NOT TWO. FREE (a beam went through), OCCUPIED (a return landed here)
+        // and UNKNOWN (neither). Treating "not free" as "unknown" makes every WALL look like
+        // unexplored space: the frontier gain then peaks against the walls, the planner sends the
+        // robot at them, and — with no collision in the bench — it drives straight through and
+        // explores the outdoors. Measured: at frame 700 the robot was at (3.49, 7.77) in a room
+        // roughly 6 x 4 m about the origin, with the gain still climbing because outside the room
+        // everything is 'unknown' for ever.
+        // The occupied set is free: it is the returns this channel already fuses.
+        std::vector<char> gridf(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
+        std::vector<char> grido(static_cast<size_t>(W) * static_cast<size_t>(H), 0);
+        const auto idx = [&](int x, int y) { return static_cast<size_t>((y - loy + 1) * W + (x - lox + 1)); };
+        for (const auto& [k, n] : free_)
+            if (n >= 1 and k.first >= lox and k.first <= hix and k.second >= loy and k.second <= hiy)
+                gridf[idx(k.first, k.second)] = 1;
+        for (const auto& [k, v] : vmap_)
+        {
+            if (v.w <= 0.0) continue;
+            const Eigen::Vector2f m(static_cast<float>(v.acc.x() / v.w), static_cast<float>(v.acc.y() / v.w));
+            const int ox = static_cast<int>(std::floor(m.x() / p_.cell)), oy = static_cast<int>(std::floor(m.y() / p_.cell));
+            if (ox < lox or ox > hix or oy < loy or oy > hiy) continue;
+            grido[idx(ox, oy)] = 1;
+        }
+        const auto is_occ = [&](int x, int y)
+        {
+            if (x < lox - 1 or x > hix + 1 or y < loy - 1 or y > hiy + 1) return false;
+            return grido[idx(x, y)] != 0;
+        };
+        // UNKNOWN is the only thing worth travelling to see.
+        const auto is_unknown = [&](int x, int y)
+        {
+            if (x < lox - 1 or x > hix + 1 or y < loy - 1 or y > hiy + 1) return false;  // beyond the map: not a target
+            return gridf[idx(x, y)] == 0 and grido[idx(x, y)] == 0;
+        };
+        const auto is_free = [&](const std::pair<int, int>& k)
+        {
+            if (k.first < lox - 1 or k.first > hix + 1 or k.second < loy - 1 or k.second > hiy + 1) return false;
+            return gridf[idx(k.first, k.second)] != 0;
+        };
+
+        const std::pair<int, int> start{static_cast<int>(std::floor(from_map.x() / p_.cell)),
+                                        static_cast<int>(std::floor(from_map.y() / p_.cell))};
+        if (not is_free(start)) return out;
+
+        // Dijkstra-on-a-grid is unnecessary here: every step costs the same, so breadth-first over
+        // free cells gives exact shortest paths and the parent map reconstructs them.
+        std::vector<int> dist_a(gridf.size(), -1);
+        std::vector<int> par_a(gridf.size(), -1);
+        std::map<std::pair<int, int>, std::pair<int, int>> parent;
+        std::map<std::pair<int, int>, int> dist;
+        std::deque<std::pair<int, int>> q{start};
+        dist[start] = 0; dist_a[idx(start.first, start.second)] = 0;
+        while (not q.empty())
+        {
+            const auto cur = q.front(); q.pop_front();
+            const int d = dist[cur];
+            const std::pair<int, int> nb[4] = {{cur.first + 1, cur.second}, {cur.first - 1, cur.second},
+                                               {cur.first, cur.second + 1}, {cur.first, cur.second - 1}};
+            for (const auto& n : nb)
+            {
+                if (not is_free(n) or dist_a[idx(n.first, n.second)] >= 0) continue;
+                dist_a[idx(n.first, n.second)] = d + 1;
+                par_a[idx(n.first, n.second)] = static_cast<int>(idx(cur.first, cur.second));
+                dist[n] = d + 1; parent[n] = cur; q.push_back(n);
+            }
+        }
+
+        // A frontier is a reachable free cell with an unknown neighbour. Its gain is the unknown
+        // area within the sensor horizon — what standing there would actually reveal.
+        const int R = std::max(1, static_cast<int>(horizon_m / p_.cell));
+        const int R2 = R * R;
+        (void)R2;
+
+        // ── CLUSTER THE FRONTIER FIRST ──────────────────────────────────────────────────────
+        // Ray-casting the visible gain costs 48 bearings x 80 steps, and there are THOUSANDS of
+        // frontier cells: evaluating each one took the run past 400 seconds without finishing.
+        // Adjacent frontier cells are the same opening anyway — ranking them individually is both
+        // wasteful and worse, because it picks an arbitrary cell of a large opening instead of its
+        // middle. Group them into connected clusters and evaluate one representative each, which
+        // is what frontier-based exploration has always done.
+        std::set<std::pair<int, int>> fr;
+        for (const auto& [k, d] : dist)
+        {
+            const std::pair<int, int> nb4[4] = {{k.first + 1, k.second}, {k.first - 1, k.second},
+                                                {k.first, k.second + 1}, {k.first, k.second - 1}};
+            bool isf = false;
+            for (const auto& n : nb4) if (is_unknown(n.first, n.second)) { isf = true; break; }
+            if (not isf) continue;
+            bool tooclose = false;
+            for (int dx = -2; dx <= 2 and not tooclose; ++dx)
+                for (int dy = -2; dy <= 2 and not tooclose; ++dy)
+                    if (is_occ(k.first + dx, k.second + dy)) tooclose = true;
+            if (not tooclose) fr.insert(k);
+        }
+        std::vector<std::pair<int, int>> reps;
+        {
+            std::set<std::pair<int, int>> seen;
+            for (const auto& s : fr)
+            {
+                if (seen.count(s)) continue;
+                std::vector<std::pair<int, int>> stack{s}, cluster;
+                seen.insert(s);
+                while (not stack.empty())
+                {
+                    const auto cur = stack.back(); stack.pop_back();
+                    cluster.push_back(cur);
+                    for (int dx = -1; dx <= 1; ++dx)
+                        for (int dy = -1; dy <= 1; ++dy)
+                        {
+                            const std::pair<int, int> n{cur.first + dx, cur.second + dy};
+                            if (fr.count(n) and not seen.count(n)) { seen.insert(n); stack.push_back(n); }
+                        }
+                }
+                // the cluster's middle, snapped back to a real frontier cell
+                double mx = 0, my = 0;
+                for (const auto& q : cluster) { mx += q.first; my += q.second; }
+                mx /= static_cast<double>(cluster.size()); my /= static_cast<double>(cluster.size());
+                std::pair<int, int> bestc = cluster.front(); double bd = 1e18;
+                for (const auto& q : cluster)
+                {
+                    const double dd = (q.first - mx) * (q.first - mx) + (q.second - my) * (q.second - my);
+                    if (dd < bd) { bd = dd; bestc = q; }
+                }
+                reps.push_back(bestc);
+            }
+        }
+
+        std::pair<int, int> best{0, 0}; double best_score = 0.0; bool have = false;
+        for (const auto& k : reps)
+        {
+            const int d = dist_a[idx(k.first, k.second)];
+            if (d < 0) continue;
+            // ⚠ COUNT WHAT A SCAN WOULD ACTUALLY SEE, NOT WHAT IS NEARBY. Counting every unknown
+            // cell in a disc includes the INSIDES OF WALLS — sealed behind occupied cells, never
+            // observable from anywhere. That leaves a permanent floor of unreachable reward: the
+            // gain plateaued at ~227 cells and never fell to zero, so the frontier was never
+            // "exhausted", Explore never ended, and the refine and consolidation phases never ran
+            // at all. The robot kept exploring for information it could not obtain.
+            // A ray stops at the first occupied cell, exactly as a beam does.
+            int unknown = 0;
+            const int NB = 48;                      // bearings; a coarse scan is enough to rank
+            for (int a = 0; a < NB; ++a)
+            {
+                const float th = 2.f * kPiF * static_cast<float>(a) / static_cast<float>(NB);
+                const float ux = std::cos(th), uy = std::sin(th);
+                for (int s = 1; s <= R; ++s)
+                {
+                    const int cx = k.first  + static_cast<int>(std::lround(ux * static_cast<float>(s)));
+                    const int cy = k.second + static_cast<int>(std::lround(uy * static_cast<float>(s)));
+                    if (is_occ(cx, cy)) break;      // the beam stops here
+                    if (is_unknown(cx, cy)) ++unknown;
+                }
+            }
+            const double score = static_cast<double>(unknown)
+                               / (1.0 + static_cast<double>(d) * p_.cell);
+            if (score > best_score) { best_score = score; best = k; have = true; last_gain_ = unknown; phase_ = Phase::Explore; }
+        }
+        // ── PHASE 2: REFINE THE WORST-KNOWN WALL ────────────────────────────────────────────
+        // No frontier means coverage is finished, NOT that the layout is finished. Find the face
+        // whose offset the data constrains least, then stand square to it at a workable range.
+        if (not have and not L_.empty())
+        {
+            phase_ = Phase::Refine;
+            // Support per face: returns currently active on it, and how square they were seen.
+            // A face with few, grazing observations is the one to go and look at.
+            const float cyl = std::cos(-yaw_), syl = std::sin(-yaw_);
+            struct FaceInfo { Eigen::Vector2f mid{0.f,0.f}, nrm{0.f,0.f}; double info = 0.0; float len = 0.f; };
+            std::vector<FaceInfo> faces;
+            for (const auto& b : L_.boxes)
+            {
+                if (not b.positive) continue;
+                const Eigen::Vector2f c0(0.5f * (b.lo.x() + b.hi.x()), 0.5f * (b.lo.y() + b.hi.y()));
+                const FaceInfo f0[4] = {
+                    {{b.lo.x(), c0.y()}, {-1.f, 0.f}, 0.0, b.height()},
+                    {{b.hi.x(), c0.y()}, { 1.f, 0.f}, 0.0, b.height()},
+                    {{c0.x(), b.lo.y()}, { 0.f,-1.f}, 0.0, b.width()},
+                    {{c0.x(), b.hi.y()}, { 0.f, 1.f}, 0.0, b.width()}};
+                for (const auto& fi : f0) faces.push_back(fi);
+            }
+            if (faces.empty()) return out;
+            // Fisher information about an offset goes as cos^2(incidence)/range^2 per return, so a
+            // cell that sees the face squarely and close carries the most. Accumulate over the
+            // free cells the robot could stand in — that IS the experiment design.
+            for (auto& fc : faces)
+            {
+                for (const auto& [k, d] : dist)
+                {
+                    const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                            (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                    const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
+                    const Eigen::Vector2f r = ml - fc.mid;
+                    const float rng = r.norm();
+                    if (rng < 0.3f or rng > 6.f) continue;
+                    const float cosi = std::abs(r.dot(fc.nrm)) / rng;
+                    fc.info += static_cast<double>(cosi) * cosi / (rng * rng);
+                }
+                fc.info *= static_cast<double>(std::max(0.2f, fc.len));
+            }
+            size_t worst = 0;
+            for (size_t i = 1; i < faces.size(); ++i) if (faces[i].info < faces[worst].info) ++worst, worst = i;
+            worst_face_sigma_ = static_cast<float>(1.0 / std::sqrt(1.0 + faces[worst].info));
+
+            // Stand square to it, at about 1.3 m — the standoff the fixed tour happens to use, and
+            // the range where cos^2/range^2 is large without the wall filling the scan.
+            std::pair<int, int> goal{0, 0}; double bestv = -1.0; bool gotv = false;
+            for (const auto& [k, d] : dist)
+            {
+                const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                        (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
+                const Eigen::Vector2f r = ml - faces[worst].mid;
+                const float rng = r.norm();
+                if (rng < 0.7f or rng > 2.6f) continue;
+                const float cosi = std::abs(r.dot(faces[worst].nrm)) / std::max(1e-3f, rng);
+                const double v = static_cast<double>(cosi) / (1.0 + 0.25 * static_cast<double>(d) * p_.cell);
+                if (v > bestv) { bestv = v; goal = k; gotv = true; }
+            }
+            if (not gotv) { phase_ = Phase::Done; return out; }
+            best = goal; have = true; last_gain_ = 0;
+        }
+        if (not have) { phase_ = Phase::Done; return out; }
+
+        std::vector<std::pair<int, int>> rev;
+        for (auto cur = best; cur != start; cur = parent[cur])
+        {
+            rev.push_back(cur);
+            if (not parent.count(cur)) return out;      // unreachable; should not happen after BFS
+        }
+        // Thin the path: a waypoint every ~0.4 m is enough for a pursuit controller, and the
+        // straight legs between them stay inside free space because the cells they join do.
+        const int stride = std::max(1, static_cast<int>(0.4f / p_.cell));
+        for (int i = static_cast<int>(rev.size()) - 1; i >= 0; i -= stride)
+            out.emplace_back((static_cast<float>(rev[static_cast<size_t>(i)].first) + 0.5f) * p_.cell,
+                             (static_cast<float>(rev[static_cast<size_t>(i)].second) + 0.5f) * p_.cell);
+        if (out.empty() or (out.back() - Eigen::Vector2f((static_cast<float>(best.first) + 0.5f) * p_.cell,
+                                                         (static_cast<float>(best.second) + 0.5f) * p_.cell)).norm() > 0.05f)
+            out.emplace_back((static_cast<float>(best.first) + 0.5f) * p_.cell,
+                             (static_cast<float>(best.second) + 0.5f) * p_.cell);
+        return out;
+    }
+
+    float Channel::reproject()
+    {
+        if (keys_.empty() or L_.empty()) return 0.f;
+        const float gy = yaw_, cg = std::cos(-gy), sg = std::sin(-gy);
+        const float cb = std::cos(gy), sb = std::sin(gy);
+        double moved = 0.0; long n = 0;
+
+        // 1. Re-register each keyframe against the CURRENT layout, starting from where it thought
+        //    it was. The layout is the shared reference; this is what makes the poses mutually
+        //    consistent instead of each one frozen at whatever the map looked like at the time.
+        for (auto& kf : keys_)
+        {
+            const Eigen::Vector3f p_L(cg * kf.pose.x() - sg * kf.pose.y(),
+                                      sg * kf.pose.x() + cg * kf.pose.y(),
+                                      std::atan2(std::sin(kf.pose.z() - gy), std::cos(kf.pose.z() - gy)));
+            const auto rr = rc::boxes::register_scan(L_, kf.pts, p_L, p_.sensor_sigma);
+            if (not rr.ok) continue;
+            const Eigen::Vector3f np(cb * rr.pose.x() - sb * rr.pose.y(),
+                                     sb * rr.pose.x() + cb * rr.pose.y(),
+                                     std::atan2(std::sin(rr.pose.z() + gy), std::cos(rr.pose.z() + gy)));
+            moved += (np.head<2>() - kf.pose.head<2>()).norm(); ++n;
+            kf.pose = np;
+        }
+
+        // 2. Rebuild the occupancy from the corrected poses. THIS is the step a counter-based map
+        //    can never do: cells swept in error are simply not swept again.
+        vmap_.clear(); free_.clear();
+        for (const auto& kf : keys_)
+        {
+            const float c = std::cos(kf.pose.z()), s = std::sin(kf.pose.z());
+            const Eigen::Vector2f o = kf.pose.head<2>();
+            const float s0 = std::sqrt(kf.sigma * kf.sigma + p_.sensor_sigma * p_.sensor_sigma);
+            const double w = 1.0 / (static_cast<double>(s0) * s0);
+            for (const auto& q : kf.pts)
+            {
+                const Eigen::Vector2f g(c * q.x() - s * q.y() + o.x(), s * q.x() + c * q.y() + o.y());
+                auto& v = vmap_[{static_cast<int>(std::floor(g.x() / p_.cell)),
+                                 static_cast<int>(std::floor(g.y() / p_.cell))}];
+                v.acc += w * g.cast<double>(); v.w += w; v.smin = std::min(v.smin, kf.sigma);
+                const Eigen::Vector2f d = g - o;
+                const float len = d.norm();
+                if (len < 1e-3f) continue;
+                const Eigen::Vector2f u = d / len;
+                for (float t = 0.f; t < len - p_.cell; t += 0.5f * p_.cell)
+                {
+                    const Eigen::Vector2f m = o + u * t;
+                    ++free_[{static_cast<int>(std::floor(m.x() / p_.cell)),
+                             static_cast<int>(std::floor(m.y() / p_.cell))}];
+                }
+            }
+            ++free_[{static_cast<int>(std::floor(o.x() / p_.cell)),
+                     static_cast<int>(std::floor(o.y() / p_.cell))}];
+        }
+        free_at_rebuild_ = free_.size();
+        return n ? static_cast<float>(moved / static_cast<double>(n)) : 0.f;
     }
 
     void Channel::snap_coplanar()
@@ -309,8 +636,6 @@ namespace rc::boxch
                     L_.boxes[b].hi.y() >= L_.boxes[a].hi.y() - 1e-4f)
                 { L_.boxes.erase(L_.boxes.begin() + static_cast<long>(a)); break; }
             }
-        L_.cov = Eigen::MatrixXf::Identity(static_cast<long>(L_.n_offsets()),
-                                           static_cast<long>(L_.n_offsets())) * (p_.sigma_flat * p_.sigma_flat);
     }
 
     bool Channel::rebuild_from_free()
@@ -443,7 +768,66 @@ namespace rc::boxch
             N.boxes.push_back(t);
         }
         if (N.boxes.empty()) return false;
-        for (const auto& b : N.boxes) L_.boxes.push_back(b);      // APPEND, never replace
+
+        // ── ONE WRITER. THE COVER PROPOSES; mdl_cost DECIDES. ───────────────────────────────
+        // The cover appended with a zero-tolerance geometric rule while simplify() deleted with a
+        // priced MDL rule, so the two disagreed about every fringe cell and oscillated for ever:
+        // 199 boxes removed on one run while the count still climbed. Two writers, two objectives,
+        // one state. Now the cover builds a COMPLETE candidate — the boxes it would make plus the
+        // ones already believed — and the candidate is adopted only if it costs fewer nats than
+        // the incumbent. That is the trial-adoption judge that worked in the previous
+        // representation (b83b4f3), and it makes oscillation impossible: nothing is written unless
+        // the total goes down.
+        rc::boxes::GrowParams gp;
+        gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat;
+        gp.cell = p_.cell; gp.min_cluster = p_.min_cluster;
+        fuse();
+        if (cloud_.empty()) return false;
+        std::set<std::pair<int, int>> flc;
+        {
+            const float cyc = std::cos(-yaw_), syc = std::sin(-yaw_);
+            for (const auto& [k, nn] : free_)
+            {
+                if (nn < 1) continue;
+                const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                        (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                const Eigen::Vector2f q(cyc * m.x() - syc * m.y(), syc * m.x() + cyc * m.y());
+                flc.insert({static_cast<int>(std::floor(q.x() / p_.cell)),
+                            static_cast<int>(std::floor(q.y() / p_.cell))});
+            }
+        }
+        // ⚠ A COMPLETE RIVAL DESCRIPTION, NOT AN ADDENDUM. Building the candidate as
+        // `incumbent + new boxes` makes it strictly larger and therefore strictly more expensive,
+        // so after the first adoption every later proposal is rejected for ever. Measured on a
+        // plain rectangle: adopt 8 boxes, simplify to 3, then reject 11/11/14/18/17-box candidates
+        // in turn — leaving a 3-box layout over part of the room, a registration with almost
+        // nothing to register against, and a pose 1.915 m out.
+        // A trial-adoption judge needs two COMPLETE descriptions of the same evidence.
+        rc::boxes::Layout cand = N;
+        if (std::getenv("WS_ADOPT_PROBE") and not L_.empty())
+        {
+            rc::boxes::Layout k2 = L_, c2 = cand;
+            rc::boxes::refit(k2, cloud_, gp, 3); rc::boxes::refit(c2, cloud_, gp, 3);
+            std::fprintf(stderr, "[adopt] keep=%zu boxes cost=%.0f | cand=%zu boxes cost=%.0f | %s\n",
+                         k2.boxes.size(), rc::boxes::mdl_cost(k2, cloud_, gp, &flc),
+                         c2.boxes.size(), rc::boxes::mdl_cost(c2, cloud_, gp, &flc),
+                         rc::boxes::mdl_cost(c2, cloud_, gp, &flc) < rc::boxes::mdl_cost(k2, cloud_, gp, &flc)
+                            ? "ADOPT" : "reject");
+        }
+        if (not L_.empty())
+        {
+            rc::boxes::Layout keep = L_;
+            rc::boxes::refit(keep, cloud_, gp, 3);
+            rc::boxes::refit(cand, cloud_, gp, 3);
+            if (rc::boxes::mdl_cost(cand, cloud_, gp, &flc)
+                >= rc::boxes::mdl_cost(keep, cloud_, gp, &flc))
+            { L_ = keep; return false; }          // the proposal does not pay — nothing is written
+        }
+        L_ = cand;
+        // The reference the evidence was registered against has just changed, so the evidence is
+        // re-registered against it and rebuilt. Without this the adoption drags the pose instead
+        // of the pose following the map.
+        if (keys_.size() >= 4) reproject();
         // Merge across the whole layout, older boxes included: a new box often completes a
         // rectangle an older one only had part of.
         {
@@ -473,8 +857,9 @@ namespace rc::boxch
                     }
             }
         }
-        L_.cov = Eigen::MatrixXf::Identity(static_cast<long>(L_.n_offsets()),
-                                           static_cast<long>(L_.n_offsets())) * (p_.sigma_flat * p_.sigma_flat);
+        // ⚠ DO NOT RESET THE POSTERIOR HERE. refit() computes it (1/H per offset) and this line
+        // used to throw it away on every rebuild, every simplify and every seed — five sites. An
+        // estimator that resets its own covariance has no memory of what it knows.
         return true;
     }
 
@@ -565,7 +950,15 @@ namespace rc::boxch
         // robot had seen in its first few metres and three successive fixes to the rebuild changed
         // nothing at all. Bit-identical output across substantive edits is not a null result — it
         // says the edited code is not on the path.
-        const bool extended = rebuild_from_free();
+        // ⚠ COVERAGE AND CONSOLIDATION ARE DIFFERENT ACTIVITIES, AND INTERLEAVING THEM COSTS THE
+        // MAP. While the robot is still discovering space the cover is extended again and again,
+        // and refit/simplify never work a stable layout: under exploration the room went from
+        // 6 boxes and 0.082 m of residual to 15 boxes and 0.364 m, while the pose stayed healthy
+        // at 0.19 m — the map fell apart, not the localisation.
+        // The fixed tour gets this for free: free space plateaus after one lap and the SECOND lap
+        // is pure consolidation. So once the planner stops exploring, the region stops growing and
+        // the remaining effort goes into fitting and simplifying what is already there.
+        const bool extended = (phase_ == Phase::Explore) ? rebuild_from_free() : false;
         if (have_cover_ or extended)
         {
             have_cover_ = true;

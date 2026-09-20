@@ -58,6 +58,59 @@ namespace rc::boxch
         const Params& params() const { return p_; }
         bool enabled() const { return p_.enabled; }
 
+        /// ── WHERE SHOULD THE ROBOT GO NEXT? ─────────────────────────────────────────────────
+        /// A path, in MAP-frame metres, to the viewpoint that most reduces what the layout does not
+        /// know. The belief is the free-space map this channel already maintains: a cell is FREE
+        /// (a beam went through it), OCCUPIED (a return landed there) or UNKNOWN. A frontier — a
+        /// free cell touching unknown space — is where new information can actually be obtained,
+        /// and the gain of standing there is the unknown area it would reveal.
+        ///
+        /// score = unknown cells within sensor horizon / (1 + path length)
+        ///
+        /// ⚠ THE PATH IS PLANNED THROUGH FREE CELLS, never as a straight line. The bench's fixed
+        /// tours were validated against the TRUE polygon — information a robot does not have — and
+        /// on the apartamento hall, whose two fins stand on the centreline, a straight run between
+        /// two sensible points goes through a wall. Planning over the free map instead uses only
+        /// what has been observed, which is the whole point of making the robot choose.
+        ///
+        /// Returns an empty path when no frontier is left: that is the honest termination
+        /// condition for exploration, and it is what a frame cap has been standing in for.
+        /// ★ An objective cannot be graded on an endpoint its own budget saturated —
+        /// 594/594 runs of the previous explorer hit the cap and it measured NULL.
+        /// ── TWO PHASES, BECAUSE COVERAGE IS A PRECONDITION AND PRECISION IS THE GOAL ────────
+        /// EXPLORE  maximise unknown area revealed per metre — the frontier objective. It answers
+        ///          "where has nobody been", which is occupancy entropy.
+        /// REFINE   once there is no frontier, maximise the information gained about the WALL
+        ///          OFFSET THAT IS WORST KNOWN. That is the estimand; occupancy never was.
+        ///
+        /// ★ The fixed tour this has to match drives TWO laps. The second lap reveals no new area
+        ///   whatsoever — it contributes PRECISION, by seeing every wall again from new angles.
+        ///   A pure frontier planner stops at the end of lap one and collects about half the data,
+        ///   which is why it cannot reach the same layout however good its coverage is.
+        ///
+        /// Information about a face offset from a viewpoint goes as cos^2(incidence)/range: a wall
+        /// seen edge-on says almost nothing about where it is. So REFINE prefers standing square
+        /// to the worst-known wall at moderate range, which is also what keeps registration
+        /// healthy — and pose error is what drives layout error
+        /// ([[free-space-cost-must-be-symmetric]]: 0.356 m rms odometry-only vs 0.019 registered).
+        enum class Phase { Explore, Refine, Done };
+        Phase phase() const { return phase_; }
+        const char* phase_name() const
+        { return phase_ == Phase::Explore ? "explore" : phase_ == Phase::Refine ? "refine" : "done"; }
+
+        std::vector<Eigen::Vector2f> plan_path(const Eigen::Vector2f& from_map, float horizon_m = 4.0f) const;
+        /// Worst face variance, in metres — the quantity REFINE is driving down, and the honest
+        /// stopping signal: when it stops improving there is nothing left to learn about shape.
+        float worst_face_sigma() const { return worst_face_sigma_; }
+        /// Unknown cells the last plan expected to reveal — the gain it was chosen for.
+        int last_gain() const { return last_gain_; }
+    private:
+        mutable int last_gain_ = 0;
+        mutable Phase phase_ = Phase::Explore;
+        mutable float worst_face_sigma_ = 1e9f;
+        mutable int refine_stall_ = 0;
+    public:
+
         /// Fold one scan in. `pts_robot` is the robot-frame scan, `pose` the map-frame robot pose,
         /// `cov` that pose's 3x3 covariance. Cheap: a voxel update per point, no solve.
         /// `seg_phi` / `seg_len` are the agent's OWN wall segments for this scan: normal angle in
@@ -125,6 +178,30 @@ namespace rc::boxch
 
     private:
         struct Vox { Eigen::Vector2d acc{0.0, 0.0}; double w = 0.0; float smin = 1e9f; };
+
+        /// ── KEYFRAMES: THE EVIDENCE, STILL IN THE FRAME IT WAS MEASURED IN ──────────────────
+        /// ★★★★★ WITHOUT THESE THE ESTIMATOR IS A FILTER, NOT A SMOOTHER. `vmap_` and `free_` are
+        /// per-cell counters: a return displaced by pose error lands in a DIFFERENT cell that is
+        /// never merged back, and a cell swept in error can never be un-swept. Consolidation can
+        /// then only OUTVOTE a mistake, never correct it — so a pose error above one cell (0.05 m)
+        /// is permanent, which is exactly why the fixed tour at 0.037 m never suffers and an
+        /// explorer at 0.19 m destroys the map.
+        /// Keeping the scan in the ROBOT frame with the pose it was taken at makes the evidence
+        /// re-projectable: when the layout changes materially, every keyframe is re-registered
+        /// against the new layout and the whole occupancy is rebuilt from the corrected poses.
+        /// That is a small bundle adjustment, and it is the difference between a map that can be
+        /// repaired and one that can only be outvoted.
+        struct KeyFrame
+        {
+            std::vector<Eigen::Vector2f> pts;   ///< robot frame, subsampled
+            Eigen::Vector3f pose{0.f, 0.f, 0.f};
+            float sigma = 0.f;
+        };
+        std::vector<KeyFrame> keys_;
+        std::uint64_t last_key_f_ = 0;
+        /// Re-register every keyframe against the current layout and rebuild vmap_/free_ from the
+        /// corrected poses. Returns the mean correction applied, in metres.
+        float reproject();
 
         /// ── FREE SPACE: THE CELLS THE BEAMS PASSED THROUGH ──────────────────────────────────
         /// ★★★★★ THE LAYOUT IS BUILT FROM THE INSIDE OUT, NOT THE OUTSIDE IN.

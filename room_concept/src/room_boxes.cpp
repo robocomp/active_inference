@@ -487,16 +487,44 @@ namespace rc::boxes
                 const size_t k = static_cast<size_t>(id);
                 if (k >= n) continue;
                 {
-                    Layout T = L;
-                    Box& b = T.boxes[k / 4];
-                    ((k % 4 == 0) ? b.lo.x() : (k % 4 == 1) ? b.lo.y() : (k % 4 == 2) ? b.hi.x() : b.hi.y()) += eps;
-                    const float jk = (T.sdf(q.p) - d) / eps;
+                    // ⚠ PERTURB IN PLACE. `Layout T = L;` here copied the whole layout — INCLUDING
+                    // `cov`, an Eigen matrix of (4*boxes)^2 floats: about 102 KB at forty boxes —
+                    // once per point, twenty thousand points per call. That is gigabytes of
+                    // allocation churn per refit; it is why the planner runs were slow and why two
+                    // of them were killed for memory on a machine with 44 GB free.
+                    Box& b = const_cast<Box&>(L.boxes[k / 4]);
+                    float& off = (k % 4 == 0) ? b.lo.x() : (k % 4 == 1) ? b.lo.y()
+                               : (k % 4 == 2) ? b.hi.x() : b.hi.y();
+                    const float keep = off;
+                    off += eps;
+                    const float jk = (L.sdf(q.p) - d) / eps;
+                    off = keep;
                     if (std::abs(jk) < 1e-4f) continue;
                     H[k] += w * jk * jk;
                     g[k] -= w * jk * static_cast<double>(d);
                 }
             }
             rms = std::sqrt(ss / static_cast<double>(pts.size()));
+            // ── THE POSTERIOR THE ESTIMATOR NEVER KEPT ──────────────────────────────────────
+            // The normal equations here are DIAGONAL — each residual depends on exactly one
+            // offset — so the variance of every offset is 1/H[k] and it is already computed. It
+            // was thrown away at the end of each call and L.cov reset to sigma_flat^2 * I, which
+            // left the estimator with no idea how well any face was known. Everything that is
+            // supposed to be driven by parameter uncertainty was then faked from geometry: the
+            // planner's "worst face" was really the face with the least floor in front of it, so
+            // standing there could not change the metric and the refine phase could not converge.
+            // An offset no point is active on keeps the prior — that IS its variance.
+            if (L.cov.rows() != static_cast<long>(n) or L.cov.cols() != static_cast<long>(n))
+                L.cov = Eigen::MatrixXf::Zero(static_cast<long>(n), static_cast<long>(n));
+            {
+                double span2 = 0.0;
+                for (const auto& b : L.boxes)
+                    span2 = std::max(span2, static_cast<double>(b.width() + b.height()));
+                const double prior = 1.0 / std::max(1e-6, span2 * span2);
+                for (size_t k = 0; k < n; ++k)
+                    L.cov(static_cast<long>(k), static_cast<long>(k)) =
+                        static_cast<float>(1.0 / std::max(prior, H[k] + prior));
+            }
             // ── DAMPED diagonal step. An offset no point is active on keeps its value. ───────
             // ⚠ AN ALMOST-UNOBSERVED OFFSET IS THE DANGEROUS CASE, NOT AN UNOBSERVED ONE.
             // With H[k] ~ 0 the undamped step g/H diverges, and ONE marginally-active point is
@@ -590,10 +618,14 @@ namespace rc::boxes
                 if (id < 0 or static_cast<size_t>(id / 4) != bi) continue;   // not this box's face
                 const float d = L.sdf(q.p);
                 const int k = id % 4;
-                Layout T = L;
-                Box& b = T.boxes[bi];
-                ((k == 0) ? b.lo.x() : (k == 1) ? b.lo.y() : (k == 2) ? b.hi.x() : b.hi.y()) += eps;
-                if (std::abs((T.sdf(q.p) - d) / eps) > 1e-4f) ++n[static_cast<size_t>(k)];
+                Box& b = const_cast<Box&>(L.boxes[bi]);      // perturb in place; see refit()
+                float& off = (k == 0) ? b.lo.x() : (k == 1) ? b.lo.y()
+                           : (k == 2) ? b.hi.x() : b.hi.y();
+                const float keep = off;
+                off += eps;
+                const bool moves = std::abs((L.sdf(q.p) - d) / eps) > 1e-4f;
+                off = keep;
+                if (moves) ++n[static_cast<size_t>(k)];
             }
             return n;
         }
