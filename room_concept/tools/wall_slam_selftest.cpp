@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include "corner_detector.h"
 #include "corner_visibility.h"
 #include "room_concept.h"
 #include "room_gn_solver.h"
@@ -2103,6 +2104,38 @@ int run_replay(const char* path)
         std::string phase = "-";
         std::vector<Eigen::Vector2f> traj_exec;   ///< where the robot ACTUALLY went (world)
         std::vector<Eigen::Vector2f> traj_est;    ///< where it BELIEVED it was (map->world)
+
+        /// ── PREDICTED-CORNER VALIDATION PROBE (WS_CORNER_PROBE) ─────────────────────────────
+        /// Project the PROVISIONAL layout's vertices into the scan and ask the fleet's own corner
+        /// channel whether they are there. Two variants per frame, differing ONLY in the pose the
+        /// prediction is made from:
+        ///   BELIEVED — `est`, what the robot actually has. This IS the proposed channel.
+        ///   ORACLE   — the true pose. Not implementable; it is the diagnostic control.
+        /// ★ The point of the pair is the LATCH. If registration has settled into a
+        /// self-consistent but misplaced alignment, the layout and the believed pose agree with
+        /// each other, so BELIEVED reads clean while ORACLE reads large. A channel that only ever
+        /// sees BELIEVED cannot detect that class of failure — and room i=81 (16/16 vertices,
+        /// rms 0.023 m, IoU 0.750, pose 0.69 m) is exactly that class. This measures it instead of
+        /// assuming it either way.
+        /// ── COLLISIONS: THE BENCH HAD NO NOTION OF THEM AT ALL ─────────────────────────────
+        /// `base.execute()` integrates dynamics and `compose()` applies the delta; nothing ever
+        /// compared the result against the room, so driving through a wall cost nothing and every
+        /// IoU here was quietly optimistic — some scans were taken from poses the robot could not
+        /// physically occupy. This does not stop the robot (that would change every number on the
+        /// bench at once); it COUNTS, so the next person sees it in the summary line instead of
+        /// having to notice it in a picture.
+        int   coll_frames = 0;            ///< frames with the body overlapping a wall or outside
+        int   coll_events = 0;            ///< how many separate times it entered that state
+        int   out_frames  = 0;            ///< frames with the centre outside the room entirely
+        float coll_depth  = 0.f;          ///< deepest penetration, m
+        int   cp_frames = 0;              ///< probe frames
+        float cp_infov = 0.f;             ///< mean model corners in the field of view
+        float cp_matched = 0.f;           ///< mean matched (assoc_prob >= 0.5)
+        float cp_occl = 0.f;              ///< mean rejected as occluded
+        float cp_resid = 0.f;             ///< median over frames of mean |detected - predicted| (m)
+        float cp_chi2 = 0.f;              ///< median over frames of the whitened residual
+        float cp_resid_oracle = 0.f;      ///< the same, predicted from the TRUE pose
+        float cp_matched_oracle = 0.f;
     };
 
     inline BoxRun run_boxes(const Poly& room, unsigned seed, bool reg, int reanchor_at, int laps,
@@ -2124,6 +2157,23 @@ int run_replay(const char* path)
             const Eigen::Vector2f d = p.head<2>() - origin.head<2>();
             return Eigen::Vector3f(c * d.x() - s * d.y(), s * d.x() + c * d.y(), wrap(p.z() - origin.z()));
         };
+        // ⚠⚠ THE PLANNER SPEAKS MAP, THE BASE SPEAKS WORLD — CONVERT, DO NOT ASSUME.
+        // `plan_path()` is handed `est` (the MAP-frame pose) and returns MAP-frame waypoints, but
+        // `exec_pose`, `pursue()`, `base.execute()` and `compose()` all live in the WORLD frame.
+        // Feeding a map waypoint straight to pursue() displaces every goal by the robot's start
+        // pose (the map frame is the world re-origined at truth[0] and rotated by -origin.z), so
+        // the robot chases points that are nowhere near what the planner chose. Measured on the
+        // apartamento hall: the robot left a 8.5 x 9.3 m room and wandered to y = -10.7 m, and its
+        // own belief agreed — it really drove there. The symptom is a trajectory that does not fit
+        // inside its own room; it is NOT a plotting-frame artefact.
+        // ★ Every information-gain result before 2026-09-20 was produced through this defect: the
+        // objective was measured, the execution was not.
+        const auto wp_to_world = [&](const Eigen::Vector2f& m)
+        {
+            const float c = std::cos(origin.z()), s = std::sin(origin.z());
+            return Eigen::Vector2f(c * m.x() - s * m.y() + origin.x(),
+                                   s * m.x() + c * m.y() + origin.y());
+        };
 
         rc::boxch::Channel ch;
         rc::boxch::Params bp; bp.enabled = true; bp.sensor_sigma = cfg.scan_sigma;
@@ -2140,8 +2190,20 @@ int run_replay(const char* path)
             const float cr = std::cos(ra_rot), sr = std::sin(ra_rot);
             return Eigen::Vector2f(cr * p.x() - sr * p.y() + ra_c.x(), sr * p.x() + cr * p.y() + ra_c.y());
         };
+        bool was_colliding = false;
         std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
         std::vector<Eigen::Vector2f> traj_exec, traj_est;
+
+        // ── predicted-corner validation probe (see BoxRun::cp_*) ────────────────────────────
+        const int cp_stride = std::getenv("WS_CORNER_PROBE")
+                            ? std::max(1, std::atoi(std::getenv("WS_CORNER_PROBE"))) : 0;
+        rc::CornerDetector cdet, cdet_oracle;
+        double cp_infov = 0, cp_matched = 0, cp_occl = 0, cp_matched_o = 0;
+        std::vector<float> cp_resid, cp_chi2, cp_resid_o;
+        std::ofstream cp_csv;
+        if (cp_stride and std::getenv("WS_CORNER_CSV"))
+        { cp_csv.open(std::getenv("WS_CORNER_CSV")); cp_csv.imbue(std::locale::classic());
+          cp_csv << "f,infov,matched,occl,resid,chi2,infov_o,matched_o,resid_o,poseerr\n"; }
 
         // ── WHO CHOOSES THE TARGETS ─────────────────────────────────────────────────────────
         // WS_BOXES_IG=1 hands the robot its own exploration: the channel plans to the frontier
@@ -2169,7 +2231,7 @@ int run_replay(const char* path)
                 // bootstrap, and any time the plan ran out, it did a full BFS and frontier scan
                 // every single frame. The run could not finish inside 280 seconds.
                 const bool spent = plan.empty() or plan_i >= plan.size()
-                                or (plan[plan_i] - exec_pose.head<2>()).norm() < 0.18f;
+                                or (wp_to_world(plan[plan_i]) - exec_pose.head<2>()).norm() < 0.18f;
                 if (spent and static_cast<int>(f) - last_plan_f >= 25)
                 {
                     if (plan_i < plan.size()) ++plan_i;
@@ -2189,13 +2251,14 @@ int run_replay(const char* path)
                         // stopping condition; a frame cap is not one, and 594/594 runs of the
                         // previous explorer hitting the cap is why it measured NULL.
                         if (plan.empty() and f > 150
-                            and ch.phase() == rc::boxch::Channel::Phase::Done) { explored = true; break; }
+                            and ch.phase() == rc::boxch::Channel::Phase::Done)
+                        { explored = true; R.frames = static_cast<int>(f) + 1; break; }
                     }
                 }
                 else if (spent) ++plan_i;
                 if (plan_i < plan.size())
                 {
-                    const Eigen::Vector2f t = plan[plan_i];
+                    const Eigen::Vector2f t = wp_to_world(plan[plan_i]);
                     goal = Eigen::Vector3f(t.x(), t.y(), exec_pose.z());
                 }
                 else
@@ -2208,9 +2271,10 @@ int run_replay(const char* path)
             if (ig and std::getenv("WS_IG_PROBE") and f % 100 == 0)
             {
                 const Eigen::Vector3f tmp = to_map(exec_pose);
-                std::fprintf(stderr, "[ig] f=%4zu %s plan=%zu/%zu gain=%5d | true=(%6.2f,%6.2f) "
+                std::fprintf(stderr, "[ig] f=%4zu %s plan=%zu/%zu gain=%5d wsig=%.4f yaw=%+.2f | true=(%6.2f,%6.2f) "
                                      "est=(%6.2f,%6.2f) poseerr=%.3f rms=%.3f boxes=%zu\n",
-                             f, ch.phase_name(), plan_i, plan.size(), ig_gain,
+                             f, ch.phase_name(), plan_i, plan.size(), ig_gain, ch.worst_face_sigma(),
+                             ch.yaw() * 180.f / kPi,
                              tmp.x(), tmp.y(), est.x(), est.y(),
                              (est.head<2>() - tmp.head<2>()).norm(), ch.rms(), ch.layout().boxes.size());
             }
@@ -2272,7 +2336,50 @@ int run_replay(const char* path)
             }
             ch.step();
 
+            // ── collision instrument (see BoxRun::coll_*) ───────────────────────────────────
+            {
+                const bool in_room = rc::corner_visibility::point_in_polygon(exec_pose.head<2>(), room);
+                const float clr = point_to_poly(exec_pose.head<2>(), room);
+                const bool hit = (not in_room) or clr < bp.body_radius;
+                if (not in_room) ++R.out_frames;
+                if (hit)
+                {
+                    if (R.coll_frames == 0 or not was_colliding) ++R.coll_events;
+                    ++R.coll_frames;
+                    R.coll_depth = std::max(R.coll_depth, in_room ? bp.body_radius - clr : clr);
+                }
+                was_colliding = hit;
+            }
+
             const Eigen::Vector3f tm = to_map(exec_pose);
+            if (cp_stride and static_cast<int>(f) % cp_stride == 0 and not ch.layout().empty())
+            {
+                const auto poly_map = ch.polygon();          // MAP frame, the frame `est` lives in
+                if (poly_map.size() >= 4)
+                {
+                    // BELIEVED: the channel as the robot could actually run it.
+                    cdet.set_model_corners(poly_map);
+                    const auto d = cdet.detect(p3, est.x(), est.y(), est.z(), P, 15.f);
+                    int nm = 0;
+                    for (const auto& m : d.matches) if (rc::CornerDetector::matched_for_display(m)) ++nm;
+                    cp_infov += d.corners_in_fov; cp_matched += nm; cp_occl += d.rej_occluded;
+                    cp_resid.push_back(d.resid_mean);
+                    cp_chi2.push_back(d.resid_chi2_mean);
+                    // ORACLE: same layout, same scan, TRUE pose. Diagnostic control only.
+                    cdet_oracle.set_model_corners(poly_map);
+                    const auto d_o = cdet_oracle.detect(p3, tm.x(), tm.y(), tm.z(), P, 15.f);
+                    int nmo = 0;
+                    for (const auto& m : d_o.matches) if (rc::CornerDetector::matched_for_display(m)) ++nmo;
+                    cp_matched_o += nmo;
+                    cp_resid_o.push_back(d_o.resid_mean);
+                    ++R.cp_frames;
+                    if (cp_csv.is_open())
+                        cp_csv << f << ',' << d.corners_in_fov << ',' << nm << ',' << d.rej_occluded
+                               << ',' << d.resid_mean << ',' << d.resid_chi2_mean << ','
+                               << d_o.corners_in_fov << ',' << nmo << ',' << d_o.resid_mean << ','
+                               << (est.head<2>() - tm.head<2>()).norm() << '\n';
+                }
+            }
             for (int k = 0; k < 4; ++k)
             {
                 const float a4 = static_cast<float>(k) * kPi * 0.5f;
@@ -2303,9 +2410,23 @@ int run_replay(const char* path)
         R.frac_out = ch.frac_out(); R.frac_in = ch.frac_in();
         R.yaw_deg = ch.yaw() * 180.f / kPi;
         R.pose_err = nperr ? *std::min_element(perr_q.begin(), perr_q.end()) / static_cast<double>(nperr) : -1.0;
+        if (R.cp_frames > 0)
+        {
+            const double n = R.cp_frames;
+            auto med = [](std::vector<float> x)
+            { if (x.empty()) return 0.f; std::sort(x.begin(), x.end()); return x[x.size() / 2]; };
+            R.cp_infov = static_cast<float>(cp_infov / n);
+            R.cp_matched = static_cast<float>(cp_matched / n);
+            R.cp_occl = static_cast<float>(cp_occl / n);
+            R.cp_matched_oracle = static_cast<float>(cp_matched_o / n);
+            R.cp_resid = med(cp_resid); R.cp_chi2 = med(cp_chi2);
+            R.cp_resid_oracle = med(cp_resid_o);
+        }
         R.replans = replans; R.explored = explored; R.ig_gain = ig_gain;
         R.phase = ig ? ch.phase_name() : "fixed-tour";
-        R.frames = static_cast<int>(truth.size());
+        // ⚠ FRAMES USED, NOT FRAMES OFFERED. A run that stops on its own stopping rule is the
+        // whole point of the explorer, and reporting the budget instead of the spend hides it.
+        if (not explored) R.frames = static_cast<int>(truth.size());
         R.layout = ch.layout();
         {
             float best = -1.f;
@@ -2719,11 +2840,12 @@ int main()
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
                     "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d"
-                    "  | replans=%d phase=%s explored=%s\n",
+                    "  | replans=%d phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
                     100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
                     r.proposed, r.admitted, r.removed, r.replans, r.phase.c_str(),
-                    r.explored ? "yes" : "NO(frame cap)");
+                    r.explored ? "yes" : "NO(frame cap)",
+                    r.coll_events, r.coll_frames, r.coll_depth, r.out_frames);
         // the TRUTH polygon, so the shape can be read rather than guessed at
         const auto& room = gen->first;
         Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
@@ -2773,8 +2895,15 @@ int main()
         const int olo = std::getenv("WS_BOXES_ORDER_LO") ? std::atoi(std::getenv("WS_BOXES_ORDER_LO")) : 1;
         const int ohi = std::getenv("WS_BOXES_ORDER_HI") ? std::atoi(std::getenv("WS_BOXES_ORDER_HI")) : 6;
         const int nord = std::max(1, ohi - olo + 1);
-        for (int i = 0; i < N; ++i)
+        // ⚠ SHARD BY ROOM INDEX, NOT BY SEED. Every run is pinned to ONE thread for determinism
+        // (see the OMP_NUM_THREADS re-exec above), so a 100-room sweep is 100 sequential minutes of
+        // one core on a 32-core box. WS_BOXES_INDEX_LO lets several processes each take a slice
+        // while room `i` keeps its identity — same seed 1000+i, same order olo + (i % nord) — so
+        // the union of the slices IS the sweep, and the per-room JSON is what gets aggregated.
+        const int ilo = std::getenv("WS_BOXES_INDEX_LO") ? std::atoi(std::getenv("WS_BOXES_INDEX_LO")) : 0;
+        for (int ii = 0; ii < N; ++ii)
         {
+            const int i = ilo + ii;
             const int order = olo + (i % nord);
             if (std::getenv("WS_BOXES_STYLE")
                 and std::string(std::getenv("WS_BOXES_STYLE")) == "apartamento")
@@ -2807,7 +2936,19 @@ int main()
                 dumpall << (nwritten++ ? ",\n" : "") << "{\"i\":" << i << ",\"order\":" << order
                         << ",\"iou\":" << r.iou << ",\"boxes\":" << r.boxes
                         << ",\"verts\":" << r.verts << ",\"tv\":" << r.truth_verts
-                        << ",\"rms\":" << r.rms << ",\"pose\":" << r.pose_err << ",\"truth\":";
+                        << ",\"rms\":" << r.rms << ",\"pose\":" << r.pose_err
+                        << ",\"cp_frames\":" << r.cp_frames << ",\"cp_infov\":" << r.cp_infov
+                        << ",\"cp_matched\":" << r.cp_matched << ",\"cp_occl\":" << r.cp_occl
+                        << ",\"cp_resid\":" << r.cp_resid << ",\"cp_chi2\":" << r.cp_chi2
+                        << ",\"cp_resid_oracle\":" << r.cp_resid_oracle
+                        << ",\"cp_matched_oracle\":" << r.cp_matched_oracle
+                        << ",\"coll_events\":" << r.coll_events
+                        << ",\"coll_frames\":" << r.coll_frames
+                        << ",\"coll_depth\":" << r.coll_depth
+                        << ",\"out_frames\":" << r.out_frames
+                        << ",\"explored\":" << (r.explored ? 1 : 0)
+                        << ",\"frames\":" << r.frames << ",\"replans\":" << r.replans
+                        << ",\"phase\":\"" << r.phase << "\",\"truth\":";
                 poly(gen->first, 1);
                 dumpall << ",\"est\":"; poly(r.est_poly, 1);
                 dumpall << ",\"traj\":"; poly(r.traj_exec, std::max<int>(1, static_cast<int>(r.traj_exec.size()) / 40));
@@ -2817,22 +2958,29 @@ int main()
         std::printf("\nRANDOM ROOM SWEEP — %d rooms, orders %d..%d, pose=%s%s, %d laps (%d skipped: no drivable circuit)\n",
                     N, olo, ohi, reg ? "registered" : "odometry-only",
                     ranch ? " +RE-ANCHOR" : "", laps, skipped);
-        std::printf("  order  n   IoU med   min     p25   | boxes med(truth)  verts med(truth) | rms   out%%  in%%\n");
+        std::printf("  order  n   IoU med   min     p25   | boxes med(truth)  verts med(truth) | rms   out%%  in%%"
+                    " | expl%%  frames med  replans med\n");
         std::vector<float> all;
         for (auto& [ord, v] : by_order)
         {
             auto med = [](std::vector<float> x)
             { std::sort(x.begin(), x.end()); return x.empty() ? 0.f : x[x.size() / 2]; };
-            std::vector<float> iou, rms, fo, fi; std::vector<float> bx, vt, tv;
+            std::vector<float> iou, rms, fo, fi; std::vector<float> bx, vt, tv, fr, rp;
+            int nexpl = 0;
             for (const auto& r : v)
             { iou.push_back(r.iou); rms.push_back(r.rms); fo.push_back(100.f * r.frac_out);
               fi.push_back(100.f * r.frac_in); bx.push_back(static_cast<float>(r.boxes));
               vt.push_back(static_cast<float>(r.verts)); tv.push_back(static_cast<float>(r.truth_verts));
+              fr.push_back(static_cast<float>(r.frames)); rp.push_back(static_cast<float>(r.replans));
+              nexpl += r.explored ? 1 : 0;
               all.push_back(r.iou); }
             std::vector<float> s = iou; std::sort(s.begin(), s.end());
-            std::printf("  %3d  %3zu   %.3f   %.3f   %.3f | %5.1f (%3d)      %5.1f (%4.1f)  | %.3f %5.1f %5.1f\n",
+            std::printf("  %3d  %3zu   %.3f   %.3f   %.3f | %5.1f (%3d)      %5.1f (%4.1f)  | %.3f %5.1f %5.1f"
+                        " | %4.0f%%  %8.0f  %8.0f\n",
                         ord, v.size(), med(iou), s.front(), s[s.size() / 4],
-                        med(bx), ord, med(vt), med(tv), med(rms), med(fo), med(fi));
+                        med(bx), ord, med(vt), med(tv), med(rms), med(fo), med(fi),
+                        100.0 * static_cast<double>(nexpl) / static_cast<double>(v.size()),
+                        med(fr), med(rp));
         }
         if (all.empty())
         {

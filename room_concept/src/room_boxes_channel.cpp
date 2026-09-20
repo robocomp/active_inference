@@ -42,10 +42,7 @@ namespace rc::boxch
         float smax = 0.f;
         for (const auto& q : band)
         {
-            const Eigen::Vector2f jth(-s * q.x() - c * q.y(), c * q.x() - s * q.y());
-            const Eigen::Vector2f pxth(cov(0, 2), cov(1, 2));
-            const float tr = cov(0, 0) + cov(1, 1) + cov(2, 2) * jth.squaredNorm() + 2.f * pxth.dot(jth);
-            const float sg = std::sqrt(std::max(0.f, tr) * 0.5f);
+            const float sg = point_sigma(cov, c, s, q);
             if (not std::isfinite(sg)) continue;
             // ⚠ The voxel map is kept in the AGENT'S MAP FRAME, not the layout's. The gauge is
             // still being estimated, and evidence stored in a frame that is itself moving cannot
@@ -113,7 +110,7 @@ namespace rc::boxch
         if (frames_ - last_key_f_ >= 25 and keys_.size() < 200)
         {
             KeyFrame kf;
-            kf.pose = pose; kf.sigma = smax;
+            kf.pose = pose; kf.sigma = smax; kf.cov = cov;
             kf.pts.reserve(band.size() / 3 + 1);
             for (size_t i = 0; i < band.size(); i += 3) kf.pts.push_back(band[i]);
             keys_.push_back(std::move(kf));
@@ -361,6 +358,66 @@ namespace rc::boxch
             return gridf[idx(k.first, k.second)] != 0;
         };
 
+        // ── A CELL BEING EMPTY IS NOT THE SAME AS THE ROBOT FITTING IN IT ───────────────────
+        // The planner used to route over bare free cells and hand the result to a pursuit
+        // controller, so it would happily thread a body 0.46 m wide through a 0.12 m fin gap. The
+        // bench has NO collision model, so nothing ever objected: measured on the apartamento hall,
+        // the executed path crossed a wall on 19 of 217 legs. Plan in configuration space instead —
+        // free space eroded by the robot's own radius — and a gap it cannot fit through simply
+        // stops being a corridor.
+        // Erosion is against KNOWN OCCUPANCY ONLY. Unknown space is not known to be an obstacle,
+        // and a frontier cell is adjacent to unknown by definition, so eroding against unknown
+        // would forbid approaching every frontier. This also RETIRES the ad-hoc "no occupied cell
+        // within 2 cells" margin the frontier test used to carry: 2 cells was a stand-in for this.
+        const int brad = std::max(0, static_cast<int>(std::ceil(p_.body_radius / p_.cell)));
+        std::vector<char> blocked(gridf.size(), 0);
+        for (int y = loy - 1; y <= hiy + 1; ++y)
+            for (int x = lox - 1; x <= hix + 1; ++x)
+            {
+                if (grido[idx(x, y)] == 0) continue;
+                for (int dy = -brad; dy <= brad; ++dy)
+                    for (int dx = -brad; dx <= brad; ++dx)
+                    {
+                        if (dx * dx + dy * dy > brad * brad) continue;      // a disc, not a square
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < lox - 1 or nx > hix + 1 or ny < loy - 1 or ny > hiy + 1) continue;
+                        blocked[idx(nx, ny)] = 1;
+                    }
+            }
+        const auto is_trav = [&](const std::pair<int, int>& k)
+        {
+            if (not is_free(k)) return false;
+            return blocked[idx(k.first, k.second)] == 0;
+        };
+
+        // ⚠ UNKNOWN SPACE OUTSIDE THE BELIEVED ROOM IS NOT AN EXPLORE TARGET. A 1-cell wall does
+        // not seal the occupied grid: at grazing incidence 2 cm of range noise leaves gaps between
+        // returns, and the free marking stops just short of the surface, so the 48 rays LEAK
+        // THROUGH the walls and score the outdoors — which is unbounded. Measured on a plain
+        // rectangle: gain RISING 930 -> 1212 -> 1304 over frames 500-800, so the frontier was
+        // never exhausted, Explore never ended, and the refine phase, the frozen cover and the
+        // Done rule have never run in any run of this planner.
+        // The layout is the robot's own statement of where the room IS, so an unknown cell with
+        // sdf >= 0 is outside it: reachable only through a face the layout does not support, which
+        // is a REFINE question (is that face where I think it is?), not an Explore one. No
+        // threshold — the sign of the SDF is the model's own boundary.
+        const float cyl = std::cos(-yaw_), syl = std::sin(-yaw_);
+        std::vector<char> gridi(gridf.size(), 1);
+        if (not L_.empty())
+            for (int y = loy - 1; y <= hiy + 1; ++y)
+                for (int x = lox - 1; x <= hix + 1; ++x)
+                {
+                    const Eigen::Vector2f m((static_cast<float>(x) + 0.5f) * p_.cell,
+                                            (static_cast<float>(y) + 0.5f) * p_.cell);
+                    const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
+                    gridi[idx(x, y)] = (L_.sdf(ml) < 0.f) ? 1 : 0;
+                }
+        const auto is_inside = [&](int x, int y)
+        {
+            if (x < lox - 1 or x > hix + 1 or y < loy - 1 or y > hiy + 1) return false;
+            return gridi[idx(x, y)] != 0;
+        };
+
         const std::pair<int, int> start{static_cast<int>(std::floor(from_map.x() / p_.cell)),
                                         static_cast<int>(std::floor(from_map.y() / p_.cell))};
         if (not is_free(start)) return out;
@@ -371,6 +428,14 @@ namespace rc::boxch
         std::vector<int> par_a(gridf.size(), -1);
         std::map<std::pair<int, int>, std::pair<int, int>> parent;
         std::map<std::pair<int, int>, int> dist;
+        // ⚠ THE ROBOT IS WHERE IT IS. Seed the start unconditionally — it may already be inside the
+        // eroded margin (it was driven there before the erosion existed, or a wall was discovered
+        // beside it), and refusing to plan from an illegal cell would simply freeze it there.
+        // If the eroded grid strands it, fall back to bare free space for this one plan so it can
+        // extract itself, and say so in the phase log rather than standing still silently.
+        bool eroded = true;
+        const auto passable = [&](const std::pair<int, int>& k)
+        { return eroded ? is_trav(k) : is_free(k); };
         std::deque<std::pair<int, int>> q{start};
         dist[start] = 0; dist_a[idx(start.first, start.second)] = 0;
         while (not q.empty())
@@ -381,10 +446,36 @@ namespace rc::boxch
                                                {cur.first, cur.second + 1}, {cur.first, cur.second - 1}};
             for (const auto& n : nb)
             {
-                if (not is_free(n) or dist_a[idx(n.first, n.second)] >= 0) continue;
+                if (not passable(n) or dist_a[idx(n.first, n.second)] >= 0) continue;
                 dist_a[idx(n.first, n.second)] = d + 1;
                 par_a[idx(n.first, n.second)] = static_cast<int>(idx(cur.first, cur.second));
                 dist[n] = d + 1; parent[n] = cur; q.push_back(n);
+            }
+        }
+
+        // The erosion can strand a robot that is already inside the margin: one cell reached means
+        // every neighbour is blocked. Retry once on bare free space so it can drive out.
+        if (dist.size() <= 1 and eroded)
+        {
+            eroded = false;
+            dist.clear(); parent.clear();
+            std::fill(dist_a.begin(), dist_a.end(), -1);
+            std::fill(par_a.begin(), par_a.end(), -1);
+            std::deque<std::pair<int, int>> q2{start};
+            dist[start] = 0; dist_a[idx(start.first, start.second)] = 0;
+            while (not q2.empty())
+            {
+                const auto cur = q2.front(); q2.pop_front();
+                const int d = dist[cur];
+                const std::pair<int, int> nb[4] = {{cur.first + 1, cur.second}, {cur.first - 1, cur.second},
+                                                   {cur.first, cur.second + 1}, {cur.first, cur.second - 1}};
+                for (const auto& n : nb)
+                {
+                    if (not is_free(n) or dist_a[idx(n.first, n.second)] >= 0) continue;
+                    dist_a[idx(n.first, n.second)] = d + 1;
+                    par_a[idx(n.first, n.second)] = static_cast<int>(idx(cur.first, cur.second));
+                    dist[n] = d + 1; parent[n] = cur; q2.push_back(n);
+                }
             }
         }
 
@@ -407,13 +498,12 @@ namespace rc::boxch
             const std::pair<int, int> nb4[4] = {{k.first + 1, k.second}, {k.first - 1, k.second},
                                                 {k.first, k.second + 1}, {k.first, k.second - 1}};
             bool isf = false;
-            for (const auto& n : nb4) if (is_unknown(n.first, n.second)) { isf = true; break; }
+            for (const auto& n : nb4)
+                if (is_unknown(n.first, n.second) and is_inside(n.first, n.second)) { isf = true; break; }
             if (not isf) continue;
-            bool tooclose = false;
-            for (int dx = -2; dx <= 2 and not tooclose; ++dx)
-                for (int dy = -2; dy <= 2 and not tooclose; ++dy)
-                    if (is_occ(k.first + dx, k.second + dy)) tooclose = true;
-            if (not tooclose) fr.insert(k);
+            // the body-radius erosion has replaced the old hand-picked "no occupied cell within
+            // 2 cells" margin; a cell the robot fits in is a cell it may stand in
+            if (passable(k)) fr.insert(k);
         }
         std::vector<std::pair<int, int>> reps;
         {
@@ -471,7 +561,7 @@ namespace rc::boxch
                     const int cx = k.first  + static_cast<int>(std::lround(ux * static_cast<float>(s)));
                     const int cy = k.second + static_cast<int>(std::lround(uy * static_cast<float>(s)));
                     if (is_occ(cx, cy)) break;      // the beam stops here
-                    if (is_unknown(cx, cy)) ++unknown;
+                    if (is_unknown(cx, cy) and is_inside(cx, cy)) ++unknown;
                 }
             }
             const double score = static_cast<double>(unknown)
@@ -484,50 +574,172 @@ namespace rc::boxch
         if (not have and not L_.empty())
         {
             phase_ = Phase::Refine;
-            // Support per face: returns currently active on it, and how square they were seen.
-            // A face with few, grazing observations is the one to go and look at.
-            const float cyl = std::cos(-yaw_), syl = std::sin(-yaw_);
-            struct FaceInfo { Eigen::Vector2f mid{0.f,0.f}, nrm{0.f,0.f}; double info = 0.0; float len = 0.f; };
+            // ── THE WORST FACE IS THE ONE WITH THE WIDEST POSTERIOR, NOT THE LEAST FLOOR ───────
+            // ⚠ This block used to sum cos^2(incidence)/range^2 over the free cells the robot
+            // could STAND IN, and call that the face's information. That is the available VANTAGE,
+            // a property of the floor plan: the "worst face" came out as the face with the least
+            // open space in front of it, standing there could not change the number, and Refine
+            // could therefore never converge — it re-elected the same face for ever.
+            // refit() now KEEPS the posterior it always computed (the normal equations are
+            // diagonal, so var(offset) = 1/H and it was being thrown away), so the estimand is
+            // available directly: read it. The face to go and look at is the one whose OFFSET the
+            // data constrains least, which is the definition of the quantity Refine drives down.
+            struct FaceInfo { Eigen::Vector2f mid{0.f,0.f}, nrm{0.f,0.f}; double var = 0.0; };
             std::vector<FaceInfo> faces;
-            for (const auto& b : L_.boxes)
+            // An offset with no posterior entry is UNKNOWN, not well known: score it at the room's
+            // own size, the weakest proper statement there is (and what refit's own prior uses).
+            double span = 0.0;
+            for (const auto& b : L_.boxes) span = std::max(span, static_cast<double>(b.width() + b.height()));
+            const double var_unknown = std::max(1e-6, span * span);
+            const bool have_cov = L_.cov.rows() == static_cast<long>(L_.n_offsets())
+                              and L_.cov.cols() == static_cast<long>(L_.n_offsets());
+            const auto var_of = [&](size_t k)
             {
+                if (not have_cov) return var_unknown;
+                const float v = L_.cov(static_cast<long>(k), static_cast<long>(k));
+                if (not std::isfinite(v) or v <= 0.f) return var_unknown;
+                return static_cast<double>(v);
+            };
+            // ── THE CANDIDATES ARE THE OFFSETS THE EVIDENCE ACTUALLY LANDS ON ──────────────────
+            // ⚠ A BOX FACE IS NOT A WALL, AND AN OFFSET IS NOT ALWAYS A PARAMETER.
+            //   · Where two positive boxes abut, the shared face is an INTERNAL SEAM, strictly
+            //     inside the union: no return can land on it.
+            //   · Where two boxes share a wall, the two coincident offsets describe ONE surface;
+            //     active_face() gives every return on it to one of them, so the other is redundant
+            //     BY CONSTRUCTION.
+            // Both cases leave H = 0, so refit honestly hands the offset its prior — sigma = the
+            // room's own span — and a posterior-ranked Refine elects that phantom on every replan
+            // and drives at a surface it can never improve. MEASURED before this: room idx 1 sat
+            // in `refine` to the frame cap with wsig = 9.53 m (= span) on three of twelve offsets,
+            // one of which was the coincident copy of the room's left wall — a wall known to 3 mm.
+            // So do not enumerate box faces at all. Walk the region BOUNDARY, ask the estimator's
+            // own attribution rule which offset each patch of it belongs to, and let the buckets
+            // that come back be the candidates. A seam contributes no boundary samples and a
+            // redundant offset is never attributed, so neither can be elected; every candidate is
+            // a patch of real wall together with the parameter a look at it would sharpen.
+            struct Bucket { Eigen::Vector2f acc{0.f, 0.f}; Eigen::Vector2f nrm{0.f, 0.f}; int n = 0; };
+            std::map<int, Bucket> buckets;
+            for (size_t bi = 0; bi < L_.boxes.size(); ++bi)
+            {
+                const auto& b = L_.boxes[bi];
                 if (not b.positive) continue;
-                const Eigen::Vector2f c0(0.5f * (b.lo.x() + b.hi.x()), 0.5f * (b.lo.y() + b.hi.y()));
-                const FaceInfo f0[4] = {
-                    {{b.lo.x(), c0.y()}, {-1.f, 0.f}, 0.0, b.height()},
-                    {{b.hi.x(), c0.y()}, { 1.f, 0.f}, 0.0, b.height()},
-                    {{c0.x(), b.lo.y()}, { 0.f,-1.f}, 0.0, b.width()},
-                    {{c0.x(), b.hi.y()}, { 0.f, 1.f}, 0.0, b.width()}};
-                for (const auto& fi : f0) faces.push_back(fi);
-            }
-            if (faces.empty()) return out;
-            // Fisher information about an offset goes as cos^2(incidence)/range^2 per return, so a
-            // cell that sees the face squarely and close carries the most. Accumulate over the
-            // free cells the robot could stand in — that IS the experiment design.
-            for (auto& fc : faces)
-            {
-                for (const auto& [k, d] : dist)
+                const Eigen::Vector2f corner[4] = {{b.lo.x(), b.lo.y()}, {b.hi.x(), b.lo.y()},
+                                                   {b.hi.x(), b.hi.y()}, {b.lo.x(), b.hi.y()}};
+                const Eigen::Vector2f nrm[4] = {{0.f,-1.f}, {1.f, 0.f}, {0.f, 1.f}, {-1.f, 0.f}};
+                for (int e = 0; e < 4; ++e)
                 {
-                    const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
-                                            (static_cast<float>(k.second) + 0.5f) * p_.cell);
-                    const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
-                    const Eigen::Vector2f r = ml - fc.mid;
-                    const float rng = r.norm();
-                    if (rng < 0.3f or rng > 6.f) continue;
-                    const float cosi = std::abs(r.dot(fc.nrm)) / rng;
-                    fc.info += static_cast<double>(cosi) * cosi / (rng * rng);
+                    const Eigen::Vector2f a = corner[e], z = corner[(e + 1) % 4];
+                    const int ns = std::max(2, static_cast<int>((z - a).norm() / p_.cell) + 1);
+                    for (int i = 0; i < ns; ++i)
+                    {
+                        const float t = static_cast<float>(i) / static_cast<float>(ns - 1);
+                        const Eigen::Vector2f s = a + t * (z - a);
+                        if (L_.inside(s + p_.cell * nrm[e])) continue;   // seam: the region goes on
+                        const int off = rc::boxes::active_face(L_, s + 0.5f * p_.cell * nrm[e]);
+                        if (off < 0 or static_cast<size_t>(off) >= L_.n_offsets()) continue;
+                        auto& bk = buckets[off];
+                        bk.acc += s; bk.nrm = nrm[e]; ++bk.n;
+                    }
                 }
-                fc.info *= static_cast<double>(std::max(0.2f, fc.len));
             }
+            // ── AN OFFSET WITH NO SENSITIVITY CANNOT BE LEARNT FROM ANYWHERE ───────────────────
+            // ⚠ ATTRIBUTION IS NOT ENOUGH, AND THIS IS THE ONE THAT COST THE MOST TO FIND.
+            // Room idx 1, offset 0 = box 0's lo.x = the room's LEFT WALL: 214 condensed cloud
+            // points attributed to it by active_face(), and a posterior still sitting exactly at
+            // refit's prior (sigma = 9.53 m = the room's span). refit and the planner disagreeing
+            // about the same layout and the same cloud IS the evidence: when two positive boxes
+            // share a wall, `Layout::sdf` takes a MIN over boxes, so perturbing one of the two
+            // coincident offsets leaves the min — and every residual — untouched. Its Jacobian is
+            // identically zero, refit's own `abs(jk) < 1e-4` test drops every one of those 214
+            // points, and no viewpoint in the world can inform it. The posterior is not broken; it
+            // is telling the truth about a DEGENERATE PARAMETERISATION.
+            // So ask the estimator's question: does moving this offset move the boundary where its
+            // own returns are? If not, the wall is being carried by the other copy and there is
+            // nothing here to refine. (The underlying degeneracy — two free offsets for one
+            // surface, where the design already has `attach` to tie them — is the estimator's to
+            // fix; the planner must not chase it either way.)
+            std::vector<int> face_off;
+            {
+                rc::boxes::Layout T = L_;
+                const float eps = 1e-3f;
+                for (const auto& [off, bk] : buckets)
+                {
+                    if (bk.n <= 0) continue;
+                    const Eigen::Vector2f mid = bk.acc / static_cast<float>(bk.n);
+                    const Eigen::Vector2f probe = mid + 0.5f * p_.cell * bk.nrm;
+                    const size_t k = static_cast<size_t>(off);
+                    rc::boxes::Box& tb = T.boxes[k / 4];
+                    float& o = (k % 4 == 0) ? tb.lo.x() : (k % 4 == 1) ? tb.lo.y()
+                             : (k % 4 == 2) ? tb.hi.x() : tb.hi.y();
+                    const float keep = o;
+                    const float d0 = T.sdf(probe);
+                    o += eps;
+                    const float jk = (T.sdf(probe) - d0) / eps;
+                    o = keep;
+                    if (std::abs(jk) < 1e-4f) continue;          // the same test refit applies
+                    faces.push_back({mid, bk.nrm, var_of(k)});
+                    face_off.push_back(off);
+                }
+            }
+            if (faces.empty()) { phase_ = Phase::Done; return out; }
             size_t worst = 0;
-            for (size_t i = 1; i < faces.size(); ++i) if (faces[i].info < faces[worst].info) ++worst, worst = i;
-            worst_face_sigma_ = static_cast<float>(1.0 / std::sqrt(1.0 + faces[worst].info));
+            for (size_t i = 1; i < faces.size(); ++i) if (faces[i].var > faces[worst].var) worst = i;
+            worst_face_sigma_ = static_cast<float>(std::sqrt(faces[worst].var));
+            static const bool probe = std::getenv("WS_IG_PROBE") != nullptr;
+            if (probe)
+            {
+                std::fprintf(stderr, "[refine] %zu faces (of %zu offsets, cov %ld) worst=%zu var=%.4g "
+                                     "mid=(%.2f,%.2f) nrm=(%+.0f,%+.0f) | vars:",
+                             faces.size(), L_.n_offsets(), static_cast<long>(L_.cov.rows()), worst,
+                             faces[worst].var, faces[worst].mid.x(), faces[worst].mid.y(),
+                             faces[worst].nrm.x(), faces[worst].nrm.y());
+                for (const auto& fc : faces) std::fprintf(stderr, " %.3g", std::sqrt(fc.var));
+                std::fprintf(stderr, " | off:");
+                for (const int o : face_off) std::fprintf(stderr, " %d", o);
+                std::fprintf(stderr, " | cloudpts:");
+                for (const int o : face_off)
+                {
+                    int n = 0;
+                    for (const auto& q : cloud_) if (rc::boxes::active_face(L_, q.p) == o) ++n;
+                    std::fprintf(stderr, " %d", n);
+                }
+                std::fprintf(stderr, "\n");
+            }
+
+            // ── WHEN IS THERE NOTHING LEFT TO LEARN ABOUT SHAPE? ────────────────────────────
+            // Split the uncertainty on a wall's offset into what looking can change and what it
+            // cannot. refit's 1/H is the REDUCIBLE part: it shrinks with every fresh view. The
+            // wall's own flatness, sigma_flat, is COMMON-MODE — every return on that surface
+            // shares it (the same correlated-evidence argument the proposal likelihood already
+            // marginalises by Woodbury), so no number of visits reduces it. Refine stops when the
+            // part it can still buy has fallen below the part it can never buy: at
+            // 1/H <= sigma_flat^2 the next drive moves the belief about that wall by less than
+            // the wall's own scatter. A physical constant of the generative model compared
+            // against the posterior — not a stopping bar invented here.
+            // ⚠ 1/H IS OPTIMISTIC ON ITS OWN: refit's normal equations are diagonal and carry no
+            // common mode, so a well-seen face reports 1.6-2.1 mm on room idx 0, far under the
+            // 10 mm flatness. That is why the comparison must be this way round — it asks whether
+            // the REDUCIBLE part has become negligible, and never claims the wall is known to
+            // 2 mm.
+            // ⚠ Before this, Refine had NO exit: the viewpoint search below almost always
+            // succeeds, so `Done` was reachable only on an empty layout and every run of this
+            // planner ended at the frame cap.
+            if (worst_face_sigma_ <= p_.sigma_flat) { phase_ = Phase::Done; return out; }
 
             // Stand square to it, at about 1.3 m — the standoff the fixed tour happens to use, and
             // the range where cos^2/range^2 is large without the wall filling the scan.
+            // ⚠ THE VIEWPOINT MUST BE INSIDE THE ROOM. This loop ranges over every reachable free
+            // cell, and free space is not confined to the layout: a beam that slips between two
+            // returns sweeps the outdoors, and standing out there is square to the wall's OUTER
+            // face at a perfectly good range. Measured (room idx 0, 6.8 x 4.0 m): the robot walked
+            // monotonically out to 11.5 m from its start and spent the whole run outside, in BOTH
+            // the old vantage-based refine and the posterior-based one. The layout is the robot's
+            // own statement of where the room is; a viewpoint it does not contain is not a
+            // viewpoint. Same SDF sign test as the frontier gain, same justification.
             std::pair<int, int> goal{0, 0}; double bestv = -1.0; bool gotv = false;
             for (const auto& [k, d] : dist)
             {
+                if (not is_inside(k.first, k.second) or not passable(k)) continue;
                 const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
                                         (static_cast<float>(k.second) + 0.5f) * p_.cell);
                 const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
@@ -549,16 +761,47 @@ namespace rc::boxch
             rev.push_back(cur);
             if (not parent.count(cur)) return out;      // unreachable; should not happen after BFS
         }
-        // Thin the path: a waypoint every ~0.4 m is enough for a pursuit controller, and the
-        // straight legs between them stay inside free space because the cells they join do.
-        const int stride = std::max(1, static_cast<int>(0.4f / p_.cell));
-        for (int i = static_cast<int>(rev.size()) - 1; i >= 0; i -= stride)
-            out.emplace_back((static_cast<float>(rev[static_cast<size_t>(i)].first) + 0.5f) * p_.cell,
-                             (static_cast<float>(rev[static_cast<size_t>(i)].second) + 0.5f) * p_.cell);
-        if (out.empty() or (out.back() - Eigen::Vector2f((static_cast<float>(best.first) + 0.5f) * p_.cell,
-                                                         (static_cast<float>(best.second) + 0.5f) * p_.cell)).norm() > 0.05f)
-            out.emplace_back((static_cast<float>(best.first) + 0.5f) * p_.cell,
-                             (static_cast<float>(best.second) + 0.5f) * p_.cell);
+        // ── THIN THE PATH, BUT NEVER ACROSS SOMETHING THE PATH WENT AROUND ──────────────────
+        // ⚠ THE OLD COMMENT HERE WAS FALSE. It claimed "the straight legs between waypoints stay
+        // inside free space because the cells they join do" — true only for walls THICKER than the
+        // stride. The BFS path is 4-connected over free cells, so it cannot cross a wall; decimating
+        // it to a waypoint every 0.4 m then reconnects the survivors with chords that cut straight
+        // through anything thinner. The apartamento hall has two 0.12 m fins and a 0.062 m edge:
+        // measured, 19 of 217 executed legs crossed a wall, and the drawn trajectory ran through
+        // both fins. It is not the controller and not the frame — it is this decimation.
+        // So pull the string instead: extend a leg while every cell under it is FREE, and plant a
+        // waypoint at the last cell for which that held. Legs come out longer than 0.4 m in open
+        // space and as short as a cell around a fin, which is the right behaviour in both places,
+        // and the constraint is a validity test rather than a tuned spacing.
+        const auto seg_free = [&](const std::pair<int, int>& a, const std::pair<int, int>& b)
+        {
+            const float ax = static_cast<float>(a.first) + 0.5f, ay = static_cast<float>(a.second) + 0.5f;
+            const float bx = static_cast<float>(b.first) + 0.5f, by = static_cast<float>(b.second) + 0.5f;
+            const float dx = bx - ax, dy = by - ay;
+            // sample at 0.4 of a cell: finer than the thinnest thing the grid can represent, so a
+            // 2-cell fin cannot slip between two samples
+            const int ns = std::max(1, static_cast<int>(std::ceil(std::max(std::abs(dx), std::abs(dy)) / 0.4f)));
+            for (int k = 0; k <= ns; ++k)
+            {
+                const float t = static_cast<float>(k) / static_cast<float>(ns);
+                const std::pair<int, int> c{static_cast<int>(std::floor(ax + t * dx)),
+                                            static_cast<int>(std::floor(ay + t * dy))};
+                if (not passable(c)) return false;
+            }
+            return true;
+        };
+        std::vector<std::pair<int, int>> fwd(rev.rbegin(), rev.rend());   // start-adjacent first
+        std::pair<int, int> anchor = start;
+        for (size_t i = 0; i < fwd.size(); ++i)
+            if (i + 1 == fwd.size() or not seg_free(anchor, fwd[i + 1]))
+            {
+                out.emplace_back((static_cast<float>(fwd[i].first) + 0.5f) * p_.cell,
+                                 (static_cast<float>(fwd[i].second) + 0.5f) * p_.cell);
+                anchor = fwd[i];
+            }
+        const Eigen::Vector2f goal_m((static_cast<float>(best.first) + 0.5f) * p_.cell,
+                                     (static_cast<float>(best.second) + 0.5f) * p_.cell);
+        if (out.empty() or (out.back() - goal_m).norm() > 0.05f) out.emplace_back(goal_m);
         return out;
     }
 
@@ -584,6 +827,18 @@ namespace rc::boxch
                                      std::atan2(std::sin(rr.pose.z() + gy), std::cos(rr.pose.z() + gy)));
             moved += (np.head<2>() - kf.pose.head<2>()).norm(); ++n;
             kf.pose = np;
+            // The re-registered pose comes with its own covariance, in the LAYOUT frame — rotate it
+            // into the map frame the keyframe lives in and keep it. This is the one place a past
+            // frame's evidence can get BETTER: a keyframe re-registered against a sharper layout
+            // has a tighter pose, so its returns legitimately carry more information than when they
+            // were captured. Without it a revisit can never pay and the explorer has no reason to
+            // look at a wall twice.
+            if (rr.cov.allFinite())
+            {
+                Eigen::Matrix3f R3 = Eigen::Matrix3f::Identity();
+                R3.topLeftCorner<2, 2>() = Eigen::Rotation2Df(gy).toRotationMatrix();
+                kf.cov = R3 * rr.cov * R3.transpose();
+            }
         }
 
         // 2. Rebuild the occupancy from the corrected poses. THIS is the step a counter-based map
@@ -593,14 +848,20 @@ namespace rc::boxch
         {
             const float c = std::cos(kf.pose.z()), s = std::sin(kf.pose.z());
             const Eigen::Vector2f o = kf.pose.head<2>();
-            const float s0 = std::sqrt(kf.sigma * kf.sigma + p_.sensor_sigma * p_.sensor_sigma);
-            const double w = 1.0 / (static_cast<double>(s0) * s0);
             for (const auto& q : kf.pts)
             {
+                // ⚠ PER POINT, NOT PER SCAN. This used to weight every point of the keyframe by
+                // kf.sigma — the scan's WORST point — and stamp that on `smin`, so the near returns
+                // that carry the geometry were charged the far returns' lever arm. Same formula as
+                // the live fold, same helper, so the rebuild cannot disagree with it.
+                const float sg = point_sigma(kf.cov, c, s, q);
+                if (not std::isfinite(sg)) continue;
+                const float s0 = std::sqrt(sg * sg + p_.sensor_sigma * p_.sensor_sigma);
+                const double w = 1.0 / (static_cast<double>(s0) * s0);
                 const Eigen::Vector2f g(c * q.x() - s * q.y() + o.x(), s * q.x() + c * q.y() + o.y());
                 auto& v = vmap_[{static_cast<int>(std::floor(g.x() / p_.cell)),
                                  static_cast<int>(std::floor(g.y() / p_.cell))}];
-                v.acc += w * g.cast<double>(); v.w += w; v.smin = std::min(v.smin, kf.sigma);
+                v.acc += w * g.cast<double>(); v.w += w; v.smin = std::min(v.smin, sg);
                 const Eigen::Vector2f d = g - o;
                 const float len = d.norm();
                 if (len < 1e-3f) continue;

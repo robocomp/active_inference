@@ -100,6 +100,14 @@ namespace rc::boxes
         std::vector<Eigen::Matrix2f> polygon_cov(float sigma_flat) const;
     };
 
+    /// Which offset of which box does the distance at `p` come from — the estimator's own
+    /// attribution rule, as `4 * box + {0=lo.x, 1=lo.y, 2=hi.x, 3=hi.y}`, or -1 for an empty
+    /// layout. refit() folds every return through this, so it is also the only honest answer to
+    /// "which parameter could a look at this patch of wall improve?": where two boxes share a
+    /// wall the returns land on ONE of the two coincident offsets and the other is redundant —
+    /// unobserved by construction, and not a place worth sending a robot.
+    int active_face(const Layout& L, const Eigen::Vector2f& p);
+
     /// ── INITIALISATION FROM ONE SCAN ─────────────────────────────────────────────────────────
     /// Estimate (yaw, one box) from a single scan in the robot frame. The yaw comes from the
     /// quadrupled-angle peak of the returns' local orientations — the standard Manhattan estimator,

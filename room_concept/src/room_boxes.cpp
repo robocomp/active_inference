@@ -53,30 +53,34 @@ namespace rc::boxes
             if (d.x() > d.y()) return {(p.x() - b.lo.x() < b.hi.x() - p.x()) ? -1.f : 1.f, 0.f};
             return {0.f, (p.y() - b.lo.y() < b.hi.y() - p.y()) ? -1.f : 1.f};
         }
-        /// Which SURFACE does this point's distance come from? The box that wins Layout::sdf's
-        /// min/max, and within it the face nearest the point. Returned as a stable id so returns
-        /// lying on one physical wall land in one group.
-        int active_face(const Layout& L, const Eigen::Vector2f& p)
-        {
-            if (L.boxes.empty()) return -1;
-            float d = std::numeric_limits<float>::infinity();
-            int win = -1;
-            for (size_t i = 0; i < L.boxes.size(); ++i)
-                if (L.boxes[i].positive)
-                { const float v = sdf_box(L.boxes[i], p); if (v < d) { d = v; win = static_cast<int>(i); } }
-            for (size_t i = 0; i < L.boxes.size(); ++i)
-                if (not L.boxes[i].positive)
-                { const float v = -sdf_box(L.boxes[i], p); if (v > d) { d = v; win = static_cast<int>(i); } }
-            if (win < 0) return -1;
-            const Box& b = L.boxes[static_cast<size_t>(win)];
-            const float dl = std::abs(p.x() - b.lo.x()), dr = std::abs(p.x() - b.hi.x());
-            const float db = std::abs(p.y() - b.lo.y()), dt = std::abs(p.y() - b.hi.y());
-            const float m = std::min(std::min(dl, dr), std::min(db, dt));
-            const int face = (m == dl) ? 0 : (m == db) ? 1 : (m == dr) ? 2 : 3;
-            return win * 4 + face;
-        }
-
     }   // namespace
+
+    /// Which SURFACE does this point's distance come from? The box that wins Layout::sdf's
+    /// min/max, and within it the face nearest the point. Returned as a stable id so returns
+    /// lying on one physical wall land in one group.
+    /// ⚠ PUBLIC BECAUSE THE PLANNER MUST ASK THE SAME QUESTION. refit() attributes every return
+    /// through this function, so it is the only rule that says which offset the evidence on a
+    /// patch of wall actually lands on — and therefore which offset a planner can hope to
+    /// improve by going to look at that patch.
+    int active_face(const Layout& L, const Eigen::Vector2f& p)
+    {
+        if (L.boxes.empty()) return -1;
+        float d = std::numeric_limits<float>::infinity();
+        int win = -1;
+        for (size_t i = 0; i < L.boxes.size(); ++i)
+            if (L.boxes[i].positive)
+            { const float v = sdf_box(L.boxes[i], p); if (v < d) { d = v; win = static_cast<int>(i); } }
+        for (size_t i = 0; i < L.boxes.size(); ++i)
+            if (not L.boxes[i].positive)
+            { const float v = -sdf_box(L.boxes[i], p); if (v > d) { d = v; win = static_cast<int>(i); } }
+        if (win < 0) return -1;
+        const Box& b = L.boxes[static_cast<size_t>(win)];
+        const float dl = std::abs(p.x() - b.lo.x()), dr = std::abs(p.x() - b.hi.x());
+        const float db = std::abs(p.y() - b.lo.y()), dt = std::abs(p.y() - b.hi.y());
+        const float m = std::min(std::min(dl, dr), std::min(db, dt));
+        const int face = (m == dl) ? 0 : (m == db) ? 1 : (m == dr) ? 2 : 3;
+        return win * 4 + face;
+    }
 
     namespace
     {

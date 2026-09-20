@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 #include <Eigen/Dense>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <map>
@@ -44,6 +45,18 @@ namespace rc::boxch
         float cell         = 0.05f;
         int   min_cluster  = 12;      ///< COMPUTE: smallest cluster worth proposing
         float z_min        = 0.20f;   ///< PHYSICAL: floor rejection, in the robot's own frame
+        /// PHYSICAL: the robot's passable half-width, from ROBOT_GEOMETRY.md's derived footprint
+        /// (`WebotsProtoLoader::xy_hull()`: area 0.2182 m², inscribed 0.2300, circumscribed 0.3278).
+        /// The planner may only route where a body of this radius fits, so a gap narrower than
+        /// 2 x this is not a corridor. ⚠ EROSION IS AGAINST KNOWN OCCUPANCY ONLY, never against
+        /// unknown space — a frontier cell is adjacent to unknown BY DEFINITION, so eroding against
+        /// unknown forbids ever approaching the thing exploration exists to look at.
+        /// ★ Using the INSCRIBED radius says "it fits going straight"; the circumscribed 0.3278
+        /// would say "it fits at any heading, so it can also turn in place there". That is a
+        /// behavioural choice ROBOT_GEOMETRY.md flags as wanting its own comparison; this is the
+        /// permissive end, and it is the number to change if the robot clips corners in the real
+        /// world.
+        float body_radius  = 0.230f;
         float z_max        = 1.60f;   ///< PHYSICAL: below the ceiling — see
                                       ///  [[lidar-high-band-must-not-reach-ceiling]], where ceiling
                                       ///  returns in a 2-D wall SDF stopped a room stabilising while
@@ -195,8 +208,33 @@ namespace rc::boxch
         {
             std::vector<Eigen::Vector2f> pts;   ///< robot frame, subsampled
             Eigen::Vector3f pose{0.f, 0.f, 0.f};
-            float sigma = 0.f;
+            float sigma = 0.f;                  ///< scan-WORST point sigma; logging only
+            /// ⚠ THE POSE COVARIANCE, NOT ONE NUMBER. `sigma` alone was the scan-wide MAXIMUM, and
+            /// reproject() stamped it on every point of the keyframe — so after the first rebuild
+            /// every voxel's `smin` was the worst point of whichever scan happened to be a
+            /// keyframe, and the per-point sigmas observe() computes so carefully were gone. A 5 m
+            /// return with 0.5 deg of heading error alone is ~44 mm, which is why the worst-face
+            /// posterior plateaued around 15 mm on faces whose sensor noise is 20 mm: the floor was
+            /// manufactured by the rebuild, not by the geometry.
+            /// Keeping the 3x3 lets point_sigma() re-derive each point's own sigma from the lever
+            /// arm at ITS range, in the rebuild exactly as in the live fold — and lets a keyframe's
+            /// evidence IMPROVE when re-registration sharpens its pose, which is what makes a
+            /// second look at a wall worth anything at all.
+            Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
         };
+        /// 1-sigma uncertainty of WHERE a robot-frame return is, given the pose covariance:
+        /// translation plus the lever arm of the heading error at that range. First-order
+        /// propagation of cov through p = t + R(theta) q. Shared by observe() and reproject() so
+        /// the live fold and the rebuild can never disagree about what a point is worth.
+        static float point_sigma(const Eigen::Matrix3f& cov, float c, float s,
+                                 const Eigen::Vector2f& q)
+        {
+            const Eigen::Vector2f jth(-s * q.x() - c * q.y(), c * q.x() - s * q.y());
+            const Eigen::Vector2f pxth(cov(0, 2), cov(1, 2));
+            const float tr = cov(0, 0) + cov(1, 1) + cov(2, 2) * jth.squaredNorm()
+                           + 2.f * pxth.dot(jth);
+            return std::sqrt(std::max(0.f, tr) * 0.5f);
+        }
         std::vector<KeyFrame> keys_;
         std::uint64_t last_key_f_ = 0;
         std::uint64_t structure_steps_ = 0;
