@@ -2282,6 +2282,9 @@ int run_replay(const char* path)
         std::vector<Eigen::Vector3f> cloud_room_prev;
         tcontrol.set_footprint(rc::RobotFootprint::shadow());
         bool have_route = false;
+        Eigen::Vector2f route_target = Eigen::Vector2f::Zero();
+        bool route_done = false;      // the controller said it arrived
+        int  route_installed_f = -100000;
 
         for (size_t f = 0; f < truth.size(); ++f)
         {
@@ -2350,13 +2353,52 @@ int run_replay(const char* path)
                             // set_path takes the ROOM-frame polyline and does its own smoothing,
                             // feasibility and arc-length bookkeeping. The path starts at the robot
                             // so the first projection is not a jump.
-                            std::vector<Eigen::Vector2f> room_path;
-                            room_path.reserve(plan.size() + 1);
-                            room_path.push_back(exec_pose.head<2>());
-                            for (const auto& w : plan) room_path.push_back(wp_to_world(w));
-                            have_route = room_path.size() >= 2;
-                            if (have_route) tcontrol.set_path(room_path);
-                            else tcontrol.stop();
+                            // ⚠ INSTALL A PATH ONLY WHEN IT IS A NEW ROUTE. set_path() goes
+                            // through reset_path_state, which its own header calls "correct for a
+                            // NEW route and wrong at control rate": it clears the carrot anchor,
+                            // the blockage streak, the ALIGNMENT WATCH and — through
+                            // PlainTracker::reset() — the monotone arc-length projection. The
+                            // explorer re-aims every 25 frames and usually re-derives the SAME
+                            // target, so installing every time made the robot re-acquire and
+                            // re-align instead of drive: measured on the hall, 15.2 m driven
+                            // against pursue()'s 47.0 m in the same budget (0.13 m/s vs 0.31),
+                            // 28% of samples near-stationary, and the coverage gap that followed
+                            // (IoU 0.924 vs 0.953).
+                            // Same target and still driving => leave the controller alone; it
+                            // tracks the route in arc length and does not need re-telling.
+                            // ── COMMIT TO A VIEWPOINT, THEN RE-EVALUATE ────────────────────
+                            // ⚠ THE PLANNER RE-AIMS EVERY 25 FRAMES AND A ROUTE FOLLOWER IS BUILT
+                            // FOR STABLE ROUTES. Accepting each new target re-installed the path,
+                            // which re-armed the alignment and re-acquired the projection, so the
+                            // robot spent the run TURNING: measured, `rot` saturated at max_rot
+                            // (0.700 rad/s) with adv at 0.03-0.23 m/s, 0.11 m/s average against
+                            // pursue()'s 0.36, and 14.7 m driven in a budget where pursue() drove
+                            // 47.0. The safety gate was NOT the cause — it read 1.00 nearly
+                            // throughout. pursue() is immune because it just swings at the new
+                            // point; a curve tracker cannot be.
+                            // So the ROBOT commits: drive to the chosen viewpoint, then choose
+                            // again. Re-planning still runs every 25 frames (it keeps the gain and
+                            // the phase current, and a blocked route still voids immediately) — it
+                            // is the TARGET that is held, not the map. The staleness cap is compute
+                            // insurance, not a bar on changing one's mind.
+                            const Eigen::Vector2f tgt = plan.empty() ? exec_pose.head<2>()
+                                                                     : wp_to_world(plan.back());
+                            const bool stale = static_cast<int>(f) - route_installed_f > 400;
+                            const bool new_route = not have_route or route_done or stale;
+                            if (new_route and plan.size() >= 1)
+                            {
+                                std::vector<Eigen::Vector2f> room_path;
+                                room_path.reserve(plan.size() + 1);
+                                room_path.push_back(exec_pose.head<2>());
+                                for (const auto& w : plan) room_path.push_back(wp_to_world(w));
+                                if (room_path.size() >= 2)
+                                {
+                                    tcontrol.set_path(room_path);
+                                    route_target = tgt; have_route = true; route_done = false;
+                                    route_installed_f = static_cast<int>(f);
+                                }
+                            }
+                            else if (plan.empty() and not have_route) tcontrol.stop();
                         }
                         // ⚠ "NO FRONTIER" AND "NO MAP" LOOK IDENTICAL AND MEAN THE OPPOSITE.
                         // At frame 0 the free map is empty, so there is no frontier and the first
@@ -2408,6 +2450,15 @@ int run_replay(const char* path)
                 rp.linear() = Eigen::Rotation2Df(exec_pose.z()
                                                  - static_cast<float>(M_PI_2)).toRotationMatrix();
                 const rc::ControlOutput out = tcontrol.compute(rp, cloud_room_prev);
+                // The controller owns arrival; when it says so, the next replan installs a new
+                // route rather than leaving the robot parked on a finished one.
+                if (out.goal_reached) route_done = true;
+                if (std::getenv("WS_IG_PROBE") and f % 200 == 0)
+                    std::fprintf(stderr, "[tc] f=%4zu adv=%.3f rot=%+.3f gate=%.2f horiz=%.2f "
+                                         "guard=%d reached=%d | plan=%zu\n",
+                                 f, out.adv, out.rot, out.gate_speed_scale, out.gate_horizon_s,
+                                 out.safety_guard_triggered ? 1 : 0, out.goal_reached ? 1 : 0,
+                                 plan.size());
                 cmd = Eigen::Vector3f(out.adv, out.side, -out.rot);   // FRAME conversion (2/2)
             }
             last_cmd = cmd;
