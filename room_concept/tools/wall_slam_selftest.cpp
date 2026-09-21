@@ -2164,6 +2164,25 @@ int run_replay(const char* path)
         /// This is the honest companion: the fraction of TRUE boundary LENGTH that was ever visible
         /// from a pose the robot actually occupied, line of sight included.
         float seen_frac = 0.f;
+        /// ── THE PROPER SCORE: IS THE PUBLISHED BELIEF HONEST? ───────────────────────────────
+        /// ⚠ IoU CANNOT PENALISE A CONFIDENT WRONG GUESS, and that is this estimator's actual
+        /// failure mode: a rectilinear cover extrapolates, so 49 of 50 rooms scored a median 0.947
+        /// having seen under 90% of their boundary, and the hall reached 0.977 with six walls never
+        /// observed at all. A metric that rewards a lucky extrapolation as much as a measurement
+        /// cannot tell a map you can act on from one you cannot.
+        /// A proper scoring rule can, because it prices the CONFIDENCE as well as the error. At
+        /// every 0.1 m of true boundary, take the distance d to the published polygon and the
+        /// published sigma of the nearest published edge (polygon_cov — the same quantity the agent
+        /// puts on the graph), and score the Gaussian log density:
+        ///     score = mean over samples of [ -1/2 (d/sigma)^2 - log sigma ]
+        /// A measured wall (sigma 0.01, d ~ 0) earns about +4.6 a sample. An unseen wall published
+        /// HONESTLY at sigma = the room's span earns about -2.2, whether or not the guess was
+        /// lucky. An unseen wall published at sigma 0.01 and wrong by 0.3 m costs about -450.
+        /// So honesty about ignorance is cheap and overconfidence is ruinous, which is exactly the
+        /// ordering IoU refuses to make. Scale-free, no vertex correspondence, and it is what a
+        /// per-patch posterior would be FOR.
+        float log_score = 0.f;
+        float pub_sigma_med = 0.f;
         int   coll_frames = 0;            ///< frames with the body overlapping a wall or outside
         int   coll_events = 0;            ///< how many separate times it entered that state
         int   out_frames  = 0;            ///< frames with the centre outside the room entirely
@@ -2444,6 +2463,13 @@ int run_replay(const char* path)
                                 if (room_path.size() >= 2)
                                 {
                                     tcontrol.set_path(room_path);
+                                    if (std::getenv("WS_ROUTE_PROBE"))
+                                    {
+                                        std::fprintf(stderr, "[route] f=%zu from=(%.2f,%.2f) n=%zu:", f,
+                                                     exec_pose.x(), exec_pose.y(), room_path.size());
+                                        for (const auto& w : room_path) std::fprintf(stderr, " (%.2f,%.2f)", w.x(), w.y());
+                                        std::fprintf(stderr, "\n");
+                                    }
                                     route_target = tgt; have_route = true; route_done = false;
                                     route_installed_f = static_cast<int>(f);
                                 }
@@ -2742,13 +2768,29 @@ int run_replay(const char* path)
             R.cp_resid_oracle = med(cp_resid_o);
         }
         // ── boundary actually observed (see BoxRun::seen_frac) ─────────────────────────────
+        // ⚠ THE SAMPLE MUST NOT SIT ON THE POLYGON. The first version put samples ON the edge, ends
+        // included, and forgave one crossing for "the wall the sample lies on". A sample at a
+        // VERTEX touches BOTH adjacent edges, so it always registered two and read as blocked:
+        // measured on the apartamento hall, 55 of 64 endpoint samples were "unseen" from every
+        // pose, and a 0.12 m fin edge (3 samples, 2 of them vertices) could never exceed 1/3.
+        // The metric reported 86% where line of sight gives ~93%, and the bias grows with vertex
+        // count. So sample the edge's INTERIOR, nudge 1 mm into the room, and demand no crossing.
         {
+            const auto inside = [&](const Eigen::Vector2f& p)
+            {
+                bool in = false;
+                for (size_t i = 0, j = room.size() - 1; i < room.size(); j = i++)
+                    if ((room[i].y() > p.y()) != (room[j].y() > p.y())
+                        and p.x() < (room[j].x() - room[i].x()) * (p.y() - room[i].y())
+                                    / (room[j].y() - room[i].y()) + room[i].x())
+                        in = not in;
+                return in;
+            };
             const auto blocked = [&](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
             {
-                int hits = 0;
                 for (size_t e = 0; e < room.size(); ++e)
-                    if (segments_cross(a, b, room[e], room[(e + 1) % room.size()])) ++hits;
-                return hits > 1;          // the wall the sample lies on may register once
+                    if (segments_cross(a, b, room[e], room[(e + 1) % room.size()])) return true;
+                return false;
             };
             double tot = 0.0, seen = 0.0;
             for (size_t e = 0; e < room.size(); ++e)
@@ -2757,16 +2799,74 @@ int run_replay(const char* path)
                 const float len = (b - a).norm();
                 if (len < 1e-4f) continue;
                 const int ns = std::max(2, static_cast<int>(len / 0.10f));
+                Eigen::Vector2f nrm(-(b - a).y() / len, (b - a).x() / len);
+                const Eigen::Vector2f mid = 0.5f * (a + b);
+                if (not inside(mid + 1e-3f * nrm)) nrm = -nrm;          // the room side
                 int ok = 0;
-                for (int k = 0; k <= ns; ++k)
+                for (int k = 0; k < ns; ++k)
                 {
-                    const Eigen::Vector2f q = a + (static_cast<float>(k) / static_cast<float>(ns)) * (b - a);
+                    const float t = (static_cast<float>(k) + 0.5f) / static_cast<float>(ns);
+                    const Eigen::Vector2f q = a + t * (b - a) + 1e-3f * nrm;
                     for (const auto& o : traj_seen)
                         if ((q - o).norm() <= 15.f and not blocked(o, q)) { ++ok; break; }
                 }
-                tot += len; seen += len * static_cast<double>(ok) / (ns + 1);
+                tot += len; seen += len * static_cast<double>(ok) / ns;
             }
             R.seen_frac = tot > 0.0 ? static_cast<float>(seen / tot) : 0.f;
+        }
+        // ── the proper score (see BoxRun::log_score) ───────────────────────────────────────
+        {
+            const auto verts = ch.layout().polygon();
+            const auto vcov  = ch.layout().polygon_cov(bp.sigma_flat);
+            if (verts.size() >= 4 and vcov.size() == verts.size())
+            {
+                // the published polygon in WORLD coordinates, with its per-vertex covariance
+                Poly pw; for (const auto& v : verts) pw.push_back(to_old(v));
+                const float cy2 = std::cos(ch.yaw()), sy2 = std::sin(ch.yaw());
+                Eigen::Matrix2f Rg; Rg << cy2, -sy2, sy2, cy2;
+                double acc = 0.0; long ns = 0;
+                std::vector<float> sigs;
+                for (size_t e = 0; e < room.size(); ++e)
+                {
+                    const Eigen::Vector2f a = room[e], b = room[(e + 1) % room.size()];
+                    const float len = (b - a).norm();
+                    if (len < 1e-4f) continue;
+                    const int m = std::max(1, static_cast<int>(len / 0.10f));
+                    for (int k = 0; k <= m; ++k)
+                    {
+                        const Eigen::Vector2f q = to_map(Eigen::Vector3f(
+                            a.x() + (static_cast<float>(k) / m) * (b.x() - a.x()),
+                            a.y() + (static_cast<float>(k) / m) * (b.y() - a.y()), 0.f)).head<2>();
+                        // nearest published edge, its distance, and the sigma ACROSS it
+                        float bd = 1e9f; size_t be = 0;
+                        for (size_t j = 0; j < pw.size(); ++j)
+                        {
+                            const float dd = point_to_segment(q, pw[j], pw[(j + 1) % pw.size()]);
+                            if (dd < bd) { bd = dd; be = j; }
+                        }
+                        const Eigen::Vector2f ea = pw[be], eb = pw[(be + 1) % pw.size()];
+                        Eigen::Vector2f t = eb - ea;
+                        if (t.norm() < 1e-6f) continue;
+                        t.normalize();
+                        const Eigen::Vector2f nrm(-t.y(), t.x());
+                        // average the two endpoint covariances, rotated into the world frame, and
+                        // project onto the edge normal: the sigma the consumer would read there
+                        const Eigen::Matrix2f C =
+                            Rg * (0.5f * (vcov[be] + vcov[(be + 1) % vcov.size()])) * Rg.transpose();
+                        const float sg = std::sqrt(std::max(1e-6f, nrm.dot(C * nrm)));
+                        sigs.push_back(sg);
+                        acc += -0.5 * static_cast<double>(bd / sg) * (bd / sg)
+                             - std::log(static_cast<double>(sg));
+                        ++ns;
+                    }
+                }
+                if (ns > 0)
+                {
+                    R.log_score = static_cast<float>(acc / static_cast<double>(ns));
+                    std::sort(sigs.begin(), sigs.end());
+                    R.pub_sigma_med = sigs[sigs.size() / 2];
+                }
+            }
         }
         R.replans = replans; R.explored = explored; R.ig_gain = ig_gain;
         R.blocked_replans = blocked_replans;
@@ -3169,7 +3269,8 @@ int main()
         if (not gen) { std::printf("room %d: no drivable circuit\n", i); return 0; }
         const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
         const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
-        const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, 2, gen->second);
+        const int laps = std::getenv("WS_BOXES_LAPS") ? std::atoi(std::getenv("WS_BOXES_LAPS")) : 2;   // the frame budget
+        const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, laps, gen->second);
         if (const char* dp = std::getenv("WS_BOXES_DUMP"))
         {
             std::ofstream o(dp);
@@ -3187,10 +3288,11 @@ int main()
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
                     "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d"
-                    "  | seen=%.0f%% replans=%d(%d blk) phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
+                    "  | seen=%.0f%% score=%+.2f pubsig=%.3f replans=%d(%d blk) phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
                     100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
                     r.proposed, r.admitted, r.removed, 100.f * r.seen_frac,
+                    r.log_score, r.pub_sigma_med,
                     r.replans, r.blocked_replans, r.phase.c_str(),
                     r.explored ? "yes" : "NO(frame cap)",
                     r.coll_events, r.coll_frames, r.coll_depth, r.out_frames);
@@ -3291,6 +3393,8 @@ int main()
                         << ",\"cp_resid_oracle\":" << r.cp_resid_oracle
                         << ",\"cp_matched_oracle\":" << r.cp_matched_oracle
                         << ",\"seen_frac\":" << r.seen_frac
+                        << ",\"log_score\":" << r.log_score
+                        << ",\"pub_sigma\":" << r.pub_sigma_med
                         << ",\"blocked_replans\":" << r.blocked_replans
                         << ",\"coll_events\":" << r.coll_events
                         << ",\"coll_frames\":" << r.coll_frames

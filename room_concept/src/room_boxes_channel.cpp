@@ -301,9 +301,22 @@ namespace rc::boxch
 
     void Channel::refresh_free_keys() const
     {
+        // ⚠ IN THE LAYOUT FRAME, like every other free set handed to rc::boxes. refit() tests these
+        // cells against L.sdf(), and the layout lives rotated by yaw_ from the map; this set alone
+        // was left in MAP cells, so the swept-space force (WS_FREEFORCE) pushed each face with cells
+        // displaced by yaw_ x range — 0.2 m at 5 m on a 2.4 deg hall, and arbitrary on a rotated
+        // random room. Every other site (fl, flc) already rotated; this one was missed.
         free_keys_.clear();
+        const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
         for (const auto& [k, c] : free_)
-            if (c >= 1) free_keys_.insert(k);
+        {
+            if (c < 1) continue;
+            const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                    (static_cast<float>(k.second) + 0.5f) * p_.cell);
+            const Eigen::Vector2f q(cy * m.x() - sy * m.y(), sy * m.x() + cy * m.y());
+            free_keys_.insert({static_cast<int>(std::floor(q.x() / p_.cell)),
+                               static_cast<int>(std::floor(q.y() / p_.cell))});
+        }
     }
 
     bool Channel::traversable(const Eigen::Vector2f& m) const
@@ -414,11 +427,42 @@ namespace rc::boxch
                         blocked[idx(nx, ny)] = 1;
                     }
             }
+        // ── THE BODY MUST ALSO FIT INSIDE THE BELIEVED ROOM (WS_PATCH / WS_MODEL_CSPACE) ──────
+        // ⚠ Erosion against OCCUPIED cells alone leaks through a thin wall. The hall's fins are
+        // 12 cm: grazing beams mark free cells inside them and leave gaps between their returns,
+        // so the configuration space had holes, and once the robot was pressed against a fin the
+        // stranded-start fallback planned over bare free space — straight up the fin. Measured:
+        // every route from frame 792 ran along x ~ 0 from y 0.4 to 4.2 with its TARGET on the fin
+        // line; the controller refused it (45 contacts, 58 blocked replans) and the robot stayed
+        // against the fin, which kept the fallback armed. The layout already knows the fin is
+        // there, so ask it too: a pose is traversable only if the body is inside the believed
+        // room, sdf <= -body_radius. The escape fallback may cross the eroded margin but must
+        // still stay inside the room (sdf < 0), never cross a wall.
+        static const bool model_cspace = std::getenv("WS_PATCH") != nullptr
+                                      or std::getenv("WS_MODEL_CSPACE") != nullptr;
+        std::vector<float> gridsd;
+        if (model_cspace and not L_.empty())
+        {
+            gridsd.assign(gridf.size(), 0.f);
+            const float cy0 = std::cos(-yaw_), sy0 = std::sin(-yaw_);
+            for (int y = loy - 1; y <= hiy + 1; ++y)
+                for (int x = lox - 1; x <= hix + 1; ++x)
+                {
+                    const Eigen::Vector2f m((static_cast<float>(x) + 0.5f) * p_.cell,
+                                            (static_cast<float>(y) + 0.5f) * p_.cell);
+                    gridsd[idx(x, y)] = L_.sdf({cy0 * m.x() - sy0 * m.y(), sy0 * m.x() + cy0 * m.y()});
+                }
+        }
+        const auto model_sd = [&](const std::pair<int, int>& k)
+        { return gridsd.empty() ? -std::numeric_limits<float>::max() : gridsd[idx(k.first, k.second)]; };
         const auto is_trav = [&](const std::pair<int, int>& k)
         {
             if (not is_free(k)) return false;
+            if (model_sd(k) > -p_.body_radius) return false;
             return blocked[idx(k.first, k.second)] == 0;
         };
+        const auto is_escape = [&](const std::pair<int, int>& k)
+        { return is_free(k) and model_sd(k) < 0.f; };
 
         // ⚠ UNKNOWN SPACE OUTSIDE THE BELIEVED ROOM IS NOT AN EXPLORE TARGET. A 1-cell wall does
         // not seal the occupied grid: at grazing incidence 2 cm of range noise leaves gaps between
@@ -448,6 +492,89 @@ namespace rc::boxch
         // millimetric sigma and kills everything beyond it. Deep inside, p -> 1. No rule about
         // doors, no threshold, and the same quantity the estimator already maintains.
         const float cyl = std::cos(-yaw_), syl = std::sin(-yaw_);
+
+        // ── WS_PATCH: EVIDENCE PER BOUNDARY PATCH, NOT PER OFFSET ───────────────────────────
+        // ⚠ An offset's posterior answers "how well is this FACE's position known"; a cell beyond
+        // the boundary asks "is there a wall at THIS PATCH". A recess mouth in the middle of a wall
+        // pinned to millimetres by its two flanks inherits those millimetres, so p_room -> 0 beyond
+        // it and the mouth is worth nothing. Likewise a wall seen only from 5 m has returns — its
+        // offset is "known" — but each of them carries the heading lever arm at 5 m, and nothing
+        // in the offset posterior says that going closer would sharpen that patch.
+        // So give every cell-length patch of the boundary its own information, accumulated from
+        // the condensed voxels that lie on it, with the estimator's own per-voxel sigma:
+        //     H_patch = sum 1/(s0^2 + cell^2/12 + smin^2),   var_patch = 1/(H_patch + 1/span^2)
+        // cell^2/12 is the voxel's quantisation variance — a condensed point is a voxel centroid —
+        // and it gives the precision term a true floor instead of an unreachable zero. span^2 is
+        // the same room-sized prior refit hands an offset with no evidence. One quantity then
+        // serves p_room beyond the patch and the precision value of looking at it.
+        static const bool patch_mode = std::getenv("WS_PATCH") != nullptr;
+        struct Patch { Eigen::Vector2f m{0.f, 0.f}; double H = 0.0; };
+        std::vector<Patch> patches;
+        std::map<std::pair<int, int>, std::vector<int>> patch_at;   // map-frame cell -> patches
+        const double sq_patch = static_cast<double>(p_.sensor_sigma) * p_.sensor_sigma
+                              + static_cast<double>(p_.sigma_flat) * p_.sigma_flat
+                              + static_cast<double>(p_.cell) * p_.cell / 12.0;
+        double span_prior = 0.0;
+        for (const auto& b : L_.boxes) span_prior = std::max(span_prior, static_cast<double>(b.width() + b.height()));
+        span_prior = std::max(span_prior, static_cast<double>(p_.cell));
+        const auto cell_of = [&](const Eigen::Vector2f& m)
+        { return std::pair<int, int>{static_cast<int>(std::floor(m.x() / p_.cell)),
+                                     static_cast<int>(std::floor(m.y() / p_.cell))}; };
+        // nearest patch to a map-frame point within `r` cells, or -1
+        const auto nearest_patch = [&](const Eigen::Vector2f& m, int r) -> int
+        {
+            const auto c = cell_of(m);
+            int best_i = -1; float bd = std::numeric_limits<float>::max();
+            for (int dy = -r; dy <= r; ++dy)
+                for (int dx = -r; dx <= r; ++dx)
+                {
+                    const auto it = patch_at.find({c.first + dx, c.second + dy});
+                    if (it == patch_at.end()) continue;
+                    for (const int i : it->second)
+                    {
+                        const float d = (patches[static_cast<size_t>(i)].m - m).squaredNorm();
+                        if (d < bd) { bd = d; best_i = i; }
+                    }
+                }
+            return best_i;
+        };
+        const auto var_patch = [&](int i)
+        { return 1.0 / (patches[static_cast<size_t>(i)].H + 1.0 / (span_prior * span_prior)); };
+        if (patch_mode and not L_.empty())
+        {
+            const float cyo = std::cos(yaw_), syo = std::sin(yaw_);          // box -> map
+            for (const auto& b : L_.boxes)
+            {
+                if (not b.positive) continue;
+                const Eigen::Vector2f corner[4] = {{b.lo.x(), b.lo.y()}, {b.hi.x(), b.lo.y()},
+                                                   {b.hi.x(), b.hi.y()}, {b.lo.x(), b.hi.y()}};
+                const Eigen::Vector2f nrm[4] = {{0.f,-1.f}, {1.f, 0.f}, {0.f, 1.f}, {-1.f, 0.f}};
+                for (int e = 0; e < 4; ++e)
+                {
+                    const Eigen::Vector2f a = corner[e], z = corner[(e + 1) % 4];
+                    const int ns = std::max(1, static_cast<int>((z - a).norm() / p_.cell));
+                    for (int i = 0; i < ns; ++i)
+                    {
+                        const Eigen::Vector2f s = a + ((static_cast<float>(i) + 0.5f) / static_cast<float>(ns)) * (z - a);
+                        if (L_.inside(s + p_.cell * nrm[e])) continue;     // seam: the region goes on
+                        const Eigen::Vector2f m(cyo * s.x() - syo * s.y(), syo * s.x() + cyo * s.y());
+                        patch_at[cell_of(m)].push_back(static_cast<int>(patches.size()));
+                        patches.push_back({m, 0.0});
+                    }
+                }
+            }
+            // every condensed voxel informs the patch it lies on (within two cells)
+            for (const auto& [k, v] : vmap_)
+            {
+                if (v.w <= 0.0) continue;
+                const Eigen::Vector2f m(static_cast<float>(v.acc.x() / v.w), static_cast<float>(v.acc.y() / v.w));
+                const int i = nearest_patch(m, 2);
+                if (i < 0) continue;
+                const double sm = static_cast<double>(v.smin);
+                patches[static_cast<size_t>(i)].H += 1.0 / (sq_patch + sm * sm);
+            }
+        }
+
         std::vector<float> gridp(gridf.size(), 1.f);       // p(cell is room)
         std::vector<char> gridi(gridf.size(), 1);          // p >= 0.5, for the binary consumers
         if (not L_.empty())
@@ -469,6 +596,19 @@ namespace rc::boxch
                     {
                         const float v = L_.cov(off, off);
                         if (std::isfinite(v) and v > 0.f) sig = std::sqrt(static_cast<double>(v));
+                    }
+                    // WS_PATCH: an UNKNOWN cell takes the sigma of the boundary patch nearest it,
+                    // so the space beyond an unbacked mouth stays ~0.5 room however well the
+                    // face's flanks pin its offset
+                    if (patch_mode and not patches.empty() and is_unknown(x, y))
+                    {
+                        int bi = -1; float bd = std::numeric_limits<float>::max();
+                        for (size_t i = 0; i < patches.size(); ++i)
+                        {
+                            const float d = (patches[i].m - m).squaredNorm();
+                            if (d < bd) { bd = d; bi = static_cast<int>(i); }
+                        }
+                        if (bi >= 0) sig = std::sqrt(var_patch(bi));
                     }
                     sig = std::max(sig, static_cast<double>(p_.cell));   // never sharper than a cell
                     const double z = -static_cast<double>(sd) / sig;
@@ -505,7 +645,7 @@ namespace rc::boxch
         // extract itself, and say so in the phase log rather than standing still silently.
         bool eroded = true;
         const auto passable = [&](const std::pair<int, int>& k)
-        { return eroded ? is_trav(k) : is_free(k); };
+        { return eroded ? is_trav(k) : is_escape(k); };
         std::deque<std::pair<int, int>> q{start};
         dist[start] = 0; dist_a[idx(start.first, start.second)] = 0;
         while (not q.empty())
@@ -541,7 +681,7 @@ namespace rc::boxch
                                                    {cur.first, cur.second + 1}, {cur.first, cur.second - 1}};
                 for (const auto& n : nb)
                 {
-                    if (not is_free(n) or dist_a[idx(n.first, n.second)] >= 0) continue;
+                    if (not is_escape(n) or dist_a[idx(n.first, n.second)] >= 0) continue;
                     dist_a[idx(n.first, n.second)] = d + 1;
                     par_a[idx(n.first, n.second)] = static_cast<int>(idx(cur.first, cur.second));
                     dist[n] = d + 1; parent[n] = cur; q2.push_back(n);
@@ -551,7 +691,18 @@ namespace rc::boxch
 
         // A frontier is a reachable free cell with an unknown neighbour. Its gain is the unknown
         // area within the sensor horizon — what standing there would actually reveal.
-        const int R = std::max(1, static_cast<int>(horizon_m / p_.cell));
+        // ⚠ THE PLANNER'S HORIZON WAS 4 m IN ROOMS UP TO 9 m ACROSS, AND THE SENSOR HAS NO RANGE
+        // CAP AT ALL (the bench ray-casts to the nearest wall, unlimited; the real LiDAR reaches
+        // far past any room). So the gain evaluation could not see — could not even represent —
+        // information more than 4 m away, while a single scan from where the robot stood already
+        // measured the whole room. That is a planner that cannot value what its own sensor is
+        // about to give it, and it is a candidate cause of coverage sitting at 86% of boundary
+        // while IoU read 0.947.
+        // WS_HORIZON overrides it so the effect can be measured rather than argued about.
+        static const float horizon_env = std::getenv("WS_HORIZON")
+                                       ? std::atof(std::getenv("WS_HORIZON")) : 0.f;
+        const float horizon_use = horizon_env > 0.f ? horizon_env : horizon_m;
+        const int R = std::max(1, static_cast<int>(horizon_use / p_.cell));
         const int R2 = R * R;
         (void)R2;
 
@@ -683,6 +834,7 @@ namespace rc::boxch
         const auto info_nats = [&](const std::pair<int, int>& from, int* unknown_out) -> double
         {
             std::map<int, double> dH;
+            std::map<int, double> dHp;         // WS_PATCH: patch index -> Fisher gain
             // ⚠ CREDIT WHAT A VIEWPOINT COULD RESOLVE, NOT WHAT IT CAN SEE. The first version
             // added a face's whole misfit if any ray reached it, so a wall visible across an open
             // hall paid the same from 8 m as from 1 m — the robot already collected every misfit
@@ -708,7 +860,7 @@ namespace rc::boxch
                     if (is_unknown(cx, cy) and in) ++unknown_seen;
                     if (not occ and in) continue;            // free room: the beam carries on
                     // this cell is the predicted surface: a real return, or the model's boundary
-                    if (not L_.empty() and cov_ok)
+                    if (not L_.empty() and (cov_ok or patch_mode))
                     {
                         const Eigen::Vector2f m((static_cast<float>(cx) + 0.5f) * p_.cell,
                                                 (static_cast<float>(cy) + 0.5f) * p_.cell);
@@ -736,9 +888,21 @@ namespace rc::boxch
                                               : static_cast<double>(vit->second.smin);
                             const double rng = static_cast<double>(step) * p_.cell;
                             const double s_v = std::max(1e-3, sigma_at_range(rng));
+                            if (patch_mode and not patches.empty())
+                            {
+                                // the same gain, credited to the PATCH it lands on and valued
+                                // against that patch's own variance (below)
+                                const int pi = nearest_patch(m, 2);
+                                const double now = std::isfinite(smin) ? 1.0 / (sq_patch + smin * smin) : 0.0;
+                                const double then = 1.0 / (sq_patch + std::min(smin, s_v) * std::min(smin, s_v));
+                                if (pi >= 0 and then > now) dHp[pi] += then - now;
+                            }
+                            else
+                            {
                             const double now = std::isfinite(smin) ? 1.0 / (s0sq + smin * smin) : 0.0;
                             const double then = 1.0 / (s0sq + std::min(smin, s_v) * std::min(smin, s_v));
                             if (then > now) dH[off] += then - now;
+                            }
                         }
                     }
                     break;                                   // the beam stops here either way
@@ -752,9 +916,20 @@ namespace rc::boxch
                 if (var > 0.0 and std::isfinite(var)) nats += 0.5 * std::log1p(h * var);
                 raw += h;
             }
+            for (const auto& [pi, h] : dHp)
+            {
+                nats += 0.5 * std::log1p(h * var_patch(pi));
+                raw += h;
+            }
             last_dH_sum_ = static_cast<float>(raw);   // raw Fisher, for the predicted-vs-realised test
             // What standing here would put a pair of eyes on, of the model's unexplained residual.
+            // ⚠ WS_PATCH DROPS IT. Measured on the hall: from replan ~28 the argmax was the cell the
+            // robot already stood in, on 300-1000 nats of misfit that never fell — the gauge
+            // rotation's linear trend along the walls, which no viewpoint and no box edit can
+            // explain. A term with no reachable zero PARKS the robot (54 of 106 replans chose a
+            // viewpoint < 0.5 m away). Its successor is the value of grow()'s pending edits.
             double mis = 0.0;
+            if (not patch_mode)
             for (const auto& [off, q] : faces_seen)
             {
                 const auto it = face_misfit.find(off);
@@ -842,7 +1017,37 @@ namespace rc::boxch
                 int m_seen = 0;
                 const double i_prec = info_nats(k, &m_seen);
                 const double i_cov  = unknown_w;        // nats of coverage still owed, weighted
-                score = i_prec + i_cov - lambda * static_cast<double>(d) * p_.cell;
+                // ── WS_PATCH: THE INFORMATION IS ONLY COLLECTED IF THE BODY GETS THERE ────────
+                // ⚠ Measured on the hall: with the corridor finally attractive, the argmax was a
+                // cell INSIDE the 0.45 m dent — nearest and squarest to its unseen walls — for a
+                // 0.46 m robot, with the dent's walls known only from 6 m away and the frame still
+                // ~2 deg off. The controller could not reach it, turned back, and spent the budget
+                // on a second unreachable sliver in the bottom wall (25 contacts).
+                // The expected gain of choosing v is P(the body fits at v) x I(v). Whether it fits
+                // is a statement about the walls around v, and those are known to the nearest
+                // patch's own sigma:  P_fit = Phi((-sdf(v) - r) / sigma_patch). Beside a measured
+                // wall that is ~1; in a slot whose walls were seen from afar it is small, so a
+                // viewpoint with margin that LOOKS INTO the slot wins instead of one inside it.
+                // The price of driving is paid either way, so it is not discounted.
+                double p_fit = 1.0;
+                if (patch_mode and not patches.empty() and not gridsd.empty())
+                {
+                    const Eigen::Vector2f mv((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                             (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                    int bi = -1; float bd = std::numeric_limits<float>::max();
+                    for (size_t i = 0; i < patches.size(); ++i)
+                    {
+                        const float dd = (patches[i].m - mv).squaredNorm();
+                        if (dd < bd) { bd = dd; bi = static_cast<int>(i); }
+                    }
+                    if (bi >= 0)
+                    {
+                        const double sg = std::max(static_cast<double>(p_.cell), std::sqrt(var_patch(bi)));
+                        const double zf = (-static_cast<double>(model_sd(k)) - p_.body_radius) / sg;
+                        p_fit = 0.5 * std::erfc(-zf * M_SQRT1_2);
+                    }
+                }
+                score = p_fit * (i_prec + i_cov) - lambda * static_cast<double>(d) * p_.cell;
                 last_info_nats_ = static_cast<float>(i_prec);
                 if (score > 0.0) ++n_pos; else ++n_neg;
                 if (score > best_score)
@@ -1061,6 +1266,14 @@ namespace rc::boxch
         {
             double mis_tot = 0.0;
             for (const auto& [o, m] : face_misfit) mis_tot += m;
+            // the coverage the model still OWES over the whole map, not just what the best
+            // viewpoint would sweep: unknown cells weighted by p(room), and the claimed ones alone
+            double owed = 0.0; int claimed_unswept = 0;
+            for (int y = loy - 1; y <= hiy + 1; ++y)
+                for (int x = lox - 1; x <= hix + 1; ++x)
+                    if (is_unknown(x, y))
+                    { owed += p_room(x, y); if (is_inside(x, y)) ++claimed_unswept; }
+            std::fprintf(stderr, "[G] owed %.1f (claimed-unswept %d cells) | ", owed, claimed_unswept);
             std::fprintf(stderr, "[G] cands=%zu pos=%d neg=%d | best=(%.2f,%.2f) score=%.1f"
                                  " = prec %.1f + cov %.1f + misfit %.1f - cost %.1f"
                                  " | misfit total %.1f over %zu faces | phase=%s\n",
@@ -1566,7 +1779,13 @@ namespace rc::boxch
         // is chosen NEAREST THE INCUMBENT among the four, which is not a tie-break rule but the
         // statement that the four are the same frame: picking the near one keeps the published
         // polygon continuous instead of letting it snap 90 degrees between frames.
-        if (yaw_votes_ > 0 and (yaw4_cos_ != 0.0 or yaw4_sin_ != 0.0))
+        // WS_GAUGE_FREEZE: the vote accumulates seg_phi + pose.z() for ever, and pose.z() is
+        // registered against a layout already drawn at the current yaw — positive feedback,
+        // measured climbing monotonically (-0.51 -> +2.46 deg against a true +0.87). Once a cover
+        // exists the frame IS the gauge, so stop re-voting it.
+        static const bool gauge_freeze = std::getenv("WS_GAUGE_FREEZE") != nullptr;
+        if (yaw_votes_ > 0 and (yaw4_cos_ != 0.0 or yaw4_sin_ != 0.0)
+            and not (gauge_freeze and adopted_once_ and not L_.empty()))
         {
             const double a = std::atan2(yaw4_sin_, yaw4_cos_) / 4.0;
             const double q = M_PI / 2.0;
