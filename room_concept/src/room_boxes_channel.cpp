@@ -1495,7 +1495,43 @@ namespace rc::boxch
         // then sat ~1 m inside them (rms 1.157 m) and the room came out at IoU 0.224. A cell a
         // beam passed through is free; how many beams is a matter of confidence, not of fact, and
         // confidence belongs in the weighting, not in a count.
-        for (const auto& [k, n] : free_) if (n >= 1) F.insert(k);
+        // ⚠ THE COVER MUST BE BUILT IN THE LAYOUT FRAME (WS_COVER_LAYOUT). The rectangles below are
+        // axis-aligned in whatever grid F is on. Built on the MAP grid and then rotated by yaw_ (by
+        // taking the bounding box of the rotated corners), every box the cover proposes is aligned
+        // with the MAP axes: at any yaw_ != 0 it staircases against the room, and the adoption judge
+        // rewards yaw_ = 0, where it fits exactly. Registration and reproject() then drag the poses
+        // onto it. Measured on the hall with the likelihood gauge: the frame settled at 0.000 +- 0.005
+        // deg in two runs while the true walls are at +0.871 — an attractor at the grid, not an
+        // estimate. So sample F on the LAYOUT grid: each layout cell asks the map whether its centre
+        // was swept (pull, not push — pushing rotated cells onto a new grid leaves aliasing holes).
+        static const bool cover_layout = std::getenv("WS_COVER_LAYOUT") != nullptr;
+        if (cover_layout)
+        {
+            const float cm = std::cos(yaw_), sm = std::sin(yaw_);          // layout -> map
+            const float cl = std::cos(-yaw_), sl = std::sin(-yaw_);        // map -> layout
+            int lx0 = std::numeric_limits<int>::max(), ly0 = lx0, lx1 = std::numeric_limits<int>::min(), ly1 = lx1;
+            for (const auto& [k, n] : free_)
+            {
+                if (n < 1) continue;
+                const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell,
+                                        (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                const Eigen::Vector2f q(cl * m.x() - sl * m.y(), sl * m.x() + cl * m.y());
+                const int qx = static_cast<int>(std::floor(q.x() / p_.cell)), qy = static_cast<int>(std::floor(q.y() / p_.cell));
+                lx0 = std::min(lx0, qx); lx1 = std::max(lx1, qx); ly0 = std::min(ly0, qy); ly1 = std::max(ly1, qy);
+            }
+            for (int qy = ly0 - 1; qy <= ly1 + 1; ++qy)
+                for (int qx = lx0 - 1; qx <= lx1 + 1; ++qx)
+                {
+                    const Eigen::Vector2f q((static_cast<float>(qx) + 0.5f) * p_.cell,
+                                            (static_cast<float>(qy) + 0.5f) * p_.cell);
+                    const Eigen::Vector2f m(cm * q.x() - sm * q.y(), sm * q.x() + cm * q.y());
+                    const auto it = free_.find({static_cast<int>(std::floor(m.x() / p_.cell)),
+                                                static_cast<int>(std::floor(m.y() / p_.cell))});
+                    if (it != free_.end() and it->second >= 1) F.insert({qx, qy});
+                }
+        }
+        else
+            for (const auto& [k, n] : free_) if (n >= 1) F.insert(k);
         if (F.size() < 12) return false;
 
         std::set<std::pair<int, int>> covered;
@@ -1595,7 +1631,8 @@ namespace rc::boxch
 
         // Into the layout frame, and keep only boxes that touch the growing union so the region
         // stays connected — a detached box would be a second apartment.
-        const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+        // (under WS_COVER_LAYOUT the rectangles are already in the layout frame: identity)
+        const float cy = cover_layout ? 1.f : std::cos(-yaw_), sy = cover_layout ? 0.f : std::sin(-yaw_);
         rc::boxes::Layout N;
         for (const auto& b : out)
         {
@@ -1724,6 +1761,94 @@ namespace rc::boxch
         return out;
     }
 
+    // ── THE GAUGE IS A PARAMETER OF THE GENERATIVE MODEL, SO FIT IT BY ITS LIKELIHOOD ───────
+    // ⚠ The vote (seg_phi + pose.z(), quadrupled, weighted by segment length, never forgotten) is
+    // an ESTIMATE OF WALL DIRECTIONS, not of the frame that best explains the returns: short
+    // oblique fragments at fin ends and door jambs vote with their length, and pose.z() is
+    // registered against a layout already drawn at the current yaw — positive feedback. Measured on
+    // the hall the frame lands 0.5-3.6 deg off from run to run while pose error stays 0.03-0.05 m:
+    // the RETURNS are in the right place and the BOX FRAME is tilted against them, which is also
+    // the linear misfit trend along every long wall.
+    // So once a layout exists, ask the model: rotate the fused returns about their centroid by -d,
+    // score them with the layout's own cost (code + negative marginal log-likelihood; the code is
+    // constant in d, so this is maximum likelihood), and take the best d. Rotating the evidence by
+    // -d is rotating the layout by +d about the same point; in the layout frame that is
+    //     yaw' = yaw + d,   every box translated by  R(-yaw-d) c - R(-yaw) c
+    // so the boxes stay axis-aligned and the room turns about c instead of about the map origin.
+    // Golden section over one degree either side per call: a search bracket, not a gate — the next
+    // structure step searches again from wherever this one landed.
+    float Channel::fit_gauge_ml(const rc::boxes::GrowParams& gp)
+    {
+        if (L_.empty() or vmap_.empty()) return 0.f;
+        std::vector<Eigen::Vector2f> m;  std::vector<float> sg;
+        m.reserve(vmap_.size()); sg.reserve(vmap_.size());
+        Eigen::Vector2d acc(0.0, 0.0);
+        for (const auto& [k, v] : vmap_)
+        {
+            if (v.w <= 0.0) continue;
+            const Eigen::Vector2f q(static_cast<float>(v.acc.x() / v.w), static_cast<float>(v.acc.y() / v.w));
+            m.push_back(q); sg.push_back(v.smin); acc += q.cast<double>();
+        }
+        if (m.size() < static_cast<size_t>(gp.min_cluster)) return 0.f;
+        const Eigen::Vector2f c = (acc / static_cast<double>(m.size())).cast<float>();
+        const float cy = std::cos(-yaw_), sy = std::sin(-yaw_);
+        std::vector<rc::boxes::CloudPoint> pts(m.size());
+        // ⚠ DO NOT RE-VOXELISE ALREADY-VOXELISED EVIDENCE. These points are vmap_ centroids — one
+        // per MAP cell, already condensed. mdl_cost() condenses again on a grid in the frame of the
+        // points it is given, i.e. the LAYOUT grid: at yaw_ + d = 0 the two grids coincide and no
+        // point merges, at any other angle some do, so fewer points are scored and the likelihood
+        // falls. That put a spurious maximum exactly on the map axes — measured, the fit settled at
+        // 0.000 +- 0.005 deg in every run while the true walls are at +0.871. A sub-millimetre cell
+        // makes the second condense the identity; nothing else in the cost reads the cell.
+        rc::boxes::GrowParams gp_ml = gp;
+        gp_ml.cell = 1e-3f;
+        const auto cost = [&](double d) -> double
+        {
+            const float cd = static_cast<float>(std::cos(-d)), sd = static_cast<float>(std::sin(-d));
+            for (size_t i = 0; i < m.size(); ++i)
+            {
+                const Eigen::Vector2f r = m[i] - c;
+                const Eigen::Vector2f w(c.x() + cd * r.x() - sd * r.y(), c.y() + sd * r.x() + cd * r.y());
+                pts[i] = {Eigen::Vector2f(cy * w.x() - sy * w.y(), sy * w.x() + cy * w.y()), sg[i]};
+            }
+            return static_cast<double>(rc::boxes::mdl_cost(L_, pts, gp_ml, nullptr));
+        };
+        const double half = M_PI / 180.0;          // one degree either side
+        const double gr = 0.5 * (std::sqrt(5.0) - 1.0);
+        double a = -half, b = half;
+        double x1 = b - gr * (b - a), x2 = a + gr * (b - a);
+        double f1 = cost(x1), f2 = cost(x2);
+        for (int it = 0; it < 20; ++it)
+        {
+            if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = b - gr * (b - a); f1 = cost(x1); }
+            else         { a = x1; x1 = x2; f1 = f2; x2 = a + gr * (b - a); f2 = cost(x2); }
+        }
+        const double d = 0.5 * (a + b);
+        const double f0 = cost(0.0), fd = cost(d);
+        if (const char* pr = std::getenv("WS_GAUGE_PROFILE"))
+        {
+            static int calls = 0;
+            if (++calls == std::atoi(pr))
+            {
+                std::fprintf(stderr, "[gauge-profile] frame=%llu yaw=%+.3f |", static_cast<unsigned long long>(frames_), yaw_ * 180.0 / M_PI);
+                for (double dd = -2.0; dd <= 2.001; dd += 0.25)
+                    std::fprintf(stderr, " %+.2f:%.1f", yaw_ * 180.0 / M_PI + dd, cost(dd * M_PI / 180.0) - f0);
+                std::fprintf(stderr, "\n");
+            }
+        }
+        static const bool probe = std::getenv("WS_GAUGE_PROBE") != nullptr;
+        if (probe)
+            std::fprintf(stderr, "[gauge] yaw=%+.3f deg  best d=%+.3f deg  cost %.1f -> %.1f\n",
+                         yaw_ * 180.0 / M_PI, d * 180.0 / M_PI, f0, fd);
+        if (not (fd < f0)) return 0.f;             // the incumbent frame explains the returns best
+        const float yo = yaw_, yn = yaw_ + static_cast<float>(d);
+        const Eigen::Vector2f t(std::cos(-yn) * c.x() - std::sin(-yn) * c.y() - (std::cos(-yo) * c.x() - std::sin(-yo) * c.y()),
+                                std::sin(-yn) * c.x() + std::cos(-yn) * c.y() - (std::sin(-yo) * c.x() + std::cos(-yo) * c.y()));
+        for (auto& bx : L_.boxes) { bx.lo += t; bx.hi += t; }
+        yaw_ = yn;
+        return static_cast<float>(d);
+    }
+
     void Channel::fuse()
     {
         // The evidence is FUSED, never appended. A capped accumulator stops taking data partway
@@ -1783,7 +1908,8 @@ namespace rc::boxch
         // registered against a layout already drawn at the current yaw — positive feedback,
         // measured climbing monotonically (-0.51 -> +2.46 deg against a true +0.87). Once a cover
         // exists the frame IS the gauge, so stop re-voting it.
-        static const bool gauge_freeze = std::getenv("WS_GAUGE_FREEZE") != nullptr;
+        static const bool gauge_freeze = std::getenv("WS_GAUGE_FREEZE") != nullptr
+                                      or std::getenv("WS_GAUGE_ML") != nullptr;   // ML owns it then
         if (yaw_votes_ > 0 and (yaw4_cos_ != 0.0 or yaw4_sin_ != 0.0)
             and not (gauge_freeze and adopted_once_ and not L_.empty()))
         {
@@ -1833,6 +1959,13 @@ namespace rc::boxch
             fuse();
             refresh_free_keys();
             if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp, 10, &free_keys_);
+            static const bool gauge_ml = std::getenv("WS_GAUGE_ML") != nullptr;
+            if (gauge_ml and not cloud_.empty() and std::abs(fit_gauge_ml(gp)) > 0.f)
+            {
+                fuse();
+                refresh_free_keys();
+                rms_ = rc::boxes::refit(L_, cloud_, gp, 10, &free_keys_);
+            }
             if (std::getenv("WS_CLOUD_PROBE") and not cloud_.empty())
             {
                 // Histogram the fused returns along x. A 6 m room drives 6 m of wall; if the cloud

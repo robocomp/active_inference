@@ -378,5 +378,8 @@ namespace rc::boxch
         std::ofstream csv_;
 
         void fuse();
+        /// WS_GAUGE_ML: turn the layout frame by the rotation that maximises the layout's own
+        /// likelihood of the fused returns (see the definition). Returns the rotation applied.
+        float fit_gauge_ml(const rc::boxes::GrowParams& gp);
     };
 }   // namespace rc::boxch

@@ -2210,6 +2210,9 @@ int run_replay(const char* path)
         EncoderModel enc; enc.sigma_xy = cfg.odom_sigma_xy; enc.sigma_th = cfg.odom_sigma_th;
         Eigen::Vector3f exec_pose = truth[0], est = Eigen::Vector3f::Zero();
         const Eigen::Vector3f origin = truth[0];
+        if (std::getenv("WS_GAUGE_PROBE"))
+            std::fprintf(stderr, "[origin] (%.3f, %.3f) heading %.4f deg: the map frame is the world turned by this\n",
+                         origin.x(), origin.y(), origin.z() * 180.0 / M_PI);
         const auto to_map = [&](const Eigen::Vector3f& p)
         {
             const float c = std::cos(-origin.z()), s = std::sin(-origin.z());
