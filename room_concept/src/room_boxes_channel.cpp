@@ -111,6 +111,7 @@ namespace rc::boxch
         {
             KeyFrame kf;
             kf.pose = pose; kf.sigma = smax; kf.cov = cov;
+            last_cov_ = cov;
             kf.pts.reserve(band.size() / 3 + 1);
             for (size_t i = 0; i < band.size(); i += 3) kf.pts.push_back(band[i]);
             keys_.push_back(std::move(kf));
@@ -298,6 +299,13 @@ namespace rc::boxch
         return removed;
     }
 
+    void Channel::refresh_free_keys() const
+    {
+        free_keys_.clear();
+        for (const auto& [k, c] : free_)
+            if (c >= 1) free_keys_.insert(k);
+    }
+
     bool Channel::traversable(const Eigen::Vector2f& m) const
     {
         const std::pair<int, int> c{static_cast<int>(std::floor(m.x() / p_.cell)),
@@ -320,6 +328,11 @@ namespace rc::boxch
         last_gain_ = 0;
         std::vector<Eigen::Vector2f> out;
         if (free_.empty()) return out;
+        // One objective or the rate heuristic, chosen once for the whole plan (see the G(v) note
+        // at the frontier scoring below). lambda is nats per metre: the agent's price of driving.
+        static const bool efe = std::getenv("WS_EFE") != nullptr;
+        static const double lambda = std::getenv("WS_EFE_LAMBDA")
+                                   ? std::atof(std::getenv("WS_EFE_LAMBDA")) : 0.7;
 
         // ⚠ DENSE GRID FOR THE DURATION OF THE PLAN. The free map is a std::map, and the gain
         // term probes ~1600 neighbours per frontier cell: at O(log n) against 20000 cells that is
@@ -414,21 +427,61 @@ namespace rc::boxch
         // rectangle: gain RISING 930 -> 1212 -> 1304 over frames 500-800, so the frontier was
         // never exhausted, Explore never ended, and the refine phase, the frozen cover and the
         // Done rule have never run in any run of this planner.
-        // The layout is the robot's own statement of where the room IS, so an unknown cell with
-        // sdf >= 0 is outside it: reachable only through a face the layout does not support, which
-        // is a REFINE question (is that face where I think it is?), not an Explore one. No
-        // threshold — the sign of the SDF is the model's own boundary.
+        // ⚠ A HARD SIGN TEST HERE WAS MY OWN DEFECT, AND IT STOPPED THE ROBOT LOOKING.
+        // The first version wrote "an unknown cell with sdf >= 0 is outside the room, so it is a
+        // REFINE question, not an Explore one". That is wrong: OUTSIDE THE CURRENT BELIEF IS
+        // EXACTLY WHERE A MISSING ROOM, ALCOVE OR RECESS IS. And the belief is a box COVER of swept
+        // space, which EXTRAPOLATES — a box fitted to the part you saw predicts its own far corner
+        // for free — so the gate declared whole unvisited regions "not room" and never sent the
+        // robot to check. Measured on the apartamento hall: the robot never crossed the centreline
+        // (trajectory x in [-3.24,+0.08] of a room spanning [-4.25,+4.25]), 16% of the true
+        // boundary was never within line of sight of any pose, six walls were seen 0% of the time —
+        // and the planner still reported the room explored, at IoU 0.977. The score was rewarding
+        // EXTRAPOLATION, and the gate is what let it.
+        //
+        // So weight, do not gate. The probability that a cell beyond a face is still room is the
+        // probability that the face is not really there — and the posterior already says how well
+        // that face is known:
+        //     p_room(cell) = Phi(-sdf / sigma_face),  sigma_face = sqrt(cov(k,k)) of active_face
+        // A cover face with no returns carries its prior width (the room's own span), so cells
+        // beyond it come out near 0.5 and stay worth visiting; a wall seen a hundred times has a
+        // millimetric sigma and kills everything beyond it. Deep inside, p -> 1. No rule about
+        // doors, no threshold, and the same quantity the estimator already maintains.
         const float cyl = std::cos(-yaw_), syl = std::sin(-yaw_);
-        std::vector<char> gridi(gridf.size(), 1);
+        std::vector<float> gridp(gridf.size(), 1.f);       // p(cell is room)
+        std::vector<char> gridi(gridf.size(), 1);          // p >= 0.5, for the binary consumers
         if (not L_.empty())
+        {
+            const bool cov_sized = L_.cov.rows() == static_cast<long>(L_.n_offsets())
+                               and L_.cov.cols() == static_cast<long>(L_.n_offsets());
+            double span = 0.0;
+            for (const auto& b : L_.boxes) span = std::max(span, static_cast<double>(b.width() + b.height()));
             for (int y = loy - 1; y <= hiy + 1; ++y)
                 for (int x = lox - 1; x <= hix + 1; ++x)
                 {
                     const Eigen::Vector2f m((static_cast<float>(x) + 0.5f) * p_.cell,
                                             (static_cast<float>(y) + 0.5f) * p_.cell);
                     const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
-                    gridi[idx(x, y)] = (L_.sdf(ml) < 0.f) ? 1 : 0;
+                    const float sd = L_.sdf(ml);
+                    double sig = span;                      // unknown face => prior width
+                    const int off = rc::boxes::active_face(L_, ml);
+                    if (cov_sized and off >= 0 and static_cast<size_t>(off) < L_.n_offsets())
+                    {
+                        const float v = L_.cov(off, off);
+                        if (std::isfinite(v) and v > 0.f) sig = std::sqrt(static_cast<double>(v));
+                    }
+                    sig = std::max(sig, static_cast<double>(p_.cell));   // never sharper than a cell
+                    const double z = -static_cast<double>(sd) / sig;
+                    const float pr = static_cast<float>(0.5 * std::erfc(-z * M_SQRT1_2));
+                    gridp[idx(x, y)] = pr;
+                    gridi[idx(x, y)] = (pr >= 0.5f) ? 1 : 0;
                 }
+        }
+        const auto p_room = [&](int x, int y)
+        {
+            if (x < lox - 1 or x > hix + 1 or y < loy - 1 or y > hiy + 1) return 0.f;
+            return gridp[idx(x, y)];
+        };
         const auto is_inside = [&](int x, int y)
         {
             if (x < lox - 1 or x > hix + 1 or y < loy - 1 or y > hiy + 1) return false;
@@ -516,7 +569,8 @@ namespace rc::boxch
                                                 {k.first, k.second + 1}, {k.first, k.second - 1}};
             bool isf = false;
             for (const auto& n : nb4)
-                if (is_unknown(n.first, n.second) and is_inside(n.first, n.second)) { isf = true; break; }
+                if (is_unknown(n.first, n.second) and p_room(n.first, n.second) > 0.05f)
+                { isf = true; break; }
             if (not isf) continue;
             // the body-radius erosion has replaced the old hand-picked "no occupied cell within
             // 2 cells" margin; a cell the robot fits in is a cell it may stand in
@@ -555,8 +609,189 @@ namespace rc::boxch
             }
         }
 
+        // ── WHAT THE MODEL DOES NOT EXPLAIN, PER FACE, IN NATS ──────────────────────────────
+        // The precision term above asks "how much better would I KNOW this offset". It is silent
+        // about a different and more valuable kind of ignorance: a face whose returns DO NOT FIT.
+        // A cluster of points sitting off a wall is evidence of matter the layout does not model —
+        // a recess, a pier, a bay — and no amount of re-observing a well-fitting wall discovers it.
+        // ★ AND IT IS THE ONE TERM condense() CANNOT DISCARD. Voxel condensation throws away
+        // repeated LOOKS at a surface, which is why the precision term is inert once a face has
+        // been seen; it does not throw away the surface's DISAGREEMENT with the model.
+        // Cost in nats: every point on face k is paying -log N(d; 0, sigma_eff) for its residual,
+        // so the excess over what noise alone would cost is
+        //     misfit_k = 1/2 * sum_points [ (d/sigma_eff)^2 - 1 ]   (floored at zero)
+        // which is exactly the likelihood a successful structure edit could recover there. Same
+        // units as I_prec and I_cov, so it needs no weight of its own.
+        // ⚠ MISFIT IS NOT ERROR. A wall carried off by a gauge rotation fits its own returns
+        // perfectly — low residual, high truth error — so this finds ghost walls and unmodelled
+        // structure and will NOT find a correctly-shaped room in the wrong place. It is a
+        // complement to the precision term, never a substitute.
+        std::map<int, double> face_misfit;
+        if (efe and not L_.empty() and not cloud_.empty())
+            for (const auto& q : cloud_)
+            {
+                const int off = rc::boxes::active_face(L_, q.p);
+                if (off < 0 or static_cast<size_t>(off) >= L_.n_offsets()) continue;
+                const double se = std::sqrt(static_cast<double>(p_.sensor_sigma) * p_.sensor_sigma
+                                          + static_cast<double>(p_.sigma_flat) * p_.sigma_flat
+                                          + static_cast<double>(q.sigma_pose) * q.sigma_pose);
+                const double z = static_cast<double>(L_.sdf(q.p)) / std::max(1e-6, se);
+                const double excess = 0.5 * (z * z - 1.0);
+                if (excess > 0.0) face_misfit[off] += excess;
+            }
+
+        // ── EXPECTED INFORMATION GAIN, IN THE ESTIMATOR'S OWN CURRENCY ──────────────────────
+        // ⚠ THE FRONTIER SCORE BELOW COUNTS CELLS; THIS COUNTS NATS ABOUT THE ESTIMAND.
+        // The layout's parameters are the box face offsets, and the estimator's evidence rule is
+        // explicit: `condense()` keeps ONE point per voxel, the best one, so a return informs an
+        // offset only if it lands in a voxel that face has not got yet, or lands in one whose
+        // stored `smin` is WORSE than the pose sigma it would be captured at. Everything else is
+        // condensed away and buys nothing.
+        // So the expected Fisher gain of standing at v is computable exactly from state that
+        // already exists: cast the same rays, march until the first occupied cell OR the layout
+        // boundary (the layout IS the generative model, so the crossing is the PREDICTED return),
+        // ask active_face() which offset that patch belongs to, and accumulate
+        //     dH_k = sum over predicted cells of  1/(s0^2 + min(smin_c, s_v)^2) - 1/(s0^2 + smin_c^2)
+        // with the second term zero for a cell no return has ever landed in. |d sdf / d offset| = 1
+        // on a face interior, so there is no incidence factor — refit has none either, and under
+        // this estimator incidence only matters through how many distinct voxels one scan touches,
+        // which the ray cast already counts.
+        // The value of that gain in NATS is exact for a diagonal Gaussian posterior:
+        //     I_prec(v) = 1/2 * sum_k log(1 + dH_k * var_k),   var_k = L_.cov(k,k)
+        // ★ A coincident or seam offset gets dH = 0 for free here, because no ray lands on it —
+        // the degeneracy of [[coincident-offsets-are-unobservable]] needs no special case.
+        const double s0sq = static_cast<double>(p_.sensor_sigma) * p_.sensor_sigma
+                          + static_cast<double>(p_.sigma_flat) * p_.sigma_flat;
+        // ⚠ THE POSE SIGMA OF A PREDICTED RETURN DEPENDS ON ITS RANGE, NOT ON THE SCAN'S WORST
+        // POINT. Using `last_sigma_` (the scan-wide MAXIMUM) as the sigma the robot would capture
+        // every predicted return at made the prediction DEGENERATE: a return only informs an offset
+        // if its sigma beats the cell's stored `smin`, and a scan maximum almost never does, so the
+        // predicted gain came out ZERO for most viewpoints (measured: median predicted dH = 0.0
+        // over 118 replans) and G(v) collapsed to coverage-minus-distance.
+        // The honest figure is the one observe() computes per point: translation plus the lever arm
+        // of the heading error AT THAT RANGE. The heading the robot will arrive with is unknown, so
+        // take the heading-independent part — |J_theta| = |q|, and the cross term averages out over
+        // approach directions — which is exact for the trace and drops one small term.
+        const auto sigma_at_range = [&](double rng) -> double
+        {
+            const double tr = static_cast<double>(last_cov_(0, 0) + last_cov_(1, 1))
+                            + static_cast<double>(last_cov_(2, 2)) * rng * rng;
+            return std::sqrt(std::max(0.0, tr) * 0.5);
+        };
+        const bool cov_ok = L_.cov.rows() == static_cast<long>(L_.n_offsets())
+                        and L_.cov.cols() == static_cast<long>(L_.n_offsets());
+        const auto info_nats = [&](const std::pair<int, int>& from, int* unknown_out) -> double
+        {
+            std::map<int, double> dH;
+            // ⚠ CREDIT WHAT A VIEWPOINT COULD RESOLVE, NOT WHAT IT CAN SEE. The first version
+            // added a face's whole misfit if any ray reached it, so a wall visible across an open
+            // hall paid the same from 8 m as from 1 m — the robot already collected every misfit
+            // from where it stood, approaching bought nothing, and lambda*d made standing still
+            // strictly better. That is why it never went to the high-residual walls.
+            // A misfit is resolved by RETURNS, and the information a return carries about a face
+            // offset is cos^2(incidence)/sigma_eff^2. Normalised against the best a sensor could
+            // ever do on that face (square on, at zero range) it is a fraction in (0,1] — so a
+            // viewpoint claims the share of the misfit it could actually clear up, and getting
+            // closer and squarer is worth more. No new constant: both halves are the estimator's.
+            std::map<int, double> faces_seen;  // offset -> best resolving quality from here
+            int unknown_seen = 0;
+            for (int a = 0; a < 48; ++a)
+            {
+                const float th = 2.f * kPiF * static_cast<float>(a) / 48.f;
+                const float ux = std::cos(th), uy = std::sin(th);
+                for (int step = 1; step <= R; ++step)
+                {
+                    const int cx = from.first  + static_cast<int>(std::lround(ux * static_cast<float>(step)));
+                    const int cy = from.second + static_cast<int>(std::lround(uy * static_cast<float>(step)));
+                    const bool occ = is_occ(cx, cy);
+                    const bool in  = is_inside(cx, cy);
+                    if (is_unknown(cx, cy) and in) ++unknown_seen;
+                    if (not occ and in) continue;            // free room: the beam carries on
+                    // this cell is the predicted surface: a real return, or the model's boundary
+                    if (not L_.empty() and cov_ok)
+                    {
+                        const Eigen::Vector2f m((static_cast<float>(cx) + 0.5f) * p_.cell,
+                                                (static_cast<float>(cy) + 0.5f) * p_.cell);
+                        const Eigen::Vector2f ml(cyl * m.x() - syl * m.y(), syl * m.x() + cyl * m.y());
+                        const int off = rc::boxes::active_face(L_, ml);
+                        if (off >= 0 and static_cast<size_t>(off) < L_.n_offsets())
+                        {
+                            {
+                                // incidence: the ray direction against the face normal, both in
+                                // the layout frame (offset%4 is lo.x, lo.y, hi.x, hi.y)
+                                const float rx = cyl * ux - syl * uy, ry = syl * ux + cyl * uy;
+                                const int side = off % 4;
+                                const float nx = (side == 0) ? -1.f : (side == 2) ? 1.f : 0.f;
+                                const float ny = (side == 1) ? -1.f : (side == 3) ? 1.f : 0.f;
+                                const double cosi = std::abs(rx * nx + ry * ny);
+                                const double rr = static_cast<double>(step) * p_.cell;
+                                const double sv = std::max(1e-3, sigma_at_range(rr));
+                                const double q = cosi * cosi * s0sq / (s0sq + sv * sv);
+                                auto& best = faces_seen[off];
+                                if (q > best) best = q;
+                            }
+                            const auto vit = vmap_.find({cx, cy});
+                            const double smin = (vit == vmap_.end() or vit->second.w <= 0.0)
+                                              ? std::numeric_limits<double>::infinity()
+                                              : static_cast<double>(vit->second.smin);
+                            const double rng = static_cast<double>(step) * p_.cell;
+                            const double s_v = std::max(1e-3, sigma_at_range(rng));
+                            const double now = std::isfinite(smin) ? 1.0 / (s0sq + smin * smin) : 0.0;
+                            const double then = 1.0 / (s0sq + std::min(smin, s_v) * std::min(smin, s_v));
+                            if (then > now) dH[off] += then - now;
+                        }
+                    }
+                    break;                                   // the beam stops here either way
+                }
+            }
+            if (unknown_out) *unknown_out = unknown_seen;
+            double nats = 0.0, raw = 0.0;
+            for (const auto& [off, h] : dH)
+            {
+                const double var = static_cast<double>(L_.cov(off, off));
+                if (var > 0.0 and std::isfinite(var)) nats += 0.5 * std::log1p(h * var);
+                raw += h;
+            }
+            last_dH_sum_ = static_cast<float>(raw);   // raw Fisher, for the predicted-vs-realised test
+            // What standing here would put a pair of eyes on, of the model's unexplained residual.
+            double mis = 0.0;
+            for (const auto& [off, q] : faces_seen)
+            {
+                const auto it = face_misfit.find(off);
+                if (it != face_misfit.end()) mis += q * it->second;
+            }
+            last_misfit_nats_ = static_cast<float>(mis);
+            return nats + mis;
+        };
+
+        // ── ONE OBJECTIVE, ONE CANDIDATE SET, NO PHASES ─────────────────────────────────────
+        // ⚠ THE SCORE HAD THE RIGHT TERMS AND THE WRONG GEOGRAPHY. G(v) was only ever evaluated at
+        // FRONTIER cluster representatives, and once the frontier emptied, at cells 0.7-2.6 m from
+        // the single WORST-VARIANCE face. So the residual term was in the score but never in the
+        // CHOICE OF WHERE TO LOOK: a wall carrying 300 nats of unexplained residual was never
+        // anchored on unless it also happened to have the widest posterior. Measured on the hall,
+        // the misfit total sat at 1000-1800 nats across 30 faces while the robot stayed in one
+        // quadrant and 14% of the boundary was never seen.
+        // So offer the objective every place the robot could stand. The candidate set is the
+        // reachable free cells on a coarse stride — 0.20 m, five times the grid, which is finer
+        // than the body is wide, so no distinct standing place is skipped — and the argmax over
+        // G(v) decides. Coverage, precision and residual then compete on geography as well as on
+        // value, and Explore/Refine stop being separate machines: the phase label is only a
+        // readout of which term won.
+        std::vector<std::pair<int, int>> efe_cands;
+        if (efe)
+        {
+            const int stride = std::max(1, static_cast<int>(std::lround(0.20f / p_.cell)));
+            for (const auto& [k, dd] : dist)
+                if (k.first % stride == 0 and k.second % stride == 0 and passable(k))
+                    efe_cands.push_back(k);
+        }
+
         std::pair<int, int> best{0, 0}; double best_score = 0.0; bool have = false;
-        for (const auto& k : reps)
+        static const bool gprobe = std::getenv("WS_G_PROBE") != nullptr;
+        int n_pos = 0, n_neg = 0;
+        double best_prec = 0, best_cov = 0, best_mis = 0, best_cost = 0;
+        for (const auto& k : (efe ? efe_cands : reps))
         {
             const int d = dist_a[idx(k.first, k.second)];
             if (d < 0) continue;
@@ -567,7 +802,10 @@ namespace rc::boxch
             // "exhausted", Explore never ended, and the refine and consolidation phases never ran
             // at all. The robot kept exploring for information it could not obtain.
             // A ray stops at the first occupied cell, exactly as a beam does.
-            int unknown = 0;
+            // Expected unknown ROOM cells revealed: each unknown cell counts its probability of
+            // being room, so a cell just beyond a poorly-known face counts ~0.5 and one beyond a
+            // wall seen a hundred times counts ~0.
+            double unknown_w = 0.0;
             const int NB = 48;                      // bearings; a coarse scan is enough to rank
             for (int a = 0; a < NB; ++a)
             {
@@ -578,17 +816,50 @@ namespace rc::boxch
                     const int cx = k.first  + static_cast<int>(std::lround(ux * static_cast<float>(s)));
                     const int cy = k.second + static_cast<int>(std::lround(uy * static_cast<float>(s)));
                     if (is_occ(cx, cy)) break;      // the beam stops here
-                    if (is_unknown(cx, cy) and is_inside(cx, cy)) ++unknown;
+                    if (is_unknown(cx, cy)) unknown_w += static_cast<double>(p_room(cx, cy));
                 }
             }
-            const double score = static_cast<double>(unknown)
-                               / (1.0 + static_cast<double>(d) * p_.cell);
-            if (score > best_score) { best_score = score; best = k; have = true; last_gain_ = unknown; phase_ = Phase::Explore; }
+            // ── ONE OBJECTIVE, IN NATS, OR THE RATE HEURISTIC ──────────────────────────────
+            // WS_EFE=1 scores the expected free energy of standing at v:
+            //     G(v) = I_prec(v) [nats about the offsets]
+            //          + unobserved_nats * m(v) [nats of coverage still owed]
+            //          - lambda * d(v) [the price of getting there]
+            // and the planner stops when no reachable viewpoint scores above zero. The relative
+            // weight of coverage and precision is NOT a knob: the precision term is scaled by the
+            // posterior var_k (large early, at its floor once a face is well seen) and the coverage
+            // term by the unknown cells that remain (large early, zero when swept), so which one
+            // dominates falls out of the belief.
+            // `unobserved_nats` is the model's own coverage statement — mdl_cost charges one nat per
+            // claimed-but-unswept cell, so sweeping one is worth exactly that.
+            // ⚠ lambda IS THE ONE UNAVOIDABLE CONSTANT AND IT IS NOT A MODEL TERM. It is the price
+            // of a metre of driving — the agent's preference over time, the pragmatic half of
+            // expected free energy. No generative model of a room can supply it. Declared here in
+            // nats/m with that name: one lap of the ladder (~36 m) costing about one box's
+            // description length (4*log(span/s0) ~ 24 nats) puts it near 0.7.
+            double score;
+            if (efe)
+            {
+                int m_seen = 0;
+                const double i_prec = info_nats(k, &m_seen);
+                const double i_cov  = unknown_w;        // nats of coverage still owed, weighted
+                score = i_prec + i_cov - lambda * static_cast<double>(d) * p_.cell;
+                last_info_nats_ = static_cast<float>(i_prec);
+                if (score > 0.0) ++n_pos; else ++n_neg;
+                if (score > best_score)
+                { best_prec = i_prec - last_misfit_nats_; best_cov = i_cov;
+                  best_mis = last_misfit_nats_; best_cost = lambda * static_cast<double>(d) * p_.cell; }
+            }
+            else
+                score = unknown_w / (1.0 + static_cast<double>(d) * p_.cell);
+            if (score > best_score)
+            { best_score = score; best = k; have = true;
+              last_gain_ = static_cast<int>(std::lround(unknown_w)); phase_ = Phase::Explore; }
         }
         // ── PHASE 2: REFINE THE WORST-KNOWN WALL ────────────────────────────────────────────
         // No frontier means coverage is finished, NOT that the layout is finished. Find the face
         // whose offset the data constrains least, then stand square to it at a workable range.
-        if (not have and not L_.empty())
+        if (efe and not have) { phase_ = Phase::Done; }   // max G(v) <= 0: nothing pays
+        if (not efe and not have and not L_.empty())
         {
             phase_ = Phase::Refine;
             // ── THE WORST FACE IS THE ONE WITH THE WIDEST POSTERIOR, NOT THE LEAST FLOOR ───────
@@ -741,7 +1012,13 @@ namespace rc::boxch
             // ⚠ Before this, Refine had NO exit: the viewpoint search below almost always
             // succeeds, so `Done` was reachable only on an empty layout and every run of this
             // planner ended at the frame cap.
-            if (worst_face_sigma_ <= p_.sigma_flat) { phase_ = Phase::Done; return out; }
+            // Under one objective the sigma bar is redundant AND wrong: evidence per face is
+            // capped by the face's LENGTH in voxels, so `1/H <= sigma_flat^2` is unreachable on a
+            // short face however long the robot looks at it — measured, the worst face plateaus at
+            // 11-15 mm against a 10 mm bar and never crosses. G(v) <= 0 asks the question the bar
+            // was trying to ask ("is there anything left worth driving to?") in a currency that
+            // does not depend on which face happens to be shortest.
+            if (not efe and worst_face_sigma_ <= p_.sigma_flat) { phase_ = Phase::Done; return out; }
 
             // Stand square to it, at about 1.3 m — the standoff the fixed tour happens to use, and
             // the range where cos^2/range^2 is large without the wall filling the scan.
@@ -764,11 +1041,35 @@ namespace rc::boxch
                 const float rng = r.norm();
                 if (rng < 0.7f or rng > 2.6f) continue;
                 const float cosi = std::abs(r.dot(faces[worst].nrm)) / std::max(1e-3f, rng);
-                const double v = static_cast<double>(cosi) / (1.0 + 0.25 * static_cast<double>(d) * p_.cell);
-                if (v > bestv) { bestv = v; goal = k; gotv = true; }
+                double v;
+                if (efe)
+                {
+                    int m_seen = 0;
+                    v = info_nats(k, &m_seen) + 1.0 * static_cast<double>(m_seen)
+                      - lambda * static_cast<double>(d) * p_.cell;
+                    // ★ Done is max_v G(v) <= 0: nothing reachable pays for the drive.
+                    if (v <= 0.0) continue;
+                }
+                else
+                    v = static_cast<double>(cosi) / (1.0 + 0.25 * static_cast<double>(d) * p_.cell);
+                if (v > bestv) { bestv = v; goal = k; gotv = true; last_info_nats_ = static_cast<float>(v); }
             }
             if (not gotv) { phase_ = Phase::Done; return out; }
             best = goal; have = true; last_gain_ = 0;
+        }
+        if (gprobe)
+        {
+            double mis_tot = 0.0;
+            for (const auto& [o, m] : face_misfit) mis_tot += m;
+            std::fprintf(stderr, "[G] cands=%zu pos=%d neg=%d | best=(%.2f,%.2f) score=%.1f"
+                                 " = prec %.1f + cov %.1f + misfit %.1f - cost %.1f"
+                                 " | misfit total %.1f over %zu faces | phase=%s\n",
+                         (efe ? efe_cands.size() : reps.size()), n_pos, n_neg,
+                         (static_cast<float>(best.first) + 0.5f) * p_.cell,
+                         (static_cast<float>(best.second) + 0.5f) * p_.cell,
+                         best_score, best_prec, best_cov, best_mis, best_cost,
+                         mis_tot, face_misfit.size(),
+                         phase_ == Phase::Explore ? "explore" : phase_ == Phase::Refine ? "refine" : "done");
         }
         if (not have) { phase_ = Phase::Done; return out; }
 
@@ -1311,7 +1612,8 @@ namespace rc::boxch
             // the corrected poses is what pulls the early, pre-layout frames back into agreement.
             if (keys_.size() >= 4 and (structure_steps_++ % 3) == 0) reproject();
             fuse();
-            if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp);
+            refresh_free_keys();
+            if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp, 10, &free_keys_);
             if (std::getenv("WS_CLOUD_PROBE") and not cloud_.empty())
             {
                 // Histogram the fused returns along x. A 6 m room drives 6 m of wall; if the cloud
@@ -1384,7 +1686,8 @@ namespace rc::boxch
         {
             fuse();
             if (cloud_.size() < static_cast<std::size_t>(gp.min_cluster)) return changed;
-            rms_ = rc::boxes::refit(L_, cloud_, gp);
+            refresh_free_keys();
+            rms_ = rc::boxes::refit(L_, cloud_, gp, 10, &free_keys_);
             // Free space, in the LAYOUT frame and on grow()'s grid.
             std::set<std::pair<int, int>> fl;
             {

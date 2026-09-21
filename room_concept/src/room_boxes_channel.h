@@ -124,15 +124,45 @@ namespace rc::boxch
         /// KNOWN occupancy within `body_radius` — so it is exactly as wrong as the robot is.
         /// `m` is a MAP-frame point (the frame `plan_path` speaks).
         bool traversable(const Eigen::Vector2f& m) const;
+        /// The swept cells as a set, for refit's free-space term (see rc::boxes::refit).
+        void refresh_free_keys() const;
         /// Worst face variance, in metres — the quantity REFINE is driving down, and the honest
         /// stopping signal: when it stops improving there is nothing left to learn about shape.
         float worst_face_sigma() const { return worst_face_sigma_; }
+        /// Expected information about the layout's offsets, in NATS, of the viewpoint the last
+        /// plan chose — the epistemic half of G(v). Zero when the rate heuristic is driving.
+        /// ★ THE FALSIFIER LIVES HERE: log this against the REALISED change in the estimator's
+        /// total Fisher information on arrival and regress. A slope far from 1 means the currency
+        /// is fiction and no lambda can rescue an objective whose value is made up.
+        float last_info_nats() const { return last_info_nats_; }
+        /// Raw predicted Fisher gain (sum of dH_k) of the chosen viewpoint — the quantity to
+        /// regress against the REALISED change in info_total(). Same units on both sides.
+        float last_dH_sum() const { return last_dH_sum_; }
+        /// Unexplained residual, in nats, on the faces the chosen viewpoint would see — the
+        /// structural half of the objective, and the only term voxel condensation cannot erase.
+        float last_misfit_nats() const { return last_misfit_nats_; }
+        /// Total Fisher information the estimator currently holds over all offsets, sum of 1/var.
+        /// The realised side of that regression.
+        double info_total() const
+        {
+            double t = 0.0;
+            if (L_.cov.rows() != static_cast<long>(L_.n_offsets())) return t;
+            for (long i = 0; i < L_.cov.rows(); ++i)
+                if (L_.cov(i, i) > 0.f and std::isfinite(L_.cov(i, i))) t += 1.0 / L_.cov(i, i);
+            return t;
+        }
         /// Unknown cells the last plan expected to reveal — the gain it was chosen for.
         int last_gain() const { return last_gain_; }
     private:
         mutable int last_gain_ = 0;
         mutable Phase phase_ = Phase::Explore;
         mutable float worst_face_sigma_ = 1e9f;
+        mutable float last_info_nats_ = 0.f;
+        mutable float last_dH_sum_ = 0.f;
+        mutable float last_misfit_nats_ = 0.f;
+        /// The pose covariance the last scan was folded with — the prediction needs it to say what
+        /// sigma a return at a given RANGE would be captured at.
+        Eigen::Matrix3f last_cov_ = Eigen::Matrix3f::Identity() * 0.01f;
         mutable int refine_stall_ = 0;
     public:
 
@@ -267,6 +297,7 @@ namespace rc::boxch
         /// passed through is free, and free space is the room. This is why the box-decomposition
         /// literature builds from occupancy rather than from a bounding volume.
         std::map<std::pair<int, int>, int> free_;
+        mutable std::set<std::pair<int, int>> free_keys_;
         /// The robot's own cell trail — always free, and the seed's guaranteed starting point.
         std::pair<int, int> last_cell_{0, 0};
         bool have_cell_ = false;

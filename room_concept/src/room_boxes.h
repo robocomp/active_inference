@@ -217,7 +217,23 @@ namespace rc::boxes
     /// residual is sdf(q) and depends on exactly ONE offset (the active face), so the normal
     /// equations are diagonal and the step is a weighted mean — no linear algebra, no line search,
     /// no step-size constant. Returns the RMS residual after fitting.
-    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters = 10);
+    /// `freecells` — the cells the beams SWEPT, in cell coordinates. Optional, and the reason it
+    /// exists: a face with no returns on it has no likelihood gradient, so nothing moves it. The
+    /// tip of a fin faces into open room and collects no returns at all, so it stays wherever it
+    /// was proposed — measured on the apartamento hall, a 1.69 m fin published at 3.23 m, closing a
+    /// 2.45 m passage to 0.97 m, with its WIDTH correct to 8 mm and rms 0.033 m. The residual
+    /// cannot see it either: the fin's sides fit their returns perfectly, and the phantom extends
+    /// into space no beam ever returned from.
+    /// ⚠ THE ROBOT DROVE THROUGH IT. One trajectory sample sat at (-0.038,-1.652) inside the
+    /// published solid. A cell the robot has occupied cannot be structure, and that is not a
+    /// likelihood statement — it is an invariant, and `mdl_cost` already charges it as `missed`.
+    /// This makes the same evidence DIFFERENTIABLE so a face can be pushed by it instead of only
+    /// being judged by it at a discrete edit.
+    /// ★ ONE DIRECTION ONLY. A swept cell the layout excludes is proof of room. A claimed cell the
+    /// beams never swept is NOT proof of matter — it may simply be room nobody has visited — so it
+    /// stays a cost on structure edits and does not become a force on a face.
+    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters = 10,
+                const std::set<std::pair<int, int>>* freecells = nullptr);
 
     /// One structure step over the accumulated global cloud. Returns what it did; mutates `L`.
     /// ── WHAT THE WHOLE LAYOUT COSTS, IN NATS ─────────────────────────────────────────────────

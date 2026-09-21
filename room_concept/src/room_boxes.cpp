@@ -442,7 +442,8 @@ namespace rc::boxes
         }
     }   // namespace
 
-    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters)
+    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters,
+                const std::set<std::pair<int, int>>* freecells)
     {
         if (L.empty() or cloud.empty()) return 0.f;
         const std::vector<CloudPoint> pts = condense(cloud, p);
@@ -508,6 +509,61 @@ namespace rc::boxes
                     g[k] -= w * jk * static_cast<double>(d);
                 }
             }
+            // ── SWEPT SPACE THE LAYOUT EXCLUDES IS A FORCE ON THE FACE THAT EXCLUDES IT ─────
+            // Same evidence mdl_cost charges as `missed`, made differentiable. Each swept cell that
+            // falls OUTSIDE the region is a residual on the face nearest it, pulling that face out
+            // until the cell is inside. Its sigma is the CELL — the resolution at which the sweep
+            // is known — so there is no new constant, and a cell already inside says nothing.
+            // ⚠ DEFAULT OFF, AND THE REASON IS POSE ERROR. On the apartamento hall this is exact:
+            // the phantom fin's tip lands within 13 mm of truth, IoU 0.969 -> 0.977, pose 0.042 ->
+            // 0.027, and no trajectory sample is left inside published solid. Across 50 random
+            // rooms it REGRESSES badly — IoU median 0.946 -> 0.910, >=0.95 48% -> 24%, rms 0.024 ->
+            // 0.042, pose 0.104 -> 0.184, paired median -0.026 and 12/50 wins — while vertex counts
+            // improve (30 -> 33 exact), so the fin repair itself is real.
+            // The walls are being dragged off their own returns, and the mechanism is known: free
+            // marking LEAKS PAST A WALL when the pose is poor, the same leak that once let the
+            // explore gain score the outdoors. The hall runs at pose 0.027 m so its swept set is
+            // clean; a room at 0.1-0.5 m bleeds free cells beyond its walls and this force chases
+            // them outward. ★ The missing piece is per-cell evidence quality: `vmap_` stores the
+            // best pose sigma a surface cell was seen at (`smin`), `free_` stores only a count, so
+            // a cell swept from a lost robot is weighted exactly like one swept from a sure one.
+            // Give free_ an smin of its own and this becomes safe; until then it is opt-in.
+            static const bool free_force = std::getenv("WS_FREEFORCE") != nullptr;
+            if (free_force and freecells != nullptr)
+                for (const auto& fc : *freecells)
+                {
+                    const Eigen::Vector2f m((static_cast<float>(fc.first) + 0.5f) * p.cell,
+                                            (static_cast<float>(fc.second) + 0.5f) * p.cell);
+                    const float dfree = L.sdf(m);
+                    if (dfree <= 0.f) continue;              // already room: no complaint
+                    const int idf = active_face(L, m);
+                    if (idf < 0) continue;
+                    const size_t kf = static_cast<size_t>(idf);
+                    if (kf >= n) continue;
+                    Box& bf = L.boxes[kf / 4];
+                    float& off = (kf % 4 == 0) ? bf.lo.x() : (kf % 4 == 1) ? bf.lo.y()
+                               : (kf % 4 == 2) ? bf.hi.x() : bf.hi.y();
+                    const float keep = off;
+                    off += eps;
+                    const float jf = (L.sdf(m) - dfree) / eps;
+                    off = keep;
+                    if (std::abs(jf) < 1e-4f) continue;
+                    // ⚠ HOW FAR OUTSIDE MATTERS, AND THE FIRST VERSION IGNORED IT. Charging every
+                    // swept-but-excluded cell at 1/cell^2 let ~24000 cells outvote ~2000 condensed
+                    // returns by an order of magnitude: the boxes ballooned to swallow the hull —
+                    // 3 boxes, 12 vertices, rms 0.616 m, IoU 0.662 on a hall that had been at
+                    // 0.969. The walls were dragged off their own returns.
+                    // The fix is not a gain, it is the MEANING: a cell just beyond a face says
+                    // "this face is a little too tight"; a cell three metres beyond says "there is
+                    // a box missing here", which is grow()'s question and not an offset's. So the
+                    // evidence decays with how far out the cell sits, at the scale the sweep is
+                    // known to — the CELL — which adds no constant and needs no cutoff.
+                    const double zf = static_cast<double>(dfree) / static_cast<double>(p.cell);
+                    const double wf = std::exp(-0.5 * zf * zf)
+                                    / (static_cast<double>(p.cell) * p.cell);
+                    H[kf] += wf * jf * jf;
+                    g[kf] -= wf * jf * static_cast<double>(dfree);
+                }
             rms = std::sqrt(ss / static_cast<double>(pts.size()));
             // ── THE POSTERIOR THE ESTIMATOR NEVER KEPT ──────────────────────────────────────
             // The normal equations here are DIAGONAL — each residual depends on exactly one

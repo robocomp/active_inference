@@ -283,6 +283,19 @@ namespace
         const float t = std::clamp((p - a).dot(ab) / std::max(1e-9f, ab.squaredNorm()), 0.f, 1.f);
         return (p - (a + t * ab)).norm();
     }
+    /// Do two segments properly cross? Used by the boundary-visibility test, where a sight line
+    /// from a pose to a wall sample must not pass through any other wall.
+    inline bool segments_cross(const Eigen::Vector2f& p1, const Eigen::Vector2f& p2,
+                               const Eigen::Vector2f& p3, const Eigen::Vector2f& p4)
+    {
+        const auto o = [](const Eigen::Vector2f& a, const Eigen::Vector2f& b, const Eigen::Vector2f& c)
+        {
+            const float v = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+            return (std::abs(v) < 1e-9f) ? 0 : (v > 0.f ? 1 : -1);
+        };
+        return o(p1, p2, p3) != o(p1, p2, p4) and o(p3, p4, p1) != o(p3, p4, p2);
+    }
+
     float point_to_poly(const Eigen::Vector2f& p, const Poly& poly)
     {
         float best = 1e9f;
@@ -2141,6 +2154,16 @@ int run_replay(const char* path)
         /// bench at once); it COUNTS, so the next person sees it in the summary line instead of
         /// having to notice it in a picture.
         int   blocked_replans = 0;        ///< replans forced by a refused command
+        /// ── HOW MUCH OF THE ROOM WAS ACTUALLY LOOKED AT ─────────────────────────────────────
+        /// ⚠ IoU CAN BE SATISFIED BY EXTRAPOLATION. A rectilinear box cover predicts its own far
+        /// corner for free, so a room can score well in places the robot never saw. Measured on the
+        /// apartamento hall: IoU 0.977 on a run whose trajectory never crossed the centreline, with
+        /// 16% of the true boundary never within line of sight of any pose and six walls seen 0% of
+        /// the time. Reporting IoU alone cannot tell mapping from guessing correctly, and every
+        /// planner comparison made on it is partly a comparison of how well each one guesses.
+        /// This is the honest companion: the fraction of TRUE boundary LENGTH that was ever visible
+        /// from a pose the robot actually occupied, line of sight included.
+        float seen_frac = 0.f;
         int   coll_frames = 0;            ///< frames with the body overlapping a wall or outside
         int   coll_events = 0;            ///< how many separate times it entered that state
         int   out_frames  = 0;            ///< frames with the centre outside the room entirely
@@ -2207,6 +2230,7 @@ int run_replay(const char* path)
             const float cr = std::cos(ra_rot), sr = std::sin(ra_rot);
             return Eigen::Vector2f(cr * p.x() - sr * p.y() + ra_c.x(), sr * p.x() + cr * p.y() + ra_c.y());
         };
+        std::vector<Eigen::Vector2f> traj_seen;   // every pose, for the boundary-visibility test
         bool was_colliding = false;
         std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
         std::vector<Eigen::Vector2f> traj_exec, traj_est;
@@ -2284,6 +2308,12 @@ int run_replay(const char* path)
         bool have_route = false;
         Eigen::Vector2f route_target = Eigen::Vector2f::Zero();
         bool route_done = false;      // the controller said it arrived
+        std::ofstream efe_probe;
+        if (const char* ep = std::getenv("WS_EFE_PROBE"))
+        { efe_probe.open(ep); efe_probe.imbue(std::locale::classic());
+          efe_probe << "f_pred,f_now,pred_dH,pred_nats,realised_dinfo,info_total,boxes_then,boxes_now\n"; }
+        float last_pred_dH = 0.f, last_pred_nats = 0.f;
+        double last_info_total = 0.0; int last_pred_f = -1; size_t last_boxes = 0;
         int  route_installed_f = -100000;
 
         for (size_t f = 0; f < truth.size(); ++f)
@@ -2348,6 +2378,26 @@ int run_replay(const char* path)
                         last_plan_f = static_cast<int>(f);
                         plan = ch.plan_path(est.head<2>());
                         plan_i = 0; ++replans; ig_gain = ch.last_gain();
+                        // ── F1: DOES THE PREDICTED INFORMATION PREDICT THE REALISED? ─────────
+                        // The objective is only as good as its currency. Log the raw Fisher gain
+                        // the planner PREDICTED for the viewpoint it chose, and the change in the
+                        // estimator's own total Fisher information since the last choice. Regress
+                        // one on the other: a slope far from 1 (or no correlation) means the value
+                        // G(v) maximises is made up, and no lambda can rescue that.
+                        if (efe_probe.is_open())
+                        {
+                            const double now = ch.info_total();
+                            if (last_pred_f >= 0)
+                                efe_probe << last_pred_f << ',' << f << ',' << last_pred_dH << ','
+                                          << last_pred_nats << ',' << (now - last_info_total) << ','
+                                          << now << ',' << last_boxes << ','
+                                          << ch.layout().boxes.size() << '\n';
+                            last_boxes = ch.layout().boxes.size();
+                            last_pred_dH = ch.last_dH_sum();
+                            last_pred_nats = ch.last_info_nats();
+                            last_info_total = now;
+                            last_pred_f = static_cast<int>(f);
+                        }
                         if (use_follower)
                         {
                             // set_path takes the ROOM-frame polyline and does its own smoothing,
@@ -2618,6 +2668,8 @@ int run_replay(const char* path)
                 }
             }
 
+            traj_seen.push_back(exec_pose.head<2>());
+
             const Eigen::Vector3f tm = to_map(exec_pose);
             if (cp_stride and static_cast<int>(f) % cp_stride == 0 and not ch.layout().empty())
             {
@@ -2688,6 +2740,33 @@ int run_replay(const char* path)
             R.cp_matched_oracle = static_cast<float>(cp_matched_o / n);
             R.cp_resid = med(cp_resid); R.cp_chi2 = med(cp_chi2);
             R.cp_resid_oracle = med(cp_resid_o);
+        }
+        // ── boundary actually observed (see BoxRun::seen_frac) ─────────────────────────────
+        {
+            const auto blocked = [&](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+            {
+                int hits = 0;
+                for (size_t e = 0; e < room.size(); ++e)
+                    if (segments_cross(a, b, room[e], room[(e + 1) % room.size()])) ++hits;
+                return hits > 1;          // the wall the sample lies on may register once
+            };
+            double tot = 0.0, seen = 0.0;
+            for (size_t e = 0; e < room.size(); ++e)
+            {
+                const Eigen::Vector2f a = room[e], b = room[(e + 1) % room.size()];
+                const float len = (b - a).norm();
+                if (len < 1e-4f) continue;
+                const int ns = std::max(2, static_cast<int>(len / 0.10f));
+                int ok = 0;
+                for (int k = 0; k <= ns; ++k)
+                {
+                    const Eigen::Vector2f q = a + (static_cast<float>(k) / static_cast<float>(ns)) * (b - a);
+                    for (const auto& o : traj_seen)
+                        if ((q - o).norm() <= 15.f and not blocked(o, q)) { ++ok; break; }
+                }
+                tot += len; seen += len * static_cast<double>(ok) / (ns + 1);
+            }
+            R.seen_frac = tot > 0.0 ? static_cast<float>(seen / tot) : 0.f;
         }
         R.replans = replans; R.explored = explored; R.ig_gain = ig_gain;
         R.blocked_replans = blocked_replans;
@@ -3108,10 +3187,11 @@ int main()
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
                     "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d"
-                    "  | replans=%d(%d blk) phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
+                    "  | seen=%.0f%% replans=%d(%d blk) phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
                     100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
-                    r.proposed, r.admitted, r.removed, r.replans, r.blocked_replans, r.phase.c_str(),
+                    r.proposed, r.admitted, r.removed, 100.f * r.seen_frac,
+                    r.replans, r.blocked_replans, r.phase.c_str(),
                     r.explored ? "yes" : "NO(frame cap)",
                     r.coll_events, r.coll_frames, r.coll_depth, r.out_frames);
         // the TRUTH polygon, so the shape can be read rather than guessed at
@@ -3210,6 +3290,7 @@ int main()
                         << ",\"cp_resid\":" << r.cp_resid << ",\"cp_chi2\":" << r.cp_chi2
                         << ",\"cp_resid_oracle\":" << r.cp_resid_oracle
                         << ",\"cp_matched_oracle\":" << r.cp_matched_oracle
+                        << ",\"seen_frac\":" << r.seen_frac
                         << ",\"blocked_replans\":" << r.blocked_replans
                         << ",\"coll_events\":" << r.coll_events
                         << ",\"coll_frames\":" << r.coll_frames
