@@ -123,6 +123,10 @@ namespace rc::boxch
         /// true-pose corner channel did. This reads `free_` and `vmap_` — swept floor, and no
         /// KNOWN occupancy within `body_radius` — so it is exactly as wrong as the robot is.
         /// `m` is a MAP-frame point (the frame `plan_path` speaks).
+        /// Signed distance (m) from a MAP-frame point to the believed layout boundary: negative
+        /// inside the room. The robot's own belief, for a caller that must route by it (the bench's
+        /// route optimiser, as controller_session routes by its GridPlanner EDT). +max if no layout.
+        float model_sdf(const Eigen::Vector2f& m) const;
         bool traversable(const Eigen::Vector2f& m) const;
         /// The swept cells as a set, for refit's free-space term (see rc::boxes::refit).
         void refresh_free_keys() const;

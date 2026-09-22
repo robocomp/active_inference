@@ -40,6 +40,8 @@
 
 #include "corner_detector.h"
 #include "trajectory_controller.h"
+#include "route_spline.h"
+#include "route_optimizer.h"
 #include "corner_visibility.h"
 #include "room_concept.h"
 #include "room_gn_solver.h"
@@ -2327,6 +2329,35 @@ int run_replay(const char* path)
         // is handed.
         std::vector<Eigen::Vector3f> cloud_room_prev;
         tcontrol.set_footprint(rc::RobotFootprint::shadow());
+        // How tightly the PD carrot follower (the bench never fits a PLAIN curve) holds the route.
+        // The bench otherwise runs the struct defaults, NOT the agent's etc/config.toml (which has
+        // PdCrossTrackGain 1.4). Overrides so the contact study can sweep them on one binary.
+        const auto env_f = [](const char* name, float& dst)
+        {
+            const char* v = std::getenv(name);
+            if (v == nullptr) return;
+            float x = 0.f;                                   // from_chars: locale-independent (CLAUDE.md)
+            if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc()) dst = x;
+        };
+        env_f("WS_TC_LOOK",   tcontrol.params.carrot_lookahead);
+        env_f("WS_TC_CUT",    tcontrol.params.carrot_max_route_cut_m);
+        env_f("WS_TC_XTRACK", tcontrol.params.pd_cross_track_gain);
+        // ── WS_TC_PLAIN: THE AGENT'S WHOLE PATH PIPELINE, NOT JUST ITS CONTROLLER ─────────────
+        // controller_session fits every planned path to a C2 RouteSpline, variationally optimises it
+        // (bending prior + one-sided clearance to a distance field + waypoint fidelity), checks every
+        // sample against the footprint, and hands the curve to PLAIN with set_route(). The bench only
+        // ever called set_path(), so PLAIN had no curve and the whole run was driven by the PD
+        // fallback — the same defect the agent itself had ("901 consecutive cycles on PD") until it
+        // was wired; PLAIN tracks ~4.7x tighter there. The distance field is the robot's BELIEF (the
+        // estimated layout), as the agent's is its GridPlanner's EDT — never the truth. Values are the
+        // agent's etc/config.toml: RouteSpacing 0.05, RouteSmoothing 0.40, ComfortStandoff 0.6,
+        // RouteSafetyBias 0.75, RouteJerkWeight 0.5, MaxAdvSpeed 0.7, MaxLateralAccel 1.0,
+        // PdCrossTrackGain 1.4.
+        const bool tc_plain = std::getenv("WS_TC_PLAIN") != nullptr;
+        const rc::RobotFootprint body = rc::RobotFootprint::shadow();
+        rc::RouteSpline route_spline;          // lives for the run: its address identifies the curve
+        if (tc_plain) tcontrol.params.pd_cross_track_gain = 1.4f;
+
         bool have_route = false;
         Eigen::Vector2f route_target = Eigen::Vector2f::Zero();
         bool route_done = false;      // the controller said it arrived
@@ -2465,7 +2496,54 @@ int run_replay(const char* path)
                                 for (const auto& w : plan) room_path.push_back(wp_to_world(w));
                                 if (room_path.size() >= 2)
                                 {
-                                    tcontrol.set_path(room_path);
+                                    bool curved = false;
+                                    if (tc_plain)
+                                    {
+                                        // world -> map, where the channel's belief lives
+                                        const auto wm = [&](const Eigen::Vector2f& w)
+                                        {
+                                            const float c = std::cos(-origin.z()), sn = std::sin(-origin.z());
+                                            const Eigen::Vector2f d = w - origin.head<2>();
+                                            return Eigen::Vector2f(c * d.x() - sn * d.y(), sn * d.x() + c * d.y());
+                                        };
+                                        const auto dist = [&](const Eigen::Vector2f& w) { return -ch.model_sdf(wm(w)); };
+                                        rc::RouteOptimizerConfig opt;
+                                        opt.enabled = true;
+                                        opt.distance = dist;
+                                        opt.distance_gradient = [&](const Eigen::Vector2f& w)
+                                        {
+                                            const float e = 0.01f;
+                                            return Eigen::Vector2f((dist(w + Eigen::Vector2f(e, 0.f)) - dist(w - Eigen::Vector2f(e, 0.f))) / (2.f * e),
+                                                                   (dist(w + Eigen::Vector2f(0.f, e)) - dist(w - Eigen::Vector2f(0.f, e))) / (2.f * e));
+                                        };
+                                        opt.d_target = body.circumscribed_radius() + 0.6f;
+                                        opt.rho = 0.7f * 0.7f / 1.0f;
+                                        opt.sigma_a = 0.30f;
+                                        opt.support_radius = [body](float heading_yaw, const Eigen::Vector2f& dir)
+                                        { return body.support_radius_yaw(heading_yaw, dir); };
+                                        opt.clearance_floor = body.inscribed_radius();
+                                        opt.iterations = 30;
+                                        opt.safety_bias = 0.75f;
+                                        opt.w_jerk = 0.5f;
+                                        const auto is_free = [&](const Eigen::Vector2f& w, float heading)
+                                        {
+                                            const float d = dist(w);
+                                            const Eigen::Vector2f g = opt.distance_gradient(w);
+                                            const Eigen::Vector2f toward = g.norm() > 1e-6f ? Eigen::Vector2f(-g.normalized()) : Eigen::Vector2f(1.f, 0.f);
+                                            return d >= body.support_radius_yaw(heading, toward);
+                                        };
+                                        if (route_spline.build(room_path, 0.05f, is_free, 0.40f, &opt))
+                                        {
+                                            tcontrol.set_path_presmoothed(route_spline.samples());
+                                            tcontrol.set_route(&route_spline, /*force_reset=*/true);
+                                            curved = true;
+                                        }
+                                    }
+                                    if (not curved)
+                                    {
+                                        tcontrol.set_path(room_path);
+                                        if (tc_plain) tcontrol.set_route(nullptr, true);
+                                    }
                                     if (std::getenv("WS_ROUTE_PROBE"))
                                     {
                                         std::fprintf(stderr, "[route] f=%zu from=(%.2f,%.2f) n=%zu:", f,

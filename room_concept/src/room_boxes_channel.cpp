@@ -319,6 +319,13 @@ namespace rc::boxch
         }
     }
 
+    float Channel::model_sdf(const Eigen::Vector2f& m) const
+    {
+        if (L_.empty()) return std::numeric_limits<float>::max();
+        const float c = std::cos(-yaw_), sn = std::sin(-yaw_);
+        return L_.sdf({c * m.x() - sn * m.y(), sn * m.x() + c * m.y()});
+    }
+
     bool Channel::traversable(const Eigen::Vector2f& m) const
     {
         const std::pair<int, int> c{static_cast<int>(std::floor(m.x() / p_.cell)),
@@ -1734,7 +1741,10 @@ namespace rc::boxch
                         for (float x = u.lo.x() + 0.5f * p_.cell; x < u.hi.x() and all_free; x += p_.cell)
                             for (float y = u.lo.y() + 0.5f * p_.cell; y < u.hi.y() and all_free; y += p_.cell)
                             {
-                                const Eigen::Vector2f mp(cyb * x - syb * y, syb * x + cyb * y);
+                                // F is on the LAYOUT grid under WS_COVER_LAYOUT, so the union's own
+                                // (layout) coordinates index it directly; otherwise rotate to the map
+                                const Eigen::Vector2f mp = cover_layout ? Eigen::Vector2f(x, y)
+                                                         : Eigen::Vector2f(cyb * x - syb * y, syb * x + cyb * y);
                                 if (not is_free(static_cast<int>(std::floor(mp.x() / p_.cell)),
                                                 static_cast<int>(std::floor(mp.y() / p_.cell)))) all_free = false;
                             }
