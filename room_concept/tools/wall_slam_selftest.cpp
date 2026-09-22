@@ -573,6 +573,30 @@ namespace
         return best;
     }
 
+    /// scan() with furniture: each ray stops at the nearer of the room boundary and any box.
+    std::vector<Eigen::Vector2f> scan_obs(const Poly& room, const Boxes& obstacles, const Eigen::Vector3f& pose,
+                                          int n, float sigma, std::mt19937& rng)
+    {
+        std::normal_distribution<float> noise(0.f, sigma);
+        std::vector<Eigen::Vector2f> out;
+        const int N = static_cast<int>(room.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float best = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < best)
+                    best = *t;
+            if (best > 1e8f) continue;
+            best = std::min(best, box_range(pose.head<2>(), d, obstacles));
+            const float r = best + noise(rng);
+            out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
+        }
+        return out;
+    }
+
     /// The LiDAR band, with furniture in the way: the nearer of the wall and the box.
     std::vector<Eigen::Vector2f> scan_occluded(const Poly& room, const Boxes& boxes,
                                                const Eigen::Vector3f& pose, int n, float sigma,
@@ -2124,6 +2148,7 @@ int run_replay(const char* path)
     // it what RoomConcept::wall_slam_observe feeds it — nothing here re-implements the estimator.
     struct BoxRun
     {
+        Boxes obstacles;                  ///< WS_BOXES_OBSTACLES: floor furniture, world frame
         float iou = 0.f, rms = 0.f, rms_core = 0.f, frac_out = 0.f, frac_in = 0.f, yaw_deg = 0.f;
         double pose_err = 0.0;
         int boxes = 0, verts = 0, proposed = 0, admitted = 0, removed = 0, truth_verts = 0;
@@ -2212,6 +2237,50 @@ int run_replay(const char* path)
         EncoderModel enc; enc.sigma_xy = cfg.odom_sigma_xy; enc.sigma_th = cfg.odom_sigma_th;
         Eigen::Vector3f exec_pose = truth[0], est = Eigen::Vector3f::Zero();
         const Eigen::Vector3f origin = truth[0];
+        // ── FLOOR OBSTACLES (WS_BOXES_OBSTACLES=N, default 5): furniture standing in the open ─────
+        // Tables, sofas, a bed: boxes the LiDAR cannot see through and the body cannot drive into.
+        // Scoring is unchanged — the truth is still the ROOM, so the question is whether the walls
+        // come back with clutter in front of them and whether the robot explores around it without
+        // hitting it. Placement is deterministic (its own stream), each box wholly inside the room,
+        // 0.3 m clear of the others and of every wall, and clear of the start pose by the body plus
+        // a margin, so the robot never starts inside one.
+        Boxes floor_obs;
+        if (const char* ob = std::getenv("WS_BOXES_OBSTACLES"))
+        {
+            int nob = 5;
+            if (int v = 0; std::from_chars(ob, ob + std::strlen(ob), v).ec == std::errc() and v > 0) nob = v;
+            std::mt19937 rgo(31415u + seed);
+            const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rgo); };
+            Eigen::Vector2f rlo(1e9f, 1e9f), rhi(-1e9f, -1e9f);
+            for (const auto& v : room) { rlo = rlo.cwiseMin(v); rhi = rhi.cwiseMax(v); }
+            for (int n = 0, tries = 0; n < nob and tries < 20000; ++tries)
+            {
+                const Eigen::Vector2f lo(U(rlo.x(), rhi.x()), U(rlo.y(), rhi.y()));
+                const Eigen::Vector2f hi = lo + Eigen::Vector2f(U(0.4f, 1.2f), U(0.4f, 1.2f));
+                bool ok = true;
+                for (int c = 0; c < 4 and ok; ++c)
+                {
+                    const Eigen::Vector2f q((c & 1) ? hi.x() : lo.x(), (c & 2) ? hi.y() : lo.y());
+                    ok = rc::corner_visibility::point_in_polygon(q, room) and point_to_poly(q, room) > 0.3f;
+                }
+                for (const auto& [l2, h2] : floor_obs)
+                    if (lo.x() < h2.x() + 0.3f and l2.x() < hi.x() + 0.3f and lo.y() < h2.y() + 0.3f and l2.y() < hi.y() + 0.3f) ok = false;
+                const Eigen::Vector2f s0 = origin.head<2>();
+                const Eigen::Vector2f cl = s0.cwiseMax(lo).cwiseMin(hi);
+                if ((cl - s0).norm() < 0.8f) ok = false;
+                if (not ok) continue;
+                floor_obs.push_back({lo, hi}); ++n;
+            }
+        }
+        R.obstacles = floor_obs;
+        // distance from a point to the nearest obstacle box (0 inside)
+        const auto obs_clear = [&](const Eigen::Vector2f& q)
+        {
+            float best = std::numeric_limits<float>::max();
+            for (const auto& [lo, hi] : floor_obs)
+                best = std::min(best, (q.cwiseMax(lo).cwiseMin(hi) - q).norm());
+            return best;
+        };
         if (std::getenv("WS_GAUGE_PROBE"))
             std::fprintf(stderr, "[origin] (%.3f, %.3f) heading %.4f deg: the map frame is the world turned by this\n",
                          origin.x(), origin.y(), origin.z() * 180.0 / M_PI);
@@ -2650,6 +2719,7 @@ int run_replay(const char* path)
                 const Eigen::Vector3f probe = compose(exec_pose, body);
                 probe_in  = rc::corner_visibility::point_in_polygon(probe.head<2>(), room);
                 probe_clr = point_to_poly(probe.head<2>(), room);
+                if (not floor_obs.empty()) probe_clr = std::min(probe_clr, obs_clear(probe.head<2>()));
                 if ((not probe_in) or probe_clr < bp.body_radius)
                 {
                     blocked = true;
@@ -2673,7 +2743,8 @@ int run_replay(const char* path)
                 P = F * P * F.transpose() + G * Q * G.transpose();
             }
 
-            const auto pts = scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
+            const auto pts = floor_obs.empty() ? scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng)
+                                               : scan_obs(room, floor_obs, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
             if (pts.size() < 20) continue;
 
             std::vector<Eigen::Vector3f> p3; p3.reserve(pts.size());
@@ -3365,6 +3436,11 @@ int main()
             o << ",\"est\":"; poly(o, r.est_poly);
             o << ",\"traj\":"; poly(o, r.traj_exec);
             o << ",\"traj_est\":"; poly(o, r.traj_est);
+            o << ",\"obstacles\":[";
+            for (size_t k = 0; k < r.obstacles.size(); ++k)
+                o << (k ? "," : "") << "[" << r.obstacles[k].first.x() << "," << r.obstacles[k].first.y() << ","
+                  << r.obstacles[k].second.x() << "," << r.obstacles[k].second.y() << "]";
+            o << "]";
             o << "}\n";
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
