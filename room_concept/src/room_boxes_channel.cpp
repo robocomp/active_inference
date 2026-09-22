@@ -319,6 +319,32 @@ namespace rc::boxch
         }
     }
 
+    void Channel::observe_obstacles(const std::vector<Eigen::Vector2f>& pts_robot, const Eigen::Vector3f& pose)
+    {
+        const float c = std::cos(pose.z()), sn = std::sin(pose.z());
+        for (const auto& q : pts_robot)
+        {
+            const Eigen::Vector2f g(c * q.x() - sn * q.y() + pose.x(), sn * q.x() + c * q.y() + pose.y());
+            ++obs_[{static_cast<int>(std::floor(g.x() / p_.cell)), static_cast<int>(std::floor(g.y() / p_.cell))}];
+        }
+    }
+
+    float Channel::obstacle_clearance(const Eigen::Vector2f& m, float horizon) const
+    {
+        if (obs_.empty()) return horizon;
+        const int r = std::max(1, static_cast<int>(std::ceil(horizon / p_.cell)));
+        const int cx = static_cast<int>(std::floor(m.x() / p_.cell)), cy = static_cast<int>(std::floor(m.y() / p_.cell));
+        float best = horizon;
+        for (int dy = -r; dy <= r; ++dy)
+            for (int dx = -r; dx <= r; ++dx)
+            {
+                if (obs_.find({cx + dx, cy + dy}) == obs_.end()) continue;
+                const Eigen::Vector2f cc((static_cast<float>(cx + dx) + 0.5f) * p_.cell, (static_cast<float>(cy + dy) + 0.5f) * p_.cell);
+                best = std::min(best, (cc - m).norm());
+            }
+        return best;
+    }
+
     float Channel::model_sdf(const Eigen::Vector2f& m) const
     {
         if (L_.empty()) return std::numeric_limits<float>::max();
@@ -434,6 +460,22 @@ namespace rc::boxch
                         blocked[idx(nx, ny)] = 1;
                     }
             }
+        // ── LOW-BAND OBSTACLES BLOCK THE BODY, NOT THE WALL SENSOR ─────────────────────────────
+        // Furniture is eroded by the body radius exactly like a wall, so no route or viewpoint puts
+        // the robot in it. It is NOT added to grido: the wall band sees over it, so the planner's
+        // predicted rays must pass over it too, and nothing here makes it evidence about the room.
+        for (const auto& [k, n] : obs_)
+        {
+            if (n < 1) continue;
+            for (int dy = -brad; dy <= brad; ++dy)
+                for (int dx = -brad; dx <= brad; ++dx)
+                {
+                    if (dx * dx + dy * dy > brad * brad) continue;
+                    const int nx = k.first + dx, ny = k.second + dy;
+                    if (nx < lox - 1 or nx > hix + 1 or ny < loy - 1 or ny > hiy + 1) continue;
+                    blocked[idx(nx, ny)] = 1;
+                }
+        }
         // ── THE BODY MUST ALSO FIT INSIDE THE BELIEVED ROOM (WS_PATCH / WS_MODEL_CSPACE) ──────
         // ⚠ Erosion against OCCUPIED cells alone leaks through a thin wall. The hall's fins are
         // 12 cm: grazing beams mark free cells inside them and leave gaps between their returns,
@@ -469,7 +511,7 @@ namespace rc::boxch
             return blocked[idx(k.first, k.second)] == 0;
         };
         const auto is_escape = [&](const std::pair<int, int>& k)
-        { return is_free(k) and model_sd(k) < 0.f; };
+        { return is_free(k) and model_sd(k) < 0.f and obs_.find(k) == obs_.end(); };   // never through furniture
 
         // ⚠ UNKNOWN SPACE OUTSIDE THE BELIEVED ROOM IS NOT AN EXPLORE TARGET. A 1-cell wall does
         // not seal the occupied grid: at grazing incidence 2 cm of range noise leaves gaps between

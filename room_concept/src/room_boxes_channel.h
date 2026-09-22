@@ -127,6 +127,16 @@ namespace rc::boxch
         /// inside the room. The robot's own belief, for a caller that must route by it (the bench's
         /// route optimiser, as controller_session routes by its GridPlanner EDT). +max if no layout.
         float model_sdf(const Eigen::Vector2f& m) const;
+        /// ── OBSTACLES ARE FOR NAVIGATION ONLY ───────────────────────────────────────────────
+        /// The low LiDAR band sees floor furniture; the wall band sees over it. Low-band returns
+        /// (robot-frame points at map-frame `pose`) are recorded HERE and nowhere else: plan_path()
+        /// treats them as occupancy and obstacle_clearance() serves the route optimiser, but they
+        /// never enter vmap_, free_, the layout, registration or the gauge. That is how the robot
+        /// works — a table is something to drive around, not a wall to fit.
+        void observe_obstacles(const std::vector<Eigen::Vector2f>& pts_robot, const Eigen::Vector3f& pose);
+        /// Distance (m) from a MAP-frame point to the nearest recorded obstacle cell, searched
+        /// within `horizon`; returns `horizon` when none is closer.
+        float obstacle_clearance(const Eigen::Vector2f& m, float horizon = 1.5f) const;
         bool traversable(const Eigen::Vector2f& m) const;
         /// The swept cells as a set, for refit's free-space term (see rc::boxes::refit).
         void refresh_free_keys() const;
@@ -373,6 +383,7 @@ namespace rc::boxch
         long   yaw_votes_ = 0;
         bool   qInfo_first_ = false;
         std::map<std::pair<int, int>, Vox> vmap_;
+        std::map<std::pair<int, int>, int> obs_;    ///< low-band returns, map cells: NAVIGATION ONLY
         std::vector<rc::boxes::CloudPoint> cloud_;
         std::vector<Eigen::Vector2f> init_scan_;
         std::uint64_t frames_ = 0;

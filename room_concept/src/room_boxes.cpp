@@ -1089,8 +1089,16 @@ namespace rc::boxes
     }
 
     RegisterResult register_scan(const Layout& L, const std::vector<Eigen::Vector2f>& pts,
-                                 const Eigen::Vector3f& odom, float sensor_sigma)
+                                 const Eigen::Vector3f& odom, float sensor_sigma, const RegisterOptions* opt)
     {
+        const bool full_prior = opt != nullptr and opt->prior_cov != nullptr;
+        Eigen::Matrix3f Omega = Eigen::Matrix3f::Zero();
+        if (full_prior)
+        {
+            Omega = opt->prior_cov->inverse();
+            if (not Omega.allFinite()) Omega.setZero();
+        }
+
         RegisterResult R;
         if (L.empty() or pts.size() < 10) return R;
 
@@ -1175,15 +1183,26 @@ namespace rc::boxes
                 // choice already made inside refit().
                 const float rres = d / std::sqrt(sig2);
                 const float w = (1.f / sig2) / (1.f + rres * rres);
+
                 H.noalias() += w * J * J.transpose();
                 g.noalias() += w * d * J;
                 loss += static_cast<double>(d) * d;
                 ++nused;
             }
+            if (full_prior)
+            {
+                // the odometry prediction as a full Gaussian prior over (x, y, theta)
+                const Eigen::Vector3f dx(x.x() - odom.x(), x.y() - odom.y(), wrap_pi(x.z() - odom.z()));
+                H.noalias() += Omega;
+                g.noalias() += Omega * dx;
+            }
+            else
+            {
             // translation-only prior toward the odometry prediction
             H(0, 0) += w_prior; H(1, 1) += w_prior;
             g(0) += w_prior * (x.x() - odom.x());
             g(1) += w_prior * (x.y() - odom.y());
+            }
 
             const Eigen::Vector3f step = H.ldlt().solve(-g);
             if (not step.allFinite()) break;

@@ -259,8 +259,18 @@ namespace rc::boxes
     GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
                     const std::set<std::pair<int, int>>* free = nullptr);
 
+    /// Optional model terms for register_scan. Null reproduces the previous behaviour exactly.
+    struct RegisterOptions
+    {
+        /// The PREDICTED pose covariance (odometry-propagated), in the same frame as `odom`. When set,
+        /// the full information P^-1 over (x, y, theta) replaces the translation-only 1/beta prior:
+        /// heading is then anchored by odometry as well as by the layout, instead of being whatever
+        /// the layout says — which let a rotated layout rotate the robot with it.
+        const Eigen::Matrix3f* prior_cov = nullptr;
+    };
     RegisterResult register_scan(const Layout& L,
                                  const std::vector<Eigen::Vector2f>& pts_robot,
                                  const Eigen::Vector3f& odom_pose,
-                                 float sensor_sigma);
+                                 float sensor_sigma,
+                                 const struct RegisterOptions* opt = nullptr);
 }   // namespace rc::boxes

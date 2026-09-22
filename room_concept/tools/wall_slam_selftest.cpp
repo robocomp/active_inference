@@ -2575,7 +2575,9 @@ int run_replay(const char* path)
                                             const Eigen::Vector2f d = w - origin.head<2>();
                                             return Eigen::Vector2f(c * d.x() - sn * d.y(), sn * d.x() + c * d.y());
                                         };
-                                        const auto dist = [&](const Eigen::Vector2f& w) { return -ch.model_sdf(wm(w)); };
+                                        // the believed walls AND the furniture the low band has seen
+                                        const auto dist = [&](const Eigen::Vector2f& w)
+                                        { const Eigen::Vector2f m = wm(w); return std::min(-ch.model_sdf(m), ch.obstacle_clearance(m)); };
                                         rc::RouteOptimizerConfig opt;
                                         opt.enabled = true;
                                         opt.distance = dist;
@@ -2743,9 +2745,15 @@ int run_replay(const char* path)
                 P = F * P * F.transpose() + G * Q * G.transpose();
             }
 
-            const auto pts = floor_obs.empty() ? scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng)
-                                               : scan_obs(room, floor_obs, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
+            // ── TWO LIDAR BANDS, AS ON THE ROBOT ──────────────────────────────────────────────
+            // The WALL band is high: it sees over floor furniture, so `pts` hits walls only and is the
+            // only thing the estimator ever sees. The LOW band stops at the furniture; `pts_low` goes
+            // to the controller's ESDF and to the channel's navigation-only obstacle map, never into
+            // the layout. Without furniture the two are the same scan.
+            const auto pts = scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
             if (pts.size() < 20) continue;
+            const auto pts_low = floor_obs.empty() ? pts
+                               : scan_obs(room, floor_obs, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
 
             std::vector<Eigen::Vector3f> p3; p3.reserve(pts.size());
             for (const auto& q : pts) p3.emplace_back(q.x(), q.y(), 0.9f);
@@ -2753,7 +2761,7 @@ int run_replay(const char* path)
             {
                 cloud_room_prev.clear(); cloud_room_prev.reserve(pts.size());
                 const float cw = std::cos(exec_pose.z()), sw = std::sin(exec_pose.z());
-                for (const auto& q : pts)
+                for (const auto& q : pts_low)          // the controller sees the furniture
                     cloud_room_prev.emplace_back(cw * q.x() - sw * q.y() + exec_pose.x(),
                                                  sw * q.x() + cw * q.y() + exec_pose.y(), 0.9f);
             }
@@ -2768,7 +2776,18 @@ int run_replay(const char* path)
                 const float gy = ch.yaw(), cg = std::cos(-gy), sg2 = std::sin(-gy);
                 const Eigen::Vector3f est_L(cg * est.x() - sg2 * est.y(),
                                             sg2 * est.x() + cg * est.y(), wrap(est.z() - gy));
-                const auto rr = rc::boxes::register_scan(ch.layout(), pts, est_L, cfg.scan_sigma);
+                // WS_REG_PRIOR: the propagated pose covariance, in the layout frame, as a FULL prior over
+                // (x, y, theta) — heading is then anchored by odometry, not only by the layout
+                static const bool reg_prior = std::getenv("WS_REG_PRIOR") != nullptr;
+                Eigen::Matrix3f P_L = P;
+                {
+                    Eigen::Matrix3f Rl = Eigen::Matrix3f::Identity();
+                    Rl.topLeftCorner<2, 2>() = Eigen::Rotation2Df(-gy).toRotationMatrix();
+                    P_L = Rl * P * Rl.transpose();
+                }
+                rc::boxes::RegisterOptions ro;
+                if (reg_prior) ro.prior_cov = &P_L;
+                const auto rr = rc::boxes::register_scan(ch.layout(), pts, est_L, cfg.scan_sigma, &ro);
                 if (rr.ok)
                 {
                     const float cb = std::cos(gy), sb = std::sin(gy);
@@ -2780,6 +2799,7 @@ int run_replay(const char* path)
                 }
             }
             ch.observe(p3, est, P, sphi, slen);
+            if (not floor_obs.empty()) ch.observe_obstacles(pts_low, est);   // navigation only
 
             if (reanchor_at > 0 and static_cast<int>(f) == reanchor_at and not reanchor_done)
             {
