@@ -2229,7 +2229,22 @@ int run_replay(const char* path)
     {
         BoxRun R;
         R.truth_verts = static_cast<int>(room.size());
-        const auto truth = circuit(wp, 0.025f, laps);
+        // ── WHERE THE RUN STARTS (WS_BOXES_START_ROT=k) ───────────────────────────────────────
+        // The robot starts at the tour's first waypoint. Rotating the waypoint list by k starts it at
+        // another one instead: same room, same circuit, same frame budget, a different initial pose.
+        // The explorer drives itself from frame 0, so this varies only the initial condition — which
+        // is the thing a single run per room cannot tell you about.
+        std::vector<Eigen::Vector2f> wp_use = wp;
+        if (const char* sr = std::getenv("WS_BOXES_START_ROT"))
+        {
+            int rot = 0;
+            if (std::from_chars(sr, sr + std::strlen(sr), rot).ec == std::errc() and not wp_use.empty())
+            {
+                rot = ((rot % static_cast<int>(wp_use.size())) + static_cast<int>(wp_use.size())) % static_cast<int>(wp_use.size());
+                std::rotate(wp_use.begin(), wp_use.begin() + rot, wp_use.end());
+            }
+        }
+        const auto truth = circuit(wp_use, 0.025f, laps);
         std::mt19937 rng(seed);
         RunConfig cfg; cfg.exec_motion = true;
 

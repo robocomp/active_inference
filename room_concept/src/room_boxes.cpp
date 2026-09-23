@@ -1092,6 +1092,22 @@ namespace rc::boxes
                                  const Eigen::Vector3f& odom, float sensor_sigma, const RegisterOptions* opt)
     {
         const bool full_prior = opt != nullptr and opt->prior_cov != nullptr;
+        // ── A RETURN'S UNCERTAINTY INCLUDES THE WALL IT IS BEING MATCHED TO (WS_REG_MAPVAR) ────
+        // ⚠ THE POSE IS BORN WRONG AT FRAME 2. The layout is then the one-scan seed — a single box
+        // for the first ~38 registrations, against rooms of 16-36 vertices — and matching a full
+        // 360-degree scan to a rectangle moves the pose 0.29-1.11 m and the heading up to 16.7 deg
+        // in ONE solve, with the map term outvoting odometry by 131-820x while odometry is two
+        // encoder ticks old. Measured across rooms 9/17/48/39/36/14; with registration off those
+        // rooms score 0.955-0.992 instead of 0.747-0.878. The 1/beta prior cannot resist because
+        // beta is the map cost AT the odometry pose, so a wrong map is indistinguishable from wrong
+        // odometry and the prior dissolves exactly when the map is the thing not to be trusted.
+        // The model-level answer: the residual's variance is the sensor PLUS the posterior variance
+        // of the offset the point is attributed to, which refit already computes (1/H, the prior
+        // span^2 for a face no evidence has landed on). A face nobody has measured then carries no
+        // weight, a well-measured wall carries all of it, and there is no gate anywhere.
+        const bool map_var = std::getenv("WS_REG_MAPVAR") != nullptr;
+        const bool cov_ok = L.cov.rows() == static_cast<long>(L.n_offsets())
+                        and L.cov.cols() == static_cast<long>(L.n_offsets());
         Eigen::Matrix3f Omega = Eigen::Matrix3f::Zero();
         if (full_prior)
         {
@@ -1100,6 +1116,7 @@ namespace rc::boxes
         }
 
         RegisterResult R;
+        double wsum_last = 0.0;      // WS_REG_PROBE: total map information admitted in the last iteration
         if (L.empty() or pts.size() < 10) return R;
 
         auto cost_at = [&](const Eigen::Vector3f& x)
@@ -1152,6 +1169,7 @@ namespace rc::boxes
             Eigen::Vector3f g = Eigen::Vector3f::Zero();
             const float c = std::cos(x.z()), s = std::sin(x.z());
             double loss = 0.0; long nused = 0;
+            wsum_last = 0.0;
             for (const auto& q : pts)
             {
                 const Eigen::Vector2f rp(c * q.x() - s * q.y(), s * q.x() + c * q.y());
@@ -1181,11 +1199,22 @@ namespace rc::boxes
                 // measured at ~800:1, moving the pose 2.066 m in ONE solve. Cauchy is smooth, so
                 // nothing is discarded and a point regains its say as the fit improves — the same
                 // choice already made inside refit().
-                const float rres = d / std::sqrt(sig2);
-                const float w = (1.f / sig2) / (1.f + rres * rres);
+                float s_eff = sig2;
+                if (map_var and cov_ok)
+                {
+                    const int off = active_face(L, m);
+                    if (off >= 0 and static_cast<size_t>(off) < L.n_offsets())
+                    {
+                        const float v = L.cov(off, off);
+                        if (std::isfinite(v) and v > 0.f) s_eff = sig2 + v;
+                    }
+                }
+                const float rres = d / std::sqrt(s_eff);
+                const float w = (1.f / s_eff) / (1.f + rres * rres);
 
                 H.noalias() += w * J * J.transpose();
                 g.noalias() += w * d * J;
+                wsum_last += static_cast<double>(w);
                 loss += static_cast<double>(d) * d;
                 ++nused;
             }
@@ -1239,6 +1268,30 @@ namespace rc::boxes
         R.pose = x;
         R.cost = cost_at(x);
         R.ok = R.pose.allFinite() and R.cov.allFinite();
+        // ── WS_REG_PROBE: WHAT ONE SOLVE DID, AND HOW FREE IT WAS TO DO IT ───────────────────
+        // The interesting number is not the residual but `beta`: the prior's weight is 1/beta, and
+        // beta is the map cost AT THE ODOMETRY POSE. A map that is wrong therefore looks exactly
+        // like odometry that is wrong, and the prior dissolves precisely when the map is the thing
+        // that should not be trusted. Printed with the step the solve took from the prediction, so
+        // that a one-solve teleport is visible as such.
+        if (std::getenv("WS_REG_PROBE") != nullptr)
+        {
+            static int call = 0;
+            Eigen::Vector2f lo(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+            Eigen::Vector2f hi(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+            for (const auto& b : L.boxes) { lo = lo.cwiseMin(b.lo); hi = hi.cwiseMax(b.hi); }
+            std::fprintf(stderr, "[reg] call=%d npts=%zu boxes=%zu ext=%.2fx%.2f beta=%.4f w_prior=%.3f "
+                                 "map_info=%.1f ratio=%.0f "
+                                 "cost=%.4f iters=%d step=%.3f dtheta=%+.2fdeg covtr=%.5f\n",
+                         ++call, pts.size(), L.boxes.size(),
+                         static_cast<double>(hi.x() - lo.x()), static_cast<double>(hi.y() - lo.y()),
+                         static_cast<double>(R.beta), 1.0 / static_cast<double>(R.beta),
+                         wsum_last, wsum_last * static_cast<double>(R.beta),
+                         static_cast<double>(R.cost), R.iterations,
+                         static_cast<double>((x.head<2>() - odom.head<2>()).norm()),
+                         static_cast<double>(wrap_pi(x.z() - odom.z())) * 180.0 / M_PI,
+                         static_cast<double>(R.cov.trace()));
+        }
         return R;
     }
 }   // namespace rc::boxes

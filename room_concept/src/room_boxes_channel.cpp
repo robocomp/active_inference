@@ -11,6 +11,21 @@
 namespace rc::boxch
 {
     static constexpr float kPiF = 3.14159265358979323846f;
+    // ⚠ A ONE-SCAN HULL IS NOT KNOWN TO A CENTIMETRE. The seed used to claim sigma_flat (0.01 m)
+    // for each of its four offsets, which is the precision of a wall that has been FITTED, not of a
+    // box drawn round one scan of a room whose shape is still unknown. Everything that reads the
+    // posterior then believed it: registration matched against the seed as if it were a measured
+    // room and stamped 0.29-1.11 m of pose error in at frame 2. refit's own answer for an offset no
+    // evidence has landed on is the room's own span, so that is what a seed offset gets until refit
+    // replaces it. WS_REG_MAPVAR is what makes a consumer act on it.
+    static float seed_offset_var(const rc::boxes::Box& b, float sigma_flat)
+    {
+        static const bool honest = std::getenv("WS_SEED_VAR") != nullptr;   // the seed half alone
+        if (not honest) return sigma_flat * sigma_flat;
+        const float span = std::max(1.f, b.width() + b.height());
+        return span * span;
+    }
+
     void Channel::observe(const std::vector<Eigen::Vector3f>& pts_robot,
                           const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov,
                           const std::vector<float>& seg_phi, const std::vector<float>& seg_len)
@@ -102,7 +117,7 @@ namespace rc::boxch
             {
                 yaw_ = gy;
                 L_.boxes.push_back(b);
-                L_.cov = Eigen::MatrixXf::Identity(4, 4) * (p_.sigma_flat * p_.sigma_flat);
+                L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat);
             }
         }
 
@@ -2057,7 +2072,7 @@ namespace rc::boxch
                     rc::boxes::Box b;
                     b.lo = c1.cwiseMin(c2); b.hi = c1.cwiseMax(c2);
                     L_.boxes.push_back(b);
-                    L_.cov = Eigen::MatrixXf::Identity(4, 4) * (p_.sigma_flat * p_.sigma_flat);
+                    L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat);
                     return true;
                 }
             }
@@ -2077,7 +2092,7 @@ namespace rc::boxch
             b.hi = {quant(xs2, 0.995f), quant(ys2, 0.995f)};
             if (not b.valid()) return false;
             L_.boxes.push_back(b);
-            L_.cov = Eigen::MatrixXf::Identity(4, 4) * (p_.sigma_flat * p_.sigma_flat);
+            L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat);
             qInfo_first_ = true;
         }
 
