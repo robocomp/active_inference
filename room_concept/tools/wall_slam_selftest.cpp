@@ -2244,7 +2244,26 @@ int run_replay(const char* path)
                 std::rotate(wp_use.begin(), wp_use.begin() + rot, wp_use.end());
             }
         }
-        const auto truth = circuit(wp_use, 0.025f, laps);
+        auto truth = circuit(wp_use, 0.025f, laps);
+        // WS_BOXES_START_FRAC=f in [0,1): start f of the way along the tour instead of at its first
+        // waypoint. The circuit is a closed loop of poses, so rotating it keeps every heading right
+        // and gives a CONTINUOUS choice of start — the waypoint rotation above offers only as many
+        // starts as the tour has corners (12 on the hall).
+        if (const char* sf = std::getenv("WS_BOXES_START_FRAC"))
+        {
+            float frac = 0.f;
+            if (std::from_chars(sf, sf + std::strlen(sf), frac).ec == std::errc() and not truth.empty())
+            {
+                frac -= std::floor(frac);
+                // ⚠ ONE LAP, NOT THE WHOLE ARRAY. `truth` is the circuit repeated `laps` times, so
+                // rotating by a fraction of its LENGTH repeats after 1/laps: asked for 20 starts,
+                // got 10 distinct ones twice over (measured, byte-identical runs).
+                const auto lap = static_cast<long>(truth.size()) / std::max(1, laps);
+                const auto off = static_cast<long>(frac * static_cast<float>(lap));
+                if (off > 0 and off < static_cast<long>(truth.size()))
+                    std::rotate(truth.begin(), truth.begin() + off, truth.end());
+            }
+        }
         std::mt19937 rng(seed);
         RunConfig cfg; cfg.exec_motion = true;
 

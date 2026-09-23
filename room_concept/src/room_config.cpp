@@ -127,6 +127,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.BoxMinCluster", room_concept.params.box.min_cluster);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxZMin", room_concept.params.box.z_min);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxZMax", room_concept.params.box.z_max);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxObsZMin", room_concept.params.box.obs_z_min);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxObsZMax", room_concept.params.box.obs_z_max);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.EnableRederive", wm.enable_rederive);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.TwinFuseInformation", wm.twin_fuse_information);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.SpanKillRespectsSupport", wm.span_kill_respects_support);

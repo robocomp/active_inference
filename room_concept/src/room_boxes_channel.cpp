@@ -10,6 +10,7 @@
 
 namespace rc::boxch
 {
+    static int layout_components(const rc::boxes::Layout& L);   // defined below
     static constexpr float kPiF = 3.14159265358979323846f;
     // ⚠ A ONE-SCAN HULL IS NOT KNOWN TO A CENTIMETRE. The seed used to claim sigma_flat (0.01 m)
     // for each of its four offsets, which is the precision of a wall that has been FITTED, not of a
@@ -332,6 +333,15 @@ namespace rc::boxch
             free_keys_.insert({static_cast<int>(std::floor(q.x() / p_.cell)),
                                static_cast<int>(std::floor(q.y() / p_.cell))});
         }
+    }
+
+    void Channel::observe_obstacles(const std::vector<Eigen::Vector3f>& pts_robot, const Eigen::Vector3f& pose)
+    {
+        std::vector<Eigen::Vector2f> band;
+        band.reserve(pts_robot.size());
+        for (const auto& q : pts_robot)
+            if (q.z() >= p_.obs_z_min and q.z() <= p_.obs_z_max) band.emplace_back(q.x(), q.y());
+        observe_obstacles(band, pose);
     }
 
     void Channel::observe_obstacles(const std::vector<Eigen::Vector2f>& pts_robot, const Eigen::Vector3f& pose)
@@ -1542,7 +1552,7 @@ namespace rc::boxch
 
     bool Channel::rebuild_from_free()
     {
-        if (free_.empty()) return false;
+        if (free_.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: free empty\n"); return false; }
         // Recompute only when the free set has grown by more than a twentieth since last time, or
         // when there is no layout yet. Nothing is lost: an unchanged cover would be recomputed to
         // the same answer.
@@ -1551,7 +1561,7 @@ namespace rc::boxch
         // registration ran against a region much smaller than the room, and the pose drifted to
         // 1.93 m with the gauge 9.9 degrees out. A hundredth costs more rebuilds and keeps the
         // reference honest.
-        if (not L_.empty() and free_.size() < free_at_rebuild_ + free_at_rebuild_ / 100) return false;
+        if (not L_.empty() and free_.size() < free_at_rebuild_ + free_at_rebuild_ / 100) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: throttled\n"); return false; }
         free_at_rebuild_ = free_.size();
         std::set<std::pair<int, int>> F;
         // ⚠ ONE SWEEP IS ALREADY A MEASUREMENT. Requiring two was my own invention, and in a
@@ -1596,13 +1606,25 @@ namespace rc::boxch
         }
         else
             for (const auto& [k, n] : free_) if (n >= 1) F.insert(k);
-        if (F.size() < 12) return false;
+        if (F.size() < 12) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: F<12\n"); return false; }
 
         std::set<std::pair<int, int>> covered;
         std::vector<rc::boxes::Box> out;
         const auto is_free = [&](int x, int y) { return F.count({x, y}) > 0; };
 
-        for (int iter = 0; iter < 24; ++iter)
+        // ⚠ THE COVER'S RECTANGLE BUDGET IS WHY THE REGION SPLITS. 24 was enough for a simple room
+        // and not for a 32-vertex apartment: measured on the hall, the loop hits the cap and leaves
+        // 9% of free cells uncovered (3% in the run that works), and the uncovered strip is the one
+        // that joins the two halves, which `polygon()` then publishes as one. It is a COMPUTE budget,
+        // not a model statement — MDL already refuses a box that does not pay for itself, so the cap
+        // only decides how many proposals the greedy loop may make before giving up.
+        static const int max_rects = [] {
+            const char* v = std::getenv("WS_COVER_MAX_RECTS");
+            int n = 24;
+            if (v != nullptr) { int x = 0; if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc() and x > 0) n = x; }
+            return n;
+        }();
+        for (int iter = 0; iter < max_rects; ++iter)
         {
             // The largest free rectangle containing some UNCOVERED cell. Seeds are sampled rather
             // than exhaustive: the cover is greedy anyway, so an exact argmax buys nothing.
@@ -1654,7 +1676,7 @@ namespace rc::boxch
                      y < static_cast<int>(std::floor(best.hi.y() / p_.cell)); ++y)
                     covered.insert({x, y});
         }
-        if (out.empty()) return false;
+        if (out.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: no rectangles\n"); return false; }
 
         // ── MERGE. A greedy cover is not a decomposition. ───────────────────────────────────
         // Picking maximal rectangles by area gain leaves the region correct but shredded: 45 boxes
@@ -1706,7 +1728,7 @@ namespace rc::boxch
             if (not t.valid()) continue;
             N.boxes.push_back(t);
         }
-        if (N.boxes.empty()) return false;
+        if (N.boxes.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: no boxes in layout frame\n"); return false; }
 
         // ── ONE WRITER. THE COVER PROPOSES; mdl_cost DECIDES. ───────────────────────────────
         // The cover appended with a zero-tolerance geometric rule while simplify() deleted with a
@@ -1721,7 +1743,7 @@ namespace rc::boxch
         gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat;
         gp.cell = p_.cell; gp.min_cluster = p_.min_cluster;
         fuse();
-        if (cloud_.empty()) return false;
+        if (cloud_.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: cloud empty\n"); return false; }
         std::set<std::pair<int, int>> flc;
         {
             const float cyc = std::cos(-yaw_), syc = std::sin(-yaw_);
@@ -1742,6 +1764,43 @@ namespace rc::boxch
         // in turn — leaving a 3-box layout over part of the room, a registration with almost
         // nothing to register against, and a pose 1.915 m out.
         // A trial-adoption judge needs two COMPLETE descriptions of the same evidence.
+        if (std::getenv("WS_COVER_PROBE"))
+        {
+            // is the FREE SET itself connected (4-connectivity on its own grid)?
+            std::set<std::pair<int, int>> todo = F;
+            int fcomp = 0; size_t biggest = 0;
+            while (not todo.empty())
+            {
+                ++fcomp; size_t sz = 0;
+                std::vector<std::pair<int, int>> st{*todo.begin()}; todo.erase(todo.begin());
+                while (not st.empty())
+                {
+                    const auto [ci, cj] = st.back(); st.pop_back(); ++sz;
+                    const std::pair<int, int> nb[4] = {{ci + 1, cj}, {ci - 1, cj}, {ci, cj + 1}, {ci, cj - 1}};
+                    for (const auto& n : nb)
+                    { const auto it = todo.find(n); if (it != todo.end()) { todo.erase(it); st.push_back(n); } }
+                }
+                biggest = std::max(biggest, sz);
+            }
+            std::fprintf(stderr, "[cover]   free cells %zu in %d component(s), biggest %zu; cover rectangles %zu\n",
+                         F.size(), fcomp, biggest, out.size());
+            // how much of the free set the rectangles actually cover, and where the remainder is
+            size_t unc = 0; Eigen::Vector2f ulo(1e9f, 1e9f), uhi(-1e9f, -1e9f);
+            for (const auto& c : F)
+            {
+                const Eigen::Vector2f m((static_cast<float>(c.first) + 0.5f) * p_.cell, (static_cast<float>(c.second) + 0.5f) * p_.cell);
+                bool covered = false;
+                for (const auto& b : out) if (b.contains(m)) { covered = true; break; }
+                if (not covered) { ++unc; ulo = ulo.cwiseMin(m); uhi = uhi.cwiseMax(m); }
+            }
+            std::fprintf(stderr, "[cover]   uncovered free cells %zu (%.1f%%) bbox x[%.2f,%.2f] y[%.2f,%.2f]\n",
+                         unc, 100.0 * static_cast<double>(unc) / static_cast<double>(std::max<size_t>(1, F.size())),
+                         ulo.x(), uhi.x(), ulo.y(), uhi.y());
+            const rc::boxes::Layout save = L_; L_ = N;
+            std::fprintf(stderr, "[comp] f=%llu cover as BUILT: %d components, %zu boxes\n",
+                         static_cast<unsigned long long>(frames_), components(), N.boxes.size());
+            L_ = save;
+        }
         rc::boxes::Layout cand = N;
         if (std::getenv("WS_ADOPT_PROBE") and not L_.empty())
         {
@@ -1758,9 +1817,47 @@ namespace rc::boxch
             rc::boxes::Layout keep = L_;
             rc::boxes::refit(keep, cloud_, gp, 3);
             rc::boxes::refit(cand, cloud_, gp, 3);
+            // ── A ROOM IS ONE REGION, AND THE JUDGE NEVER SAID SO (WS_CONNECTED) ───────────────
+            // ⚠ Measured on the hall from one start: the adopted cover was TWO components 0.07 m
+            // apart at the fin passage, and `polygon()` walks ONE loop from the lowest-left inside
+            // cell, so 27.92 of 56.98 m2 never reached the published outline — 31.83 m2 published
+            // for a 60.41 m2 room, IoU 0.522, with the pose and the gauge both healthy. The layout
+            // was right and the publication silently dropped half of it. The greedy cover is capped
+            // at 24 rectangles and left 9% of free cells uncovered (3% in the run that works),
+            // including the strip that joins the halves; the comment above claims boxes are
+            // filtered to keep the region connected, and that filter does not exist.
+            // The model already says a room is Manhattan, CLOSED and SIMPLY CONNECTED. mdl_cost
+            // never encoded it, so a two-apartment description competed on likelihood alone and
+            // won. Refusing it is not a threshold: it is the model's own statement.
+            // ⚠ REFUSE THE SPLIT, NOT THE PROGRESS. Refusing every disconnected candidate also
+            // refuses IMPROVEMENTS to a layout that is already split, and then the incumbent — the
+            // worse description — survives: measured over 50 rooms, outright rejection costs the
+            // mean 0.969 -> 0.956 and the worst room 0.901 -> 0.772 while the hall gains
+            // (mean 0.887 -> 0.917, worst 0.473 -> 0.705). The invariant is that a room is ONE
+            // region; a candidate may not make the layout MORE broken than it already is.
+            static const bool want_connected = std::getenv("WS_CONNECTED") != nullptr;
+            const int keep_components = layout_components(keep);
+            if (want_connected and layout_components(cand) > std::max(1, keep_components))
+            {
+                if (std::getenv("WS_COVER_PROBE"))
+                    std::fprintf(stderr, "[cover]   REJECT cand: %d components vs incumbent %d (a room is one region)\n",
+                                 layout_components(cand), keep_components);
+                L_ = keep; return false;
+            }
             if (rc::boxes::mdl_cost(cand, cloud_, gp, &flc)
                 >= rc::boxes::mdl_cost(keep, cloud_, gp, &flc))
-            { L_ = keep; return false; }          // the proposal does not pay — nothing is written
+            {
+                if (std::getenv("WS_COVER_PROBE"))
+                {
+                    Eigen::Vector2f clo(1e9f, 1e9f), chi(-1e9f, -1e9f);
+                    for (const auto& b : cand.boxes) { clo = clo.cwiseMin(b.lo); chi = chi.cwiseMax(b.hi); }
+                    std::fprintf(stderr, "[cover]   REJECT cand %zu boxes x[%.2f,%.2f] y[%.2f,%.2f] cost %.0f vs keep %zu boxes cost %.0f\n",
+                                 cand.boxes.size(), clo.x(), chi.x(), clo.y(), chi.y(),
+                                 rc::boxes::mdl_cost(cand, cloud_, gp, &flc), keep.boxes.size(),
+                                 rc::boxes::mdl_cost(keep, cloud_, gp, &flc));
+                }
+                L_ = keep; return false;
+            }          // the proposal does not pay — nothing is written
         }
         // ⚠ DISCARD THE GAUGE VOTES TAKEN AGAINST THE PROVISIONAL HULL. The seed exists so that
         // registration has SOMETHING from frame one, and it works — but it is one scan's interval
@@ -1776,6 +1873,7 @@ namespace rc::boxch
             yaw4_cos_ = 0.0; yaw4_sin_ = 0.0; yaw_votes_ = 0;
         }
         L_ = cand;
+        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu just ADOPTED: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
         // The reference the evidence was registered against has just changed, so the evidence is
         // re-registered against it and rebuilt. Without this the adoption drags the pose instead
         // of the pose following the map.
@@ -1818,9 +1916,68 @@ namespace rc::boxch
         return true;
     }
 
+    // WS_COVER_PROBE: how many CONNECTED COMPONENTS the layout's union has. Layout::polygon()
+    // traces ONE closed loop from the lowest-left inside cell, so anything beyond the first
+    // component is silently dropped at publication. Same arrangement grid polygon() itself uses.
+    // Connected components of a layout's region, on the grid its own box edges induce. Used by the
+    // trial-adoption judge and by the published-polygon check below.
+    static int layout_components(const rc::boxes::Layout& L_)   // (declared above)
+    {
+        if (L_.empty()) return 0;
+        std::vector<float> xs, ys;
+        for (const auto& b : L_.boxes)
+        { xs.push_back(b.lo.x()); xs.push_back(b.hi.x()); ys.push_back(b.lo.y()); ys.push_back(b.hi.y()); }
+        std::sort(xs.begin(), xs.end()); xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+        std::sort(ys.begin(), ys.end()); ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+        const int nx = static_cast<int>(xs.size()) - 1, ny = static_cast<int>(ys.size()) - 1;
+        if (nx < 1 or ny < 1) return 0;
+        const auto in_cell = [&](int i, int j)
+        {
+            if (i < 0 or j < 0 or i >= nx or j >= ny) return false;
+            return L_.inside({0.5f * (xs[static_cast<size_t>(i)] + xs[static_cast<size_t>(i + 1)]),
+                              0.5f * (ys[static_cast<size_t>(j)] + ys[static_cast<size_t>(j + 1)])});
+        };
+        std::vector<char> seen(static_cast<size_t>(nx) * static_cast<size_t>(ny), 0);
+        int comps = 0;
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i)
+            {
+                if (seen[static_cast<size_t>(j) * nx + i] or not in_cell(i, j)) continue;
+                ++comps;
+                std::vector<std::pair<int, int>> st{{i, j}};
+                seen[static_cast<size_t>(j) * nx + i] = 1;
+                while (not st.empty())
+                {
+                    const auto [ci, cj] = st.back(); st.pop_back();
+                    const std::pair<int, int> nb[4] = {{ci + 1, cj}, {ci - 1, cj}, {ci, cj + 1}, {ci, cj - 1}};
+                    for (const auto& [ni, nj] : nb)
+                        if (in_cell(ni, nj) and not seen[static_cast<size_t>(nj) * nx + ni])
+                        { seen[static_cast<size_t>(nj) * nx + ni] = 1; st.push_back({ni, nj}); }
+                }
+            }
+        return comps;
+    }
+
+    int Channel::components() const { return layout_components(L_); }
+
     std::vector<Eigen::Vector2f> Channel::polygon() const
     {
         if (L_.empty()) return {};
+        // ⚠ PUBLISHING LESS THAN THE LAYOUT MUST BE LOUD. Layout::polygon() traces ONE closed loop
+        // from the lowest-left inside cell, so if the region ever falls into two components it
+        // publishes one of them and says nothing: measured, 31.83 m2 of a 56.98 m2 layout, with no
+        // consumer able to tell. Warn once per occurrence; the adoption judge (WS_CONNECTED) is what
+        // prevents it, this is the check that it worked.
+        if (const int nc = layout_components(L_); nc > 1)
+        {
+            static int warned = 0;
+            if (warned < 20)
+            {
+                ++warned;
+                std::fprintf(stderr, "[boxes] ⚠ layout has %d components — polygon() publishes ONE of them "
+                                     "(%zu boxes). The published room is missing area.\n", nc, L_.boxes.size());
+            }
+        }
         const float cy = std::cos(yaw_), sy = std::sin(yaw_);
         std::vector<Eigen::Vector2f> out;
         for (const auto& v : L_.polygon())
@@ -2008,6 +2165,23 @@ namespace rc::boxch
         // The fixed tour gets this for free: free space plateaus after one lap and the SECOND lap
         // is pure consolidation. So once the planner stops exploring, the region stops growing and
         // the remaining effort goes into fitting and simplifying what is already there.
+        static const bool cover_probe = std::getenv("WS_COVER_PROBE") != nullptr;
+        if (cover_probe)
+        {
+            Eigen::Vector2f flo(1e9f, 1e9f), fhi(-1e9f, -1e9f);
+            for (const auto& [k, n] : free_)
+            {
+                if (n < 1) continue;
+                const Eigen::Vector2f m((static_cast<float>(k.first) + 0.5f) * p_.cell, (static_cast<float>(k.second) + 0.5f) * p_.cell);
+                flo = flo.cwiseMin(m); fhi = fhi.cwiseMax(m);
+            }
+            Eigen::Vector2f blo(1e9f, 1e9f), bhi(-1e9f, -1e9f);
+            for (const auto& b : L_.boxes) { blo = blo.cwiseMin(b.lo); bhi = bhi.cwiseMax(b.hi); }
+            std::fprintf(stderr, "[cover] f=%llu phase=%s cover=%d free=%zu (at_rebuild %zu) freebox x[%.2f,%.2f] y[%.2f,%.2f] | boxes=%zu layoutbox x[%.2f,%.2f] y[%.2f,%.2f]\n",
+                         static_cast<unsigned long long>(frames_), phase_name(), have_cover_ ? 1 : 0,
+                         free_.size(), free_at_rebuild_, flo.x(), fhi.x(), flo.y(), fhi.y(),
+                         L_.boxes.size(), blo.x(), bhi.x(), blo.y(), bhi.y());
+        }
         const bool extended = (phase_ == Phase::Explore) ? rebuild_from_free() : false;
         if (have_cover_ or extended)
         {
@@ -2046,9 +2220,14 @@ namespace rc::boxch
                 for (const auto& [b, n] : hx) if (n > 30) std::fprintf(stderr, " %.2f(%d)", b * 0.25f, n);
                 std::fprintf(stderr, "\n");
             }
+        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu after refit/gauge: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
             snap_coplanar();
+        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu after snap_coplanar: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
+
             if (std::getenv("WS_BOXES_NOSIMP") == nullptr)
                 simplify();      // measure the complexity, then force it down
+        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu after simplify: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
+
             return true;
         }
 

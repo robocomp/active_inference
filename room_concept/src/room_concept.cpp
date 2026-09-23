@@ -2487,6 +2487,9 @@ namespace rc
             for (const auto& sg : seg.segments)
             { sphi.push_back(sg.phi); slen.push_back(std::abs(sg.s_max - sg.s_min)); }
             box_channel_.observe(points, pose, box_pose_cov_, sphi, slen);
+            // The SAME scan, below the wall band: furniture, for navigation only. It never enters
+            // the layout, the registration or the gauge — see Params::obs_z_min.
+            box_channel_.observe_obstacles(points, pose);
         }
 
         // Observation weights (range / incidence) — the SAME as the SDF term's, from each segment's own

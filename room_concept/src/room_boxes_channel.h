@@ -57,6 +57,15 @@ namespace rc::boxch
         /// permissive end, and it is the number to change if the robot clips corners in the real
         /// world.
         float body_radius  = 0.230f;
+        /// ── THE OBSTACLE BAND: EVERYTHING BELOW THE WALL BAND ──────────────────────────────
+        /// PHYSICAL, robot frame. Returns here are FURNITURE, not walls: the wall band is above
+        /// them (z_min), which is how the robot separates the two — the high LiDAR sees over a
+        /// table, the low one sees the table. They are recorded for NAVIGATION ONLY (obs_), never
+        /// as evidence about the room. Measured in the bench: one band, with furniture on the
+        /// floor, fits the furniture's faces as walls and loses the robot — IoU 0.543 against
+        /// 0.983 with the bands separated.
+        float obs_z_min    = 0.15f;
+        float obs_z_max    = 1.45f;
         float z_max        = 1.60f;   ///< PHYSICAL: below the ceiling — see
                                       ///  [[lidar-high-band-must-not-reach-ceiling]], where ceiling
                                       ///  returns in a 2-D wall SDF stopped a room stabilising while
@@ -127,6 +136,8 @@ namespace rc::boxch
         /// inside the room. The robot's own belief, for a caller that must route by it (the bench's
         /// route optimiser, as controller_session routes by its GridPlanner EDT). +max if no layout.
         float model_sdf(const Eigen::Vector2f& m) const;
+        /// WS_COVER_PROBE: connected components of the union (polygon() publishes only the first).
+        int components() const;
         /// ── OBSTACLES ARE FOR NAVIGATION ONLY ───────────────────────────────────────────────
         /// The low LiDAR band sees floor furniture; the wall band sees over it. Low-band returns
         /// (robot-frame points at map-frame `pose`) are recorded HERE and nowhere else: plan_path()
@@ -134,6 +145,8 @@ namespace rc::boxch
         /// never enter vmap_, free_, the layout, registration or the gauge. That is how the robot
         /// works — a table is something to drive around, not a wall to fit.
         void observe_obstacles(const std::vector<Eigen::Vector2f>& pts_robot, const Eigen::Vector3f& pose);
+        /// Same, from the 3-D scan: keeps [obs_z_min, obs_z_max] — the band BELOW the wall band.
+        void observe_obstacles(const std::vector<Eigen::Vector3f>& pts_robot, const Eigen::Vector3f& pose);
         /// Distance (m) from a MAP-frame point to the nearest recorded obstacle cell, searched
         /// within `horizon`; returns `horizon` when none is closer.
         float obstacle_clearance(const Eigen::Vector2f& m, float horizon = 1.5f) const;
