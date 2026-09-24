@@ -7,6 +7,8 @@
 
 #include "refrigerator_config.h"
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -35,205 +37,364 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
         std::exit(EXIT_FAILURE);
 
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
-    auto getf = [&](const std::string& k, float def) -> float {
-        return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;
-    };
-    auto geti = [&](const std::string& k, int def) -> int {
-        return cfg.exists(k) ? cfg.get<int>(k) : def;
-    };
-    auto gets = [&](const std::string& k, std::string def) -> std::string {
-        return cfg.exists(k) ? cfg.get<std::string>(k) : def;
-    };
-    auto getb = [&](const std::string& k, bool def) -> bool {
-        return cfg.exists(k) ? cfg.get<bool>(k) : def;
-    };
+    // Every read below registers its key, its CODE DEFAULT and a one-line description,
+    // so the startup table can say where each value came from - not just what it is.
+    // (The four local lambdas now forward to the shared registry; the call sites are
+    // unchanged except for that description.)
+    rc::cfg::Reader reader(cfg, "refrigerator_concept");
+    const auto getf = [&](std::string_view k, float def, std::string_view what,
+                          rc::cfg::Opts o = {}) { return reader.f(k, def, what, o); };
+    const auto geti = [&](std::string_view k, int def, std::string_view what,
+                          rc::cfg::Opts o = {}) { return reader.i(k, def, what, o); };
+    const auto gets = [&](std::string_view k, std::string def, std::string_view what,
+                          rc::cfg::Opts o = {}) { return reader.s(k, std::move(def), what, o); };
+    const auto getb = [&](std::string_view k, bool def, std::string_view what,
+                          rc::cfg::Opts o = {}) { return reader.b(k, def, what, o); };
 
     // ─── Agent convergence & cadence ───────────────────────────────────────────
-    out.state_eps                = getf("RefrigeratorConcept.StateEps",               0.04f);
-    out.K_stable                 = geti("RefrigeratorConcept.KStable",                30);
-    out.detection_alive_max_frames = geti("RefrigeratorConcept.DetectionAliveMaxFrames", 40);
-    out.matched_frames_before_aging = geti("RefrigeratorConcept.MatchedFramesBeforeAging", 5);
-    out.central_region_frac      = getf("RefrigeratorConcept.CentralRegionFrac",     0.25f);
-    out.epistemic_cooldown_cycles= geti("RefrigeratorConcept.EpistemicCooldownCycles", 200);
-    out.refrigerator_log_period_frames  = geti("RefrigeratorConcept.RefrigeratorLogPeriodFrames",   30);
-    out.support_bank_max_points    = geti("RefrigeratorConcept.SupportBankMaxPoints",     4000);
-    out.support_bank_quantization_m= getf("RefrigeratorConcept.SupportBankQuantizationM", 0.02f);
-    out.support_select_radius_margin_m = getf("RefrigeratorConcept.SupportSelectRadiusMarginM", 0.50f);
-    out.support_select_height_margin_m = getf("RefrigeratorConcept.SupportSelectHeightMarginM", 0.25f);
+    out.state_eps                = getf("RefrigeratorConcept.StateEps", 0.04f,
+            "Σ|Δstate| convergence threshold between cycles (m+rad)");
+    out.K_stable                 = geti("RefrigeratorConcept.KStable", 30,
+            "consecutive converged cycles before model_stable");
+    out.detection_alive_max_frames = geti("RefrigeratorConcept.DetectionAliveMaxFrames", 40,
+            "cycles without a fresh mask before detection_alive=false");
+    out.matched_frames_before_aging = geti("RefrigeratorConcept.MatchedFramesBeforeAging", 5,
+            "a barely-born belief (fewer matched frames than this) is NOT");
+    out.central_region_frac      = getf("RefrigeratorConcept.CentralRegionFrac", 0.25f,
+            "central image box is [frac, 1-frac]×[frac, 1-frac]; a detectable");
+    out.epistemic_cooldown_cycles= geti("RefrigeratorConcept.EpistemicCooldownCycles", 200,
+            "min cycles withdrawn after satisfaction");
+    out.refrigerator_log_period_frames  = geti("RefrigeratorConcept.RefrigeratorLogPeriodFrames", 30,
+            "per-cycle log throttle");
+    out.support_bank_max_points    = geti("RefrigeratorConcept.SupportBankMaxPoints", 4000,
+            "cap on the refrigerator-owned support-point memory bank");
+    out.support_bank_quantization_m= getf("RefrigeratorConcept.SupportBankQuantizationM", 0.02f,
+            "support-bank dedup grid (m)");
+    out.support_select_radius_margin_m = getf("RefrigeratorConcept.SupportSelectRadiusMarginM", 0.50f,
+            "XY margin (m) around the model for support-bank selection");
+    out.support_select_height_margin_m = getf("RefrigeratorConcept.SupportSelectHeightMarginM", 0.25f,
+            "Z margin (m) around the model for support-bank selection");
 
     // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
-    out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
-    out.show_dashboard           = getb("RefrigeratorConcept.ShowDashboard",          true);
-    out.shape_eval_period        = geti("RefrigeratorConcept.ShapeEvalPeriod",        30);
-    out.shape_eval_min_points    = geti("RefrigeratorConcept.ShapeEvalMinPoints",     300);
-    out.shape_evidence_clamp     = getf("RefrigeratorConcept.ShapeEvidenceClamp",     8.0f);
-    out.dump_cloud_path          = gets("RefrigeratorConcept.DumpCloudPath",          "");
+    out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs", 3000,
+            "Demote Operating→Degraded→Waiting when the retina's `masks` node stops advancing its mask_frame_id for this long (producer dead/stalled) — don't…");
+    out.show_dashboard           = getb("RefrigeratorConcept.ShowDashboard", true,
+            "Show the combined GUI window (belief timeseries dashboard + evidence monitor in one splitter). false ⇒ no GUI windows are built at all (headless);…");
+    out.shape_eval_period        = geti("RefrigeratorConcept.ShapeEvalPeriod", 30,
+            "Every shape_eval_period cycles (once the support bank has ≥ shape_eval_min_points) fit a ROUND model to the accumulated cloud and accumulate a…");
+    out.shape_eval_min_points    = geti("RefrigeratorConcept.ShapeEvalMinPoints", 300,
+            "");
+    out.shape_evidence_clamp     = getf("RefrigeratorConcept.ShapeEvidenceClamp", 8.0f,
+            "");
+    out.dump_cloud_path          = gets("RefrigeratorConcept.DumpCloudPath", "",
+            "DIAGNOSTIC one-shot: if non-empty, dump a fitted refrigerator's accumulated support-bank point cloud (room frame, XYZ per line) to this path ONCE…");
 
     // ─── RefrigeratorModel geometry / mask split ──────────────────────────────────────
-    out.sigma_obs          = getf("RefrigeratorModel.SigmaObs",          0.05f);
-    out.sdf_threshold_for_storage = getf("RefrigeratorModel.SdfThresholdForStorage", 0.08f);
+    out.sigma_obs          = getf("RefrigeratorModel.SigmaObs", 0.05f,
+            "Forwarded to RefrigeratorModelParams.sigma_obs: a mask point within TOP_THICKNESS + sigma_obs below the top face is attributed to the slab…");
+    out.sdf_threshold_for_storage = getf("RefrigeratorModel.SdfThresholdForStorage", 0.08f,
+            "On-surface membership for the candidate/residual split in RefrigeratorFitter::observe");
 
     // ─── AI2 belief ────────────────────────────────────────────────────────────
-    out.ai2_sigma_base_m     = getf("RefrigeratorModel.AI2SigmaBaseM",       0.03f);
-    out.ai2_clutter_frac     = getf("RefrigeratorModel.AI2ClutterFrac",      0.10f);
-    out.ai2_clutter_scale_m  = getf("RefrigeratorModel.AI2ClutterScaleM",    0.12f);
-    out.ai2_prior_size_std   = getf("RefrigeratorModel.AI2PriorSizeStd",     0.30f);
-    out.ai2_prior_footprint_m   = getf("RefrigeratorModel.AI2PriorFootprintM",   0.60f);
-    out.ai2_prior_footprint_std = getf("RefrigeratorModel.AI2PriorFootprintStd", 0.08f);
+    out.ai2_sigma_base_m     = getf("RefrigeratorModel.AI2SigmaBaseM", 0.03f,
+            "base on-surface obs noise std (m); R = σ² (+ motion_var + …)");
+    out.ai2_clutter_frac     = getf("RefrigeratorModel.AI2ClutterFrac", 0.10f,
+            "ε: prior weight of the uniform clutter mixture component");
+    out.ai2_clutter_scale_m  = getf("RefrigeratorModel.AI2ClutterScaleM", 0.12f,
+            "a point further than ~this from every surface is likely clutter");
+    out.ai2_prior_size_std   = getf("RefrigeratorModel.AI2PriorSizeStd", 0.30f,
+            "(legacy; the size prior is now split into footprint vs height below)");
+    out.ai2_prior_footprint_m   = getf("RefrigeratorModel.AI2PriorFootprintM", 0.60f,
+            "mean of the w & h(depth) prior (m)");
+    out.ai2_prior_footprint_std = getf("RefrigeratorModel.AI2PriorFootprintStd", 0.08f,
+            "TIGHT → strong footprint prior (m)");
     // ★FALLBACK ALIGNED TO THE MANIFEST (2026-08-17). This read 1.70 while the manifest and config.toml
     // both say 1.90 — invisible while config is present, and a silently shorter fridge the moment it is
     // not. A code default that contradicts the declaration is the same defect class as an inherited one.
-    out.ai2_prior_height_m      = getf("RefrigeratorModel.AI2PriorHeightM",      1.90f);
-    out.ai2_prior_height_std    = getf("RefrigeratorModel.AI2PriorHeightStd",    0.50f);
-    out.ai2_depth_unobs_precision = getf("RefrigeratorModel.AI2DepthUnobsPrecision", 1500.0f);
-    out.ai2_depth_obs_band_m      = getf("RefrigeratorModel.AI2DepthObsBandM",       0.10f);
-    out.ai2_top_no_float_precision = getf("RefrigeratorModel.AI2TopNoFloatPrecision", 10000.0f);
-    out.ai2_top_no_float_margin_m  = getf("RefrigeratorModel.AI2TopNoFloatMarginM",   0.02f);
-    out.ai2_top_overseg_sigma_per_m = getf("RefrigeratorModel.AI2TopOversegSigmaPerM", 2.0f);
-    out.ai2_wall_precision          = getf("RefrigeratorModel.AI2WallPrecision",         400.0f);
-    out.ai2_wall_parallel_precision = getf("RefrigeratorModel.AI2WallParallelPrecision", 200.0f);
-    out.ai2_wall_reach_m            = getf("RefrigeratorModel.AI2WallReachM",             0.15f);
-    out.ai2_door_clearance_gain     = getf("RefrigeratorModel.AI2DoorClearanceGain",       3.0f);
-    out.detect_min_fill             = getf("RefrigeratorModel.DetectMinFill",              0.10f);
-    out.detect_max_fill             = getf("RefrigeratorModel.DetectMaxFill",              0.60f);
-    out.detect_soft                 = getf("RefrigeratorModel.DetectSoft",                 0.06f);
-    out.ai2_volatility_infer        = getb("RefrigeratorModel.AI2VolatilityInfer",        false);
-    out.ai2_volatility_lr           = getf("RefrigeratorModel.AI2VolatilityLr",           0.02f);
-    out.ai2_volatility_sigma        = getf("RefrigeratorModel.AI2VolatilitySigma",        2.0f);
-    out.ai2_wall_explain_frac       = getf("RefrigeratorModel.AI2WallExplainFrac",        0.25f);
-    out.ai2_wall_explain_sigma_m    = getf("RefrigeratorModel.AI2WallExplainSigmaM",      0.05f);
-    out.ai2_wall_no_cross_precision = getf("RefrigeratorModel.WallNoCrossPrecision",     2000.0f);
-    out.ai2_wall_no_cross_margin_m  = getf("RefrigeratorModel.WallNoCrossMarginM",       0.0f);
-    out.ai2_process_std_m    = getf("RefrigeratorModel.AI2ProcessStdM",      0.005f);
-    out.ai2_process_std_yaw  = getf("RefrigeratorModel.AI2ProcessStdYaw",    0.01f);
-    out.ai2_age_nominal_dt_s = getf("RefrigeratorModel.AI2AgeNominalDtS",    0.0f);
-    out.ai2_common_mode_pos_std  = getf("RefrigeratorModel.AI2CommonModePosStd",  0.03f);
-    out.ai2_common_mode_size_std = getf("RefrigeratorModel.AI2CommonModeSizeStd", 0.02f);
-    out.ai2_common_mode_yaw_std  = getf("RefrigeratorModel.AI2CommonModeYawStd",  0.03f);
-    out.motion_cm_pos_gain       = getf("RefrigeratorModel.MotionCmPosGain",      0.10f);
-    out.motion_cm_size_gain      = getf("RefrigeratorModel.MotionCmSizeGain",     0.20f);
-    out.motion_cm_yaw_gain       = getf("RefrigeratorModel.MotionCmYawGain",      0.12f);
-    out.ai2_ang_lever_m           = getf("RefrigeratorModel.AI2AngLeverM",           2.0f);
-    out.ai2_periph_ref            = getf("RefrigeratorModel.AI2PeriphRef",           0.50f);
-    out.ai2_motion_ref_mps        = getf("RefrigeratorModel.AI2MotionRefMps",        0.60f);
-    out.ai2_motion_confirm_only   = getb("RefrigeratorModel.AI2MotionConfirmOnly",   true);
-    out.ai2_still_lin_mps         = getf("RefrigeratorModel.AI2StillLinMps",         0.05f);
-    out.ai2_still_ang_radps       = getf("RefrigeratorModel.AI2StillAngRadps",       0.10f);
-    out.ai2_still_dotd            = getf("RefrigeratorModel.AI2StillDotd",           0.05f);
-    out.ai2_moving_update_center_radius = getf("RefrigeratorModel.AI2MovingUpdateCenterRadius", 0.35f);
-    out.ai2_range_noise_lat_per_m = getf("RefrigeratorModel.AI2RangeNoiseLatPerM", 0.02f);
-    out.ai2_range_noise_yaw_per_m = getf("RefrigeratorModel.AI2RangeNoiseYawPerM", 0.03f);
-    out.ai2_range_noise_size_per_m = getf("RefrigeratorModel.AI2RangeNoiseSizePerM", 0.08f);
-    out.ai2_trunc_gate_frac    = getf("RefrigeratorModel.AI2TruncGateFrac",   0.10f);
-    out.ai2_gn_iters         = geti("RefrigeratorModel.AI2GnIters",          4);
-    out.ai2_csv_path         = gets("RefrigeratorModel.AI2CsvPath",          "");
-    out.detect_probe_csv_path = gets("RefrigeratorConcept.DetectProbeCsvPath", out.detect_probe_csv_path);
-    out.birth_surprise_probe = getb("RefrigeratorModel.BirthSurpriseProbe",  false);
-    out.pixel_sigma_over_f     = getf("RefrigeratorModel.PixelSigmaOverF",       0.0015f);
-    out.depth_sigma0_m         = getf("RefrigeratorModel.DepthSigma0M",          0.006f);
-    out.depth_sigma_range_coef = getf("RefrigeratorModel.DepthSigmaRangeCoef",   0.004f);
-    out.model_sigma_m          = getf("RefrigeratorModel.ModelSigmaM",           0.010f);
-    out.footprint_residual     = getb("RefrigeratorModel.FootprintResidual",     false);
-    out.quotient_chart         = getb("RefrigeratorModel.QuotientChart",          false);
-    out.depth_tilt_std         = getf("RefrigeratorModel.DepthTiltStd",          0.020f);
-    out.depth_bias_std         = getf("RefrigeratorModel.DepthBiasStd",          0.015f);
-    out.depth_scale_std        = getf("RefrigeratorModel.DepthScaleStd",         0.010f);
+    out.ai2_prior_height_m      = getf("RefrigeratorModel.AI2PriorHeightM", 1.90f,
+            "mean of the H (vertical) static anchor (m) — a standard tall fridge");
+    out.ai2_prior_height_std    = getf("RefrigeratorModel.AI2PriorHeightStd", 0.50f,
+            "anchor std (m); stops the box top floating above the cloud");
+    out.ai2_depth_unobs_precision = getf("RefrigeratorModel.AI2DepthUnobsPrecision", 1500.0f,
+            "extra 1/m² when depth extent is unobserved (single face)");
+    out.ai2_depth_obs_band_m      = getf("RefrigeratorModel.AI2DepthObsBandM", 0.10f,
+            "ly-spread (m) below which the cloud is a single depth face");
+    out.ai2_top_no_float_precision = getf("RefrigeratorModel.AI2TopNoFloatPrecision", 10000.0f,
+            "firm two-sided anchor pinning H → observed robust cloud top (1/m²)");
+    out.ai2_top_no_float_margin_m  = getf("RefrigeratorModel.AI2TopNoFloatMarginM", 0.02f,
+            "upward allowance (m) added to the observed top as the anchor target");
+    out.ai2_top_overseg_sigma_per_m = getf("RefrigeratorModel.AI2TopOversegSigmaPerM", 2.0f,
+            "R inflation (σ per m) for points ABOVE the robust top — fades the");
+    out.ai2_wall_precision          = getf("RefrigeratorModel.AI2WallPrecision", 400.0f,
+            "1/m² at zero gap (back face → wall)");
+    out.ai2_wall_parallel_precision = getf("RefrigeratorModel.AI2WallParallelPrecision", 200.0f,
+            "back face parallel to the wall (width-axis · wall-normal → 0)");
+    out.ai2_wall_reach_m            = getf("RefrigeratorModel.AI2WallReachM", 0.15f,
+            "gap scale over which the flush hypothesis loses its weight");
+    out.ai2_door_clearance_gain     = getf("RefrigeratorModel.AI2DoorClearanceGain", 3.0f,
+            "WALL as a competing per-point explanation (explaining away — see RefrigeratorBeliefParams). π_wall and the extra wall-plane std. 0 = OFF (mixture…");
+    out.detect_min_fill             = getf("RefrigeratorModel.DetectMinFill", 0.10f,
+            "INFERRED VOLATILITY (MODEL_HISTORY.md §3) — the HISTORY stage");
+    out.detect_max_fill             = getf("RefrigeratorModel.DetectMaxFill", 0.60f,
+            "");
+    out.detect_soft                 = getf("RefrigeratorModel.DetectSoft", 0.06f,
+            "");
+    out.ai2_volatility_infer        = getb("RefrigeratorModel.AI2VolatilityInfer", false,
+            "ON 08-03 for the A/B tour. Watch omega_w/tau_w in ai2_log.csv");
+    out.ai2_volatility_lr           = getf("RefrigeratorModel.AI2VolatilityLr", 0.02f,
+            "gradient step on ω per MEASURED cycle (predict-only cycles never touch it)");
+    out.ai2_volatility_sigma        = getf("RefrigeratorModel.AI2VolatilitySigma", 2.0f,
+            "hyperprior width σ_ω: how far evidence may pull ω from the configured Q");
+    out.ai2_wall_explain_frac       = getf("RefrigeratorModel.AI2WallExplainFrac", 0.25f,
+            "π_wall: prior weight of 'this point belongs to a known room wall'");
+    out.ai2_wall_explain_sigma_m    = getf("RefrigeratorModel.AI2WallExplainSigmaM", 0.05f,
+            "extra wall-plane std (m): room-polygon + localization slack (adds to WallRef σ)");
+    out.ai2_wall_no_cross_precision = getf("RefrigeratorModel.WallNoCrossPrecision", 2000.0f,
+            "1/m² per m of penetration past the wall (>> the flush precision)");
+    out.ai2_wall_no_cross_margin_m  = getf("RefrigeratorModel.WallNoCrossMarginM", 0.0f,
+            "interior offset (m) inside which the constraint activates");
+    out.ai2_process_std_m    = getf("RefrigeratorModel.AI2ProcessStdM", 0.005f,
+            "predict process-noise std, length DOFs (m/frame)");
+    out.ai2_process_std_yaw  = getf("RefrigeratorModel.AI2ProcessStdYaw", 0.01f,
+            "predict process-noise std, yaw (rad/frame)");
+    out.ai2_age_nominal_dt_s = getf("RefrigeratorModel.AI2AgeNominalDtS", 0.0f,
+            "Stale-belief aging (measurement-age → covariance)");
+    out.ai2_common_mode_pos_std  = getf("RefrigeratorModel.AI2CommonModePosStd", 0.03f,
+            "shared position error (m); pose-chain cov adds to it");
+    out.ai2_common_mode_size_std = getf("RefrigeratorModel.AI2CommonModeSizeStd", 0.02f,
+            "shared size error w,h,H (m)");
+    out.ai2_common_mode_yaw_std  = getf("RefrigeratorModel.AI2CommonModeYawStd", 0.03f,
+            "shared yaw error (rad)");
+    out.motion_cm_pos_gain       = getf("RefrigeratorModel.MotionCmPosGain", 0.10f,
+            "position (cx,cy) shared-error std per m/s of motion_dotd");
+    out.motion_cm_size_gain      = getf("RefrigeratorModel.MotionCmSizeGain", 0.20f,
+            "extent (w,h,H) shared-error std per m/s — the anti-RESHAPE lever");
+    out.motion_cm_yaw_gain       = getf("RefrigeratorModel.MotionCmYawGain", 0.12f,
+            "yaw shared-error std (rad) per m/s — the anti-ROTATE lever");
+    out.ai2_ang_lever_m           = getf("RefrigeratorModel.AI2AngLeverM", 2.0f,
+            "rad/s → m/s lever (tangential speed of a fridge ~this far away) for ego-motion");
+    out.ai2_periph_ref            = getf("RefrigeratorModel.AI2PeriphRef", 0.50f,
+            "centroid radius (focal-norm) at which the off-axis periphery penalty → 1");
+    out.ai2_motion_ref_mps        = getf("RefrigeratorModel.AI2MotionRefMps", 0.60f,
+            "motion magnitude (m/s) at which a fully-peripheral frame is fully unreliable");
+    out.ai2_motion_confirm_only   = getb("RefrigeratorModel.AI2MotionConfirmOnly", true,
+            "Discrete confirm-only gate ('only update if the robot is still'): true ⇒ the fitter CONFIRMS but does NOT move the geometry mean (predict-only…");
+    out.ai2_still_lin_mps         = getf("RefrigeratorModel.AI2StillLinMps", 0.05f,
+            "camera linear speed (m/s) below which the robot counts as 'still'");
+    out.ai2_still_ang_radps       = getf("RefrigeratorModel.AI2StillAngRadps", 0.10f,
+            "camera angular speed (rad/s) below which the robot counts as 'still'");
+    out.ai2_still_dotd            = getf("RefrigeratorModel.AI2StillDotd", 0.05f,
+            "per-mask ego-motion corruption speed (m/s) still-level");
+    out.ai2_moving_update_center_radius = getf("RefrigeratorModel.AI2MovingUpdateCenterRadius", 0.35f,
+            "mask centroid radius below which a moving update is still allowed");
+    out.ai2_range_noise_lat_per_m = getf("RefrigeratorModel.AI2RangeNoiseLatPerM", 0.02f,
+            "lateral deprojection std growth (m per m of range)");
+    out.ai2_range_noise_yaw_per_m = getf("RefrigeratorModel.AI2RangeNoiseYawPerM", 0.03f,
+            "yaw common-mode std growth (rad per m of range)");
+    out.ai2_range_noise_size_per_m = getf("RefrigeratorModel.AI2RangeNoiseSizePerM", 0.08f,
+            "SIZE (w,h,H) common-mode std growth (m per m of range): a distant");
+    out.ai2_trunc_gate_frac    = getf("RefrigeratorModel.AI2TruncGateFrac", 0.10f,
+            "mask can't reshape/inflate a converged refrigerator (freezes geometry afar) THRESHOLD (truncation gate): skip the geometric update (predict only)…");
+    out.ai2_gn_iters         = geti("RefrigeratorModel.AI2GnIters", 4,
+            "Gauss-Newton iterations per frame");
+    out.ai2_csv_path         = gets("RefrigeratorModel.AI2CsvPath", "",
+            "if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV");
+    out.detect_probe_csv_path = gets("RefrigeratorConcept.DetectProbeCsvPath", out.detect_probe_csv_path,
+            "The DETECTOR's truth table (rc::probe) — one row per cycle per instance: viewpoint, framing, and what YOLO did about it");
+    out.birth_surprise_probe = getb("RefrigeratorModel.BirthSurpriseProbe", false,
+            "EXPERIMENTAL birth-surprise probe (read-only): read residual_concept's `grid` node as an unexplained- occupancy (surprise) field, cluster it, and LOG…");
+    out.pixel_sigma_over_f     = getf("RefrigeratorModel.PixelSigmaOverF", 0.0015f,
+            "(footprint-residual path — OFF)");
+    out.depth_sigma0_m         = getf("RefrigeratorModel.DepthSigma0M", 0.006f,
+            "depth std floor (m)");
+    out.depth_sigma_range_coef = getf("RefrigeratorModel.DepthSigmaRangeCoef", 0.004f,
+            "depth std growth (m per m² of range)");
+    out.model_sigma_m          = getf("RefrigeratorModel.ModelSigmaM", 0.010f,
+            "residual model/surface std (m) added in quadrature (R floor)");
+    out.footprint_residual     = getb("RefrigeratorModel.FootprintResidual", false,
+            "a1′+a2′: weighted 2-D footprint residual + shared depth-affine nuisance (replaces the moment channel; the real grazing-yaw fix). depth_bias/scale_std…");
+    out.quotient_chart         = getb("RefrigeratorModel.QuotientChart", false,
+            "C2v symmetry-quotient chart (PRECISION_AS_INFORMATION.md Stage 3): optimise the footprint in [s,a₁,a₂] so the 4 box representatives collapse to one…");
+    out.depth_tilt_std         = getf("RefrigeratorModel.DepthTiltStd", 0.020f,
+            "shared per-frame depth tilt prior std (m/rad) — the yaw nuisance");
+    out.depth_bias_std         = getf("RefrigeratorModel.DepthBiasStd", 0.015f,
+            "shared per-frame depth bias prior std (m)");
+    out.depth_scale_std        = getf("RefrigeratorModel.DepthScaleStd", 0.010f,
+            "shared per-frame depth scale prior std (fraction)");
 
     // ─── "Is this really a fridge?" plausibility filter + soft singleton ───────
-    out.fridge_filter_enabled   = getb("RefrigeratorConcept.FridgeFilterEnabled",   true);
-    out.plaus_aspect_scale      = getf("RefrigeratorModel.AspectScale",             0.15f);
-    out.plaus_size_scale        = getf("RefrigeratorModel.SizeScale",               0.15f);
-    out.plaus_alt_size_scale    = getf("RefrigeratorModel.AltSizeScale",            0.60f);
-    out.plaus_height_min        = getf("RefrigeratorModel.HeightPlausibleMin",      1.20f);
-    out.plaus_height_soft       = getf("RefrigeratorModel.HeightSoft",              0.15f);
-    out.plaus_fe_ref            = getf("RefrigeratorModel.FeRef",                    2.0f);
-    out.plaus_fe_scale          = getf("RefrigeratorModel.FeScale",                 1.0f);
-    out.plaus_clamp             = getf("RefrigeratorModel.PlausClamp",              8.0f);
-    out.plaus_height_prior_gain = getf("RefrigeratorModel.PlausHeightPriorGain",    2000.0f);
-    out.plaus_to_existence_gain = getf("RefrigeratorModel.PlausToExistenceGain",    1.5f);
-    out.singleton_inhibition    = getf("RefrigeratorModel.SingletonInhibition",     1.0f);
-    out.fridge_filter_log       = getb("RefrigeratorConcept.FridgeFilterLog",       false);
+    out.fridge_filter_enabled   = getb("RefrigeratorConcept.FridgeFilterEnabled", true,
+            "master switch for the whole plausibility filter");
+    out.plaus_aspect_scale      = getf("RefrigeratorModel.AspectScale", 0.15f,
+            "aspect = |w−h|/(w+h); aspect_ok = exp(−(aspect/scale)²) → 1 square");
+    out.plaus_size_scale        = getf("RefrigeratorModel.SizeScale", 0.15f,
+            "size_ok = exp(−((w−fp)²+(h−fp)²)/(2·scale²)), fp = prior_footprint_m");
+    out.plaus_alt_size_scale    = getf("RefrigeratorModel.AltSizeScale", 0.60f,
+            "alternative footprint std (m) around prior_footprint_m");
+    out.plaus_height_min        = getf("RefrigeratorModel.HeightPlausibleMin", 1.20f,
+            "logistic centre (m): height_ok ≈ 0.5 here, →1 tall, →0 below ~1 m");
+    out.plaus_height_soft       = getf("RefrigeratorModel.HeightSoft", 0.15f,
+            "logistic softness (m) of the height_ok falloff");
+    out.plaus_fe_ref            = getf("RefrigeratorModel.FeRef", 2.0f,
+            "'healthy fridge fit' free-energy reference (NEEDS LIVE TUNING)");
+    out.plaus_fe_scale          = getf("RefrigeratorModel.FeScale", 1.0f,
+            "fit_ok = exp(−max(0, FE−fe_ref)/fe_scale)");
+    out.plaus_clamp             = getf("RefrigeratorModel.PlausClamp", 8.0f,
+            "±bound on the plaus_evidence accumulator (bounded memory: one bad frame can't kill a real fridge)");
+    out.plaus_height_prior_gain = getf("RefrigeratorModel.PlausHeightPriorGain", 2000.0f,
+            "precision (1/m²) per unit (deficit/soft) below plaus_height_min");
+    out.plaus_to_existence_gain = getf("RefrigeratorModel.PlausToExistenceGain", 1.5f,
+            "how strongly tanh(plaus_evidence) pushes the existence log-odds per cycle");
+    out.singleton_inhibition    = getf("RefrigeratorModel.SingletonInhibition", 1.0f,
+            "mutual-inhibition weight: a STRONGER fridge subtracts this·P(exists) from a weaker one's existence L");
+    out.fridge_filter_log       = getb("RefrigeratorConcept.FridgeFilterLog", false,
+            "log per-instance plausibility / evidence / existence-delta each cycle");
 
     // ─── RT-edge covariance upload ─────────────────────────────────────────────
-    out.rt_cov_scale                  = getf("RefrigeratorConcept.RtCovScale",           1.0f);
-    out.publish_object_obs            = getb("RefrigeratorConcept.PublishObjectObs",   false);
-    out.object_obs_frame              = gets("RefrigeratorConcept.ObjectObsFrame",     "body");
+    out.rt_cov_scale                  = getf("RefrigeratorConcept.RtCovScale", 1.0f,
+            "Upload the refrigerator pose covariance onto the room→refrigerator RT edge (rt_covariance_att, 6×6 SE3), mapped from the belief's full Σ over…");
+    out.publish_object_obs            = getb("RefrigeratorConcept.PublishObjectObs", false,
+            "RefrigeratorConcept.PublishObjectObs");
+    out.object_obs_frame              = gets("RefrigeratorConcept.ObjectObsFrame", "body",
+            "RefrigeratorConcept.ObjectObsFrame (localizer base node)");
 
     // ─── Multi-instance tracker + ricoh attention ──────────────────────────────
-    out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
-    out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.50f);
-    out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f);
-    out.tracker_birth_frames     = geti("Tracker.BirthFrames",      8);
-    out.birth_fusion             = getb("Tracker.BirthFusion",       false);
-    out.birth_fusion_gain        = getf("Tracker.BirthFusionGain",   6.0f);
-    out.birth_fusion_mass_ref    = getf("Tracker.BirthFusionMassRef",8.0f);
-    out.birth_fusion_radius_m    = getf("Tracker.BirthFusionRadiusM",0.50f);
-    out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);
-    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.05f);
-    out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
-    out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
-    out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
+    out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis", 9.0f,
+            "χ²₂ gate (~3σ) for a mask↔instance match once it has a cov");
+    out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM", 0.50f,
+            "metric XY gate (m) before an instance has a usable covariance");
+    out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f,
+            "Detection-noise std R (m) added to the fit cov in the Mahalanobis gate (S = P + R²I)");
+    out.tracker_birth_frames     = geti("Tracker.BirthFrames", 8,
+            "frames a mask must stay unexplained before spawning a refrigerator");
+    out.birth_fusion             = getb("Tracker.BirthFusion", false,
+            "FUSED BIRTH (EXPERIMENTAL, off by default): let residual-grid SURPRISE MASS under a detection accelerate its birth");
+    out.birth_fusion_gain        = getf("Tracker.BirthFusionGain", 6.0f,
+            "max extra evidence/frame at full corroboration (0 ⇒ baseline)");
+    out.birth_fusion_mass_ref    = getf("Tracker.BirthFusionMassRef", 8.0f,
+            "residual mass at which corroboration is half-saturated (m/(m+ref))");
+    out.birth_fusion_radius_m    = getf("Tracker.BirthFusionRadiusM", 0.50f,
+            "window (m) for the residual-mass sample under the detection");
+    out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM", 0.60f,
+            "a birth must be ≥ this (m) from every existing refrigerator");
+    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap", 0.05f,
+            "Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of the SMALLER footprint (two refrigerators cannot…");
+    out.tracker_birth_width_m    = getf("Tracker.BirthWidthM", 1.0f,
+            "Default geometry for a refrigerator BORN from a mask, used only when no birth burst is available (see birth_frag_* below); the belief refines from…");
+    out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM", 0.6f,
+            "");
+    out.tracker_birth_height_m   = getf("Tracker.BirthHeightM", 0.75f,
+            "");
     // Birth fragment: keep the probation burst and admit the birth on it (see refrigerator_config.h).
-    out.birth_frag_enabled       = getb("Tracker.BirthFragment",          true);
-    out.birth_frag_cell_m       = getf("Tracker.BirthFragmentVoxelM",    0.03f);
-    out.birth_frag_max_pts       = geti("Tracker.BirthFragmentMaxPts",    20000);
+    out.birth_frag_enabled       = getb("Tracker.BirthFragment", true,
+            "A candidate matures over tracker_birth_frames observations; until now every mask cloud seen on the way was discarded and the instance was seeded from…");
+    out.birth_frag_cell_m       = getf("Tracker.BirthFragmentVoxelM", 0.03f,
+            "dedup grid for the burst (finer than the bank: a burst is short)");
+    out.birth_frag_max_pts       = geti("Tracker.BirthFragmentMaxPts", 20000,
+            "hard cap per candidate; a lingering blob cannot grow without bound");
     out.birth_frag_delta_ms      = static_cast<std::uint64_t>(
-                                       std::max(0, geti("Tracker.BirthFragmentDeltaMs", 4000)));
-    out.birth_admit_plausibility = getf("Tracker.BirthAdmitPlausibility", 0.35f);
-    out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f);
-    out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
-    out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);
+                                       std::max(0, geti("Tracker.BirthFragmentDeltaMs", 4000,
+                                               "")));
+    out.birth_admit_plausibility = getf("Tracker.BirthAdmitPlausibility", 0.35f,
+            "ADMISSION on the accumulated burst");
+    out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f,
+            "min YOLO confidence for a ricoh detection to raise attention");
+    out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f,
+            "extra angular tolerance on the refrigerator's angular half-size");
+    out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM", 1.0f,
+            "extra range band (ricoh range is rough/indicative)");
 
     // ─── LiDAR range factor · coverage · free-space · footprint moment · FE ────
     // YOLO-independent LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h). OFF by default.
-    out.lidar_precision      = getf("RefrigeratorModel.LidarPrecision",      0.0f);
-    out.lidar_bpearl_precision = getf("RefrigeratorModel.LidarBpearlPrecision", 0.0f);
-    out.lidar_robust_c_m     = getf("RefrigeratorModel.LidarRobustCM",       0.05f);
-    out.lidar_select_margin_m = getf("RefrigeratorModel.LidarSelectMarginM", 0.10f);
-    out.lidar_coverage_n0     = getf("RefrigeratorModel.LidarCoverageN0",     60.0f);
-    out.lidar_coverage_ang_power = getf("RefrigeratorModel.LidarCoverageAngPower", 1.0f);
-    out.max_step_m            = getf("RefrigeratorModel.MaxStepM",            1.0f);
-    out.coverage_precision    = getf("RefrigeratorModel.CoveragePrecision",  0.0f);
-    out.coverage_robust_c_m   = getf("RefrigeratorModel.CoverageRobustCM",   0.15f);
-    out.free_space_precision  = getf("RefrigeratorModel.FreeSpacePrecision", 0.0f);
-    out.footprint_moment_precision = getf("RefrigeratorModel.FootprintMomentPrecision", 0.0f);
-    out.footprint_moment_range_per_m = getf("RefrigeratorModel.FootprintMomentRangePerM", 0.03f);
-    out.fe_baseline_adapt_down       = getf("RefrigeratorModel.FeBaselineAdaptDown", 0.05f);
-    out.fe_baseline_adapt_up         = getf("RefrigeratorModel.FeBaselineAdaptUp",   0.005f);
-    out.fe_surprise_smooth           = getf("RefrigeratorModel.FeSurpriseSmooth",    0.10f);
-    out.footprint_moment_motion_gain = getf("RefrigeratorModel.FootprintMomentMotionGain", 0.30f);
-    out.orientation_motion_ref       = getf("RefrigeratorModel.OrientationMotionRef", 0.50f);
+    out.lidar_precision      = getf("RefrigeratorModel.LidarPrecision", 0.0f,
+            "per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF");
+    out.lidar_bpearl_precision = getf("RefrigeratorModel.LidarBpearlPrecision", 0.0f,
+            "Low 'bpearl' LiDAR as a SEPARATE per-device ray-set (own origin, occlusion-aware first-hit; sees the legs the high helios grazes over)");
+    out.lidar_robust_c_m     = getf("RefrigeratorModel.LidarRobustCM", 0.05f,
+            "Cauchy scale (m): returns this far off the surface fade out");
+    out.lidar_select_margin_m = getf("RefrigeratorModel.LidarSelectMarginM", 0.10f,
+            "pre-select returns within (birth half-extent + margin), all z up to top");
+    out.lidar_coverage_n0     = getf("RefrigeratorModel.LidarCoverageN0", 60.0f,
+            "LiDAR ray count for FULL weight; fewer → proportionally down-weighted");
+    out.lidar_coverage_ang_power = getf("RefrigeratorModel.LidarCoverageAngPower", 1.0f,
+            "Angular-coverage weighting: precision ×= (1−R)^p, R = mean-resultant length of return bearings about the centre. p=0 disables (flat), p=1 = pure…");
+    out.max_step_m            = getf("RefrigeratorModel.MaxStepM", 1.0f,
+            "THRESHOLD (outlier step guard): a static refrigerator cannot physically move this far in one frame, so a GN step whose centre jump exceeds it is an…");
+    out.coverage_precision    = getf("RefrigeratorModel.CoveragePrecision", 0.0f,
+            "Grow-only pull from on-plane mask points the mixture ceded to clutter, so a model under-covering a large mask grows to explain it (fixes…");
+    out.coverage_robust_c_m   = getf("RefrigeratorModel.CoverageRobustCM", 0.15f,
+            "Cauchy scale (m): on-plane points this far outside fade out (stray-point guard)");
+    out.free_space_precision  = getf("RefrigeratorModel.FreeSpacePrecision", 0.0f,
+            "The counter-force that BOUNDS coverage");
+    out.footprint_moment_precision = getf("RefrigeratorModel.FootprintMomentPrecision", 0.0f,
+            "Measures (w,h,yaw) from the top-band cloud's 2D inertia tensor and folds it as a linear Gaussian factor — the escape from the clutter-trap that…");
+    out.footprint_moment_range_per_m = getf("RefrigeratorModel.FootprintMomentRangePerM", 0.03f,
+            "GENTLE range term (m per m of range): shared per-frame moment variance grows as (this·range)²");
+    out.fe_baseline_adapt_down       = getf("RefrigeratorModel.FeBaselineAdaptDown", 0.05f,
+            "Baseline EMA rates: DOWN fast (consolidate a better fit), UP slow (a sustained mismatch — the refrigerator moved — stays surprising long enough to…");
+    out.fe_baseline_adapt_up         = getf("RefrigeratorModel.FeBaselineAdaptUp", 0.005f,
+            "");
+    out.fe_surprise_smooth           = getf("RefrigeratorModel.FeSurpriseSmooth", 0.10f,
+            "");
+    out.footprint_moment_motion_gain = getf("RefrigeratorModel.FootprintMomentMotionGain", 0.30f,
+            "Ego-motion (motion_dotd) coupling: moment variance grows by (this·motion_dotd)² so a 'going-away/rotation' frame (degraded/split mask) can't reshape…");
+    out.orientation_motion_ref       = getf("RefrigeratorModel.OrientationMotionRef", 0.50f,
+            "");
 
     // ─── Appearance-based FRONT (door) detection + yaw resolver ────────────────
-    out.front_detect_enabled   = getb("RefrigeratorConcept.FrontDetectEnabled",   true);
-    out.contour_check_enabled  = getb("RefrigeratorConcept.ContourCheckEnabled", true);
-    out.front_min_face_area_px = getf("RefrigeratorConcept.FrontMinFaceAreaPx",    900.0f);
-    out.front_min_confidence   = getf("RefrigeratorConcept.FrontMinConfidence",    0.10f);
-    out.front_log              = getb("RefrigeratorConcept.FrontLog",              false);
-    out.obliquity_moment_gain        = getf("RefrigeratorModel.ObliquityMomentGain", 0.0f);
-    out.footprint_moment_completeness_gain = getf("RefrigeratorModel.FootprintMomentCompletenessGain", 0.0f);
-    out.footprint_moment_min_completeness  = getf("RefrigeratorModel.FootprintMomentMinCompleteness",  0.02f);
+    out.front_detect_enabled   = getb("RefrigeratorConcept.FrontDetectEnabled", true,
+            "master switch: subscribe to ZED RGB + run detect_front/resolve_front");
+    out.contour_check_enabled  = getb("RefrigeratorConcept.ContourCheckEnabled", true,
+            "The classifier-free existence channel: score the believed silhouette against the RGB's own gradient and against the DEPTH plane's agreement with the…");
+    out.front_min_face_area_px = getf("RefrigeratorConcept.FrontMinFaceAreaPx", 900.0f,
+            "min projected face area (px²) to score for door-ness");
+    out.front_min_confidence   = getf("RefrigeratorConcept.FrontMinConfidence", 0.10f,
+            "min door-ness margin (max−second)/(max+eps) for detect_front to emit");
+    out.front_log              = getb("RefrigeratorConcept.FrontLog", false,
+            "log each adopted door-mode flip / accepted cue");
+    out.obliquity_moment_gain        = getf("RefrigeratorModel.ObliquityMomentGain", 0.0f,
+            "Grazing-view yaw stability (CSV rogue-rotation fix)");
+    out.footprint_moment_completeness_gain = getf("RefrigeratorModel.FootprintMomentCompletenessGain", 0.0f,
+            "footprint_moment_completeness_gain / _min_completeness: forwarded to RefrigeratorBeliefParams — inflate the moment measurement variance as the…");
+    out.footprint_moment_min_completeness  = getf("RefrigeratorModel.FootprintMomentMinCompleteness", 0.02f,
+            "clamp floor for 1/completeness in the term above (caps the inflation of");
 
     // ─── Existence / removal ───────────────────────────────────────────────────
-    out.existence_removal_enabled = getb("RefrigeratorModel.ExistenceRemovalEnabled", false);
-    out.existence_removal_prob    = getf("RefrigeratorModel.ExistenceRemovalProb",    0.12f);
-    out.existence_frame_correlation = getf("RefrigeratorModel.ExistenceFrameCorrelation", 0.0f);
-    out.existence_logodds_max     = getf("RefrigeratorModel.ExistenceLogoddsMax",     4.0f);
-    out.existence_detection_prob  = getf("RefrigeratorModel.ExistenceDetectionProb",  0.85f);
-    out.existence_clutter_prob    = getf("RefrigeratorModel.ExistenceClutterProb",    0.05f);
-    out.existence_sensor_sigma_m  = getf("RefrigeratorModel.ExistenceSensorSigmaM",   0.03f);
-    out.existence_remove_frames   = geti("RefrigeratorModel.ExistenceRemoveFrames",   15);
-    out.existence_absence_range_ref_m = getf("RefrigeratorModel.ExistenceAbsenceRangeRefM", 2.5f);
-    out.existence_absence_range_power = getf("RefrigeratorModel.ExistenceAbsenceRangePower", 2.0f);
-    out.existence_verify_surprise     = getf("RefrigeratorModel.ExistenceVerifySurprise",   20.0f);
-    out.verify_surprise_smooth        = getf("RefrigeratorModel.VerifySurpriseSmooth",       0.10f);
-    out.existence_verify_gain         = getf("RefrigeratorModel.ExistenceVerifyGain",       5.0f);
+    out.existence_removal_enabled = getb("RefrigeratorModel.ExistenceRemovalEnabled", false,
+            "Each cycle carve the LiDAR sweep against the refrigerator footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob");
+    out.existence_removal_prob    = getf("RefrigeratorModel.ExistenceRemovalProb", 0.12f,
+            "decision boundary: remove when L < log(p/(1−p))");
+    out.existence_frame_correlation = getf("RefrigeratorModel.ExistenceFrameCorrelation", 0.0f,
+            "rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and the default); opt in only with a value MEASURED from…");
+    out.existence_logodds_max     = getf("RefrigeratorModel.ExistenceLogoddsMax", 4.0f,
+            "clamp |L| so evidence stays finite AND recoverable");
+    out.existence_detection_prob  = getf("RefrigeratorModel.ExistenceDetectionProb", 0.85f,
+            "P(beam through OCCUPIED footprint returns from it)");
+    out.existence_clutter_prob    = getf("RefrigeratorModel.ExistenceClutterProb", 0.05f,
+            "P(beam through EMPTY footprint returns anyway) — spurious rate");
+    out.existence_sensor_sigma_m  = getf("RefrigeratorModel.ExistenceSensorSigmaM", 0.03f,
+            "LiDAR range σ (m) for the soft occ/free surface split");
+    out.existence_remove_frames   = geti("RefrigeratorModel.ExistenceRemoveFrames", 15,
+            "debounce: require the removal decision this many consecutive");
+    out.existence_absence_range_ref_m = getf("RefrigeratorModel.ExistenceAbsenceRangeRefM", 2.5f,
+            "range (m) below which absence is trusted at full weight");
+    out.existence_absence_range_power = getf("RefrigeratorModel.ExistenceAbsenceRangePower", 2.0f,
+            "decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables");
+    out.existence_verify_surprise     = getf("RefrigeratorModel.ExistenceVerifySurprise", 20.0f,
+            "decayed go-verify surprise (un-resolvable absence) above which");
+    out.verify_surprise_smooth        = getf("RefrigeratorModel.VerifySurpriseSmooth", 0.10f,
+            "EMA weight of the go-verify surprise accumulator (new sample");
+    out.existence_verify_gain         = getf("RefrigeratorModel.ExistenceVerifyGain", 5.0f,
+            "epistemic gain (nats) a wants_verification refrigerator gets, so the");
 
     std::print("refrigerator_concept: configuration loaded.\n");
     // Peripheral (ricoh) existence confirmation — see refrigerator_config.h. OFF by default.
-    out.ricoh_confirm_enabled        = getb("RefrigeratorConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
-    out.ricoh_confirm_detection_prob = getf("RefrigeratorConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
-    out.ricoh_confirm_clutter_prob   = getf("RefrigeratorConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+    out.ricoh_confirm_enabled        = getb("RefrigeratorConcept.RicohConfirmEnabled", out.ricoh_confirm_enabled,
+            "RefrigeratorConcept.RicohConfirmEnabled");
+    out.ricoh_confirm_detection_prob = getf("RefrigeratorConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob,
+            "RefrigeratorConcept.RicohConfirmDetectionProb");
+    out.ricoh_confirm_clutter_prob   = getf("RefrigeratorConcept.RicohConfirmClutterProb", out.ricoh_confirm_clutter_prob,
+            "RefrigeratorConcept.RicohConfirmClutterProb");
 
     // ── THE DECLARED VERTICAL SPAN, ADOPTED (shared: rc::manifest::adopt_span) ─────────────────────
     // The manifest states the anchoring ONCE, as a fact about the object, and the span is derived from it —

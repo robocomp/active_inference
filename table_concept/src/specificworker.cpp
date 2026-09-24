@@ -29,6 +29,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
@@ -79,7 +81,13 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 
     load_config(configLoader);
 
-    const int period = configLoader.get<int>("Period.Compute");
+    // The LAST config read this agent makes, so the effective-config table is published just after
+    // it. Registered rather than read raw so it appears in that table like every other key; req()
+    // keeps the old throw-if-missing behaviour, since a period is not something to default.
+    int period = 0;
+    rc::cfg::Reader reader(configLoader, "table_concept");
+    reader.req("Period.Compute", period,
+               "GRAFCET step period (ms) for every state of this agent's state machine");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this),
@@ -308,6 +316,31 @@ void SpecificWorker::initialize()
 
     // Standalone Qt dashboard + evidence-monitor windows (belief plots + per-instance snapshot).
     build_dashboard();
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - sixteen confident false positives from the one
+    // check whose whole value is that it does not cry wolf. The rule is general: publish when the
+    // LAST reader has run, which is the end of startup, not the end of parsing. (An agent with
+    // [Platform.*]/[Scenario.*] overlays must also publish after those are applied.)
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() is a CLAIM - that every config key this agent reads goes through a Reader -
+    // and it ARMS the unread sweep. It became true once the shared readers
+    // (common/agent_presence_monitor, concept_manifest::resolve) were migrated; before that the sweep
+    // reported INCONCLUSIVE rather than an empty list, because an empty list reads as a clean bill of
+    // health. common/config_report/check_registry_complete.sh table_concept is the grep that stops the claim
+    // from rotting into a lie - re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("table_concept");
+    rc::cfg::Reader(configLoader, "table_concept").publish("etc/config_effective.csv");
 }
 
 // ─── Main compute loop ───────────────────────────────────────────────────────────────────────────
@@ -370,7 +403,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     // place-only key would suppress a genuine object placed there from every direction.
     // Observer pose → view bearing. SHARED (common/phantom_log/observer_pose.h): the classifier failure is
     // VIEWPOINT-dependent, so the false-alarm field is keyed on (world cell × bearing), never place alone.
-    rc::history::note_observer(e, inner_eigen_.get(), x, y);
+    rc::history::note_observer(e, *G, inner_eigen_.get(), x, y);
     if (inst)   // death: carry the existence-channel state that decides whether this was a CONFIDENT kill
     {
         e.age_cycles    = inst->processed_cycles;

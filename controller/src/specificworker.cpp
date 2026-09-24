@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <print>
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "specificworker.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
@@ -46,7 +47,12 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 			hibernationChecker.start(500);
 		#endif
 		
-		const int period = configLoader.get<int>("Period.Compute");
+		// Registered rather than read raw, so the period appears in the startup table like every
+		// other key. req() keeps the throw-if-missing behaviour: a period is not something to
+		// default silently.
+		int period = 0;
+		rc::cfg::Reader(configLoader, "controller").req("Period.Compute", period,
+		        "GRAFCET step period (ms) for every state of this agent's state machine");
 
 		// State machine: Compute → Waiting → Operating → Degraded → Waiting
 		states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
@@ -567,6 +573,27 @@ void SpecificWorker::initialize()
 	// Start the control thread last, once all dependencies are wired up.
 	control_running_.store(true, std::memory_order_release);
 	control_thread_ = std::thread(&SpecificWorker::control_loop, this);
+
+	// ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+	//
+	// ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+	// are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+	// keys when the coordinator is configured, further down this same function. Publishing before
+	// that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+	// one of them "in the file, read by nothing" - confident false positives from the one check whose
+	// whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+	// run, which is the end of startup, not the end of parsing.
+	//
+	// Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+	// default - and writes the full table to etc/config_effective.csv, this run's own record of which
+	// arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+	//
+	// declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+	// ARMS the unread sweep; check_registry_complete.sh controller is the grep that keeps the claim
+	// honest. Re-run it whenever a config read is added.
+	rc::cfg::exempt_generated_prefixes();
+	rc::cfg::registry().declare_complete("controller");
+	rc::cfg::Reader(configLoader, "controller").publish("etc/config_effective.csv");
 }
 
 
@@ -838,146 +865,256 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 /////////////////////////////////////////////////////////////////
 void SpecificWorker::load_params()
 {
-	load_optional_cast<double>("Planner.CellSize", params.planner_cell_size_m);
+	// Every read registers its key, its CODE DEFAULT and a one-line description, so the startup
+	// table can say where each value came from - not just what it is.
+	rc::cfg::Reader cfgr(configLoader, "controller");
+	cfgr.opt_cast<double>("Planner.CellSize", params.planner_cell_size_m,
+         "Planning grid resolution");
 	// The mesh's frame, not the robot's shape — see ControllerParams::robot_mesh_yaw_deg.
-	load_optional_cast<double>("Planner.RobotMeshYawDeg", params.robot_mesh_yaw_deg);
+	cfgr.opt_cast<double>("Planner.RobotMeshYawDeg", params.robot_mesh_yaw_deg,
+         "Degrees to rotate the robot's mesh into the ROBOT frame (x right, y FORWARD)");
 	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,
 	// which is a hard admissibility margin — this one never makes a passable gap unplannable.
 	// ★[Planner], not [Controller]: these sit with CellSize, beside the thing they configure.
-	load_optional_cast<double>("Planner.ClearanceWeight", params.planner_clearance_weight);
-	load_optional_cast<double>("Planner.ClearancePref", params.planner_clearance_pref_m);
-	load_optional("Mission.LibraryPath", missions_path_);
-	load_optional("Mission.MetricsCsvPath", params.mission_csv_path);
-	load_optional("Mission.RunDir", params.mission_run_dir);
-	load_optional_cast<double>("Controller.ComfortStandoff", params.comfort_standoff_m);
+	cfgr.opt_cast<double>("Planner.ClearanceWeight", params.planner_clearance_weight,
+         "A* CLEARANCE PREFERENCE — see GridPlanner::Params::clearance_weight");
+	cfgr.opt_cast<double>("Planner.ClearancePref", params.planner_clearance_pref_m,
+         "");
+	cfgr.opt("Mission.LibraryPath", missions_path_,
+         "Where recorded missions live");
+	cfgr.opt("Mission.MetricsCsvPath", params.mission_csv_path,
+         "One row of continuous trajectory statistics per completed run is appended here");
+	cfgr.opt("Mission.RunDir", params.mission_run_dir,
+         "One JSON per completed run, under <dir>/<mission>/");
+	cfgr.opt_cast<double>("Controller.ComfortStandoff", params.comfort_standoff_m,
+         "Preferred standoff BEYOND the robot's real extent, handed to the MPPI as d_safe");
 	// Grounded EFE affordance selection (common/affordance_manager): nav-cost weight (nats/m) +
 	// commitment hysteresis (nats). G = λ_cost·dist − epistemic_gain; the room/table choice is now
 	// in one information currency instead of a hard table>room priority.
 	{
 		double aff_lambda_cost = 0.2, aff_switch_margin = 0.5, aff_room_gain_scale = 0.35;
-		load_optional_cast<double>("Controller.AffordanceLambdaCost", aff_lambda_cost);
-		load_optional_cast<double>("Controller.AffordanceSwitchMargin", aff_switch_margin);
-		load_optional_cast<double>("Controller.AffordanceRoomGainScale", aff_room_gain_scale);
+		cfgr.opt_cast<double>("Controller.AffordanceLambdaCost", aff_lambda_cost,
+          "grounded EFE selection nav-cost weight (nats per metre): G = λ·dist − ΔH");
+		cfgr.opt_cast<double>("Controller.AffordanceSwitchMargin", aff_switch_margin,
+          "commitment hysteresis (nats): held affordance must be beaten by this much to switch");
+		cfgr.opt_cast<double>("Controller.AffordanceRoomGainScale", aff_room_gain_scale,
+          "so a lost robot in an empty room is unaffected. 1.0 restores the old behaviour");
 		affordance_manager_.set_selection_params(static_cast<float>(aff_lambda_cost),
 		                                         static_cast<float>(aff_switch_margin));
 		affordance_manager_.set_room_gain_scale(static_cast<float>(aff_room_gain_scale));
 	}
-	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
-	load_optional_cast<double>("Controller.MaxLateralAccel", params.max_lateral_accel_mps2);
-	load_optional_cast<double>("Controller.SharpTurnSlowdown", params.sharp_turn_slowdown);
-	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
-	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
-	load_optional_cast<double>("Controller.PoseUncertaintyCoupling", params.pose_uncertainty_coupling);
-	load_optional("Controller.TrackerUsesLatestPose", params.tracker_uses_latest_pose);
+	cfgr.opt_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps,
+         "");
+	cfgr.opt_cast<double>("Controller.MaxLateralAccel", params.max_lateral_accel_mps2,
+         "Lateral-acceleration budget");
+	cfgr.opt_cast<double>("Controller.SharpTurnSlowdown", params.sharp_turn_slowdown,
+         "Measured (tools/tracker_sim --brake): from |kappa| = 0.3 1/m upward the ROTATION limit h*w_max/kappa_avg is the only thing setting the speed — the…");
+	cfgr.opt_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps,
+         "authority left for the feedback). If deviation rises instead, this is the variable to put back");
+	cfgr.opt_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m,
+         "THE standoff. Exactly one number now expresses 'how much room do we want beyond the robot's actual shape', replacing six independent C-space margins…");
+	cfgr.opt_cast<double>("Controller.PoseUncertaintyCoupling", params.pose_uncertainty_coupling,
+         "1 = the limiter as configured; 0 = it computes and reports but never restrains; 0.5 = half");
+	cfgr.opt("Controller.TrackerUsesLatestPose", params.tracker_uses_latest_pose,
+         "false = the previous behaviour, one pose for everything, pinned to the last LiDAR stamp");
 	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,
 	// which is a hard admissibility margin — this one never makes a passable gap unplannable.
 
-	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
-	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
-	load_optional_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms);
-	load_optional_cast<double>("Controller.ControlPollMs", params.control_poll_ms);
-	load_optional_cast<double>("Controller.CommandFreshnessTauMs", params.command_freshness_tau_ms);
-	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
-	load_optional("Transforms.rt_twist_compensation", params.rt_twist_compensation);
-	load_optional("Transforms.overlay_csv_path", params.overlay_csv_path);
-	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
-	load_optional("Lidar.HeliosName", params.lidar_helios_name);
-	load_optional("Lidar.BpearlName", params.lidar_bpearl_name);
-	load_optional("Lidar.StallTimeoutMs", params.lidar_stall_timeout_ms);
-	load_optional("Target.EdgeType", params.target_edge_type);
-	load_optional_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m);
-	load_optional_cast<double>("Controller.PoseXYStdStop", params.pose_xy_std_stop_m);
-	load_optional_cast<double>("Controller.PoseThetaStdSlow", params.pose_theta_std_slow_rad);
-	load_optional_cast<double>("Controller.PoseThetaStdStop", params.pose_theta_std_stop_rad);
-	load_optional_cast<double>("Controller.MinAdvSpeedScale", params.min_adv_speed_scale);
-	load_optional_cast<double>("Controller.MinRotSpeedScale", params.min_rot_speed_scale);
-	load_optional_cast<double>("Controller.PosePredictionHorizon", params.uncertainty_prediction_horizon_s);
-	load_optional_cast<double>("Controller.PoseXYStdGrowthPerMps", params.pose_xy_std_growth_per_mps);
-	load_optional_cast<double>("Controller.PoseThetaStdGrowthPerRps", params.pose_theta_std_growth_per_rps);
-	load_optional_cast<double>("Controller.AdvRotationCouplingExponent", params.adv_rotation_coupling_exponent);
-	load_optional_cast<double>("Controller.TemporaryObstacleFrontDistance", params.temporary_obstacle_front_distance_m);
-	load_optional_cast<double>("Controller.TemporaryObstacleHalfWidth", params.temporary_obstacle_half_width_m);
-	load_optional_cast<double>("Controller.TemporaryObstacleClusterMargin", params.temporary_obstacle_cluster_margin_m);
-	load_optional_cast<double>("Controller.TemporaryObstaclePadding", params.temporary_obstacle_padding_m);
-	load_optional_cast<double>("Controller.TemporaryObstacleOcclusionDepth", params.temporary_obstacle_occlusion_depth_m);
-	if (configLoader.exists("Controller.TemporaryObstacleRobustLoss"))
+	cfgr.opt_cast<double>("Controller.PosGain", params.pos_gain,
+         "");
+	cfgr.opt_cast<double>("Controller.RotGain", params.rot_gain,
+         "");
+	cfgr.opt_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms,
+         "The base is commanded from a dedicated thread at this period instead of from compute(), whose measured cadence was median 108 ms but mean 212, p99…");
+	cfgr.opt_cast<double>("Controller.ControlPollMs", params.control_poll_ms,
+         "false = the pipeline runs when the presence state machine's on_operating_loop hook sets a flag, i.e. at Period.Compute on the GUI THREAD");
+	cfgr.opt_cast<double>("Controller.CommandFreshnessTauMs", params.command_freshness_tau_ms,
+         "Authority of a command decays as 1/(1+(age/τ)²) so a stalled planner coasts to a stop rather than driving blind on a stale command. τ well above the…");
+	cfgr.opt("Transforms.interpolate_rt", params.interpolate_rt,
+         "");
+	cfgr.opt("Transforms.rt_twist_compensation", params.rt_twist_compensation,
+         "Dead-reckon the DISPLAYED lidar cloud + robot icon forward from the last lidar timestamp to 'now' using the measured base velocity, so the overlay…");
+	cfgr.opt("Transforms.overlay_csv_path", params.overlay_csv_path,
+         "When non-empty, append per-cycle overlay-lag diagnostics to this CSV (for plotting the lag / velocity / RT-staleness evolution)");
+	cfgr.opt("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points,
+         "");
+	cfgr.opt("Lidar.HeliosName", params.lidar_helios_name,
+         "Per-device high/low LiDAR planes: points arrive in the DEVICE frame (metres) and are transformed to the robot frame via each sensor's static mount RT…");
+	cfgr.opt("Lidar.BpearlName", params.lidar_bpearl_name,
+         "");
+	cfgr.opt("Lidar.StallTimeoutMs", params.lidar_stall_timeout_ms,
+         "Stream watchdog: if no fresh LiDAR frame arrives for this long while operating, the controller enters a local emergency hold (stops the robot, waits…");
+	cfgr.opt("Target.EdgeType", params.target_edge_type,
+         "");
+	cfgr.opt_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m,
+         "LOWEST while sigma is at its highest) — i.e. a flatter minimum, which is geometry, not odometry");
+	cfgr.opt_cast<double>("Controller.PoseXYStdStop", params.pose_xy_std_stop_m,
+         "ramp width held at 0.04, as before");
+	cfgr.opt_cast<double>("Controller.PoseThetaStdSlow", params.pose_theta_std_slow_rad,
+         "0.055 restores the 'theta is never the binding term' property the 08-02 measurement relied on");
+	cfgr.opt_cast<double>("Controller.PoseThetaStdStop", params.pose_theta_std_stop_rad,
+         "");
+	cfgr.opt_cast<double>("Controller.MinAdvSpeedScale", params.min_adv_speed_scale,
+         "");
+	cfgr.opt_cast<double>("Controller.MinRotSpeedScale", params.min_rot_speed_scale,
+         "");
+	cfgr.opt_cast<double>("Controller.PosePredictionHorizon", params.uncertainty_prediction_horizon_s,
+         "");
+	cfgr.opt_cast<double>("Controller.PoseXYStdGrowthPerMps", params.pose_xy_std_growth_per_mps,
+         "says nothing about a feature-poor corridor or a localisation loss, which is what this term guards");
+	cfgr.opt_cast<double>("Controller.PoseThetaStdGrowthPerRps", params.pose_theta_std_growth_per_rps,
+         "");
+	cfgr.opt_cast<double>("Controller.AdvRotationCouplingExponent", params.adv_rotation_coupling_exponent,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleFrontDistance", params.temporary_obstacle_front_distance_m,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleHalfWidth", params.temporary_obstacle_half_width_m,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleClusterMargin", params.temporary_obstacle_cluster_margin_m,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstaclePadding", params.temporary_obstacle_padding_m,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleOcclusionDepth", params.temporary_obstacle_occlusion_depth_m,
+         "");
+	// Empty default = "the config is silent, keep the built-in loss", which is what the exists()
+	// guard meant; the difference is that the key now appears in the startup table either way.
+	if (const auto loss_name = cfgr.s("Controller.TemporaryObstacleRobustLoss", "",
+	        "robust loss for temporary-obstacle residuals (huber | cauchy | ...); empty = keep the built-in");
+	    not loss_name.empty())
 	{
-		const auto loss_name = configLoader.get<std::string>("Controller.TemporaryObstacleRobustLoss");
 		if (const auto loss_type = robust_loss_type_from_string(loss_name); loss_type.has_value())
 			params.temporary_obstacle_robust_loss = loss_type.value();
 		else
 			qWarning() << "controller: unknown temporary obstacle robust loss" << loss_name.c_str() << "- using huber";
 	}
-	load_optional_cast<double>("Controller.TemporaryObstacleRobustLossScale", params.temporary_obstacle_robust_loss_scale_m);
-	load_optional("Controller.TemporaryObstacleMinPoints", params.temporary_obstacle_min_points);
-	load_optional("Controller.TemporaryObstacleHistoryScans", params.temporary_obstacle_history_scans);
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleRobustLossScale", params.temporary_obstacle_robust_loss_scale_m,
+         "");
+	cfgr.opt("Controller.TemporaryObstacleMinPoints", params.temporary_obstacle_min_points,
+         "earlier; the tracker's existence log-odds filter prunes transient false positives");
+	cfgr.opt("Controller.TemporaryObstacleHistoryScans", params.temporary_obstacle_history_scans,
+         "");
 	int temporary_obstacle_ttl_ms = static_cast<int>(params.temporary_obstacle_ttl_ms);
-	load_optional("Controller.TemporaryObstacleTTLms", temporary_obstacle_ttl_ms);
+	cfgr.opt("Controller.TemporaryObstacleTTLms", temporary_obstacle_ttl_ms,
+         "");
 	params.temporary_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, temporary_obstacle_ttl_ms));
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceInitLogOdds", params.temporary_obstacle_existence_init_log_odds);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceMinLogOdds", params.temporary_obstacle_existence_min_log_odds);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceMaxLogOdds", params.temporary_obstacle_existence_max_log_odds);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceRemoveThresholdLogOdds", params.temporary_obstacle_existence_remove_threshold_log_odds);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceObservationBias", params.temporary_obstacle_existence_observation_bias);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceSupportGain", params.temporary_obstacle_existence_support_gain);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceRememberedGain", params.temporary_obstacle_existence_remembered_gain);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceWeakMissPenalty", params.temporary_obstacle_existence_weak_miss_penalty);
-	load_optional_cast<double>("Controller.TemporaryObstacleExistenceAbsencePenalty", params.temporary_obstacle_existence_absence_penalty);
-	load_optional_cast<double>("Controller.TemporaryObstacleMinHeight", params.temporary_obstacle_min_height_m);
-	load_optional_cast<double>("Controller.TemporaryObstacleMaxHeight", params.temporary_obstacle_max_height_m);
-	load_optional_cast<double>("Controller.UnmodelledScanMinZ", params.unmodelled_scan_min_z_m);
-	load_optional_cast<double>("Controller.UnmodelledScanMaxZ", params.unmodelled_scan_max_z_m);
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceInitLogOdds", params.temporary_obstacle_existence_init_log_odds,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceMinLogOdds", params.temporary_obstacle_existence_min_log_odds,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceMaxLogOdds", params.temporary_obstacle_existence_max_log_odds,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceRemoveThresholdLogOdds", params.temporary_obstacle_existence_remove_threshold_log_odds,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceObservationBias", params.temporary_obstacle_existence_observation_bias,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceSupportGain", params.temporary_obstacle_existence_support_gain,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceRememberedGain", params.temporary_obstacle_existence_remembered_gain,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceWeakMissPenalty", params.temporary_obstacle_existence_weak_miss_penalty,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceAbsencePenalty", params.temporary_obstacle_existence_absence_penalty,
+         "");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleMinHeight", params.temporary_obstacle_min_height_m,
+         "LiDAR height band (metres, robot frame ≈ height above floor since robot_from_lidar is identity and the source cloud is already floor-referenced)");
+	cfgr.opt_cast<double>("Controller.TemporaryObstacleMaxHeight", params.temporary_obstacle_max_height_m,
+         "");
+	cfgr.opt_cast<double>("Controller.UnmodelledScanMinZ", params.unmodelled_scan_min_z_m,
+         "Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor)");
+	cfgr.opt_cast<double>("Controller.UnmodelledScanMaxZ", params.unmodelled_scan_max_z_m,
+         "");
 	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
-	load_optional("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled);
+	cfgr.opt("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled,
+         "Controller-side LiDAR obstacle CREATION (reactive blockage/stall temp obstacles + refresh)");
 
 	// Rotate in place at the goal to face an affordance's commanded yaw (false ⇒ arrive on position
 	// only, never orient). See ControllerParams::goal_facing_yaw_enabled.
-	load_optional("Controller.GoalFacingYawEnabled", params.goal_facing_yaw_enabled);
-	load_optional_cast<double>("Controller.ObjectSigmaInflationK", params.object_sigma_inflation_k);
-	load_optional_cast<double>("Controller.ObjectSigmaInflationMaxM", params.object_sigma_inflation_max_m);
+	cfgr.opt("Controller.GoalFacingYawEnabled", params.goal_facing_yaw_enabled,
+         "Honour an affordance's commanded facing yaw at arrival. true = the follower rotates in place at the goal until it faces target.yaw_rad, and only then…");
+	cfgr.opt_cast<double>("Controller.ObjectSigmaInflationK", params.object_sigma_inflation_k,
+         "Nine concept agents publish an rt_covariance on each object's RT edge — a 6x6 row-major SE3 covariance [x,y,z,rx,ry,rz] — and until now the…");
+	cfgr.opt_cast<double>("Controller.ObjectSigmaInflationMaxM", params.object_sigma_inflation_max_m,
+         "Hard ceiling on that growth, in metres");
 
 	// Affordance servo ("lock-on") executor — HOW only; WHAT/WHEN is per-affordance (contract).
-	load_optional("Controller.LockOnEnabled", params.lockon_enabled);
-	load_optional_cast<double>("Controller.LockOnSweepSpeedMps", params.lockon_sweep_speed_mps);
-	load_optional_cast<double>("Controller.LockOnSweepRangeM",   params.lockon_sweep_range_m);
-	load_optional_cast<double>("Controller.LockOnOffsetTol",    params.lockon_offset_tol);
-	load_optional_cast<double>("Controller.LockOnKYaw",         params.lockon_k_yaw);
-	load_optional_cast<double>("Controller.LockOnMaxYawRps",    params.lockon_max_yaw_rps);
-	load_optional_cast<double>("Controller.LockOnDitherYawRps", params.lockon_dither_yaw_rps);
-	load_optional_cast<double>("Controller.LockOnSettleMs",     params.lockon_settle_ms);
-	load_optional_cast<double>("Controller.LockOnSettleMaxMs",  params.lockon_settle_max_ms);
-	load_optional("Controller.LockOnSettleNewFrames",           params.lockon_settle_new_frames);
-	load_optional_cast<double>("Controller.LockOnStepMs",       params.lockon_step_ms);
-	load_optional("Controller.LockOnMaxAttempts",              params.lockon_max_attempts);
-	load_optional_cast<double>("Controller.AffordanceDwellMs", params.affordance_dwell_ms);
-	load_optional("Controller.AffordanceDwellMaskHits",        params.affordance_dwell_mask_hits);
-	load_optional_cast<double>("Controller.AffordanceDwellMaxMs", params.affordance_dwell_max_ms);
-	load_optional_cast<double>("Controller.AffordanceApproachRecheckM", params.affordance_approach_recheck_m);
-	load_optional("Controller.CameraNodeName",                 params.camera_node_name);
+	cfgr.opt("Controller.LockOnEnabled", params.lockon_enabled,
+         "Affordance servo ('lock-on') executor — the HOW (gains/caps/timing)");
+	cfgr.opt_cast<double>("Controller.LockOnSweepSpeedMps", params.lockon_sweep_speed_mps,
+         "PRIMARY: distance-sweep advance speed");
+	cfgr.opt_cast<double>("Controller.LockOnSweepRangeM", params.lockon_sweep_range_m,
+         "oscillate ± this far from the arrival pose");
+	cfgr.opt_cast<double>("Controller.LockOnOffsetTol", params.lockon_offset_tol,
+         "|normalized centre offset| deadband for yaw centring (secondary)");
+	cfgr.opt_cast<double>("Controller.LockOnKYaw", params.lockon_k_yaw,
+         "rps per unit centre error");
+	cfgr.opt_cast<double>("Controller.LockOnMaxYawRps", params.lockon_max_yaw_rps,
+         "tiny caps: micro-search, not navigation");
+	cfgr.opt_cast<double>("Controller.LockOnDitherYawRps", params.lockon_dither_yaw_rps,
+         "");
+	cfgr.opt_cast<double>("Controller.LockOnSettleMs", params.lockon_settle_ms,
+         "MINIMUM still-window before a measurement");
+	cfgr.opt_cast<double>("Controller.LockOnSettleMaxMs", params.lockon_settle_max_ms,
+         "bound on waiting for post-stop evidence");
+	cfgr.opt("Controller.LockOnSettleNewFrames", params.lockon_settle_new_frames,
+         "producer frames to wait for after the base stops");
+	cfgr.opt_cast<double>("Controller.LockOnStepMs", params.lockon_step_ms,
+         "duration of one sweep step (18 mm at the speed above)");
+	cfgr.opt("Controller.LockOnMaxAttempts", params.lockon_max_attempts,
+         "");
+	cfgr.opt_cast<double>("Controller.AffordanceDwellMs", params.affordance_dwell_ms,
+         "Hold still for this long after finishing one affordance before the planner is allowed to select the next");
+	cfgr.opt("Controller.AffordanceDwellMaskHits", params.affordance_dwell_mask_hits,
+         "A fixed dwell is a bet that the mask will arrive inside it");
+	cfgr.opt_cast<double>("Controller.AffordanceDwellMaxMs", params.affordance_dwell_max_ms,
+         "BOUND on the whole wait");
+	cfgr.opt_cast<double>("Controller.AffordanceApproachRecheckM", params.affordance_approach_recheck_m,
+         "The standpoint IS re-tested every cycle — but only against the planner grid, whose occupancy comes from beliefs that decay");
+	cfgr.opt("Controller.CameraNodeName", params.camera_node_name,
+         "The camera node whose rgb media descriptor backs the affordance panel's picture");
 
 	// Physical-stuck detection + reverse-and-turn escape (see ControllerParams).
-	load_optional("Controller.StuckRecoveryEnabled",            params.stuck_recovery_enabled);
-	load_optional_cast<double>("Controller.StuckCmdLinEps",     params.stuck_cmd_lin_eps);
-	load_optional_cast<double>("Controller.StuckCmdRotEps",     params.stuck_cmd_rot_eps);
-	load_optional_cast<double>("Controller.StuckMeasLinEps",    params.stuck_meas_lin_eps);
-	load_optional_cast<double>("Controller.StuckMeasRotEps",    params.stuck_meas_rot_eps);
-	load_optional_cast<double>("Controller.StuckSlipRatio",     params.stuck_slip_ratio);
-	load_optional_cast<double>("Controller.StuckConfirmMs",     params.stuck_confirm_ms);
-	load_optional_cast<double>("Controller.EscapeAdvSpeedMps",  params.escape_adv_speed_mps);
-	load_optional_cast<double>("Controller.EscapeRotSpeedRps",  params.escape_rot_speed_rps);
-	load_optional_cast<double>("Controller.EscapeDistanceM",    params.escape_distance_m);
-	load_optional_cast<double>("Controller.EscapeMaxMs",        params.escape_max_ms);
-	load_optional_cast<double>("Controller.EscapeSideProbeM",   params.escape_side_probe_m);
-	load_optional_cast<double>("Controller.EscapeRearProbeM",   params.escape_rear_probe_m);
-	load_optional_cast<double>("Controller.EscapeRearMinM",     params.escape_rear_min_m);
-	load_optional_cast<double>("Controller.StuckVirtualObstacleRadiusM",  params.stuck_virtual_obstacle_radius_m);
-	load_optional_cast<double>("Controller.StuckVirtualObstacleForwardM", params.stuck_virtual_obstacle_forward_m);
+	cfgr.opt("Controller.StuckRecoveryEnabled", params.stuck_recovery_enabled,
+         "Physical-WEDGE detection + reverse-and-turn escape");
+	cfgr.opt_cast<double>("Controller.StuckCmdLinEps", params.stuck_cmd_lin_eps,
+         "m/s — LEGACY (no longer gates detect_stuck; kept for config back-compat)");
+	cfgr.opt_cast<double>("Controller.StuckCmdRotEps", params.stuck_cmd_rot_eps,
+         "rad/s — LEGACY (see above)");
+	cfgr.opt_cast<double>("Controller.StuckMeasLinEps", params.stuck_meas_lin_eps,
+         "m/s — LEGACY (base-speed gate removed; kept for config back-compat)");
+	cfgr.opt_cast<double>("Controller.StuckMeasRotEps", params.stuck_meas_rot_eps,
+         "rad/s — LEGACY (see above)");
+	cfgr.opt_cast<double>("Controller.StuckSlipRatio", params.stuck_slip_ratio,
+         "wedge = measured base speed < this × commanded (prediction error)");
+	cfgr.opt_cast<double>("Controller.StuckConfirmMs", params.stuck_confirm_ms,
+         "sustained command-without-motion before escape fires");
+	cfgr.opt_cast<double>("Controller.EscapeAdvSpeedMps", params.escape_adv_speed_mps,
+         "reverse speed (issued negative)");
+	cfgr.opt_cast<double>("Controller.EscapeRotSpeedRps", params.escape_rot_speed_rps,
+         "slight turn rate during escape");
+	cfgr.opt_cast<double>("Controller.EscapeDistanceM", params.escape_distance_m,
+         "back up at most this far …");
+	cfgr.opt_cast<double>("Controller.EscapeMaxMs", params.escape_max_ms,
+         "… or this long, whichever comes first");
+	cfgr.opt_cast<double>("Controller.EscapeSideProbeM", params.escape_side_probe_m,
+         "lateral ESDF probe for turn-direction choice");
+	cfgr.opt_cast<double>("Controller.EscapeRearProbeM", params.escape_rear_probe_m,
+         "rear ESDF probe distance");
+	cfgr.opt_cast<double>("Controller.EscapeRearMinM", params.escape_rear_min_m,
+         "rear clearance below this → rotate-in-place, no reverse");
+	cfgr.opt_cast<double>("Controller.StuckVirtualObstacleRadiusM", params.stuck_virtual_obstacle_radius_m,
+         "half-extent of the virtual disc");
+	cfgr.opt_cast<double>("Controller.StuckVirtualObstacleForwardM", params.stuck_virtual_obstacle_forward_m,
+         "placed this far ahead of the robot");
 	int stuck_virtual_obstacle_ttl_ms = static_cast<int>(params.stuck_virtual_obstacle_ttl_ms);
-	load_optional("Controller.StuckVirtualObstacleTTLms", stuck_virtual_obstacle_ttl_ms);
+	cfgr.opt("Controller.StuckVirtualObstacleTTLms", stuck_virtual_obstacle_ttl_ms,
+         "lifetime before it ages out");
 	params.stuck_virtual_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, stuck_virtual_obstacle_ttl_ms));
-	load_optional("Controller.ProximityLogEnabled",             params.proximity_log_enabled);
-	load_optional("Controller.ProximityCsvPath",                params.proximity_csv_path);
-	load_optional_cast<double>("Controller.ProximityLogDistance", params.proximity_log_distance_m);
+	cfgr.opt("Controller.ProximityLogEnabled", params.proximity_log_enabled,
+         "Near-obstacle 'black box': when the robot comes within proximity_log_distance_m of a tracked obstacle (or the trajectory ESDF drops that low), append…");
+	cfgr.opt("Controller.ProximityCsvPath", params.proximity_csv_path,
+         "");
+	cfgr.opt_cast<double>("Controller.ProximityLogDistance", params.proximity_log_distance_m,
+         "m; gate distance for logging a row (raw lidar / tracked obstacle / ESDF)");
 
 	world_model_.set_params(&params);
 	obstacle_tracker_.set_params(&params);
@@ -989,32 +1126,52 @@ void SpecificWorker::load_params()
 	// No robot_radius: every body extent is derived from the footprint itself. d_safe is the ONE
 	// standoff knob, and it is comfort only — the hard constraint is the footprint test.
 	path_controller_.params.d_safe = params.comfort_standoff_m;
-	load_optional("Controller.PathHorizonWaypoints", params.path_horizon_waypoints);
-	load_optional("Controller.RouteContinuous", params.route_continuous);
-	load_optional("Controller.SmoothPlannedPath", params.smooth_planned_path);
-	load_optional_cast<double>("Controller.RouteSpacing", params.route_spacing_m);
-	load_optional_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m);
-	load_optional("Controller.RouteOptimize", params.route_optimize);
+	cfgr.opt("Controller.PathHorizonWaypoints", params.path_horizon_waypoints,
+         "Cross-cycle control-continuity cost in the MPPI (see TrajectoryController::Params). 0 = off, which is the pre-existing behaviour and the baseline…");
+	cfgr.opt("Controller.RouteContinuous", params.route_continuous,
+         "true = the mission is driven as ONE continuous curve (RouteFollower): no waypoint targets, no arrival radius, no per-waypoint replan,…");
+	cfgr.opt("Controller.SmoothPlannedPath", params.smooth_planned_path,
+         "Fit the C2 curve to EVERY planned path — click targets and affordance targets too, not only missions");
+	cfgr.opt_cast<double>("Controller.RouteSpacing", params.route_spacing_m,
+         "");
+	cfgr.opt_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m,
+         "");
+	cfgr.opt("Controller.RouteOptimize", params.route_optimize,
+         "Variationally optimise the route's control polygon before it is driven (route_optimizer.h)");
 	// ── Blockage -> replan trigger ──
 	// The one thing the elastic band cannot do for itself: a gradient band cannot escape an obstacle
 	// sitting ON the route (the field's gradient there is axial). A* owns homotopy, the band owns
 	// geometry, and this is the handover. Exposed because it is the mechanism that has to be TUNED
 	// against a real "someone put a box in the corridor" test, and a rebuild per trial is not that.
-	load_optional_cast<double>("Controller.BlockageEsdfThreshold", path_controller_.params.blockage_esdf_threshold);
-	load_optional("Controller.BlockageMinWaypoints", path_controller_.params.blockage_min_waypoints);
-	load_optional_cast<double>("Controller.BlockageLookahead", path_controller_.params.blockage_lookahead_m);
-	load_optional("Controller.BlockageConfirmCycles", path_controller_.params.blockage_confirm_cycles);
-	load_optional("Controller.BlockageCooldownCycles", path_controller_.params.blockage_cooldown_cycles);
-	load_optional("Controller.BandEnabled", params.band_enabled);
-	load_optional("Controller.BandIterations", params.band_iterations);
-	load_optional_cast<double>("Controller.BandLead", params.band_lead_m);
-	load_optional_cast<double>("Controller.BandWindow", params.band_window_m);
-	load_optional("Controller.BandPeriodCycles", params.band_period_cycles);
-	load_optional_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias);
-	load_optional_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight);
+	cfgr.opt_cast<double>("Controller.BlockageEsdfThreshold", path_controller_.params.blockage_esdf_threshold,
+         "ESDF below this on path = blocked (well under d_safe)");
+	cfgr.opt("Controller.BlockageMinWaypoints", path_controller_.params.blockage_min_waypoints,
+         "need N consecutive blocked waypoints");
+	cfgr.opt_cast<double>("Controller.BlockageLookahead", path_controller_.params.blockage_lookahead_m,
+         "only check waypoints within this distance ahead");
+	cfgr.opt("Controller.BlockageConfirmCycles", path_controller_.params.blockage_confirm_cycles,
+         "consecutive cycles before declaring blockage (1.5 s at 10 Hz)");
+	cfgr.opt("Controller.BlockageCooldownCycles", path_controller_.params.blockage_cooldown_cycles,
+         "minimum cycles between replan triggers");
+	cfgr.opt("Controller.BandEnabled", params.band_enabled,
+         "control_mode alone does NOT identify what drove a run: the same follower over a route whose head is re-optimised at control rate and over one…");
+	cfgr.opt("Controller.BandIterations", params.band_iterations,
+         "Gauss-Newton steps per cycle");
+	cfgr.opt_cast<double>("Controller.BandLead", params.band_lead_m,
+         "Metres of route AHEAD of the robot left frozen before the window opens");
+	cfgr.opt_cast<double>("Controller.BandWindow", params.band_window_m,
+         "Length of the deformable window beyond the lead");
+	cfgr.opt("Controller.BandPeriodCycles", params.band_period_cycles,
+         "Run the band every N control cycles. 1 = every cycle");
+	cfgr.opt_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias,
+         "Route optimiser: speed (0) <-> safety (1)");
+	cfgr.opt_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight,
+         "The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness of the TURN RATE is the…");
 
-	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
-	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
+	cfgr.opt_cast<double>("Controller.LambdaContinuity", params.lambda_continuity,
+         "so no --loop result was ever transferable. tools/tracker_sim inherits that warning.)");
+	cfgr.opt_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor,
+         "");
 	// ★EIGHT ASSIGNMENTS WERE HERE AND EVERY ONE OF THEM WAS WRITE-ONLY (removed 2026-09-09 with the
 	// sampler that had been their only reader): lambda_continuity, continuity_rot_factor,
 	// goal_clearance_relax_dist, goal_obstacle_margin, goal_clearance_min_ratio and the three
@@ -1028,35 +1185,50 @@ void SpecificWorker::load_params()
 	// elastic band's job. So either mode is only coherent with BandEnabled=true.
 	// Cross-track feedback for the PD tracker. Without it the tracker is pure pursuit and cuts corners:
 	// it converges to the carrot's direction, not to the route the band just optimised.
-	load_optional_cast<double>("Controller.PlainTrackerL", path_controller_.params.plain_L);
-	load_optional_cast<double>("Controller.PlainTrackerTLag", path_controller_.params.plain_T_lag);
-	load_optional_cast<double>("Controller.PlainTrackerGdc", path_controller_.params.plain_g_dc);
-	load_optional_cast<double>("Controller.PlainTrackerW", path_controller_.params.plain_W);
-	load_optional_cast<double>("Controller.PlainTrackerRotHeadroom", path_controller_.params.plain_rot_headroom);
-	load_optional_cast<double>("Controller.PlainTrackerBrakeK", path_controller_.params.plain_brake_k);
-	load_optional_cast<double>("Controller.PlainTrackerProjWindow", path_controller_.params.plain_proj_window);
-	load_optional_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain);
-	load_optional_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps);
+	cfgr.opt_cast<double>("Controller.PlainTrackerL", path_controller_.params.plain_L,
+         "★THE TRACKER'S FREE PARAMETER, recorded per run");
+	cfgr.opt_cast<double>("Controller.PlainTrackerTLag", path_controller_.params.plain_T_lag,
+         "EXACT: identified tau 0.213-0.236 + delay 0.20, r^2 0.94-0.95");
+	cfgr.opt_cast<double>("Controller.PlainTrackerGdc", path_controller_.params.plain_g_dc,
+         "EXACT: 1 / 0.89 identified DC gain");
+	cfgr.opt_cast<double>("Controller.PlainTrackerW", path_controller_.params.plain_W,
+         "EXACT: the route's own smoothing scale (kappa_avg window)");
+	cfgr.opt_cast<double>("Controller.PlainTrackerRotHeadroom", path_controller_.params.plain_rot_headroom,
+         "★THE TERM THE DESIGN FORGOT");
+	cfgr.opt_cast<double>("Controller.PlainTrackerBrakeK", path_controller_.params.plain_brake_k,
+         "This tour turns 178 degrees at s=24.18 (kappa_avg 6.81)");
+	cfgr.opt_cast<double>("Controller.PlainTrackerProjWindow", path_controller_.params.plain_proj_window,
+         "2. plain_proj_window — how far FORWARD IN ARC LENGTH the projection may search");
+	cfgr.opt_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain,
+         "★NOTE FOR ANYONE TEMPTED TO ADD ONE HERE");
+	cfgr.opt_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps,
+         "");
 	// Lateral bumper — the reactive half. The A* clearance preference and the band keep the ROUTE off
 	// walls; this keeps the BODY off them when the tracker's own error puts it there anyway.
-	load_optional_cast<double>("Controller.PdBumperGain", path_controller_.params.pd_bumper_gain);
-	load_optional_cast<double>("Controller.PdBumperDist", path_controller_.params.pd_bumper_dist_m);
+	cfgr.opt_cast<double>("Controller.PdBumperGain", path_controller_.params.pd_bumper_gain,
+         "The sampler had lambda_lateral_bumper to push the body off things it passed too close to");
+	cfgr.opt_cast<double>("Controller.PdBumperDist", path_controller_.params.pd_bumper_dist_m,
+         "Gap (m, measured from the BODY, not the centre) below which a side starts pushing back");
 	// Carrot rate limit — see Params::carrot_rate_limit_factor. Bounds how far the STEERING TARGET may
 	// move per cycle, so a localisation jump cannot be converted straight into a steering command.
-	load_optional_cast<double>("Controller.CarrotRateLimitFactor", path_controller_.params.carrot_rate_limit_factor);
+	cfgr.opt_cast<double>("Controller.CarrotRateLimitFactor", path_controller_.params.carrot_rate_limit_factor,
+         "How far the carrot may move IN THE ROOM FRAME in one control cycle, as a multiple of the distance the robot itself could have travelled (max_adv *…");
 	// Carrot lookahead. It was never config-exposed and ran on the 2.0 m default, but MEASURED on this
 	// apartment the route only supports ~1 m: clip_carrot_to_reachable binds on 75% of cycles and the
 	// achieved carrot_dist has p50 1.06 m. So the clip — not this number — was setting the lookahead,
 	// every cycle, through a test that flips as curvature and the live ESDF shift. Asking for a
 	// lookahead the geometry can actually give leaves the clip rarely binding.
-	load_optional_cast<double>("Controller.CarrotLookahead", path_controller_.params.carrot_lookahead);
+	cfgr.opt_cast<double>("Controller.CarrotLookahead", path_controller_.params.carrot_lookahead,
+         "Carrot / path following");
 	// How close a lidar return must be for a room-frame MODEL point (furniture, room polygon) to be
 	// treated as already measured and dropped from the ESDF. Stops a pose jump painting a PHANTOM wall
 	// alongside the real one — see build_esdf.
-	load_optional_cast<double>("Controller.ModelMergeRadius", path_controller_.params.model_merge_radius_m);
+	cfgr.opt_cast<double>("Controller.ModelMergeRadius", path_controller_.params.model_merge_radius_m,
+         "How close a lidar return must be for a room-frame MODEL point (furniture, room polygon) to be considered already measured and therefore dropped");
 	{
 		std::string mode = "plain";
-		load_optional("Controller.ControlMode", mode);
+		cfgr.opt("Controller.ControlMode", mode,
+          "route: a fixed 1.0 m), which is a property of the tracker, not of the field");
 		std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return std::tolower(c); });
 		const bool pd = (mode == "pd" or mode == "pursuit" or mode == "tracker");
 		const bool plain = not pd;

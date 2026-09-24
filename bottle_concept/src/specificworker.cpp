@@ -25,6 +25,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
@@ -90,7 +92,12 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 #endif
 
     // Agent-presence state machine: Waiting → Operating → Degraded.
-    const int period = configLoader.get<int>("Period.Compute");
+    // Registered rather than read raw, so the period appears in the startup table like every
+    // other key. req() keeps the throw-if-missing behaviour: a period is not something to
+    // default silently.
+    int period = 0;
+    rc::cfg::Reader(configLoader, "bottle_concept").req("Period.Compute", period,
+            "GRAFCET step period (ms) for every state of this agent's state machine");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this),
@@ -404,6 +411,27 @@ void SpecificWorker::initialize()
     }
     restore_strip_geometry();
     strip_window_->show();
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - confident false positives from the one check whose
+    // whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+    // run, which is the end of startup, not the end of parsing.
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+    // ARMS the unread sweep; check_registry_complete.sh bottle_concept is the grep that keeps the claim
+    // honest. Re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("bottle_concept");
+    rc::cfg::Reader(configLoader, "bottle_concept").publish("etc/config_effective.csv");
 }
 
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
@@ -422,7 +450,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     // is keyed on (world cell × bearing), never place alone.
     // Observer pose → view bearing. SHARED (common/phantom_log/observer_pose.h): the classifier failure is
     // VIEWPOINT-dependent, so the false-alarm field is keyed on (world cell × bearing), never place alone.
-    rc::history::note_observer(e, inner_eigen_.get(), x, y);
+    rc::history::note_observer(e, *G, inner_eigen_.get(), x, y);
     if (inst)
     {
         // ★These are REAL now. Before the existence channel every bottle death was UNATTRIBUTABLE by

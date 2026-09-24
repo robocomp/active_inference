@@ -18,6 +18,8 @@
  */
 #include "specificworker.h"
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 #include "kinematics.h"
 #include "self_projection_capsules.h"
 #include "self_projection_viewer.h"
@@ -232,6 +234,7 @@ SpecificWorker::~SpecificWorker()
 
 void SpecificWorker::initialize()
 {
+    rc::cfg::Reader cfgr(configLoader, "self_calibration");
     std::cout << "initialize worker" << std::endl;
 	GenericWorker::initialize();
 
@@ -257,28 +260,68 @@ void SpecificWorker::initialize()
 
     //initializeCODE
     init_media_plane();
-    try { residual_gate_m_ = configLoader.get<double>("SelfCalib.residual_gate_m"); } catch (...) {}
-    try { tau_vspread_min_ = configLoader.get<double>("SelfCalib.tau_vspread_min"); } catch (...) {}
-    try { encoder_sigma_rad_    = configLoader.get<double>("SelfCalib.encoder_sigma_deg") * 0.017453292519943295; } catch (...) {}
-    try { depth_sensor_sigma_m_ = configLoader.get<double>("SelfCalib.depth_sensor_sigma_m"); } catch (...) {}
-    try { depth_sensor_range_k_ = configLoader.get<double>("SelfCalib.depth_sensor_range_k"); } catch (...) {}
-    try { geom_sigma_m_         = configLoader.get<double>("SelfCalib.geom_sigma_m"); } catch (...) {}
-    try { grazing_cos_min_      = configLoader.get<double>("SelfCalib.grazing_cos_min"); } catch (...) {}
-    try { filter_enabled_       = configLoader.get<bool>("SelfCalib.filter_enabled"); } catch (...) {}
-    { double m = 0.020; try { m = configLoader.get<double>("SelfCalib.model_sigma_m"); } catch (...) {} model_sigma_sq_ = m * m; }
-    try { prior_sigma_trans_    = configLoader.get<double>("SelfCalib.prior_sigma_trans_m"); } catch (...) {}
-    try { prior_sigma_rot_      = configLoader.get<double>("SelfCalib.prior_sigma_rot_deg") * 0.017453292519943295; } catch (...) {}
-    try { pose_min_dq_          = configLoader.get<double>("SelfCalib.pose_min_dq"); } catch (...) {}
-    try { apply_filter_to_overlay_ = configLoader.get<bool>("SelfCalib.apply_filter_to_overlay"); } catch (...) {}
+    cfgr.opt_cast<double>("SelfCalib.residual_gate_m", residual_gate_m_,
+            "inlier band (SelfCalib.residual_gate_m)");
+    cfgr.opt_cast<double>("SelfCalib.tau_vspread_min", tau_vspread_min_,
+            "min depth-velocity std (m/s) to identify τ (SelfCalib.tau_vspread_min)");
+    {   // The config states DEGREES; the member holds RADIANS. Registering the key in the unit
+        // the FILE uses is the point - a table that reported radians here would not match the
+        // number anybody types, which is how a unit bug survives a review of both sides.
+        double deg = encoder_sigma_rad_ * 57.29577951308232;
+        cfgr.opt("SelfCalib.encoder_sigma_deg", deg,
+                 "per-encoder angle noise the calibration assumes (deg; stored internally as radians)");
+        encoder_sigma_rad_ = deg * 0.017453292519943295;
+    }
+    cfgr.opt_cast<double>("SelfCalib.depth_sensor_sigma_m", depth_sensor_sigma_m_,
+            "base depth-sensor noise floor (SelfCalib.depth_sensor_sigma_m)");
+    cfgr.opt_cast<double>("SelfCalib.depth_sensor_range_k", depth_sensor_range_k_,
+            "depth noise grows ≈ k·range² (/m) (SelfCalib.depth_sensor_range_k)");
+    cfgr.opt_cast<double>("SelfCalib.geom_sigma_m", geom_sigma_m_,
+            "single-capsule model floor (SelfCalib.geom_sigma_m)");
+    cfgr.opt_cast<double>("SelfCalib.grazing_cos_min", grazing_cos_min_,
+            "clamp on |ray·surface-normal|: grazing samples inflate σ_geom ≤1/this (SelfCalib.grazing_cos_min)");
+    cfgr.opt_cast<bool>("SelfCalib.filter_enabled", filter_enabled_,
+            "SelfCalib.filter_enabled");
+    { double m = 0.020; cfgr.opt_cast<double>("SelfCalib.model_sigma_m", m,
+            "per-pose nuisance bias σ (m): the ±22mm config-dependent single-capsule model error, correlated within a pose"); model_sigma_sq_ = m * m; }
+    cfgr.opt_cast<double>("SelfCalib.prior_sigma_trans_m", prior_sigma_trans_,
+            "extrinsic prior σ, translation m (SelfCalib.prior_sigma_trans_m)");
+    {   // The config states DEGREES; the member holds RADIANS. Registering the key in the unit
+        // the FILE uses is the point - a table that reported radians here would not match the
+        // number anybody types, which is how a unit bug survives a review of both sides.
+        double deg = prior_sigma_rot_ * 57.29577951308232;
+        cfgr.opt("SelfCalib.prior_sigma_rot_deg", deg,
+                 "prior std on the rotation parameters (deg; stored internally as radians)");
+        prior_sigma_rot_ = deg * 0.017453292519943295;
+    }
+    cfgr.opt_cast<double>("SelfCalib.pose_min_dq", pose_min_dq_,
+            "min ‖Δq‖ rad to count a NEW pose (SelfCalib.pose_min_dq)");
+    cfgr.opt_cast<bool>("SelfCalib.apply_filter_to_overlay", apply_filter_to_overlay_,
+            "SelfCalib.apply_filter_to_overlay");
     {
         const double D = 0.017453292519943295;
         double tx=0, ty=0, tz=0, rx=0, ry=0, rz=0;
-        try { tx = configLoader.get<double>("SelfCalib.inject_tx_m"); } catch (...) {}
-        try { ty = configLoader.get<double>("SelfCalib.inject_ty_m"); } catch (...) {}
-        try { tz = configLoader.get<double>("SelfCalib.inject_tz_m"); } catch (...) {}
-        try { rx = configLoader.get<double>("SelfCalib.inject_rx_deg") * D; } catch (...) {}
-        try { ry = configLoader.get<double>("SelfCalib.inject_ry_deg") * D; } catch (...) {}
-        try { rz = configLoader.get<double>("SelfCalib.inject_rz_deg") * D; } catch (...) {}
+        cfgr.opt_cast<double>("SelfCalib.inject_tx_m", tx,
+                "");
+        cfgr.opt_cast<double>("SelfCalib.inject_ty_m", ty,
+                "");
+        cfgr.opt_cast<double>("SelfCalib.inject_tz_m", tz,
+                "");
+        {   double deg = rx / D;
+        cfgr.opt("SelfCalib.inject_rx_deg", deg,
+                 "deliberate rx error (deg) injected into the mount, to test whether the calibration recovers it");
+        rx = deg * D;
+    }
+        {   double deg = ry / D;
+        cfgr.opt("SelfCalib.inject_ry_deg", deg,
+                 "deliberate ry error (deg) injected into the mount, to test whether the calibration recovers it");
+        ry = deg * D;
+    }
+        {   double deg = rz / D;
+        cfgr.opt("SelfCalib.inject_rz_deg", deg,
+                 "deliberate rz error (deg) injected into the mount, to test whether the calibration recovers it");
+        rz = deg * D;
+    }
         const Eigen::Matrix3d R = (Eigen::AngleAxisd(rz, Eigen::Vector3d::UnitZ())
                                  * Eigen::AngleAxisd(ry, Eigen::Vector3d::UnitY())
                                  * Eigen::AngleAxisd(rx, Eigen::Vector3d::UnitX())).matrix();
@@ -294,7 +337,8 @@ void SpecificWorker::initialize()
     // FK model (the SAME Kinematics the controller uses) + the graph extrinsic API.
     if (G) inner_eigen_ = G->get_inner_eigen_api();
     std::string urdf = "/home/pbustos/robocomp/components/active_inference/common/kinematics/gen3_robotiq_2f_85-mod.urdf";
-    try { urdf = configLoader.get<std::string>("SelfCalib.urdf_path"); } catch (...) {}
+    cfgr.opt_cast<std::string>("SelfCalib.urdf_path", urdf,
+            "");
     try
     {
         kin_ = std::make_unique<Kinematics>(urdf);   // base_tf_ stays identity ⇒ base_link frame
@@ -313,6 +357,27 @@ void SpecificWorker::initialize()
         graph_viewers.at("")->add_custom_widget_in_own_window("self_projection", viewer_.get());
     else
         viewer_->show();
+
+	// ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+	//
+	// ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+	// are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+	// keys when the coordinator is configured, further down this same function. Publishing before
+	// that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+	// one of them "in the file, read by nothing" - confident false positives from the one check whose
+	// whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+	// run, which is the end of startup, not the end of parsing.
+	//
+	// Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+	// default - and writes the full table to etc/config_effective.csv, this run's own record of which
+	// arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+	//
+	// declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+	// ARMS the unread sweep; check_registry_complete.sh self_calibration is the grep that keeps the claim
+	// honest. Re-run it whenever a config read is added.
+	rc::cfg::exempt_generated_prefixes();
+	rc::cfg::registry().declare_complete("self_calibration");
+	rc::cfg::Reader(configLoader, "self_calibration").publish("etc/config_effective.csv");
 }
 
 // Discover the zero-copy media plane from the DSR graph (the camera node carries a
@@ -327,7 +392,10 @@ void SpecificWorker::init_media_plane()
     }
 
     std::string camera_node = "zed";
-    try { camera_node = configLoader.get<std::string>("SelfCalib.camera_node"); } catch (...) {}
+    // Its own Reader: this read is in a different function from the startup block, and a Reader is
+    // two pointers over the same process-wide registry - so the key still reaches the table.
+    rc::cfg::Reader(configLoader, "self_calibration").opt("SelfCalib.camera_node", camera_node,
+            "which camera node on the graph this calibration solves the mount for");
 
     const auto desc = rc::media::descriptor_from_graph(*G, camera_node);
     if (not desc.has_value())

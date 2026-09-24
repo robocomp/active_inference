@@ -17,6 +17,8 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "pick_and_place_fsm.h"
 
 #include <chrono>
@@ -103,6 +105,7 @@ SpecificWorker::~SpecificWorker()
 
 void SpecificWorker::initialize()
 {
+    rc::cfg::Reader cfgr(configLoader, "kinova_controller");
     std::cout << "initialize worker" << std::endl;
 	GenericWorker::initialize();
 
@@ -139,15 +142,21 @@ void SpecificWorker::initialize()
             });
 
     // Auto-arm the run as if the Start button were checked (default off).
-    try { run_requested_ = configLoader.get<bool>("Controller.auto_start"); } catch (...) {}
+    cfgr.opt_cast<bool>("Controller.auto_start", run_requested_,
+            "mirrors the viewer Start button");
     if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
-    try { exit_on_homing_timeout_ = configLoader.get<bool>("Controller.exit_on_homing_timeout"); } catch (...) {}
-    try { bottle_from_graph_ = configLoader.get<bool>("Controller.bottle_from_graph"); } catch (...) {}
+    cfgr.opt_cast<bool>("Controller.exit_on_homing_timeout", exit_on_homing_timeout_,
+            "Fail-fast for UNATTENDED runs: on a homing timeout (arm jammed) quit cleanly instead of idling in WaitingForStart forever (which wasted 15…");
+    cfgr.opt_cast<bool>("Controller.bottle_from_graph", bottle_from_graph_,
+            "Source of the bottle pose. false (default): query Webots ground truth (getObjectPose). true: READ the bottle pose from the DSR graph (the…");
     if (bottle_from_graph_) std::print("[scene] bottle pose READ from DSR graph (table->bottle edge), not Webots\n");
-    try { bottle_monitor_ = configLoader.get<bool>("Controller.bottle_monitor"); } catch (...) {}
-    try { publish_scene_to_graph_ = configLoader.get<bool>("Controller.publish_scene_to_graph"); } catch (...) {}
+    cfgr.opt_cast<bool>("Controller.bottle_monitor", bottle_monitor_,
+            "");
+    cfgr.opt_cast<bool>("Controller.publish_scene_to_graph", publish_scene_to_graph_,
+            "OPT-IN scene publishing (default off): write robot->table->bottle RT edges from Webots ground truth so other agents/viewer see a live scene");
     if (publish_scene_to_graph_) std::print("[scene] publishing robot->table->bottle to DSR graph (Webots ground truth)\n");
-    try { joint_buffer_enabled_ = configLoader.get<bool>("Controller.publish_joint_buffer"); } catch (...) {}
+    cfgr.opt_cast<bool>("Controller.publish_joint_buffer", joint_buffer_enabled_,
+            "write the rolling (stamp_ms,q) ring on kinova_arm_r for the self_calibration agent (~20Hz)");
     if (joint_buffer_enabled_) std::print("[joint-buffer] publishing (stamp_ms,q) ring on kinova_arm_r for self_calibration\n");
 
     // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
@@ -233,6 +242,33 @@ void SpecificWorker::initialize()
     }
     std::print("[looprate] control loop target = {} Hz (Period.Compute = {} ms)\n",
                1000 / std::max(1, getPeriod("Compute")), getPeriod("Compute"));
+
+	// ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+	//
+	// ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+	// are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+	// keys when the coordinator is configured, further down this same function. Publishing before
+	// that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+	// one of them "in the file, read by nothing" - confident false positives from the one check whose
+	// whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+	// run, which is the end of startup, not the end of parsing.
+	//
+	// Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+	// default - and writes the full table to etc/config_effective.csv, this run's own record of which
+	// arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+	//
+	// declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+	// ARMS the unread sweep; check_registry_complete.sh kinova_controller is the grep that keeps the claim
+	// honest. Re-run it whenever a config read is added.
+	rc::cfg::exempt_generated_prefixes();
+	// ⚠ NOT declared complete, and that is the honest state: 101 reads across this component's other
+	// source files still use the raw try/catch dialect. Arming the sweep here would name their keys
+	// "in the file, read by nothing" - a confident lie from the one check whose whole value is that it
+	// does not cry wolf. The table still prints, with full provenance for every key that IS registered;
+	// only the unread verdict is withheld. Uncomment once
+	// common/config_report/check_registry_complete.sh kinova_controller passes:
+	//     rc::cfg::registry().declare_complete("kinova_controller");
+	rc::cfg::Reader(configLoader, "kinova_controller").publish("etc/config_effective.csv");
 }
 
 // Publish the rolling (stamp_ms, q) ring onto the kinova_arm_r node so the

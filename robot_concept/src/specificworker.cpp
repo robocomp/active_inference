@@ -26,6 +26,8 @@
 #include <map>
 #include <QtMath>
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/robot_footprint/robot_footprint.h"
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
@@ -120,7 +122,8 @@ namespace
 std::string read_media_source(const ConfigLoader& cfg, const char* key)
 {
 	std::string s = "auto";
-	rc::ConfigLoaderUtils::load_optional(cfg, key, s);
+	rc::cfg::Reader(cfg, "robot_concept").opt(key, s,
+	        "per-sensor media source selector: auto | ice | dds");
 	std::ranges::transform(s, s.begin(), ::tolower);
 	if (s != "auto" and s != "ice" and s != "dds")
 	{
@@ -145,7 +148,9 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 			hibernationChecker.start(500);
 		#endif
 
-		const int period = configLoader.get<int>("Period.Compute");
+		int period = 0;
+		rc::cfg::Reader(configLoader, "robot_concept").req("Period.Compute", period,
+		        "GRAFCET step period (ms) for every state of this agent's state machine");
 
 		states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
 			std::bind(&SpecificWorker::waiting_loop, this),
@@ -287,17 +292,24 @@ void SpecificWorker::initialize()
 	// (etc/config_beta.toml), so pointing the agent at a different Agent.configFile / different robot
 	// needs no code change. If the key is absent we fall back to the single node of type "robot"
 	// already in the graph rather than guessing a name.
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.robot_name", robot_name);
+	// Every read below registers its key, its CODE DEFAULT and a one-line description, so the
+	// startup table can say where each value came from - not just what it is.
+	rc::cfg::Reader cfgr(configLoader, "robot_concept");
+	cfgr.opt("Agent.robot_name", robot_name,
+	           "name of this robot's node; every robot-node lookup keys off it. Empty = fall back to the single node of type 'robot'");
 	// The MESH's frame, not the robot's shape — see the declaration. P3Bot needs 90.
 	// ★Loaded as double: ConfigLoader's variant carries no float alternative, and asking it for one is a
 	// static_assert, not a conversion.
 	{
 		double yaw_deg = mesh_yaw_deg;
-		rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.mesh_yaw_deg", yaw_deg);
+		cfgr.opt("Agent.mesh_yaw_deg", yaw_deg,
+	           "yaw (deg) of the display MESH's own frame, NOT the robot's - P3Bot's proto wraps the machine in a 90 deg rotation");
 		mesh_yaw_deg = static_cast<float>(yaw_deg);
 	}
-	rc::ConfigLoaderUtils::load_optional<std::uint64_t, int>(configLoader, "Agent.robot_node_id", canonical_robot_id_);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.graph_layout", graph_layout_);
+	cfgr.opt<std::uint64_t, int>("Agent.robot_node_id", canonical_robot_id_,
+	           "canonical robot node id, used by the identity check");
+	cfgr.opt("Agent.graph_layout", graph_layout_,
+	           "Graphviz engine for the graph view: twopi|sfdp|dot|neato|fdp|circo");
 	if (robot_name.empty())
 	{
 		if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
@@ -322,13 +334,15 @@ void SpecificWorker::initialize()
 	// room_concept consumes it to pick its layout, and REFUSES TO START without it: it authors the
 	// room polygon every other agent reads, so a wrong floor plan puts the whole fleet in the wrong
 	// building while every number downstream stays self-consistent.
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.scenario", scenario_name_);
+	cfgr.opt("Agent.scenario", scenario_name_,
+	           "WHERE the robot is; published as scenario_name on its node - room_concept REFUSES to start without it");
 	// WHAT this base can do, as opposed to where it is — read from the BASE COMPONENT's own config,
 	// which is the same file on the real robot as in simulation. An earlier version of this declared
 	// `Agent.holonomic` here by hand; that was a second copy of `baseType`, which SVD48VBase already
 	// states, so it is gone. One fact, one file, owned by the component that owns the hardware.
 	std::string base_config_path;
-	try { base_config_path = configLoader.get<std::string>("Agent.base_config_file"); } catch (...) {}
+	cfgr.opt("Agent.base_config_file", base_config_path,
+	         "the BASE component's own config - the one file that states what this hardware CAN do");
 	if (base_config_path.empty())
 		qWarning() << "[Agent] Agent.base_config_file is not set: no base capability or geometry will"
 		              " be published. Consumers keep whatever constants they hold today.";
@@ -366,28 +380,49 @@ void SpecificWorker::initialize()
 		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
 		              " room_concept will refuse to start if its config defines scenario overlays.";
 
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_rgb_fps", params.DSR_RGB_FPS);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_depth_fps", params.DSR_DEPTH_FPS);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.dsr_lidar_fps", params.DSR_LIDAR_FPS);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.decimation_factor", params.LIDAR_DECIMATION_FACTOR);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Debug.verbose", verbose_debug_);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Component.Debug.Verbose", verbose_debug_);
+	cfgr.opt("Camera.dsr_rgb_fps", params.DSR_RGB_FPS,
+	           "legacy DSR rgb blob upload rate (fps); 0 = every frame, <0 = disabled (the media plane is the real path)");
+	cfgr.opt("Camera.dsr_depth_fps", params.DSR_DEPTH_FPS,
+	           "legacy DSR depth blob upload rate (fps); <0 = disabled");
+	cfgr.opt("Lidar.dsr_lidar_fps", params.DSR_LIDAR_FPS,
+	           "legacy DSR lidar blob upload rate (fps); <0 = disabled, the media plane carries it");
+	cfgr.opt("Lidar.decimation_factor", params.LIDAR_DECIMATION_FACTOR,
+	           "keep 1 point in N on the legacy DSR lidar upload path");
+	cfgr.opt("Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT,
+	           "interpolate RT edges to the query timestamp instead of taking the latest");
+	cfgr.opt("Debug.verbose", verbose_debug_,
+	           "verbose logging", rc::cfg::diagnostic);
+	cfgr.opt("Component.Debug.Verbose", verbose_debug_,
+	           "verbose logging (the [Component.Debug] spelling; read after Debug.verbose, so it wins)", rc::cfg::diagnostic);
 
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.domain_id", params.MEDIA_DOMAIN_ID);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.rgb_topic", params.MEDIA_RGB_TOPIC);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.depth_topic", params.MEDIA_DEPTH_TOPIC);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.ricoh_topic", params.MEDIA_RICOH_TOPIC);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_topic", params.MEDIA_LIDAR_TOPIC);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.imu_topic", params.MEDIA_IMU_TOPIC);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_zed",   params.ENABLE_ZED);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_ricoh", params.ENABLE_RICOH);
-	rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Transforms.boresight_yaw_zed",   params.BORESIGHT_YAW_ZED);
-	rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Transforms.boresight_yaw_ricoh", params.BORESIGHT_YAW_RICOH);
-	rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "Transforms.persist_mounts_on_stop", params.PERSIST_MOUNTS_ON_STOP);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_lidar", params.ENABLE_LIDAR);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_imu",   params.ENABLE_IMU);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.data_sharing", params.MEDIA_DATA_SHARING);
+	cfgr.opt("Media.domain_id", params.MEDIA_DOMAIN_ID,
+	           "DDS domain for the media plane (7), deliberately isolated from the DSR domain (0)");
+	cfgr.opt("Media.rgb_topic", params.MEDIA_RGB_TOPIC,
+	           "media-plane topic carrying the zed rgb frames");
+	cfgr.opt("Media.depth_topic", params.MEDIA_DEPTH_TOPIC,
+	           "media-plane topic carrying the zed depth frames");
+	cfgr.opt("Media.ricoh_topic", params.MEDIA_RICOH_TOPIC,
+	           "media-plane topic carrying the ricoh panorama");
+	cfgr.opt("Media.lidar_topic", params.MEDIA_LIDAR_TOPIC,
+	           "media-plane topic carrying the 3-D lidar cloud");
+	cfgr.opt("Media.imu_topic", params.MEDIA_IMU_TOPIC,
+	           "media-plane topic carrying the imu samples");
+	cfgr.opt("Media.enable_zed", params.ENABLE_ZED,
+	           "publish the zed rgb+depth streams on the media plane");
+	cfgr.opt("Media.enable_ricoh", params.ENABLE_RICOH,
+	           "publish the ricoh panorama on the media plane");
+	cfgr.opt<float, double>("Transforms.boresight_yaw_zed", params.BORESIGHT_YAW_ZED,
+	           "measured zed boresight yaw correction (rad)");
+	cfgr.opt<float, double>("Transforms.boresight_yaw_ricoh", params.BORESIGHT_YAW_RICOH,
+	           "measured ricoh boresight yaw correction (rad)");
+	cfgr.opt<bool>("Transforms.persist_mounts_on_stop", params.PERSIST_MOUNTS_ON_STOP,
+	           "write the calibrated mount back to etc/mount_calib_<robot>.txt on a graceful stop");
+	cfgr.opt("Media.enable_lidar", params.ENABLE_LIDAR,
+	           "publish the 3-D lidar cloud on the media plane");
+	cfgr.opt("Media.enable_imu", params.ENABLE_IMU,
+	           "publish the imu samples on the media plane");
+	cfgr.opt("Media.data_sharing", params.MEDIA_DATA_SHARING,
+	           "DataSharing topology for true zero-copy loans; advertised in the descriptor so consumers can match it");
 	// Per-sensor source selector ("auto" | "ice" | "dds"), normalized+validated by read_media_source().
 	// Forced modes seed the runtime gate up front: "dds" starts already bypassing (monitor-only),
 	// "ice"/"auto" start bridging. negotiate() then honours or re-checks it each tick.
@@ -751,6 +786,31 @@ void SpecificWorker::initialize()
 	// called inline: GenericWorker::initialize() has created the window, but a geometry set before the
 	// window manager has mapped it is silently overridden by some WMs.
 	QTimer::singleShot(0, this, [this]() { restore_window_settings(); });
+
+	// ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+	//
+	// ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+	// are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+	// keys when the coordinator is configured, further down this same function. Publishing before
+	// that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+	// one of them "in the file, read by nothing" - sixteen confident false positives from the one
+	// check whose whole value is that it does not cry wolf. The rule is general: publish when the
+	// LAST reader has run, which is the end of startup, not the end of parsing. (An agent with
+	// [Platform.*]/[Scenario.*] overlays must also publish after those are applied.)
+	//
+	// Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+	// default - and writes the full table to etc/config_effective.csv, this run's own record of which
+	// arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+	//
+	// declare_complete() is a CLAIM - that every config key this agent reads goes through a Reader -
+	// and it ARMS the unread sweep. It became true once the shared readers
+	// (common/agent_presence_monitor, concept_manifest::resolve) were migrated; before that the sweep
+	// reported INCONCLUSIVE rather than an empty list, because an empty list reads as a clean bill of
+	// health. common/config_report/check_registry_complete.sh robot_concept is the grep that stops the claim
+	// from rotting into a lie - re-run it whenever a config read is added.
+	rc::cfg::exempt_generated_prefixes();
+	rc::cfg::registry().declare_complete("robot_concept");
+	rc::cfg::Reader(configLoader, "robot_concept").publish("etc/config_effective.csv");
 }
 
 // A node was inserted OR an attribute was updated (update_node_signal covers both). Relayout only when the id
@@ -1722,9 +1782,13 @@ void SpecificWorker::wire_agent_status_overlay()
 	// required peer lost and shutting down — proved hypersensitive to graph-publish stalls and to the
 	// retina's restart window. Greying a node early costs nothing and is undone the moment the
 	// heartbeat resumes, so the display gets its own, much shorter knob.
-	const int stale_after_ms = configLoader.exists("Presence.stale_display_ms")
-	                         ? configLoader.get<int>("Presence.stale_display_ms")
-	                         : 3000;
+	// Registered like every other key. If this setup runs AFTER the table is published the row simply
+	// does not appear in that run's printout; it cannot be mis-reported as unread, because the sweep
+	// stays INCONCLUSIVE until the shared [Presence.*] reader is migrated too.
+	int stale_after_ms = 3000;
+	rc::cfg::Reader(configLoader, "robot_concept").opt("Presence.stale_display_ms", stale_after_ms,
+	        "display-only: grey a peer's node after this silence (ms), decoupled from heartbeat_timeout_ms",
+	        rc::cfg::diagnostic);
 	agent_status_overlay_.start(G, graph_viewer, stale_after_ms);
 }
 

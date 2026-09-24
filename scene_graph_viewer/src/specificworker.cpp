@@ -25,6 +25,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 #include "../../common/viewers/gl_graph3d_viewer.h"
 
 #include <QCoreApplication>
@@ -67,7 +69,12 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 
     cfg_ = rc::load_viewer_config(configLoader);
 
-    const int period = configLoader.get<int>("Period.Compute");
+    // Registered rather than read raw, so the period appears in the startup table like every
+    // other key. req() keeps the throw-if-missing behaviour: a period is not something to
+    // default silently.
+    int period = 0;
+    rc::cfg::Reader(configLoader, "scene_graph_viewer").req("Period.Compute", period,
+            "GRAFCET step period (ms) for every state of this agent's state machine");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this),
@@ -247,6 +254,27 @@ void SpecificWorker::initialize()
             return;
         build_viewer_window();
     });
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - confident false positives from the one check whose
+    // whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+    // run, which is the end of startup, not the end of parsing.
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+    // ARMS the unread sweep; check_registry_complete.sh scene_graph_viewer is the grep that keeps the claim
+    // honest. Re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("scene_graph_viewer");
+    rc::cfg::Reader(configLoader, "scene_graph_viewer").publish("etc/config_effective.csv");
 }
 
 // ─── The view ────────────────────────────────────────────────────────────────
