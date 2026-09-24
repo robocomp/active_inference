@@ -197,6 +197,10 @@ namespace rc::boxes
         /// parameter — the sensor's coverage statement — not a tuned bar: at 1 nat a claimed but
         /// never-observed cell is about e:1 against, so a merge must save more than one parameter
         /// per cell of empty space it swallows.
+        /// Swept space the layout excludes pushes the face that excludes it (see refit). Was
+        /// WS_FREEFORCE: a one-scan hull's tip lands within 13 mm of truth with it, and the walls
+        /// are dragged off their own returns without the frame fix that went with it.
+        bool  free_force = false;
         float unobserved_nats = 1.0f;
     };
     struct GrowResult
@@ -267,6 +271,10 @@ namespace rc::boxes
         /// heading is then anchored by odometry as well as by the layout, instead of being whatever
         /// the layout says — which let a rotated layout rotate the robot with it.
         const Eigen::Matrix3f* prior_cov = nullptr;
+        /// Weight a residual by sensor variance PLUS the posterior variance of the offset it is
+        /// attributed to, so a wall nobody has measured cannot pull the pose (was WS_REG_MAPVAR).
+        /// Pairs with Params::seed_prior_span — each is useless without the other.
+        bool map_var = false;
     };
     RegisterResult register_scan(const Layout& L,
                                  const std::vector<Eigen::Vector2f>& pts_robot,

@@ -528,8 +528,7 @@ namespace rc::boxes
             // best pose sigma a surface cell was seen at (`smin`), `free_` stores only a count, so
             // a cell swept from a lost robot is weighted exactly like one swept from a sure one.
             // Give free_ an smin of its own and this becomes safe; until then it is opt-in.
-            static const bool free_force = std::getenv("WS_FREEFORCE") != nullptr;
-            if (free_force and freecells != nullptr)
+            if (p.free_force and freecells != nullptr)
                 for (const auto& fc : *freecells)
                 {
                     const Eigen::Vector2f m((static_cast<float>(fc.first) + 0.5f) * p.cell,
@@ -1105,7 +1104,7 @@ namespace rc::boxes
         // of the offset the point is attributed to, which refit already computes (1/H, the prior
         // span^2 for a face no evidence has landed on). A face nobody has measured then carries no
         // weight, a well-measured wall carries all of it, and there is no gate anywhere.
-        const bool map_var = std::getenv("WS_REG_MAPVAR") != nullptr;
+        const bool map_var = opt != nullptr and opt->map_var;
         const bool cov_ok = L.cov.rows() == static_cast<long>(L.n_offsets())
                         and L.cov.cols() == static_cast<long>(L.n_offsets());
         Eigen::Matrix3f Omega = Eigen::Matrix3f::Zero();

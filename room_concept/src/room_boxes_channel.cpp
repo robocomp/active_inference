@@ -19,10 +19,9 @@ namespace rc::boxch
     // room and stamped 0.29-1.11 m of pose error in at frame 2. refit's own answer for an offset no
     // evidence has landed on is the room's own span, so that is what a seed offset gets until refit
     // replaces it. WS_REG_MAPVAR is what makes a consumer act on it.
-    static float seed_offset_var(const rc::boxes::Box& b, float sigma_flat)
+    static float seed_offset_var(const rc::boxes::Box& b, float sigma_flat, bool prior_span)
     {
-        static const bool honest = std::getenv("WS_SEED_VAR") != nullptr;   // the seed half alone
-        if (not honest) return sigma_flat * sigma_flat;
+        if (not prior_span) return sigma_flat * sigma_flat;
         const float span = std::max(1.f, b.width() + b.height());
         return span * span;
     }
@@ -118,7 +117,7 @@ namespace rc::boxch
             {
                 yaw_ = gy;
                 L_.boxes.push_back(b);
-                L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat);
+                L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat, p_.seed_prior_span);
             }
         }
 
@@ -256,7 +255,7 @@ namespace rc::boxch
     {
         if (L_.boxes.size() < 2 or cloud_.empty()) return 0;
         rc::boxes::GrowParams gp;
-        gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat;
+        gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat; gp.free_force = p_.free_force;
         gp.cell = p_.cell; gp.min_cluster = p_.min_cluster;
 
         // The free space, in layout-frame cells, so the cost can see an empty claim.
@@ -402,8 +401,12 @@ namespace rc::boxch
         // One objective or the rate heuristic, chosen once for the whole plan (see the G(v) note
         // at the frontier scoring below). lambda is nats per metre: the agent's price of driving.
         static const bool efe = std::getenv("WS_EFE") != nullptr;
-        static const double lambda = std::getenv("WS_EFE_LAMBDA")
-                                   ? std::atof(std::getenv("WS_EFE_LAMBDA")) : 0.7;
+        static const double lambda = [] {
+            const char* v = std::getenv("WS_EFE_LAMBDA");
+            double d = 0.7;                                   // from_chars, never atof (CLAUDE.md)
+            if (v != nullptr) { double x = 0; if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc()) d = x; }
+            return d;
+        }();
 
         // ⚠ DENSE GRID FOR THE DURATION OF THE PLAN. The free map is a std::map, and the gain
         // term probes ~1600 neighbours per frontier cell: at O(log n) against 20000 cells that is
@@ -512,7 +515,7 @@ namespace rc::boxch
         // there, so ask it too: a pose is traversable only if the body is inside the believed
         // room, sdf <= -body_radius. The escape fallback may cross the eroded margin but must
         // still stay inside the room (sdf < 0), never cross a wall.
-        static const bool model_cspace = std::getenv("WS_PATCH") != nullptr
+        static const bool model_cspace = std::getenv("WS_PATCH") != nullptr        // planner: bench-only
                                       or std::getenv("WS_MODEL_CSPACE") != nullptr;
         std::vector<float> gridsd;
         if (model_cspace and not L_.empty())
@@ -773,8 +776,12 @@ namespace rc::boxch
         // about to give it, and it is a candidate cause of coverage sitting at 86% of boundary
         // while IoU read 0.947.
         // WS_HORIZON overrides it so the effect can be measured rather than argued about.
-        static const float horizon_env = std::getenv("WS_HORIZON")
-                                       ? std::atof(std::getenv("WS_HORIZON")) : 0.f;
+        static const float horizon_env = [] {
+            const char* v = std::getenv("WS_HORIZON");
+            float f = 0.f;                                    // from_chars, never atof (CLAUDE.md)
+            if (v != nullptr) { float x = 0; if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc()) f = x; }
+            return f;
+        }();
         const float horizon_use = horizon_env > 0.f ? horizon_env : horizon_m;
         const int R = std::max(1, static_cast<int>(horizon_use / p_.cell));
         const int R2 = R * R;
@@ -1425,7 +1432,9 @@ namespace rc::boxch
             const Eigen::Vector3f p_L(cg * kf.pose.x() - sg * kf.pose.y(),
                                       sg * kf.pose.x() + cg * kf.pose.y(),
                                       std::atan2(std::sin(kf.pose.z() - gy), std::cos(kf.pose.z() - gy)));
-            const auto rr = rc::boxes::register_scan(L_, kf.pts, p_L, p_.sensor_sigma);
+            rc::boxes::RegisterOptions ro;
+            ro.map_var = p_.reg_map_var;   // a wall nobody has measured cannot pull the pose
+            const auto rr = rc::boxes::register_scan(L_, kf.pts, p_L, p_.sensor_sigma, &ro);
             if (not rr.ok) continue;
             const Eigen::Vector3f np(cb * rr.pose.x() - sb * rr.pose.y(),
                                      sb * rr.pose.x() + cb * rr.pose.y(),
@@ -1578,7 +1587,7 @@ namespace rc::boxch
         // deg in two runs while the true walls are at +0.871 — an attractor at the grid, not an
         // estimate. So sample F on the LAYOUT grid: each layout cell asks the map whether its centre
         // was swept (pull, not push — pushing rotated cells onto a new grid leaves aliasing holes).
-        static const bool cover_layout = std::getenv("WS_COVER_LAYOUT") != nullptr;
+        const bool cover_layout = p_.cover_layout;
         if (cover_layout)
         {
             const float cm = std::cos(yaw_), sm = std::sin(yaw_);          // layout -> map
@@ -1618,12 +1627,7 @@ namespace rc::boxch
         // that joins the two halves, which `polygon()` then publishes as one. It is a COMPUTE budget,
         // not a model statement — MDL already refuses a box that does not pay for itself, so the cap
         // only decides how many proposals the greedy loop may make before giving up.
-        static const int max_rects = [] {
-            const char* v = std::getenv("WS_COVER_MAX_RECTS");
-            int n = 24;
-            if (v != nullptr) { int x = 0; if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc() and x > 0) n = x; }
-            return n;
-        }();
+        const int max_rects = std::max(1, p_.cover_max_rects);
         for (int iter = 0; iter < max_rects; ++iter)
         {
             // The largest free rectangle containing some UNCOVERED cell. Seeds are sampled rather
@@ -1740,7 +1744,7 @@ namespace rc::boxch
         // representation (b83b4f3), and it makes oscillation impossible: nothing is written unless
         // the total goes down.
         rc::boxes::GrowParams gp;
-        gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat;
+        gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat; gp.free_force = p_.free_force;
         gp.cell = p_.cell; gp.min_cluster = p_.min_cluster;
         fuse();
         if (cloud_.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: cloud empty\n"); return false; }
@@ -1835,7 +1839,7 @@ namespace rc::boxch
             // mean 0.969 -> 0.956 and the worst room 0.901 -> 0.772 while the hall gains
             // (mean 0.887 -> 0.917, worst 0.473 -> 0.705). The invariant is that a room is ONE
             // region; a candidate may not make the layout MORE broken than it already is.
-            static const bool want_connected = std::getenv("WS_CONNECTED") != nullptr;
+            const bool want_connected = p_.connected;
             const int keep_components = layout_components(keep);
             if (want_connected and layout_components(cand) > std::max(1, keep_components))
             {
@@ -2119,6 +2123,7 @@ namespace rc::boxch
 
         rc::boxes::GrowParams gp;
         gp.sensor_sigma = p_.sensor_sigma;
+        gp.free_force   = p_.free_force;
         gp.sigma_flat   = p_.sigma_flat;
         gp.cell         = p_.cell;
         gp.min_cluster  = p_.min_cluster;
@@ -2132,8 +2137,8 @@ namespace rc::boxch
         // registered against a layout already drawn at the current yaw — positive feedback,
         // measured climbing monotonically (-0.51 -> +2.46 deg against a true +0.87). Once a cover
         // exists the frame IS the gauge, so stop re-voting it.
-        static const bool gauge_freeze = std::getenv("WS_GAUGE_FREEZE") != nullptr
-                                      or std::getenv("WS_GAUGE_ML") != nullptr;   // ML owns it then
+        const bool gauge_freeze = std::getenv("WS_GAUGE_FREEZE") != nullptr   // bench-only experiment
+                               or p_.gauge_ml;                                // ML owns the gauge then
         if (yaw_votes_ > 0 and (yaw4_cos_ != 0.0 or yaw4_sin_ != 0.0)
             and not (gauge_freeze and adopted_once_ and not L_.empty()))
         {
@@ -2200,8 +2205,7 @@ namespace rc::boxch
             fuse();
             refresh_free_keys();
             if (not cloud_.empty()) rms_ = rc::boxes::refit(L_, cloud_, gp, 10, &free_keys_);
-            static const bool gauge_ml = std::getenv("WS_GAUGE_ML") != nullptr;
-            if (gauge_ml and not cloud_.empty() and std::abs(fit_gauge_ml(gp)) > 0.f)
+            if (p_.gauge_ml and not cloud_.empty() and std::abs(fit_gauge_ml(gp)) > 0.f)
             {
                 fuse();
                 refresh_free_keys();
@@ -2251,7 +2255,7 @@ namespace rc::boxch
                     rc::boxes::Box b;
                     b.lo = c1.cwiseMin(c2); b.hi = c1.cwiseMax(c2);
                     L_.boxes.push_back(b);
-                    L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat);
+                    L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat, p_.seed_prior_span);
                     return true;
                 }
             }
@@ -2271,7 +2275,7 @@ namespace rc::boxch
             b.hi = {quant(xs2, 0.995f), quant(ys2, 0.995f)};
             if (not b.valid()) return false;
             L_.boxes.push_back(b);
-            L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat);
+            L_.cov = Eigen::MatrixXf::Identity(4, 4) * seed_offset_var(b, p_.sigma_flat, p_.seed_prior_span);
             qInfo_first_ = true;
         }
 

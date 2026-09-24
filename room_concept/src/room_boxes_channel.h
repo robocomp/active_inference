@@ -64,6 +64,28 @@ namespace rc::boxch
         /// as evidence about the room. Measured in the bench: one band, with furniture on the
         /// floor, fits the furniture's faces as walls and loses the robot — IoU 0.543 against
         /// 0.983 with the bands separated.
+        // ── MODEL CHOICES VALIDATED IN THE BENCH (were WS_* environment flags) ──────────────
+        /// Fit the layout frame by the layout's own likelihood instead of the segment vote.
+        bool  gauge_ml        = false;
+        /// Build the free-space cover on the LAYOUT grid, not the map grid (else every proposed
+        /// box is aligned with the map axes and the judge rewards a frame of exactly 0 degrees).
+        bool  cover_layout    = false;
+        /// COMPUTE budget of the greedy cover: how many rectangles it may propose. Not a model
+        /// statement — MDL already refuses a box that does not pay for itself.
+        int   cover_max_rects = 24;
+        /// Refuse a candidate cover that would make the region more disconnected than it is. ⚠ A
+        /// TRADE, not a win: the apartment gains (mean .887->.917, worst .473->.705) and the 50
+        /// simple rooms lose at the tail (.969/.901 -> .956/.772). Off until it is priced in nats.
+        bool  connected       = false;
+        /// A one-scan seed's offsets carry the room's span, not sigma_flat: a box drawn round one
+        /// scan is not known to a centimetre. Pairs with GrowParams::free_force and
+        /// RegisterOptions::map_var.
+        bool  seed_prior_span = false;
+        /// Pass RegisterOptions::map_var when this channel registers (reproject).
+        bool  reg_map_var     = false;
+        /// Swept space pushes a face that excludes it — forwarded to GrowParams::free_force.
+        bool  free_force      = false;
+
         float obs_z_min    = 0.15f;
         float obs_z_max    = 1.45f;
         float z_max        = 1.60f;   ///< PHYSICAL: below the ceiling — see

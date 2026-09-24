@@ -129,6 +129,14 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxZMax", room_concept.params.box.z_max);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxObsZMin", room_concept.params.box.obs_z_min);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.BoxObsZMax", room_concept.params.box.obs_z_max);
+        // Model choices validated in tools/wall_slam_selftest (were WS_* env flags; see config.toml).
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxFreeForce",     room_concept.params.box.free_force);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxGaugeML",       room_concept.params.box.gauge_ml);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxCoverLayout",   room_concept.params.box.cover_layout);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxConnected",     room_concept.params.box.connected);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxSeedPriorSpan", room_concept.params.box.seed_prior_span);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxRegMapVar",     room_concept.params.box.reg_map_var);
+        rc::ConfigLoaderUtils::load_optional<int>(cl,  "RoomShape.BoxCoverMaxRects", room_concept.params.box.cover_max_rects);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.EnableRederive", wm.enable_rederive);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.TwinFuseInformation", wm.twin_fuse_information);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.SpanKillRespectsSupport", wm.span_kill_respects_support);

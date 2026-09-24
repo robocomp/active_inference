@@ -2344,6 +2344,20 @@ int run_replay(const char* path)
 
         rc::boxch::Channel ch;
         rc::boxch::Params bp; bp.enabled = true; bp.sensor_sigma = cfg.scan_sigma;
+        // ── THE MODEL CHOICES ARE PARAMETERS NOW, NOT ENVIRONMENT READS ────────────────────
+        // They live in rc::boxch::Params so the AGENT can set them from its config; the bench keeps
+        // driving them from WS_* so every measurement in this file's history stays reproducible.
+        {
+            const auto flag = [](const char* n) { return std::getenv(n) != nullptr; };
+            bp.free_force      = flag("WS_FREEFORCE");
+            bp.gauge_ml        = flag("WS_GAUGE_ML");
+            bp.cover_layout    = flag("WS_COVER_LAYOUT");
+            bp.connected       = flag("WS_CONNECTED");
+            bp.seed_prior_span = flag("WS_SEED_VAR");
+            bp.reg_map_var     = flag("WS_REG_MAPVAR");
+            if (const char* v = std::getenv("WS_COVER_MAX_RECTS"))
+            { int x = 0; if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc() and x > 0) bp.cover_max_rects = x; }
+        }
         ch.configure(bp);
         rc::wallseg::Params wsp; wsp.sensor_sigma = cfg.scan_sigma;
 
@@ -2820,6 +2834,7 @@ int run_replay(const char* path)
                     P_L = Rl * P * Rl.transpose();
                 }
                 rc::boxes::RegisterOptions ro;
+                ro.map_var = bp.reg_map_var;
                 if (reg_prior) ro.prior_cov = &P_L;
                 const auto rr = rc::boxes::register_scan(ch.layout(), pts, est_L, cfg.scan_sigma, &ro);
                 if (rr.ok)

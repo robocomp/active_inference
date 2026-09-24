@@ -1132,6 +1132,37 @@ BoxZMax = 2.00
 BoxObsZMin = 0.15
 BoxObsZMax = 1.45
 
+# ── MODEL CHOICES MEASURED IN tools/wall_slam_selftest (2026-09-21..24) ───────────────────────────
+# These were WS_* environment flags while they were being measured; they are parameters now, so the
+# agent runs what the bench validated instead of the defaults nobody set. ⚠ They apply to the BOX
+# SIDECAR only (BoxLayout): MapMode = "given" and the wall-map estimator are untouched by all of it.
+#
+# The layout frame is fitted by the layout's own likelihood instead of a vote of wall-segment
+# directions that never forgets. The vote landed 0.5-3.6 deg off run to run; the fit lands within
+# 0.1 deg on the hall. Needs BoxCoverLayout, or the two pull against each other (the cover's own
+# grid then rewards a frame of exactly 0) and the frame drifts to 2 deg.
+BoxGaugeML = true
+# The free-space cover is built on the LAYOUT grid. On the map grid every rectangle it proposes is
+# aligned with the map axes, so at any non-zero frame it staircases against the room.
+BoxCoverLayout = true
+# Swept space the layout excludes pushes the face that excludes it. This is what pulls a phantom
+# wall back: the hall's lower fin, published 1.3 m too long, lands 6 cm from truth with it.
+BoxFreeForce = true
+# A one-scan seed's four offsets carry the ROOM'S SPAN, not sigma_flat — a box drawn round one scan
+# is not known to a centimetre — and a residual is weighted by the sensor PLUS the posterior variance
+# of the wall it is matched to. The pair is useless split: alone, the second is destructive.
+# They matter when this channel REGISTERS (reproject); the live pose comes from the agent.
+BoxSeedPriorSpan = true
+BoxRegMapVar = true
+# ⚠ OFF, AND IT IS A TRADE, NOT A DEFECT. Refusing a cover that would leave the region disconnected
+# helps the 32-vertex apartment (mean .887 -> .917 over 20 starts, worst .473 -> .705) and costs the
+# 50 simple rooms' tail (mean .969 -> .956, worst .901 -> .772). The right form is to PRICE a second
+# component in nats rather than forbid it; until then this stays off and polygon() warns instead.
+BoxConnected = false
+# COMPUTE budget of the greedy cover, not a model statement (MDL already refuses a box that does not
+# pay). 48 measured neutral on the rooms and slightly worse on the hall, so 24 stands.
+BoxCoverMaxRects = 24
+
 MapMode = "estimate"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
