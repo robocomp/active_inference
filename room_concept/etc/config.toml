@@ -1104,7 +1104,9 @@ BoundaryMuQualityThreshold      = 0.084
 # (d307c84) and is not being staked on an estimator whose bench ladder still has open rows: over
 # 5 seeds, growth beats no-growth on 5 of 6 structured rooms but c2 is -0.007, and c4/c2w1 find
 # nothing on some seeds. Bench: WS_BOXES=1 WS_TOUR_ROOM=<rect|c1|c2|c4|w1|w2|c2w1> bin/wall_slam_selftest
-BoxLayout = true
+# ★2026-09-24 false again, which is what the paragraph above always said: the wall map is the
+# shipped estimator and the box layout is the A/B. Turn both this and MapMode on together.
+BoxLayout = false
 # COMPUTE, not a bar: how often the structure is re-examined. Between steps the channel only folds
 # returns into its voxel map, which is a few microseconds per scan.
 BoxEveryFrames = 40
@@ -1163,7 +1165,14 @@ BoxConnected = false
 # pay). 48 measured neutral on the rooms and slightly worse on the hall, so 24 stands.
 BoxCoverMaxRects = 24
 
-MapMode = "estimate"
+# ── WHICH ROOM THE AGENT WORKS WITH ──────────────────────────────────────────────────────────────
+# "given": the layout is loaded from the SVG and the agent localises in it — the shipped behaviour,
+# and what the fleet runs. "estimate": no layout is loaded, the room is learnt from the LiDAR (wall
+# SLAM, plus the box sidecar when BoxLayout is on).
+# ★2026-09-24 BACK TO "given" BY DEFAULT. The estimation work continues on its branch and every
+# box-sidecar call sits inside `if (estimating())`, so this line alone decides whether any of it
+# runs. To work on the estimator: MapMode = "estimate" AND BoxLayout = true.
+MapMode = "given"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0
