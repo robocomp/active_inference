@@ -22,6 +22,7 @@
 #include <array>
 #include <opencv2/imgproc.hpp>   // fillConvexPoly / bitwise_and — the rasterised phi score
 #include "../../common/rt_query_probe/rt_query_probe.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -212,13 +213,13 @@ void DoorFitter::compute_chain_cov(DoorInstance& inst)
     // pinned to the mask capture stamp.
     const auto& s = inst.model.state();
     const Mat::Vector3d centre(s.cx, s.cy, s.cz);
-    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, "room", inst.last_mask_timestamp_ms);
+    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, rc::room::current_room_frame(*G_), inst.last_mask_timestamp_ms);
     if (not c_src.has_value())
         return;
     DSR::GaussianPoint3D gp;
     gp.mean = c_src.value();
     gp.covariance = DSR::Cov3d::Zero();
-    const auto g = gaussian_->transform_point("room", gp, chain_src_frame_, inst.last_mask_timestamp_ms);
+    const auto g = gaussian_->transform_point(rc::room::current_room_frame(*G_), gp, chain_src_frame_, inst.last_mask_timestamp_ms);
     if (not g.has_value())
         return;
     inst.chain_cov_xx = static_cast<float>(g->covariance(0, 0));
@@ -711,7 +712,7 @@ std::optional<Eigen::Matrix4d> DoorFitter::room_T_zed_matrix(std::uint64_t pose_
     // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
     static rc::rtprobe::Probe rt_probe{"door_fitter room<-body"};
     DSR::RT_API::TimeQueryInfo rt_info;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms, "RT",
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", pose_ts_ms, "RT",
                                                              DSR::RT_API::TimeQuery::Interpolated,
                                                              &rt_info);
     rt_probe.note(rt_info, G_);
