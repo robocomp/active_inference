@@ -30,6 +30,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "viewpoint_score.h"
+#include "../room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc::nbv
 {
@@ -74,6 +75,8 @@ inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::D
     std::vector<IdentifiedObstacle> obs;
     if (inner_eigen == nullptr)
         return obs;
+    // Resolved ONCE: the room cannot change mid-loop, and current_room_frame walks the graph.
+    const std::string room_frame = rc::room::current_room_frame(G);
     for (const char* type : {"object", "box"})
         for (const auto& n : G.get_nodes_by_type(type))
         {
@@ -85,7 +88,7 @@ inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::D
                 continue;
             if (not (w.value() > 0.0f and d.value() > 0.0f))
                 continue;
-            const auto tr = inner_eigen->get_transformation_matrix("room", n.name(), 0);
+            const auto tr = inner_eigen->get_transformation_matrix(room_frame, n.name(), 0);
             if (not tr.has_value())   // ALWAYS check: a missing node/edge in the RT chain returns nullopt
                 continue;
             const auto& M = tr.value();
@@ -158,7 +161,7 @@ inline Sensor sensor_from_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eige
     // body origin (~3 cm) and the object z-spans are room-frame, so mixing them biases the binding axis.
     // ts==0 ⇒ MAIN THREAD ONLY (the InnerEigenAPI ts==0 cache is unlocked; CLAUDE.md).
     if (inner_eigen != nullptr)
-        if (const auto rtz = inner_eigen->get_transformation_matrix("room", "zed", 0); rtz.has_value())
+        if (const auto rtz = inner_eigen->get_transformation_matrix(rc::room::current_room_frame(G), "zed", 0); rtz.has_value())
             s.height_m = static_cast<float>(rtz.value()(2, 3));
 
     // Say ONCE what is missing. Silence is what made this class of failure expensive: an incomplete model

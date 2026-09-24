@@ -170,7 +170,9 @@ public:
     void enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
                                 std::string source_frame, std::string target_frame);
 
-    // Frames the transform resolves; defaults "zed" → "room".
+    // Frames the transform resolves; defaults "zed" → "room". The TARGET is a configured name, resolved
+    // per frame in resolve_transform: "room" means "whichever room is current" (rc::room::resolve_frame),
+    // because room_concept names its rooms room_1, room_2, … and no literal can follow a hand-over.
     void set_frames(std::string source_frame, std::string target_frame);
 
     // A/B control: read the producer's legacy ROOM-frame array verbatim instead of transforming the
@@ -236,7 +238,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI> owned_inner_eigen_;
     DSR::InnerEigenAPI* inner_eigen_       = nullptr;
     std::string         src_frame_         = "zed";
-    std::string         tgt_frame_         = "room";
+    std::string         tgt_frame_         = "room";   // CONFIGURED; "room" ⇒ the current room, resolved per frame
     bool                transform_enabled_ = false;
     bool                force_legacy_room_ = false;   // MASK_INGESTOR_LEGACY_ROOM=1 (A/B escape hatch)
     bool                pose_extrapolate_  = true;    // beat the room→robot RT lag (producer default)

@@ -16,7 +16,10 @@
 
 #include <cmath>
 
+#include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+
+#include "../room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…
 
 #include "phantom_log.h"   // rc::history::PhantomEvent
 
@@ -26,11 +29,14 @@ namespace rc::history
 // Fill e.robot_* / e.view_bearing / e.range_m from the robot's current room-frame pose. `x, y` is the
 // instance centre, already in e. A missing transform leaves the fields at zero and is NOT an error — the
 // room node can legitimately be absent (a death recorded while localisation is down still wants recording).
-inline void note_observer(PhantomEvent& e, DSR::InnerEigenAPI* inner_eigen, float x, float y)
+// ★`G` IS A REQUIRED ARGUMENT, not a convenience: the room's frame is `room_1`, `room_2`, … and has to be
+// resolved from the graph. Making it required is what stops a call site quietly keeping the old literal.
+inline void note_observer(PhantomEvent& e, DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eigen,
+                          float x, float y)
 {
     if (inner_eigen == nullptr)
         return;
-    const auto rtb = inner_eigen->get_transformation_matrix("room", "body", 0);
+    const auto rtb = inner_eigen->get_transformation_matrix(rc::room::current_room_frame(G), "body", 0);
     if (not rtb.has_value())
         return;                          // ALWAYS check the optional — see CLAUDE.md (bad_optional_access)
     const auto& Tm = rtb.value();

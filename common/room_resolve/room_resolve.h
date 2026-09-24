@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include <dsr/api/dsr_api.h>
 
@@ -90,6 +91,52 @@ inline std::optional<DSR::Node> current_room_node(DSR::DSRGraph& G)
     if (not id.has_value())
         return std::nullopt;
     return G.get_node(*id);
+}
+
+/// The NAME of the node with this id, or "" when it is not in the graph. Cheaper than get_node: it
+/// copies a string, not a node with its polygon attributes.
+inline std::string name_of(DSR::DSRGraph& G, std::uint64_t id)
+{
+    return G.get_name_from_id(id).value_or(std::string{});
+}
+
+/// ★THE ROOM'S FRAME NAME — what every `inner_eigen->get_transformation_matrix(...)` /
+/// `transform(...)` / `transform_point(...)` argument wants. Use this INSTEAD of the literal "room".
+///
+/// WHY IT IS NOT A CONSTANT ANY MORE. room_concept names its first room `room_1` and every room
+/// discovered afterwards `room_<k>` (room_scene_graph.cpp: dsr_create_room_and_reparent for the first,
+/// step_proto_room for the rest). A literal "room" in a frame argument therefore names a node that no
+/// longer exists, and `get_transformation_matrix` answers that with `nullopt` — SILENTLY, because a
+/// missing node and an unresolvable RT chain are the same answer. That is the failure this function
+/// exists to make impossible: the frame is resolved from the graph, by TYPE and by the robot's
+/// `current` edge, exactly like `current_room`.
+///
+/// "" when the room is unknown. That is deliberate and NOT a sentinel that needs its own branch: no
+/// node is named "", so every transform built on it returns nullopt, which is the same branch the
+/// caller already takes when the chain is not resolvable yet. A caller that wants to tell "no room"
+/// from "no chain" apart should ask `current_room` and say so.
+///
+/// Backward compatible with a stale graph: a leftover node still named plain "room" is resolved by
+/// this function too, because nothing here looks at the name to decide WHICH room.
+inline std::string current_room_frame(DSR::DSRGraph& G)
+{
+    const auto id = current_room(G);
+    if (not id.has_value())
+        return {};
+    return name_of(G, *id);
+}
+
+/// Resolve a CONFIGURED frame name. The token "room" is the fleet's word for "whichever room is
+/// current" — it is what every config file, every struct default and every comment already says — and
+/// it is resolved from the graph HERE, at use time. Anything else is a literal node name and passes
+/// through untouched.
+///
+/// ★RESOLVE IT EVERY TIME, never latch it. Which room is current changes (a door crossing hands over to
+/// a proto-room), and a name latched at construction is a dead frame that cortex answers with a silent
+/// nullopt — the same write-once node-name memo that has bitten this fleet before.
+inline std::string resolve_frame(DSR::DSRGraph& G, const std::string& configured)
+{
+    return configured == "room" ? current_room_frame(G) : configured;
 }
 
 /// True when `node`'s `parent` attribute names a proto-room — a mirror of something whose belief lives in
