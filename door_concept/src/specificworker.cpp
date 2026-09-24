@@ -32,6 +32,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room:: current_room / is_proto / is_proto_mirror
 
 #include "../../common/detectability/detectability.h"   // rc::detect — the YOLO inverse model
@@ -178,7 +180,12 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 
     load_config(configLoader);
 
-    const int period = configLoader.get<int>("Period.Compute");
+    // Registered rather than read raw, so the period appears in the startup table like every
+    // other key. req() keeps the throw-if-missing behaviour: a period is not something to
+    // default silently.
+    int period = 0;
+    rc::cfg::Reader(configLoader, "door_concept").req("Period.Compute", period,
+            "GRAFCET step period (ms) for every state of this agent's state machine");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this),
@@ -682,6 +689,27 @@ void SpecificWorker::initialize()
 
     restore_strip_geometry();
     strip_window_->show();
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - confident false positives from the one check whose
+    // whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+    // run, which is the end of startup, not the end of parsing.
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+    // ARMS the unread sweep; check_registry_complete.sh door_concept is the grep that keeps the claim
+    // honest. Re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("door_concept");
+    rc::cfg::Reader(configLoader, "door_concept").publish("etc/config_effective.csv");
 }
 
 // ─── Door actuation ──────────────────────────────────────────────────────────
@@ -692,7 +720,7 @@ std::optional<SpecificWorker::ActuationTarget> SpecificWorker::nearest_door_for_
 {
     if (not fitter_ or not inner_eigen_)
         return std::nullopt;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);
     if (not rtb.has_value())
         return std::nullopt;
     const Eigen::Vector2f robot(static_cast<float>(rtb.value()(0, 3)),
@@ -910,14 +938,14 @@ void SpecificWorker::log_detect_probe()
     // origin would cluster with every other failed lookup and invent a viewpoint that never existed.
     if (not inner_eigen_)
         return;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);
     if (not rtb.has_value())
         return;
     const auto& Tb = rtb.value();
     const float rx = static_cast<float>(Tb(0, 3)), ry = static_cast<float>(Tb(1, 3));
     const float rtheta = static_cast<float>(std::atan2(Tb(1, 0), Tb(0, 0)));
     float cam_z = static_cast<float>(Tb(2, 3));
-    if (const auto rtz = inner_eigen_->get_transformation_matrix("room", "zed", 0); rtz.has_value())
+    if (const auto rtz = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", 0); rtz.has_value())
         cam_z = static_cast<float>(rtz.value()(2, 3));
 
     const auto& pkt = mask_ingestor_->packet();
@@ -978,7 +1006,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     // is keyed on (world cell × bearing), never place alone.
     // Observer pose → view bearing. SHARED (common/phantom_log/observer_pose.h): the classifier failure is
     // VIEWPOINT-dependent, so the false-alarm field is keyed on (world cell × bearing), never place alone.
-    rc::history::note_observer(e, inner_eigen_.get(), x, y);
+    rc::history::note_observer(e, *G, inner_eigen_.get(), x, y);
     if (inst)
     {
         e.age_cycles    = inst->processed_cycles;
@@ -1690,7 +1718,7 @@ void SpecificWorker::run_instance_tracker()
     {
         const auto& pkt_p = mask_ingestor_->packet();
         Eigen::Vector2f robot_xy(0.f, 0.f);
-        if (const auto rp = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); rp.has_value())
+        if (const auto rp = inner_eigen_->transform(rc::room::current_room_frame(*G), Eigen::Vector3d::Zero(), "zed"); rp.has_value())
             robot_xy = {static_cast<float>(rp->x()), static_cast<float>(rp->y())};
 
         const auto dets_p = rc::peripheral::gather(pkt_p, "door", robot_xy);
@@ -2916,7 +2944,7 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // ── P(the robot is in the actuation zone), and which SIDE it is on ───────────────────────────
     if (not inner_eigen_)
         return st;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);
     if (not rtb.has_value())
         return st;   // ALWAYS check the optional (CLAUDE.md); no pose ⇒ nothing below is knowable
     const Eigen::Vector2f robot(static_cast<float>(rtb.value()(0, 3)),
@@ -3212,7 +3240,7 @@ bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open,
     { world_T_room = *reg; have_tf = true; }
     else if (inner_eigen_)
         for (const char* frame : {"root", "world"})
-            if (const auto m = inner_eigen_->get_transformation_matrix(frame, "room", 0); m.has_value())
+            if (const auto m = inner_eigen_->get_transformation_matrix(frame, rc::room::current_room_frame(*G), 0); m.has_value())
             { world_T_room = m.value().matrix(); have_tf = true; break; }
 
     // ★REFUSE LOCALLY rather than send coordinates we know are wrong. Only the PLACE path needs the
