@@ -45,7 +45,11 @@ namespace rc::object_anchor
                                                          const std::string&     robot_frame,
                                                          const Eigen::Vector3f& pose_room,
                                                          std::uint64_t          ts,
-                                                         const std::string&     room_frame = "room")
+                                                         // The room's frame name — rc::room::current_room_frame.
+                                                         // NO DEFAULT on purpose: the room is `room_1`, `room_2`, …,
+                                                         // so a literal baked in here would be a dead frame and the
+                                                         // lookup below would answer nullopt without saying why.
+                                                         const std::string&     room_frame)
     {
         // M = robot_frame ← room_frame : maps a room point/heading into the robot base frame.
         const auto m = inner.get_transformation_matrix(robot_frame, room_frame, ts);

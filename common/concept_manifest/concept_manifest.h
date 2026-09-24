@@ -39,6 +39,8 @@
 
 #include <genericworker.h>   // ConfigLoader
 
+#include "../config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
+
 namespace rc::manifest {
 
 // How the object is held up. This is the single statement from which the vertical span follows.
@@ -290,16 +292,31 @@ inline float resolve(const ConfigLoader& cfg, const char* cfg_key,
                      const ConfigLoader& man, const char* man_key,
                      float agent_default, std::string_view what)
 {
-    const bool has_man = man.exists(man_key);
-    const bool has_cfg = cfg.exists(cfg_key);
-    const float m = has_man ? static_cast<float>(man.get<double>(man_key)) : 0.0f;
-    const float c = has_cfg ? static_cast<float>(cfg.get<double>(cfg_key)) : 0.0f;
-    if (has_man and has_cfg and std::abs(m - c) > 1e-4f)
+    // Both reads go through scratch Readers: they register NOTHING on their own, because the two
+    // sources disagree about provenance and only ONE row should reach the effective-config table -
+    // the one that says which source actually won. `man` is a different FILE (the manifest), so
+    // folding its keys in as config keys would misreport where the number came from.
+    const auto mv = rc::cfg::Reader::scratch(man).maybe<float, double>(man_key, "");
+    const auto cv = rc::cfg::Reader::scratch(cfg).maybe<float, double>(cfg_key, "");
+    if (mv and cv and std::abs(*mv - *cv) > 1e-4f)
         std::print("[manifest] OVERRIDE {}: manifest={:.4g} config={:.4g} — the config wins, but a world "
-                   "fact is being contradicted; say why in the manifest\n", what, m, c);
-    if (has_cfg) return c;
-    if (has_man) return m;
-    return agent_default;
+                   "fact is being contradicted; say why in the manifest\n", what, *mv, *cv);
+
+    const float value = cv ? *cv : (mv ? *mv : agent_default);
+
+    // ONE row, carrying the precedence this function exists to enforce. Origin::Manifest is what
+    // distinguishes "the world fact won" from "the config said so" - and without it a manifest-driven
+    // number would appear in the table as an unexplained code default.
+    rc::cfg::Record r;
+    r.key          = cfg_key;
+    r.type         = "float";
+    r.code_default = std::format("{:.6g}", agent_default);
+    r.effective    = std::format("{:.6g}", value);
+    r.description  = std::string(what);
+    r.origin       = cv ? rc::cfg::Origin::File
+                        : (mv ? rc::cfg::Origin::Manifest : rc::cfg::Origin::Default);
+    rc::cfg::registry().note(std::move(r));
+    return value;
 }
 
 // ─── ADOPT THE DECLARED SPAN — the ~30 lines hood proved, so the next agent does not retype them ──

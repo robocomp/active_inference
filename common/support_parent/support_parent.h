@@ -47,6 +47,7 @@
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include "../room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc::support
 {
@@ -62,9 +63,11 @@ struct Params
 struct Decision
 {
     std::uint64_t parent_id = 0;
-    // Defaults to "room" because the room IS this fleet's universal fallback parent — every object hangs off
-    // it when nothing else wins. A default of "" would read as "no parent decided", which never happens.
-    std::string   parent_name = "room";
+    // The room IS this fleet's universal fallback parent — every object hangs off it when nothing else
+    // wins — but its NAME is `room_1`, `room_2`, … so it cannot be a literal here: `decide` reads it off
+    // the room node it was handed. "" therefore means the room node could not be read, and a caller must
+    // not write it anywhere: an empty frame resolves to nothing, which is the honest answer.
+    std::string   parent_name;
     // The chosen support's TOP in room z. NaN ⇒ the room/floor won, so there is NO z anchor and the caller
     // must not invent one. Distinguishing "no support" from "support at z=0" matters: the floor hypothesis is
     // about the object's own base being near zero, not about a surface at zero.
@@ -116,7 +119,7 @@ inline float support_top_z(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eigen, st
     const auto h = G.get_attrib_by_name<height_m_att>(n.value());
     if (not h.has_value() or h.value() <= 0.0f)
         return nan;
-    const auto org = inner_eigen->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), n->name(), 0);
+    const auto org = inner_eigen->transform(rc::room::current_room_frame(G), Mat::Vector3d(0.0, 0.0, 0.0), n->name(), 0);
     if (not org.has_value())
         return nan;
     return static_cast<float>(org->z()) + h.value();
@@ -156,7 +159,7 @@ inline Decision decide(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eigen, std::u
 
         // The base point in the SUPPORT'S LOCAL frame — oriented footprint test and vertical residual in one
         // step, so a rotated worktop needs no separate yaw handling.
-        const auto loc = inner_eigen->transform(t.name(), Mat::Vector3d(cx, cy, base_z), "room", 0);
+        const auto loc = inner_eigen->transform(t.name(), Mat::Vector3d(cx, cy, base_z), room_dec.parent_name, 0);
         if (not loc.has_value())
             continue;
         const float lx = std::abs(static_cast<float>(loc->x()));

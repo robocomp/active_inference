@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../media_transport/lidar_plane_reader.h"
+#include "../room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc
 {
@@ -45,7 +46,7 @@ bool ConceptLidarIngestor::pump()
     if (reader_)
     {
         const bool en = g.helios_precision > 0.0f or g.free_space_precision > 0.0f;
-        if (const auto sweep = reader_->poll("room", /*interpolate=*/true, /*enabled=*/en);
+        if (const auto sweep = reader_->poll(rc::room::current_room_frame(*G_), /*interpolate=*/true, /*enabled=*/en);
             sweep.has_value() and not sweep->points.empty())
         {
             sweep_room_   = std::move(sweep->points);
@@ -56,7 +57,7 @@ bool ConceptLidarIngestor::pump()
     // Low bpearl plane — its OWN capture stamp, its OWN origin. Only pumped while its feature is on.
     if (reader_bpearl_)
     {
-        if (const auto bp = reader_bpearl_->poll("room", /*interpolate=*/true,
+        if (const auto bp = reader_bpearl_->poll(rc::room::current_room_frame(*G_), /*interpolate=*/true,
                                                  /*enabled=*/g.bpearl_precision > 0.0f);
             bp.has_value() and not bp->points.empty())
         {

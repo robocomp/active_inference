@@ -11,6 +11,8 @@
 #include <sstream>
 #include <unordered_set>
 #include <utility>
+#include "../config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 #include <QElapsedTimer>
 #include <QMetaType>
 
@@ -20,37 +22,51 @@ AgentPresenceMonitor::AgentPresenceMonitor(const ConfigLoader &config_loader,
     : config_loader(config_loader)
     , graph(std::move(graph))
     , local_agent_id(local_agent_id)
-    , monitor_period_ms(config_loader.exists("Presence.monitor_period_ms") ? config_loader.get<int>("Presence.monitor_period_ms") : 500)
-    , heartbeat_timeout_ms(config_loader.exists("Presence.heartbeat_timeout_ms") ? config_loader.get<int>("Presence.heartbeat_timeout_ms") : 3000)
-    , rejoin_grace_ms(config_loader.exists("Presence.rejoin_grace_ms") ? config_loader.get<int>("Presence.rejoin_grace_ms") : 1500)
-    , agent_info_period_ms(config_loader.exists("Presence.agent_info_period_ms") ? config_loader.get<int>("Presence.agent_info_period_ms") : 1000)
-    , stale_grace_ms(config_loader.exists("Presence.stale_grace_ms") ? config_loader.get<int>("Presence.stale_grace_ms") : 120000)
-    , debug_logging_(config_loader.exists("Presence.debug") ? config_loader.get<bool>("Presence.debug") : false)
-    , debug_snapshot_period_ms(config_loader.exists("Presence.debug_snapshot_period_ms") ? config_loader.get<int>("Presence.debug_snapshot_period_ms") : 5000)
-    , required_agent_ids(config_loader.exists("Presence.required_agent_ids")
-                             ? sorted_unique(config_loader.get<std::vector<int>>("Presence.required_agent_ids"))
-                             : std::vector<std::uint32_t>{})
-    , optional_agent_ids(config_loader.exists("Presence.optional_agent_ids")
-                             ? sorted_unique(config_loader.get<std::vector<int>>("Presence.optional_agent_ids"))
-                             : std::vector<std::uint32_t>{})
-    , required_agent_names(config_loader.exists("Presence.required_agent_names")
-                               ? config_loader.get<std::vector<std::string>>("Presence.required_agent_names")
-                               : std::vector<std::string>{})
-    , optional_agent_names(config_loader.exists("Presence.optional_agent_names")
-                               ? config_loader.get<std::vector<std::string>>("Presence.optional_agent_names")
-                               : std::vector<std::string>{})
-    , owned_node_names_(config_loader.exists("Owns.nodes")
-                            ? config_loader.get<std::vector<std::string>>("Owns.nodes")
-                            : std::vector<std::string>{})
-    , owned_subtree_roots_(config_loader.exists("Owns.subtrees")
-                               ? config_loader.get<std::vector<std::string>>("Owns.subtrees")
-                               : std::vector<std::string>{})
-    , node_requires_(config_loader.exists("Presence.node_requires")
-                         ? config_loader.get<std::vector<std::string>>("Presence.node_requires")
-                         : std::vector<std::string>{})
-    , config_dir_(config_loader.exists("Presence.config_dir")
-                      ? config_loader.get<std::string>("Presence.config_dir")
-                      : "etc")
+    // ── EVERY [Presence.*]/[Owns.*] READ, REGISTERED, WITH ITS OWN EXPLANATION ─────────────────
+    //
+    // These sixteen keys are read HERE, in a shared unit, on behalf of the 14 agents that link it -
+    // which is why none of those agents could honestly declare its config registry complete while
+    // this file still read them raw: the unread sweep would have named all sixteen as "in the file,
+    // read by nothing".
+    //
+    // ★A TEMPORARY Reader per initialiser, deliberately. A single Reader MEMBER would have to be
+    // declared before every field that uses it, and member-initialiser order follows DECLARATION
+    // order in the header, not the order written here - so one reordered field would silently
+    // construct it after its first use. A Reader is two pointers; sixteen of them cost nothing and
+    // the ordering hazard cannot arise.
+    //
+    // ★The agent name is EMPTY on purpose: this unit reads on someone else's behalf and must not
+    // claim to name the agent. Whichever agent created the first Reader already did.
+    , monitor_period_ms(rc::cfg::Reader(config_loader, "").i("Presence.monitor_period_ms", 500,
+          "how often the presence monitor re-reads peer heartbeats (ms)"))
+    , heartbeat_timeout_ms(rc::cfg::Reader(config_loader, "").i("Presence.heartbeat_timeout_ms", 3000,
+          "silence (ms) after which a required peer counts as LOST; long on purpose - acting on a short silence proved hypersensitive to graph-publish stalls"))
+    , rejoin_grace_ms(rc::cfg::Reader(config_loader, "").i("Presence.rejoin_grace_ms", 1500,
+          "grace (ms) for a peer to rejoin before its loss is acted on"))
+    , agent_info_period_ms(rc::cfg::Reader(config_loader, "").i("Presence.agent_info_period_ms", 1000,
+          "how often this agent publishes its OWN heartbeat (ms)"))
+    , stale_grace_ms(rc::cfg::Reader(config_loader, "").i("Presence.stale_grace_ms", 120000,
+          "how long a silent peer's record is kept before it is dropped entirely (ms)"))
+    , debug_logging_(rc::cfg::Reader(config_loader, "").b("Presence.debug", false,
+          "verbose presence logging", rc::cfg::diagnostic))
+    , debug_snapshot_period_ms(rc::cfg::Reader(config_loader, "").i("Presence.debug_snapshot_period_ms", 5000,
+          "period (ms) of the presence debug snapshot dump", rc::cfg::diagnostic))
+    , required_agent_ids(sorted_unique(rc::cfg::Reader(config_loader, "").v<int>("Presence.required_agent_ids", {},
+          "agent ids that MUST be present; losing one sends this agent to Degraded")))
+    , optional_agent_ids(sorted_unique(rc::cfg::Reader(config_loader, "").v<int>("Presence.optional_agent_ids", {},
+          "agent ids tracked for display but not required")))
+    , required_agent_names(rc::cfg::Reader(config_loader, "").v<std::string>("Presence.required_agent_names", {},
+          "agent names that MUST be present - the by-name half of required_agent_ids"))
+    , optional_agent_names(rc::cfg::Reader(config_loader, "").v<std::string>("Presence.optional_agent_names", {},
+          "agent names tracked but not required"))
+    , owned_node_names_(rc::cfg::Reader(config_loader, "").v<std::string>("Owns.nodes", {},
+          "graph nodes this agent OWNS and deletes on a graceful exit"))
+    , owned_subtree_roots_(rc::cfg::Reader(config_loader, "").v<std::string>("Owns.subtrees", {},
+          "subtree roots this agent owns and deletes on a graceful exit"))
+    , node_requires_(rc::cfg::Reader(config_loader, "").v<std::string>("Presence.node_requires", {},
+          "graph nodes that must exist before this agent may leave Waiting"))
+    , config_dir_(rc::cfg::Reader(config_loader, "").s("Presence.config_dir", "etc",
+          "directory holding peer config files, for the by-name presence lookup"))
 {
     timer.setInterval(monitor_period_ms);
 }
@@ -622,10 +638,28 @@ void AgentPresenceMonitor::delete_single_owned_node(const std::string &name_or_p
     }
 }
 
+// `root_name` is an exact node name, or a trailing-`*` PREFIX pattern — the same convention
+// delete_single_owned_node already uses for Owns.nodes. The prefix form is what an Owns.subtrees entry
+// needs now that room_concept names its rooms `room_1`, `room_2`, … instead of one node called "room":
+// `subtrees = ["room_*"]` reaps every room the crashed peer owned, and there is no single literal that
+// could. Each match is torn down independently, so a fleet with two rooms cleans up both.
 void AgentPresenceMonitor::delete_subtree(const std::string &root_name)
 {
     if (!graph)
         return;
+
+    if (!root_name.empty() && root_name.back() == '*')
+    {
+        const std::string prefix = root_name.substr(0, root_name.size() - 1);
+        std::vector<std::string> roots;
+        for (const auto &node : graph->get_nodes())
+            if (node.name().size() >= prefix.size() && node.name().compare(0, prefix.size(), prefix) == 0)
+                roots.push_back(node.name());
+        for (const auto &name : roots)
+            delete_subtree(name);       // one level of recursion: `name` carries no '*'
+        return;
+    }
+
     auto root_opt = graph->get_node(root_name);
     if (!root_opt.has_value())
         return;
@@ -676,21 +710,21 @@ void AgentPresenceMonitor::delete_peer_owned_nodes(const std::string &peer_clean
     {
         ConfigLoader peer_loader;
         peer_loader.load(peer_config_path);
-        if (!peer_loader.exists("Owns.nodes"))
-            return;
-        const auto peer_nodes = peer_loader.get<std::vector<std::string>>("Owns.nodes");
+        // ★Reader::scratch READS BUT REGISTERS NOTHING, and that is the whole point here: this is a
+        // CRASHED PEER'S config file, not ours. A normal Reader would fold another process's Owns.*
+        // into this agent's effective-config table, so the startup table would report a
+        // configuration no one is running. An instrument that mixes up whose config it is describing
+        // is worse than no instrument.
+        auto peer = rc::cfg::Reader::scratch(peer_loader);
+        const auto peer_nodes = peer.v<std::string>("Owns.nodes", {}, "");
         if (peer_nodes.empty())
             return;
         std::cout << "[Presence] cleaning up " << peer_nodes.size()
                   << " owned node(s) of crashed peer '" << peer_clean_name << "'" << std::endl;
         for (const auto &name : peer_nodes)
             delete_single_owned_node(name);
-        if (peer_loader.exists("Owns.subtrees"))
-        {
-            const auto peer_subtrees = peer_loader.get<std::vector<std::string>>("Owns.subtrees");
-            for (const auto &root : peer_subtrees)
-                delete_subtree(root);
-        }
+        for (const auto &root : peer.v<std::string>("Owns.subtrees", {}, ""))
+            delete_subtree(root);
     }
     catch (const std::exception &error)
     {

@@ -154,6 +154,26 @@ target_link_libraries(ai_common_core INTERFACE Eigen3::Eigen Qt6::Core ${AI_COMM
 add_library(ai_common::core ALIAS ai_common_core)
 
 # =====================================================================================
+# ai_common::config — the effective-config table (what this agent is ACTUALLY running).
+#
+# INTERFACE, and split in two on purpose:
+#   config_report.h  registry/deltas/fingerprint/sweep — STDLIB ONLY, so common/run_tests.sh builds
+#                    its test with a bare g++ (no toml++, no $ROBOCOMP/classes) and controller/tools/
+#                    can link it while still building without Qt/DSR/Ice.
+#   config_read.h    rc::cfg::Reader — the only file that includes ConfigLoader.h.
+#
+# It links NOTHING: keeping it dependency-free is the property that makes it adoptable everywhere,
+# including from a free function like load_<obj>_config() that has no worker and no graph.
+# 19 components already resolve both include paths through ai_common::core's interface, so adding
+# this to their LIBS documents intent rather than fixing a build.
+# =====================================================================================
+add_library(ai_common_config INTERFACE)
+target_include_directories(ai_common_config INTERFACE ${CMAKE_CURRENT_SOURCE_DIR} $ENV{ROBOCOMP}/classes)
+target_compile_features(ai_common_config INTERFACE cxx_std_23)
+target_compile_options(ai_common_config INTERFACE -fno-char8_t)
+add_library(ai_common::config ALIAS ai_common_config)
+
+# =====================================================================================
 # ai_common::presence — the agent presence protocol. 14 consumers, zero flag divergence.
 # agent_presence_coordinator.h includes <ConfigLoader/ConfigLoader.h>, which today only resolves
 # because ROBOCOMP_INITIALIZE puts $ROBOCOMP/classes on the inherited directory include path.

@@ -20,6 +20,7 @@
 #include <utility>
 
 #include <QDateTime>   // wall-clock ms source for the producer-liveness probes (kept out of the header)
+#include "../room_resolve/room_resolve.h"   // rc::room::resolve_frame — "room" means the CURRENT room (room_1, room_2, …)
 
 
 namespace rc {
@@ -101,8 +102,15 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
     // run. The caller already reports an unresolvable chain properly: 1 line in 100, naming both frames
     // and the running total. Bailing here routes the condition into that counter instead of into the log.
     // Costs two `name_map` lookups under a shared_lock; get_node would have copied both whole nodes.
+    // ★THE TARGET FRAME IS RESOLVED HERE, NOT LATCHED. `tgt_frame_` is what the agent CONFIGURED, and
+    // the token "room" in a config is the fleet's word for "whichever room is current" — room_concept
+    // names its rooms `room_1`, `room_2`, … so the literal is not a node name any more. Resolving it per
+    // frame is what keeps this working across a room hand-over; a name taken once at enable_frame_transform
+    // time would be a dead frame the moment the room changed, and cortex answers a dead frame with nullopt.
+    const std::string tgt_frame = (G_ != nullptr) ? rc::room::resolve_frame(*G_, tgt_frame_) : tgt_frame_;
+
     if (G_ != nullptr)
-        if (not G_->get_id_from_name(tgt_frame_).has_value()
+        if (not G_->get_id_from_name(tgt_frame).has_value()
             or not G_->get_id_from_name(src_frame_).has_value())
             return std::nullopt;
 
@@ -110,7 +118,7 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
     // and the only path when extrapolation is off. Still capture-stamp pinned.
     const auto direct = [&]() -> std::optional<Eigen::Matrix4d>
     {
-        const auto T = inner_eigen_->get_transformation_matrix(tgt_frame_, src_frame_, stamp);
+        const auto T = inner_eigen_->get_transformation_matrix(tgt_frame, src_frame_, stamp);
         return T.has_value() ? std::optional{to_m4(T.value())} : std::nullopt;
     };
 
@@ -143,7 +151,7 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
     //      cap; it reports how far it walked, and past the cap we take the un-extrapolated pose
     //      instead of predicting across a stalled producer.
     DSR::RT_API::TimeQueryInfo info;
-    auto base = inner_eigen_->get_transformation_matrix(tgt_frame_, robot_name_, stamp, "RT",
+    auto base = inner_eigen_->get_transformation_matrix(tgt_frame, robot_name_, stamp, "RT",
                                                         DSR::RT_API::TimeQuery::Extrapolated,
                                                         &info);
     if (not base.has_value())
@@ -154,7 +162,7 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
     //      still returns the nearest measured pose, which beats dropping the frame.
     if (std::abs(info.applied_dt_ms) > static_cast<std::int64_t>(pose_extrap_max_dt_s_ * 1000.f))
     {
-        base = inner_eigen_->get_transformation_matrix(tgt_frame_, robot_name_, stamp, "RT",
+        base = inner_eigen_->get_transformation_matrix(tgt_frame, robot_name_, stamp, "RT",
                                                        DSR::RT_API::TimeQuery::Interpolated);
         if (not base.has_value())
             return direct();
