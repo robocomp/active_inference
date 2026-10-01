@@ -4592,6 +4592,16 @@ namespace rc
             zupt_pred_gain_tr_ = w_tr; zupt_pred_gain_ro_ = w_ro;   // for the viewer / debug row
             d.head<2>() *= w_tr;
             d[2]        *= w_ro;
+            // ★ AND RE-ISSUE THE PREDICTION FROM THE SCALED INCREMENT. set_model_prediction() above
+            // already wrote base (+) UNSCALED Delta into the model, and that is the pose an early exit
+            // publishes -- so until 2026-10-01 this block scaled a copy nothing downstream read for the
+            // pose, and the rest hypothesis never reached the published mean it exists to act on.
+            // Measured on the first live run with it on: the selected increment fell 30x (46 -> 1.6 um
+            // per cycle) while the published pose still stepped 81 um per cycle and wandered 72 mm in
+            // 11.5 min truly still. The fallback source predicts no motion, so there is nothing to redo.
+            if (selection.source != MotionPriorSource::FallbackZero)
+                set_model_prediction(base_pos + d.head<2>(), wrap_angle(base_theta + d[2]),
+                                     selection.prediction_precision);
         }
 
         last_selected_prior_ = selection.selected_prior;
