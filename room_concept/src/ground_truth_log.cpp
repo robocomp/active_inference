@@ -197,7 +197,7 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             hd_csv_ << "v_" << rc::calib::param_name(i) << ',';
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
             hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
-        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes\n";
+        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -234,7 +234,9 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << res.imu_segs << ',' << res.wheel_segs;
     for (int i = 0; i < rc::calib::P_COUNT; ++i) hd_csv_ << ',' << res.calib_value[i];
     for (int i = 0; i < rc::calib::P_COUNT; ++i) hd_csv_ << ',' << res.calib_sigma[i];
-    hd_csv_ << ',' << res.calib_informed << ',' << res.calib_condition << ',' << res.calib_episodes << '\n';
+    hd_csv_ << ',' << res.calib_informed << ',' << res.calib_condition << ',' << res.calib_episodes
+            << ',' << d.nl_c0 << ',' << d.nl_c1 << ',' << d.nl_c2 << ',' << d.nl_samples
+            << ',' << (room_concept_.params.heading_noise_learning ? 1 : 0) << '\n';
     hd_csv_.flush();
 }
 

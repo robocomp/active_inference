@@ -67,6 +67,7 @@
 #include "image_edge_factor.h"
 #include "se2_preintegration.h"
 #include "motion_calibration.h"
+#include "wheel_noise_learner.h"
 #include "reloc_search.h"
 
 namespace rc
@@ -586,6 +587,10 @@ public:
         // false: the legacy 0/1 switch (gyro whenever it brackets the segment and the wheels are not
         // stationary), one shared scale, kept for A/B. ★The bias sign fix applies to BOTH.
         bool heading_fusion = false;
+        // Learn the wheels' heading-noise density as d_w^2 = c0 + c1|v| + c2|omega| from the
+        // wheel-minus-gyro disagreement (truth cancels), anchored on the gyro's stated density. Used
+        // for the wheel factor's weight in the fusion above. See wheel_noise_learner.h.
+        bool heading_noise_learning = false;
         // ── The WHEELS' own per-sample velocity variance, as a preintegration density ──────────────
         // OFF by default, like every channel that can move the published pose. When on, each odometry
         // sample's stated velCov (forwarded by robot_concept onto robot_current_speed_variance) is
@@ -854,6 +859,8 @@ public:
             float zupt_dt   = 0.f;    ///< s on which the wheels read stationary
             float dens_w    = -1.f;   ///< rad/sqrt(s) used for the wheel factor
             float dens_g    = -1.f;   ///< rad/sqrt(s) used for the gyro factor
+            float nl_c0 = 0.f, nl_c1 = 0.f, nl_c2 = 0.f;   ///< learned wheel density^2 coefficients
+            long  nl_samples = 0;                          ///< segments the learner has seen
         } heading_diag;
         float wheel_shadow_dtheta = 0.f;
         int   imu_segs = 0, wheel_segs = 0;
@@ -1862,6 +1869,7 @@ private:
    rc::calib::HeadingCovariates cyc_heading_cov_{};
    double cyc_gyro_w_dt_ = 0.0, cyc_heading_dt_ = 0.0;      // for the time-weighted mean gyro weight
    UpdateResult::HeadingDiag cyc_hdiag_{};
+   rc::calib::WheelNoiseLearner wheel_noise_;
    double cyc_dens_w_dt_ = 0.0, cyc_dens_g_dt_ = 0.0;      // density * dt, for time-weighted means
    double gyro_w_dt_sum_ = 0.0, heading_dt_sum_ = 0.0;      // same, over the 5 s [ImuInject] window
    float cyc_wheel_shadow_dtheta_ = 0.f;

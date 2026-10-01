@@ -855,6 +855,13 @@ HeadingFusion       = true   # Heading = precision-weighted PRODUCT of the wheel
                         # ★Parked, the gyro now carries weight (zupt density 0.0102 vs the gyro's
                         # stated density); if the heading walks while parked, the gyro's STATED noise
                         # is too small -- fix that number, do not re-add the gate.
+HeadingNoiseLearning = true  # Learn the wheels' heading-noise density d_w^2 = c0 + c1|v| + c2|omega|
+                        # from wheel-minus-gyro (truth cancels), anchored on the gyro's STATED density,
+                        # and use it for the wheel weight in HeadingFusion. Needs HeadingFusion = true.
+                        # Offline, cross-validated on the two 2026-10-01 logs: rest error halved vs the
+                        # switch (.046 vs .107/.091 deg/2s, p<1e-6), slow driving equal or better, fast
+                        # turns tied. Coefficients are in tmp/heading/*.csv (nl_c0..nl_c2). UNRUN LIVE.
+
 ImuLinearInjection  = true   # Add the accelerometer's within-segment double integration to the
                         # wheel displacement. The integrator holds the reported wheel velocity flat
                         # across each segment; the true displacement is v0*dt + the double integral,

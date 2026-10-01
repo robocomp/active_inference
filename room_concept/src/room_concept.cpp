@@ -4341,6 +4341,10 @@ namespace rc
         res.gyro_weight         = cyc_heading_dt_ > 0.0
                                 ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
         res.heading_diag        = cyc_hdiag_;
+        res.heading_diag.nl_c0 = static_cast<float>(wheel_noise_.coeffs()[0]);
+        res.heading_diag.nl_c1 = static_cast<float>(wheel_noise_.coeffs()[1]);
+        res.heading_diag.nl_c2 = static_cast<float>(wheel_noise_.coeffs()[2]);
+        res.heading_diag.nl_samples = wheel_noise_.samples();
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
@@ -4975,6 +4979,10 @@ namespace rc
         res.gyro_weight         = cyc_heading_dt_ > 0.0
                                 ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
         res.heading_diag        = cyc_hdiag_;
+        res.heading_diag.nl_c0 = static_cast<float>(wheel_noise_.coeffs()[0]);
+        res.heading_diag.nl_c1 = static_cast<float>(wheel_noise_.coeffs()[1]);
+        res.heading_diag.nl_c2 = static_cast<float>(wheel_noise_.coeffs()[2]);
+        res.heading_diag.nl_samples = wheel_noise_.samples();
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
@@ -7776,8 +7784,14 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             {
                 const float dpsi_w = wheel_raw * k_ww + curve;
                 const float ws = wheel_sigma(odom.var_rot);
-                const float dens_w = wheel_stationary ? params.odom_preint_noise.zupt_density_omega
-                                   : (ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                const float dens_w_stated = wheel_stationary ? params.odom_preint_noise.zupt_density_omega
+                                          : (ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                // Learned: the wheels' density at THIS motion, from their disagreement with the gyro.
+                // Its prior is the stated/model rest density, so on a cold start it begins there.
+                if (params.heading_noise_learning)
+                    wheel_noise_.set_prior_density(ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                const float dens_w = params.heading_noise_learning
+                                   ? wheel_noise_.density(odom.adv, odom.rot) : dens_w_stated;
                 const float s_kw = motion_calib_.param_sigma(rc::calib::P_K_OMEGA_W) * wheel_raw;
                 const float var_w = dens_w * dens_w * dt + s_kw * s_kw;
                 cyc_dens_w_dt_ += static_cast<double>(dens_w) * dt;
@@ -7789,6 +7803,10 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                     const float s_kg = motion_calib_.param_sigma(rc::calib::P_K_OMEGA) * dth_imu;
                     const float s_bg = motion_calib_.param_sigma(rc::calib::P_B_OMEGA) * dt;
                     const float var_g = dens_g * dens_g * dt + s_kg * s_kg + s_bg * s_bg;
+                    // Teach the learner: wheel minus gyro cancels the true rotation. Only with a
+                    // STATED gyro density (gs) -- the model constant is not an anchor.
+                    if (params.heading_noise_learning and gs > 0.f)
+                        wheel_noise_.add(dpsi_w - (dth_imu * k_g - b_g * dt), dt, odom.adv, odom.rot, gs);
                     cyc_dens_g_dt_ += static_cast<double>(dens_g) * dt;
                     w_g = var_w / std::max(var_w + var_g, 1e-30f);
                     dtheta = w_g * dpsi_g + (1.f - w_g) * dpsi_w;
