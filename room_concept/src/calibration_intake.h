@@ -107,6 +107,7 @@ namespace rc::calib
         /// Persist / restore the WINDOW (evidence), and forget it. See BatchEstimator::save.
         bool        save(const std::string& path) const { return est_.save(path); }
         std::size_t load(const std::string& path)       { return est_.load(path); }
+        [[nodiscard]] std::size_t legacy_dropped() const noexcept { return est_.legacy_dropped(); }
         void        reset() noexcept                    { est_.reset(); }
 
         /// Offer one episode. Returns why it was accepted or refused. `fit_residual_m` is the

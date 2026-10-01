@@ -4337,6 +4337,9 @@ namespace rc
         res.imu_lin_segs = cyc_imu_lin_segs_;
         res.imu_dtheta          = cyc_imu_dtheta_;
         res.wheel_dtheta        = cyc_wheel_dtheta_;
+        res.heading_cov         = cyc_heading_cov_;
+        res.gyro_weight         = cyc_heading_dt_ > 0.0
+                                ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
@@ -4963,6 +4966,9 @@ namespace rc
         res.imu_lin_segs = cyc_imu_lin_segs_;
         res.imu_dtheta          = cyc_imu_dtheta_;
         res.wheel_dtheta        = cyc_wheel_dtheta_;
+        res.heading_cov         = cyc_heading_cov_;
+        res.gyro_weight         = cyc_heading_dt_ > 0.0
+                                ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
@@ -6994,6 +7000,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                                   << QString::fromStdString(params.calib_state_file)
                                   << " (" << motion_calib_.closures() << " closed pivot(s)) — the "
                                      "window resumes, the priors do not move";
+            if (const std::size_t d = motion_calib_.legacy_dropped(); d > 0)
+                qWarning().nospace() << "[calib] DROPPED " << d << " episode rows from "
+                                     << QString::fromStdString(params.calib_state_file)
+                                     << " — written before the heading became two factors (one shared "
+                                        "heading covariate, bias of opposite sign); no exact split exists, "
+                                        "so the window re-earns them";
         }
 
         // Drain any closed pivots first, on THIS thread, before the episode path runs. A closure is
@@ -7218,7 +7230,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
                                   r_forward, r_lateral, r_theta,
                                   pos_var, th_var, corrected_this_cycle, res.sdf_mse,
-                                  last_cycle_dt_s_);
+                                  last_cycle_dt_s_, res.heading_cov);
         }
         res.calib_value = motion_calib_.last_solve().value;
         res.calib_sigma = motion_calib_.last_solve().sigma;
@@ -7642,6 +7654,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         cyc_imu_dvx_ = cyc_imu_dvy_ = cyc_imu_dpx_ = cyc_imu_dpy_ = 0.f;
         cyc_wheel_dvx_ = cyc_wheel_dvy_ = 0.f; cyc_imu_lin_segs_ = 0;
         cyc_imu_segs_ = cyc_wheel_segs_ = 0;
+        cyc_heading_cov_ = {};
+        cyc_gyro_w_dt_ = cyc_heading_dt_ = 0.0;
 
         // Integrate over all odometry readings in [win_start_ms, win_end_ms], on the clock chosen above.
         for (size_t i = 0; i < odometry_history.size(); ++i)
@@ -7706,59 +7720,116 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             const float dx_use = dx_local + (params.imu_linear_injection ? imu_dpx_seg : 0.f);
             const float dy_use = dy_local + (params.imu_linear_injection ? imu_dpy_seg : 0.f);
 
-            // THE INJECTION. Heading change from the gyro when it brackets this segment, otherwise
-            // the wheel-derived rate. Translation stays on the wheels either way -- an accelerometer
-            // cannot supply it without a drifting double integration, and the wheels are already
-            // exact there.
-            const float k_w = motion_calib_.omega_scale();
-            // A BIAS is subtracted per unit TIME, a scale multiplies the RATE. That difference is the
-            // only thing separating the two, and it is why the joint solve can find both at once.
-            const float b_w = motion_calib_.omega_bias();
-            // Per-wheel mismatch: unequal effective radii make a commanded straight line curve, so
-            // it adds heading in proportion to DISTANCE driven, not to rotation or to time.
+            // ── HEADING: two factors on one rotation ──────────────────────────────────────────────
+            // The wheels and the gyro each measure this segment's rotation, wrong in different ways,
+            // so each is corrected by ITS OWN calibration and the two are combined by precision.
+            //   wheels: dpsi_w = k_omega_w * rot*dt + dk_wheel * forward     (scrubbing, asymmetry)
+            //   gyro:   dpsi_g = k_omega * (integrated gyro) - b_omega * dt   (scale, bias)
+            // Their product is a Gaussian on the heading whose mean is the precision-weighted mean --
+            // which is what "a weighted combination of wheels and gyro" means as a generative model.
+            // The weights come from each channel's noise density PLUS its scale uncertainty, so the
+            // gyro takes a fast turn (scrubbing uncertainty grows with |rotation|), and the wheels
+            // take a stop (they read exactly zero there; ZUPT density). No gate decides it.
+            //
+            // Translation stays on the wheels either way -- an accelerometer cannot supply it without
+            // a drifting double integration, and the wheels are already exact there.
+            const float k_g   = motion_calib_.omega_scale();
+            const float b_g   = motion_calib_.omega_bias();          // physical sign: gyro reads w + b
+            const float k_ww  = motion_calib_.wheel_omega_scale();
             const float dk_wheel = motion_calib_.wheel_mismatch();
             const float curve = dk_wheel * dy_local;
-            float dtheta = odom.rot * dt * k_w - b_w * dt + curve;
-            float rot_eff = dt > 0.f ? dtheta / dt : (odom.rot * k_w - b_w);
-            // Which sensor's noise describes rot_eff below. The channel that SUPPLIED the mean is the
-            // one whose stated variance applies to it; crediting the gyro's noise to a wheel-derived
-            // heading would describe a measurement that was never made.
-            bool heading_from_imu = false;
-            // ZUPT: the wheels read ~0 exactly when actually stopped (no scrubbing error to correct
-            // for there), while the gyro over this same span is pure random-walk noise -- measured
-            // ~0.011 rad accumulated per 5 s window with the robot parked (see the coverage guard
-            // below, imu_dtheta_sum_). Below this, skip the gyro override entirely and let dtheta
-            // stay the wheel-derived value above (already ~0), instead of integrating that noise as
-            // if it were rotation.
+            const float wheel_raw = odom.rot * dt;
+            // The ZUPT condition no longer GATES anything under fusion: it only says which noise
+            // describes a wheel reading -- a stopped encoder's residual (zupt_density_omega) rather
+            // than a rolling one's. Under the legacy switch it still decides the channel.
             const bool wheel_stationary = params.zupt_enabled
                                         and std::abs(odom.rot)  < params.zupt_wheel_rot_eps
                                         and std::abs(odom.adv)  < params.zupt_wheel_lin_eps
                                         and std::abs(odom.side) < params.zupt_wheel_lin_eps;
             if (wheel_stationary)
                 ++zupt_segs_;
-            if (float dth_imu = 0.f; not wheel_stationary and imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
+            float dth_imu = 0.f;
+            const bool have_gyro = imu_dtheta(effective_start_ms, effective_end_ms, dth_imu);
+
+            float dtheta = 0.f;
+            float w_g = 0.f;            // the gyro's share of this segment's heading
+            float sig_om_fused = -1.f;  // density handed to the preintegrator; <0 = use the model
+            rc::calib::HeadingCovariates hc{};
+            if (params.heading_fusion)
             {
-                // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
-                // taking out of the wheel estimate, which is the whole point of the injection and the
-                // one number that says it is doing something rather than merely running.
-                wheel_dtheta_sum_ += dtheta;
-                imu_dtheta_sum_   += dth_imu;
-                cyc_wheel_shadow_dtheta_ += dtheta;   // what the wheels said, before the override
-                cyc_imu_dtheta_          += dth_imu;  // what actually entered the prior
-                ++cyc_imu_segs_;
-                // The learned scale applies to whichever channel supplies the heading, and the gyro
-                // supplies ~99% of it -- applying it only to the wheel branch would leave it inert.
-                dtheta = dth_imu * k_w - b_w * dt + curve;
-                rot_eff = dtheta / dt;               // the mean rate the gyro actually saw
-                heading_from_imu = true;
-                ++imu_segments;
+                const float dpsi_w = wheel_raw * k_ww + curve;
+                const float ws = wheel_sigma(odom.var_rot);
+                const float dens_w = wheel_stationary ? params.odom_preint_noise.zupt_density_omega
+                                   : (ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                const float s_kw = motion_calib_.param_sigma(rc::calib::P_K_OMEGA_W) * wheel_raw;
+                const float var_w = dens_w * dens_w * dt + s_kw * s_kw;
+                if (have_gyro)
+                {
+                    const float dpsi_g = dth_imu * k_g - b_g * dt;
+                    const float gs = imu_sigma(effective_start_ms, effective_end_ms, true);
+                    const float dens_g = gs >= 0.f ? gs : params.odom_preint_noise.sigma_omega;
+                    const float s_kg = motion_calib_.param_sigma(rc::calib::P_K_OMEGA) * dth_imu;
+                    const float s_bg = motion_calib_.param_sigma(rc::calib::P_B_OMEGA) * dt;
+                    const float var_g = dens_g * dens_g * dt + s_kg * s_kg + s_bg * s_bg;
+                    w_g = var_w / std::max(var_w + var_g, 1e-30f);
+                    dtheta = w_g * dpsi_g + (1.f - w_g) * dpsi_w;
+                    // A stated density reaches the preintegrator only if some producer stated one;
+                    // otherwise the model's own constant stays in charge, as before.
+                    if (gs >= 0.f or (ws >= 0.f and not wheel_stationary))
+                        sig_om_fused = std::sqrt(var_w * var_g / std::max(var_w + var_g, 1e-30f) / dt);
+                    wheel_dtheta_sum_ += dpsi_w;            // diagnostics: both channels, same segment
+                    imu_dtheta_sum_   += dpsi_g;
+                    cyc_wheel_shadow_dtheta_ += dpsi_w;
+                    ++cyc_imu_segs_;
+                    ++imu_segments;
+                }
+                else
+                {
+                    dtheta = dpsi_w;
+                    sig_om_fused = (wheel_stationary or ws < 0.f) ? -1.f : ws;
+                    ++cyc_wheel_segs_;
+                    ++wheel_segments;
+                }
+                hc.th_gyro   = w_g * dth_imu;
+                hc.t_gyro    = w_g * dt;
+                hc.th_wheel  = (1.f - w_g) * wheel_raw;
+                hc.fwd_wheel = (1.f - w_g) * dy_local;
             }
             else
             {
-                cyc_wheel_dtheta_ += dtheta;          // wheel value that entered the prior unmodified
-                ++cyc_wheel_segs_;
-                ++wheel_segments;
+                // LEGACY: one channel per segment, one shared scale. The bias now carries its
+                // physical sign, so it is subtracted -- on wheel segments too, which is one of the
+                // defects the fusion path removes (a parked robot's wheels have no gyro bias).
+                if (not wheel_stationary and have_gyro)
+                {
+                    wheel_dtheta_sum_ += wheel_raw * k_g - b_g * dt + curve;
+                    imu_dtheta_sum_   += dth_imu;
+                    cyc_wheel_shadow_dtheta_ += wheel_raw * k_g - b_g * dt + curve;
+                    dtheta = dth_imu * k_g - b_g * dt + curve;
+                    w_g = 1.f;
+                    sig_om_fused = imu_sigma(effective_start_ms, effective_end_ms, true);
+                    hc.th_gyro = dth_imu;
+                    ++cyc_imu_segs_;
+                    ++imu_segments;
+                }
+                else
+                {
+                    dtheta = wheel_raw * k_g - b_g * dt + curve;
+                    sig_om_fused = wheel_sigma(odom.var_rot);
+                    hc.th_gyro = wheel_raw;           // the shared scale acted on the wheels here
+                    ++cyc_wheel_segs_;
+                    ++wheel_segments;
+                }
+                hc.t_gyro    = dt;
+                hc.fwd_wheel = dy_local;
             }
+            const float rot_eff = dt > 0.f ? dtheta / dt : 0.f;
+            cyc_imu_dtheta_   += w_g * dtheta;            // the heading's gyro-attributed share
+            cyc_wheel_dtheta_ += (1.f - w_g) * dtheta;    // and the wheels'; they sum to dtheta
+            cyc_heading_cov_.th_gyro  += hc.th_gyro;  cyc_heading_cov_.t_gyro    += hc.t_gyro;
+            cyc_heading_cov_.th_wheel += hc.th_wheel; cyc_heading_cov_.fwd_wheel += hc.fwd_wheel;
+            cyc_gyro_w_dt_ += static_cast<double>(w_g) * dt; cyc_heading_dt_ += dt;
+            gyro_w_dt_sum_ += static_cast<double>(w_g) * dt; heading_dt_sum_ += dt;
 
             // Transform to global frame using MIDPOINT theta (reduces integration bias)
             // The learned yaw offset rotates the body->world mapping: it absorbs a mount or
@@ -7777,12 +7848,10 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 // accelerometer's covers the translation only when its correction is actually being
                 // used, because otherwise the displacement came from the wheels and it is the wheels'
                 // noise that describes it.
-                // Yaw: the gyro's density when the gyro supplied the heading, the wheels' own when
-                // they did. imu_sigma already returns <0 unless the IMU brackets the segment, so the
-                // two never both apply.
-                const float sig_om = heading_from_imu
-                                   ? imu_sigma(effective_start_ms, effective_end_ms, true)
-                                   : wheel_sigma(odom.var_rot);
+                // Yaw: the density of the heading that was actually integrated -- the fused one
+                // (product of the two channels' variances) under fusion, the supplying channel's
+                // under the legacy switch. <0 leaves the model constant in charge.
+                const float sig_om = sig_om_fused;
                 // Translation always comes from the wheels. When the accelerometer's within-segment
                 // correction is enabled it is ADDED to that displacement, so its noise is an extra
                 // independent contribution to the same channel, not a replacement for the wheels'.
@@ -7797,7 +7866,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 const float v_lat_eff  = odom.side + (params.imu_linear_injection ? imu_dpx_seg / dt : 0.f);
                 const float v_long_eff = odom.adv  + (params.imu_linear_injection ? imu_dpy_seg / dt : 0.f);
                 preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lat, sig_long, sig_om);
-                if (sig_lat >= 0.f or sig_long >= 0.f or (not heading_from_imu and sig_om >= 0.f))
+                if (sig_lat >= 0.f or sig_long >= 0.f or (w_g < 1.f and wheel_sigma(odom.var_rot) >= 0.f))
                     ++odom_var_segments;
             }
 
@@ -7888,11 +7957,17 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                                               : QString("n/a (needs >%1 rad of turning)")
                                                     .arg(kMinRotForRatio, 0, 'f', 1))
                               << " over " << QString::number(imu_dtheta_sum_, 'f', 3) << " rad"
-                              << " zupt=" << zupt_segs_ << "/" << imu_seg_total_ << " seg";
+                              << " zupt=" << zupt_segs_ << "/" << imu_seg_total_ << " seg"
+                              << " gyro_weight="
+                              << (heading_dt_sum_ > 0.0
+                                      ? QString::number(100.0 * gyro_w_dt_sum_ / heading_dt_sum_, 'f', 1) + "%"
+                                      : QString("n/a"))
+                              << (params.heading_fusion ? " (fused)" : " (switch)");
             imu_stats_last_log_ms_ = t_end_ms;
             imu_seg_used_ = imu_seg_total_ = 0;
             imu_dtheta_sum_ = wheel_dtheta_sum_ = 0.0;
             zupt_segs_ = 0;
+            gyro_w_dt_sum_ = heading_dt_sum_ = 0.0;
         }
 
         if (preint_out != nullptr)

@@ -52,6 +52,7 @@
 #include "calibration_intake.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace rc::calib
@@ -120,7 +121,8 @@ namespace rc::calib
         /// feedback. Leave it TRUE for normal operation.
         bool  apply        = true;
         /// WHICH parameters may act, as a bitmask over rc::calib::Param (bit 0 = k_v, 1 = eps_yaw,
-        /// 2 = k_omega, 3 = b_omega, 4 = k_lat, 5 = dk_wheel). -1 = all, which is normal operation.
+        /// 2 = k_omega, 3 = b_omega, 4 = k_lat, 5 = dk_wheel, 6 = k_omega_w). -1 = all, which is
+        /// normal operation.
         ///
         /// ★ It exists to separate the CHANNELS, not to tune them. Measured 2026-08-31, arm 3: with
         /// everything applied, translation drift was unchanged (39.59 -> 38.98 mm/m, d = 0.04) while
@@ -179,6 +181,13 @@ namespace rc::calib
     };
 
     /// Accumulates one ramp-plus-correction episode and folds it into the parameters.
+    /// One cycle's heading covariates, per channel -- the Jacobian of the fused heading with respect
+    /// to each channel's own parameters. See rc::calib::Episode for the definitions.
+    struct HeadingCovariates
+    {
+        float th_gyro = 0.f, t_gyro = 0.f, th_wheel = 0.f, fwd_wheel = 0.f;
+    };
+
     class MotionCalibrator
     {
     public:
@@ -189,6 +198,8 @@ namespace rc::calib
             pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
+            prior_sigma_ = { pr.sigma_k_v, pr.sigma_eps_yaw, pr.sigma_k_omega, pr.sigma_b_omega,
+                             pr.sigma_k_lat, pr.sigma_dk_wheel, pr.sigma_k_omega_w };
             // The two newest channels keep the estimator's own defaults: they have never been
             // measured on this robot, and inventing a config knob for a prior nobody has data for
             // would dress an assumption up as a setting.
@@ -242,13 +253,15 @@ namespace rc::calib
         /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
         [[nodiscard]] float estimated_forward_scale() const noexcept
         { return taught(rc::calib::P_K_V) ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
-        /// Multiplies the heading increment, whichever channel produced it.
+        /// Multiplies the GYRO's heading increment only. The wheels have their own, wheel_omega_scale():
+        /// the two sensors are wrong in different ways and one number cannot serve both.
         [[nodiscard]] float omega_scale() const noexcept
         { return acting(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
         /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
         [[nodiscard]] float estimated_omega_scale() const noexcept
         { return taught(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
-        /// rad/s, subtracted from the measured rate. Separated from the SCALE only by the
+        /// rad/s, the GYRO's bias with its physical sign (the gyro reads omega + b), subtracted from the
+        /// gyro rate only -- never from a wheel segment. Separated from the SCALE only by the
         /// time-vs-rotation covariate pair, which is why it needs the joint solve to exist at all.
         [[nodiscard]] float omega_bias() const noexcept
         { return acting(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
@@ -257,13 +270,32 @@ namespace rc::calib
         { return taught(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
         /// Multiplies LATERAL wheel displacement. Separate from forward_scale(): a mecanum's lateral
         /// channel is the one roller slip corrupts, so the two are physically different errors.
+        /// ★ acting(), not taught(): p_applied records what passes the mask, so an accessor that ignored
+        /// the mask would apply a correction the feedback undo never hears about.
         [[nodiscard]] float lateral_scale() const noexcept
-        { return taught(rc::calib::P_K_LAT) ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
+        { return acting(rc::calib::P_K_LAT) ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
         /// rad per metre driven forward: unequal effective wheel radii make a commanded straight
         /// line curve. Added to the heading increment in proportion to DISTANCE, which is what
-        /// distinguishes it from a gyro scale (rotation) or a gyro bias (time).
+        /// distinguishes it from a gyro scale (rotation) or a gyro bias (time). WHEEL factor only.
+        /// acting(), not taught() -- see lateral_scale().
         [[nodiscard]] float wheel_mismatch() const noexcept
-        { return taught(rc::calib::P_DK_WHEEL) ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
+        { return acting(rc::calib::P_DK_WHEEL) ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
+        /// Multiplies the WHEELS' heading increment only (radius over track, plus scrubbing).
+        [[nodiscard]] float wheel_omega_scale() const noexcept
+        { return acting(rc::calib::P_K_OMEGA_W) ? 1.f + last_.value[rc::calib::P_K_OMEGA_W] : 1.f; }
+        [[nodiscard]] float estimated_wheel_omega_scale() const noexcept
+        { return taught(rc::calib::P_K_OMEGA_W) ? 1.f + last_.value[rc::calib::P_K_OMEGA_W] : 1.f; }
+
+        /// How uncertain the model is about parameter p AS IT IS BEING USED: the posterior sigma
+        /// while the estimate acts, the prior sigma while it does not (then the nominal is what is
+        /// applied, and the prior is exactly what is known about how wrong that nominal is). This is
+        /// what the heading fusion weights each channel by -- a channel whose scale is unknown is
+        /// worth less on a fast turn, and that falls out of the variance with no switch.
+        [[nodiscard]] float param_sigma(int p) const noexcept
+        {
+            if (acting(p) and last_.sigma[p] > 0.f) return last_.sigma[p];
+            return prior_sigma_[p];
+        }
 
         [[nodiscard]] float yaw_sigma() const noexcept { return last_.sigma[rc::calib::P_EPS_YAW]; }
         [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }
@@ -308,6 +340,8 @@ namespace rc::calib
             if (n > 0) last_ = intake_.estimate();   // re-solve from the restored evidence
             return n;
         }
+        /// Episode rows the last load_state() refused because they predate the two-factor heading.
+        [[nodiscard]] std::size_t legacy_dropped() const noexcept { return intake_.legacy_dropped(); }
         /// Back to the priors, and the file with it — a reset that left the file behind would be
         /// undone by the next restart, which is not what anyone pressing "reset" means.
         void reset_state(const std::string& path) noexcept
@@ -321,7 +355,7 @@ namespace rc::calib
         void observe(float d_forward, float d_lateral, float d_theta,
                      float r_forward, float r_lateral, float r_theta,
                      float pos_var, float theta_var, bool corrected,
-                     float fit_residual, float dt) noexcept
+                     float fit_residual, float dt, const HeadingCovariates &hc) noexcept
         {
             if (not enabled()) return;
             const bool finite = std::isfinite(d_forward) and std::isfinite(d_theta)
@@ -334,6 +368,12 @@ namespace rc::calib
             // in the episode carries it, and without it the two are collinear whenever the robot
             // turns at a steady rate -- which is most of the time.
             if (std::isfinite(dt) and dt > 0.f) acc_dur_ += dt;
+            if (std::isfinite(hc.th_gyro) and std::isfinite(hc.t_gyro)
+                and std::isfinite(hc.th_wheel) and std::isfinite(hc.fwd_wheel))
+            {
+                acc_hc_.th_gyro += hc.th_gyro;   acc_hc_.t_gyro    += hc.t_gyro;
+                acc_hc_.th_wheel += hc.th_wheel; acc_hc_.fwd_wheel += hc.fwd_wheel;
+            }
             if (corrected)
             {
                 // ── THE FIT THAT PRODUCED A CORRECTION, NOT THE DRIFT THAT PRECEDED IT ───────────
@@ -448,6 +488,8 @@ namespace rc::calib
             rc::calib::Episode e;
             e.d_forward = acc_fwd_;   e.d_lateral = acc_lat_;   e.d_theta = acc_th_;
             e.duration  = acc_dur_;
+            e.th_gyro   = acc_hc_.th_gyro;  e.t_gyro    = acc_hc_.t_gyro;
+            e.th_wheel  = acc_hc_.th_wheel; e.fwd_wheel = acc_hc_.fwd_wheel;
             e.r_forward = acc_r_fwd_; e.r_lateral = acc_r_lat_; e.r_theta = acc_r_th_;
             e.pos_var = r_pos;        e.theta_var = r_th;
             // ★ WHAT WAS ACTING WHILE THIS EPISODE WAS ACCUMULATED. Captured here, BEFORE the offer
@@ -472,6 +514,7 @@ namespace rc::calib
             acc_fwd_ = acc_lat_ = acc_th_ = 0.f;
             acc_r_fwd_ = acc_r_lat_ = acc_r_th_ = 0.f;
             acc_pos_var_ = acc_th_var_ = acc_fit_ = acc_dur_ = 0.f;
+            acc_hc_ = {};
             acc_measured_ = false;
             waiting_ = false;
         }
@@ -485,6 +528,8 @@ namespace rc::calib
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
         float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f, acc_dur_ = 0.f;
+        HeadingCovariates acc_hc_{};
+        std::array<float, rc::calib::P_COUNT> prior_sigma_{0.02f, 0.0175f, 0.02f, 5.0e-4f, 0.05f, 0.02f, 0.155f};
         /// Has any corrected cycle contributed to the episode being accumulated? Only then is it an
         /// observation at all.
         bool acc_measured_ = false;

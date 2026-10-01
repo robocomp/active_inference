@@ -578,6 +578,14 @@ public:
         // noise. Bounded by construction: the term is confined to one segment and never chained, so
         // it cannot drift however wrong the accelerometer is.
         bool imu_linear_injection = false;
+        // ── HEADING = PRODUCT OF TWO FACTORS, not a switch ──────────────────────────────────────────
+        // true: every segment's heading is the precision-weighted mean of the wheel factor and the
+        // gyro factor, each corrected by ITS OWN calibration (wheels: k_omega_w + dk_wheel; gyro:
+        // k_omega + b_omega). The weights come from each channel's stated noise density plus its
+        // scale uncertainty, so the gyro dominates a fast turn and the wheels a stop -- with no gate.
+        // false: the legacy 0/1 switch (gyro whenever it brackets the segment and the wheels are not
+        // stationary), one shared scale, kept for A/B. ★The bias sign fix applies to BOTH.
+        bool heading_fusion = false;
         // ── The WHEELS' own per-sample velocity variance, as a preintegration density ──────────────
         // OFF by default, like every channel that can move the published pose. When on, each odometry
         // sample's stated velCov (forwarded by robot_concept onto robot_current_speed_variance) is
@@ -831,6 +839,8 @@ public:
 
         float imu_dtheta          = 0.f;
         float wheel_dtheta        = 0.f;
+        rc::calib::HeadingCovariates heading_cov{};   ///< per-channel heading Jacobian, this cycle
+        float gyro_weight         = -1.f;   ///< time-weighted mean w_g this cycle, <0 = no segment
         float wheel_shadow_dtheta = 0.f;
         int   imu_segs = 0, wheel_segs = 0;
         Eigen::Matrix<float,5,1> state = Eigen::Matrix<float,5,1>::Zero();
@@ -1835,6 +1845,9 @@ private:
    int   cyc_imu_lin_segs_ = 0;
    float cyc_imu_dtheta_          = 0.f;
    float cyc_wheel_dtheta_        = 0.f;
+   rc::calib::HeadingCovariates cyc_heading_cov_{};
+   double cyc_gyro_w_dt_ = 0.0, cyc_heading_dt_ = 0.0;      // for the time-weighted mean gyro weight
+   double gyro_w_dt_sum_ = 0.0, heading_dt_sum_ = 0.0;      // same, over the 5 s [ImuInject] window
    float cyc_wheel_shadow_dtheta_ = 0.f;
    int   cyc_imu_segs_ = 0, cyc_wheel_segs_ = 0;
 

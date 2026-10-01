@@ -21,11 +21,14 @@ Episode make(float d_fwd, float d_th, float dur, const float truth[P_COUNT], flo
 {
     Episode e;
     e.d_forward = d_fwd; e.d_theta = d_th; e.duration = dur; e.d_lateral = d_lat;
+    // Gyro-only heading (legacy-equivalent rows): every segment's weight is on the gyro, while the
+    // curvature of unequal wheels still rides on the distance travelled.
+    e.th_gyro = d_th; e.t_gyro = dur; e.th_wheel = 0.f; e.fwd_wheel = d_fwd;
     e.r_forward =  truth[P_K_V]     * d_fwd            + noise(sig_pos);
     e.r_lateral = -truth[P_EPS_YAW] * d_fwd
                  + truth[P_K_LAT]   * d_lat            + noise(sig_pos);
     e.r_theta   =  truth[P_K_OMEGA] * d_th
-                 + truth[P_B_OMEGA] * dur
+                 - truth[P_B_OMEGA] * dur          // the gyro reads w + b: a bias is OWED back
                  + truth[P_DK_WHEEL]* d_fwd            + noise(sig_th);
     e.pos_var = sig_pos * sig_pos; e.theta_var = sig_th * sig_th;
     return e;
@@ -118,6 +121,80 @@ int main()
               "lateral scale separated from mount yaw (same component)");
         check(std::abs(r.value[P_DK_WHEEL] - truth[P_DK_WHEEL]) < 0.003f,
               "per-wheel mismatch separated from gyro scale AND bias (same component)");
+    }
+
+    // ---- 5. TWO heading factors: wheel and gyro scales are different numbers, and both come back
+    // Episodes are mixtures of segments with different gyro weights w_g, as the fused integrator
+    // produces them: fast turns lean on the gyro, slow turns and stops on the wheels. The wheels
+    // over-report rotation by 7% (scrubbing) while the gyro is 1% short with a bias.
+    {
+        float truth[P_COUNT] = {0.f, 0.f, 0.010f, 3.0e-4f, 0.f, 0.006f, -0.070f};
+        BatchEstimator est; est.configure({}, 512);
+        std::uniform_real_distribution<float> U(0.f, 1.f);
+        for (int i = 0; i < 400; ++i)
+        {
+            Episode e;
+            const int nseg = 6;
+            for (int k = 0; k < nseg; ++k)
+            {
+                const float rate = (U(rng) < 0.3f) ? 0.f : (U(rng) < 0.5f ? 0.15f : 0.9f) * (U(rng) < 0.5f ? -1.f : 1.f);
+                const float v    = (U(rng) < 0.5f) ? 0.f : 0.35f;
+                const float dt   = 0.5f + U(rng);
+                const float w_g  = rate == 0.f ? 0.6f : (std::abs(rate) < 0.5f ? 0.35f : 0.95f);
+                const float th = rate * dt, fwd = v * dt;
+                e.d_forward += fwd; e.d_theta += th; e.duration += dt;
+                e.th_gyro += w_g * th; e.t_gyro += w_g * dt;
+                e.th_wheel += (1.f - w_g) * th; e.fwd_wheel += (1.f - w_g) * fwd;
+            }
+            e.r_forward = noise(sig_pos); e.r_lateral = noise(sig_pos);
+            e.r_theta = truth[P_K_OMEGA] * e.th_gyro - truth[P_B_OMEGA] * e.t_gyro
+                      + truth[P_K_OMEGA_W] * e.th_wheel + truth[P_DK_WHEEL] * e.fwd_wheel + noise(sig_th);
+            e.pos_var = sig_pos * sig_pos; e.theta_var = sig_th * sig_th;
+            est.add(e);
+        }
+        const auto r = est.solve();
+        std::printf("\n5. TWO HEADING FACTORS (%d episodes)  condition %.1f\n", r.episodes, r.condition);
+        for (int p : {P_K_OMEGA, P_B_OMEGA, P_DK_WHEEL, P_K_OMEGA_W})
+            std::printf("   %-9s %+.6f (truth %+.6f) sigma %.6f informed=%d\n",
+                        param_name(p).data(), r.value[p], truth[p], r.sigma[p], (int)r.informed[p]);
+        check(std::abs(r.value[P_K_OMEGA_W] - truth[P_K_OMEGA_W]) < 0.01f, "WHEEL rotation scale recovered (-7%)");
+        check(std::abs(r.value[P_K_OMEGA] - truth[P_K_OMEGA]) < 0.004f, "GYRO scale recovered separately (+1%)");
+        check(std::abs(r.value[P_B_OMEGA] - truth[P_B_OMEGA]) < 1.0e-4f, "gyro bias recovered with its PHYSICAL sign");
+        check(std::abs(r.value[P_DK_WHEEL] - truth[P_DK_WHEEL]) < 0.003f, "wheel curvature recovered on the wheel factor");
+    }
+
+    // ---- 6. CLOSED LOOP: applying the estimate and re-solving must converge, not ratchet
+    // Each round applies the current estimate; the next round's rows carry it in p_applied and their
+    // residual is what is LEFT. Before the sign fix the bias column made this a gain-2 iteration.
+    {
+        float truth[P_COUNT] = {0.f, 0.f, 0.f, 4.0e-4f, 0.f, 0.f, 0.f};
+        Eigen::Matrix<float, P_COUNT, 1> applied = Eigen::Matrix<float, P_COUNT, 1>::Zero();
+        BatchEstimator est; est.configure({}, 64);
+        float worst = 0.f, last = 0.f, sig = 0.f;
+        std::uniform_real_distribution<float> R(-1.5f, 1.5f), W(0.2f, 1.2f);
+        for (int round = 0; round < 12; ++round)
+        {
+            for (int i = 0; i < 64; ++i)
+            {
+                const float th = R(rng), dur = std::abs(th) / W(rng) + 2.f;
+                Episode e; e.d_theta = th; e.duration = dur; e.th_gyro = th; e.t_gyro = dur;
+                // Remaining heading error after the model subtracted the applied bias.
+                e.r_theta = -(truth[P_B_OMEGA] - applied[P_B_OMEGA]) * dur + noise(sig_th);
+                e.pos_var = sig_pos * sig_pos; e.theta_var = sig_th * sig_th;
+                e.p_applied = applied;
+                est.add(e);
+            }
+            const auto r = est.solve();
+            applied[P_B_OMEGA] = r.value[P_B_OMEGA];
+            last = r.value[P_B_OMEGA];
+            sig  = r.sigma[P_B_OMEGA];
+            worst = std::max(worst, std::abs(last - truth[P_B_OMEGA]));
+        }
+        std::printf("\n6. CLOSED LOOP bias: final %+.6f (truth %+.6f), worst |err| over rounds %.6f\n",
+                    last, truth[P_B_OMEGA], worst);
+        std::printf("   posterior sigma %.6f\n", sig);
+        check(std::abs(last - truth[P_B_OMEGA]) < 3.f * sig, "closed-loop bias converges to the truth (3 sigma)");
+        check(worst < 2.0f * truth[P_B_OMEGA], "and never overshoots on the way (no gain-2 ratchet)");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASS", failures, failures == 1 ? "" : "s");

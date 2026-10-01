@@ -219,6 +219,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.MotionCalibApply", room_concept.params.motion_calib.apply);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.MotionCalibApplyMask", room_concept.params.motion_calib.apply_mask);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.ImuLinearInjection", room_concept.params.imu_linear_injection);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.HeadingFusion", room_concept.params.heading_fusion);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomVarianceInjection", room_concept.params.odom_variance_injection);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawP0", room_concept.params.motion_calib.yaw_p0);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawQ", room_concept.params.motion_calib.yaw_q);

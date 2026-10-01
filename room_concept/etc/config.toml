@@ -845,6 +845,16 @@ OdomVarianceInjection = true   # ★ ON 2026-08-29. The precondition this flag w
                         # not a performance number, is the whole test of this flag on Shadow.
                         # It earns its keep the day a producer reports a variance that VARIES.
 
+HeadingFusion       = true   # Heading = precision-weighted PRODUCT of the wheel factor and the gyro
+                        # factor, each corrected by its OWN calibration (wheels: k_omega_w, dk_wheel;
+                        # gyro: k_omega, b_omega). Weights come from each channel's stated density
+                        # plus its scale uncertainty, so the gyro takes fast turns and the wheels take
+                        # stops, with no gate. false = the legacy 0/1 switch with one shared scale
+                        # (gyro wherever it brackets a moving segment), kept for A/B. 2026-10-01,
+                        # UNRUN LIVE. ★Check the [ImuInject] line: gyro_weight=..% (fused).
+                        # ★Parked, the gyro now carries weight (zupt density 0.0102 vs the gyro's
+                        # stated density); if the heading walks while parked, the gyro's STATED noise
+                        # is too small -- fix that number, do not re-add the gate.
 ImuLinearInjection  = true   # Add the accelerometer's within-segment double integration to the
                         # wheel displacement. The integrator holds the reported wheel velocity flat
                         # across each segment; the true displacement is v0*dt + the double integral,

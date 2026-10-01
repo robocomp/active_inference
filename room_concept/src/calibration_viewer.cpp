@@ -91,10 +91,11 @@ namespace rc
               "<b>Distinguished from lateral scale by:</b> which component of the motion it rides on "
               "— this one on forward travel, that one on sideways travel." },
             { "gyro scale",        100.f,               "%",     QColor(192, 57, 43),
-              "<b>k_omega — gyro / rotation scale</b><br>"
-              "How much more (or less) rotation the odometry reports than actually happened, as a "
-              "fraction. This is the parameter the calibration pivot exists to measure, and the only "
-              "one a closure can check without a map.<br><br>"
+              "<b>k_omega — GYRO rotation scale</b><br>"
+              "How much more (or less) rotation the gyro reports than actually happened, as a "
+              "fraction. Acts on the gyro's heading factor only; the wheels have their own "
+              "(wheel rot. scale). This is the parameter the calibration pivot exists to measure, and "
+              "the only one a closure can check without a map.<br><br>"
               "<b>Learns from:</b> turning — it loads on <i>d_theta</i>.<br>"
               "<b>★Confounded with gyro bias</b> whenever the robot turns at a steady rate: at fixed "
               "omega, d_theta and elapsed time are proportional, so the two columns are collinear and "
@@ -127,6 +128,15 @@ namespace rc
               "<i>d_forward</i> there.<br>"
               "<b>Distinguished from gyro scale by:</b> gyro scale rides on rotation, this rides on "
               "distance. Driving straight separates them; turning on the spot does not." },
+            { "wheel rot. scale",  100.f,               "%",     QColor(52, 152, 219),
+              "<b>k_omega_w — WHEEL rotation scale</b><br>"
+              "How much more rotation the WHEELS report than happened: wheel radius over track width, "
+              "plus the scrubbing a skid-steered turn adds (5-8% long on Shadow). A different error "
+              "from the gyro's, so it gets its own number.<br><br>"
+              "<b>Learns from:</b> rotation on segments where the wheels carry weight in the heading — "
+              "slow turns and the edges of stops. On fast turns the gyro takes the heading and this "
+              "is barely excited, which is honest: the wheels said little there.<br>"
+              "<b>Distinguished from gyro scale by:</b> which factor the rotation was weighted into." },
         };
         static_assert(std::size(spec) == static_cast<std::size_t>(rc::calib::P_COUNT),
                       "add a row here whenever rc::calib::Param gains a parameter");

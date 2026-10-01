@@ -57,8 +57,9 @@ namespace rc::calib
     {
         P_K_V = 0,      ///< translation odometry scale (fractional, 0 = correct)
         P_EPS_YAW,      ///< body/mount yaw offset (rad)
-        P_K_OMEGA,      ///< gyro scale (fractional)
-        P_B_OMEGA,      ///< gyro bias (rad/s) — separated from scale ONLY by time-vs-rotation
+        P_K_OMEGA,      ///< GYRO scale (fractional). Acts on the gyro's heading factor only.
+        P_B_OMEGA,      ///< GYRO bias (rad/s), PHYSICAL sign: the gyro reads omega + b, so the model
+                        ///< subtracts b*dt. Separated from the scale ONLY by time-vs-rotation.
         P_K_LAT,        ///< wheel LATERAL scale (fractional). Excitable only on a base that can
                         ///< strafe; on a differential base its covariate is identically zero and it
                         ///< correctly stays at its prior for ever.
@@ -67,6 +68,11 @@ namespace rc::calib
                         ///< component but is driven by DISTANCE — which is the only thing separating
                         ///< it from the gyro scale (rotation) and the gyro bias (time). Three
                         ///< parameters, one component, three covariates.
+                        ///< Acts on the WHEEL heading factor only: a gyro has no wheel asymmetry.
+        P_K_OMEGA_W,    ///< WHEEL heading scale (fractional) = k_r*k_b - 1, i.e. radius over track.
+                        ///< A differential base over-reports rotation because it turns by scrubbing
+                        ///< (measured 5-8% on Shadow), so this is NOT the gyro scale and must not share
+                        ///< its number. Excited by rotation on segments where the wheels carry weight.
         P_COUNT
     };
 
@@ -80,6 +86,7 @@ namespace rc::calib
             case P_B_OMEGA: return "b_omega";
             case P_K_LAT:    return "k_lat";
             case P_DK_WHEEL: return "dk_wheel";
+            case P_K_OMEGA_W: return "k_omega_w";
             default:        return "?";
         }
     }
@@ -92,6 +99,16 @@ namespace rc::calib
         float d_lateral = 0.f;   ///< m, body +X
         float d_theta   = 0.f;   ///< rad, as the model believed it
         float duration  = 0.f;   ///< s — the covariate that separates a gyro BIAS from a scale
+
+        // ★ HEADING COVARIATES, PER CHANNEL. The heading is the precision-weighted product of two
+        // factors -- wheels and gyro -- each with its OWN parameters, so the heading row's Jacobian is
+        // the weighted sum of each channel's own derivative. Every segment contributes its weight w_g
+        // (gyro) and 1-w_g (wheels); w_g is 1/0 under the legacy switch. RAW quantities, before any
+        // correction, because the model is linear in the parameters around zero.
+        float th_gyro   = 0.f;   ///< rad, sum w_g * (raw gyro rotation)        -> d/dk_omega
+        float t_gyro    = 0.f;   ///< s,   sum w_g * dt                         -> d/db_omega is MINUS this
+        float th_wheel  = 0.f;   ///< rad, sum (1-w_g) * (raw wheel rotation)   -> d/dk_omega_w
+        float fwd_wheel = 0.f;   ///< m,   sum (1-w_g) * forward travel         -> d/ddk_wheel
 
         // The measurement: what the optimizer had to add, in the ROBOT frame.
         float r_forward = 0.f;   ///< m
@@ -167,6 +184,9 @@ namespace rc::calib
         float sigma_k_lat   = 0.05f;    ///< 5% — roller slip makes a mecanum's lateral channel much
                                         ///< worse than its forward one, so the prior is looser
         float sigma_dk_wheel = 0.02f;   ///< rad/m — 2 cm of lateral drift per metre driven straight
+        float sigma_k_omega_w = 0.155f; ///< 15.5% — the wheels' rotation-scale uncertainty, the same
+                                        ///< number the preintegrator charges (NoiseModel::scale_omega).
+                                        ///< Wide on purpose: scrubbing makes wheel rotation 5-8% long.
     };
 
     class BatchEstimator
@@ -190,7 +210,7 @@ namespace rc::calib
     /// than the episode rows, whose reference is the optimizer's own correction.
     ///
     /// ★ IT IS THE SAME TWO COVARIATES AS THE HEADING ROW, so it drops into the existing solve with
-    ///   no new machinery. The heading row is r_theta ~ d_theta*k_omega + duration*b_omega; a closure
+    ///   no new machinery. The heading row is r_theta ~ th_gyro*k_omega - t_gyro*b_omega; a closure
     ///   supplies exactly that pair, with the rotation being the truth and the duration being
     ///   truth/rate. The residual is the heading the model still owes: truth - (what the CORRECTED
     ///   odometry accumulated), so a perfectly calibrated robot contributes r = 0 and teaches nothing,
@@ -225,6 +245,8 @@ namespace rc::calib
     /// changes, so the very next solve reports each parameter at its prior sigma and `informed`
     /// false — which is the honest description of a robot that has just been told to un-learn.
     void reset() noexcept { eps_.clear(); cls_.clear(); }
+    /// Episode rows in the last load() that were in a pre-split format and therefore dropped.
+    [[nodiscard]] std::size_t legacy_dropped() const noexcept { return legacy_dropped_; }
 
     /// ── PERSIST THE EVIDENCE, NOT THE CONCLUSION ─────────────────────────────────────────────────
     /// What is written is the WINDOW: the episodes and the closed pivots. Not the parameters.
@@ -251,13 +273,14 @@ namespace rc::calib
         f.imbue(std::locale::classic());
         f << "# motion calibration window — evidence, not parameters. Delete to return to the priors.\n";
         f << "# E,d_forward,d_lateral,d_theta,duration,r_forward,r_lateral,r_theta,pos_var,theta_var,"
-             "p_applied x P_COUNT\n";
+             "th_gyro,t_gyro,th_wheel,fwd_wheel,p_applied x P_COUNT\n";
         f << "# C,r_theta,d_theta,duration,weight\n";
         for (const auto& e : eps_)
         {
             f << "E," << e.d_forward << ',' << e.d_lateral << ',' << e.d_theta << ',' << e.duration
               << ',' << e.r_forward << ',' << e.r_lateral << ',' << e.r_theta
-              << ',' << e.pos_var << ',' << e.theta_var;
+              << ',' << e.pos_var << ',' << e.theta_var
+              << ',' << e.th_gyro << ',' << e.t_gyro << ',' << e.th_wheel << ',' << e.fwd_wheel;
             for (int i = 0; i < P_COUNT; ++i) f << ',' << e.p_applied[i];
             f << '\n';
         }
@@ -273,6 +296,7 @@ namespace rc::calib
         std::ifstream f(path);
         if (not f.is_open()) return 0;
         eps_.clear(); cls_.clear();
+        legacy_dropped_ = 0;
         std::string line; std::size_t n = 0;
         while (std::getline(f, line))
         {
@@ -292,16 +316,23 @@ namespace rc::calib
             // loads with p_applied = 0, reproducing the old (biased) reading for it rather than
             // inventing a value -- an honest degradation, and a reason to DELETE state files written
             // by an older build rather than carry them across this fix.
-            if (line[0] == 'E' and (v.size() == 9 or v.size() == 9 + std::size_t{P_COUNT}))
+            // ★ ONLY THE CURRENT FORMAT IS ACCEPTED. Rows written before the heading was split into
+            // two factors (9 or 15 fields) carry ONE heading covariate for two sensors and a bias
+            // stored with the opposite sign; there is no exact way to split them afterwards, and an
+            // approximate split would be evidence the solve cannot tell from a measurement. They are
+            // dropped and counted -- the file is evidence, re-earned in one tour.
+            if (line[0] == 'E' and v.size() == 13 + std::size_t{P_COUNT})
             {
                 Episode e;
                 e.d_forward = v[0]; e.d_lateral = v[1]; e.d_theta   = v[2]; e.duration = v[3];
                 e.r_forward = v[4]; e.r_lateral = v[5]; e.r_theta   = v[6];
                 e.pos_var   = v[7]; e.theta_var = v[8];
-                if (v.size() > 9)
-                    for (int i = 0; i < P_COUNT; ++i) e.p_applied[i] = v[9 + i];
+                e.th_gyro   = v[9]; e.t_gyro    = v[10]; e.th_wheel = v[11]; e.fwd_wheel = v[12];
+                for (int i = 0; i < P_COUNT; ++i) e.p_applied[i] = v[13 + i];
                 eps_.push_back(e); ++n;
             }
+            else if (line[0] == 'E')
+                ++legacy_dropped_;
             else if (line[0] == 'C' and v.size() == 4)
             {
                 ClosureRow c;
@@ -328,7 +359,7 @@ namespace rc::calib
             // re-centring it on the running estimate is a ratchet rather than a memory.
             Eigen::Matrix<float, P_COUNT, 1> p0;
             p0 << prior_.sigma_k_v, prior_.sigma_eps_yaw, prior_.sigma_k_omega, prior_.sigma_b_omega,
-                  prior_.sigma_k_lat, prior_.sigma_dk_wheel;
+                  prior_.sigma_k_lat, prior_.sigma_dk_wheel, prior_.sigma_k_omega_w;
             for (int i = 0; i < P_COUNT; ++i)
                 H(i, i) += 1.f / std::max(p0[i] * p0[i], 1e-18f);
             const Eigen::Matrix<float, P_COUNT, P_COUNT> H_prior = H;
@@ -364,9 +395,16 @@ namespace rc::calib
                 // (unequal wheel radii make a commanded straight curve). No pair of scalar filters
                 // could do this; it is the clearest case for solving jointly.
                 Eigen::Matrix<float, P_COUNT, 1> j_th = Eigen::Matrix<float, P_COUNT, 1>::Zero();
-                j_th[P_K_OMEGA]  = e.d_theta;
-                j_th[P_B_OMEGA]  = e.duration;
-                j_th[P_DK_WHEEL] = e.d_forward;
+                // Each channel's parameters ride on that channel's share of the heading. The bias is
+                // SUBTRACTED by the model (gyro reads omega + b), so r = truth - prediction rises by
+                // dt per unit of b: the column is -t_gyro. It used to be +duration while the
+                // integrator subtracted b*dt, which made the solved value -b and the closed loop
+                // (via p_applied below) a gain-2 iteration -- unstable once the data outweighed the
+                // prior. The fixed point happened to be right, which is why it looked plausible.
+                j_th[P_K_OMEGA]   =  e.th_gyro;
+                j_th[P_B_OMEGA]   = -e.t_gyro;
+                j_th[P_K_OMEGA_W] =  e.th_wheel;
+                j_th[P_DK_WHEEL]  =  e.fwd_wheel;
                 H += wt * j_th * j_th.transpose();
                 // Undo the feedback: the recorded residual is what remained AFTER
                 // p_applied acted, so the total this row must explain is r + J*p_applied.
@@ -377,8 +415,10 @@ namespace rc::calib
             for (const auto &c : cls_)
             {
                 Eigen::Matrix<float, P_COUNT, 1> j_cl = Eigen::Matrix<float, P_COUNT, 1>::Zero();
-                j_cl[P_K_OMEGA] = c.d_theta;
-                j_cl[P_B_OMEGA] = c.duration;
+                // A closure is a pivot, and a pivot's heading comes from the gyro factor (the wheels'
+                // scrubbing variance is largest exactly there), so it informs the gyro's parameters.
+                j_cl[P_K_OMEGA] =  c.d_theta;
+                j_cl[P_B_OMEGA] = -c.duration;
                 H += c.weight * j_cl * j_cl.transpose();
                 b += c.weight * j_cl * c.r_theta;
             }
@@ -415,5 +455,6 @@ namespace rc::calib
         struct ClosureRow { float r_theta = 0.f, d_theta = 0.f, duration = 0.f, weight = 0.f; };
         std::deque<ClosureRow> cls_;
         std::deque<Episode> eps_;
+        std::size_t legacy_dropped_ = 0;
     };
 }
