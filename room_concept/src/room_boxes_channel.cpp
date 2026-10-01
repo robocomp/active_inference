@@ -1839,6 +1839,21 @@ namespace rc::boxch
             // mean 0.969 -> 0.956 and the worst room 0.901 -> 0.772 while the hall gains
             // (mean 0.887 -> 0.917, worst 0.473 -> 0.705). The invariant is that a room is ONE
             // region; a candidate may not make the layout MORE broken than it already is.
+            // ── OR PRICE IT, IN THE CURRENCY EVERYTHING ELSE IS PRICED IN ──────────────────────
+            // A flat refusal is the only decision in this estimator not made in nats, and it shows:
+            // it wins the apartment and loses the simple rooms' tail. One extra region costs what a
+            // region costs — 4*log(span/sigma), a box's own code length — so a split that explains
+            // the returns better than one region plus that price is still allowed to win.
+            const auto region_price = [&](const rc::boxes::Layout& L)
+            {
+                const int c = layout_components(L);
+                if (c <= 1) return 0.0;
+                double span = 1.0;
+                for (const auto& b : L.boxes) span = std::max(span, static_cast<double>(b.width() + b.height()));
+                const double s0 = std::sqrt(static_cast<double>(p_.sensor_sigma) * p_.sensor_sigma
+                                          + static_cast<double>(p_.sigma_flat) * p_.sigma_flat);
+                return static_cast<double>(c - 1) * 4.0 * std::log(span / s0);
+            };
             const bool want_connected = p_.connected;
             const int keep_components = layout_components(keep);
             if (want_connected and layout_components(cand) > std::max(1, keep_components))
@@ -1848,8 +1863,11 @@ namespace rc::boxch
                                  layout_components(cand), keep_components);
                 L_ = keep; return false;
             }
-            if (rc::boxes::mdl_cost(cand, cloud_, gp, &flc)
-                >= rc::boxes::mdl_cost(keep, cloud_, gp, &flc))
+            const double cand_cost = static_cast<double>(rc::boxes::mdl_cost(cand, cloud_, gp, &flc))
+                                   + (p_.connected_price ? region_price(cand) : 0.0);
+            const double keep_cost = static_cast<double>(rc::boxes::mdl_cost(keep, cloud_, gp, &flc))
+                                   + (p_.connected_price ? region_price(keep) : 0.0);
+            if (cand_cost >= keep_cost)
             {
                 if (std::getenv("WS_COVER_PROBE"))
                 {

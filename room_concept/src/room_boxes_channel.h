@@ -77,6 +77,11 @@ namespace rc::boxch
         /// TRADE, not a win: the apartment gains (mean .887->.917, worst .473->.705) and the 50
         /// simple rooms lose at the tail (.969/.901 -> .956/.772). Off until it is priced in nats.
         bool  connected       = false;
+        /// PRICE a second region instead of forbidding it: the adoption cost gains one region's
+        /// description length, 4*log(span/sigma), per extra connected component — the same currency
+        /// a box is charged in. A split that explains the evidence better than one region plus that
+        /// price still wins, which a flat refusal cannot express.
+        bool  connected_price = false;
         /// A one-scan seed's offsets carry the room's span, not sigma_flat: a box drawn round one
         /// scan is not known to a centimetre. Pairs with GrowParams::free_force and
         /// RegisterOptions::map_var.

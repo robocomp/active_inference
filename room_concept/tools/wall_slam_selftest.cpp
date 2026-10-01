@@ -2353,6 +2353,7 @@ int run_replay(const char* path)
             bp.gauge_ml        = flag("WS_GAUGE_ML");
             bp.cover_layout    = flag("WS_COVER_LAYOUT");
             bp.connected       = flag("WS_CONNECTED");
+            bp.connected_price = flag("WS_CONNECT_PRICE");
             bp.seed_prior_span = flag("WS_SEED_VAR");
             bp.reg_map_var     = flag("WS_REG_MAPVAR");
             if (const char* v = std::getenv("WS_COVER_MAX_RECTS"))

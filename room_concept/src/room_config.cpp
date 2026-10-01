@@ -134,6 +134,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxGaugeML",       room_concept.params.box.gauge_ml);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxCoverLayout",   room_concept.params.box.cover_layout);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxConnected",     room_concept.params.box.connected);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxConnectedPrice", room_concept.params.box.connected_price);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxSeedPriorSpan", room_concept.params.box.seed_prior_span);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomShape.BoxRegMapVar",     room_concept.params.box.reg_map_var);
         rc::ConfigLoaderUtils::load_optional<int>(cl,  "RoomShape.BoxCoverMaxRects", room_concept.params.box.cover_max_rects);
