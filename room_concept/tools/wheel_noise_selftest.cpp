@@ -43,6 +43,30 @@ int main()
         for (int i = 0; i < 2000; ++i) L.add(0.01f, dt, 0.3f, 0.3f, -1.f);   // gyro states no variance
         check(L.samples() == 0, "no anchor (gyro density unstated) => no samples taken");
     }
+    {
+        // The live failure of 2026-10-01: drive, then stand still for far longer than any window.
+        WheelNoiseLearner L; L.set_prior_density(0.0037f); L.set_motion_prior_density(0.0447f);
+        auto feed = [&](double v, double w) {
+            const double var = (sg * sg + c0 + c1 * v + c2 * w) * dt;
+            L.add(static_cast<float>(std::sqrt(var) * N(rng)), dt, v, w, sg);
+        };
+        for (int i = 0; i < 20000; ++i) { const double r = U(rng); feed(r < 0.5 ? 0.35 : 0.0, r < 0.5 ? 0.0 : 0.9); }
+        const auto before = L.coeffs();
+        for (int i = 0; i < 120000; ++i) feed(0.0, 0.0);               // 40 min parked at 50 Hz
+        const auto after = L.coeffs();
+        std::printf("3. LONG STOP after driving: c1 %.2e -> %.2e, c2 %.2e -> %.2e (truth %.2e, %.2e)\n",
+                    before[1], after[1], before[2], after[2], c1, c2);
+        check(std::abs(after[1] - c1) < 0.2 * c1, "speed term survives a 40-minute stop");
+        check(std::abs(after[2] - c2) < 0.2 * c2, "turn-rate term survives a 40-minute stop");
+    }
+    {
+        WheelNoiseLearner L; L.set_prior_density(0.0037f); L.set_motion_prior_density(0.0447f);
+        for (int i = 0; i < 30000; ++i) L.add(static_cast<float>(sg * std::sqrt(dt) * N(rng)), dt, 0.0, 0.0, sg);
+        std::printf("4. NEVER MOVED: density at v=.3 %.4f, at w=.5 %.4f (motion prior 0.0447)\n",
+                    L.density(0.3f, 0.f), L.density(0.f, 0.5f));
+        check(L.density(0.3f, 0.f) > 0.02f and L.density(0.f, 0.5f) > 0.02f,
+              "unexcited motion terms stay at the conservative prior, not at zero");
+    }
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASS", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

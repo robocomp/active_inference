@@ -7789,7 +7789,11 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 // Learned: the wheels' density at THIS motion, from their disagreement with the gyro.
                 // Its prior is the stated/model rest density, so on a cold start it begins there.
                 if (params.heading_noise_learning)
+                {
                     wheel_noise_.set_prior_density(ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                    // Until moving rows exist, a moving wheel is as noisy as the motion model's constant.
+                    wheel_noise_.set_motion_prior_density(params.odom_preint_noise.sigma_omega);
+                }
                 const float dens_w = params.heading_noise_learning
                                    ? wheel_noise_.density(odom.adv, odom.rot) : dens_w_stated;
                 const float s_kw = motion_calib_.param_sigma(rc::calib::P_K_OMEGA_W) * wheel_raw;
