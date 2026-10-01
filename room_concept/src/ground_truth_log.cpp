@@ -7,10 +7,13 @@
 
 #include <QDebug>
 #include <QString>
+#include <QDateTime>
+#include <QDir>
 
 #include <cmath>
 #include <filesystem>
 #include <locale>
+#include <limits>
 
 namespace rc
 {
@@ -160,6 +163,79 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             << ',' << fb.correction.x() << ',' << fb.correction.y() << ',' << fb.correction.z()
             << '\n';
     gt_csv_.flush();
+}
+
+
+void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
+{
+    if (shutting_down_.load())
+        return;
+    if (not hd_csv_open_attempted_)
+    {
+        hd_csv_open_attempted_ = true;
+        // One file PER RUN, named by its start time: an A/B (HeadingFusion true/false) needs both
+        // runs to survive, and nobody should have to rename anything by hand.
+        QDir().mkpath("tmp/heading");
+        const QString path = QString("tmp/heading/heading_%1.csv")
+                                 .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss"));
+        hd_csv_.open(path.toStdString(), std::ios::out | std::ios::trunc);
+        if (not hd_csv_.is_open())
+        {
+            qWarning() << "[heading] cannot open" << path;
+            return;
+        }
+        hd_csv_.imbue(std::locale::classic());   // es_ES would write decimal COMMAS into a CSV
+        hd_csv_ << "# heading fusion log. fusion=1: wheel x gyro product; 0: legacy switch. Angles rad, "
+                   "times s, densities rad/sqrt(s). raw_* are UNcalibrated channel rotations this cycle. "
+                   "est/pred are the pose after/before the optimiser. gt_* NaN on the real robot.\n";
+        hd_csv_ << "ts_ms,fusion,est_x,est_y,est_th,pred_x,pred_y,pred_th,gt_x,gt_y,gt_th,"
+                   "iters,sdf_mse,cov_tt,dy_local,dx_local,"
+                   "dth_total,dth_gyro_share,dth_wheel_share,wheel_shadow,"
+                   "raw_wheel,raw_gyro,gyro_dt,total_dt,zupt_dt,gyro_weight,dens_w,dens_g,"
+                   "hc_th_gyro,hc_t_gyro,hc_th_wheel,hc_fwd_wheel,imu_segs,wheel_segs,";
+        for (int i = 0; i < rc::calib::P_COUNT; ++i)
+            hd_csv_ << "v_" << rc::calib::param_name(i) << ',';
+        for (int i = 0; i < rc::calib::P_COUNT; ++i)
+            hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
+        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes\n";
+        qInfo() << "[heading] logging every cycle to" << path;
+    }
+    if (not hd_csv_.is_open())
+        return;
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    float gx = nan, gy = nan, gth = nan;
+    if (G)
+        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+        {
+            const auto &rn = robots.front();
+            const auto ax = G->get_attrib_by_name<robot_gt_x_att>(rn);
+            const auto ay = G->get_attrib_by_name<robot_gt_y_att>(rn);
+            const auto aa = G->get_attrib_by_name<robot_gt_angle_att>(rn);
+            // Same sign convention as gt_error.csv: the producer's angle is inverted.
+            if (ax and ay and aa) { gx = ax.value(); gy = ay.value(); gth = -aa.value(); }
+        }
+    const auto &p = res.robot_pose;
+    const float est_th = std::atan2(p.linear()(1, 0), p.linear()(0, 0));
+    const auto &d = res.heading_diag;
+    const auto &hc = res.heading_cov;
+    hd_csv_ << res.timestamp_ms << ',' << (room_concept_.params.heading_fusion ? 1 : 0)
+            << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
+            << ',' << res.pred_x << ',' << res.pred_y << ',' << res.pred_theta
+            << ',' << gx << ',' << gy << ',' << gth
+            << ',' << res.iterations_used << ',' << res.sdf_mse
+            << ',' << (res.covariance.rows() > 2 ? res.covariance(2, 2) : -1.f)
+            << ',' << res.dy_local << ',' << res.dx_local
+            << ',' << (res.imu_dtheta + res.wheel_dtheta) << ',' << res.imu_dtheta << ',' << res.wheel_dtheta
+            << ',' << res.wheel_shadow_dtheta
+            << ',' << d.raw_wheel << ',' << d.raw_gyro << ',' << d.gyro_dt << ',' << d.total_dt
+            << ',' << d.zupt_dt << ',' << res.gyro_weight << ',' << d.dens_w << ',' << d.dens_g
+            << ',' << hc.th_gyro << ',' << hc.t_gyro << ',' << hc.th_wheel << ',' << hc.fwd_wheel
+            << ',' << res.imu_segs << ',' << res.wheel_segs;
+    for (int i = 0; i < rc::calib::P_COUNT; ++i) hd_csv_ << ',' << res.calib_value[i];
+    for (int i = 0; i < rc::calib::P_COUNT; ++i) hd_csv_ << ',' << res.calib_sigma[i];
+    hd_csv_ << ',' << res.calib_informed << ',' << res.calib_condition << ',' << res.calib_episodes << '\n';
+    hd_csv_.flush();
 }
 
 

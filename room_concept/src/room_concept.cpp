@@ -4340,6 +4340,11 @@ namespace rc
         res.heading_cov         = cyc_heading_cov_;
         res.gyro_weight         = cyc_heading_dt_ > 0.0
                                 ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
+        res.heading_diag        = cyc_hdiag_;
+        if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
+            res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
+        if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
+            res.heading_diag.dens_g = static_cast<float>(cyc_dens_g_dt_ / cyc_hdiag_.gyro_dt);
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
@@ -4969,6 +4974,11 @@ namespace rc
         res.heading_cov         = cyc_heading_cov_;
         res.gyro_weight         = cyc_heading_dt_ > 0.0
                                 ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
+        res.heading_diag        = cyc_hdiag_;
+        if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
+            res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
+        if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
+            res.heading_diag.dens_g = static_cast<float>(cyc_dens_g_dt_ / cyc_hdiag_.gyro_dt);
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
@@ -7237,10 +7247,11 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_b_omega = motion_calib_.estimated_omega_bias();
         {
             const auto &r = motion_calib_.last_solve();
-            res.calib_informed = (r.informed[rc::calib::P_K_V]     ? 1 : 0)
-                               | (r.informed[rc::calib::P_EPS_YAW] ? 2 : 0)
-                               | (r.informed[rc::calib::P_K_OMEGA] ? 4 : 0)
-                               | (r.informed[rc::calib::P_B_OMEGA] ? 8 : 0);
+            // Bit p = parameter p informed. The low four bits keep their old meaning (k_v, eps_yaw,
+            // k_omega, b_omega); k_lat, dk_wheel and k_omega_w follow in enum order.
+            res.calib_informed = 0;
+            for (int p = 0; p < rc::calib::P_COUNT; ++p)
+                if (r.informed[p]) res.calib_informed |= (1 << p);
             res.calib_condition = r.condition;
         }
         res.calib_sigma_b_omega = motion_calib_.last_solve().sigma[rc::calib::P_B_OMEGA];
@@ -7656,6 +7667,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         cyc_imu_segs_ = cyc_wheel_segs_ = 0;
         cyc_heading_cov_ = {};
         cyc_gyro_w_dt_ = cyc_heading_dt_ = 0.0;
+        cyc_hdiag_ = {};
+        cyc_dens_w_dt_ = cyc_dens_g_dt_ = 0.0;
 
         // Integrate over all odometry readings in [win_start_ms, win_end_ms], on the clock chosen above.
         for (size_t i = 0; i < odometry_history.size(); ++i)
@@ -7750,6 +7763,10 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 ++zupt_segs_;
             float dth_imu = 0.f;
             const bool have_gyro = imu_dtheta(effective_start_ms, effective_end_ms, dth_imu);
+            cyc_hdiag_.raw_wheel += wheel_raw;
+            cyc_hdiag_.total_dt  += dt;
+            if (have_gyro) { cyc_hdiag_.raw_gyro += dth_imu; cyc_hdiag_.gyro_dt += dt; }
+            if (wheel_stationary) cyc_hdiag_.zupt_dt += dt;
 
             float dtheta = 0.f;
             float w_g = 0.f;            // the gyro's share of this segment's heading
@@ -7763,6 +7780,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                                    : (ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
                 const float s_kw = motion_calib_.param_sigma(rc::calib::P_K_OMEGA_W) * wheel_raw;
                 const float var_w = dens_w * dens_w * dt + s_kw * s_kw;
+                cyc_dens_w_dt_ += static_cast<double>(dens_w) * dt;
                 if (have_gyro)
                 {
                     const float dpsi_g = dth_imu * k_g - b_g * dt;
@@ -7771,6 +7789,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                     const float s_kg = motion_calib_.param_sigma(rc::calib::P_K_OMEGA) * dth_imu;
                     const float s_bg = motion_calib_.param_sigma(rc::calib::P_B_OMEGA) * dt;
                     const float var_g = dens_g * dens_g * dt + s_kg * s_kg + s_bg * s_bg;
+                    cyc_dens_g_dt_ += static_cast<double>(dens_g) * dt;
                     w_g = var_w / std::max(var_w + var_g, 1e-30f);
                     dtheta = w_g * dpsi_g + (1.f - w_g) * dpsi_w;
                     // A stated density reaches the preintegrator only if some producer stated one;

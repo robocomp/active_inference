@@ -841,6 +841,20 @@ public:
         float wheel_dtheta        = 0.f;
         rc::calib::HeadingCovariates heading_cov{};   ///< per-channel heading Jacobian, this cycle
         float gyro_weight         = -1.f;   ///< time-weighted mean w_g this cycle, <0 = no segment
+        /// Per-cycle heading diagnostics for tmp/heading/heading_*.csv. RAW channel rotations (before
+        /// any calibration) so each channel's scale can be regressed against truth offline; the
+        /// densities are the ones the weights were actually computed from (time-weighted means,
+        /// <0 = not computed this cycle, e.g. the legacy switch).
+        struct HeadingDiag
+        {
+            float raw_wheel = 0.f;    ///< rad, sum rot*dt over ALL segments
+            float raw_gyro  = 0.f;    ///< rad, integrated gyro over the segments it bracketed
+            float gyro_dt   = 0.f;    ///< s bracketed by the gyro
+            float total_dt  = 0.f;    ///< s integrated
+            float zupt_dt   = 0.f;    ///< s on which the wheels read stationary
+            float dens_w    = -1.f;   ///< rad/sqrt(s) used for the wheel factor
+            float dens_g    = -1.f;   ///< rad/sqrt(s) used for the gyro factor
+        } heading_diag;
         float wheel_shadow_dtheta = 0.f;
         int   imu_segs = 0, wheel_segs = 0;
         Eigen::Matrix<float,5,1> state = Eigen::Matrix<float,5,1>::Zero();
@@ -1847,6 +1861,8 @@ private:
    float cyc_wheel_dtheta_        = 0.f;
    rc::calib::HeadingCovariates cyc_heading_cov_{};
    double cyc_gyro_w_dt_ = 0.0, cyc_heading_dt_ = 0.0;      // for the time-weighted mean gyro weight
+   UpdateResult::HeadingDiag cyc_hdiag_{};
+   double cyc_dens_w_dt_ = 0.0, cyc_dens_g_dt_ = 0.0;      // density * dt, for time-weighted means
    double gyro_w_dt_sum_ = 0.0, heading_dt_sum_ = 0.0;      // same, over the 5 s [ImuInject] window
    float cyc_wheel_shadow_dtheta_ = 0.f;
    int   cyc_imu_segs_ = 0, cyc_wheel_segs_ = 0;

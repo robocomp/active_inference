@@ -32,6 +32,11 @@ namespace rc
         /// One row per accepted CORRECTED publish. Wired to PosePublisher's hook — this is a
         /// diagnostic ABOUT a published pose, not part of publishing one.
         void log_ground_truth(const RoomConcept::UpdateResult& res);
+        /// One row per localiser result into tmp/heading/heading_<start>.csv -- real robot AND
+        /// simulation (gt columns are NaN without ground truth). Everything needed to judge the
+        /// wheel x gyro heading fusion offline: raw channel rotations, weights, densities, ZUPT time,
+        /// all calibration values/sigmas, and the pose before and after the optimiser.
+        void log_heading(const RoomConcept::UpdateResult& res);
 
     private:
         void gt_convention_report(float est_th, float gt_th);
@@ -46,5 +51,7 @@ namespace rc
         long   gt_report_at_ = 200;
         std::ofstream gt_csv_;
         bool          gt_csv_open_attempted_ = false;
+        std::ofstream hd_csv_;
+        bool          hd_csv_open_attempted_ = false;
     };
 }   // namespace rc

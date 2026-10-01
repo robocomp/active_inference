@@ -152,7 +152,7 @@ void SpecificWorker::initialize()
     // publish in that window today, which is exactly what made the same shape survive review once
     // already — the hand-over goes after the thing it hands over, not before it.
     pose_pub_->set_on_corrected_published([this](const rc::RoomConcept::UpdateResult& res)
-                                          { gt_log_->log_ground_truth(res); });
+                                          { gt_log_->log_ground_truth(res); gt_log_->log_heading(res); });
     phase("load_config");
 
     // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──
