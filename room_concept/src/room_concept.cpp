@@ -4345,6 +4345,8 @@ namespace rc
         res.heading_diag.nl_c1 = static_cast<float>(wheel_noise_.coeffs()[1]);
         res.heading_diag.nl_c2 = static_cast<float>(wheel_noise_.coeffs()[2]);
         res.heading_diag.nl_samples = wheel_noise_.samples();
+        res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
+        res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
@@ -4983,6 +4985,8 @@ namespace rc
         res.heading_diag.nl_c1 = static_cast<float>(wheel_noise_.coeffs()[1]);
         res.heading_diag.nl_c2 = static_cast<float>(wheel_noise_.coeffs()[2]);
         res.heading_diag.nl_samples = wheel_noise_.samples();
+        res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
+        res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)

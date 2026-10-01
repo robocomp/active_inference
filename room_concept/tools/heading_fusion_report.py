@@ -128,6 +128,59 @@ def report(path):
         print(f"   {nme:10s} {d['v_' + nme][-1]:+.5f} ± {d['s_' + nme][-1]:.5f}  {'informed' if mask >> i & 1 else '-'}")
 
 
+def rest_report(d):
+    """6. Rest on the prediction (PreintZuptOnPrediction): wander while TRULY still, and the moving
+    prediction error that a rest hypothesis must not raise. Needs ground truth."""
+    g = d.get("gt_th")
+    if g is None or np.isfinite(g).sum() < 100:
+        print("6. no ground truth: rest/wander section skipped"); return
+    on = int(np.nanmax(d["rest_on"])) if "rest_on" in d else 0
+    t = (d["ts_ms"] - d["ts_ms"][0]) / 1000.0
+    gx, gy, gth = d["gt_x"], d["gt_y"], np.unwrap(d["gt_th"])
+    ex, ey, eth = d["est_x"], d["est_y"], np.unwrap(d["est_th"])
+    # truly still: truth moves < 1 mm and < 0.01 deg within each 5-s block; stretches of >= 30 s
+    blk = (t // 5).astype(int); still_blk = []
+    for b in np.unique(blk):
+        m = blk == b
+        if m.sum() < 20: continue
+        if np.hypot(np.ptp(gx[m]), np.ptp(gy[m])) < 1e-3 and np.degrees(np.ptp(gth[m])) < 0.01: still_blk.append(b)
+    runs, cur = [], []
+    for b in still_blk:
+        if cur and b != cur[-1] + 1: runs.append(cur); cur = []
+        cur.append(b)
+    if cur: runs.append(cur)
+    runs = [r for r in runs if len(r) >= 6]
+    print(f"6. REST ON PREDICTION = {on}.  truly-still stretches >= 30 s: {len(runs)}")
+    tot_t = 0; wx = []; wth = []
+    for r in runs:
+        m = np.isin(blk, r); T = t[m][-1] - t[m][0]; tot_t += T
+        dxy = 1e3 * np.hypot(ex[m] - ex[m][0], ey[m] - ey[m][0]).max()
+        dth = np.degrees(np.abs(eth[m] - eth[m][0]).max())
+        wx.append(dxy / (T / 60)); wth.append(dth / (T / 60))
+        print(f"   {t[m][0]/60:5.1f}-{t[m][-1]/60:5.1f} min: estimate wandered up to {dxy:6.1f} mm, {dth:.3f} deg"
+              f"   (truth {1e3*np.hypot(np.ptp(gx[m]),np.ptp(gy[m])):.1f} mm, {np.degrees(np.ptp(gth[m])):.3f} deg)")
+    if runs:
+        print(f"   still time {tot_t/60:.1f} min; wander rate median {np.median(wx):.1f} mm/min, {np.median(wth):.3f} deg/min")
+    if on and "rest_gain_tr" in d:
+        gt_, gr_ = d["rest_gain_tr"], d["rest_gain_ro"]
+        sm = np.isin(blk, sum(runs, [])) if runs else np.zeros(len(t), bool)
+        print(f"   gain P(moving) while still: tr p50 {np.nanmedian(gt_[sm]) if sm.any() else float('nan'):.3f}  ro p50 {np.nanmedian(gr_[sm]) if sm.any() else float('nan'):.3f}"
+              f" | while moving: tr p10 {np.nanpercentile(gt_[~sm],10):.3f}  ro p10 {np.nanpercentile(gr_[~sm],10):.3f}")
+    # moving prediction error: predicted increment (pred - previous est) against truth, per 2-s window
+    pdx = d["pred_x"][1:] - ex[:-1]; pdy = d["pred_y"][1:] - ey[:-1]
+    has = ~((d["pred_x"][1:] == 0) & (d["pred_y"][1:] == 0))
+    gdx = np.diff(gx); gdy = np.diff(gy)
+    w2 = (t[1:] // 2).astype(int); errs = []
+    for b in np.unique(w2):
+        m = (w2 == b) & has
+        if m.sum() < 10: continue
+        path = np.hypot(gdx[m], gdy[m]).sum()
+        if path < 0.05: continue          # moving windows only (>= 2.5 cm/s)
+        errs.append(abs(np.hypot(pdx[m], pdy[m]).sum() - path) / path)
+    if errs:
+        print(f"   moving windows: |predicted path - true path| / true path  median {100*np.median(errs):.2f} %  p90 {100*np.percentile(errs,90):.2f} %  (n={len(errs)})")
+
+
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
     paths = sys.argv[1:] or sorted(glob.glob(os.path.join(here, "..", "tmp", "heading", "heading_*.csv")))[-1:]
@@ -135,3 +188,4 @@ if __name__ == "__main__":
         sys.exit("no tmp/heading/heading_*.csv yet — run room_concept first")
     for p in paths:
         report(p)
+        rest_report(load(p)[0])

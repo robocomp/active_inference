@@ -860,6 +860,7 @@ public:
             float dens_w    = -1.f;   ///< rad/sqrt(s) used for the wheel factor
             float dens_g    = -1.f;   ///< rad/sqrt(s) used for the gyro factor
             float nl_c0 = 0.f, nl_c1 = 0.f, nl_c2 = 0.f;   ///< learned wheel density^2 coefficients
+            float rest_gain_tr = -1.f, rest_gain_ro = -1.f;  ///< P(moving) applied to the prediction; <0 = off
             long  nl_samples = 0;                          ///< segments the learner has seen
         } heading_diag;
         float wheel_shadow_dtheta = 0.f;

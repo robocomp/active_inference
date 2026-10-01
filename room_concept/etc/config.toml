@@ -428,6 +428,19 @@ PreintZuptLeverM     = 0.26
 # rate dependence the per-sample form still carries at speed (1.47x across a 3x rate change).
 PreintZuptAsFactor   = false
 
+# ── Rest as a probability on the PREDICTION (the published mean) ──────────────
+# Each predicted increment is scaled by the posterior probability of MOVING: a two-hypothesis mixture,
+# at rest (increment = odometry noise at the ZUPT densities) vs moving (uniform over what the base can
+# do in the interval). No threshold; see RoomConcept::select_motion_prior. Off since it was written.
+# ★ A/B 2026-10-01. Why now: in a 37-min truly-still stretch (sim, truth moved 2 mm / 0.63 deg) the
+#   published pose wandered 59 x 28 mm and 2.65 deg -- pure integrated odometry, because the SDF
+#   early exit accepted every prediction and the wheels report phantom motion at rest (sim noise
+#   floor) that the wheel-eps ZUPT test caught on only ~45% of cycles.
+#   Arm A = heading_2026-10-01_20-21-34.csv (false). Arm B = the next run (true). Judge with
+#   `python3 tools/heading_fusion_report.py`, section 6: wander while truly still, and the moving
+#   prediction error (it must NOT rise -- slow creeping motion is where a rest hypothesis can bite).
+PreintZuptOnPrediction = true
+
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
 # elapsed time. Measured on this agent's own debug log: 92.8% of frames coast on the odometry
