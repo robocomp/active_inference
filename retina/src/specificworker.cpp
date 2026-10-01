@@ -59,6 +59,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <numbers>
 #include <cmath>
 #include <limits>
 #include <filesystem>
@@ -372,6 +373,9 @@ void SpecificWorker::initialize()
     }
     door_approach_log_.configure(params.DOOR_APPROACH_LOG_PATH, params.DOOR_APPROACH_LABEL,
                                  params.DOOR_APPROACH_LOG);
+    zed_frame_dump_.configure(params.ZED_DUMP_ENABLED, params.ZED_DUMP_DIR, params.ZED_DUMP_JPEG_QUALITY,
+                              params.ZED_DUMP_MIN_MOVE_M,
+                              params.ZED_DUMP_MIN_TURN_DEG * std::numbers::pi_v<float> / 180.0f);
 
     // Same table for the panorama popup's posterior readout — it names ADE20K ids, so it is the ZED
     // stage's list when that one exists and the 360 stage's otherwise (they are the same 150 names).
@@ -1374,6 +1378,30 @@ void SpecificWorker::compute()
     // Detector accountability for THIS frame, keyed on the same stamp the masks node carries, so it
     // joins directly to every agent's detect_probe.csv row for the same cycle.
     log_detect_drops(zed_res->frame.stamp, /*is_360=*/false);
+    // WAF pilot dataset: the frame, the camera pose it was captured from (pinned to its stamp on the
+    // worker) and the raw Webots ground truth. imwrite only reads the Mat, so no clone is needed.
+    if (zed_frame_dump_.enabled())
+    {
+        if (not robot_T_zed_)
+        {
+            const auto [room_name, robot_name] = scene_processor->get_room_robot_names_for_compute();
+            if (auto m = inner_eigen_api->get_transformation_matrix(robot_name, "zed", 0); m.has_value())
+                robot_T_zed_ = m.value();
+        }
+        rc::diag::ZedDumpGroundTruth gt;
+        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+        {
+            const auto& r = robots.front();
+            const auto x = G->get_attrib_by_name<robot_gt_x_att>(r);
+            const auto y = G->get_attrib_by_name<robot_gt_y_att>(r);
+            const auto a = G->get_attrib_by_name<robot_gt_angle_att>(r);
+            const auto ts = G->get_attrib_by_name<robot_gt_timestamp_att>(r);
+            if (x and y and a)
+                gt = {*x, *y, *a, ts ? *ts : 0, true};
+        }
+        zed_frame_dump_.maybe_save(zed_res->frame.stamp, zed_res->frame.rgbd.bgr,
+                                   zed_res->frame.room_T_sensor, robot_T_zed_, gt);
+    }
     // Approach row for THIS frame. Gated on semantic_fresh only — never on "a door was found", which
     // would leave the file starting at the moment of success with the whole approach missing.
     if (door_approach_log_.enabled() and zed_res->semantic_fresh and zed_res->semantic)

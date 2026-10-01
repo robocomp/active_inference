@@ -145,6 +145,15 @@ struct RetinaParams
     std::string DOOR_APPROACH_LOG_PATH  = "etc/door_approach.csv";
     std::string DOOR_APPROACH_LABEL     = "door";   // must be an ADE20K name the loaded model exposes
 
+    // ── ZED frame + pose dump for the WAF world-model pilot (zed_frame_dump.h) ─────────────────────
+    // OFF by default: one JPEG per kept frame, written on the main thread. Turn on only to record a
+    // dataset. A frame is kept when the camera moved ≥ min_move_m or turned ≥ min_turn_deg.
+    bool        ZED_DUMP_ENABLED        = false;  // ZedDump.enabled
+    std::string ZED_DUMP_DIR            = "etc/zed_frames";  // ZedDump.dir (poses.csv + <stamp>.jpg)
+    int         ZED_DUMP_JPEG_QUALITY   = 92;     // ZedDump.jpeg_quality
+    float       ZED_DUMP_MIN_MOVE_M     = 0.05f;  // ZedDump.min_move_m
+    float       ZED_DUMP_MIN_TURN_DEG   = 3.0f;   // ZedDump.min_turn_deg
+
     // ── Door SECOND OPINION (door_specialist_stage.h) ──────────────────────────────────────────────
     // A model trained on doors, run only on frames where the ADE20K path produced no door mask. It
     // exists because that path's posterior collapses as the robot approaches (P(door) 0.995 at 5.5 m →

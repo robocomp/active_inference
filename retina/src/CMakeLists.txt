@@ -29,6 +29,7 @@ LIST(APPEND SOURCES
   ../src/retina_params.cpp
   ../src/graph_publisher.cpp
   ../src/door_approach_log.cpp
+  ../src/zed_frame_dump.cpp
   ../../common/contour_edge/contour_edge_check.cpp
   ../src/door_specialist.cpp
   ../src/door_specialist_stage.cpp

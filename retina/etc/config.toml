@@ -516,6 +516,17 @@ enabled = true
 path    = "etc/door_approach.csv"
 label   = "door"            # must be an ADE20K class the loaded model exposes (see prob_class_ids)
 
+# ── ZED frame + pose dump for the WAF world-model pilot (src/zed_frame_dump.h) ─────────────────────
+# OFF by default. When on, writes <dir>/<stamp>.jpg plus one row per image in <dir>/poses.csv with the
+# camera pose, the robot pose estimate and the Webots ground truth (raw). A frame is kept when the
+# camera moved ≥ min_move_m or turned ≥ min_turn_deg since the last kept one.
+[ZedDump]
+enabled      = false
+dir          = "etc/zed_frames"
+jpeg_quality = 92
+min_move_m   = 0.05
+min_turn_deg = 3.0
+
 # ── Door SECOND OPINION → a model trained on doors, asked only when the cheap channel is silent ────
 # WHY: the ADE20K path's posterior collapses as the robot closes on a door — median P(door) 0.995 at
 # 5.5-6 m, 0.450 at 4.0-4.5 m, 0.110 at 3.5-4.0 m on a plainly visible CLOSED door, which it calls
