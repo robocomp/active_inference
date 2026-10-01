@@ -96,16 +96,29 @@ def report(path):
     else:
         print("3. no ground truth (real robot): channel scales from truth skipped")
 
-    # 4. prediction quality: optimiser's heading correction
-    corr = wrap(d["est_th"] - d["pred_th"])
-    turned = np.abs(d["dth_total"]).sum()
-    print(f"4. heading correction applied by the optimiser: total |corr| {np.degrees(np.abs(corr).sum()):.1f} deg"
-          f" over {np.degrees(turned):.0f} deg turned  -> {np.abs(corr).sum() / max(turned, 1e-6) * 100:.2f} % per rad,"
-          f"  {np.degrees(np.abs(corr).sum()) / max(dt.sum(), 1e-6) * 60:.2f} deg/min")
+    # 4. prediction quality. Two traps measured on the first live log (2026-10-01): rows with no
+    # prediction yet carry pred = 0, and during start-up the room frame is RE-ANCHORED (est-gt jumped
+    # 60 -> -90 deg), so absolute headings are not comparable across a run. Both are handled by
+    # skipping pred-less rows and grading INCREMENTS over windows, which a re-anchor cannot touch
+    # except in the one window that contains it -- hence medians, not sums.
+    has_pred = ~((d["pred_x"] == 0) & (d["pred_y"] == 0) & (d["pred_th"] == 0))
+    corr = np.abs(wrap(d["est_th"] - d["pred_th"]))[has_pred]
+    print(f"4. optimiser heading correction per cycle (deg): median {np.degrees(np.median(corr)):.3f}"
+          f"  p90 {np.degrees(np.percentile(corr, 90)):.3f}  p99 {np.degrees(np.percentile(corr, 99)):.3f}"
+          f"  ({(~has_pred).sum()} rows without a prediction skipped)")
     if np.isfinite(g).sum() > 100:
-        e = wrap(d["est_th"] - g); e = e[np.isfinite(e)]
-        e = wrap(e - np.angle(np.mean(np.exp(1j * e))))
-        print(f"   estimated heading vs truth (offset removed): rms {np.degrees(np.sqrt(np.mean(e ** 2))):.3f} deg")
+        t = (d["ts_ms"] - d["ts_ms"][0]) / 1000.0
+        for win in (2.0, 10.0):
+            k = np.searchsorted(t, np.arange(t[0], t[-1] - win, win))
+            k2 = np.searchsorted(t, t[k] + win)
+            m = (k2 < len(t)) & np.isfinite(g[k]) & np.isfinite(g[np.minimum(k2, len(t) - 1)])
+            k, k2 = k[m], k2[m]
+            err = np.degrees(np.abs(wrap((d["est_th"][k2] - d["est_th"][k]) - (g[k2] - g[k]))))
+            perr = np.degrees(np.abs(wrap(np.array([d["dth_total"][i + 1:j + 1].sum() for i, j in zip(k, k2)])
+                                          - (g[k2] - g[k]))))
+            print(f"   |heading-increment error| over {win:.0f} s windows (deg, median / p90):"
+                  f"  published {np.median(err):.3f} / {np.percentile(err, 90):.3f}"
+                  f"   motion prior alone {np.median(perr):.3f} / {np.percentile(perr, 90):.3f}")
 
     # 5. calibrator at the end
     names = [h[2:] for h in d if h.startswith("v_")]
