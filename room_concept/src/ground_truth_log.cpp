@@ -197,7 +197,7 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             hd_csv_ << "v_" << rc::calib::param_name(i) << ',';
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
             hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
-        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro\n";
+        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -238,7 +238,9 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << d.nl_c0 << ',' << d.nl_c1 << ',' << d.nl_c2 << ',' << d.nl_samples
             << ',' << (room_concept_.params.heading_noise_learning ? 1 : 0)
             << ',' << (room_concept_.params.zupt_on_prediction ? 1 : 0)
-            << ',' << d.rest_gain_tr << ',' << d.rest_gain_ro << '\n';
+            << ',' << d.rest_gain_tr << ',' << d.rest_gain_ro
+            << ',' << (room_concept_.params.zupt_pred_learn_rest ? 1 : 0)
+            << ',' << d.rest_dens_v << ',' << d.rest_dens_w << '\n';
     hd_csv_.flush();
 }
 

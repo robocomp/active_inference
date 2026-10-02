@@ -455,7 +455,16 @@ PreintZuptAsFactor   = false
 #   14x and 16x below the PreintZuptDensity* the mixture borrows, so it calls anything under ~7 cm/s
 #   rest. Those densities also shape the preintegrator's parked covariance, so they are NOT simply
 #   shrunk here. OFF until the mixture has its own (learned) rest density.
-PreintZuptOnPrediction = false
+# ★★★ 2026-10-02: the mixture now has its own rest density, learnt online by EM over its own
+#   responsibilities (src/rest_density_learner.h; PreintZuptDensity* is only its 1-cycle prior), and it
+#   judges the signed sum over PreintZuptPredWindowS (rest noise random-walks, motion persists). Selftest
+#   (tools/rest_density_selftest.cpp): converges to the true rest density from the 14x-wide prior;
+#   parked gain 0.002; creep 0.5 cm/s and up passes 100 %; 5 min creeping at 0.7 cm/s leaves the density
+#   unchanged. ON again for the RE-RUN of the registered slow-approach test (on-arm only; the off arm
+#   heading_2026-10-02_14-45-58 is reused). UNRUN LIVE.
+PreintZuptOnPrediction = true
+PreintZuptPredLearnRest = true
+PreintZuptPredWindowS   = 0.5
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the

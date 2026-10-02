@@ -4347,6 +4347,8 @@ namespace rc
         res.heading_diag.nl_samples = wheel_noise_.samples();
         res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
         res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
+        res.heading_diag.rest_dens_v  = rest_learn_tr_.density();
+        res.heading_diag.rest_dens_w  = rest_learn_ro_.density();
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
@@ -4570,25 +4572,39 @@ namespace rc
             auto& d = selection.selected_prior.delta_pose;
             const float T = std::max(1e-3f, selection.selected_prior.dt * 1e-3f);
             const auto& nm = params.odom_preint_noise;
-            const float sig_p = std::sqrt(nm.zupt_density_v * nm.zupt_density_v * T);      // m
-            const float sig_r = std::sqrt(nm.zupt_density_omega * nm.zupt_density_omega * T);
             const float L     = std::max(nm.zupt_lever_m, 1e-3f);
-            // Coupled, so a pivot cannot be read as rest: a robot turning on the spot has |dp| ~ 0
-            // and must still be recognised as moving.
-            const float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
-            const float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
-            const auto moving_p = [](float m, float sigma, float span) -> float
+            // The rest density. Borrowing the preintegrator's PreintZuptDensity* made the mixture call
+            // everything under ~7 cm/s rest (registered slow-approach test, 2026-10-02: FAIL in every
+            // band) -- those describe a lumped parked VELOCITY noise for covariance shaping, 14-16x the
+            // odometry's own noise at rest. With PreintZuptPredLearnRest the mixture learns its own by
+            // EM over its own responsibilities; the borrowed value is only the learner's prior.
+            float d_tr = nm.zupt_density_v, d_ro = nm.zupt_density_omega;
+            if (params.zupt_pred_learn_rest)
             {
-                if (not (sigma > 0.f) or not (span > 0.f)) return 1.f;
-                const float rest   = std::exp(-0.5f * m * m / (sigma * sigma))
-                                   / std::sqrt(2.f * static_cast<float>(M_PI)) / sigma;
-                const float moving = 1.f / (2.f * span);
-                const float den = rest + moving;
-                return den > 0.f ? moving / den : 1.f;
-            };
+                rest_learn_tr_.set_prior(d_tr);  rest_learn_ro_.set_prior(d_ro);
+                d_tr = rest_learn_tr_.density(); d_ro = rest_learn_ro_.density();
+            }
+            // Coupled, so a pivot cannot be read as rest: a robot turning on the spot has |dp| ~ 0
+            // and must still be recognised as moving. With the learnt density the mixture judges the
+            // signed sum over a short window (RestWindow): rest noise random-walks, motion persists, so
+            // creeping far below one cycle's noise is still recognised as motion.
+            float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
+            float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
+            float T_judge = T;
+            if (params.zupt_pred_learn_rest)
+            {
+                rest_window_.set_window(params.zupt_pred_window_s);
+                const auto w = rest_window_.push(d[0], d[1], d[2], T, L);
+                m_tr = w.m_tr; m_ro = w.m_ro; T_judge = w.T;
+            }
             // Span of the "moving" uniform: what this base could plausibly have done in T.
-            const float w_tr = moving_p(m_tr, sig_p, params.zupt_pred_v_max * T);
-            const float w_ro = moving_p(m_ro, sig_r, params.zupt_pred_w_max * T);
+            const float w_tr = rc::preint::RestDensityLearner::p_moving(m_tr, d_tr, T_judge, params.zupt_pred_v_max * T_judge);
+            const float w_ro = rc::preint::RestDensityLearner::p_moving(m_ro, d_ro, T_judge, params.zupt_pred_w_max * T_judge);
+            if (params.zupt_pred_learn_rest)
+            {   // M-step input: the judged motion, weighted by how much the mixture believes it was rest.
+                rest_learn_tr_.add(m_tr, T_judge, 1.f - w_tr);
+                rest_learn_ro_.add(m_ro, T_judge, 1.f - w_ro);
+            }
             zupt_pred_gain_tr_ = w_tr; zupt_pred_gain_ro_ = w_ro;   // for the viewer / debug row
             d.head<2>() *= w_tr;
             d[2]        *= w_ro;
@@ -4997,6 +5013,8 @@ namespace rc
         res.heading_diag.nl_samples = wheel_noise_.samples();
         res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
         res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
+        res.heading_diag.rest_dens_v  = rest_learn_tr_.density();
+        res.heading_diag.rest_dens_w  = rest_learn_ro_.density();
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
