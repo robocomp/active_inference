@@ -439,6 +439,13 @@ PreintZuptAsFactor   = false
 #   Arm A = heading_2026-10-01_20-21-34.csv (false). Arm B = the next run (true). Judge with
 #   `python3 tools/heading_fusion_report.py`, section 6: wander while truly still, and the moving
 #   prediction error (it must NOT rise -- slow creeping motion is where a rest hypothesis can bite).
+# ★ RESULT 2026-10-02 (arm B2 = heading_2026-10-02_11-33-26, after c697ed9 made it reach the published
+#   pose at all -- arm B1 was invalid, see that commit). Truly still 11.9 min: wander 0.2 mm/min and
+#   0.023 deg/min against arm A's 7.9 mm/min and 0.44 deg/min; worst stretch 0.7 mm / 0.03 deg over
+#   10.7 min against 65 mm / 2.6 deg. Moving, by true speed: >20 cm/s gain 1.00, |err| 1.75 % vs 1.27 %
+#   (n=39 vs 185, route); creep <5 cm/s gain 0.61, signed error -1.2 % (no undershoot) but n=10 --
+#   INCONCLUSIVE, not passed. ADOPTED. Still owed: a registered slow-approach test (creep is where the
+#   rest hypothesis acts on real motion).
 PreintZuptOnPrediction = true
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
