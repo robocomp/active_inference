@@ -461,8 +461,16 @@ PreintZuptAsFactor   = false
 #   (tools/rest_density_selftest.cpp): converges to the true rest density from the 14x-wide prior;
 #   parked gain 0.002; creep 0.5 cm/s and up passes 100 %; 5 min creeping at 0.7 cm/s leaves the density
 #   unchanged. ON again for the RE-RUN of the registered slow-approach test (on-arm only; the off arm
-#   heading_2026-10-02_14-45-58 is reused). UNRUN LIVE.
-PreintZuptOnPrediction = true
+#   heading_2026-10-02_14-45-58 is reused).
+# ★★★★ RE-RUN 2026-10-02 20:56 (heading_2026-10-02_20-55-42): FAIL again, improved. Signed path error
+#   on/off by band: <1 cm/s -97/+5.5, 1-2 -47/+0.1, 2-3.5 -15/+0.3, 3.5-6.5 -0.2/0.0 (PASS).
+#   CAUSE: EM RUNAWAY. The learnt density fell 1.2e-3 -> 9.5e-4 in the first parked minute (truth 4.5e-4),
+#   then the first 0.5 cm/s legs sat ~3 sigma from rest, were partly counted as rest, widened d, and more
+#   was absorbed: 4.7e-3 by minute 3, 5.6e-3 at the end. Withheld motion was then dragged back by the fit:
+#   539 optimiser cycles and 64 mm jumps in the final still minute. Model misspecification, not tuning:
+#   "moving" is a diffuse uniform up to v_max, so a widened rest Gaussian always out-explains a slow-motion
+#   cluster. The selftest missed it because it parked 10 min before creeping. OFF.
+PreintZuptOnPrediction = false
 PreintZuptPredLearnRest = true
 PreintZuptPredWindowS   = 0.5
 
