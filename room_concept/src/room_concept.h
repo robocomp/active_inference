@@ -498,12 +498,11 @@ public:
         bool  zupt_on_prediction = false;
         float zupt_pred_v_max    = 1.0f;   ///< m/s   — width of the "moving" hypothesis, not a limit
         float zupt_pred_w_max    = 2.0f;
-        /// Learn the rest mixture's OWN stationary density (rest_density_learner.h) instead of using the
-        /// preintegrator's PreintZuptDensity* directly; those become its prior.
+        /// Decide rest vs moving with RestMotionChannel (rest_density_learner.h): a velocity state per
+        /// body-frame channel whose noise is learnt from its own innovations; PreintZuptDensity* become
+        /// only a one-cycle prior. false = the legacy per-cycle mixture that failed the creep test.
         bool  zupt_pred_learn_rest = false;
-        /// s over which a velocity is assumed to persist: the rest mixture judges the signed sum of the
-        /// increments in this window (see RestWindow). A model constant, not a threshold.
-        float zupt_pred_window_s = 0.5f;   ///< rad/s — the base's plausible range, not a clamp
+   ///< rad/s — the base's plausible range, not a clamp
         /// Where the calibration WINDOW (evidence, never parameters) is kept between runs.
         std::string calib_state_file = "etc/motion_calib_state.csv";
         bool motion_preintegration = false;
@@ -1879,8 +1878,8 @@ private:
    double cyc_gyro_w_dt_ = 0.0, cyc_heading_dt_ = 0.0;      // for the time-weighted mean gyro weight
    UpdateResult::HeadingDiag cyc_hdiag_{};
    rc::calib::WheelNoiseLearner wheel_noise_;
-   rc::preint::RestDensityLearner rest_learn_tr_, rest_learn_ro_;
-   rc::preint::RestWindow rest_window_;
+   rc::preint::RestMotionChannel rest_fwd_, rest_lat_, rest_rot_;   // is the body at rest? (body frame)
+   bool rest_chan_init_ = false;
    double cyc_dens_w_dt_ = 0.0, cyc_dens_g_dt_ = 0.0;      // density * dt, for time-weighted means
    double gyro_w_dt_sum_ = 0.0, heading_dt_sum_ = 0.0;      // same, over the 5 s [ImuInject] window
    float cyc_wheel_shadow_dtheta_ = 0.f;

@@ -4347,8 +4347,8 @@ namespace rc
         res.heading_diag.nl_samples = wheel_noise_.samples();
         res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
         res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
-        res.heading_diag.rest_dens_v  = rest_learn_tr_.density();
-        res.heading_diag.rest_dens_w  = rest_learn_ro_.density();
+        res.heading_diag.rest_dens_v  = rest_fwd_.density() * std::sqrt(2.f);   // as a |translation| density
+        res.heading_diag.rest_dens_w  = rest_rot_.density();
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
@@ -4573,37 +4573,40 @@ namespace rc
             const float T = std::max(1e-3f, selection.selected_prior.dt * 1e-3f);
             const auto& nm = params.odom_preint_noise;
             const float L     = std::max(nm.zupt_lever_m, 1e-3f);
-            // The rest density. Borrowing the preintegrator's PreintZuptDensity* made the mixture call
-            // everything under ~7 cm/s rest (registered slow-approach test, 2026-10-02: FAIL in every
-            // band) -- those describe a lumped parked VELOCITY noise for covariance shaping, 14-16x the
-            // odometry's own noise at rest. With PreintZuptPredLearnRest the mixture learns its own by
-            // EM over its own responsibilities; the borrowed value is only the learner's prior.
-            float d_tr = nm.zupt_density_v, d_ro = nm.zupt_density_omega;
+            float w_tr = 1.f, w_ro = 1.f;
             if (params.zupt_pred_learn_rest)
             {
-                rest_learn_tr_.set_prior(d_tr);  rest_learn_ro_.set_prior(d_ro);
-                d_tr = rest_learn_tr_.density(); d_ro = rest_learn_ro_.density();
+                // ── IS THE BODY AT REST? A velocity state, per body-frame channel ─────────────────────
+                // See rest_density_learner.h for the three versions that failed and why this one is built
+                // as it is: a velocity Kalman filter per channel (forward, lateral, rotation) with smooth/
+                // jump process noise, the odometry noise learnt from its own innovations (so slow motion
+                // cannot inflate it), and P(moving) by Savage-Dickey on v = 0. Body frame, because a
+                // differential base translates only along its heading: one channel carries the motion.
+                if (not rest_chan_init_)
+                {
+                    rc::preint::RestMotionChannel::Params pr; pr.v0 = 1.15f;   // rotation: uniform on +-2 rad/s
+                    rest_rot_.set_params(pr);
+                    rest_chan_init_ = true;
+                }
+                // the configured |translation| density spread over two axes; only ever a one-cycle prior
+                rest_fwd_.set_prior(nm.zupt_density_v / std::sqrt(2.f));
+                rest_lat_.set_prior(nm.zupt_density_v / std::sqrt(2.f));
+                rest_rot_.set_prior(nm.zupt_density_omega);
+                const float c = std::cos(base_theta), s = std::sin(base_theta);
+                const float bx =  c * d[0] + s * d[1];        // the increment in the body frame
+                const float by = -s * d[0] + c * d[1];
+                const float pf = rest_fwd_.step(bx, T), pl = rest_lat_.step(by, T), pr = rest_rot_.step(d[2], T);
+                w_tr = 1.f - (1.f - pf) * (1.f - pl);
+                w_ro = pr;
             }
-            // Coupled, so a pivot cannot be read as rest: a robot turning on the spot has |dp| ~ 0
-            // and must still be recognised as moving. With the learnt density the mixture judges the
-            // signed sum over a short window (RestWindow): rest noise random-walks, motion persists, so
-            // creeping far below one cycle's noise is still recognised as motion.
-            float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
-            float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
-            float T_judge = T;
-            if (params.zupt_pred_learn_rest)
+            else
             {
-                rest_window_.set_window(params.zupt_pred_window_s);
-                const auto w = rest_window_.push(d[0], d[1], d[2], T, L);
-                m_tr = w.m_tr; m_ro = w.m_ro; T_judge = w.T;
-            }
-            // Span of the "moving" uniform: what this base could plausibly have done in T.
-            const float w_tr = rc::preint::RestDensityLearner::p_moving(m_tr, d_tr, T_judge, params.zupt_pred_v_max * T_judge);
-            const float w_ro = rc::preint::RestDensityLearner::p_moving(m_ro, d_ro, T_judge, params.zupt_pred_w_max * T_judge);
-            if (params.zupt_pred_learn_rest)
-            {   // M-step input: the judged motion, weighted by how much the mixture believes it was rest.
-                rest_learn_tr_.add(m_tr, T_judge, 1.f - w_tr);
-                rest_learn_ro_.add(m_ro, T_judge, 1.f - w_ro);
+                // LEGACY: the per-cycle mixture with the borrowed PreintZuptDensity* -- FAILED the registered
+                // slow-approach test (2026-10-02); kept reproducible. Coupled, so a pivot is not read as rest.
+                const float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
+                const float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
+                w_tr = rc::preint::mixture_p_moving(m_tr, nm.zupt_density_v,     T, params.zupt_pred_v_max * T);
+                w_ro = rc::preint::mixture_p_moving(m_ro, nm.zupt_density_omega, T, params.zupt_pred_w_max * T);
             }
             zupt_pred_gain_tr_ = w_tr; zupt_pred_gain_ro_ = w_ro;   // for the viewer / debug row
             d.head<2>() *= w_tr;
@@ -5013,8 +5016,8 @@ namespace rc
         res.heading_diag.nl_samples = wheel_noise_.samples();
         res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
         res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
-        res.heading_diag.rest_dens_v  = rest_learn_tr_.density();
-        res.heading_diag.rest_dens_w  = rest_learn_ro_.density();
+        res.heading_diag.rest_dens_v  = rest_fwd_.density() * std::sqrt(2.f);   // as a |translation| density
+        res.heading_diag.rest_dens_w  = rest_rot_.density();
         if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
             res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
         if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)

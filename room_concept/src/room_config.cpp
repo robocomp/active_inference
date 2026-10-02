@@ -363,8 +363,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                                                    room_concept.params.zupt_on_prediction);
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreintZuptPredLearnRest",
                                                    room_concept.params.zupt_pred_learn_rest);
-        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptPredWindowS",
-                                                            room_concept.params.zupt_pred_window_s);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptPredVMax",
                                                             room_concept.params.zupt_pred_v_max);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptPredWMax",

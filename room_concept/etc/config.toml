@@ -470,9 +470,15 @@ PreintZuptAsFactor   = false
 #   539 optimiser cycles and 64 mm jumps in the final still minute. Model misspecification, not tuning:
 #   "moving" is a diffuse uniform up to v_max, so a widened rest Gaussian always out-explains a slow-motion
 #   cluster. The selftest missed it because it parked 10 min before creeping. OFF.
-PreintZuptOnPrediction = false
+# ★★★★★ 2026-10-02 22:xx: REBUILT around a VELOCITY STATE (rest_density_learner.h RestMotionChannel):
+#   per body-frame channel (forward, lateral, rotation) a velocity Kalman filter with smooth/jump process
+#   noise, the odometry noise learnt from its OWN INNOVATIONS (a creep is absorbed by v and cannot
+#   inflate it), P(moving) by Savage-Dickey on v = 0. Selftest REPLAYS the live failure (30 s warm-up
+#   from the 14x prior, then the creep schedule): density stable 4.2e-4 (truth 4.5e-4) throughout;
+#   creep passed 0.78 @0.5 cm/s, 1.00 @>=1 cm/s, 0.84 @0.01 rad/s; parked 0.013; onset/stop 1 cycle.
+#   ON for the third run of the registered test (on-arm only). UNRUN LIVE.
+PreintZuptOnPrediction = true
 PreintZuptPredLearnRest = true
-PreintZuptPredWindowS   = 0.5
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
