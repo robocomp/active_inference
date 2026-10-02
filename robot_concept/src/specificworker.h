@@ -171,6 +171,10 @@ private:
 	// particular robot.
 	std::string robot_name;
 	std::string scenario_name_;   ///< WHERE the robot is; published as `scenario_name` on its node
+	/// Metres per unit of the base's published LINEAR velocity (adv, side). The Webots bridge publishes
+	/// m/s; the real SVD48VBase publishes mm/s (its wheel radius and track are in mm). Every consumer of
+	/// robot_current_*_speed expects m/s, so the conversion happens HERE, once, at the boundary.
+	float odom_linear_scale_ = 1.f;
 	/// Can the base command an INSTANTANEOUS lateral velocity in its own frame? Published as
 	/// `robot_holonomic`. std::nullopt = the config did not say, and then NOTHING is published:
 	/// absent means "unknown, keep doing what you do", which is the only honest default. Guessing
