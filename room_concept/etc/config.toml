@@ -446,7 +446,16 @@ PreintZuptAsFactor   = false
 #   (n=39 vs 185, route); creep <5 cm/s gain 0.61, signed error -1.2 % (no undershoot) but n=10 --
 #   INCONCLUSIVE, not passed. ADOPTED. Still owed: a registered slow-approach test (creep is where the
 #   rest hypothesis acts on real motion).
-PreintZuptOnPrediction = true
+# ★★ REGISTERED SLOW-APPROACH TEST 2026-10-02 (tools/creep_test.py, thesis §ex-rest): FAIL, decisively.
+#   off = heading_2026-10-02_14-45-58, on = heading_2026-10-02_13-44-16; predicted path vs truth by
+#   true speed: <1 cm/s off +5.5 % / on -96 %; 1-2 +0.1 / -96; 2-3.5 +0.3 / -89; 3.5-6.5 0.0 / -85;
+#   6.5-10 +0.6 / -43 (n 24-81 per band and arm). The published pose lagged too (-96 % below 2 cm/s).
+#   CAUSE, as the registration anticipated -- the rest density is too wide for THIS use: measured on
+#   truly-still cycles of three runs, the wheels' rest noise is 4.5e-4 m/sqrt(s) and 6.4e-4 rad/sqrt(s),
+#   14x and 16x below the PreintZuptDensity* the mixture borrows, so it calls anything under ~7 cm/s
+#   rest. Those densities also shape the preintegrator's parked covariance, so they are NOT simply
+#   shrunk here. OFF until the mixture has its own (learned) rest density.
+PreintZuptOnPrediction = false
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
