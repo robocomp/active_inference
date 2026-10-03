@@ -483,7 +483,8 @@ PreintZuptAsFactor   = false
 # ★ LONG PARK 2026-10-03 19:52 (heading_2026-10-03_19-52-19): 49.8 min truly still -- wander 0.8 mm/min,
 #   0.023 deg/min (off: 7.9 mm/min, 0.44 deg/min); the 40.8 mm max is ONE 33.5 mm fit correction at t=0
 #   (start-up localisation), not drift. Normal driving afterwards 1.35 % path error (off 1.27 %). CLOSED.
-#   Still unexplained: learnt rest density stable at 2.3e-4 vs 4.5e-4 measured from wheel increments.
+#   Still unexplained: learnt rest density (logged rest_dens_v, a |translation| density) 2.3e-4 while
+#   parked, 3.1e-4 after driving, vs 4.5e-4 measured from wheel increments.
 PreintZuptOnPrediction = true
 PreintZuptPredLearnRest = true
 
