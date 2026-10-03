@@ -479,8 +479,11 @@ PreintZuptAsFactor   = false
 #   ON for the third run of the registered test (on-arm only).
 # ★★★★★★ THIRD REGISTERED RUN 2026-10-03 09:07 (heading_2026-10-03_09-06-31 vs off 14-45-58): PASS in every
 #   band. Signed path error on (off): <1 cm/s +2.1 (+5.5); 1-2 +0.3 (+0.1); 2-3.5 +0.3 (+0.3); 3.5-6.5
-#   +0.3 (0.0); n 25-72. ADOPTED. Still owed: a LONG park with this version (only 1.2 min truly still in
-#   that run: 2.9 mm); learnt rest density ended 2.4e-4 vs 4.5e-4 measured -- low, watch it.
+#   +0.3 (0.0); n 25-72. ADOPTED.
+# ★ LONG PARK 2026-10-03 19:52 (heading_2026-10-03_19-52-19): 49.8 min truly still -- wander 0.8 mm/min,
+#   0.023 deg/min (off: 7.9 mm/min, 0.44 deg/min); the 40.8 mm max is ONE 33.5 mm fit correction at t=0
+#   (start-up localisation), not drift. Normal driving afterwards 1.35 % path error (off 1.27 %). CLOSED.
+#   Still unexplained: learnt rest density stable at 2.3e-4 vs 4.5e-4 measured from wheel increments.
 PreintZuptOnPrediction = true
 PreintZuptPredLearnRest = true
 
