@@ -476,7 +476,11 @@ PreintZuptAsFactor   = false
 #   inflate it), P(moving) by Savage-Dickey on v = 0. Selftest REPLAYS the live failure (30 s warm-up
 #   from the 14x prior, then the creep schedule): density stable 4.2e-4 (truth 4.5e-4) throughout;
 #   creep passed 0.78 @0.5 cm/s, 1.00 @>=1 cm/s, 0.84 @0.01 rad/s; parked 0.013; onset/stop 1 cycle.
-#   ON for the third run of the registered test (on-arm only). UNRUN LIVE.
+#   ON for the third run of the registered test (on-arm only).
+# ★★★★★★ THIRD REGISTERED RUN 2026-10-03 09:07 (heading_2026-10-03_09-06-31 vs off 14-45-58): PASS in every
+#   band. Signed path error on (off): <1 cm/s +2.1 (+5.5); 1-2 +0.3 (+0.1); 2-3.5 +0.3 (+0.3); 3.5-6.5
+#   +0.3 (0.0); n 25-72. ADOPTED. Still owed: a LONG park with this version (only 1.2 min truly still in
+#   that run: 2.9 mm); learnt rest density ended 2.4e-4 vs 4.5e-4 measured -- low, watch it.
 PreintZuptOnPrediction = true
 PreintZuptPredLearnRest = true
 
