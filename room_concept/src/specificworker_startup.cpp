@@ -119,7 +119,9 @@ void SpecificWorker::start_status_stream()
              .i("stable_frames", scene_graph_ ? scene_graph_->stable_frames() : 0)
              .i("needed", params.STABLE_FRAMES_REQUIRED)
              .b("map_ready", room_concept_.map_ready())
-             .b("grid_searching", room_concept_.is_grid_searching());
+             .b("grid_searching", room_concept_.is_grid_searching())
+             .f("height_measured", room_concept_.measured_ceiling(), 4)   // 0 until the LiDAR has seen it
+             .f("height_stated", params.room_height, 4);
         },
         .streams = [this]
         {

@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-room_tui.py — terminal viewer for room_concept's live status stream.
+room_tui.py — terminal dashboard for room_concept's live status stream.
 
     tools/room_run.sh                       # starts the agent in the background and opens this
     python3 tools/room_tui.py               # (re)attach to a running room_concept
     python3 tools/room_tui.py --log tmp/agent_<ts>.log --pid <pid>
 
+ONE SCREEN, everything at once: a top bar (agent, pid, uptime, state, map mode, config, solve/predict,
+compute Hz); peers, streams and the non-default config keys on the left; localisation (with σθ and
+surprise sparklines) and the room in the centre; motion calibration and camera mounts on the right;
+the latest warnings and the latest event along the bottom. Narrow terminals collapse to two columns,
+then one (scrollable).
+
+Full-screen detail views (Esc closes):  F1/s startup timeline · F2/w warnings history · F3/l raw log
+· F4/g config gates (searchable) · F5/c commands.   / searches in the raw log and the gates view.
+
 The agent (rc::StatusStream, common/status_stream/) serves newline-delimited JSON on
 $XDG_RUNTIME_DIR/rc_status/<agent>_<id>.sock and appends every event to tmp/agent_events_<start>.jsonl.
 This viewer auto-discovers the socket, replays what the agent kept (hello, startup phases, loaded
-files, state-machine transitions, the last 200 log lines, the last state snapshot), and reconnects on
+files, state-machine transitions, the last 200 log lines, the last state snapshot) and reconnects on
 its own when the agent restarts.
 
 QUITTING: `q` asks — stop the agent (SIGTERM, so its graph cleanup runs; NEVER SIGKILL) and quit, or
@@ -26,22 +35,25 @@ import datetime as _dt
 import glob
 import json
 import os
-import re
 import signal
 import time
 
+from rich.console import Group
+from rich.table import Table
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import (Button, DataTable, Footer, Input, Label, RichLog, Static,
-                             TabbedContent, TabPane)
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
+from textual.widgets import (Button, DataTable, Footer, Input, Label, RichLog, Sparkline, Static)
 
-LEVEL_STYLE = {"debug": "dim", "info": "", "warning": "yellow", "critical": "bold red", "fatal": "bold white on red"}
 MAX_LOG_LINES = 20000
+MAX_WARN = 5000
 DEG = 57.29577951308232
+OK, AMBER, RED, DIM = "green", "yellow", "bold red", "dim"
+
+LEVEL_STYLE = {"debug": DIM, "info": "", "warning": AMBER, "critical": RED, "fatal": "bold white on red"}
 
 # Motion calibration: the Calib window's own labels and display scales (calibration_viewer.cpp).
 CALIB_DISPLAY = {
@@ -53,26 +65,11 @@ CALIB_DISPLAY = {
     "dk_wheel":  ("wheel mismatch",    1000.0, "mrad/m"),
     "k_omega_w": ("wheel rot. scale",  100.0, "%"),
 }
-# Camera mount parameters: (label, scale from internal SI, unit) — calibration_viewer.cpp again.
-CAM_DISPLAY = [("pitch", DEG, "deg"), ("height", 1000.0, "mm"), ("yaw", DEG, "deg"), ("dt", 1.0, "x")]
+# Camera mount parameters, internal SI -> display (calibration_viewer.cpp again).
+CAM_DISPLAY = [("pitch", DEG, "°"), ("height", 1000.0, "mm"), ("yaw", DEG, "°"), ("dt", 1.0, "x")]
 
 
-def fmt(v, nd=3, scale=1.0) -> str:
-    if v is None:
-        return "—"
-    try:
-        return f"{v * scale:.{nd}f}"
-    except (TypeError, ValueError):
-        return str(v)
-
-
-def kv_fill(table: DataTable, rows: list[tuple]) -> None:
-    """Rewrite a 2-3 column key/value table in place (2 Hz; the tables are small)."""
-    table.clear()
-    for r in rows:
-        table.add_row(*[c if isinstance(c, Text) else Text(str(c)) for c in r])
-
-
+# ── helpers ───────────────────────────────────────────────────────────────────────────────────────────
 def socket_dir() -> str:
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     return os.path.join(xdg, "rc_status") if xdg else f"/tmp/rc_status_{os.getuid()}"
@@ -105,17 +102,48 @@ def pid_is_agent(pid: int, agent: str) -> bool:
         return False
 
 
-def hms(t_ms: int | float | None) -> str:
+def hms(t_ms) -> str:
     if not t_ms:
         return ""
     return _dt.datetime.fromtimestamp(t_ms / 1000.0).strftime("%H:%M:%S.%f")[:-3]
 
 
-# ── modal: quit ───────────────────────────────────────────────────────────────────────────────────────
+def fmt(v, nd=3, scale=1.0) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{v * scale:.{nd}f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def dur(sec: float) -> str:
+    sec = int(max(0, sec))
+    h, r = divmod(sec, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
+
+
+def compact_table() -> Table:
+    return Table(box=None, show_header=True, header_style="bold dim", pad_edge=False, padding=(0, 1), expand=True)
+
+
+def gate_shown(r: dict) -> bool:
+    """The full gates view's default filter: non-default, A/B arms, every bool/string key."""
+    if r.get("effective") == "(absent)":
+        return False
+    o = r.get("origin", "")
+    return (o in ("overlay", "manifest", "runtime", "shadowed", "typeerr", "unread")
+            or r.get("effective") != r.get("default")
+            or r.get("kind") == "experiment"
+            or r.get("type") in ("bool", "str"))
+
+
+# ── modals ────────────────────────────────────────────────────────────────────────────────────────────
 class QuitScreen(ModalScreen[str]):
     DEFAULT_CSS = """
     QuitScreen { align: center middle; }
-    #dlg { width: 72; height: auto; border: thick $warning; background: $surface; padding: 1 2; }
+    #dlg { width: 72; max-width: 95%; height: auto; border: thick $warning; background: $surface; padding: 1 2; }
     #dlg Button { width: 100%; margin: 1 0 0 0; }
     """
 
@@ -142,11 +170,10 @@ class QuitScreen(ModalScreen[str]):
         self.dismiss("cancel")
 
 
-# ── modal: confirm a command ──────────────────────────────────────────────────────────────────────
 class ConfirmScreen(ModalScreen[bool]):
     DEFAULT_CSS = """
     ConfirmScreen { align: center middle; }
-    #cdlg { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    #cdlg { width: 80; max-width: 95%; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
     #cdlg Horizontal { height: auto; margin: 1 0 0 0; }
     #cdlg Button { margin: 0 2 0 0; }
     """
@@ -171,29 +198,298 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-# ── the app ───────────────────────────────────────────────────────────────────────────────────────────
+# ── full-screen detail views ──────────────────────────────────────────────────────────────────────────
+class DetailScreen(Screen):
+    """Base: a title line, the body, Esc closes. Subclasses implement rebuild() and feed_event()."""
+    BINDINGS = [Binding("escape", "close", "Back"), Binding("q", "app.quit_dialog", "Quit")]
+    DEFAULT_CSS = """
+    DetailScreen #dtitle { height: 1; background: $boost; padding: 0 1; }
+    DetailScreen #dsearch { display: none; }
+    DetailScreen #dsearch.visible { display: block; }
+    DetailScreen .cap { height: 1; color: $text-muted; padding: 0 1; }
+    """
+    TITLE_TEXT = ""
+
+    def compose_body(self) -> ComposeResult:
+        yield from ()
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.TITLE_TEXT, id="dtitle")
+        yield from self.compose_body()
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        pass
+
+    def feed_event(self, ev: dict) -> None:
+        pass
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
+class StartupScreen(DetailScreen):
+    TITLE_TEXT = "Startup timeline — phases, loaded files, state machine, peers, stalls  (Esc: back)"
+
+    def compose_body(self) -> ComposeResult:
+        yield DataTable(id="startup", zebra_stripes=True, cursor_type="row")
+
+    def rebuild(self) -> None:
+        t = self.query_one("#startup", DataTable)
+        t.clear(columns=True)
+        t.add_columns("time", "kind", "what", "ms", "detail")
+        for row in self.app.startup_rows:
+            t.add_row(*row)
+        t.move_cursor(row=max(0, t.row_count - 1))
+
+    def feed_event(self, ev: dict) -> None:
+        if ev.get("_startup_row"):
+            t = self.query_one("#startup", DataTable)
+            t.add_row(*ev["_startup_row"])
+            t.move_cursor(row=t.row_count - 1)
+
+
+class WarningsScreen(DetailScreen):
+    TITLE_TEXT = "Warnings history — every warning/critical/fatal line, on the terminal or not  (Esc: back)"
+
+    def compose_body(self) -> ComposeResult:
+        yield DataTable(id="warnfull", zebra_stripes=True, cursor_type="row")
+
+    def rebuild(self) -> None:
+        t = self.query_one("#warnfull", DataTable)
+        t.clear(columns=True)
+        t.add_columns("time", "level", "tag", "message")
+        for row in self.app.warnings:
+            t.add_row(*row)
+        t.move_cursor(row=max(0, t.row_count - 1))
+
+    def feed_event(self, ev: dict) -> None:
+        if ev.get("_warn_row"):
+            t = self.query_one("#warnfull", DataTable)
+            t.add_row(*ev["_warn_row"])
+            t.move_cursor(row=t.row_count - 1)
+
+
+class RawLogScreen(DetailScreen):
+    TITLE_TEXT = "Raw log  (t: events log ⇄ stdout file · /: search · f: follow · Esc: back)"
+    BINDINGS = [Binding("slash", "search", "Search"), Binding("t", "toggle_source", "Source"),
+                Binding("f", "toggle_follow", "Follow")]
+
+    def compose_body(self) -> ComposeResult:
+        yield Static("", id="rawbar", classes="cap")
+        yield Input(placeholder="search (case-insensitive substring; Esc clears)", id="dsearch")
+        yield RichLog(id="raw", max_lines=MAX_LOG_LINES, wrap=False, highlight=False, markup=False)
+
+    def rebuild(self) -> None:
+        a = self.app
+        src = (f"stdout file {os.path.basename(a.log_path or '') or '(unknown)'}" if a.raw_source == "stdout"
+               else f"events log {os.path.basename(a.hello.get('events') or '') or '(socket replay)'}"
+                    "  (⟂ = not on the terminal)")
+        flt = f"  ·  filter '{a.search}'" if a.search else ""
+        self.query_one("#rawbar", Static).update(f"source: {src}{flt}  ·  follow {'on' if a.follow else 'off'}")
+        log = self.query_one("#raw", RichLog)
+        log.clear()
+        lines = (Text(s) for s in a.stdout_lines) if a.raw_source == "stdout" else iter(a.event_lines)
+        for line in lines:
+            if a.matches(line.plain):
+                log.write(line, scroll_end=False)
+        if a.follow:
+            log.scroll_end(animate=False)
+
+    def feed_event(self, ev: dict) -> None:
+        line = ev.get("_raw_line")
+        if line is not None and ev.get("_raw_source") == self.app.raw_source and self.app.matches(line.plain):
+            self.query_one("#raw", RichLog).write(line, scroll_end=self.app.follow)
+
+    def action_search(self) -> None:
+        inp = self.query_one("#dsearch", Input)
+        inp.add_class("visible")
+        inp.value = self.app.search
+        inp.focus()
+
+    @on(Input.Submitted, "#dsearch")
+    def _submitted(self, ev: Input.Submitted) -> None:
+        self.app.search = ev.value.strip()
+        ev.input.remove_class("visible")
+        self.rebuild()
+        self.query_one("#raw", RichLog).focus()
+
+    def action_close(self) -> None:
+        inp = self.query_one("#dsearch", Input)
+        if inp.has_class("visible") or self.app.search:
+            inp.remove_class("visible")
+            if self.app.search:
+                self.app.search = ""
+                self.rebuild()
+            return
+        self.app.pop_screen()
+
+    def action_toggle_source(self) -> None:
+        a = self.app
+        a.raw_source = "events" if a.raw_source == "stdout" else "stdout"
+        if a.raw_source == "stdout" and not a.log_path:
+            self.notify("no stdout log known (pass --log, or the agent's stdout is a terminal)", severity="warning")
+            a.raw_source = "events"
+        self.rebuild()
+
+    def action_toggle_follow(self) -> None:
+        self.app.follow = not self.app.follow
+        self.rebuild()
+
+
+class GatesScreen(DetailScreen):
+    TITLE_TEXT = "Config gates — non-default keys, A/B arms, every bool/string key  (/: search · a: all · Esc: back)"
+    BINDINGS = [Binding("slash", "search", "Search"), Binding("a", "toggle_all", "All keys")]
+    ORIGIN_STYLE = {"default": DIM, "file": "", "overlay": "cyan", "manifest": "blue", "runtime": "magenta",
+                    "shadowed": RED, "typeerr": RED, "unread": AMBER}
+
+    def __init__(self):
+        super().__init__()
+        self.show_all = False
+
+    def compose_body(self) -> ComposeResult:
+        yield Static("", id="gates_head", classes="cap")
+        yield Input(placeholder="search keys/descriptions (Esc clears)", id="dsearch")
+        yield DataTable(id="gates", zebra_stripes=True, cursor_type="row")
+
+    def rebuild(self) -> None:
+        a = self.app
+        ev = a.config_ev
+        recs = ev.get("records", [])
+        t = self.query_one("#gates", DataTable)
+        t.clear(columns=True)
+        t.add_columns("key", "origin", "kind", "type", "effective", "default", "description")
+        q = a.gsearch.lower()
+        shown = bad = 0
+        for r in recs:
+            o = r.get("origin", "")
+            if o in ("shadowed", "typeerr"):
+                bad += 1
+            if not (self.show_all or gate_shown(r)):
+                continue
+            if q and q not in (r.get("key", "") + " " + r.get("description", "")).lower():
+                continue
+            shown += 1
+            changed = r.get("effective") != r.get("default")
+            kind = r.get("kind", "")
+            org = o + (f" ({r['overlay']})" if r.get("overlay") else "")
+            t.add_row(Text(r.get("key", ""), style=RED if o in ("shadowed", "typeerr") else ""),
+                      Text(org, style=self.ORIGIN_STYLE.get(o, "")),
+                      Text("A/B" if kind == "experiment" else kind,
+                           style="magenta bold" if kind == "experiment" else DIM),
+                      Text(r.get("type", ""), style=DIM),
+                      Text(r.get("effective", ""), style="bold" if changed else ""),
+                      Text(r.get("default", "") if changed else "", style=DIM),
+                      Text(r.get("description", ""), style=DIM))
+        head = (f"{shown} of {len(recs)} keys ({'all' if self.show_all else 'non-default, A/B, bool/string'})"
+                f"  ·  fingerprint {ev.get('fingerprint', '?')}  ·  {ev.get('undocumented', 0)} undocumented  ·  "
+                f"unread {ev.get('unread', '?') if ev.get('sweep_armed') else 'INCONCLUSIVE'}")
+        if bad:
+            head += f"  ·  [b red]{bad} key(s) present but NOT in force[/]"
+        if a.gsearch:
+            head += f"  ·  filter '{a.gsearch}'"
+        if not recs:
+            head = "no config event yet — it is published at the END of the agent's startup"
+        self.query_one("#gates_head", Static).update(head)
+
+    def feed_event(self, ev: dict) -> None:
+        if ev.get("kind") == "config":
+            self.rebuild()
+
+    def action_toggle_all(self) -> None:
+        self.show_all = not self.show_all
+        self.rebuild()
+
+    def action_search(self) -> None:
+        inp = self.query_one("#dsearch", Input)
+        inp.add_class("visible")
+        inp.value = self.app.gsearch
+        inp.focus()
+
+    @on(Input.Submitted, "#dsearch")
+    def _submitted(self, ev: Input.Submitted) -> None:
+        self.app.gsearch = ev.value.strip()
+        ev.input.remove_class("visible")
+        self.rebuild()
+        self.query_one("#gates", DataTable).focus()
+
+    def action_close(self) -> None:
+        inp = self.query_one("#dsearch", Input)
+        if inp.has_class("visible") or self.app.gsearch:
+            inp.remove_class("visible")
+            if self.app.gsearch:
+                self.app.gsearch = ""
+                self.rebuild()
+            return
+        self.app.pop_screen()
+
+
+class CommandsScreen(DetailScreen):
+    TITLE_TEXT = "Commands — the agent's whitelist; each asks for confirmation  (Esc: back)"
+    DEFAULT_CSS = """
+    CommandsScreen #cmd_buttons { height: auto; padding: 0 1; }
+    CommandsScreen #cmd_buttons Horizontal { height: 3; }
+    CommandsScreen #cmd_buttons Button { min-width: 30; }
+    CommandsScreen #cmd_buttons Label { padding: 1 2; color: $text-muted; }
+    """
+
+    def compose_body(self) -> ComposeResult:
+        yield Vertical(id="cmd_buttons")
+        yield Static("replies", classes="cap")
+        yield DataTable(id="replies", cursor_type="none")
+
+    def rebuild(self) -> None:
+        box = self.query_one("#cmd_buttons", Vertical)
+        box.remove_children()
+        if not self.app.commands:
+            box.mount(Label("the agent has registered no commands (yet)"))
+        for c in self.app.commands:
+            box.mount(Horizontal(Button(c["name"], id=f"cmd-{c['name']}", variant="primary"),
+                                 Label(c.get("description", ""))))
+        t = self.query_one("#replies", DataTable)
+        t.clear(columns=True)
+        t.add_columns("time", "command", "ok", "message")
+        for row in self.app.replies:
+            t.add_row(*row)
+
+    def feed_event(self, ev: dict) -> None:
+        if ev.get("kind") == "commands":
+            self.rebuild()
+        elif ev.get("_reply_row"):
+            self.query_one("#replies", DataTable).add_row(*ev["_reply_row"])
+
+    @on(Button.Pressed, "#cmd_buttons Button")
+    def _cmd_pressed(self, ev: Button.Pressed) -> None:
+        self.app.ask_command((ev.button.id or "")[4:])
+
+
+# ── the app: the dashboard is its default screen ─────────────────────────────────────────────────────
 class RoomTUI(App):
     TITLE = "room_concept"
     CSS = """
-    #status { height: 1; background: $boost; padding: 0 1; }
-    #rawbar { height: 1; padding: 0 1; color: $text-muted; }
-    .cap { height: 1; color: $text-muted; padding: 0 1; }
-    #filter, #gfilter { display: none; }
-    #cmd_buttons { height: auto; padding: 0 1; }
-    #cmd_buttons Horizontal { height: 3; }
-    #cmd_buttons Button { min-width: 34; }
-    #cmd_buttons Label { padding: 1 2; color: $text-muted; }
-    #filter.visible, #gfilter.visible { display: block; }
-    DataTable { height: 1fr; }
-    RichLog { height: 1fr; }
+    #topbar { height: auto; max-height: 2; background: $boost; padding: 0 1; }
+    #grid { grid-size: 3; grid-columns: 1fr 1fr 1fr; grid-gutter: 0 1; height: 1fr; padding: 0 1; }
+    #grid.cols2 { grid-size: 2; grid-columns: 1fr 1fr; grid-rows: auto; }
+    #grid.cols1 { grid-size: 1; grid-columns: 1fr; grid-rows: auto; }
+    .col { height: 100%; }
+    #grid.cols2 .col, #grid.cols1 .col { height: auto; }
+    .panel { border: round $panel-lighten-2; border-title-color: $text-muted; padding: 0 1; height: auto; }
+    .spark { height: 1; }
+    .sparklabel { height: 1; color: $text-muted; }
+    #bottom { height: 9; padding: 0 1; }
+    #warnlog { height: 1fr; border: round $panel-lighten-2; border-title-color: $text-muted; }
+    #lastev { height: 1; color: $text-muted; }
     """
     BINDINGS = [
         Binding("q", "quit_dialog", "Quit"),
-        Binding("slash", "search", "Search"),
-        Binding("t", "toggle_source", "Raw: stdout/events"),
-        Binding("c", "commands", "Commands"),
-        Binding("f", "toggle_follow", "Follow"),
-        Binding("escape", "clear_search", "Clear search", show=False),
+        Binding("f1,s", "detail('startup')", "Startup", key_display="F1"),
+        Binding("f2,w", "detail('warnings')", "Warnings", key_display="F2"),
+        Binding("f3,l", "detail('raw')", "Raw log", key_display="F3"),
+        Binding("f4,g", "detail('gates')", "Config", key_display="F4"),
+        Binding("f5,c", "detail('commands')", "Commands", key_display="F5"),
     ]
 
     def __init__(self, args):
@@ -204,111 +500,295 @@ class RoomTUI(App):
         self.log_path: str | None = args.log
         self.hello: dict = {}
         self.connected = False
-        self.sock_path: str | None = None
-        self.sm_state = "?"
         self.writer: asyncio.StreamWriter | None = None
+        self.sm_state = "?"
+        self.state: dict = {}
+        self.config_ev: dict = {}
+        self.commands: list[dict] = []
+        self.next_cmd_id = 1
+        # history the detail screens render from
+        self.startup_rows: list[tuple] = []
+        self.warnings: collections.deque[tuple] = collections.deque(maxlen=MAX_WARN)
+        self.replies: list[tuple] = []
+        self.peers: dict[str, tuple[str, int]] = {}        # name -> (last event, t_ms)
+        self.sth_hist: collections.deque[float] = collections.deque(maxlen=240)
+        self.kl_hist: collections.deque[float] = collections.deque(maxlen=240)
         # raw log
-        # The events log is the COMPLETE, timestamped record (every line, routed to the terminal or
-        # not); the stdout file holds only what the routing table kept on the terminal.
-        self.raw_source = "events"
+        self.raw_source = "events"   # the events log is the complete, timestamped record
         self.stdout_lines: collections.deque[str] = collections.deque(maxlen=MAX_LOG_LINES)
         self.event_lines: collections.deque[Text] = collections.deque(maxlen=MAX_LOG_LINES)
         self.max_file_seq = 0
         self.last_seq = 0
         self.search = ""
+        self.gsearch = ""
         self.follow = True
         self.n_warn = 0
+        self.tail_task_for: str | None = None
 
     # ── layout ──
     def compose(self) -> ComposeResult:
-        yield Static("", id="status")
-        with TabbedContent(id="tabs"):
-            with TabPane("Startup", id="tab-startup"):
-                yield DataTable(id="startup", zebra_stripes=True, cursor_type="row")
-            with TabPane("Config gates", id="tab-gates"):
-                yield Static("", id="gates_head", classes="cap")
-                yield Input(placeholder="search keys/descriptions (Esc clears)", id="gfilter")
-                yield DataTable(id="gates", zebra_stripes=True, cursor_type="row")
-            with TabPane("Peers/Streams", id="tab-streams"):
-                yield Static("streams (rate from each ingestor's counter, age = ms since its last frame)", classes="cap")
-                yield DataTable(id="streams", cursor_type="none")
-                yield Static("peers", classes="cap")
-                yield DataTable(id="peers", cursor_type="none")
-            with TabPane("Localisation", id="tab-loc"):
-                yield DataTable(id="loc", cursor_type="none")
-            with TabPane("Room", id="tab-room"):
-                yield DataTable(id="room", cursor_type="none")
-            with TabPane("Motion calibration", id="tab-calib"):
-                yield Static("", id="calib_head", classes="cap")
-                yield DataTable(id="calib", cursor_type="none")
-            with TabPane("Camera mounts", id="tab-cams"):
-                yield Static("TOTAL mount correction in force (applied - p), as the Calib window shows it", classes="cap")
-                yield DataTable(id="cams", cursor_type="none")
-            with TabPane("Commands", id="tab-cmds"):
-                yield Static("Commands the agent registered (its whitelist). Each asks for confirmation.", classes="cap")
-                yield Vertical(id="cmd_buttons")
-                yield Static("replies", classes="cap")
-                yield DataTable(id="replies", cursor_type="none")
-            with TabPane("Warnings", id="tab-warn"):
-                yield DataTable(id="warn", zebra_stripes=True, cursor_type="row")
-            with TabPane("Raw log", id="tab-raw"):
-                yield Static("", id="rawbar")
-                yield Input(placeholder="search (case-insensitive substring; Esc clears)", id="filter")
-                yield RichLog(id="raw", max_lines=MAX_LOG_LINES, wrap=False, highlight=False, markup=False)
+        yield Static("", id="topbar")
+        with Grid(id="grid"):
+            with VerticalScroll(classes="col", id="col-left"):
+                yield Static("", id="p-peers", classes="panel")
+                yield Static("", id="p-streams", classes="panel")
+                yield Static("", id="p-gates", classes="panel")
+            with VerticalScroll(classes="col", id="col-centre"):
+                with Vertical(id="p-loc", classes="panel"):
+                    yield Static("", id="loc-body")
+                    yield Static("σθ (deg)", classes="sparklabel", id="sth-label")
+                    yield Sparkline([], id="sth-spark", classes="spark")
+                    yield Static("surprise KL (nats)", classes="sparklabel", id="kl-label")
+                    yield Sparkline([], id="kl-spark", classes="spark")
+                yield Static("", id="p-room", classes="panel")
+            with VerticalScroll(classes="col", id="col-right"):
+                yield Static("", id="p-calib", classes="panel")
+                yield Static("", id="p-cams", classes="panel")
+        with Vertical(id="bottom"):
+            yield RichLog(id="warnlog", max_lines=500, wrap=False, markup=False, highlight=False)
+            yield Static("", id="lastev")
         yield Footer()
 
     def on_mount(self) -> None:
-        t = self.query_one("#startup", DataTable)
-        t.add_columns("time", "kind", "what", "ms", "detail")
-        w = self.query_one("#warn", DataTable)
-        w.add_columns("time", "level", "tag", "message")
-        self.query_one("#streams", DataTable).add_columns("stream", "Hz", "age ms", "")
-        self.query_one("#peers", DataTable).add_columns("time", "event", "peer", "id")
-        self.query_one("#loc", DataTable).add_columns("quantity", "value", "note")
-        self.query_one("#room", DataTable).add_columns("quantity", "value")
-        self.query_one("#calib", DataTable).add_columns("param", "meaning", "value", "± 1σ", "unit", "informed", "APPLIED")
-        self.query_one("#cams", DataTable).add_columns(
-            "camera", "pitch deg", "height mm", "yaw deg", "dt x", "informed", "cond", "pairs", "age s")
-        self.query_one("#replies", DataTable).add_columns("time", "command", "ok", "message")
-        self.query_one("#gates", DataTable).add_columns("key", "origin", "kind", "type", "effective", "default",
-                                                        "description")
-        self.config_ev: dict = {}
-        self.gsearch = ""
-        self.commands: list[dict] = []
-        self.next_cmd_id = 1
-        self.peer_rows: list[tuple] = []
-        self.missing: list[str] = []
-        self.update_status()
-        self.update_rawbar()
+        titles = {"p-peers": "peers / presence", "p-streams": "streams",
+                  "p-gates": "config: non-default + A/B  (F4)", "p-loc": "localisation", "p-room": "room",
+                  "p-calib": "motion calibration", "p-cams": "camera mounts (total correction in force)"}
+        for wid, title in titles.items():
+            self.query_one(f"#{wid}").border_title = title
+        self.query_one("#warnlog").border_title = "warnings  (F2: history)"
+        self.relayout(self.size.width, self.size.height)
+        for fn in (self.render_peers, self.render_streams, self.render_gates, self.render_loc, self.render_room,
+                   self.render_calib, self.render_cams, self.update_topbar):
+            fn()
         self.run_worker(self.socket_loop(), exclusive=False, group="sock")
         if self.log_path:
-            self.run_worker(self.tail_stdout(), exclusive=False, group="tail")
-        self.set_interval(1.0, self.update_status)
+            self.start_tail()
+        self.set_interval(1.0, self.update_topbar)
 
-    # ── status line ──
-    def update_status(self) -> None:
-        if not self.is_running or not self.screen_stack:
-            return
+    # ── responsive: 3 columns, then 2, then 1 (scrollable) ──
+    def on_resize(self, ev) -> None:
+        self.relayout(ev.size.width, ev.size.height)
+
+    def relayout(self, width: int, height: int) -> None:
         try:
-            self.query_one("#status", Static)
+            g = self.query_one("#grid", Grid)
         except Exception:
-            return   # tearing down
-        alive = pid_alive(self.pid)
-        conn = "[green]connected[/]" if self.connected else "[yellow]reconnecting…[/]"
-        proc = (f"pid {self.pid} " + ("[green]alive[/]" if alive else "[red]not running[/]")) if self.pid else "pid ?"
-        agent = f"{self.hello.get('agent', self.agent)} id {self.hello.get('id', '?')}"
-        warn = f"  ·  [yellow]{self.n_warn} warning(s)[/]" if self.n_warn else ""
-        miss = f"  ·  [red]missing {' '.join(self.missing)}[/]" if getattr(self, "missing", None) else ""
-        comp = f"  ·  {self.compute_line}" if getattr(self, "compute_line", "") else ""
-        self.query_one("#status", Static).update(
-            f"[b]{agent}[/]  ·  {proc}  ·  socket {conn}  ·  SM [b]{self.sm_state}[/]{miss}{warn}{comp}")
+            return
+        n = 3 if width >= 150 else (2 if width >= 100 else 1)
+        for k in (1, 2, 3):
+            g.set_class(k == n, f"cols{k}")
+        # Fewer columns ⇒ the panels stack at their natural height and the grid itself scrolls.
+        g.styles.overflow_y = "hidden" if n == 3 else "auto"
+        self.query_one("#bottom").styles.height = 13 if height >= 55 else (9 if height >= 40 else 6)
 
-    def update_rawbar(self) -> None:
-        src = (f"stdout file {os.path.basename(self.log_path or '')}" if self.raw_source == "stdout"
-               else f"events log {os.path.basename(self.hello.get('events') or '') or '(socket replay)'}"
-                    "  (⟂ = not printed on the terminal)")
-        flt = f"  ·  filter: '{self.search}'" if self.search else ""
-        self.query_one("#rawbar", Static).update(f"source: {src}  (t toggles){flt}  ·  follow {'on' if self.follow else 'off'}")
+    # ── the dashboard panels ──
+    def panel(self, wid: str, renderable) -> None:
+        try:
+            self.query_one(f"#{wid}", Static).update(renderable)
+        except Exception:
+            pass   # tearing down, or a detail screen is on top of a not-yet-mounted dashboard
+
+    def update_topbar(self) -> None:
+        h = self.hello
+        alive = pid_alive(self.pid)
+        pid = (f"pid {self.pid} " + (f"[{OK}]alive[/]" if alive else f"[{RED}]not running[/]")) if self.pid else "pid ?"
+        up = dur(time.time() - h["start_ms"] / 1000.0) if h.get("start_ms") and alive else "—"
+        sm_col = {"Operating": OK, "Waiting": AMBER, "Degraded": RED, "stopping": AMBER,
+                  "exited": RED}.get(self.sm_state, "default")
+        st = self.state
+        room, loc, comp = st.get("room", {}), st.get("loc", {}), st.get("compute", {})
+        cfg = "—"
+        argv = h.get("argv", [])
+        if len(argv) > 1:
+            path = argv[1] if os.path.isabs(argv[1]) else os.path.join(h.get("cwd", ""), argv[1])
+            try:
+                mt = _dt.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%m-%d %H:%M")
+                cfg = f"{os.path.basename(path)} ({mt})"
+            except OSError:
+                cfg = os.path.basename(path)
+        conn = "" if self.connected else f" · [{AMBER}]socket reconnecting…[/]"
+        miss = st.get("presence", {}).get("missing", [])
+        pres = f"[{RED}]missing {' '.join(miss)}[/]" if miss else (f"[{OK}]peers ok[/]" if st else "peers ?")
+        warn = f" · [{AMBER}]⚠ {self.n_warn}[/]" if self.n_warn else ""
+        self.panel("topbar", f"[b]{h.get('agent', self.agent)}[/] id {h.get('id', '?')} · {pid} · up {up} · "
+                             f"[{sm_col}]{self.sm_state}[/] · {pres} · map {room.get('map_mode', '—')} · "
+                             f"cfg {cfg} · {loc.get('mode', '—')} · compute {fmt(comp.get('hz'), 1)} Hz{warn}{conn}")
+
+    def render_peers(self) -> None:
+        t = compact_table()
+        t.show_header = False
+        t.add_column("peer", ratio=1, no_wrap=True, overflow="ellipsis")
+        t.add_column("state", no_wrap=True)
+        t.add_column("at", style=DIM, no_wrap=True)
+        miss = self.state.get("presence", {}).get("missing", [])
+        for m in miss:
+            t.add_row(m, Text("MISSING (required)", style=RED), "")
+        for name, (evname, t_ms) in sorted(self.peers.items()):
+            if name in miss:
+                continue
+            style = RED if "lost" in evname else (OK if "ready" in evname else AMBER)
+            t.add_row(name, Text(evname, style=style), hms(t_ms)[:8])
+        footer = (Text("required peers: all present", style=OK) if self.state and not miss
+                  else Text("no state yet", style=DIM) if not self.state else Text(""))
+        self.panel("p-peers", Group(t, footer) if t.row_count else footer)
+
+    def render_streams(self) -> None:
+        t = compact_table()
+        t.add_column("stream", no_wrap=True, ratio=1)
+        t.add_column("Hz", justify="right", no_wrap=True)
+        t.add_column("age", justify="right", no_wrap=True)
+        t.add_column("", no_wrap=True)
+        for name, s in self.state.get("streams", {}).items():
+            hz, age = s.get("hz", -1), s.get("age_ms", -1)
+            if age is None or age < 0:
+                flag = Text("—" if name == "imu" else "no frame", style=DIM if name == "imu" else AMBER)
+            elif age > 1000:
+                flag = Text("STALE", style=RED)
+            elif age > 250:
+                flag = Text("slow", style=AMBER)
+            else:
+                flag = Text("ok", style=OK)
+            t.add_row(name, fmt(hz, 1) if hz is not None and hz >= 0 else "—",
+                      "—" if age is None or age < 0 else f"{age} ms", flag)
+        comp = self.state.get("compute", {})
+        if comp:
+            t.add_row("compute()", fmt(comp.get("hz"), 1),
+                      f"{fmt(comp.get('us', 0) / 1000.0, 1)}/{fmt(comp.get('us_max', 0) / 1000.0, 0)}ms", "")
+        self.panel("p-streams", t if t.row_count else Text("no state yet", style=DIM))
+
+    def render_gates(self) -> None:
+        recs = self.config_ev.get("records", [])
+        if not recs:
+            self.panel("p-gates", Text("published at the end of startup", style=DIM))
+            return
+        bad = [r for r in recs if r.get("origin") in ("shadowed", "typeerr")]
+        rows = [r for r in recs if r not in bad and r.get("effective") != "(absent)" and (
+            r.get("effective") != r.get("default") or r.get("kind") == "experiment" or r.get("origin") == "overlay")]
+        # Experiment arms and overlays first: they are what makes THIS run different from the last.
+        rows.sort(key=lambda r: (r.get("kind") != "experiment", r.get("origin") != "overlay", r["key"]))
+        t = compact_table()
+        t.show_header = False
+        t.add_column("key", ratio=1, no_wrap=True, overflow="ellipsis")
+        t.add_column("value", no_wrap=True, max_width=16, overflow="ellipsis")
+        for r in bad:
+            t.add_row(Text(r["key"], style=RED), Text(r.get("origin", ""), style=RED))
+        limit = 12
+        for r in rows[:limit]:
+            o = r.get("origin", "")
+            style = "magenta" if r.get("kind") == "experiment" else ("cyan" if o == "overlay" else "")
+            t.add_row(Text(r["key"], style=style), Text(r.get("effective", ""), style="bold"))
+        if len(rows) > limit:
+            t.add_row(Text(f"+{len(rows) - limit} more  (F4)", style=DIM), "")
+        self.panel("p-gates", t)
+
+    def render_loc(self) -> None:
+        l = self.state.get("loc", {})
+        if not l.get("have"):
+            self.panel("loc-body", Text("no localisation result yet", style=DIM))
+            return
+        ok = Text("ok", style=OK) if l.get("ok") else Text("NOT OK", style=RED)
+        if l.get("diverged"):
+            ok = Text("DIVERGED", style=RED)
+        age = l.get("age_ms", -1)
+        t = compact_table()
+        t.show_header = False
+        t.add_column("k", style=DIM, no_wrap=True)
+        t.add_column("v", ratio=1, no_wrap=True, overflow="ellipsis")
+        t.add_row("pose", f"x {fmt(l.get('x'), 3)}  y {fmt(l.get('y'), 3)} m  θ {fmt(l.get('theta'), 1, DEG)}°")
+        t.add_row("σ", f"{fmt(l.get('sx'), 0, 1000)} / {fmt(l.get('sy'), 0, 1000)} mm   {fmt(l.get('sth'), 2, DEG)}°")
+        t.add_row("result", Text.assemble(ok, f"  {l.get('mode', '')} · {l.get('iters')} it · "
+                                              f"cond {fmt(l.get('cond'), 1)}"))
+        t.add_row("early-exit", f"{fmt(l.get('early_exit_metric'), 1, 1000)} mm · |SDF| "
+                                f"{fmt(l.get('sdf_med'), 1, 1000)} · innov {fmt(l.get('innov'), 1, 1000)} mm")
+        t.add_row("surprise", f"KL {fmt(l.get('kl'), 2)} · mismatch {fmt(l.get('mismatch'), 2)} nats"
+                              + ("" if l.get("scored") else " (unscored)"))
+        t.add_row("age", Text.assemble(Text(f"{age} ms", style=RED if age > 1000 else (AMBER if age > 250 else "")),
+                                       f" · reloc epoch {l.get('reloc_epoch')}"))
+        self.panel("loc-body", t)
+        try:
+            self.query_one("#sth-spark", Sparkline).data = list(self.sth_hist)
+            self.query_one("#kl-spark", Sparkline).data = list(self.kl_hist)
+            if self.sth_hist:
+                self.query_one("#sth-label", Static).update(
+                    f"σθ {fmt(self.sth_hist[-1], 3)}°  (max {fmt(max(self.sth_hist), 3)}, last {len(self.sth_hist) // 2} s)")
+            if self.kl_hist:
+                self.query_one("#kl-label", Static).update(
+                    f"surprise KL {fmt(self.kl_hist[-1], 2)}  (max {fmt(max(self.kl_hist), 2)})")
+        except Exception:
+            pass
+
+    def render_room(self) -> None:
+        r = self.state.get("room", {})
+        if not r:
+            self.panel("p-room", Text("no state yet", style=DIM))
+            return
+        t = compact_table()
+        t.show_header = False
+        t.add_column("k", style=DIM, no_wrap=True)
+        t.add_column("v", ratio=1, no_wrap=True, overflow="ellipsis")
+        stable = f"{r.get('stable_frames', 0)}/{r.get('needed', '?')}"
+        t.add_row("room node", Text("created", style=OK) if r.get("node_created")
+                  else Text(f"not yet · stable {stable}", style=AMBER))
+        t.add_row("map", Text.assemble(f"{r.get('map_mode', '?')} · ",
+                                       Text("ready", style=OK) if r.get("map_ready") else Text("not ready", style=AMBER),
+                                       Text("  RELOCALISING", style=AMBER) if r.get("grid_searching") else ""))
+        if r.get("map_mode") == "estimate" or r.get("walls"):
+            t.add_row("layout", f"{r.get('walls', 0)} walls · {r.get('verts', 0)} verts · "
+                                f"{'closed' if r.get('closed') else 'open'}")
+        hm, hs = r.get("height_measured"), r.get("height_stated")
+        t.add_row("height", (f"{fmt(hm, 2)} m measured" if hm and hm > 0 else "not measured yet")
+                  + (f" · {fmt(hs, 2)} stated" if hs else ""))
+        self.panel("p-room", t)
+
+    def render_calib(self) -> None:
+        c = self.state.get("calib", {})
+        names = c.get("names", [])
+        if not names:
+            self.panel("p-calib", Text("no state yet", style=DIM))
+            return
+        val, sig = c.get("value", []), c.get("sigma", [])
+        inf, app = c.get("informed", 0), c.get("applied", 0)
+        t = compact_table()
+        t.add_column("param", no_wrap=True, overflow="ellipsis", ratio=1)
+        t.add_column("value ± σ", justify="right", no_wrap=True)
+        t.add_column("inf", no_wrap=True)
+        t.add_column("", no_wrap=True)
+        for i, n in enumerate(names):
+            label, scale, unit = CALIB_DISPLAY.get(n, (n, 1.0, ""))
+            v = val[i] if i < len(val) else None
+            s = sig[i] if i < len(sig) else None
+            informed, applied = bool(inf >> i & 1), bool(app >> i & 1)
+            t.add_row(label, f"{fmt(v, 2, scale)} ± {fmt(s, 2, scale)} {unit}",
+                      Text("●", style=OK) if informed else Text("○", style=DIM),
+                      Text("APPLIED", style="bold green") if applied else Text("·", style=DIM))
+        t.caption = (f"● informed · APPLIED = correcting odometry · {c.get('episodes', 0)} episodes · "
+                     f"cond {fmt(c.get('cond'), 1)}")
+        t.caption_style = DIM
+        self.panel("p-calib", t)
+
+    def render_cams(self) -> None:
+        cams = self.state.get("camcal", [])
+        if not cams:
+            self.panel("p-cams", Text("no mount solve yet (first after ~5 s of paired corners)", style=DIM))
+            return
+        # Transposed — one COLUMN per camera — so two or three cameras fit a third of the screen.
+        t = compact_table()
+        t.add_column("", style=DIM, no_wrap=True)
+        for c in cams:
+            t.add_column(c.get("cam", "?"), justify="right", no_wrap=True, ratio=1)
+        for i, (name, scale, unit) in enumerate(CAM_DISPLAY[:3]):
+            nd = 1 if i == 1 else 2
+            cells = []
+            for c in cams:
+                v, sg = c.get("value", [None] * 4), c.get("sigma", [None] * 4)
+                informed = bool(c.get("informed", 0) >> i & 1)
+                cells.append(Text(f"{fmt(v[i], nd, scale)} ± {fmt(sg[i], nd, scale)}", style="" if informed else DIM))
+            t.add_row(f"{name} {unit}", *cells)
+        t.add_row("pairs", *[Text(str(c.get("pairs", 0)), style=AMBER if c.get("age_ms", 0) > 30000 else "")
+                             for c in cams])
+        t.caption = "dim = axis not informed by the data"
+        t.caption_style = DIM
+        self.panel("p-cams", t)
 
     # ── socket ──
     async def socket_loop(self) -> None:
@@ -322,8 +802,8 @@ class RoomTUI(App):
             except OSError:
                 await asyncio.sleep(1.0)
                 continue
-            self.sock_path, self.writer, self.connected = path, writer, True
-            self.update_status()
+            self.writer, self.connected = writer, True
+            self.update_topbar()
             try:
                 while True:
                     line = await reader.readline()
@@ -342,7 +822,7 @@ class RoomTUI(App):
                     writer.close()
                 except Exception:
                     pass
-                self.update_status()
+                self.update_topbar()
             await asyncio.sleep(1.0)
 
     def send(self, obj: dict) -> bool:
@@ -364,6 +844,16 @@ class RoomTUI(App):
         fn = getattr(self, f"on_ev_{kind}", None)
         if fn:
             fn(ev)
+        self.forward(ev)
+
+    def forward(self, ev: dict) -> None:
+        """Hand an event to the detail screen on top, if one is open."""
+        scr = self.screen
+        if isinstance(scr, DetailScreen):
+            try:
+                scr.feed_event(ev)
+            except Exception:
+                pass
 
     def on_ev_hello(self, ev: dict) -> None:
         new_run = (ev.get("pid"), ev.get("start_ms")) != (self.hello.get("pid"), self.hello.get("start_ms"))
@@ -374,269 +864,66 @@ class RoomTUI(App):
                 self.pid = ev["pid"]
             if not self.log_path and ev.get("stdout", "").startswith("/") and os.path.isfile(ev["stdout"]):
                 self.log_path = ev["stdout"]
-                self.run_worker(self.tail_stdout(), exclusive=False, group="tail")
+                self.start_tail()
             self.load_events_file()
             self.startup_row(ev, "hello", f"pid {ev.get('pid')}", "", f"cwd {ev.get('cwd', '')}")
-        self.update_status()
-        self.update_rawbar()
+        self.update_topbar()
 
     def reset_run(self) -> None:
-        self.query_one("#startup", DataTable).clear()
-        self.query_one("#warn", DataTable).clear()
-        self.query_one("#peers", DataTable).clear()
-        self.missing = []
-        self.compute_line = ""
-        self.config_ev = {}
-        self.query_one("#gates", DataTable).clear()
+        self.startup_rows.clear()
+        self.warnings.clear()
         self.event_lines.clear()
-        self.max_file_seq = 0
-        self.last_seq = 0
-        self.n_warn = 0
+        self.peers.clear()
+        self.sth_hist.clear()
+        self.kl_hist.clear()
+        self.state, self.config_ev = {}, {}
+        self.max_file_seq = self.last_seq = self.n_warn = 0
         self.sm_state = "?"
+        try:
+            self.query_one("#warnlog", RichLog).clear()
+        except Exception:
+            pass
 
     def startup_row(self, ev: dict, kind: str, what: str, ms, detail: str, style: str = "") -> None:
-        t = self.query_one("#startup", DataTable)
         cells = [hms(ev.get("t")), kind, what, "" if ms in (None, "") else str(ms), detail]
-        t.add_row(*[Text(str(c), style=style) for c in cells])
-        if self.follow:
-            t.move_cursor(row=t.row_count - 1)
+        row = tuple(Text(str(c), style=style) for c in cells)
+        self.startup_rows.append(row)
+        ev["_startup_row"] = row
+        self.panel("lastev", Text.assemble((hms(ev.get("t"))[:8] + "  ", DIM), (kind + "  ", style or "bold"),
+                                           (what + "  ", style), (detail, style or DIM)))
 
     def on_ev_phase(self, ev: dict) -> None:
         ms = ev.get("ms", 0)
-        style = "bold red" if ms > 1000 else ("yellow" if ms > 200 else "")
+        style = RED if ms > 1000 else (AMBER if ms > 200 else "")
         cum = "" if ev.get("sub") else f"cumulative {ev.get('cum_ms', '')} ms"
         self.startup_row(ev, "phase", ev.get("name", ""), ms, cum, style)
 
     def on_ev_loaded(self, ev: dict) -> None:
         detail = ev.get("detail", "")
-        style = "red" if "FAILED" in detail else ""
-        self.startup_row(ev, "loaded", ev.get("what", ""), "", f"{ev.get('path', '')}  {detail}".strip(), style)
+        self.startup_row(ev, "loaded", ev.get("what", ""), "", f"{ev.get('path', '')}  {detail}".strip(),
+                         RED if "FAILED" in detail else "")
 
     def on_ev_sm(self, ev: dict) -> None:
         self.sm_state = ev.get("state", "?")
-        style = {"Operating": "green", "Degraded": "bold red", "Waiting": "yellow"}.get(self.sm_state, "")
+        style = {"Operating": OK, "Degraded": RED, "Waiting": AMBER}.get(self.sm_state, "")
         self.startup_row(ev, "sm", self.sm_state, "", ev.get("detail", ""), style)
-        self.update_status()
+        self.update_topbar()
 
     def on_ev_wait(self, ev: dict) -> None:
         peers = "peers OK" if ev.get("peers_ok") else "peers MISSING: " + " ".join(ev.get("missing", []))
-        lidar = ("lidar OK (" if ev.get("lidar_ok") else "lidar: ") + ev.get("why", "") + (")" if ev.get("lidar_ok") else "")
-        self.startup_row(ev, "wait", "Waiting", "", f"{peers} | {lidar}", "yellow")
+        lidar = (("lidar OK (" + ev.get("why", "") + ")") if ev.get("lidar_ok") else ("lidar: " + ev.get("why", "")))
+        self.startup_row(ev, "wait", "Waiting", "", f"{peers} | {lidar}", AMBER)
 
     def on_ev_peer(self, ev: dict) -> None:
+        name = ev.get("name", "") or f"id {ev.get('id', '?')}"
+        self.peers[name] = (ev.get("event", ""), ev.get("t", 0))
         self.startup_row(ev, "peer", ev.get("event", ""), "", f"{ev.get('name', '')} id {ev.get('id', '')}")
-        style = "red" if "lost" in ev.get("event", "") else ("green" if "ready" in ev.get("event", "") else "")
-        self.query_one("#peers", DataTable).add_row(
-            Text(hms(ev.get("t"))), Text(ev.get("event", ""), style=style), Text(ev.get("name", "")),
-            Text(str(ev.get("id", ""))))
-
-    # ── config gates (common/config_report, published once at the end of startup) ──
-    ORIGIN_STYLE = {"default": "dim", "file": "", "overlay": "cyan", "manifest": "blue", "runtime": "magenta",
-                    "shadowed": "bold red", "typeerr": "bold red", "unread": "yellow"}
-
-    def on_ev_config(self, ev: dict) -> None:
-        self.config_ev = ev
-        self.fill_gates()
-
-    def gate_shown(self, r: dict) -> bool:
-        if r.get("effective") == "(absent)":
-            return False                      # an overlay key this file does not set
-        o = r.get("origin", "")
-        return (o in ("overlay", "manifest", "runtime", "shadowed", "typeerr", "unread")
-                or r.get("effective") != r.get("default")
-                or r.get("kind") == "experiment"
-                or r.get("type") in ("bool", "str"))
-
-    def fill_gates(self) -> None:
-        ev = self.config_ev
-        recs = ev.get("records", [])
-        t = self.query_one("#gates", DataTable)
-        t.clear()
-        q = self.gsearch.lower()
-        shown = 0
-        bad = 0
-        for r in recs:
-            if r.get("origin") in ("shadowed", "typeerr"):
-                bad += 1
-            if not self.gate_shown(r):
-                continue
-            if q and q not in (r.get("key", "") + " " + r.get("description", "")).lower():
-                continue
-            shown += 1
-            o = r.get("origin", "")
-            ost = self.ORIGIN_STYLE.get(o, "")
-            changed = r.get("effective") != r.get("default")
-            kind = r.get("kind", "")
-            org = o + (f" ({r['overlay']})" if r.get("overlay") else "")
-            t.add_row(Text(r.get("key", ""), style="bold red" if o in ("shadowed", "typeerr") else ""),
-                      Text(org, style=ost),
-                      Text("A/B" if kind == "experiment" else kind, style="magenta bold" if kind == "experiment" else "dim"),
-                      Text(r.get("type", ""), style="dim"),
-                      Text(r.get("effective", ""), style="bold" if changed else ""),
-                      Text(r.get("default", "") if changed else "", style="dim"),
-                      Text(r.get("description", ""), style="dim"))
-        head = (f"{shown} of {len(recs)} keys shown (non-default, A/B arms, every bool/string)  ·  "
-                f"fingerprint {ev.get('fingerprint', '?')}  ·  {ev.get('undocumented', 0)} undocumented  ·  "
-                f"unread {ev.get('unread', '?') if ev.get('sweep_armed') else 'INCONCLUSIVE'}")
-        if bad:
-            head += f"  ·  [b red]{bad} key(s) present but NOT in force (shadowed / type error)[/]"
-        if self.gsearch:
-            head += f"  ·  filter '{self.gsearch}'"
-        self.query_one("#gates_head", Static).update(head)
-
-    @on(Input.Submitted, "#gfilter")
-    def _gsearch_submitted(self, ev: Input.Submitted) -> None:
-        self.gsearch = ev.value.strip()
-        self.fill_gates()
-        self.query_one("#gates", DataTable).focus()
-
-    # ── commands ──
-    def on_ev_commands(self, ev: dict) -> None:
-        self.commands = ev.get("list", [])
-        box = self.query_one("#cmd_buttons", Vertical)
-        box.remove_children()
-        for c in self.commands:
-            row = Horizontal(Button(c["name"], id=f"cmd-{c['name']}", variant="primary"),
-                             Label(c.get("description", "")))
-            box.mount(row)
-
-    @on(Button.Pressed, "#cmd_buttons Button")
-    def _cmd_pressed(self, ev: Button.Pressed) -> None:
-        name = (ev.button.id or "")[4:]
-        c = next((c for c in self.commands if c["name"] == name), None)
-        if not c:
-            return
-
-        def go(yes: bool | None) -> None:
-            if not yes:
-                return
-            cid = self.next_cmd_id
-            self.next_cmd_id += 1
-            if not self.send({"cmd": name, "id": cid, "args": {}}):
-                self.notify("not connected — command not sent", severity="error")
-
-        self.push_screen(ConfirmScreen(name, c.get("description", ""), c.get("confirm", "")), go)
-
-    def on_ev_reply(self, ev: dict) -> None:
-        ok = ev.get("ok")
-        msg = ev.get("msg", "") + (f"  →  {ev['path']}" if ev.get("path") else "")
-        self.query_one("#replies", DataTable).add_row(
-            Text(hms(ev.get("t"))), Text(ev.get("cmd", "")), Text("ok" if ok else "FAILED", style="green" if ok else "bold red"),
-            Text(msg))
-        self.notify(f"{ev.get('cmd')}: {msg}", severity="information" if ok else "error")
-
-    # ── the 2 Hz snapshot ──
-    def on_ev_state(self, ev: dict) -> None:
-        self.state = ev
-        self.fill_streams(ev)
-        self.fill_loc(ev.get("loc", {}))
-        self.fill_room(ev.get("room", {}))
-        self.fill_calib(ev.get("calib", {}))
-        self.fill_cams(ev.get("camcal", []))
-        pres = ev.get("presence", {})
-        self.missing = pres.get("missing", [])
-        comp = ev.get("compute", {})
-        self.compute_line = f"compute {fmt(comp.get('hz'), 1)} Hz, mean {fmt(comp.get('us', 0) / 1000.0, 2)} ms, " \
-                            f"max {fmt(comp.get('us_max', 0) / 1000.0, 1)} ms"
-        self.update_status()
-
-    def fill_streams(self, ev: dict) -> None:
-        rows = []
-        for name, s in ev.get("streams", {}).items():
-            hz, age = s.get("hz", -1), s.get("age_ms", -1)
-            stale = age is not None and age > 1000
-            never = age is not None and age < 0 and name != "imu"
-            flag = Text("STALE", style="bold red") if stale else (Text("no frame yet", style="yellow") if never else Text("ok", style="green"))
-            rows.append((Text(name), Text(fmt(hz, 1) if hz is not None and hz >= 0 else "—"),
-                         Text("—" if age is None or age < 0 else str(age), style="red" if stale else ""), flag))
-        comp = ev.get("compute", {})
-        rows.append((Text("compute()"), Text(fmt(comp.get("hz"), 1)),
-                     Text(f"{fmt(comp.get('us', 0) / 1000.0, 2)} ms mean / {fmt(comp.get('us_max', 0) / 1000.0, 1)} max"),
-                     Text("")))
-        miss = ev.get("presence", {}).get("missing", [])
-        rows.append((Text("required peers"), Text(""), Text("missing: " + " ".join(miss) if miss else "all present",
-                                                            style="red" if miss else "green"), Text("")))
-        kv_fill(self.query_one("#streams", DataTable), rows)
-
-    def fill_loc(self, l: dict) -> None:
-        if not l.get("have"):
-            kv_fill(self.query_one("#loc", DataTable), [("—", "no localisation result yet", "")])
-            return
-        ok = Text("ok", style="green") if l.get("ok") else Text("NOT OK", style="bold red")
-        if l.get("diverged"):
-            ok = Text("DIVERGED (dead-reckoned fallback)", style="bold red")
-        age = l.get("age_ms", -1)
-        rows = [
-            ("result", ok, f"reloc epoch {l.get('reloc_epoch')}"),
-            ("x", f"{fmt(l.get('x'), 3)} m", f"σ {fmt(l.get('sx'), 1, 1000)} mm"),
-            ("y", f"{fmt(l.get('y'), 3)} m", f"σ {fmt(l.get('sy'), 1, 1000)} mm"),
-            ("θ", f"{fmt(l.get('theta'), 2, DEG)} deg", f"σ {fmt(l.get('sth'), 3, DEG)} deg"),
-            ("mode", Text(l.get("mode", ""), style="cyan" if l.get("mode") == "predict" else ""),
-             f"{l.get('iters')} iteration(s)" + (", SDF polished" if l.get("polished") else "")),
-            ("condition number", fmt(l.get("cond"), 2), ""),
-            ("early-exit metric", f"{fmt(l.get('early_exit_metric'), 1, 1000)} mm", "mean |SDF| at the predicted pose"),
-            ("median |SDF|", f"{fmt(l.get('sdf_med'), 1, 1000)} mm", f"at prediction {fmt(l.get('pred_sdf_med'), 1, 1000)} mm"),
-            ("innovation", f"{fmt(l.get('innov'), 1, 1000)} mm", "‖optimised − predicted‖"),
-            ("surprise KL", f"{fmt(l.get('kl'), 3)} nats", f"mismatch {fmt(l.get('mismatch'), 3)} nats"
-             + ("" if l.get("scored") else " (not scored this cycle)")),
-            ("result age", Text(f"{age} ms", style="red" if age > 1000 else ""), "now − scan timestamp"),
-        ]
-        kv_fill(self.query_one("#loc", DataTable), rows)
-
-    def fill_room(self, r: dict) -> None:
-        stable = f"{r.get('stable_frames', 0)}/{r.get('needed', '?')}"
-        rows = [
-            ("map mode", r.get("map_mode", "?")),
-            ("room node in graph", Text("yes", style="green") if r.get("node_created") else Text("not yet", style="yellow")),
-            ("stable frames", stable),
-            ("map ready", Text(str(r.get("map_ready")), style="" if r.get("map_ready") else "yellow")),
-            ("relocalising (grid search)", Text("YES", style="bold yellow") if r.get("grid_searching") else "no"),
-            ("walls (estimate mode)", r.get("walls", 0)),
-            ("polygon vertices", r.get("verts", 0)),
-            ("polygon closed", r.get("closed")),
-        ]
-        kv_fill(self.query_one("#room", DataTable), rows)
-
-    def fill_calib(self, c: dict) -> None:
-        names, val, sig = c.get("names", []), c.get("value", []), c.get("sigma", [])
-        inf, app = c.get("informed", 0), c.get("applied", 0)
-        rows = []
-        for i, n in enumerate(names):
-            label, scale, unit = CALIB_DISPLAY.get(n, (n, 1.0, ""))
-            v = val[i] if i < len(val) else None
-            s_ = sig[i] if i < len(sig) else None
-            informed = bool(inf >> i & 1)
-            applied = bool(app >> i & 1)
-            rows.append((Text(n), Text(label), Text(fmt(v, 3, scale)), Text(fmt(s_, 3, scale)), Text(unit),
-                         Text("● informed", style="green") if informed else Text("○ not taught", style="dim"),
-                         Text("■ APPLIED", style="bold green") if applied else Text("·", style="dim")))
-        kv_fill(self.query_one("#calib", DataTable), rows)
-        self.query_one("#calib_head", Static).update(
-            f"episodes {c.get('episodes', 0)}  ·  carried {c.get('carried', 0)}  ·  dropped {c.get('dropped', 0)}"
-            f"  ·  condition {fmt(c.get('cond'), 2)}  ·  APPLIED = informed AND allowed: correcting the odometry now")
-
-    def fill_cams(self, cams: list) -> None:
-        rows = []
-        for c in cams:
-            v, s_ = c.get("value", [None] * 4), c.get("sigma", [None] * 4)
-            cells = [Text(c.get("cam", "?"))]
-            for i, (_, scale, _) in enumerate(CAM_DISPLAY):
-                cells.append(Text(f"{fmt(v[i], 2, scale)} ± {fmt(s_[i], 2, scale)}"))
-            inf = c.get("informed", 0)
-            cells.append(Text("".join(ch if inf >> i & 1 else "·" for i, ch in enumerate("PHYD"))))
-            cells.append(Text(fmt(c.get("cond"), 1)))
-            cells.append(Text(str(c.get("pairs", 0))))
-            cells.append(Text(fmt(c.get("age_ms", 0) / 1000.0, 0)))
-            rows.append(tuple(cells))
-        if not rows:
-            rows = [(Text("—"), Text("no mount solve yet (the first arrives after ~5 s of paired corners)"),
-                     *[Text("")] * 7)]
-        kv_fill(self.query_one("#cams", DataTable), rows)
+        self.render_peers()
 
     def on_ev_stall(self, ev: dict) -> None:
         age = ev.get("age_ms", -1)
         self.startup_row(ev, "stall", ev.get("stream", ""), "",
-                         "no sweep ever arrived" if age < 0 else f"last sweep {age} ms ago", "bold red")
+                         "no sweep ever arrived" if age < 0 else f"last sweep {age} ms ago", RED)
         self.add_warning(ev, "critical", ev.get("stream", ""), f"stream STALLED ({age} ms)")
 
     def on_ev_fatal(self, ev: dict) -> None:
@@ -647,29 +934,58 @@ class RoomTUI(App):
         self.startup_row(ev, "lifecycle", ev.get("state", ""), "", ev.get("reason", ""), "cyan")
         if ev.get("state") in ("stopping", "exited"):
             self.sm_state = ev["state"]
-            self.update_status()
+            self.update_topbar()
+
+    def on_ev_state(self, ev: dict) -> None:
+        self.state = ev
+        loc = ev.get("loc", {})
+        if loc.get("have"):
+            self.sth_hist.append((loc.get("sth") or 0.0) * DEG)
+            self.kl_hist.append(loc.get("kl") or 0.0)
+        for fn in (self.render_peers, self.render_streams, self.render_loc, self.render_room,
+                   self.render_calib, self.render_cams, self.update_topbar):
+            fn()
+
+    def on_ev_config(self, ev: dict) -> None:
+        self.config_ev = ev
+        self.render_gates()
+
+    def on_ev_commands(self, ev: dict) -> None:
+        self.commands = ev.get("list", [])
+
+    def on_ev_reply(self, ev: dict) -> None:
+        ok = ev.get("ok")
+        msg = ev.get("msg", "") + (f"  →  {ev['path']}" if ev.get("path") else "")
+        row = (Text(hms(ev.get("t"))), Text(ev.get("cmd", "")), Text("ok" if ok else "FAILED", style=OK if ok else RED),
+               Text(msg))
+        self.replies.append(row)
+        ev["_reply_row"] = row
+        self.notify(f"{ev.get('cmd')}: {msg}", severity="information" if ok else "error")
 
     def on_ev_log(self, ev: dict, from_file: bool = False) -> None:
         if not from_file and ev.get("seq", 0) and ev["seq"] <= self.max_file_seq:
             return   # already read from the events file
         lvl = ev.get("level", "info")
-        line = Text(f"{hms(ev.get('t'))} ", style="dim")
+        line = Text(f"{hms(ev.get('t'))} ", style=DIM)
         line.append(ev.get("msg", ""), style=LEVEL_STYLE.get(lvl, ""))
         if not ev.get("term", True):
-            line.append("  ⟂", style="dim")   # not on the terminal: stream/file only
+            line.append("  ⟂", style=DIM)   # not on the terminal: stream/file only
         self.event_lines.append(line)
-        if self.raw_source == "events":
-            self.write_raw(line)
+        ev["_raw_line"], ev["_raw_source"] = line, "events"
         if lvl in ("warning", "critical", "fatal"):
             self.add_warning(ev, lvl, ev.get("tag", ""), ev.get("msg", ""))
 
     def add_warning(self, ev: dict, lvl: str, tag: str, msg: str) -> None:
         self.n_warn += 1
-        w = self.query_one("#warn", DataTable)
         style = LEVEL_STYLE.get(lvl, "")
-        w.add_row(Text(hms(ev.get("t"))), Text(lvl, style=style), Text(tag), Text(msg, style=style))
-        if self.follow:
-            w.move_cursor(row=w.row_count - 1)
+        row = (Text(hms(ev.get("t"))), Text(lvl, style=style), Text(tag), Text(msg, style=style))
+        self.warnings.append(row)
+        ev["_warn_row"] = row
+        try:
+            self.query_one("#warnlog", RichLog).write(
+                Text.assemble((hms(ev.get("t"))[:8] + "  ", DIM), (msg, style)), scroll_end=True)
+        except Exception:
+            pass
 
     # ── the events file: the WHOLE history, not just the replay ring ──
     def load_events_file(self) -> None:
@@ -688,14 +1004,15 @@ class RoomTUI(App):
                         self.max_file_seq = max(self.max_file_seq, ev.get("seq", 0))
         except OSError:
             pass
-        if self.raw_source == "events":
-            self.redraw_raw()
 
-    # ── raw log ──
-    async def tail_stdout(self) -> None:
-        path = self.log_path
+    # ── the stdout file ──
+    def start_tail(self) -> None:
+        if self.tail_task_for != self.log_path:
+            self.tail_task_for = self.log_path
+            self.run_worker(self.tail_stdout(self.log_path), exclusive=False, group="tail")
+
+    async def tail_stdout(self, path: str) -> None:
         pos = 0
-        first = True
         while path == self.log_path:
             try:
                 size = os.path.getsize(path)
@@ -706,16 +1023,9 @@ class RoomTUI(App):
                         f.seek(pos)
                         chunk = f.read()
                         pos = f.tell()
-                    lines = chunk.splitlines()
-                    for ln in lines:
+                    for ln in chunk.splitlines():
                         self.stdout_lines.append(ln)
-                    if self.raw_source == "stdout":
-                        if first:
-                            self.redraw_raw()
-                        else:
-                            for ln in lines:
-                                self.write_raw(Text(ln))
-                    first = False
+                        self.forward({"_raw_line": Text(ln), "_raw_source": "stdout"})
             except OSError:
                 pass
             await asyncio.sleep(0.3)
@@ -723,72 +1033,30 @@ class RoomTUI(App):
     def matches(self, text: str) -> bool:
         return not self.search or self.search.lower() in text.lower()
 
-    def write_raw(self, line: Text) -> None:
-        if self.matches(line.plain):
-            log = self.query_one("#raw", RichLog)
-            log.write(line, scroll_end=self.follow)
-
-    def redraw_raw(self) -> None:
-        log = self.query_one("#raw", RichLog)
-        log.clear()
-        src = (Text(s) for s in self.stdout_lines) if self.raw_source == "stdout" else iter(self.event_lines)
-        for line in src:
-            if self.matches(line.plain):
-                log.write(line, scroll_end=False)
-        if self.follow:
-            log.scroll_end(animate=False)
-
     # ── actions ──
-    def action_search(self) -> None:
-        tabs = self.query_one("#tabs", TabbedContent)
-        if tabs.active == "tab-gates":
-            inp = self.query_one("#gfilter", Input)
-            inp.add_class("visible")
-            inp.value = self.gsearch
-            inp.focus()
+    def action_detail(self, which: str) -> None:
+        cls = {"startup": StartupScreen, "warnings": WarningsScreen, "raw": RawLogScreen,
+               "gates": GatesScreen, "commands": CommandsScreen}[which]
+        if isinstance(self.screen, cls):
             return
-        tabs.active = "tab-raw"
-        inp = self.query_one("#filter", Input)
-        inp.add_class("visible")
-        inp.value = self.search
-        inp.focus()
+        if isinstance(self.screen, DetailScreen):
+            self.pop_screen()
+        self.push_screen(cls())
 
-    @on(Input.Submitted, "#filter")
-    def _search_submitted(self, ev: Input.Submitted) -> None:
-        self.search = ev.value.strip()
-        self.update_rawbar()
-        self.redraw_raw()
-        self.query_one("#raw", RichLog).focus()
-
-    def action_clear_search(self) -> None:
-        g = self.query_one("#gfilter", Input)
-        if g.has_class("visible") or self.gsearch:
-            g.remove_class("visible")
-            if self.gsearch:
-                self.gsearch = ""
-                self.fill_gates()
+    def ask_command(self, name: str) -> None:
+        c = next((c for c in self.commands if c["name"] == name), None)
+        if not c:
             return
-        inp = self.query_one("#filter", Input)
-        inp.remove_class("visible")
-        if self.search:
-            self.search = ""
-            self.update_rawbar()
-            self.redraw_raw()
 
-    def action_toggle_source(self) -> None:
-        self.raw_source = "events" if self.raw_source == "stdout" else "stdout"
-        if self.raw_source == "stdout" and not self.log_path:
-            self.notify("no stdout log known (pass --log, or the agent's stdout is a terminal)", severity="warning")
-            self.raw_source = "events"
-        self.update_rawbar()
-        self.redraw_raw()
+        def go(yes: bool | None) -> None:
+            if not yes:
+                return
+            cid = self.next_cmd_id
+            self.next_cmd_id += 1
+            if not self.send({"cmd": name, "id": cid, "args": {}}):
+                self.notify("not connected — command not sent", severity="error")
 
-    def action_commands(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "tab-cmds"
-
-    def action_toggle_follow(self) -> None:
-        self.follow = not self.follow
-        self.update_rawbar()
+        self.push_screen(ConfirmScreen(name, c.get("description", ""), c.get("confirm", "")), go)
 
     def action_quit_dialog(self) -> None:
         alive = pid_alive(self.pid) and pid_is_agent(self.pid, self.agent)
@@ -816,7 +1084,7 @@ class RoomTUI(App):
                 return
             await asyncio.sleep(0.25)
         self.notify(f"pid {pid} is still running 30 s after SIGTERM. NOT escalating to SIGKILL (it would leak "
-                    f"its graph nodes). Check the raw log; press q again to detach.", severity="error", timeout=30)
+                    f"its graph nodes). Check the raw log (F3); press q again to detach.", severity="error", timeout=30)
 
 
 def main() -> None:
@@ -825,9 +1093,7 @@ def main() -> None:
     ap.add_argument("--sock", help="explicit socket path (default: auto-discover the newest)")
     ap.add_argument("--log", help="the agent's raw stdout/stderr log file (the launcher passes it)")
     ap.add_argument("--pid", type=int, help="the agent's pid (the launcher passes it; else taken from hello)")
-    args = ap.parse_args()
-    app = RoomTUI(args)
-    app.run()
+    RoomTUI(ap.parse_args()).run()
 
 
 if __name__ == "__main__":
