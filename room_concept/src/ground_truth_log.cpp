@@ -201,7 +201,9 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
             hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
         hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w,"
-                   "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info\n";
+                   "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info,"
+                   "calib_applied,sur_open,sur_c_fwd,sur_c_lat,sur_c_th,sur_pp_fwd,sur_pp_lat,sur_pp_th,"
+                   "sur_pq_fwd,sur_pq_lat,sur_pq_th\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -246,7 +248,11 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << (room_concept_.params.zupt_pred_learn_rest ? 1 : 0)
             << ',' << d.rest_dens_v << ',' << d.rest_dens_w
             << ',' << (res.surprise.scored ? 1 : 0) << ',' << res.surprise.kl << ',' << res.surprise.mismatch
-            << ',' << res.surprise.expected << ',' << res.surprise.info << '\n';
+            << ',' << res.surprise.expected << ',' << res.surprise.info
+            << ',' << res.calib_applied << ',' << res.surprise.open_cycles
+            << ',' << res.surprise.c_fwd << ',' << res.surprise.c_lat << ',' << res.surprise.c_th
+            << ',' << res.surprise.pp_fwd << ',' << res.surprise.pp_lat << ',' << res.surprise.pp_th
+            << ',' << res.surprise.pq_fwd << ',' << res.surprise.pq_lat << ',' << res.surprise.pq_th << '\n';
     hd_csv_.flush();
 }
 

@@ -3818,7 +3818,7 @@ namespace rc
         // The motion model's predictive covariance grows by this cycle's increment noise whether or not the
         // cycle is then corrected; score_surprise() scores and resets it at the next correction.
         if (selected_prior.valid and selected_prior.covariance_eigen.allFinite())
-            sur_P_pred_ += selected_prior.covariance_eigen;
+            { sur_P_pred_ += selected_prior.covariance_eigen; ++sur_open_cycles_; }
 
         // ===== EARLY EXIT CHECK =====
         // ★NOT WHILE SEARCHING (09-17) — the relocaliser's rule (5ca93b4). The early exit trusts the prediction
@@ -3999,7 +3999,7 @@ namespace rc
                 else
                     current_covariance *= 4.0f;
                 res.diverged = true;
-                std::println("[SAFETY] SDF optimization produced a NON-FINITE pose — falling back to {} "
+                rc::status::println("[SAFETY] SDF optimization produced a NON-FINITE pose — falling back to {} "
                              "(x={:.3f} y={:.3f} th={:.3f}); covariance inflated, corners bypassed",
                              have_odom ? "ODOMETRY" : (last_good_pose_valid_ ? "LAST GOOD POSE" : "ORIGIN"),
                              x, y, phi);
@@ -4080,7 +4080,7 @@ namespace rc
                     }
                     // FRESH FE breakdown at the settled (flipped) pose (not the stale 5-frame cache).
                     const auto bd = window_mgr_.compute_rfe_loss_breakdown(*model_, params, get_device());
-                    std::print("[FLIP] dyaw={:+.0f}deg dxy=({:+.2f},{:+.2f}) | SDF old={:.3f} new={:.3f} | "
+                    rc::status::print("[FLIP] dyaw={:+.0f}deg dxy=({:+.2f},{:+.2f}) | SDF old={:.3f} new={:.3f} | "
                                "anchorSD old={:.1f} new={:.1f} (n={}) | FE obs={:.2f} corner={:.2f} object={:.2f} | iters={}\n",
                                dth * 57.2958f, x - flip_prev_x_, y - flip_prev_y_, sdf_old, sdf_new,
                                anc_old, anc_new, nanc, bd.obs, bd.corner, bd.object, res.iterations_used);
@@ -7365,6 +7365,14 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                                 res.robot_pose.translation().y() - res.pred_y,
                                 std::remainder(est_th - res.pred_theta, 2.f * float(M_PI))};
         res.surprise = rc::surprise::kl_gauss(c, sur_P_pred_, P_post);
+        // Per axis in the body frame: forward = (-sin th, cos th), lateral = (cos th, sin th) on this robot.
+        const Eigen::Vector2f uf(-std::sin(est_th), std::cos(est_th)), ul(std::cos(est_th), std::sin(est_th));
+        const Eigen::Matrix2f Pp = sur_P_pred_.topLeftCorner<2, 2>(), Pq = P_post.topLeftCorner<2, 2>();
+        res.surprise.c_fwd = uf.dot(c.head<2>());  res.surprise.c_lat = ul.dot(c.head<2>());  res.surprise.c_th = c[2];
+        res.surprise.pp_fwd = uf.dot(Pp * uf);     res.surprise.pp_lat = ul.dot(Pp * ul);     res.surprise.pp_th = sur_P_pred_(2, 2);
+        res.surprise.pq_fwd = uf.dot(Pq * uf);     res.surprise.pq_lat = ul.dot(Pq * ul);     res.surprise.pq_th = P_post(2, 2);
+        res.surprise.open_cycles = sur_open_cycles_;
+        sur_open_cycles_ = 0;
         if (P_post.allFinite()) sur_P_pred_ = P_post;
     }
 

@@ -96,5 +96,35 @@ def main():
             print(f'  {k + 1}/3  {fmt(s["kl_s"]):>8} | {fmt(s["kl_m"]):>8} | {fmt(s["ratio"], "{:.2f}"):>5}'
                   f'   ({s["nsc"]} corrections, {s["L"]:.1f} m)')
 
+def per_axis(path):
+    """Which AXIS is mis-scaled? For each body axis, sum(c^2) / sum(P_pred - P_post): ~1 honest, <1 the motion
+    covariance is too wide on that axis, >1 too narrow. Split by open-loop length, because a per-cycle floor
+    that adds up linearly shows as a ratio that FALLS with the number of cycles accumulated."""
+    with open(path) as f:
+        rows = [r for r in csv.DictReader(l for l in f if not l.startswith('#'))]
+    if not rows or 'sur_c_fwd' not in rows[0]:
+        return
+    ev = []
+    for r in rows:
+        if r.get('sur_scored') != '1': continue
+        try:
+            ev.append({k: float(r[k]) for k in ('sur_open', 'sur_c_fwd', 'sur_c_lat', 'sur_c_th', 'sur_pp_fwd',
+                                                 'sur_pp_lat', 'sur_pp_th', 'sur_pq_fwd', 'sur_pq_lat', 'sur_pq_th')})
+        except ValueError:
+            pass
+    if not ev: return
+    print(f'\n{os.path.basename(path)} per axis: sum(c^2)/sum(P_pred-P_post)   (~1 honest, <1 too wide, >1 too narrow)')
+    print('  open-loop cycles     n    forward   lateral   heading')
+    for lo, hi in ((1, 2), (2, 5), (5, 40), (40, 400), (400, 10**9)):
+        e = [x for x in ev if lo <= x['sur_open'] < hi]
+        if not e: continue
+        def ratio(a):
+            den = sum(max(x[f'sur_pp_{a}'] - x[f'sur_pq_{a}'], 0.0) for x in e)
+            return sum(x[f'sur_c_{a}'] ** 2 for x in e) / den if den > 0 else float('nan')
+        print(f'  {lo:>5}-{hi if hi < 10**9 else "inf":<6}  {len(e):6d}   {ratio("fwd"):7.3f}   {ratio("lat"):7.3f}   {ratio("th"):7.3f}')
+
+
 if __name__ == '__main__':
     main()
+    for p in (sys.argv[1:] or sorted(glob.glob('tmp/heading/heading_*.csv'), key=os.path.getmtime)[-1:]):
+        per_axis(p)

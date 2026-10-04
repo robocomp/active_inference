@@ -43,6 +43,13 @@ namespace rc::surprise
         float expected = 0.f;   ///< nats, E[mismatch] under a calibrated model
         float info     = 0.f;   ///< nats, the covariance part of the KL
         bool  scored   = false; ///< a correction was scored this cycle
+        // Per axis, in the BODY frame (forward, lateral, heading), filled by the caller: the correction and
+        // the predictive / posterior variances on that axis. Logged to attribute an over- or under-confident
+        // motion covariance to an axis before anything is rescaled (2026-10-04).
+        float c_fwd = 0.f, c_lat = 0.f, c_th = 0.f;
+        float pp_fwd = 0.f, pp_lat = 0.f, pp_th = 0.f;
+        float pq_fwd = 0.f, pq_lat = 0.f, pq_th = 0.f;
+        int   open_cycles = 0;  ///< prediction cycles accumulated into P_pred since the last scored correction
     };
 
     /// c = est - pred (heading already wrapped). P_pred, P_post: 3x3 pose covariances (x, y, theta).

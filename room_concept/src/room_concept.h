@@ -1906,7 +1906,8 @@ private:
    /// while the polish is off (the growth step is gated on it) -- it would make every prediction look
    /// infinitely confident.
    Eigen::Matrix3f sur_P_pred_ = Eigen::Matrix3f::Zero();
-   bool            sur_init_ = false;   // first correction only seeds sur_P_pred_ (no pose prior before it)
+   bool            sur_init_ = false;
+   int             sur_open_cycles_ = 0;   // cycles accumulated into sur_P_pred_ since the last scored correction   // first correction only seeds sur_P_pred_ (no pose prior before it)
    void apply_adaptive_covariance(UpdateResult& res);
 
    /// Drop the strided-window bookkeeping. MUST accompany every window_mgr_.clear(): after a recovery
