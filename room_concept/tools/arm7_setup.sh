@@ -106,8 +106,10 @@ else
     done
   fi
   # A leg starts COLD: an inherited warm window is not the leg it claims to be.
-  rm -fv "$RC/etc/motion_calib_state.csv" "$RC/etc/camera_calib_Shadow_ricoh.txt" \
-         "$RC/etc/camera_calib_Shadow_zed.txt" "$RC/etc/image_edge_mount.csv" 2>/dev/null || true
+  # ★ MOTION evidence only (2026-10-04). Wiping the CAMERA evidence too made every leg restart the camera
+  #   mount estimator cold; its first wild estimates were published into the shared edges and robot_concept
+  #   persisted them as the mount (zed +14 cm, ricoh -12 cm). Arm 7 is about the motion calibrator.
+  rm -fv "$RC/etc/motion_calib_state.csv" 2>/dev/null || true
 fi
 echo
 echo "── arm 7 leg '$leg': MotionCalibApplyMask = $mask, GyroBias = $bias ──"
