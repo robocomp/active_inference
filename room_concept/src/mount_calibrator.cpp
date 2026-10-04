@@ -662,6 +662,7 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
 
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
+    const Eigen::Vector4d applied_before = mp_pool_.applied();   // the anchor this solve was taken against
     apply_mount_solve(mp_pool_, *driving_, pool, params.IMAGE_EDGE_CAMERA);
     mp_pool_.save(mp_pool_.path());   // per (robot, camera); a kill -9 costs at most one window
     if (viewer() != nullptr and pool.ok)
@@ -675,7 +676,12 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
             // The estimator works in units of the PRIOR SIGMA (h carries it), so convert back to
             // physical here — and scale the posterior sigma the same way, or the popup would show a
             // physical value with a dimensionless uncertainty beside it.
-            pv(i) = static_cast<float>(pool.p(i)     * psig[i]);
+            // ★ THE TOTAL, NOT THE INCREMENT (2026-10-04). Since the loop was closed (09-03) `p` is
+            //   what is LEFT to correct this window; it is folded into `applied` and goes to ~0 at
+            //   convergence, so plotting it showed every mount settling at zero with a tiny sigma —
+            //   "no correction needed" — while the ricoh was being corrected by -6 mm. The correction
+            //   in force after this window is applied - p (the solve vector is x = -p).
+            pv(i) = static_cast<float>((applied_before(i) - pool.p(i)) * psig[i]);
             sv(i) = static_cast<float>(pool.sigma(i) * psig[i]);
         }
         viewer()->set_camera_calibration(pv, sv, pool.informed, static_cast<float>(pool.cond),

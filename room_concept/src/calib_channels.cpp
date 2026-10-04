@@ -147,7 +147,8 @@ void CalibChannels::pump_calib_channels()
                                         params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
                 for (int i = 0; i < rc::camcal::P_COUNT; ++i)
                 {
-                    pv(i) = static_cast<float>(sol.p(i)     * psig[i]);
+                    // The TOTAL correction (applied - p), not the increment p — see mount_pair_update.
+                    pv(i) = static_cast<float>((ch.calib.applied()(i) - sol.p(i)) * psig[i]);
                     sv(i) = static_cast<float>(sol.sigma(i) * psig[i]);
                 }
                 viewer()->set_camera_calibration(pv, sv, sol.informed,
@@ -240,8 +241,8 @@ void CalibChannels::pump_calib_channels()
                 qInfo().nospace().noquote()
                     << "[camcal] " << QString::fromStdString(ch.name) << " " << ch.pairs
                     << " pairs | yaw "
-                    << QString::number(-sol.p(2) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA * 180.0 / M_PI,
-                                       'f', 4)
+                    << QString::number((ch.calib.applied()(2) - sol.p(2)) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA
+                                       * 180.0 / M_PI, 'f', 4)   // the total in force, not the increment
                     << " deg | cond " << QString::number(sol.cond, 'f', 1);
         }
     }

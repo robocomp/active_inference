@@ -750,7 +750,7 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
         // hand-copied field is a chance to pass a literal 0 for a sigma, which once rendered the one
         // parameter we had never measured as the most certain thing on the screen.
         calib_viewer_->update_values(loc_res->calib_value, loc_res->calib_sigma,
-                                     loc_res->calib_informed,
+                                     loc_res->calib_informed, loc_res->calib_applied,
                                      loc_res->calib_condition, loc_res->calib_episodes);
     }
 
