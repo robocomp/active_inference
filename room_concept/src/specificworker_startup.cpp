@@ -14,6 +14,7 @@
 // this runs on the GUI thread and every millisecond here is a millisecond the window cannot paint.
 
 #include "specificworker.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include "calib_channels.h"
 #include "ground_truth_log.h"
@@ -36,6 +37,7 @@
 #include <ranges>
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
+#include "status_routing.h"                             // which log lines still reach the terminal
 
 void SpecificWorker::request_shutdown()
 {
@@ -100,6 +102,9 @@ void SpecificWorker::start_status_stream()
     o.agent = agent_name;
     o.id = agent_id;
     o.events_dir = "tmp";
+    // Every Qt message is recorded; status_routing.h decides which ALSO reach the terminal.
+    o.capture_min = rc::status::Level::Debug;
+    o.to_terminal = &rc::room_routing::to_terminal;
     status_stream_ = std::make_unique<rc::StatusStream>(std::move(o));
     rc::status::event("lifecycle", rc::status::Obj{}.s("state", "starting"));
 
@@ -185,9 +190,11 @@ void SpecificWorker::start_status_stream()
             status_.build_state();
     });
     t->start(500);
-    qInfo().noquote() << QString("[status] viewer socket %1 | events %2 | attach with tools/room_tui.py")
-                             .arg(status_stream_->socket_path())
-                             .arg(QString::fromStdString(status_stream_->events_path()));
+    qInfo().noquote() << QString("[lifecycle] %1 id %2 starting | diagnostics -> %3 | viewer socket %4 "
+                                 "(tools/room_tui.py). The terminal shows lifecycle, [SM], warnings and errors only.")
+                             .arg(QString::fromStdString(agent_name)).arg(agent_id)
+                             .arg(QString::fromStdString(status_stream_->events_path()))
+                             .arg(status_stream_->socket_path());
 }
 
 void SpecificWorker::initialize()
@@ -545,7 +552,7 @@ void SpecificWorker::initialize()
             }
             if (peers_ready and lidar_ready)
             {
-                std::println("[SM] Waiting: peers ready and LiDAR stream '{}' advertised -> Operating", why);
+                rc::status::println("[SM] Waiting: peers ready and LiDAR stream '{}' advertised -> Operating", why);
                 emit presenceReady();
                 return;
             }
@@ -559,7 +566,7 @@ void SpecificWorker::initialize()
                 std::string missing;
                 for (const auto& label : presence_coordinator_.missing_required_names())
                     missing += " " + label;
-                std::println("[SM] Waiting — peers{}{} | lidar: {}",
+                rc::status::println("[SM] Waiting — peers{}{} | lidar: {}",
                              peers_ready ? " OK" : " MISSING:",
                              peers_ready ? std::string{} : missing,
                              lidar_ready ? ("OK (" + why + ")") : why);
@@ -597,7 +604,7 @@ void SpecificWorker::initialize()
                 {
                     lidar_stall_reported_ = true;
                     degraded_from_lidar_  = true;
-                    std::println("[SM] Operating -> Waiting: LiDAR stream STALLED ({}) — "
+                    rc::status::println("[SM] Operating -> Waiting: LiDAR stream STALLED ({}) — "
                                  "not localizing on stale evidence",
                                  age < 0 ? std::string("no sweep ever arrived")
                                          : std::format("last sweep {} ms ago", age));

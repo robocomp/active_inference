@@ -77,7 +77,7 @@ public:
         status::Level capture_min = status::Level::Warning;
         /// Routing: TRUE ⇒ the line also reaches the terminal. Called on the posting thread, so it
         /// must be thread-safe (a pure function of its arguments is). Empty ⇒ everything reaches it.
-        std::function<bool(status::Level, std::string_view tag)> to_terminal;
+        std::function<bool(status::Level, std::string_view tag, std::string_view line)> to_terminal;
     };
 
     /// Reply: ok + a human message, plus optional extra fields (a JSON object body, no braces).

@@ -206,7 +206,7 @@ bool StatusStream::route_and_post(status::Level level, std::string_view line, st
     const auto tag = tag_of(line);
     const bool terminal = level >= status::Level::Critical
                           or not opts_.to_terminal
-                          or opts_.to_terminal(level, tag);
+                          or opts_.to_terminal(level, tag, line);
     // Qt lines below the capture level are left exactly as they were: printed, not recorded.
     if (origin == "qt" and level < opts_.capture_min)
         return true;

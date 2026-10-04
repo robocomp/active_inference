@@ -208,7 +208,9 @@ class RoomTUI(App):
         self.sm_state = "?"
         self.writer: asyncio.StreamWriter | None = None
         # raw log
-        self.raw_source = "stdout" if args.log else "events"
+        # The events log is the COMPLETE, timestamped record (every line, routed to the terminal or
+        # not); the stdout file holds only what the routing table kept on the terminal.
+        self.raw_source = "events"
         self.stdout_lines: collections.deque[str] = collections.deque(maxlen=MAX_LOG_LINES)
         self.event_lines: collections.deque[Text] = collections.deque(maxlen=MAX_LOG_LINES)
         self.max_file_seq = 0

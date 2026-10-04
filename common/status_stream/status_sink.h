@@ -27,6 +27,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <format>
+#include <ostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -230,6 +232,24 @@ inline void vfeed(bool err, Level level, const char* fmt, std::va_list ap)
     detail::vfeed(true, Level::Warning, fmt, ap);
     va_end(ap);
 }
+/// The `std::cout << a << b << std::endl;` shape: `rc::status::Line{} << a << b << std::endl;`
+/// The whole expression is ONE line, logged when the temporary dies at the end of the statement.
+class Line
+{
+public:
+    explicit Line(Level level = Level::Info, bool to_stderr = false) : level_(level), err_(to_stderr) {}
+    Line(const Line&) = delete;
+    Line& operator=(const Line&) = delete;
+    ~Line() { log(level_, os_.str(), err_); }
+    template <class T>
+    Line& operator<<(const T& v) { os_ << v; return *this; }
+    Line& operator<<(std::ostream& (*)(std::ostream&)) { return *this; }   // std::endl / std::flush
+private:
+    std::ostringstream os_;
+    Level level_;
+    bool err_;
+};
+
 /// A fatal stop: one `fatal` event plus the line on stderr, flushed. The CALLER still exits.
 inline void fatal(std::string_view msg)
 {
