@@ -48,6 +48,8 @@
 #include "image_edge_source.h"
 #include "room_viewer.h"
 #include "room_config.h"
+#include "status_reporter.h"
+#include "../../common/status_stream/status_stream.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include <atomic>
@@ -382,6 +384,14 @@ class SpecificWorker : public GenericWorker
 
 
         std::atomic<bool> shutting_down_{false};
+
+        // ── Live status stream for the terminal viewer (tools/room_tui.py) ─────────────────────────
+        // Owned by the MAIN thread; null when [Status] Enable = false. Started FIRST in initialize()
+        // so the startup timeline is complete. status_ says WHAT room_concept reports; it is a no-op
+        // whenever the stream is off, so call sites carry no guard.
+        std::unique_ptr<rc::StatusStream> status_stream_;
+        rc::StatusReporter                status_;
+        void start_status_stream();
 
     signals:
         void presenceReady();

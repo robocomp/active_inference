@@ -72,6 +72,7 @@ LIST(APPEND LIBS
   ai_common::affordance   # affordance_manager
   ai_common::robot        # base CAPABILITY off the robot node — bounds the pose clamp
   ai_common::core         # header-only beliefs/geometry (object_anchor/, occlusion, …)
+  ai_common::status       # rc::StatusStream: live status socket + events file for tools/room_tui.py
 )
 
 # ── Sources ────────────────────────────────────────────────────────────────────

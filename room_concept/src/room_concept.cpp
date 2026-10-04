@@ -1,4 +1,5 @@
 #include "room_concept.h"
+#include "../../common/status_stream/status_sink.h"
 #include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 #include "pointcloud_center_estimator.h"
 #include <numeric>
@@ -7058,11 +7059,19 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         if (not calib_state_loaded_)
         {
             calib_state_loaded_ = true;
-            if (const std::size_t n = motion_calib_.load_state(params.calib_state_file); n > 0)
+            const std::size_t n = motion_calib_.load_state(params.calib_state_file);
+            if (n > 0)
                 qInfo().nospace() << "[calib] restored " << n << " measurements from "
                                   << QString::fromStdString(params.calib_state_file)
                                   << " (" << motion_calib_.closures() << " closed pivot(s)) — the "
                                      "window resumes, the priors do not move";
+            // Localiser thread: rc::status::event only pushes into the stream's queue.
+            rc::status::event("loaded", rc::status::Obj{}
+                                            .s("what", "motion_calib")
+                                            .s("path", params.calib_state_file)
+                                            .s("detail", std::format("{} measurements, {} closed pivot(s){}", n,
+                                                                     motion_calib_.closures(),
+                                                                     n > 0 ? "" : " (nothing on disk: priors)")));
             if (const std::size_t d = motion_calib_.legacy_dropped(); d > 0)
                 qWarning().nospace() << "[calib] DROPPED " << d << " episode rows from "
                                      << QString::fromStdString(params.calib_state_file)

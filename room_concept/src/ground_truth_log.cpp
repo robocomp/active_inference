@@ -1,6 +1,7 @@
 #include <genericworker.h>   // FIRST: DSR's signal emitter is not self-contained
 
 #include "ground_truth_log.h"
+#include "status_reporter.h"
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
@@ -185,6 +186,7 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             return;
         }
         hd_csv_.imbue(std::locale::classic());   // es_ES would write decimal COMMAS into a CSV
+        rc::StatusReporter::loaded("heading_log", path.toStdString(), "per-run heading fusion CSV (written)");
         hd_csv_ << "# heading fusion log. fusion=1: wheel x gyro product; 0: legacy switch. Angles rad, "
                    "times s, densities rad/sqrt(s). raw_* are UNcalibrated channel rotations this cycle. "
                    "est/pred are the pose after/before the optimiser. gt_* NaN on the real robot. "

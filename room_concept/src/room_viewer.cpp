@@ -8,6 +8,7 @@
 #include <fstream>
 #include <locale>
 #include "room_viewer.h"
+#include "../../common/status_stream/status_sink.h"
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +94,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     {
         const auto ms = vphase_timer.restart();
         if (vcsv.is_open()) vcsv << "viewer:" << name << ',' << ms << ",\n" << std::flush;
+        rc::status::event("phase", rc::status::Obj{}.s("name", std::string("viewer:") + name).i("ms", ms).b("sub", true));
         QCoreApplication::processEvents();
     };
 

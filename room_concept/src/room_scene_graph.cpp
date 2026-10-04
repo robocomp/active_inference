@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <ranges>
 #include "room_scene_graph.h"
+#include "status_reporter.h"
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
 #include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
 
@@ -2689,6 +2690,9 @@ void RoomSceneGraph::resolve_overlays_from_graph()
                             << "would put the whole fleet in the wrong building. Set `scenario` in"
                             << "the robot_concept config THAT IS ACTUALLY RUNNING — check its command"
                             << "line, not the config you expect it to use — and restart it.";
+                rc::StatusReporter::fatal("REFUSING TO START: robot node " + robot_name + " carries no "
+                                          "`scenario_name` and this config defines scenario overlays. Set "
+                                          "`scenario` in the robot_concept config that is actually running.");
                 std::exit(EXIT_FAILURE);
             }
             const std::string scen = sc.value().get();
@@ -2699,6 +2703,8 @@ void RoomSceneGraph::resolve_overlays_from_graph()
                             << "has no section in this config. Add [Scenario."
                             << QString::fromStdString(scen) << "] naming its RoomLayoutSvg, or the"
                             << "agent would load some other building's floor plan.";
+                rc::StatusReporter::fatal("REFUSING TO START: scenario " + scen + " has no [Scenario."
+                                          + scen + "] section in this config.");
                 std::exit(EXIT_FAILURE);
             }
             const auto changed = params_->apply_scenario(scen);

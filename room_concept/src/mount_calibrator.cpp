@@ -1,4 +1,5 @@
 #include "mount_calibrator.h"
+#include "status_reporter.h"
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -600,10 +601,14 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
                               << " px — mount sigmas are now cluster-honest and will read LARGER; "
                                  "yaw approaches the between-vertex SEM by construction";
         const std::string path = mp_pool_.path();
-        if (const std::size_t k = mp_pool_.load(path); k > 0)
+        const std::size_t k = mp_pool_.load(path);
+        if (k > 0)
             qInfo().nospace() << "[camcal] resumed from " << QString::fromStdString(path)
                               << " (" << k << " pairs, camera "
                               << QString::fromStdString(params.IMAGE_EDGE_CAMERA) << ")";
+        rc::StatusReporter::loaded("camcal_evidence", path,
+                                   std::format("camera {}: {} pairs{}", params.IMAGE_EDGE_CAMERA, k,
+                                               k > 0 ? "" : " (none on disk: starting empty)"));
         // A correction restored from disk must reach the mount BEFORE the first frame is measured
         // against it, or this session's first window is referenced to an extrinsic the evidence
         // does not describe.

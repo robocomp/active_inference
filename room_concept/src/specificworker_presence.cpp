@@ -137,9 +137,10 @@ void SpecificWorker::cleanup_self_agent_node()
     }
 }
 
-void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t /*id*/)
+void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t id)
 {
     qInfo() << "[Presence] optional peer lost:" << QString::fromStdString(name);
+    rc::StatusReporter::peer("optional_lost", name, id);
 
     if (name != "controller" || !G)
         return;
@@ -147,7 +148,8 @@ void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_
     scene_graph_->on_controller_lost();
 }
 
-void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t /*id*/)
+void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t id)
 {
     qInfo() << "[Presence] optional peer ready:" << QString::fromStdString(name);
+    rc::StatusReporter::peer("optional_ready", name, id);
 }

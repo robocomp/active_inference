@@ -33,11 +33,13 @@
 #include <filesystem>
 #include <fstream>
 #include <locale>
+#include <ranges>
 
 void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
         return;
+    if (status_stream_) status_stream_->stopping("shutdown requested");
 
     save_window_settings();
     if (viewer_)
@@ -75,6 +77,8 @@ void SpecificWorker::request_shutdown()
     // _Exit skips all of that; the OS reclaims memory/sockets/threads. Only reached on a real shutdown
     // (shutting_down_ latched above). Brief pause lets the removal deltas + participant departure reach
     // peers first.
+    rc::status::event("lifecycle", rc::status::Obj{}.s("state", "exited").s("reason", "clean shutdown"));
+    rc::status::flush();   // _Exit runs no destructor, so the stream's own final flush never would
     std::cout.flush();
     std::cerr.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -82,8 +86,28 @@ void SpecificWorker::request_shutdown()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// The status stream starts before anything else in initialize(), so its startup timeline is whole.
+// Off ([Status] Enable = false) ⇒ no socket, no events file, no log capture — and every rc::status
+// call in the agent degrades to exactly the print it replaced.
+void SpecificWorker::start_status_stream()
+{
+    rc::load_status_config(configLoader, params);
+    if (not params.STATUS_ENABLE)
+        return;
+    rc::StatusStream::Options o;
+    o.agent = agent_name;
+    o.id = agent_id;
+    o.events_dir = "tmp";
+    status_stream_ = std::make_unique<rc::StatusStream>(std::move(o));
+    rc::status::event("lifecycle", rc::status::Obj{}.s("state", "starting"));
+    qInfo().noquote() << QString("[status] viewer socket %1 | events %2 | attach with tools/room_tui.py")
+                             .arg(status_stream_->socket_path())
+                             .arg(QString::fromStdString(status_stream_->events_path()));
+}
+
 void SpecificWorker::initialize()
 {
+    start_status_stream();
     GenericWorker::initialize();
 
     // ── STARTUP PHASES: TIMED, AND THE WINDOW STAYS ALIVE THROUGH THEM ───────────────────────────
@@ -120,6 +144,7 @@ void SpecificWorker::initialize()
             f.imbue(std::locale::classic());
             f << name << ',' << ms << ',' << init_timer.elapsed() << '\n';
         }
+        status_.phase(name, ms, init_timer.elapsed());
         if (ms > 200)
             qInfo().noquote() << QString("[startup] %1 took %2 ms (cumulative %3 ms) — the window is "
                                          "blocked for the duration of any phase on this thread")
@@ -225,6 +250,8 @@ void SpecificWorker::initialize()
         // only honest option: a wrong floor plan reads downstream as a localiser fault.
         qCritical() << "[room] REFUSING TO START: no type-\"robot\" node in the graph when the"
                     << "layout must be chosen. Start robot_concept first.";
+        rc::StatusReporter::fatal("REFUSING TO START: no type-\"robot\" node in the graph when the "
+                                  "layout must be chosen. Start robot_concept first.");
         std::exit(EXIT_FAILURE);
     }
     // The other half of the overlays: values whose home is the localiser or the planner, not the
@@ -260,6 +287,8 @@ void SpecificWorker::initialize()
         room_concept_.configure_room_estimate();
         calib_->set_room_polygon({}, Eigen::Vector2f::Zero());
         room_initialized_from_svg_polygon_ = false;
+        rc::StatusReporter::loaded("layout", "", "RoomShape.MapMode = estimate: no layout loaded; "
+                                                 "the room is learnt from the LiDAR");
         qInfo() << "[room] RoomShape.MapMode = estimate: no layout loaded; the room will be learnt from the LiDAR"
                 << "(first pose = origin until the polygon closes and is re-anchored).";
     }
@@ -268,6 +297,8 @@ void SpecificWorker::initialize()
     const std::string pose_path = pose_file_path();
     phase("room_model");
     room_concept_.set_seed_pose_file(pose_path);
+    rc::StatusReporter::loaded("seed_pose", pose_path,
+                               room_concept_.estimating() ? "ignored in estimate mode" : "");
     phase("seed_pose");
 
     // The DSR graph viewer is OPTIONAL now: the layout GUI lives in its own top-level window
@@ -377,6 +408,7 @@ void SpecificWorker::initialize()
         .on_peer_restarted = [](std::uint32_t id)
         {
             qInfo() << "[Presence] peer" << id << "restarted";
+            rc::StatusReporter::peer("restarted", "", id);
         },
         .on_optional_peer_lost = [this](const std::string &name, std::uint32_t id)
         {
@@ -393,6 +425,12 @@ void SpecificWorker::initialize()
             qInfo() << "[SM] -> Waiting";
             QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(false); });
             const auto missing = presence_coordinator_.missing_required_names();
+            {
+                std::string m;
+                for (const auto& label : missing) m += (m.empty() ? "" : " ") + label;
+                rc::StatusReporter::sm("Waiting", m.empty() ? "" : "missing: " + m);
+                status_.reset_waiting();
+            }
             if (!missing.empty())
             {
                 QString m;
@@ -408,6 +446,10 @@ void SpecificWorker::initialize()
             const bool peers_ready = presence_coordinator_.all_required_ready();
             std::string why;
             const bool lidar_ready = lidar_stream_ready(&why);
+            {
+                const auto miss = presence_coordinator_.missing_required_names();
+                status_.waiting(peers_ready, {miss.begin(), miss.end()}, lidar_ready, why);
+            }
             if (peers_ready and lidar_ready)
             {
                 std::println("[SM] Waiting: peers ready and LiDAR stream '{}' advertised -> Operating", why);
@@ -435,6 +477,7 @@ void SpecificWorker::initialize()
             operating_since_ms_   = QDateTime::currentMSecsSinceEpoch();
             lidar_stall_reported_ = false;
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
+            rc::StatusReporter::sm("Operating", "all required constraints satisfied");
             QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(true); });
             if (!room_concept_.is_running())
             {
@@ -465,6 +508,7 @@ void SpecificWorker::initialize()
                                  "not localizing on stale evidence",
                                  age < 0 ? std::string("no sweep ever arrived")
                                          : std::format("last sweep {} ms ago", age));
+                    rc::StatusReporter::stall("lidar", age);
                     emit presenceLost();
                     return;
                 }
@@ -499,9 +543,14 @@ void SpecificWorker::initialize()
             {
                 degraded_from_lidar_ = false;
                 qInfo() << "[SM] -> Degraded (LiDAR stall, peers intact) — passing through to Waiting";
+                rc::StatusReporter::sm("Degraded", "LiDAR stall, peers intact — passing through to Waiting");
             }
             else
+            {
                 qInfo() << "[SM] -> Degraded: required peer lost —" << REQUIRED_LOSS_GRACE_MS << "ms grace before shutdown";
+                rc::StatusReporter::sm("Degraded", std::format("required peer lost — {} ms grace before shutdown",
+                                                               REQUIRED_LOSS_GRACE_MS));
+            }
             QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
             {
                 if (shutting_down_)
@@ -509,9 +558,11 @@ void SpecificWorker::initialize()
                 if (presence_coordinator_.all_required_ready())
                 {
                     qInfo() << "[SM] required peers recovered during grace — staying alive";
+                    rc::StatusReporter::sm("Degraded", "required peers recovered during grace — staying alive");
                     return;
                 }
                 qWarning() << "[SM] required peer still missing after grace — shutting down cleanly";
+                rc::StatusReporter::sm("Degraded", "required peer still missing after grace — shutting down cleanly");
                 request_shutdown();   // does cleanup + crash-free _Exit (terminal)
             });
         },

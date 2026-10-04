@@ -16,6 +16,11 @@
 namespace rc
 {
 
+void load_status_config(const ConfigLoader& cl, RoomConfig& p)
+{
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "Status.Enable", p.STATUS_ENABLE);
+}
+
 void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                       rc::RoomConcept& room_concept, rc::EpistemicController& epistemic)
 {

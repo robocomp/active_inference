@@ -1,6 +1,7 @@
 #include <genericworker.h>   // FIRST: DSR's signal emitter is not self-contained (see pose_publisher.cpp)
 
 #include "calib_channels.h"
+#include "status_reporter.h"
 
 #include "mount_calibrator.h"
 #include "room_concept.h"
@@ -119,6 +120,9 @@ void CalibChannels::pump_calib_channels()
                 qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
                                   << " resumed from " << QString::fromStdString(path)
                                   << " (" << k_aux << " pairs)";
+            rc::StatusReporter::loaded("camcal_evidence", path,
+                                       std::format("camera {}: {} pairs{}", ch.name, k_aux,
+                                                   k_aux > 0 ? "" : " (none on disk: starting empty)"));
         }
 
         // ── This channel's own column in the Calib window ────────────────────────────────────────

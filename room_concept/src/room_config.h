@@ -334,6 +334,11 @@ struct RoomConfig
     int LIDAR_STALL_TIMEOUT_MS = 3000;   // Operating: no sweep for this long ⇒ back to Waiting
     int LIDAR_WAIT_LOG_PERIOD_MS = 2000; // Waiting: how often to reprint why we are still waiting
 
+    // [Status] — the live status stream a terminal viewer attaches to (tools/room_tui.py, launched by
+    // tools/room_run.sh). Local socket + tmp/agent_events_<start>.jsonl; never touches DSR. false =
+    // no socket, no file, no capture: every line prints exactly as it did before the stream existed.
+    bool STATUS_ENABLE = true;
+
     // Camera-overlay object projection: DSR node TYPES whose oriented boxes are projected on
     // the live RGB image (alongside the always-drawn walls). Concept agents now publish all
     // furniture as generic "object" nodes (class in object_subtype), so "object" alone covers
@@ -438,6 +443,10 @@ struct RoomConfig
     std::vector<std::string> CALIB_CAMERAS = {};   // ImageEdge.calibCameras
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
+
+// [Status] only. Separate because the status stream starts FIRST in initialize(), before
+// GenericWorker::initialize() and long before load_room_config(), so it can time every phase.
+void load_status_config(const ConfigLoader& cl, RoomConfig& p);
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,
 // and seed the planner's robot footprint. Call once from initialize().

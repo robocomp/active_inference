@@ -1603,6 +1603,12 @@ ExecStallProgress  = 0.10   # metres of new closest-approach that counts as prog
 
 # ---- Acceleration ramp (SpecificWorker) ---- MOVE THIS TO ROBOT
 
+[Status]
+# Live status stream for the terminal viewer (tools/room_tui.py; launcher tools/room_run.sh): a local
+# socket under $XDG_RUNTIME_DIR/rc_status/ plus tmp/agent_events_<start>.jsonl. Never touches DSR.
+# false = no socket, no events file, and every log line prints to the terminal exactly as before.
+Enable = true
+
 [Overlay]
 # DISPLAY ONLY — DSR node types projected as oriented boxes on the camera RGB overlay (walls are
 # always drawn). Nothing in the estimator reads this. Brought across from P3Bot because the header

@@ -413,12 +413,16 @@ void SpecificWorker::initialize_room_model_from_svg()
         calib_->set_room_polygon(room_polygon, offset);
         room_concept_.configure_room_from_polygon(calib_->room_polygon());
         room_initialized_from_svg_polygon_ = true;
+        rc::StatusReporter::loaded("layout", svg_path,
+                                   std::format("{} vertices, recentred by ({:.3f}, {:.3f}) m",
+                                               room_polygon.size(), offset.x(), offset.y()));
         return;
     }
     calib_->set_room_polygon({}, Eigen::Vector2f::Zero());
     room_concept_.configure_room_from_rect(params.GRID_MAX_DIM.width(), params.GRID_MAX_DIM.height());
     room_initialized_from_svg_polygon_ = false;
     qWarning() << "SVG polygon not loaded; using rectangular fallback.";
+    rc::StatusReporter::loaded("layout", svg_path, "FAILED: fewer than 3 points — rectangular fallback in use");
 }
 
 ///////////////////////////////////////////////////////////////////////////////
