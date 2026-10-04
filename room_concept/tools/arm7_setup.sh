@@ -42,7 +42,7 @@ case "${1:-}" in
       [ -z "$pid" ] && { printf "  %-16s NOT RUNNING\n" "$pc"; continue; }
       start=$((now - $(ps -o etimes= -p "$pid" | tr -d ' ')))
       for f in $(tr '\0' ' ' < /proc/$pid/cmdline); do
-        case "$f" in *etc/config*) cfg="$f"; [ -f "$cfg" ] || cfg="$(readlink -f /proc/$pid/cwd)/$f"
+        case "$f" in *etc/config*) case "$f" in /*) cfg="$f";; *) cfg="$(readlink -f /proc/$pid/cwd)/$f";; esac
           if [ "$(stat -c %Y "$cfg")" -gt "$start" ]; then echo "  ⚠ $pc: $cfg written AFTER start — RESTART it"
           else echo "  ✓ $pc reads $cfg (predates the process)"; fi;; esac
       done
