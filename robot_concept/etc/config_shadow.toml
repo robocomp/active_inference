@@ -225,7 +225,14 @@ boresight_yaw_ricoh = 0.0
 #   self-calibration (ImageEdge.mountPublish); a hand-edited edge would be persisted just the same.
 # ⚠ kill -9 never reaches this. The overlay then keeps its previous version, which is the conservative
 #   outcome: an unrecorded session is a session whose calibration is simply not adopted.
-persist_mounts_on_stop = true
+# ★ OFF 2026-10-04. This saved room_concept's PUBLISHED camera correction back as the mount at every
+#   stop and re-applied it at start, so the estimator's output became its own next nominal: a ratchet
+#   (ricoh yaw -0.05 -> -0.14 deg over 13 restarts) and, after an experiment wiped the camera evidence,
+#   cold-start estimates persisted as the mount (zed +14 cm, ricoh -12 cm; mount_calib_Shadow.txt rev
+#   14-15, kept as mount_calib_Shadow.txt.ratchet-2026-10-04). room_concept now anchors the nominal on
+#   the JSON (ImageEdge.mountDescriptionFile) and persists its own evidence; a measured mount reaches
+#   the JSON only by a deliberate edit.
+persist_mounts_on_stop = false
 
 [Component.Debug]
 Verbose = false
