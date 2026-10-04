@@ -19,18 +19,34 @@ namespace rc
 {
 namespace
 {
-// The load_optional_apply shape on top of the Reader: the callback runs only when the key is present.
+// The load_optional_apply shape on top of the Reader: the key registers with its code default like any
+// other, and the callback runs only when the FILE supplied it (absent, shadowed or mistyped ⇒ no call).
 template <class T, class F>
-void reader_apply(const rc::cfg::Reader& reader, std::string_view key, std::string_view what, F&& apply)
+void reader_apply(const rc::cfg::Reader& reader, std::string_view key, std::string_view what, T def, F&& apply)
 {
-    if (const auto v = reader.maybe<T>(key, what))
-        apply(*v);
+    reader.opt<T>(key, def, what);
+    if (rc::cfg::registry().record(key).origin == rc::cfg::Origin::File)
+        apply(def);
 }
 
 // An overlay that CHANGED a value, recorded on the key it changed, so the table (and the viewer's
 // Config gates panel) shows origin=overlay instead of the file value that is no longer in force.
 // The destination is the one registered key ending in ".<name>" outside the overlay sections; when
 // that is not unique, the overlay key itself carries the record rather than a guessed destination.
+// An overlay key ([Platform.<robot>.*] / [Scenario.<name>.*]) is PARSED here for every robot and
+// scenario but APPLIED only for the one the graph names, so it is not a setting of its own: read it
+// without registering (no "(absent)" rows for the sections that do not set it), and mark the keys
+// that ARE present consumed, so the unread sweep does not report them. The value that takes effect
+// is recorded on its destination key by note_overlay_applied() below.
+template <class T, class LoadT = T>
+std::optional<T> overlay_read_impl(const ConfigLoader& cl, const std::string& key)
+{
+    auto v = rc::cfg::Reader::scratch(cl).maybe<T, LoadT>(key, "");
+    if (v.has_value())
+        rc::cfg::registry().mark_consumed(key, "platform/scenario overlay parse (applied by apply_*)");
+    return v;
+}
+
 template <class V>
 void note_overlay_applied(std::string_view name, const V& value, const std::string& source)
 {
@@ -175,12 +191,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "Outlier-aware: a residual bigger than these is a relocalization/jump (the gentle slew would take ~30 s to catch up → the pose strands metres from…");
     reader.opt<float, double>("PredictPublish.snap_thresh_rad", p.PREDICT_SNAP_THRESH_RAD,
             "");
-    reader_apply<std::string>(reader, "RoomConcept.OptimizerType", "5.8e-4, sigma_theta ~1.4 deg; 1.75 deg on rotating early-exit frames)", [&](const std::string& optimizer_type)
+    reader_apply<std::string>(reader, "RoomConcept.OptimizerType", "pose optimiser backend: LBFGS | ADAM | GN", p.OptimizerType, [&](const std::string& optimizer_type)
     {
         p.OptimizerType = optimizer_type;
         room_concept.params.optimizer_type = optimizer_type;
     });
-    reader_apply<std::string>(reader, "RoomConcept.RoomLayoutSvg", "", [&](const std::string& svg_file)
+    reader_apply<std::string>(reader, "RoomConcept.RoomLayoutSvg", "layout SVG (a [Scenario.*] overlay may replace it)", p.ROOM_LAYOUT_SVG, [&](const std::string& svg_file)
     {
         p.ROOM_LAYOUT_SVG = svg_file;
     });
@@ -189,7 +205,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
 
     // ── [RoomShape] wall-SLAM: estimate the layout instead of loading it ───────────────────────
     // MapMode is the ONE switch; absent ⇒ "given" ⇒ nothing else in this block has any effect.
-    reader_apply<std::string>(reader, "RoomShape.MapMode", "runs. To work on the estimator: MapMode = 'estimate' AND BoxLayout = true", [&](const std::string& m)
+    reader_apply<std::string>(reader, "RoomShape.MapMode", "given = load the layout; estimate = learn it from the LiDAR", p.MAP_MODE, [&](const std::string& m)
     {
         p.MAP_MODE = m;
         room_concept.params.map_mode = (m == "estimate") ? rc::RoomConcept::Params::MapMode::Estimate
@@ -356,7 +372,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m — keep wall points this far below the ceiling");
 
     // Camera-overlay object projection: comma-separated DSR node types (e.g. "object,table,cylinder,chair").
-    reader_apply<std::string>(reader, "Overlay.ObjectTypes", "overlay silently omits the table, the cylinder and the chairs. Comma-separated", [&](const std::string& csv)
+    reader_apply<std::string>(reader, "Overlay.ObjectTypes", "DISPLAY ONLY: node types drawn as boxes on the camera overlay (comma-separated)", std::string("object"), [&](const std::string& csv)
     {
         std::vector<std::string> types;
         std::size_t start = 0;
@@ -696,10 +712,11 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "ObjectAnchor.optimizeLandmark — p_o as a private");
     // Guarded by exists(): ConfigLoader throws on `key = []`, and a silently-empty list would disable
     // every landmark while the enable flag still read true — a confusing way to get nothing.
-    if (auto v = reader.maybe<std::vector<std::string>>("ObjectAnchor.subtypes",
-                                                         "object subtypes accepted as pose landmarks");
-        v.has_value() and not v->empty())
-        p.OBJECT_ANCHOR_SUBTYPES = std::move(*v);
+    {
+        auto v = p.OBJECT_ANCHOR_SUBTYPES;
+        reader.opt("ObjectAnchor.subtypes", v, "object subtypes accepted as pose landmarks");
+        if (not v.empty()) p.OBJECT_ANCHOR_SUBTYPES = std::move(v);
+    }
     reader.opt<float, double>("ObjectAnchor.weight", p.OBJECT_ANCHOR_WEIGHT,
             "ObjectAnchor.weight (keep < walls)");
     reader.opt<float, double>("ObjectAnchor.huber", p.OBJECT_ANCHOR_HUBER,
@@ -800,7 +817,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             const std::string sec = "Platform." + n;
             const auto f = [&](const char* key, std::optional<float>& dst)
             {
-                if (const auto v = reader.maybe<float, double>(sec + "." + key, "platform overlay"))
+                if (const auto v = overlay_read_impl<float, double>(cl, sec + "." + key))
                     dst = *v;
             };
             f("mountPitchSigma",    ov.mount_pitch_sigma);
@@ -820,12 +837,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             // twice from opposite seeds: only a key that is actually present makes the two agree.
             const auto i = [&](const char* key, std::optional<int>& dst)
             {
-                if (const auto v = reader.maybe<int>(sec + "." + key, "platform overlay"))
+                if (const auto v = overlay_read_impl<int>(cl, sec + "." + key))
                     dst = *v;
             };
             const auto b = [&](const char* key, std::optional<bool>& dst)
             {
-                if (const auto v = reader.maybe<bool>(sec + "." + key, "platform overlay"))
+                if (const auto v = overlay_read_impl<bool>(cl, sec + "." + key))
                     dst = *v;
             };
             i("Period",                     ov.period_compute);
@@ -849,7 +866,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             f("BeliefForgetTime",                  ov.belief_forget_time);
             f("ObjectAnchorMeasSigmaXY",           ov.object_anchor_meas_sigma_xy);
             f("StableSdfMseMax",                   ov.stable_sdf_mse_max);
-            if (auto cam = reader.maybe<std::string>(sec + ".camera", "platform overlay: driving camera");
+            if (auto cam = overlay_read_impl<std::string>(cl, sec + ".camera");
                 cam.has_value() and not cam->empty())
                 ov.image_edge_camera = *cam;
             p.platform_overlays[n] = ov;
@@ -869,23 +886,22 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             // Presence is honest now (Reader::maybe): no NaN sentinel, no read-it-twice-from-opposite-
             // seeds trick for the bool.
             const std::string sec = "Scenario." + n;
-            if (auto svg = reader.maybe<std::string>(sec + ".RoomLayoutSvg", "scenario overlay: layout file");
+            if (auto svg = overlay_read_impl<std::string>(cl, sec + ".RoomLayoutSvg");
                 svg.has_value() and not svg->empty())
                 ov.room_layout_svg = *svg;
-            if (const auto h = reader.maybe<float, double>(sec + ".RoomHeight", "scenario overlay: ceiling height (m)"))
+            if (const auto h = overlay_read_impl<float, double>(cl, sec + ".RoomHeight"))
                 ov.room_height = *h;
-            if (const auto b = reader.maybe<bool>(sec + ".RecenterRoomPolygon", "scenario overlay"))
+            if (const auto b = overlay_read_impl<bool>(cl, sec + ".RecenterRoomPolygon"))
                 ov.recenter_room_polygon = *b;
             const auto sf = [&](const char* key, std::optional<float>& dst)
             {
-                if (const auto v = reader.maybe<float, double>(sec + "." + key, "scenario overlay"))
+                if (const auto v = overlay_read_impl<float, double>(cl, sec + "." + key))
                     dst = *v;
             };
             sf("LidarHighMaxHeight", ov.lidar_high_max_height);
             sf("TargetWallMargin",   ov.target_wall_margin);
             {   // ⚠ ConfigLoader throws on an EMPTY array, so absent is how to say "leave it".
-                if (auto subs = reader.maybe<std::vector<std::string>>(sec + ".ObjectAnchorSubtypes",
-                                                                       "scenario overlay");
+                if (auto subs = overlay_read_impl<std::vector<std::string>>(cl, sec + ".ObjectAnchorSubtypes");
                     subs.has_value() and not subs->empty())
                     ov.object_anchor_subtypes = std::move(*subs);
             }
