@@ -848,6 +848,7 @@ public:
         /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at
         /// its previous value -- which a bare value cannot be distinguished from convergence.
         int   calib_informed = 0;
+        int   calib_applied = 0;        ///< bitmask: parameter i is correcting the odometry (informed AND allowed)
         float calib_condition = 0.f;    ///< of the CORRELATION-normalised information matrix
         float calib_sigma_yaw = 0.f, calib_sigma_k_v = 0.f, calib_sigma_k_w = 0.f;
         float calib_sigma_b_omega = 0.f;   ///< never leave this at 0: a displayed 0 reads as certainty

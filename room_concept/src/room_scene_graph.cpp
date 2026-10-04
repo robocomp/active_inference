@@ -341,6 +341,37 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         // run that never offers the manoeuvre still ends knowing whether it should have.
         dsr_update_calibration(res);
     }
+    // The learnt body is a property of the robot, not of the room: published whether or not a room is.
+    dsr_publish_body_calibration(res);
+}
+
+void RoomSceneGraph::dsr_publish_body_calibration(const rc::RoomConcept::UpdateResult& res)
+{
+    if (G_ == nullptr or dsr_robot_id_ == 0) return;
+    // The estimate only changes when an episode is offered and the window re-solves; the episode count
+    // is that event. Re-writing an unchanged value every cycle would only churn the CRDT.
+    if (res.calib_episodes == published_calib_episodes_) return;
+    auto node = G_->get_node(dsr_robot_id_);
+    if (not node.has_value()) return;
+    std::string names;
+    std::vector<float> values(rc::calib::P_COUNT), sigmas(rc::calib::P_COUNT);
+    for (int i = 0; i < rc::calib::P_COUNT; ++i)
+    {
+        if (i > 0) names += ',';
+        names += rc::calib::param_name(i);
+        values[i] = res.calib_value[i];
+        sigmas[i] = res.calib_sigma[i];
+    }
+    G_->add_or_modify_attrib_local<body_calib_names_att>(node.value(), names);
+    G_->add_or_modify_attrib_local<body_calib_values_att>(node.value(), std::move(values));
+    G_->add_or_modify_attrib_local<body_calib_sigmas_att>(node.value(), std::move(sigmas));
+    G_->add_or_modify_attrib_local<body_calib_informed_att>(node.value(), res.calib_informed);
+    G_->add_or_modify_attrib_local<body_calib_applied_att>(node.value(), res.calib_applied);
+    G_->add_or_modify_attrib_local<body_calib_episodes_att>(node.value(), res.calib_episodes);
+    G_->add_or_modify_attrib_local<body_calib_timestamp_att>(node.value(),
+                                                             static_cast<std::uint64_t>(res.timestamp_ms));
+    if (G_->update_node(node.value()))
+        published_calib_episodes_ = res.calib_episodes;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

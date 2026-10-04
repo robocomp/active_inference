@@ -219,6 +219,10 @@ private:
     // work has carried the robot somewhere with room. That is the whole design: the calibration is a
     // passenger on the day's driving, not a trip of its own.
     void dsr_update_calibration(const rc::RoomConcept::UpdateResult& res);
+    /// THE LEARNT BODY onto the robot node (body_calib_* attributes): the motion calibrator's values,
+    /// sigmas, and which parameters are measured / acting. Corrections RELATIVE to the nominal body
+    /// robot_concept publishes, never replacements for it. Written only when the estimator re-solves.
+    void dsr_publish_body_calibration(const rc::RoomConcept::UpdateResult& res);
     /// Create afford_calib with its contract already on it and NOT on offer. See the definition: the
     /// consumer latches a contract once per node id, and this node is reused for every step.
     bool ensure_calib_node();
@@ -351,6 +355,7 @@ private:
     int                                   no_target_dbg_      = 0;   // throttle for the no-target trace
 
     std::uint64_t dsr_robot_id_ = 0;
+    int  published_calib_episodes_ = -1;   // episode count at the last body_calib_* write (-1 = never)
     std::uint64_t dsr_body_id_  = 0;
     std::uint64_t dsr_world_id_ = 0;
     bool overlays_resolved_ = false;
