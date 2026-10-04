@@ -1192,6 +1192,19 @@ Re-run of `gyro-all` after the two fixes (`6bab57e`), same bridge session and do
   (its covariance, not its mean); the `informed` gate (σ < 0.9 prior) is still a threshold; the motion state
   saved before arm 7 was written under the units bug and is NOT restored (cold start).
 
+### Arm 7 — ADDENDUM 2026-10-04: the native pair DID gain; the cross-run comparison could not see it.
+
+`tools/calib_benefit.py` replays each run's own prediction with the acting calibration subtracted (exact to
+first order; the model is linear) and scores both against the LiDAR-solved poses between consecutive solves —
+no ground truth. Signed heading drift while moving, nominal -> learned:
+- native-all: **-0.066 -> -0.035 deg/s** (GT: -0.067 -> -0.035); heading |err| per degree turned -45%.
+- gyro-all (fixed): -0.097 -> -0.049 (GT -0.100 -> -0.052). gyro-all pre-fix: -0.126 -> -0.121 (learnt nothing).
+- Position |err| slightly WORSE with calibration on every leg (+0.3..+0.7 mm/m) — small, consistent, open.
+The LiDAR-anchored figure tracks ground truth to ~0.003 deg/s, so this is the GT-free benefit measure for the
+real robot. ★ The "Native pair: no harm, no measurable gain" line above compared TWO runs, whose session
+noise (6x in solves at 30-60 m) swamped a halving of the drift; the same-run counterfactual does not have
+that noise. Prefer it for every future calibration claim.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.
