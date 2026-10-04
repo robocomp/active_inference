@@ -1111,6 +1111,39 @@ step from changing code — before checking the anomaly against the emission gua
 The check took two commands. **A number that is 47x larger than its neighbours is a reason to ask
 what it is, not evidence that something is broken.**
 
+## 13. Arm 7 — APPLY EVERYTHING ONLINE. Pre-registered 2026-10-04, BEFORE the run.
+
+**Question.** The calibrator has run closed-loop since 2026-08-30, but only `k_v` may act
+(`MotionCalibApplyMask = 1`). The finding that put the mask there was retracted (§6 arm 3; t = −0.68), and
+heading fusion (2026-10-01) now feeds the gyro and wheel heading parameters straight into the prediction.
+Does letting ALL parameters act (`mask = −1`) make the online-corrected motion model better, with no harm?
+
+**Design.** One session, four legs, cold each (`tools/arm7_setup.sh` wipes the evidence; the pre-arm-7 warm
+state is kept in `etc/pre-arm7/` and put back by `restore`). Route: controller mission **`calib turns`**
+(14 loops, ~176 m, ~0.87 rad/m — the heading parameters need rotation). Order, so the bridge restarts once:
+`native-k` → `native-all` → `gyro-all` → `gyro-k`.
+- `native-*`: no injection. Known native error: the sim wheels over-report rotation ~8 % on a mixed tour
+  (bridge config note), which is `k_omega_w`'s to find — but with fusion the gyro carries most heading.
+- `gyro-*`: `GyroBias = +0.002 rad/s` (4 prior sigmas). The bridge adds it to gz
+  (`specificworker.cpp:2567`); the model's `b_omega` has the PHYSICAL sign (gyro reads ω + b), so the
+  answer is **`b_omega` → +0.002**. `mask = 1` cannot touch it; `mask = −1` can.
+
+**Endpoints** (`tools/arm7_setup.sh report` → `tools/arm7_report.py`), read on the LAST THIRD of each leg,
+where online learning has had time to act:
+1. **Correction load**, mm per metre (§6's working endpoint).
+2. **Surprise** (`surprise.h`, committed `0daa52a`): KL nats/m and Σ mismatch / Σ expected.
+3. Sim ground truth: heading error of the predicted increments, deg per rad turned.
+
+**Predictions.**
+- `gyro-all`: `b_omega` within 2σ of +0.002, AND last-third correction load BELOW `gyro-k`, AND
+  mismatch/expected closer to 1 than `gyro-k`. A wrong-sign `b_omega` (−0.002) = a sign defect in the
+  chain, not a calibration result.
+- `native-all` vs `native-k`: no harm — last-third load and deg/rad not worse beyond run-to-run noise. A
+  null here is the expected outcome, not a failure: `k_omega_w` was still uninformed (σ 0.150 = its prior)
+  after 100 m on the 2026-10-03 log, and the `informed` gate (σ < 0.9 prior) withholds it until it is.
+- If `gyro-all` passes and `native-all` does no harm, `mask = −1` becomes the default. The `informed`
+  gate (a threshold) is then the next thing to replace, by applying the joint posterior mean.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.
