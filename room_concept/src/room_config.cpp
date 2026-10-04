@@ -480,6 +480,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawCorrection", p.IMAGE_EDGE_MOUNT_YAW_CORR);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.mountApply", p.IMAGE_EDGE_MOUNT_APPLY);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.mountPublish", p.IMAGE_EDGE_MOUNT_PUBLISH);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.mountDescriptionFile", p.IMAGE_EDGE_MOUNT_DESCRIPTION);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.wallPositionSigma", p.IMAGE_EDGE_WALL_POS_SIGMA);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.useTriplePoints", p.IMAGE_EDGE_USE_TRIPLE_POINTS);
 

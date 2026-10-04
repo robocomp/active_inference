@@ -1794,27 +1794,18 @@ mountApply = true
 #   SpecificWorker::publish_mount_to_graph — that separation, not a magnitude limit, is what makes
 #   it safe to leave running.
 #
-# ⚠⚠ NOT BUILT, AND THE REASON THIS IS OFF BY DEFAULT: THE VALUE IS NOT PERSISTED, AND ACROSS A
-#    RESTART IT STOPS BEING AN OUTPUT. A new process binds to whatever the edge holds, so today's
-#    published value becomes tomorrow's prior anchor and tomorrow's nominal. Within a session the
-#    loop is stationary; across sessions it can random-walk by its own posterior sigma, because
-#    after the first publish nothing outside the loop still holds the mount's independently measured
-#    value. Two consequences, both deliberate:
-#      · the graph is PERSISTENT, so the published value already survives a room_concept restart —
-#        it is not lost, it is simply no longer distinguishable from the nominal.
-#      · robot_concept rewrites body->camera from Transforms.boresight_yaw_<cam> at every start. That
-#        write now treats a configured 0 as "never measured" and leaves a non-zero edge alone, so it
-#        can no longer silently revert a published correction (robot_concept/src/specificworker.cpp).
-#
-#    THE STEP THAT CLOSES IT, and it is the right place for it: write the converged mount back into
-#    the ROBOT'S JSON (robot_concept/shadow.json), which is the description of the physical mount.
-#    Then the prior is anchored on a measurement the loop never writes, a cold start begins
-#    calibrated, and "has it converged?" becomes a question about a file rather than about a graph
-#    the estimator itself edits. robot_concept owns that file and already traps SIGINT/SIGTERM ->
-#    request_shutdown(), so doing it ON A GRACEFUL STOP is the natural home: read body->camera, write
-#    the mount block, log what changed. Not implemented. Until it is, treat a published value as
-#    good for the session and re-derivable from etc/camera_calib_<robot>_<cam>.txt.
+# ★ ON since 2026-09; the cross-restart problem it had is CLOSED (2026-10-04) by mountDescriptionFile below.
+#   Before that, the nominal the estimator measured against was read from the graph, i.e. from this
+#   loop's own earlier output, and robot_concept saved the edge over the JSON at every stop
+#   (persist_mounts_on_stop) — a ratchet: ricoh yaw crept -0.05 -> -0.14 deg over 13 restarts, and on
+#   10-04 cold-start estimates (camera evidence wiped for an experiment) were persisted as the mount:
+#   zed 14 cm high / -1.3 deg pitch, ricoh 12 cm low (robot_concept/etc/mount_calib_Shadow.txt rev 14-15).
 mountPublish = true
+# ── mountDescriptionFile: the robot description that ANCHORS the mount ───────────────────────────
+# The nominal body->camera edge is read from this file (the robot's DSR JSON), never from the graph, so
+# the graph is purely an output and a restart cannot turn last session's answer into this session's
+# prior. Empty = the old graph-anchored behaviour. Path relative to room_concept's working directory.
+mountDescriptionFile = "../robot_concept/shadow.json"
 # ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
 #   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
 #   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the

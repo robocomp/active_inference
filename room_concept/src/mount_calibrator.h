@@ -18,6 +18,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,10 @@ namespace rc
                                const rc::mount::Accum::Solution& sol, const std::string& cam);
         void publish_mount_to_graph(rc::camcal::Estimator& pool, const rc::CameraIngestor& ing,
                                     const std::string& cam);
+        /// The parent->camera RT edge as the ROBOT DESCRIPTION states it (ImageEdge.mountDescriptionFile),
+        /// as (translation, euler xyz). nullopt when no file is configured or the edge is not in it.
+        std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>>
+            description_mount(const std::string& parent, const std::string& cam) const;
         void reconcile_mount_nominal(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
                                      const std::string& cam);
         void loop_closure_observe(const std::string& cam, int vertex, bool ceiling,

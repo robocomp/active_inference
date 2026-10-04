@@ -425,6 +425,7 @@ struct RoomConfig
     /// the estimator keeps measuring against the extrinsic it read at bind (see
     /// SpecificWorker::publish_mount_to_graph for why that separation is the whole safety argument).
     bool  IMAGE_EDGE_MOUNT_PUBLISH     = false;   // ImageEdge.mountPublish
+    std::string IMAGE_EDGE_MOUNT_DESCRIPTION;     // ImageEdge.mountDescriptionFile: the robot JSON = the mount NOMINAL
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)

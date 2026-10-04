@@ -1,4 +1,8 @@
 #include "mount_calibrator.h"
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QFile>
 
 #include "room_viewer.h"
 
@@ -91,13 +95,106 @@ void MountCalibrator::apply_mount_solve(rc::camcal::Estimator &pool, rc::CameraI
 ///   never is. Re-centring the prior on the estimator's own last answer removes the prior's pull, and
 ///   publishes happen every window — that asymmetry is the whole reason this function is not two
 ///   lines.
+std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>>
+MountCalibrator::description_mount(const std::string &parent, const std::string &cam) const
+{
+    if (params.IMAGE_EDGE_MOUNT_DESCRIPTION.empty()) return std::nullopt;
+    QFile f(QString::fromStdString(params.IMAGE_EDGE_MOUNT_DESCRIPTION));
+    if (not f.open(QIODevice::ReadOnly)) return std::nullopt;
+    const QJsonObject symbols = QJsonDocument::fromJson(f.readAll()).object()
+                                    .value("DSRModel").toObject().value("symbols").toObject();
+    QString parent_id, cam_id;
+    for (const auto &v : symbols)
+    {
+        const auto o = v.toObject();
+        if (o.value("name").toString() == QString::fromStdString(parent)) parent_id = o.value("id").toString();
+        if (o.value("name").toString() == QString::fromStdString(cam))    cam_id    = o.value("id").toString();
+    }
+    if (parent_id.isEmpty() or cam_id.isEmpty()) return std::nullopt;
+    for (const auto &link : symbols.value(parent_id).toObject().value("links").toArray())
+    {
+        const auto l = link.toObject();
+        if (l.value("dst").toString() != cam_id or l.value("label").toString() != "RT") continue;
+        const auto la = l.value("linkAttribute").toObject();
+        const auto t = la.value("rt_translation").toObject().value("value").toArray();
+        const auto r = la.value("rt_rotation_euler_xyz").toObject().value("value").toArray();
+        if (t.size() < 3 or r.size() < 3) return std::nullopt;
+        return std::pair{Eigen::Vector3f(t[0].toDouble(), t[1].toDouble(), t[2].toDouble()),
+                         Eigen::Vector3f(r[0].toDouble(), r[1].toDouble(), r[2].toDouble())};
+    }
+    return std::nullopt;
+}
+
 void MountCalibrator::reconcile_mount_nominal(rc::camcal::Estimator &pool, rc::CameraIngestor &ing,
                                              const std::string &cam)
 {
-    const Eigen::Matrix3f graph_R = ing.base_R();       // as just bound, i.e. what the graph says
-    const Eigen::Vector3f graph_t = ing.base_t();
+    Eigen::Matrix3f graph_R = ing.base_R();             // as just bound, i.e. what the graph says
+    Eigen::Vector3f graph_t = ing.base_t();
     const Eigen::Vector4d ap = pool.applied();
     const bool has_corr = ap.head<3>().cwiseAbs().maxCoeff() > 1e-12;
+
+    // The description's edge becomes the publish nominal on EVERY exit path below: adopt_external_nominal
+    // clears the stored edge nominal, so setting it once up here would be undone by that branch.
+    std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>> desc_edge;
+    struct EdgeNominalOnExit
+    {
+        rc::camcal::Estimator &pool;
+        const std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>> &edge;
+        ~EdgeNominalOnExit() { if (edge.has_value()) pool.set_edge_nominal(edge->first, edge->second); }
+    } edge_nominal_on_exit{pool, desc_edge};
+
+    // ── THE NOMINAL IS THE ROBOT DESCRIPTION, NEVER THE GRAPH (2026-10-04) ───────────────────────
+    // The graph's body->camera edge is this loop's OUTPUT (mountPublish), and robot_concept saved it
+    // back over the JSON at every graceful stop (persist_mounts_on_stop) and re-applied it at start.
+    // So the nominal this function compared against was, after any restart, the loop's own earlier
+    // answer: a slow ratchet (ricoh yaw -0.05 -> -0.14 deg over 13 restarts, 2026-09-12..10-03), and
+    // on 10-04, after the camera evidence was wiped for an experiment, cold-start estimates published
+    // and persisted as the mount: zed 14 cm high and -1.3 deg pitch, ricoh 12 cm low
+    // (robot_concept/etc/mount_calib_Shadow.txt, revisions 14-15).
+    // When the description file is configured, the base the ingestor measures against is re-derived
+    // from it: with E = parent->camera and base = cam<-robot = E^-1 * C^-1 for the chain C above it,
+    //     base_desc = E_desc^-1 * E_graph * base_graph,
+    // which needs nothing above the camera's own link. Whatever the graph holds then no longer matters:
+    // the comparisons below run against the DESCRIPTION, and the graph is purely an output again.
+    if (auto cn = G->get_node(cam); cn.has_value())
+        if (const auto pid = G->get_attrib_by_name<parent_att>(cn.value()); pid.has_value())
+            if (auto pn = G->get_node(pid.value()); pn.has_value())
+                if (const auto desc = description_mount(pn->name(), cam); desc.has_value())
+                    if (const auto e = G->get_edge(pn->id(), cn->id(), "RT"); e.has_value())
+                    {
+                        const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+                        const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
+                        if (rot.has_value() and tr.has_value() and rot.value().get().size() >= 3
+                            and tr.value().get().size() >= 3)
+                        {
+                            const auto E = [](const Eigen::Vector3f &t, const Eigen::Vector3f &r)
+                            {
+                                Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+                                T.block<3, 3>(0, 0) = (Eigen::AngleAxisf(r.x(), Eigen::Vector3f::UnitX())
+                                                     * Eigen::AngleAxisf(r.y(), Eigen::Vector3f::UnitY())
+                                                     * Eigen::AngleAxisf(r.z(), Eigen::Vector3f::UnitZ())).toRotationMatrix();
+                                T.block<3, 1>(0, 3) = t;
+                                return T;
+                            };
+                            const auto &gr = rot.value().get(); const auto &gt = tr.value().get();
+                            const Eigen::Matrix4f E_graph = E({gt[0], gt[1], gt[2]}, {gr[0], gr[1], gr[2]});
+                            const Eigen::Matrix4f E_desc  = E(desc->first, desc->second);
+                            Eigen::Matrix4f B = Eigen::Matrix4f::Identity();
+                            B.block<3, 3>(0, 0) = graph_R; B.block<3, 1>(0, 3) = graph_t;
+                            const Eigen::Matrix4f B_desc = E_desc.inverse() * E_graph * B;
+                            graph_R = B_desc.block<3, 3>(0, 0);
+                            graph_t = B_desc.block<3, 1>(0, 3);
+                            ing.set_base(graph_R, graph_t);
+                            desc_edge = desc;                                    // the publish composes on it
+                            mount_publish_[cam].have_nominal = false;            // re-read from the pool
+                            qInfo().noquote() << QString::asprintf(
+                                "[camcal] %s: nominal mount taken from the robot DESCRIPTION %s"
+                                " (t [%+.4f %+.4f %+.4f]); the graph edge differed from it by %.2e.",
+                                cam.c_str(), params.IMAGE_EDGE_MOUNT_DESCRIPTION.c_str(),
+                                desc->first.x(), desc->first.y(), desc->first.z(),
+                                static_cast<double>((E_graph - E_desc).cwiseAbs().maxCoeff()));
+                        }
+                    }
 
     if (not pool.have_base())
     {
