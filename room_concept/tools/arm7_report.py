@@ -33,8 +33,12 @@ def load(path):
     return {k: a[:, i] for i, k in enumerate(h)}
 
 
-def thirds(n):
-    return [slice(k * n // 3, (k + 1) * n // 3) for k in range(3)]
+def thirds_by_path(x, y):
+    """Row slices covering equal thirds of the DISTANCE driven. Thirds of time are wrong: a leg that
+    finishes its route and then sits parked puts all its driving in the first third (arm 7 leg 1)."""
+    c = np.r_[0.0, np.cumsum(np.hypot(np.diff(x), np.diff(y)))]
+    cuts = [0] + [int(np.searchsorted(c, c[-1] * k / 3)) for k in (1, 2)] + [len(x)]
+    return [slice(cuts[k], cuts[k + 1]) for k in range(3)]
 
 
 def grade(d):
@@ -44,7 +48,7 @@ def grade(d):
     corr = np.hypot(ex - px, ey - py)                        # what the optimiser removed, per row
     step = np.r_[0.0, np.hypot(np.diff(ex), np.diff(ey))]    # path driven, per row
     out = {"T": t[-1], "path": step.sum()}
-    out["load"] = [1000 * corr[s].sum() / max(step[s].sum(), 1e-9) for s in thirds(len(t))]
+    out["load"] = [1000 * corr[s].sum() / max(step[s].sum(), 1e-9) for s in thirds_by_path(ex, ey)]
     out["load_all"] = 1000 * corr.sum() / max(step.sum(), 1e-9)
     # ground truth: predicted increments vs true increments, 5-s windows with motion
     gx, gy, gth = d["gt_x"], d["gt_y"], d["gt_th"]
@@ -75,8 +79,8 @@ def sur(path):
     rows = sr.load(path)
     if not rows:
         return None
-    n = len(rows)
-    return sr.summary(rows), [sr.summary(rows[s]) for s in thirds(n)]
+    sl = thirds_by_path(np.array([r["x"] for r in rows]), np.array([r["y"] for r in rows]))
+    return sr.summary(rows), [sr.summary(rows[s]) for s in sl]
 
 
 def main():

@@ -77,16 +77,20 @@ def main():
         lines.append((name, fmt(s['T'], '{:.0f}'), fmt(s['L'], '{:.1f}'), str(s['nsc']), fmt(s['kl']),
                       fmt(s['kl_s']), fmt(s['kl_m']), fmt(s['med']), fmt(s['mis']), fmt(s['info']),
                       f"{fmt(s['ratio'], '{:.2f}')} [{fmt(s['lo'], '{:.2f}')}, {fmt(s['hi'], '{:.2f}')}]"))
-        t0, T = rows[0]['t'], s['T']
-        parts = [[r for r in rows if k * T / 3 <= r['t'] - t0 < (k + 1) * T / 3 + (1e-9 if k == 2 else 0)]
-                 for k in range(3)]
+        # thirds of the DISTANCE driven, not of time: a leg that parks after its route would put all
+        # of its driving in the first third
+        cum = [0.0]
+        for a, b in zip(rows, rows[1:]):
+            cum.append(cum[-1] + math.hypot(b['x'] - a['x'], b['y'] - a['y']))
+        cut = [0] + [next(i for i, c in enumerate(cum) if c >= cum[-1] * k / 3) for k in (1, 2)] + [len(rows)]
+        parts = [rows[cut[k]:cut[k + 1]] for k in range(3)]
         thirds.append((name, [summary(q) if len(q) > 1 else None for q in parts]))
     if len(lines) > 1:
         w = [max(len(l[i]) for l in lines) for i in range(len(lines[0]))]
         for l in lines:
             print('  '.join(c.rjust(w[i]) for i, c in enumerate(l)))
     for name, parts in thirds:
-        print(f'\n{name} by thirds of the run   (nats/s | nats/m | mis/expected)')
+        print(f'\n{name} by thirds of the distance driven   (nats/s | nats/m | mis/expected)')
         for k, s in enumerate(parts):
             if s is None: continue
             print(f'  {k + 1}/3  {fmt(s["kl_s"]):>8} | {fmt(s["kl_m"]):>8} | {fmt(s["ratio"], "{:.2f}"):>5}'
