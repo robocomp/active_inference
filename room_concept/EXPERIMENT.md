@@ -1166,6 +1166,32 @@ per-window error is random. `native-all` replayed the same way is best at b = 0,
 target +0.002 at the gyro. The moving-cycle LS of +0.0034 is the noisier, confounded estimator; where it
 lands between them is the finding.
 
+### Arm 7 — VERDICT, 2026-10-04: `MotionCalibApplyMask = -1` is the default.
+
+Re-run of `gyro-all` after the two fixes (`6bab57e`), same bridge session and dose as the failed leg:
+
+| | failed leg (pre-fix) | re-run (fixed) |
+|---|---|---|
+| `b_omega` | +0.00001 ± 0.00050 (prior) | **+0.00065 ± 0.00025, informed** |
+| predicted heading drift while moving, deg/s, thirds | +0.130 / +0.125 / +0.139 | **+0.095 / +0.058 / +0.025** |
+| heading error, moving 5-s windows | 1.73 deg rms, 0.80 deg/rad | **1.39 deg rms, 0.66 deg/rad** |
+| correction load, mm/m | 32.9 | 9.6 |
+| surprise, nats/m | 12.8 | 2.8 |
+
+- **Online application works when there is something to correct.** The injected bias (0.115 deg/s at the
+  gyro) is learnt out of the prediction during the leg: ~80% of the systematic drift is gone by the last third.
+- **Attribution is shared.** `b_omega` reaches only a third of the injected value; `k_omega` (-0.0059 ±
+  0.0029) and `k_omega_w` (+0.091 ± 0.093, the sim wheels' known ~8% over-rotation) absorb the rest. The
+  heading parameters are correlated on this route; the PREDICTION is what is identified, the split is not.
+  Pre-registered "b_omega within 2 sigma of +0.002": NOT met; what the prediction needs: met.
+- **Native pair: no harm, no measurable gain** (moving-window rms 1.547 vs 1.541 deg). The last-third
+  correction-load gap (11.2 vs 3.1) is inside the session noise shown at 30-60 m, where both legs ran the same
+  effective config and differed 6x.
+- `gyro-k` NOT run: with `k_v` only, `b_omega` cannot act by construction.
+- **Open, not blocking:** mismatch/expected 0.11-0.27 on every leg — the motion model is ~5x UNDER-confident
+  (its covariance, not its mean); the `informed` gate (σ < 0.9 prior) is still a threshold; the motion state
+  saved before arm 7 was written under the units bug and is NOT restored (cold start).
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.

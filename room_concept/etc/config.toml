@@ -973,7 +973,7 @@ MotionCalibEnabled  = true
 # With apply=false the covariate stays raw and the residual stays the FULL error, so recovery should
 # jump toward 100%. Any account not involving feedback predicts no change.
 # ⚠ TRUE for all normal operation. The robot drives UNCALIBRATED while this is false.
-MotionCalibApply = true    # normal operation. false = open-loop arm (estimate, do not apply).
+MotionCalibApply    = true    # normal operation. false = open-loop arm (estimate, do not apply).
 # Which parameters may ACT, bitmask: 1=k_v 2=eps_yaw 4=k_omega 8=b_omega 16=k_lat 32=dk_wheel.
 # -1 = all (normal). 1 = forward scale only. Estimation and logging are unaffected either way.
 # ⚠ THE FINDING THAT PUT THIS AT 1 WAS RETRACTED, 2026-08-31. It read: "with everything applied
@@ -985,7 +985,7 @@ MotionCalibApply = true    # normal operation. false = open-loop arm (estimate, 
 # both. The heading parameters remain the badly-conditioned ones, which is a reason for caution,
 # not evidence against them. Setting -1 costs nothing measured and is the honest default if the
 # heading channel is ever wanted; left at 1 pending arm 4.
-MotionCalibApplyMask = 1
+MotionCalibApplyMask = -1
                         # 262 m ON vs 105 m OFF, per-60s windows, bursts excluded, err/m 0.0263 ->
                         # 0.0303 when OFF (+14.9%, t=2.67 z=2.31). It lowers the error FLOOR; it does
                         # not flatten the sawtooth — a ramp of the same slope starts lower and takes
