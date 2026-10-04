@@ -4,6 +4,7 @@
  */
 
 #include "lidar_ingestor.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 #include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 
 #include <algorithm>
@@ -223,7 +224,7 @@ bool LidarIngestor::pump()
                 band_report_ms_ = tnow;
                 const double n = std::max(1L, band_in_);
                 const double hn = std::max(1L, band_in_);
-                std::println("[band] {:.1f}-{:.2f} m keeps {}/{} pts/sweep ({:.1f}%) | z mean {:.2f} "
+                rc::status::println("[band] {:.1f}-{:.2f} m keeps {}/{} pts/sweep ({:.1f}%) | z mean {:.2f} "
                              "span {:.2f}..{:.2f} | mean ground range {:.2f} m | z sixths "
                              "{:.0f}/{:.0f}/{:.0f}/{:.0f}/{:.0f}/{:.0f}% (top bin = ceiling if it spikes)",
                              min_h_m, max_h_m,
@@ -245,7 +246,7 @@ bool LidarIngestor::pump()
     const auto now = QDateTime::currentMSecsSinceEpoch();
     if (last_src_report_ms_ == 0 || now - last_src_report_ms_ >= 5000)
     {
-        std::println("[LidarSrc] 5s media fresh={} served={}", fresh_frames_, served_);
+        rc::status::println("[LidarSrc] 5s media fresh={} served={}", fresh_frames_, served_);
         fresh_frames_ = served_ = 0;
         last_src_report_ms_ = now;
     }
@@ -498,7 +499,7 @@ void LidarIngestor::update_ceiling_cap(bool startup)
         measured_ceiling_pts_.store(ceil_cnt, std::memory_order_relaxed);
         measured_ceiling_sigma_.store(ceil_sigma, std::memory_order_relaxed);
         if (log_now(verdict))
-        std::println("[CeilingCheck] CEILING at body z = {:.3f} +/- {:.3f} m ({} pts, peak bin {:.2f}): "
+        rc::status::println("[CeilingCheck] CEILING at body z = {:.3f} +/- {:.3f} m ({} pts, peak bin {:.2f}): "
                      "r_peak={:.2f} m matches the annulus prediction {:.2f} m (inner edge {:.2f} m) "
                      "better than the wall {:.2f} m -> high band capped at {:.2f} m. The sigma is the "
                      "plane's SPREAD, not spread/sqrt(n): a leaky histogram holds the same plane over "
@@ -510,7 +511,7 @@ void LidarIngestor::update_ceiling_cap(bool startup)
     {
         high_max_z_ = cfg_max;
         if (log_now(verdict))
-        std::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) is WALL-TOP: r_peak={:.2f} m is closer to "
+        rc::status::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) is WALL-TOP: r_peak={:.2f} m is closer to "
                      "the wall {:.2f} m than to the annulus prediction {:.2f} m (inner edge {:.2f} m) -> "
                      "high band kept at config max {:.2f} m (top-wall points retained for the SDF).",
                      ceil_z, ceil_cnt, r_peak, pred_wall, pred_ceiling, r_in, cfg_max);
@@ -520,7 +521,7 @@ void LidarIngestor::update_ceiling_cap(bool startup)
         high_max_z_ = std::clamp(ceil_z - params_->LIDAR_CEILING_MARGIN,
                                  params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
         if (log_now(verdict))
-        std::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) but spatial test inconclusive "
+        rc::status::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) but spatial test inconclusive "
                      "(ref_n={}, peak_n={}) -> conservatively capped at {:.2f} m.",
                      ceil_z, ceil_cnt, static_cast<int>(ref_n), static_cast<int>(peak_n), high_max_z_);
     }
@@ -528,7 +529,7 @@ void LidarIngestor::update_ceiling_cap(bool startup)
     {
         high_max_z_ = cfg_max;
         if (log_now(verdict))
-        std::println("[CeilingCheck] no z-density peak in [{:.2f}, {:.2f}] m (best {} pts) -> high band max = "
+        rc::status::println("[CeilingCheck] no z-density peak in [{:.2f}, {:.2f}] m (best {} pts) -> high band max = "
                      "config cutoff {:.2f} m (NOT an assumed ceiling; just where the band stops).",
                      clo, chi, ceil_cnt, cfg_max);
     }
@@ -571,24 +572,24 @@ void LidarIngestor::run_startup_geometry_check()
         if (bp_cnt > 0)
         {
             if (std::abs(bp_root) > params_->LIDAR_FLOOR_TOLERANCE)
-                std::println("[FloorCheck] WARNING: frame='{}' base_z={:.0f} mm | bpearl floor at world z = {:.0f} mm "
+                rc::status::println("[FloorCheck] WARNING: frame='{}' base_z={:.0f} mm | bpearl floor at world z = {:.0f} mm "
                              "(expected ~0, {} pts, {} sweeps) -> floor datum off by {:.0f} mm — check root height / "
                              "sensor mounts in shadow.json (helios ref {:.0f} mm is grazing, not the datum)",
                              params_->LIDAR_ROBOT_FRAME, base_z.value_or(0.0) * 1000.0, bp_root * 1000.f,
                              bp_cnt, geom_bpearl_sweeps_, bp_root * 1000.f, he_root * 1000.f);
             else
-                std::println("[FloorCheck] OK: frame='{}' base_z={:.0f} mm | bpearl floor at world z = {:.0f} mm "
+                rc::status::println("[FloorCheck] OK: frame='{}' base_z={:.0f} mm | bpearl floor at world z = {:.0f} mm "
                              "(within {:.0f} mm, {} pts) | helios ref {:.0f} mm (grazing, high by design)",
                              params_->LIDAR_ROBOT_FRAME, base_z.value_or(0.0) * 1000.0, bp_root * 1000.f,
                              params_->LIDAR_FLOOR_TOLERANCE * 1000.f, bp_cnt, he_root * 1000.f);
         }
         else
-            std::println("[FloorCheck] bpearl floor unavailable ({} sweeps) — helios floor {:.0f} mm is GRAZING "
+            rc::status::println("[FloorCheck] bpearl floor unavailable ({} sweeps) — helios floor {:.0f} mm is GRAZING "
                          "(upright lidar, floor >3 m out), not a reliable datum; skipping mount verdict.",
                          geom_bpearl_sweeps_, he_root * 1000.f);
     }
     else
-        std::println("[FloorCheck] floor verification skipped (helios_pts={}, bpearl_pts={}, root RT ready={})",
+        rc::status::println("[FloorCheck] floor verification skipped (helios_pts={}, bpearl_pts={}, root RT ready={})",
                      he_cnt, bp_cnt, base_z.has_value());
 
     update_ceiling_cap(/*startup=*/true);

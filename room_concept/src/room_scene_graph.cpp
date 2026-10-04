@@ -4,6 +4,7 @@
  */
 
 #include <chrono>
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 #include <thread>
 #include <cstdlib>
 #include <algorithm>
@@ -1236,7 +1237,7 @@ bool RoomSceneGraph::ensure_calib_node()
     if (not id.has_value())
     { qWarning() << "[calib] failed to create afford_calib"; return false; }
     trigger_layout_();
-    std::print("[calib] afford_calib created QUIESCENT with its contract: orient, no predicate — the "
+    rc::status::print("[calib] afford_calib created QUIESCENT with its contract: orient, no predicate — the "
                "rotation IS the goal; {:.0f}s per step, which is patience rather than a prediction. "
                "It will be armed next cycle, so the contract can never be read late.\n", kStepPatienceS);
     std::fflush(stdout);
@@ -1291,7 +1292,7 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     if (++calib_dbg_ % 1200 == 0)
     {
         const auto post = calib_.posterior();
-        std::print("[calib] rotation scale {:+.5f} +/- {:.5f} ({} windows, {} discarded, density "
+        rc::status::print("[calib] rotation scale {:+.5f} +/- {:.5f} ({} windows, {} discarded, density "
                    "{:.5f} rad/sqrt(s), {}) | diet {:.3f} rad/s | a pivot would be worth {:.3f} nats\n",
                    post.s, post.s_std, post.windows, calib_.poisoned_windows(), post.sigma,
                    post.identifiable() ? "MEASURED" : "still the prior",
@@ -1299,9 +1300,9 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
         // The true figure above is what the run is graded on; this is what the wire carries. They are
         // printed apart, on purpose, so no later reader can mistake one for the other.
         if (calib_.gain_is_forced())
-            std::print("[calib] ★TESTING: advertising {:.3f} nats instead of the {:.3f} it is worth\n",
+            rc::status::print("[calib] ★TESTING: advertising {:.3f} nats instead of the {:.3f} it is worth\n",
                        calib_.marginal_gain_nats(), calib_.true_marginal_gain_nats());
-        std::print("[calib] pricing {} posterior (k_omega sigma {:.4f})\n",
+        rc::status::print("[calib] pricing {} posterior (k_omega sigma {:.4f})\n",
                    calib_.authoritative_information() > 0.0 ? "the STEERING" : "its OWN passive",
                    calib_.authoritative_information() > 0.0
                        ? 1.0 / std::sqrt(calib_.authoritative_information()) : 0.0);
@@ -1336,17 +1337,17 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             }
             closures_seen_ = nclosed;
         }
-        std::print("[calib] pivot step -> {} | {} step(s), {:.1f} deg accumulated\n",
+        rc::status::print("[calib] pivot step -> {} | {} step(s), {:.1f} deg accumulated\n",
                    rc::affordance::to_string(outcome), calib_.pivot().steps_issued(),
                    calib_.pivot().accumulated_rad() * 180.0 / M_PI);
         if (cl.usable)
-            std::print("[calib] ★CLOSURE: odometry accumulated {:.1f} deg against {:.1f} deg of TRUTH "
+            rc::status::print("[calib] ★CLOSURE: odometry accumulated {:.1f} deg against {:.1f} deg of TRUTH "
                        "=> s_omega {:+.4f} ({:+.2f}%), resolved to {:.2f}%. No map, no survey, no "
                        "localiser in that number.\n",
                        cl.turned_rad * 180.0 / M_PI, cl.truth_rad * 180.0 / M_PI, cl.s_omega,
                        cl.s_omega * 100.0, cl.resolution * 100.0);
         else if (calib_.pivot().state() == rc::calib::PivotAffordance::State::Closed)
-            std::print("[calib] the pivot closed but the scale it measured ({:+.4f}) is finer than "
+            rc::status::print("[calib] the pivot closed but the scale it measured ({:+.4f}) is finer than "
                        "the closure resolves ({:.2f}%) — not a measurement, and not quoted as one.\n",
                        cl.s_omega, cl.resolution * 100.0);
 
@@ -1402,7 +1403,7 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                 calib_csv_.flush();
                 if (sep.solved)
                 {
-                    std::print("[calib] ★SEPARATED BY RATE: scale {:+.4f} +/- {:.4f}{} | bias "
+                    rc::status::print("[calib] ★SEPARATED BY RATE: scale {:+.4f} +/- {:.4f}{} | bias "
                                "{:+.5f} +/- {:.5f} rad/s{}. Two closures at {:.2f} and {:.2f} rad/s "
                                "— neither alone can tell these apart.\n",
                                sep.k_omega, sep.sigma_k, sep.usable_k ? "" : " (below resolution)",
@@ -1557,7 +1558,7 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
         // ever clear it.
         calib_.mark_offered();
         calib_armed_at_ms_ = static_cast<std::uint64_t>(res.timestamp_ms);
-        std::print("[calib] offering step {} of {}: turn to {:.0f} deg, worth {:.3f} nats\n",
+        rc::status::print("[calib] offering step {} of {}: turn to {:.0f} deg, worth {:.3f} nats\n",
                    calib_.pivot().steps_issued() + 1, 3 * 4 /* turns x steps-per-turn */,
                    calib_bearing_rad_ * 180.0 / M_PI, calib_.marginal_gain_nats());
         std::fflush(stdout);
@@ -1618,7 +1619,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                            : outcome == Outcome::Unreachable ? 6
                            : outcome == Outcome::OutsideRoom ? 7 : 0;
         ++aff_completions_;
-        std::print("[planner] completion consumed (outcome={}) -> target cleared, {}\n",
+        rc::status::print("[planner] completion consumed (outcome={}) -> target cleared, {}\n",
                    rc::affordance::to_string(outcome),
                    observed ? "belief refreshed" : "belief NOT refreshed (nothing was observed)");
         std::fflush(stdout);
@@ -1663,13 +1664,13 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // handled like the others so the run continues, but it is worth its own line: no amount of
         // driving fixes a cell that does not exist in the layout.
         if (outcome == Outcome::OutsideRoom)
-            std::print("[planner] ★the consumer says ({:.2f},{:.2f}) is OUTSIDE the room layout — "
+            rc::status::print("[planner] ★the consumer says ({:.2f},{:.2f}) is OUTSIDE the room layout — "
                        "that cell should never have been offered; check the exploration grid extent "
                        "against the room polygon\n", armed_tx_, armed_ty_);
         if (approach_failed and not std::isnan(armed_tx_) and not std::isnan(armed_ty_))
         {
             planner.mark_target_finished(Eigen::Vector2f(armed_tx_, armed_ty_));
-            std::print("[planner] {} at ({:.2f},{:.2f}) — nothing observed there; cell de-prioritised "
+            rc::status::print("[planner] {} at ({:.2f},{:.2f}) — nothing observed there; cell de-prioritised "
                        "(decaying attempt suppressor, neglect untouched), selecting elsewhere\n",
                        rc::affordance::to_string(outcome), armed_tx_, armed_ty_);
         }
@@ -1703,7 +1704,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                     ? std::chrono::duration<float>(
                           std::chrono::steady_clock::now() - stall_last_progress_).count()
                     : 0.f;
-                std::print("[planner] afford_room EXECUTING (controller-claimed) — target "
+                rc::status::print("[planner] afford_room EXECUTING (controller-claimed) — target "
                            "({:.2f},{:.2f}) d={:.2f}m best={:.2f}m no_progress={:.1f}s/{:.0f}s "
                            "episode_cycles={}\n",
                            t ? t->position.x() : 0.f, t ? t->position.y() : 0.f,
@@ -1758,7 +1759,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                 if (now_ms - armed_at_ms_ > kExecutionLeaseMs)
                 {
-                    std::print("[planner] afford_room claim held {:.1f}s without completing — LEASE "
+                    rc::status::print("[planner] afford_room claim held {:.1f}s without completing — LEASE "
                                "EXPIRED, reclaiming ({:.2f},{:.2f}) and selecting elsewhere\n",
                                (now_ms - armed_at_ms_) / 1000.f, armed_tx_, armed_ty_);
                     std::fflush(stdout);
@@ -1779,7 +1780,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                 if (now_ms - armed_at_ms_ > kOfferUnclaimedMs and planner.current_target())
                 {
-                    std::print("[planner] afford_room OFFERED for {:.1f}s and never claimed — retiring "
+                    rc::status::print("[planner] afford_room OFFERED for {:.1f}s and never claimed — retiring "
                                "({:.2f},{:.2f}) and selecting elsewhere\n",
                                (now_ms - armed_at_ms_) / 1000.f, armed_tx_, armed_ty_);
                     std::fflush(stdout);
@@ -1807,7 +1808,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                 if (is_armed_target and not armed_retired_)
                 {
                     armed_retired_ = true;
-                    std::print("[planner] afford_room COMPLETED (level-triggered) — retiring target "
+                    rc::status::print("[planner] afford_room COMPLETED (level-triggered) — retiring target "
                                "({:.2f},{:.2f}) at d={:.2f}m; re-selecting\n",
                                done.x(), done.y(), (done - planner.robot_pos()).norm());
                     std::fflush(stdout);
@@ -1834,7 +1835,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // the planner is mid-dwell with a cleared target, or evaluate_targets bailed before the
         // STARVED diagnostic (room bounds / robot state not yet set).
         if (++no_target_dbg_ % 90 == 0)
-            std::print("[planner] update_target() returned NOTHING — no affordance published "
+            rc::status::print("[planner] update_target() returned NOTHING — no affordance published "
                        "(dwell or unset room/robot state); {} cycles\n", no_target_dbg_);
         std::fflush(stdout);
         return;
@@ -1925,7 +1926,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                       : (not active and not pending) ? "COMPLETED(stuck?)" : "INVALID";
     const bool offered = (not active and pending);
     if (++publish_dbg_ % 90 == 0 or not offered)
-        std::print("[planner] publish target=({:.2f},{:.2f}) yaw={:.2f} gain={:.3f} rot_in_place={} "
+        rc::status::print("[planner] publish target=({:.2f},{:.2f}) yaw={:.2f} gain={:.3f} rot_in_place={} "
                    "accepted={} -> afford_room state={}\n",
                    tx, ty, yaw, gain, target_opt->rotate_in_place, published, state);
     std::fflush(stdout);
@@ -2017,7 +2018,7 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
         const int ours = rc::AffordanceManager::producer_epoch(G_, aff_id).value_or(claim->epoch);
         if (claim->epoch < ours and ++exec_stale_epoch_reports_ % 90 == 1)
         {
-            std::print("[planner] afford_room — the consumer is executing epoch {} at ({:.2f},{:.2f}) "
+            rc::status::print("[planner] afford_room — the consumer is executing epoch {} at ({:.2f},{:.2f}) "
                        "while we are offering epoch {} at ({:.2f},{:.2f}). WAITING: it is closer to "
                        "finishing than to restarting, and the no-progress clock now watches ITS pose. "
                        "Withdraw explicitly if this proposal must be preempted.\n",
@@ -2028,7 +2029,7 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
     }
     else if (someone_claims and ++exec_stale_epoch_reports_ % 900 == 1)
     {
-        std::print("[planner] afford_room is claimed by a consumer that publishes no executing pose "
+        rc::status::print("[planner] afford_room is claimed by a consumer that publishes no executing pose "
                    "(pre-rollout). Falling back to measuring against our own target — rebuild it to "
                    "close this gap.\n");
         std::fflush(stdout);
@@ -2203,7 +2204,7 @@ void RoomSceneGraph::log_table_landmarks()
         if (not has_obs) continue;
 
         if (throttle_log)
-            std::print("[table-landmark] #{} room=({:.3f},{:.3f},{:.2f}) obs_robot=({:.3f},{:.3f}) "
+            rc::status::print("[table-landmark] #{} room=({:.3f},{:.3f},{:.2f}) obs_robot=({:.3f},{:.3f}) "
                        "robot=({:.2f},{:.2f},{:.2f}) alive={} age={} fresh_w={:.3f} cov_ratio={:.1f} "
                        "ray_align={:.2f} parent='{}'\n",
                        n.id(), wx, wy, wyaw, ox, oy, rx, ry, rth, alive, age, fresh_weight,
@@ -2294,14 +2295,14 @@ void RoomSceneGraph::refresh_object_anchors()
         }
         std::string cls_list;
         for (const auto& c : cfg.subtypes) { if (not cls_list.empty()) cls_list += ','; cls_list += c; }
-        std::print("[room][anchors] classes=[{}] nodes={} with_obj_obs_robot={} anchors_used={}\n",
+        rc::status::print("[room][anchors] classes=[{}] nodes={} with_obj_obs_robot={} anchors_used={}\n",
                    cls_list, n_nodes, with_obs, anchors.size());
         if (not anchors.empty())
         {
             const auto& a = anchors.front();
             // Λdiag≈0 ⇒ map cov Σ_o came back huge (factor muted). p_o vs z_o wildly apart ⇒ frame bug;
             // near-equal (after the R(-θ) transform) ⇒ anchor satisfied (0 loss is then correct).
-            std::print("[room][anchors]   a0 type={} p_o=({:.2f},{:.2f},{:.2f}) z_o=({:.2f},{:.2f}) "
+            rc::status::print("[room][anchors]   a0 type={} p_o=({:.2f},{:.2f},{:.2f}) z_o=({:.2f},{:.2f}) "
                        "Λdiag=({:.2f},{:.2f}) has_yaw={}\n",
                        a.type, a.pose_world.x(), a.pose_world.y(), a.pose_world.z(),
                        a.obs_robot.x(), a.obs_robot.y(), a.information(0, 0), a.information(1, 1),
@@ -2317,7 +2318,7 @@ void RoomSceneGraph::refresh_object_anchors()
                 if (const auto pn = G_->get_node(p.value()); pn.has_value())
                     parent_name = pn->name();
             if (const auto rt = rt_api_->get_RT_pose_from_parent(n); rt.has_value())
-                std::print("[room][anchors]   RAW {} #{} parent='{}' t=({:.2f},{:.2f})\n",
+                rc::status::print("[room][anchors]   RAW {} #{} parent='{}' t=({:.2f},{:.2f})\n",
                            n.name(), n.id(), parent_name,
                            rt->translation().x(), rt->translation().y());
             break;   // first table only

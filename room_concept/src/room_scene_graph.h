@@ -20,6 +20,7 @@
 // threading state; SpecificWorker calls update() on fresh localization frames.
 
 #include <chrono>
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -74,7 +75,7 @@ public:
         // point -- the offer looks like any other offer -- and the one thing that must not happen is
         // a run being graded on it weeks later because nobody remembered the flag was on.
         if (cp.forced_gain_nats > 0.0)
-            std::print("[calib] ★TESTING: the advertised gain is FORCED to {:.3f} nats. afford_calib "
+            rc::status::print("[calib] ★TESTING: the advertised gain is FORCED to {:.3f} nats. afford_calib "
                        "will win contests it has not earned; the true valuation is logged beside it "
                        "and is the only one that means anything.\n", cp.forced_gain_nats);
     }

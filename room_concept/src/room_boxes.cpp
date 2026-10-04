@@ -1,4 +1,5 @@
 #include "room_boxes.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include <algorithm>
 #include <array>
@@ -1279,7 +1280,7 @@ namespace rc::boxes
             Eigen::Vector2f lo(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
             Eigen::Vector2f hi(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
             for (const auto& b : L.boxes) { lo = lo.cwiseMin(b.lo); hi = hi.cwiseMax(b.hi); }
-            std::fprintf(stderr, "[reg] call=%d npts=%zu boxes=%zu ext=%.2fx%.2f beta=%.4f w_prior=%.3f "
+            rc::status::cprintf_err("[reg] call=%d npts=%zu boxes=%zu ext=%.2fx%.2f beta=%.4f w_prior=%.3f "
                                  "map_info=%.1f ratio=%.0f "
                                  "cost=%.4f iters=%d step=%.3f dtheta=%+.2fdeg covtr=%.5f\n",
                          ++call, pts.size(), L.boxes.size(),

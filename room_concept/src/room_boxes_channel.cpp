@@ -1,4 +1,5 @@
 #include "room_boxes_channel.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include <algorithm>
 #include <cmath>
@@ -1262,22 +1263,22 @@ namespace rc::boxch
             static const bool probe = std::getenv("WS_IG_PROBE") != nullptr;
             if (probe)
             {
-                std::fprintf(stderr, "[refine] %zu faces (of %zu offsets, cov %ld) worst=%zu var=%.4g "
+                rc::status::cprintf_err("[refine] %zu faces (of %zu offsets, cov %ld) worst=%zu var=%.4g "
                                      "mid=(%.2f,%.2f) nrm=(%+.0f,%+.0f) | vars:",
                              faces.size(), L_.n_offsets(), static_cast<long>(L_.cov.rows()), worst,
                              faces[worst].var, faces[worst].mid.x(), faces[worst].mid.y(),
                              faces[worst].nrm.x(), faces[worst].nrm.y());
-                for (const auto& fc : faces) std::fprintf(stderr, " %.3g", std::sqrt(fc.var));
-                std::fprintf(stderr, " | off:");
-                for (const int o : face_off) std::fprintf(stderr, " %d", o);
-                std::fprintf(stderr, " | cloudpts:");
+                for (const auto& fc : faces) rc::status::cprintf_err(" %.3g", std::sqrt(fc.var));
+                rc::status::cprintf_err(" | off:");
+                for (const int o : face_off) rc::status::cprintf_err(" %d", o);
+                rc::status::cprintf_err(" | cloudpts:");
                 for (const int o : face_off)
                 {
                     int n = 0;
                     for (const auto& q : cloud_) if (rc::boxes::active_face(L_, q.p) == o) ++n;
-                    std::fprintf(stderr, " %d", n);
+                    rc::status::cprintf_err(" %d", n);
                 }
-                std::fprintf(stderr, "\n");
+                rc::status::cprintf_err("\n");
             }
 
             // ── WHEN IS THERE NOTHING LEFT TO LEARN ABOUT SHAPE? ────────────────────────────
@@ -1354,8 +1355,8 @@ namespace rc::boxch
                 for (int x = lox - 1; x <= hix + 1; ++x)
                     if (is_unknown(x, y))
                     { owed += p_room(x, y); if (is_inside(x, y)) ++claimed_unswept; }
-            std::fprintf(stderr, "[G] owed %.1f (claimed-unswept %d cells) | ", owed, claimed_unswept);
-            std::fprintf(stderr, "[G] cands=%zu pos=%d neg=%d | best=(%.2f,%.2f) score=%.1f"
+            rc::status::cprintf_err("[G] owed %.1f (claimed-unswept %d cells) | ", owed, claimed_unswept);
+            rc::status::cprintf_err("[G] cands=%zu pos=%d neg=%d | best=(%.2f,%.2f) score=%.1f"
                                  " = prec %.1f + cov %.1f + misfit %.1f - cost %.1f"
                                  " | misfit total %.1f over %zu faces | phase=%s\n",
                          (efe ? efe_cands.size() : reps.size()), n_pos, n_neg,
@@ -1561,7 +1562,7 @@ namespace rc::boxch
 
     bool Channel::rebuild_from_free()
     {
-        if (free_.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: free empty\n"); return false; }
+        if (free_.empty()) { if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[cover]   skip: free empty\n"); return false; }
         // Recompute only when the free set has grown by more than a twentieth since last time, or
         // when there is no layout yet. Nothing is lost: an unchanged cover would be recomputed to
         // the same answer.
@@ -1570,7 +1571,7 @@ namespace rc::boxch
         // registration ran against a region much smaller than the room, and the pose drifted to
         // 1.93 m with the gauge 9.9 degrees out. A hundredth costs more rebuilds and keeps the
         // reference honest.
-        if (not L_.empty() and free_.size() < free_at_rebuild_ + free_at_rebuild_ / 100) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: throttled\n"); return false; }
+        if (not L_.empty() and free_.size() < free_at_rebuild_ + free_at_rebuild_ / 100) { if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[cover]   skip: throttled\n"); return false; }
         free_at_rebuild_ = free_.size();
         std::set<std::pair<int, int>> F;
         // ⚠ ONE SWEEP IS ALREADY A MEASUREMENT. Requiring two was my own invention, and in a
@@ -1615,7 +1616,7 @@ namespace rc::boxch
         }
         else
             for (const auto& [k, n] : free_) if (n >= 1) F.insert(k);
-        if (F.size() < 12) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: F<12\n"); return false; }
+        if (F.size() < 12) { if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[cover]   skip: F<12\n"); return false; }
 
         std::set<std::pair<int, int>> covered;
         std::vector<rc::boxes::Box> out;
@@ -1680,7 +1681,7 @@ namespace rc::boxch
                      y < static_cast<int>(std::floor(best.hi.y() / p_.cell)); ++y)
                     covered.insert({x, y});
         }
-        if (out.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: no rectangles\n"); return false; }
+        if (out.empty()) { if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[cover]   skip: no rectangles\n"); return false; }
 
         // ── MERGE. A greedy cover is not a decomposition. ───────────────────────────────────
         // Picking maximal rectangles by area gain leaves the region correct but shredded: 45 boxes
@@ -1732,7 +1733,7 @@ namespace rc::boxch
             if (not t.valid()) continue;
             N.boxes.push_back(t);
         }
-        if (N.boxes.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: no boxes in layout frame\n"); return false; }
+        if (N.boxes.empty()) { if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[cover]   skip: no boxes in layout frame\n"); return false; }
 
         // ── ONE WRITER. THE COVER PROPOSES; mdl_cost DECIDES. ───────────────────────────────
         // The cover appended with a zero-tolerance geometric rule while simplify() deleted with a
@@ -1747,7 +1748,7 @@ namespace rc::boxch
         gp.sensor_sigma = p_.sensor_sigma; gp.sigma_flat = p_.sigma_flat; gp.free_force = p_.free_force;
         gp.cell = p_.cell; gp.min_cluster = p_.min_cluster;
         fuse();
-        if (cloud_.empty()) { if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[cover]   skip: cloud empty\n"); return false; }
+        if (cloud_.empty()) { if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[cover]   skip: cloud empty\n"); return false; }
         std::set<std::pair<int, int>> flc;
         {
             const float cyc = std::cos(-yaw_), syc = std::sin(-yaw_);
@@ -1786,7 +1787,7 @@ namespace rc::boxch
                 }
                 biggest = std::max(biggest, sz);
             }
-            std::fprintf(stderr, "[cover]   free cells %zu in %d component(s), biggest %zu; cover rectangles %zu\n",
+            rc::status::cprintf_err("[cover]   free cells %zu in %d component(s), biggest %zu; cover rectangles %zu\n",
                          F.size(), fcomp, biggest, out.size());
             // how much of the free set the rectangles actually cover, and where the remainder is
             size_t unc = 0; Eigen::Vector2f ulo(1e9f, 1e9f), uhi(-1e9f, -1e9f);
@@ -1797,11 +1798,11 @@ namespace rc::boxch
                 for (const auto& b : out) if (b.contains(m)) { covered = true; break; }
                 if (not covered) { ++unc; ulo = ulo.cwiseMin(m); uhi = uhi.cwiseMax(m); }
             }
-            std::fprintf(stderr, "[cover]   uncovered free cells %zu (%.1f%%) bbox x[%.2f,%.2f] y[%.2f,%.2f]\n",
+            rc::status::cprintf_err("[cover]   uncovered free cells %zu (%.1f%%) bbox x[%.2f,%.2f] y[%.2f,%.2f]\n",
                          unc, 100.0 * static_cast<double>(unc) / static_cast<double>(std::max<size_t>(1, F.size())),
                          ulo.x(), uhi.x(), ulo.y(), uhi.y());
             const rc::boxes::Layout save = L_; L_ = N;
-            std::fprintf(stderr, "[comp] f=%llu cover as BUILT: %d components, %zu boxes\n",
+            rc::status::cprintf_err("[comp] f=%llu cover as BUILT: %d components, %zu boxes\n",
                          static_cast<unsigned long long>(frames_), components(), N.boxes.size());
             L_ = save;
         }
@@ -1810,7 +1811,7 @@ namespace rc::boxch
         {
             rc::boxes::Layout k2 = L_, c2 = cand;
             rc::boxes::refit(k2, cloud_, gp, 3); rc::boxes::refit(c2, cloud_, gp, 3);
-            std::fprintf(stderr, "[adopt] keep=%zu boxes cost=%.0f | cand=%zu boxes cost=%.0f | %s\n",
+            rc::status::cprintf_err("[adopt] keep=%zu boxes cost=%.0f | cand=%zu boxes cost=%.0f | %s\n",
                          k2.boxes.size(), rc::boxes::mdl_cost(k2, cloud_, gp, &flc),
                          c2.boxes.size(), rc::boxes::mdl_cost(c2, cloud_, gp, &flc),
                          rc::boxes::mdl_cost(c2, cloud_, gp, &flc) < rc::boxes::mdl_cost(k2, cloud_, gp, &flc)
@@ -1859,7 +1860,7 @@ namespace rc::boxch
             if (want_connected and layout_components(cand) > std::max(1, keep_components))
             {
                 if (std::getenv("WS_COVER_PROBE"))
-                    std::fprintf(stderr, "[cover]   REJECT cand: %d components vs incumbent %d (a room is one region)\n",
+                    rc::status::cprintf_err("[cover]   REJECT cand: %d components vs incumbent %d (a room is one region)\n",
                                  layout_components(cand), keep_components);
                 L_ = keep; return false;
             }
@@ -1873,7 +1874,7 @@ namespace rc::boxch
                 {
                     Eigen::Vector2f clo(1e9f, 1e9f), chi(-1e9f, -1e9f);
                     for (const auto& b : cand.boxes) { clo = clo.cwiseMin(b.lo); chi = chi.cwiseMax(b.hi); }
-                    std::fprintf(stderr, "[cover]   REJECT cand %zu boxes x[%.2f,%.2f] y[%.2f,%.2f] cost %.0f vs keep %zu boxes cost %.0f\n",
+                    rc::status::cprintf_err("[cover]   REJECT cand %zu boxes x[%.2f,%.2f] y[%.2f,%.2f] cost %.0f vs keep %zu boxes cost %.0f\n",
                                  cand.boxes.size(), clo.x(), chi.x(), clo.y(), chi.y(),
                                  rc::boxes::mdl_cost(cand, cloud_, gp, &flc), keep.boxes.size(),
                                  rc::boxes::mdl_cost(keep, cloud_, gp, &flc));
@@ -1895,7 +1896,7 @@ namespace rc::boxch
             yaw4_cos_ = 0.0; yaw4_sin_ = 0.0; yaw_votes_ = 0;
         }
         L_ = cand;
-        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu just ADOPTED: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
+        if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[comp] f=%llu just ADOPTED: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
         // The reference the evidence was registered against has just changed, so the evidence is
         // re-registered against it and rebuilt. Without this the adoption drags the pose instead
         // of the pose following the map.
@@ -1996,7 +1997,7 @@ namespace rc::boxch
             if (warned < 20)
             {
                 ++warned;
-                std::fprintf(stderr, "[boxes] ⚠ layout has %d components — polygon() publishes ONE of them "
+                rc::status::cprintf_err("[boxes] ⚠ layout has %d components — polygon() publishes ONE of them "
                                      "(%zu boxes). The published room is missing area.\n", nc, L_.boxes.size());
             }
         }
@@ -2076,15 +2077,15 @@ namespace rc::boxch
             static int calls = 0;
             if (++calls == std::atoi(pr))
             {
-                std::fprintf(stderr, "[gauge-profile] frame=%llu yaw=%+.3f |", static_cast<unsigned long long>(frames_), yaw_ * 180.0 / M_PI);
+                rc::status::cprintf_err("[gauge-profile] frame=%llu yaw=%+.3f |", static_cast<unsigned long long>(frames_), yaw_ * 180.0 / M_PI);
                 for (double dd = -2.0; dd <= 2.001; dd += 0.25)
-                    std::fprintf(stderr, " %+.2f:%.1f", yaw_ * 180.0 / M_PI + dd, cost(dd * M_PI / 180.0) - f0);
-                std::fprintf(stderr, "\n");
+                    rc::status::cprintf_err(" %+.2f:%.1f", yaw_ * 180.0 / M_PI + dd, cost(dd * M_PI / 180.0) - f0);
+                rc::status::cprintf_err("\n");
             }
         }
         static const bool probe = std::getenv("WS_GAUGE_PROBE") != nullptr;
         if (probe)
-            std::fprintf(stderr, "[gauge] yaw=%+.3f deg  best d=%+.3f deg  cost %.1f -> %.1f\n",
+            rc::status::cprintf_err("[gauge] yaw=%+.3f deg  best d=%+.3f deg  cost %.1f -> %.1f\n",
                          yaw_ * 180.0 / M_PI, d * 180.0 / M_PI, f0, fd);
         if (not (fd < f0)) return 0.f;             // the incumbent frame explains the returns best
         const float yo = yaw_, yn = yaw_ + static_cast<float>(d);
@@ -2200,7 +2201,7 @@ namespace rc::boxch
             }
             Eigen::Vector2f blo(1e9f, 1e9f), bhi(-1e9f, -1e9f);
             for (const auto& b : L_.boxes) { blo = blo.cwiseMin(b.lo); bhi = bhi.cwiseMax(b.hi); }
-            std::fprintf(stderr, "[cover] f=%llu phase=%s cover=%d free=%zu (at_rebuild %zu) freebox x[%.2f,%.2f] y[%.2f,%.2f] | boxes=%zu layoutbox x[%.2f,%.2f] y[%.2f,%.2f]\n",
+            rc::status::cprintf_err("[cover] f=%llu phase=%s cover=%d free=%zu (at_rebuild %zu) freebox x[%.2f,%.2f] y[%.2f,%.2f] | boxes=%zu layoutbox x[%.2f,%.2f] y[%.2f,%.2f]\n",
                          static_cast<unsigned long long>(frames_), phase_name(), have_cover_ ? 1 : 0,
                          free_.size(), free_at_rebuild_, flo.x(), fhi.x(), flo.y(), fhi.y(),
                          L_.boxes.size(), blo.x(), bhi.x(), blo.y(), bhi.y());
@@ -2238,17 +2239,17 @@ namespace rc::boxch
                 float lo = 1e9f, hi = -1e9f;
                 for (const auto& q : cloud_)
                 { hx[static_cast<int>(std::floor(q.p.x() / 0.25f))]++; lo = std::min(lo, q.p.x()); hi = std::max(hi, q.p.x()); }
-                std::fprintf(stderr, "[cloud] x span %.2f m (%.2f..%.2f)  peaks:", hi - lo, lo, hi);
-                for (const auto& [b, n] : hx) if (n > 30) std::fprintf(stderr, " %.2f(%d)", b * 0.25f, n);
-                std::fprintf(stderr, "\n");
+                rc::status::cprintf_err("[cloud] x span %.2f m (%.2f..%.2f)  peaks:", hi - lo, lo, hi);
+                for (const auto& [b, n] : hx) if (n > 30) rc::status::cprintf_err(" %.2f(%d)", b * 0.25f, n);
+                rc::status::cprintf_err("\n");
             }
-        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu after refit/gauge: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
+        if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[comp] f=%llu after refit/gauge: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
             snap_coplanar();
-        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu after snap_coplanar: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
+        if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[comp] f=%llu after snap_coplanar: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
 
             if (std::getenv("WS_BOXES_NOSIMP") == nullptr)
                 simplify();      // measure the complexity, then force it down
-        if (std::getenv("WS_COVER_PROBE")) std::fprintf(stderr, "[comp] f=%llu after simplify: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
+        if (std::getenv("WS_COVER_PROBE")) rc::status::cprintf_err("[comp] f=%llu after simplify: %d components, %zu boxes\n", static_cast<unsigned long long>(frames_), components(), L_.boxes.size());
 
             return true;
         }
