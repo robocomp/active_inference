@@ -128,8 +128,52 @@ void SpecificWorker::start_status_stream()
             return v;
         },
         .missing = [this] { return presence_coordinator_.missing_required_names(); },
-        .overlay_verbose = {},
+        .overlay_verbose = [this] { return overlay_verbose_; },
     });
+
+    // ── commands a viewer may send (the whitelist). Only hooks that already exist and are safe on
+    // the main thread; nothing here invents new agent behaviour. Rerun is NOT offered: its logger is
+    // initialised once when the localiser thread starts and its flag is read unsynchronised on that
+    // thread, so there is no safe runtime toggle to call. ──
+    status_stream_->register_command(
+        "reset_motion_calib",
+        "Forget the motion-calibration evidence (RoomConcept::request_calibration_reset — the Calib "
+        "window's Reset, motion half only; camera mounts are untouched)",
+        "Reset the MOTION calibration? Every parameter returns to its prior and the state file is "
+        "deleted. Camera mount evidence is NOT touched.",
+        [this](const QJsonObject&)
+        {
+            room_concept_.request_calibration_reset();   // queued; applied on the localiser thread
+            return rc::StatusStream::Reply{true, "reset queued; the localiser applies it on its next cycle", {}};
+        });
+    status_stream_->register_command(
+        "dump_state", "Write the current state snapshot to tmp/state_<time>.json", "",
+        [this](const QJsonObject&)
+        {
+            const std::string json = status_.build_state();
+            std::filesystem::create_directories("tmp");
+            const std::string path = "tmp/state_" + QDateTime::currentDateTime()
+                                                        .toString("yyyy-MM-dd_HH-mm-ss-zzz").toStdString() + ".json";
+            std::ofstream f(path, std::ios::out | std::ios::trunc);
+            if (not f.is_open())
+                return rc::StatusStream::Reply{false, "cannot open " + path, {}};
+            f.imbue(std::locale::classic());
+            f << json << '\n';
+            const std::string abs = std::filesystem::absolute(path).string();
+            return rc::StatusStream::Reply{true, "state written", rc::status::Obj{}.s("path", abs).body()};
+        });
+    status_stream_->register_command(
+        "toggle_overlay_verbose",
+        "Toggle the 2-D viewer's verbose wall-SLAM overlay (Viewer2D::set_overlay_verbose; display only)", "",
+        [this](const QJsonObject&)
+        {
+            auto* v = viewer_ ? viewer_->viewer() : nullptr;
+            if (v == nullptr)
+                return rc::StatusStream::Reply{false, "the 2-D viewer does not exist (yet)", {}};
+            overlay_verbose_ = not overlay_verbose_;
+            v->set_overlay_verbose(overlay_verbose_);
+            return rc::StatusStream::Reply{true, overlay_verbose_ ? "verbose overlay ON" : "verbose overlay OFF", {}};
+        });
     // Serialised every 500 ms while a viewer is attached; every 5 s otherwise, for the events file.
     auto* t = new QTimer(this);
     connect(t, &QTimer::timeout, this, [this]

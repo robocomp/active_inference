@@ -393,6 +393,7 @@ class SpecificWorker : public GenericWorker
         rc::StatusReporter                status_;
         void start_status_stream();
         int                               status_idle_ticks_ = 0;
+        bool                              overlay_verbose_ = false;   ///< mirrors Viewer2D (no getter)
 
     signals:
         void presenceReady();
