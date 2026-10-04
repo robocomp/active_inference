@@ -53,6 +53,8 @@
 
 #include <variant>
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -67,7 +69,9 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 #ifdef HIBERNATION_ENABLED
         hibernationChecker.start(500);
 #endif
-        const int period = configLoader.get<int>("Period.Compute");
+        int period = 0;
+        rc::cfg::Reader(configLoader, "room_concept").req("Period.Compute", period,
+                                                          "compute() period, ms (the GRAFCET steps' tick)");
 
         states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
             std::bind(&SpecificWorker::waiting_loop, this),

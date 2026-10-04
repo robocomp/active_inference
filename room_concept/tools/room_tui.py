@@ -178,12 +178,12 @@ class RoomTUI(App):
     #status { height: 1; background: $boost; padding: 0 1; }
     #rawbar { height: 1; padding: 0 1; color: $text-muted; }
     .cap { height: 1; color: $text-muted; padding: 0 1; }
-    #filter { display: none; }
+    #filter, #gfilter { display: none; }
     #cmd_buttons { height: auto; padding: 0 1; }
     #cmd_buttons Horizontal { height: 3; }
     #cmd_buttons Button { min-width: 34; }
     #cmd_buttons Label { padding: 1 2; color: $text-muted; }
-    #filter.visible { display: block; }
+    #filter.visible, #gfilter.visible { display: block; }
     DataTable { height: 1fr; }
     RichLog { height: 1fr; }
     """
@@ -223,6 +223,10 @@ class RoomTUI(App):
         with TabbedContent(id="tabs"):
             with TabPane("Startup", id="tab-startup"):
                 yield DataTable(id="startup", zebra_stripes=True, cursor_type="row")
+            with TabPane("Config gates", id="tab-gates"):
+                yield Static("", id="gates_head", classes="cap")
+                yield Input(placeholder="search keys/descriptions (Esc clears)", id="gfilter")
+                yield DataTable(id="gates", zebra_stripes=True, cursor_type="row")
             with TabPane("Peers/Streams", id="tab-streams"):
                 yield Static("streams (rate from each ingestor's counter, age = ms since its last frame)", classes="cap")
                 yield DataTable(id="streams", cursor_type="none")
@@ -264,6 +268,10 @@ class RoomTUI(App):
         self.query_one("#cams", DataTable).add_columns(
             "camera", "pitch deg", "height mm", "yaw deg", "dt x", "informed", "cond", "pairs", "age s")
         self.query_one("#replies", DataTable).add_columns("time", "command", "ok", "message")
+        self.query_one("#gates", DataTable).add_columns("key", "origin", "kind", "type", "effective", "default",
+                                                        "description")
+        self.config_ev: dict = {}
+        self.gsearch = ""
         self.commands: list[dict] = []
         self.next_cmd_id = 1
         self.peer_rows: list[tuple] = []
@@ -376,6 +384,8 @@ class RoomTUI(App):
         self.query_one("#peers", DataTable).clear()
         self.missing = []
         self.compute_line = ""
+        self.config_ev = {}
+        self.query_one("#gates", DataTable).clear()
         self.event_lines.clear()
         self.max_file_seq = 0
         self.last_seq = 0
@@ -417,6 +427,66 @@ class RoomTUI(App):
         self.query_one("#peers", DataTable).add_row(
             Text(hms(ev.get("t"))), Text(ev.get("event", ""), style=style), Text(ev.get("name", "")),
             Text(str(ev.get("id", ""))))
+
+    # ── config gates (common/config_report, published once at the end of startup) ──
+    ORIGIN_STYLE = {"default": "dim", "file": "", "overlay": "cyan", "manifest": "blue", "runtime": "magenta",
+                    "shadowed": "bold red", "typeerr": "bold red", "unread": "yellow"}
+
+    def on_ev_config(self, ev: dict) -> None:
+        self.config_ev = ev
+        self.fill_gates()
+
+    def gate_shown(self, r: dict) -> bool:
+        if r.get("effective") == "(absent)":
+            return False                      # an overlay key this file does not set
+        o = r.get("origin", "")
+        return (o in ("overlay", "manifest", "runtime", "shadowed", "typeerr", "unread")
+                or r.get("effective") != r.get("default")
+                or r.get("kind") == "experiment"
+                or r.get("type") in ("bool", "str"))
+
+    def fill_gates(self) -> None:
+        ev = self.config_ev
+        recs = ev.get("records", [])
+        t = self.query_one("#gates", DataTable)
+        t.clear()
+        q = self.gsearch.lower()
+        shown = 0
+        bad = 0
+        for r in recs:
+            if r.get("origin") in ("shadowed", "typeerr"):
+                bad += 1
+            if not self.gate_shown(r):
+                continue
+            if q and q not in (r.get("key", "") + " " + r.get("description", "")).lower():
+                continue
+            shown += 1
+            o = r.get("origin", "")
+            ost = self.ORIGIN_STYLE.get(o, "")
+            changed = r.get("effective") != r.get("default")
+            kind = r.get("kind", "")
+            org = o + (f" ({r['overlay']})" if r.get("overlay") else "")
+            t.add_row(Text(r.get("key", ""), style="bold red" if o in ("shadowed", "typeerr") else ""),
+                      Text(org, style=ost),
+                      Text("A/B" if kind == "experiment" else kind, style="magenta bold" if kind == "experiment" else "dim"),
+                      Text(r.get("type", ""), style="dim"),
+                      Text(r.get("effective", ""), style="bold" if changed else ""),
+                      Text(r.get("default", "") if changed else "", style="dim"),
+                      Text(r.get("description", ""), style="dim"))
+        head = (f"{shown} of {len(recs)} keys shown (non-default, A/B arms, every bool/string)  ·  "
+                f"fingerprint {ev.get('fingerprint', '?')}  ·  {ev.get('undocumented', 0)} undocumented  ·  "
+                f"unread {ev.get('unread', '?') if ev.get('sweep_armed') else 'INCONCLUSIVE'}")
+        if bad:
+            head += f"  ·  [b red]{bad} key(s) present but NOT in force (shadowed / type error)[/]"
+        if self.gsearch:
+            head += f"  ·  filter '{self.gsearch}'"
+        self.query_one("#gates_head", Static).update(head)
+
+    @on(Input.Submitted, "#gfilter")
+    def _gsearch_submitted(self, ev: Input.Submitted) -> None:
+        self.gsearch = ev.value.strip()
+        self.fill_gates()
+        self.query_one("#gates", DataTable).focus()
 
     # ── commands ──
     def on_ev_commands(self, ev: dict) -> None:
@@ -668,7 +738,14 @@ class RoomTUI(App):
 
     # ── actions ──
     def action_search(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "tab-raw"
+        tabs = self.query_one("#tabs", TabbedContent)
+        if tabs.active == "tab-gates":
+            inp = self.query_one("#gfilter", Input)
+            inp.add_class("visible")
+            inp.value = self.gsearch
+            inp.focus()
+            return
+        tabs.active = "tab-raw"
         inp = self.query_one("#filter", Input)
         inp.add_class("visible")
         inp.value = self.search
@@ -682,6 +759,13 @@ class RoomTUI(App):
         self.query_one("#raw", RichLog).focus()
 
     def action_clear_search(self) -> None:
+        g = self.query_one("#gfilter", Input)
+        if g.has_class("visible") or self.gsearch:
+            g.remove_class("visible")
+            if self.gsearch:
+                self.gsearch = ""
+                self.fill_gates()
+            return
         inp = self.query_one("#filter", Input)
         inp.remove_class("visible")
         if self.search:

@@ -35,6 +35,8 @@
 #include <locale>
 #include <ranges>
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
+
 void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
@@ -669,6 +671,42 @@ void SpecificWorker::initialize()
 
 
     restore_window_settings();
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING (common/config_report) ─────────────────────────────────
+    // Published at the END of initialize(), when the LAST reader has run: the shared presence unit
+    // reads its [Presence.*]/[Owns.*] keys in configure() above, and the [Platform.*]/[Scenario.*]
+    // overlays were applied during the graph checks — publishing earlier would name keys as unread
+    // that are read, or show file values an overlay has already replaced. Prints the deltas-only
+    // banner on the terminal (as robot_concept does) and writes the full table to
+    // etc/config_effective.csv.
+    // declare_complete() is a CLAIM that every key this agent reads goes through an rc::cfg::Reader;
+    // it ARMS the unread sweep. common/config_report/check_registry_complete.sh room_concept is the
+    // grep that keeps the claim honest — re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("room_concept");
+    const auto published = rc::cfg::Reader(configLoader, "room_concept").publish("etc/config_effective.csv");
+    // The same table, as data, for the viewer's Config gates panel.
+    {
+        rc::status::Arr recs;
+        for (const auto& r : rc::cfg::registry().records())
+            recs.raw(rc::status::Obj{}
+                         .s("key", r.key).s("type", r.type)
+                         .s("origin", rc::cfg::to_string(r.origin)).s("kind", rc::cfg::to_string(r.kind))
+                         .b("runtime", r.mut == rc::cfg::Mutability::RuntimeTuned)
+                         .s("default", r.code_default).s("effective", r.effective)
+                         .s("description", r.description).s("overlay", r.overlay_source)
+                         .i("reads", r.reads)
+                         .str());
+        rc::status::event("config", rc::status::Obj{}
+                                        .s("agent", "room_concept")
+                                        .s("fingerprint", published.fingerprint)
+                                        .s("arm", published.arm)
+                                        .i("undocumented", published.undocumented)
+                                        .i("unread", published.unread)
+                                        .b("sweep_armed", published.sweep_armed)
+                                        .s("dump", "etc/config_effective.csv")
+                                        .raw("records", recs.str()));
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
