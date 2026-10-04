@@ -65,6 +65,12 @@ namespace rc
         /// converted/delivered per camera, for the pump report in compute().
         std::string convert_stats_line() const;
 
+        /// Every camera's ingest counter and frame age, for the status stream's rate readout.
+        struct StreamStat { std::string name; long long frames = -1; long long age_ms = -1; };
+        std::vector<StreamStat> stream_stats() const;
+        /// The status stream's copy of each calibration channel's solve (see rc::camcal::Sink).
+        void set_camcal_sink(rc::camcal::Sink s) { camcal_sink_ = std::move(s); }
+
         /// Carry a triple point's image corner into the room plane at the LiDAR corner's range, so the
         /// canvas can draw a camera corner beside its LiDAR one. Static: it needs no channel state.
         static void place_triple_points_in_room(rc::ImageEdgeObs& obs, const rc::CameraIngestor& ing,
@@ -107,5 +113,6 @@ namespace rc
             std::int64_t                         viz_ms = 0;
         };
         std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
+        rc::camcal::Sink camcal_sink_;
     };
 }   // namespace rc

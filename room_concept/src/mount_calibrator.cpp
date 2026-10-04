@@ -670,6 +670,18 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
     const Eigen::Vector4d applied_before = mp_pool_.applied();   // the anchor this solve was taken against
     apply_mount_solve(mp_pool_, *driving_, pool, params.IMAGE_EDGE_CAMERA);
     mp_pool_.save(mp_pool_.path());   // per (robot, camera); a kill -9 costs at most one window
+    if (pool.ok and camcal_sink_)
+    {
+        const double psig[4] = {params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
+        std::array<float, 4> v{}, s{};
+        for (int i = 0; i < 4; ++i)   // the TOTAL correction, exactly as the Calib window below gets it
+        {
+            v[static_cast<std::size_t>(i)] = static_cast<float>((applied_before(i) - pool.p(i)) * psig[i]);
+            s[static_cast<std::size_t>(i)] = static_cast<float>(pool.sigma(i) * psig[i]);
+        }
+        camcal_sink_(params.IMAGE_EDGE_CAMERA, v, s, pool.informed, static_cast<float>(pool.cond), mp_pool_.pairs());
+    }
     if (viewer() != nullptr and pool.ok)
     {
         Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;

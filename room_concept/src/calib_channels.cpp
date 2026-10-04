@@ -137,7 +137,7 @@ void CalibChannels::pump_calib_channels()
         //   evidence sat on disk. The column must describe the estimator, not this tick's luck.
         //   Wall clock, 5 s, matching the driving camera's window so both columns are the same age.
         if (const auto now_ms = QDateTime::currentMSecsSinceEpoch();
-            viewer() and now_ms - ch.viz_ms >= 5000)
+            (viewer() or camcal_sink_) and now_ms - ch.viz_ms >= 5000)
         {
             ch.viz_ms = now_ms;
             if (const auto sol = ch.calib.solve(); sol.ok)
@@ -155,9 +155,13 @@ void CalibChannels::pump_calib_channels()
                     pv(i) = static_cast<float>((ch.calib.applied()(i) - sol.p(i)) * psig[i]);
                     sv(i) = static_cast<float>(sol.sigma(i) * psig[i]);
                 }
-                viewer()->set_camera_calibration(pv, sv, sol.informed,
-                                                static_cast<float>(sol.cond),
-                                                ch.calib.pairs(), ch.name);
+                if (viewer())
+                    viewer()->set_camera_calibration(pv, sv, sol.informed,
+                                                    static_cast<float>(sol.cond),
+                                                    ch.calib.pairs(), ch.name);
+                if (camcal_sink_)
+                    camcal_sink_(ch.name, {pv(0), pv(1), pv(2), pv(3)}, {sv(0), sv(1), sv(2), sv(3)},
+                                 sol.informed, static_cast<float>(sol.cond), ch.calib.pairs());
             }
         }
 
@@ -551,6 +555,20 @@ void CalibChannels::pump_image_edges()
         room_polygon_offset_ = offset;
         if (image_edge_source_ and room_polygon_.size() >= 3)
             image_edge_source_->set_room_polygon(room_polygon_);
+    }
+
+    std::vector<CalibChannels::StreamStat> CalibChannels::stream_stats() const
+    {
+        std::vector<StreamStat> out;
+        const auto add = [&out](const std::string& name, const rc::CameraIngestor& ing)
+        {
+            out.push_back({name, static_cast<long long>(ing.frames_ingested()),
+                           static_cast<long long>(ing.ms_since_last_frame())});
+        };
+        if (camera_ingestor_) add(params.IMAGE_EDGE_CAMERA, *camera_ingestor_);
+        for (const auto& chp : calib_channels_)
+            if (chp->ingestor) add(chp->name, *chp->ingestor);
+        return out;
     }
 
     std::string CalibChannels::convert_stats_line() const

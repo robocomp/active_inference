@@ -256,6 +256,8 @@ void SpecificWorker::compute()
     section_timer.start();
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
+    if (status_stream_ and loc_res.has_value())
+        status_.observe(*loc_res);   // scalars only; the snapshot timer serialises them
     t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
@@ -356,6 +358,7 @@ void SpecificWorker::compute()
         if (compute_csv_.is_open())
             compute_csv_ << "wall_ms,total_us,affordance_us,loc_fetch_us,viewer_us,dsr_us,ui_us,did_publish,gui_thread\n";
     }
+    status_.observe_compute(elapsed_since_init_us);
     if (compute_csv_.is_open())
     {
         compute_csv_ << now_ms << ',' << elapsed_since_init_us << ',' << t_affordance_us << ',' << t_loc_fetch_us

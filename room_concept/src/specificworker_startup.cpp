@@ -100,6 +100,45 @@ void SpecificWorker::start_status_stream()
     o.events_dir = "tmp";
     status_stream_ = std::make_unique<rc::StatusStream>(std::move(o));
     rc::status::event("lifecycle", rc::status::Obj{}.s("state", "starting"));
+
+    // ── the 2 Hz state snapshot ──
+    // Everything it reads is main-thread state or an atomic; every collaborator is null-checked
+    // because the timer can fire during the processEvents() pumps of a half-built startup.
+    status_.set_sources({
+        .room = [this](rc::status::Obj& o)
+        {
+            o.s("map_mode", room_concept_.estimating() ? "estimate" : "given")
+             .b("node_created", scene_graph_ and scene_graph_->room_node_created())
+             .i("stable_frames", scene_graph_ ? scene_graph_->stable_frames() : 0)
+             .i("needed", params.STABLE_FRAMES_REQUIRED)
+             .b("map_ready", room_concept_.map_ready())
+             .b("grid_searching", room_concept_.is_grid_searching());
+        },
+        .streams = [this]
+        {
+            std::vector<rc::StatusReporter::StreamSample> v;
+            if (lidar_ingestor_)
+                v.push_back({"lidar", static_cast<long long>(lidar_ingestor_->frames_total()),
+                             static_cast<long long>(lidar_ingestor_->ms_since_last_frame())});
+            if (imu_ingestor_)
+                v.push_back({"imu", static_cast<long long>(imu_ingestor_->served()), -1});
+            if (calib_)
+                for (const auto& st : calib_->stream_stats())
+                    v.push_back({st.name, st.frames, st.age_ms});
+            return v;
+        },
+        .missing = [this] { return presence_coordinator_.missing_required_names(); },
+        .overlay_verbose = {},
+    });
+    // Serialised every 500 ms while a viewer is attached; every 5 s otherwise, for the events file.
+    auto* t = new QTimer(this);
+    connect(t, &QTimer::timeout, this, [this]
+    {
+        if (not status_stream_ or shutting_down_) return;
+        if (status_stream_->has_clients() or ++status_idle_ticks_ % 10 == 0)
+            status_.build_state();
+    });
+    t->start(500);
     qInfo().noquote() << QString("[status] viewer socket %1 | events %2 | attach with tools/room_tui.py")
                              .arg(status_stream_->socket_path())
                              .arg(QString::fromStdString(status_stream_->events_path()));
@@ -171,6 +210,14 @@ void SpecificWorker::initialize()
     pose_pub_ = std::make_unique<rc::PosePublisher>(G, params, room_concept_,
                                                     &viewer_raw_slot_, shutting_down_);
     calib_ = std::make_unique<rc::CalibChannels>(G, params, room_concept_, *mount_, &viewer_raw_slot_);
+    if (status_stream_)
+    {
+        const rc::camcal::Sink sink = [this](const std::string& cam, const std::array<float, 4>& v,
+                                             const std::array<float, 4>& s, int informed, float cond, long pairs)
+        { status_.note_camcal(cam, v, s, informed, cond, pairs); };
+        mount_->set_camcal_sink(sink);
+        calib_->set_camcal_sink(sink);
+    }
     gt_log_ = std::make_unique<rc::GroundTruthLog>(G, room_concept_, shutting_down_);
     // AFTER gt_log_ exists. The lambda captures `this` and dereferences gt_log_, so registering it
     // first left a window in which a corrected publish would have null-dereferenced. Nothing could
@@ -428,7 +475,7 @@ void SpecificWorker::initialize()
             {
                 std::string m;
                 for (const auto& label : missing) m += (m.empty() ? "" : " ") + label;
-                rc::StatusReporter::sm("Waiting", m.empty() ? "" : "missing: " + m);
+                status_.sm("Waiting", m.empty() ? "" : "missing: " + m);
                 status_.reset_waiting();
             }
             if (!missing.empty())
@@ -477,7 +524,7 @@ void SpecificWorker::initialize()
             operating_since_ms_   = QDateTime::currentMSecsSinceEpoch();
             lidar_stall_reported_ = false;
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
-            rc::StatusReporter::sm("Operating", "all required constraints satisfied");
+            status_.sm("Operating", "all required constraints satisfied");
             QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(true); });
             if (!room_concept_.is_running())
             {
@@ -543,12 +590,12 @@ void SpecificWorker::initialize()
             {
                 degraded_from_lidar_ = false;
                 qInfo() << "[SM] -> Degraded (LiDAR stall, peers intact) — passing through to Waiting";
-                rc::StatusReporter::sm("Degraded", "LiDAR stall, peers intact — passing through to Waiting");
+                status_.sm("Degraded", "LiDAR stall, peers intact — passing through to Waiting");
             }
             else
             {
                 qInfo() << "[SM] -> Degraded: required peer lost —" << REQUIRED_LOSS_GRACE_MS << "ms grace before shutdown";
-                rc::StatusReporter::sm("Degraded", std::format("required peer lost — {} ms grace before shutdown",
+                status_.sm("Degraded", std::format("required peer lost — {} ms grace before shutdown",
                                                                REQUIRED_LOSS_GRACE_MS));
             }
             QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
@@ -558,11 +605,11 @@ void SpecificWorker::initialize()
                 if (presence_coordinator_.all_required_ready())
                 {
                     qInfo() << "[SM] required peers recovered during grace — staying alive";
-                    rc::StatusReporter::sm("Degraded", "required peers recovered during grace — staying alive");
+                    status_.sm("Degraded", "required peers recovered during grace — staying alive");
                     return;
                 }
                 qWarning() << "[SM] required peer still missing after grace — shutting down cleanly";
-                rc::StatusReporter::sm("Degraded", "required peer still missing after grace — shutting down cleanly");
+                status_.sm("Degraded", "required peer still missing after grace — shutting down cleanly");
                 request_shutdown();   // does cleanup + crash-free _Exit (terminal)
             });
         },

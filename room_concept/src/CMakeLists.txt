@@ -86,6 +86,7 @@ LIST(APPEND SOURCES
   ../src/ground_truth_log.cpp
   ../src/door_apertures.cpp
   ../src/specificworker_presence.cpp
+  ../src/status_reporter.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
   ../src/room_concept.cpp

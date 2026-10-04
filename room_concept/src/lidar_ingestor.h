@@ -83,6 +83,8 @@ public:
     // (b) ONCE Operating: are frames actually arriving? Wall-clock ms since the last sweep reached the
     //     buffer, or -1 if none ever has. A live descriptor with a silent producer still reads -1/large.
     [[nodiscard]] std::int64_t ms_since_last_frame() const noexcept;
+    /// Sweeps pushed to the buffer since start (monotonic), for the status stream's rate readout.
+    [[nodiscard]] std::uint64_t frames_total() const noexcept { return frames_total_.load(std::memory_order_relaxed); }
 
 private:
     // Ingest-thread body: tightly paced poll of the reader so a fresh scan reaches the localizer with
@@ -180,6 +182,7 @@ private:
     // Wall-clock stamp (ms since epoch) of the last sweep pushed to the buffer, 0 = never. Written on
     // the ingest thread, read by the state machine on the main thread ⇒ atomic.
     std::atomic<std::int64_t> last_frame_wall_ms_{0};
+    std::atomic<std::uint64_t> frames_total_{0};
 };
 
 }  // namespace rc

@@ -60,6 +60,8 @@ namespace rc
         /// auxiliary channels pass their own ingestor per call — and it is set once it exists, which
         /// is after this object is constructed. Null until then, and every use is guarded.
         void set_driving_ingestor(rc::CameraIngestor* ing) { driving_ = ing; }
+        /// The status stream's copy of each window's solve (see rc::camcal::Sink).
+        void set_camcal_sink(rc::camcal::Sink s) { camcal_sink_ = std::move(s); }
 
         void mount_pair_update(const rc::ImageEdgeObs& obs,
                                const std::vector<rc::CornerDetector::CornerMatch>& matches,
@@ -91,6 +93,7 @@ namespace rc
         RoomConfig&  params;
         RoomViewer** viewer_slot_ = nullptr;   ///< the worker's unique_ptr slot; may hold null
         rc::CameraIngestor* driving_ = nullptr;
+        rc::camcal::Sink    camcal_sink_;
 
         // ── THE SENSOR TRIANGLE ──────────────────────────────────────────────────────────────────
         // Each camera's residual against the LiDAR is (camera error) + (LiDAR corner error).

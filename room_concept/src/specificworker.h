@@ -392,6 +392,7 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::StatusStream> status_stream_;
         rc::StatusReporter                status_;
         void start_status_stream();
+        int                               status_idle_ticks_ = 0;
 
     signals:
         void presenceReady();

@@ -37,7 +37,9 @@
  */
 
 #include <QDebug>
+#include <array>
 #include <charconv>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <cstdio>
@@ -50,6 +52,12 @@
 
 namespace rc::camcal
 {
+    /// Where a mount solve goes besides the Calib window (the status stream): camera, the TOTAL
+    /// correction and its 1-sigma in internal units (pitch rad, height m, yaw rad, dt x), the informed
+    /// mask, the condition number and the pair count. Called on the main thread.
+    using Sink = std::function<void(const std::string& cam, const std::array<float, 4>& value,
+                                    const std::array<float, 4>& sigma, int informed, float cond, long pairs)>;
+
     enum Param : int
     {
         P_PITCH = 0,   ///< boresight pitch (rad): rotation about the camera's own x axis

@@ -266,6 +266,7 @@ void LidarIngestor::ingest_scan(std::vector<Eigen::Vector3f>&& points_high, std:
     // Wall clock, NOT the source stamp: the state machine asks "did anything arrive recently?", and a
     // producer republishing an old stamp (or a clock skew between hosts) must not read as liveness.
     last_frame_wall_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_release);
+    frames_total_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool LidarIngestor::stream_descriptor_available(std::string* detail) const

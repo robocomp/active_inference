@@ -41,6 +41,36 @@ from textual.widgets import (Button, DataTable, Footer, Input, Label, RichLog, S
 
 LEVEL_STYLE = {"debug": "dim", "info": "", "warning": "yellow", "critical": "bold red", "fatal": "bold white on red"}
 MAX_LOG_LINES = 20000
+DEG = 57.29577951308232
+
+# Motion calibration: the Calib window's own labels and display scales (calibration_viewer.cpp).
+CALIB_DISPLAY = {
+    "k_v":       ("translation scale", 100.0, "%"),
+    "eps_yaw":   ("mount yaw",         DEG,   "deg"),
+    "k_omega":   ("gyro scale",        100.0, "%"),
+    "b_omega":   ("gyro bias",         DEG,   "deg/s"),
+    "k_lat":     ("lateral scale",     100.0, "%"),
+    "dk_wheel":  ("wheel mismatch",    1000.0, "mrad/m"),
+    "k_omega_w": ("wheel rot. scale",  100.0, "%"),
+}
+# Camera mount parameters: (label, scale from internal SI, unit) — calibration_viewer.cpp again.
+CAM_DISPLAY = [("pitch", DEG, "deg"), ("height", 1000.0, "mm"), ("yaw", DEG, "deg"), ("dt", 1.0, "x")]
+
+
+def fmt(v, nd=3, scale=1.0) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{v * scale:.{nd}f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def kv_fill(table: DataTable, rows: list[tuple]) -> None:
+    """Rewrite a 2-3 column key/value table in place (2 Hz; the tables are small)."""
+    table.clear()
+    for r in rows:
+        table.add_row(*[c if isinstance(c, Text) else Text(str(c)) for c in r])
 
 
 def socket_dir() -> str:
@@ -112,13 +142,47 @@ class QuitScreen(ModalScreen[str]):
         self.dismiss("cancel")
 
 
+# ── modal: confirm a command ──────────────────────────────────────────────────────────────────────
+class ConfirmScreen(ModalScreen[bool]):
+    DEFAULT_CSS = """
+    ConfirmScreen { align: center middle; }
+    #cdlg { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    #cdlg Horizontal { height: auto; margin: 1 0 0 0; }
+    #cdlg Button { margin: 0 2 0 0; }
+    """
+
+    def __init__(self, name: str, description: str, question: str):
+        super().__init__()
+        self.cmd_name, self.description, self.question = name, description, question
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="cdlg"):
+            yield Label(f"[b]{self.cmd_name}[/b] — {self.description}")
+            yield Label(self.question or f"Send '{self.cmd_name}' to the running agent?")
+            with Horizontal():
+                yield Button("Yes, send it", id="yes", variant="warning")
+                yield Button("Cancel", id="no")
+
+    @on(Button.Pressed)
+    def _pressed(self, ev: Button.Pressed) -> None:
+        self.dismiss(ev.button.id == "yes")
+
+    def key_escape(self) -> None:
+        self.dismiss(False)
+
+
 # ── the app ───────────────────────────────────────────────────────────────────────────────────────────
 class RoomTUI(App):
     TITLE = "room_concept"
     CSS = """
     #status { height: 1; background: $boost; padding: 0 1; }
     #rawbar { height: 1; padding: 0 1; color: $text-muted; }
+    .cap { height: 1; color: $text-muted; padding: 0 1; }
     #filter { display: none; }
+    #cmd_buttons { height: auto; padding: 0 1; }
+    #cmd_buttons Horizontal { height: 3; }
+    #cmd_buttons Button { min-width: 34; }
+    #cmd_buttons Label { padding: 1 2; color: $text-muted; }
     #filter.visible { display: block; }
     DataTable { height: 1fr; }
     RichLog { height: 1fr; }
@@ -127,6 +191,7 @@ class RoomTUI(App):
         Binding("q", "quit_dialog", "Quit"),
         Binding("slash", "search", "Search"),
         Binding("t", "toggle_source", "Raw: stdout/events"),
+        Binding("c", "commands", "Commands"),
         Binding("f", "toggle_follow", "Follow"),
         Binding("escape", "clear_search", "Clear search", show=False),
     ]
@@ -158,6 +223,26 @@ class RoomTUI(App):
         with TabbedContent(id="tabs"):
             with TabPane("Startup", id="tab-startup"):
                 yield DataTable(id="startup", zebra_stripes=True, cursor_type="row")
+            with TabPane("Peers/Streams", id="tab-streams"):
+                yield Static("streams (rate from each ingestor's counter, age = ms since its last frame)", classes="cap")
+                yield DataTable(id="streams", cursor_type="none")
+                yield Static("peers", classes="cap")
+                yield DataTable(id="peers", cursor_type="none")
+            with TabPane("Localisation", id="tab-loc"):
+                yield DataTable(id="loc", cursor_type="none")
+            with TabPane("Room", id="tab-room"):
+                yield DataTable(id="room", cursor_type="none")
+            with TabPane("Motion calibration", id="tab-calib"):
+                yield Static("", id="calib_head", classes="cap")
+                yield DataTable(id="calib", cursor_type="none")
+            with TabPane("Camera mounts", id="tab-cams"):
+                yield Static("TOTAL mount correction in force (applied - p), as the Calib window shows it", classes="cap")
+                yield DataTable(id="cams", cursor_type="none")
+            with TabPane("Commands", id="tab-cmds"):
+                yield Static("Commands the agent registered (its whitelist). Each asks for confirmation.", classes="cap")
+                yield Vertical(id="cmd_buttons")
+                yield Static("replies", classes="cap")
+                yield DataTable(id="replies", cursor_type="none")
             with TabPane("Warnings", id="tab-warn"):
                 yield DataTable(id="warn", zebra_stripes=True, cursor_type="row")
             with TabPane("Raw log", id="tab-raw"):
@@ -171,6 +256,18 @@ class RoomTUI(App):
         t.add_columns("time", "kind", "what", "ms", "detail")
         w = self.query_one("#warn", DataTable)
         w.add_columns("time", "level", "tag", "message")
+        self.query_one("#streams", DataTable).add_columns("stream", "Hz", "age ms", "")
+        self.query_one("#peers", DataTable).add_columns("time", "event", "peer", "id")
+        self.query_one("#loc", DataTable).add_columns("quantity", "value", "note")
+        self.query_one("#room", DataTable).add_columns("quantity", "value")
+        self.query_one("#calib", DataTable).add_columns("param", "meaning", "value", "± 1σ", "unit", "informed", "APPLIED")
+        self.query_one("#cams", DataTable).add_columns(
+            "camera", "pitch deg", "height mm", "yaw deg", "dt x", "informed", "cond", "pairs", "age s")
+        self.query_one("#replies", DataTable).add_columns("time", "command", "ok", "message")
+        self.commands: list[dict] = []
+        self.next_cmd_id = 1
+        self.peer_rows: list[tuple] = []
+        self.missing: list[str] = []
         self.update_status()
         self.update_rawbar()
         self.run_worker(self.socket_loop(), exclusive=False, group="sock")
@@ -191,8 +288,10 @@ class RoomTUI(App):
         proc = (f"pid {self.pid} " + ("[green]alive[/]" if alive else "[red]not running[/]")) if self.pid else "pid ?"
         agent = f"{self.hello.get('agent', self.agent)} id {self.hello.get('id', '?')}"
         warn = f"  ·  [yellow]{self.n_warn} warning(s)[/]" if self.n_warn else ""
+        miss = f"  ·  [red]missing {' '.join(self.missing)}[/]" if getattr(self, "missing", None) else ""
+        comp = f"  ·  {self.compute_line}" if getattr(self, "compute_line", "") else ""
         self.query_one("#status", Static).update(
-            f"[b]{agent}[/]  ·  {proc}  ·  socket {conn}  ·  SM [b]{self.sm_state}[/]{warn}")
+            f"[b]{agent}[/]  ·  {proc}  ·  socket {conn}  ·  SM [b]{self.sm_state}[/]{miss}{warn}{comp}")
 
     def update_rawbar(self) -> None:
         src = (f"stdout file {os.path.basename(self.log_path or '')}" if self.raw_source == "stdout"
@@ -274,6 +373,9 @@ class RoomTUI(App):
     def reset_run(self) -> None:
         self.query_one("#startup", DataTable).clear()
         self.query_one("#warn", DataTable).clear()
+        self.query_one("#peers", DataTable).clear()
+        self.missing = []
+        self.compute_line = ""
         self.event_lines.clear()
         self.max_file_seq = 0
         self.last_seq = 0
@@ -311,6 +413,153 @@ class RoomTUI(App):
 
     def on_ev_peer(self, ev: dict) -> None:
         self.startup_row(ev, "peer", ev.get("event", ""), "", f"{ev.get('name', '')} id {ev.get('id', '')}")
+        style = "red" if "lost" in ev.get("event", "") else ("green" if "ready" in ev.get("event", "") else "")
+        self.query_one("#peers", DataTable).add_row(
+            Text(hms(ev.get("t"))), Text(ev.get("event", ""), style=style), Text(ev.get("name", "")),
+            Text(str(ev.get("id", ""))))
+
+    # ── commands ──
+    def on_ev_commands(self, ev: dict) -> None:
+        self.commands = ev.get("list", [])
+        box = self.query_one("#cmd_buttons", Vertical)
+        box.remove_children()
+        for c in self.commands:
+            row = Horizontal(Button(c["name"], id=f"cmd-{c['name']}", variant="primary"),
+                             Label(c.get("description", "")))
+            box.mount(row)
+
+    @on(Button.Pressed, "#cmd_buttons Button")
+    def _cmd_pressed(self, ev: Button.Pressed) -> None:
+        name = (ev.button.id or "")[4:]
+        c = next((c for c in self.commands if c["name"] == name), None)
+        if not c:
+            return
+
+        def go(yes: bool | None) -> None:
+            if not yes:
+                return
+            cid = self.next_cmd_id
+            self.next_cmd_id += 1
+            if not self.send({"cmd": name, "id": cid, "args": {}}):
+                self.notify("not connected — command not sent", severity="error")
+
+        self.push_screen(ConfirmScreen(name, c.get("description", ""), c.get("confirm", "")), go)
+
+    def on_ev_reply(self, ev: dict) -> None:
+        ok = ev.get("ok")
+        msg = ev.get("msg", "") + (f"  →  {ev['path']}" if ev.get("path") else "")
+        self.query_one("#replies", DataTable).add_row(
+            Text(hms(ev.get("t"))), Text(ev.get("cmd", "")), Text("ok" if ok else "FAILED", style="green" if ok else "bold red"),
+            Text(msg))
+        self.notify(f"{ev.get('cmd')}: {msg}", severity="information" if ok else "error")
+
+    # ── the 2 Hz snapshot ──
+    def on_ev_state(self, ev: dict) -> None:
+        self.state = ev
+        self.fill_streams(ev)
+        self.fill_loc(ev.get("loc", {}))
+        self.fill_room(ev.get("room", {}))
+        self.fill_calib(ev.get("calib", {}))
+        self.fill_cams(ev.get("camcal", []))
+        pres = ev.get("presence", {})
+        self.missing = pres.get("missing", [])
+        comp = ev.get("compute", {})
+        self.compute_line = f"compute {fmt(comp.get('hz'), 1)} Hz, mean {fmt(comp.get('us', 0) / 1000.0, 2)} ms, " \
+                            f"max {fmt(comp.get('us_max', 0) / 1000.0, 1)} ms"
+        self.update_status()
+
+    def fill_streams(self, ev: dict) -> None:
+        rows = []
+        for name, s in ev.get("streams", {}).items():
+            hz, age = s.get("hz", -1), s.get("age_ms", -1)
+            stale = age is not None and age > 1000
+            never = age is not None and age < 0 and name != "imu"
+            flag = Text("STALE", style="bold red") if stale else (Text("no frame yet", style="yellow") if never else Text("ok", style="green"))
+            rows.append((Text(name), Text(fmt(hz, 1) if hz is not None and hz >= 0 else "—"),
+                         Text("—" if age is None or age < 0 else str(age), style="red" if stale else ""), flag))
+        comp = ev.get("compute", {})
+        rows.append((Text("compute()"), Text(fmt(comp.get("hz"), 1)),
+                     Text(f"{fmt(comp.get('us', 0) / 1000.0, 2)} ms mean / {fmt(comp.get('us_max', 0) / 1000.0, 1)} max"),
+                     Text("")))
+        miss = ev.get("presence", {}).get("missing", [])
+        rows.append((Text("required peers"), Text(""), Text("missing: " + " ".join(miss) if miss else "all present",
+                                                            style="red" if miss else "green"), Text("")))
+        kv_fill(self.query_one("#streams", DataTable), rows)
+
+    def fill_loc(self, l: dict) -> None:
+        if not l.get("have"):
+            kv_fill(self.query_one("#loc", DataTable), [("—", "no localisation result yet", "")])
+            return
+        ok = Text("ok", style="green") if l.get("ok") else Text("NOT OK", style="bold red")
+        if l.get("diverged"):
+            ok = Text("DIVERGED (dead-reckoned fallback)", style="bold red")
+        age = l.get("age_ms", -1)
+        rows = [
+            ("result", ok, f"reloc epoch {l.get('reloc_epoch')}"),
+            ("x", f"{fmt(l.get('x'), 3)} m", f"σ {fmt(l.get('sx'), 1, 1000)} mm"),
+            ("y", f"{fmt(l.get('y'), 3)} m", f"σ {fmt(l.get('sy'), 1, 1000)} mm"),
+            ("θ", f"{fmt(l.get('theta'), 2, DEG)} deg", f"σ {fmt(l.get('sth'), 3, DEG)} deg"),
+            ("mode", Text(l.get("mode", ""), style="cyan" if l.get("mode") == "predict" else ""),
+             f"{l.get('iters')} iteration(s)" + (", SDF polished" if l.get("polished") else "")),
+            ("condition number", fmt(l.get("cond"), 2), ""),
+            ("early-exit metric", f"{fmt(l.get('early_exit_metric'), 1, 1000)} mm", "mean |SDF| at the predicted pose"),
+            ("median |SDF|", f"{fmt(l.get('sdf_med'), 1, 1000)} mm", f"at prediction {fmt(l.get('pred_sdf_med'), 1, 1000)} mm"),
+            ("innovation", f"{fmt(l.get('innov'), 1, 1000)} mm", "‖optimised − predicted‖"),
+            ("surprise KL", f"{fmt(l.get('kl'), 3)} nats", f"mismatch {fmt(l.get('mismatch'), 3)} nats"
+             + ("" if l.get("scored") else " (not scored this cycle)")),
+            ("result age", Text(f"{age} ms", style="red" if age > 1000 else ""), "now − scan timestamp"),
+        ]
+        kv_fill(self.query_one("#loc", DataTable), rows)
+
+    def fill_room(self, r: dict) -> None:
+        stable = f"{r.get('stable_frames', 0)}/{r.get('needed', '?')}"
+        rows = [
+            ("map mode", r.get("map_mode", "?")),
+            ("room node in graph", Text("yes", style="green") if r.get("node_created") else Text("not yet", style="yellow")),
+            ("stable frames", stable),
+            ("map ready", Text(str(r.get("map_ready")), style="" if r.get("map_ready") else "yellow")),
+            ("relocalising (grid search)", Text("YES", style="bold yellow") if r.get("grid_searching") else "no"),
+            ("walls (estimate mode)", r.get("walls", 0)),
+            ("polygon vertices", r.get("verts", 0)),
+            ("polygon closed", r.get("closed")),
+        ]
+        kv_fill(self.query_one("#room", DataTable), rows)
+
+    def fill_calib(self, c: dict) -> None:
+        names, val, sig = c.get("names", []), c.get("value", []), c.get("sigma", [])
+        inf, app = c.get("informed", 0), c.get("applied", 0)
+        rows = []
+        for i, n in enumerate(names):
+            label, scale, unit = CALIB_DISPLAY.get(n, (n, 1.0, ""))
+            v = val[i] if i < len(val) else None
+            s_ = sig[i] if i < len(sig) else None
+            informed = bool(inf >> i & 1)
+            applied = bool(app >> i & 1)
+            rows.append((Text(n), Text(label), Text(fmt(v, 3, scale)), Text(fmt(s_, 3, scale)), Text(unit),
+                         Text("● informed", style="green") if informed else Text("○ not taught", style="dim"),
+                         Text("■ APPLIED", style="bold green") if applied else Text("·", style="dim")))
+        kv_fill(self.query_one("#calib", DataTable), rows)
+        self.query_one("#calib_head", Static).update(
+            f"episodes {c.get('episodes', 0)}  ·  carried {c.get('carried', 0)}  ·  dropped {c.get('dropped', 0)}"
+            f"  ·  condition {fmt(c.get('cond'), 2)}  ·  APPLIED = informed AND allowed: correcting the odometry now")
+
+    def fill_cams(self, cams: list) -> None:
+        rows = []
+        for c in cams:
+            v, s_ = c.get("value", [None] * 4), c.get("sigma", [None] * 4)
+            cells = [Text(c.get("cam", "?"))]
+            for i, (_, scale, _) in enumerate(CAM_DISPLAY):
+                cells.append(Text(f"{fmt(v[i], 2, scale)} ± {fmt(s_[i], 2, scale)}"))
+            inf = c.get("informed", 0)
+            cells.append(Text("".join(ch if inf >> i & 1 else "·" for i, ch in enumerate("PHYD"))))
+            cells.append(Text(fmt(c.get("cond"), 1)))
+            cells.append(Text(str(c.get("pairs", 0))))
+            cells.append(Text(fmt(c.get("age_ms", 0) / 1000.0, 0)))
+            rows.append(tuple(cells))
+        if not rows:
+            rows = [(Text("—"), Text("no mount solve yet (the first arrives after ~5 s of paired corners)"),
+                     *[Text("")] * 7)]
+        kv_fill(self.query_one("#cams", DataTable), rows)
 
     def on_ev_stall(self, ev: dict) -> None:
         age = ev.get("age_ms", -1)
@@ -447,6 +696,9 @@ class RoomTUI(App):
             self.raw_source = "events"
         self.update_rawbar()
         self.redraw_raw()
+
+    def action_commands(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-cmds"
 
     def action_toggle_follow(self) -> None:
         self.follow = not self.follow
