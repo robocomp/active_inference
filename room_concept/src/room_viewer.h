@@ -19,6 +19,8 @@
 // media-plane bring-up here. Plain class (no QObject/MOC); the worker connects
 // widget signals to lambdas that call these methods.
 
+#include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -163,6 +165,12 @@ private:
     QPointer<QLabel>             rt_rate_label_;   // RT publish-rate readout in the controls row
     QPointer<rc::Viewer2D>       viewer_2d_;
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
+    // Surprise (surprise.h) as a RATE: the scored KL of the last kSurpriseWindowS seconds of results, so a
+    // single solve that scores a long open-loop stretch reads as what it is, nats over that stretch.
+    struct SurpriseSample { std::int64_t ts_ms; float kl, mismatch; };
+    std::deque<SurpriseSample> surprise_win_;
+    std::int64_t surprise_last_ts_ = -1;
+    static constexpr float kSurpriseWindowS = 10.f;
     QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
     // Integrated odometry as the PREDICTOR consumes it — see get_predictor_delta().
     QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time

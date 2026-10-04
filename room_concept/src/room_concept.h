@@ -70,6 +70,7 @@
 #include "wheel_noise_learner.h"
 #include "rest_density_learner.h"
 #include "reloc_search.h"
+#include "surprise.h"
 
 namespace rc
 {
@@ -796,6 +797,10 @@ public:
         // alignment, so it measures the same thing on the real robot as it does here. On early-exit
         // cycles it equals robot_pose exactly; that identity is a free self-check on this plumbing.
         float pred_x = 0.f, pred_y = 0.f, pred_theta = 0.f;
+        /// KL(posterior || motion prediction) for this cycle, in nats -- what the room evidence had to tell
+        /// the motion model (see surprise.h). Zero on an early exit; the open-loop stretch is scored whole
+        /// at the next correction. Logged per cycle in the heading CSV, drawn on the pred |SDF| plot.
+        rc::surprise::Surprise surprise;
 
         // Body-frame displacement the WHEELS claimed this cycle: dx_local = side*dt (lateral),
         // dy_local = adv*dt (forward). Heading has a second opinion (the gyro) so its errors are
@@ -1891,6 +1896,16 @@ private:
    /// frames that actually had a prediction — a zero innovation otherwise means "no information", not
    /// "perfect agreement", and folding those in would drag the estimate back down.
    void feed_motion_calibrator(UpdateResult& res);
+   /// Fill res.surprise. corrected = the estimate was moved by evidence this cycle (solve or polish).
+   /// Must run after res.covariance and res.pred_* hold this cycle's values.
+   void score_surprise(UpdateResult& res, bool corrected);
+   /// The motion model's predictive covariance for the pose, accumulated from every cycle's selected-prior
+   /// covariance since the last scored correction, then reset to that correction's posterior. Kept HERE and
+   /// not read from current_covariance, because current_covariance does not propagate between solves
+   /// while the polish is off (the growth step is gated on it) -- it would make every prediction look
+   /// infinitely confident.
+   Eigen::Matrix3f sur_P_pred_ = Eigen::Matrix3f::Zero();
+   bool            sur_init_ = false;   // first correction only seeds sur_P_pred_ (no pose prior before it)
    void apply_adaptive_covariance(UpdateResult& res);
 
    /// Drop the strided-window bookkeeping. MUST accompany every window_mgr_.clear(): after a recovery

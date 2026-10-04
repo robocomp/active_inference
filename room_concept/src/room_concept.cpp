@@ -3814,6 +3814,11 @@ namespace rc
             window_mgr_.newest().object_anchors = latest_object_anchors_;
         }
 
+        // The motion model's predictive covariance grows by this cycle's increment noise whether or not the
+        // cycle is then corrected; score_surprise() scores and resets it at the next correction.
+        if (selected_prior.valid and selected_prior.covariance_eigen.allFinite())
+            sur_P_pred_ += selected_prior.covariance_eigen;
+
         // ===== EARLY EXIT CHECK =====
         // ★NOT WHILE SEARCHING (09-17) — the relocaliser's rule (5ca93b4). The early exit trusts the prediction
         // against a FIXED map and skips the solve; while the layout is still estimated there is no fixed map. With
@@ -4359,6 +4364,7 @@ namespace rc
         // MUST come after the fields above: it reads dy_local/dx_local/imu_dtheta as the covariates
         // H. Called earlier it sees zeros, H -> 0, and the learner silently never learns anything.
         feed_motion_calibrator(res);
+        score_surprise(res, true);   // after the adaptive floor: scored against the PUBLISHED posterior
         return res;
     }
 
@@ -5053,6 +5059,8 @@ namespace rc
                                             res.innovation[1]*res.innovation[1]);
             apply_adaptive_covariance(res);
         }
+        // Only a polished early exit moved the estimate; otherwise the posterior IS the prediction (KL 0).
+        score_surprise(res, res.sdf_polished);
 
         model_->robot_pos.data().copy_(torch::tensor({x, y},
             torch::TensorOptions().device(get_device())));
@@ -7310,6 +7318,24 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_episodes = motion_calib_.episodes();
         res.calib_carried = motion_calib_.carried();
         res.calib_dropped = motion_calib_.dropped();
+    }
+
+    void RoomConcept::score_surprise(UpdateResult& res, bool corrected)
+    {
+        res.surprise = {};
+        if (not corrected) return;
+        const Eigen::Matrix3f P_post = res.covariance;
+        if (not sur_init_)
+        {   // the first correction has no pose prior to be scored against; it only seeds the recursion
+            if (P_post.allFinite()) { sur_P_pred_ = P_post; sur_init_ = true; }
+            return;
+        }
+        const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
+        const Eigen::Vector3f c{res.robot_pose.translation().x() - res.pred_x,
+                                res.robot_pose.translation().y() - res.pred_y,
+                                std::remainder(est_th - res.pred_theta, 2.f * float(M_PI))};
+        res.surprise = rc::surprise::kl_gauss(c, sur_P_pred_, P_post);
+        if (P_post.allFinite()) sur_P_pred_ = P_post;
     }
 
     void RoomConcept::apply_adaptive_covariance(UpdateResult& res)

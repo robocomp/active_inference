@@ -151,6 +151,10 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // (a small rotation-dependent boost is added at runtime, so brief crossings during turns are
     // expected). Same axis as FE — both are SDF-energy quantities in meters.
     ts_plot_fe_->add_series("pred |SDF|", QColor(0, 150, 70), 1.6f, 0);
+    // Surprise on the RIGHT axis (nats/s; pred |SDF| is metres): the same time base shows the cause (the
+    // prediction misses the walls) next to its price (what the room had to tell the motion model).
+    ts_plot_fe_->add_series("surprise nats/s", QColor(220, 120, 0), 1.6f, 0, 1);
+    ts_plot_fe_->add_series("mismatch nats/s", QColor(150, 60, 200), 1.2f, 0, 1);
     if (room_concept_ != nullptr)
     {
         const float thr = room_concept_->params.sigma_sdf * room_concept_->params.prediction_trust_factor;
@@ -203,6 +207,16 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         "prediction inside Gauss-Newton.\n\n"
         "The threshold widens while turning (0.2 m per radian) because a heading error pivots the whole\n"
         "scan: 0.02 rad at 5 m already displaces the points 10 cm on a prediction that is perfectly good."));
+    ts_plot_fe_->set_series_tooltip("surprise nats/s", QStringLiteral(
+        "KL(posterior || motion prediction), summed over the last 10 s, per second (right axis).\n"
+        "What the room evidence had to tell the motion model: the free energy's complexity term.\n"
+        "Zero while the prediction is trusted (early exit); a solve scores the whole open-loop stretch\n"
+        "since the previous one. Lower = a motion model that needs less correcting. Per-run summary:\n"
+        "tools/surprise_report.py on tmp/heading/heading_<start>.csv."));
+    ts_plot_fe_->set_series_tooltip("mismatch nats/s", QStringLiteral(
+        "The part of the surprise due to the prediction being WRONG: 1/2 c' P_pred^-1 c for the correction c\n"
+        "(right axis). An honest motion model has a known expected value for it; the per-run report gives\n"
+        "sum(mismatch)/sum(expected): ~1 calibrated, >1 biased or over-confident, <1 under-confident."));
     ts_plot_conf_->set_series_tooltip("confidence", QStringLiteral(
         "Localisation confidence, 0..1, raw and unsmoothed.\n\n"
         "Read it as a trend, not a value: what matters is whether it is recovering or decaying, and\n"
@@ -632,6 +646,21 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     // ran (warmup / no odometry) — skip those so the line doesn't spike to a garbage sample.
     if (std::isfinite(loc_res->early_exit_metric))
         ts_plot_fe_->add_point("pred |SDF|", loc_res->early_exit_metric);
+    // Surprise rate: once per NEW result (the viewer may see the same result on several ticks).
+    if (loc_res->timestamp_ms != surprise_last_ts_)
+    {
+        surprise_last_ts_ = loc_res->timestamp_ms;
+        const auto &s = loc_res->surprise;
+        if (s.scored and std::isfinite(s.kl))
+            surprise_win_.push_back({loc_res->timestamp_ms, s.kl, s.mismatch});
+        const auto horizon = loc_res->timestamp_ms - static_cast<std::int64_t>(kSurpriseWindowS * 1000.f);
+        while (not surprise_win_.empty() and surprise_win_.front().ts_ms < horizon)
+            surprise_win_.pop_front();
+        float kl = 0.f, mis = 0.f;
+        for (const auto &w : surprise_win_) { kl += w.kl; mis += w.mismatch; }
+        ts_plot_fe_->add_point("surprise nats/s", kl / kSurpriseWindowS);
+        ts_plot_fe_->add_point("mismatch nats/s", mis / kSurpriseWindowS);
+    }
     // RGB projection agreement, appended only when a NEW cycle produced one. Without the stamp test
     // a stalled camera would draw a flat line at its last value, which reads as "steady" rather than
     // "stopped" — the two must not look alike.

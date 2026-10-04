@@ -187,7 +187,8 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
         hd_csv_.imbue(std::locale::classic());   // es_ES would write decimal COMMAS into a CSV
         hd_csv_ << "# heading fusion log. fusion=1: wheel x gyro product; 0: legacy switch. Angles rad, "
                    "times s, densities rad/sqrt(s). raw_* are UNcalibrated channel rotations this cycle. "
-                   "est/pred are the pose after/before the optimiser. gt_* NaN on the real robot.\n";
+                   "est/pred are the pose after/before the optimiser. gt_* NaN on the real robot. "
+                   "sur_* nats, KL(posterior||motion prediction), scored on corrected cycles (surprise.h).\n";
         hd_csv_ << "ts_ms,fusion,est_x,est_y,est_th,pred_x,pred_y,pred_th,gt_x,gt_y,gt_th,"
                    "iters,sdf_mse,cov_tt,dy_local,dx_local,"
                    "dth_total,dth_gyro_share,dth_wheel_share,wheel_shadow,"
@@ -197,7 +198,8 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             hd_csv_ << "v_" << rc::calib::param_name(i) << ',';
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
             hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
-        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w\n";
+        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w,"
+                   "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -240,7 +242,9 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << (room_concept_.params.zupt_on_prediction ? 1 : 0)
             << ',' << d.rest_gain_tr << ',' << d.rest_gain_ro
             << ',' << (room_concept_.params.zupt_pred_learn_rest ? 1 : 0)
-            << ',' << d.rest_dens_v << ',' << d.rest_dens_w << '\n';
+            << ',' << d.rest_dens_v << ',' << d.rest_dens_w
+            << ',' << (res.surprise.scored ? 1 : 0) << ',' << res.surprise.kl << ',' << res.surprise.mismatch
+            << ',' << res.surprise.expected << ',' << res.surprise.info << '\n';
     hd_csv_.flush();
 }
 
