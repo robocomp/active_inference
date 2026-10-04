@@ -168,6 +168,9 @@ namespace rc::calib
         // own. Same rule as rot_model_sigma -- grow the covariance with the covariate that predicts
         // the model error, never a threshold on it.
         float fit_model_gain  = 2.0f;   // multiplies mean |SDF| over the episode, into the position R
+        // The localiser's SDF observation noise (RoomConcept.SigmaSdf), bound at configure time. Sets the
+        // median |SDF| a fit is EXPECTED to show (0.6745 sigma), which the heading R is inflated against.
+        float fit_sigma       = 0.15f;
         // ── HOW FAR AN UNMEASURED EPISODE MAY BE CARRIED ─────────────────────────────────────────
         // An episode that saw no correction is not flushed (see observe): its motion is carried
         // forward so the covariate survives until a real correction arrives to explain it. These cap
@@ -476,7 +479,23 @@ namespace rc::calib
             const float fit_model = cfg_.fit_model_gain * acc_fit_;
             const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var)
                               + rot_model * rot_model + fit_model * fit_model;
-            const float r_th  = std::max(acc_th_var_,  cfg_.min_obs_var) + fit_model * fit_model;
+            // ── HEADING R: THE SOLVE'S OWN VARIANCE, INFLATED BY ITS GOODNESS OF FIT (Birge ratio) ──────
+            // ★ FIXED 2026-10-04 (arm 7, leg gyro-all). This used to ADD fit_model^2 -- a quantity in
+            // METRES -- to a heading variance in RAD^2. A typical 8.8 cm worst fit became 0.031 rad^2
+            // (sigma 10 deg for half a second of driving), 7000x the solve's own 4.2e-6, so 113 episodes
+            // carried 1% of b_omega's prior information and a +0.002 rad/s injected gyro bias left it at
+            // exactly its prior, while the same episodes regressed without the prior read +0.00148.
+            // The dimensionless form: the solver's posterior variance already holds the fit's CURVATURE;
+            // what it lacks is the MISFIT, which scales it by (observed / expected residual)^2, the
+            // expected median |SDF| under the localiser's own noise being 0.6745 sigma. A fit within its
+            // noise leaves R ~ the solve's variance; a not-tracking burst (|SDF| 0.26 m, the 08-23 case)
+            // inflates it ~7x. The factor 2 is the episode's TWO ends: the residual is a difference of
+            // two corrected headings, each with the solve's variance. Offline on that leg's episodes:
+            // b_omega +0.00119 +- 0.00015 (informed) instead of +0.00001 +- 0.00050.
+            // The POSITION R keeps its additive metres form (dimensionally consistent there); changing
+            // it mid-arm would confound arm 7's k_v comparison.
+            const float birge = acc_fit_ / (0.6745f * std::max(cfg_.fit_sigma, 1e-6f));
+            const float r_th  = 2.f * std::max(acc_th_var_, cfg_.min_obs_var) * (1.f + birge * birge);
             // ── ONE ESTIMATOR, NOT THREE ──────────────────────────────────────────────────────────
             // These used to be three independent scalar Kalman filters. Independence cannot separate
             // parameters that land on the SAME component of the correction and differ only in

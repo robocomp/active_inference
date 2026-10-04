@@ -1144,6 +1144,28 @@ where online learning has had time to act:
 - If `gyro-all` passes and `native-all` does no harm, `mask = −1` becomes the default. The `informed`
   gate (a threshold) is then the next thing to replace, by applying the joint posterior mean.
 
+### Arm 7 — leg `gyro-all` FAILED, 2026-10-04, for two calibrator defects. Fixed; leg re-run.
+
+`b_omega` ended at **+0.00001 ± 0.00050 — exactly its prior** after 178 m with +0.002 rad/s injected (parked
+gyro measured +0.00173, so the dose was live). A sigma that never shrinks means the estimator received no
+information. The same leg's saved episodes, regressed without the prior, read **+0.00148** — the signal was
+there. Two defects:
+1. **Units.** The episode heading R ADDED `(2 * max|SDF|)^2`, a quantity in METRES, to a variance in RAD^2:
+   0.031 rad^2 (sigma 10 deg for half a second of driving), 7000x the solve's own 4.2e-6. 113 episodes carried
+   1% of the prior's information. Now the Birge form: `2 * var_solve * (1 + (max|SDF| / 0.6745 sigma_sdf)^2)`.
+   Offline on the leg's episodes: +0.00119 ± 0.00015, informed.
+2. **Covariates the prediction never used.** Rest-on-prediction withheld rotation on 85% of cycles (robot
+   judged still), so the bias never entered the prediction there (+0.00045 rad/s in it), but `t_gyro` still
+   counted that time and diluted the fit. Covariates now carry the rest gain. Moving cycles alone: +0.00339.
+
+★ Replay of the leg's own predictions against ground truth with a bias removed: the mean predicted drift
++0.0206 deg/s is nulled by b ~ 0.0012 on ALL cycles, but per-window heading rms only falls 0.668 -> 0.635 deg
+— the bias is a small part of the prediction's heading error (it acts on moving cycles only); most of the
+per-window error is random. `native-all` replayed the same way is best at b = 0, so no false bias.
+**Amended prediction for the re-run** (written before it): `b_omega` informed with σ < 0.0005 and positive;
+target +0.002 at the gyro. The moving-cycle LS of +0.0034 is the noisier, confounded estimator; where it
+lands between them is the finding.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.

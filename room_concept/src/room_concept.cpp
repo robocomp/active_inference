@@ -4573,6 +4573,8 @@ namespace rc
         // the increment collapses. At 0.25 m/s over 50 ms Delta is ~3.7 sigma, the rest hypothesis is
         // e^-6.8 down, and the increment passes through untouched. No threshold: the crossover falls
         // where the two densities meet and moves with the odometry's own noise.
+        // A cycle the rest block does not scale used the increment whole; never carry the last cycle's gain.
+        zupt_pred_gain_tr_ = zupt_pred_gain_ro_ = 1.f;
         if (params.zupt_on_prediction and selection.selected_prior.valid)
         {
             auto& d = selection.selected_prior.delta_pose;
@@ -7247,7 +7249,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     void RoomConcept::feed_motion_calibrator(UpdateResult &res)
     {
         // Params are assigned directly onto .params with no init hook, so bind on first use.
-        if (not motion_calib_.configured()) motion_calib_.configure(params.motion_calib);
+        if (not motion_calib_.configured())
+        {
+            auto mc = params.motion_calib;
+            mc.fit_sigma = params.sigma_sdf;   // the heading R's expected misfit is the localiser's own noise
+            motion_calib_.configure(mc);
+        }
         if (motion_calib_.enabled())
         {
             const float th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
@@ -7288,10 +7295,21 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             // a scale parameter is entitled to explain.
             // ⚠ The MOTION-based episode close stays — that part is independent and sound.
             const bool corrected_this_cycle = res.iterations_used > 0;
-            motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
+            // ★ THE COVARIATES ARE WHAT THE PREDICTION USED, so they carry the rest gain (2026-10-04).
+            // With rest-on-prediction the increment is scaled by P(moving) before it enters the
+            // prediction; a parameter acts on the prediction only through what got in. Unscaled, a gyro
+            // bias was regressed over every parked second the rest filter had (correctly) withheld from
+            // the prediction -- 85% of cycles on arm 7's gyro-all leg -- and its estimate was diluted.
+            // Measured there: the prediction's own per-cycle bias was +0.00045 rad/s on rest cycles and
+            // +0.00339 while moving; regressing on t_gyro x gain gives +0.00343.
+            const float g_tr = zupt_pred_gain_tr_, g_ro = zupt_pred_gain_ro_;   // 1 when the block did not scale
+            auto hc = res.heading_cov;
+            hc.th_gyro *= g_ro; hc.t_gyro *= g_ro; hc.th_wheel *= g_ro; hc.fwd_wheel *= g_tr;
+            motion_calib_.observe(res.dy_local * g_tr, res.dx_local * g_tr,
+                                  (res.imu_dtheta + res.wheel_dtheta) * g_ro,
                                   r_forward, r_lateral, r_theta,
                                   pos_var, th_var, corrected_this_cycle, res.sdf_mse,
-                                  last_cycle_dt_s_, res.heading_cov);
+                                  last_cycle_dt_s_, hc);   // wall time: the intake judges speed with it
         }
         res.calib_value = motion_calib_.last_solve().value;
         res.calib_sigma = motion_calib_.last_solve().sigma;
