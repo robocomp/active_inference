@@ -39,6 +39,9 @@ inline constexpr std::array kTerminalTags = {
 inline constexpr std::array kQuietWarningTags = {
     "Timing"sv, "Compute"sv, "pumps"sv, "LidarSrc"sv, "band"sv,
     "level2"sv, "exist-kill"sv, "death-exist"sv, "refine"sv,
+    // room_boxes_channel's per-frame box-layout traces, written to stderr (hence Warning level)
+    // although they are diagnostics, not warnings:
+    "cover"sv, "comp"sv, "G"sv, "gauge"sv, "gauge-profile"sv, "cloud"sv, "boxes"sv, "reg"sv, "adopt"sv,
 };
 
 /// Warnings carrying one of these words reach the terminal even under a quiet tag.
