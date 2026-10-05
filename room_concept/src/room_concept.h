@@ -72,6 +72,7 @@
 #include "reloc_search.h"
 #include "surprise.h"
 #include "motion_cov_scale.h"
+#include "stride_span.h"
 
 namespace rc
 {
@@ -801,6 +802,7 @@ public:
         // alignment, so it measures the same thing on the real robot as it does here. On early-exit
         // cycles it equals robot_pose exactly; that identity is a free self-check on this plumbing.
         float pred_x = 0.f, pred_y = 0.f, pred_theta = 0.f;
+        bool  slot_appended = false;   ///< strided window: this frame was APPENDED (not a replace of the newest)
         /// KL(posterior || motion prediction) for this cycle, in nats -- what the room evidence had to tell
         /// the motion model (see surprise.h). Zero on an early exit; the open-loop stretch is scored whole
         /// at the next correction. Logged per cycle in the heading CSV, drawn on the pred |SDF| plot.
@@ -1819,12 +1821,8 @@ private:
    // describe the whole interval back to the last admitted slot, not the last frame.
    Eigen::Vector3f stride_last_admitted_{0.f, 0.f, 0.f};
    bool            stride_has_admitted_ = false;
-   Eigen::Vector3f stride_delta_accum_  = Eigen::Vector3f::Zero();
-   Eigen::Matrix3f stride_cov_accum_    = Eigen::Matrix3f::Zero();
-   // Preintegrated form of the same accumulation (Params::motion_preintegration). Chained with
-   // rc::preint::chain() rather than summed: an error in the heading accumulated so far rotates all
-   // the translation that follows, and `stride_cov_accum_ += ...` drops exactly that term.
-   rc::preint::Interval stride_preint_accum_{};
+   // What the NEWEST slot's motion factor carries (delta, summed cov, chained preint): stride_span.h.
+   rc::StrideSpan  stride_span_;
    bool preint_announced_ = false;   // one-shot "the propagated covariance is really in force" log
 
    // ---- Debug-log mirrors, set where the newest slot is BUILT so BOTH writer paths can emit them ----
@@ -1931,9 +1929,7 @@ private:
    void reset_stride_state()
    {
        stride_has_admitted_ = false;
-       stride_delta_accum_.setZero();
-       stride_cov_accum_.setZero();
-       stride_preint_accum_ = rc::preint::Interval{};
+       stride_span_.reset();
    }
 
    // Prediction-based early exit tracking

@@ -2559,7 +2559,8 @@ namespace rc
                 wall_input_rec_.open("tmp/wall_input_" + std::to_string(ms) + ".bin", std::ios::binary | std::ios::trunc);
                 if (wall_input_rec_.is_open())
                 {
-                    const std::uint32_t version = 1;
+                    // v2 (2026-10-05): odom is THIS frame's delta, not the stride accumulator (stride_span.h)
+                    const std::uint32_t version = 2;
                     wall_input_rec_.write("WIN1", 4);
                     wall_input_rec_.write(reinterpret_cast<const char*>(&version), sizeof(version));
                     qInfo() << "[room][wall-slam] RecordWallInput: recording wall-step input to tmp/wall_input_" << ms << ".bin";
@@ -3475,18 +3476,9 @@ namespace rc
         // window's oldest-to-newest chain is constrained by a fraction of the motion that actually
         // happened, which under-constrains exactly the DOF this change exists to fix.
         bool stride_replace = false;
+        const Eigen::Vector3f frame_odom_delta = slot_odom_delta;   // THIS frame's motion, for the recorder
         if (params.window_stride_enabled)
         {
-            stride_delta_accum_ += slot_odom_delta;       // global-frame increments, additive
-            stride_cov_accum_   += slot_motion_cov;       // independent increments
-
-            // Preintegrated form of the same accumulation. `+=` on the covariance drops the transport
-            // term — an error in the heading accumulated so far rotates ALL the translation that
-            // follows — and with window_min_turn_rad = 0.15 rad that term is not small. chain() is the
-            // same recursion the per-sample loop uses, applied at frame granularity.
-            if (params.motion_preintegration and selected_prior.has_preint)
-                stride_preint_accum_ = rc::preint::chain(stride_preint_accum_, selected_prior.preint);
-
             if (stride_has_admitted_ and window_mgr_.size() > 1)
             {
                 const float travel = std::hypot(pred_pos.x() - stride_last_admitted_[0],
@@ -3496,22 +3488,31 @@ namespace rc
                 stride_replace = (travel < params.window_min_travel_m
                                   and turn < params.window_min_turn_rad);
             }
-            // Either way the newest slot spans back to the last admitted one.
-            slot_odom_delta = stride_delta_accum_;
-            slot_motion_cov = stride_cov_accum_;
+            // ★ What the factor spans (stride_span.h). The newest slot is always the PREVIOUS frame, so a
+            //   REPLACED frame links to the newest's predecessor and carries newest ⊕ this frame, while an
+            //   APPENDED frame links to the previous frame and carries this frame only. Until 2026-10-05
+            //   one accumulator served both and an appended slot carried the whole stride as one frame:
+            //   ±3-9 cm correction pairs at every admission. The preintegrated form is CHAINED (chain()
+            //   keeps the transport term that `+=` on the covariance drops).
+            const rc::preint::Interval *frame_preint =
+                (params.motion_preintegration and selected_prior.has_preint) ? &selected_prior.preint : nullptr;
+            const auto &span = stride_replace ? stride_span_.replace(slot_odom_delta, slot_motion_cov, frame_preint)
+                                              : stride_span_.append(slot_odom_delta, slot_motion_cov, frame_preint);
+            slot_odom_delta = span.delta;
+            slot_motion_cov = span.cov;
             // covariance() is called exactly HERE, once, on the interval the motion factor will
             // actually carry — never per frame (see the warning on Interval::covariance()).
-            if (params.motion_preintegration and stride_preint_accum_.samples > 0)
-                slot_motion_cov = stride_preint_accum_.covariance();
+            if (params.motion_preintegration and span.preint.samples > 0)
+                slot_motion_cov = span.preint.covariance();
         }
 
         // Mirror what this slot's motion factor actually got, for BOTH debug-log writers (the
         // early-exit one is in another function and can only see members).
         last_slot_motion_cov_ = slot_motion_cov;
-        if (params.motion_preintegration and params.window_stride_enabled and stride_preint_accum_.samples > 0)
+        if (params.motion_preintegration and params.window_stride_enabled and stride_span_.current().preint.samples > 0)
         {
-            last_preint_samples_    = stride_preint_accum_.samples;
-            last_preint_duration_s_ = stride_preint_accum_.duration_s;
+            last_preint_samples_    = stride_span_.current().preint.samples;
+            last_preint_duration_s_ = stride_span_.current().preint.duration_s;
         }
         else if (params.motion_preintegration and selected_prior.has_preint)
         {
@@ -3573,7 +3574,7 @@ namespace rc
         }
 
         rec_stride_replace_ = stride_replace;   // RecordWallInput (diagnostic only)
-        rec_odom_delta_     = slot_odom_delta;
+        rec_odom_delta_     = frame_odom_delta;   // v2: per FRAME (v1 recorded the stride accumulator)
         bool window_slid = false;
         if (stride_replace)
         {
@@ -3611,10 +3612,7 @@ namespace rc
             if (params.window_stride_enabled)
             {
                 stride_last_admitted_ = Eigen::Vector3f(pred_pos.x(), pred_pos.y(), pred_theta);
-                stride_has_admitted_  = true;
-                stride_delta_accum_.setZero();
-                stride_cov_accum_.setZero();
-                stride_preint_accum_ = rc::preint::Interval{};
+                stride_has_admitted_  = true;   // stride_span_ already restarted from this frame (append)
             }
         }
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
@@ -4341,6 +4339,7 @@ namespace rc
         res.early_exit_metric = last_early_exit_metric_;
         res.pred_sdf_median   = last_pred_sdf_median_;
         res.pred_x = last_pred_pos_.x();
+        res.slot_appended = params.window_stride_enabled and not rec_stride_replace_;
         res.pred_y = last_pred_pos_.y();
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;
@@ -5013,6 +5012,7 @@ namespace rc
         // it is the interesting one: between corrections the prediction runs open-loop, so these are
         // the only cycles where an accumulating channel error is visible before the optimizer hides it.
         res.pred_x = last_pred_pos_.x();
+        res.slot_appended = params.window_stride_enabled and not rec_stride_replace_;
         res.pred_y = last_pred_pos_.y();
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;

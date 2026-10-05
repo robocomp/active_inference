@@ -51,6 +51,7 @@
 #include "room_boxes_channel.h"
 #include "svg_room_loader.h"   // the bench runs the AGENT's channel, not a copy of it
 #include "wall_segmenter.h"
+#include "stride_span.h"
 
 using rc::RoomConcept;
 using Poly = std::vector<Eigen::Vector2f>;
@@ -1886,15 +1887,27 @@ int run_replay(const char* path)
     std::vector<AbsorbRow> absorb_log;
     int b_prev = 0, t_prev = 0, m_prev = 0;
     float prev_th = 0.f;
+    rc::StrideSpan span;   // v2 recordings: the slot factors, built as the agent builds them
+    Eigen::Vector3f skipped_odom = Eigen::Vector3f::Zero();
     for (size_t k = 0; k < F.size(); ++k)
     {
         const Frame& fr = F[k];
-        // The accumulator is the total since the last ADMITTED slot, so it adds to THAT slot's pose,
+        // v1: the accumulator is the total since the last ADMITTED slot, so it adds to THAT slot's pose,
         // and the base may only advance AFTER a frame which admitted one has been solved. Taking it
         // from the previous FRAME's pose (itself base + odom_{k-1}) counts the motion twice.
+        // v2 records THIS frame's delta: it adds to the previous frame's solved pose, and the slot's
+        // factor is built exactly as the agent builds it (stride_span.h).
+        const Eigen::Vector3f base = (version >= 2) ? est : slot_base;
         const Eigen::Vector3f pred = (k == 0) ? Eigen::Vector3f::Zero()
-            : Eigen::Vector3f(slot_base.x() + fr.odom.x(), slot_base.y() + fr.odom.y(), wrap(slot_base.z() + fr.odom.z()));
-        if (fr.pts.size() < 10) { est = pred; continue; }
+            : Eigen::Vector3f(base.x() + fr.odom.x(), base.y() + fr.odom.y(), wrap(base.z() + fr.odom.z()));
+        // A frame skipped here builds no slot, so (v2) its motion rides into the next frame that does.
+        if (fr.pts.size() < 10) { est = pred; skipped_odom += fr.odom; continue; }
+        const Eigen::Vector3f frame_d = skipped_odom + fr.odom;
+        skipped_odom.setZero();
+        const Eigen::Vector3f slot_delta = (version >= 2)
+            ? ((fr.stride and not window.empty()) ? span.replace(frame_d, Eigen::Matrix3f::Zero(), nullptr)
+                                                  : span.append(frame_d, Eigen::Matrix3f::Zero(), nullptr)).delta
+            : fr.odom;
         // WS_REPLAY_SEED_STILL=1: do not seed the map from a scan taken while the robot is turning.
         // The seed is the OBB of ONE scan, and a scan is treated as instantaneous; at 275 deg/s
         // (this recording's p99) the sweep smears by tens of degrees, so the seed rectangle is wrong
@@ -1994,10 +2007,11 @@ int run_replay(const char* path)
         RoomConcept::WindowSlot slot;
         slot.pose = pose_tensor(pred);
         slot.lidar_points = points_tensor(fr.pts);
-        slot.odometry_delta = (k == 0) ? Eigen::Vector3f::Zero() : fr.odom;
+        slot.odometry_delta = (k == 0) ? Eigen::Vector3f::Zero() : slot_delta;
         slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
                                           cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
-        slot.odom_delta_tensor = torch::tensor({fr.odom.x(), fr.odom.y(), fr.odom.z()}, torch::kFloat32);
+        slot.odom_delta_tensor = torch::tensor({slot.odometry_delta.x(), slot.odometry_delta.y(), slot.odometry_delta.z()},
+                                               torch::kFloat32);
         slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
         slot.wall_assoc = res.assoc;
 
