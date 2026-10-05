@@ -8,6 +8,7 @@
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "chair_support_bank.h"
+#include "chair_contour.h"   // rc::chair_contour_set — the contour channel's silhouette (pure, tested)
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion:: (SHARED LoS occlusion)   // rc::support_bank:: adapter (SHARED bank)
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <unordered_map>
 #include <utility>
 #include "../../common/rt_query_probe/rt_query_probe.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -93,13 +95,13 @@ void ChairFitter::compute_chain_cov(ChairInstance& inst)
     // pinned to the mask capture stamp.
     const auto& s = inst.model.state();
     const Mat::Vector3d centre(s.cx, s.cy, s.cz);
-    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, "room", inst.last_mask_timestamp_ms);
+    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, rc::room::current_room_frame(*G_), inst.last_mask_timestamp_ms);
     if (not c_src.has_value())
         return;
     DSR::GaussianPoint3D gp;
     gp.mean = c_src.value();
     gp.covariance = DSR::Cov3d::Zero();
-    const auto g = gaussian_->transform_point("room", gp, chain_src_frame_, inst.last_mask_timestamp_ms);
+    const auto g = gaussian_->transform_point(rc::room::current_room_frame(*G_), gp, chain_src_frame_, inst.last_mask_timestamp_ms);
     if (not g.has_value())
         return;
     inst.chain_cov_xx = static_cast<float>(g->covariance(0, 0));
@@ -660,7 +662,7 @@ std::optional<Eigen::Matrix4d> ChairFitter::room_T_zed_matrix(std::uint64_t pose
     // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
     static rc::rtprobe::Probe rt_probe{"chair_fitter room<-body"};
     DSR::RT_API::TimeQueryInfo rt_info;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms, "RT",
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", pose_ts_ms, "RT",
                                                              DSR::RT_API::TimeQuery::Interpolated,
                                                              &rt_info);
     rt_probe.note(rt_info, G_);
@@ -905,6 +907,64 @@ float ChairFitter::los_occlusion(const ChairInstance& inst) const
             }
     }
     return worst;
+}
+
+// ─── The classifier-free CONTOUR channel's geometry ───────────────────────────────────────────────
+//
+// The believed chair's SILHOUETTE (seat slab ∪ backrest slab — not its bounding box, which is mostly air)
+// projected into the camera frame at the frame's own capture stamp, plus the same silhouette slid along the
+// floor as the null. The shape and why it is that shape: chair_contour.h. This wrapper owns only what the
+// shape cannot know — the extrinsic at the right instant, the near clip, and the intrinsics-to-delivered-
+// frame scale. The geometry is the AI2 belief's (pose + its fixed template dims), the same one the scene
+// graph publishes and the existence channel judges — not ChairModel's, which only serves the support split.
+rc::edges::ContourSet ChairFitter::compute_contour_set(const ChairInstance& inst, std::uint64_t stamp_ms,
+                                                       int frame_cols, int frame_rows)
+{
+    rc::edges::ContourSet out;
+    if (not inner_eigen_ or not inst.ai2_initialized)
+        return out;
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return out;
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return out;
+    }
+    // Pinned to the FRAME's capture stamp — the contour is compared against those pixels, and ts = 0 would
+    // be the current pose: a different instant, which reads as a belief error while the robot turns.
+    const auto Mopt = room_T_zed_matrix(stamp_ms);
+    if (not Mopt.has_value())
+        return out;
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+
+    const float W = static_cast<float>(camera_api_->get_width());
+    const float H = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or H <= 0.f)
+        return out;
+    // Pixel coords come out in the CameraAPI's INTRINSIC frame; a delivered image of another size would put
+    // the contour somewhere plausible but wrong, and the channel would read that as the chair having moved.
+    const float sx = (frame_cols > 0) ? static_cast<float>(frame_cols) / W : 1.0f;
+    const float sy = (frame_rows > 0) ? static_cast<float>(frame_rows) / H : 1.0f;
+
+    const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
+    {
+        const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
+        if (Pc.y() <= 0.20) return std::nullopt;                      // behind / at the image plane
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+        if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
+        rc::edges::ProjectedVertex v;
+        v.px = cv::Point2f(static_cast<float>(uv.x()) * sx, static_cast<float>(uv.y()) * sy);
+        // The ZED depth plane stores the camera-frame FORWARD coordinate, not the Euclidean norm.
+        v.depth_m = static_cast<float>(Pc.y());
+        return v;
+    };
+
+    const auto& b = inst.ai2_belief;
+    const auto& s = b.state();
+    rc::ChairOutlineDims dims;
+    dims.seat_w = b.seat_w(); dims.seat_d = b.seat_d(); dims.seat_h = b.seat_h(); dims.back_h = b.back_h();
+    dims.seat_thickness = b.params().seat_thickness; dims.floor_z = b.cz();
+    return rc::chair_contour_set(s.cx, s.cy, s.yaw, dims, project);
 }
 
 void ChairFitter::compute_projected_roi(ChairInstance& inst)

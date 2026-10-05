@@ -48,6 +48,8 @@
 #include "chair_config.h"      // rc::ChairConfig + load_chair_config
 #include "chair_instance.h"    // rc::ChairInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"       // rc::RgbIngestor  — SHARED ZED RGB (contour channel)
+#include "../../common/rgb_ingestor/depth_ingestor.h"     // rc::DepthIngestor — its metric sibling
 #include "chair_scene_graph.h" // rc::ChairSceneGraph (DSR node/RT I/O)
 #include "chair_fitter.h"      // rc::ChairFitter (active-inference core)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
@@ -217,6 +219,14 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
     std::unique_ptr<DSR::InnerGaussianAPI>            gaussian_api_;    // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
+    // ZED RGB + depth for the classifier-free contour channel (Existence.ContourCheck). Dormant (no DDS
+    // participant) while that flag is off; reset in request_shutdown BEFORE the graph goes.
+    std::unique_ptr<rc::RgbIngestor>                    rgb_ingestor_;
+    std::unique_ptr<rc::DepthIngestor>                  depth_ingestor_;
+    // Capture stamp of the camera frame the contour channel last scored. The channel runs on the mask clock
+    // (update_existence_beliefs), and scoring the same RGB/depth frame twice would charge one look twice.
+    std::uint64_t                                      contour_last_stamp_ms_ = 0;
+    std::uint64_t                                      contour_last_depth_stamp_ms_ = 0;
     std::unique_ptr<rc::ChairSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
     float exist_support_scale_   = 0.0f;   // existence belief: online-calibrated E[npts·range²] (0 = seed from cfg)

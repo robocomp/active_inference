@@ -237,6 +237,9 @@ VacateConfidentFrames = 45  # an in-frustum instance that keeps winning NO mask 
 OcclusionCheck = true    # SUPPRESS the vacate negative when the camera→chair ray is blocked by a CLOSER object (another
                          # chair, the table, a person …). A chair hidden behind something is not removed for lack of a mask.
 OcclusionMarginM = 0.30  # an occluder must be ≥ this many metres CLOSER than the chair to count as blocking it
+ContourCheck = true      # classifier-free contour channel (common/contour_edge, as in door/fridge): the chair's projected
+                         # SILHOUETTE (seat ∪ backrest) scored against ZED RGB edges + depth. The YOLO-blind rescue: holds a
+                         # chair the detector stops labelling, refutes one the depth shows is gone. Brings up ZED rgb+depth.
 # Room-containment pose prior: P(a chair centre outside the room walls) ≈ 0 (the room polygon is a trusted nominal
 # model, never fitted). Suppresses out-of-room BIRTHS and removes an instance a localization glitch put outside —
 # even behind a wall where the sensor can never reach it to vacate. Independent of frustum/occlusion.

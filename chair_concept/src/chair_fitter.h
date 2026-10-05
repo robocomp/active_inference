@@ -31,6 +31,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 #include <dsr/api/dsr_camera_api.h>
+#include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet — shared silhouette + its null
 
 #include "chair_config.h"        // rc::ChairConfig
 #include "chair_instance.h"      // rc::ChairInstance, ChairState
@@ -123,6 +124,14 @@ public:
     // instance's projected ROI — falls off toward the image edge (roi_offset) and with range. Used to weight
     // the existence VACATE so absence only removes to the degree ZED should have resolved it ("ZED removes").
     float zed_detectability(const ChairInstance& inst) const;
+
+    // The classifier-free CONTOUR channel's geometry: the believed chair's SILHOUETTE (seat ∪ backrest) in
+    // the ZED image + the same silhouette slid sideways along the floor (the null the RGB half is scored
+    // against). Pinned to the frame's capture stamp; frame_cols/rows rescale from the CameraAPI intrinsics
+    // to the delivered image. Empty face ⇒ NOT MEASURED (a corner behind the camera, no camera/extrinsic) —
+    // the caller must HOLD, never read it as a refutation. Shape: chair_contour.h.
+    rc::edges::ContourSet compute_contour_set(const ChairInstance& inst, std::uint64_t stamp_ms,
+                                              int frame_cols, int frame_rows);
     float motion_magnitude(const ChairInstance& inst) const;   // combined ego-motion speed (m/s)
     float periphery_penalty(const ChairInstance& inst) const;  // off-axis penalty ∈ [0,1] (0 on-axis → 1 at periph_ref)
     // true if q is inside the polygon, or outside by no more than margin_m (tolerance for a wall-hugging chair

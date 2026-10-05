@@ -32,6 +32,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
@@ -48,6 +50,8 @@
 #include "../../common/footprint/footprint.h"   // rc::geom:: (SHARED)
 #include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
+#include "../../common/contour_edge/contour_edge_check.h"   // rc::edges — classifier-free RGB contour check
+#include "../../common/contour_edge/contour_depth_check.h"  // rc::edges — its metric (depth) half
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -122,7 +126,12 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 
     load_config(configLoader);
 
-    const int period = configLoader.get<int>("Period.Compute");
+    // Registered rather than read raw, so the period appears in the startup table like every
+    // other key. req() keeps the throw-if-missing behaviour: a period is not something to
+    // default silently.
+    int period = 0;
+    rc::cfg::Reader(configLoader, "chair_concept").req("Period.Compute", period,
+            "GRAFCET step period (ms) for every state of this agent's state machine");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this),
@@ -184,6 +193,10 @@ void SpecificWorker::request_shutdown()
     save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
+
+    // Media-plane camera subscribers go BEFORE the graph/participant teardown (rgb_ingestor.h contract).
+    rgb_ingestor_.reset();
+    depth_ingestor_.reset();
 
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
     // destruct later with the rest of the object can fault inside DSR. Mirrors bottle_concept.
@@ -279,6 +292,10 @@ void SpecificWorker::initialize()
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
     mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
+    // ZED RGB + depth for the contour channel. Constructed here but the subscribers come up LAZILY in
+    // pump() on the Operating main thread, once the "zed" descriptor exists, and only while the flag is on.
+    rgb_ingestor_   = std::make_unique<rc::RgbIngestor>(G, &cfg_.exist_contour_check, "zed");
+    depth_ingestor_ = std::make_unique<rc::DepthIngestor>(G, &cfg_.exist_contour_check, "zed");
     scene_graph_ = std::make_unique<rc::ChairSceneGraph>(
         G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 
@@ -468,6 +485,27 @@ void SpecificWorker::initialize()
     }
     restore_strip_geometry();
     strip_window_->show();
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - confident false positives from the one check whose
+    // whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+    // run, which is the end of startup, not the end of parsing.
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+    // ARMS the unread sweep; check_registry_complete.sh chair_concept is the grep that keeps the claim
+    // honest. Re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("chair_concept");
+    rc::cfg::Reader(configLoader, "chair_concept").publish("etc/config_effective.csv");
 }
 
 // One row per chair: the adequacy gap (nats still missing before Σ meets the consumer's σ*), p(exists),
@@ -629,6 +667,9 @@ void SpecificWorker::compute()
     refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
     fitter_->update_ego_motion();   // robot/camera speed → "be-still-to-update" gate (once per cycle)
     mask_ingestor_->refresh();
+    // Newest ZED RGB/depth for the contour channel (deep-copied; read on this thread only). No-op when off.
+    if (rgb_ingestor_)   rgb_ingestor_->pump();
+    if (depth_ingestor_) depth_ingestor_->pump();
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
 
     // Chairs are generic `object` nodes named "chair_*" (schema migration); filter by name prefix.
@@ -1089,7 +1130,7 @@ void SpecificWorker::run_instance_tracker()
     {
         const auto& pkt_p = mask_ingestor_->packet();
         Eigen::Vector2f robot_xy(0.f, 0.f);
-        if (const auto rp = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); rp.has_value())
+        if (const auto rp = inner_eigen_->transform(rc::room::current_room_frame(*G), Eigen::Vector3d::Zero(), "zed"); rp.has_value())
             robot_xy = {static_cast<float>(rp->x()), static_cast<float>(rp->y())};
 
         const auto dets_p = rc::peripheral::gather(pkt_p, "chair", robot_xy);
@@ -1182,7 +1223,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     // key would suppress a genuine chair placed there from every direction.
     // Observer pose → view bearing. SHARED (common/phantom_log/observer_pose.h): the classifier failure is
     // VIEWPOINT-dependent, so the false-alarm field is keyed on (world cell × bearing), never place alone.
-    rc::history::note_observer(e, inner_eigen_.get(), x, y);
+    rc::history::note_observer(e, *G, inner_eigen_.get(), x, y);
     if (inst)   // death: carry the state that says whether this was a CONFIDENT kill
     {
         e.age_cycles    = inst->processed_cycles;
@@ -1238,6 +1279,26 @@ void SpecificWorker::update_existence_beliefs()
     policy.logodds_max   = cfg_.exist_max_logodds;
     policy.removal_prob  = 1.0f / (1.0f + std::exp(-cfg_.exist_remove_logodds));   // exact same boundary
     policy.remove_frames = static_cast<float>(cfg_.exist_remove_frames);
+
+    // ── CONTOUR channel inputs for this cycle (classifier-free; common/contour_edge) ─────────────────────
+    // Each plane is scored only on a frame it has not scored yet, and its contour is projected at THAT
+    // frame's own capture stamp — the RGB and depth planes need not carry the same instant, and a depth
+    // frame compared against an RGB-stamped projection would be judged at the wrong pose while turning.
+    // The RGB gradient is prepared ONCE per frame and scored for every chair (prepare once, score many).
+    const cv::Mat* ct_rgb   = (rgb_ingestor_ and not rgb_ingestor_->frame().empty())     ? &rgb_ingestor_->frame()   : nullptr;
+    const cv::Mat* ct_depth = (depth_ingestor_ and not depth_ingestor_->frame().empty()) ? &depth_ingestor_->frame() : nullptr;
+    const std::uint64_t ct_rgb_stamp   = ct_rgb   ? rgb_ingestor_->stamp_ms()   : 0;
+    const std::uint64_t ct_depth_stamp = ct_depth ? depth_ingestor_->stamp_ms() : 0;
+    const bool ct_rgb_fresh   = cfg_.exist_contour_check and ct_rgb_stamp > 0 and ct_rgb_stamp != contour_last_stamp_ms_;
+    const bool ct_depth_fresh = cfg_.exist_contour_check and ct_depth_stamp > 0 and ct_depth_stamp != contour_last_depth_stamp_ms_;
+    rc::edges::PreparedFrame ct_prep;
+    if (ct_rgb_fresh)
+    {
+        ct_prep = rc::edges::prepare_frame(*ct_rgb);
+        contour_last_stamp_ms_ = ct_rgb_stamp;
+    }
+    if (ct_depth_fresh)
+        contour_last_depth_stamp_ms_ = ct_depth_stamp;
 
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
@@ -1358,10 +1419,98 @@ void SpecificWorker::update_existence_beliefs()
         inst.existence.integrate(p_vis, ratio);
         inst.exist_logodds = inst.existence.logodds();
 
+        // ── CONTOUR channel (classifier-free) — the YOLO-blind rescue ────────────────────────────────
+        // ★THE ONLY EVIDENCE HERE THAT DOES NOT END AT THE DETECTOR. Both channels above are YOLO's: when
+        // the network stops painting "chair" on a chair already in the model — a viewpoint it dislikes, a
+        // chair half under a table, too close — the not-won branch charges that as ABSENCE OF THE CHAIR
+        // rather than absence of the label. This asks the image itself, as door_concept and
+        // refrigerator_concept do (common/contour_edge):
+        //   RGB   — is there an intensity boundary along the chair's projected SOLID outline, more than
+        //           along the same outline slid sideways along the floor? Relative (gradient has no
+        //           absolute scale), so it NEEDS a surviving control and stays silent without one.
+        //   DEPTH — is there a surface at the depth the belief predicts, with space behind its edge?
+        //           Absolute (metres are metres), so it needs no null — and it is the half that can say
+        //           "we are looking straight through where the chair is supposed to be".
+        // Both are bounded and dimensionless, so they SUM, and the sum passes through ONE tanh: two
+        // consequences of the same fact must not each buy a full observation.
+        //
+        // ★IN THIS AGENT'S UNIT, NOT THE FRIDGE'S. rc::exist::contour_evidence scales by log(pd/pc) ≈ 2.83
+        // nats; chair's channels are denominated in Existence.EvidenceGain (0.15/frame — the not-won branch
+        // charges exactly -g at full visibility). At 2.83 the contour would outweigh the chair's own mask
+        // channel 19:1 and decide existence single-handed. So the cycle is worth g·tanh(verdict): at most
+        // one chair observation, the same unit as the absence it argues against — enough to HOLD a chair
+        // YOLO has gone blind on, not enough to keep a phantom alive against a working detector.
+        // ★SYMMETRIC, weighted only by remaining line of sight: an occluder in front of the outline makes
+        // both halves read the occluder, not the chair, so that look is worth (1 − occlusion) either way.
+        float p_vis_ct = 0.0f;
+        if (ct_rgb_fresh or ct_depth_fresh)
+        {
+            float verdict = 0.0f;
+            int   n_used  = 0;
+            inst.dbg_ct_edge_n = inst.dbg_ct_depth_n = 0;   // 0 = NOT MEASURED this frame, never "refuted"
+            if (ct_rgb_fresh and ct_prep.valid())
+            {
+                const auto cs = fitter_->compute_contour_set(inst, ct_rgb_stamp, ct_rgb->cols, ct_rgb->rows);
+                if (cs.face.valid())
+                {
+                    std::vector<std::vector<cv::Point>> ctl;
+                    ctl.reserve(cs.controls.size());
+                    for (const auto& cc : cs.controls)
+                        ctl.push_back(cc.px);
+                    const auto es = rc::edges::contour_edge_support(ct_prep, cs.face.px, ctl);
+                    // This half's own precondition: with no surviving control `excess` has no scale.
+                    if (es.n_samples > 0 and es.n_controls > 0)
+                    {
+                        verdict += es.excess;
+                        n_used   = std::max(n_used, es.n_samples);
+                        inst.dbg_ct_edge_excess = es.excess;
+                        inst.dbg_ct_edge_n      = es.n_samples;
+                    }
+                }
+            }
+            if (ct_depth_fresh)
+            {
+                // Projected straight into the DEPTH image's own grid (compute_contour_set rescales from the
+                // intrinsics), so the scorer's RGB→depth scale factors stay 1.
+                const auto cs = fitter_->compute_contour_set(inst, ct_depth_stamp, ct_depth->cols, ct_depth->rows);
+                if (cs.face.valid())
+                {
+                    rc::edges::ContourDepthParams dp;
+                    // σ_d from the belief's OWN uncertainty, not a constant: position, plus yaw swinging the
+                    // outline's lateral edges by up to half a seat width. A poorly known chair must not be
+                    // judged against its predicted depth as if it were pinned.
+                    const auto& P = inst.ai2_belief.covariance();
+                    const float lever = 0.5f * inst.ai2_belief.seat_w();
+                    dp.sigma_depth_m = std::sqrt(std::max(1e-4f, P(0, 0) + P(1, 1) + lever * lever * P(2, 2)));
+                    const auto ds = rc::edges::contour_depth_support(*ct_depth, cs.face, cs.controls, dp);
+                    if (ds.n_samples > 0)
+                    {
+                        verdict += ds.verdict;
+                        n_used   = std::max(n_used, ds.n_samples);
+                        inst.dbg_ct_depth_verdict = ds.verdict;
+                        inst.dbg_ct_depth_bias_m  = ds.mean_bias_m;
+                        inst.dbg_ct_depth_n       = ds.n_samples;
+                    }
+                }
+            }
+            inst.dbg_ct_dL = 0.0f;
+            if (n_used > 0 and std::isfinite(verdict))     // n_used == 0 ⇒ nothing measured ⇒ HOLD
+            {
+                const float occ_ct = cfg_.exist_occlusion_check ? fitter_->los_occlusion(inst) : 0.0f;
+                p_vis_ct = std::clamp(1.0f - occ_ct, 0.0f, 1.0f);
+                const float ratio_ct = g * std::tanh(verdict);
+                inst.existence.integrate(p_vis_ct, ratio_ct);
+                inst.exist_logodds = inst.existence.logodds();
+                inst.dbg_ct_dL = p_vis_ct * ratio_ct;
+            }
+        }
+
         // p_vis is EXACTLY what one look was worth (staleness confidence x ZED detectability x remaining
         // line of sight), which is the debounce's unit — so it is passed straight through. A cycle that
         // could not have resolved the chair advances nothing and correctly HOLDS.
-        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, p_vis);
+        // A cycle in which the contour channel also looked was worth the better of the two looks.
+        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy,
+                                                       std::max(p_vis, p_vis_ct));
         if (verdict.remove)
             to_remove.push_back(id);
         if (verdict.stalled)
@@ -1397,13 +1546,18 @@ void SpecificWorker::update_existence_beliefs()
                 // Same diagnostic to a CSV (you read those) — roomprior=0 ⇒ polygon NOT loaded; inroom=0 ⇒ outside walls;
                 // zed_pd=0 ⇒ ZED can't reliably see it (far/edge) so absence won't remove it (ricoh-only-visible).
                 static std::ofstream ex_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/chair_existence_log.csv");
-                    f << "cycle,node,L,cx,cy,inroom,roomprior_loaded,roi,won,since_det,occluded,zed_pd\n"; return f; }();
+                    f << "cycle,node,L,cx,cy,inroom,roomprior_loaded,roi,won,since_det,occluded,zed_pd,"
+                         "ct_en,ct_ex,ct_dn,ct_dv,ct_bias,ct_dL\n"; return f; }();
                 if (ex_csv)
                 {
                     ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.exist_logodds << ',' << ms.cx << ',' << ms.cy
                            << ',' << (inroom ? 1 : 0) << ',' << (has_poly ? 1 : 0) << ',' << (inst.roi_valid ? 1 : 0)
                            << ',' << (inst.assigned_mask_idx >= 0 ? 1 : 0) << ',' << inst.frames_since_detection
-                           << ',' << occluded << ',' << zed_pd << '\n';
+                           << ',' << occluded << ',' << zed_pd
+                           // contour channel: ct_en/ct_dn = 0 means NOT MEASURED, never refuted
+                           << ',' << inst.dbg_ct_edge_n << ',' << inst.dbg_ct_edge_excess
+                           << ',' << inst.dbg_ct_depth_n << ',' << inst.dbg_ct_depth_verdict
+                           << ',' << inst.dbg_ct_depth_bias_m << ',' << inst.dbg_ct_dL << '\n';
                     ex_csv.flush();
                 }
             }
