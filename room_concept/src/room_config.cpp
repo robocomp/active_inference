@@ -572,8 +572,21 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     }
     reader.opt<bool>("RoomConcept.MotionPreintegration", room_concept.params.motion_preintegration,
             "propagate the motion covariance from densities per sqrt(s) instead of the per-cycle legacy diagonal");
-    reader.opt<bool>("RoomConcept.MotionCovLearn", room_concept.params.motion_cov_learn,
-            "learn a per-body-axis scale on the propagated motion noise from the corrections (motion_cov_scale.h)");
+    {
+        auto &po = room_concept.params.odom_preint_noise;
+        reader.opt<bool>("RoomConcept.MotionNoiseProportional", po.motion_proportional,
+                "odometry noise per METRE rolled and per RADIAN turned (se2_preintegration.h), not per second");
+        reader.opt<float, double>("RoomConcept.PreintKLong", po.k_long, "m² per m rolled — forward");
+        reader.opt<float, double>("RoomConcept.PreintKLat", po.k_lat, "m² per m rolled — lateral");
+        reader.opt<float, double>("RoomConcept.PreintKLatTurn", po.k_lat_turn, "m² per rad turned — lateral");
+        reader.opt<float, double>("RoomConcept.PreintKThTurn", po.k_th_turn, "rad² per rad turned — heading");
+        reader.opt<float, double>("RoomConcept.PreintKTimeTrans", po.k_t_trans, "m² per s — model translation drift");
+        reader.opt<float, double>("RoomConcept.PreintKTimeRot", po.k_t_rot, "rad² per s — model heading drift");
+        reader.opt<bool>("RoomConcept.MotionNoiseLearn", room_concept.params.motion_noise_learn,
+                "learn the coefficients above from the localiser's corrections (motion_noise_vc.h)");
+        reader.opt<double>("RoomConcept.MotionNoiseMemory", room_concept.params.motion_noise_memory,
+                "corrections of evidence the noise learner remembers");
+    }
     reader.opt<float, double>("RoomConcept.PreintOdomSigmaVLat", room_concept.params.odom_preint_noise.sigma_v_lat,
             "m/√s — lateral velocity noise floor (0.001 m / √0.05 s)");
     reader.opt<float, double>("RoomConcept.PreintOdomSigmaVLong", room_concept.params.odom_preint_noise.sigma_v_long,

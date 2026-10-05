@@ -3818,12 +3818,23 @@ namespace rc
         if (selected_prior.valid and selected_prior.covariance_eigen.allFinite())
         {
             sur_P_pred_ += selected_prior.covariance_eigen; ++sur_open_cycles_;
-            // the learner's Q is the UNSCALED noise; only the measured prior carries the learnt scale
-            const bool measured = motion_prior_selection.source == MotionPriorSource::Measured and last_measured_scaled_;
-            sur_Q0_ += measured ? last_measured_q0_ : selected_prior.covariance_eigen;
-            // a FUSED prior already carries the scaled measured term inside a precision sum that cannot be
-            // un-scaled, so a stretch containing one cannot say what kappa should be: it does not train
-            if (motion_prior_selection.source == MotionPriorSource::Fused and last_measured_scaled_) sur_Q0_mixed_ = true;
+            // The noise COMPONENTS this cycle added (motion_noise_vc.h), and their coefficient-weighted sum
+            // as applied. Only a MEASURED, preintegrated prior carries them; a stretch with any other cycle
+            // (command, fused, legacy diagonal) cannot say what the coefficients should be: it does not train.
+            const auto &np = params.odom_preint_noise;
+            if (motion_prior_selection.source == MotionPriorSource::Measured and selected_prior.has_preint
+                and np.motion_proportional)
+            {
+                const std::array<float, rc::preint::Interval::NC> kk{np.k_long, np.k_lat, np.k_lat_turn,
+                                                                     np.k_th_turn, np.k_t_trans, np.k_t_rot};
+                for (int j = 0; j < rc::preint::Interval::NC; ++j)
+                {
+                    sur_U_[j]  += selected_prior.preint.unit[j];
+                    sur_QK_    += kk[j] * selected_prior.preint.unit[j];
+                }
+            }
+            else
+                sur_mixed_ = true;
         }
 
         // ===== EARLY EXIT CHECK =====
@@ -7358,29 +7369,15 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_dropped = motion_calib_.dropped();
     }
 
-    Eigen::Matrix3f RoomConcept::apply_cov_scale(const Eigen::Matrix3f &Q, float theta) const
-    {
-        // body axes: forward = (-sin th, cos th), lateral = (cos th, sin th); T maps body -> world
-        Eigen::Matrix3f T = Eigen::Matrix3f::Identity();
-        T(0, 0) = -std::sin(theta); T(1, 0) = std::cos(theta);   // column 0: forward
-        T(0, 1) =  std::cos(theta); T(1, 1) = std::sin(theta);   // column 1: lateral
-        const Eigen::Vector3f s(std::sqrt(float(cov_scale_.kappa(0))), std::sqrt(float(cov_scale_.kappa(1))),
-                                std::sqrt(float(cov_scale_.kappa(2))));
-        const Eigen::Matrix3f S = T * s.asDiagonal() * T.transpose();   // symmetric: T is orthonormal
-        const Eigen::Matrix3f out = S * Q * S;
-        return out.allFinite() ? out : Q;
-    }
-
     void RoomConcept::score_surprise(UpdateResult& res, bool corrected)
     {
         res.surprise = {};
-        res.surprise.k_fwd = float(cov_scale_.kappa(0)); res.surprise.k_lat = float(cov_scale_.kappa(1));
-        res.surprise.k_th  = float(cov_scale_.kappa(2));
+        fill_noise_vc(res);
         if (not corrected) return;
         const Eigen::Matrix3f P_post = res.covariance;
         if (not sur_init_)
         {   // the first correction has no pose prior to be scored against; it only seeds the recursion
-            if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; sur_Q0_.setZero(); sur_Q0_mixed_ = false; sur_init_ = true; }
+            if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; reset_noise_stretch(); sur_init_ = true; }
             return;
         }
         const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
@@ -7403,19 +7400,48 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.surprise.pp_fwd = uf.dot(Pp * uf);     res.surprise.pp_lat = ul.dot(Pp * ul);     res.surprise.pp_th = sur_P_pred_(2, 2);
         res.surprise.pq_fwd = uf.dot(Pq * uf);     res.surprise.pq_lat = ul.dot(Pq * ul);     res.surprise.pq_th = P_solver(2, 2);
         res.surprise.open_cycles = sur_open_cycles_;
-        // ── LEARN the motion-noise scale from this correction (motion_cov_scale.h), per body axis ──────
-        if (params.motion_cov_learn and not sur_Q0_mixed_)
+        // ── LEARN the motion-noise components from this correction (motion_noise_vc.h) ─────────────────
+        // Against the SOLVER's posterior (P_solver, pre-floor) and the prediction the stretch built.
+        auto &np = params.odom_preint_noise;
+        if (params.motion_noise_learn and np.motion_proportional and not sur_mixed_ and sur_open_cycles_ > 0)
         {
-            const Eigen::Matrix2f Pv = sur_P_prev_.topLeftCorner<2, 2>(), Q0 = sur_Q0_.topLeftCorner<2, 2>();
-            cov_scale_.observe(0, res.surprise.c_fwd, uf.dot(Pv * uf), uf.dot(Q0 * uf), res.surprise.pq_fwd);
-            cov_scale_.observe(1, res.surprise.c_lat, ul.dot(Pv * ul), ul.dot(Q0 * ul), res.surprise.pq_lat);
-            cov_scale_.observe(2, res.surprise.c_th,  sur_P_prev_(2, 2), sur_Q0_(2, 2),  res.surprise.pq_th);
+            if (not noise_vc_init_)
+            {   // priors = the configured coefficients, as loaded
+                rc::preint::MotionNoiseVC::Params vp;
+                vp.memory = params.motion_noise_memory;
+                vp.k0 = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot};
+                noise_vc_.set_params(vp);
+                noise_vc_init_ = true;
+            }
+            Eigen::Matrix3f T;   // body axes in world coords: forward, lateral, heading
+            T << uf.x(), ul.x(), 0.f,
+                 uf.y(), ul.y(), 0.f,
+                 0.f,    0.f,    1.f;
+            noise_vc_.observe(c, T, sur_P_pred_, P_solver, sur_QK_, sur_U_);
+            // the coefficients the NEXT prediction is built with
+            np.k_long    = float(noise_vc_.k(0)); np.k_lat     = float(noise_vc_.k(1));
+            np.k_lat_turn = float(noise_vc_.k(2)); np.k_th_turn = float(noise_vc_.k(3));
+            np.k_t_trans = float(noise_vc_.k(4)); np.k_t_rot   = float(noise_vc_.k(5));
         }
-        res.surprise.k_fwd = float(cov_scale_.kappa(0)); res.surprise.k_lat = float(cov_scale_.kappa(1));
-        res.surprise.k_th  = float(cov_scale_.kappa(2));
+        fill_noise_vc(res);
         sur_open_cycles_ = 0;
-        sur_Q0_mixed_ = false;
-        if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; sur_Q0_.setZero(); }
+        reset_noise_stretch();
+        if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; }
+    }
+
+    void RoomConcept::reset_noise_stretch()
+    {
+        for (auto &u : sur_U_) u.setZero();
+        sur_QK_.setZero();
+        sur_mixed_ = false;
+    }
+
+    void RoomConcept::fill_noise_vc(UpdateResult &res) const
+    {
+        const auto &np = params.odom_preint_noise;
+        res.surprise.vc = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot,
+                           float(noise_vc_.rho(0)), float(noise_vc_.rho(1)), float(noise_vc_.rho(2))};
+        res.surprise.vc_trained = not sur_mixed_ and sur_open_cycles_ > 0;
     }
 
     void RoomConcept::apply_adaptive_covariance(UpdateResult& res)
@@ -8254,16 +8280,6 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         }
         else
             cov_eigen = compute_motion_covariance(prior, true);
-        // ── THE LEARNT SCALE (motion_cov_scale.h): how much of the propagated noise the corrections show ──
-        last_measured_q0_ = cov_eigen;
-        last_measured_scaled_ = params.motion_cov_learn;
-        if (params.motion_cov_learn)
-        {
-            const float th0 = last_update_result.ok
-                ? std::atan2(last_update_result.robot_pose.linear()(1, 0), last_update_result.robot_pose.linear()(0, 0))
-                : 0.f;
-            cov_eigen = apply_cov_scale(cov_eigen, th0);
-        }
         prior.covariance_eigen = cov_eigen;
         // Full 3×3, not just the diagonal: this tensor feeds the meas_cov_* diagnostic columns, and a
         // silently truncated copy would make the logged covariance disagree with the one in use.

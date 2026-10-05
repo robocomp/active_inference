@@ -30,6 +30,7 @@
  *  runs that share the gate.
  */
 #pragma once
+#include <array>
 #include <Eigen/Dense>
 #include <cmath>
 #include <limits>
@@ -51,7 +52,10 @@ namespace rc::surprise
         float pq_fwd = 0.f, pq_lat = 0.f, pq_th = 0.f;
         int   open_cycles = 0;  ///< prediction cycles accumulated into P_pred since the last scored correction
         bool  floor_bound = false;   ///< apply_adaptive_covariance raised the published posterior on some axis
-        float k_fwd = 1.f, k_lat = 1.f, k_th = 1.f;   ///< learnt motion-noise scale in force (motion_cov_scale.h)
+        /// motion-noise coefficients in force (motion_noise_vc.h): k_long, k_lat, k_lat_turn, k_th_turn,
+        /// k_t_trans, k_t_rot, then the scan excess rho_fwd, rho_lat, rho_th
+        std::array<float, 9> vc{};
+        bool  vc_trained = false;   ///< this stretch was eligible to train the learner
     };
 
     /// c = est - pred (heading already wrapped). P_pred, P_post: 3x3 pose covariances (x, y, theta).

@@ -256,7 +256,7 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # and 0.01 + 0.08*0.10 = 18 mm over a 0.10 m keyframe step — about 13x looser than what preintegration
 # is producing. The note above already says "calibrating sigma_* against the real odometry stream is
 # the load-bearing next step, not a refinement"; this is that bill arriving.
-# ★ 2026-10-04: ON again, with MotionCovLearn below. The legacy diagonal it replaces added CONSTANT per-cycle
+# ★ 2026-10-04: ON again, now with MotionNoiseProportional below. The legacy diagonal it replaces added CONSTANT per-cycle
 #   sigma floors (StationaryMotionThreshold 2 cm -- which fires below 0.4 m/s, i.e. on all normal driving --
 #   and rotation_noise_base 0.01 rad) that summed as a random walk at the localiser's rate: the per-axis
 #   surprise log read sum(c^2)/sum(Pp-Pq) = 0.58 fwd / 0.27 lat / 0.18 heading one cycle apart, ~0.01 over
@@ -272,9 +272,20 @@ MotionPreintegration   = true  # was true; 2026-08-13 LANDED ON. The controlled 
                                 # the real odometry stream; today's derived floor swamps the new shape.
                                 # ARM log_2026-08-13_12-05-32.csv / BASE log_2026-08-13_12-12-57.csv.
                                 # THE WAY BACK IS ONE WORD: false — no rebuild needed.
-MotionCovLearn         = false  # learn a per-body-axis scale on the propagated motion noise from the
-                                # corrections (src/motion_cov_scale.h); k_fwd/k_lat/k_th in the heading CSV.
-                                # false = the densities as configured (the A/B arm).
+# ★ 2026-10-05 MOTION-PROPORTIONAL NOISE + its learner (replaces the per-axis kappa, which could not fit:
+#   GT showed odometry error grows per METRE and per RADIAN and not at all per second -- 7769 windows,
+#   a_time = 0 on every axis; parked GT drift ~1 mm/30 s against 39 mm predicted). Priors below are those GT
+#   fits (sim). The learner (src/motion_noise_vc.h) fits them plus the scan side's excess variance (rho)
+#   from every correction; heading CSV columns vc_*. false/false = the per-second densities above.
+MotionNoiseProportional = true
+MotionNoiseLearn        = false   # OFF: live window posteriors break its assumption (motion_noise_vc.h header)
+MotionNoiseMemory       = 20000   # corrections remembered (~20 runs); one run pins only the dominant terms
+PreintKLong             = 94e-6   # m^2 per m rolled   -- forward
+PreintKLat              = 6e-6    # m^2 per m rolled   -- lateral
+PreintKLatTurn          = 10e-6   # m^2 per rad turned -- lateral (scrub)
+PreintKThTurn           = 190e-6  # rad^2 per rad turned
+PreintKTimeTrans        = 4e-6    # m^2 per s   -- model translation drift (GT: ~0 in sim)
+PreintKTimeRot          = 4e-6    # rad^2 per s -- model heading drift (gyro bias walk)
 # PreintOdomSigmaVLat  = 0.0894   # m/√s   — derived from max(StationaryMotionThreshold, OdomNoiseBase)/√0.05
 # PreintOdomSigmaVLong = 0.0894
 # ★★ STAGED DOWN 2026-08-18, 0.0447 -> 0.010. The derived value comes from RotationNoiseBase/√0.05,
