@@ -42,15 +42,23 @@ ContourSet project_quad(const std::array<Eigen::Vector3d, 4>& corners,
                         float slide_span_m,
                         const PointProjector& project)
 {
+    return project_loop_slid(std::vector<Eigen::Vector3d>(corners.begin(), corners.end()),
+                             slide_dir, slide_span_m, project);
+}
+
+ContourSet project_loop_slid(const std::vector<Eigen::Vector3d>& loop,
+                             const Eigen::Vector3d& slide_dir,
+                             float slide_span_m,
+                             const PointProjector& project)
+{
     ContourSet out;
-    if (not project or slide_span_m <= 1e-4f)
+    if (not project or slide_span_m <= 1e-4f or loop.size() < 3)
         return out;
     const double dir_norm = slide_dir.norm();
     if (not std::isfinite(dir_norm) or dir_norm < 1e-6)
         return out;
     const Eigen::Vector3d u = slide_dir / dir_norm;
 
-    const std::vector<Eigen::Vector3d> loop(corners.begin(), corners.end());
     auto face = project_loop(loop, project);
     if (not face.has_value())
         return out;                      // a corner behind the camera ⇒ nothing measured this frame
