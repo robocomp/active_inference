@@ -55,6 +55,30 @@ OK, AMBER, RED, DIM = "green", "yellow", "bold red", "dim"
 
 LEVEL_STYLE = {"debug": DIM, "info": "", "warning": AMBER, "critical": RED, "fatal": "bold white on red"}
 
+# ── WHICH LOG LINES ARE WORTH A HUMAN'S EYE ───────────────────────────────────────────────────────────
+# The events file keeps EVERYTHING (that is the record); this only decides what the main-screen "log" pane
+# and the default raw-log view show. A line is shown if it is a warning or worse, or carries an ALWAYS tag,
+# or is one of the first REPEAT_SHOWN lines of its tag that is not on the NOISE list. So a one-off startup
+# line shows, a periodic 5-s report shows its first couple of samples and then goes quiet, and a tag
+# that starts warning always breaks through. Edit the two sets freely; nothing else reads them.
+ALWAYS_TAGS = {"lifecycle", "SM", "FLIP", "gt", "Preint", "reloc", "recovery", "Recovery", "room", "calib",
+               "CeilingCheck", "FloorCheck", "heading", "cfg"}
+NOISE_TAGS = {"TIMER - DEBUG", "Timing", "imgedge", "camcal", "canvas", "planner", "LidarSrc", "ImuInject",
+              "pumps", "band", "triple", "mount", "mount/pair", "mount/shift", "mount/calib", "mount/pool",
+              "loop", "earlyexit", "hess", "camviz"}
+NOISE_PREFIXES = ("Ignoring DSR RGBD payload", "Received Full Graph")
+REPEAT_SHOWN = 2
+
+
+def log_tag(ev: dict) -> str:
+    tag = ev.get("tag") or ""
+    if not tag:
+        m = ev.get("msg", "").lstrip()
+        if m.startswith("[") and "]" in m:
+            tag = m[1:m.index("]")]
+    return tag
+
+
 # Motion calibration: the Calib window's own labels and display scales (calibration_viewer.cpp).
 CALIB_DISPLAY = {
     "k_v":       ("translation scale", 100.0, "%"),
@@ -274,9 +298,9 @@ class WarningsScreen(DetailScreen):
 
 
 class RawLogScreen(DetailScreen):
-    TITLE_TEXT = "Raw log  (t: events log ⇄ stdout file · /: search · f: follow · Esc: back)"
+    TITLE_TEXT = "Raw log  (a: important ⇄ all · t: events log ⇄ stdout file · /: search · f: follow · Esc: back)"
     BINDINGS = [Binding("slash", "search", "Search"), Binding("t", "toggle_source", "Source"),
-                Binding("f", "toggle_follow", "Follow")]
+                Binding("f", "toggle_follow", "Follow"), Binding("a", "toggle_all", "Important/All")]
 
     def compose_body(self) -> ComposeResult:
         yield Static("", id="rawbar", classes="cap")
@@ -289,19 +313,22 @@ class RawLogScreen(DetailScreen):
                else f"events log {os.path.basename(a.hello.get('events') or '') or '(socket replay)'}"
                     "  (⟂ = not on the terminal)")
         flt = f"  ·  filter '{a.search}'" if a.search else ""
-        self.query_one("#rawbar", Static).update(f"source: {src}{flt}  ·  follow {'on' if a.follow else 'off'}")
+        shown = "ALL lines" if a.raw_all or a.raw_source == "stdout" else f"important only ({a.n_hidden} hidden; a: all)"
+        self.query_one("#rawbar", Static).update(
+            f"source: {src}{flt}  ·  {shown}  ·  follow {'on' if a.follow else 'off'}")
         log = self.query_one("#raw", RichLog)
         log.clear()
-        lines = (Text(s) for s in a.stdout_lines) if a.raw_source == "stdout" else iter(a.event_lines)
-        for line in lines:
-            if a.matches(line.plain):
+        lines = ((Text(s), True) for s in a.stdout_lines) if a.raw_source == "stdout" else iter(a.event_lines)
+        for line, imp in lines:
+            if (imp or a.raw_all) and a.matches(line.plain):
                 log.write(line, scroll_end=False)
         if a.follow:
             log.scroll_end(animate=False)
 
     def feed_event(self, ev: dict) -> None:
         line = ev.get("_raw_line")
-        if line is not None and ev.get("_raw_source") == self.app.raw_source and self.app.matches(line.plain):
+        if (line is not None and ev.get("_raw_source") == self.app.raw_source and self.app.matches(line.plain)
+                and (ev.get("_important", True) or self.app.raw_all)):
             self.query_one("#raw", RichLog).write(line, scroll_end=self.app.follow)
 
     def action_search(self) -> None:
@@ -337,6 +364,10 @@ class RawLogScreen(DetailScreen):
 
     def action_toggle_follow(self) -> None:
         self.app.follow = not self.app.follow
+        self.rebuild()
+
+    def action_toggle_all(self) -> None:
+        self.app.raw_all = not self.app.raw_all
         self.rebuild()
 
 
@@ -480,7 +511,8 @@ class RoomTUI(App):
     .spark { height: 1; }
     .sparklabel { height: 1; color: $text-muted; }
     #bottom { height: 9; padding: 0 1; }
-    #warnlog { height: 1fr; border: round $panel-lighten-2; border-title-color: $text-muted; }
+    #implog { height: 3fr; border: round $panel-lighten-2; border-title-color: $text-muted; }
+    #warnlog { height: 2fr; border: round $panel-lighten-2; border-title-color: $text-muted; }
     #lastev { height: 1; color: $text-muted; }
     """
     BINDINGS = [
@@ -516,7 +548,10 @@ class RoomTUI(App):
         # raw log
         self.raw_source = "events"   # the events log is the complete, timestamped record
         self.stdout_lines: collections.deque[str] = collections.deque(maxlen=MAX_LOG_LINES)
-        self.event_lines: collections.deque[Text] = collections.deque(maxlen=MAX_LOG_LINES)
+        self.event_lines: collections.deque[tuple[Text, bool]] = collections.deque(maxlen=MAX_LOG_LINES)
+        self.raw_all = False                                   # raw log: important lines only by default
+        self.tag_counts: collections.Counter[str] = collections.Counter()
+        self.n_hidden = 0
         self.max_file_seq = 0
         self.last_seq = 0
         self.search = ""
@@ -545,6 +580,7 @@ class RoomTUI(App):
                 yield Static("", id="p-calib", classes="panel")
                 yield Static("", id="p-cams", classes="panel")
         with Vertical(id="bottom"):
+            yield RichLog(id="implog", max_lines=2000, wrap=False, markup=False, highlight=False)
             yield RichLog(id="warnlog", max_lines=500, wrap=False, markup=False, highlight=False)
             yield Static("", id="lastev")
         yield Footer()
@@ -556,6 +592,7 @@ class RoomTUI(App):
         for wid, title in titles.items():
             self.query_one(f"#{wid}").border_title = title
         self.query_one("#warnlog").border_title = "warnings  (F2: history)"
+        self.query_one("#implog").border_title = "log — important lines  (F3: raw, a: all)"
         self.relayout(self.size.width, self.size.height)
         for fn in (self.render_peers, self.render_streams, self.render_gates, self.render_loc, self.render_room,
                    self.render_calib, self.render_cams, self.update_topbar):
@@ -579,7 +616,9 @@ class RoomTUI(App):
             g.set_class(k == n, f"cols{k}")
         # Fewer columns ⇒ the panels stack at their natural height and the grid itself scrolls.
         g.styles.overflow_y = "hidden" if n == 3 else "auto"
-        self.query_one("#bottom").styles.height = 13 if height >= 55 else (9 if height >= 40 else 6)
+        # The 3-column panels stop well short of the bottom at their natural height; the log + warnings
+        # take that space (about half the screen) instead of leaving it empty.
+        self.query_one("#bottom").styles.height = max(10, int(height * (0.5 if n == 3 else 0.4)))
 
     # ── the dashboard panels ──
     def panel(self, wid: str, renderable) -> None:
@@ -873,6 +912,8 @@ class RoomTUI(App):
         self.startup_rows.clear()
         self.warnings.clear()
         self.event_lines.clear()
+        self.tag_counts.clear()
+        self.n_hidden = 0
         self.peers.clear()
         self.sth_hist.clear()
         self.kl_hist.clear()
@@ -881,6 +922,7 @@ class RoomTUI(App):
         self.sm_state = "?"
         try:
             self.query_one("#warnlog", RichLog).clear()
+            self.query_one("#implog", RichLog).clear()
         except Exception:
             pass
 
@@ -970,10 +1012,35 @@ class RoomTUI(App):
         line.append(ev.get("msg", ""), style=LEVEL_STYLE.get(lvl, ""))
         if not ev.get("term", True):
             line.append("  ⟂", style=DIM)   # not on the terminal: stream/file only
-        self.event_lines.append(line)
-        ev["_raw_line"], ev["_raw_source"] = line, "events"
+        imp = self.important(ev, lvl)
+        self.event_lines.append((line, imp))
+        ev["_raw_line"], ev["_raw_source"], ev["_important"] = line, "events", imp
+        if imp:
+            try:
+                self.query_one("#implog", RichLog).write(line, scroll_end=True)
+            except Exception:
+                pass
+        else:
+            self.n_hidden += 1
         if lvl in ("warning", "critical", "fatal"):
             self.add_warning(ev, lvl, ev.get("tag", ""), ev.get("msg", ""))
+
+    def important(self, ev: dict, lvl: str) -> bool:
+        """See ALWAYS_TAGS / NOISE_TAGS at the top of the file."""
+        if lvl in ("warning", "critical", "fatal"):
+            return True
+        if lvl == "debug":
+            return False
+        msg = ev.get("msg", "").lstrip()
+        if msg.startswith(NOISE_PREFIXES):
+            return False
+        tag = log_tag(ev)
+        if tag in ALWAYS_TAGS:
+            return True
+        if tag in NOISE_TAGS:
+            return False
+        self.tag_counts[tag] += 1
+        return self.tag_counts[tag] <= REPEAT_SHOWN
 
     def add_warning(self, ev: dict, lvl: str, tag: str, msg: str) -> None:
         self.n_warn += 1

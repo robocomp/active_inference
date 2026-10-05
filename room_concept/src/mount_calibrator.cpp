@@ -32,11 +32,17 @@ void MountCalibrator::push_mount_correction(rc::CameraIngestor &ing, const Eigen
     const float yaw    = static_cast<float>(applied(2)) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
     if (std::abs(pitch) + std::abs(height) + std::abs(yaw) <= 0.f) return;
     ing.set_mount_correction(pitch, height, yaw);
-    qInfo().nospace().noquote()
-        << "[camcal] " << QString::fromStdString(cam) << " mount correction " << why << ": pitch "
-        << QString::number(pitch * 180.0 / M_PI, 'f', 4) << " deg, height "
-        << QString::number(height, 'f', 4) << " m, yaw "
-        << QString::number(yaw * 180.0 / M_PI, 'f', 4) << " deg  (total against the graph extrinsic)";
+    // Logged only when the printed values change: the zed re-applied the same total every 0.1 s.
+    const QString vals = QString("pitch %1 deg, height %2 m, yaw %3 deg")
+                             .arg(QString::number(pitch * 180.0 / M_PI, 'f', 4), QString::number(height, 'f', 4),
+                                  QString::number(yaw * 180.0 / M_PI, 'f', 4));
+    if (auto &last = last_corr_logged_[cam]; last != vals)
+    {
+        last = vals;
+        qInfo().nospace().noquote()
+            << "[camcal] " << QString::fromStdString(cam) << " mount correction " << why << ": " << vals
+            << "  (total against the graph extrinsic)";
+    }
 }
 
 /// Feed the pooled solve back into the camera mount.

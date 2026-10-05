@@ -93,6 +93,7 @@ namespace rc
         RoomConfig&  params;
         RoomViewer** viewer_slot_ = nullptr;   ///< the worker's unique_ptr slot; may hold null
         rc::CameraIngestor* driving_ = nullptr;
+        std::map<std::string, QString> last_corr_logged_;   ///< per camera: the correction line last printed
         rc::camcal::Sink    camcal_sink_;
 
         // ── THE SENSOR TRIANGLE ──────────────────────────────────────────────────────────────────
