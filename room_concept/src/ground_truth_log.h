@@ -37,9 +37,20 @@ namespace rc
         /// wheel x gyro heading fusion offline: raw channel rotations, weights, densities, ZUPT time,
         /// all calibration values/sigmas, and the pose before and after the optimiser.
         void log_heading(const RoomConcept::UpdateResult& res);
+        /// The room frame is the layout recentred on its bbox (RecenterRoomPolygon): room = world - offset.
+        /// The supervisor pose is WORLD, so gt_x/gt_y are written minus this offset (the raw values go to
+        /// gt_x_world/gt_y_world). Set once from initialize_room_model_from_svg(); zero = frames coincide.
+        void set_world_offset(const Eigen::Vector2f& off) { off_x_.store(off.x()); off_y_.store(off.y()); }
 
     private:
         void gt_convention_report(float est_th, float gt_th);
+        /// The world->room offset is right only if the scenario's SVG is drawn in Webots world
+        /// coordinates (verified for apartamento only). Accumulates est - gt_room and, at 200/2000/20000
+        /// samples, logs its mean against the error the localiser can explain: its own scatter PLUS its
+        /// claimed sigma (scatter alone fails when parked: 1 mm scatter, 9 mm constant bias). A wrong frame
+        /// is metres; a localiser bias is centimetres, so the 3x margin is generous to the latter.
+        /// Diagnostic only -- it changes nothing.
+        void gt_frame_report(float dx, float dy, float claimed_var_xy);
 
         std::shared_ptr<DSR::DSRGraph> G;
         RoomConcept& room_concept_;
@@ -48,6 +59,10 @@ namespace rc
         double gt_sum_diff_c_ = 0, gt_sum_diff_s_ = 0;   ///< circular accumulators for est - gt
         double gt_sum_sum_c_  = 0, gt_sum_sum_s_  = 0;   ///< and for est + gt
         long   gt_n_ = 0;
+        double fr_sx_ = 0, fr_sy_ = 0, fr_sxx_ = 0, fr_syy_ = 0;   ///< est - gt_room moments
+        double fr_var_ = 0;   ///< sum of the published posterior's var_x + var_y
+        long   fr_n_ = 0, fr_report_at_ = 200;
+        std::atomic<float> off_x_{0.f}, off_y_{0.f};   ///< world -> room translation (set on main, read on localiser)
         long   gt_report_at_ = 200;
         std::ofstream gt_csv_;
         bool          gt_csv_open_attempted_ = false;

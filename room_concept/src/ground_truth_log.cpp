@@ -41,6 +41,33 @@ void GroundTruthLog::gt_convention_report(float est_th, float gt_th_raw)
 }
 
 
+void GroundTruthLog::gt_frame_report(float dx, float dy, float claimed_var_xy)
+{
+    if (not std::isfinite(dx) or not std::isfinite(dy)) return;
+    if (std::isfinite(claimed_var_xy)) fr_var_ += claimed_var_xy;
+    fr_sx_ += dx; fr_sy_ += dy; fr_sxx_ += double(dx) * dx; fr_syy_ += double(dy) * dy;
+    if (++fr_n_ != fr_report_at_) return;
+    fr_report_at_ *= 10;                                   // 200, 2000, 20000 -- three checks, then quiet
+    const double n = static_cast<double>(fr_n_);
+    const double mx = fr_sx_ / n, my = fr_sy_ / n;
+    const double sx = std::sqrt(std::max(fr_sxx_ / n - mx * mx, 0.0));
+    const double sy = std::sqrt(std::max(fr_syy_ / n - my * my, 0.0));
+    const double mean = std::hypot(mx, my), scatter = std::hypot(sx, sy);
+    const double claimed = std::sqrt(fr_var_ / n);
+    const double explained = 3.0 * std::hypot(scatter, claimed);   // posterior is 2-3x overconfident vs GT (10-04)
+    qInfo().nospace().noquote()
+        << "[gt] frame check over " << fr_n_ << " samples: mean(est - gt_room) = ("
+        << QString::number(mx, 'f', 3) << ", " << QString::number(my, 'f', 3) << ") m, |mean| "
+        << QString::number(mean, 'f', 3) << " vs 3*hypot(scatter " << QString::number(scatter, 'f', 3)
+        << ", claimed sigma " << QString::number(claimed, 'f', 3) << ") = " << QString::number(explained, 'f', 3)
+        << " m (offset applied " << QString::number(off_x_.load(), 'f', 3) << ", "
+        << QString::number(off_y_.load(), 'f', 3) << ")  ->  "
+        << (mean <= explained ? "GT is in the room frame; the error columns grade the localiser"
+                              : "the mean is more than the localiser can explain: this scenario's SVG is probably NOT "
+                              "drawn in Webots world coordinates -- gt_* columns MIS-GRADE (use gt_*_world + a fitted transform)");
+}
+
+
 void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
 {
     if (shutting_down_.load() or not G)
@@ -98,7 +125,7 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        // its counterfactual travelling as one number is how a mismatch hides.
                        // fb_ts = 0 means the shadow did not produce a pair on this cycle.
                        "fb_ts,fb_cal_x,fb_cal_y,fb_cal_th,fb_nom_x,fb_nom_y,fb_nom_th,"
-                       "fb_corr_pitch,fb_corr_height,fb_corr_yaw\n";
+                       "fb_corr_pitch,fb_corr_height,fb_corr_yaw,gt_x_world,gt_y_world\n";
         }
         else
             qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
@@ -114,12 +141,15 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
     const float gt_th_raw = ga.value();
     const float gt_th     = -gt_th_raw;
     gt_convention_report(est_th, gt_th_raw);
+    gt_frame_report(p.translation().x() - (gx.value() - off_x_.load()),
+                    p.translation().y() - (gy.value() - off_y_.load()),
+                    res.covariance.rows() > 1 ? res.covariance(0, 0) + res.covariance(1, 1) : NAN);
     // Fetched once and used raw: the pose error each implies is computed from this row offline,
     // because the subtraction is the analysis and not the measurement.
     const auto fb = room_concept_.get_factor_b();
     const std::int64_t fb_ts = fb.valid ? fb.ts_ms : 0;
     gt_csv_ << res.timestamp_ms
-            << ',' << gx.value() << ',' << gy.value() << ',' << gt_th
+            << ',' << gx.value() - off_x_.load() << ',' << gy.value() - off_y_.load() << ',' << gt_th
             << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
             << ',' << gt_th_raw
             << ',' << res.sdf_mse << ',' << res.iterations_used
@@ -162,6 +192,7 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             << ',' << fb.pose_calibrated.x() << ',' << fb.pose_calibrated.y() << ',' << fb.pose_calibrated.z()
             << ',' << fb.pose_nominal.x()    << ',' << fb.pose_nominal.y()    << ',' << fb.pose_nominal.z()
             << ',' << fb.correction.x() << ',' << fb.correction.y() << ',' << fb.correction.z()
+            << ',' << gx.value() << ',' << gy.value()
             << '\n';
     gt_csv_.flush();
 }
@@ -203,7 +234,7 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
         hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w,"
                    "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info,"
                    "calib_applied,sur_open,sur_c_fwd,sur_c_lat,sur_c_th,sur_pp_fwd,sur_pp_lat,sur_pp_th,"
-                   "sur_pq_fwd,sur_pq_lat,sur_pq_th\n";
+                   "sur_pq_fwd,sur_pq_lat,sur_pq_th,preint,cov_learn,k_fwd,k_lat,k_th,gt_x_world,gt_y_world,sur_floor\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -221,6 +252,9 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             // Same sign convention as gt_error.csv: the producer's angle is inverted.
             if (ax and ay and aa) { gx = ax.value(); gy = ay.value(); gth = -aa.value(); }
         }
+    // the supervisor pose is WORLD; the estimate is in the recentred ROOM frame (set_world_offset)
+    const float gx_world = gx, gy_world = gy;
+    gx -= off_x_.load(); gy -= off_y_.load();
     const auto &p = res.robot_pose;
     const float est_th = std::atan2(p.linear()(1, 0), p.linear()(0, 0));
     const auto &d = res.heading_diag;
@@ -252,7 +286,11 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << res.calib_applied << ',' << res.surprise.open_cycles
             << ',' << res.surprise.c_fwd << ',' << res.surprise.c_lat << ',' << res.surprise.c_th
             << ',' << res.surprise.pp_fwd << ',' << res.surprise.pp_lat << ',' << res.surprise.pp_th
-            << ',' << res.surprise.pq_fwd << ',' << res.surprise.pq_lat << ',' << res.surprise.pq_th << '\n';
+            << ',' << res.surprise.pq_fwd << ',' << res.surprise.pq_lat << ',' << res.surprise.pq_th
+            << ',' << (room_concept_.params.motion_preintegration ? 1 : 0)
+            << ',' << (room_concept_.params.motion_cov_learn ? 1 : 0)
+            << ',' << res.surprise.k_fwd << ',' << res.surprise.k_lat << ',' << res.surprise.k_th
+            << ',' << gx_world << ',' << gy_world << ',' << (res.surprise.floor_bound ? 1 : 0) << '\n';
     hd_csv_.flush();
 }
 

@@ -281,13 +281,16 @@ class SpecificWorker : public GenericWorker
         // writes onto the robot node as robot_gt_*. The point is a witness from OUTSIDE the
         // estimator: a wrong pose fitted well scores exactly like a right one on the SDF residual,
         // which is how a 0.35 rad yaw error hid behind an SDF of 0.009 for a whole session.
-        // ⚠ The two poses are in DIFFERENT FRAMES — GT is world, the estimate is room — so a
-        // CONSTANT offset between them is expected and benign (the room frame's own orientation).
+        // ⚠ The two poses are in DIFFERENT FRAMES — GT is world, the estimate is room. ★2026-10-04 the
+        // TRANSLATION is now removed at the logger (GroundTruthLog::set_world_offset = the recentring
+        // offset; apartamento (-4.2535, +4.628), verified to mm, raw values kept in gt_*_world). It is
+        // exact only if the scenario's SVG (after mirror_x) is drawn in Webots world coordinates.
         // What matters is whether that offset stays constant: fit offset+gain over many rows and
         // look at the RESIDUAL. Never compare two single readings; that is how three wrong
 
     // ── robot_gt_angle arrives with an INVERTED SIGN (measured 2026-08-28, 9258 rows) ────────────
-    // Position is a clean pure translation: gt_x = est_x + 0.53, gt_y = est_y, slope +1 on both.
+    // Position is a clean pure translation: gt_x = est_x + 0.53, gt_y = est_y, slope +1 on both
+    // (0.53 was an older layout's recentring offset; now subtracted at the logger, see above).
     // Heading is not: gt_theta = -est_theta - 89.2 deg. No rigid transform maps position that way
     // and angle this way, and the position half is verifiably right, so the ANGLE is wrong — the
     // signature (a clean reflection, not a rotation) is what you get extracting a Webots axis-angle

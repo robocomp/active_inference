@@ -418,6 +418,7 @@ void SpecificWorker::initialize_room_model_from_svg()
                     << "RT edges saved before this change are stale.";
 
         calib_->set_room_polygon(room_polygon, offset);
+        if (gt_log_) gt_log_->set_world_offset(offset);   // GT is world; the estimate is this recentred frame
         room_concept_.configure_room_from_polygon(calib_->room_polygon());
         room_initialized_from_svg_polygon_ = true;
         rc::StatusReporter::loaded("layout", svg_path,
