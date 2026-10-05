@@ -3818,7 +3818,15 @@ namespace rc
         // The motion model's predictive covariance grows by this cycle's increment noise whether or not the
         // cycle is then corrected; score_surprise() scores and resets it at the next correction.
         if (selected_prior.valid and selected_prior.covariance_eigen.allFinite())
-            { sur_P_pred_ += selected_prior.covariance_eigen; ++sur_open_cycles_; }
+        {
+            sur_P_pred_ += selected_prior.covariance_eigen; ++sur_open_cycles_;
+            // the learner's Q is the UNSCALED noise; only the measured prior carries the learnt scale
+            const bool measured = motion_prior_selection.source == MotionPriorSource::Measured and last_measured_scaled_;
+            sur_Q0_ += measured ? last_measured_q0_ : selected_prior.covariance_eigen;
+            // a FUSED prior already carries the scaled measured term inside a precision sum that cannot be
+            // un-scaled, so a stretch containing one cannot say what kappa should be: it does not train
+            if (motion_prior_selection.source == MotionPriorSource::Fused and last_measured_scaled_) sur_Q0_mixed_ = true;
+        }
 
         // ===== EARLY EXIT CHECK =====
         // ★NOT WHILE SEARCHING (09-17) — the relocaliser's rule (5ca93b4). The early exit trusts the prediction
@@ -4365,7 +4373,7 @@ namespace rc
         // MUST come after the fields above: it reads dy_local/dx_local/imu_dtheta as the covariates
         // H. Called earlier it sees zeros, H -> 0, and the learner silently never learns anything.
         feed_motion_calibrator(res);
-        score_surprise(res, true);   // after the adaptive floor: scored against the PUBLISHED posterior
+        score_surprise(res, true);   // after the adaptive floor: KL vs the PUBLISHED posterior; per-axis + learner vs the solver's
         return res;
     }
 
@@ -7350,14 +7358,29 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_dropped = motion_calib_.dropped();
     }
 
+    Eigen::Matrix3f RoomConcept::apply_cov_scale(const Eigen::Matrix3f &Q, float theta) const
+    {
+        // body axes: forward = (-sin th, cos th), lateral = (cos th, sin th); T maps body -> world
+        Eigen::Matrix3f T = Eigen::Matrix3f::Identity();
+        T(0, 0) = -std::sin(theta); T(1, 0) = std::cos(theta);   // column 0: forward
+        T(0, 1) =  std::cos(theta); T(1, 1) = std::sin(theta);   // column 1: lateral
+        const Eigen::Vector3f s(std::sqrt(float(cov_scale_.kappa(0))), std::sqrt(float(cov_scale_.kappa(1))),
+                                std::sqrt(float(cov_scale_.kappa(2))));
+        const Eigen::Matrix3f S = T * s.asDiagonal() * T.transpose();   // symmetric: T is orthonormal
+        const Eigen::Matrix3f out = S * Q * S;
+        return out.allFinite() ? out : Q;
+    }
+
     void RoomConcept::score_surprise(UpdateResult& res, bool corrected)
     {
         res.surprise = {};
+        res.surprise.k_fwd = float(cov_scale_.kappa(0)); res.surprise.k_lat = float(cov_scale_.kappa(1));
+        res.surprise.k_th  = float(cov_scale_.kappa(2));
         if (not corrected) return;
         const Eigen::Matrix3f P_post = res.covariance;
         if (not sur_init_)
         {   // the first correction has no pose prior to be scored against; it only seeds the recursion
-            if (P_post.allFinite()) { sur_P_pred_ = P_post; sur_init_ = true; }
+            if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; sur_Q0_.setZero(); sur_Q0_mixed_ = false; sur_init_ = true; }
             return;
         }
         const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
@@ -7367,13 +7390,32 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.surprise = rc::surprise::kl_gauss(c, sur_P_pred_, P_post);
         // Per axis in the body frame: forward = (-sin th, cos th), lateral = (cos th, sin th) on this robot.
         const Eigen::Vector2f uf(-std::sin(est_th), std::cos(est_th)), ul(std::cos(est_th), std::sin(est_th));
-        const Eigen::Matrix2f Pp = sur_P_pred_.topLeftCorner<2, 2>(), Pq = P_post.topLeftCorner<2, 2>();
+        // ★ The per-axis posterior is the SOLVER's, from BEFORE apply_adaptive_covariance. That floor sets
+        //   P(i,i) = max(P, EMA v², v²): a posterior that is a function of this very correction, which voids
+        //   E[c²] = P_pred - P_post (Fable 2026-10-04: ~200/874 corrections were floor-bound and carried
+        //   87-97% of sum c², poisoning kappa). current_covariance is the filter state the floor never
+        //   touches (res.covariance = current_covariance, then the floor edits only res). The PREDICTION
+        //   side stays on the published value: it is what prev_cov -> predict_step actually propagated.
+        const Eigen::Matrix3f P_solver = current_covariance.allFinite() ? current_covariance : P_post;
+        res.surprise.floor_bound = (P_post.diagonal() - P_solver.diagonal()).maxCoeff() > 0.f;
+        const Eigen::Matrix2f Pp = sur_P_pred_.topLeftCorner<2, 2>(), Pq = P_solver.topLeftCorner<2, 2>();
         res.surprise.c_fwd = uf.dot(c.head<2>());  res.surprise.c_lat = ul.dot(c.head<2>());  res.surprise.c_th = c[2];
         res.surprise.pp_fwd = uf.dot(Pp * uf);     res.surprise.pp_lat = ul.dot(Pp * ul);     res.surprise.pp_th = sur_P_pred_(2, 2);
-        res.surprise.pq_fwd = uf.dot(Pq * uf);     res.surprise.pq_lat = ul.dot(Pq * ul);     res.surprise.pq_th = P_post(2, 2);
+        res.surprise.pq_fwd = uf.dot(Pq * uf);     res.surprise.pq_lat = ul.dot(Pq * ul);     res.surprise.pq_th = P_solver(2, 2);
         res.surprise.open_cycles = sur_open_cycles_;
+        // ── LEARN the motion-noise scale from this correction (motion_cov_scale.h), per body axis ──────
+        if (params.motion_cov_learn and not sur_Q0_mixed_)
+        {
+            const Eigen::Matrix2f Pv = sur_P_prev_.topLeftCorner<2, 2>(), Q0 = sur_Q0_.topLeftCorner<2, 2>();
+            cov_scale_.observe(0, res.surprise.c_fwd, uf.dot(Pv * uf), uf.dot(Q0 * uf), res.surprise.pq_fwd);
+            cov_scale_.observe(1, res.surprise.c_lat, ul.dot(Pv * ul), ul.dot(Q0 * ul), res.surprise.pq_lat);
+            cov_scale_.observe(2, res.surprise.c_th,  sur_P_prev_(2, 2), sur_Q0_(2, 2),  res.surprise.pq_th);
+        }
+        res.surprise.k_fwd = float(cov_scale_.kappa(0)); res.surprise.k_lat = float(cov_scale_.kappa(1));
+        res.surprise.k_th  = float(cov_scale_.kappa(2));
         sur_open_cycles_ = 0;
-        if (P_post.allFinite()) sur_P_pred_ = P_post;
+        sur_Q0_mixed_ = false;
+        if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; sur_Q0_.setZero(); }
     }
 
     void RoomConcept::apply_adaptive_covariance(UpdateResult& res)
@@ -8212,6 +8254,16 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         }
         else
             cov_eigen = compute_motion_covariance(prior, true);
+        // ── THE LEARNT SCALE (motion_cov_scale.h): how much of the propagated noise the corrections show ──
+        last_measured_q0_ = cov_eigen;
+        last_measured_scaled_ = params.motion_cov_learn;
+        if (params.motion_cov_learn)
+        {
+            const float th0 = last_update_result.ok
+                ? std::atan2(last_update_result.robot_pose.linear()(1, 0), last_update_result.robot_pose.linear()(0, 0))
+                : 0.f;
+            cov_eigen = apply_cov_scale(cov_eigen, th0);
+        }
         prior.covariance_eigen = cov_eigen;
         // Full 3×3, not just the diagonal: this tensor feeds the meas_cov_* diagnostic columns, and a
         // silently truncated copy would make the logged covariance disagree with the one in use.

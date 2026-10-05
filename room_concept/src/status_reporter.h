@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -93,6 +94,9 @@ public:
 
     /// compute(): the result it ALREADY fetched. Only scalars are kept — never the scan.
     void observe(const RoomConcept::UpdateResult& r);
+    /// EVERY corrected localiser result (PosePublisher's hand-over, LOCALISER thread): accumulates the
+    /// surprise so the snapshot reports a true rate in nats/s, not a 2 Hz sample of a 20 Hz quantity.
+    void accumulate_surprise(const RoomConcept::UpdateResult& r);
     /// compute(): this tick's cost.
     void observe_compute(long long us);
     /// The camera mount solve, in physical units, from the same place the Calib window gets it.
@@ -141,6 +145,12 @@ private:
 
     struct Rate { long long count = -1; long long t_ms = 0; double hz = 0; };
     std::map<std::string, Rate> rates_;
+
+    // surprise accumulated since the last snapshot (written on the localiser thread)
+    std::mutex sur_mtx_;
+    double kl_acc_ = 0.0, mm_acc_ = 0.0;
+    long sur_scored_ = 0, sur_results_ = 0;
+    long long sur_t0_ms_ = 0;
 
     std::string sm_state_ = "?";
     std::string last_state_;

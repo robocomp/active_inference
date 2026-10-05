@@ -256,7 +256,12 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # and 0.01 + 0.08*0.10 = 18 mm over a 0.10 m keyframe step — about 13x looser than what preintegration
 # is producing. The note above already says "calibrating sigma_* against the real odometry stream is
 # the load-bearing next step, not a refinement"; this is that bill arriving.
-MotionPreintegration   = false  # was true; 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
+# ★ 2026-10-04: ON again, with MotionCovLearn below. The legacy diagonal it replaces added CONSTANT per-cycle
+#   sigma floors (StationaryMotionThreshold 2 cm -- which fires below 0.4 m/s, i.e. on all normal driving --
+#   and rotation_noise_base 0.01 rad) that summed as a random walk at the localiser's rate: the per-axis
+#   surprise log read sum(c^2)/sum(Pp-Pq) = 0.58 fwd / 0.27 lat / 0.18 heading one cycle apart, ~0.01 over
+#   long stretches (heading_2026-10-04_20-38-02.csv). Densities per sqrt(s) put dt where the physics does.
+MotionPreintegration   = true  # was true; 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
                                 # 3 cm) is NULL in every moving band and +0.63 pp early exit while parked
                                 # (the only difference outside its Wilson 95% CI); cov_tt unchanged,
                                 # no boundary ratchet, timing identical. So this is kept on STRUCTURAL
@@ -267,6 +272,9 @@ MotionPreintegration   = false  # was true; 2026-08-13 LANDED ON. The controlled
                                 # the real odometry stream; today's derived floor swamps the new shape.
                                 # ARM log_2026-08-13_12-05-32.csv / BASE log_2026-08-13_12-12-57.csv.
                                 # THE WAY BACK IS ONE WORD: false — no rebuild needed.
+MotionCovLearn         = false  # learn a per-body-axis scale on the propagated motion noise from the
+                                # corrections (src/motion_cov_scale.h); k_fwd/k_lat/k_th in the heading CSV.
+                                # false = the densities as configured (the A/B arm).
 # PreintOdomSigmaVLat  = 0.0894   # m/√s   — derived from max(StationaryMotionThreshold, OdomNoiseBase)/√0.05
 # PreintOdomSigmaVLong = 0.0894
 # ★★ STAGED DOWN 2026-08-18, 0.0447 -> 0.010. The derived value comes from RotationNoiseBase/√0.05,

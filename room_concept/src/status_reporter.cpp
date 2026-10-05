@@ -71,6 +71,18 @@ void StatusReporter::observe(const RoomConcept::UpdateResult& r)
     l.dropped = r.calib_dropped;
 }
 
+void StatusReporter::accumulate_surprise(const RoomConcept::UpdateResult& r)
+{
+    std::lock_guard lk(sur_mtx_);
+    ++sur_results_;
+    if (r.surprise.scored)
+    {
+        kl_acc_ += r.surprise.kl;
+        mm_acc_ += r.surprise.mismatch;
+        ++sur_scored_;
+    }
+}
+
 void StatusReporter::observe_compute(long long us)
 {
     if (comp_t0_ms_ == 0) comp_t0_ms_ = now_ms();
@@ -111,6 +123,19 @@ std::string StatusReporter::build_state()
              .f("early_exit_metric", l.ee, 4).f("sdf_med", l.sdf, 4).f("pred_sdf_med", l.pred_sdf, 4)
              .f("innov", l.innov, 4).f("kl", l.kl, 4).f("mismatch", l.mismatch, 4).b("scored", l.scored)
              .u("reloc_epoch", l.epoch).i("age_ms", l.ts_ms > 0 ? now - l.ts_ms : -1);
+        }
+        // Surprise RATES over the interval since the last snapshot, from every corrected result.
+        {
+            std::lock_guard lk(sur_mtx_);
+            if (sur_t0_ms_ > 0 and now > sur_t0_ms_)
+            {
+                const double secs = 1e-3 * static_cast<double>(now - sur_t0_ms_);
+                o.f("kl_rate", kl_acc_ / secs, 4).f("mismatch_rate", mm_acc_ / secs, 4)
+                 .i("n_scored", sur_scored_).i("results", sur_results_).f("rate_window_s", secs, 3);
+            }
+            kl_acc_ = mm_acc_ = 0.0;
+            sur_scored_ = sur_results_ = 0;
+            sur_t0_ms_ = now;
         }
         st.raw("loc", o.str());
     }

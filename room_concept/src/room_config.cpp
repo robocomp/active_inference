@@ -571,7 +571,9 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         pc.scale_omega  = p0.cmd_noise_rot;
     }
     reader.opt<bool>("RoomConcept.MotionPreintegration", room_concept.params.motion_preintegration,
-            "");
+            "propagate the motion covariance from densities per sqrt(s) instead of the per-cycle legacy diagonal");
+    reader.opt<bool>("RoomConcept.MotionCovLearn", room_concept.params.motion_cov_learn,
+            "learn a per-body-axis scale on the propagated motion noise from the corrections (motion_cov_scale.h)");
     reader.opt<float, double>("RoomConcept.PreintOdomSigmaVLat", room_concept.params.odom_preint_noise.sigma_v_lat,
             "m/√s — lateral velocity noise floor (0.001 m / √0.05 s)");
     reader.opt<float, double>("RoomConcept.PreintOdomSigmaVLong", room_concept.params.odom_preint_noise.sigma_v_long,

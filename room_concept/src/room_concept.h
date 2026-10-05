@@ -71,6 +71,7 @@
 #include "rest_density_learner.h"
 #include "reloc_search.h"
 #include "surprise.h"
+#include "motion_cov_scale.h"
 
 namespace rc
 {
@@ -507,6 +508,9 @@ public:
         /// Where the calibration WINDOW (evidence, never parameters) is kept between runs.
         std::string calib_state_file = "etc/motion_calib_state.csv";
         bool motion_preintegration = false;
+        /// Learn a per-body-axis scale on the propagated motion noise from the localiser's corrections
+        /// (motion_cov_scale.h) and apply it to the measured motion prior. RoomConcept.MotionCovLearn.
+        bool motion_cov_learn = false;
         rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
         // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base
         // 0.05 m vs odom_noise_base 0.01 m) because an open-loop command really can be wrong while the
@@ -1906,6 +1910,16 @@ private:
    /// while the polish is off (the growth step is gated on it) -- it would make every prediction look
    /// infinitely confident.
    Eigen::Matrix3f sur_P_pred_ = Eigen::Matrix3f::Zero();
+   // The same split two ways: the posterior at the last scored correction, and the motion noise accumulated
+   // since BEFORE the learnt scale (what MotionCovScale learns against). sur_P_pred_ = sur_P_prev_ + scaled Q.
+   Eigen::Matrix3f sur_P_prev_ = Eigen::Matrix3f::Zero();
+   Eigen::Matrix3f sur_Q0_ = Eigen::Matrix3f::Zero();
+   rc::preint::MotionCovScale cov_scale_;
+   Eigen::Matrix3f last_measured_q0_ = Eigen::Matrix3f::Zero();   // the measured prior's covariance before kappa
+   bool            last_measured_scaled_ = false;
+   bool            sur_Q0_mixed_ = false;           // the stretch held a FUSED cycle: sur_Q0_ is not kappa-free
+   /// kappa applied to a world-frame motion covariance, in the body frame of heading theta.
+   [[nodiscard]] Eigen::Matrix3f apply_cov_scale(const Eigen::Matrix3f &Q, float theta) const;
    bool            sur_init_ = false;
    int             sur_open_cycles_ = 0;   // cycles accumulated into sur_P_pred_ since the last scored correction   // first correction only seeds sur_P_pred_ (no pose prior before it)
    void apply_adaptive_covariance(UpdateResult& res);

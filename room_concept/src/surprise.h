@@ -50,6 +50,8 @@ namespace rc::surprise
         float pp_fwd = 0.f, pp_lat = 0.f, pp_th = 0.f;
         float pq_fwd = 0.f, pq_lat = 0.f, pq_th = 0.f;
         int   open_cycles = 0;  ///< prediction cycles accumulated into P_pred since the last scored correction
+        bool  floor_bound = false;   ///< apply_adaptive_covariance raised the published posterior on some axis
+        float k_fwd = 1.f, k_lat = 1.f, k_th = 1.f;   ///< learnt motion-noise scale in force (motion_cov_scale.h)
     };
 
     /// c = est - pred (heading already wrapped). P_pred, P_post: 3x3 pose covariances (x, y, theta).

@@ -122,6 +122,17 @@ def per_axis(path):
             den = sum(max(x[f'sur_pp_{a}'] - x[f'sur_pq_{a}'], 0.0) for x in e)
             return sum(x[f'sur_c_{a}'] ** 2 for x in e) / den if den > 0 else float('nan')
         print(f'  {lo:>5}-{hi if hi < 10**9 else "inf":<6}  {len(e):6d}   {ratio("fwd"):7.3f}   {ratio("lat"):7.3f}   {ratio("th"):7.3f}')
+    # the learnt scale (motion_cov_scale.h): where kappa stood at each third of the run, and the flags in force
+    if 'k_fwd' in rows[0]:
+        ks = []
+        for r in rows:
+            try: ks.append((float(r['k_fwd']), float(r['k_lat']), float(r['k_th'])))
+            except ValueError: pass
+        if ks:
+            print(f"  MotionPreintegration={rows[0].get('preint')}  MotionCovLearn={rows[0].get('cov_learn')}"
+                  f"   kappa (fwd, lat, th) at 1/3 2/3 end:")
+            for k in (len(ks) // 3, 2 * len(ks) // 3, len(ks) - 1):
+                print(f'    row {k:6d}   {ks[k][0]:7.3f}   {ks[k][1]:7.3f}   {ks[k][2]:7.3f}')
 
 
 if __name__ == '__main__':
