@@ -197,6 +197,11 @@ private:
     // SIMULATION ONLY: needs robot_gt_*, which robot_concept writes only while the producer reports
     // simulated. On real hardware the series stay empty and the plot is honestly flat.
     QPointer<rc::TimeSeriesPlot> ts_plot_loc_;
+    // SELF-CALIBRATION, GT-free (drift_monitor.h): systematic drift per m / per rad, its own panel.
+    // The monitor refits only on a scored correction, so the last fit is HELD and re-drawn every UI
+    // tick — otherwise the lines exist only as isolated points at the corrections.
+    QPointer<rc::TimeSeriesPlot> ts_plot_syst_;
+    std::optional<std::array<float, 3>> syst_last_;   ///< fwd mm/m, lat mm/m, heading mrad/rad
     rc::LocalizationDriftMeter   drift_pred_;   ///< ground truth vs the PREDICTED pose
     rc::LocalizationDriftMeter   drift_pose_;   ///< ground truth vs the PUBLISHED pose
     double corr_sum_m_ = 0.0;                   ///< |published - predicted| accumulated, metres

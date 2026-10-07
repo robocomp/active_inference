@@ -263,6 +263,7 @@ void SpecificWorker::compute()
     if (status_stream_ and loc_res.has_value())
         status_.observe(*loc_res);   // scalars only; the snapshot timer serialises them
     t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
+    joint_calibration_step(loc_res);   // plan 2026-10-05: joint calib monitor (logs only unless LidarMountApply)
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
@@ -385,6 +386,60 @@ void SpecificWorker::compute()
                 << "gui_thread=" << on_gui_thread;
     }
     fps_counter_.print("[Compute]", 3000);
+}
+
+// ── JOINT CALIBRATION (plan docs/superpowers/plans/2026-10-05-joint-calibration.md) ──────────────
+// Task 4, MONITOR: once per new motion solve, one joint posterior over odometry + helios mount + every
+// camera mount -> tmp/joint_calib/. Logs only.
+// ⚠ DEVIATION from the plan's call site: the motion block is read from the localizer's RESULT
+//   (UpdateResult::calib_information, a copy made on the localizer thread), not by reaching into
+//   room_concept_.motion_calibrator() -- that calibrator is fed on the LOCALIZER thread and its
+//   episode deque must not be iterated from this one. The camera pools are fed here, on the main
+//   thread, so they are read directly. The trigger is the monotonic episode counter
+//   (calib_episodes), not last_solve().episodes, which saturates at the 512-episode window.
+//
+// Task 5, LiDAR-SIDE CORRECTION (LidarMountApply, default OFF), every cycle:
+//   T_corr = Planar{lever_x, lever_y, eps_yaw / kEpsPerLidarYaw} from the motion calibrator's ACTING
+//   values (calib_applied bit set), points get compose(T_corr, T_inject).
+// ⚠ DEVIATION: the plan takes T_corr from the JOINT posterior. The acting MOTION values are used
+//   instead because p_applied (which undoes the feedback) records exactly those; applying the joint's
+//   value would act a number p_applied never hears about -- the Review Focus #2 failure. The joint
+//   remains the logged monitor.
+// Camera evidence is then re-referenced to the LiDAR frame in force (camcal::Estimator::
+// reference_to_lidar_yaw, idempotent, persisted), and the joint refers it back through
+// CameraBlock::lidar_yaw_applied. Runs whatever the flag, so evidence left referenced to a correction
+// from an earlier session is brought back to the frame now in force.
+void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
+{
+    if (not loc_res.has_value()) return;
+    const double yaw_sigma = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    double psi_app = 0.0;
+    if (params.LIDAR_MOUNT_APPLY and lidar_ingestor_)
+    {
+        const auto acting = [&](int i)
+        { return ((loc_res->calib_applied >> i) & 1) ? loc_res->calib_value[i] : 0.f; };
+        const rc::lidar_mount::Planar T_corr{acting(rc::calib::P_LEVER_X), acting(rc::calib::P_LEVER_Y),
+                                             acting(rc::calib::P_EPS_YAW) / rc::joint::kEpsPerLidarYaw};
+        lidar_ingestor_->set_mount_extra(rc::lidar_mount::compose(T_corr, lidar_ingestor_->mount_inject()));
+        psi_app = T_corr.yaw;
+    }
+    if (mount_) mount_->pool().reference_to_lidar_yaw(psi_app, yaw_sigma);
+    if (calib_)
+        for (auto& ch : calib_->channels()) ch->calib.reference_to_lidar_yaw(psi_app, yaw_sigma);
+
+    if (not params.JOINT_CALIB_MONITOR) return;
+    const int ep = loc_res->calib_episodes;
+    if (ep == joint_last_episodes_ or loc_res->calib_information.episodes <= 0) return;
+    joint_last_episodes_ = ep;
+    const Eigen::Vector4d unit(params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                               yaw_sigma, 1.0);
+    std::vector<rc::joint::CameraBlock> cams;
+    if (mount_)
+        cams.push_back({params.IMAGE_EDGE_CAMERA, mount_->pool().marginal_information(unit), mount_->pool().lidar_yaw_ref()});
+    if (calib_)
+        for (const auto& ch : calib_->channels())
+            cams.push_back({ch->name, ch->calib.marginal_information(unit), ch->calib.lidar_yaw_ref()});
+    joint_monitor_.observe(loc_res->timestamp_ms, ep, loc_res->calib_information, cams);
 }
 
 void SpecificWorker::initialize_room_model_from_svg()

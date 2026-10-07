@@ -48,7 +48,9 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <limits>
 #include <string_view>
+#include <vector>
 
 namespace rc::calib
 {
@@ -73,6 +75,12 @@ namespace rc::calib
                         ///< A differential base over-reports rotation because it turns by scrubbing
                         ///< (measured 5-8% on Shadow), so this is NOT the gyro scale and must not share
                         ///< its number. Excited by rotation on segments where the wheels carry weight.
+        P_LEVER_X,      ///< helios offset from the axle midpoint along body X (lateral), metres.
+        P_LEVER_Y,      ///< ... along body Y (forward). Visible ONLY under rotation: a sensor off the
+                        ///< spin axis traces a circle, so per correction k (I - R(dth_k)^T)*lever lands
+                        ///< in the end-frame translation residual. Separated from eps_yaw (driven by
+                        ///< forward travel) by covariate, as the header describes. Spec §5; plan
+                        ///< 2026-10-05 Task 1. Estimated always; ACTS only through LidarMountApply.
         P_COUNT
     };
 
@@ -87,6 +95,8 @@ namespace rc::calib
             case P_K_LAT:    return "k_lat";
             case P_DK_WHEEL: return "dk_wheel";
             case P_K_OMEGA_W: return "k_omega_w";
+            case P_LEVER_X: return "lever_x";
+            case P_LEVER_Y: return "lever_y";
             default:        return "?";
         }
     }
@@ -109,6 +119,13 @@ namespace rc::calib
         float t_gyro    = 0.f;   ///< s,   sum w_g * dt                         -> d/db_omega is MINUS this
         float th_wheel  = 0.f;   ///< rad, sum (1-w_g) * (raw wheel rotation)   -> d/dk_omega_w
         float fwd_wheel = 0.f;   ///< m,   sum (1-w_g) * forward travel         -> d/ddk_wheel
+
+        // ★ LEVER COVARIATES, accumulated PER CORRECTION (plan 2026-10-05 r1, Fable review 1a). The
+        // episode residual is the SUM of per-correction residuals, each (I - R(dth_k)^T)*lever with
+        // dth_k the rotation since the previous correction -- NOT (I - R(d_theta)^T)*lever on the net
+        // turn, which is 10% low at 0.8 rad, 43% low at 1.73 rad, and invents a cross column.
+        float lever_s = 0.f;     ///< sum_k sin(dth_k)
+        float lever_c = 0.f;     ///< sum_k (1 - cos(dth_k))
 
         // The measurement: what the optimizer had to add, in the ROBOT frame.
         float r_forward = 0.f;   ///< m
@@ -187,11 +204,23 @@ namespace rc::calib
         float sigma_k_omega_w = 0.155f; ///< 15.5% — the wheels' rotation-scale uncertainty, the same
                                         ///< number the preintegrator charges (NoiseModel::scale_omega).
                                         ///< Wide on purpose: scrubbing makes wheel rotation 5-8% long.
+        float sigma_lever   = 0.05f;    ///< m — 5 cm, the spec's mount prior on the helios lever arm
     };
 
     class BatchEstimator
     {
     public:
+        /// The window's normal equations in PHYSICAL units, for the joint calibration
+        /// (joint_calibration.h). p = H^-1 b reproduces solve().value exactly: both are built by the
+        /// same accumulate().
+        struct Information
+        {
+            Eigen::Matrix<float, P_COUNT, P_COUNT> H       = Eigen::Matrix<float, P_COUNT, P_COUNT>::Zero(); ///< data + prior
+            Eigen::Matrix<float, P_COUNT, P_COUNT> H_prior = Eigen::Matrix<float, P_COUNT, P_COUNT>::Zero(); ///< prior only (diagonal)
+            Eigen::Matrix<float, P_COUNT, 1>       b       = Eigen::Matrix<float, P_COUNT, 1>::Zero();       ///< p = H^-1 b reproduces solve().value
+            int episodes = 0;
+        };
+
         void configure(const Prior &p, std::size_t window) { prior_ = p; window_ = std::max<std::size_t>(window, 8); }
 
         void add(const Episode &e)
@@ -273,7 +302,7 @@ namespace rc::calib
         f.imbue(std::locale::classic());
         f << "# motion calibration window — evidence, not parameters. Delete to return to the priors.\n";
         f << "# E,d_forward,d_lateral,d_theta,duration,r_forward,r_lateral,r_theta,pos_var,theta_var,"
-             "th_gyro,t_gyro,th_wheel,fwd_wheel,p_applied x P_COUNT\n";
+             "th_gyro,t_gyro,th_wheel,fwd_wheel,p_applied x P_COUNT,lever_s,lever_c\n";
         f << "# C,r_theta,d_theta,duration,weight\n";
         for (const auto& e : eps_)
         {
@@ -282,6 +311,7 @@ namespace rc::calib
               << ',' << e.pos_var << ',' << e.theta_var
               << ',' << e.th_gyro << ',' << e.t_gyro << ',' << e.th_wheel << ',' << e.fwd_wheel;
             for (int i = 0; i < P_COUNT; ++i) f << ',' << e.p_applied[i];
+            f << ',' << e.lever_s << ',' << e.lever_c;
             f << '\n';
         }
         for (const auto& c : cls_)
@@ -321,14 +351,25 @@ namespace rc::calib
             // stored with the opposite sign; there is no exact way to split them afterwards, and an
             // approximate split would be evidence the solve cannot tell from a measurement. They are
             // dropped and counted -- the file is evidence, re-earned in one tour.
-            if (line[0] == 'E' and v.size() == 13 + std::size_t{P_COUNT})
+            // ★ TWO WIDTHS ARE ACCEPTED (plan 2026-10-05 Task 1): the current 13 + P_COUNT + 2 (lever
+            // covariates at the END), and the pre-lever 13 + 7. For a pre-lever row the lever entries
+            // of p_applied are 0 -- EXACT, the lever was never applied -- while lever_s = d_theta,
+            // lever_c = 0 is a first-order APPROXIMATION of the per-correction sums (exact to first
+            // order when the episode's corrections were one cycle apart, the live regime).
+            constexpr std::size_t kPreLeverParams = 7;
+            const bool current   = v.size() == 13 + std::size_t{P_COUNT} + 2;
+            const bool pre_lever = v.size() == 13 + kPreLeverParams;
+            if (line[0] == 'E' and (current or pre_lever))
             {
                 Episode e;
                 e.d_forward = v[0]; e.d_lateral = v[1]; e.d_theta   = v[2]; e.duration = v[3];
                 e.r_forward = v[4]; e.r_lateral = v[5]; e.r_theta   = v[6];
                 e.pos_var   = v[7]; e.theta_var = v[8];
                 e.th_gyro   = v[9]; e.t_gyro    = v[10]; e.th_wheel = v[11]; e.fwd_wheel = v[12];
-                for (int i = 0; i < P_COUNT; ++i) e.p_applied[i] = v[13 + i];
+                const std::size_t np = current ? std::size_t{P_COUNT} : kPreLeverParams;
+                for (std::size_t i = 0; i < np; ++i) e.p_applied[static_cast<int>(i)] = v[13 + i];
+                if (current) { e.lever_s = v[13 + P_COUNT]; e.lever_c = v[14 + P_COUNT]; }
+                else         { e.lever_s = e.d_theta;       e.lever_c = 0.f; }
                 eps_.push_back(e); ++n;
             }
             else if (line[0] == 'E')
@@ -345,6 +386,15 @@ namespace rc::calib
         return n;
     }
 
+    /// The window's normal equations, data + prior, in physical units. See Information.
+        [[nodiscard]] Information information() const
+        {
+            Information inf;
+            accumulate(inf.H, inf.H_prior, inf.b);
+            inf.episodes = static_cast<int>(eps_.size());
+            return inf;
+        }
+
     /// Solve the window. p = (J'WJ + P0^-1)^-1 J'W r, and that same inverse IS the covariance.
         [[nodiscard]] Result solve() const
         {
@@ -352,26 +402,67 @@ namespace rc::calib
             out.episodes = static_cast<int>(eps_.size());
             if (eps_.size() < 4) return out;
 
-            Eigen::Matrix<float, P_COUNT, P_COUNT> H = Eigen::Matrix<float, P_COUNT, P_COUNT>::Zero();
-            Eigen::Matrix<float, P_COUNT, 1>       b = Eigen::Matrix<float, P_COUNT, 1>::Zero();
+            Eigen::Matrix<float, P_COUNT, P_COUNT> H, H_prior;
+            Eigen::Matrix<float, P_COUNT, 1>       b;
+            accumulate(H, H_prior, b);
+
+            const Eigen::LDLT<Eigen::Matrix<float, P_COUNT, P_COUNT>> ldlt(H);
+            if (ldlt.info() != Eigen::Success) return out;
+            out.value = ldlt.solve(b);
+            const Eigen::Matrix<float, P_COUNT, P_COUNT> cov = H.inverse();
+            if (not cov.allFinite()) return out;
+
+            for (int i = 0; i < P_COUNT; ++i)
+            {
+                out.sigma[i] = std::sqrt(std::max(cov(i, i), 0.f));
+                // "Informed" = this window actually shrank the posterior for THIS parameter. A
+                // parameter the driving never excited comes back at its prior sigma and is reported
+                // as uninformed rather than as a confident zero.
+                out.informed[i] = out.sigma[i] < 0.9f * (1.f / std::sqrt(H_prior(i, i)));
+            }
+            // Normalise to correlation form before asking about conditioning -- see Result::condition.
+            Eigen::Matrix<float, P_COUNT, 1> d;
+            for (int i = 0; i < P_COUNT; ++i) d[i] = 1.f / std::sqrt(std::max(H(i, i), 1e-30f));
+            const Eigen::Matrix<float, P_COUNT, P_COUNT> Hn = d.asDiagonal() * H * d.asDiagonal();
+            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<float, P_COUNT, P_COUNT>> es(Hn);
+            const auto ev = es.eigenvalues();
+            out.condition = ev.minCoeff() > 0.f ? ev.maxCoeff() / ev.minCoeff()
+                                                : std::numeric_limits<float>::infinity();
+            out.ok = out.value.allFinite();
+            return out;
+        }
+
+    private:
+        /// The ONE place the normal equations are built, shared by solve() and information() so the
+        /// two cannot diverge.
+        void accumulate(Eigen::Matrix<float, P_COUNT, P_COUNT> &H,
+                        Eigen::Matrix<float, P_COUNT, P_COUNT> &H_prior,
+                        Eigen::Matrix<float, P_COUNT, 1> &b) const
+        {
+            H.setZero();
+            b.setZero();
 
             // Prior information. Zero mean, so it contributes to H only -- see Prior for why
             // re-centring it on the running estimate is a ratchet rather than a memory.
             Eigen::Matrix<float, P_COUNT, 1> p0;
             p0 << prior_.sigma_k_v, prior_.sigma_eps_yaw, prior_.sigma_k_omega, prior_.sigma_b_omega,
-                  prior_.sigma_k_lat, prior_.sigma_dk_wheel, prior_.sigma_k_omega_w;
+                  prior_.sigma_k_lat, prior_.sigma_dk_wheel, prior_.sigma_k_omega_w,
+                  prior_.sigma_lever, prior_.sigma_lever;
             for (int i = 0; i < P_COUNT; ++i)
                 H(i, i) += 1.f / std::max(p0[i] * p0[i], 1e-18f);
-            const Eigen::Matrix<float, P_COUNT, P_COUNT> H_prior = H;
+            H_prior = H;
 
             for (const auto &e : eps_)
             {
                 const float wp = 1.f / std::max(e.pos_var, 1e-12f);
                 const float wt = 1.f / std::max(e.theta_var, 1e-12f);
 
-                // ALONG-track row: only the translation scale moves the robot along its own heading.
+                // ALONG-track row (forward, body Y): the translation scale by distance; the helios
+                // lever by the ACCUMULATED rotation covariates (per correction -- see Episode::lever_s).
                 Eigen::Matrix<float, P_COUNT, 1> j_along = Eigen::Matrix<float, P_COUNT, 1>::Zero();
-                j_along[P_K_V] = e.d_forward;
+                j_along[P_K_V]     = e.d_forward;
+                j_along[P_LEVER_X] = e.lever_s;
+                j_along[P_LEVER_Y] = e.lever_c;
                 H += wp * j_along * j_along.transpose();
                 // Undo the feedback: the recorded residual is what remained AFTER
                 // p_applied acted, so the total this row must explain is r + J*p_applied.
@@ -385,6 +476,10 @@ namespace rc::calib
                 Eigen::Matrix<float, P_COUNT, 1> j_cross = Eigen::Matrix<float, P_COUNT, 1>::Zero();
                 j_cross[P_EPS_YAW] = -e.d_forward;
                 j_cross[P_K_LAT]   =  e.d_lateral;
+                // Lever (rotation-driven): r_X = lever_c*dx - lever_s*dy. Same component as eps_yaw,
+                // different covariate (rotation vs distance) -- the separation the header promises.
+                j_cross[P_LEVER_X] =  e.lever_c;
+                j_cross[P_LEVER_Y] = -e.lever_s;
                 H += wp * j_cross * j_cross.transpose();
                 // Undo the feedback: the recorded residual is what remained AFTER
                 // p_applied acted, so the total this row must explain is r + J*p_applied.
@@ -422,34 +517,8 @@ namespace rc::calib
                 H += c.weight * j_cl * j_cl.transpose();
                 b += c.weight * j_cl * c.r_theta;
             }
-
-            const Eigen::LDLT<Eigen::Matrix<float, P_COUNT, P_COUNT>> ldlt(H);
-            if (ldlt.info() != Eigen::Success) return out;
-            out.value = ldlt.solve(b);
-            const Eigen::Matrix<float, P_COUNT, P_COUNT> cov = H.inverse();
-            if (not cov.allFinite()) return out;
-
-            for (int i = 0; i < P_COUNT; ++i)
-            {
-                out.sigma[i] = std::sqrt(std::max(cov(i, i), 0.f));
-                // "Informed" = this window actually shrank the posterior for THIS parameter. A
-                // parameter the driving never excited comes back at its prior sigma and is reported
-                // as uninformed rather than as a confident zero.
-                out.informed[i] = out.sigma[i] < 0.9f * (1.f / std::sqrt(H_prior(i, i)));
-            }
-            // Normalise to correlation form before asking about conditioning -- see Result::condition.
-            Eigen::Matrix<float, P_COUNT, 1> d;
-            for (int i = 0; i < P_COUNT; ++i) d[i] = 1.f / std::sqrt(std::max(H(i, i), 1e-30f));
-            const Eigen::Matrix<float, P_COUNT, P_COUNT> Hn = d.asDiagonal() * H * d.asDiagonal();
-            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<float, P_COUNT, P_COUNT>> es(Hn);
-            const auto ev = es.eigenvalues();
-            out.condition = ev.minCoeff() > 0.f ? ev.maxCoeff() / ev.minCoeff()
-                                                : std::numeric_limits<float>::infinity();
-            out.ok = out.value.allFinite();
-            return out;
         }
 
-    private:
         Prior prior_{};
         std::size_t window_ = 64;
         struct ClosureRow { float r_theta = 0.f, d_theta = 0.f, duration = 0.f, weight = 0.f; };

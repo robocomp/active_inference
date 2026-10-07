@@ -383,7 +383,15 @@ namespace rc::preint
             const float m_om   = prop ? std::sqrt(std::max(q_.k_t_rot,   0.f)) : q_.sigma_omega;
             const float s_lat  = combine(m_lat,  sigma_v_lat_meas);
             const float s_long = combine(m_long, sigma_v_long_meas);
-            const float s_om   = combine(m_om,   sigma_omega_meas);
+            // ★ HEADING, motion-proportional: the stated density (the FUSED wheel×gyro heading's) and the
+            //   model's per-radian term describe the SAME error — the GT fit behind k_th_turn measured the
+            //   total error of the heading actually integrated — so they must not add (they did until
+            //   2026-10-05: heading read ~2.7x too wide). The model term is kept here and the stated one is
+            //   carried separately, then the two combine as a MAX below: a degrading sensor still loosens
+            //   the prior, it just never stacks on the model.
+            const bool om_split = prop and sigma_omega_meas >= 0.f;
+            const float s_om   = om_split ? m_om : combine(m_om, sigma_omega_meas);
+            float var_omega_stated = om_split ? sigma_omega_meas * sigma_omega_meas / dt : 0.f;
             float var_v_lat  = s_lat  * s_lat  / dt;   // (m/s)²
             float var_v_long = s_long * s_long / dt;
             float var_omega  = s_om   * s_om   / dt;   // (rad/s)²
@@ -412,6 +420,7 @@ namespace rc::preint
                 var_v_lat  = zupt(var_v_lat,  q_.zupt_density_v,     m_v);
                 var_v_long = zupt(var_v_long, q_.zupt_density_v,     m_v);
                 var_omega  = zupt(var_omega,  q_.zupt_density_omega, m_w);
+                if (om_split) var_omega_stated = zupt(var_omega_stated, q_.zupt_density_omega, m_w);
             }
 
             Eigen::Matrix3f Q = Eigen::Matrix3f::Zero();
@@ -426,6 +435,8 @@ namespace rc::preint
                 Q(1, 1) += q_.k_long * ds;
                 Q(0, 0) += q_.k_lat * ds + q_.k_lat_turn * dth;
                 Q(2, 2) += q_.k_th_turn * dth;
+                const bool stated_wins = om_split and var_omega_stated * dt * dt > Q(2, 2);
+                if (stated_wins) Q(2, 2) = var_omega_stated * dt * dt;
                 // The unit components. The time ones carry the ZUPT's shrink factor, so that
                 // k_t·unit is exactly the model's share of the per-second term above.
                 const auto f = [](float after, float before) { return before > 0.f ? after / before : 1.f; };
@@ -433,9 +444,10 @@ namespace rc::preint
                 qd[Interval::C_DIST_LONG]  = {0.f, ds, 0.f};
                 qd[Interval::C_DIST_LAT]   = {ds, 0.f, 0.f};
                 qd[Interval::C_TURN_LAT]   = {dth, 0.f, 0.f};
-                qd[Interval::C_TURN_TH]    = {0.f, 0.f, dth};
+                // when the stated heading density wins, the model's heading components did not act
+                qd[Interval::C_TURN_TH]    = {0.f, 0.f, stated_wins ? 0.f : dth};
                 qd[Interval::C_TIME_TRANS] = {f(var_v_lat, pre_lat) * dt, f(var_v_long, pre_long) * dt, 0.f};
-                qd[Interval::C_TIME_ROT]   = {0.f, 0.f, f(var_omega, pre_om) * dt};
+                qd[Interval::C_TIME_ROT]   = {0.f, 0.f, stated_wins ? 0.f : f(var_omega, pre_om) * dt};
                 for (int j = 0; j < Interval::NC; ++j)
                     iv_.unit[j] = A * iv_.unit[j] * A.transpose() + B * qd[j].asDiagonal() * B.transpose();
             }

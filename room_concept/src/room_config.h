@@ -43,6 +43,12 @@ struct RoomConfig
     std::string LIDAR_HELIOS_NAME     = "helios";
     // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
     std::string LIDAR_ROBOT_FRAME     = "";   // empty ⇒ auto-derived from the type-"robot" node at init
+    // Joint sensor-mount + odometry calibration (plan docs/superpowers/plans/2026-10-05-joint-calibration.md).
+    bool  JOINT_CALIB_MONITOR = true;   // RoomConcept.JointCalibMonitor — LOG ONLY, changes nothing
+    bool  LIDAR_MOUNT_APPLY = false;    // RoomConcept.LidarMountApply — helios (lever, yaw) applied to the points
+    float LIDAR_MOUNT_INJECT_X = 0.f;   // RoomConcept.LidarMountInjectX (m)    ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_Y = 0.f;   // RoomConcept.LidarMountInjectY (m)    ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_YAW_DEG = 0.f;   // RoomConcept.LidarMountInjectYawDeg ⚠ SIMULATION ONLY
 
     // ── PLATFORM OVERLAY: one config for every robot ────────────────────────────────────────────
     // Most of this file is POLICY and is the same everywhere. A handful of values are PHYSICAL —

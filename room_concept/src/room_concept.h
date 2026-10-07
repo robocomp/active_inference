@@ -72,6 +72,9 @@
 #include "reloc_search.h"
 #include "surprise.h"
 #include "motion_noise_vc.h"
+#include "motion_noise_innov.h"
+#include "pose_field_bias.h"
+#include "drift_monitor.h"
 #include "stride_span.h"
 
 namespace rc
@@ -514,6 +517,17 @@ public:
         /// RoomConcept.MotionNoiseLearn / MotionNoiseMemory.
         bool   motion_noise_learn  = false;
         double motion_noise_memory = 20000.0;   ///< corrections remembered (~20 runs of ~1k)
+        /// Measure the SCAN-TO-SCAN innovation every cycle and learn the noise components from it
+        /// (motion_noise_innov.h, Fable window memo 2026-10-05). Always learns and logs
+        /// (tmp/noise_innov/innov_<ts>.csv); the learnt coefficients reach the prediction ONLY when
+        /// motion_noise_learn is also true. RoomConcept.MotionNoiseInnov.
+        bool   motion_noise_innov  = true;
+        /// Learn the slow POSE-FIELD bias of the scan-only pose without ground truth (pose_field_bias.h) and
+        /// log it (heading CSV pf_*). pose_field_publish additionally ADDS its covariance to the PUBLISHED pose
+        /// covariance (never to the solver's). RoomConcept.PoseFieldBias / PoseFieldPublish / PoseFieldSigma0.
+        bool   pose_field_bias     = true;
+        bool   pose_field_publish  = false;
+        double pose_field_sigma0   = 0.02;
         rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
         // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base
         // 0.05 m vs odom_noise_base 0.01 m) because an open-loop command really can be wrong while the
@@ -852,6 +866,10 @@ public:
         Eigen::Matrix<float, rc::calib::P_COUNT, 1> calib_sigma =
             Eigen::Matrix<float, rc::calib::P_COUNT, 1>::Zero();
         float calib_b_omega = 0.f;      ///< rad/s, the gyro bias the joint solve can now separate
+        /// The motion block's normal equations as of its last re-solve (plan 2026-10-05 Task 4), for
+        /// the joint calibration monitor on the MAIN thread. A copy, because motion_calib_ is fed on
+        /// the localizer thread and its window must not be iterated from another one.
+        rc::calib::BatchEstimator::Information calib_information{};
         /// Bitmask over rc::calib::Param: which parameters this window actually TAUGHT (posterior
         /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at
         /// its previous value -- which a bare value cannot be distinguished from convergence.
@@ -1918,8 +1936,31 @@ private:
        Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero()};
    Eigen::Matrix3f sur_QK_ = Eigen::Matrix3f::Zero();
    bool            sur_mixed_ = false;
-   rc::preint::MotionNoiseVC noise_vc_;
-   bool            noise_vc_init_ = false;
+   rc::DriftMonitor drift_mon_;                       // systematic drift per m / rad / s (drift_monitor.h)
+   float sur_d_ = 0.f, sur_phi_ = 0.f, sur_T_ = 0.f;  // the open stretch's odometry motion
+   // ── SCAN-TO-SCAN INNOVATION (motion_noise_innov.h, Fable window memo 2026-10-05) ──────────────
+   // Each cycle: the scan-only pose z (the newest scan's SDF Gauss-Newton step alone) and its CLAIMED
+   // covariance H_s^-1, the odometry increment, and this cycle's unit noise components. Consecutive
+   // cycles give delta = z_n - z_{n-1} - odom_n, whose second moment is linear in the coefficients.
+   rc::preint::MotionNoiseInnov noise_innov_;
+   bool            noise_innov_init_ = false;
+   std::array<Eigen::Matrix3f, rc::preint::Interval::NC> cyc_U_{};
+   bool            cyc_U_ok_ = false;                         // a measured, preintegrated prior this cycle
+   Eigen::Vector3f cyc_odom_ = Eigen::Vector3f::Zero();       // this cycle's odometry increment (world)
+   float           cyc_dt_s_ = 0.f;                           // this cycle's duration, s
+   long            innov_cycle_ = 0, innov_prev_cycle_ = -10;
+   Eigen::Vector3f innov_z_ = Eigen::Vector3f::Zero(), innov_z_prev_ = Eigen::Vector3f::Zero();
+   Eigen::Matrix3f innov_R_ = Eigen::Matrix3f::Zero(), innov_R_prev_ = Eigen::Matrix3f::Zero();
+   bool            innov_ok_ = false, innov_prev_ok_ = false;
+   std::ofstream   innov_csv_;
+   /// The newest scan's SDF factor alone, linearised at (x, y, th): the same query, observation weights,
+   /// IRLS Huber and Jacobian as the solver's SdfFactor (room_gn_solver.cpp). Shared by the polish.
+   bool scan_linearize(const torch::Tensor &pts, float x, float y, float th, Eigen::Matrix3f &H, Eigen::Vector3f &bb);
+   /// z = x_lin - H^-1 b and R = H^-1 into innov_z_/innov_R_ (innov_ok_ on success).
+   void scan_only_pose(const torch::Tensor &pts, float x, float y, float th);
+   void observe_innovation(UpdateResult &res);
+   rc::PoseFieldBias field_bias_;
+   bool              field_bias_init_ = false;
    void reset_noise_stretch();
    void fill_noise_vc(UpdateResult &res) const;
    bool            sur_init_ = false;

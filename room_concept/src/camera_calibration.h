@@ -250,10 +250,37 @@ namespace rc::camcal
         /// of the error relative to the ORIGINAL graph extrinsic. See Accum::applied.
         void apply_correction(const Eigen::Vector4d& dp) { acc_.apply_correction(dp); }
         [[nodiscard]] const Eigen::Vector4d& applied() const noexcept { return acc_.applied; }
+
+        // ── THE LIDAR FRAME THIS EVIDENCE IS REFERENCED TO (plan 2026-10-05 Task 5) ──────────────
+        // With LidarMountApply the helios points are rotated by psi_app, and a pair then measures the
+        // camera yaw relative to THAT LiDAR: p_yaw rises by psi_app. Evidence taken under different
+        // psi_app must not be summed as if it were one quantity, so whenever psi_app changes the OLD
+        // evidence is re-referenced to the new frame with Accum::rebase(+dpsi / yaw_sigma) -- DATA ONLY:
+        // the camera did not move, so the prior anchor `applied` stays (apply_correction would also
+        // move the anchor, which mountApply then pushes into the camera projection).
+        // ⚠ DEVIATION from the plan's step 3 (apply_correction with -dpsi): wrong direction relative to
+        //   what new pairs measure, and it moves the camera. Pinned by tools/mount_info_selftest (A2).
+        // ★ Persisted with the evidence ("lidar_yaw_ref"), so a restart that re-applies the same psi_app
+        //   does not rebase evidence that was already rebased. A file without the line was taken with
+        //   no LiDAR correction: 0, exactly.
+        [[nodiscard]] double lidar_yaw_ref() const noexcept { return lidar_yaw_ref_; }
+        /// Re-reference the evidence to a LiDAR rotated by `psi_app` (rad). Idempotent.
+        void reference_to_lidar_yaw(double psi_app, double yaw_sigma)
+        {
+            if (not std::isfinite(psi_app) or not (yaw_sigma > 0.0)) return;
+            const double d = psi_app - lidar_yaw_ref_;
+            if (d == 0.0) return;
+            acc_.rebase(Eigen::Vector4d(0.0, 0.0, d / yaw_sigma, 0.0));
+            lidar_yaw_ref_ = psi_app;
+        }
         [[nodiscard]] double vertex_offset_sigma_px() const noexcept { return acc_.offset_sigma_px; }
         void reset() { acc_.reset(); }
         [[nodiscard]] long pairs() const noexcept { return acc_.n; }
         [[nodiscard]] rc::mount::Accum::Solution solve() const { return acc_.solve(); }
+        /// The evidence in physical units, data and prior apart, for the joint calibration
+        /// (plan 2026-10-05 Task 2). `unit` = (pitch, height, yaw, dt) prior sigmas. See MarginalInfo.
+        [[nodiscard]] rc::mount::MarginalInfo marginal_information(const Eigen::Vector4d& unit) const
+        { return acc_.marginal_information(unit); }
 
         /// Sufficient statistics only. See the header note on why this is not the fitted values.
         /// ★ ATOMIC: the evidence is written to a sibling temp file and RENAMED into place. A rename
@@ -303,6 +330,9 @@ namespace rc::camcal
             //   rather than within one.
             f << "applied," << acc_.applied(0) << ',' << acc_.applied(1) << ','
               << acc_.applied(2) << ',' << acc_.applied(3) << '\n';
+            // The LiDAR yaw correction this evidence is referenced to (plan 2026-10-05 Task 5). Older
+            // readers ignore the key; a file without it was taken with no LiDAR correction.
+            f << "lidar_yaw_ref," << lidar_yaw_ref_ << '\n';
             // ── THE NOMINAL (format 3) ───────────────────────────────────────────────────────────
             // Written whenever known. Its ABSENCE is meaningful and the loader says so rather than
             // assuming the graph still holds the nominal — see load().
@@ -350,6 +380,7 @@ namespace rc::camcal
             std::ifstream f(path);
             if (not f.is_open()) return 0;
             rc::mount::Accum in;
+            double lidar_yaw_ref_in = 0.0;
             std::string line;
             const auto num = [](std::string_view s, double& out)
             {   // from_chars, never strtod: these machines run es_ES (CLAUDE.md)
@@ -397,6 +428,8 @@ namespace rc::camcal
                     if (num(tok[1], a0) and num(tok[2], a1) and num(tok[3], a2) and num(tok[4], a3))
                         in.applied = Eigen::Vector4d(a0, a1, a2, a3);
                 }
+                else if (tok[0] == "lidar_yaw_ref" and tok.size() == 2 and num(tok[1], v))
+                    lidar_yaw_ref_in = v;
                 else if (tok[0] == "base_R" and tok.size() == 4)
                 {
                     double di = 0, dj = 0;
@@ -506,6 +539,7 @@ namespace rc::camcal
             const double keep_sigma = acc_.offset_sigma_px;
             acc_ = in;
             acc_.offset_sigma_px = keep_sigma;
+            lidar_yaw_ref_ = lidar_yaw_ref_in;
             // ★ ALL NINE CELLS AND BOTH VECTORS, or there is no nominal. A half-written one is a
             //   mount nobody measured, and silently completing it from the graph is the very
             //   substitution this field exists to prevent.
@@ -523,5 +557,6 @@ namespace rc::camcal
         Eigen::Vector3f  base_t_ = Eigen::Vector3f::Zero();
         Eigen::Vector3f  edge_t_ = Eigen::Vector3f::Zero(), edge_r_ = Eigen::Vector3f::Zero();
         bool             have_base_ = false, have_edge_ = false;
+        double           lidar_yaw_ref_ = 0.0;   ///< see reference_to_lidar_yaw()
     };
 }   // namespace rc::camcal

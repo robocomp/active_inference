@@ -227,14 +227,17 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
                    "dth_total,dth_gyro_share,dth_wheel_share,wheel_shadow,"
                    "raw_wheel,raw_gyro,gyro_dt,total_dt,zupt_dt,gyro_weight,dens_w,dens_g,"
                    "hc_th_gyro,hc_t_gyro,hc_th_wheel,hc_fwd_wheel,imu_segs,wheel_segs,";
-        for (int i = 0; i < rc::calib::P_COUNT; ++i)
+        // ★ The first 7 parameters only, in place: the lever (P_LEVER_X/Y, plan 2026-10-05 Task 1) is
+        // appended at the END of the row so every existing column keeps its position.
+        for (int i = 0; i < rc::calib::P_LEVER_X; ++i)
             hd_csv_ << "v_" << rc::calib::param_name(i) << ',';
-        for (int i = 0; i < rc::calib::P_COUNT; ++i)
+        for (int i = 0; i < rc::calib::P_LEVER_X; ++i)
             hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
         hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w,"
                    "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info,"
                    "calib_applied,sur_open,sur_c_fwd,sur_c_lat,sur_c_th,sur_pp_fwd,sur_pp_lat,sur_pp_th,"
-                   "sur_pq_fwd,sur_pq_lat,sur_pq_th,preint,noise_prop,noise_learn,vc_k_long,vc_k_lat,vc_k_lat_turn,vc_k_th_turn,vc_k_t_trans,vc_k_t_rot,vc_rho_fwd,vc_rho_lat,vc_rho_th,vc_trained,gt_x_world,gt_y_world,sur_floor,slot_appended\n";
+                   "sur_pq_fwd,sur_pq_lat,sur_pq_th,preint,noise_prop,noise_learn,vc_k_long,vc_k_lat,vc_k_lat_turn,vc_k_th_turn,vc_k_t_trans,vc_k_t_rot,vc_rho_fwd,vc_rho_lat,vc_rho_th,vc_trained,gt_x_world,gt_y_world,sur_floor,slot_appended,drift_n,drift_fwd_m,drift_lat_m,drift_th_rad,drift_th_s,se_fwd_m,se_lat_m,se_th_rad,"
+                   "v_lever_x,v_lever_y,s_lever_x,s_lever_y,pf_sigma_b,pf_len,pf_xx,pf_tt\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -272,8 +275,8 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << d.zupt_dt << ',' << res.gyro_weight << ',' << d.dens_w << ',' << d.dens_g
             << ',' << hc.th_gyro << ',' << hc.t_gyro << ',' << hc.th_wheel << ',' << hc.fwd_wheel
             << ',' << res.imu_segs << ',' << res.wheel_segs;
-    for (int i = 0; i < rc::calib::P_COUNT; ++i) hd_csv_ << ',' << res.calib_value[i];
-    for (int i = 0; i < rc::calib::P_COUNT; ++i) hd_csv_ << ',' << res.calib_sigma[i];
+    for (int i = 0; i < rc::calib::P_LEVER_X; ++i) hd_csv_ << ',' << res.calib_value[i];
+    for (int i = 0; i < rc::calib::P_LEVER_X; ++i) hd_csv_ << ',' << res.calib_sigma[i];
     hd_csv_ << ',' << res.calib_informed << ',' << res.calib_condition << ',' << res.calib_episodes
             << ',' << d.nl_c0 << ',' << d.nl_c1 << ',' << d.nl_c2 << ',' << d.nl_samples
             << ',' << (room_concept_.params.heading_noise_learning ? 1 : 0)
@@ -293,7 +296,15 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
     for (const float v : res.surprise.vc) hd_csv_ << ',' << v;
     hd_csv_ << ',' << (res.surprise.vc_trained ? 1 : 0)
             << ',' << gx_world << ',' << gy_world << ',' << (res.surprise.floor_bound ? 1 : 0)
-            << ',' << (res.slot_appended ? 1 : 0) << '\n';
+            << ',' << (res.slot_appended ? 1 : 0)
+            << ',' << res.surprise.drift_n << ',' << res.surprise.drift_b[0] << ',' << res.surprise.drift_b[3]
+            << ',' << res.surprise.drift_b[7] << ',' << res.surprise.drift_b[8] << ',' << res.surprise.drift_se[0]
+            << ',' << res.surprise.drift_se[3] << ',' << res.surprise.drift_se[7]
+            << ',' << res.calib_value[rc::calib::P_LEVER_X] << ',' << res.calib_value[rc::calib::P_LEVER_Y]
+            << ',' << res.calib_sigma[rc::calib::P_LEVER_X] << ',' << res.calib_sigma[rc::calib::P_LEVER_Y]
+            // the pose-field bias term (pose_field_bias.h): its size, length, and what it adds (xx, θθ)
+            << ',' << res.surprise.pf_sigma_b << ',' << res.surprise.pf_len << ',' << res.surprise.pf_xx
+            << ',' << res.surprise.pf_tt << '\n';
     hd_csv_.flush();
 }
 

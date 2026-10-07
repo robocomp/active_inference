@@ -6,6 +6,8 @@
 // rather than as a confident wrong number.
 #include "../src/calibration_estimator.h"
 #include <cstdio>
+#include <fstream>
+#include <locale>
 #include <random>
 #include <vector>
 
@@ -195,6 +197,87 @@ int main()
         std::printf("   posterior sigma %.6f\n", sig);
         check(std::abs(last - truth[P_B_OMEGA]) < 3.f * sig, "closed-loop bias converges to the truth (3 sigma)");
         check(worst < 2.0f * truth[P_B_OMEGA], "and never overshoots on the way (no gain-2 ratchet)");
+    }
+
+    // ── 7. LEVER ARM (helios offset from the axle midpoint) ───────────────────────────────────────
+    // Forward model PER CORRECTION k: r_k = (I - R(dth_k)^T) * lever, body X = lateral, Y = forward.
+    // Episodes are SUMS of per-cycle corrections (motion_calibration.h observe()), so the covariates are
+    // lever_s = sum sin(dth_k), lever_c = sum (1 - cos dth_k). Live: 10-60 corrections of a few
+    // hundredths of a radian each; rarely one correction spanning a large turn. Both are generated.
+    // Plan 2026-10-05 Task 1 (r1).
+    auto lever_rows = [&](BatchEstimator &est, const float truth[P_COUNT], bool spins, bool straights,
+                          const Eigen::Matrix<float, P_COUNT, 1> &applied)
+    {
+        std::uniform_real_distribution<float> TH(-1.5f, 1.5f), D(0.5f, 2.0f);
+        std::uniform_int_distribution<int> M(10, 60);
+        for (int i = 0; i < 200; ++i)
+        {
+            const bool spin = spins and (not straights or i % 2 == 0);
+            // ⚠ DEVIATION from the plan's 0.02*TH (+-30 mrad): at 4 mm episode noise, 200 straights
+            // carrying +-30 mrad of incidental rotation DO inform the lever (sigma ~16 mm against a
+            // 50 mm prior), so "straight-only => uninformed" would be false for a correct estimator.
+            // A straight here carries +-3 mrad, which is what "straight-only" is meant to model.
+            const float dth = spin ? TH(rng) : 0.002f * TH(rng);
+            const float dfw = spin ? 0.02f * D(rng) : D(rng);
+            const int m = (i % 10 == 9) ? 1 : M(rng);            // 1 in 10: a single end-of-episode correction
+            float ls = 0.f, lc = 0.f;
+            for (int k = 0; k < m; ++k) { const float t = dth / m; ls += std::sin(t); lc += 1.f - std::cos(t); }
+            const float lx = truth[P_LEVER_X] - applied[P_LEVER_X];
+            const float ly = truth[P_LEVER_Y] - applied[P_LEVER_Y];
+            Episode e;
+            e.d_forward = dfw; e.d_theta = dth; e.duration = 1.f + std::abs(dth);
+            e.th_gyro = dth; e.t_gyro = e.duration; e.fwd_wheel = dfw;
+            e.lever_s = ls; e.lever_c = lc;
+            e.r_lateral = lc * lx - ls * ly - truth[P_EPS_YAW] * dfw + noise(0.004f);
+            e.r_forward = ls * lx + lc * ly + truth[P_K_V] * dfw     + noise(0.004f);
+            e.r_theta   = noise(0.001f);
+            e.pos_var = 0.004f * 0.004f; e.theta_var = 0.001f * 0.001f;
+            e.p_applied = applied;
+            est.add(e);
+        }
+    };
+    {
+        float truth[P_COUNT] = {};
+        truth[P_LEVER_X] = 0.03f; truth[P_LEVER_Y] = -0.02f; truth[P_EPS_YAW] = 0.01f;
+        const Eigen::Matrix<float, P_COUNT, 1> none = Eigen::Matrix<float, P_COUNT, 1>::Zero();
+
+        // A: mixed driving recovers both lever components AND eps_yaw.
+        BatchEstimator a; a.configure(Prior{}, 512); lever_rows(a, truth, true, true, none);
+        const auto ra = a.solve();
+        std::printf("\n7A. lever x %+.4f (truth %+.4f) +- %.4f | y %+.4f (truth %+.4f) +- %.4f | eps %+.4f\n",
+                    ra.value[P_LEVER_X], truth[P_LEVER_X], ra.sigma[P_LEVER_X],
+                    ra.value[P_LEVER_Y], truth[P_LEVER_Y], ra.sigma[P_LEVER_Y], ra.value[P_EPS_YAW]);
+        check(std::abs(ra.value[P_LEVER_X] - truth[P_LEVER_X]) < 3.f * ra.sigma[P_LEVER_X], "7A lever x recovered (3 sigma)");
+        check(std::abs(ra.value[P_LEVER_Y] - truth[P_LEVER_Y]) < 3.f * ra.sigma[P_LEVER_Y], "7A lever y recovered (3 sigma)");
+        check(ra.informed[P_LEVER_X] and ra.informed[P_LEVER_Y], "7A lever informed under rotation");
+        check(std::abs(ra.value[P_EPS_YAW] - truth[P_EPS_YAW]) < 3.f * ra.sigma[P_EPS_YAW], "7A eps_yaw still recovered beside the lever");
+
+        // B: straight-only driving must leave the lever UNINFORMED at its prior, not confidently wrong.
+        BatchEstimator b; b.configure(Prior{}, 512); lever_rows(b, truth, false, true, none);
+        const auto rb = b.solve();
+        std::printf("7B. straight-only: lever sigma x %.4f y %.4f (prior %.4f)\n",
+                    rb.sigma[P_LEVER_X], rb.sigma[P_LEVER_Y], Prior{}.sigma_lever);
+        check(not rb.informed[P_LEVER_X] and not rb.informed[P_LEVER_Y], "7B straight-only: lever uninformed");
+
+        // C: closed loop -- the applied lever is undone through p_applied and the total is recovered.
+        BatchEstimator c; c.configure(Prior{}, 512);
+        Eigen::Matrix<float, P_COUNT, 1> half = none; half[P_LEVER_X] = 0.015f; half[P_LEVER_Y] = -0.01f;
+        lever_rows(c, truth, true, true, half);
+        const auto rc_ = c.solve();
+        check(std::abs(rc_.value[P_LEVER_X] - truth[P_LEVER_X]) < 3.f * rc_.sigma[P_LEVER_X], "7C closed loop: TOTAL lever recovered");
+
+        // D: information() reproduces solve().value exactly.
+        const auto info = a.information();
+        const Eigen::Matrix<float, P_COUNT, 1> p = info.H.ldlt().solve(info.b);
+        check((p - ra.value).cwiseAbs().maxCoeff() < 1e-5f, "7D information() reproduces solve()");
+    }
+    {
+        const char *path = "/tmp/calib_legacy_rows.csv";
+        { std::ofstream f(path); f.imbue(std::locale::classic());
+          f << "E,1,0,0.5,2,0.01,0,0.001,0.0001,0.0001,0.5,2,0,1,0,0,0,0,0,0,0\n"; }   // 13 + 7 fields
+        BatchEstimator l; l.configure(Prior{}, 64);
+        check(l.load(path) == 1, "7E a pre-lever (13+7) row still loads: p_applied lever = 0 (exact), "
+                                 "lever_s = d_theta, lever_c = 0 (first-order APPROXIMATION)");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASS", failures, failures == 1 ? "" : "s");

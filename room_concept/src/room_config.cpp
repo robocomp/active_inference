@@ -419,6 +419,28 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m per rad of turning, added in quadrature to the position R");
     reader.opt<float, double>("RoomConcept.MotionCalibFitModelGain", room_concept.params.motion_calib.fit_model_gain,
             "multiplies mean |SDF| over the episode, into the position R");
+    reader.opt<float, double>("RoomConcept.MotionCalibLeverSigma", room_concept.params.motion_calib.lever_sigma,
+            "m. Prior on the helios lever arm (spec §5); learnt only from ROTATION (plan 2026-10-05 Task 1)");
+    reader.opt<bool>("RoomConcept.JointCalibMonitor", p.JOINT_CALIB_MONITOR,
+            "LOG ONLY: one joint posterior over odometry + helios mount + camera mounts per motion solve -> tmp/joint_calib/ (plan 2026-10-05 Task 4)");
+    // ── helios mount correction + sim-only injection at the LiDAR ingestor (plan 2026-10-05 Task 5) ──
+    reader.opt<bool>("RoomConcept.LidarMountApply", p.LIDAR_MOUNT_APPLY,
+            "apply the motion calibrator's ACTING helios (lever_x, lever_y, eps_yaw/kEps) to the LiDAR points; OFF until validated (plan 2026-10-05 Task 5/6)");
+    reader.opt<float, double>("RoomConcept.LidarMountInjectX", p.LIDAR_MOUNT_INJECT_X,
+            "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body X)");
+    reader.opt<float, double>("RoomConcept.LidarMountInjectY", p.LIDAR_MOUNT_INJECT_Y,
+            "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body Y)");
+    reader.opt<float, double>("RoomConcept.LidarMountInjectYawDeg", p.LIDAR_MOUNT_INJECT_YAW_DEG,
+            "deg. SIMULATION ONLY: planted helios mount error (sensor CCW yaw)");
+    // The lever acts and the yaw moves to the LiDAR side exactly when the correction is applied there,
+    // so p_applied records what acts and the odometry never applies the same yaw a second time.
+    room_concept.params.motion_calib.apply_lever    = p.LIDAR_MOUNT_APPLY;
+    room_concept.params.motion_calib.lidar_side_yaw = p.LIDAR_MOUNT_APPLY;
+    if (p.LIDAR_MOUNT_INJECT_X != 0.f or p.LIDAR_MOUNT_INJECT_Y != 0.f or p.LIDAR_MOUNT_INJECT_YAW_DEG != 0.f)
+        qWarning().nospace() << "[cfg] ⚠ LidarMountInject* is NONZERO (x " << p.LIDAR_MOUNT_INJECT_X
+                             << " m, y " << p.LIDAR_MOUNT_INJECT_Y << " m, yaw " << p.LIDAR_MOUNT_INJECT_YAW_DEG
+                             << " deg): a helios mount error is being PLANTED in the LiDAR points. "
+                                "SIMULATION ONLY -- set all three to 0 on the real robot.";
     // ★ EXPOSED 2026-09-01 so the episode LENGTH can be A/B'd without a rebuild between legs.
     // These are identifiability triggers, not tuning: below them the Jacobian rows are ~0. But
     // information in a channel goes as (accumulated covariate)^2 while episodes arrive at 1/T, so
@@ -586,6 +608,14 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                 "learn the coefficients above from the localiser's corrections (motion_noise_vc.h)");
         reader.opt<double>("RoomConcept.MotionNoiseMemory", room_concept.params.motion_noise_memory,
                 "corrections of evidence the noise learner remembers");
+        reader.opt<bool>("RoomConcept.MotionNoiseInnov", room_concept.params.motion_noise_innov,
+                "learn + log the noise components from the scan-to-scan innovation (motion_noise_innov.h)");
+        reader.opt<bool>("RoomConcept.PoseFieldBias", room_concept.params.pose_field_bias,
+                "learn + log the slow pose-field bias of the scan-only pose (pose_field_bias.h)");
+        reader.opt<bool>("RoomConcept.PoseFieldPublish", room_concept.params.pose_field_publish,
+                "add the pose-field bias covariance to the PUBLISHED pose covariance");
+        reader.opt<double>("RoomConcept.PoseFieldSigma0", room_concept.params.pose_field_sigma0,
+                "m, prior sigma of the pose-field bias (50 pseudo-pairs)");
     }
     reader.opt<float, double>("RoomConcept.PreintOdomSigmaVLat", room_concept.params.odom_preint_noise.sigma_v_lat,
             "m/√s — lateral velocity noise floor (0.001 m / √0.05 s)");

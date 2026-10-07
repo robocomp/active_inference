@@ -10,6 +10,8 @@ For each run:
   * the same split into thirds of the run, which is where online self-calibration should show (later
     thirds cheaper than the first, ratio drifting toward 1).
 Several files are printed side by side, so an A/B (calibration on/off) reads in one table.
+  * drift(): the SYSTEMATIC part of the prediction error per metre and per radian (GT-free self-calibration
+    measure; calibration should drive it to 0) separated from the random densities.
 """
 import csv, glob, math, os, random, sys
 
@@ -138,7 +140,108 @@ def per_axis(path):
             for k in (0, len(ks) // 3, 2 * len(ks) // 3, len(ks) - 1):
                 print(f'    {k:6d}  ' + ''.join(f'{v:12.3e}' for v in ks[k]))
 
+def drift(path, min_open=5, n_boot=1000):
+    """SELF-CALIBRATION, GT-free: how much of the odometry's prediction error is SYSTEMATIC.
+
+    Per open-loop stretch (between two scored corrections) take the correction c (scan solve minus
+    prediction, per body axis), the signed forward travel d (body frame, m) and the signed turn phi (rad)
+    accumulated over it. Calibration errors (wheel scale, track, gyro scale, mount yaw) grow LINEARLY and
+    with a sign; slip and sensor noise grow like a square root and average out. So, per axis:
+        E[c]                 = b_d * d + b_phi * phi + b_t * T (systematic: what calibration must remove -> 0)
+        E[(c - E[c])^2]      = r + a_d * |d| + a_phi * |phi|   (random densities: calibration leaves them)
+    T is the stretch duration: a GYRO BIAS turns the heading per SECOND, even parked, and without this term
+    parked stretches load their heading corrections onto a near-zero turn and report nonsense slopes.
+    A raw "error per metre" mixes the two. Stretches shorter than min_open cycles are left out: those end
+    because the scan disagreed (early-exit selection), not because a drift budget ran out. b is reported
+    in mm/m, mm/rad (translation) and mrad/m, mrad/rad (heading), with a bootstrap 90 % interval."""
+    import numpy as np
+    with open(path) as f:
+        rows = [r for r in csv.DictReader(l for l in f if not l.startswith('#'))]
+    if not rows or 'sur_c_fwd' not in rows[0]:
+        return
+    th_key = 'est_th' if 'est_th' in rows[0] else 'est_theta'
+    pth_key = 'pred_th' if 'pred_th' in rows[0] else 'pred_theta'
+    S = []   # (t, d, phi, T, c_fwd, c_lat, c_th)
+    d = phi = 0.0
+    prev = None
+    t0 = None
+    for r in rows:
+        try:
+            x, y, th = float(r['est_x']), float(r['est_y']), float(r[th_key])
+            px, py, pth = float(r['pred_x']), float(r['pred_y']), float(r[pth_key])
+        except (ValueError, KeyError):
+            continue
+        # The covariates are the ODOMETRY's motion: this row's prediction minus the previous row's estimate.
+        # Taking the estimated path instead leaks the correction itself into d and phi (c/phi -> 1 rad/rad).
+        if prev is not None:
+            dx, dy = px - prev[0], py - prev[1]
+            d += -math.sin(prev[2]) * dx + math.cos(prev[2]) * dy          # body forward = (-sin th, cos th)
+            phi += math.remainder(pth - prev[2], 2 * math.pi)
+        prev = (x, y, th)
+        t_now = float(r['ts_ms']) / 1000.0
+        if t0 is None:
+            t0 = t_now
+        if r.get('sur_scored') == '1':
+            try:
+                op = float(r['sur_open'])
+                c = (float(r['sur_c_fwd']), float(r['sur_c_lat']), float(r['sur_c_th']))
+                if op >= min_open and all(math.isfinite(v) for v in c):
+                    S.append((t_now, d, phi, t_now - t0) + c)
+            except (ValueError, KeyError):
+                pass
+            d = phi = 0.0      # the correction resets the open-loop stretch
+            t0 = t_now
+    if len(S) < 8:
+        print(f'\n{os.path.basename(path)} drift: only {len(S)} stretches >= {min_open} cycles -- not enough')
+        return
+    A = np.array(S)
+    X = A[:, 1:4]
+
+    def fit(Xs, cs):
+        # pass 1: OLS for the mean; pass 2: variance model from the residuals; pass 3: WLS with it
+        b = np.linalg.lstsq(Xs, cs, rcond=None)[0]
+        res2 = (cs - Xs @ b) ** 2
+        V = np.column_stack([np.ones(len(cs)), np.abs(Xs[:, :2])])
+        a = np.clip(np.linalg.lstsq(V, res2, rcond=None)[0], 0.0, None)
+        var = np.maximum(V @ a, 1e-12)
+        w = 1.0 / var
+        b = np.linalg.lstsq(Xs * np.sqrt(w)[:, None], cs * np.sqrt(w), rcond=None)[0]
+        # standard errors from the WLS normal matrix: an UNEXCITED part (no travel / no turn) shows a huge
+        # +-, instead of a confident nonsense slope
+        se = np.sqrt(np.diag(np.linalg.pinv((Xs * w[:, None]).T @ Xs)))
+        return b, a, se
+
+    rng = np.random.default_rng(1)
+    names = (('forward', 1e3, 'mm'), ('lateral', 1e3, 'mm'), ('heading', 1e3, 'mrad'))
+    print(f'\n{os.path.basename(path)} SYSTEMATIC DRIFT (self-calibration residual), {len(S)} stretches >= {min_open} cycles,'
+          f' {np.abs(X[:, 0]).sum():.1f} m / {math.degrees(np.abs(X[:, 1]).sum()):.0f} deg')
+    print('  axis       b per metre [90%]            b per radian [90%]           b per second [90%]           random: per m      per rad    floor')
+    for k, (nm, sc, u) in enumerate(names):
+        cs = A[:, 4 + k]
+        b, a, _ = fit(X, cs)
+        boot = []
+        for _ in range(n_boot):
+            i = rng.integers(0, len(cs), len(cs))
+            try: boot.append(fit(X[i], cs[i])[0])
+            except np.linalg.LinAlgError: pass
+        boot = np.array(boot)
+        lo, hi = np.percentile(boot, 5, axis=0), np.percentile(boot, 95, axis=0)
+        print(f'  {nm:8s} {sc*b[0]:+8.2f} {u}/m [{sc*lo[0]:+.2f},{sc*hi[0]:+.2f}]   '
+              f'{sc*b[1]:+8.2f} {u}/rad [{sc*lo[1]:+.2f},{sc*hi[1]:+.2f}]   '
+              f'{sc*b[2]:+8.3f} {u}/s [{sc*lo[2]:+.3f},{sc*hi[2]:+.3f}]   '
+              f'{sc*math.sqrt(a[1]):6.2f} {u}/sqrt(m) {sc*math.sqrt(a[2]):6.2f} {u}/sqrt(rad) {sc*math.sqrt(a[0]):5.2f} {u}')
+    # convergence: the same systematic fit by thirds of the run (in time)
+    if len(S) >= 24:
+        print('  by thirds (b +- se; fwd/lat per metre in mm/m, heading per radian in mrad/rad):')
+        for j, part in enumerate(np.array_split(A, 3)):
+            fs = [fit(part[:, 1:4], part[:, 4 + k]) for k in range(3)]
+            print(f'    {j + 1}/3  fwd {1e3*fs[0][0][0]:+7.2f} +-{1e3*fs[0][2][0]:<7.2f} lat {1e3*fs[1][0][0]:+7.2f} +-{1e3*fs[1][2][0]:<7.2f}'
+                  f' heading {1e3*fs[2][0][1]:+7.2f} +-{1e3*fs[2][2][1]:<7.2f} gyro-bias {1e3*fs[2][0][2]:+6.3f} mrad/s'
+                  f' ({len(part)} stretches, {np.abs(part[:, 1]).sum():.1f} m, {math.degrees(np.abs(part[:, 2]).sum()):.0f} deg)')
+
+
 if __name__ == '__main__':
     main()
     for p in (sys.argv[1:] or sorted(glob.glob('tmp/heading/heading_*.csv'), key=os.path.getmtime)[-1:]):
         per_axis(p)
+        drift(p)

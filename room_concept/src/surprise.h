@@ -53,9 +53,15 @@ namespace rc::surprise
         int   open_cycles = 0;  ///< prediction cycles accumulated into P_pred since the last scored correction
         bool  floor_bound = false;   ///< apply_adaptive_covariance raised the published posterior on some axis
         /// motion-noise coefficients in force (motion_noise_vc.h): k_long, k_lat, k_lat_turn, k_th_turn,
-        /// k_t_trans, k_t_rot, then the scan excess rho_fwd, rho_lat, rho_th
+        /// k_t_trans, k_t_rot, then the scan white/claimed ratio s_fwd, s_lat, s_th (motion_noise_innov.h; CSV columns still named vc_rho_*)
         std::array<float, 9> vc{};
         bool  vc_trained = false;   ///< this stretch was eligible to train the learner
+        /// systematic drift (drift_monitor.h), row-major [axis fwd/lat/heading][per m, per rad, per s], + s.e.
+        std::array<float, 9> drift_b{}, drift_se{};
+        int   drift_n = -1;         ///< stretches the monitor has seen; -1 = not computed this result
+        /// pose-field bias (pose_field_bias.h): sigma_b (m), correlation length (m), and the covariance it
+        /// adds to this cycle's pose (xx m², θθ rad²) — added to the PUBLISHED covariance only if publishing is on
+        float pf_sigma_b = 0.f, pf_len = 0.f, pf_xx = 0.f, pf_tt = 0.f;
     };
 
     /// c = est - pred (heading already wrapped). P_pred, P_post: 3x3 pose covariances (x, y, theta).

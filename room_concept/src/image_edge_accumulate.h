@@ -65,6 +65,7 @@
  */
 
 #include <cmath>
+#include <vector>
 
 #include <Eigen/Dense>
 
@@ -184,4 +185,129 @@ namespace rc::img
         return out;
     }
 
+    /// ═══ THE FRAME-LEVEL FORM (2026-10-05) — BUILT, TRIED, NOT IN USE ════════════════════════════════
+    /// ⛔ Tried live as the driving factor (run heading_2026-10-05_16-53-24): calibration got WORSE, solve-
+    /// cycle position error/sigma 2.2-3.1x -> 4.4-6.6x, heading unchanged. Likely the frame nuisances absorb
+    /// the misfit, L drops, and pi comes out > 1, scaling the term UP. The driving factor is back on
+    /// accumulate_segment. Kept with its selftest (tools/image_edge_frame_selftest.cpp) for the record.
+    ///
+    /// accumulate_segment() above marginalises ALL FIVE nuisance columns PER SEGMENT, so each segment
+    /// gets its own copy of the frame-global ones: [0] mount pitch, [1] height, [2] boresight YAW,
+    /// [3] image/LiDAR dt. With triple points that is ~1 sample per segment, so one shared yaw was
+    /// counted ~50 times: heading information 390k rad^-2 against the 82k a 0.2 deg yaw prior allows,
+    /// published sigma_theta 0.09 deg against 0.9 deg measured (GT, 2026-10-05). The model is two-level:
+    ///     r_k = J_k dx + g^T h_g,k + m_s h_l,k + e_k,   g ~ N(0, I_4) shared by the FRAME,
+    ///                                                   m_s ~ N(0, 1) per SEGMENT (column [4]).
+    /// Exact two-level Woodbury: per segment, marginalise m_s into a 7-D (dx, g) information block
+    ///     Lam_s = A_yy - k_s A_ym A_ym^T,  beta_s = b_y - k_s A_ym b_m,  k_s = 1 / (1 + A_mm)
+    /// sum over segments, then marginalise g ONCE:
+    ///     H = Lam_xx - Lam_xg (I + Lam_gg)^-1 Lam_gx,  b likewise,  L = 0.5 (rho - beta_g^T (I+Lam_gg)^-1 beta_g).
+    ///
+    /// ★ THE FRAME'S PRECISION IS INFERRED, not asserted. The term's own chi2/dof ran ~8.3: its stated
+    ///   pixel sigmas over-claim. A Gamma(a0, b0) precision pi on the whole frame, integrated out, gives
+    ///   the loss (a0 + n/2) * log(1 + L / b0), whose gradient is pi_hat * grad L with
+    ///   pi_hat = (a0 + n/2) / (b0 + L) — so H and b are scaled by pi_hat, and evaluate() and linearize()
+    ///   still return the same function (IFactor's contract). Same hierarchical-precision pattern as the
+    ///   boundary prior's u_b. a0 = b0 = 2: mean 1, worth ~4 samples, so ~60 samples decide.
+    ///   (GN drops the rank-1 curvature of the log; it only makes the step more conservative.)
+    struct FrameAccum
+    {
+        Eigen::Matrix3f H = Eigen::Matrix3f::Zero();   ///< already scaled by pi
+        Eigen::Vector3f b = Eigen::Vector3f::Zero();   ///< already scaled by pi
+        float loss = 0.f;                              ///< (a0 + n/2) log(1 + L/b0)
+        float L = 0.f;                                 ///< the marginal quadratic form, before pi
+        float pi = 1.f;                                ///< the frame's inferred precision scale
+        int   n_used = 0;
+    };
+
+    /// residual(seg_index, k, J_row) and sigma_pred2(seg_index, k) as in accumulate_segment, but with
+    /// the segment index first. Sample admission (sigma, responsibility gamma) is IDENTICAL to it.
+    template <class ResidualFn, class SigmaPredFn>
+    FrameAccum accumulate_frame(const std::vector<ImageEdgeSegment>& segs, ResidualFn&& residual,
+                                SigmaPredFn&& sigma_pred2, double a0 = 2.0, double b0 = 2.0, int em_iters = 4)
+    {
+        constexpr int G = 4;                       // frame-global nuisances: columns 0..3
+        static_assert(IMAGE_EDGE_NUISANCES == G + 1, "column [4] is the per-segment one");
+        using Vec7 = Eigen::Matrix<double, 3 + G, 1>;
+        using Mat7 = Eigen::Matrix<double, 3 + G, 3 + G>;
+
+        // Residuals and Jacobians ONCE; the EM below only re-weights them.
+        struct Smp { std::size_t seg; Eigen::Matrix<float, 1, 3> J; float r, sp2, pred2, pi_vis, L; NuisVec h; };
+        std::vector<Smp> ss;
+        for (std::size_t si = 0; si < segs.size(); ++si)
+            for (std::size_t k = 0; k < segs[si].samples.size(); ++k)
+            {
+                const auto& s = segs[si].samples[k];
+                Smp m{si, {}, 0.f, 0.f, 0.f, s.pi_vis, s.search_L, s.h};
+                m.r = residual(si, k, m.J);
+                if (not std::isfinite(m.r) or not m.J.allFinite()) continue;
+                if (not (s.sigma_px > 0.f) or not std::isfinite(s.sigma_px)) continue;
+                m.sp2 = s.sigma_px * s.sigma_px;
+                m.pred2 = std::max(0.f, sigma_pred2(si, k));
+                ss.push_back(m);
+            }
+
+        FrameAccum out;
+        // ★ EM over (responsibilities, pi): the inlier density's variance is sigma_px^2 / pi. With pi held
+        //   at 1 the mixture trims the tails of honestly-wide residuals as "outliers", which makes the
+        //   noise look SMALLER than it is and biases pi high (selftest: 0.18 instead of 0.11 at 3x).
+        double pi = 1.0;
+        for (int it = 0; it < std::max(1, em_iters); ++it)
+        {
+            Mat7 Lam = Mat7::Zero(); Vec7 beta = Vec7::Zero(); double rho = 0.0;   // DOUBLE: see the header
+            int n_used = 0;
+            std::size_t i = 0;
+            while (i < ss.size())
+            {
+                const std::size_t si = ss[i].seg;
+                Mat7 Ayy = Mat7::Zero(); Vec7 Aym = Vec7::Zero(), by = Vec7::Zero();
+                double Amm = 0.0, bm = 0.0, rr = 0.0; int ns = 0;
+                for (; i < ss.size() and ss[i].seg == si; ++i)
+                {
+                    const auto& m = ss[i];
+                    const float s2  = static_cast<float>(m.sp2 / pi) + m.pred2;
+                    const float gam = responsibility(m.r, s2, m.pi_vis, m.L);
+                    if (not (gam > 1e-6f)) continue;
+                    const double w = static_cast<double>(gam) / static_cast<double>(m.sp2);
+                    Vec7 a;
+                    a.head<3>() = m.J.transpose().template cast<double>();
+                    a.tail<G>() = m.h.template head<G>().template cast<double>();
+                    const double hl = static_cast<double>(m.h(G)), r = static_cast<double>(m.r);
+                    Ayy.noalias() += w * a * a.transpose();
+                    Aym += (w * hl) * a;
+                    Amm += w * hl * hl;
+                    by  += (w * r) * a;
+                    bm  += w * r * hl;
+                    rr  += w * r * r;
+                    ++ns;
+                }
+                if (ns == 0) continue;
+                const double km = 1.0 / (1.0 + Amm);
+                Lam.noalias() += Ayy - km * Aym * Aym.transpose();
+                beta += by - (km * bm) * Aym;
+                rho  += rr - km * bm * bm;
+                n_used += ns;
+            }
+            if (n_used == 0) return FrameAccum{};
+            const Eigen::Matrix3d Lxx = Lam.template topLeftCorner<3, 3>();
+            const Eigen::Matrix<double, 3, G> Lxg = Lam.template topRightCorner<3, G>();
+            const Eigen::Matrix<double, G, G> Lgg = Lam.template bottomRightCorner<G, G>();
+            const Eigen::Matrix<double, G, G> Kg = (Eigen::Matrix<double, G, G>::Identity() + Lgg).inverse();
+            Eigen::Matrix3d H = Lxx - Lxg * Kg * Lxg.transpose();
+            H = 0.5 * (H + H.transpose());
+            const Eigen::Vector3d b = beta.template head<3>() - Lxg * Kg * beta.template tail<G>();
+            const double L = std::max(0.0, 0.5 * (rho - beta.template tail<G>().dot(Kg * beta.template tail<G>())));
+            const double shape = a0 + 0.5 * n_used;
+            pi = shape / (b0 + L);
+            out.H = (pi * H).cast<float>();
+            out.b = (pi * b).cast<float>();
+            out.L = static_cast<float>(L);
+            out.pi = static_cast<float>(pi);
+            out.loss = static_cast<float>(shape * std::log1p(L / b0));
+            out.n_used = n_used;
+        }
+        if (not std::isfinite(out.loss) or not out.H.allFinite() or not out.b.allFinite())
+            out = FrameAccum{};
+        return out;
+    }
 }  // namespace rc::img

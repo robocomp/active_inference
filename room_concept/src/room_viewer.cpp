@@ -197,6 +197,14 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_loc_->add_series("pose drift mm/m", QColor(46, 204, 113), 1.6f, 5);
     ts_plot_loc_->add_series("correction mm/m", QColor(230, 126, 34), 1.4f, 5);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_loc_);
+
+    // ── SELF-CALIBRATION, GT-free (drift_monitor.h): the SYSTEMATIC part of the prediction error ──
+    ts_plot_syst_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_syst_->set_visible_window(60.f);
+    ts_plot_syst_->add_series("syst fwd mm/m", QColor(231, 76, 60), 2.0f);
+    ts_plot_syst_->add_series("syst lat mm/m", QColor(155, 89, 182), 2.0f);
+    ts_plot_syst_->add_series("syst heading mrad/rad", QColor(241, 196, 15), 2.0f, 0, 1);   // right axis
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_syst_);
     // ── What each legend entry MEANS, on hover ───────────────────────────────────────────────────
     // A series name is a label, not an explanation. None of these say what units they are in, which
     // direction is good, or what a reader should do about a value — and the plots are read by people
@@ -256,6 +264,18 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         "on top of the blue one. Them SEPARATING is the news: it means the optimizer started working.\n\n"
         "If this stays flat while pred drift rises, the model got worse and the optimizer is paying for\n"
         "it — look at the orange line, which is where that cost appears."));
+    ts_plot_syst_->set_series_tooltip("syst fwd mm/m", QStringLiteral(
+        "SYSTEMATIC forward drift of the odometry, mm per metre travelled — what self-calibration must remove.\n\n"
+        "Fitted live, GT-free, from every scored correction: c = b_d*d + b_phi*phi + b_t*T over each open-loop\n"
+        "stretch (d forward travel, phi turn, T duration). Calibration errors grow linearly and with a sign,\n"
+        "noise like a square root, so b separates them. Converging to 0 = calibrated. Negative = the wheels\n"
+        "over-report forward travel. Offline twin with confidence intervals: tools/surprise_report.py (drift)."));
+    ts_plot_syst_->set_series_tooltip("syst lat mm/m", QStringLiteral(
+        "SYSTEMATIC lateral drift per metre travelled (mm/m): a mount-yaw residual shows up here\n"
+        "(1 mm/m ~ 0.06 deg). Converging to 0 = calibrated."));
+    ts_plot_syst_->set_series_tooltip("syst heading mrad/rad", QStringLiteral(
+        "SYSTEMATIC heading drift per radian turned (mrad/rad, right axis): a rotation-scale residual\n"
+        "(1 mrad/rad = 0.1 % scale). Converging to 0 = calibrated."));
     ts_plot_loc_->set_series_tooltip("correction mm/m", QStringLiteral(
         "How far the optimizer had to MOVE the pose, per metre travelled: |published - predicted|.\n\n"
         "The effort channel. An uncalibrated robot need not localise visibly worse — it can localise\n"
@@ -685,6 +705,21 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     const float conf = std::clamp((std::log10(det_cov) - kDetLost) / (kDetTight - kDetLost), 0.f, 1.f);
     if (ts_plot_conf_)
         ts_plot_conf_->add_point("confidence", conf);
+
+    // ── SELF-CALIBRATION, GT-free: the systematic drift the agent fitted at this correction ──────────
+    // The fit changes only at a scored correction (drift_n > 0); between them the last fit is held and
+    // drawn every tick, so the lines are continuous.
+    if (loc_res->surprise.drift_n > 0)
+    {
+        const auto &b = loc_res->surprise.drift_b;   // [axis][per m, per rad, per s]
+        syst_last_ = std::array<float, 3>{1000.f * b[0], 1000.f * b[3], 1000.f * b[7]};
+    }
+    if (ts_plot_syst_ and syst_last_)
+    {
+        ts_plot_syst_->add_point("syst fwd mm/m", (*syst_last_)[0]);
+        ts_plot_syst_->add_point("syst lat mm/m", (*syst_last_)[1]);
+        ts_plot_syst_->add_point("syst heading mrad/rad", (*syst_last_)[2]);
+    }
 
     // ── FEED THE LOCALIZATION METRIC ─────────────────────────────────────────────────────────────
     // ⚠ This replaced a block that fed ts_plot_gt_, a plot that was DECLARED and USED but never

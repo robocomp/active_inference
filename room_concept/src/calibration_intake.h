@@ -127,6 +127,8 @@ namespace rc::calib
 
         [[nodiscard]] const Result &estimate() const noexcept { return last_; }
         [[nodiscard]] std::size_t   pool() const noexcept { return est_.size(); }
+        /// The estimator itself, read-only -- for its information() (joint calibration, plan 2026-10-05 Task 4).
+        [[nodiscard]] const BatchEstimator& estimator() const noexcept { return est_; }
         [[nodiscard]] int count(Verdict v) const noexcept { return counts_[static_cast<int>(v)]; }
         [[nodiscard]] int accepted_from(Source s) const noexcept
         { return accepted_by_source_[static_cast<int>(s)]; }

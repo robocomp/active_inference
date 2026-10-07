@@ -137,6 +137,20 @@ namespace rc::calib
         /// applied and the feedback undo stays exact. Masking changes what the robot DOES, never
         /// what the estimator learns -- every parameter keeps being estimated and logged.
         int   apply_mask   = -1;
+        /// ── THE HELIOS LEVER ARM MAY ACT (plan 2026-10-05, Tasks 1 and 5) ───────────────────────
+        /// The lever (P_LEVER_X/Y) is ESTIMATED always but has no odometry-side consumer: it can only
+        /// act on the LiDAR points (LidarMountApply). Until that is on, acting() is false for it, so
+        /// p_applied records 0 for an estimated-but-unapplied lever and the feedback undo stays exact
+        /// (Review Focus #2: a parameter recorded as applied that did not act manufactures the 50% cap).
+        bool  apply_lever  = false;
+        /// Prior sigma on the helios lever arm, m (RoomConcept.MotionCalibLeverSigma). Spec §5.
+        float lever_sigma  = 0.05f;
+        /// ── THE YAW ACTS ON THE LIDAR POINTS, NOT ON THE ODOMETRY (plan 2026-10-05 Task 5) ───────
+        /// Set with LidarMountApply. acting(P_EPS_YAW) is UNCHANGED, so p_applied keeps recording the
+        /// yaw that acted -- whichever side applied it -- and the r + J*p_applied undo stays exact
+        /// (clearing the apply bit instead would reproduce the 50% cap; Fable review Q4). Only the
+        /// odometry-side consumer, yaw_offset(), returns 0, so the same yaw never acts twice.
+        bool  lidar_side_yaw = false;
         float yaw_p0       = 1.0e-4f;   // (rad)^2   -> 1 sigma ~ 0.57 deg
         float yaw_q        = 1.0e-9f;   // (rad)^2 per update
         float scale_p0     = 4.0e-4f;   // fractional^2 -> 1 sigma ~ 2%
@@ -201,8 +215,10 @@ namespace rc::calib
             pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
+            pr.sigma_lever   = std::max(c.lever_sigma, 1e-6f);
             prior_sigma_ = { pr.sigma_k_v, pr.sigma_eps_yaw, pr.sigma_k_omega, pr.sigma_b_omega,
-                             pr.sigma_k_lat, pr.sigma_dk_wheel, pr.sigma_k_omega_w };
+                             pr.sigma_k_lat, pr.sigma_dk_wheel, pr.sigma_k_omega_w,
+                             pr.sigma_lever, pr.sigma_lever };
             // The two newest channels keep the estimator's own defaults: they have never been
             // measured on this robot, and inventing a config knob for a prior nobody has data for
             // would dress an assumption up as a setting.
@@ -242,11 +258,18 @@ namespace rc::calib
         { return enabled() and last_.informed[p]; }
         /// Taught AND allowed to act. The applied accessors below gate on this; the estimated_*
         /// accessors gate on taught() alone, so the log keeps its meaning in open-loop mode.
+        /// ★ The lever acts ONLY while cfg_.apply_lever (it has no odometry-side consumer; it acts on
+        /// the LiDAR points), so p_applied records it exactly when it acts. Plan 2026-10-05 Task 1.
         [[nodiscard]] bool acting(int p) const noexcept
-        { return taught(p) and cfg_.apply and ((cfg_.apply_mask >> p) & 1); }
+        {
+            const bool lever = p == rc::calib::P_LEVER_X or p == rc::calib::P_LEVER_Y;
+            return taught(p) and cfg_.apply and ((cfg_.apply_mask >> p) & 1) and (not lever or cfg_.apply_lever);
+        }
         /// Applied to the body->world rotation of the odometry displacement.
+        /// 0 while the yaw acts LIDAR-side (Config::lidar_side_yaw); that consumer reads the acting value
+        /// from UpdateResult (calib_value where calib_applied has the bit), on the main thread.
         [[nodiscard]] float yaw_offset() const noexcept
-        { return acting(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
+        { return (acting(rc::calib::P_EPS_YAW) and not cfg_.lidar_side_yaw) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
         /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
         [[nodiscard]] float estimated_yaw_offset() const noexcept
         { return taught(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
@@ -304,6 +327,14 @@ namespace rc::calib
         [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }
         [[nodiscard]] float k_w_sigma() const noexcept { return last_.sigma[rc::calib::P_K_OMEGA]; }
         [[nodiscard]] const rc::calib::Result& last_solve() const noexcept { return last_; }
+        /// The window's normal equations in physical units (plan 2026-10-05 Task 4). Iterates the
+        /// window: call it on the thread that owns this calibrator.
+        [[nodiscard]] rc::calib::BatchEstimator::Information information() const
+        { return intake_.estimator().information(); }
+        /// information() as of the last re-solve, cached there so a per-cycle copy into the result
+        /// (which crosses to the main thread) costs a copy and not a pass over 512 episodes.
+        [[nodiscard]] const rc::calib::BatchEstimator::Information& last_information() const noexcept
+        { return last_info_; }
         [[nodiscard]] const rc::calib::CalibrationIntake& intake() const noexcept { return intake_; }
         /// Tag episodes that follow as coming from a deliberate manoeuvre. Reporting only -- it
         /// cannot change how an episode is weighted, and must not: see calibration_intake.h.
@@ -331,6 +362,7 @@ namespace rc::calib
             if (not enabled()) return;
             intake_.offer_closure(truth_rad, turned_rad, rate_rad_s, sigma_s);
             last_ = intake_.estimate();     // re-solve now: a closure is worth minutes of robot time
+            last_info_ = information();
         }
         [[nodiscard]] std::size_t closures() const noexcept { return intake_.closures(); }
 
@@ -340,7 +372,7 @@ namespace rc::calib
         std::size_t load_state(const std::string& path)
         {
             const std::size_t n = intake_.load(path);
-            if (n > 0) last_ = intake_.estimate();   // re-solve from the restored evidence
+            if (n > 0) { last_ = intake_.estimate(); last_info_ = information(); }   // re-solve from the restored evidence
             return n;
         }
         /// Episode rows the last load_state() refused because they predate the two-factor heading.
@@ -351,6 +383,7 @@ namespace rc::calib
         {
             intake_.reset();
             last_ = intake_.estimate();
+            last_info_ = information();
             std::error_code ec; std::filesystem::remove(path, ec);
             episodes_ = 0;
         }
@@ -367,6 +400,9 @@ namespace rc::calib
             if (not finite) { reset_episode(); prev_corrected_ = corrected; return; }
 
             acc_fwd_ += d_forward; acc_lat_ += d_lateral; acc_th_ += d_theta;
+            // The rotation since the previous CORRECTION, for the lever covariates (plan 2026-10-05
+            // Task 1, Episode::lever_s). Every cycle, corrected or not.
+            th_since_corr_ += d_theta;
             // Elapsed time: the covariate that separates a gyro BIAS from a gyro SCALE. Nothing else
             // in the episode carries it, and without it the two are collinear whenever the robot
             // turns at a steady rate -- which is most of the time.
@@ -403,6 +439,11 @@ namespace rc::calib
                 //   was the fit". They are the same number only on a cycle where a fit happened.
                 if (std::isfinite(fit_residual)) acc_fit_ = std::max(acc_fit_, fit_residual);
                 acc_r_fwd_ += r_forward; acc_r_lat_ += r_lateral; acc_r_th_ += r_theta;
+                // ★ PER CORRECTION, not on the net turn: each correction's lever residual is
+                // (I - R(dth_k)^T)*lever with dth_k the rotation since the previous correction.
+                acc_lever_s_ += std::sin(th_since_corr_);
+                acc_lever_c_ += 1.f - std::cos(th_since_corr_);
+                th_since_corr_ = 0.f;
                 acc_pos_var_ = std::max(acc_pos_var_, pos_var);
                 acc_th_var_  = std::max(acc_th_var_,  theta_var);
                 acc_measured_ = true;   // this episode contains an actual measurement
@@ -475,7 +516,11 @@ namespace rc::calib
     private:
         void flush() noexcept
         {
-            const float rot_model = cfg_.rot_model_sigma * std::abs(acc_th_);
+            // ★ OFF WHILE THE LEVER ACTS (plan 2026-10-05 Task 5, Fable review Q3). This term charged
+            // turning episodes for exactly the effect the lever columns now MODEL; keeping both counts
+            // it twice and caps sigma_lever near 15 mm however long the run. Kept while the lever is
+            // only estimated (Task 1), so that arm's estimate is conservative.
+            const float rot_model = cfg_.apply_lever ? 0.f : cfg_.rot_model_sigma * std::abs(acc_th_);
             const float fit_model = cfg_.fit_model_gain * acc_fit_;
             const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var)
                               + rot_model * rot_model + fit_model * fit_model;
@@ -509,6 +554,7 @@ namespace rc::calib
             e.duration  = acc_dur_;
             e.th_gyro   = acc_hc_.th_gyro;  e.t_gyro    = acc_hc_.t_gyro;
             e.th_wheel  = acc_hc_.th_wheel; e.fwd_wheel = acc_hc_.fwd_wheel;
+            e.lever_s   = acc_lever_s_;     e.lever_c   = acc_lever_c_;
             e.r_forward = acc_r_fwd_; e.r_lateral = acc_r_lat_; e.r_theta = acc_r_th_;
             e.pos_var = r_pos;        e.theta_var = r_th;
             // ★ WHAT WAS ACTING WHILE THIS EPISODE WAS ACCUMULATED. Captured here, BEFORE the offer
@@ -526,6 +572,7 @@ namespace rc::calib
             // same door with a different tag, which changes the reporting and nothing else.
             last_verdict_ = intake_.offer(e, source_hint_, acc_fit_);
             last_ = intake_.estimate();
+            last_info_ = information();
             reset_episode();
         }
         void reset_episode() noexcept
@@ -534,6 +581,11 @@ namespace rc::calib
             acc_r_fwd_ = acc_r_lat_ = acc_r_th_ = 0.f;
             acc_pos_var_ = acc_th_var_ = acc_fit_ = acc_dur_ = 0.f;
             acc_hc_ = {};
+            // ★ th_since_corr_ is NOT reset here: it is the rotation since the last CORRECTION, a physical
+            // quantity independent of episode boundaries. An episode closing on the falling edge (the
+            // cycle after a correction) carries rotation that the NEXT correction's residual contains;
+            // zeroing it lost that cycle (caught by motion_calib_lever_selftest A: 0.666 vs 0.996).
+            acc_lever_s_ = acc_lever_c_ = 0.f;
             acc_measured_ = false;
             waiting_ = false;
         }
@@ -542,13 +594,18 @@ namespace rc::calib
         bool configured_ = false, prev_corrected_ = false;
         rc::calib::CalibrationIntake intake_;
         rc::calib::Result last_{};
+        rc::calib::BatchEstimator::Information last_info_{};
         rc::calib::Verdict last_verdict_ = rc::calib::Verdict::Accepted;
         rc::calib::Source  source_hint_  = rc::calib::Source::Passive;
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
         float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f, acc_dur_ = 0.f;
         HeadingCovariates acc_hc_{};
-        std::array<float, rc::calib::P_COUNT> prior_sigma_{0.02f, 0.0175f, 0.02f, 5.0e-4f, 0.05f, 0.02f, 0.155f};
+        /// Lever covariates (plan 2026-10-05 Task 1): rotation since the last correction, and the
+        /// per-correction sums sin / (1 - cos) of it. See rc::calib::Episode::lever_s.
+        float th_since_corr_ = 0.f, acc_lever_s_ = 0.f, acc_lever_c_ = 0.f;
+        std::array<float, rc::calib::P_COUNT> prior_sigma_{0.02f, 0.0175f, 0.02f, 5.0e-4f, 0.05f, 0.02f, 0.155f,
+                                                           0.05f, 0.05f};
         /// Has any corrected cycle contributed to the episode being accumulated? Only then is it an
         /// observation at all.
         bool acc_measured_ = false;

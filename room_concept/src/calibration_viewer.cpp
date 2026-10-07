@@ -141,6 +141,20 @@ namespace rc
               "slow turns and the edges of stops. On fast turns the gyro takes the heading and this "
               "is barely excited, which is honest: the wheels said little there.<br>"
               "<b>Distinguished from gyro scale by:</b> which factor the rotation was weighted into." },
+            { "lever x (lat.)",    1000.f,              "mm",    QColor(127, 140, 141),
+              "<b>lever_x — helios LiDAR offset from the axle midpoint, LATERAL</b><br>"
+              "How far the LiDAR really sits sideways from where the robot description says. A sensor "
+              "off the spin axis traces a circle when the robot turns, so the localiser reports a "
+              "translation the wheels never made.<br><br>"
+              "<b>Learns from:</b> ROTATION only — per correction, (I - R(dθ)ᵀ)·lever lands in the "
+              "translation residual. Straight driving cannot see it.<br>"
+              "<b>Acts only</b> with LidarMountApply (on the LiDAR points). Plan 2026-10-05." },
+            { "lever y (fwd.)",    1000.f,              "mm",    QColor(149, 165, 166),
+              "<b>lever_y — helios LiDAR offset from the axle midpoint, FORWARD</b><br>"
+              "As lever x, along the driving direction.<br><br>"
+              "<b>Learns from:</b> ROTATION only. Separated from the mount yaw (which rides on forward "
+              "travel) by covariate.<br>"
+              "<b>Acts only</b> with LidarMountApply (on the LiDAR points). Plan 2026-10-05." },
         };
         static_assert(std::size(spec) == static_cast<std::size_t>(rc::calib::P_COUNT),
                       "add a row here whenever rc::calib::Param gains a parameter");

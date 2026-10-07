@@ -47,6 +47,13 @@ LidarIngestor::LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConce
     : G_(std::move(graph)), room_concept_(&room_concept), params_(&params)
 {
     high_max_z_ = params_->LIDAR_HIGH_MAX_HEIGHT;   // until the startup check refines it from the ceiling
+    // Sim-only planted helios mount error (plan 2026-10-05 Task 5): M_inj = {InjectX, InjectY, InjectYaw}
+    // is the sensor's displacement and CCW yaw; the nominal transform then reads M_inj^-1(p_true), so the
+    // points get inverse(M_inj). Identity by default.
+    mount_inject_ = rc::lidar_mount::inverse(rc::lidar_mount::Planar{
+        params_->LIDAR_MOUNT_INJECT_X, params_->LIDAR_MOUNT_INJECT_Y,
+        params_->LIDAR_MOUNT_INJECT_YAW_DEG * static_cast<float>(M_PI / 180.0)});
+    mount_extra_ = mount_inject_;
     if (!params_->LIDAR_USE_MEDIA)
     {
         qWarning() << "[Lidar] LIDAR_USE_MEDIA=false and the DSR-graph path was removed — no LiDAR source";
@@ -117,6 +124,18 @@ void LidarIngestor::ingest_loop()
     }
 }
 
+void LidarIngestor::set_mount_extra(const rc::lidar_mount::Planar& t)
+{
+    const std::lock_guard<std::mutex> lk(mount_mx_);
+    mount_extra_ = t;
+}
+
+rc::lidar_mount::Planar LidarIngestor::mount_extra() const
+{
+    const std::lock_guard<std::mutex> lk(mount_mx_);
+    return mount_extra_;
+}
+
 bool LidarIngestor::pump()
 {
     if (!reader_)
@@ -126,9 +145,16 @@ bool LidarIngestor::pump()
     // base ("body") via the DSR RT tree. interpolate=false — helios → body only crosses the
     // static mount edge, so the sweep stamp is irrelevant. The height filter below is meaningful in
     // this robot-base frame (z = height above the base).
-    const auto sweep = reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
+    auto sweep = reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
     if (sweep.has_value())
+    {
         ++fresh_frames_;
+        // ── helios mount correction (and sim-only injection), plan 2026-10-05 Task 5 ──────────────
+        // Applied HERE, right after device->body, so the corner detector, wall-SLAM, the SDF and the
+        // camera pairs all consume ONE frame. z untouched, so the height band below is unaffected.
+        if (const auto extra = mount_extra(); not rc::lidar_mount::is_identity(extra))
+            for (auto& p : sweep->points) p = rc::lidar_mount::apply(extra, p);
+    }
 
     bool ingested = false;
     if (sweep.has_value() and not sweep->points.empty())

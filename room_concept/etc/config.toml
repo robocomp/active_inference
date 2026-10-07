@@ -280,6 +280,16 @@ MotionPreintegration   = true  # was true; 2026-08-13 LANDED ON. The controlled 
 MotionNoiseProportional = true
 MotionNoiseLearn        = false   # OFF: live window posteriors break its assumption (motion_noise_vc.h header)
 MotionNoiseMemory       = 20000   # corrections remembered (~20 runs); one run pins only the dominant terms
+MotionNoiseInnov        = true    # 2026-10-05 (Fable window memo): learn the components above from the SCAN-TO-SCAN
+                                  # innovation every cycle (motion_noise_innov.h) instead of the correction. Learns
+                                  # and logs tmp/noise_innov/innov_<ts>.csv always; the coefficients reach the
+                                  # prediction only if MotionNoiseLearn = true as well.
+PoseFieldBias           = true    # 2026-10-06 (Fable memo §3): learn the slow POSE-FIELD bias of the scan-only pose
+                                  # GT-free (pose_field_bias.h) and log it (heading CSV pf_*). The reason the published
+                                  # pose is 5-10x overconfident: the solver's covariance is conditional on the map.
+PoseFieldPublish        = true    # ADD that bias covariance (beta * R_scan) to the PUBLISHED pose covariance. ON 2026-10-07 (user); was OFF until a
+                                  # run graded with tools/nees_report.py (pf_* columns) says it is honest. Owner: user.
+PoseFieldSigma0         = 0.02    # m, its prior sigma (50 pseudo-pairs): what a run with no driving reports
 PreintKLong             = 94e-6   # m^2 per m rolled   -- forward
 PreintKLat              = 6e-6    # m^2 per m rolled   -- lateral
 PreintKLatTurn          = 10e-6   # m^2 per rad turned -- lateral (scrub)
@@ -1041,6 +1051,21 @@ MotionCalibRotModelSigma = 0.030  # m per rad of turning, added in quadrature to
                         # as much as it deserves. It only sets the RELATIVE weight of turning against
                         # straight episodes, so an order of magnitude is what matters — which is why
                         # carrying it is defensible where carrying a ZUPT sigma would not be.
+MotionCalibLeverSigma = 0.05   # m. Prior on the helios lever arm (spec §5). Learnt only from ROTATION.
+                        # Estimated always, applied only through LidarMountApply. Plan
+                        # docs/superpowers/plans/2026-10-05-joint-calibration.md Task 1.
+JointCalibMonitor = true   # LOG ONLY: one joint posterior over odometry + helios mount + camera mounts per
+                           # motion solve -> tmp/joint_calib/joint_<ts>.csv. Changes nothing. Grade with
+                           # tools/joint_calib_report.py. Plan: docs/superpowers/plans/2026-10-05-joint-calibration.md
+LidarMountApply   = false  # apply the helios (lever_x, lever_y, yaw) to the points: the motion calibrator's
+                           # ACTING values (taught + MotionCalibApply + MotionCalibApplyMask bits 1/7/8), so
+                           # p_applied records exactly what acts. The yaw then acts on the points INSTEAD of
+                           # the odometry. OFF until Task 6's injection run recovers a planted error. Owner: user.
+                           # ⚠ Turning it on mid-run moves the published pose by R(theta)*lever and the
+                           # yaw in one step -- expected, not a relocalisation.
+LidarMountInjectX = 0.0    # m    ⚠ SIMULATION ONLY: plant a KNOWN helios mount error = the sensor's displacement
+LidarMountInjectY = 0.0    # m      and CCW yaw from its nominal mount, body frame (points get inverse() of it).
+LidarMountInjectYawDeg = 0.0 # deg  Leave all three at 0 on the real robot -- room_config WARNs when any is nonzero.
 MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the position R. Also the
                         # header default. A correction can only be as good as the FIT that produced
                         # it: when the localiser is not tracking, the optimizer fires nearly every

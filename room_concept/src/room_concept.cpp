@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <limits>
 #include <locale>
+#include <ctime>
 #include <print>
 #include <sstream>
 #include <sys/stat.h>
@@ -3815,9 +3816,23 @@ namespace rc
 
         // The motion model's predictive covariance grows by this cycle's increment noise whether or not the
         // cycle is then corrected; score_surprise() scores and resets it at the next correction.
+        // The scan-to-scan innovation's per-cycle inputs (motion_noise_innov.h). innov_ok_ is set again
+        // only by a scan-only pose taken THIS cycle, so a cycle that ends on any other path breaks the chain.
+        ++innov_cycle_;
+        innov_ok_ = false;
+        cyc_U_ok_ = false;
+        cyc_odom_ = selected_prior.valid ? selected_prior.delta_pose : Eigen::Vector3f::Zero();
+        cyc_dt_s_ = selected_prior.valid ? selected_prior.dt * 1e-3f : 0.f;   // OdometryPrior::dt is in ms
         if (selected_prior.valid and selected_prior.covariance_eigen.allFinite())
         {
             sur_P_pred_ += selected_prior.covariance_eigen; ++sur_open_cycles_;
+            {   // the odometry's own signed motion over the stretch, for the drift monitor (drift_monitor.h)
+                const Eigen::Vector3f &dp = selected_prior.delta_pose;
+                const float th_mid = pred_theta - 0.5f * dp[2];
+                sur_d_   += -std::sin(th_mid) * dp[0] + std::cos(th_mid) * dp[1];   // body forward = (-sin, cos)
+                sur_phi_ += dp[2];
+                sur_T_   += selected_prior.dt;
+            }
             // The noise COMPONENTS this cycle added (motion_noise_vc.h), and their coefficient-weighted sum
             // as applied. Only a MEASURED, preintegrated prior carries them; a stretch with any other cycle
             // (command, fused, legacy diagonal) cannot say what the coefficients should be: it does not train.
@@ -3831,7 +3846,9 @@ namespace rc
                 {
                     sur_U_[j]  += selected_prior.preint.unit[j];
                     sur_QK_    += kk[j] * selected_prior.preint.unit[j];
+                    cyc_U_[j]   = selected_prior.preint.unit[j];
                 }
+                cyc_U_ok_ = cyc_odom_.allFinite();
             }
             else
                 sur_mixed_ = true;
@@ -4384,6 +4401,15 @@ namespace rc
         // H. Called earlier it sees zeros, H -> 0, and the learner silently never learns anything.
         feed_motion_calibrator(res);
         score_surprise(res, true);   // after the adaptive floor: KL vs the PUBLISHED posterior; per-axis + learner vs the solver's
+        // The scan-only pose re-taken at the CONVERGED pose (the step from there is ~0, so z is the
+        // solver's scan-alone answer), for the noise learner (motion_noise_innov.h).
+        if (params.motion_noise_innov and map_guided_checks_allowed() and not searching())
+        {
+            const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
+            scan_only_pose(window_mgr_.newest().lidar_points, res.robot_pose.translation().x(),
+                           res.robot_pose.translation().y(), est_th);
+        }
+        observe_innovation(res);
         return res;
     }
 
@@ -4659,6 +4685,163 @@ namespace rc
         return selection;
     }
 
+    bool RoomConcept::scan_linearize(const torch::Tensor &pts, float x, float y, float th,
+                                     Eigen::Matrix3f &H, Eigen::Vector3f &bb)
+    {
+        H.setZero(); bb.setZero();
+        if (not pts.defined() or pts.size(0) == 0 or not model_) return false;
+        const auto opt = torch::TensorOptions().dtype(torch::kFloat32).device(get_device());
+        const auto pose_xy = torch::tensor({x, y}, opt);
+        const auto pose_th = torch::tensor({th}, opt);
+        const auto q = model_->sdf_query_at_pose(pts, pose_xy, pose_th, true);
+        if (not q.sdf.defined() or q.sdf.size(0) == 0 or not q.grad.defined()) return false;
+        const auto w = build_observation_weights(*model_, params, pts, pose_th, q, &doors_robot_);
+        const auto d_cpu = q.sdf.detach().to(torch::kCPU).contiguous();
+        const auto g_cpu = q.grad.detach().to(torch::kCPU).contiguous();
+        const auto w_cpu = w.detach().to(torch::kCPU).contiguous();
+        const auto p_cpu = pts.detach().to(torch::kCPU).contiguous();
+        const auto da = d_cpu.accessor<float, 1>();
+        const auto ga = g_cpu.accessor<float, 2>();
+        const auto wa = w_cpu.accessor<float, 1>();
+        const auto pa = p_cpu.accessor<float, 2>();
+        const int n = static_cast<int>(d_cpu.size(0));
+        const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
+        const float delta_h = params.rfe_huber_delta;
+        const float c = std::cos(th), sn = std::sin(th);
+        for (int i = 0; i < n; ++i)
+        {
+            const float dv = da[i];
+            if (not std::isfinite(dv)) continue;
+            const float ad = std::abs(dv);
+            const float u = (ad <= delta_h or ad < 1e-9f) ? 1.0f : delta_h / ad;   // IRLS Huber
+            const float a = 0.5f * inv_var * wa[i] * u / static_cast<float>(n);
+            // q = R(θ)·p, so ∂d/∂θ = gᵀ(J·q) = -g_x·q_y + g_y·q_x — SdfFactor::linearize, verbatim
+            const float px = pa[i][0], py = pa[i][1];
+            const float qx = c * px - sn * py, qy = sn * px + c * py;
+            Eigen::Vector3f J;
+            J << ga[i][0], ga[i][1], -ga[i][0] * qy + ga[i][1] * qx;
+            H.noalias()  += a * J * J.transpose();
+            bb.noalias() += (a * dv) * J;
+        }
+        return H.allFinite() and bb.allFinite() and H.trace() > 0.f;
+    }
+
+    void RoomConcept::scan_only_pose(const torch::Tensor &pts, float x, float y, float th)
+    {
+        innov_ok_ = false;
+        Eigen::Matrix3f H; Eigen::Vector3f bb;
+        if (not scan_linearize(pts, x, y, th, H, bb)) return;
+        const Eigen::LDLT<Eigen::Matrix3f> ldlt(H);
+        if (ldlt.info() != Eigen::Success) return;
+        const Eigen::Vector3f step = -ldlt.solve(bb);
+        const Eigen::Matrix3f R = ldlt.solve(Eigen::Matrix3f::Identity());
+        if (not step.allFinite() or not R.allFinite() or R(0, 0) <= 0.f or R(2, 2) <= 0.f) return;
+        innov_z_ = Eigen::Vector3f(x, y, th) + step;
+        innov_z_[2] = std::remainder(innov_z_[2], 2.f * float(M_PI));
+        innov_R_ = 0.5f * (R + R.transpose());
+        innov_ok_ = true;
+    }
+
+    void RoomConcept::observe_innovation(UpdateResult &res)
+    {
+        if (not params.motion_noise_innov) return;
+        // The belief state, not a threshold on the data: while searching / relocalising the scan-only pose
+        // is not of the room the odometry is moving through.
+        const bool scan_ok = innov_ok_ and not searching() and not grid_search_active_.load(std::memory_order_relaxed);
+        auto &np = params.odom_preint_noise;
+        const bool fed = scan_ok and cyc_U_ok_ and innov_prev_ok_ and innov_prev_cycle_ + 1 == innov_cycle_
+                         and np.motion_proportional;
+        if (fed)
+        {
+            if (not noise_innov_init_)
+            {   // priors = the configured coefficients, as loaded
+                rc::preint::MotionNoiseInnov::Params vp;
+                vp.memory = params.motion_noise_memory;
+                vp.k0 = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot};
+                noise_innov_.set_params(vp);
+                noise_innov_init_ = true;
+            }
+            Eigen::Vector3f delta = innov_z_ - innov_z_prev_ - cyc_odom_;
+            delta[2] = std::remainder(delta[2], 2.f * float(M_PI));
+            const float th = innov_z_[2] - 0.5f * cyc_odom_[2];
+            const float sn = std::sin(th), cs = std::cos(th);
+            Eigen::Matrix3f T;   // columns: body forward (-sin, cos), lateral (cos, sin), heading — in world
+            T << -sn, cs, 0.f,
+                  cs, sn, 0.f,
+                 0.f, 0.f, 1.f;
+            const Eigen::Vector3f odom_body(T.col(0).dot(cyc_odom_), T.col(1).dot(cyc_odom_), cyc_odom_[2]);
+            // P(the body moved this cycle): the rest channel's own belief (RestMotionChannel), either motion
+            const float p_move = 1.f - (1.f - std::clamp(zupt_pred_gain_tr_, 0.f, 1.f)) * (1.f - std::clamp(zupt_pred_gain_ro_, 0.f, 1.f));
+            noise_innov_.observe(delta, T, cyc_U_, innov_R_ + innov_R_prev_, odom_body, p_move, cyc_dt_s_);
+            if (params.motion_noise_learn)
+            {   // the coefficients the NEXT prediction is built with
+                np.k_long     = float(noise_innov_.k(0)); np.k_lat     = float(noise_innov_.k(1));
+                np.k_lat_turn = float(noise_innov_.k(2)); np.k_th_turn = float(noise_innov_.k(3));
+                np.k_t_trans  = float(noise_innov_.k(4)); np.k_t_rot   = float(noise_innov_.k(5));
+            }
+            // ── the replay log: everything the estimator saw, so it can be re-fitted offline ──
+            if (not innov_csv_.is_open())
+            {
+                std::filesystem::create_directories("tmp/noise_innov");
+                char stamp[32]; const std::time_t now = std::time(nullptr);
+                std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+                innov_csv_.open(std::string("tmp/noise_innov/innov_") + stamp + ".csv");
+                innov_csv_.imbue(std::locale::classic());
+                innov_csv_ << "ts_ms,d_fwd,d_lat,d_th,odom_fwd,odom_lat,odom_th,searching";
+                for (const char *ax : {"fwd", "lat", "th"})
+                {
+                    for (int j = 0; j < rc::preint::MotionNoiseInnov::NP; ++j) innov_csv_ << ",x" << j << '_' << ax;
+                    innov_csv_ << ",y_" << ax << ",m_" << ax;
+                }
+                innov_csv_ << ",k_long,k_lat,k_lat_turn,k_th_turn,k_t_trans,k_t_rot,s_fwd,s_lat,s_th,q_fwd,q_lat,q_th"
+                              ",z_x,z_y,z_th,r_out_fwd,r_out_lat,r_out_th,p_move,dt_s,mv_fwd,mv_lat,mv_th\n";
+            }
+            innov_csv_ << res.timestamp_ms << ',' << T.col(0).dot(delta) << ',' << T.col(1).dot(delta) << ',' << delta[2]
+                       << ',' << odom_body[0] << ',' << odom_body[1] << ',' << odom_body[2] << ",0";
+            for (int a = 0; a < 3; ++a)
+            {
+                const auto &x = noise_innov_.last_x(a);
+                for (int j = 0; j < rc::preint::MotionNoiseInnov::NP; ++j) innov_csv_ << ',' << x(j);
+                innov_csv_ << ',' << noise_innov_.last_y(a) << ',' << noise_innov_.last_m(a);
+            }
+            for (int j = 0; j < 6; ++j) innov_csv_ << ',' << noise_innov_.k(j);
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.s(a);
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.q(a);
+            // the scan-only pose itself (the bias-field structure function is built from z over path length)
+            // and each axis's outlier responsibility
+            innov_csv_ << ',' << innov_z_[0] << ',' << innov_z_[1] << ',' << innov_z_[2];
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.last_r(a);
+            innov_csv_ << ',' << p_move << ',' << cyc_dt_s_;
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.mv(a);
+            innov_csv_ << '\n';
+        }
+        // ── the slow POSE-FIELD bias (pose_field_bias.h): learnt along unbroken chains of scan-only poses, and
+        //    its covariance added to the PUBLISHED pose when asked (the solver's own covariance never sees it) ──
+        if (params.pose_field_bias and scan_ok)
+        {
+            if (not field_bias_init_)
+            {
+                rc::PoseFieldBias::Params fp; fp.sigma0 = params.pose_field_sigma0;
+                field_bias_.set_params(fp);
+                field_bias_init_ = true;
+            }
+            // Only the part that ACCUMULATES along a path (k_j, scale), not the while-moving step: its source is
+            // ambiguous and, summed as odometry, it swallowed the whole bias signal live (2026-10-07 11-14: sigma_b
+            // 0 for the entire tour; replay without it: 47 mm, heading 18.5x -> 3.8x). Without it the estimate can
+            // only err LARGE (22-20 replay: 71 vs ~45 mm needed), never collapse to zero.
+            const float odo_var_tr = fed ? float(noise_innov_.odom_var_accum(0) + noise_innov_.odom_var_accum(1)) : 0.f;
+            field_bias_.observe(innov_z_, innov_R_, cyc_odom_, odo_var_tr, 0.f, fed);
+            const Eigen::Matrix3f Sb = field_bias_.covariance(innov_R_);
+            res.surprise.pf_sigma_b = float(field_bias_.sigma_b());
+            res.surprise.pf_len     = float(field_bias_.length());
+            res.surprise.pf_xx      = 0.5f * (Sb(0, 0) + Sb(1, 1));
+            res.surprise.pf_tt      = Sb(2, 2);
+            if (params.pose_field_publish and Sb.allFinite()) res.covariance += Sb;
+        }
+        innov_prev_ok_ = scan_ok;
+        if (scan_ok) { innov_z_prev_ = innov_z_; innov_R_prev_ = innov_R_; innov_prev_cycle_ = innov_cycle_; }
+    }
+
     std::optional<RoomConcept::UpdateResult> RoomConcept::try_prediction_early_exit(
         const torch::Tensor& points_tensor,
         const Eigen::Vector3f& slot_odom_delta,
@@ -4771,6 +4954,11 @@ namespace rc
         // MEASURE ONLY: the diagnostics above are the point; the decision below is not ours to take while
         // the layout is still being estimated (there is no fixed map to trust the prediction against).
         if (measure_only) return std::nullopt;
+        // The scan-only pose AT THE PREDICTION, for the noise learner (motion_noise_innov.h). Taken
+        // before either decision below, so it exists on early-exit and solve cycles alike; a solve
+        // re-takes it at the converged pose.
+        if (params.motion_noise_innov)
+            scan_only_pose(points_tensor, pose_xy[0].item<float>(), pose_xy[1].item<float>(), pose_th[0].item<float>());
 
         // Widen the SDF trust threshold when the robot is rotating.
         // A theta error ε at room scale R produces SDF displacement ~R*ε.
@@ -4928,40 +5116,11 @@ namespace rc
             // says was plausible for this interval. No lambda to tune, and the units are metres and
             // radians rather than a bare number.
             {
-                const auto q = model_->sdf_query_at_pose(points_tensor, pose_xy, pose_th, true);
-                if (q.sdf.defined() and q.sdf.size(0) > 0 and q.grad.defined())
+                Eigen::Matrix3f H;
+                Eigen::Vector3f bb;
+                if (scan_linearize(points_tensor, pose_xy[0].item<float>(), pose_xy[1].item<float>(),
+                                   pose_th[0].item<float>(), H, bb))
                 {
-                    const auto w = build_observation_weights(*model_, params, points_tensor,
-                                                             pose_th, q, &doors_robot_);
-                    const auto d_cpu = q.sdf.detach().to(torch::kCPU).contiguous();
-                    const auto g_cpu = q.grad.detach().to(torch::kCPU).contiguous();
-                    const auto w_cpu = w.detach().to(torch::kCPU).contiguous();
-                    const auto p_cpu = points_tensor.detach().to(torch::kCPU).contiguous();
-                    const auto da = d_cpu.accessor<float, 1>();
-                    const auto ga = g_cpu.accessor<float, 2>();
-                    const auto wa = w_cpu.accessor<float, 1>();
-                    const auto pa = p_cpu.accessor<float, 2>();
-                    const int n = static_cast<int>(d_cpu.size(0));
-                    const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-                    const float delta_h = params.rfe_huber_delta;
-                    const float th_now = last_pred_theta_;
-                    const float c = std::cos(th_now), sn = std::sin(th_now);
-                    Eigen::Matrix3f H = Eigen::Matrix3f::Zero();
-                    Eigen::Vector3f bb = Eigen::Vector3f::Zero();
-                    for (int i = 0; i < n; ++i)
-                    {
-                        const float dv = da[i];
-                        if (not std::isfinite(dv)) continue;
-                        const float ad = std::abs(dv);
-                        const float u = (ad <= delta_h or ad < 1e-9f) ? 1.0f : delta_h / ad;
-                        const float a = 0.5f * inv_var * wa[i] * u / static_cast<float>(n);
-                        const float px = pa[i][0], py = pa[i][1];
-                        const float qx = c * px - sn * py, qy = sn * px + c * py;
-                        Eigen::Vector3f J;
-                        J << ga[i][0], ga[i][1], -ga[i][0] * qy + ga[i][1] * qx;
-                        H.noalias()  += a * J * J.transpose();
-                        bb.noalias() += (a * dv) * J;
-                    }
                     // ★ THE REGULARISER IS THE POSE'S OWN ACCUMULATED UNCERTAINTY, not one
                     // interval's motion prior. This step corrects error built up over HUNDREDS of
                     // free-running cycles, so "how far could the robot have moved in the last 50 ms"
@@ -5083,6 +5242,8 @@ namespace rc
         }
         // Only a polished early exit moved the estimate; otherwise the posterior IS the prediction (KL 0).
         score_surprise(res, res.sdf_polished);
+        res.timestamp_ms = lidar_timestamp_ms;   // before observe_innovation: its log row is keyed on it
+        observe_innovation(res);
 
         model_->robot_pos.data().copy_(torch::tensor({x, y},
             torch::TensorOptions().device(get_device())));
@@ -7341,6 +7502,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         }
         res.calib_value = motion_calib_.last_solve().value;
         res.calib_sigma = motion_calib_.last_solve().sigma;
+        res.calib_information = motion_calib_.last_information();   // joint calib monitor (plan 2026-10-05 Task 4)
         res.calib_b_omega = motion_calib_.estimated_omega_bias();
         {
             const auto &r = motion_calib_.last_solve();
@@ -7378,6 +7540,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         if (not sur_init_)
         {   // the first correction has no pose prior to be scored against; it only seeds the recursion
             if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; reset_noise_stretch(); sur_init_ = true; }
+            sur_d_ = sur_phi_ = sur_T_ = 0.f;
             return;
         }
         const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
@@ -7400,33 +7563,32 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.surprise.pp_fwd = uf.dot(Pp * uf);     res.surprise.pp_lat = ul.dot(Pp * ul);     res.surprise.pp_th = sur_P_pred_(2, 2);
         res.surprise.pq_fwd = uf.dot(Pq * uf);     res.surprise.pq_lat = ul.dot(Pq * ul);     res.surprise.pq_th = P_solver(2, 2);
         res.surprise.open_cycles = sur_open_cycles_;
-        // ── LEARN the motion-noise components from this correction (motion_noise_vc.h) ─────────────────
-        // Against the SOLVER's posterior (P_solver, pre-floor) and the prediction the stretch built.
-        auto &np = params.odom_preint_noise;
-        if (params.motion_noise_learn and np.motion_proportional and not sur_mixed_ and sur_open_cycles_ > 0)
-        {
-            if (not noise_vc_init_)
-            {   // priors = the configured coefficients, as loaded
-                rc::preint::MotionNoiseVC::Params vp;
-                vp.memory = params.motion_noise_memory;
-                vp.k0 = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot};
-                noise_vc_.set_params(vp);
-                noise_vc_init_ = true;
-            }
-            Eigen::Matrix3f T;   // body axes in world coords: forward, lateral, heading
-            T << uf.x(), ul.x(), 0.f,
-                 uf.y(), ul.y(), 0.f,
-                 0.f,    0.f,    1.f;
-            noise_vc_.observe(c, T, sur_P_pred_, P_solver, sur_QK_, sur_U_);
-            // the coefficients the NEXT prediction is built with
-            np.k_long    = float(noise_vc_.k(0)); np.k_lat     = float(noise_vc_.k(1));
-            np.k_lat_turn = float(noise_vc_.k(2)); np.k_th_turn = float(noise_vc_.k(3));
-            np.k_t_trans = float(noise_vc_.k(4)); np.k_t_rot   = float(noise_vc_.k(5));
-        }
+        // The motion-noise components are learnt from the SCAN-TO-SCAN innovation every cycle
+        // (observe_innovation, motion_noise_innov.h), not from this correction: the window posterior is not
+        // one Kalman update, so (c, P_pred, P_post) cannot give the gain (Fable window memo 2026-10-05).
         fill_noise_vc(res);
+        // ── the systematic drift (drift_monitor.h): c against the stretch's own odometry motion ──
+        drift_mon_.observe(Eigen::Vector3d(res.surprise.c_fwd, res.surprise.c_lat, res.surprise.c_th),
+                           Eigen::Vector3d(std::max(res.surprise.pp_fwd - res.surprise.pq_fwd, 0.f),
+                                           std::max(res.surprise.pp_lat - res.surprise.pq_lat, 0.f),
+                                           std::max(res.surprise.pp_th  - res.surprise.pq_th,  0.f)),
+                           sur_d_, sur_phi_, sur_T_, sur_open_cycles_);
+        {
+            Eigen::Matrix3d b, se; drift_mon_.solve(b, se);
+            for (int a = 0; a < 3; ++a) for (int j = 0; j < 3; ++j)
+            { res.surprise.drift_b[3 * a + j] = float(b(a, j)); res.surprise.drift_se[3 * a + j] = float(se(a, j)); }
+            res.surprise.drift_n = int(drift_mon_.stretches());
+        }
+        sur_d_ = sur_phi_ = sur_T_ = 0.f;
         sur_open_cycles_ = 0;
         reset_noise_stretch();
-        if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; }
+        // ★ Re-seed from the SOLVER's posterior, not the floored one (Fable 2026-10-05 window memo §1).
+        //   apply_adaptive_covariance sets P(i,i) = max(P, EMA v², v²) with v THIS correction, so seeding
+        //   from it made the next P_pred >= c_prev² by construction: measured pp(n)/pq(n-1) median 3.07,
+        //   p90 9.7 on heading after a floor-bound correction (vs 1.65 unfloored). The comment above about
+        //   prev_cov -> predict_step concerns a path the window never reads while CovarianceFromSolver.
+        const Eigen::Matrix3f &seed = P_solver.allFinite() ? P_solver : P_post;
+        if (seed.allFinite()) { sur_P_pred_ = sur_P_prev_ = seed; }
     }
 
     void RoomConcept::reset_noise_stretch()
@@ -7440,7 +7602,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     {
         const auto &np = params.odom_preint_noise;
         res.surprise.vc = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot,
-                           float(noise_vc_.rho(0)), float(noise_vc_.rho(1)), float(noise_vc_.rho(2))};
+                           float(noise_innov_.s(0)), float(noise_innov_.s(1)), float(noise_innov_.s(2))};
         res.surprise.vc_trained = not sur_mixed_ and sur_open_cycles_ > 0;
     }
 

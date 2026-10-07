@@ -34,6 +34,7 @@
 #include <genericworker.h>          // DSR API
 
 #include "buffer_types.h"           // rc::HighLidarBuffer, rc::LidarData (+ Eigen)
+#include "lidar_mount.h"            // rc::lidar_mount::Planar (plan 2026-10-05 Task 5)
 #include "room_concept.h"           // rc::RoomConcept (notify_new_lidar)
 #include "room_config.h"            // rc::RoomConfig (shared config)
 
@@ -86,6 +87,17 @@ public:
     /// Sweeps pushed to the buffer since start (monotonic), for the status stream's rate readout.
     [[nodiscard]] std::uint64_t frames_total() const noexcept { return frames_total_.load(std::memory_order_relaxed); }
 
+    /// ── THE EXTRA PLANAR MOUNT TRANSFORM (plan 2026-10-05 Task 5) ─────────────────────────────────
+    /// Applied to every helios point right after the DSR device->body transform:
+    /// compose(T_corr, T_inject), see lidar_mount.h for the one convention. Starts at T_inject (the
+    /// sim-only planted error from LidarMountInject*, identity by default); the main thread replaces it
+    /// with compose(T_corr, T_inject) while LidarMountApply is on. Thread-safe (mutex): set on the main
+    /// thread, read on the ingest thread.
+    void set_mount_extra(const rc::lidar_mount::Planar& t);
+    [[nodiscard]] rc::lidar_mount::Planar mount_extra() const;
+    /// The sim-only injection this ingestor was built with: inverse(Planar{InjectX, InjectY, InjectYaw}).
+    [[nodiscard]] const rc::lidar_mount::Planar& mount_inject() const noexcept { return mount_inject_; }
+
 private:
     // Ingest-thread body: tightly paced poll of the reader so a fresh scan reaches the localizer with
     // ~0-2 ms latency instead of waiting for the next ~16 ms compute() tick. Sleeps briefly (woken on
@@ -106,6 +118,10 @@ private:
     /// robot happened to boot froze the band, and a missed ceiling then fed the 2-D wall model
     /// interior rings for the rest of the run (the wall-SLAM hairball). Logs on VERDICT CHANGE only.
     void update_ceiling_cap(bool startup);
+
+    mutable std::mutex       mount_mx_;
+    rc::lidar_mount::Planar  mount_extra_{};    ///< guarded by mount_mx_
+    rc::lidar_mount::Planar  mount_inject_{};   ///< constant after construction
 
     std::shared_ptr<DSR::DSRGraph> G_;
     rc::RoomConcept*      room_concept_ = nullptr;

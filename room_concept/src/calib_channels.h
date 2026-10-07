@@ -95,6 +95,7 @@ namespace rc
         std::vector<Eigen::Vector2f> room_polygon_;
         Eigen::Vector2f              room_polygon_offset_ = Eigen::Vector2f::Zero();
 
+    public:
         /// The driving camera keeps the members above; every OTHER camera in ImageEdge.calibCameras
         /// gets one of these. Auxiliary channels wrote NO pair rows before 2026-09-02 — they
         /// accumulated evidence but left no replayable record, so arm 7's attribution table could not
@@ -112,6 +113,14 @@ namespace rc
             /// disk still shows it on a tick where no frame arrived).
             std::int64_t                         viz_ms = 0;
         };
+        /// Every calibration-only channel, read-only (joint calibration monitor, plan 2026-10-05 Task 4).
+        [[nodiscard]] const std::vector<std::unique_ptr<CalibChannel>>& channels() const noexcept
+        { return calib_channels_; }
+        /// Mutable access, for re-referencing each channel's evidence when the LiDAR mount correction
+        /// changes (plan 2026-10-05 Task 5). Main thread only, like the pumps.
+        [[nodiscard]] std::vector<std::unique_ptr<CalibChannel>>& channels() noexcept
+        { return calib_channels_; }
+    private:
         std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
         rc::camcal::Sink camcal_sink_;
     };

@@ -53,6 +53,24 @@ int main()
         if (not ok) ++fails;
     }
 
+    // ── 1b. heading: a stated density and the model's per-radian term combine as a MAX, never a sum ──
+    {
+        const float dt = 0.05f, w = 0.8f, dth = w * dt;
+        const float mvar = float(k_true[5]) * dt + float(k_true[3]) * dth;
+        bool ok = true;
+        for (const float sig : {0.001f, 0.2f})   // stated below the model, then above it
+        {
+            Integrator g(0.f); g.set_noise(model(k_true));
+            g.add(0.f, 0.f, w, dt, -1.f, -1.f, sig);
+            const float got = g.result().cov(2, 2), want = std::max(mvar, sig * sig * dt);
+            const bool o = std::abs(got - want) <= 1e-6f * want;
+            std::printf("1b. heading var, stated %.3f: got %.3e want max(model %.3e, stated %.3e)  (%s)\n",
+                        sig, got, mvar, sig * sig * dt, o ? "ok" : "FAIL");
+            ok = ok and o;
+        }
+        if (not ok) ++fails;
+    }
+
     // ── 2. closed-loop recovery (clean, then with inconsistent posteriors) ──
     for (const bool adversarial : {false, true})
     {
