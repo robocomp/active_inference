@@ -63,11 +63,14 @@ int main()
     const auto mi = acc.marginal_information(unit);
     check(s.ok and mi.ok and s.marginalised and mi.marginalised, "A: both solve, marginalised");
     const Eigen::Vector4d p = (mi.H_data + mi.H_prior).ldlt().solve(mi.b_data + mi.b_prior);
-    const Eigen::Vector4d p_phys = s.p.cwiseProduct(unit);
+    // solve() returns the INCREMENT on top of `applied`; marginal_information() the TOTAL against the graph:
+    // p_total = (p_incr - applied) * unit (2026-10-07; live: 80 M ricoh pairs solve to 0 with 0.5 sigma applied).
+    const Eigen::Vector4d p_phys = (s.p - acc.applied).cwiseProduct(unit);
     std::printf("  A: p (info) %+.5f %+.5f %+.5f | p (solve) %+.5f %+.5f %+.5f | planted %+.5f %+.5f %+.5f\n",
                 p[0], p[1], p[2], p_phys[0], p_phys[1], p_phys[2], planted[0], planted[1], planted[2]);
     check((p - p_phys).cwiseAbs().maxCoeff() < 1e-9 * (1.0 + p_phys.cwiseAbs().maxCoeff()),
-          "A: (H_data + H_prior)^-1 (b_data + b_prior) == Solution::p in physical units");
+          "A: (H_data + H_prior)^-1 (b_data + b_prior) == the TOTAL (Solution::p - applied) in physical units");
+    check(mi.b_prior.cwiseAbs().maxCoeff() < 1e-12, "A: the prior is centred at ZERO total (the graph extrinsic)");
     // solve() multiplies its sigma by the Birge ratio sqrt(max(1, chi2/dof)); marginal_information()
     // reports that factor rather than folding it into H (see MarginalInfo::sigma_inflation).
     const Eigen::Vector4d sig = (mi.H_data + mi.H_prior).inverse().diagonal().cwiseSqrt() * mi.sigma_inflation;

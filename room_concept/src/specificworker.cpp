@@ -420,7 +420,9 @@ void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept:
         { return ((loc_res->calib_applied >> i) & 1) ? loc_res->calib_value[i] : 0.f; };
         const rc::lidar_mount::Planar T_corr{acting(rc::calib::P_LEVER_X), acting(rc::calib::P_LEVER_Y),
                                              acting(rc::calib::P_EPS_YAW) / rc::joint::kEpsPerLidarYaw};
-        lidar_ingestor_->set_mount_extra(rc::lidar_mount::compose(T_corr, lidar_ingestor_->mount_inject()));
+        // The sim-only injection is now applied by the ingestor itself, BEFORE this (Pose6, plan 2026-10-08
+        // Task 4): T_corr alone here, same order T_corr(T_inject(p)) as before.
+        lidar_ingestor_->set_mount_extra(T_corr);
         psi_app = T_corr.yaw;
     }
     if (mount_) mount_->pool().reference_to_lidar_yaw(psi_app, yaw_sigma);
@@ -428,18 +430,41 @@ void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept:
         for (auto& ch : calib_->channels()) ch->calib.reference_to_lidar_yaw(psi_app, yaw_sigma);
 
     if (not params.JOINT_CALIB_MONITOR) return;
+    const Eigen::Vector4d unit(params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                               yaw_sigma, 1.0);
+    const auto cameras = [&]
+    {
+        std::vector<rc::joint::CameraBlock> cams;
+        if (mount_)
+            cams.push_back({params.IMAGE_EDGE_CAMERA, mount_->pool().marginal_information(unit), mount_->pool().lidar_yaw_ref()});
+        if (calib_)
+            for (const auto& ch : calib_->channels())
+                cams.push_back({ch->name, ch->calib.marginal_information(unit), ch->calib.lidar_yaw_ref()});
+        return cams;
+    };
+    // ── r2 MOUNTS MONITOR (plan 2026-10-08 Task 5), ~1 Hz on the LiDAR clock: helios 6 + bpearl 6 + cameras from
+    //    the kinematic block (a COPY in UpdateResult, localizer thread) and the floor/vertical blocks (a COPY from
+    //    the ingestor's snapshot, ingest thread). LOG ONLY -> tmp/joint_calib/mounts_<ts>.csv. The r1 motion block
+    //    is deliberately NOT an input (single owner, r2.2 item 4). ──
+    if (params.MOUNT_FACTORS and lidar_ingestor_ and loc_res->timestamp_ms - mount_monitor_ms_ >= 1000)
+    {
+        mount_monitor_ms_ = loc_res->timestamp_ms;
+        const auto mf = lidar_ingestor_->mount_factor_snapshot();
+        rc::joint::MountBlocks B;
+        B.kinematic   = loc_res->mount_kin_info;
+        B.floor       = mf.floor;
+        B.vert_helios = mf.vert_helios;
+        B.vert_bpearl = mf.vert_bpearl;
+        B.s_helios = mf.s_helios; B.s_bpearl = mf.s_bpearl;
+        // the helios band's mean height above the helios origin: where its tilt moves the 2-D scan (r2.2 item 7)
+        B.band_dz = 0.5 * (double(params.LIDAR_HIGH_MIN_HEIGHT) + double(params.LIDAR_HIGH_MAX_HEIGHT)) - mf.s_helios.z();
+        rc::joint::MountMonitor::Extra ex; ex.yaw_offset = loc_res->mount_yaw_offset;
+        mount_monitor_.observe(loc_res->timestamp_ms, B, cameras(), ex);
+    }
     const int ep = loc_res->calib_episodes;
     if (ep == joint_last_episodes_ or loc_res->calib_information.episodes <= 0) return;
     joint_last_episodes_ = ep;
-    const Eigen::Vector4d unit(params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
-                               yaw_sigma, 1.0);
-    std::vector<rc::joint::CameraBlock> cams;
-    if (mount_)
-        cams.push_back({params.IMAGE_EDGE_CAMERA, mount_->pool().marginal_information(unit), mount_->pool().lidar_yaw_ref()});
-    if (calib_)
-        for (const auto& ch : calib_->channels())
-            cams.push_back({ch->name, ch->calib.marginal_information(unit), ch->calib.lidar_yaw_ref()});
-    joint_monitor_.observe(loc_res->timestamp_ms, ep, loc_res->calib_information, cams);
+    joint_monitor_.observe(loc_res->timestamp_ms, ep, loc_res->calib_information, cameras());
 }
 
 void SpecificWorker::initialize_room_model_from_svg()

@@ -33,7 +33,9 @@
  */
 #pragma once
 #include "calibration_estimator.h"
+#include "mount_factors.h"
 #include "mount_lidar_pair.h"
+#include <array>
 #include <Eigen/Dense>
 #include <string>
 #include <vector>
@@ -99,6 +101,148 @@ namespace rc::joint
             H.block(o, o, 4, 4) += ci.H_prior;
             b.segment(o, 4)     += ci.b_prior;
         }
+        const Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
+        if (ldlt.info() != Eigen::Success) return s;
+        s.value = ldlt.solve(b);
+        s.cov   = ldlt.solve(Eigen::MatrixXd::Identity(n, n));
+        s.sigma = s.cov.diagonal().cwiseMax(0.0).cwiseSqrt();
+        s.ok    = s.value.allFinite() and s.cov.allFinite();
+        return s;
+    }
+
+    /* ── r2: THE MOUNTS, DECOUPLED FROM THE MOTION CALIBRATOR (plan 2026-10-08, Task 5; r2.2 items 2, 7) ──────
+     *  theta = [ helios 6 | bpearl 6 | cam_1 4 | ... ], each LiDAR a Pose6 error (dx, dy, dz, droll, dpitch, dyaw)
+     *  in the BODY frame, rotation about ITS OWN sensor origin (lidar_mount.h). Each factor measures a known
+     *  linear map of theta (y_f = A_f theta) and contributes A_f^T H_f A_f / A_f^T b_f -- its DATA part only; ONE
+     *  prior per physical parameter is added here (helios_prior_sigma, bpearl_prior_sigma, the cameras' own).
+     *    kinematic (KinematicMount)  (dx, dy, psi) of the BAND-EFFECTIVE helios, BODY-origin planar form (the
+     *        2-D localiser absorbs z = X o M_eff). A helios tilt shifts every band point by (w_y dz, -w_x dz),
+     *        dz = band_dz = z_band - z_helios, i.e. it IS a planar shift of the 2-D scan:
+     *          dx_k = h.dx + band_dz h.dpitch - (J s_h)_x h.dyaw,   dy_k = h.dy - band_dz h.droll - (J s_h)_y h.dyaw,
+     *          psi_k = h.dyaw,     J s = (-s_y, s_x): the Pose6 (sensor-origin) -> Planar (body-origin) map.
+     *        ⚠ ADDITION to the plan: the same tilt->band coupling r2.2 item 7 pins for the bpearl acts on the
+     *        kinematic lever (it is the same 2-D scan), so it is modelled here too. It is REQUIRED for item 7 to
+     *        be right: with item 7's bpearl coupling alone the helios-tilt arm moves the BPEARL by ~8 mm, and with
+     *        neither it moves the HELIOS planar instead (joint_mounts_selftest (d1), (d2)).
+     *    floor (FloorPlaneMount)     (droll, dpitch, dz) of the bpearl, absolute (gauge G4).
+     *    vert_helios (VerticalMount HeliosTilt)  helios (droll, dpitch), absolute; its other rows carry 0.
+     *    vert_bpearl (VerticalMount BpearlPlanar) bpearl RELATIVE to the helios-built map, about s_b:
+     *          M_rel = M_h,eff^-1 o M_b  =>  rel_t = t_b - t_h,eff - h.dyaw J (s_b - s_h),  rel_yaw = b.dyaw - h.dyaw
+     *        with t_h,eff = (h.dx + band_dz h.dpitch, h.dy - band_dz h.droll): r2.2 item 7's coupling
+     *        ("bpearl_rel_dx -= w_hy dz, bpearl_rel_dy += w_hx dz"), pinned by joint_mounts_selftest (d), plus
+     *        the rotation-centre term h.dyaw J(s_b - s_h) (0.295 m: 5 mm/deg) the review's A = [I_b - I_h] omits.
+     *    cameras  y_c = psi_c + kCamPerLidarYaw * psi_h on the yaw row, with psi_h = the helios dyaw column
+     *        DIRECTLY (r2.2 item 2: eps_yaw = -psi_h, kEps = -1, so A = kCam = -1 -- NOT kCam/kEps again).
+     *  SINGLE OWNER: the r1 motion block (eps_yaw, lever) is NOT an input -- it would double-anchor the helios
+     *  (review §4(c)); joint_mounts_selftest (e) pins that it cannot reach this solve.
+     *  GAUGE: helios dz is informed by nothing here (ceiling height is a nuisance, the floor is grazing) and
+     *  stays at its prior -- the report prints it as "prior". The helios-bpearl vertical offset is therefore NOT
+     *  calibrated by this plan.
+     */
+    struct MountBlocks
+    {
+        rc::mountf::Info3 kinematic;      ///< helios (dx, dy, psi), body-origin planar, band-effective
+        rc::mountf::Info3 floor;          ///< bpearl (droll, dpitch, dz)
+        rc::mountf::Info6 vert_helios;    ///< helios, tilt rows only
+        rc::mountf::Info6 vert_bpearl;    ///< bpearl RELATIVE planar (dx, dy, dyaw) about s_bpearl
+        Eigen::Vector3d s_helios{0.0, -0.155, 1.1075};   ///< sensor origins in the Shadow frame (r2.2 item 5)
+        Eigen::Vector3d s_bpearl{0.0, 0.14, 0.7025};
+        double band_dz = 0.6425;          ///< mean height of the helios band (1.5-2.0 m) above the helios origin
+        bool kinematic_tilt_coupling = true;   ///< false ONLY for the selftest's control (d2)
+        Eigen::Matrix<double, 6, 1> helios_prior_sigma =
+            (Eigen::Matrix<double, 6, 1>() << 0.05, 0.05, 0.02, 0.0175, 0.0175, 0.0175).finished();
+        Eigen::Matrix<double, 6, 1> bpearl_prior_sigma =
+            (Eigen::Matrix<double, 6, 1>() << 0.05, 0.05, 0.02, 0.0175, 0.0175, 0.0175).finished();
+    };
+    inline constexpr int kHelios = 0, kBpearl = 6, kMountCols = 12;
+    /// Per-parameter information share columns: kinematic, floor, vert_helios, vert_bpearl, cameras, prior.
+    inline constexpr int kShareCols = 6;
+    inline const std::array<const char *, kShareCols> kShareNames{"kin", "floor", "vert_h", "vert_b", "cam", "prior"};
+    struct MountSolution
+    {
+        Eigen::VectorXd value, sigma;
+        Eigen::MatrixXd cov;
+        Eigen::MatrixXd share;            ///< n x kShareCols: diag(A_f^T H_f A_f)_i / H_ii
+        std::vector<std::string> names;   ///< "helios.dx".."helios.dyaw", "bpearl.dx".., "<cam>.pitch".."<cam>.dt"
+        bool ok = false;
+    };
+
+    inline MountSolution solve_mounts(const MountBlocks &B, const std::vector<CameraBlock> &cams)
+    {
+        const int n = kMountCols + 4 * static_cast<int>(cams.size());
+        Eigen::MatrixXd H = Eigen::MatrixXd::Zero(n, n);
+        Eigen::VectorXd b = Eigen::VectorXd::Zero(n);
+        MountSolution s;
+        s.share = Eigen::MatrixXd::Zero(n, kShareCols);
+        for (const char *dev : {"helios", "bpearl"})
+            for (const char *p : {"dx", "dy", "dz", "droll", "dpitch", "dyaw"}) s.names.push_back(std::string(dev) + "." + p);
+        enum { DX, DY, DZ, ROLL, PITCH, YAW };
+        auto add = [&](const Eigen::MatrixXd &A, const Eigen::MatrixXd &Hf, const Eigen::VectorXd &bf, int f)
+        {
+            const Eigen::MatrixXd At = A.transpose();
+            const Eigen::MatrixXd HA = At * Hf * A;
+            H += HA;  b += At * bf;
+            s.share.col(f) += HA.diagonal();
+        };
+        // kinematic -> helios (band-effective, body-origin planar)
+        {
+            Eigen::MatrixXd A = Eigen::MatrixXd::Zero(3, n);
+            const Eigen::Vector2d Js(-B.s_helios.y(), B.s_helios.x());
+            const double dzk = B.kinematic_tilt_coupling ? B.band_dz : 0.0;
+            A(0, kHelios + DX) = 1.0; A(0, kHelios + PITCH) =  dzk; A(0, kHelios + YAW) = -Js.x();
+            A(1, kHelios + DY) = 1.0; A(1, kHelios + ROLL)  = -dzk; A(1, kHelios + YAW) = -Js.y();
+            A(2, kHelios + YAW) = 1.0;
+            add(A, B.kinematic.H_data, B.kinematic.b_data, 0);
+        }
+        // floor -> bpearl (droll, dpitch, dz)
+        {
+            Eigen::MatrixXd A = Eigen::MatrixXd::Zero(3, n);
+            A(0, kBpearl + ROLL) = 1.0; A(1, kBpearl + PITCH) = 1.0; A(2, kBpearl + DZ) = 1.0;
+            add(A, B.floor.H_data, B.floor.b_data, 1);
+        }
+        // vertical helios -> helios, identity (only its tilt rows are non-zero)
+        {
+            Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6, n);
+            A.block(0, kHelios, 6, 6).setIdentity();
+            add(A, B.vert_helios.H_data, B.vert_helios.b_data, 2);
+        }
+        // vertical bpearl -> RELATIVE to the band-effective helios, about the bpearl origin
+        {
+            Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6, n);
+            A.block(0, kBpearl, 6, 6).setIdentity();
+            const Eigen::Vector2d d = (B.s_bpearl - B.s_helios).head<2>();
+            const Eigen::Vector2d Jd(-d.y(), d.x());
+            A(0, kHelios + DX) = -1.0; A(0, kHelios + PITCH) = -B.band_dz; A(0, kHelios + YAW) = -Jd.x();
+            A(1, kHelios + DY) = -1.0; A(1, kHelios + ROLL)  =  B.band_dz; A(1, kHelios + YAW) = -Jd.y();
+            A(5, kHelios + YAW) = -1.0;
+            add(A, B.vert_bpearl.H_data, B.vert_bpearl.b_data, 3);
+        }
+        // cameras (r1 model, coupling on the helios dyaw column DIRECTLY)
+        for (std::size_t c = 0; c < cams.size(); ++c)
+        {
+            const auto &ci = cams[c].info;
+            for (const char *p : {"pitch", "height", "yaw", "dt"}) s.names.push_back(cams[c].name + "." + p);
+            const int o = kMountCols + 4 * static_cast<int>(c);
+            if (not ci.ok) { H.block(o, o, 4, 4) += Eigen::Matrix4d::Identity(); s.share.block(o, 5, 4, 1).array() += 1.0; continue; }
+            Eigen::MatrixXd A = Eigen::MatrixXd::Zero(4, n);
+            A.block(0, o, 4, 4).setIdentity();
+            A(kCamYawRow, kHelios + YAW) = static_cast<double>(kCamPerLidarYaw);
+            Eigen::Vector4d ref = Eigen::Vector4d::Zero();
+            ref[kCamYawRow] = cams[c].lidar_yaw_applied;
+            add(A, ci.H_data, ci.b_data - ci.H_data * ref, 4);
+            H.block(o, o, 4, 4) += ci.H_prior;
+            b.segment(o, 4)     += ci.b_prior;
+            s.share.block(o, 5, 4, 1) += ci.H_prior.diagonal();
+        }
+        // ONE prior per LiDAR parameter, at zero (the nominal mount)
+        for (int k = 0; k < 6; ++k)
+        {
+            const double ph = 1.0 / (B.helios_prior_sigma[k] * B.helios_prior_sigma[k]);
+            const double pb = 1.0 / (B.bpearl_prior_sigma[k] * B.bpearl_prior_sigma[k]);
+            H(kHelios + k, kHelios + k) += ph;  s.share(kHelios + k, 5) += ph;
+            H(kBpearl + k, kBpearl + k) += pb;  s.share(kBpearl + k, 5) += pb;
+        }
+        for (int i = 0; i < n; ++i) if (H(i, i) > 0.0) s.share.row(i) /= H(i, i);
         const Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
         if (ldlt.info() != Eigen::Success) return s;
         s.value = ldlt.solve(b);

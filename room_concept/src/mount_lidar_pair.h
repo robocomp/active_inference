@@ -632,6 +632,16 @@ namespace rc::mount
             mi.H_prior = Dinv * Dinv;
             mi.b_data  = -(Dinv * ne.b);
             mi.b_prior = -(Dinv * prior_rhs());
+            // ★ RE-EXPRESSED AS THE TOTAL ERROR AGAINST THE GRAPH EXTRINSIC (2026-10-07). solve() returns the
+            //   INCREMENT on top of `applied` — apply_mount_solve does applied += -p and rebases the evidence —
+            //   measured: 80 M ricoh pairs solve to p = 0 while 0.503 sigma of yaw is already applied. A joint
+            //   solve needs the TOTAL (it couples this mount to the LiDAR's total yaw), so shift the mean by
+            //   the applied correction: p_total = p_incr - applied*unit. Data and prior shift together; the
+            //   prior then sits at ZERO total, i.e. anchored on the original graph extrinsic, as `applied`'s
+            //   note intends.
+            const Eigen::Vector4d p_applied = -applied.cwiseProduct(unit);   // physical, p sign
+            mi.b_data  += mi.H_data  * p_applied;
+            mi.b_prior += mi.H_prior * p_applied;
             mi.marginalised = ne.marginalised;
             const Solution s = solve(min_n);
             mi.sigma_inflation = std::sqrt(std::max(1.0, s.chi2_dof));

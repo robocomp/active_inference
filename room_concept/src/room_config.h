@@ -16,6 +16,7 @@
 // the ConfigLoader. Keeps the ~150 lines of load_* boilerplate out of
 // SpecificWorker::initialize().
 
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
@@ -49,6 +50,16 @@ struct RoomConfig
     float LIDAR_MOUNT_INJECT_X = 0.f;   // RoomConcept.LidarMountInjectX (m)    ⚠ SIMULATION ONLY
     float LIDAR_MOUNT_INJECT_Y = 0.f;   // RoomConcept.LidarMountInjectY (m)    ⚠ SIMULATION ONLY
     float LIDAR_MOUNT_INJECT_YAW_DEG = 0.f;   // RoomConcept.LidarMountInjectYawDeg ⚠ SIMULATION ONLY
+    // r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF helios injection (with
+    // X/Y/YawDeg above, now a Pose6 about the SENSOR origin) + the bpearl's, and the decoupled mount factors.
+    float LIDAR_MOUNT_INJECT_Z = 0.f;          // RoomConcept.LidarMountInjectZ (m)          ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_ROLL_DEG = 0.f;   // RoomConcept.LidarMountInjectRollDeg      ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_PITCH_DEG = 0.f;  // RoomConcept.LidarMountInjectPitchDeg     ⚠ SIMULATION ONLY
+    std::array<float, 6> BPEARL_MOUNT_INJECT{};   // RoomConcept.BpearlMountInject{X,Y,Z,RollDeg,PitchDeg,YawDeg} ⚠ SIM ONLY
+    bool  MOUNT_FACTORS = true;          // RoomConcept.MountFactors — estimate + LOG the LiDAR mounts (r2); changes no pose
+    float BPEARL_MOUNT_RATE = 2.f;       // RoomConcept.BpearlMountRate (Hz) — floor/vertical factor sweeps per second
+    float MOUNT_POSE_SIGMA_XY = 0.05f;   // RoomConcept.MountPoseSigmaXY (m) — per-sweep pose nuisance prior (WIDE)
+    float MOUNT_POSE_SIGMA_YAW_DEG = 2.f;   // RoomConcept.MountPoseSigmaYawDeg
 
     // ── PLATFORM OVERLAY: one config for every robot ────────────────────────────────────────────
     // Most of this file is POLICY and is the same everywhere. A handful of values are PHYSICAL —

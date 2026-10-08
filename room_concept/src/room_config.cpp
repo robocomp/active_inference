@@ -4,6 +4,7 @@
  */
 
 #include "room_config.h"
+#include <algorithm>
 #include <limits>
 #include <cmath>
 
@@ -432,15 +433,58 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body Y)");
     reader.opt<float, double>("RoomConcept.LidarMountInjectYawDeg", p.LIDAR_MOUNT_INJECT_YAW_DEG,
             "deg. SIMULATION ONLY: planted helios mount error (sensor CCW yaw)");
+    reader.opt<float, double>("RoomConcept.LidarMountInjectZ", p.LIDAR_MOUNT_INJECT_Z,
+            "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body Z); Pose6 about the sensor origin");
+    reader.opt<float, double>("RoomConcept.LidarMountInjectRollDeg", p.LIDAR_MOUNT_INJECT_ROLL_DEG,
+            "deg. SIMULATION ONLY: planted helios mount error (rotation about body X through the sensor origin)");
+    reader.opt<float, double>("RoomConcept.LidarMountInjectPitchDeg", p.LIDAR_MOUNT_INJECT_PITCH_DEG,
+            "deg. SIMULATION ONLY: planted helios mount error (rotation about body Y through the sensor origin)");
+    {
+        constexpr std::array<const char*, 6> keys{"RoomConcept.BpearlMountInjectX", "RoomConcept.BpearlMountInjectY",
+                                                  "RoomConcept.BpearlMountInjectZ", "RoomConcept.BpearlMountInjectRollDeg",
+                                                  "RoomConcept.BpearlMountInjectPitchDeg", "RoomConcept.BpearlMountInjectYawDeg"};
+        for (std::size_t k = 0; k < keys.size(); ++k)
+            reader.opt<float, double>(keys[k], p.BPEARL_MOUNT_INJECT[k],
+                    "SIMULATION ONLY: planted bpearl mount error (m / deg), Pose6 about the bpearl origin, body frame");
+    }
+    // ── r2 mount factors (plan 2026-10-08): kinematic (helios x,y,yaw), floor (bpearl z,roll,pitch), verticals ──
+    reader.opt<bool>("RoomConcept.MountFactors", p.MOUNT_FACTORS,
+            "estimate + LOG the helios/bpearl mounts from the kinematic, floor and vertical factors (tmp/joint_calib/mounts_*.csv); moves no pose. ⚠ ON => eps_yaw stops acting on the odometry (single owner)");
+    reader.opt<float, double>("RoomConcept.BpearlMountRate", p.BPEARL_MOUNT_RATE,
+            "Hz. Floor/vertical factor sweeps per second (bpearl read + helios verticals), throttled on the ingest thread");
+    reader.opt<float, double>("RoomConcept.MountPoseSigmaXY", p.MOUNT_POSE_SIGMA_XY,
+            "m. WIDE prior of the per-sweep pose nuisance in the vertical factor (the pose-field sigma, never the solver's marginal)");
+    reader.opt<float, double>("RoomConcept.MountPoseSigmaYawDeg", p.MOUNT_POSE_SIGMA_YAW_DEG,
+            "deg. WIDE prior of the per-sweep pose-yaw nuisance in the vertical factor");
+    room_concept.params.mount_factors = p.MOUNT_FACTORS;
     // The lever acts and the yaw moves to the LiDAR side exactly when the correction is applied there,
     // so p_applied records what acts and the odometry never applies the same yaw a second time.
     room_concept.params.motion_calib.apply_lever    = p.LIDAR_MOUNT_APPLY;
-    room_concept.params.motion_calib.lidar_side_yaw = p.LIDAR_MOUNT_APPLY;
-    if (p.LIDAR_MOUNT_INJECT_X != 0.f or p.LIDAR_MOUNT_INJECT_Y != 0.f or p.LIDAR_MOUNT_INJECT_YAW_DEG != 0.f)
+    // r2.2 item 4, SINGLE OWNER (MANDATORY): with the mount factors on, the kinematic factor owns the helios
+    // yaw, so eps_yaw must NOT act on the odometry (else the yaw plant is absorbed into the odometry before
+    // the kinematic factor sees it). lidar_side_yaw makes yaw_offset() return 0.
+    // ⚠ BEHAVIOUR CHANGE of the odometry side: eps_yaw stops acting (it was acting under ApplyMask = -1).
+    // ⚠ DEVIATION (defensible version): lidar_side_yaw ALONE would leave acting(P_EPS_YAW) true, so p_applied
+    //   would record a yaw that nothing applied (no LiDAR-side consumer while LidarMountApply is off) and the
+    //   calibrator's r + J*p_applied undo would charge it back -- the r1 Review Focus #2 failure. So, unless
+    //   LidarMountApply puts the yaw on the points, the eps apply bit is ALSO cleared: eps is then estimated
+    //   and reported, never applied, and p_applied records 0 for it.
+    room_concept.params.motion_calib.lidar_side_yaw = p.LIDAR_MOUNT_APPLY or p.MOUNT_FACTORS;
+    if (p.MOUNT_FACTORS and not p.LIDAR_MOUNT_APPLY)
+        room_concept.params.motion_calib.apply_mask &= ~(1 << rc::calib::P_EPS_YAW);
+    if (p.LIDAR_MOUNT_INJECT_X != 0.f or p.LIDAR_MOUNT_INJECT_Y != 0.f or p.LIDAR_MOUNT_INJECT_YAW_DEG != 0.f
+        or p.LIDAR_MOUNT_INJECT_Z != 0.f or p.LIDAR_MOUNT_INJECT_ROLL_DEG != 0.f or p.LIDAR_MOUNT_INJECT_PITCH_DEG != 0.f)
         qWarning().nospace() << "[cfg] ⚠ LidarMountInject* is NONZERO (x " << p.LIDAR_MOUNT_INJECT_X
-                             << " m, y " << p.LIDAR_MOUNT_INJECT_Y << " m, yaw " << p.LIDAR_MOUNT_INJECT_YAW_DEG
+                             << " m, y " << p.LIDAR_MOUNT_INJECT_Y << " m, z " << p.LIDAR_MOUNT_INJECT_Z
+                             << " m, roll " << p.LIDAR_MOUNT_INJECT_ROLL_DEG << ", pitch " << p.LIDAR_MOUNT_INJECT_PITCH_DEG
+                             << ", yaw " << p.LIDAR_MOUNT_INJECT_YAW_DEG
                              << " deg): a helios mount error is being PLANTED in the LiDAR points. "
-                                "SIMULATION ONLY -- set all three to 0 on the real robot.";
+                                "SIMULATION ONLY -- set all six to 0 on the real robot.";
+    if (std::ranges::any_of(p.BPEARL_MOUNT_INJECT, [](float v) { return v != 0.f; }))
+        qWarning().nospace() << "[cfg] ⚠ BpearlMountInject* is NONZERO (x " << p.BPEARL_MOUNT_INJECT[0] << " y "
+                             << p.BPEARL_MOUNT_INJECT[1] << " z " << p.BPEARL_MOUNT_INJECT[2] << " m, roll "
+                             << p.BPEARL_MOUNT_INJECT[3] << " pitch " << p.BPEARL_MOUNT_INJECT[4] << " yaw "
+                             << p.BPEARL_MOUNT_INJECT[5] << " deg): a bpearl mount error is being PLANTED. SIMULATION ONLY.";
     // ★ EXPOSED 2026-09-01 so the episode LENGTH can be A/B'd without a rebuild between legs.
     // These are identifiability triggers, not tuning: below them the Jacobian rows are ~0. But
     // information in a channel goes as (accumulated covariate)^2 while episodes arrive at 1/T, so
@@ -610,6 +654,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                 "corrections of evidence the noise learner remembers");
         reader.opt<bool>("RoomConcept.MotionNoiseInnov", room_concept.params.motion_noise_innov,
                 "learn + log the noise components from the scan-to-scan innovation (motion_noise_innov.h)");
+        reader.opt<int>("RoomConcept.ScanOnlyIters", room_concept.params.scan_only_iters,
+                "Gauss-Newton iterations for the scan-only pose (1 = single step, under-steps)");
         reader.opt<bool>("RoomConcept.PoseFieldBias", room_concept.params.pose_field_bias,
                 "learn + log the slow pose-field bias of the scan-only pose (pose_field_bias.h)");
         reader.opt<bool>("RoomConcept.PoseFieldPublish", room_concept.params.pose_field_publish,

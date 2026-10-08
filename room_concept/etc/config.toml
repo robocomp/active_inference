@@ -284,6 +284,9 @@ MotionNoiseInnov        = true    # 2026-10-05 (Fable window memo): learn the co
                                   # innovation every cycle (motion_noise_innov.h) instead of the correction. Learns
                                   # and logs tmp/noise_innov/innov_<ts>.csv always; the coefficients reach the
                                   # prediction only if MotionNoiseLearn = true as well.
+ScanOnlyIters           = 3       # 2026-10-08: GN iterations for the scan-only pose z used by the noise learner, the
+                                  # pose-field bias and the kinematic mount factor. 1 step recovered only 81-88 % of a
+                                  # planted offset (tools/kinematic_shortfall_diag.py); iterate to the scan-only optimum.
 PoseFieldBias           = true    # 2026-10-06 (Fable memo §3): learn the slow POSE-FIELD bias of the scan-only pose
                                   # GT-free (pose_field_bias.h) and log it (heading CSV pf_*). The reason the published
                                   # pose is 5-10x overconfident: the solver's covariance is conditional on the map.
@@ -1066,6 +1069,32 @@ LidarMountApply   = false  # apply the helios (lever_x, lever_y, yaw) to the poi
 LidarMountInjectX = 0.0    # m    ⚠ SIMULATION ONLY: plant a KNOWN helios mount error = the sensor's displacement
 LidarMountInjectY = 0.0    # m      and CCW yaw from its nominal mount, body frame (points get inverse() of it).
 LidarMountInjectYawDeg = 0.0 # deg  Leave all three at 0 on the real robot -- room_config WARNs when any is nonzero.
+# ── r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF planted mount errors ──
+# ⚠ Since 2026-10-08 ALL LidarMountInject* form ONE Pose6 rotating about the SENSOR origin (lidar_mount.h), not
+# a Planar about the body origin: for X/Y/YawDeg = (0.03, -0.02, 1) the kinematic factor now reads a body-origin
+# lever of (27.3, -20) mm; the mounts monitor reports the Pose6 (30, -20) mm. ⚠ SIMULATION ONLY, all 0 here.
+LidarMountInjectZ        = 0.0   # m
+LidarMountInjectRollDeg  = 0.0   # deg, about body X through the helios origin
+LidarMountInjectPitchDeg = 0.0   # deg, about body Y through the helios origin
+BpearlMountInjectX        = 0.0  # m    ⚠ SIMULATION ONLY: planted bpearl mount error, Pose6 about the bpearl origin
+BpearlMountInjectY        = 0.0  # m
+BpearlMountInjectZ        = 0.0  # m
+BpearlMountInjectRollDeg  = 0.0  # deg
+BpearlMountInjectPitchDeg = 0.0  # deg
+BpearlMountInjectYawDeg   = 0.0  # deg
+# The mount factors: helios (x, y, yaw) from the KINEMATIC factor (scan-only poses vs the calibrated odometry),
+# bpearl (z, roll, pitch) from the FLOOR, helios (roll, pitch) + bpearl (x, y, yaw relative to the helios) from
+# VERTICAL walls / the horizontal ceiling; fused with the cameras -> tmp/joint_calib/mounts_<ts>.csv (grade:
+# tools/joint_calib_report.py --mounts), per-cycle kinematic log tmp/mount_factors/kin_<ts>.csv. ESTIMATE + LOG
+# only: nothing here moves the published pose (LidarMountApply stays OFF).
+# ⚠ BEHAVIOUR CHANGE WHEN TRUE (r2.2 item 4, single owner): the kinematic factor owns the helios yaw, so
+# eps_yaw STOPS ACTING ON THE ODOMETRY -- room_config sets motion_calib.lidar_side_yaw AND clears the eps_yaw
+# apply bit (unless LidarMountApply puts it on the points), so p_applied records 0 for it. eps_yaw is still
+# estimated and logged. The acting value (yaw_offset) is logged per row and must read 0.
+MountFactors      = true
+BpearlMountRate   = 2.0    # Hz: floor/vertical sweeps per second (bpearl + the full helios sweep), ingest thread
+MountPoseSigmaXY  = 0.05   # m   WIDE prior of the vertical factor's per-sweep pose nuisance (pose-field sigma,
+MountPoseSigmaYawDeg = 2.0 # deg never the solver's own marginal -- r2.2 item 6)
 MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the position R. Also the
                         # header default. A correction can only be as good as the FIT that produced
                         # it: when the localiser is not tracking, the optimizer fires nearly every
@@ -1807,7 +1836,7 @@ maxSlots     = 1          # newest window slot only, like corners
 #   claiming the mount is better known than it is, is the one direction that can hurt.
 mountPitchSigma  = 0.0035   # rad (~0.2 deg)   ⚠ NOT MEASURED ON SHADOW
 mountHeightSigma = 0.010    # m                ⚠ NOT MEASURED ON SHADOW
-mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
+mountYawSigma    = 0.0175   # rad (1 deg)      ⚠ NOT MEASURED ON SHADOW. 2026-10-08: widened from 0.0035 for joint-calib Task 6 (a 0.2 deg prior let the per-vertex offsets absorb a planted 1 deg); revisit after
 # ── The per-vertex offset nuisance (mount_lidar_pair.h) ──────────────────────────────────────────
 # Prior sigma on a CORNER'S OWN image offset, in pixels. MEASURED 2026-09-02: per-vertex means reach
 # −17 px and spread sd 5.3 px across 23 corners, while the mount signal being estimated is 1.1 px of
@@ -2006,7 +2035,7 @@ names = ["Shadow", "P3Bot"]
 camera            = "ricoh"
 mountPitchSigma   = 0.0035
 mountHeightSigma  = 0.010
-mountYawSigma     = 0.0035
+mountYawSigma     = 0.0175   # 2026-10-08 joint-calib Task 6: widened from 0.0035 (0.2 deg let per-vertex offsets absorb a planted 1 deg); revisit after
 wallPositionSigma = 0.015
 # ── The rest of Shadow's own values ────────────────────────────────────────────────────────────
 # MEASURED on Shadow: the ZUPT densities come from the parked-variance measurement, CmdNoiseRot from

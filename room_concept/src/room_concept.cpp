@@ -4729,15 +4729,35 @@ namespace rc
     void RoomConcept::scan_only_pose(const torch::Tensor &pts, float x, float y, float th)
     {
         innov_ok_ = false;
-        Eigen::Matrix3f H; Eigen::Vector3f bb;
-        if (not scan_linearize(pts, x, y, th, H, bb)) return;
-        const Eigen::LDLT<Eigen::Matrix3f> ldlt(H);
-        if (ldlt.info() != Eigen::Success) return;
-        const Eigen::Vector3f step = -ldlt.solve(bb);
-        const Eigen::Matrix3f R = ldlt.solve(Eigen::Matrix3f::Identity());
-        if (not step.allFinite() or not R.allFinite() or R(0, 0) <= 0.f or R(2, 2) <= 0.f) return;
-        innov_z_ = Eigen::Vector3f(x, y, th) + step;
-        innov_z_[2] = std::remainder(innov_z_[2], 2.f * float(M_PI));
+        last_scan_iters_ = 0;
+        // ★ ITERATED (2026-10-08). z is DEFINED as the scan-only optimum. One Gauss-Newton step from the
+        //   dead-reckoned prediction recovered only g = 0.81-0.88 of a planted mount offset against ground
+        //   truth (z - pred = g·(gt - pred), tools/kinematic_shortfall_diag.py); the missing (1 - g) then
+        //   arrived as a burst at the next solve, which the noise learner's outlier mixture down-weighted, so
+        //   every consumer of z (noise learner, pose-field bias, kinematic mount factor) saw a shrunk signal.
+        //   Re-linearise at each new pose up to ScanOnlyIters times; stop when a step is numerically
+        //   negligible (a convergence test, not a model threshold). R = H^-1 at the FINAL pose.
+        Eigen::Vector3f z(x, y, th);
+        Eigen::Matrix3f R = Eigen::Matrix3f::Zero();
+        bool have = false;
+        for (int it = 0; it < std::max(1, params.scan_only_iters); ++it)
+        {
+            Eigen::Matrix3f H; Eigen::Vector3f bb;
+            if (not scan_linearize(pts, z.x(), z.y(), z.z(), H, bb)) break;
+            const Eigen::LDLT<Eigen::Matrix3f> ldlt(H);
+            if (ldlt.info() != Eigen::Success) break;
+            const Eigen::Vector3f step = -ldlt.solve(bb);
+            const Eigen::Matrix3f Ri = ldlt.solve(Eigen::Matrix3f::Identity());
+            if (not step.allFinite() or not Ri.allFinite() or Ri(0, 0) <= 0.f or Ri(2, 2) <= 0.f) break;
+            z += step;
+            z[2] = std::remainder(z[2], 2.f * float(M_PI));
+            R = Ri;          // the curvature at the pose this step started from; refreshed next pass
+            have = true;
+            ++last_scan_iters_;
+            if (step.head<2>().norm() < 1e-4f and std::abs(step[2]) < 1e-4f) break;
+        }
+        if (not have) return;
+        innov_z_ = z;
         innov_R_ = 0.5f * (R + R.transpose());
         innov_ok_ = true;
     }
@@ -4751,6 +4771,23 @@ namespace rc
         auto &np = params.odom_preint_noise;
         const bool fed = scan_ok and cyc_U_ok_ and innov_prev_ok_ and innov_prev_cycle_ + 1 == innov_cycle_
                          and np.motion_proportional;
+        // ── THE ODOMETRY STEP, LAID OUT AT THE SCAN-ONLY HEADING (2026-10-08, fix B) ─────────────────────────
+        // cyc_odom_ is the predictor's step in WORLD axes, rotated with the PREDICTOR's heading. While moving that
+        // heading ran +0.1..+0.3 deg ahead of the scan-only heading (published heading vs GT +0.29 deg, scan-only
+        // +0.07 deg; run 2026-10-08 18-03), and compared against scan-only poses the difference appeared as a
+        // lateral component eps * d_fwd -- read by the kinematic mount factor as a FALSE helios yaw (+0.56 deg in
+        // a null run). Recover the body increment with the predictor's own mid-cycle heading, then lay it out at
+        // the scan-only mid-cycle heading, so z_n - z_{n-1} and the step live in the same frame.
+        Eigen::Vector3f odom_w = cyc_odom_;
+        {
+            const float th_p = res.pred_theta - 0.5f * cyc_odom_[2];                 // predictor, mid-cycle
+            const float th_z = innov_z_[2]   - 0.5f * cyc_odom_[2];                  // scan-only, mid-cycle
+            const float sp = std::sin(th_p), cp = std::cos(th_p), sz = std::sin(th_z), cz = std::cos(th_z);
+            const float b_fwd = -sp * cyc_odom_[0] + cp * cyc_odom_[1];             // body forward = (-sin, cos)
+            const float b_lat =  cp * cyc_odom_[0] + sp * cyc_odom_[1];             // body lateral = ( cos, sin)
+            if (std::isfinite(res.pred_theta))
+                odom_w = Eigen::Vector3f(-sz * b_fwd + cz * b_lat, cz * b_fwd + sz * b_lat, cyc_odom_[2]);
+        }
         if (fed)
         {
             if (not noise_innov_init_)
@@ -4761,7 +4798,7 @@ namespace rc
                 noise_innov_.set_params(vp);
                 noise_innov_init_ = true;
             }
-            Eigen::Vector3f delta = innov_z_ - innov_z_prev_ - cyc_odom_;
+            Eigen::Vector3f delta = innov_z_ - innov_z_prev_ - odom_w;
             delta[2] = std::remainder(delta[2], 2.f * float(M_PI));
             const float th = innov_z_[2] - 0.5f * cyc_odom_[2];
             const float sn = std::sin(th), cs = std::cos(th);
@@ -4769,10 +4806,12 @@ namespace rc
             T << -sn, cs, 0.f,
                   cs, sn, 0.f,
                  0.f, 0.f, 1.f;
-            const Eigen::Vector3f odom_body(T.col(0).dot(cyc_odom_), T.col(1).dot(cyc_odom_), cyc_odom_[2]);
+            const Eigen::Vector3f odom_body(T.col(0).dot(odom_w), T.col(1).dot(odom_w), odom_w[2]);
             // P(the body moved this cycle): the rest channel's own belief (RestMotionChannel), either motion
             const float p_move = 1.f - (1.f - std::clamp(zupt_pred_gain_tr_, 0.f, 1.f)) * (1.f - std::clamp(zupt_pred_gain_ro_, 0.f, 1.f));
             noise_innov_.observe(delta, T, cyc_U_, innov_R_ + innov_R_prev_, odom_body, p_move, cyc_dt_s_);
+            // r2 kinematic mount factor: the same delta, the learner's per-axis model variance (plan 2026-10-08)
+            if (params.mount_factors) observe_kinematic_mount(delta, T, odom_body, res);
             if (params.motion_noise_learn)
             {   // the coefficients the NEXT prediction is built with
                 np.k_long     = float(noise_innov_.k(0)); np.k_lat     = float(noise_innov_.k(1));
@@ -4794,7 +4833,7 @@ namespace rc
                     innov_csv_ << ",y_" << ax << ",m_" << ax;
                 }
                 innov_csv_ << ",k_long,k_lat,k_lat_turn,k_th_turn,k_t_trans,k_t_rot,s_fwd,s_lat,s_th,q_fwd,q_lat,q_th"
-                              ",z_x,z_y,z_th,r_out_fwd,r_out_lat,r_out_th,p_move,dt_s,mv_fwd,mv_lat,mv_th\n";
+                              ",z_x,z_y,z_th,r_out_fwd,r_out_lat,r_out_th,p_move,dt_s,mv_fwd,mv_lat,mv_th,z_iters\n";
             }
             innov_csv_ << res.timestamp_ms << ',' << T.col(0).dot(delta) << ',' << T.col(1).dot(delta) << ',' << delta[2]
                        << ',' << odom_body[0] << ',' << odom_body[1] << ',' << odom_body[2] << ",0";
@@ -4813,6 +4852,7 @@ namespace rc
             for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.last_r(a);
             innov_csv_ << ',' << p_move << ',' << cyc_dt_s_;
             for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.mv(a);
+            innov_csv_ << ',' << last_scan_iters_;
             innov_csv_ << '\n';
         }
         // ── the slow POSE-FIELD bias (pose_field_bias.h): learnt along unbroken chains of scan-only poses, and
@@ -4830,7 +4870,7 @@ namespace rc
             // 0 for the entire tour; replay without it: 47 mm, heading 18.5x -> 3.8x). Without it the estimate can
             // only err LARGE (22-20 replay: 71 vs ~45 mm needed), never collapse to zero.
             const float odo_var_tr = fed ? float(noise_innov_.odom_var_accum(0) + noise_innov_.odom_var_accum(1)) : 0.f;
-            field_bias_.observe(innov_z_, innov_R_, cyc_odom_, odo_var_tr, 0.f, fed);
+            field_bias_.observe(innov_z_, innov_R_, odom_w, odo_var_tr, 0.f, fed);
             const Eigen::Matrix3f Sb = field_bias_.covariance(innov_R_);
             res.surprise.pf_sigma_b = float(field_bias_.sigma_b());
             res.surprise.pf_len     = float(field_bias_.length());
@@ -4838,8 +4878,95 @@ namespace rc
             res.surprise.pf_tt      = Sb(2, 2);
             if (params.pose_field_publish and Sb.allFinite()) res.covariance += Sb;
         }
+        if (params.mount_factors)
+        {   // r2: the kinematic block and the acting eps travel to the main thread as COPIES (r1 thread rule)
+            res.mount_kin_info   = kin_mount_.info();
+            res.mount_yaw_offset = motion_calib_.yaw_offset();
+            // ... and the wall map + pose the ingest thread's vertical factor reads (one copy under a lock)
+            if (scan_ok and map_guided_checks_allowed())
+            {
+                MountSnapshot snap;
+                snap.valid = true;
+                snap.ts_ms = res.timestamp_ms;
+                const Eigen::Matrix2f Rl = res.robot_pose.linear();
+                snap.pose = Eigen::Vector3f(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
+                                            std::atan2(Rl(1, 0), Rl(0, 0)));
+                if (cyc_dt_s_ > 0.f and cyc_odom_.allFinite()) snap.vel = cyc_odom_ / cyc_dt_s_;
+                snap.polygon = nominal_room_polygon();
+                if (snap.polygon.size() >= 3)
+                {
+                    std::scoped_lock lk(mount_snap_mutex_);
+                    mount_snap_ = std::move(snap);
+                }
+            }
+            else
+            {
+                std::scoped_lock lk(mount_snap_mutex_);
+                mount_snap_.valid = false;
+            }
+        }
         innov_prev_ok_ = scan_ok;
         if (scan_ok) { innov_z_prev_ = innov_z_; innov_R_prev_ = innov_R_; innov_prev_cycle_ = innov_cycle_; }
+    }
+
+    // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md
+    //    Tasks 1, 1b, 5; r2.2 items 1, 4). Called from observe_innovation on `fed` cycles only. ──────────────
+    // T's columns are (FORWARD, LATERAL, heading) in world coordinates, so T.col(0).dot(delta) is the forward
+    // innovation and odom_body = (forward, lateral, dtheta) -- named fields in Cycle, never a positional pair.
+    // Row variance = the noise learner's model variance for the axis this cycle (last_m), weight 1 - its outlier
+    // responsibility (last_r); the odometry calibration's posterior / applied values / re-solve counter feed the
+    // common-mode Schur over (k_v, k_lat).
+    void RoomConcept::observe_kinematic_mount(const Eigen::Vector3f &delta, const Eigen::Matrix3f &T,
+                                              const Eigen::Vector3f &odom_body, UpdateResult &res)
+    {
+        using rc::calib::P_K_V;
+        using rc::calib::P_K_LAT;
+        // ── the odometry calibration as it stands: applied (acting) and estimated (taught) values, posterior ──
+        const auto &sol = motion_calib_.last_solve();
+        const Eigen::Vector2d applied(motion_calib_.acting(P_K_V) ? double(sol.value[P_K_V]) : 0.0,
+                                      motion_calib_.acting(P_K_LAT) ? double(sol.value[P_K_LAT]) : 0.0);
+        const Eigen::Vector2d estimate(motion_calib_.taught(P_K_V) ? double(sol.value[P_K_V]) : 0.0,
+                                       motion_calib_.taught(P_K_LAT) ? double(sol.value[P_K_LAT]) : 0.0);
+        Eigen::Matrix2d Sig = Eigen::Matrix2d::Constant(std::numeric_limits<double>::quiet_NaN());   // NaN = keep
+        if (const auto &inf = motion_calib_.last_information(); inf.episodes > 0)
+        {
+            const Eigen::Matrix<double, rc::calib::P_COUNT, rc::calib::P_COUNT> Hd = inf.H.cast<double>();
+            const Eigen::LDLT<Eigen::Matrix<double, rc::calib::P_COUNT, rc::calib::P_COUNT>> ldlt(Hd);
+            if (ldlt.info() == Eigen::Success)
+            {
+                const auto C = ldlt.solve(Eigen::Matrix<double, rc::calib::P_COUNT, rc::calib::P_COUNT>::Identity()).eval();
+                Sig << C(P_K_V, P_K_V), C(P_K_V, P_K_LAT), C(P_K_LAT, P_K_V), C(P_K_LAT, P_K_LAT);
+            }
+        }
+        kin_mount_.set_odometry(Sig, applied, estimate - applied, motion_calib_.episodes());
+        rc::mountf::KinematicMount::Cycle c;
+        c.innov_fwd = double(T.col(0).dot(delta));
+        c.innov_lat = double(T.col(1).dot(delta));
+        c.d_fwd = double(odom_body[0]); c.d_lat = double(odom_body[1]); c.dth = double(odom_body[2]);
+        c.var_fwd = noise_innov_.last_m(0);  c.var_lat = noise_innov_.last_m(1);
+        c.w_fwd = 1.0 - noise_innov_.last_r(0);  c.w_lat = 1.0 - noise_innov_.last_r(1);
+        kin_mount_.observe(c);
+        // ── per-cycle replay log: what the factor saw, plus the ACTING eps (Task 6 must show it is 0) ──
+        if (not kin_csv_.is_open())
+        {
+            std::filesystem::create_directories("tmp/mount_factors");
+            char stamp[32]; const std::time_t now = std::time(nullptr);
+            std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+            kin_csv_.open(std::string("tmp/mount_factors/kin_") + stamp + ".csv");
+            kin_csv_.imbue(std::locale::classic());
+            kin_csv_ << "ts_ms,innov_fwd,innov_lat,odom_fwd,odom_lat,odom_th,var_fwd,var_lat,w_fwd,w_lat,"
+                        "yaw_offset,kv_applied,klat_applied,mu_kv,mu_klat,sig_kv,sig_klat,episodes,"
+                        "dx,dy,psi,dx_sd,dy_sd,psi_sd\n";
+        }
+        const Eigen::Vector3d m = kin_mount_.mean(), sd = kin_mount_.sigma();
+        const Eigen::Matrix2d So = kin_mount_.sigma_odometry();
+        kin_csv_ << res.timestamp_ms << ',' << c.innov_fwd << ',' << c.innov_lat << ',' << c.d_fwd << ',' << c.d_lat << ','
+                 << c.dth << ',' << c.var_fwd << ',' << c.var_lat << ',' << c.w_fwd << ',' << c.w_lat << ','
+                 << motion_calib_.yaw_offset() << ',' << applied[0] << ',' << applied[1] << ','
+                 << estimate[0] - applied[0] << ',' << estimate[1] - applied[1] << ','
+                 << std::sqrt(std::max(0.0, So(0, 0))) << ',' << std::sqrt(std::max(0.0, So(1, 1))) << ','
+                 << motion_calib_.episodes() << ',' << m[0] << ',' << m[1] << ',' << m[2] << ','
+                 << sd[0] << ',' << sd[1] << ',' << sd[2] << '\n';
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::try_prediction_early_exit(

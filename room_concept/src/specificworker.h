@@ -338,6 +338,9 @@ class SpecificWorker : public GenericWorker
     /// Joint sensor-mount + odometry calibration MONITOR (plan 2026-10-05 Task 4): logs only.
     rc::joint::Monitor joint_monitor_;
     int joint_last_episodes_ = -1;
+    /// r2 mounts monitor (plan 2026-10-08 Task 5): helios 6 + bpearl 6 + cameras, ~1 Hz, logs only.
+    rc::joint::MountMonitor mount_monitor_;
+    std::int64_t mount_monitor_ms_ = std::numeric_limits<std::int64_t>::min() / 2;
     void joint_calibration_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);
     /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
     std::unique_ptr<rc::GroundTruthLog> gt_log_;

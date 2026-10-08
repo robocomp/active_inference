@@ -3,6 +3,10 @@
  *    This file is part of RoboComp — see lidar_ingestor.h.
  */
 
+#include <filesystem>
+#include <ctime>
+#include <fstream>
+#include <locale>
 #include "lidar_ingestor.h"
 #include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 #include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
@@ -47,13 +51,28 @@ LidarIngestor::LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConce
     : G_(std::move(graph)), room_concept_(&room_concept), params_(&params)
 {
     high_max_z_ = params_->LIDAR_HIGH_MAX_HEIGHT;   // until the startup check refines it from the ceiling
-    // Sim-only planted helios mount error (plan 2026-10-05 Task 5): M_inj = {InjectX, InjectY, InjectYaw}
-    // is the sensor's displacement and CCW yaw; the nominal transform then reads M_inj^-1(p_true), so the
-    // points get inverse(M_inj). Identity by default.
-    mount_inject_ = rc::lidar_mount::inverse(rc::lidar_mount::Planar{
-        params_->LIDAR_MOUNT_INJECT_X, params_->LIDAR_MOUNT_INJECT_Y,
-        params_->LIDAR_MOUNT_INJECT_YAW_DEG * static_cast<float>(M_PI / 180.0)});
-    mount_extra_ = mount_inject_;
+    // Sim-only planted mount errors (plan 2026-10-08 Task 4; r1 Task 5 for the helios planar part): M_inj is
+    // the sensor's 6-DoF displacement + rotation ABOUT ITS OWN ORIGIN, body frame (lidar_mount.h Pose6); the
+    // nominal transform then reads M_inj^-1(p_true), so the points get inverse(M_inj). Identity by default.
+    // ⚠ The helios X/Y/YawDeg keys were a Planar about the BODY origin until 2026-10-08; as a Pose6 the same
+    //   numbers differ by (I - R) s: for (30, -20) mm / 1 deg the kinematic factor now expects a body-origin
+    //   lever of (30 - 2.7, -20) mm (joint_calibration.h solve_mounts maps it back).
+    {
+        constexpr float d2r = static_cast<float>(M_PI / 180.0);
+        inject_helios_ = rc::lidar_mount::inverse(rc::lidar_mount::Pose6{
+            Eigen::Vector3f(params_->LIDAR_MOUNT_INJECT_X, params_->LIDAR_MOUNT_INJECT_Y, params_->LIDAR_MOUNT_INJECT_Z),
+            d2r * Eigen::Vector3f(params_->LIDAR_MOUNT_INJECT_ROLL_DEG, params_->LIDAR_MOUNT_INJECT_PITCH_DEG,
+                                  params_->LIDAR_MOUNT_INJECT_YAW_DEG)});
+        const auto &b = params_->BPEARL_MOUNT_INJECT;
+        inject_bpearl_ = rc::lidar_mount::inverse(rc::lidar_mount::Pose6{
+            Eigen::Vector3f(b[0], b[1], b[2]), d2r * Eigen::Vector3f(b[3], b[4], b[5])});
+    }
+    mount_extra_ = {};
+    {   // r2 mount factors: roles + the WIDE per-sweep pose prior lives in the call (mount_factor_step)
+        rc::mountf::VerticalMount::Params ph; ph.role = rc::mountf::VerticalMount::Role::HeliosTilt;
+        rc::mountf::VerticalMount::Params pb; pb.role = rc::mountf::VerticalMount::Role::BpearlPlanar;
+        vert_h_.set_params(ph); vert_bp_.set_params(pb);
+    }
     if (!params_->LIDAR_USE_MEDIA)
     {
         qWarning() << "[Lidar] LIDAR_USE_MEDIA=false and the DSR-graph path was removed — no LiDAR source";
@@ -149,9 +168,13 @@ bool LidarIngestor::pump()
     if (sweep.has_value())
     {
         ++fresh_frames_;
-        // ── helios mount correction (and sim-only injection), plan 2026-10-05 Task 5 ──────────────
+        // ── helios sim-only injection (Pose6, plan 2026-10-08 Task 4) and the r1 correction ─────────
         // Applied HERE, right after device->body, so the corner detector, wall-SLAM, the SDF and the
-        // camera pairs all consume ONE frame. z untouched, so the height band below is unaffected.
+        // camera pairs all consume ONE frame. A planted roll/pitch/z moves z as a real one would, so the
+        // height band below selects what a mis-mounted sensor would give it.
+        resolve_sensor_origins();
+        if (not rc::lidar_mount::is_identity(inject_helios_))
+            for (auto& p : sweep->points) p = rc::lidar_mount::apply(inject_helios_, s_helios_, p);
         if (const auto extra = mount_extra(); not rc::lidar_mount::is_identity(extra))
             for (auto& p : sweep->points) p = rc::lidar_mount::apply(extra, p);
     }
@@ -172,10 +195,12 @@ bool LidarIngestor::pump()
                 geom_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
                     G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
             if (geom_bpearl_reader_)
-                if (const auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
+                if (auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
                     bp.has_value() and not bp->points.empty())
                 {
                     ++geom_bpearl_sweeps_;
+                    if (not rc::lidar_mount::is_identity(inject_bpearl_))   // sim-only planted bpearl error
+                        for (auto& p : bp->points) p = rc::lidar_mount::apply(inject_bpearl_, s_bpearl_, p);
                     for (const auto& p : bp->points)
                     {
                         if (p.head<2>().norm() < 0.10f) continue;
@@ -265,6 +290,10 @@ bool LidarIngestor::pump()
                 band_z_lo_ = 1e9f; band_z_hi_ = -1e9f; band_zhist_ = {};
             }
         }
+        // r2 mount factors, throttled (BpearlMountRate): the FULL helios sweep (walls at every height + the
+        // ceiling) before it is reduced to the band; the bpearl inside. Estimate + log only.
+        if (params_->MOUNT_FACTORS)
+            mount_factor_step(sweep->points, sweep->stamp_ms);
         ingest_scan(std::move(points_high), sweep->stamp_ms);
         ingested = true;
     }
@@ -620,9 +649,138 @@ void LidarIngestor::run_startup_geometry_check()
 
     update_ceiling_cap(/*startup=*/true);
 
-    // Drop the one-shot bpearl probe reader + histogram (diagnostic; frees the extra subscriber).
-    geom_bpearl_reader_.reset();
+    // Drop the one-shot bpearl probe histogram; the reader too unless the r2 mount factors keep reading the
+    // bpearl (the PERMANENT throttled reader is this same one, plan 2026-10-08 Task 5).
+    if (not params_->MOUNT_FACTORS)
+        geom_bpearl_reader_.reset();
     std::vector<int>().swap(geom_hist_bpearl_);
+}
+
+// ── r2 MOUNT FACTORS (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md, Tasks 2, 3, 5) ──
+// Ingest thread. The localiser's wall map and pose come from RoomConcept::mount_snapshot() -- ONE copy under its
+// lock, never the map itself -- carried to each sweep's own stamp with the last cycle's rate (the helios and the
+// bpearl are not simultaneous; the vertical factor's WIDE per-sweep pose prior absorbs what is left).
+void LidarIngestor::resolve_sensor_origins()
+{
+    if (origins_resolved_ or not inner_eigen_) return;
+    // Both sensor origins in the frame the points arrive in (LIDAR_ROBOT_FRAME = Shadow): the DSR RT chain is
+    // the truth (shadow.json); the r2.2 item 5 constants are the fallback until it resolves.
+    const auto h = inner_eigen_->get_translation_vector(params_->LIDAR_ROBOT_FRAME, params_->LIDAR_HELIOS_NAME);
+    const auto b = inner_eigen_->get_translation_vector(params_->LIDAR_ROBOT_FRAME, "bpearl");
+    if (h.has_value() and b.has_value())
+    {
+        s_helios_ = h->cast<float>(); s_bpearl_ = b->cast<float>();
+        origins_resolved_ = origins_from_graph_ = true;
+        rc::status::println("[MountFactors] sensor origins in '{}': helios ({:.4f}, {:.4f}, {:.4f}) bpearl ({:.4f}, {:.4f}, {:.4f})",
+                            params_->LIDAR_ROBOT_FRAME, s_helios_.x(), s_helios_.y(), s_helios_.z(),
+                            s_bpearl_.x(), s_bpearl_.y(), s_bpearl_.z());
+    }
+}
+
+bool LidarIngestor::walls_at(std::int64_t stamp_ms, std::vector<rc::mountf::VerticalMount::Wall>& walls,
+                             float* gap_s, float* speed, float* heading, std::int64_t* place) const
+{
+    walls.clear();
+    if (not room_concept_) return false;
+    const auto snap = room_concept_->mount_snapshot();
+    if (not snap.valid or snap.polygon.size() < 3) return false;
+    const float dt = 1e-3f * static_cast<float>(stamp_ms - snap.ts_ms);
+    const Eigen::Vector3f P = snap.pose + dt * snap.vel;              // the pose carried to this sweep's stamp
+    if (gap_s)   *gap_s = dt;
+    if (speed)   *speed = snap.vel.head<2>().norm();
+    if (heading) *heading = P.z();
+    if (place)   *place = rc::mountf::place_key(P.x(), P.y(), P.z());
+    const float c = std::cos(P.z()), s = std::sin(P.z());
+    auto to_body = [&](const Eigen::Vector2f& v)
+    { const Eigen::Vector2f q = v - P.head<2>(); return Eigen::Vector2f(c * q.x() + s * q.y(), -s * q.x() + c * q.y()); };
+    for (std::size_t k = 0; k < snap.polygon.size(); ++k)
+        walls.push_back({to_body(snap.polygon[k]), to_body(snap.polygon[(k + 1) % snap.polygon.size()])});
+    return true;
+}
+
+void LidarIngestor::mount_factor_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms)
+{
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    const float rate = std::max(params_->BPEARL_MOUNT_RATE, 1e-3f);
+    if (now - mount_step_ms_ < static_cast<std::int64_t>(1000.f / rate)) return;
+    mount_step_ms_ = now;
+    const float sxy = params_->MOUNT_POSE_SIGMA_XY, syaw = params_->MOUNT_POSE_SIGMA_YAW_DEG * static_cast<float>(M_PI / 180.0);
+    const Eigen::Matrix3f pose_cov = Eigen::Vector3f(sxy, sxy, syaw).cwiseAbs2().asDiagonal();
+    // A COMPUTATIONAL stride, not a selection: every k-th return so one step costs ~ms on this thread; the
+    // per-sweep nuisance (not the point count) already bounds what one sweep can claim.
+    constexpr std::size_t kMaxPts = 8000;
+    auto strided = [](const std::vector<Eigen::Vector3f>& in)
+    {
+        if (in.size() <= kMaxPts) return in;
+        const std::size_t k = (in.size() + kMaxPts - 1) / kMaxPts;
+        std::vector<Eigen::Vector3f> out; out.reserve(in.size() / k + 1);
+        for (std::size_t i = 0; i < in.size(); i += k) out.push_back(in[i]);
+        return out;
+    };
+    std::vector<rc::mountf::VerticalMount::Wall> walls;
+    // (1) helios verticals: tilt from walls at every height + the ceiling (h_c a nuisance)
+    std::int64_t place_h = -1;
+    if (walls_at(helios_stamp_ms, walls, nullptr, nullptr, nullptr, &place_h))
+        vert_h_.observe_sweep(strided(helios_full), s_helios_, walls, pose_cov,
+                              measured_ceiling_z_.load(std::memory_order_relaxed), place_h);
+    // (2) bpearl: floor (absolute) + verticals (planar relative to the helios-built map). The reader is the
+    //     startup check's, kept alive; while that check is still running it owns the reader.
+    if (geom_check_done_ or not params_->LIDAR_STARTUP_GEOMETRY_CHECK)
+    {
+        if (not geom_bpearl_reader_ and G_)
+            geom_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+                G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
+        if (geom_bpearl_reader_)
+            if (auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
+                bp.has_value() and not bp->points.empty() and bp->stamp_ms > last_bp_mount_stamp_)
+            {
+                last_bp_mount_stamp_ = bp->stamp_ms;
+                if (not rc::lidar_mount::is_identity(inject_bpearl_))
+                    for (auto& p : bp->points) p = rc::lidar_mount::apply(inject_bpearl_, s_bpearl_, p);
+                const auto pts = strided(bp->points);
+                // Place-level common mode (fix A, 2026-10-08): both bpearl factors key each sweep by the place it
+                // was taken from, so a parked robot's repeated view counts as ONE observation of that place.
+                float gap = 0.f, spd = 0.f, hdg = 0.f;
+                std::int64_t place_b = -1;
+                const bool have_walls = walls_at(bp->stamp_ms, walls, &gap, &spd, &hdg, &place_b);
+                floor_bp_.observe_sweep(pts, s_bpearl_, place_b);
+                if (have_walls)
+                {
+                    vert_bp_.observe_sweep(pts, s_bpearl_, walls, pose_cov, 0.f, place_b);
+                    // ── per-sweep diagnosis (2026-10-08): bpearl dy -22 mm in a null run. A timing cause scales with
+                    //    speed x stamp gap and points along the motion; a map/polygon cause depends on WHERE.
+                    Eigen::Vector3d m, sg;
+                    if (vert_bp_.last_sweep_planar(m, sg))
+                    {
+                        if (not bp_sweep_csv_.is_open())
+                        {
+                            std::filesystem::create_directories("tmp/mount_factors");
+                            char stamp[32]; const std::time_t now_t = std::time(nullptr);
+                            std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now_t));
+                            bp_sweep_csv_.open(std::string("tmp/mount_factors/bpearl_sweeps_") + stamp + ".csv");
+                            bp_sweep_csv_.imbue(std::locale::classic());
+                            bp_sweep_csv_ << "stamp_ms,gap_s,speed,heading,dx,dy,dyaw,sd_dx,sd_dy,sd_dyaw,n_walls\n";
+                        }
+                        bp_sweep_csv_ << bp->stamp_ms << ',' << gap << ',' << spd << ',' << hdg << ',' << m(0) << ',' << m(1)
+                                      << ',' << m(2) << ',' << sg(0) << ',' << sg(1) << ',' << sg(2) << ',' << walls.size() << '\n';
+                    }
+                }
+            }
+    }
+    MountFactorSnapshot snap;
+    snap.floor = floor_bp_.info(); snap.vert_helios = vert_h_.info(); snap.vert_bpearl = vert_bp_.info();
+    snap.s_helios = s_helios_.cast<double>(); snap.s_bpearl = s_bpearl_.cast<double>();
+    snap.floor_share = floor_bp_.floor_share(); snap.floor_sigma = floor_bp_.sigma_floor();
+    snap.wall_sigma_h = vert_h_.sigma_wall(); snap.wall_sigma_b = vert_bp_.sigma_wall();
+    snap.origins_from_graph = origins_from_graph_;
+    const std::lock_guard<std::mutex> lk(mf_mx_);
+    mf_snap_ = std::move(snap);
+}
+
+LidarIngestor::MountFactorSnapshot LidarIngestor::mount_factor_snapshot() const
+{
+    const std::lock_guard<std::mutex> lk(mf_mx_);
+    return mf_snap_;
 }
 
 }  // namespace rc

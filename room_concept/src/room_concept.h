@@ -74,6 +74,7 @@
 #include "motion_noise_vc.h"
 #include "motion_noise_innov.h"
 #include "pose_field_bias.h"
+#include "mount_factors.h"
 #include "drift_monitor.h"
 #include "stride_span.h"
 
@@ -525,9 +526,16 @@ public:
         /// Learn the slow POSE-FIELD bias of the scan-only pose without ground truth (pose_field_bias.h) and
         /// log it (heading CSV pf_*). pose_field_publish additionally ADDS its covariance to the PUBLISHED pose
         /// covariance (never to the solver's). RoomConcept.PoseFieldBias / PoseFieldPublish / PoseFieldSigma0.
+        /// Gauss-Newton iterations for the scan-only pose z (scan_only_pose). 1 = the old single step, which
+        /// under-stepped (g = 0.81-0.88). RoomConcept.ScanOnlyIters.
+        int    scan_only_iters     = 3;
         bool   pose_field_bias     = true;
         bool   pose_field_publish  = false;
         double pose_field_sigma0   = 0.02;
+        /// r2 mount factors (plan 2026-10-08): feed the KINEMATIC factor (helios dx, dy, psi) from the same
+        /// innovation stream and carry its Info3 in UpdateResult; also publish the mount snapshot the ingestor's
+        /// floor/vertical factors read. Estimate + log only. RoomConcept.MountFactors.
+        bool   mount_factors       = true;
         rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
         // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base
         // 0.05 m vs odom_noise_base 0.01 m) because an open-loop command really can be wrong while the
@@ -870,6 +878,12 @@ public:
         /// the joint calibration monitor on the MAIN thread. A copy, because motion_calib_ is fed on
         /// the localizer thread and its window must not be iterated from another one.
         rc::calib::BatchEstimator::Information calib_information{};
+        /// r2 KINEMATIC mount factor (mount_factors.h), a COPY made on the localizer thread every cycle (r1
+        /// thread rule): helios (dx, dy, psi) with the odometry nuisance already Schur-marginalised.
+        rc::mountf::Info3 mount_kin_info{};
+        /// The motion calibrator's ACTING eps on the odometry (yaw_offset()): must read 0 while the mount
+        /// factors own the helios yaw (r2.2 items 4/9). Logged in the mounts CSV.
+        float mount_yaw_offset = 0.f;
         /// Bitmask over rc::calib::Param: which parameters this window actually TAUGHT (posterior
         /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at
         /// its previous value -- which a bare value cannot be distinguished from convergence.
@@ -1240,6 +1254,19 @@ public:
     /// MAP. Until there is one (Estimate mode before closure) they have nothing to judge against.
     bool map_guided_checks_allowed() const { return map_ready(); }
     const std::vector<Eigen::Vector2f>& polygon_vertices() const { return init_polygon_vertices_; }
+    /// r2 mount factors (plan 2026-10-08 Task 5): what the INGEST thread's vertical factor needs from the
+    /// localiser -- the wall map and the pose -- as one COPY taken under a lock (never read the map from the
+    /// ingest thread). Written on the localizer thread every tracked cycle. vel = world-frame rate (per s) of
+    /// the last cycle, so the reader can carry the pose to its own sweep's stamp.
+    struct MountSnapshot
+    {
+        bool valid = false;
+        std::int64_t ts_ms = 0;
+        Eigen::Vector3f pose = Eigen::Vector3f::Zero();   ///< x, y, theta (room frame)
+        Eigen::Vector3f vel  = Eigen::Vector3f::Zero();   ///< d(x, y, theta)/dt, per second
+        std::vector<Eigen::Vector2f> polygon;             ///< the room polygon (room frame)
+    };
+    MountSnapshot mount_snapshot() const { std::scoped_lock lk(mount_snap_mutex_); return mount_snap_; }
     std::vector<Eigen::Vector2f> nominal_room_polygon() const
     {
         if (estimating())
@@ -1952,7 +1979,16 @@ private:
    Eigen::Vector3f innov_z_ = Eigen::Vector3f::Zero(), innov_z_prev_ = Eigen::Vector3f::Zero();
    Eigen::Matrix3f innov_R_ = Eigen::Matrix3f::Zero(), innov_R_prev_ = Eigen::Matrix3f::Zero();
    bool            innov_ok_ = false, innov_prev_ok_ = false;
+   int             last_scan_iters_ = 0;                      // GN iterations the last scan-only pose took
    std::ofstream   innov_csv_;
+   // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan 2026-10-08 Task 1/1b/5) ──────────────────────
+   rc::mountf::KinematicMount kin_mount_;
+   mutable std::mutex mount_snap_mutex_;                      // guards mount_snap_ (read by the ingest thread)
+   MountSnapshot   mount_snap_;
+   std::ofstream   kin_csv_;                                  // tmp/mount_factors/kin_<ts>.csv: per fed cycle
+   /// Feed kin_mount_ from this cycle's innovation (observe_innovation, only when `fed`).
+   void observe_kinematic_mount(const Eigen::Vector3f &delta, const Eigen::Matrix3f &T,
+                                const Eigen::Vector3f &odom_body, UpdateResult &res);
    /// The newest scan's SDF factor alone, linearised at (x, y, th): the same query, observation weights,
    /// IRLS Huber and Jacobian as the solver's SdfFactor (room_gn_solver.cpp). Shared by the polish.
    bool scan_linearize(const torch::Tensor &pts, float x, float y, float th, Eigen::Matrix3f &H, Eigen::Vector3f &bb);

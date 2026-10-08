@@ -105,4 +105,66 @@ namespace rc::joint
         std::vector<std::string> cols_;
         int reopened_ = 0;
     };
+
+    /* MountMonitor — the LOG-ONLY r2 mount monitor (plan 2026-10-08 Task 5). One row per call: solve_mounts over
+     * the mount-factor blocks + the cameras -> tmp/joint_calib/mounts_<ts>.csv. Changes NOTHING the robot does.
+     * Row: ts_ms, yaw_offset (the motion calibrator's ACTING eps on the odometry -- must be 0 while the
+     * kinematic factor owns the helios yaw, r2.2 items 4/9), n_kin, n_floor, n_vert_h, n_vert_b, then per
+     * parameter: <name>, <name>_sd, <name>_sh_<factor> for each of kShareNames (its information share).
+     * ⚠ THREADS: the blocks are COPIES (kinematic from UpdateResult, floor/vertical from the ingestor's
+     * snapshot); this runs on the main thread. Grade with tools/joint_calib_report.py --mounts. */
+    class MountMonitor
+    {
+    public:
+        explicit MountMonitor(std::string dir = "tmp/joint_calib") : dir_(std::move(dir)) {}
+        struct Extra { double yaw_offset = 0.0; };
+        MountSolution observe(std::int64_t ts_ms, const MountBlocks &B, const std::vector<CameraBlock> &cams, const Extra &ex)
+        {
+            const MountSolution s = solve_mounts(B, cams);
+            if (s.ok) write_row(ts_ms, B, s, ex);
+            return s;
+        }
+        [[nodiscard]] const std::string& path() const noexcept { return path_; }
+    private:
+        void ensure_open(const MountSolution &s)
+        {
+            if (csv_.is_open() and s.names == cols_) return;
+            if (csv_.is_open()) csv_.close();
+            cols_ = s.names;
+            std::error_code ec;
+            std::filesystem::create_directories(dir_, ec);
+            const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            std::tm tm{}; localtime_r(&t, &tm);
+            char buf[32]; std::strftime(buf, sizeof buf, "%Y-%m-%d_%H-%M-%S", &tm);
+            path_ = dir_ + "/mounts_" + buf + (reopened_++ ? "_" + std::to_string(reopened_) : "") + ".csv";
+            csv_.open(path_, std::ios::out | std::ios::trunc);
+            if (not csv_.is_open()) return;
+            csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal separator
+            csv_ << "ts_ms,yaw_offset,n_kin,n_floor,n_vert_h,n_vert_b";
+            for (const auto &n : s.names)
+            {
+                csv_ << ',' << n << ',' << n << "_sd";
+                for (const char *f : kShareNames) csv_ << ',' << n << "_sh_" << f;
+            }
+            csv_ << '\n';
+        }
+        void write_row(std::int64_t ts_ms, const MountBlocks &B, const MountSolution &s, const Extra &ex)
+        {
+            ensure_open(s);
+            if (not csv_.is_open()) return;
+            csv_ << ts_ms << ',' << ex.yaw_offset << ',' << B.kinematic.n << ',' << B.floor.n << ','
+                 << B.vert_helios.n << ',' << B.vert_bpearl.n;
+            for (Eigen::Index i = 0; i < s.value.size(); ++i)
+            {
+                csv_ << ',' << s.value[i] << ',' << s.sigma[i];
+                for (int f = 0; f < kShareCols; ++f) csv_ << ',' << s.share(i, f);
+            }
+            csv_ << '\n';
+            csv_.flush();
+        }
+        std::string dir_, path_;
+        std::ofstream csv_;
+        std::vector<std::string> cols_;
+        int reopened_ = 0;
+    };
 }
