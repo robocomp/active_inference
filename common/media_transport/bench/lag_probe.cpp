@@ -18,6 +18,12 @@
 //   ./lag_probe image rc/zed/rgb 7 8
 //   ./lag_probe imu rc/imu/data
 //
+// SPLIT. Each delivered frame also carries the writer's DDS source_timestamp (ns, set inside write()),
+// so the age is cut in two: UPSTREAM = capture stamp -> write() (driver, Ice hops, conversions, all in
+// the producer chain) and TRANSPORT = write() -> our take() (DDS alone). Only the second is DDS's to fix.
+// The probe subscribes WITH data-sharing, like the agents' factories do from the descriptor; it used to
+// take the config default (OFF) and so measured the serialising path no agent uses.
+//
 // A stamp of 0 means the producer did not stamp the frame; those are skipped rather than counted as
 // zero-age. The value is signed: negative means the producer's clock leads ours, which on a
 // multi-machine setup is clock skew, not latency.
@@ -49,19 +55,26 @@ int run(const std::string& topic, std::uint32_t domain, double secs)
     cfg.domain_id = domain;
     cfg.topic_name = topic;
     cfg.shared_memory_only = true;
+    cfg.data_sharing = true;
     Sub sub;
     if (not sub.init(cfg)) { std::printf("init failed on %s (domain %u)\n", topic.c_str(), domain); return 1; }
+    std::printf("%-22s zero-copy possible: %s\n", topic.c_str(), sub.data_sharing_active() ? "yes" : "NO");
 
-    std::vector<double> lags, deltas;
+    std::vector<double> lags, deltas, upstream, transport;
     std::uint64_t prev = 0;
     std::size_t dups = 0;   // frames republished under a stamp already seen
     const auto t_end = std::chrono::steady_clock::now() + std::chrono::duration<double>(secs);
     while (std::chrono::steady_clock::now() < t_end)
-        sub.wait_and_poll([&](const Frame& f, std::int64_t)
+        sub.wait_and_poll([&](const Frame& f, std::int64_t recv_ns)
         {
             const std::uint64_t stamp = f.stamp_ms();
             if (stamp == 0) return;                  // unstamped: no age can be formed
             lags.push_back(now_ms() - static_cast<double>(stamp));
+            if (const std::int64_t src = sub.last_source_ns(); src > 0)
+            {
+                upstream.push_back(1e-6 * static_cast<double>(src) - static_cast<double>(stamp));
+                transport.push_back(1e-6 * static_cast<double>(recv_ns - src));
+            }
             if (prev != 0 and stamp == prev) ++dups;   // a producer with no dedup republishes the same scan
             if (prev != 0 and stamp > prev) deltas.push_back(static_cast<double>(stamp - prev));
             prev = stamp;
@@ -78,6 +91,17 @@ int run(const std::string& topic, std::uint32_t domain, double secs)
                 topic.c_str(), lags.size(), lsum / static_cast<double>(lags.size()),
                 quantile(lags, 0.10), quantile(lags, 0.50), quantile(lags, 0.90),
                 lags.front(), lags.back());
+    const auto split = [&](std::vector<double>& v, const char* what)
+    {
+        if (v.empty()) return;
+        std::sort(v.begin(), v.end());
+        double sum = 0.0; for (double x : v) sum += x;
+        std::printf("%-22s   %-9s mean %7.3f  p10 %7.3f  med %7.3f  p90 %7.3f  min %7.3f  max %7.3f ms\n",
+                    topic.c_str(), what, sum / static_cast<double>(v.size()),
+                    quantile(v, 0.10), quantile(v, 0.50), quantile(v, 0.90), v.front(), v.back());
+    };
+    split(upstream,  "upstream");    // capture stamp (integer ms) -> write(): the producer chain
+    split(transport, "transport");   // write() -> take(): DDS alone, ns resolution
     if (dups > 0)
         std::printf("%-22s   ^ %zu of %zu frames (%.0f%%) REPUBLISH a stamp already sent: the producer is not"
                     " deduping, so consumers pay for and re-time data they already have\n",
