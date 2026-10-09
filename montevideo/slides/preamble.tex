@@ -1,0 +1,40 @@
+% Shared setup for every day of the course.
+\usetheme[progressbar=frametitle, numbering=fraction, block=fill]{metropolis}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb, bm, booktabs, graphicx, xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric}
+
+\graphicspath{{figures/}}
+
+% --- colours -------------------------------------------------------------------------------------
+\definecolor{accent}{HTML}{C0392B}
+\definecolor{cool}{HTML}{2E6DB4}
+\definecolor{muted}{HTML}{7A7A7A}
+\definecolor{good}{HTML}{2E8B57}
+\setbeamercolor{alerted text}{fg=accent}
+\setbeamercolor{example text}{fg=cool}
+
+% --- notation (follows the thesis' notation chapter) ---------------------------------------------
+\newcommand{\given}{\,|\,}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\KL}[2]{D_{\mathrm{KL}}\!\left[#1\,\middle\|\,#2\right]}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\Hess}{\mathcal{H}}
+\newcommand{\nats}{\,\text{nats}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% --- course devices ------------------------------------------------------------------------------
+% \src{...}: where a claim or number comes from (thesis file and line, or a post-thesis note).
+\newcommand{\src}[1]{\par\vfill\hfill{\scriptsize\color{muted}source: #1}}
+% \wip: marks a post-thesis result.
+\newcommand{\wip}{{\scriptsize\color{white}\colorbox{accent}{\,work in progress\,}}}
+% \lesson{...}: the one sentence a frame exists to say.
+\newcommand{\lesson}[1]{\begin{alertblock}{}\centering #1\end{alertblock}}
+% a measurement story
+\newenvironment{measured}[1]{\begin{exampleblock}{Measured: #1}}{\end{exampleblock}}
+
+\author{Course built on the doctoral thesis of No\'e Zapata}
+\institute{Montevideo, 30 November -- 4 December 2026}

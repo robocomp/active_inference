@@ -10,7 +10,7 @@ def world(w, ax=None, things=True):
     ax = ax or plt.gca()
     for room in w.rooms:
         ax.add_patch(Polygon(room.polygon, closed=True, fc="0.96", ec="none"))
-        ax.text(*room.polygon.mean(axis=0), room.name, ha="center", va="center", color="0.6")
+        ax.text(*room.polygon.mean(axis=0), room.name, ha="center", va="center", color="0.6", clip_on=True)
     for room in w.rooms:
         for a, b in w.room_walls(room.name):
             ax.plot([a[0], b[0]], [a[1], b[1]], color="0.15", lw=2.5, solid_capstyle="butt")

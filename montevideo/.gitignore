@@ -9,3 +9,4 @@ slides/*.out
 slides/*.snm
 slides/*.toc
 slides/*.vrb
+slides/figures/.day*
