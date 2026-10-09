@@ -327,7 +327,7 @@ namespace rc::wallmap
         // rebuilds the line a little further out. Paired on 7 random rooms: IoU 0.957 -> 0.819 with
         // polygons that no longer close at all. Kept because the ASYMMETRY is real and worth
         // revisiting with a looser held-test; the term itself, as written, is not affordable.
-        bool  splice_surrender = false;
+        bool  splice_surrender = true;    // FIX-S: a jump pays the existence support it erases (model term; was off)
         // Charge the re-derivation for support on the EXTENT it drops, not only for lines it makes
         // vanish entirely. MEASURED HARMFUL, default OFF, and it is the third result of this exact
         // shape: room 32 falls 0.954 -> 0.349, because a corrective cycle necessarily throws away a

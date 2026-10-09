@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <limits>
 #include <locale>          // std::locale::classic — CSV must not acquire a comma separator
@@ -175,6 +176,7 @@ void RoomSceneGraph::on_controller_lost()
         return;
     if (affordance_manager_.release_execution_claim(G_))
     {
+        layout_target_.reset();   // the live layout explorer re-plans on its next cycle
         if (epistemic_)
             epistemic_->epistemic_planner().clear_target();
         qWarning() << "[Presence] released stale afford_room execution claim after controller loss";
@@ -188,6 +190,29 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     last_adv_  = adv;
     last_side_ = side;
     last_rot_  = rot;
+
+    // The estimator's one-shot re-anchor, absorbed into every published frame BEFORE anything below
+    // writes in one (see absorb_reanchor).
+    absorb_reanchor(res.robot_pose);
+    last_int_pose_ = res.robot_pose;
+    have_last_int_pose_ = true;
+
+    // ── START-UP PROTO-ROOM: the room exists from the first second of an estimation run ─────────────
+    // Born here, on the localiser thread, the first time an estimating agent has no room — ALWAYS, even if
+    // the layout is already "publishable" (2026-10-09: it was, on the very first update of a run, and the
+    // ordinary path created a surveyed-looking room with no exploration at all). Promotion, not birth, waits
+    // for the layout: map_ready AND the explorer's `finished`.
+    if (not room_node_created_ and params_->STARTUP_PROTO_ENABLED and room_concept_->estimating())
+    {
+        std::string why;
+        if (not birth_startup_proto(res, why))
+        {
+            // One row per update on EVERY path, including "not born yet" — see ProtoRow.
+            ProtoRow row;
+            row.reason = "not_born:" + why;
+            write_proto_row(res, row);
+        }
+    }
 
     const float sdf_mse = res.sdf_mse;
     const float cov_tt  = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
@@ -250,7 +275,10 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     {
         stable_frames_ = stable ? stable_frames_ + 1 : 0;
         // Estimate mode: also wait for the learnt polygon to close and be re-anchored (map_ready).
-        if (stable_frames_ >= params_->STABLE_FRAMES_REQUIRED and room_concept_->map_ready())
+        // ...unless the start-up proto owns creation (estimating + StartupProto.Enabled): its birth may wait
+        // one update after sweeping leftovers, and this path must not slip a surveyed-looking room in between.
+        const bool proto_owns_creation = params_->STARTUP_PROTO_ENABLED and room_concept_->estimating();
+        if (not proto_owns_creation and stable_frames_ >= params_->STABLE_FRAMES_REQUIRED and room_concept_->map_ready())
             dsr_create_room_and_reparent(res);
         // ★NOTHING IS PUBLISHED WHILE WAITING, AND THAT IS THE POINT. This used to call
         // dsr_update_pose(res) here, writing the estimate onto root->robot every frame until the room
@@ -277,22 +305,41 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         // the polygon's vertex count. Republish the contract attribute so consumers see the new
         // shape. The wall_i nodes are NOT rebuilt here (dsr_create_wall_nodes is create-once); that
         // is the known follow-up, as is naming walls by landmark id so door edge indices survive.
-        if (room_concept_->estimating())
+        if (startup_proto_ and not startup_promoted_)
         {
-            const auto poly = room_concept_->nominal_room_polygon();
-            if (poly.size() >= 3 and poly.size() != published_polygon_verts_)
+            // The start-up proto's polygon is CONFIRMED FREE SPACE, not the learnt layout — see
+            // step_startup_proto, which also promotes it when the layout becomes publishable.
+            step_startup_proto(res, startup_reason_);
+        }
+        else if (room_concept_->estimating())
+        {
+            // ★WHICH NODE, AND IN WHICH FRAME (2026-10-09). After a door crossing the polygon being learnt
+            // is the NEW space's; writing it onto this agent's old room overwrote that room's surveyed
+            // layout with another room's (the gap the start-up-proto survey found). It goes to the
+            // crossing proto instead, in ITS frozen frame, and only once it is publishable: the proto is
+            // born with NO polygon on purpose (the controller plans against whatever it is handed).
+            // The agent's own room gets it in the published frame (T_pub_int_: identity unless the room
+            // is a promoted start-up proto, whose frame is the robot's initial pose).
+            const bool to_proto = room_rt_retired_ and proto_room_id_ != 0;
+            const auto poly_int = room_concept_->nominal_room_polygon();
+            const Eigen::Affine2f T = to_proto ? T_room_proto_.inverse() : T_pub_int_;
+            auto& last_verts = to_proto ? proto_polygon_verts_ : published_polygon_verts_;
+            const std::uint64_t target = to_proto ? proto_room_id_ : dsr_room_id_;
+            if (poly_int.size() >= 3 and poly_int.size() != last_verts
+                and (not to_proto or room_concept_->map_ready()))
             {
-                if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
+                if (auto rn = G_->get_node(target); rn.has_value())
                 {
                     std::vector<float> px, py;
-                    for (const auto& v : poly) { px.push_back(v.x()); py.push_back(v.y()); }
+                    for (const auto& v0 : poly_int) { const Eigen::Vector2f v = T * v0; px.push_back(v.x()); py.push_back(v.y()); }
                     rn->attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{px, 0, 0};
                     rn->attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{py, 0, 0};
                     G_->update_node(rn.value());
-                    qInfo() << "[room][wall-slam] structure change: republished delimiting_polygon with"
-                            << static_cast<int>(poly.size()) << "vertices (was" << static_cast<int>(published_polygon_verts_)
+                    qInfo() << "[room][wall-slam] structure change: republished delimiting_polygon on"
+                            << QString::fromStdString(rn->name()) << "with"
+                            << static_cast<int>(poly_int.size()) << "vertices (was" << static_cast<int>(last_verts)
                             << "); wall_i nodes are stale until restart";
-                    published_polygon_verts_ = poly.size();
+                    last_verts = poly_int.size();
                 }
             }
         }
@@ -331,8 +378,8 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 ceiling_disagree_frames_ = 0;
             }
         }
-        if (params_->PROTO_ROOM_ENABLED)
-            step_proto_room(res);   // crossing evidence → recovery weighting, and the proto-room's one-time birth
+        if (params_->PROTO_ROOM_ENABLED or startup_proto_)
+            step_proto_room(res);   // crossing evidence → recovery weighting, the crossing proto's birth, the CSV row
         if (write_rt)
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
@@ -395,12 +442,16 @@ void RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pos
 // Shared writer for the robot↔room RT edge. `robot_pose`/`covariance` are the room←robot estimate
 // (room frame); when the room is a child of the robot we invert to robot→room (pose AND cov Jacobian)
 // before the timestamped ring-buffer write. Called by both the corrected and predicted paths.
-void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
-                                         const Eigen::Matrix3f& covariance,
+void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
+                                         const Eigen::Matrix3f& covariance_int,
                                          std::uint64_t timestamp_ms,
                                          std::uint64_t child_override)
 {
     if (!G_ || !rt_api_) return;
+    // `robot_pose_int`/`covariance_int` are in the estimator's INTERNAL frame for child_override == 0, and
+    // already in the child's frame otherwise. The two names below are what gets WRITTEN.
+    Eigen::Affine2f robot_pose = robot_pose_int;
+    Eigen::Matrix3f covariance = covariance_int;
 
     // ── SAFETY BARRIER: never publish a non-finite pose to the graph ─────────────────────────────
     // This RT edge is what every other agent — including the controller that drives the wheels —
@@ -439,6 +490,19 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
                             proto_room_id_);
         return;
+    }
+
+    // ── THE START-UP PROTO'S FRAME IS FROZEN AT THE ROBOT'S INITIAL POSE ─────────────────────────────
+    // The estimator re-anchors its internal frame once, when the layout closes (92 deg + 0.74 m measured in
+    // one frame). Published raw, that is a teleport for every consumer holding the room frame. T_pub_int_
+    // absorbed it (absorb_reanchor), so the pose is mapped here, exactly like the crossing proto above:
+    // a constant rotation leaves theta's variance alone and rotates the xy block.
+    if (child_override == 0 and pub_gauge_frozen_)
+    {
+        Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
+        A.topLeftCorner<2, 2>() = T_pub_int_.linear();
+        robot_pose = T_pub_int_ * robot_pose_int;
+        covariance = A * covariance_int * A.transpose();
     }
 
     const bool pose_finite = robot_pose.matrix().allFinite() and covariance.allFinite();
@@ -490,10 +554,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         qWarning() << "dsr_update_pose: cached room node missing, resetting room state"
                    << "room_id=" << dsr_room_id_;
         log_cached_ids("cached room node missing", dsr_room_id_);
-        room_node_created_ = false;
-        dsr_room_id_ = 0;
-        affordance_manager_.reset();
-        stable_frames_ = 0;
+        forget_room("cached room node missing");
     }
 
     const Eigen::Matrix2f R = robot_pose.linear();
@@ -527,12 +588,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                    << "room_node_created=" << room_node_created_;
         log_cached_ids("destination node missing", child_id);
         if (room_node_created_ && child_id == dsr_room_id_)
-        {
-            room_node_created_ = false;
-            dsr_room_id_ = 0;
-            affordance_manager_.reset();
-            stable_frames_ = 0;
-        }
+            forget_room("destination node missing");
         return;
     }
 
@@ -764,12 +820,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         qWarning() << "dsr_update_pose: insert_or_assign_edge_RT failed:" << error.what();
         log_cached_ids("insert_or_assign_edge_RT failed", child_id);
         if (room_node_created_ && child_id == dsr_room_id_)
-        {
-            room_node_created_ = false;
-            dsr_room_id_ = 0;
-            affordance_manager_.reset();
-            stable_frames_ = 0;
-        }
+            forget_room("insert_or_assign_edge_RT failed");
         return;
     }
 
@@ -790,7 +841,8 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
             const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
             Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
             A.topLeftCorner<2, 2>() = T_proto_room.linear();
-            write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
+            // From the INTERNAL pose: T_room_proto_ is the crossing proto in the internal frame.
+            write_robot_room_rt(T_proto_room * robot_pose_int, A * covariance_int * A.transpose(), timestamp_ms,
                                 proto_room_id_);
         }
     }
@@ -807,8 +859,19 @@ void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
     // reading the terminal, so a branch that returns early must still say so in the file — otherwise
     // "the agent stopped" and "the code returned somewhere I forgot to log" look the same afterwards.
     ProtoRow row;
-    step_proto_room_impl(res, row);
+    if (reanchor_this_update_)
+        row.event = "reanchor";
+    if (startup_proto_)
+        row.reason = startup_reason_.empty() ? std::string("startup") : startup_reason_;
+    // A start-up proto that is still proto has no doors of its own yet and is not a room anyone could
+    // cross OUT of: the crossing evidence starts once it is promoted (and is a surveyed room).
+    if (params_->PROTO_ROOM_ENABLED and not (startup_proto_ and not startup_promoted_))
+        step_proto_room_impl(res, row);
+    if (not startup_event_.empty())
+        row.event = row.event.empty() ? startup_event_ : row.event + "+" + startup_event_;
     write_proto_row(res, row);
+    startup_event_.clear();
+    reanchor_this_update_ = false;
 }
 
 void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& res, ProtoRow& row)
@@ -828,13 +891,8 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         //   aperture quantities below are expressed in that frame, so they must move with it — otherwise
         //   the published proto frame teleports (what this design exists to prevent) AND the crossing
         //   geometry silently starts measuring from the wrong place.
-        if (Eigen::Affine2f T_new_old; room_concept_->take_pending_reanchor(T_new_old))
-        {
-            T_room_proto_ = T_new_old * T_room_proto_;
-            proto_centre_ = T_new_old * proto_centre_;
-            proto_n_out_  = (T_new_old.linear() * proto_n_out_).normalized();
-            row.event = "reanchor";
-        }
+        // (Consumed once per update by absorb_reanchor, at the top of update(), which also moves the
+        //  start-up proto's frame; the event column is set by step_proto_room.)
         const float sig_s = std::sqrt(proto_n_out_.dot(cov_xy * proto_n_out_) + 1e-8f);
         const float s = (xy - proto_centre_).dot(proto_n_out_);
         room_concept_->set_outside_prob(rc::crossing::phi((s - r_body) / sig_s));
@@ -996,7 +1054,13 @@ void RoomSceneGraph::write_proto_row(const rc::RoomConcept::UpdateResult& res, c
                       "s,u,sig_s,sig_t,span_w,outside_prob,"
                       "proto_id,retired,estimating,searching,map_ready,"
                       "sdf_mse,pred_sdf_median,misfit_raw,misfit_weighted,iters,cond,diverged,"
-                      "proto_x,proto_y,proto_theta\n";
+                      "proto_x,proto_y,proto_theta,"
+                      // ── start-up proto (2026-10-09). gauge_* = T_pub_int_ (internal → published): it must
+                      //    be EXACTLY constant except on a `reanchor` row, where it absorbs the move. fs_* =
+                      //    the confirmed-free-space ring last published. plan_* = the layout explorer's last
+                      //    decision, target in the PUBLISHED frame; plan_why is never empty once it has run.
+                      "startup,promoted,reason,fs_verts,fs_area,fs_free_cells,gauge_x,gauge_y,gauge_theta,"
+                      "plan_why,plan_tx,plan_ty,plan_gain,plan_cands,plan_with_gain,plan_unknowns\n";
     }
 
     const Eigen::Vector2f xy = res.robot_pose.translation();
@@ -1028,7 +1092,22 @@ void RoomSceneGraph::write_proto_row(const rc::RoomConcept::UpdateResult& res, c
                << misfit_raw << ',' << misfit_raw * (1.f - op) << ','
                << res.iterations_used << ',' << res.condition_number << ','
                << (res.diverged ? 1 : 0) << ','
-               << pt.x() << ',' << pt.y() << ',' << p_theta << '\n';
+               << pt.x() << ',' << pt.y() << ',' << p_theta << ',';
+    {
+        const Eigen::Vector2f gt = T_pub_int_.translation();
+        const float g_theta = std::atan2(T_pub_int_.linear()(1, 0), T_pub_int_.linear()(0, 0));
+        const float fs_area = fs_published_.size() >= 3 ? rc::freespace::signed_area(fs_published_) : ProtoRow::NA;
+        const auto& pl = layout_last_plan_;
+        const Eigen::Vector2f ptgt = T_pub_int_ * pl.target;
+        proto_csv_ << (startup_proto_ ? 1 : 0) << ',' << (startup_promoted_ ? 1 : 0) << ','
+                   << csv_safe(row.reason) << ',' << fs_published_.size() << ',' << fs_area << ','
+                   << (free_space_ ? free_space_->free_cells() : 0L) << ','
+                   << gt.x() << ',' << gt.y() << ',' << g_theta << ','
+                   << csv_safe(pl.why) << ','
+                   << (pl.ok ? ptgt.x() : ProtoRow::NA) << ',' << (pl.ok ? ptgt.y() : ProtoRow::NA) << ','
+                   << (pl.ok ? pl.gain : ProtoRow::NA) << ',' << pl.candidates << ',' << pl.with_gain << ','
+                   << pl.unknowns << '\n';
+    }
     // Flushed every row on purpose: the interesting run is the one that ends in a crash or a kill, and
     // a buffered tail is exactly the part that would be missing. ~20 Hz of one short line is nothing.
     proto_csv_.flush();
@@ -1061,6 +1140,678 @@ void RoomSceneGraph::mark_room_rt_not_current()
         return;
     }
     qInfo() << "[room][proto] robot->room RT RETIRED (valid=false).";
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// ── START-UP PROTO-ROOM + THE PUBLISHED GAUGE (2026-10-09) ───────────────────────────────────────────
+// See the declarations in room_scene_graph.h and docs/superpowers/plans/2026-10-09-startup-proto-room-
+// and-layout-explorer.md. Everything here runs on the LOCALISER thread (update() and its callees).
+namespace
+{
+    std::int64_t steady_ms()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    float angle_of(const Eigen::Affine2f& T) { return std::atan2(T.linear()(1, 0), T.linear()(0, 0)); }
+    float wrap_pi(float a) { return std::atan2(std::sin(a), std::cos(a)); }
+}   // namespace
+
+void RoomSceneGraph::absorb_reanchor(const Eigen::Affine2f& int_now)
+{
+    // Nothing is published in a frame derived from the internal one: leave the hand-over pending (it is
+    // a composition, so whoever needs it later still gets the whole move).
+    if (not pub_gauge_frozen_ and proto_room_id_ == 0)
+        return;
+    Eigen::Affine2f T_new_old;
+    if (not room_concept_->take_pending_reanchor(T_new_old))
+        return;
+    // ★ WAS THE ROBOT RE-EXPRESSED WITH THE MAP? (2026-10-09) The absorb below assumes the re-anchor moved the
+    //   robot's internal pose by T_new_old. Live, an early re-anchor (one update after the start-up proto's
+    //   birth) rotated the MAP by 105 deg while the internal robot pose stayed at (0, 0, 0); absorbing it anyway
+    //   published the robot rotated 105 deg against reality, and the controller drove AWAY from every target
+    //   (0.5 -> 5.5 m) into a wall. The robot's own continuity decides: whichever hypothesis — re-expressed
+    //   (int_now ~ T_new_old * last) or untouched (int_now ~ last) — explains the current internal pose better
+    //   is the one the frames follow. Untouched => nothing the published frame derives from moved: absorb nothing.
+    if (have_last_int_pose_)
+    {
+        const auto mismatch = [](const Eigen::Affine2f& a, const Eigen::Affine2f& b)
+        {
+            const Eigen::Affine2f d = a.inverse() * b;
+            return d.translation().norm() + 1.0f * std::abs(std::atan2(d.linear()(1, 0), d.linear()(0, 0)));   // m + 1 m/rad
+        };
+        const float e_moved = mismatch(int_now, T_new_old * last_int_pose_);
+        const float e_kept  = mismatch(int_now, last_int_pose_);
+        if (e_kept < e_moved)
+        {
+            qWarning().noquote() << QString("[room][gauge] estimator re-anchor NOT absorbed: the internal robot pose did "
+                                            "not move with it (kept %1 vs moved %2); published frame unchanged.")
+                                        .arg(e_kept, 0, 'f', 3).arg(e_moved, 0, 'f', 3);
+            reanchor_this_update_ = true;
+            return;
+        }
+    }
+    // p_new = T_new_old · p_old. A frame published as T_pub_int (internal → published) must keep mapping
+    // the SAME physical point to the same published coordinates: T_pub_int' = T_pub_int · T_new_old⁻¹.
+    if (pub_gauge_frozen_)
+    {
+        std::scoped_lock lk(gauge_mutex_);
+        T_pub_int_ = T_pub_int_ * T_new_old.inverse();
+    }
+    if (proto_room_id_ != 0)
+    {
+        T_room_proto_ = T_new_old * T_room_proto_;
+        proto_centre_ = T_new_old * proto_centre_;
+        proto_n_out_  = (T_new_old.linear() * proto_n_out_).normalized();
+    }
+    // Everything this class holds in the internal frame moves with it.
+    if (layout_target_.has_value())
+    {
+        *layout_target_ = T_new_old * *layout_target_;
+        layout_yaw_ = wrap_pi(layout_yaw_ + angle_of(T_new_old));
+    }
+    for (auto& [c, until] : layout_refused_)
+        c = T_new_old * c;
+    if (not std::isnan(armed_tx_))
+    {
+        const Eigen::Vector2f a = T_new_old * Eigen::Vector2f(armed_tx_, armed_ty_);
+        armed_tx_ = a.x(); armed_ty_ = a.y();
+    }
+    reanchor_this_update_ = true;
+    qInfo().noquote() << QString("[room][gauge] estimator re-anchor ABSORBED: internal frame moved by (%1, %2) m, %3 deg; "
+                                 "the published room frame did not move (gauge_* columns in tmp/proto_room.csv).")
+                             .arg(T_new_old.translation().x(), 0, 'f', 3).arg(T_new_old.translation().y(), 0, 'f', 3)
+                             .arg(angle_of(T_new_old) * 180.f / static_cast<float>(M_PI), 0, 'f', 2);
+}
+
+std::vector<Eigen::Vector2f> RoomSceneGraph::published_polygon() const
+{
+    auto poly = room_concept_->nominal_room_polygon();
+    for (auto& v : poly)
+        v = T_pub_int_ * v;
+    return poly;
+}
+
+void RoomSceneGraph::forget_room(const char* why)
+{
+    if (startup_proto_)
+        qWarning() << "[room][startup-proto] room state reset (" << why << ") while"
+                   << (startup_promoted_ ? "the promoted start-up room" : "the start-up proto-room")
+                   << "was this agent's room; its frozen frame is released.";
+    room_node_created_ = false;
+    dsr_room_id_ = 0;
+    affordance_manager_.reset();
+    stable_frames_ = 0;
+    published_polygon_verts_ = 0;
+    startup_proto_ = startup_promoted_ = false;
+    layout_finished_ = false;
+    pub_gauge_frozen_ = false;
+    {
+        std::scoped_lock lk(gauge_mutex_);
+        T_pub_int_ = Eigen::Affine2f::Identity();
+    }
+    free_space_.reset();
+    fs_published_.clear();
+    fs_free_ring_.clear();
+    layout_visits_ = 0;
+    layout_target_.reset();
+    layout_refused_.clear();
+}
+
+bool RoomSceneGraph::sweep_foreign_rooms()
+{
+    if (params_->PRESERVE_BOOTSTRAP_ROOM or not G_)
+        return false;
+    bool any = false;
+    for (const auto& r : G_->get_nodes_by_type("room"))
+    {
+        if (r.id() == dsr_room_id_ or r.id() == proto_room_id_)
+            continue;
+        // A room this agent did not make while its start-up proto is the room: a leftover of a crashed or
+        // SIGKILLed run that synced in after the start-up sweep (CLAUDE.md "Stopping an agent"). Left in
+        // place it would WIN rc::room::current_room (rule 2 beats rule 3) and every consumer would anchor
+        // to a dead room. room_concept owns the room_* subtree, so reaping it is this agent's job.
+        for (const auto& e : G_->get_node_edges_by_type(r, "has_intention"))
+            if (G_->get_node(e.to()).has_value())
+                G_->delete_node(e.to());
+        qWarning() << "[room][startup-proto] deleting LEFTOVER room node" << QString::fromStdString(r.name())
+                   << r.id() << "— it synced in after the start-up sweep and would out-rank the start-up proto";
+        G_->delete_node(r);
+        any = true;
+    }
+    return any;
+}
+
+void RoomSceneGraph::resolve_lidar_origin()
+{
+    if (lidar_origin_resolved_ or not G_ or not rt_api_ or dsr_robot_id_ == 0)
+        return;
+    // The beams start at the helios, not at the robot origin (ROBOT_GEOMETRY.md: 15.5 cm behind it). Walk
+    // the RT chain helios → … → robot node and keep the translation. Read once; the mount does not move.
+    auto node = G_->get_node(params_->LIDAR_HELIOS_NAME);
+    Eigen::Affine3d T = Eigen::Affine3d::Identity();
+    bool ok = node.has_value();
+    for (int depth = 0; ok and depth < 8 and node->id() != dsr_robot_id_; ++depth)
+    {
+        const auto rt = rt_api_->get_RT_pose_from_parent(node.value());
+        const auto parent = G_->get_attrib_by_name<parent_att>(node.value());
+        if (not rt.has_value() or not parent.has_value()) { ok = false; break; }
+        T = Eigen::Affine3d(rt->matrix()) * T;
+        node = G_->get_node(parent.value());
+        ok = node.has_value();
+    }
+    ok = ok and node->id() == dsr_robot_id_;
+    if (ok)
+    {
+        lidar_origin_ = T.translation().head<2>().cast<float>();
+        lidar_origin_resolved_ = true;
+        qInfo() << "[room][startup-proto] free-space beams start at the helios: (" << lidar_origin_.x() << ","
+                << lidar_origin_.y() << ") m in the robot frame";
+    }
+    else if (++lidar_origin_tries_ == 20)
+    {
+        lidar_origin_resolved_ = true;   // stop asking; the erosion margin absorbs the offset
+        qWarning() << "[room][startup-proto] could not walk" << QString::fromStdString(params_->LIDAR_HELIOS_NAME)
+                   << "-> robot in the RT tree; free-space beams start at the robot origin (the erosion"
+                   << "margin absorbs a mount offset of a few cm)";
+    }
+}
+
+bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& why)
+{
+    (void) res;
+    if (not G_ or not rt_api_) { why = "no_graph"; return false; }
+    if (dsr_robot_id_ == 0 or not G_->get_node(dsr_robot_id_).has_value())
+        check_init_graph_is_valid();
+    if (dsr_robot_id_ == 0) { why = "no_robot_node"; return false; }
+
+    // ★THE START-UP SWEEP MUST PRECEDE THE BIRTH. A leftover room would out-rank the proto in
+    // rc::room::current_room (rule 2 beats rule 3), so two rooms would be resolved at once — consumers on
+    // the dead one, this agent on the proto. specificworker_startup already swept once; a leftover that
+    // synced in later is swept here and the birth waits for the next update.
+    if (const auto rooms = G_->get_nodes_by_type("room"); not rooms.empty())
+    {
+        if (params_->PRESERVE_BOOTSTRAP_ROOM)
+        {
+            why = "bootstrap_room_preserved";
+            return false;
+        }
+        qWarning() << "[room][startup-proto]" << static_cast<int>(rooms.size())
+                   << "room node(s) already in the graph at start-up — sweeping them before the proto is born";
+        cleanup_room_graph_nodes();
+        why = "swept_leftover_rooms";
+        return false;
+    }
+
+    DSR::Node node = DSR::Node::create<room_node_type>("room_1");
+    G_->add_or_modify_attrib_local<room_id_att>(node, static_cast<std::uint64_t>(1));
+    const bool measured = room_concept_->measured_ceiling() > 1.5f;
+    const float ceiling = measured ? room_concept_->measured_ceiling() : params_->room_height;
+    G_->add_or_modify_attrib_local<room_height_att>(node, ceiling);
+    G_->add_or_modify_attrib_local<room_height_sigma_att>(node, measured ? room_concept_->measured_ceiling_sigma() : 0.f);
+    published_room_height_ = ceiling;
+    // No delimiting polygon yet: an absent attribute says "nothing confirmed", and the controller waits
+    // for it. The first ring of confirmed free space is written within PublishPeriodMs.
+    rc::provenance::stamp_creation(*G_, node);
+    const auto id = G_->insert_node(node);
+    if (not id.has_value()) { why = "insert_failed"; return false; }
+    if (not G_->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(id.value(), id.value())))
+    {
+        // Without the edge it would read as a SURVEYED room with no polygon — refuse rather than lie.
+        G_->delete_node(id.value());
+        why = "proto_edge_failed";
+        return false;
+    }
+    dsr_room_id_       = id.value();
+    room_node_created_ = true;
+    stable_frames_     = 0;
+    published_polygon_verts_ = 0;
+    startup_proto_     = true;
+    startup_promoted_  = false;
+    layout_finished_   = false;
+    pub_gauge_frozen_  = true;
+    {
+        std::scoped_lock lk(gauge_mutex_);
+        T_pub_int_ = Eigen::Affine2f::Identity();   // the frame = the internal frame NOW = the initial pose
+    }
+    if (Eigen::Affine2f stale; room_concept_->take_pending_reanchor(stale))
+        qWarning() << "[room][startup-proto] discarded a re-anchor pending from before the birth (it moved a"
+                   << "frame nobody had published)";
+    rc::freespace::Params fp;
+    fp.cell      = params_->STARTUP_PROTO_CELL;
+    fp.half_span = params_->STARTUP_PROTO_HALF_SPAN;
+    fp.erode_m   = params_->STARTUP_PROTO_ERODE_M >= 0.f
+                 ? params_->STARTUP_PROTO_ERODE_M
+                 : 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+    fp.max_verts = params_->STARTUP_PROTO_MAX_VERTS;
+    free_space_.emplace(fp);
+    fs_published_.clear();
+    fs_free_ring_.clear();
+    layout_visits_ = 0;
+    fs_last_ms_ = 0;
+    layout_target_.reset();
+    layout_refused_.clear();
+    layout_plan_ms_ = 0;
+    layout_last_plan_ = {};
+    startup_event_  = "startup_born";
+    startup_reason_ = "born";
+    room_concept_->set_freeze_internal_frame(true);   // no internal re-anchor while the proto owns the frame
+    trigger_layout_();
+    qInfo().noquote() << QString("[room][startup-proto] room_1 BORN as a PROTO-ROOM (id %1): frame = the robot's "
+                                 "initial pose, frozen; polygon = confirmed free space eroded by %2 m; afford_room "
+                                 "driven by the layout explorer until the layout is publishable. See tmp/proto_room.csv.")
+                             .arg(id.value()).arg(fp.erode_m, 0, 'f', 2);
+    return true;
+}
+
+void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason)
+{
+    // ★ PROMOTION = the layout is publishable AND the explorer has nothing left worth visiting (2026-10-09).
+    //   map_ready alone fired on the FIRST update of the first live run: one parked view made a 4-wall
+    //   rectangle "publishable" that was ~8 x 9 m and rotated against the real walls (localiser sdf_med 0.21 m);
+    //   every afford_room target then landed beyond the real walls, the controller repaired it 6 m and found no
+    //   path. The explorer's `finished` (closed polygon AND nothing left to learn) is the bench's own stopping
+    //   rule — the robot keeps working inside CONFIRMED free space until the layout has actually been surveyed.
+    // Staged (2026-10-09): no promotion while plain SLAM owns the pose — promotion still freezes and localises
+    // against the WALL MAP's polygon, which is not the layout the proto publishes. Adopting the map layout as the
+    // promoted room is the next step.
+    if (room_concept_->map_ready() and layout_finished_ and not room_concept_->plain_slam_driving())
+    {
+        promote_startup_proto(reason);
+        return;
+    }
+    if (not free_space_.has_value()) { reason = "no_accumulator"; return; }
+    resolve_lidar_origin();
+
+    // ── accumulate, every update: the beams of this scan, in the PUBLISHED (frozen) frame ────────────
+    // Through the door-aperture filter first: a return seen through an open doorway is the NEXT room, and
+    // one open door would otherwise pour the free region through it.
+    const auto pts = room_concept_->filter_through_door(res.lidar_scan);
+    const Eigen::Affine2f pose_pub = T_pub_int_ * res.robot_pose;
+    std::vector<Eigen::Vector2f> ends;
+    ends.reserve(pts.size());
+    for (const auto& p : pts)
+        if (p.allFinite())
+            ends.push_back(pose_pub * p.head<2>());
+    free_space_->add_scan(pose_pub * lidar_origin_, ends);
+    // the robot's own footprint is confirmed free — see FreeSpacePolygon::add_footprint. Radius = circumscribed
+    // body radius PLUS the erosion the ring is cut back by: with the body alone (0.33 m) the eroded ring still
+    // left the robot outside (0.05 m beyond the edge, as live); with + erode it sits ~0.2 m inside (scratch test
+    // 2026-10-09). The extra band (~0.24 m round the body) is claimed free without being seen — accepted: the
+    // controller's own LiDAR obstacle layer still guards it, and without it the controller cannot start at all.
+    pose_hist_.emplace_back(res.timestamp_ms, pose_pub);
+    while (pose_hist_.size() > 2 and pose_hist_.back().first - pose_hist_.front().first > 10000) pose_hist_.pop_front();
+    stamp_low_obstacles();
+    free_space_->add_footprint(pose_pub.translation(),
+                               0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH)
+                               + free_space_->params().erode_m);
+    reason = "accumulating";
+
+    // ── publish, throttled ──────────────────────────────────────────────────────────────────────────
+    const std::int64_t now = steady_ms();
+    if (now - fs_last_ms_ < params_->STARTUP_PROTO_PUBLISH_MS)
+        return;
+    fs_last_ms_ = now;
+    const bool swept = sweep_foreign_rooms();
+    // ── WHICH BOUNDARY THE CONTROLLER GETS (2026-10-09) ─────────────────────────────────────────────────
+    // The confirmed-free raster. ⚠ TRIED AND REVERTED the same evening: publishing the learnt LAYOUT once
+    // map_ready — live the layout collapsed to a small tilted 4-vertex box while the robot drove, and the
+    // controller planned inside it. The layout is not trustworthy as a boundary until promotion.
+    if (auto fr = free_space_->polygon(pose_pub.translation()); not fr.empty())
+        fs_free_ring_ = std::move(fr);
+    std::vector<Eigen::Vector2f> ring;
+    // ── THE ROOM AS THE SLAM MAP SHOWS IT (2026-10-09) ─────────────────────────────────────────────────────────
+    // With plain SLAM owning the pose, the raster is a well-aligned occupancy map, and its Manhattan outline snapped
+    // onto the measured walls IS the layout (offline vs Webots truth: IoU 0.957 on two live recordings). It replaces
+    // the wall map's polygon, which on this apartment froze at its first-frame seed box. Fallback: the raw ring.
+    if (room_concept_->plain_slam_driving())
+        if (auto lay = free_space_->manhattan_layout(pose_pub.translation());
+            lay.size() >= 4 and rc::freespace::point_in_polygon(pose_pub.translation(), lay))
+            ring = std::move(lay);
+    if (ring.empty())
+        ring = fs_free_ring_;
+    if (ring.empty()) { reason = swept ? "swept_foreign_room+no_ring" : "no_ring"; return; }
+    if (ring == fs_published_) { reason = swept ? "swept_foreign_room+ring_unchanged" : "ring_unchanged"; return; }
+    auto rn = G_->get_node(dsr_room_id_);
+    if (not rn.has_value()) { reason = "room_missing"; return; }
+    std::vector<float> px, py;
+    for (const auto& v : ring) { px.push_back(v.x()); py.push_back(v.y()); }
+    rn->attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{px, 0, 0};
+    rn->attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{py, 0, 0};
+    if (not G_->update_node(rn.value())) { reason = "update_node_failed"; return; }
+    const bool first = fs_published_.empty();
+    fs_published_ = std::move(ring);
+    {   // every published outline, for grading against ground truth (published frame; ';' rows, "x,y" pairs)
+        static std::ofstream lay_csv;
+        if (not lay_csv.is_open())
+        {
+            lay_csv.open("tmp/map_layout.csv", std::ios::out | std::ios::trunc);
+            lay_csv.imbue(std::locale::classic());
+            lay_csv << "# ts_ms;plain_slam;verts\n";
+        }
+        if (lay_csv.is_open())
+        {
+            lay_csv << res.timestamp_ms << ';' << (room_concept_->plain_slam_driving() ? 1 : 0) << ';';
+            for (const auto& v : fs_published_) lay_csv << v.x() << ',' << v.y() << ' ';
+            lay_csv << '\n';
+            lay_csv.flush();
+        }
+    }
+    reason = swept ? "swept_foreign_room+ring_published" : "ring_published";
+    if (first)
+        qInfo() << "[room][startup-proto] first confirmed-free-space polygon published:"
+                << static_cast<int>(fs_published_.size()) << "vertices," << rc::freespace::signed_area(fs_published_)
+                << "m2 — the controller can plan from here";
+    // ★REVIEW FOCUS 4: a held explorer target the new ring no longer contains is dropped NOW, before the
+    // controller can answer OutsideRoom to it.
+    if (layout_target_.has_value()
+        and not rc::freespace::point_in_polygon(T_pub_int_ * *layout_target_, fs_published_))
+    {
+        rc::status::print("[layout] held target ({:.2f},{:.2f}) is no longer inside the confirmed-free polygon — "
+                          "dropped, re-planning\n", layout_target_->x(), layout_target_->y());
+        layout_target_.reset();
+    }
+}
+
+// Low obstacles (counters, tables, chairs — below helios's scan plane) become MATTER in the free-space raster, each
+// batch placed with the pose INTERPOLATED to its own capture stamp (the sweeps and the localiser are not simultaneous).
+// A batch newer than the last pose waits for the next update; one older than the history is dropped.
+void RoomSceneGraph::stamp_low_obstacles()
+{
+    if (not free_space_) return;
+    for (auto& b : room_concept_->take_low_obstacles()) low_obs_pending_.push_back(std::move(b));
+    std::deque<RoomConcept::LowObstacles> keep;
+    for (auto& b : low_obs_pending_)
+    {
+        if (pose_hist_.size() < 2 or b.stamp_ms > pose_hist_.back().first) { keep.push_back(std::move(b)); continue; }
+        if (b.stamp_ms < pose_hist_.front().first) continue;
+        const auto hi = std::ranges::lower_bound(pose_hist_, b.stamp_ms, {}, &std::pair<std::int64_t, Eigen::Affine2f>::first);
+        const auto lo = hi == pose_hist_.begin() ? hi : std::prev(hi);
+        const float span = static_cast<float>(hi->first - lo->first);
+        const float a = span > 0.f ? static_cast<float>(b.stamp_ms - lo->first) / span : 0.f;
+        const Eigen::Vector2f t = (1.f - a) * lo->second.translation() + a * hi->second.translation();
+        const float th0 = angle_of(lo->second), th = th0 + a * wrap_pi(angle_of(hi->second) - th0);
+        Eigen::Affine2f T = Eigen::Affine2f::Identity();
+        T.translate(t).rotate(th);
+        for (auto& p : b.xy) p = T * p;
+        free_space_->add_matter(b.xy);
+    }
+    low_obs_pending_ = std::move(keep);
+    while (low_obs_pending_.size() > 16) low_obs_pending_.pop_front();
+}
+
+void RoomSceneGraph::promote_startup_proto(std::string& reason)
+{
+    // The re-anchor that came with map_ready was absorbed at the top of this update, so the learnt polygon
+    // maps into the frozen frame here without a jump.
+    const auto poly_pub = published_polygon();
+    if (poly_pub.size() < 3) { reason = "map_ready_but_no_polygon"; return; }
+    auto rn = G_->get_node(dsr_room_id_);
+    if (not rn.has_value()) { reason = "room_missing"; return; }
+    std::vector<float> px, py;
+    for (const auto& v : poly_pub) { px.push_back(v.x()); py.push_back(v.y()); }
+    rn->attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{px, 0, 0};
+    rn->attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{py, 0, 0};
+    if (not G_->update_node(rn.value())) { reason = "promote_update_failed"; return; }
+    // PROMOTION IN PLACE: same node id, same frame, the `proto` self-edge removed. No identity question at
+    // start-up (it is the robot's first room); ltsm_agent's identity authority concerns crossings.
+    if (not G_->delete_edge(dsr_room_id_, dsr_room_id_, "proto"))
+        qWarning() << "[room][startup-proto] could not delete the proto self-edge on room" << dsr_room_id_
+                   << "— consumers will keep reading it as a proto";
+    startup_promoted_ = true;
+    published_polygon_verts_ = poly_pub.size();
+    free_space_.reset();
+    dsr_create_wall_nodes();   // in the PUBLISHED frame (published_polygon)
+    // HAND-BACK to the pose-information planner, seeded with the promoted polygon in the frame it plans in
+    // (internal). It was seeded only at room creation before, which the start-up path never reaches.
+    if (epistemic_ != nullptr)
+    {
+        const auto poly_int = room_concept_->nominal_room_polygon();
+        Eigen::Vector2f pmin = poly_int.front(), pmax = poly_int.front();
+        for (const auto& v : poly_int) { pmin = pmin.cwiseMin(v); pmax = pmax.cwiseMax(v); }
+        epistemic_->set_room_bounds(pmin, pmax);
+        epistemic_->set_room_polygon(poly_int);
+        epistemic_->epistemic_planner().clear_target();
+    }
+    layout_target_.reset();
+    layout_refused_.clear();
+    armed_tx_ = armed_ty_ = std::numeric_limits<float>::quiet_NaN();
+    armed_retired_ = false;
+    armed_seen_live_ = false;
+    armed_at_ms_ = 0;
+    startup_event_ = "promoted";
+    reason = "promoted";
+    trigger_layout_();
+    const Eigen::Vector2f g = T_pub_int_.translation();
+    qInfo().noquote() << QString("[room][startup-proto] room_1 PROMOTED IN PLACE (id %1): learnt layout of %2 vertices "
+                                 "published in the frozen start-up frame (gauge %3, %4 m, %5 deg); proto edge removed; "
+                                 "afford_room handed to the epistemic planner.")
+                             .arg(dsr_room_id_).arg(poly_pub.size()).arg(g.x(), 0, 'f', 3).arg(g.y(), 0, 'f', 3)
+                             .arg(angle_of(T_pub_int_) * 180.f / static_cast<float>(M_PI), 0, 'f', 2);
+}
+
+void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateResult& res)
+{
+    // ★LIVENESS CONSTANTS, flagged per CLAUDE.md. Like kOfferUnclaimedMs / kExecutionLeaseMs in the planner
+    // path they guard the offer/claim/complete HANDSHAKE, not a belief; nothing in the model says how long a
+    // consumer that declined a standpoint should be spared it. kRefusedMs only removes a refused cell from the
+    // candidate set for a while (the bench has no consumer that can refuse, so the port has no such memory).
+    constexpr std::int64_t kOfferUnclaimedMs  = 5000;
+    constexpr std::int64_t kExecutionLeaseMs  = 45000;
+    constexpr std::int64_t kRefusedMs         = 30000;
+    if (fs_published_.size() < 3)
+    {
+        layout_last_plan_ = {};
+        layout_last_plan_.why = "no_polygon_yet";   // nothing the controller could plan in
+        return;
+    }
+    const std::int64_t now = steady_ms();
+    const Eigen::Vector2f robot = res.robot_pose.translation();   // internal frame
+    std::erase_if(layout_refused_, [now](const auto& r) { return r.second <= now; });
+    bool replan = not layout_target_.has_value();
+    const auto refuse_held = [&](std::string_view what)
+    {
+        // ★ RELEASE THE CLAIM FIRST (2026-10-09): the producer owns preemption. Re-planning alone published a
+        //   new epoch while the controller kept HOLDING the old, unreachable one it was executing ("offering
+        //   epoch 2 … HOLDING"), so the robot never moved. Same call as the pose planner's stall watchdog.
+        affordance_manager_.release_execution_claim(G_);
+        if (layout_target_.has_value())
+        {
+            layout_refused_.emplace_back(*layout_target_, now + kRefusedMs);
+            rc::status::print("[layout] {} at ({:.2f},{:.2f}) — standpoint set aside for {:.0f} s, re-planning\n",
+                              what, layout_target_->x(), layout_target_->y(), kRefusedMs / 1000.0);
+        }
+        layout_target_.reset();
+        layout_stall_ms_ = 0;   // a fresh window for whatever is claimed next
+        replan = true;
+    };
+
+    // 1. EDGE: a completion the manager latched (same protocol as the planner path).
+    if (affordance_manager_.consume_completion_event())
+    {
+        using rc::affordance::Outcome;
+        const auto outcome = affordance_manager_.last_outcome();
+        last_outcome_code_ = outcome == Outcome::Satisfied   ? 1
+                           : outcome == Outcome::Timeout     ? 2
+                           : outcome == Outcome::Refused     ? 3
+                           : outcome == Outcome::Abandoned   ? 4
+                           : outcome == Outcome::Infeasible  ? 5
+                           : outcome == Outcome::Unreachable ? 6
+                           : outcome == Outcome::OutsideRoom ? 7 : 0;
+        ++aff_completions_;
+        const bool approach_failed = outcome == Outcome::Refused or outcome == Outcome::Infeasible
+                                  or outcome == Outcome::Unreachable or outcome == Outcome::OutsideRoom;
+        if (approach_failed)
+            refuse_held(rc::affordance::to_string(outcome));
+        else
+        {
+            rc::status::print("[layout] completion consumed (outcome={}) — re-planning\n",
+                              rc::affordance::to_string(outcome));
+            layout_target_.reset();
+            replan = true;
+        }
+    }
+    // 2. LEVEL: the node's protocol state (a missed edge must not wedge the explorer).
+    if (const auto n = G_->get_node("afford_room"); n.has_value() and layout_target_.has_value() and armed_at_ms_ != 0)
+    {
+        const bool a = G_->get_attrib_by_name<active_att>(n.value()).value_or(false);
+        const bool p = G_->get_attrib_by_name<epistemic_pending_att>(n.value()).value_or(true);
+        if (a or p) armed_seen_live_ = true;
+        // ★ NO-PROGRESS WATCHDOG (2026-10-09): the controller can CLAIM a standpoint it then cannot plan to
+        //   (its footprint margin is wider than the explorer's clearance, so narrow gaps the explorer threads are
+        //   closed to it) and it does not refuse it — live the robot sat 1.3 m from a claimed target for minutes
+        //   with has_plan = 0. Same rule and constants as the pose planner's stall watchdog: the approach must
+        //   improve by EXEC_STALL_PROGRESS_M within EXEC_STALL_TIMEOUT_S, else the target is set aside.
+        bool stalled = false;
+        if (not (a and p)) layout_stall_ms_ = 0;   // nothing claimed: no clock to carry into the next claim
+        if (a and p and params_->EXEC_STALL_TIMEOUT_S > 0.f)
+        {
+            // MOTION, not distance-to-target (2026-10-09): the explorer replans every ReplanS and each new target
+            // reset a distance clock, so it never fired while the controller sat 0.77 m from a stale standpoint.
+            // The clock restarts only when the ROBOT moves by EXEC_STALL_PROGRESS_M.
+            if (layout_stall_ms_ == 0 or (robot - layout_stall_anchor_).norm() > params_->EXEC_STALL_PROGRESS_M)
+            { layout_stall_anchor_ = robot; layout_stall_ms_ = now; }
+            else if (now - layout_stall_ms_ > static_cast<std::int64_t>(1000.f * params_->EXEC_STALL_TIMEOUT_S))
+                stalled = true;
+        }
+        if (stalled)
+            refuse_held("no approach progress (controller cannot reach it)");
+        else if (a and p and now - static_cast<std::int64_t>(armed_at_ms_) > kExecutionLeaseMs)
+            refuse_held("claim held too long (lease expired)");
+        else if (p and not a and now - static_cast<std::int64_t>(armed_at_ms_) > kOfferUnclaimedMs)
+            refuse_held("offer never claimed");
+        else if (not a and not p and armed_seen_live_)
+        {
+            rc::status::print("[layout] afford_room COMPLETED (level) at ({:.2f},{:.2f}) — re-planning\n",
+                              layout_target_->x(), layout_target_->y());
+            ++layout_visits_;
+            layout_target_.reset();
+            replan = true;
+        }
+    }
+    // 3. RE-EVALUATE periodically while not executing (the bench replans every 15 frames).
+    const bool executing = affordance_manager_.is_executing(G_);
+    if (not executing and now - layout_plan_ms_ > static_cast<std::int64_t>(1000.f * params_->STARTUP_PROTO_REPLAN_S))
+        replan = true;
+    if (executing and not replan)
+        return;   // the controller owns the claim; the goal is not moved under it
+
+    if (replan)
+    {
+        rc::layout::ExplorerParams ep;
+        ep.clearance = params_->STARTUP_PROTO_EXPLORER_CLEARANCE >= 0.f
+                     ? params_->STARTUP_PROTO_EXPLORER_CLEARANCE
+                     : 0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+        const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+        // Standpoints come from CONFIRMED-FREE space (the raster), not from the published boundary: once that
+        // boundary is the layout it knows walls but not furniture, and live the explorer put a standpoint on an
+        // object the controller's LiDAR saw as occupied (2026-10-09). They must ALSO lie inside the published
+        // boundary (the raster can claim floor under a counter that the layout's walls rule out beyond).
+        const auto& feas_src = fs_free_ring_.size() >= 3 ? fs_free_ring_ : fs_published_;
+        std::vector<Eigen::Vector2f> feasible;
+        feasible.reserve(feas_src.size());
+        for (const auto& v : feas_src) feasible.push_back(T_int_pub * v);
+        rc::layout::FeasibleGrid grid(feasible, ep.cell, ep.clearance);
+        // Furniture (low-obstacle matter) blocks ROUTES too, not only standpoints: the ring fills interior holes, so
+        // without this the explorer's A* walked across the dining table and called its far side reachable (live
+        // 2026-10-09: 0.75-nat targets refused by the stall watchdog every 25 s for 5 min). The robot's own disc is
+        // exempt — it is standing there, so whatever the raster holds round it does not trap it.
+        if (free_space_)
+            grid.block_if([&](const Eigen::Vector2f& c)
+            {
+                const Eigen::Vector2f cp = T_pub_int_ * c;
+                return (c - robot).norm() > ep.clearance and free_space_->matter_within(cp, ep.clearance);
+            });
+        const auto admissible = [this, &ep](const Eigen::Vector2f& v)
+        {
+            if (not rc::freespace::point_in_polygon(T_pub_int_ * v, fs_published_)) return false;
+            // Not on furniture: no low-obstacle matter within the body's clearance (the ring fills interior holes,
+            // so a table island is inside it — 2026-10-09 live: standpoints among the dining chairs, no route).
+            if (free_space_ and free_space_->matter_within(T_pub_int_ * v, ep.clearance)) return false;
+            // ★ An AREA, not a cell (2026-10-09): a refused standpoint's neighbours a few cm away are just as
+            //   unreachable; excluding only its own cell made the explorer re-offer the same spot 6 cm over.
+            //   kRefusedRadiusM is a liveness constant (~ the controller's clearance scale), flagged.
+            constexpr float kRefusedRadiusM = 0.75f;
+            return std::ranges::none_of(layout_refused_, [&](const auto& r) { return (r.first - v).norm() < kRefusedRadiusM; });
+        };
+        const auto& map = room_concept_->wall_map_localiser_only();
+        const auto poly = room_concept_->explorer_polygon_localiser_only();
+        layout_last_plan_ = rc::layout::plan(map, poly, grid, robot, ep, admissible);
+        // latched until the room is forgotten/reborn. "no_gain" with a publishable layout is the same verdict as
+        // "finished" from the robot's side: nothing reachable is left worth visiting (live: 358/400 plans no_gain,
+        // map_ready = 1, never promoted, robot parked).
+        // ⚠ REVERTED the same day: "no_gain + map_ready" fired on the FIRST plans of the next run (the layout is
+        //   publishable from one view; the explorer could not yet reach anything) and promoted at once. Only the
+        //   explorer's own `finished` promotes; stuck targets are handled by the no-progress watchdog and the
+        //   controller's Unreachable report instead.
+        // ...and "nothing REACHABLE is left" (no_gain / unreachable) once the robot has actually VISITED at least one
+        // standpoint: the earlier version fired on the first plans of a run (layout publishable from one view, nothing
+        // reachable yet). Live 2026-10-09: after 13 m and the west half explored, every plan for 70 s was
+        // "unreachable" (remaining gain only beyond furniture), map_ready, IoU 0.86 vs GT — and the proto never
+        // promoted. A visit is a logical precondition, not a tuned number.
+        if (layout_last_plan_.finished
+            or (layout_visits_ > 0 and room_concept_->map_ready()
+                and (layout_last_plan_.why == "no_gain" or layout_last_plan_.why == "unreachable")))
+            layout_finished_ = true;
+        layout_plan_ms_ = now;
+        const auto prev = layout_target_;
+        if (layout_last_plan_.ok)
+        {
+            const Eigen::Vector2f tgt = layout_last_plan_.target;
+            // FACE WHAT IS LEAST KNOWN: the worst corner above the publish bar; else the frontier nearest the
+            // standpoint; else the direction of travel. (The LiDAR is 360°; the cameras are not.)
+            std::optional<Eigen::Vector2f> look;
+            float worst = map.params.publish_corner_sigma;
+            for (const auto& c : poly.corners)
+                if (std::isfinite(c.sigma) and c.sigma > worst and (c.p - tgt).norm() > 1e-3f) { worst = c.sigma; look = c.p; }
+            if (not look.has_value())
+            {
+                float best = std::numeric_limits<float>::infinity();
+                for (const auto& f : map.frontiers())
+                    if (const float d = (f - tgt).norm(); d > 0.3f and d < best) { best = d; look = f; }
+            }
+            const Eigen::Vector2f dir = look.has_value() ? Eigen::Vector2f(*look - tgt) : Eigen::Vector2f(tgt - robot);
+            layout_target_ = tgt;
+            layout_best_d_ = std::numeric_limits<float>::infinity();   // the motion clock is NOT reset by a replan
+            layout_yaw_    = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
+            layout_gain_   = layout_last_plan_.gain;
+        }
+        else
+            layout_target_.reset();
+        if (not prev.has_value() or not layout_target_.has_value() or (*prev - *layout_target_).norm() > 1e-3f)
+            rc::status::print("[layout] plan: {} target={} gain={:.2f} nats ({:.3f}/m) candidates={} with_gain={} "
+                              "unknowns={} refused_held={}\n",
+                              layout_last_plan_.why,
+                              layout_target_ ? std::format("({:.2f},{:.2f})", layout_target_->x(), layout_target_->y())
+                                             : std::string("none"),
+                              layout_last_plan_.gain, layout_last_plan_.score, layout_last_plan_.candidates,
+                              layout_last_plan_.with_gain, layout_last_plan_.unknowns, layout_refused_.size());
+    }
+    if (not layout_target_.has_value())
+        return;
+
+    // 4. PUBLISH in the published frame. Never a standpoint outside the ring the controller holds — it would
+    //    answer OutsideRoom, and offer → refuse → offer is the loop review focus 4 names.
+    const Eigen::Vector2f t_pub = T_pub_int_ * *layout_target_;
+    if (not rc::freespace::point_in_polygon(t_pub, fs_published_))
+    {
+        refuse_held("planned standpoint outside the published ring");
+        return;
+    }
+    const float yaw_pub = wrap_pi(layout_yaw_ + angle_of(T_pub_int_));
+    const bool published = affordance_manager_.publish_target(
+        G_, dsr_room_id_, t_pub.x(), t_pub.y(), yaw_pub, layout_gain_,
+        [this]() { trigger_layout_(); },
+        [this]() { trigger_layout_(); });
+    pub_tx_ = layout_target_->x(); pub_ty_ = layout_target_->y(); pub_ok_ = published;
+    if (published)
+    {
+        armed_tx_ = layout_target_->x(); armed_ty_ = layout_target_->y();
+        armed_retired_ = false; armed_seen_live_ = false;
+        armed_at_ms_ = static_cast<std::uint64_t>(now);
+        rc::status::print("[layout] afford_room OFFERED ({:.2f},{:.2f}) yaw={:.2f} gain={:.2f} nats (published frame)\n",
+                          t_pub.x(), t_pub.y(), yaw_pub, layout_gain_);
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1541,11 +2292,14 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
         G_->update_node(node);
     }
 
+    // In the PUBLISHED room frame (identity unless this room is a promoted start-up proto).
+    const Eigen::Vector2f calib_xy = T_pub_int_ * res.robot_pose.translation();
+    const float calib_yaw = calib_bearing_rad_ + std::atan2(T_pub_int_.linear()(1, 0), T_pub_int_.linear()(0, 0));
     const bool published = calib_manager_.publish_target(
         G_, dsr_room_id_,
-        res.robot_pose.translation().x(),        // its own pose: an orient does not navigate, and
-        res.robot_pose.translation().y(),        // publishing somewhere else would be a claim we cannot make
-        calib_bearing_rad_,
+        calib_xy.x(),        // its own pose: an orient does not navigate, and
+        calib_xy.y(),        // publishing somewhere else would be a claim we cannot make
+        std::atan2(std::sin(calib_yaw), std::cos(calib_yaw)),
         static_cast<float>(calib_.marginal_gain_nats()),
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
@@ -1567,7 +2321,16 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
 
 void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
 {
-    if (!G_ || !room_node_created_ || !epistemic_) return;
+    if (!G_ || !room_node_created_) return;
+    // While the start-up proto is still proto, the layout is what is unknown, not the pose against a known
+    // layout: the live LAYOUT explorer drives afford_room. The EpistemicPlanner takes over at promotion,
+    // seeded with the promoted polygon (promote_startup_proto).
+    if (startup_proto_ and not startup_promoted_)
+    {
+        dsr_update_layout_affordance(res);
+        return;
+    }
+    if (!epistemic_) return;
 
     auto& planner = epistemic_->epistemic_planner();
 
@@ -1887,12 +2650,17 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                          std::cos(planner.robot_theta() + kRecoveryTurnRad));
     }
 
+    // The planner works in the estimator's INTERNAL frame; the node carries the PUBLISHED one (identity
+    // unless this room is a promoted start-up proto — see internal_from_published). pub_tx_/armed_tx_ stay
+    // internal: they are read back by the planner (mark_target_finished) and the localiser CSV.
+    const Eigen::Vector2f t_pub = T_pub_int_ * Eigen::Vector2f(tx, ty);
+    const float yaw_pub = yaw + std::atan2(T_pub_int_.linear()(1, 0), T_pub_int_.linear()(0, 0));
     const bool published = affordance_manager_.publish_target(
         G_,
         dsr_room_id_,
-        tx,
-        ty,
-        yaw,
+        t_pub.x(),
+        t_pub.y(),
+        std::atan2(std::sin(yaw_pub), std::cos(yaw_pub)),
         gain,
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
@@ -2085,6 +2853,8 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
     if (!G_ || !rt_api_ || !room_node_created_ || !epistemic_) return;
 
     std::vector<rc::EpistemicPlanner::ObstacleFootprint> footprints;
+    const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+    const float th_int_pub = std::atan2(T_int_pub.linear()(1, 0), T_int_pub.linear()(0, 0));
 
     auto collect = [&](const std::string& node_type)
     {
@@ -2104,11 +2874,13 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
             const float yaw = static_cast<float>(
                 std::atan2(rt_opt->linear()(1, 0), rt_opt->linear()(0, 0)));
 
+            // Graph (published) frame → the planner's internal frame (identity unless start-up proto).
+            const Eigen::Vector2f c_int = T_int_pub * Eigen::Vector2f(static_cast<float>(t.x()), static_cast<float>(t.y()));
             footprints.push_back({
-                .center = {static_cast<float>(t.x()), static_cast<float>(t.y())},
+                .center = c_int,
                 .half_w = half_w,
                 .half_d = half_d,
-                .yaw    = yaw
+                .yaw    = yaw + th_int_pub
             });
         }
     };
@@ -2273,6 +3045,23 @@ void RoomSceneGraph::refresh_object_anchors()
     cfg.freshness_age_scale= params_->OBJECT_ANCHOR_FRESHNESS_AGE_SCALE;
 
     auto anchors = object_anchor_source_.gather(*G_, *inner_gaussian_, cfg);
+    // The anchors' map poses are read in the GRAPH's room frame; the localiser works in its internal one.
+    // Identity unless this room is a promoted start-up proto (internal_from_published). obs_robot and the
+    // robot-frame measurement information are frame-independent; the map pose and its covariance rotate.
+    if (pub_gauge_frozen_)
+    {
+        const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+        const float th = std::atan2(T_int_pub.linear()(1, 0), T_int_pub.linear()(0, 0));
+        Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
+        A.topLeftCorner<2, 2>() = T_int_pub.linear();
+        for (auto& a : anchors)
+        {
+            const Eigen::Vector2f p = T_int_pub * a.pose_world.head<2>();
+            a.pose_world = Eigen::Vector3f(p.x(), p.y(), std::atan2(std::sin(a.pose_world.z() + th),
+                                                                     std::cos(a.pose_world.z() + th)));
+            a.map_cov = A * a.map_cov * A.transpose();
+        }
+    }
 
     // Diagnostic (~1/s): pinpoint where the chain breaks —
     //   tables=0            → room doesn't see the table node
@@ -2436,7 +3225,7 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     auto room_node_opt = G_->get_node(dsr_room_id_);
     if (!room_node_opt.has_value()) { qWarning() << "dsr_create_wall_nodes: room node missing"; return; }
 
-    const auto polygon = room_concept_->nominal_room_polygon();
+    const auto polygon = published_polygon();   // the room's PUBLISHED frame (see internal_from_published)
     const int n = static_cast<int>(polygon.size());
     if (n < 3) { qWarning() << "dsr_create_wall_nodes: polygon has fewer than 3 vertices"; return; }
 
@@ -2597,12 +3386,9 @@ void RoomSceneGraph::cleanup_room_graph_nodes()
     for (const char *name : {"afford_room", "afford_calib"})
         if (auto n = G_->get_node(name); n.has_value())
             G_->delete_node(n.value());
-    room_node_created_ = false;
-    dsr_room_id_ = 0;
-    affordance_manager_.reset();
+    forget_room("cleanup_room_graph_nodes");
     calib_manager_.reset();
     calib_contract_written_ = false;
-    stable_frames_ = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

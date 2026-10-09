@@ -294,6 +294,8 @@ bool LidarIngestor::pump()
         // ceiling) before it is reduced to the band; the bpearl inside. Estimate + log only.
         if (params_->MOUNT_FACTORS)
             mount_factor_step(sweep->points, sweep->stamp_ms);
+        if (params_->STARTUP_PROTO_ENABLED)
+            low_obstacle_step(sweep->points, sweep->stamp_ms);
         ingest_scan(std::move(points_high), sweep->stamp_ms);
         ingested = true;
     }
@@ -696,6 +698,36 @@ bool LidarIngestor::walls_at(std::int64_t stamp_ms, std::vector<rc::mountf::Vert
     for (std::size_t k = 0; k < snap.polygon.size(); ++k)
         walls.push_back({to_body(snap.polygon[k]), to_body(snap.polygon[(k + 1) % snap.polygon.size()])});
     return true;
+}
+
+void LidarIngestor::low_obstacle_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms)
+{
+    if (not room_concept_) return;
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    if (now - low_obs_ms_ < 500) return;   // 2 Hz: furniture does not move; the raster is sticky
+    low_obs_ms_ = now;
+    // Height band of "something the base would hit": above the floor, below the robot's top. Points arrive in
+    // LIDAR_ROBOT_FRAME (Shadow, z = 0 at the floor). ⚠ kFloorClearM is the floor-vs-obstacle split — a
+    // physical property of the base (ground clearance + floor-return noise ~2 cm), not a tuned gate; kTopM is
+    // the robot's height. The self-body disc is excluded (the bpearl sees the base itself).
+    constexpr float kFloorClearM = 0.08f, kTopM = 1.60f, kSelfR = 0.40f;
+    auto keep = [&](const Eigen::Vector3f& p)
+    { return p.allFinite() and p.z() > kFloorClearM and p.z() < kTopM and p.head<2>().norm() > kSelfR; };
+    RoomConcept::LowObstacles h{.stamp_ms = helios_stamp_ms, .xy = {}};
+    for (const auto& p : helios_full) if (keep(p)) h.xy.push_back(p.head<2>());
+    if (not h.xy.empty()) room_concept_->post_low_obstacles(std::move(h));
+    if (not low_bpearl_reader_ and G_)
+        low_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+            G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
+    if (low_bpearl_reader_)
+        if (auto bp = low_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
+            bp.has_value() and not bp->points.empty() and bp->stamp_ms > last_bp_low_stamp_)
+        {
+            last_bp_low_stamp_ = bp->stamp_ms;
+            RoomConcept::LowObstacles b{.stamp_ms = bp->stamp_ms, .xy = {}};
+            for (const auto& p : bp->points) if (keep(p)) b.xy.push_back(p.head<2>());
+            if (not b.xy.empty()) room_concept_->post_low_obstacles(std::move(b));
+        }
 }
 
 void LidarIngestor::mount_factor_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms)

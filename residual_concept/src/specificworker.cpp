@@ -8,6 +8,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include <cstdlib>
@@ -55,7 +57,12 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     hibernationChecker.start(500);
 #endif
 
-    const int period = configLoader.get<int>("Period.Compute");
+    // Registered rather than read raw, so the period appears in the startup table like every
+    // other key. req() keeps the throw-if-missing behaviour: a period is not something to
+    // default silently.
+    int period = 0;
+    rc::cfg::Reader(configLoader, "residual_concept").req("Period.Compute", period,
+            "GRAFCET step period (ms) for every state of this agent's state machine");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this), std::bind(&SpecificWorker::waiting_enter, this));
@@ -207,6 +214,27 @@ void SpecificWorker::initialize()
 
     if (const auto room = rc::room::current_room(*G); room.has_value()) room_node_id_ = *room;
     else                   qWarning() << "residual_concept: no room node found at startup";
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - confident false positives from the one check whose
+    // whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+    // run, which is the end of startup, not the end of parsing.
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+    // ARMS the unread sweep; check_registry_complete.sh residual_concept is the grep that keeps the claim
+    // honest. Re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("residual_concept");
+    rc::cfg::Reader(configLoader, "residual_concept").publish("etc/config_effective.csv");
 }
 
 std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
@@ -224,6 +252,8 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
     // (class in the object_subtype string attr), so the whole modelled-furniture set is exactly
     // get_nodes_by_type("object") — no per-class type list needed here (any object with a valid
     // box becomes an explainer).
+    // Resolved ONCE: the room cannot change mid-loop, and current_room_frame walks the graph.
+    const std::string room_frame_objs = rc::room::current_room_frame(*G);
     for (const auto& n : G->get_nodes_by_type("object"))
         {
             const float w = G->get_attrib_by_name<width_m_att> (n).value_or(0.0f);
@@ -236,7 +266,7 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
                 if (log_skip) std::println("[collapse-skip] '{}' w={:.2f} d={:.2f} h={:.2f} (needs all >0)", n.name(), w, d, h);
                 continue;
             }
-            const auto T = inner_eigen_->get_transformation_matrix("room", n.name(), 0);
+            const auto T = inner_eigen_->get_transformation_matrix(room_frame_objs, n.name(), 0);
             if (not T.has_value())
             {
                 if (log_skip) std::println("[collapse-skip] '{}' no room→object transform", n.name());
@@ -288,6 +318,8 @@ void SpecificWorker::build_support_surfaces()
     // Only tables are support surfaces. Every concept is now a generic `object` node, so filter
     // the object set down to tables. Tables carry object_subtype "round"/"square" (the shape model,
     // NOT the literal "table"), so the reliable class discriminator is the "table_" name prefix.
+    // Resolved ONCE: the room cannot change mid-loop, and current_room_frame walks the graph.
+    const std::string room_frame_tables = rc::room::current_room_frame(*G);
     for (const auto& n : G->get_nodes_by_type("object"))
     {
         if (not n.name().starts_with("table"))
@@ -297,7 +329,7 @@ void SpecificWorker::build_support_surfaces()
         const float h = G->get_attrib_by_name<height_m_att>(n).value_or(0.0f);
         if (w <= 0.0f or d <= 0.0f or h <= 0.0f)
             continue;
-        const auto T = inner_eigen_->get_transformation_matrix("room", n.name(), 0);
+        const auto T = inner_eigen_->get_transformation_matrix(room_frame_tables, n.name(), 0);
         if (not T.has_value())
             continue;
         const auto& M = T.value().matrix();
@@ -412,7 +444,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     // Observer pose → view bearing: the classifier failure is VIEWPOINT-dependent, so the eventual p_FA field
     // is keyed on (world cell × bearing), never place alone.
     if (inner_eigen_)
-        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        if (const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0); rtb.has_value())
         {
             const auto& Tm = rtb.value();
             e.robot_x = static_cast<float>(Tm(0, 3));
@@ -663,6 +695,34 @@ void SpecificWorker::compute()
     // ── PHASE-0 REBUILD: occupancy-grid safety layer, running LIVE as a diagnostic (publish still via the old
     //    path until it's verified stable). Init once from the room polygon bounds; then integrate every sweep. ──
     {
+        // ── RE-SIZE WHEN THE ROOM CHANGES OR OUTGROWS THE GRID (decision 7 of the start-up proto plan) ──
+        // ⚠ A re-size CLEARS the grid's evidence (OccupancyGrid::reset), so it is logged, and on growth the
+        // new bounds take headroom proportional to the room seen so far: a proto polygon growing step by step
+        // then costs a logarithmic number of resets, not one per republish.
+        float grow_margin = 0.5f;
+        if (grid_ready_)
+        {
+            const auto poly = read_room_polygon();
+            const char* why = nullptr;
+            if (grid_room_id_ != room_node_id_)
+                why = "the room changed";
+            else if (poly.size() >= 3)
+            {
+                float pxmn = 1e9f, pymn = 1e9f, pxmx = -1e9f, pymx = -1e9f;
+                for (const auto& p : poly) { pxmn = std::min(pxmn, p.x()); pxmx = std::max(pxmx, p.x()); pymn = std::min(pymn, p.y()); pymx = std::max(pymx, p.y()); }
+                if (pxmn < grid_xmn_ or pymn < grid_ymn_ or pxmx > grid_xmx_ or pymx > grid_ymx_)
+                {
+                    why = "the room polygon outgrew the grid";
+                    grow_margin = std::max(0.5f, 0.5f * std::max(pxmx - pxmn, pymx - pymn));
+                }
+            }
+            if (why != nullptr)
+            {
+                std::println("[grid] RE-INIT: {} (room {} -> {}); evidence cleared, re-accumulating", why,
+                             grid_room_id_, room_node_id_);
+                grid_ready_ = false;
+            }
+        }
         if (not grid_ready_)
         {
             const auto poly = read_room_polygon();
@@ -671,8 +731,10 @@ void SpecificWorker::compute()
             {
                 xmn = ymn = 1e9f; xmx = ymx = -1e9f;
                 for (const auto& p : poly) { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
-                xmn -= 0.5f; ymn -= 0.5f; xmx += 0.5f; ymx += 0.5f;      // margin around the room
+                xmn -= grow_margin; ymn -= grow_margin; xmx += grow_margin; ymx += grow_margin;   // margin around the room
             }
+            grid_room_id_ = room_node_id_;
+            grid_xmn_ = xmn; grid_ymn_ = ymn; grid_xmx_ = xmx; grid_ymx_ = ymx;
             rc::OccGridParams gp;
             gp.floor_z0 = cfg_.cluster.floor_z0; gp.floor_slope = cfg_.cluster.floor_slope; gp.ceil_z = cfg_.cluster.ceil_z;
             // Forgetting + self-body: give evidence a finite lifetime and put the robot's own body in the sensor
@@ -1077,7 +1139,7 @@ void SpecificWorker::integrate_zed_into_grid()
     if (not zed_ingestor_->has_depth()) return;
 
     // room←zed at the sweep stamp (Nearest — the camera pose moves with the robot).
-    const auto rt = inner_eigen_->get_transformation_matrix("room", "zed", current_ts_, "RT",
+    const auto rt = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", current_ts_, "RT",
                                                             DSR::RT_API::TimeQuery::Nearest);
     if (not rt.has_value()) return;
     const Eigen::Matrix4f room_T_cam = rt->matrix().cast<float>();
@@ -1860,6 +1922,15 @@ void SpecificWorker::remove_by_occupancy_evidence()
 
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
+    // ★OUR ROOM WAS DELETED: let go of it, or this agent stays bound for ever to an id nobody publishes
+    // (every RT read in its frame silently fails). compute() re-resolves while it is 0, and the grid is
+    // re-sized for whichever room comes next. (Queued connection: this runs on the main thread, like compute.)
+    if (id != 0 and id == room_node_id_)
+    {
+        std::print("[residual] room node {} deleted — releasing it; re-resolving the room each cycle\n", id);
+        room_node_id_ = 0;
+        grid_ready_ = false;
+    }
     if (fitter_)
         fitter_->forget_node(id);
     trigger_graph_layout_twopi();

@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "door_apertures.h"
+#include "scan_slam.h"
 #include "layout_estimator.h"   // DoorAperture — the snapshot below, and no cycle: it knows nothing of us
 #include <condition_variable>
 #include <atomic>
@@ -747,6 +748,9 @@ public:
         // map-frame odometry delta, stride flag, timestamp) to tmp/wall_input_<unix_ms>.bin, so a live run can
         // be replayed through the offline harness core. Read-only: changes no estimate.
         bool  record_wall_input = false;
+        /// RoomShape.PlainSlam (2026-10-09): while SEARCHING, the pose comes from plain scan-to-occupancy SLAM
+        /// (scan_slam.h), NOT from the provisional layout. The wall map observes at that pose and never feeds it.
+        bool  plain_slam = false;
         float wall_gauge_sigma_theta = 1e-3f;  // rad
         int   wall_max_slots = 0;              // wall factors on the newest N slots (0 ⇒ every slot)
 
@@ -1242,7 +1246,12 @@ public:
     using LayoutState = LayoutEstimator::State;
     LayoutState layout_state() const
     { return (not estimating() or wall_frozen_) ? LayoutState::Localizing : LayoutState::Searching; }
+    /// Set by RoomSceneGraph while a start-up PROTO-room owns the published frame: the one-shot internal
+    /// re-anchor at map_ready is then skipped (internal frame == published frame until promotion).
+    void set_freeze_internal_frame(bool v) { freeze_internal_frame_.store(v, std::memory_order_relaxed); }
     bool searching()  const { return layout_state() == LayoutState::Searching; }
+    /// Plain SLAM owns the pose: Estimate mode, still learning the layout, and RoomShape.PlainSlam on.
+    bool plain_slam_driving() const { return params.plain_slam and estimating() and searching(); }
     bool localizing() const { return layout_state() == LayoutState::Localizing; }
     /// The LEARNT layout specifically has been frozen — i.e. this run reached LOCALIZING by
     /// estimating the room rather than by being given one. Prefer localizing() unless the difference
@@ -1267,6 +1276,32 @@ public:
         std::vector<Eigen::Vector2f> polygon;             ///< the room polygon (room frame)
     };
     MountSnapshot mount_snapshot() const { std::scoped_lock lk(mount_snap_mutex_); return mount_snap_; }
+
+    /// LOW OBSTACLES (2026-10-09): returns between the floor and the robot's top, robot frame (xy), with the
+    /// sweep's capture stamp. Posted by the ingest thread (LidarIngestor::low_obstacle_step), taken by the
+    /// localiser thread (RoomSceneGraph) to stamp MATTER into the start-up proto's free-space raster — helios
+    /// scans ABOVE counters/tables/chairs, so its beams alone claim the floor under them as free.
+    struct LowObstacles { std::int64_t stamp_ms = 0; std::vector<Eigen::Vector2f> xy; };
+    void post_low_obstacles(LowObstacles o)
+    {
+        std::scoped_lock lk(low_obs_mutex_);
+        low_obs_.push_back(std::move(o));
+        while (low_obs_.size() > 16) low_obs_.pop_front();   // bounded: ~8 s at 2 Hz
+    }
+    std::deque<LowObstacles> take_low_obstacles()
+    {
+        std::scoped_lock lk(low_obs_mutex_);
+        return std::exchange(low_obs_, {});
+    }
+    /// ── FOR THE LIVE LAYOUT EXPLORER (layout_explorer.h), LOCALISER THREAD ONLY ──────────────────────────
+    /// The wall map has ONE owner, the localiser thread (the viewer gets a copy inside UpdateResult). The
+    /// scene graph's update() runs on that same thread (pose_publisher.cpp, maybe_publish_corrected_pose),
+    /// which is the only caller allowed: a reference valid for the calling cycle, never stored, never
+    /// handed to another thread. The polygon is the one the PUBLISH TEST sees (carried + live window
+    /// information) — the explorer predicts its gain through what the agent itself believes.
+    const wallmap::WallMap& wall_map_localiser_only() const { return wall_map_; }
+    wallmap::Polygon explorer_polygon_localiser_only() const
+    { return wall_map_.build_polygon_with(window_wall_information()); }
     std::vector<Eigen::Vector2f> nominal_room_polygon() const
     {
         if (estimating())
@@ -1681,6 +1716,7 @@ private:
    bool validate_seed_pose(const std::vector<Eigen::Vector3f>& pts);
 
    // Grid-search liveness for the UI (written on the localizer thread, read on the GUI thread).
+   std::atomic<bool>         freeze_internal_frame_{false};   // see set_freeze_internal_frame
    std::atomic<bool>         grid_search_active_{false};
    std::atomic<std::int64_t> grid_search_end_ms_{0};
 
@@ -1984,6 +2020,8 @@ private:
    // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan 2026-10-08 Task 1/1b/5) ──────────────────────
    rc::mountf::KinematicMount kin_mount_;
    mutable std::mutex mount_snap_mutex_;                      // guards mount_snap_ (read by the ingest thread)
+   std::mutex low_obs_mutex_;                                 // guards low_obs_ (ingest -> localiser)
+   std::deque<LowObstacles> low_obs_;
    MountSnapshot   mount_snap_;
    std::ofstream   kin_csv_;                                  // tmp/mount_factors/kin_<ts>.csv: per fed cycle
    /// Feed kin_mount_ from this cycle's innovation (observe_innovation, only when `fed`).
@@ -2090,6 +2128,8 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Matrix2f> window_wall_information() const;
     bool          rec_stride_replace_ = false;                       // this frame's stride decision, for the recorder
     Eigen::Vector3f rec_odom_delta_ = Eigen::Vector3f::Zero();       // this frame's map-frame odometry delta
+    rc::slam::ScanSlam plain_slam_;                                   // Estimate-mode pose (plain_slam_driving)
+    bool plain_slam_seed_ = true;                                     // (re)seed from the window's pose on next step
     /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
     /// on. From then on the layout is GIVEN: see the four guards that read it in room_concept.cpp.
     unsigned wall_mh_log_tick_ = 0;   // rate limit for the "still annealing" line

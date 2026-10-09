@@ -26,6 +26,8 @@
 #include <functional>
 #include <map>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <print>
 #include <memory>
 #include <vector>
@@ -41,6 +43,8 @@
 #include "object_anchor_source.h"    // rc::ObjectAnchorSource (validated objects → SE(2) landmarks)
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
+#include "free_space_polygon.h"      // rc::freespace (the start-up proto-room's extent)
+#include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 
 namespace rc
 {
@@ -122,6 +126,19 @@ public:
                                     std::uint64_t timestamp_ms);
 
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
+    /// The room is still the start-up PROTO-room (born, not yet promoted) — the UI says ESTIMATING. Read from
+    /// the main thread; the two flags are written on the localiser thread (a stale read only delays the label).
+    [[nodiscard]] bool room_is_startup_proto() const { return startup_proto_ and not startup_promoted_; }
+
+    /// ── THE PUBLISHED ROOM FRAME vs THE ESTIMATOR'S INTERNAL FRAME ────────────────────────────────────
+    /// Identity in every mode except one: a START-UP PROTO-ROOM (StartupProto.Enabled, Estimate mode) is
+    /// published in the robot's initial pose, frozen for ever, while the estimator re-anchors its internal
+    /// frame once when the layout closes. From then on every room-frame quantity that crosses the graph
+    /// boundary — the RT, the polygon, walls, afford_room/afford_calib targets, obstacle footprints, object
+    /// anchors, door apertures — is mapped through this transform. Thread-safe snapshot (the main thread
+    /// maps the door apertures with it); the writer is the localiser thread.
+    [[nodiscard]] Eigen::Affine2f internal_from_published() const
+    { std::scoped_lock lk(gauge_mutex_); return T_pub_int_.inverse(); }
     // Consecutive "stable" localization frames accumulated so far (resets to 0 on any unstable frame,
     // on relocalization and on room deletion). Drives the UI stabilization readout; meaningless once
     // room_node_created() is true, since the counter stops being advanced then.
@@ -158,6 +175,61 @@ private:
     //   is this room's pose composed with that constant, written on every pose write.
     // Not removed while this agent runs (first test: topology only); owned cleanup reaps it with the room.
     void step_proto_room(const rc::RoomConcept::UpdateResult& res);
+    /// Consume the estimator's one-shot re-anchor (take_pending_reanchor) into EVERY frame published as a
+    /// fixed transform of the internal one: the start-up proto's T_pub_int_ and the crossing proto's
+    /// T_room_proto_. One consumer, at the top of update(), so neither can miss it.
+    void absorb_reanchor(const Eigen::Affine2f& int_now);
+    Eigen::Affine2f last_int_pose_ = Eigen::Affine2f::Identity();   ///< internal robot pose at the previous update
+    bool have_last_int_pose_ = false;
+    bool reanchor_this_update_ = false;   ///< for the proto CSV's `event` column
+    std::string startup_event_;           ///< "startup_born" / "promoted" — one-shot, for the same column
+
+    // ── START-UP PROTO-ROOM (StartupProto.*) ──────────────────────────────────────────────────────────
+    // Estimate mode only. `room_1` + `proto` self-edge born on the first update when no room exists; its
+    // frame is the internal frame at birth = the robot's INITIAL pose (estimate mode starts the pose at the
+    // origin), frozen: T_pub_int_ absorbs the estimator's re-anchor. Its polygon is CONFIRMED FREE SPACE
+    // (free_space_polygon.h), republished at most every PublishPeriodMs while it grows. afford_room is
+    // driven by the live layout explorer while it is proto. PROMOTED IN PLACE when map_ready: the learnt
+    // polygon (in the frozen frame) replaces the free-space one, the `proto` edge is deleted, same id.
+    bool birth_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& why);
+    void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
+    void promote_startup_proto(std::string& reason);
+    void forget_room(const char* why);    ///< the room node vanished: reset EVERY piece of room state together
+    bool sweep_foreign_rooms();           ///< leftover room nodes while the start-up proto is the room
+    void resolve_lidar_origin();          ///< helios position in the robot frame (the beams' origin)
+    std::vector<Eigen::Vector2f> published_polygon() const;   ///< nominal polygon mapped to the published frame
+    bool          startup_proto_    = false;   ///< dsr_room_id_ IS the start-up proto (promoted or not)
+    bool          startup_promoted_ = false;
+    Eigen::Affine2f T_pub_int_ = Eigen::Affine2f::Identity();   ///< internal → published (see accessor)
+    bool          pub_gauge_frozen_ = false;   ///< T_pub_int_ absorbs re-anchors (set at start-up proto birth)
+    mutable std::mutex gauge_mutex_;
+    std::optional<rc::freespace::FreeSpacePolygon> free_space_;
+    std::vector<Eigen::Vector2f> fs_published_;   ///< last ring written to the proto (published frame)
+    std::vector<Eigen::Vector2f> fs_free_ring_;   ///< confirmed-free raster ring (published frame) — explorer feasibility
+    std::deque<std::pair<std::int64_t, Eigen::Affine2f>> pose_hist_;   ///< (stamp, robot pose in published frame), ~10 s
+    std::deque<RoomConcept::LowObstacles> low_obs_pending_;
+    int layout_visits_ = 0;   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
+    void stamp_low_obstacles();
+    std::int64_t  fs_last_ms_ = 0;
+    std::int64_t  sweep_last_ms_ = 0;
+    Eigen::Vector2f lidar_origin_{0.f, 0.f};   ///< robot frame
+    bool          lidar_origin_resolved_ = false;
+    int           lidar_origin_tries_ = 0;
+    std::string   startup_reason_;             ///< last reason, for the CSV row
+    // ── the live layout explorer's affordance state (afford_room while the start-up proto is proto) ──
+    void dsr_update_layout_affordance(const rc::RoomConcept::UpdateResult& res);
+    void layout_publish_armed();          ///< (re)publish the held target through affordance_manager_
+    std::optional<Eigen::Vector2f> layout_target_;   ///< internal frame
+    float         layout_yaw_  = 0.f;               ///< internal frame
+    float         layout_gain_ = 0.f;
+    std::int64_t  layout_plan_ms_ = 0;
+    rc::layout::Plan layout_last_plan_;
+    bool layout_finished_ = false;
+    std::int64_t layout_stall_ms_ = 0;                                     ///< no-progress watchdog clock (explorer)
+    float        layout_best_d_   = std::numeric_limits<float>::infinity();   // (unused since 10-09: motion-based watchdog)
+    Eigen::Vector2f layout_stall_anchor_ = Eigen::Vector2f::Zero();          ///< where the robot was when the clock started   ///< the explorer reported `finished` (closed + nothing left to learn); gates promotion
+    std::vector<std::pair<Eigen::Vector2f, std::int64_t>> layout_refused_;   ///< (cell, until_ms), internal frame
+    std::size_t   proto_polygon_verts_ = 0;   ///< crossing proto: vertex count last written to it
     std::uint64_t   proto_room_id_ = 0;
     Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
     Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
@@ -197,11 +269,12 @@ private:
     struct ProtoRow
     {
         static constexpr float NA = std::numeric_limits<float>::quiet_NaN();
-        const char* event = "";     ///< "", "born", "reanchor" — one-shot transitions
+        std::string event;          ///< "", "born", "reanchor", "startup_born", "promoted" — one-shot transitions ('+'-joined)
         int         n_apert = 0;    ///< apertures offered this frame; 0 = door_concept published none
         std::string door;           ///< the selected one (post-birth: the one crossed)
         float p_open = NA, p_past = NA, p_span = NA, p_geom = NA, p_cross = NA;
         float s = NA, u = NA, sig_s = NA, sig_t = NA, span_w = NA;
+        std::string reason;         ///< start-up proto: why this update did what it did (never empty there)
     };
     void step_proto_room_impl(const rc::RoomConcept::UpdateResult& res, ProtoRow& row);
     void write_proto_row(const rc::RoomConcept::UpdateResult& res, const ProtoRow& row);

@@ -388,6 +388,10 @@ void SpecificWorker::initialize()
         // RoomShape.MapMode = estimate: no layout is loaded. The room is learnt from the LiDAR and
         // published once its polygon closes; the viewer draws the walls as they are born.
         room_concept_.configure_room_estimate();
+        // A start-up proto-room will own the published frame (frozen at the robot's initial pose): freeze the
+        // internal frame from the very first cycle, before any re-anchor can run (room_concept.cpp, map_ready).
+        if (params.STARTUP_PROTO_ENABLED)
+            room_concept_.set_freeze_internal_frame(true);
         calib_->set_room_polygon({}, Eigen::Vector2f::Zero());
         room_initialized_from_svg_polygon_ = false;
         rc::StatusReporter::loaded("layout", "", "RoomShape.MapMode = estimate: no layout loaded; "

@@ -1641,12 +1641,25 @@ namespace rc::wallmap
                     if (std::find(best_v.ord.begin(), best_v.ord.end(), *it) != best_v.ord.end()) continue;
                     const auto* w = find(*it);
                     if (w == nullptr) continue;
-                    bool held = false;
+                    const WallLandmark* held_by = nullptr;
                     for (const auto id2 : best_v.ord)
                         if (const auto* w2 = find(id2); w2 != nullptr
                             and std::abs(wrap_pi(w->phi - w2->phi)) < 0.2f
-                            and std::abs(w->d - w2->d) < 0.3f) { held = true; break; }
-                    if (held) continue;
+                            and std::abs(w->d - w2->d) < 0.3f) { held_by = w2; break; }
+                    if (held_by != nullptr)
+                    {
+                        // FIX-S: a near-parallel twin HOLDS the host's support only as far as the host's own
+                        // observations agree with the twin's line. The host's information matrix is the
+                        // precision of its line given everything it absorbed, so the Gaussian evidence of
+                        // those observations under the twin's (phi, d) instead of the host's MAP line is
+                        // 1/2 r' I r nats — zero for an identical line, decisive for a 25k-point wall moved
+                        // 17 cm (measured live 2026-10-09: wall 2 replaced by a 3k-point twin at dd=0.17,
+                        // which then slid 1.4 m with the pose). A blanket waiver below 0.3 m was that hole.
+                        const Eigen::Vector2f r(wrap_pi(w->phi - held_by->phi), w->d - held_by->d);
+                        const float ev = 0.5f * r.dot(w->information * r);
+                        if (std::isfinite(ev)) surrender += ev;
+                        continue;
+                    }
                     for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
                 }
             cost += surrender;
@@ -2110,6 +2123,30 @@ namespace rc::wallmap
             }
         }
         last_obs_ts_ = timestamp_ms; last_obs_theta_ = pose.z();
+        // FIX-G2: THE BOUNDED POSE TERM of the per-segment gate (the consensus prior below stays flat). It is the product of
+        // the pose prior (what the estimator believes, pose_cov_eff) and the weak flat prior that keeps the
+        // consensus invertible along directions a scan cannot see: Lambda_p = Lambda_flat + Sigma_pose^-1.
+        // Precisions add, so no gate is ever wider than the pose posterior NOR wider than the flat prior —
+        // a ballooning posterior along an unobserved direction (measured 0.8 m, run_walhit) can no longer
+        // open the segment gate beyond what the consensus and the prior resolve. The old per-segment term
+        // H*pose_cov*H' was the unbounded version of this; the flat constants already existed (cmode_prior_*).
+        Eigen::Matrix3f Lam_prior = Eigen::Matrix3f::Zero();
+        {
+            const float sx = params.cmode_prior_sigma_xy, sa = params.cmode_prior_sigma_phi;
+            if (sx > 0.f and sa > 0.f) { Lam_prior(0, 0) = 1.f / (sx * sx); Lam_prior(1, 1) = 1.f / (sx * sx); Lam_prior(2, 2) = 1.f / (sa * sa); }
+        }
+        // Combine in COVARIANCE form, (L1+L2)^-1 = S1 - S1 (S1+S2)^-1 S1: exact for a SINGULAR pose covariance
+        // (theta-theta reads 0 in the live recording), where inverting the pose covariance is impossible and a
+        // guard that skips it silently turns this term into the flat prior alone (measured: that made the
+        // per-segment gate 1 m wide and lost the pose on both recordings).
+        Eigen::Matrix3f P_prior = Lam_prior.inverse();
+        if (pose_cov_eff.allFinite())
+        {
+            const Eigen::Matrix3f Sf = Lam_prior.inverse();
+            const Eigen::Matrix3f sum = pose_cov_eff + Sf;
+            const Eigen::Matrix3f Pc = pose_cov_eff - pose_cov_eff * sum.inverse() * pose_cov_eff;
+            if (Pc.allFinite()) P_prior = Pc;
+        }
 
         // ── Every segment in the map frame, with the covariance the association test needs ───────
         struct SegMap
@@ -2132,7 +2169,7 @@ namespace rc::wallmap
             J(1, 0) = linefit::tangent_of(sm[s].phi).dot(t);
             sm[s].Sigma_loc = J * (*cov_r) * J.transpose();   // the segment fit alone; wall + sys_cov are added per wall
             sm[s].H = H;
-            sm[s].Sigma = sm[s].Sigma_loc + H * pose_cov_eff * H.transpose();
+            sm[s].Sigma = sm[s].Sigma_loc + H * P_prior * H.transpose();   // FIX-G: bounded pose term
             sm[s].ok = sm[s].Sigma.allFinite();
             // DIRECTION EVIDENCE (update_theta0): every segment votes on the room's reference
             // direction, whatever the Manhattan gate later does with it. This is the only place
@@ -2257,6 +2294,9 @@ namespace rc::wallmap
             // collapses to today's gate. The prior here is deliberately WEAK: its only job is to keep
             // Lambda invertible along directions this scan cannot see (one wall, or two parallel
             // walls), where the honest answer is "unknown", not "zero".
+            // FIX-G2: the CONSENSUS prior stays FLAT. Combining it with the pose posterior (G1) was measured
+            // to collapse association on both live recordings: the agent's covariance reads 1-3 mm while
+            // parked, which pins delta at 0 and turns the leave-one-out test into the old gate (:2259 comment).
             Eigen::Matrix3f Lp = Eigen::Matrix3f::Zero();
             const float sx = params.cmode_prior_sigma_xy, sa = params.cmode_prior_sigma_phi;
             if (sx > 0.f and sa > 0.f)
@@ -2989,7 +3029,13 @@ namespace rc::wallmap
                 const size_t id = static_cast<size_t>(fgrid.idx(i, j));
                 const float l = fgrid.lodds[id];
                 const bool matter = fgrid.hits[id] >= 3 or l > 1.5f;
-                const bool fresh_free = fgrid.is_free(i, j) and fgrid.free_ms[id] >= fresh_ref_ms;
+                // FIX-B (Fable, 2026-10-09): free passage is priced in the SAME currency and at the SAME latency as
+                // matter — graded by its log-odds from the first pass — instead of only once is_free (3 passes at
+                // -0.4) is reached, while matter already counts after 2 hits (+1.0 each > 1.5). With that asymmetry,
+                // at frame 2 amputating the unswept half of the seed box always GAINED nats (live run_walhit:
+                // "[down] removing 1 order entries, margin=1.4 nats" ⇒ a half-room locked in for 20 min). Replay,
+                // 21 RNG seeds, live flags: failures 10/21 -> 2/21, the live seed IoU 0.31 -> 0.76.
+                const bool fresh_free = l < 0.f and fgrid.hits[id] < 3 and fgrid.free_ms[id] >= fresh_ref_ms;
                 float w = 0.f;
                 if (matter) w = -std::max(l, 2.f);      // claiming matter as interior costs
                 else if (fresh_free) w = -l;            // claiming fresh free as interior gains (−l > 0)

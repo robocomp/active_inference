@@ -2627,6 +2627,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         reset_stuck_state();
         path_controller.stop();
         motion_commander.stop_robot();
+        if (no_route_since_ms_ == 0) no_route_since_ms_ = time_source();   // reported Unreachable by execute_plan
         if (time_source() - last_no_route_log_ms_ >= 3000)
         {
             last_no_route_log_ms_ = time_source();
@@ -2637,6 +2638,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         return false;
     }
 
+    no_route_since_ms_ = 0;   // a route exists this cycle
     if (step.target_changed || !path_controller.is_active())
     {
         // Presmoothed: smooth_plan already fitted the C2 curve AND checked every sample against the
@@ -3057,6 +3059,25 @@ void ControllerSession::hold_approach_commitment(ControllerPlanningStep &step, s
     // rather than pin the robot to something nobody is offering.
     if (approach_commit_.has_value() and approach_commit_->epoch > epoch.value())
         approach_commit_.reset();
+    // ── THE PRODUCER'S WITHDRAWAL (rule 5 above: "no edge ⇒ nobody is driving") ─────────────────────────
+    // The producer owns preemption and exercises it by DELETING our `executing` edge (release_execution_claim).
+    // Holding on past that — and rewriting the edge with the old epoch — made a withdrawal invisible: measured
+    // 2026-10-09, room_concept withdrew a stuck standpoint every 25 s for 13 proposals while the robot sat
+    // 0.2 m from proposal 1. Once our edge has been seen, its disappearance ends the commitment and the
+    // current offer becomes the new one.
+    if (approach_commit_.has_value())
+    {
+        if (rc::AffordanceManager::read_executing(graph_, step.target.node_id).has_value())
+            approach_commit_->edge_seen = true;
+        else if (approach_commit_->edge_seen)
+        {
+            std::println("[approach] '{}': the producer withdrew epoch {} (our executing edge is gone) — "
+                         "adopting its offer, epoch {}", step.target.node_name, approach_commit_->epoch,
+                         epoch.value());
+            std::fflush(stdout);
+            approach_commit_.reset();
+        }
+    }
 
     if (not approach_commit_.has_value())
     {
@@ -4062,6 +4083,27 @@ void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::Route
               << rep.e_kappa << ',' << rep.e_clear << ',' << rep.e_anchor << ',' << rep.e_gauge << '\n';
 }
 
+void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &affordance_manager,
+                                                       const TimeSource &time_source)
+{
+    // ── NO ROUTE FOR LONG ⇒ REPORT UNREACHABLE (2026-10-09) ─────────────────────────────────────────────
+    // The HOLD below (drive_point_target) never ended: the repair stage's unroutable_at_ record only applies
+    // while world_hash() is unchanged, and the live obstacle layer changes it every cycle, so a claimed
+    // standpoint with no route was held for ever ("HOLDING — no route", robot parked for minutes) while the
+    // producer offered fresh epochs the approach commitment refused to follow. The protocol's answer is the
+    // consumer's verdict: report Unreachable, and the producer sets the standpoint aside and offers another.
+    // 5 s = several replans' worth of no route (a liveness constant, flagged).
+    if (no_route_since_ms_ != 0 and time_source() - no_route_since_ms_ > 5000)
+    {
+        std::println("[controller] no route for {:.1f} s — reporting Unreachable to the producer",
+                     (time_source() - no_route_since_ms_) / 1000.0);
+        std::fflush(stdout);
+        affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
+        approach_commit_.reset();
+        no_route_since_ms_ = 0;
+    }
+}
+
 void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      rc::TrajectoryController &path_controller,
                                      ControllerObstacleTracker &obstacle_tracker,
@@ -4070,6 +4112,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      rc::AffordanceManager &affordance_manager,
                                      const TimeSource &time_source)
 {
+    report_unreachable_if_no_route(affordance_manager, time_source);
     if (!params_ || params_->obstacle_creation_enabled)
         obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
     // Proactive scene-level "model anything the concept agents don't" is now owned by the dedicated
@@ -4843,10 +4886,32 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     if (!path_controller.is_active())
     {
+        // ── THE PATH ENDED SHORT OF THE STANDPOINT (2026-10-09) ─────────────────────────────────────────────
+        // The follower reports goal_reached when its PATH is done; arrival_is_real refused it (live: 0.77 m from
+        // the standpoint, 1714 such "arrivals" in 90 s) and this branch then stopped the robot for ever — no
+        // replan, no verdict to the producer. Drop the plan so the next cycle replans; if the path keeps ending
+        // short for 5 s (the same liveness constant as no-route), report Unreachable so the producer moves on.
+        if (last_target_info_.has_value() and last_target_info_->from_affordance)
+        {
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            if (short_path_since_ms_ == 0) short_path_since_ms_ = time_source();
+            else if (time_source() - short_path_since_ms_ > 5000)
+            {
+                std::println("[controller] path keeps ending {:.2f} m short of '{}' for {:.1f} s — reporting "
+                             "Unreachable to the producer", d_here, last_target_info_->node_name,
+                             (time_source() - short_path_since_ms_) / 1000.0);
+                std::fflush(stdout);
+                affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
+                approach_commit_.reset();
+                short_path_since_ms_ = 0;
+            }
+        }
         clear_tracking_state();
         note_no_command(); motion_commander.stop_robot();
         return;
     }
+    short_path_since_ms_ = 0;   // following a path
 
     // ── THE CARROT GUARD WAS REMOVED, AND WHY IT SHOULD NOT COME BACK AS A GATE ──────────────────
     // The observation behind it is real: clip_carrot_to_reachable can pull the carrot onto the robot,

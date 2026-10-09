@@ -1,0 +1,30 @@
+# BASIC FLEET in room-ESTIMATION mode (2026-10-09, room_concept/docs/superpowers/plans/
+# 2026-10-09-startup-proto-room-and-layout-explorer.md). Same format as cognitive.toml.
+#
+#   1. sensorimotor base + Webots:   python3 subcognitive.py sub.toml
+#   2. this fleet:                   python3 cognitive.py fleet_basic.toml
+#
+# room_concept runs etc/config.toml with [RoomShape] MapMode = "estimate" and [StartupProto] Enabled = true:
+# the room exists from the first second as a PROTO-ROOM (room_1 + `proto` self-edge) whose polygon is the
+# LiDAR's confirmed free space; the controller drives the robot to the layout explorer's afford_room
+# targets inside it; the proto is promoted in place when the learnt layout is publishable.
+# What to watch: room_concept/tmp/proto_room.csv (one row per pose update, `reason` on every row).
+#
+# robot_concept is NOT in this file (2026-10-09, user): it is started separately and must be up first. Then
+# room_concept (sweeps leftover rooms, births the proto), residual_concept, and the controller last.
+# Stop with Ctrl-C / SIGTERM — never kill -9 (owned nodes would leak into the shared graph).
+
+[[components]]
+name = "room_concept"
+cwd  = "~/robocomp/components/active_inference/room_concept"
+cmd  = "bin/room_concept etc/config.toml"
+
+[[components]]
+name = "residual_concept"
+cwd  = "~/robocomp/components/active_inference/residual_concept"
+cmd  = "bin/residual_concept etc/config.toml"
+
+[[components]]
+name = "controller"
+cwd  = "~/robocomp/components/active_inference/controller"
+cmd  = "bin/controller etc/config.toml"

@@ -250,6 +250,13 @@ private:
     // single source of obstacle truth once verified stable).
     rc::OccupancyGrid grid_;
     bool              grid_ready_ = false;
+    // ── RE-BINDING (2026-10-09, start-up proto-room plan, decision 7) ───────────────────────────────────
+    // The room this grid was sized for, and the bounds it covers. room_concept's start-up proto-room is
+    // the room from the first second and its polygon GROWS as free space is confirmed; and a room can be
+    // deleted and re-born. So the grid is re-sized when the room changes or its polygon outgrows these
+    // bounds, and room_node_id_ is re-resolved after its node is deleted (del_node_slot).
+    std::uint64_t     grid_room_id_ = 0;
+    float             grid_xmn_ = 0.f, grid_ymn_ = 0.f, grid_xmx_ = 0.f, grid_ymx_ = 0.f;
 
     // Collaborators (constructed in initialize()). Declared in dependency order.
     std::unique_ptr<rc::ResidualSceneGraph>    scene_graph_;

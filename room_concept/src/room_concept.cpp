@@ -2332,6 +2332,7 @@ namespace rc
     {
         init_use_polygon_ = false;
         init_polygon_vertices_.clear();
+        plain_slam_seed_ = true;   // a fresh room to learn: the scan map starts again from the current pose
         wall_map_ = wallmap::WallMap{};
         wall_map_.params = params.wall_map;
         box_channel_.configure(params.box);
@@ -2820,7 +2821,13 @@ namespace rc
                 Eigen::Vector2f lo = Rm * poly.verts.front(), hi = lo;
                 for (const auto& v : poly.verts) { const Eigen::Vector2f q = Rm * v; lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
                 const Eigen::Vector2f c = Eigen::Rotation2Df(rot) * ((lo + hi) * 0.5f);
-                reanchor_map_frame(c, rot);
+                // ★ NOT while a start-up proto-room owns the published frame (2026-10-09). That frame is frozen at
+                //   the robot's initial pose, so re-centring the internal one buys nothing; and this early in a run
+                //   the re-anchor rotated the MAP while the robot pose was not re-expressed with it — the localiser
+                //   then snapped the robot to the rotated map (heading -0.53 -> 2.88 rad while driving) and the
+                //   controller steered by the jump. Internal frame == published frame until promotion.
+                if (not freeze_internal_frame_.load(std::memory_order_relaxed))
+                    reanchor_map_frame(c, rot);
                 wall_reanchored_ = true;
                 poly = wall_map_.build_polygon_with(window_wall_information());
                 pub  = wall_map_.manhattan_polygon_with(window_wall_information());
@@ -3648,7 +3655,27 @@ namespace rc
         {
             auto newest_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
             auto pa = newest_cpu.accessor<float, 1>();
-            wall_slam_observe(sampled_points, Eigen::Vector3f(pa[0], pa[1], pa[2]), lidar.second);
+            Eigen::Vector3f wall_pose(pa[0], pa[1], pa[2]);
+            // ── PLAIN SLAM OWNS THE POSE WHILE THE ROOM IS LEARNT (scan_slam.h) ──────────────────────────────
+            // The scan is registered against the occupancy map of the scans already registered, from the odometry
+            // prediction; the result REPLACES the newest slot's pose, and the solve below is skipped. The wall map
+            // then observes at a pose it did not produce — it can no longer drag the pose it is built from.
+            if (plain_slam_driving())
+            {
+                if (plain_slam_seed_)
+                {
+                    plain_slam_.reset();
+                    plain_slam_.set_pose(wall_pose - rec_odom_delta_);   // step() adds this frame's delta back
+                    plain_slam_seed_ = false;
+                }
+                std::vector<Eigen::Vector2f> xy;
+                xy.reserve(sampled_points.size());
+                for (const auto& q : sampled_points) xy.emplace_back(q.x(), q.y());
+                wall_pose = plain_slam_.step(rec_odom_delta_, xy);
+                window_mgr_.newest().pose = torch::tensor({wall_pose.x(), wall_pose.y(), wall_pose.z()},
+                    torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+            }
+            wall_slam_observe(sampled_points, wall_pose, lidar.second);
         }
 
         // ===== CORNER DETECTION (optional, controlled by EnableCornerTracking) =====
@@ -3919,7 +3946,8 @@ namespace rc
 
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [last_loss, iterations] =
-                  (params.optimizer_type == "GN" or estimating()) ? run_gn_loop(selected_prior)
+                  plain_slam_driving() ? std::pair<float, int>{0.f, 0}       // the pose is plain SLAM's (above)
+                : (params.optimizer_type == "GN" or estimating()) ? run_gn_loop(selected_prior)
                 : (params.optimizer_type == "LBFGS") ? run_lbfgs_loop(selected_prior)
                                                      : run_adam_loop(selected_prior);
             last_t_adam_ms_ = std::chrono::duration<float, std::milli>(
@@ -3973,6 +4001,11 @@ namespace rc
         {
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [covariance, condition_number] = compute_posterior_covariance(points_tensor);
+            if (plain_slam_driving())
+            {
+                covariance = plain_slam_.covariance();   // the posterior of the pose that was actually used
+                current_covariance = covariance;
+            }
             res.covariance = covariance;
             res.condition_number = condition_number;
             hess_pre_adaptive_ = res.covariance;   // before apply_adaptive_covariance floors it

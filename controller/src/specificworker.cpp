@@ -26,6 +26,7 @@
 #include <fps/fps.h>
 
 #include <QTimer>
+#include <QFile>
 
 #include <algorithm>
 #include <chrono>
@@ -529,6 +530,31 @@ void SpecificWorker::initialize()
 	// ★ONE BUFFER. The viewer and the control path (path_controller_ above) read the same registered
 	// room cloud. They were split while the control path held its scan back a frame and the overlay
 	// should not pay that lag; the hold is gone, so the split would now only cost a second transform.
+	// ── REMOTE RUN/STOP (2026-10-09): a file another process (an operator script, an assistant) can drop
+	// into this agent's directory to press the same buttons. `remote_cmd.txt`, one word per line: `run` or
+	// `stop`. Read and DELETED every 300 ms, so a command fires exactly once; each is echoed to the log.
+	// Run uses whatever drive mode is selected in the window, exactly like the button.
+	remote_run_  = gui.mission.on_run;
+	remote_stop_ = gui.mission.on_stop;
+	{
+		auto *t = new QTimer(this);
+		connect(t, &QTimer::timeout, this, [this]()
+		{
+			QFile f(QStringLiteral("remote_cmd.txt"));
+			if (not f.exists() or not f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+			const QString all = QString::fromUtf8(f.readAll());
+			f.close();
+			f.remove();
+			for (const QString &raw : all.split('\n', Qt::SkipEmptyParts))
+			{
+				const QString c = raw.trimmed().toLower();
+				if (c == "run" and remote_run_)        { std::println("[remote] RUN");  remote_run_(1, false); }
+				else if (c == "stop" and remote_stop_) { std::println("[remote] STOP"); remote_stop_(); }
+				else std::println("[remote] ignored '{}' (expected run | stop)", c.toStdString());
+			}
+		});
+		t->start(300);
+	}
 	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
 	// The Stick <-> Loose slider must open on the L the tracker is actually running (load_params ran
 	// long before this). Its predecessor opened at a hard-coded midpoint that disagreed with the config.
@@ -696,6 +722,8 @@ void SpecificWorker::compute()
 
 	if (!ensure_current_plan(*step))
 	{
+		// No route held too long ⇒ tell the producer (the early return below never reaches execute_plan).
+		session_.report_unreachable_if_no_route(affordance_manager_, [this]() { return current_time_ms(); });
 		// ★THE DISPLAY MUST BE UPDATED HERE TOO, and its absence is why a hold looked like a frozen
 		// viewer. compute() used to return on this path without touching it, so the canvas kept the
 		// last frame from before the hold — for as long as the hold lasted, which for a failed repair

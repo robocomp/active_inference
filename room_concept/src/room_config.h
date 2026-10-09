@@ -217,6 +217,19 @@ struct RoomConfig
     /// this. p_cross itself is a continuous posterior with no gate inside; turning it into the discrete act
     /// of creating a node needs a loss-based decision level, and this is it. Flagged per CLAUDE.md.
     float       PROTO_ROOM_BIRTH_PROB = 0.95f;  // config: ProtoRoom.BirthProb
+    /// StartupProto.*: in an ESTIMATION run the room exists from the first second as a proto-room
+    /// (`room_1` + `proto` self-edge, frame = the robot's initial pose, frozen), whose polygon is CONFIRMED
+    /// FREE SPACE (free_space_polygon.h) and whose afford_room is driven by the live layout explorer
+    /// (layout_explorer.h); promoted in place (same id, same frame) when the learnt layout is publishable.
+    /// Enabled=false restores the old behaviour exactly: nothing is published before map_ready.
+    bool  STARTUP_PROTO_ENABLED        = false;   // config: StartupProto.Enabled
+    float STARTUP_PROTO_CELL           = 0.05f;   // config: StartupProto.Cell (m, free-space raster)
+    float STARTUP_PROTO_HALF_SPAN      = 20.f;    // config: StartupProto.HalfSpan (m, raster extent about the start)
+    float STARTUP_PROTO_ERODE_M        = -1.f;    // config: StartupProto.ErodeM (m; <0 = body radius 0.5*max(W,L))
+    int   STARTUP_PROTO_MAX_VERTS      = 64;      // config: StartupProto.MaxVerts
+    int   STARTUP_PROTO_PUBLISH_MS     = 1000;    // config: StartupProto.PublishPeriodMs (polygon republish throttle)
+    float STARTUP_PROTO_EXPLORER_CLEARANCE = -1.f; // config: StartupProto.ExplorerClearance (m; <0 = circumscribed radius)
+    float STARTUP_PROTO_REPLAN_S       = 15.f;    // config: StartupProto.ReplanS (s between explorer re-evaluations)
     /// Where the calibration WINDOW is kept between runs. Evidence (episodes + closed pivots), never
     /// the fitted parameters — restoring a fitted value as a prior mean is the ratchet that walked
     /// the gyro bias to the wrong sign. Delete the file, or press Reset in the calibration window,

@@ -117,7 +117,8 @@ public:
     // room node exists in the DSR graph — the same condition consumers gate on — RED while the
     // localizer is still accumulating consecutive stable frames (shown as n/required). GUI thread only.
     /// `searching` (a global grid search is running or just finished) outranks the other two states.
-    void set_room_stable(bool stable, int stable_frames, int frames_required, bool searching = false);
+    void set_room_stable(bool stable, int stable_frames, int frames_required, bool searching = false,
+                         bool estimating = false);   ///< estimating: the room is still a start-up PROTO-room
 
     // Push one ~1 Hz sample of the RT-publish rate (corrected pose) and optimizer rate to the live
     // rate plot in the lower frame. Predicted poses are no longer published, so there is no pred rate.

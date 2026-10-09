@@ -129,6 +129,19 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "config: ProtoRoom.Enabled");
     reader.opt<float, double>("ProtoRoom.BirthProb", p.PROTO_ROOM_BIRTH_PROB,
             "config: ProtoRoom.BirthProb");
+    reader.opt<bool>("StartupProto.Enabled", p.STARTUP_PROTO_ENABLED,
+            "estimation run: publish a proto-room (confirmed free space) from the first second");
+    reader.opt<float, double>("StartupProto.Cell", p.STARTUP_PROTO_CELL, "m — free-space raster cell");
+    reader.opt<float, double>("StartupProto.HalfSpan", p.STARTUP_PROTO_HALF_SPAN, "m — raster half extent");
+    reader.opt<float, double>("StartupProto.ErodeM", p.STARTUP_PROTO_ERODE_M,
+            "m — erosion of the free space (<0 = body radius 0.5*max(width,length))");
+    reader.opt<int>("StartupProto.MaxVerts", p.STARTUP_PROTO_MAX_VERTS, "vertex budget of the ring");
+    reader.opt<int>("StartupProto.PublishPeriodMs", p.STARTUP_PROTO_PUBLISH_MS,
+            "ms between proto polygon republishes");
+    reader.opt<float, double>("StartupProto.ExplorerClearance", p.STARTUP_PROTO_EXPLORER_CLEARANCE,
+            "m — explorer standpoints this far inside the ring (<0 = circumscribed body radius)");
+    reader.opt<float, double>("StartupProto.ReplanS", p.STARTUP_PROTO_REPLAN_S,
+            "s between layout-explorer re-evaluations");
     reader.opt<std::string>("RoomConcept.CalibStateFile", p.CALIB_STATE_FILE,
             "config: RoomConcept.CalibStateFile");
     reader.opt<float, double>("RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale,
@@ -229,6 +242,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                 "m");
         reader.opt<bool>("RoomShape.FreezeLayoutWhenPublishable", wm.freeze_when_publishable,
                 "── FREEZE THE LAYOUT once it first becomes publishable (RoomShape.FreezeLayoutWhenPublishable) An EXPERIMENT switch, not a modelling term, and off by…");
+        reader.opt<bool>("RoomShape.PlainSlam", room_concept.params.plain_slam,
+                "RoomShape.PlainSlam — Estimate-mode pose from plain scan-to-occupancy SLAM, not the layout (2026-10-09)");
         reader.opt<bool>("RoomShape.RecordWallInput", room_concept.params.record_wall_input,
                 "RoomShape.RecordWallInput — DIAGNOSTIC RECORDER (2026-09-17), default OFF");
         reader.opt<bool>("RoomShape.EnableLevel2", wm.enable_level2,

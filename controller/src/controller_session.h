@@ -595,6 +595,13 @@ private:
     // Rate limit for the planner-failure HOLD message. Planner failure is deliberately NOT routed into the
     // stuck/escape reflex (reversing cannot fix a planner), so this line is the only signal that it happened.
     std::uint64_t last_no_route_log_ms_ = 0;
+    std::uint64_t no_route_since_ms_    = 0;   ///< first cycle of the current no-route HOLD (0 = routing fine)
+    std::uint64_t short_path_since_ms_  = 0;   ///< first cycle the path ENDED short of an affordance standpoint
+public:
+    /// No route for > 5 s ⇒ report Unreachable to the affordance producer. Called on EVERY cycle the worker
+    /// fails to plan (ensure_current_plan false returns before execute_plan) and from execute_plan.
+    void report_unreachable_if_no_route(rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
+private:
 
     // Grid planner with EXACT robot-footprint collision. Replaces the visibility graph: it rasterises the same
     // obstacle polygons once into a fixed grid, so cost is independent of polygon COUNT (measured on the real
@@ -769,6 +776,7 @@ private:
         Eigen::Vector2f last_offer{0.f, 0.f};          // the most recent thing the producer published
         Eigen::Vector2f last_offer_counted{0.f, 0.f};  // the last offer the counter below has counted
         int deferred = 0;                   // republishes held off — REPUBLISHES, not cycles
+        bool edge_seen = false;             // our `executing` edge has been observed in the graph
     };
     // ── WHY THE PIPELINE REFUSED TO PLAN THIS CYCLE ──────────────────────────────────────────────
     // ★ensure_current_plan() returning false is the one outcome with NO diagnosis attached, and it is

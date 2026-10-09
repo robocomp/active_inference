@@ -96,6 +96,7 @@ LIST(APPEND SOURCES
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
   ../src/room_scene_graph.cpp
+  ../src/layout_explorer.cpp
   ../src/lidar_ingestor.cpp
   ../src/imu_ingestor.cpp
   ../src/room_viewer.cpp

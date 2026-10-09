@@ -622,7 +622,7 @@ void RoomViewer::set_rt_rate_text(const QString& text)
         rt_rate_label_->setText(text);
 }
 
-void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required, bool searching)
+void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required, bool searching, bool estimating)
 {
     if (custom_widget_ == nullptr or custom_widget_->lbl_room_stable == nullptr)
         return;
@@ -632,10 +632,13 @@ void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_requ
     // SEARCHING outranks both other states: while a global grid search runs the pose is being
     // relocated wholesale, so "ROOM STABLE" would be actively misleading — the room node still
     // exists, but the robot's place in it is exactly what is currently in question.
-    const int state = searching ? 2 : (stable ? 1 : 0);
+    // ESTIMATING (2026-10-09): a start-up proto-room has a node, so "ROOM STABLE" would claim a surveyed
+    // layout while the robot is still exploring it. Shown until the proto is promoted.
+    const int state = searching ? 2 : estimating ? 3 : (stable ? 1 : 0);
 
-    const QString text = searching ? QStringLiteral("SEARCHING…")
-                       : stable    ? QStringLiteral("ROOM STABLE")
+    const QString text = searching  ? QStringLiteral("SEARCHING…")
+                       : estimating ? QStringLiteral("ESTIMATING ROOM…")
+                       : stable     ? QStringLiteral("ROOM STABLE")
                                    : QStringLiteral("STABILIZING %1/%2")
                                          .arg(stable_frames).arg(std::max(1, frames_required));
 
@@ -651,8 +654,8 @@ void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_requ
         static constexpr const char* kStyle =
             "QLabel { background-color: %1; color: white; border: 1px solid %2;"
             " border-radius: 4px; font-weight: bold; }";
-        const QString bg     = state == 2 ? "#c9791a" : state == 1 ? "#1e8b3a" : "#b02020";
-        const QString border = state == 2 ? "#8c520f" : state == 1 ? "#145c26" : "#7a1616";
+        const QString bg     = (state == 2 or state == 3) ? "#c9791a" : state == 1 ? "#1e8b3a" : "#b02020";
+        const QString border = (state == 2 or state == 3) ? "#8c520f" : state == 1 ? "#145c26" : "#7a1616";
         lbl->setStyleSheet(QString(kStyle).arg(bg, border));
         room_stable_shown_ = state;
     }

@@ -142,6 +142,10 @@ private:
     /// Throttled (BpearlMountRate): helios verticals from the FULL helios sweep, then the bpearl (permanent
     /// reader, geom_bpearl_reader_ kept alive) for the floor and its verticals.
     void mount_factor_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
+    /// 2 Hz: low returns (floor < z < robot top) of the full helios sweep and the bpearl -> RoomConcept mailbox.
+    void low_obstacle_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
+    std::int64_t low_obs_ms_ = 0, last_bp_low_stamp_ = std::numeric_limits<std::int64_t>::min();
+    std::unique_ptr<rc::media::LidarPlaneReader> low_bpearl_reader_;
     /// The localiser's wall map in the BODY frame at the pose carried to `stamp_ms`; false if none yet.
     /// gap_s / speed / heading (optional): the stamp gap sweep - snapshot, the snapshot's speed and heading
     bool walls_at(std::int64_t stamp_ms, std::vector<rc::mountf::VerticalMount::Wall>& walls,

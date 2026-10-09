@@ -157,6 +157,12 @@ void SpecificWorker::compute()
     {
         last_door_scan_ms_ = now_ms;
         auto open_doors = doors_.refresh(*G, *inner_eigen_, rc::room::current_room_frame(*G));
+        // The apertures come out in the GRAPH's room frame; the localiser uses them in its internal one.
+        // Identity unless the room is a promoted start-up proto, whose published frame stays at the
+        // robot's initial pose while the estimator re-anchors (RoomSceneGraph::internal_from_published).
+        if (scene_graph_)
+            if (const Eigen::Affine2f T = scene_graph_->internal_from_published(); not T.matrix().isIdentity(1e-9f))
+                for (auto& d : open_doors) { d.a = T * d.a; d.b = T * d.b; }
         static std::size_t last_n = std::numeric_limits<std::size_t>::max();
         if (open_doors.size() != last_n)
         {
@@ -342,7 +348,8 @@ void SpecificWorker::compute()
         viewer_->set_room_stable(scene_graph_->room_node_created(),
                                  scene_graph_->stable_frames(),
                                  params.STABLE_FRAMES_REQUIRED,
-                                 room_concept_.is_grid_searching());
+                                 room_concept_.is_grid_searching(),
+                                 scene_graph_->room_is_startup_proto());
         t_ui_us = section_timer.nsecsElapsed() / 1000;
     }
 

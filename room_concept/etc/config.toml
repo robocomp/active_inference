@@ -1199,7 +1199,7 @@ HessianCheck            = true
 # ★ GN only. The GN Hessian is the Gauss-Newton approximation and drops second-order terms the
 #   autograd one keeps — hessian_check.csv logs both, so a regression is visible rather than
 #   theoretical. Set false to restore the old path.
-CovarianceFromSolver    = true
+CovarianceFromSolver    = true    # 2026-10-09: a false TEST was CONFOUNDED (that path never corrects the covariance in Estimate mode: sigma_x 0.32 -> 1.39 m) — reverted
 
 AdaptiveCovEnabled      = true
 WindowStrideEnabled     = true
@@ -1322,7 +1322,11 @@ BoxCoverMaxRects = 24
 # ★2026-09-24 BACK TO "given" BY DEFAULT. The estimation work continues on its branch and every
 # box-sidecar call sits inside `if (estimating())`, so this line alone decides whether any of it
 # runs. To work on the estimator: MapMode = "estimate" AND BoxLayout = true.
-MapMode = "given"
+# ★2026-10-09 "estimate" FOR THE BASIC FLEET (robot_concept + room_concept + controller + residual_concept,
+# utils/fleet_basic.toml): the room is learnt from the LiDAR, published from the first second as a START-UP
+# PROTO-ROOM ([StartupProto] below) and driven by the live layout explorer. Set "given" (and
+# [StartupProto] Enabled = false) to go back to the surveyed-layout fleet.
+MapMode = "estimate"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0
@@ -1338,13 +1342,14 @@ WallMapSigmaD        = 0.04     # m
 # itself. Answers "does the rest behave as predicted when the map stops changing?". Off = normal SLAM.
 FreezeLayoutWhenPublishable = false
 # DIAGNOSTIC: record exactly what the wall step receives per frame to tmp/wall_input_<ms>.bin (offline replay). OFF normally.
+PlainSlam = true    # 2026-10-09: while the room is learnt the pose comes from plain scan-to-occupancy SLAM (scan_slam.h), not from the provisional layout. Offline on 3 live recordings vs GT: median 0.8/1.8/1.4 cm (live was 22 cm / 1.55 m / 3.13 m)
 RecordWallInput = true
 # Level-2 features: wall columns, alcoves and corner steps, found from residual free space just
 # OUTSIDE the published polygon. On by default and worth having in a real flat. ⚠ A DOORWAY is free
 # space outside a wall, so in a plain room with an opening it is read as an alcove and the published
 # outline grows a notch that the walls themselves do not have. Set false when the room is known to be
 # a simple polygon and you want exactly what the walls say.
-EnableLevel2 = false
+EnableLevel2 = true    # 2026-10-09: ON (bench, apartamento: with L2+Rederive off the wall map pins a 4-6-wall half-room; on: IoU .94-.98 from 7 starts; 4x6 rect still 4 corners on 8/8 starts)
 # ── THE WALL DATA TERM: one residual per (slot, wall), not one per point ──────────────────────────
 # S-Graphs+ Eq. 6 in 2-D. The segment is compressed into a fitted line with its own information
 # BEFORE the solver sees it, and the WALL is transformed into the sensor frame to meet it there.
@@ -1380,7 +1385,7 @@ EnableLevel2 = false
 # Measured with the gate and the death floor in place: failing recording assoc 82-100% -> 98-100%,
 # sides 4.034 x 6.012 -> 4.040 x 5.992. ⚠ TRADE: on the healthy recording association drops 83-89%
 # -> 74-78% and the short side goes 4.019 -> 4.114. Watch the birth count.
-WallLineFactor = true
+WallLineFactor = false   # 2026-10-09 set (ii)+G5: honest bench 0/15 fail (min IoU .94) only WITHOUT CMODE+LINE; they were the Sept latch cure on the rect while driving — WATCH for the latch live
 # ── THE ASSOCIATION GATE MUST KNOW THE SEGMENTS SHARE ONE POSE ───────────────────────────────────
 # Every segment in a scan is measured from the same pose, so their innovations share a rank-3
 # component. The gate used only the DIAGONAL blocks of that joint covariance, i.e. it tested S
@@ -1400,7 +1405,7 @@ WallLineFactor = true
 # under this gate it comes out looser, so `publishable` is NOT reached (0.064 m against a 0.060 bar
 # with AbsorbSchur off; 0.202 m with it on). Geometry is unaffected. Until that is fixed the layout
 # will not be re-anchored, frozen or published — a live run tests the GATE, not the publish path.
-CommonModeGate = true
+CommonModeGate = false   # 2026-10-09 set (ii)+G5 (see WallLineFactor); per-segment gate now bounded in code (FIX-G2)
 # ── GLOBAL RE-DERIVATION (re_derive) ─────────────────────────────────────────────────────────────
 # The escape hatch from a wrong local topology: every `rederive_every_frames` (40) it traces the free
 # grid's contour and proposes a whole new cycle, which the adoption judge then accepts or reverts.
@@ -1412,7 +1417,7 @@ CommonModeGate = true
 # good 3.849 x 5.934 rectangle and the orientation was stable to 0.01 deg per frame.
 # The real fix is that a proposal must not be published before it is judged; this flag only removes
 # the proposer, and with it the ability to recover from a genuinely wrong cycle.
-EnableRederive = false
+EnableRederive = true    # 2026-10-09 set (ii)+G5: safe on the honest bench WITH the twin guard (FIX-S, splice_surrender): 30 runs, no pose > 0.11 m. Without the guard it let a 3k-pt twin displace a 25k-pt wall live.
 # ── TWIN FUSION: does a fused duplicate ALSO hand over its confidence? ────────────────────────────
 # A candidate that turns out to BE an existing wall is fused into it, and fuse() adds its 2x2
 # information block. The two are NOT in the same units: a candidate's information is the line fit's
@@ -2164,3 +2169,22 @@ Enabled   = true
 # ⚠ DECISION LEVEL on p_cross (log-odds fusion of door_open_prob and the pose's "footprint is past the
 # aperture, within its span"). The one threshold in this path; p_cross itself has no gate.
 BirthProb = 0.95
+
+# ── START-UP PROTO-ROOM (2026-10-09, docs/superpowers/plans/2026-10-09-startup-proto-room-and-layout-explorer.md)
+# Estimate mode only. From the first update the room exists as `room_1` with a `proto` self-edge, frame = the
+# robot's initial pose (FROZEN: the estimator's re-anchor is absorbed, never published). Its delimiting_polygon
+# is CONFIRMED FREE SPACE — the union of what the LiDAR's beams crossed, eroded by the body, <= MaxVerts
+# vertices — so the controller (which cannot tell proto from surveyed) plans only where it has seen floor.
+# afford_room is driven by the live layout explorer (the offline bench's EIG explorer, ported). When the
+# learnt layout becomes publishable the proto is PROMOTED IN PLACE: same id, same frame, learnt polygon, proto
+# edge deleted, afford_room handed to the epistemic planner. Everything is logged to tmp/proto_room.csv.
+# Enabled = false restores the old estimate-mode behaviour exactly (nothing published before map_ready).
+[StartupProto]
+Enabled           = true
+Cell              = 0.05    # m — free-space raster
+HalfSpan          = 20.0    # m — raster half extent about the start pose
+ErodeM            = 0.0     # m — 2026-10-09: 0 (was -1 = body radius). The controller ALREADY keeps its footprint off the polygon edge; eroding by the body too counted the margin twice and closed gaps the robot fits through. <0 = body radius
+MaxVerts          = 64      # vertex budget of the published ring
+PublishPeriodMs   = 1000    # proto polygon republish throttle
+ExplorerClearance = 0.45    # m — 2026-10-09: body circumscribed radius 0.33 + controller FootprintSafetyMarginM 0.05 + one 5 cm raster cell. At 0.33 (the old <0 default) standpoints sat where the controller's footprint could not go, and it stopped 0.2 m short. <0 = circumscribed body radius
+ReplanS           = 15.0    # s between layout-explorer re-evaluations while no claim is held
