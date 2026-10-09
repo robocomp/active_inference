@@ -72,6 +72,7 @@ LIST(APPEND LIBS
   ai_common::affordance   # affordance_manager
   ai_common::robot        # base CAPABILITY off the robot node — bounds the pose clamp
   ai_common::core         # header-only beliefs/geometry (object_anchor/, occlusion, …)
+  ai_common::status       # rc::StatusStream: live status socket + events file for tools/room_tui.py
 )
 
 # ── Sources ────────────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ LIST(APPEND SOURCES
   ../src/ground_truth_log.cpp
   ../src/door_apertures.cpp
   ../src/specificworker_presence.cpp
+  ../src/status_reporter.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
   ../src/room_concept.cpp
@@ -94,6 +96,7 @@ LIST(APPEND SOURCES
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
   ../src/room_scene_graph.cpp
+  ../src/layout_explorer.cpp
   ../src/lidar_ingestor.cpp
   ../src/imu_ingestor.cpp
   ../src/room_viewer.cpp
@@ -263,7 +266,29 @@ add_executable(wall_slam_selftest EXCLUDE_FROM_ALL
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
 )
-target_include_directories(wall_slam_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+# ── THE BENCH DRIVES THE AGENT'S OWN FOLLOWER ────────────────────────────────────────────────
+# `pursue()` was a six-line P controller written for the hand tour, whose waypoints were safe by
+# construction. It steers at a POINT, never strafes, and knows nothing about walls — and once the
+# bench grew a collision model it turned out to drive at a wall in 88 of 100 rooms.
+# The controller agent already solved path following: RouteSpline + RouteFollower + PlainTracker,
+# whose headers document the laps it cost to get right. They are pure Eigen/STL — "no Qt, no DSR"
+# by their own top-of-file claim, verified — so the bench can link them directly instead of growing
+# a second, worse follower. `controller_motion_commander` is the only DSR-bound piece and the bench
+# does not need it: BaseModel::execute already applies the real hardware limits.
+set(CTRL_SRC ${CMAKE_CURRENT_LIST_DIR}/../../controller/src)
+# The WHOLE control chain, not a tracker in isolation: TrajectoryController owns the route, the
+# ESDF it builds from the scan, the blockage/alignment logic and the Plain->PD fallback, and it IS
+# the PathWorld/FieldWorld the trackers query. 1757 lines, zero DSR/Qt references.
+target_sources(wall_slam_selftest PRIVATE
+  ${CTRL_SRC}/route_optimizer.cpp
+  ${CTRL_SRC}/route_spline.cpp
+  ${CTRL_SRC}/route_follower.cpp
+  ${CTRL_SRC}/trajectory_controller.cpp
+  ${CTRL_SRC}/trackers/plain_tracker.cpp
+  ${CTRL_SRC}/trackers/pd_tracker.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../../common/robot_footprint/robot_footprint.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../../common/robot_footprint/mesh_hull.cpp)
+target_include_directories(wall_slam_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src ${CTRL_SRC})
 target_link_libraries(wall_slam_selftest ${LIBS})
 set_target_properties(wall_slam_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 

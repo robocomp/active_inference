@@ -1,4 +1,5 @@
 #include "wall_map.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include <algorithm>
 #include <cmath>
@@ -627,10 +628,10 @@ namespace rc::wallmap
                         if (got_hi) s0 = s1 - params.stub_thickness;
                         else        s1 = s0 + params.stub_thickness;
                         if (params.debug_splice)
-                            std::printf("[level2] one-sided: unseen face placed by the thin-wall prior, s=[%.3f,%.3f]\n", s0, s1);
+                            rc::status::cprintf("[level2] one-sided: unseen face placed by the thin-wall prior, s=[%.3f,%.3f]\n", s0, s1);
                     }
                     if (params.debug_splice)
-                        std::printf("[level2] fit(%.1f cells): s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
+                        rc::status::cprintf("[level2] fit(%.1f cells): s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
                                     band_cells, s0, s1, h, front.size(), lo_side.size(), hi_side.size());
                 };
                 refit(3.f);
@@ -681,7 +682,7 @@ namespace rc::wallmap
                 if (not rectilinear)
                 {
                     if (params.debug_splice)
-                        std::printf("[level2] refused: the step would leave a non-rectilinear edge\n");
+                        rc::status::cprintf("[level2] refused: the step would leave a non-rectilinear edge\n");
                     continue;
                 }
             }
@@ -692,7 +693,7 @@ namespace rc::wallmap
             const float cost = static_cast<float>(added) * edge_code_nats(true);
             const float gain = jump_delta_nats(out, trial, c == 2 ? born_of_edge(out.wall_of_edge, e) : 0);
             if (params.debug_splice)
-                std::printf("[level2] %s %s zone %zu cells on edge %d: s=[%.2f,%.2f] h=%.2f +%d edges gain=%.1f cost=%.1f -> %s\n",
+                rc::status::cprintf("[level2] %s %s zone %zu cells on edge %d: s=[%.2f,%.2f] h=%.2f +%d edges gain=%.1f cost=%.1f -> %s\n",
                             corner ? "CORNER" : "mid-edge", c == 1 ? "matter" : "free", comp.size(), e, s0, s1, h, added, gain, cost,
                             gain > cost ? "ACCEPT" : "refuse");
             referee("level2", gain > cost, gain, cost, cost, out.verts, trial.verts);
@@ -933,12 +934,12 @@ namespace rc::wallmap
             {
                 if (params.debug_splice)
                 {
-                    std::printf("[exist-kill] wall %llu span=%.2f m (s %.2f..%.2f) bins=%d testable=%.3f < %.3f | bins:",
+                    rc::status::cprintf("[exist-kill] wall %llu span=%.2f m (s %.2f..%.2f) bins=%d testable=%.3f < %.3f | bins:",
                                 (unsigned long long)w.id, w.s_max - w.s_min, w.s_min, w.s_max, nb, testable, 2.f * bw);
-                    for (int b = 0; b < nb; ++b) std::printf(" %.1f", w.exist_bins[static_cast<size_t>(b)]);
+                    for (int b = 0; b < nb; ++b) rc::status::cprintf(" %.1f", w.exist_bins[static_cast<size_t>(b)]);
                     float S = 0.f, R = 0.f;
                     for (int b = 0; b < nb; ++b) { S += sup[static_cast<size_t>(b)]; R += ref[static_cast<size_t>(b)]; }
-                    std::printf(" | this frame sup=%.1f ref=%.1f\n", S, R);
+                    rc::status::cprintf(" | this frame sup=%.1f ref=%.1f\n", S, R);
                 }
                 w.exist_lodds = lo_clamp; continue;
             }
@@ -965,7 +966,7 @@ namespace rc::wallmap
         {
             if (w.exist_lodds > lo_clamp + 1e-3f) continue;
             if (params.debug_splice)
-                std::printf("[death-exist] wall %llu phi=%.3f d=%.3f lodds=%.1f frames=%d pts=%d bins=%zu\n",
+                rc::status::cprintf("[death-exist] wall %llu phi=%.3f d=%.3f lodds=%.1f frames=%d pts=%d bins=%zu\n",
                             (unsigned long long)w.id, w.phi, w.d, w.exist_lodds,
                             w.frames_seen, w.points_seen, w.exist_bins.size());
             fr.deaths_info.push_back({w.id, w.exist_lodds, w.frames_seen, w.points_seen});
@@ -991,7 +992,7 @@ namespace rc::wallmap
             if (params.death_floor and in_cycle and order.size() <= 4)
             {
                 if (params.debug_splice)
-                    std::printf("[death-exist] wall %llu HELD: the cycle is already at %zu edges\n",
+                    rc::status::cprintf("[death-exist] wall %llu HELD: the cycle is already at %zu edges\n",
                                 (unsigned long long)*it, order.size());
                 continue;
             }
@@ -1063,7 +1064,7 @@ namespace rc::wallmap
             if (best_eps > params.manhattan_gate_rad + 2.f * theta0_sigma())
             {
                 if (params.debug_splice)
-                    std::printf("[mh-gate] refused cand phi=%.3f d=%.3f npts=%d eps=%.1fdeg gate=%.1fdeg\n",
+                    rc::status::cprintf("[mh-gate] refused cand phi=%.3f d=%.3f npts=%d eps=%.1fdeg gate=%.1fdeg\n",
                                 c.phi, c.d, c.npts, best_eps * 180.f / kPi,
                                 (params.manhattan_gate_rad + 2.f * theta0_sigma()) * 180.f / kPi);
                 return -1;
@@ -1159,7 +1160,7 @@ namespace rc::wallmap
                     { mirror_exists = true; break; }
         const Polygon poly_cur = build_polygon();
         if (params.debug_splice)
-            std::printf("[splice] cand phi=%.3f d=%.3f s[%.2f,%.2f] npts=%d wrap=%.2f %s\n",
+            rc::status::cprintf("[splice] cand phi=%.3f d=%.3f s[%.2f,%.2f] npts=%d wrap=%.2f %s\n",
                         c.phi, c.d, c.s_min, c.s_max, c.npts, wrap_evidence,
                         wraps_behind ? "STUB-CLASS" : "boundary-class");
 
@@ -1178,7 +1179,7 @@ namespace rc::wallmap
             // WRAP-COMPLETION family below). Everything else skips anti-parallel hosts.
             const bool antiparallel = std::abs(dphi) > 3.f * kPi / 4.f;
             if (antiparallel and params.debug_splice)
-                std::printf("[splice]   antipar host %llu: dsum=%.2f ext=%d wrap_ok=%d\n",
+                rc::status::cprintf("[splice]   antipar host %llu: dsum=%.2f ext=%d wrap_ok=%d\n",
                             (unsigned long long)E->id, c.d + E->d,
                             static_cast<int>(E->has_extent), static_cast<int>(wraps_behind));
             if (antiparallel and not (wraps_behind and std::abs(c.d + E->d) < 0.35f and E->has_extent))
@@ -1350,7 +1351,7 @@ namespace rc::wallmap
                 const Eigen::Vector2f far_p  = (e0 <= e1) ? c1 : c0;
                 const float s_att = tE.dot(near_p);
                 if (params.debug_splice)
-                    std::printf("[splice]   stub geom @host %llu: near_e=%.2f far_e=%.2f s_att=%.2f span[%.2f,%.2f]\n",
+                    rc::status::cprintf("[splice]   stub geom @host %llu: near_e=%.2f far_e=%.2f s_att=%.2f span[%.2f,%.2f]\n",
                                 (unsigned long long)E->id, near_e, far_e, s_att, E->s_min, E->s_max);
                 if (near_e >= -tol and near_e <= tol
                     and far_e >= 4.f * params.exist_bin_m
@@ -1582,7 +1583,7 @@ namespace rc::wallmap
                 }
                 walls.resize(walls_before);
                 if (params.debug_splice)
-                    std::printf("[splice]   %s-variant nw=%zu ord=%zu why=%s score=%.2f host=%llu\n",
+                    rc::status::cprintf("[splice]   %s-variant nw=%zu ord=%zu why=%s score=%.2f host=%llu\n",
                                 v.is_stub ? "stub" : "bnd",
                                 v.new_walls.size(), v.ord.size(), why, score, (unsigned long long)host_id);
                 // Minimal overlap only — the old MAJORITY-of-extent bar froze a whole map: a
@@ -1597,7 +1598,7 @@ namespace rc::wallmap
         if (best_v.score < 0.f)
         {
             if (params.debug_splice and wraps_behind)
-                std::printf("[splice]   no stub variant survived for cand phi=%.3f d=%.3f\n", c.phi, c.d);
+                rc::status::cprintf("[splice]   no stub variant survived for cand phi=%.3f d=%.3f\n", c.phi, c.d);
             return -1;
         }
         // ── ORDER-QUANTIZED GLOBAL ACCEPTANCE (user design 2026-09-01) ──────────────────────────
@@ -1640,17 +1641,30 @@ namespace rc::wallmap
                     if (std::find(best_v.ord.begin(), best_v.ord.end(), *it) != best_v.ord.end()) continue;
                     const auto* w = find(*it);
                     if (w == nullptr) continue;
-                    bool held = false;
+                    const WallLandmark* held_by = nullptr;
                     for (const auto id2 : best_v.ord)
                         if (const auto* w2 = find(id2); w2 != nullptr
                             and std::abs(wrap_pi(w->phi - w2->phi)) < 0.2f
-                            and std::abs(w->d - w2->d) < 0.3f) { held = true; break; }
-                    if (held) continue;
+                            and std::abs(w->d - w2->d) < 0.3f) { held_by = w2; break; }
+                    if (held_by != nullptr)
+                    {
+                        // FIX-S: a near-parallel twin HOLDS the host's support only as far as the host's own
+                        // observations agree with the twin's line. The host's information matrix is the
+                        // precision of its line given everything it absorbed, so the Gaussian evidence of
+                        // those observations under the twin's (phi, d) instead of the host's MAP line is
+                        // 1/2 r' I r nats — zero for an identical line, decisive for a 25k-point wall moved
+                        // 17 cm (measured live 2026-10-09: wall 2 replaced by a 3k-point twin at dd=0.17,
+                        // which then slid 1.4 m with the pose). A blanket waiver below 0.3 m was that hole.
+                        const Eigen::Vector2f r(wrap_pi(w->phi - held_by->phi), w->d - held_by->d);
+                        const float ev = 0.5f * r.dot(w->information * r);
+                        if (std::isfinite(ev)) surrender += ev;
+                        continue;
+                    }
                     for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
                 }
             cost += surrender;
             if (params.debug_splice)
-                std::printf("[splice]   jump dorder=%+d dnats=%.1f cost=%.1f (code %.1f + surrender %.1f) -> %s\n",
+                rc::status::cprintf("[splice]   jump dorder=%+d dnats=%.1f cost=%.1f (code %.1f + surrender %.1f) -> %s\n",
                             dorder, dnats, cost, cost - surrender, surrender,
                             dnats > cost ? "ACCEPT" : "refuse");
             referee("splice", dnats > cost, dnats, cost, cost, poly_cur.verts, trial.verts);
@@ -1766,7 +1780,7 @@ namespace rc::wallmap
                     if (twin_exists) continue;
                 }
                 if (params.debug_splice)
-                    std::printf("[spur] wall %llu edge %d side %+d corner_s=%.2f tip_s=%.2f wrap=%.2f\n",
+                    rc::status::cprintf("[spur] wall %llu edge %d side %+d corner_s=%.2f tip_s=%.2f wrap=%.2f\n",
                                 (unsigned long long)W.id, e, side, corner_s, tip_s,
                                 static_cast<float>(net) / static_cast<float>(ntot));
                 // Trial: mirror M (extent = the overshoot, mirrored) and tip cap T (both signs).
@@ -1829,7 +1843,7 @@ namespace rc::wallmap
                         if (left.dot(We2->normal()) <= 0.f)
                         {
                             if (params.debug_splice)
-                                std::printf("[spur]     interior-fail edge %zu wall %llu dir(%.2f,%.2f) n(%.2f,%.2f)\n",
+                                rc::status::cprintf("[spur]     interior-fail edge %zu wall %llu dir(%.2f,%.2f) n(%.2f,%.2f)\n",
                                             e2, (unsigned long long)p2.wall_of_edge[e2],
                                             dirv.x(), dirv.y(), We2->normal().x(), We2->normal().y());
                             ok = false; break;
@@ -1852,7 +1866,7 @@ namespace rc::wallmap
                     if (not ok)
                     {
                         if (params.debug_splice)
-                            std::printf("[spur]   tsign %+d REFUSED: %s (%s)\n", tsign, why, p2.status.c_str());
+                            rc::status::cprintf("[spur]   tsign %+d REFUSED: %s (%s)\n", tsign, why, p2.status.c_str());
                         walls.resize(walls_before);
                         continue;
                     }
@@ -1873,7 +1887,7 @@ namespace rc::wallmap
                         const float dnats = bin_nats + e_grid;
                         const float cost = static_cast<float>(params.wrap_code_edges) * edge_code_nats(true);
                         if (params.debug_splice)
-                            std::printf("[spur]   jump dnats=%.1f (bins %.1f + grid %.1f) cost=%.1f -> %s\n",
+                            rc::status::cprintf("[spur]   jump dnats=%.1f (bins %.1f + grid %.1f) cost=%.1f -> %s\n",
                                         dnats, bin_nats, e_grid, cost, dnats > cost ? "ACCEPT" : "refuse");
                         referee("wrap", dnats > cost, dnats, cost, cost, poly.verts, p2.verts);
                         if (dnats <= cost)
@@ -1892,7 +1906,7 @@ namespace rc::wallmap
                     fr.births_info.push_back(biM);
                     fr.births++;
                     if (params.debug_splice)
-                        std::printf("[spur]   WRAPPED wall %llu: tip T=%llu mirror M=%llu (tsign %+d)\n",
+                        rc::status::cprintf("[spur]   WRAPPED wall %llu: tip T=%llu mirror M=%llu (tsign %+d)\n",
                                     (unsigned long long)w_id, (unsigned long long)T.id,
                                     (unsigned long long)M.id, tsign);
                     return index_of(M.id);
@@ -2013,7 +2027,7 @@ namespace rc::wallmap
         if (best_o.empty()) return -1;
         referee("down", true, best_margin - best_refund, -best_refund, -best_refund, cur.verts, best_t);
         if (params.debug_splice)
-            std::printf("[down] removing %d order entries, margin=%.1f nats\n", best_removed, best_margin);
+            rc::status::cprintf("[down] removing %d order entries, margin=%.1f nats\n", best_removed, best_margin);
         order = std::move(best_o);
         for (int wi = static_cast<int>(walls.size()) - 1; wi >= 0; --wi)
             if (std::find(order.begin(), order.end(), walls[static_cast<size_t>(wi)].id) == order.end()
@@ -2109,6 +2123,30 @@ namespace rc::wallmap
             }
         }
         last_obs_ts_ = timestamp_ms; last_obs_theta_ = pose.z();
+        // FIX-G2: THE BOUNDED POSE TERM of the per-segment gate (the consensus prior below stays flat). It is the product of
+        // the pose prior (what the estimator believes, pose_cov_eff) and the weak flat prior that keeps the
+        // consensus invertible along directions a scan cannot see: Lambda_p = Lambda_flat + Sigma_pose^-1.
+        // Precisions add, so no gate is ever wider than the pose posterior NOR wider than the flat prior —
+        // a ballooning posterior along an unobserved direction (measured 0.8 m, run_walhit) can no longer
+        // open the segment gate beyond what the consensus and the prior resolve. The old per-segment term
+        // H*pose_cov*H' was the unbounded version of this; the flat constants already existed (cmode_prior_*).
+        Eigen::Matrix3f Lam_prior = Eigen::Matrix3f::Zero();
+        {
+            const float sx = params.cmode_prior_sigma_xy, sa = params.cmode_prior_sigma_phi;
+            if (sx > 0.f and sa > 0.f) { Lam_prior(0, 0) = 1.f / (sx * sx); Lam_prior(1, 1) = 1.f / (sx * sx); Lam_prior(2, 2) = 1.f / (sa * sa); }
+        }
+        // Combine in COVARIANCE form, (L1+L2)^-1 = S1 - S1 (S1+S2)^-1 S1: exact for a SINGULAR pose covariance
+        // (theta-theta reads 0 in the live recording), where inverting the pose covariance is impossible and a
+        // guard that skips it silently turns this term into the flat prior alone (measured: that made the
+        // per-segment gate 1 m wide and lost the pose on both recordings).
+        Eigen::Matrix3f P_prior = Lam_prior.inverse();
+        if (pose_cov_eff.allFinite())
+        {
+            const Eigen::Matrix3f Sf = Lam_prior.inverse();
+            const Eigen::Matrix3f sum = pose_cov_eff + Sf;
+            const Eigen::Matrix3f Pc = pose_cov_eff - pose_cov_eff * sum.inverse() * pose_cov_eff;
+            if (Pc.allFinite()) P_prior = Pc;
+        }
 
         // ── Every segment in the map frame, with the covariance the association test needs ───────
         struct SegMap
@@ -2131,7 +2169,7 @@ namespace rc::wallmap
             J(1, 0) = linefit::tangent_of(sm[s].phi).dot(t);
             sm[s].Sigma_loc = J * (*cov_r) * J.transpose();   // the segment fit alone; wall + sys_cov are added per wall
             sm[s].H = H;
-            sm[s].Sigma = sm[s].Sigma_loc + H * pose_cov_eff * H.transpose();
+            sm[s].Sigma = sm[s].Sigma_loc + H * P_prior * H.transpose();   // FIX-G: bounded pose term
             sm[s].ok = sm[s].Sigma.allFinite();
             // DIRECTION EVIDENCE (update_theta0): every segment votes on the room's reference
             // direction, whatever the Manhattan gate later does with it. This is the only place
@@ -2202,7 +2240,7 @@ namespace rc::wallmap
                         {
                             corner_explained[static_cast<size_t>(s)] = 1;
                             if (params.debug_splice)
-                                std::printf("[corner-explained] seg %d npts=%d phi=%.3f at corner %d\n",
+                                rc::status::cprintf("[corner-explained] seg %d npts=%d phi=%.3f at corner %d\n",
                                             s, sgx.npts, sm[s].phi, c2);
                             bool fused_cr = false;
                             for (auto& cr : corner_residue)
@@ -2256,6 +2294,9 @@ namespace rc::wallmap
             // collapses to today's gate. The prior here is deliberately WEAK: its only job is to keep
             // Lambda invertible along directions this scan cannot see (one wall, or two parallel
             // walls), where the honest answer is "unknown", not "zero".
+            // FIX-G2: the CONSENSUS prior stays FLAT. Combining it with the pose posterior (G1) was measured
+            // to collapse association on both live recordings: the agent's covariance reads 1-3 mm while
+            // parked, which pins delta at 0 and turns the leave-one-out test into the old gate (:2259 comment).
             Eigen::Matrix3f Lp = Eigen::Matrix3f::Zero();
             const float sx = params.cmode_prior_sigma_xy, sa = params.cmode_prior_sigma_phi;
             if (sx > 0.f and sa > 0.f)
@@ -2525,7 +2566,7 @@ namespace rc::wallmap
                 // plumbing this flag deliberately does not invent.
                 // `twin_fuse_information = false` keeps the mean-only behaviour for experiments.
                 if (params.debug_splice)
-                    std::printf("[twin-fuse] wall %llu info_d %.1f + cand info_d %.1f (cand npts=%d frames=%d) — mean fused, information UNCHANGED\n",
+                    rc::status::cprintf("[twin-fuse] wall %llu info_d %.1f + cand info_d %.1f (cand npts=%d frames=%d) — mean fused, information UNCHANGED\n",
                                 (unsigned long long)wl.id, wl.information(1, 1), c.information(1, 1),
                                 c.npts, c.frames);
                 {
@@ -2634,7 +2675,7 @@ namespace rc::wallmap
                     const auto skip = [&](const char* why2)
                     {
                         if (params.debug_splice)
-                            std::printf("[cull-skip] wall %llu: %s\n",
+                            rc::status::cprintf("[cull-skip] wall %llu: %s\n",
                                         (unsigned long long)w->id, why2);
                     };
                     if (std::count(order.begin(), order.end(), pz.wall_of_edge[e]) != 1) { skip("dup-in-order"); continue; }
@@ -2673,7 +2714,7 @@ namespace rc::wallmap
                     if (ntot > 0 and 2 * nfree > ntot)
                     {
                         if (params.debug_splice)
-                            std::printf("[cull] zero-evidence wall %llu phi=%.3f d=%.3f edge through free (%d/%d)\n",
+                            rc::status::cprintf("[cull] zero-evidence wall %llu phi=%.3f d=%.3f edge through free (%d/%d)\n",
                                         (unsigned long long)w->id, w->phi, w->d, nfree, ntot);
                         splice_out(pz.wall_of_edge[e]);
                         fr.deaths++;
@@ -2701,7 +2742,7 @@ namespace rc::wallmap
                 if (best_eps > gate_eff)
                 {
                     if (params.debug_splice)
-                        std::printf("[mh-evict] wall %llu phi=%.3f pts=%d eps=%.1fdeg > gate %.1fdeg\n",
+                        rc::status::cprintf("[mh-evict] wall %llu phi=%.3f pts=%d eps=%.1fdeg > gate %.1fdeg\n",
                                     (unsigned long long)w->id, w->phi, w->points_seen,
                                     best_eps * 180.f / kPi, gate_eff * 180.f / kPi);
                     splice_out(id);
@@ -2733,7 +2774,7 @@ namespace rc::wallmap
             if (shorter <= 0.f or ov <= 0.5f * shorter) continue;
             const std::uint64_t victim = (A->points_seen < B->points_seen) ? A->id : B->id;
             if (params.debug_splice)
-                std::printf("[ghost-sweep] wall %llu retired from the cycle (same-facing same-span with %llu)\n",
+                rc::status::cprintf("[ghost-sweep] wall %llu retired from the cycle (same-facing same-span with %llu)\n",
                             static_cast<unsigned long long>(victim),
                             static_cast<unsigned long long>((victim == A->id) ? B->id : A->id));
             order.erase(std::remove(order.begin(), order.end(), victim), order.end());
@@ -2988,7 +3029,13 @@ namespace rc::wallmap
                 const size_t id = static_cast<size_t>(fgrid.idx(i, j));
                 const float l = fgrid.lodds[id];
                 const bool matter = fgrid.hits[id] >= 3 or l > 1.5f;
-                const bool fresh_free = fgrid.is_free(i, j) and fgrid.free_ms[id] >= fresh_ref_ms;
+                // FIX-B (Fable, 2026-10-09): free passage is priced in the SAME currency and at the SAME latency as
+                // matter — graded by its log-odds from the first pass — instead of only once is_free (3 passes at
+                // -0.4) is reached, while matter already counts after 2 hits (+1.0 each > 1.5). With that asymmetry,
+                // at frame 2 amputating the unswept half of the seed box always GAINED nats (live run_walhit:
+                // "[down] removing 1 order entries, margin=1.4 nats" ⇒ a half-room locked in for 20 min). Replay,
+                // 21 RNG seeds, live flags: failures 10/21 -> 2/21, the live seed IoU 0.31 -> 0.76.
+                const bool fresh_free = l < 0.f and fgrid.hits[id] < 3 and fgrid.free_ms[id] >= fresh_ref_ms;
                 float w = 0.f;
                 if (matter) w = -std::max(l, 2.f);      // claiming matter as interior costs
                 else if (fresh_free) w = -l;            // claiming fresh free as interior gains (−l > 0)
@@ -3008,7 +3055,7 @@ namespace rc::wallmap
                 else if (in_t) { ++n_free_in; e_free_in += e; } else { ++n_free_out; e_free_out += e; }
             }
         if (params.debug_splice)
-            std::printf("[gridterm] dn=%.1f | matter->in %d (%.1f) matter->out %d (%.1f) | free->in %d (%.1f) free->out %d (%.1f)\n",
+            rc::status::cprintf("[gridterm] dn=%.1f | matter->in %d (%.1f) matter->out %d (%.1f) | free->in %d (%.1f) free->out %d (%.1f)\n",
                         dn, n_mat_in, e_mat_in, n_mat_out, e_mat_out, n_free_in, e_free_in, n_free_out, e_free_out);
         return dn;
     }
@@ -3049,7 +3096,7 @@ namespace rc::wallmap
         // A challenger whose cycle has since fallen open has failed outright, whatever the nats say.
         const bool survives = pnow.closed and pinc.closed and pcha.closed and dE_now > 0.f;
         if (params.debug_splice)
-            std::printf("[trial] RESOLVE at frame %d (opened %d, dE was %.1f): now dE %.1f = grid %.1f + in %.1f - out %.1f - code %.1f (sigma %.1f), closed %d -> %s\n",
+            rc::status::cprintf("[trial] RESOLVE at frame %d (opened %d, dE was %.1f): now dE %.1f = grid %.1f + in %.1f - out %.1f - code %.1f (sigma %.1f), closed %d -> %s\n",
                         frames_observed_, trial_.opened_at, trial_.dE_at_open, dE_now, grid_now,
                         trial_.support_in, trial_.surrender, trial_.code,
                         std::sqrt(std::max(var, 0.f)), static_cast<int>(pnow.closed),
@@ -3073,7 +3120,7 @@ namespace rc::wallmap
         // Connected free component containing the robot.
         const std::vector<char> comp = free_component(robot_map);
         if (comp.empty())
-        { if (params.debug_splice) std::printf("[rederive] bail: no free component\n"); return false; }
+        { if (params.debug_splice) rc::status::cprintf("[rederive] bail: no free component\n"); return false; }
         const auto inc = [&](int i, int j) { return fgrid.in(i, j) and comp[static_cast<size_t>(fgrid.idx(i, j))] != 0; };
         // Moore boundary trace of the component, CCW.
         int si = -1, sj = -1;
@@ -3102,7 +3149,7 @@ namespace rc::wallmap
             }
         }
         if (contour.size() < 12)
-        { if (params.debug_splice) std::printf("[rederive] bail: contour %zu cells\n", contour.size()); return false; }
+        { if (params.debug_splice) rc::status::cprintf("[rederive] bail: contour %zu cells\n", contour.size()); return false; }
         // Simplify: Douglas-Peucker with the grid's own resolution as tolerance.
         std::vector<Eigen::Vector2f> simp;
         {
@@ -3126,7 +3173,7 @@ namespace rc::wallmap
             if (simp.size() > 1 and (simp.front() - simp.back()).norm() < 1e-3f) simp.pop_back();
         }
         if (simp.size() < 3)
-        { if (params.debug_splice) std::printf("[rederive] bail: simplified to %zu verts\n", simp.size()); return false; }
+        { if (params.debug_splice) rc::status::cprintf("[rederive] bail: simplified to %zu verts\n", simp.size()); return false; }
         // Ensure CCW.
         {
             float a2 = 0.f;
@@ -3316,7 +3363,7 @@ namespace rc::wallmap
         rectilinearize();
         if (new_order.size() > 1 and new_order.front() == new_order.back()) new_order.pop_back();
         if (new_order.size() < 3)
-        { if (params.debug_splice) std::printf("[rederive] bail: only %zu runs after snap\n", new_order.size()); return false; }
+        { if (params.debug_splice) rc::status::cprintf("[rederive] bail: only %zu runs after snap\n", new_order.size()); return false; }
 
         // Adopt iff the new cycle explains the observed free space BETTER (grid IoU) — the global
         // free-energy comparison, evaluated on the evidence both cycles claim to explain.
@@ -3357,7 +3404,7 @@ namespace rc::wallmap
                         }
                     if (pair_present) continue;
                     if (params.debug_splice)
-                        std::printf("[wrap-keep?] lost pair (d=%.3f pts=%d / d=%.3f pts=%d) — searching anchor\n",
+                        rc::status::cprintf("[wrap-keep?] lost pair (d=%.3f pts=%d / d=%.3f pts=%d) — searching anchor\n",
                                     fa->d, fa->points_seen, fb->d, fb->points_seen);
                     // Anchor at the SURVIVING member's entry (the measured case); insert the cap
                     // and the missing face beside it — tip end, cap sign, side and host-resume
@@ -3373,7 +3420,7 @@ namespace rc::wallmap
                     if (surv_pos < 0)
                     {
                         if (params.debug_splice)
-                            std::printf("[wrap-keep?] no anchor for the lost pair in the new cycle\n");
+                            rc::status::cprintf("[wrap-keep?] no anchor for the lost pair in the new cycle\n");
                         continue;
                     }
                     (void)miss;
@@ -3406,17 +3453,17 @@ namespace rc::wallmap
                     if (sub.empty())
                     {
                         if (params.debug_splice)
-                            std::printf("[wrap-keep?] pair's old arc longer than 5 entries — skipped\n");
+                            rc::status::cprintf("[wrap-keep?] pair's old arc longer than 5 entries — skipped\n");
                         continue;
                     }
                     if (params.debug_splice)
                     {
-                        std::printf("[wk-arc]");
+                        rc::status::cprintf("[wk-arc]");
                         for (const auto ida2 : sub)
                             if (const auto* wA = find(ida2); wA != nullptr)
-                                std::printf(" (id=%llu phi=%.2f d=%.2f pts=%d)",
+                                rc::status::cprintf(" (id=%llu phi=%.2f d=%.2f pts=%d)",
                                             (unsigned long long)wA->id, wA->phi, wA->d, wA->points_seen);
-                        std::printf("\n");
+                        rc::status::cprintf("\n");
                     }
                     bool injected = false;
                     for (const bool fwd : {true, false})
@@ -3453,20 +3500,20 @@ namespace rc::wallmap
                                 { ok2 = false; wv = "interior"; break; }
                             }
                             if (params.debug_splice and not ok2)
-                                std::printf("[wk-var] arc=%zu fwd=%d res=%d -> %s [%.60s]\n",
+                                rc::status::cprintf("[wk-var] arc=%zu fwd=%d res=%d -> %s [%.60s]\n",
                                             path.size(), static_cast<int>(fwd), resume3, wv, t2.status.c_str());
                             if (ok2)
                             {
                                 new_order = std::move(o2);
                                 injected = true;
                                 if (params.debug_splice)
-                                    std::printf("[wrap-keep] transplanted the pair's %zu-entry arc (pts=%d) into the contour cycle\n",
+                                    rc::status::cprintf("[wrap-keep] transplanted the pair's %zu-entry arc (pts=%d) into the contour cycle\n",
                                                 path.size(), fs->points_seen);
                             }
                         }
                     }
                     if (not injected and params.debug_splice)
-                        std::printf("[wrap-keep?] all transplant variants refused (surv_pos=%d)\n", surv_pos);
+                        rc::status::cprintf("[wrap-keep?] all transplant variants refused (surv_pos=%d)\n", surv_pos);
                 }
         }
         const auto grid_iou = [&](const Polygon& poly) -> float
@@ -3505,7 +3552,7 @@ namespace rc::wallmap
                 pf = fix.build_polygon();
             }
             if (fix.order.size() != new_order.size() and params.debug_splice)
-                std::printf("[rederive] self-crossing repaired: %zu -> %zu entries\n", new_order.size(), fix.order.size());
+                rc::status::cprintf("[rederive] self-crossing repaired: %zu -> %zu entries\n", new_order.size(), fix.order.size());
             new_order = fix.order;
         }
         const Polygon pnew = build_from(new_order);
@@ -3609,14 +3656,14 @@ namespace rc::wallmap
                     : (((iou_new > iou_old + 0.02f) or health_waiver) and surrender <= params.adopt_surrender_nats);
         if (params.debug_splice)
         {
-            std::printf("[rederive] runs=%zu created=%zu closed=%d dE=%.1f (grid %.1f + in %.1f - out %.1f - code %.1f) iou %.3f->%.3f -> %s [%.70s]\n",
+            rc::status::cprintf("[rederive] runs=%zu created=%zu closed=%d dE=%.1f (grid %.1f + in %.1f - out %.1f - code %.1f) iou %.3f->%.3f -> %s [%.70s]\n",
                         new_order.size(), created.size(), static_cast<int>(pnew.closed),
                         dE, e_grid, support_in, surrender, code, iou_old, iou_new,
                         adopt_ok ? "ADOPT" : "keep", pnew.status.c_str());
-            std::printf("[rederive]   margin: dE %.1f vs %.1f x sigma %.1f = %.1f nats -> %s\n",
+            rc::status::cprintf("[rederive]   margin: dE %.1f vs %.1f x sigma %.1f = %.1f nats -> %s\n",
                         dE, params.adopt_sigma_k, e_sigma, params.adopt_sigma_k * e_sigma,
                         dE > params.adopt_sigma_k * e_sigma ? "significant" : "noise");
-            std::printf("[rederive]   waiver: corner %.4f -> %.4f, gain %.1f nats vs code %.1f -> %s\n",
+            rc::status::cprintf("[rederive]   waiver: corner %.4f -> %.4f, gain %.1f nats vs code %.1f -> %s\n",
                         pold.worst_corner_sigma, pnew.worst_corner_sigma, waiver_gain, code,
                         health_waiver ? "waived" : "no");
         }
@@ -3651,7 +3698,7 @@ namespace rc::wallmap
                     if ((near2(oa, na2) and near2(ob, nb2)) or (near2(oa, nb2) and near2(ob, na2)))
                     { kept = true; break; }
                 if (not kept)
-                    std::printf("[adopt-loss] wrapped pair LOST by adoption: "
+                    rc::status::cprintf("[adopt-loss] wrapped pair LOST by adoption: "
                                 "(phi=%.3f d=%.3f pts=%d bins=%zu)/(phi=%.3f d=%.3f pts=%d bins=%zu) iou %.3f->%.3f\n",
                                 oa->phi, oa->d, oa->points_seen, oa->exist_bins.size(),
                                 ob->phi, ob->d, ob->points_seen, ob->exist_bins.size(),
@@ -3693,7 +3740,7 @@ namespace rc::wallmap
             trial_.dE_at_open = dE;
             trial_open_now = true;
             if (params.debug_splice)
-                std::printf("[trial] OPEN at frame %d: dE %.1f, iou %.3f->%.3f, %zu -> %zu edges, %d frames to prove it\n",
+                rc::status::cprintf("[trial] OPEN at frame %d: dE %.1f, iou %.3f->%.3f, %zu -> %zu edges, %d frames to prove it\n",
                             frames_observed_, dE, iou_old, iou_new, pold.verts.size(), pnew.verts.size(),
                             trial_.frames_left);
         }
@@ -3725,7 +3772,7 @@ namespace rc::wallmap
             if (adopt_ok and trial_.open and not trial_open_now)
             {
                 if (params.debug_splice)
-                    std::printf("[trial] CLOSED by a judged adoption at frame %d\n", frames_observed_);
+                    rc::status::cprintf("[trial] CLOSED by a judged adoption at frame %d\n", frames_observed_);
                 trial_ = Trial{};
             }
             return true;
@@ -3763,7 +3810,7 @@ namespace rc::wallmap
         if (weakest != 0)
         {
             if (params.debug_splice)
-                std::printf("[death-cross] wall %llu pts=%d spliced out to uncross the cycle\n",
+                rc::status::cprintf("[death-cross] wall %llu pts=%d spliced out to uncross the cycle\n",
                             (unsigned long long)weakest, weakest_pts);
             splice_out(weakest);
             return true;
@@ -3985,7 +4032,7 @@ namespace rc::wallmap
         d.fwd_dll = forward_delta(cur, trial);
         d.cur = cur; d.trial = trial;
         if (params.debug_splice)
-            std::printf("[referee] %-6s incumbent %s (%.1f vs %.1f) | forward %s (dll %.1f vs %.1f)\n",
+            rc::status::cprintf("[referee] %-6s incumbent %s (%.1f vs %.1f) | forward %s (dll %.1f vs %.1f)\n",
                         site, accepted ? "ACCEPT" : "refuse", evidence, cost,
                         d.fwd_dll > fwd_cost ? "ACCEPT" : "refuse", d.fwd_dll, fwd_cost);
         decisions.push_back(std::move(d));

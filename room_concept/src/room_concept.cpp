@@ -1,4 +1,5 @@
 #include "room_concept.h"
+#include "../../common/status_stream/status_sink.h"
 #include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 #include "pointcloud_center_estimator.h"
 #include <numeric>
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <limits>
 #include <locale>
+#include <ctime>
 #include <print>
 #include <sstream>
 #include <sys/stat.h>
@@ -2330,6 +2332,7 @@ namespace rc
     {
         init_use_polygon_ = false;
         init_polygon_vertices_.clear();
+        plain_slam_seed_ = true;   // a fresh room to learn: the scan map starts again from the current pose
         wall_map_ = wallmap::WallMap{};
         wall_map_.params = params.wall_map;
         box_channel_.configure(params.box);
@@ -2487,6 +2490,9 @@ namespace rc
             for (const auto& sg : seg.segments)
             { sphi.push_back(sg.phi); slen.push_back(std::abs(sg.s_max - sg.s_min)); }
             box_channel_.observe(points, pose, box_pose_cov_, sphi, slen);
+            // The SAME scan, below the wall band: furniture, for navigation only. It never enters
+            // the layout, the registration or the gauge — see Params::obs_z_min.
+            box_channel_.observe_obstacles(points, pose);
         }
 
         // Observation weights (range / incidence) — the SAME as the SDF term's, from each segment's own
@@ -2555,7 +2561,8 @@ namespace rc
                 wall_input_rec_.open("tmp/wall_input_" + std::to_string(ms) + ".bin", std::ios::binary | std::ios::trunc);
                 if (wall_input_rec_.is_open())
                 {
-                    const std::uint32_t version = 1;
+                    // v2 (2026-10-05): odom is THIS frame's delta, not the stride accumulator (stride_span.h)
+                    const std::uint32_t version = 2;
                     wall_input_rec_.write("WIN1", 4);
                     wall_input_rec_.write(reinterpret_cast<const char*>(&version), sizeof(version));
                     qInfo() << "[room][wall-slam] RecordWallInput: recording wall-step input to tmp/wall_input_" << ms << ".bin";
@@ -2814,7 +2821,13 @@ namespace rc
                 Eigen::Vector2f lo = Rm * poly.verts.front(), hi = lo;
                 for (const auto& v : poly.verts) { const Eigen::Vector2f q = Rm * v; lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
                 const Eigen::Vector2f c = Eigen::Rotation2Df(rot) * ((lo + hi) * 0.5f);
-                reanchor_map_frame(c, rot);
+                // ★ NOT while a start-up proto-room owns the published frame (2026-10-09). That frame is frozen at
+                //   the robot's initial pose, so re-centring the internal one buys nothing; and this early in a run
+                //   the re-anchor rotated the MAP while the robot pose was not re-expressed with it — the localiser
+                //   then snapped the robot to the rotated map (heading -0.53 -> 2.88 rad while driving) and the
+                //   controller steered by the jump. Internal frame == published frame until promotion.
+                if (not freeze_internal_frame_.load(std::memory_order_relaxed))
+                    reanchor_map_frame(c, rot);
                 wall_reanchored_ = true;
                 poly = wall_map_.build_polygon_with(window_wall_information());
                 pub  = wall_map_.manhattan_polygon_with(window_wall_information());
@@ -3471,18 +3484,9 @@ namespace rc
         // window's oldest-to-newest chain is constrained by a fraction of the motion that actually
         // happened, which under-constrains exactly the DOF this change exists to fix.
         bool stride_replace = false;
+        const Eigen::Vector3f frame_odom_delta = slot_odom_delta;   // THIS frame's motion, for the recorder
         if (params.window_stride_enabled)
         {
-            stride_delta_accum_ += slot_odom_delta;       // global-frame increments, additive
-            stride_cov_accum_   += slot_motion_cov;       // independent increments
-
-            // Preintegrated form of the same accumulation. `+=` on the covariance drops the transport
-            // term — an error in the heading accumulated so far rotates ALL the translation that
-            // follows — and with window_min_turn_rad = 0.15 rad that term is not small. chain() is the
-            // same recursion the per-sample loop uses, applied at frame granularity.
-            if (params.motion_preintegration and selected_prior.has_preint)
-                stride_preint_accum_ = rc::preint::chain(stride_preint_accum_, selected_prior.preint);
-
             if (stride_has_admitted_ and window_mgr_.size() > 1)
             {
                 const float travel = std::hypot(pred_pos.x() - stride_last_admitted_[0],
@@ -3492,22 +3496,31 @@ namespace rc
                 stride_replace = (travel < params.window_min_travel_m
                                   and turn < params.window_min_turn_rad);
             }
-            // Either way the newest slot spans back to the last admitted one.
-            slot_odom_delta = stride_delta_accum_;
-            slot_motion_cov = stride_cov_accum_;
+            // ★ What the factor spans (stride_span.h). The newest slot is always the PREVIOUS frame, so a
+            //   REPLACED frame links to the newest's predecessor and carries newest ⊕ this frame, while an
+            //   APPENDED frame links to the previous frame and carries this frame only. Until 2026-10-05
+            //   one accumulator served both and an appended slot carried the whole stride as one frame:
+            //   ±3-9 cm correction pairs at every admission. The preintegrated form is CHAINED (chain()
+            //   keeps the transport term that `+=` on the covariance drops).
+            const rc::preint::Interval *frame_preint =
+                (params.motion_preintegration and selected_prior.has_preint) ? &selected_prior.preint : nullptr;
+            const auto &span = stride_replace ? stride_span_.replace(slot_odom_delta, slot_motion_cov, frame_preint)
+                                              : stride_span_.append(slot_odom_delta, slot_motion_cov, frame_preint);
+            slot_odom_delta = span.delta;
+            slot_motion_cov = span.cov;
             // covariance() is called exactly HERE, once, on the interval the motion factor will
             // actually carry — never per frame (see the warning on Interval::covariance()).
-            if (params.motion_preintegration and stride_preint_accum_.samples > 0)
-                slot_motion_cov = stride_preint_accum_.covariance();
+            if (params.motion_preintegration and span.preint.samples > 0)
+                slot_motion_cov = span.preint.covariance();
         }
 
         // Mirror what this slot's motion factor actually got, for BOTH debug-log writers (the
         // early-exit one is in another function and can only see members).
         last_slot_motion_cov_ = slot_motion_cov;
-        if (params.motion_preintegration and params.window_stride_enabled and stride_preint_accum_.samples > 0)
+        if (params.motion_preintegration and params.window_stride_enabled and stride_span_.current().preint.samples > 0)
         {
-            last_preint_samples_    = stride_preint_accum_.samples;
-            last_preint_duration_s_ = stride_preint_accum_.duration_s;
+            last_preint_samples_    = stride_span_.current().preint.samples;
+            last_preint_duration_s_ = stride_span_.current().preint.duration_s;
         }
         else if (params.motion_preintegration and selected_prior.has_preint)
         {
@@ -3569,7 +3582,7 @@ namespace rc
         }
 
         rec_stride_replace_ = stride_replace;   // RecordWallInput (diagnostic only)
-        rec_odom_delta_     = slot_odom_delta;
+        rec_odom_delta_     = frame_odom_delta;   // v2: per FRAME (v1 recorded the stride accumulator)
         bool window_slid = false;
         if (stride_replace)
         {
@@ -3607,10 +3620,7 @@ namespace rc
             if (params.window_stride_enabled)
             {
                 stride_last_admitted_ = Eigen::Vector3f(pred_pos.x(), pred_pos.y(), pred_theta);
-                stride_has_admitted_  = true;
-                stride_delta_accum_.setZero();
-                stride_cov_accum_.setZero();
-                stride_preint_accum_ = rc::preint::Interval{};
+                stride_has_admitted_  = true;   // stride_span_ already restarted from this frame (append)
             }
         }
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
@@ -3645,7 +3655,27 @@ namespace rc
         {
             auto newest_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
             auto pa = newest_cpu.accessor<float, 1>();
-            wall_slam_observe(sampled_points, Eigen::Vector3f(pa[0], pa[1], pa[2]), lidar.second);
+            Eigen::Vector3f wall_pose(pa[0], pa[1], pa[2]);
+            // ── PLAIN SLAM OWNS THE POSE WHILE THE ROOM IS LEARNT (scan_slam.h) ──────────────────────────────
+            // The scan is registered against the occupancy map of the scans already registered, from the odometry
+            // prediction; the result REPLACES the newest slot's pose, and the solve below is skipped. The wall map
+            // then observes at a pose it did not produce — it can no longer drag the pose it is built from.
+            if (plain_slam_driving())
+            {
+                if (plain_slam_seed_)
+                {
+                    plain_slam_.reset();
+                    plain_slam_.set_pose(wall_pose - rec_odom_delta_);   // step() adds this frame's delta back
+                    plain_slam_seed_ = false;
+                }
+                std::vector<Eigen::Vector2f> xy;
+                xy.reserve(sampled_points.size());
+                for (const auto& q : sampled_points) xy.emplace_back(q.x(), q.y());
+                wall_pose = plain_slam_.step(rec_odom_delta_, xy);
+                window_mgr_.newest().pose = torch::tensor({wall_pose.x(), wall_pose.y(), wall_pose.z()},
+                    torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+            }
+            wall_slam_observe(sampled_points, wall_pose, lidar.second);
         }
 
         // ===== CORNER DETECTION (optional, controlled by EnableCornerTracking) =====
@@ -3811,6 +3841,46 @@ namespace rc
             window_mgr_.newest().object_anchors = latest_object_anchors_;
         }
 
+        // The motion model's predictive covariance grows by this cycle's increment noise whether or not the
+        // cycle is then corrected; score_surprise() scores and resets it at the next correction.
+        // The scan-to-scan innovation's per-cycle inputs (motion_noise_innov.h). innov_ok_ is set again
+        // only by a scan-only pose taken THIS cycle, so a cycle that ends on any other path breaks the chain.
+        ++innov_cycle_;
+        innov_ok_ = false;
+        cyc_U_ok_ = false;
+        cyc_odom_ = selected_prior.valid ? selected_prior.delta_pose : Eigen::Vector3f::Zero();
+        cyc_dt_s_ = selected_prior.valid ? selected_prior.dt * 1e-3f : 0.f;   // OdometryPrior::dt is in ms
+        if (selected_prior.valid and selected_prior.covariance_eigen.allFinite())
+        {
+            sur_P_pred_ += selected_prior.covariance_eigen; ++sur_open_cycles_;
+            {   // the odometry's own signed motion over the stretch, for the drift monitor (drift_monitor.h)
+                const Eigen::Vector3f &dp = selected_prior.delta_pose;
+                const float th_mid = pred_theta - 0.5f * dp[2];
+                sur_d_   += -std::sin(th_mid) * dp[0] + std::cos(th_mid) * dp[1];   // body forward = (-sin, cos)
+                sur_phi_ += dp[2];
+                sur_T_   += selected_prior.dt;
+            }
+            // The noise COMPONENTS this cycle added (motion_noise_vc.h), and their coefficient-weighted sum
+            // as applied. Only a MEASURED, preintegrated prior carries them; a stretch with any other cycle
+            // (command, fused, legacy diagonal) cannot say what the coefficients should be: it does not train.
+            const auto &np = params.odom_preint_noise;
+            if (motion_prior_selection.source == MotionPriorSource::Measured and selected_prior.has_preint
+                and np.motion_proportional)
+            {
+                const std::array<float, rc::preint::Interval::NC> kk{np.k_long, np.k_lat, np.k_lat_turn,
+                                                                     np.k_th_turn, np.k_t_trans, np.k_t_rot};
+                for (int j = 0; j < rc::preint::Interval::NC; ++j)
+                {
+                    sur_U_[j]  += selected_prior.preint.unit[j];
+                    sur_QK_    += kk[j] * selected_prior.preint.unit[j];
+                    cyc_U_[j]   = selected_prior.preint.unit[j];
+                }
+                cyc_U_ok_ = cyc_odom_.allFinite();
+            }
+            else
+                sur_mixed_ = true;
+        }
+
         // ===== EARLY EXIT CHECK =====
         // ★NOT WHILE SEARCHING (09-17) — the relocaliser's rule (5ca93b4). The early exit trusts the prediction
         // against a FIXED map and skips the solve; while the layout is still estimated there is no fixed map. With
@@ -3876,7 +3946,8 @@ namespace rc
 
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [last_loss, iterations] =
-                  (params.optimizer_type == "GN" or estimating()) ? run_gn_loop(selected_prior)
+                  plain_slam_driving() ? std::pair<float, int>{0.f, 0}       // the pose is plain SLAM's (above)
+                : (params.optimizer_type == "GN" or estimating()) ? run_gn_loop(selected_prior)
                 : (params.optimizer_type == "LBFGS") ? run_lbfgs_loop(selected_prior)
                                                      : run_adam_loop(selected_prior);
             last_t_adam_ms_ = std::chrono::duration<float, std::milli>(
@@ -3930,6 +4001,11 @@ namespace rc
         {
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [covariance, condition_number] = compute_posterior_covariance(points_tensor);
+            if (plain_slam_driving())
+            {
+                covariance = plain_slam_.covariance();   // the posterior of the pose that was actually used
+                current_covariance = covariance;
+            }
             res.covariance = covariance;
             res.condition_number = condition_number;
             hess_pre_adaptive_ = res.covariance;   // before apply_adaptive_covariance floors it
@@ -3990,7 +4066,7 @@ namespace rc
                 else
                     current_covariance *= 4.0f;
                 res.diverged = true;
-                std::println("[SAFETY] SDF optimization produced a NON-FINITE pose — falling back to {} "
+                rc::status::println("[SAFETY] SDF optimization produced a NON-FINITE pose — falling back to {} "
                              "(x={:.3f} y={:.3f} th={:.3f}); covariance inflated, corners bypassed",
                              have_odom ? "ODOMETRY" : (last_good_pose_valid_ ? "LAST GOOD POSE" : "ORIGIN"),
                              x, y, phi);
@@ -4071,7 +4147,7 @@ namespace rc
                     }
                     // FRESH FE breakdown at the settled (flipped) pose (not the stale 5-frame cache).
                     const auto bd = window_mgr_.compute_rfe_loss_breakdown(*model_, params, get_device());
-                    std::print("[FLIP] dyaw={:+.0f}deg dxy=({:+.2f},{:+.2f}) | SDF old={:.3f} new={:.3f} | "
+                    rc::status::print("[FLIP] dyaw={:+.0f}deg dxy=({:+.2f},{:+.2f}) | SDF old={:.3f} new={:.3f} | "
                                "anchorSD old={:.1f} new={:.1f} (n={}) | FE obs={:.2f} corner={:.2f} object={:.2f} | iters={}\n",
                                dth * 57.2958f, x - flip_prev_x_, y - flip_prev_y_, sdf_old, sdf_new,
                                anc_old, anc_new, nanc, bd.obs, bd.corner, bd.object, res.iterations_used);
@@ -4324,6 +4400,7 @@ namespace rc
         res.early_exit_metric = last_early_exit_metric_;
         res.pred_sdf_median   = last_pred_sdf_median_;
         res.pred_x = last_pred_pos_.x();
+        res.slot_appended = params.window_stride_enabled and not rec_stride_replace_;
         res.pred_y = last_pred_pos_.y();
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;
@@ -4334,12 +4411,38 @@ namespace rc
         res.imu_lin_segs = cyc_imu_lin_segs_;
         res.imu_dtheta          = cyc_imu_dtheta_;
         res.wheel_dtheta        = cyc_wheel_dtheta_;
+        res.heading_cov         = cyc_heading_cov_;
+        res.gyro_weight         = cyc_heading_dt_ > 0.0
+                                ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
+        res.heading_diag        = cyc_hdiag_;
+        res.heading_diag.nl_c0 = static_cast<float>(wheel_noise_.coeffs()[0]);
+        res.heading_diag.nl_c1 = static_cast<float>(wheel_noise_.coeffs()[1]);
+        res.heading_diag.nl_c2 = static_cast<float>(wheel_noise_.coeffs()[2]);
+        res.heading_diag.nl_samples = wheel_noise_.samples();
+        res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
+        res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
+        res.heading_diag.rest_dens_v  = rest_fwd_.density() * std::sqrt(2.f);   // as a |translation| density
+        res.heading_diag.rest_dens_w  = rest_rot_.density();
+        if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
+            res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
+        if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
+            res.heading_diag.dens_g = static_cast<float>(cyc_dens_g_dt_ / cyc_hdiag_.gyro_dt);
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
         // MUST come after the fields above: it reads dy_local/dx_local/imu_dtheta as the covariates
         // H. Called earlier it sees zeros, H -> 0, and the learner silently never learns anything.
         feed_motion_calibrator(res);
+        score_surprise(res, true);   // after the adaptive floor: KL vs the PUBLISHED posterior; per-axis + learner vs the solver's
+        // The scan-only pose re-taken at the CONVERGED pose (the step from there is ~0, so z is the
+        // solver's scan-alone answer), for the noise learner (motion_noise_innov.h).
+        if (params.motion_noise_innov and map_guided_checks_allowed() and not searching())
+        {
+            const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
+            scan_only_pose(window_mgr_.newest().lidar_points, res.robot_pose.translation().x(),
+                           res.robot_pose.translation().y(), est_th);
+        }
+        observe_innovation(res);
         return res;
     }
 
@@ -4548,33 +4651,62 @@ namespace rc
         // the increment collapses. At 0.25 m/s over 50 ms Delta is ~3.7 sigma, the rest hypothesis is
         // e^-6.8 down, and the increment passes through untouched. No threshold: the crossover falls
         // where the two densities meet and moves with the odometry's own noise.
+        // A cycle the rest block does not scale used the increment whole; never carry the last cycle's gain.
+        zupt_pred_gain_tr_ = zupt_pred_gain_ro_ = 1.f;
         if (params.zupt_on_prediction and selection.selected_prior.valid)
         {
             auto& d = selection.selected_prior.delta_pose;
             const float T = std::max(1e-3f, selection.selected_prior.dt * 1e-3f);
             const auto& nm = params.odom_preint_noise;
-            const float sig_p = std::sqrt(nm.zupt_density_v * nm.zupt_density_v * T);      // m
-            const float sig_r = std::sqrt(nm.zupt_density_omega * nm.zupt_density_omega * T);
             const float L     = std::max(nm.zupt_lever_m, 1e-3f);
-            // Coupled, so a pivot cannot be read as rest: a robot turning on the spot has |dp| ~ 0
-            // and must still be recognised as moving.
-            const float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
-            const float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
-            const auto moving_p = [](float m, float sigma, float span) -> float
+            float w_tr = 1.f, w_ro = 1.f;
+            if (params.zupt_pred_learn_rest)
             {
-                if (not (sigma > 0.f) or not (span > 0.f)) return 1.f;
-                const float rest   = std::exp(-0.5f * m * m / (sigma * sigma))
-                                   / std::sqrt(2.f * static_cast<float>(M_PI)) / sigma;
-                const float moving = 1.f / (2.f * span);
-                const float den = rest + moving;
-                return den > 0.f ? moving / den : 1.f;
-            };
-            // Span of the "moving" uniform: what this base could plausibly have done in T.
-            const float w_tr = moving_p(m_tr, sig_p, params.zupt_pred_v_max * T);
-            const float w_ro = moving_p(m_ro, sig_r, params.zupt_pred_w_max * T);
+                // ── IS THE BODY AT REST? A velocity state, per body-frame channel ─────────────────────
+                // See rest_density_learner.h for the three versions that failed and why this one is built
+                // as it is: a velocity Kalman filter per channel (forward, lateral, rotation) with smooth/
+                // jump process noise, the odometry noise learnt from its own innovations (so slow motion
+                // cannot inflate it), and P(moving) by Savage-Dickey on v = 0. Body frame, because a
+                // differential base translates only along its heading: one channel carries the motion.
+                if (not rest_chan_init_)
+                {
+                    rc::preint::RestMotionChannel::Params pr; pr.v0 = 1.15f;   // rotation: uniform on +-2 rad/s
+                    rest_rot_.set_params(pr);
+                    rest_chan_init_ = true;
+                }
+                // the configured |translation| density spread over two axes; only ever a one-cycle prior
+                rest_fwd_.set_prior(nm.zupt_density_v / std::sqrt(2.f));
+                rest_lat_.set_prior(nm.zupt_density_v / std::sqrt(2.f));
+                rest_rot_.set_prior(nm.zupt_density_omega);
+                const float c = std::cos(base_theta), s = std::sin(base_theta);
+                const float bx =  c * d[0] + s * d[1];        // the increment in the body frame
+                const float by = -s * d[0] + c * d[1];
+                const float pf = rest_fwd_.step(bx, T), pl = rest_lat_.step(by, T), pr = rest_rot_.step(d[2], T);
+                w_tr = 1.f - (1.f - pf) * (1.f - pl);
+                w_ro = pr;
+            }
+            else
+            {
+                // LEGACY: the per-cycle mixture with the borrowed PreintZuptDensity* -- FAILED the registered
+                // slow-approach test (2026-10-02); kept reproducible. Coupled, so a pivot is not read as rest.
+                const float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
+                const float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
+                w_tr = rc::preint::mixture_p_moving(m_tr, nm.zupt_density_v,     T, params.zupt_pred_v_max * T);
+                w_ro = rc::preint::mixture_p_moving(m_ro, nm.zupt_density_omega, T, params.zupt_pred_w_max * T);
+            }
             zupt_pred_gain_tr_ = w_tr; zupt_pred_gain_ro_ = w_ro;   // for the viewer / debug row
             d.head<2>() *= w_tr;
             d[2]        *= w_ro;
+            // ★ AND RE-ISSUE THE PREDICTION FROM THE SCALED INCREMENT. set_model_prediction() above
+            // already wrote base (+) UNSCALED Delta into the model, and that is the pose an early exit
+            // publishes -- so until 2026-10-01 this block scaled a copy nothing downstream read for the
+            // pose, and the rest hypothesis never reached the published mean it exists to act on.
+            // Measured on the first live run with it on: the selected increment fell 30x (46 -> 1.6 um
+            // per cycle) while the published pose still stepped 81 um per cycle and wandered 72 mm in
+            // 11.5 min truly still. The fallback source predicts no motion, so there is nothing to redo.
+            if (selection.source != MotionPriorSource::FallbackZero)
+                set_model_prediction(base_pos + d.head<2>(), wrap_angle(base_theta + d[2]),
+                                     selection.prediction_precision);
         }
 
         last_selected_prior_ = selection.selected_prior;
@@ -4584,6 +4716,290 @@ namespace rc
         }
         last_motion_prior_source_ = selection.source;
         return selection;
+    }
+
+    bool RoomConcept::scan_linearize(const torch::Tensor &pts, float x, float y, float th,
+                                     Eigen::Matrix3f &H, Eigen::Vector3f &bb)
+    {
+        H.setZero(); bb.setZero();
+        if (not pts.defined() or pts.size(0) == 0 or not model_) return false;
+        const auto opt = torch::TensorOptions().dtype(torch::kFloat32).device(get_device());
+        const auto pose_xy = torch::tensor({x, y}, opt);
+        const auto pose_th = torch::tensor({th}, opt);
+        const auto q = model_->sdf_query_at_pose(pts, pose_xy, pose_th, true);
+        if (not q.sdf.defined() or q.sdf.size(0) == 0 or not q.grad.defined()) return false;
+        const auto w = build_observation_weights(*model_, params, pts, pose_th, q, &doors_robot_);
+        const auto d_cpu = q.sdf.detach().to(torch::kCPU).contiguous();
+        const auto g_cpu = q.grad.detach().to(torch::kCPU).contiguous();
+        const auto w_cpu = w.detach().to(torch::kCPU).contiguous();
+        const auto p_cpu = pts.detach().to(torch::kCPU).contiguous();
+        const auto da = d_cpu.accessor<float, 1>();
+        const auto ga = g_cpu.accessor<float, 2>();
+        const auto wa = w_cpu.accessor<float, 1>();
+        const auto pa = p_cpu.accessor<float, 2>();
+        const int n = static_cast<int>(d_cpu.size(0));
+        const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
+        const float delta_h = params.rfe_huber_delta;
+        const float c = std::cos(th), sn = std::sin(th);
+        for (int i = 0; i < n; ++i)
+        {
+            const float dv = da[i];
+            if (not std::isfinite(dv)) continue;
+            const float ad = std::abs(dv);
+            const float u = (ad <= delta_h or ad < 1e-9f) ? 1.0f : delta_h / ad;   // IRLS Huber
+            const float a = 0.5f * inv_var * wa[i] * u / static_cast<float>(n);
+            // q = R(θ)·p, so ∂d/∂θ = gᵀ(J·q) = -g_x·q_y + g_y·q_x — SdfFactor::linearize, verbatim
+            const float px = pa[i][0], py = pa[i][1];
+            const float qx = c * px - sn * py, qy = sn * px + c * py;
+            Eigen::Vector3f J;
+            J << ga[i][0], ga[i][1], -ga[i][0] * qy + ga[i][1] * qx;
+            H.noalias()  += a * J * J.transpose();
+            bb.noalias() += (a * dv) * J;
+        }
+        return H.allFinite() and bb.allFinite() and H.trace() > 0.f;
+    }
+
+    void RoomConcept::scan_only_pose(const torch::Tensor &pts, float x, float y, float th)
+    {
+        innov_ok_ = false;
+        last_scan_iters_ = 0;
+        // ★ ITERATED (2026-10-08). z is DEFINED as the scan-only optimum. One Gauss-Newton step from the
+        //   dead-reckoned prediction recovered only g = 0.81-0.88 of a planted mount offset against ground
+        //   truth (z - pred = g·(gt - pred), tools/kinematic_shortfall_diag.py); the missing (1 - g) then
+        //   arrived as a burst at the next solve, which the noise learner's outlier mixture down-weighted, so
+        //   every consumer of z (noise learner, pose-field bias, kinematic mount factor) saw a shrunk signal.
+        //   Re-linearise at each new pose up to ScanOnlyIters times; stop when a step is numerically
+        //   negligible (a convergence test, not a model threshold). R = H^-1 at the FINAL pose.
+        Eigen::Vector3f z(x, y, th);
+        Eigen::Matrix3f R = Eigen::Matrix3f::Zero();
+        bool have = false;
+        for (int it = 0; it < std::max(1, params.scan_only_iters); ++it)
+        {
+            Eigen::Matrix3f H; Eigen::Vector3f bb;
+            if (not scan_linearize(pts, z.x(), z.y(), z.z(), H, bb)) break;
+            const Eigen::LDLT<Eigen::Matrix3f> ldlt(H);
+            if (ldlt.info() != Eigen::Success) break;
+            const Eigen::Vector3f step = -ldlt.solve(bb);
+            const Eigen::Matrix3f Ri = ldlt.solve(Eigen::Matrix3f::Identity());
+            if (not step.allFinite() or not Ri.allFinite() or Ri(0, 0) <= 0.f or Ri(2, 2) <= 0.f) break;
+            z += step;
+            z[2] = std::remainder(z[2], 2.f * float(M_PI));
+            R = Ri;          // the curvature at the pose this step started from; refreshed next pass
+            have = true;
+            ++last_scan_iters_;
+            if (step.head<2>().norm() < 1e-4f and std::abs(step[2]) < 1e-4f) break;
+        }
+        if (not have) return;
+        innov_z_ = z;
+        innov_R_ = 0.5f * (R + R.transpose());
+        innov_ok_ = true;
+    }
+
+    void RoomConcept::observe_innovation(UpdateResult &res)
+    {
+        if (not params.motion_noise_innov) return;
+        // The belief state, not a threshold on the data: while searching / relocalising the scan-only pose
+        // is not of the room the odometry is moving through.
+        const bool scan_ok = innov_ok_ and not searching() and not grid_search_active_.load(std::memory_order_relaxed);
+        auto &np = params.odom_preint_noise;
+        const bool fed = scan_ok and cyc_U_ok_ and innov_prev_ok_ and innov_prev_cycle_ + 1 == innov_cycle_
+                         and np.motion_proportional;
+        // ── THE ODOMETRY STEP, LAID OUT AT THE SCAN-ONLY HEADING (2026-10-08, fix B) ─────────────────────────
+        // cyc_odom_ is the predictor's step in WORLD axes, rotated with the PREDICTOR's heading. While moving that
+        // heading ran +0.1..+0.3 deg ahead of the scan-only heading (published heading vs GT +0.29 deg, scan-only
+        // +0.07 deg; run 2026-10-08 18-03), and compared against scan-only poses the difference appeared as a
+        // lateral component eps * d_fwd -- read by the kinematic mount factor as a FALSE helios yaw (+0.56 deg in
+        // a null run). Recover the body increment with the predictor's own mid-cycle heading, then lay it out at
+        // the scan-only mid-cycle heading, so z_n - z_{n-1} and the step live in the same frame.
+        Eigen::Vector3f odom_w = cyc_odom_;
+        {
+            const float th_p = res.pred_theta - 0.5f * cyc_odom_[2];                 // predictor, mid-cycle
+            const float th_z = innov_z_[2]   - 0.5f * cyc_odom_[2];                  // scan-only, mid-cycle
+            const float sp = std::sin(th_p), cp = std::cos(th_p), sz = std::sin(th_z), cz = std::cos(th_z);
+            const float b_fwd = -sp * cyc_odom_[0] + cp * cyc_odom_[1];             // body forward = (-sin, cos)
+            const float b_lat =  cp * cyc_odom_[0] + sp * cyc_odom_[1];             // body lateral = ( cos, sin)
+            if (std::isfinite(res.pred_theta))
+                odom_w = Eigen::Vector3f(-sz * b_fwd + cz * b_lat, cz * b_fwd + sz * b_lat, cyc_odom_[2]);
+        }
+        if (fed)
+        {
+            if (not noise_innov_init_)
+            {   // priors = the configured coefficients, as loaded
+                rc::preint::MotionNoiseInnov::Params vp;
+                vp.memory = params.motion_noise_memory;
+                vp.k0 = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot};
+                noise_innov_.set_params(vp);
+                noise_innov_init_ = true;
+            }
+            Eigen::Vector3f delta = innov_z_ - innov_z_prev_ - odom_w;
+            delta[2] = std::remainder(delta[2], 2.f * float(M_PI));
+            const float th = innov_z_[2] - 0.5f * cyc_odom_[2];
+            const float sn = std::sin(th), cs = std::cos(th);
+            Eigen::Matrix3f T;   // columns: body forward (-sin, cos), lateral (cos, sin), heading — in world
+            T << -sn, cs, 0.f,
+                  cs, sn, 0.f,
+                 0.f, 0.f, 1.f;
+            const Eigen::Vector3f odom_body(T.col(0).dot(odom_w), T.col(1).dot(odom_w), odom_w[2]);
+            // P(the body moved this cycle): the rest channel's own belief (RestMotionChannel), either motion
+            const float p_move = 1.f - (1.f - std::clamp(zupt_pred_gain_tr_, 0.f, 1.f)) * (1.f - std::clamp(zupt_pred_gain_ro_, 0.f, 1.f));
+            noise_innov_.observe(delta, T, cyc_U_, innov_R_ + innov_R_prev_, odom_body, p_move, cyc_dt_s_);
+            // r2 kinematic mount factor: the same delta, the learner's per-axis model variance (plan 2026-10-08)
+            if (params.mount_factors) observe_kinematic_mount(delta, T, odom_body, res);
+            if (params.motion_noise_learn)
+            {   // the coefficients the NEXT prediction is built with
+                np.k_long     = float(noise_innov_.k(0)); np.k_lat     = float(noise_innov_.k(1));
+                np.k_lat_turn = float(noise_innov_.k(2)); np.k_th_turn = float(noise_innov_.k(3));
+                np.k_t_trans  = float(noise_innov_.k(4)); np.k_t_rot   = float(noise_innov_.k(5));
+            }
+            // ── the replay log: everything the estimator saw, so it can be re-fitted offline ──
+            if (not innov_csv_.is_open())
+            {
+                std::filesystem::create_directories("tmp/noise_innov");
+                char stamp[32]; const std::time_t now = std::time(nullptr);
+                std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+                innov_csv_.open(std::string("tmp/noise_innov/innov_") + stamp + ".csv");
+                innov_csv_.imbue(std::locale::classic());
+                innov_csv_ << "ts_ms,d_fwd,d_lat,d_th,odom_fwd,odom_lat,odom_th,searching";
+                for (const char *ax : {"fwd", "lat", "th"})
+                {
+                    for (int j = 0; j < rc::preint::MotionNoiseInnov::NP; ++j) innov_csv_ << ",x" << j << '_' << ax;
+                    innov_csv_ << ",y_" << ax << ",m_" << ax;
+                }
+                innov_csv_ << ",k_long,k_lat,k_lat_turn,k_th_turn,k_t_trans,k_t_rot,s_fwd,s_lat,s_th,q_fwd,q_lat,q_th"
+                              ",z_x,z_y,z_th,r_out_fwd,r_out_lat,r_out_th,p_move,dt_s,mv_fwd,mv_lat,mv_th,z_iters\n";
+            }
+            innov_csv_ << res.timestamp_ms << ',' << T.col(0).dot(delta) << ',' << T.col(1).dot(delta) << ',' << delta[2]
+                       << ',' << odom_body[0] << ',' << odom_body[1] << ',' << odom_body[2] << ",0";
+            for (int a = 0; a < 3; ++a)
+            {
+                const auto &x = noise_innov_.last_x(a);
+                for (int j = 0; j < rc::preint::MotionNoiseInnov::NP; ++j) innov_csv_ << ',' << x(j);
+                innov_csv_ << ',' << noise_innov_.last_y(a) << ',' << noise_innov_.last_m(a);
+            }
+            for (int j = 0; j < 6; ++j) innov_csv_ << ',' << noise_innov_.k(j);
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.s(a);
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.q(a);
+            // the scan-only pose itself (the bias-field structure function is built from z over path length)
+            // and each axis's outlier responsibility
+            innov_csv_ << ',' << innov_z_[0] << ',' << innov_z_[1] << ',' << innov_z_[2];
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.last_r(a);
+            innov_csv_ << ',' << p_move << ',' << cyc_dt_s_;
+            for (int a = 0; a < 3; ++a) innov_csv_ << ',' << noise_innov_.mv(a);
+            innov_csv_ << ',' << last_scan_iters_;
+            innov_csv_ << '\n';
+        }
+        // ── the slow POSE-FIELD bias (pose_field_bias.h): learnt along unbroken chains of scan-only poses, and
+        //    its covariance added to the PUBLISHED pose when asked (the solver's own covariance never sees it) ──
+        if (params.pose_field_bias and scan_ok)
+        {
+            if (not field_bias_init_)
+            {
+                rc::PoseFieldBias::Params fp; fp.sigma0 = params.pose_field_sigma0;
+                field_bias_.set_params(fp);
+                field_bias_init_ = true;
+            }
+            // Only the part that ACCUMULATES along a path (k_j, scale), not the while-moving step: its source is
+            // ambiguous and, summed as odometry, it swallowed the whole bias signal live (2026-10-07 11-14: sigma_b
+            // 0 for the entire tour; replay without it: 47 mm, heading 18.5x -> 3.8x). Without it the estimate can
+            // only err LARGE (22-20 replay: 71 vs ~45 mm needed), never collapse to zero.
+            const float odo_var_tr = fed ? float(noise_innov_.odom_var_accum(0) + noise_innov_.odom_var_accum(1)) : 0.f;
+            field_bias_.observe(innov_z_, innov_R_, odom_w, odo_var_tr, 0.f, fed);
+            const Eigen::Matrix3f Sb = field_bias_.covariance(innov_R_);
+            res.surprise.pf_sigma_b = float(field_bias_.sigma_b());
+            res.surprise.pf_len     = float(field_bias_.length());
+            res.surprise.pf_xx      = 0.5f * (Sb(0, 0) + Sb(1, 1));
+            res.surprise.pf_tt      = Sb(2, 2);
+            if (params.pose_field_publish and Sb.allFinite()) res.covariance += Sb;
+        }
+        if (params.mount_factors)
+        {   // r2: the kinematic block and the acting eps travel to the main thread as COPIES (r1 thread rule)
+            res.mount_kin_info   = kin_mount_.info();
+            res.mount_yaw_offset = motion_calib_.yaw_offset();
+            // ... and the wall map + pose the ingest thread's vertical factor reads (one copy under a lock)
+            if (scan_ok and map_guided_checks_allowed())
+            {
+                MountSnapshot snap;
+                snap.valid = true;
+                snap.ts_ms = res.timestamp_ms;
+                const Eigen::Matrix2f Rl = res.robot_pose.linear();
+                snap.pose = Eigen::Vector3f(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
+                                            std::atan2(Rl(1, 0), Rl(0, 0)));
+                if (cyc_dt_s_ > 0.f and cyc_odom_.allFinite()) snap.vel = cyc_odom_ / cyc_dt_s_;
+                snap.polygon = nominal_room_polygon();
+                if (snap.polygon.size() >= 3)
+                {
+                    std::scoped_lock lk(mount_snap_mutex_);
+                    mount_snap_ = std::move(snap);
+                }
+            }
+            else
+            {
+                std::scoped_lock lk(mount_snap_mutex_);
+                mount_snap_.valid = false;
+            }
+        }
+        innov_prev_ok_ = scan_ok;
+        if (scan_ok) { innov_z_prev_ = innov_z_; innov_R_prev_ = innov_R_; innov_prev_cycle_ = innov_cycle_; }
+    }
+
+    // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md
+    //    Tasks 1, 1b, 5; r2.2 items 1, 4). Called from observe_innovation on `fed` cycles only. ──────────────
+    // T's columns are (FORWARD, LATERAL, heading) in world coordinates, so T.col(0).dot(delta) is the forward
+    // innovation and odom_body = (forward, lateral, dtheta) -- named fields in Cycle, never a positional pair.
+    // Row variance = the noise learner's model variance for the axis this cycle (last_m), weight 1 - its outlier
+    // responsibility (last_r); the odometry calibration's posterior / applied values / re-solve counter feed the
+    // common-mode Schur over (k_v, k_lat).
+    void RoomConcept::observe_kinematic_mount(const Eigen::Vector3f &delta, const Eigen::Matrix3f &T,
+                                              const Eigen::Vector3f &odom_body, UpdateResult &res)
+    {
+        using rc::calib::P_K_V;
+        using rc::calib::P_K_LAT;
+        // ── the odometry calibration as it stands: applied (acting) and estimated (taught) values, posterior ──
+        const auto &sol = motion_calib_.last_solve();
+        const Eigen::Vector2d applied(motion_calib_.acting(P_K_V) ? double(sol.value[P_K_V]) : 0.0,
+                                      motion_calib_.acting(P_K_LAT) ? double(sol.value[P_K_LAT]) : 0.0);
+        const Eigen::Vector2d estimate(motion_calib_.taught(P_K_V) ? double(sol.value[P_K_V]) : 0.0,
+                                       motion_calib_.taught(P_K_LAT) ? double(sol.value[P_K_LAT]) : 0.0);
+        Eigen::Matrix2d Sig = Eigen::Matrix2d::Constant(std::numeric_limits<double>::quiet_NaN());   // NaN = keep
+        if (const auto &inf = motion_calib_.last_information(); inf.episodes > 0)
+        {
+            const Eigen::Matrix<double, rc::calib::P_COUNT, rc::calib::P_COUNT> Hd = inf.H.cast<double>();
+            const Eigen::LDLT<Eigen::Matrix<double, rc::calib::P_COUNT, rc::calib::P_COUNT>> ldlt(Hd);
+            if (ldlt.info() == Eigen::Success)
+            {
+                const auto C = ldlt.solve(Eigen::Matrix<double, rc::calib::P_COUNT, rc::calib::P_COUNT>::Identity()).eval();
+                Sig << C(P_K_V, P_K_V), C(P_K_V, P_K_LAT), C(P_K_LAT, P_K_V), C(P_K_LAT, P_K_LAT);
+            }
+        }
+        kin_mount_.set_odometry(Sig, applied, estimate - applied, motion_calib_.episodes());
+        rc::mountf::KinematicMount::Cycle c;
+        c.innov_fwd = double(T.col(0).dot(delta));
+        c.innov_lat = double(T.col(1).dot(delta));
+        c.d_fwd = double(odom_body[0]); c.d_lat = double(odom_body[1]); c.dth = double(odom_body[2]);
+        c.var_fwd = noise_innov_.last_m(0);  c.var_lat = noise_innov_.last_m(1);
+        c.w_fwd = 1.0 - noise_innov_.last_r(0);  c.w_lat = 1.0 - noise_innov_.last_r(1);
+        kin_mount_.observe(c);
+        // ── per-cycle replay log: what the factor saw, plus the ACTING eps (Task 6 must show it is 0) ──
+        if (not kin_csv_.is_open())
+        {
+            std::filesystem::create_directories("tmp/mount_factors");
+            char stamp[32]; const std::time_t now = std::time(nullptr);
+            std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+            kin_csv_.open(std::string("tmp/mount_factors/kin_") + stamp + ".csv");
+            kin_csv_.imbue(std::locale::classic());
+            kin_csv_ << "ts_ms,innov_fwd,innov_lat,odom_fwd,odom_lat,odom_th,var_fwd,var_lat,w_fwd,w_lat,"
+                        "yaw_offset,kv_applied,klat_applied,mu_kv,mu_klat,sig_kv,sig_klat,episodes,"
+                        "dx,dy,psi,dx_sd,dy_sd,psi_sd\n";
+        }
+        const Eigen::Vector3d m = kin_mount_.mean(), sd = kin_mount_.sigma();
+        const Eigen::Matrix2d So = kin_mount_.sigma_odometry();
+        kin_csv_ << res.timestamp_ms << ',' << c.innov_fwd << ',' << c.innov_lat << ',' << c.d_fwd << ',' << c.d_lat << ','
+                 << c.dth << ',' << c.var_fwd << ',' << c.var_lat << ',' << c.w_fwd << ',' << c.w_lat << ','
+                 << motion_calib_.yaw_offset() << ',' << applied[0] << ',' << applied[1] << ','
+                 << estimate[0] - applied[0] << ',' << estimate[1] - applied[1] << ','
+                 << std::sqrt(std::max(0.0, So(0, 0))) << ',' << std::sqrt(std::max(0.0, So(1, 1))) << ','
+                 << motion_calib_.episodes() << ',' << m[0] << ',' << m[1] << ',' << m[2] << ','
+                 << sd[0] << ',' << sd[1] << ',' << sd[2] << '\n';
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::try_prediction_early_exit(
@@ -4698,6 +5114,11 @@ namespace rc
         // MEASURE ONLY: the diagnostics above are the point; the decision below is not ours to take while
         // the layout is still being estimated (there is no fixed map to trust the prediction against).
         if (measure_only) return std::nullopt;
+        // The scan-only pose AT THE PREDICTION, for the noise learner (motion_noise_innov.h). Taken
+        // before either decision below, so it exists on early-exit and solve cycles alike; a solve
+        // re-takes it at the converged pose.
+        if (params.motion_noise_innov)
+            scan_only_pose(points_tensor, pose_xy[0].item<float>(), pose_xy[1].item<float>(), pose_th[0].item<float>());
 
         // Widen the SDF trust threshold when the robot is rotating.
         // A theta error ε at room scale R produces SDF displacement ~R*ε.
@@ -4855,40 +5276,11 @@ namespace rc
             // says was plausible for this interval. No lambda to tune, and the units are metres and
             // radians rather than a bare number.
             {
-                const auto q = model_->sdf_query_at_pose(points_tensor, pose_xy, pose_th, true);
-                if (q.sdf.defined() and q.sdf.size(0) > 0 and q.grad.defined())
+                Eigen::Matrix3f H;
+                Eigen::Vector3f bb;
+                if (scan_linearize(points_tensor, pose_xy[0].item<float>(), pose_xy[1].item<float>(),
+                                   pose_th[0].item<float>(), H, bb))
                 {
-                    const auto w = build_observation_weights(*model_, params, points_tensor,
-                                                             pose_th, q, &doors_robot_);
-                    const auto d_cpu = q.sdf.detach().to(torch::kCPU).contiguous();
-                    const auto g_cpu = q.grad.detach().to(torch::kCPU).contiguous();
-                    const auto w_cpu = w.detach().to(torch::kCPU).contiguous();
-                    const auto p_cpu = points_tensor.detach().to(torch::kCPU).contiguous();
-                    const auto da = d_cpu.accessor<float, 1>();
-                    const auto ga = g_cpu.accessor<float, 2>();
-                    const auto wa = w_cpu.accessor<float, 1>();
-                    const auto pa = p_cpu.accessor<float, 2>();
-                    const int n = static_cast<int>(d_cpu.size(0));
-                    const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-                    const float delta_h = params.rfe_huber_delta;
-                    const float th_now = last_pred_theta_;
-                    const float c = std::cos(th_now), sn = std::sin(th_now);
-                    Eigen::Matrix3f H = Eigen::Matrix3f::Zero();
-                    Eigen::Vector3f bb = Eigen::Vector3f::Zero();
-                    for (int i = 0; i < n; ++i)
-                    {
-                        const float dv = da[i];
-                        if (not std::isfinite(dv)) continue;
-                        const float ad = std::abs(dv);
-                        const float u = (ad <= delta_h or ad < 1e-9f) ? 1.0f : delta_h / ad;
-                        const float a = 0.5f * inv_var * wa[i] * u / static_cast<float>(n);
-                        const float px = pa[i][0], py = pa[i][1];
-                        const float qx = c * px - sn * py, qy = sn * px + c * py;
-                        Eigen::Vector3f J;
-                        J << ga[i][0], ga[i][1], -ga[i][0] * qy + ga[i][1] * qx;
-                        H.noalias()  += a * J * J.transpose();
-                        bb.noalias() += (a * dv) * J;
-                    }
                     // ★ THE REGULARISER IS THE POSE'S OWN ACCUMULATED UNCERTAINTY, not one
                     // interval's motion prior. This step corrects error built up over HUNDREDS of
                     // free-running cycles, so "how far could the robot have moved in the last 50 ms"
@@ -4950,6 +5342,7 @@ namespace rc
         // it is the interesting one: between corrections the prediction runs open-loop, so these are
         // the only cycles where an accumulating channel error is visible before the optimizer hides it.
         res.pred_x = last_pred_pos_.x();
+        res.slot_appended = params.window_stride_enabled and not rec_stride_replace_;
         res.pred_y = last_pred_pos_.y();
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;
@@ -4960,6 +5353,22 @@ namespace rc
         res.imu_lin_segs = cyc_imu_lin_segs_;
         res.imu_dtheta          = cyc_imu_dtheta_;
         res.wheel_dtheta        = cyc_wheel_dtheta_;
+        res.heading_cov         = cyc_heading_cov_;
+        res.gyro_weight         = cyc_heading_dt_ > 0.0
+                                ? static_cast<float>(cyc_gyro_w_dt_ / cyc_heading_dt_) : -1.f;
+        res.heading_diag        = cyc_hdiag_;
+        res.heading_diag.nl_c0 = static_cast<float>(wheel_noise_.coeffs()[0]);
+        res.heading_diag.nl_c1 = static_cast<float>(wheel_noise_.coeffs()[1]);
+        res.heading_diag.nl_c2 = static_cast<float>(wheel_noise_.coeffs()[2]);
+        res.heading_diag.nl_samples = wheel_noise_.samples();
+        res.heading_diag.rest_gain_tr = params.zupt_on_prediction ? zupt_pred_gain_tr_ : -1.f;
+        res.heading_diag.rest_gain_ro = params.zupt_on_prediction ? zupt_pred_gain_ro_ : -1.f;
+        res.heading_diag.rest_dens_v  = rest_fwd_.density() * std::sqrt(2.f);   // as a |translation| density
+        res.heading_diag.rest_dens_w  = rest_rot_.density();
+        if (params.heading_fusion and cyc_hdiag_.total_dt > 0.f)
+            res.heading_diag.dens_w = static_cast<float>(cyc_dens_w_dt_ / cyc_hdiag_.total_dt);
+        if (params.heading_fusion and cyc_hdiag_.gyro_dt > 0.f)
+            res.heading_diag.dens_g = static_cast<float>(cyc_dens_g_dt_ / cyc_hdiag_.gyro_dt);
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
@@ -4991,6 +5400,10 @@ namespace rc
                                             res.innovation[1]*res.innovation[1]);
             apply_adaptive_covariance(res);
         }
+        // Only a polished early exit moved the estimate; otherwise the posterior IS the prediction (KL 0).
+        score_surprise(res, res.sdf_polished);
+        res.timestamp_ms = lidar_timestamp_ms;   // before observe_innovation: its log row is keyed on it
+        observe_innovation(res);
 
         model_->robot_pos.data().copy_(torch::tensor({x, y},
             torch::TensorOptions().device(get_device())));
@@ -6986,11 +7399,25 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         if (not calib_state_loaded_)
         {
             calib_state_loaded_ = true;
-            if (const std::size_t n = motion_calib_.load_state(params.calib_state_file); n > 0)
+            const std::size_t n = motion_calib_.load_state(params.calib_state_file);
+            if (n > 0)
                 qInfo().nospace() << "[calib] restored " << n << " measurements from "
                                   << QString::fromStdString(params.calib_state_file)
                                   << " (" << motion_calib_.closures() << " closed pivot(s)) — the "
                                      "window resumes, the priors do not move";
+            // Localiser thread: rc::status::event only pushes into the stream's queue.
+            rc::status::event("loaded", rc::status::Obj{}
+                                            .s("what", "motion_calib")
+                                            .s("path", params.calib_state_file)
+                                            .s("detail", std::format("{} measurements, {} closed pivot(s){}", n,
+                                                                     motion_calib_.closures(),
+                                                                     n > 0 ? "" : " (nothing on disk: priors)")));
+            if (const std::size_t d = motion_calib_.legacy_dropped(); d > 0)
+                qWarning().nospace() << "[calib] DROPPED " << d << " episode rows from "
+                                     << QString::fromStdString(params.calib_state_file)
+                                     << " — written before the heading became two factors (one shared "
+                                        "heading covariate, bias of opposite sign); no exact split exists, "
+                                        "so the window re-earns them";
         }
 
         // Drain any closed pivots first, on THIS thread, before the episode path runs. A closure is
@@ -7171,7 +7598,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     void RoomConcept::feed_motion_calibrator(UpdateResult &res)
     {
         // Params are assigned directly onto .params with no init hook, so bind on first use.
-        if (not motion_calib_.configured()) motion_calib_.configure(params.motion_calib);
+        if (not motion_calib_.configured())
+        {
+            auto mc = params.motion_calib;
+            mc.fit_sigma = params.sigma_sdf;   // the heading R's expected misfit is the localiser's own noise
+            motion_calib_.configure(mc);
+        }
         if (motion_calib_.enabled())
         {
             const float th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
@@ -7212,20 +7644,33 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             // a scale parameter is entitled to explain.
             // ⚠ The MOTION-based episode close stays — that part is independent and sound.
             const bool corrected_this_cycle = res.iterations_used > 0;
-            motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
+            // ★ THE COVARIATES ARE WHAT THE PREDICTION USED, so they carry the rest gain (2026-10-04).
+            // With rest-on-prediction the increment is scaled by P(moving) before it enters the
+            // prediction; a parameter acts on the prediction only through what got in. Unscaled, a gyro
+            // bias was regressed over every parked second the rest filter had (correctly) withheld from
+            // the prediction -- 85% of cycles on arm 7's gyro-all leg -- and its estimate was diluted.
+            // Measured there: the prediction's own per-cycle bias was +0.00045 rad/s on rest cycles and
+            // +0.00339 while moving; regressing on t_gyro x gain gives +0.00343.
+            const float g_tr = zupt_pred_gain_tr_, g_ro = zupt_pred_gain_ro_;   // 1 when the block did not scale
+            auto hc = res.heading_cov;
+            hc.th_gyro *= g_ro; hc.t_gyro *= g_ro; hc.th_wheel *= g_ro; hc.fwd_wheel *= g_tr;
+            motion_calib_.observe(res.dy_local * g_tr, res.dx_local * g_tr,
+                                  (res.imu_dtheta + res.wheel_dtheta) * g_ro,
                                   r_forward, r_lateral, r_theta,
                                   pos_var, th_var, corrected_this_cycle, res.sdf_mse,
-                                  last_cycle_dt_s_);
+                                  last_cycle_dt_s_, hc);   // wall time: the intake judges speed with it
         }
         res.calib_value = motion_calib_.last_solve().value;
         res.calib_sigma = motion_calib_.last_solve().sigma;
+        res.calib_information = motion_calib_.last_information();   // joint calib monitor (plan 2026-10-05 Task 4)
         res.calib_b_omega = motion_calib_.estimated_omega_bias();
         {
             const auto &r = motion_calib_.last_solve();
-            res.calib_informed = (r.informed[rc::calib::P_K_V]     ? 1 : 0)
-                               | (r.informed[rc::calib::P_EPS_YAW] ? 2 : 0)
-                               | (r.informed[rc::calib::P_K_OMEGA] ? 4 : 0)
-                               | (r.informed[rc::calib::P_B_OMEGA] ? 8 : 0);
+            // Bit p = parameter p informed. The low four bits keep their old meaning (k_v, eps_yaw,
+            // k_omega, b_omega); k_lat, dk_wheel and k_omega_w follow in enum order.
+            res.calib_informed = 0;
+            for (int p = 0; p < rc::calib::P_COUNT; ++p)
+                if (r.informed[p]) res.calib_informed |= (1 << p);
             res.calib_condition = r.condition;
         }
         res.calib_sigma_b_omega = motion_calib_.last_solve().sigma[rc::calib::P_B_OMEGA];
@@ -7239,8 +7684,86 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_k_w = motion_calib_.estimated_omega_scale();
         res.calib_yaw = motion_calib_.estimated_yaw_offset();
         res.calib_episodes = motion_calib_.episodes();
+        res.calib_applied = 0;
+        for (int i = 0; i < rc::calib::P_COUNT; ++i)
+            if (motion_calib_.acting(i)) res.calib_applied |= 1 << i;
         res.calib_carried = motion_calib_.carried();
         res.calib_dropped = motion_calib_.dropped();
+    }
+
+    void RoomConcept::score_surprise(UpdateResult& res, bool corrected)
+    {
+        res.surprise = {};
+        fill_noise_vc(res);
+        if (not corrected) return;
+        const Eigen::Matrix3f P_post = res.covariance;
+        if (not sur_init_)
+        {   // the first correction has no pose prior to be scored against; it only seeds the recursion
+            if (P_post.allFinite()) { sur_P_pred_ = sur_P_prev_ = P_post; reset_noise_stretch(); sur_init_ = true; }
+            sur_d_ = sur_phi_ = sur_T_ = 0.f;
+            return;
+        }
+        const float est_th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
+        const Eigen::Vector3f c{res.robot_pose.translation().x() - res.pred_x,
+                                res.robot_pose.translation().y() - res.pred_y,
+                                std::remainder(est_th - res.pred_theta, 2.f * float(M_PI))};
+        res.surprise = rc::surprise::kl_gauss(c, sur_P_pred_, P_post);
+        // Per axis in the body frame: forward = (-sin th, cos th), lateral = (cos th, sin th) on this robot.
+        const Eigen::Vector2f uf(-std::sin(est_th), std::cos(est_th)), ul(std::cos(est_th), std::sin(est_th));
+        // ★ The per-axis posterior is the SOLVER's, from BEFORE apply_adaptive_covariance. That floor sets
+        //   P(i,i) = max(P, EMA v², v²): a posterior that is a function of this very correction, which voids
+        //   E[c²] = P_pred - P_post (Fable 2026-10-04: ~200/874 corrections were floor-bound and carried
+        //   87-97% of sum c², poisoning kappa). current_covariance is the filter state the floor never
+        //   touches (res.covariance = current_covariance, then the floor edits only res). The PREDICTION
+        //   side stays on the published value: it is what prev_cov -> predict_step actually propagated.
+        const Eigen::Matrix3f P_solver = current_covariance.allFinite() ? current_covariance : P_post;
+        res.surprise.floor_bound = (P_post.diagonal() - P_solver.diagonal()).maxCoeff() > 0.f;
+        const Eigen::Matrix2f Pp = sur_P_pred_.topLeftCorner<2, 2>(), Pq = P_solver.topLeftCorner<2, 2>();
+        res.surprise.c_fwd = uf.dot(c.head<2>());  res.surprise.c_lat = ul.dot(c.head<2>());  res.surprise.c_th = c[2];
+        res.surprise.pp_fwd = uf.dot(Pp * uf);     res.surprise.pp_lat = ul.dot(Pp * ul);     res.surprise.pp_th = sur_P_pred_(2, 2);
+        res.surprise.pq_fwd = uf.dot(Pq * uf);     res.surprise.pq_lat = ul.dot(Pq * ul);     res.surprise.pq_th = P_solver(2, 2);
+        res.surprise.open_cycles = sur_open_cycles_;
+        // The motion-noise components are learnt from the SCAN-TO-SCAN innovation every cycle
+        // (observe_innovation, motion_noise_innov.h), not from this correction: the window posterior is not
+        // one Kalman update, so (c, P_pred, P_post) cannot give the gain (Fable window memo 2026-10-05).
+        fill_noise_vc(res);
+        // ── the systematic drift (drift_monitor.h): c against the stretch's own odometry motion ──
+        drift_mon_.observe(Eigen::Vector3d(res.surprise.c_fwd, res.surprise.c_lat, res.surprise.c_th),
+                           Eigen::Vector3d(std::max(res.surprise.pp_fwd - res.surprise.pq_fwd, 0.f),
+                                           std::max(res.surprise.pp_lat - res.surprise.pq_lat, 0.f),
+                                           std::max(res.surprise.pp_th  - res.surprise.pq_th,  0.f)),
+                           sur_d_, sur_phi_, sur_T_, sur_open_cycles_);
+        {
+            Eigen::Matrix3d b, se; drift_mon_.solve(b, se);
+            for (int a = 0; a < 3; ++a) for (int j = 0; j < 3; ++j)
+            { res.surprise.drift_b[3 * a + j] = float(b(a, j)); res.surprise.drift_se[3 * a + j] = float(se(a, j)); }
+            res.surprise.drift_n = int(drift_mon_.stretches());
+        }
+        sur_d_ = sur_phi_ = sur_T_ = 0.f;
+        sur_open_cycles_ = 0;
+        reset_noise_stretch();
+        // ★ Re-seed from the SOLVER's posterior, not the floored one (Fable 2026-10-05 window memo §1).
+        //   apply_adaptive_covariance sets P(i,i) = max(P, EMA v², v²) with v THIS correction, so seeding
+        //   from it made the next P_pred >= c_prev² by construction: measured pp(n)/pq(n-1) median 3.07,
+        //   p90 9.7 on heading after a floor-bound correction (vs 1.65 unfloored). The comment above about
+        //   prev_cov -> predict_step concerns a path the window never reads while CovarianceFromSolver.
+        const Eigen::Matrix3f &seed = P_solver.allFinite() ? P_solver : P_post;
+        if (seed.allFinite()) { sur_P_pred_ = sur_P_prev_ = seed; }
+    }
+
+    void RoomConcept::reset_noise_stretch()
+    {
+        for (auto &u : sur_U_) u.setZero();
+        sur_QK_.setZero();
+        sur_mixed_ = false;
+    }
+
+    void RoomConcept::fill_noise_vc(UpdateResult &res) const
+    {
+        const auto &np = params.odom_preint_noise;
+        res.surprise.vc = {np.k_long, np.k_lat, np.k_lat_turn, np.k_th_turn, np.k_t_trans, np.k_t_rot,
+                           float(noise_innov_.s(0)), float(noise_innov_.s(1)), float(noise_innov_.s(2))};
+        res.surprise.vc_trained = not sur_mixed_ and sur_open_cycles_ > 0;
     }
 
     void RoomConcept::apply_adaptive_covariance(UpdateResult& res)
@@ -7639,6 +8162,10 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         cyc_imu_dvx_ = cyc_imu_dvy_ = cyc_imu_dpx_ = cyc_imu_dpy_ = 0.f;
         cyc_wheel_dvx_ = cyc_wheel_dvy_ = 0.f; cyc_imu_lin_segs_ = 0;
         cyc_imu_segs_ = cyc_wheel_segs_ = 0;
+        cyc_heading_cov_ = {};
+        cyc_gyro_w_dt_ = cyc_heading_dt_ = 0.0;
+        cyc_hdiag_ = {};
+        cyc_dens_w_dt_ = cyc_dens_g_dt_ = 0.0;
 
         // Integrate over all odometry readings in [win_start_ms, win_end_ms], on the clock chosen above.
         for (size_t i = 0; i < odometry_history.size(); ++i)
@@ -7703,59 +8230,136 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             const float dx_use = dx_local + (params.imu_linear_injection ? imu_dpx_seg : 0.f);
             const float dy_use = dy_local + (params.imu_linear_injection ? imu_dpy_seg : 0.f);
 
-            // THE INJECTION. Heading change from the gyro when it brackets this segment, otherwise
-            // the wheel-derived rate. Translation stays on the wheels either way -- an accelerometer
-            // cannot supply it without a drifting double integration, and the wheels are already
-            // exact there.
-            const float k_w = motion_calib_.omega_scale();
-            // A BIAS is subtracted per unit TIME, a scale multiplies the RATE. That difference is the
-            // only thing separating the two, and it is why the joint solve can find both at once.
-            const float b_w = motion_calib_.omega_bias();
-            // Per-wheel mismatch: unequal effective radii make a commanded straight line curve, so
-            // it adds heading in proportion to DISTANCE driven, not to rotation or to time.
+            // ── HEADING: two factors on one rotation ──────────────────────────────────────────────
+            // The wheels and the gyro each measure this segment's rotation, wrong in different ways,
+            // so each is corrected by ITS OWN calibration and the two are combined by precision.
+            //   wheels: dpsi_w = k_omega_w * rot*dt + dk_wheel * forward     (scrubbing, asymmetry)
+            //   gyro:   dpsi_g = k_omega * (integrated gyro) - b_omega * dt   (scale, bias)
+            // Their product is a Gaussian on the heading whose mean is the precision-weighted mean --
+            // which is what "a weighted combination of wheels and gyro" means as a generative model.
+            // The weights come from each channel's noise density PLUS its scale uncertainty, so the
+            // gyro takes a fast turn (scrubbing uncertainty grows with |rotation|), and the wheels
+            // take a stop (they read exactly zero there; ZUPT density). No gate decides it.
+            //
+            // Translation stays on the wheels either way -- an accelerometer cannot supply it without
+            // a drifting double integration, and the wheels are already exact there.
+            const float k_g   = motion_calib_.omega_scale();
+            const float b_g   = motion_calib_.omega_bias();          // physical sign: gyro reads w + b
+            const float k_ww  = motion_calib_.wheel_omega_scale();
             const float dk_wheel = motion_calib_.wheel_mismatch();
             const float curve = dk_wheel * dy_local;
-            float dtheta = odom.rot * dt * k_w - b_w * dt + curve;
-            float rot_eff = dt > 0.f ? dtheta / dt : (odom.rot * k_w - b_w);
-            // Which sensor's noise describes rot_eff below. The channel that SUPPLIED the mean is the
-            // one whose stated variance applies to it; crediting the gyro's noise to a wheel-derived
-            // heading would describe a measurement that was never made.
-            bool heading_from_imu = false;
-            // ZUPT: the wheels read ~0 exactly when actually stopped (no scrubbing error to correct
-            // for there), while the gyro over this same span is pure random-walk noise -- measured
-            // ~0.011 rad accumulated per 5 s window with the robot parked (see the coverage guard
-            // below, imu_dtheta_sum_). Below this, skip the gyro override entirely and let dtheta
-            // stay the wheel-derived value above (already ~0), instead of integrating that noise as
-            // if it were rotation.
+            const float wheel_raw = odom.rot * dt;
+            // The ZUPT condition no longer GATES anything under fusion: it only says which noise
+            // describes a wheel reading -- a stopped encoder's residual (zupt_density_omega) rather
+            // than a rolling one's. Under the legacy switch it still decides the channel.
             const bool wheel_stationary = params.zupt_enabled
                                         and std::abs(odom.rot)  < params.zupt_wheel_rot_eps
                                         and std::abs(odom.adv)  < params.zupt_wheel_lin_eps
                                         and std::abs(odom.side) < params.zupt_wheel_lin_eps;
             if (wheel_stationary)
                 ++zupt_segs_;
-            if (float dth_imu = 0.f; not wheel_stationary and imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
+            float dth_imu = 0.f;
+            const bool have_gyro = imu_dtheta(effective_start_ms, effective_end_ms, dth_imu);
+            cyc_hdiag_.raw_wheel += wheel_raw;
+            cyc_hdiag_.total_dt  += dt;
+            if (have_gyro) { cyc_hdiag_.raw_gyro += dth_imu; cyc_hdiag_.gyro_dt += dt; }
+            if (wheel_stationary) cyc_hdiag_.zupt_dt += dt;
+
+            float dtheta = 0.f;
+            float w_g = 0.f;            // the gyro's share of this segment's heading
+            float sig_om_fused = -1.f;  // density handed to the preintegrator; <0 = use the model
+            rc::calib::HeadingCovariates hc{};
+            if (params.heading_fusion)
             {
-                // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
-                // taking out of the wheel estimate, which is the whole point of the injection and the
-                // one number that says it is doing something rather than merely running.
-                wheel_dtheta_sum_ += dtheta;
-                imu_dtheta_sum_   += dth_imu;
-                cyc_wheel_shadow_dtheta_ += dtheta;   // what the wheels said, before the override
-                cyc_imu_dtheta_          += dth_imu;  // what actually entered the prior
-                ++cyc_imu_segs_;
-                // The learned scale applies to whichever channel supplies the heading, and the gyro
-                // supplies ~99% of it -- applying it only to the wheel branch would leave it inert.
-                dtheta = dth_imu * k_w - b_w * dt + curve;
-                rot_eff = dtheta / dt;               // the mean rate the gyro actually saw
-                heading_from_imu = true;
-                ++imu_segments;
+                const float dpsi_w = wheel_raw * k_ww + curve;
+                const float ws = wheel_sigma(odom.var_rot);
+                const float dens_w_stated = wheel_stationary ? params.odom_preint_noise.zupt_density_omega
+                                          : (ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                // Learned: the wheels' density at THIS motion, from their disagreement with the gyro.
+                // Its prior is the stated/model rest density, so on a cold start it begins there.
+                if (params.heading_noise_learning)
+                {
+                    wheel_noise_.set_prior_density(ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
+                    // Until moving rows exist, a moving wheel is as noisy as the motion model's constant.
+                    wheel_noise_.set_motion_prior_density(params.odom_preint_noise.sigma_omega);
+                }
+                const float dens_w = params.heading_noise_learning
+                                   ? wheel_noise_.density(odom.adv, odom.rot) : dens_w_stated;
+                const float s_kw = motion_calib_.param_sigma(rc::calib::P_K_OMEGA_W) * wheel_raw;
+                const float var_w = dens_w * dens_w * dt + s_kw * s_kw;
+                cyc_dens_w_dt_ += static_cast<double>(dens_w) * dt;
+                if (have_gyro)
+                {
+                    const float dpsi_g = dth_imu * k_g - b_g * dt;
+                    const float gs = imu_sigma(effective_start_ms, effective_end_ms, true);
+                    const float dens_g = gs >= 0.f ? gs : params.odom_preint_noise.sigma_omega;
+                    const float s_kg = motion_calib_.param_sigma(rc::calib::P_K_OMEGA) * dth_imu;
+                    const float s_bg = motion_calib_.param_sigma(rc::calib::P_B_OMEGA) * dt;
+                    const float var_g = dens_g * dens_g * dt + s_kg * s_kg + s_bg * s_bg;
+                    // Teach the learner: wheel minus gyro cancels the true rotation. Only with a
+                    // STATED gyro density (gs) -- the model constant is not an anchor.
+                    if (params.heading_noise_learning and gs > 0.f)
+                        wheel_noise_.add(dpsi_w - (dth_imu * k_g - b_g * dt), dt, odom.adv, odom.rot, gs);
+                    cyc_dens_g_dt_ += static_cast<double>(dens_g) * dt;
+                    w_g = var_w / std::max(var_w + var_g, 1e-30f);
+                    dtheta = w_g * dpsi_g + (1.f - w_g) * dpsi_w;
+                    // A stated density reaches the preintegrator only if some producer stated one;
+                    // otherwise the model's own constant stays in charge, as before.
+                    if (gs >= 0.f or (ws >= 0.f and not wheel_stationary))
+                        sig_om_fused = std::sqrt(var_w * var_g / std::max(var_w + var_g, 1e-30f) / dt);
+                    wheel_dtheta_sum_ += dpsi_w;            // diagnostics: both channels, same segment
+                    imu_dtheta_sum_   += dpsi_g;
+                    cyc_wheel_shadow_dtheta_ += dpsi_w;
+                    ++cyc_imu_segs_;
+                    ++imu_segments;
+                }
+                else
+                {
+                    dtheta = dpsi_w;
+                    sig_om_fused = (wheel_stationary or ws < 0.f) ? -1.f : ws;
+                    ++cyc_wheel_segs_;
+                    ++wheel_segments;
+                }
+                hc.th_gyro   = w_g * dth_imu;
+                hc.t_gyro    = w_g * dt;
+                hc.th_wheel  = (1.f - w_g) * wheel_raw;
+                hc.fwd_wheel = (1.f - w_g) * dy_local;
             }
             else
             {
-                cyc_wheel_dtheta_ += dtheta;          // wheel value that entered the prior unmodified
-                ++cyc_wheel_segs_;
-                ++wheel_segments;
+                // LEGACY: one channel per segment, one shared scale. The bias now carries its
+                // physical sign, so it is subtracted -- on wheel segments too, which is one of the
+                // defects the fusion path removes (a parked robot's wheels have no gyro bias).
+                if (not wheel_stationary and have_gyro)
+                {
+                    wheel_dtheta_sum_ += wheel_raw * k_g - b_g * dt + curve;
+                    imu_dtheta_sum_   += dth_imu;
+                    cyc_wheel_shadow_dtheta_ += wheel_raw * k_g - b_g * dt + curve;
+                    dtheta = dth_imu * k_g - b_g * dt + curve;
+                    w_g = 1.f;
+                    sig_om_fused = imu_sigma(effective_start_ms, effective_end_ms, true);
+                    hc.th_gyro = dth_imu;
+                    ++cyc_imu_segs_;
+                    ++imu_segments;
+                }
+                else
+                {
+                    dtheta = wheel_raw * k_g - b_g * dt + curve;
+                    sig_om_fused = wheel_sigma(odom.var_rot);
+                    hc.th_gyro = wheel_raw;           // the shared scale acted on the wheels here
+                    ++cyc_wheel_segs_;
+                    ++wheel_segments;
+                }
+                hc.t_gyro    = dt;
+                hc.fwd_wheel = dy_local;
             }
+            const float rot_eff = dt > 0.f ? dtheta / dt : 0.f;
+            cyc_imu_dtheta_   += w_g * dtheta;            // the heading's gyro-attributed share
+            cyc_wheel_dtheta_ += (1.f - w_g) * dtheta;    // and the wheels'; they sum to dtheta
+            cyc_heading_cov_.th_gyro  += hc.th_gyro;  cyc_heading_cov_.t_gyro    += hc.t_gyro;
+            cyc_heading_cov_.th_wheel += hc.th_wheel; cyc_heading_cov_.fwd_wheel += hc.fwd_wheel;
+            cyc_gyro_w_dt_ += static_cast<double>(w_g) * dt; cyc_heading_dt_ += dt;
+            gyro_w_dt_sum_ += static_cast<double>(w_g) * dt; heading_dt_sum_ += dt;
 
             // Transform to global frame using MIDPOINT theta (reduces integration bias)
             // The learned yaw offset rotates the body->world mapping: it absorbs a mount or
@@ -7774,12 +8378,10 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 // accelerometer's covers the translation only when its correction is actually being
                 // used, because otherwise the displacement came from the wheels and it is the wheels'
                 // noise that describes it.
-                // Yaw: the gyro's density when the gyro supplied the heading, the wheels' own when
-                // they did. imu_sigma already returns <0 unless the IMU brackets the segment, so the
-                // two never both apply.
-                const float sig_om = heading_from_imu
-                                   ? imu_sigma(effective_start_ms, effective_end_ms, true)
-                                   : wheel_sigma(odom.var_rot);
+                // Yaw: the density of the heading that was actually integrated -- the fused one
+                // (product of the two channels' variances) under fusion, the supplying channel's
+                // under the legacy switch. <0 leaves the model constant in charge.
+                const float sig_om = sig_om_fused;
                 // Translation always comes from the wheels. When the accelerometer's within-segment
                 // correction is enabled it is ADDED to that displacement, so its noise is an extra
                 // independent contribution to the same channel, not a replacement for the wheels'.
@@ -7794,7 +8396,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 const float v_lat_eff  = odom.side + (params.imu_linear_injection ? imu_dpx_seg / dt : 0.f);
                 const float v_long_eff = odom.adv  + (params.imu_linear_injection ? imu_dpy_seg / dt : 0.f);
                 preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lat, sig_long, sig_om);
-                if (sig_lat >= 0.f or sig_long >= 0.f or (not heading_from_imu and sig_om >= 0.f))
+                if (sig_lat >= 0.f or sig_long >= 0.f or (w_g < 1.f and wheel_sigma(odom.var_rot) >= 0.f))
                     ++odom_var_segments;
             }
 
@@ -7885,11 +8487,17 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                                               : QString("n/a (needs >%1 rad of turning)")
                                                     .arg(kMinRotForRatio, 0, 'f', 1))
                               << " over " << QString::number(imu_dtheta_sum_, 'f', 3) << " rad"
-                              << " zupt=" << zupt_segs_ << "/" << imu_seg_total_ << " seg";
+                              << " zupt=" << zupt_segs_ << "/" << imu_seg_total_ << " seg"
+                              << " gyro_weight="
+                              << (heading_dt_sum_ > 0.0
+                                      ? QString::number(100.0 * gyro_w_dt_sum_ / heading_dt_sum_, 'f', 1) + "%"
+                                      : QString("n/a"))
+                              << (params.heading_fusion ? " (fused)" : " (switch)");
             imu_stats_last_log_ms_ = t_end_ms;
             imu_seg_used_ = imu_seg_total_ = 0;
             imu_dtheta_sum_ = wheel_dtheta_sum_ = 0.0;
             zupt_segs_ = 0;
+            gyro_w_dt_sum_ = heading_dt_sum_ = 0.0;
         }
 
         if (preint_out != nullptr)

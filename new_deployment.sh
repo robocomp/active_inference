@@ -58,7 +58,7 @@ qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
 #get id of open session
 sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 #change to the saved working directory
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/viewer3d"
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/controller"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "controller"
 

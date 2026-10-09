@@ -105,6 +105,25 @@ inline constexpr std::array<float, 4> kControlOffsets{-1.6f, -1.0f, 1.0f, 1.6f};
                                       float slide_span_m,
                                       const PointProjector& project);
 
+// ── ENTRY 1b: an arbitrary closed loop of N ≥ 3 world points, same null ─────────────────────────────
+//
+// project_quad is this with N = 4, and is implemented in terms of it so the two cannot drift. It exists
+// for objects whose SOLID silhouette is not one planar face. A chair is the case that forced it: its
+// bounding box is mostly see-through (between the legs, under the seat, beside the backrest), so a box
+// face would put the depth check's "inside" samples on the floor behind it and refute every real chair;
+// and its backrest alone has a bottom edge with the seat IN FRONT of it, which reads as "no recession"
+// and refutes too. The honest contour from the front is the backrest and the seat top together — an
+// L-shaped loop that is not planar in 3-D but projects to one simple polygon from any viewpoint in front
+// of the backrest and above the seat. ★EVERY EDGE OF THE LOOP MUST BE AN OCCLUDING BOUNDARY of the solid
+// it encloses: the depth scorer tests recession on all of them, and an internal edge (a joint between two
+// parts of the same object) has the object itself on its far side.
+// `loop` in closed-loop order, `slide_dir` / `slide_span_m` as for project_quad: the direction along the
+// support plane in which a displaced copy is a like-for-like comparison, and the object's width along it.
+[[nodiscard]] ContourSet project_loop_slid(const std::vector<Eigen::Vector3d>& loop,
+                                           const Eigen::Vector3d& slide_dir,
+                                           float slide_span_m,
+                                           const PointProjector& project);
+
 // ── ENTRY 2: an upright box standing on a support plane ──────────────────────────────────────────────
 //
 // The form every box-shaped concept has (fridge, cabinet, table, chair). Picks the camera-facing

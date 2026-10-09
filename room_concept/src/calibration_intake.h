@@ -107,6 +107,7 @@ namespace rc::calib
         /// Persist / restore the WINDOW (evidence), and forget it. See BatchEstimator::save.
         bool        save(const std::string& path) const { return est_.save(path); }
         std::size_t load(const std::string& path)       { return est_.load(path); }
+        [[nodiscard]] std::size_t legacy_dropped() const noexcept { return est_.legacy_dropped(); }
         void        reset() noexcept                    { est_.reset(); }
 
         /// Offer one episode. Returns why it was accepted or refused. `fit_residual_m` is the
@@ -126,6 +127,8 @@ namespace rc::calib
 
         [[nodiscard]] const Result &estimate() const noexcept { return last_; }
         [[nodiscard]] std::size_t   pool() const noexcept { return est_.size(); }
+        /// The estimator itself, read-only -- for its information() (joint calibration, plan 2026-10-05 Task 4).
+        [[nodiscard]] const BatchEstimator& estimator() const noexcept { return est_; }
         [[nodiscard]] int count(Verdict v) const noexcept { return counts_[static_cast<int>(v)]; }
         [[nodiscard]] int accepted_from(Source s) const noexcept
         { return accepted_by_source_[static_cast<int>(s)]; }

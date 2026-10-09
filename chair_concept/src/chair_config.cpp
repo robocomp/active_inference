@@ -236,6 +236,8 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "Existence.OcclusionCheck — suppress the vacate negative when the chair is hidden");
     out.exist_occlusion_margin_m = getf("Existence.OcclusionMarginM", 0.30f,
             "Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count");
+    out.exist_contour_check      = getb("Existence.ContourCheck", true,
+            "Existence.ContourCheck — score the chair's projected solid outline against ZED RGB edges + depth (YOLO-blind rescue)");
     out.exist_room_prior         = getb("Existence.RoomPrior", true,
             "Existence.RoomPrior — enforce the room-containment pose prior");
     out.exist_room_margin_m      = getf("Existence.RoomMarginM", 0.40f,

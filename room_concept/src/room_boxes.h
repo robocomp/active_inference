@@ -100,6 +100,14 @@ namespace rc::boxes
         std::vector<Eigen::Matrix2f> polygon_cov(float sigma_flat) const;
     };
 
+    /// Which offset of which box does the distance at `p` come from — the estimator's own
+    /// attribution rule, as `4 * box + {0=lo.x, 1=lo.y, 2=hi.x, 3=hi.y}`, or -1 for an empty
+    /// layout. refit() folds every return through this, so it is also the only honest answer to
+    /// "which parameter could a look at this patch of wall improve?": where two boxes share a
+    /// wall the returns land on ONE of the two coincident offsets and the other is redundant —
+    /// unobserved by construction, and not a place worth sending a robot.
+    int active_face(const Layout& L, const Eigen::Vector2f& p);
+
     /// ── INITIALISATION FROM ONE SCAN ─────────────────────────────────────────────────────────
     /// Estimate (yaw, one box) from a single scan in the robot frame. The yaw comes from the
     /// quadrupled-angle peak of the returns' local orientations — the standard Manhattan estimator,
@@ -189,6 +197,10 @@ namespace rc::boxes
         /// parameter — the sensor's coverage statement — not a tuned bar: at 1 nat a claimed but
         /// never-observed cell is about e:1 against, so a merge must save more than one parameter
         /// per cell of empty space it swallows.
+        /// Swept space the layout excludes pushes the face that excludes it (see refit). Was
+        /// WS_FREEFORCE: a one-scan hull's tip lands within 13 mm of truth with it, and the walls
+        /// are dragged off their own returns without the frame fix that went with it.
+        bool  free_force = false;
         float unobserved_nats = 1.0f;
     };
     struct GrowResult
@@ -209,7 +221,23 @@ namespace rc::boxes
     /// residual is sdf(q) and depends on exactly ONE offset (the active face), so the normal
     /// equations are diagonal and the step is a weighted mean — no linear algebra, no line search,
     /// no step-size constant. Returns the RMS residual after fitting.
-    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters = 10);
+    /// `freecells` — the cells the beams SWEPT, in cell coordinates. Optional, and the reason it
+    /// exists: a face with no returns on it has no likelihood gradient, so nothing moves it. The
+    /// tip of a fin faces into open room and collects no returns at all, so it stays wherever it
+    /// was proposed — measured on the apartamento hall, a 1.69 m fin published at 3.23 m, closing a
+    /// 2.45 m passage to 0.97 m, with its WIDTH correct to 8 mm and rms 0.033 m. The residual
+    /// cannot see it either: the fin's sides fit their returns perfectly, and the phantom extends
+    /// into space no beam ever returned from.
+    /// ⚠ THE ROBOT DROVE THROUGH IT. One trajectory sample sat at (-0.038,-1.652) inside the
+    /// published solid. A cell the robot has occupied cannot be structure, and that is not a
+    /// likelihood statement — it is an invariant, and `mdl_cost` already charges it as `missed`.
+    /// This makes the same evidence DIFFERENTIABLE so a face can be pushed by it instead of only
+    /// being judged by it at a discrete edit.
+    /// ★ ONE DIRECTION ONLY. A swept cell the layout excludes is proof of room. A claimed cell the
+    /// beams never swept is NOT proof of matter — it may simply be room nobody has visited — so it
+    /// stays a cost on structure edits and does not become a force on a face.
+    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters = 10,
+                const std::set<std::pair<int, int>>* freecells = nullptr);
 
     /// One structure step over the accumulated global cloud. Returns what it did; mutates `L`.
     /// ── WHAT THE WHOLE LAYOUT COSTS, IN NATS ─────────────────────────────────────────────────
@@ -235,8 +263,22 @@ namespace rc::boxes
     GrowResult grow(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p,
                     const std::set<std::pair<int, int>>* free = nullptr);
 
+    /// Optional model terms for register_scan. Null reproduces the previous behaviour exactly.
+    struct RegisterOptions
+    {
+        /// The PREDICTED pose covariance (odometry-propagated), in the same frame as `odom`. When set,
+        /// the full information P^-1 over (x, y, theta) replaces the translation-only 1/beta prior:
+        /// heading is then anchored by odometry as well as by the layout, instead of being whatever
+        /// the layout says — which let a rotated layout rotate the robot with it.
+        const Eigen::Matrix3f* prior_cov = nullptr;
+        /// Weight a residual by sensor variance PLUS the posterior variance of the offset it is
+        /// attributed to, so a wall nobody has measured cannot pull the pose (was WS_REG_MAPVAR).
+        /// Pairs with Params::seed_prior_span — each is useless without the other.
+        bool map_var = false;
+    };
     RegisterResult register_scan(const Layout& L,
                                  const std::vector<Eigen::Vector2f>& pts_robot,
                                  const Eigen::Vector3f& odom_pose,
-                                 float sensor_sigma);
+                                 float sensor_sigma,
+                                 const struct RegisterOptions* opt = nullptr);
 }   // namespace rc::boxes

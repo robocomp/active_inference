@@ -9,6 +9,7 @@
  */
 
 #include "camera_ingestor.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 #include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 
 #include <cstring>
@@ -113,7 +114,7 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
         const Eigen::Vector3f up_cam = (cam_R_robot_ * Eigen::Vector3f::UnitZ()).normalized();
         cam_R_robot_ = Eigen::AngleAxisf(mount_yaw_correction_, up_cam).toRotationMatrix()
                      * cam_R_robot_;
-        std::print("[imgedge] boresight yaw correction {:+.5f} rad ({:+.3f} deg) applied about the "
+        rc::status::print("[imgedge] boresight yaw correction {:+.5f} rad ({:+.3f} deg) applied about the "
                    "robot vertical, in camera coords [{:+.3f} {:+.3f} {:+.3f}]\n",
                    mount_yaw_correction_, mount_yaw_correction_ * 180.0 / M_PI,
                    up_cam.x(), up_cam.y(), up_cam.z());
@@ -126,7 +127,7 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
     extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
 
     if (extrinsic_ok_)
-        std::print("[imgedge] bound '{}': {}x{} model={} (reproduced to {:.2e} px), cam<-{} t=[{:.3f} {:.3f} {:.3f}]\n",
+        rc::status::print("[imgedge] bound '{}': {}x{} model={} (reproduced to {:.2e} px), cam<-{} t=[{:.3f} {:.3f} {:.3f}]\n",
                    camera_node_, static_cast<int>(model_.width), static_cast<int>(model_.height),
                    model_.kind == CameraModel::Kind::Pinhole ? "pinhole"
                      : (model_.kind == CameraModel::Kind::Equirect ? "equirect" : "cylindrical"),
@@ -239,7 +240,7 @@ int CameraIngestor::probe_depth(const std::vector<Eigen::Vector2f>& uv, int patc
         // ★ MAX_IMAGE_BYTES is 3686400 = exactly 1280x720x4, so FORMAT_DEPTH_F32 at that resolution
         //   fits with ZERO margin and anything larger is dropped SILENTLY by the plane. Say the size
         //   out loud once, so "producer healthy, plane reads 0 Hz" is diagnosable from the log.
-        std::print("[imgedge] depth subscriber up on '{}' (Z16 -> 1.84 MB, F32 -> 3.69 MB at "
+        rc::status::print("[imgedge] depth subscriber up on '{}' (Z16 -> 1.84 MB, F32 -> 3.69 MB at "
                    "1280x720; the plane's ceiling is 3.69 MB)\n", camera_node_);
     }
 

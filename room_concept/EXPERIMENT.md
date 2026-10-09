@@ -1111,6 +1111,100 @@ step from changing code — before checking the anomaly against the emission gua
 The check took two commands. **A number that is 47x larger than its neighbours is a reason to ask
 what it is, not evidence that something is broken.**
 
+## 13. Arm 7 — APPLY EVERYTHING ONLINE. Pre-registered 2026-10-04, BEFORE the run.
+
+**Question.** The calibrator has run closed-loop since 2026-08-30, but only `k_v` may act
+(`MotionCalibApplyMask = 1`). The finding that put the mask there was retracted (§6 arm 3; t = −0.68), and
+heading fusion (2026-10-01) now feeds the gyro and wheel heading parameters straight into the prediction.
+Does letting ALL parameters act (`mask = −1`) make the online-corrected motion model better, with no harm?
+
+**Design.** One session, four legs, cold each (`tools/arm7_setup.sh` wipes the evidence; the pre-arm-7 warm
+state is kept in `etc/pre-arm7/` and put back by `restore`). Route: controller mission **`calib turns`**
+(14 loops, ~176 m, ~0.87 rad/m — the heading parameters need rotation). Order, so the bridge restarts once:
+`native-k` → `native-all` → `gyro-all` → `gyro-k`.
+- `native-*`: no injection. Known native error: the sim wheels over-report rotation ~8 % on a mixed tour
+  (bridge config note), which is `k_omega_w`'s to find — but with fusion the gyro carries most heading.
+- `gyro-*`: `GyroBias = +0.002 rad/s` (4 prior sigmas). The bridge adds it to gz
+  (`specificworker.cpp:2567`); the model's `b_omega` has the PHYSICAL sign (gyro reads ω + b), so the
+  answer is **`b_omega` → +0.002**. `mask = 1` cannot touch it; `mask = −1` can.
+
+**Endpoints** (`tools/arm7_setup.sh report` → `tools/arm7_report.py`), read on the LAST THIRD of each leg,
+where online learning has had time to act:
+1. **Correction load**, mm per metre (§6's working endpoint).
+2. **Surprise** (`surprise.h`, committed `0daa52a`): KL nats/m and Σ mismatch / Σ expected.
+3. Sim ground truth: heading error of the predicted increments, deg per rad turned.
+
+**Predictions.**
+- `gyro-all`: `b_omega` within 2σ of +0.002, AND last-third correction load BELOW `gyro-k`, AND
+  mismatch/expected closer to 1 than `gyro-k`. A wrong-sign `b_omega` (−0.002) = a sign defect in the
+  chain, not a calibration result.
+- `native-all` vs `native-k`: no harm — last-third load and deg/rad not worse beyond run-to-run noise. A
+  null here is the expected outcome, not a failure: `k_omega_w` was still uninformed (σ 0.150 = its prior)
+  after 100 m on the 2026-10-03 log, and the `informed` gate (σ < 0.9 prior) withholds it until it is.
+- If `gyro-all` passes and `native-all` does no harm, `mask = −1` becomes the default. The `informed`
+  gate (a threshold) is then the next thing to replace, by applying the joint posterior mean.
+
+### Arm 7 — leg `gyro-all` FAILED, 2026-10-04, for two calibrator defects. Fixed; leg re-run.
+
+`b_omega` ended at **+0.00001 ± 0.00050 — exactly its prior** after 178 m with +0.002 rad/s injected (parked
+gyro measured +0.00173, so the dose was live). A sigma that never shrinks means the estimator received no
+information. The same leg's saved episodes, regressed without the prior, read **+0.00148** — the signal was
+there. Two defects:
+1. **Units.** The episode heading R ADDED `(2 * max|SDF|)^2`, a quantity in METRES, to a variance in RAD^2:
+   0.031 rad^2 (sigma 10 deg for half a second of driving), 7000x the solve's own 4.2e-6. 113 episodes carried
+   1% of the prior's information. Now the Birge form: `2 * var_solve * (1 + (max|SDF| / 0.6745 sigma_sdf)^2)`.
+   Offline on the leg's episodes: +0.00119 ± 0.00015, informed.
+2. **Covariates the prediction never used.** Rest-on-prediction withheld rotation on 85% of cycles (robot
+   judged still), so the bias never entered the prediction there (+0.00045 rad/s in it), but `t_gyro` still
+   counted that time and diluted the fit. Covariates now carry the rest gain. Moving cycles alone: +0.00339.
+
+★ Replay of the leg's own predictions against ground truth with a bias removed: the mean predicted drift
++0.0206 deg/s is nulled by b ~ 0.0012 on ALL cycles, but per-window heading rms only falls 0.668 -> 0.635 deg
+— the bias is a small part of the prediction's heading error (it acts on moving cycles only); most of the
+per-window error is random. `native-all` replayed the same way is best at b = 0, so no false bias.
+**Amended prediction for the re-run** (written before it): `b_omega` informed with σ < 0.0005 and positive;
+target +0.002 at the gyro. The moving-cycle LS of +0.0034 is the noisier, confounded estimator; where it
+lands between them is the finding.
+
+### Arm 7 — VERDICT, 2026-10-04: `MotionCalibApplyMask = -1` is the default.
+
+Re-run of `gyro-all` after the two fixes (`6bab57e`), same bridge session and dose as the failed leg:
+
+| | failed leg (pre-fix) | re-run (fixed) |
+|---|---|---|
+| `b_omega` | +0.00001 ± 0.00050 (prior) | **+0.00065 ± 0.00025, informed** |
+| predicted heading drift while moving, deg/s, thirds | +0.130 / +0.125 / +0.139 | **+0.095 / +0.058 / +0.025** |
+| heading error, moving 5-s windows | 1.73 deg rms, 0.80 deg/rad | **1.39 deg rms, 0.66 deg/rad** |
+| correction load, mm/m | 32.9 | 9.6 |
+| surprise, nats/m | 12.8 | 2.8 |
+
+- **Online application works when there is something to correct.** The injected bias (0.115 deg/s at the
+  gyro) is learnt out of the prediction during the leg: ~80% of the systematic drift is gone by the last third.
+- **Attribution is shared.** `b_omega` reaches only a third of the injected value; `k_omega` (-0.0059 ±
+  0.0029) and `k_omega_w` (+0.091 ± 0.093, the sim wheels' known ~8% over-rotation) absorb the rest. The
+  heading parameters are correlated on this route; the PREDICTION is what is identified, the split is not.
+  Pre-registered "b_omega within 2 sigma of +0.002": NOT met; what the prediction needs: met.
+- **Native pair: no harm, no measurable gain** (moving-window rms 1.547 vs 1.541 deg). The last-third
+  correction-load gap (11.2 vs 3.1) is inside the session noise shown at 30-60 m, where both legs ran the same
+  effective config and differed 6x.
+- `gyro-k` NOT run: with `k_v` only, `b_omega` cannot act by construction.
+- **Open, not blocking:** mismatch/expected 0.11-0.27 on every leg — the motion model is ~5x UNDER-confident
+  (its covariance, not its mean); the `informed` gate (σ < 0.9 prior) is still a threshold; the motion state
+  saved before arm 7 was written under the units bug and is NOT restored (cold start).
+
+### Arm 7 — ADDENDUM 2026-10-04: the native pair DID gain; the cross-run comparison could not see it.
+
+`tools/calib_benefit.py` replays each run's own prediction with the acting calibration subtracted (exact to
+first order; the model is linear) and scores both against the LiDAR-solved poses between consecutive solves —
+no ground truth. Signed heading drift while moving, nominal -> learned:
+- native-all: **-0.066 -> -0.035 deg/s** (GT: -0.067 -> -0.035); heading |err| per degree turned -45%.
+- gyro-all (fixed): -0.097 -> -0.049 (GT -0.100 -> -0.052). gyro-all pre-fix: -0.126 -> -0.121 (learnt nothing).
+- Position |err| slightly WORSE with calibration on every leg (+0.3..+0.7 mm/m) — small, consistent, open.
+The LiDAR-anchored figure tracks ground truth to ~0.003 deg/s, so this is the GT-free benefit measure for the
+real robot. ★ The "Native pair: no harm, no measurable gain" line above compared TWO runs, whose session
+noise (6x in solves at 30-60 m) swamped a halving of the drift; the same-run counterfactual does not have
+that noise. Prefer it for every future calibration claim.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.

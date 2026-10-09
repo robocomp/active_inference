@@ -53,6 +53,8 @@
 
 #include <variant>
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -67,7 +69,9 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 #ifdef HIBERNATION_ENABLED
         hibernationChecker.start(500);
 #endif
-        const int period = configLoader.get<int>("Period.Compute");
+        int period = 0;
+        rc::cfg::Reader(configLoader, "room_concept").req("Period.Compute", period,
+                                                          "compute() period, ms (the GRAFCET steps' tick)");
 
         states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
             std::bind(&SpecificWorker::waiting_loop, this),
@@ -153,6 +157,12 @@ void SpecificWorker::compute()
     {
         last_door_scan_ms_ = now_ms;
         auto open_doors = doors_.refresh(*G, *inner_eigen_, rc::room::current_room_frame(*G));
+        // The apertures come out in the GRAPH's room frame; the localiser uses them in its internal one.
+        // Identity unless the room is a promoted start-up proto, whose published frame stays at the
+        // robot's initial pose while the estimator re-anchors (RoomSceneGraph::internal_from_published).
+        if (scene_graph_)
+            if (const Eigen::Affine2f T = scene_graph_->internal_from_published(); not T.matrix().isIdentity(1e-9f))
+                for (auto& d : open_doors) { d.a = T * d.a; d.b = T * d.b; }
         static std::size_t last_n = std::numeric_limits<std::size_t>::max();
         if (open_doors.size() != last_n)
         {
@@ -256,7 +266,10 @@ void SpecificWorker::compute()
     section_timer.start();
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
+    if (status_stream_ and loc_res.has_value())
+        status_.observe(*loc_res);   // scalars only; the snapshot timer serialises them
     t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
+    joint_calibration_step(loc_res);   // plan 2026-10-05: joint calib monitor (logs only unless LidarMountApply)
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
@@ -335,7 +348,8 @@ void SpecificWorker::compute()
         viewer_->set_room_stable(scene_graph_->room_node_created(),
                                  scene_graph_->stable_frames(),
                                  params.STABLE_FRAMES_REQUIRED,
-                                 room_concept_.is_grid_searching());
+                                 room_concept_.is_grid_searching(),
+                                 scene_graph_->room_is_startup_proto());
         t_ui_us = section_timer.nsecsElapsed() / 1000;
     }
 
@@ -356,6 +370,7 @@ void SpecificWorker::compute()
         if (compute_csv_.is_open())
             compute_csv_ << "wall_ms,total_us,affordance_us,loc_fetch_us,viewer_us,dsr_us,ui_us,did_publish,gui_thread\n";
     }
+    status_.observe_compute(elapsed_since_init_us);
     if (compute_csv_.is_open())
     {
         compute_csv_ << now_ms << ',' << elapsed_since_init_us << ',' << t_affordance_us << ',' << t_loc_fetch_us
@@ -378,6 +393,85 @@ void SpecificWorker::compute()
                 << "gui_thread=" << on_gui_thread;
     }
     fps_counter_.print("[Compute]", 3000);
+}
+
+// ── JOINT CALIBRATION (plan docs/superpowers/plans/2026-10-05-joint-calibration.md) ──────────────
+// Task 4, MONITOR: once per new motion solve, one joint posterior over odometry + helios mount + every
+// camera mount -> tmp/joint_calib/. Logs only.
+// ⚠ DEVIATION from the plan's call site: the motion block is read from the localizer's RESULT
+//   (UpdateResult::calib_information, a copy made on the localizer thread), not by reaching into
+//   room_concept_.motion_calibrator() -- that calibrator is fed on the LOCALIZER thread and its
+//   episode deque must not be iterated from this one. The camera pools are fed here, on the main
+//   thread, so they are read directly. The trigger is the monotonic episode counter
+//   (calib_episodes), not last_solve().episodes, which saturates at the 512-episode window.
+//
+// Task 5, LiDAR-SIDE CORRECTION (LidarMountApply, default OFF), every cycle:
+//   T_corr = Planar{lever_x, lever_y, eps_yaw / kEpsPerLidarYaw} from the motion calibrator's ACTING
+//   values (calib_applied bit set), points get compose(T_corr, T_inject).
+// ⚠ DEVIATION: the plan takes T_corr from the JOINT posterior. The acting MOTION values are used
+//   instead because p_applied (which undoes the feedback) records exactly those; applying the joint's
+//   value would act a number p_applied never hears about -- the Review Focus #2 failure. The joint
+//   remains the logged monitor.
+// Camera evidence is then re-referenced to the LiDAR frame in force (camcal::Estimator::
+// reference_to_lidar_yaw, idempotent, persisted), and the joint refers it back through
+// CameraBlock::lidar_yaw_applied. Runs whatever the flag, so evidence left referenced to a correction
+// from an earlier session is brought back to the frame now in force.
+void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
+{
+    if (not loc_res.has_value()) return;
+    const double yaw_sigma = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    double psi_app = 0.0;
+    if (params.LIDAR_MOUNT_APPLY and lidar_ingestor_)
+    {
+        const auto acting = [&](int i)
+        { return ((loc_res->calib_applied >> i) & 1) ? loc_res->calib_value[i] : 0.f; };
+        const rc::lidar_mount::Planar T_corr{acting(rc::calib::P_LEVER_X), acting(rc::calib::P_LEVER_Y),
+                                             acting(rc::calib::P_EPS_YAW) / rc::joint::kEpsPerLidarYaw};
+        // The sim-only injection is now applied by the ingestor itself, BEFORE this (Pose6, plan 2026-10-08
+        // Task 4): T_corr alone here, same order T_corr(T_inject(p)) as before.
+        lidar_ingestor_->set_mount_extra(T_corr);
+        psi_app = T_corr.yaw;
+    }
+    if (mount_) mount_->pool().reference_to_lidar_yaw(psi_app, yaw_sigma);
+    if (calib_)
+        for (auto& ch : calib_->channels()) ch->calib.reference_to_lidar_yaw(psi_app, yaw_sigma);
+
+    if (not params.JOINT_CALIB_MONITOR) return;
+    const Eigen::Vector4d unit(params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                               yaw_sigma, 1.0);
+    const auto cameras = [&]
+    {
+        std::vector<rc::joint::CameraBlock> cams;
+        if (mount_)
+            cams.push_back({params.IMAGE_EDGE_CAMERA, mount_->pool().marginal_information(unit), mount_->pool().lidar_yaw_ref()});
+        if (calib_)
+            for (const auto& ch : calib_->channels())
+                cams.push_back({ch->name, ch->calib.marginal_information(unit), ch->calib.lidar_yaw_ref()});
+        return cams;
+    };
+    // ── r2 MOUNTS MONITOR (plan 2026-10-08 Task 5), ~1 Hz on the LiDAR clock: helios 6 + bpearl 6 + cameras from
+    //    the kinematic block (a COPY in UpdateResult, localizer thread) and the floor/vertical blocks (a COPY from
+    //    the ingestor's snapshot, ingest thread). LOG ONLY -> tmp/joint_calib/mounts_<ts>.csv. The r1 motion block
+    //    is deliberately NOT an input (single owner, r2.2 item 4). ──
+    if (params.MOUNT_FACTORS and lidar_ingestor_ and loc_res->timestamp_ms - mount_monitor_ms_ >= 1000)
+    {
+        mount_monitor_ms_ = loc_res->timestamp_ms;
+        const auto mf = lidar_ingestor_->mount_factor_snapshot();
+        rc::joint::MountBlocks B;
+        B.kinematic   = loc_res->mount_kin_info;
+        B.floor       = mf.floor;
+        B.vert_helios = mf.vert_helios;
+        B.vert_bpearl = mf.vert_bpearl;
+        B.s_helios = mf.s_helios; B.s_bpearl = mf.s_bpearl;
+        // the helios band's mean height above the helios origin: where its tilt moves the 2-D scan (r2.2 item 7)
+        B.band_dz = 0.5 * (double(params.LIDAR_HIGH_MIN_HEIGHT) + double(params.LIDAR_HIGH_MAX_HEIGHT)) - mf.s_helios.z();
+        rc::joint::MountMonitor::Extra ex; ex.yaw_offset = loc_res->mount_yaw_offset;
+        mount_monitor_.observe(loc_res->timestamp_ms, B, cameras(), ex);
+    }
+    const int ep = loc_res->calib_episodes;
+    if (ep == joint_last_episodes_ or loc_res->calib_information.episodes <= 0) return;
+    joint_last_episodes_ = ep;
+    joint_monitor_.observe(loc_res->timestamp_ms, ep, loc_res->calib_information, cameras());
 }
 
 void SpecificWorker::initialize_room_model_from_svg()
@@ -411,14 +505,19 @@ void SpecificWorker::initialize_room_model_from_svg()
                     << "RT edges saved before this change are stale.";
 
         calib_->set_room_polygon(room_polygon, offset);
+        if (gt_log_) gt_log_->set_world_offset(offset);   // GT is world; the estimate is this recentred frame
         room_concept_.configure_room_from_polygon(calib_->room_polygon());
         room_initialized_from_svg_polygon_ = true;
+        rc::StatusReporter::loaded("layout", svg_path,
+                                   std::format("{} vertices, recentred by ({:.3f}, {:.3f}) m",
+                                               room_polygon.size(), offset.x(), offset.y()));
         return;
     }
     calib_->set_room_polygon({}, Eigen::Vector2f::Zero());
     room_concept_.configure_room_from_rect(params.GRID_MAX_DIM.width(), params.GRID_MAX_DIM.height());
     room_initialized_from_svg_polygon_ = false;
     qWarning() << "SVG polygon not loaded; using rectangular fallback.";
+    rc::StatusReporter::loaded("layout", svg_path, "FAILED: fewer than 3 points — rectangular fallback in use");
 }
 
 ///////////////////////////////////////////////////////////////////////////////

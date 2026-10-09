@@ -43,6 +43,7 @@
 #include "strip_schedule.h"  // which panorama strips this frame looks at (shared by the 360 stages)
 #include "rgbd_data.h"
 #include "door_approach_log.h"
+#include "zed_frame_dump.h"
 #include "retina_params.h"
 #include "stream_rate_monitor.h"
 #include "model_projection_overlay.h"   // rc::ModelProjectionOverlay + GraphObjectBox (SceneFrame value member)
@@ -334,6 +335,8 @@ class SpecificWorker : public GenericWorker
         // Range is the independent variable and it is MEASURED (ZED depth at the peak pixel), never
         // taken from a belief the instrument would then be auditing. See door_approach_log.h.
         rc::diag::DoorApproachLog door_approach_log_;
+        rc::diag::ZedFrameDump zed_frame_dump_;     // WAF pilot dataset recorder, off by default
+        std::optional<Mat::RTMat> robot_T_zed_;     // static mount, cached on first use by the dump
 
         // ── Depth-correction dataset (Ricoh popup: "Collect" / "Rebuild map") ───────────────────
         // Collection is a DELIBERATE act, not background logging: the fit is only as good as its

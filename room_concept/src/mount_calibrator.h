@@ -18,6 +18,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,8 @@ namespace rc
         /// auxiliary channels pass their own ingestor per call — and it is set once it exists, which
         /// is after this object is constructed. Null until then, and every use is guarded.
         void set_driving_ingestor(rc::CameraIngestor* ing) { driving_ = ing; }
+        /// The status stream's copy of each window's solve (see rc::camcal::Sink).
+        void set_camcal_sink(rc::camcal::Sink s) { camcal_sink_ = std::move(s); }
 
         void mount_pair_update(const rc::ImageEdgeObs& obs,
                                const std::vector<rc::CornerDetector::CornerMatch>& matches,
@@ -70,6 +73,10 @@ namespace rc
                                const rc::mount::Accum::Solution& sol, const std::string& cam);
         void publish_mount_to_graph(rc::camcal::Estimator& pool, const rc::CameraIngestor& ing,
                                     const std::string& cam);
+        /// The parent->camera RT edge as the ROBOT DESCRIPTION states it (ImageEdge.mountDescriptionFile),
+        /// as (translation, euler xyz). nullopt when no file is configured or the edge is not in it.
+        std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>>
+            description_mount(const std::string& parent, const std::string& cam) const;
         void reconcile_mount_nominal(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
                                      const std::string& cam);
         void loop_closure_observe(const std::string& cam, int vertex, bool ceiling,
@@ -86,6 +93,8 @@ namespace rc
         RoomConfig&  params;
         RoomViewer** viewer_slot_ = nullptr;   ///< the worker's unique_ptr slot; may hold null
         rc::CameraIngestor* driving_ = nullptr;
+        std::map<std::string, QString> last_corr_logged_;   ///< per camera: the correction line last printed
+        rc::camcal::Sink    camcal_sink_;
 
         // ── THE SENSOR TRIANGLE ──────────────────────────────────────────────────────────────────
         // Each camera's residual against the LiDAR is (camera error) + (LiDAR corner error).

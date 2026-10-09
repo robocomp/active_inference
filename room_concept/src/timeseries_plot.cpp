@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <tuple>
 
 #include <QToolTip>
 
@@ -48,13 +49,14 @@ namespace
     { return std::isfinite(v) ? QString("%1").arg(v, 0, 'f', 4) : QString("--"); }
 }
 void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
-                                float line_width, int avg_window)
+                                float line_width, int avg_window, int axis)
 {
     std::lock_guard lk(mu_);
     auto& s = series_[name];
     s.name = name;
     s.colour = colour;
     s.line_width = line_width;
+    s.axis = axis == 1 ? 1 : 0;
     s.avg_window = std::max(0, avg_window);
 
     if (s.avg_window > 0)
@@ -66,6 +68,7 @@ void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
         a.name = avg_name;
         a.colour = colour.lighter(160);
         a.line_width = line_width + 0.5f;
+        a.axis = s.axis;
     }
 }
 
@@ -147,7 +150,32 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
     const float t_min = t_now - window_sec_;
     const float t_max = t_now;
 
-    // Determine value range: fixed if pinned, else auto-scale across all visible series (+5% pad).
+    // Determine value range: fixed if pinned, else auto-scale across the visible LEFT-axis series (+5% pad).
+    // The right axis (if any series uses it) always auto-scales on its own series.
+    const auto auto_range = [&](int axis, bool with_ref) -> std::pair<float, float>
+    {
+        float lo = std::numeric_limits<float>::max();
+        float hi = std::numeric_limits<float>::lowest();
+        for (const auto& [_, s] : series_)
+        {
+            if (s.axis != axis) continue;
+            for (const auto& pt : s.samples)
+            {
+                if (pt.t < t_min or not std::isfinite(pt.v)) continue;
+                lo = std::min(lo, pt.v);
+                hi = std::max(hi, pt.v);
+            }
+        }
+        // Keep the reference line in view even when the data doesn't reach it.
+        if (with_ref and ref_line_enabled_)
+        {
+            lo = std::min(lo, ref_line_y_);
+            hi = std::max(hi, ref_line_y_);
+        }
+        if (lo >= hi) { lo = 0.f; hi = 1.f; }
+        const float pad = (hi - lo) * 0.05f;
+        return {lo - pad, hi + pad};
+    };
     float v_min, v_max;
     if (y_fixed_)
     {
@@ -155,39 +183,20 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
         v_max = y_fixed_max_;
     }
     else
-    {
-        v_min = std::numeric_limits<float>::max();
-        v_max = std::numeric_limits<float>::lowest();
-        for (const auto& [_, s] : series_)
-        {
-            for (const auto& pt : s.samples)
-            {
-                if (pt.t < t_min) continue;
-                v_min = std::min(v_min, pt.v);
-                v_max = std::max(v_max, pt.v);
-            }
-        }
-        // Keep the reference line in view even when the data doesn't reach it.
-        if (ref_line_enabled_)
-        {
-            v_min = std::min(v_min, ref_line_y_);
-            v_max = std::max(v_max, ref_line_y_);
-        }
-        if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
-
-        const float pad = (v_max - v_min) * 0.05f;
-        v_min -= pad;
-        v_max += pad;
-    }
+        std::tie(v_min, v_max) = auto_range(0, true);
+    const bool right = has_right_axis();
+    const auto [r_min, r_max] = right ? auto_range(1, false) : std::pair<float, float>{0.f, 1.f};
 
     draw_axes(p, t_min, t_max, v_min, v_max);
+    if (right) draw_right_axis(p, r_min, r_max);
 
     // Plot area
-    const float pw = static_cast<float>(width()  - kLeft - kRight);
+    const float pw = static_cast<float>(width()  - kLeft - right_margin());
     const float ph = static_cast<float>(height() - kTop  - kBottom);
 
     auto map_x = [&](float t) -> float { return kLeft + (t - t_min) / (t_max - t_min) * pw; };
     auto map_y = [&](float v) -> float { return kTop  + (1.f - (v - v_min) / (v_max - v_min)) * ph; };
+    auto map_yr = [&](float v) -> float { return kTop  + (1.f - (v - r_min) / (r_max - r_min)) * ph; };
 
     // Horizontal reference line (decision threshold) — dashed, drawn under the series.
     if (ref_line_enabled_ && ref_line_y_ >= v_min && ref_line_y_ <= v_max)
@@ -214,8 +223,9 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
         for (const auto& pt : s.samples)
         {
             if (pt.t < t_min) continue;
+            if (not std::isfinite(pt.v)) { started = false; continue; }   // NaN = a gap, not a value
             const float sx = map_x(pt.t);
-            const float sy = map_y(pt.v);
+            const float sy = s.axis == 1 ? map_yr(pt.v) : map_y(pt.v);
             if (!started) { path.moveTo(sx, sy); started = true; }
             else          { path.lineTo(sx, sy); }
         }
@@ -229,7 +239,7 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
 void TimeSeriesPlot::draw_axes(QPainter& p, float t_min, float t_max,
                                 float v_min, float v_max) const
 {
-    const float pw = static_cast<float>(width()  - kLeft - kRight);
+    const float pw = static_cast<float>(width()  - kLeft - right_margin());
     const float ph = static_cast<float>(height() - kTop  - kBottom);
 
     p.setPen(QPen(QColor(80, 80, 80), 1));
@@ -265,6 +275,33 @@ void TimeSeriesPlot::draw_axes(QPainter& p, float t_min, float t_max,
         p.drawText(QRect(x - 20, kTop + static_cast<int>(ph) + 2, 40, 16),
                    Qt::AlignHCenter | Qt::AlignTop,
                    QString::number(t, 'f', 0) + "s");
+    }
+}
+
+bool TimeSeriesPlot::has_right_axis() const
+{
+    return std::ranges::any_of(series_, [](const auto& kv) { return kv.second.axis == 1; });
+}
+
+void TimeSeriesPlot::draw_right_axis(QPainter& p, float v_min, float v_max) const
+{
+    const int x  = width() - kRightAxis;
+    const float ph = static_cast<float>(height() - kTop - kBottom);
+    // Tick labels take the colour of the first right-axis series, so it is unambiguous which line they scale.
+    QColor col(20, 20, 20);
+    for (const auto& [key, s] : series_)
+        if (s.axis == 1 and not key.ends_with("_avg")) { col = s.colour.darker(130); break; }
+    p.setPen(QPen(QColor(80, 80, 80), 1));
+    p.drawLine(x, kTop, x, kTop + static_cast<int>(ph));
+    p.setFont(QFont("Monospace", 7));
+    p.setPen(col);
+    for (int i = 0; i <= 4; ++i)
+    {
+        const float frac = static_cast<float>(i) / 4.f;
+        const float val = v_max - frac * (v_max - v_min);
+        const int y = kTop + static_cast<int>(frac * ph);
+        p.drawText(QRect(x + 3, y - 7, kRightAxis - 4, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                   QString::number(val, 'g', 3));
     }
 }
 

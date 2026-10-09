@@ -336,6 +336,18 @@ void SpecificWorker::initialize()
 	// building while every number downstream stays self-consistent.
 	cfgr.opt("Agent.scenario", scenario_name_,
 	           "WHERE the robot is; published as scenario_name on its node - room_concept REFUSES to start without it");
+	// The base's LINEAR velocity unit. Webots bridge: m/s. Real SVD48VBase: mm/s -- found 2026-10-02 by
+	// reading its publisher (wheel radius and track in mm, so adv/side come out in mm/s while rot is
+	// rad/s). Unconverted, the real robot would have reported every forward speed 1000x too large.
+	{
+		std::string units = "m";
+		cfgr.opt("Odometry.linear_units", units, "base linear velocity unit: \"m\" (Webots bridge) or \"mm\" (real SVD48VBase)");
+		if (units == "mm")      odom_linear_scale_ = 1e-3f;
+		else if (units == "m")  odom_linear_scale_ = 1.f;
+		else qFatal("[Odometry] linear_units must be \"m\" or \"mm\", got \"%s\"", units.c_str());
+		qInfo().nospace() << "[Odometry] base linear velocity in " << QString::fromStdString(units)
+		                  << "/s -> scale " << odom_linear_scale_ << " to m/s";
+	}
 	// WHAT this base can do, as opposed to where it is — read from the BASE COMPONENT's own config,
 	// which is the same file on the real robot as in simulation. An earlier version of this declared
 	// `Agent.holonomic` here by hand; that was a second copy of `baseType`, which SVD48VBase already
@@ -2199,8 +2211,9 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())
 	{
-		G->add_or_modify_attrib_local<robot_current_advance_speed_att>(pose_node.value(), pose.adv);
-		G->add_or_modify_attrib_local<robot_current_side_speed_att>(pose_node.value(), pose.side);
+		// Linear speeds in m/s whatever the producer's unit (see odom_linear_scale_); rot is rad/s on both.
+		G->add_or_modify_attrib_local<robot_current_advance_speed_att>(pose_node.value(), pose.adv * odom_linear_scale_);
+		G->add_or_modify_attrib_local<robot_current_side_speed_att>(pose_node.value(), pose.side * odom_linear_scale_);
 		G->add_or_modify_attrib_local<robot_current_angular_speed_att>(pose_node.value(), pose.rot);
 		G->add_or_modify_attrib_local<robot_current_speed_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.timestamp));
 		// Carry the producer's simulation clock through as well. The velocities above are per
@@ -2245,8 +2258,9 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		// a zero would read downstream as INFINITE CONFIDENCE, which is the trap the .idsl warns about.
 		{
 			const auto stated = [](float v) { return v >= 0.f ? v : -1.f; };   // NaN also reads as unknown
-			const float var_adv  = stated(pose.velCov.m11);   // forward, body +Y
-			const float var_side = stated(pose.velCov.m00);   // lateral, body +X
+			const float s2 = odom_linear_scale_ * odom_linear_scale_;   // a variance scales with the square
+			const float var_adv  = pose.velCov.m11 >= 0.f ? pose.velCov.m11 * s2 : -1.f;   // forward, body +Y
+			const float var_side = pose.velCov.m00 >= 0.f ? pose.velCov.m00 * s2 : -1.f;   // lateral, body +X
 			const float var_rot  = stated(pose.velCov.m55);   // yaw rate, frame-independent
 			if (var_adv >= 0.f or var_side >= 0.f or var_rot >= 0.f)
 			{

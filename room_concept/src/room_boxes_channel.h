@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 #include <Eigen/Dense>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <map>
@@ -44,6 +45,54 @@ namespace rc::boxch
         float cell         = 0.05f;
         int   min_cluster  = 12;      ///< COMPUTE: smallest cluster worth proposing
         float z_min        = 0.20f;   ///< PHYSICAL: floor rejection, in the robot's own frame
+        /// PHYSICAL: the robot's passable half-width, from ROBOT_GEOMETRY.md's derived footprint
+        /// (`WebotsProtoLoader::xy_hull()`: area 0.2182 m², inscribed 0.2300, circumscribed 0.3278).
+        /// The planner may only route where a body of this radius fits, so a gap narrower than
+        /// 2 x this is not a corridor. ⚠ EROSION IS AGAINST KNOWN OCCUPANCY ONLY, never against
+        /// unknown space — a frontier cell is adjacent to unknown BY DEFINITION, so eroding against
+        /// unknown forbids ever approaching the thing exploration exists to look at.
+        /// ★ Using the INSCRIBED radius says "it fits going straight"; the circumscribed 0.3278
+        /// would say "it fits at any heading, so it can also turn in place there". That is a
+        /// behavioural choice ROBOT_GEOMETRY.md flags as wanting its own comparison; this is the
+        /// permissive end, and it is the number to change if the robot clips corners in the real
+        /// world.
+        float body_radius  = 0.230f;
+        /// ── THE OBSTACLE BAND: EVERYTHING BELOW THE WALL BAND ──────────────────────────────
+        /// PHYSICAL, robot frame. Returns here are FURNITURE, not walls: the wall band is above
+        /// them (z_min), which is how the robot separates the two — the high LiDAR sees over a
+        /// table, the low one sees the table. They are recorded for NAVIGATION ONLY (obs_), never
+        /// as evidence about the room. Measured in the bench: one band, with furniture on the
+        /// floor, fits the furniture's faces as walls and loses the robot — IoU 0.543 against
+        /// 0.983 with the bands separated.
+        // ── MODEL CHOICES VALIDATED IN THE BENCH (were WS_* environment flags) ──────────────
+        /// Fit the layout frame by the layout's own likelihood instead of the segment vote.
+        bool  gauge_ml        = false;
+        /// Build the free-space cover on the LAYOUT grid, not the map grid (else every proposed
+        /// box is aligned with the map axes and the judge rewards a frame of exactly 0 degrees).
+        bool  cover_layout    = false;
+        /// COMPUTE budget of the greedy cover: how many rectangles it may propose. Not a model
+        /// statement — MDL already refuses a box that does not pay for itself.
+        int   cover_max_rects = 24;
+        /// Refuse a candidate cover that would make the region more disconnected than it is. ⚠ A
+        /// TRADE, not a win: the apartment gains (mean .887->.917, worst .473->.705) and the 50
+        /// simple rooms lose at the tail (.969/.901 -> .956/.772). Off until it is priced in nats.
+        bool  connected       = false;
+        /// PRICE a second region instead of forbidding it: the adoption cost gains one region's
+        /// description length, 4*log(span/sigma), per extra connected component — the same currency
+        /// a box is charged in. A split that explains the evidence better than one region plus that
+        /// price still wins, which a flat refusal cannot express.
+        bool  connected_price = false;
+        /// A one-scan seed's offsets carry the room's span, not sigma_flat: a box drawn round one
+        /// scan is not known to a centimetre. Pairs with GrowParams::free_force and
+        /// RegisterOptions::map_var.
+        bool  seed_prior_span = false;
+        /// Pass RegisterOptions::map_var when this channel registers (reproject).
+        bool  reg_map_var     = false;
+        /// Swept space pushes a face that excludes it — forwarded to GrowParams::free_force.
+        bool  free_force      = false;
+
+        float obs_z_min    = 0.15f;
+        float obs_z_max    = 1.45f;
         float z_max        = 1.60f;   ///< PHYSICAL: below the ceiling — see
                                       ///  [[lidar-high-band-must-not-reach-ceiling]], where ceiling
                                       ///  returns in a 2-D wall SDF stopped a room stabilising while
@@ -57,6 +106,119 @@ namespace rc::boxch
         void configure(const Params& p) { p_ = p; }
         const Params& params() const { return p_; }
         bool enabled() const { return p_.enabled; }
+
+        /// ── WHERE SHOULD THE ROBOT GO NEXT? ─────────────────────────────────────────────────
+        /// A path, in MAP-frame metres, to the viewpoint that most reduces what the layout does not
+        /// know. The belief is the free-space map this channel already maintains: a cell is FREE
+        /// (a beam went through it), OCCUPIED (a return landed there) or UNKNOWN. A frontier — a
+        /// free cell touching unknown space — is where new information can actually be obtained,
+        /// and the gain of standing there is the unknown area it would reveal.
+        ///
+        /// score = unknown cells within sensor horizon / (1 + path length)
+        ///
+        /// ⚠ THE PATH IS PLANNED THROUGH FREE CELLS, never as a straight line. The bench's fixed
+        /// tours were validated against the TRUE polygon — information a robot does not have — and
+        /// on the apartamento hall, whose two fins stand on the centreline, a straight run between
+        /// two sensible points goes through a wall. Planning over the free map instead uses only
+        /// what has been observed, which is the whole point of making the robot choose.
+        ///
+        /// Returns an empty path when no frontier is left: that is the honest termination
+        /// condition for exploration, and it is what a frame cap has been standing in for.
+        /// ★ An objective cannot be graded on an endpoint its own budget saturated —
+        /// 594/594 runs of the previous explorer hit the cap and it measured NULL.
+        /// ── TWO PHASES, BECAUSE COVERAGE IS A PRECONDITION AND PRECISION IS THE GOAL ────────
+        /// EXPLORE  maximise unknown area revealed per metre — the frontier objective. It answers
+        ///          "where has nobody been", which is occupancy entropy.
+        /// REFINE   once there is no frontier, maximise the information gained about the WALL
+        ///          OFFSET THAT IS WORST KNOWN. That is the estimand; occupancy never was.
+        ///
+        /// ★ The fixed tour this has to match drives TWO laps. The second lap reveals no new area
+        ///   whatsoever — it contributes PRECISION, by seeing every wall again from new angles.
+        ///   A pure frontier planner stops at the end of lap one and collects about half the data,
+        ///   which is why it cannot reach the same layout however good its coverage is.
+        ///
+        /// Information about a face offset from a viewpoint goes as cos^2(incidence)/range: a wall
+        /// seen edge-on says almost nothing about where it is. So REFINE prefers standing square
+        /// to the worst-known wall at moderate range, which is also what keeps registration
+        /// healthy — and pose error is what drives layout error
+        /// ([[free-space-cost-must-be-symmetric]]: 0.356 m rms odometry-only vs 0.019 registered).
+        enum class Phase { Explore, Refine, Done };
+        Phase phase() const { return phase_; }
+        const char* phase_name() const
+        { return phase_ == Phase::Explore ? "explore" : phase_ == Phase::Refine ? "refine" : "done"; }
+
+        std::vector<Eigen::Vector2f> plan_path(const Eigen::Vector2f& from_map, float horizon_m = 4.0f) const;
+
+        /// ── CAN A BODY STAND HERE, IN THE ROBOT'S OWN BELIEF? ───────────────────────────────
+        /// The same configuration-space predicate `plan_path` routes on, exposed so a path
+        /// FOLLOWER can validate the curve it actually intends to drive. `RouteSpline` smooths
+        /// across the planner's polyline and is APPROXIMATING, not interpolating, so the smoothed
+        /// curve can leave the corridor the planner certified — near a 0.12 m fin that matters.
+        /// ⚠ THE ANSWER MUST COME FROM THE MAP, NEVER FROM THE TRUE ROOM. A follower handed the
+        /// truth polygon is an oracle, and it would look excellent for the same reason the
+        /// true-pose corner channel did. This reads `free_` and `vmap_` — swept floor, and no
+        /// KNOWN occupancy within `body_radius` — so it is exactly as wrong as the robot is.
+        /// `m` is a MAP-frame point (the frame `plan_path` speaks).
+        /// Signed distance (m) from a MAP-frame point to the believed layout boundary: negative
+        /// inside the room. The robot's own belief, for a caller that must route by it (the bench's
+        /// route optimiser, as controller_session routes by its GridPlanner EDT). +max if no layout.
+        float model_sdf(const Eigen::Vector2f& m) const;
+        /// WS_COVER_PROBE: connected components of the union (polygon() publishes only the first).
+        int components() const;
+        /// ── OBSTACLES ARE FOR NAVIGATION ONLY ───────────────────────────────────────────────
+        /// The low LiDAR band sees floor furniture; the wall band sees over it. Low-band returns
+        /// (robot-frame points at map-frame `pose`) are recorded HERE and nowhere else: plan_path()
+        /// treats them as occupancy and obstacle_clearance() serves the route optimiser, but they
+        /// never enter vmap_, free_, the layout, registration or the gauge. That is how the robot
+        /// works — a table is something to drive around, not a wall to fit.
+        void observe_obstacles(const std::vector<Eigen::Vector2f>& pts_robot, const Eigen::Vector3f& pose);
+        /// Same, from the 3-D scan: keeps [obs_z_min, obs_z_max] — the band BELOW the wall band.
+        void observe_obstacles(const std::vector<Eigen::Vector3f>& pts_robot, const Eigen::Vector3f& pose);
+        /// Distance (m) from a MAP-frame point to the nearest recorded obstacle cell, searched
+        /// within `horizon`; returns `horizon` when none is closer.
+        float obstacle_clearance(const Eigen::Vector2f& m, float horizon = 1.5f) const;
+        bool traversable(const Eigen::Vector2f& m) const;
+        /// The swept cells as a set, for refit's free-space term (see rc::boxes::refit).
+        void refresh_free_keys() const;
+        /// Worst face variance, in metres — the quantity REFINE is driving down, and the honest
+        /// stopping signal: when it stops improving there is nothing left to learn about shape.
+        float worst_face_sigma() const { return worst_face_sigma_; }
+        /// Expected information about the layout's offsets, in NATS, of the viewpoint the last
+        /// plan chose — the epistemic half of G(v). Zero when the rate heuristic is driving.
+        /// ★ THE FALSIFIER LIVES HERE: log this against the REALISED change in the estimator's
+        /// total Fisher information on arrival and regress. A slope far from 1 means the currency
+        /// is fiction and no lambda can rescue an objective whose value is made up.
+        float last_info_nats() const { return last_info_nats_; }
+        /// Raw predicted Fisher gain (sum of dH_k) of the chosen viewpoint — the quantity to
+        /// regress against the REALISED change in info_total(). Same units on both sides.
+        float last_dH_sum() const { return last_dH_sum_; }
+        /// Unexplained residual, in nats, on the faces the chosen viewpoint would see — the
+        /// structural half of the objective, and the only term voxel condensation cannot erase.
+        float last_misfit_nats() const { return last_misfit_nats_; }
+        /// Total Fisher information the estimator currently holds over all offsets, sum of 1/var.
+        /// The realised side of that regression.
+        double info_total() const
+        {
+            double t = 0.0;
+            if (L_.cov.rows() != static_cast<long>(L_.n_offsets())) return t;
+            for (long i = 0; i < L_.cov.rows(); ++i)
+                if (L_.cov(i, i) > 0.f and std::isfinite(L_.cov(i, i))) t += 1.0 / L_.cov(i, i);
+            return t;
+        }
+        /// Unknown cells the last plan expected to reveal — the gain it was chosen for.
+        int last_gain() const { return last_gain_; }
+    private:
+        mutable int last_gain_ = 0;
+        mutable Phase phase_ = Phase::Explore;
+        mutable float worst_face_sigma_ = 1e9f;
+        mutable float last_info_nats_ = 0.f;
+        mutable float last_dH_sum_ = 0.f;
+        mutable float last_misfit_nats_ = 0.f;
+        /// The pose covariance the last scan was folded with — the prediction needs it to say what
+        /// sigma a return at a given RANGE would be captured at.
+        Eigen::Matrix3f last_cov_ = Eigen::Matrix3f::Identity() * 0.01f;
+        mutable int refine_stall_ = 0;
+    public:
 
         /// Fold one scan in. `pts_robot` is the robot-frame scan, `pose` the map-frame robot pose,
         /// `cov` that pose's 3x3 covariance. Cheap: a voxel update per point, no solve.
@@ -126,6 +288,56 @@ namespace rc::boxch
     private:
         struct Vox { Eigen::Vector2d acc{0.0, 0.0}; double w = 0.0; float smin = 1e9f; };
 
+        /// ── KEYFRAMES: THE EVIDENCE, STILL IN THE FRAME IT WAS MEASURED IN ──────────────────
+        /// ★★★★★ WITHOUT THESE THE ESTIMATOR IS A FILTER, NOT A SMOOTHER. `vmap_` and `free_` are
+        /// per-cell counters: a return displaced by pose error lands in a DIFFERENT cell that is
+        /// never merged back, and a cell swept in error can never be un-swept. Consolidation can
+        /// then only OUTVOTE a mistake, never correct it — so a pose error above one cell (0.05 m)
+        /// is permanent, which is exactly why the fixed tour at 0.037 m never suffers and an
+        /// explorer at 0.19 m destroys the map.
+        /// Keeping the scan in the ROBOT frame with the pose it was taken at makes the evidence
+        /// re-projectable: when the layout changes materially, every keyframe is re-registered
+        /// against the new layout and the whole occupancy is rebuilt from the corrected poses.
+        /// That is a small bundle adjustment, and it is the difference between a map that can be
+        /// repaired and one that can only be outvoted.
+        struct KeyFrame
+        {
+            std::vector<Eigen::Vector2f> pts;   ///< robot frame, subsampled
+            Eigen::Vector3f pose{0.f, 0.f, 0.f};
+            float sigma = 0.f;                  ///< scan-WORST point sigma; logging only
+            /// ⚠ THE POSE COVARIANCE, NOT ONE NUMBER. `sigma` alone was the scan-wide MAXIMUM, and
+            /// reproject() stamped it on every point of the keyframe — so after the first rebuild
+            /// every voxel's `smin` was the worst point of whichever scan happened to be a
+            /// keyframe, and the per-point sigmas observe() computes so carefully were gone. A 5 m
+            /// return with 0.5 deg of heading error alone is ~44 mm, which is why the worst-face
+            /// posterior plateaued around 15 mm on faces whose sensor noise is 20 mm: the floor was
+            /// manufactured by the rebuild, not by the geometry.
+            /// Keeping the 3x3 lets point_sigma() re-derive each point's own sigma from the lever
+            /// arm at ITS range, in the rebuild exactly as in the live fold — and lets a keyframe's
+            /// evidence IMPROVE when re-registration sharpens its pose, which is what makes a
+            /// second look at a wall worth anything at all.
+            Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
+        };
+        /// 1-sigma uncertainty of WHERE a robot-frame return is, given the pose covariance:
+        /// translation plus the lever arm of the heading error at that range. First-order
+        /// propagation of cov through p = t + R(theta) q. Shared by observe() and reproject() so
+        /// the live fold and the rebuild can never disagree about what a point is worth.
+        static float point_sigma(const Eigen::Matrix3f& cov, float c, float s,
+                                 const Eigen::Vector2f& q)
+        {
+            const Eigen::Vector2f jth(-s * q.x() - c * q.y(), c * q.x() - s * q.y());
+            const Eigen::Vector2f pxth(cov(0, 2), cov(1, 2));
+            const float tr = cov(0, 0) + cov(1, 1) + cov(2, 2) * jth.squaredNorm()
+                           + 2.f * pxth.dot(jth);
+            return std::sqrt(std::max(0.f, tr) * 0.5f);
+        }
+        std::vector<KeyFrame> keys_;
+        std::uint64_t last_key_f_ = 0;
+        std::uint64_t structure_steps_ = 0;
+        /// Re-register every keyframe against the current layout and rebuild vmap_/free_ from the
+        /// corrected poses. Returns the mean correction applied, in metres.
+        float reproject();
+
         /// ── FREE SPACE: THE CELLS THE BEAMS PASSED THROUGH ──────────────────────────────────
         /// ★★★★★ THE LAYOUT IS BUILT FROM THE INSIDE OUT, NOT THE OUTSIDE IN.
         /// The first design seeded one box = the interval HULL of the returns and let growth carve
@@ -139,6 +351,7 @@ namespace rc::boxch
         /// passed through is free, and free space is the room. This is why the box-decomposition
         /// literature builds from occupancy rather than from a bounding volume.
         std::map<std::pair<int, int>, int> free_;
+        mutable std::set<std::pair<int, int>> free_keys_;
         /// The robot's own cell trail — always free, and the seed's guaranteed starting point.
         std::pair<int, int> last_cell_{0, 0};
         bool have_cell_ = false;
@@ -186,6 +399,7 @@ namespace rc::boxch
         std::size_t free_at_rebuild_ = 0;
         /// Once the free-space cover has built a layout, it owns it.
         bool have_cover_ = false;
+        bool   adopted_once_ = false;
 
         Params p_;
         rc::boxes::Layout L_;
@@ -209,6 +423,7 @@ namespace rc::boxch
         long   yaw_votes_ = 0;
         bool   qInfo_first_ = false;
         std::map<std::pair<int, int>, Vox> vmap_;
+        std::map<std::pair<int, int>, int> obs_;    ///< low-band returns, map cells: NAVIGATION ONLY
         std::vector<rc::boxes::CloudPoint> cloud_;
         std::vector<Eigen::Vector2f> init_scan_;
         std::uint64_t frames_ = 0;
@@ -218,5 +433,8 @@ namespace rc::boxch
         std::ofstream csv_;
 
         void fuse();
+        /// WS_GAUGE_ML: turn the layout frame by the rotation that maximises the layout's own
+        /// likelihood of the fused returns (see the definition). Returns the rotation applied.
+        float fit_gauge_ml(const rc::boxes::GrowParams& gp);
     };
 }   // namespace rc::boxch

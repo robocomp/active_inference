@@ -41,6 +41,7 @@
 #include "mount_calibrator.h"
 #include "pose_publisher.h"
 #include "calib_channels.h"
+#include "joint_calib_monitor.h"
 #include "door_apertures.h"
 #include "ground_truth_log.h"
 #include "camera_calibration.h"
@@ -48,6 +49,8 @@
 #include "image_edge_source.h"
 #include "room_viewer.h"
 #include "room_config.h"
+#include "status_reporter.h"
+#include "../../common/status_stream/status_stream.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include <atomic>
@@ -279,13 +282,16 @@ class SpecificWorker : public GenericWorker
         // writes onto the robot node as robot_gt_*. The point is a witness from OUTSIDE the
         // estimator: a wrong pose fitted well scores exactly like a right one on the SDF residual,
         // which is how a 0.35 rad yaw error hid behind an SDF of 0.009 for a whole session.
-        // ⚠ The two poses are in DIFFERENT FRAMES — GT is world, the estimate is room — so a
-        // CONSTANT offset between them is expected and benign (the room frame's own orientation).
+        // ⚠ The two poses are in DIFFERENT FRAMES — GT is world, the estimate is room. ★2026-10-04 the
+        // TRANSLATION is now removed at the logger (GroundTruthLog::set_world_offset = the recentring
+        // offset; apartamento (-4.2535, +4.628), verified to mm, raw values kept in gt_*_world). It is
+        // exact only if the scenario's SVG (after mirror_x) is drawn in Webots world coordinates.
         // What matters is whether that offset stays constant: fit offset+gain over many rows and
         // look at the RESIDUAL. Never compare two single readings; that is how three wrong
 
     // ── robot_gt_angle arrives with an INVERTED SIGN (measured 2026-08-28, 9258 rows) ────────────
-    // Position is a clean pure translation: gt_x = est_x + 0.53, gt_y = est_y, slope +1 on both.
+    // Position is a clean pure translation: gt_x = est_x + 0.53, gt_y = est_y, slope +1 on both
+    // (0.53 was an older layout's recentring offset; now subtracted at the logger, see above).
     // Heading is not: gt_theta = -est_theta - 89.2 deg. No rigid transform maps position that way
     // and angle this way, and the position half is verifiably right, so the ANGLE is wrong — the
     // signature (a clean reflection, not a rotation) is what you get extracting a Webots axis-angle
@@ -329,6 +335,13 @@ class SpecificWorker : public GenericWorker
     /// every calibration-only camera, their extractors, evidence and pair logs, and the room polygon
     /// they project.
     std::unique_ptr<rc::CalibChannels> calib_;
+    /// Joint sensor-mount + odometry calibration MONITOR (plan 2026-10-05 Task 4): logs only.
+    rc::joint::Monitor joint_monitor_;
+    int joint_last_episodes_ = -1;
+    /// r2 mounts monitor (plan 2026-10-08 Task 5): helios 6 + bpearl 6 + cameras, ~1 Hz, logs only.
+    rc::joint::MountMonitor mount_monitor_;
+    std::int64_t mount_monitor_ms_ = std::numeric_limits<std::int64_t>::min() / 2;
+    void joint_calibration_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);
     /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
     std::unique_ptr<rc::GroundTruthLog> gt_log_;
     /// Open doorways, refreshed from the graph in compute() and handed to the localiser as a snapshot.
@@ -382,6 +395,16 @@ class SpecificWorker : public GenericWorker
 
 
         std::atomic<bool> shutting_down_{false};
+
+        // ── Live status stream for the terminal viewer (tools/room_tui.py) ─────────────────────────
+        // Owned by the MAIN thread; null when [Status] Enable = false. Started FIRST in initialize()
+        // so the startup timeline is complete. status_ says WHAT room_concept reports; it is a no-op
+        // whenever the stream is off, so call sites carry no guard.
+        std::unique_ptr<rc::StatusStream> status_stream_;
+        rc::StatusReporter                status_;
+        void start_status_stream();
+        int                               status_idle_ticks_ = 0;
+        bool                              overlay_verbose_ = false;   ///< mirrors Viewer2D (no getter)
 
     signals:
         void presenceReady();

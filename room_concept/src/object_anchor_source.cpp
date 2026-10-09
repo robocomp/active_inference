@@ -1,4 +1,5 @@
 #include "object_anchor_source.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include <algorithm>
 #include <cmath>
@@ -229,13 +230,13 @@ namespace rc
                         // publishes, and that ambiguity costs an afternoon.
                         static std::uint64_t defer_k = 0;
                         if ((defer_k++ % 60) == 0)
-                            std::print("[room][anchors] pin DEFERRED for {} #{} (map σ={:.0f}mm, but the "
+                            rc::status::print("[room][anchors] pin DEFERRED for {} #{} (map σ={:.0f}mm, but the "
                                        "localizer is not sustained-stable yet)\n",
                                        obs.type, obs.node_id, obs.map_pos_sigma * 1000.f);
                         continue;
                     }
                     it = pinned_pose_.emplace(obs.node_id, obs.pose_world).first;
-                    std::print("[room][anchors] PINNED {} #{} at world ({:.2f},{:.2f},{:.2f}) (map σ={:.0f}mm)\n",
+                    rc::status::print("[room][anchors] PINNED {} #{} at world ({:.2f},{:.2f},{:.2f}) (map σ={:.0f}mm)\n",
                                obs.type, obs.node_id, obs.pose_world.x(), obs.pose_world.y(),
                                obs.pose_world.z(), obs.map_pos_sigma * 1000.f);
                 }

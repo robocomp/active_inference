@@ -15,14 +15,22 @@
  *   1. the robot --[current]--> room edge, owned by ltsm_agent, when exactly ONE such edge exists;
  *   2. otherwise the unique room that is NOT a proto-room (a single-room fleet with no ltsm running —
  *      exactly the old behaviour, now deterministic);
- *   3. otherwise NOTHING. Two `current` edges, or two non-proto rooms and no `current`, is ambiguous, and
- *      guessing is worse than waiting.
+ *   3. (2026-10-09) otherwise, ONLY when there is no `current` edge at all AND no non-proto room, a UNIQUE
+ *      proto-room — room_concept's START-UP proto in an estimation run (the robot's first room: nobody
+ *      disputes its identity, so it is the room from the first second). Never fires beside a real room,
+ *      so a door crossing still resolves to the old room until ltsm_agent moves `current`;
+ *   4. otherwise NOTHING. Two non-proto rooms and no `current`, or two protos, is ambiguous, and guessing
+ *      is worse than waiting. (Two `current` edges abstain from rule 1 and fall through to rule 2 — the
+ *      code has always done that; rule 3 is disabled by them.)
+ *   The rule itself is the pure function rc::room::resolve_current_room in room_resolve_rule.h, pinned by
+ *   room_resolve_test.cpp; this header only gathers the facts from the graph.
  *   ★nullopt means "nobody has told me" — never "released". A caller that lets go of a room on nullopt
  *   would release every room on the first cycle of a fleet that runs no ltsm_agent.
  *
  * PROTO-ROOM: a `room` node carrying a `proto` SELF-edge (room→room). It is room_concept's provisional
- * room for space the current room does not explain; its identity is still unresolved, so it is never
- * "the" room for a consumer. Promotion removes the edge and keeps the node id.
+ * room for space the current room does not explain; its identity is still unresolved, so it is "the" room
+ * for a consumer only through rule 3 (no other room, no `current` edge). Promotion removes the edge and
+ * keeps the node id.
  *
  * PROTO MIRROR: an object node (e.g. door_concept's entry mirror `door_N`) whose `parent` attribute is a
  * proto-room. It references a physical thing whose single belief lives in the current room; every loop
@@ -34,8 +42,11 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <dsr/api/dsr_api.h>
+
+#include "room_resolve_rule.h"   // the rule, as a pure function (pinned by room_resolve_test.cpp)
 
 namespace rc::room
 {
@@ -46,42 +57,41 @@ inline bool is_proto(DSR::DSRGraph& G, std::uint64_t room_id)
     return G.get_edge(room_id, room_id, "proto").has_value();
 }
 
-/// The room ltsm_agent's `current` edge points at, if exactly one such edge exists. Read by EDGE TYPE,
-/// not by walking from a robot node named per platform; the destination's TYPE is the check.
-inline std::optional<std::uint64_t> current_edge_room(DSR::DSRGraph& G)
+/// The robot→room `current` edges, counted by EDGE TYPE (not by walking from a robot node named per
+/// platform); the destination's TYPE is the check.
+inline CurrentEdges current_edges(DSR::DSRGraph& G)
 {
-    std::optional<std::uint64_t> found;
-    int n = 0;
+    CurrentEdges c;
     for (const auto& e : G.get_edges_by_type("current"))
     {
         const auto dst = G.get_node(e.to());
         if (not dst.has_value() or dst->type() != "room")
             continue;
-        ++n;
-        found = e.to();
+        ++c.count;
+        c.room = e.to();
     }
-    if (n > 1)
-        return std::nullopt;   // mid-write or two writers — ambiguous, report nothing
-    return found;
+    return c;
+}
+
+/// The room ltsm_agent's `current` edge points at, if exactly one such edge exists.
+inline std::optional<std::uint64_t> current_edge_room(DSR::DSRGraph& G)
+{
+    const auto c = current_edges(G);
+    if (c.count != 1)
+        return std::nullopt;   // none, or mid-write / two writers — ambiguous, report nothing
+    return c.room;
 }
 
 /// "The" room, per the rule in the header comment. nullopt = unknown, NEVER a release.
 inline std::optional<std::uint64_t> current_room(DSR::DSRGraph& G)
 {
-    if (const auto c = current_edge_room(G); c.has_value())
-        return c;
-    std::optional<std::uint64_t> found;
-    int n = 0;
+    const auto cur = current_edges(G);
+    if (cur.count == 1)
+        return cur.room;   // rule 1 needs no room scan
+    std::vector<RoomFact> rooms;
     for (const auto& r : G.get_nodes_by_type("room"))
-    {
-        if (is_proto(G, r.id()))
-            continue;
-        ++n;
-        found = r.id();
-    }
-    if (n != 1)
-        return std::nullopt;
-    return found;
+        rooms.push_back({.id = r.id(), .proto = is_proto(G, r.id())});
+    return resolve_current_room(cur, rooms);
 }
 
 /// Same, returning the node (convenience for call sites that read attributes off it).
@@ -141,13 +151,18 @@ inline std::string resolve_frame(DSR::DSRGraph& G, const std::string& configured
 
 /// True when `node`'s `parent` attribute names a proto-room — a mirror of something whose belief lives in
 /// another room (see header). Nodes with no `parent` attribute are never mirrors.
+/// ★A proto-room that IS the current room (rule 3: the start-up proto of an estimation run) has no other
+/// room for its objects to mirror: everything born in it is its own, single belief. Without this exception
+/// every object a concept agent births under the start-up proto would be skipped by its own fitting loop.
 inline bool is_proto_mirror(DSR::DSRGraph& G, const DSR::Node& node)
 {
     const auto p = G.get_attrib_by_name<parent_att>(node);
     if (not p.has_value())
         return false;
     const auto pn = G.get_node(p.value());
-    return pn.has_value() and pn->type() == "room" and is_proto(G, pn->id());
+    if (not (pn.has_value() and pn->type() == "room" and is_proto(G, pn->id())))
+        return false;
+    return current_room(G) != std::optional<std::uint64_t>{pn->id()};
 }
 
 }   // namespace rc::room

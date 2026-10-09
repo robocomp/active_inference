@@ -277,6 +277,12 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
             "");
     cfgr.opt("DoorApproach.label", params.DOOR_APPROACH_LABEL,
             "must be an ADE20K name the loaded model exposes");
+    cfgr.opt("ZedDump.enabled", params.ZED_DUMP_ENABLED,
+            "Save ZED RGB frames + capture pose for the WAF pilot — see zed_frame_dump.h");
+    cfgr.opt("ZedDump.dir", params.ZED_DUMP_DIR, "ZedDump.dir");
+    cfgr.opt("ZedDump.jpeg_quality", params.ZED_DUMP_JPEG_QUALITY, "ZedDump.jpeg_quality");
+    cfgr.opt<float, double>("ZedDump.min_move_m", params.ZED_DUMP_MIN_MOVE_M, "ZedDump.min_move_m");
+    cfgr.opt<float, double>("ZedDump.min_turn_deg", params.ZED_DUMP_MIN_TURN_DEG, "ZedDump.min_turn_deg");
     cfgr.opt("DoorSpecialist.enabled", params.DOOR_SPECIALIST_ENABLED,
             "A model trained on doors, run only on frames where the ADE20K path produced no door mask");
     cfgr.opt("DoorSpecialist.model_path", params.DOOR_SPECIALIST_MODEL,

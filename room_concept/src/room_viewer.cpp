@@ -8,6 +8,7 @@
 #include <fstream>
 #include <locale>
 #include "room_viewer.h"
+#include "../../common/status_stream/status_sink.h"
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +94,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     {
         const auto ms = vphase_timer.restart();
         if (vcsv.is_open()) vcsv << "viewer:" << name << ',' << ms << ",\n" << std::flush;
+        rc::status::event("phase", rc::status::Obj{}.s("name", std::string("viewer:") + name).i("ms", ms).b("sub", true));
         QCoreApplication::processEvents();
     };
 
@@ -151,6 +153,10 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // (a small rotation-dependent boost is added at runtime, so brief crossings during turns are
     // expected). Same axis as FE — both are SDF-energy quantities in meters.
     ts_plot_fe_->add_series("pred |SDF|", QColor(0, 150, 70), 1.6f, 0);
+    // Surprise on the RIGHT axis (nats/s; pred |SDF| is metres): the same time base shows the cause (the
+    // prediction misses the walls) next to its price (what the room had to tell the motion model).
+    ts_plot_fe_->add_series("surprise nats/s", QColor(220, 120, 0), 1.6f, 0, 1);
+    ts_plot_fe_->add_series("mismatch nats/s", QColor(150, 60, 200), 1.2f, 0, 1);
     if (room_concept_ != nullptr)
     {
         const float thr = room_concept_->params.sigma_sdf * room_concept_->params.prediction_trust_factor;
@@ -191,6 +197,14 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_loc_->add_series("pose drift mm/m", QColor(46, 204, 113), 1.6f, 5);
     ts_plot_loc_->add_series("correction mm/m", QColor(230, 126, 34), 1.4f, 5);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_loc_);
+
+    // ── SELF-CALIBRATION, GT-free (drift_monitor.h): the SYSTEMATIC part of the prediction error ──
+    ts_plot_syst_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_syst_->set_visible_window(60.f);
+    ts_plot_syst_->add_series("syst fwd mm/m", QColor(231, 76, 60), 2.0f);
+    ts_plot_syst_->add_series("syst lat mm/m", QColor(155, 89, 182), 2.0f);
+    ts_plot_syst_->add_series("syst heading mrad/rad", QColor(241, 196, 15), 2.0f, 0, 1);   // right axis
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_syst_);
     // ── What each legend entry MEANS, on hover ───────────────────────────────────────────────────
     // A series name is a label, not an explanation. None of these say what units they are in, which
     // direction is good, or what a reader should do about a value — and the plots are read by people
@@ -203,6 +217,16 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         "prediction inside Gauss-Newton.\n\n"
         "The threshold widens while turning (0.2 m per radian) because a heading error pivots the whole\n"
         "scan: 0.02 rad at 5 m already displaces the points 10 cm on a prediction that is perfectly good."));
+    ts_plot_fe_->set_series_tooltip("surprise nats/s", QStringLiteral(
+        "KL(posterior || motion prediction), summed over the last 10 s, per second (right axis).\n"
+        "What the room evidence had to tell the motion model: the free energy's complexity term.\n"
+        "Zero while the prediction is trusted (early exit); a solve scores the whole open-loop stretch\n"
+        "since the previous one. Lower = a motion model that needs less correcting. Per-run summary:\n"
+        "tools/surprise_report.py on tmp/heading/heading_<start>.csv."));
+    ts_plot_fe_->set_series_tooltip("mismatch nats/s", QStringLiteral(
+        "The part of the surprise due to the prediction being WRONG: 1/2 c' P_pred^-1 c for the correction c\n"
+        "(right axis). An honest motion model has a known expected value for it; the per-run report gives\n"
+        "sum(mismatch)/sum(expected): ~1 calibrated, >1 biased or over-confident, <1 under-confident."));
     ts_plot_conf_->set_series_tooltip("confidence", QStringLiteral(
         "Localisation confidence, 0..1, raw and unsmoothed.\n\n"
         "Read it as a trend, not a value: what matters is whether it is recovering or decaying, and\n"
@@ -240,6 +264,18 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         "on top of the blue one. Them SEPARATING is the news: it means the optimizer started working.\n\n"
         "If this stays flat while pred drift rises, the model got worse and the optimizer is paying for\n"
         "it — look at the orange line, which is where that cost appears."));
+    ts_plot_syst_->set_series_tooltip("syst fwd mm/m", QStringLiteral(
+        "SYSTEMATIC forward drift of the odometry, mm per metre travelled — what self-calibration must remove.\n\n"
+        "Fitted live, GT-free, from every scored correction: c = b_d*d + b_phi*phi + b_t*T over each open-loop\n"
+        "stretch (d forward travel, phi turn, T duration). Calibration errors grow linearly and with a sign,\n"
+        "noise like a square root, so b separates them. Converging to 0 = calibrated. Negative = the wheels\n"
+        "over-report forward travel. Offline twin with confidence intervals: tools/surprise_report.py (drift)."));
+    ts_plot_syst_->set_series_tooltip("syst lat mm/m", QStringLiteral(
+        "SYSTEMATIC lateral drift per metre travelled (mm/m): a mount-yaw residual shows up here\n"
+        "(1 mm/m ~ 0.06 deg). Converging to 0 = calibrated."));
+    ts_plot_syst_->set_series_tooltip("syst heading mrad/rad", QStringLiteral(
+        "SYSTEMATIC heading drift per radian turned (mrad/rad, right axis): a rotation-scale residual\n"
+        "(1 mrad/rad = 0.1 % scale). Converging to 0 = calibrated."));
     ts_plot_loc_->set_series_tooltip("correction mm/m", QStringLiteral(
         "How far the optimizer had to MOVE the pose, per metre travelled: |published - predicted|.\n\n"
         "The effort channel. An uncalibrated robot need not localise visibly worse — it can localise\n"
@@ -586,7 +622,7 @@ void RoomViewer::set_rt_rate_text(const QString& text)
         rt_rate_label_->setText(text);
 }
 
-void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required, bool searching)
+void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required, bool searching, bool estimating)
 {
     if (custom_widget_ == nullptr or custom_widget_->lbl_room_stable == nullptr)
         return;
@@ -596,10 +632,13 @@ void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_requ
     // SEARCHING outranks both other states: while a global grid search runs the pose is being
     // relocated wholesale, so "ROOM STABLE" would be actively misleading — the room node still
     // exists, but the robot's place in it is exactly what is currently in question.
-    const int state = searching ? 2 : (stable ? 1 : 0);
+    // ESTIMATING (2026-10-09): a start-up proto-room has a node, so "ROOM STABLE" would claim a surveyed
+    // layout while the robot is still exploring it. Shown until the proto is promoted.
+    const int state = searching ? 2 : estimating ? 3 : (stable ? 1 : 0);
 
-    const QString text = searching ? QStringLiteral("SEARCHING…")
-                       : stable    ? QStringLiteral("ROOM STABLE")
+    const QString text = searching  ? QStringLiteral("SEARCHING…")
+                       : estimating ? QStringLiteral("ESTIMATING ROOM…")
+                       : stable     ? QStringLiteral("ROOM STABLE")
                                    : QStringLiteral("STABILIZING %1/%2")
                                          .arg(stable_frames).arg(std::max(1, frames_required));
 
@@ -615,8 +654,8 @@ void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_requ
         static constexpr const char* kStyle =
             "QLabel { background-color: %1; color: white; border: 1px solid %2;"
             " border-radius: 4px; font-weight: bold; }";
-        const QString bg     = state == 2 ? "#c9791a" : state == 1 ? "#1e8b3a" : "#b02020";
-        const QString border = state == 2 ? "#8c520f" : state == 1 ? "#145c26" : "#7a1616";
+        const QString bg     = (state == 2 or state == 3) ? "#c9791a" : state == 1 ? "#1e8b3a" : "#b02020";
+        const QString border = (state == 2 or state == 3) ? "#8c520f" : state == 1 ? "#145c26" : "#7a1616";
         lbl->setStyleSheet(QString(kStyle).arg(bg, border));
         room_stable_shown_ = state;
     }
@@ -632,6 +671,21 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     // ran (warmup / no odometry) — skip those so the line doesn't spike to a garbage sample.
     if (std::isfinite(loc_res->early_exit_metric))
         ts_plot_fe_->add_point("pred |SDF|", loc_res->early_exit_metric);
+    // Surprise rate: once per NEW result (the viewer may see the same result on several ticks).
+    if (loc_res->timestamp_ms != surprise_last_ts_)
+    {
+        surprise_last_ts_ = loc_res->timestamp_ms;
+        const auto &s = loc_res->surprise;
+        if (s.scored and std::isfinite(s.kl))
+            surprise_win_.push_back({loc_res->timestamp_ms, s.kl, s.mismatch});
+        const auto horizon = loc_res->timestamp_ms - static_cast<std::int64_t>(kSurpriseWindowS * 1000.f);
+        while (not surprise_win_.empty() and surprise_win_.front().ts_ms < horizon)
+            surprise_win_.pop_front();
+        float kl = 0.f, mis = 0.f;
+        for (const auto &w : surprise_win_) { kl += w.kl; mis += w.mismatch; }
+        ts_plot_fe_->add_point("surprise nats/s", kl / kSurpriseWindowS);
+        ts_plot_fe_->add_point("mismatch nats/s", mis / kSurpriseWindowS);
+    }
     // RGB projection agreement, appended only when a NEW cycle produced one. Without the stamp test
     // a stalled camera would draw a flat line at its last value, which reads as "steady" rather than
     // "stopped" — the two must not look alike.
@@ -654,6 +708,21 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     const float conf = std::clamp((std::log10(det_cov) - kDetLost) / (kDetTight - kDetLost), 0.f, 1.f);
     if (ts_plot_conf_)
         ts_plot_conf_->add_point("confidence", conf);
+
+    // ── SELF-CALIBRATION, GT-free: the systematic drift the agent fitted at this correction ──────────
+    // The fit changes only at a scored correction (drift_n > 0); between them the last fit is held and
+    // drawn every tick, so the lines are continuous.
+    if (loc_res->surprise.drift_n > 0)
+    {
+        const auto &b = loc_res->surprise.drift_b;   // [axis][per m, per rad, per s]
+        syst_last_ = std::array<float, 3>{1000.f * b[0], 1000.f * b[3], 1000.f * b[7]};
+    }
+    if (ts_plot_syst_ and syst_last_)
+    {
+        ts_plot_syst_->add_point("syst fwd mm/m", (*syst_last_)[0]);
+        ts_plot_syst_->add_point("syst lat mm/m", (*syst_last_)[1]);
+        ts_plot_syst_->add_point("syst heading mrad/rad", (*syst_last_)[2]);
+    }
 
     // ── FEED THE LOCALIZATION METRIC ─────────────────────────────────────────────────────────────
     // ⚠ This replaced a block that fed ts_plot_gt_, a plot that was DECLARED and USED but never
@@ -721,7 +790,7 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
         // hand-copied field is a chance to pass a literal 0 for a sigma, which once rendered the one
         // parameter we had never measured as the most certain thing on the screen.
         calib_viewer_->update_values(loc_res->calib_value, loc_res->calib_sigma,
-                                     loc_res->calib_informed,
+                                     loc_res->calib_informed, loc_res->calib_applied,
                                      loc_res->calib_condition, loc_res->calib_episodes);
     }
 

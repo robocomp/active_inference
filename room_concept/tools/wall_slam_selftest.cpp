@@ -38,6 +38,10 @@
 #include <string>
 #include <vector>
 
+#include "corner_detector.h"
+#include "trajectory_controller.h"
+#include "route_spline.h"
+#include "route_optimizer.h"
 #include "corner_visibility.h"
 #include "room_concept.h"
 #include "room_gn_solver.h"
@@ -47,6 +51,7 @@
 #include "room_boxes_channel.h"
 #include "svg_room_loader.h"   // the bench runs the AGENT's channel, not a copy of it
 #include "wall_segmenter.h"
+#include "stride_span.h"
 
 using rc::RoomConcept;
 using Poly = std::vector<Eigen::Vector2f>;
@@ -281,6 +286,19 @@ namespace
         const float t = std::clamp((p - a).dot(ab) / std::max(1e-9f, ab.squaredNorm()), 0.f, 1.f);
         return (p - (a + t * ab)).norm();
     }
+    /// Do two segments properly cross? Used by the boundary-visibility test, where a sight line
+    /// from a pose to a wall sample must not pass through any other wall.
+    inline bool segments_cross(const Eigen::Vector2f& p1, const Eigen::Vector2f& p2,
+                               const Eigen::Vector2f& p3, const Eigen::Vector2f& p4)
+    {
+        const auto o = [](const Eigen::Vector2f& a, const Eigen::Vector2f& b, const Eigen::Vector2f& c)
+        {
+            const float v = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+            return (std::abs(v) < 1e-9f) ? 0 : (v > 0.f ? 1 : -1);
+        };
+        return o(p1, p2, p3) != o(p1, p2, p4) and o(p3, p4, p1) != o(p3, p4, p2);
+    }
+
     float point_to_poly(const Eigen::Vector2f& p, const Poly& poly)
     {
         float best = 1e9f;
@@ -426,6 +444,21 @@ namespace
     /// Proportional pursuit of a reference pose: turn toward it, and drive at a speed that falls off
     /// with heading error. Deliberately simple — its job is to DEMAND more than the base can deliver
     /// at the corners of the path, because that is where command and execution diverge.
+    /// ── THE BENCH'S HALF OF THE AGENT'S FOLLOWER ────────────────────────────────────────────
+    /// PlainTracker takes a PathWorld and NOT a FieldWorld — by its own header, it is "structurally
+    /// incapable of querying an obstacle", because in the agent the route is kept safe by the
+    /// planner's footprint predicate, the band, and RouteFollower::repair. The bench has the first
+    /// of those (plan_path routes in configuration space at body_radius) and the spline's own
+    /// is_free feasibility pass; it has no band. So this adapter carries the geometry only.
+    struct BenchPathWorld : rc::PathWorld
+    {
+        const rc::RouteSpline* sp = nullptr;
+        float radius = 0.230f;
+        const rc::RouteSpline* route_spline() const override { return sp; }
+        float body_extent(const Eigen::Vector2f&, float) const override { return radius; }
+        float body_extent_max() const override { return radius; }
+    };
+
     inline Eigen::Vector3f pursue(const Eigen::Vector3f& cur, const Eigen::Vector3f& goal)
     {
         const Eigen::Vector2f d = goal.head<2>() - cur.head<2>();
@@ -539,6 +572,30 @@ namespace
             if (ok and t0 > 1e-3f) best = std::min(best, t0);
         }
         return best;
+    }
+
+    /// scan() with furniture: each ray stops at the nearer of the room boundary and any box.
+    std::vector<Eigen::Vector2f> scan_obs(const Poly& room, const Boxes& obstacles, const Eigen::Vector3f& pose,
+                                          int n, float sigma, std::mt19937& rng)
+    {
+        std::normal_distribution<float> noise(0.f, sigma);
+        std::vector<Eigen::Vector2f> out;
+        const int N = static_cast<int>(room.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float best = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < best)
+                    best = *t;
+            if (best > 1e8f) continue;
+            best = std::min(best, box_range(pose.head<2>(), d, obstacles));
+            const float r = best + noise(rng);
+            out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
+        }
+        return out;
     }
 
     /// The LiDAR band, with furniture in the way: the nearer of the wall and the box.
@@ -1830,15 +1887,27 @@ int run_replay(const char* path)
     std::vector<AbsorbRow> absorb_log;
     int b_prev = 0, t_prev = 0, m_prev = 0;
     float prev_th = 0.f;
+    rc::StrideSpan span;   // v2 recordings: the slot factors, built as the agent builds them
+    Eigen::Vector3f skipped_odom = Eigen::Vector3f::Zero();
     for (size_t k = 0; k < F.size(); ++k)
     {
         const Frame& fr = F[k];
-        // The accumulator is the total since the last ADMITTED slot, so it adds to THAT slot's pose,
+        // v1: the accumulator is the total since the last ADMITTED slot, so it adds to THAT slot's pose,
         // and the base may only advance AFTER a frame which admitted one has been solved. Taking it
         // from the previous FRAME's pose (itself base + odom_{k-1}) counts the motion twice.
+        // v2 records THIS frame's delta: it adds to the previous frame's solved pose, and the slot's
+        // factor is built exactly as the agent builds it (stride_span.h).
+        const Eigen::Vector3f base = (version >= 2) ? est : slot_base;
         const Eigen::Vector3f pred = (k == 0) ? Eigen::Vector3f::Zero()
-            : Eigen::Vector3f(slot_base.x() + fr.odom.x(), slot_base.y() + fr.odom.y(), wrap(slot_base.z() + fr.odom.z()));
-        if (fr.pts.size() < 10) { est = pred; continue; }
+            : Eigen::Vector3f(base.x() + fr.odom.x(), base.y() + fr.odom.y(), wrap(base.z() + fr.odom.z()));
+        // A frame skipped here builds no slot, so (v2) its motion rides into the next frame that does.
+        if (fr.pts.size() < 10) { est = pred; skipped_odom += fr.odom; continue; }
+        const Eigen::Vector3f frame_d = skipped_odom + fr.odom;
+        skipped_odom.setZero();
+        const Eigen::Vector3f slot_delta = (version >= 2)
+            ? ((fr.stride and not window.empty()) ? span.replace(frame_d, Eigen::Matrix3f::Zero(), nullptr)
+                                                  : span.append(frame_d, Eigen::Matrix3f::Zero(), nullptr)).delta
+            : fr.odom;
         // WS_REPLAY_SEED_STILL=1: do not seed the map from a scan taken while the robot is turning.
         // The seed is the OBB of ONE scan, and a scan is treated as instantaneous; at 275 deg/s
         // (this recording's p99) the sweep smears by tens of degrees, so the seed rectangle is wrong
@@ -1938,10 +2007,11 @@ int run_replay(const char* path)
         RoomConcept::WindowSlot slot;
         slot.pose = pose_tensor(pred);
         slot.lidar_points = points_tensor(fr.pts);
-        slot.odometry_delta = (k == 0) ? Eigen::Vector3f::Zero() : fr.odom;
+        slot.odometry_delta = (k == 0) ? Eigen::Vector3f::Zero() : slot_delta;
         slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
                                           cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
-        slot.odom_delta_tensor = torch::tensor({fr.odom.x(), fr.odom.y(), fr.odom.z()}, torch::kFloat32);
+        slot.odom_delta_tensor = torch::tensor({slot.odometry_delta.x(), slot.odometry_delta.y(), slot.odometry_delta.z()},
+                                               torch::kFloat32);
         slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
         slot.wall_assoc = res.assoc;
 
@@ -2092,13 +2162,80 @@ int run_replay(const char* path)
     // it what RoomConcept::wall_slam_observe feeds it — nothing here re-implements the estimator.
     struct BoxRun
     {
+        Boxes obstacles;                  ///< WS_BOXES_OBSTACLES: floor furniture, world frame
         float iou = 0.f, rms = 0.f, rms_core = 0.f, frac_out = 0.f, frac_in = 0.f, yaw_deg = 0.f;
         double pose_err = 0.0;
         int boxes = 0, verts = 0, proposed = 0, admitted = 0, removed = 0, truth_verts = 0;
         rc::boxes::Layout layout;          ///< the estimate itself, for opening a tail case
         Poly est_poly;                     ///< in WORLD coords, already gauge-aligned
+        int replans = 0;                   ///< how many times the explorer chose a new target
+        bool explored = false;             ///< it ran out of frontier — the honest stopping point
+        int ig_gain = 0, frames = 0;
+        std::string phase = "-";
         std::vector<Eigen::Vector2f> traj_exec;   ///< where the robot ACTUALLY went (world)
         std::vector<Eigen::Vector2f> traj_est;    ///< where it BELIEVED it was (map->world)
+
+        /// ── PREDICTED-CORNER VALIDATION PROBE (WS_CORNER_PROBE) ─────────────────────────────
+        /// Project the PROVISIONAL layout's vertices into the scan and ask the fleet's own corner
+        /// channel whether they are there. Two variants per frame, differing ONLY in the pose the
+        /// prediction is made from:
+        ///   BELIEVED — `est`, what the robot actually has. This IS the proposed channel.
+        ///   ORACLE   — the true pose. Not implementable; it is the diagnostic control.
+        /// ★ The point of the pair is the LATCH. If registration has settled into a
+        /// self-consistent but misplaced alignment, the layout and the believed pose agree with
+        /// each other, so BELIEVED reads clean while ORACLE reads large. A channel that only ever
+        /// sees BELIEVED cannot detect that class of failure — and room i=81 (16/16 vertices,
+        /// rms 0.023 m, IoU 0.750, pose 0.69 m) is exactly that class. This measures it instead of
+        /// assuming it either way.
+        /// ── COLLISIONS: THE BENCH HAD NO NOTION OF THEM AT ALL ─────────────────────────────
+        /// `base.execute()` integrates dynamics and `compose()` applies the delta; nothing ever
+        /// compared the result against the room, so driving through a wall cost nothing and every
+        /// IoU here was quietly optimistic — some scans were taken from poses the robot could not
+        /// physically occupy. This does not stop the robot (that would change every number on the
+        /// bench at once); it COUNTS, so the next person sees it in the summary line instead of
+        /// having to notice it in a picture.
+        int   blocked_replans = 0;        ///< replans forced by a refused command
+        /// ── HOW MUCH OF THE ROOM WAS ACTUALLY LOOKED AT ─────────────────────────────────────
+        /// ⚠ IoU CAN BE SATISFIED BY EXTRAPOLATION. A rectilinear box cover predicts its own far
+        /// corner for free, so a room can score well in places the robot never saw. Measured on the
+        /// apartamento hall: IoU 0.977 on a run whose trajectory never crossed the centreline, with
+        /// 16% of the true boundary never within line of sight of any pose and six walls seen 0% of
+        /// the time. Reporting IoU alone cannot tell mapping from guessing correctly, and every
+        /// planner comparison made on it is partly a comparison of how well each one guesses.
+        /// This is the honest companion: the fraction of TRUE boundary LENGTH that was ever visible
+        /// from a pose the robot actually occupied, line of sight included.
+        float seen_frac = 0.f;
+        /// ── THE PROPER SCORE: IS THE PUBLISHED BELIEF HONEST? ───────────────────────────────
+        /// ⚠ IoU CANNOT PENALISE A CONFIDENT WRONG GUESS, and that is this estimator's actual
+        /// failure mode: a rectilinear cover extrapolates, so 49 of 50 rooms scored a median 0.947
+        /// having seen under 90% of their boundary, and the hall reached 0.977 with six walls never
+        /// observed at all. A metric that rewards a lucky extrapolation as much as a measurement
+        /// cannot tell a map you can act on from one you cannot.
+        /// A proper scoring rule can, because it prices the CONFIDENCE as well as the error. At
+        /// every 0.1 m of true boundary, take the distance d to the published polygon and the
+        /// published sigma of the nearest published edge (polygon_cov — the same quantity the agent
+        /// puts on the graph), and score the Gaussian log density:
+        ///     score = mean over samples of [ -1/2 (d/sigma)^2 - log sigma ]
+        /// A measured wall (sigma 0.01, d ~ 0) earns about +4.6 a sample. An unseen wall published
+        /// HONESTLY at sigma = the room's span earns about -2.2, whether or not the guess was
+        /// lucky. An unseen wall published at sigma 0.01 and wrong by 0.3 m costs about -450.
+        /// So honesty about ignorance is cheap and overconfidence is ruinous, which is exactly the
+        /// ordering IoU refuses to make. Scale-free, no vertex correspondence, and it is what a
+        /// per-patch posterior would be FOR.
+        float log_score = 0.f;
+        float pub_sigma_med = 0.f;
+        int   coll_frames = 0;            ///< frames with the body overlapping a wall or outside
+        int   coll_events = 0;            ///< how many separate times it entered that state
+        int   out_frames  = 0;            ///< frames with the centre outside the room entirely
+        float coll_depth  = 0.f;          ///< deepest penetration, m
+        int   cp_frames = 0;              ///< probe frames
+        float cp_infov = 0.f;             ///< mean model corners in the field of view
+        float cp_matched = 0.f;           ///< mean matched (assoc_prob >= 0.5)
+        float cp_occl = 0.f;              ///< mean rejected as occluded
+        float cp_resid = 0.f;             ///< median over frames of mean |detected - predicted| (m)
+        float cp_chi2 = 0.f;              ///< median over frames of the whitened residual
+        float cp_resid_oracle = 0.f;      ///< the same, predicted from the TRUE pose
+        float cp_matched_oracle = 0.f;
     };
 
     inline BoxRun run_boxes(const Poly& room, unsigned seed, bool reg, int reanchor_at, int laps,
@@ -2106,7 +2243,41 @@ int run_replay(const char* path)
     {
         BoxRun R;
         R.truth_verts = static_cast<int>(room.size());
-        const auto truth = circuit(wp, 0.025f, laps);
+        // ── WHERE THE RUN STARTS (WS_BOXES_START_ROT=k) ───────────────────────────────────────
+        // The robot starts at the tour's first waypoint. Rotating the waypoint list by k starts it at
+        // another one instead: same room, same circuit, same frame budget, a different initial pose.
+        // The explorer drives itself from frame 0, so this varies only the initial condition — which
+        // is the thing a single run per room cannot tell you about.
+        std::vector<Eigen::Vector2f> wp_use = wp;
+        if (const char* sr = std::getenv("WS_BOXES_START_ROT"))
+        {
+            int rot = 0;
+            if (std::from_chars(sr, sr + std::strlen(sr), rot).ec == std::errc() and not wp_use.empty())
+            {
+                rot = ((rot % static_cast<int>(wp_use.size())) + static_cast<int>(wp_use.size())) % static_cast<int>(wp_use.size());
+                std::rotate(wp_use.begin(), wp_use.begin() + rot, wp_use.end());
+            }
+        }
+        auto truth = circuit(wp_use, 0.025f, laps);
+        // WS_BOXES_START_FRAC=f in [0,1): start f of the way along the tour instead of at its first
+        // waypoint. The circuit is a closed loop of poses, so rotating it keeps every heading right
+        // and gives a CONTINUOUS choice of start — the waypoint rotation above offers only as many
+        // starts as the tour has corners (12 on the hall).
+        if (const char* sf = std::getenv("WS_BOXES_START_FRAC"))
+        {
+            float frac = 0.f;
+            if (std::from_chars(sf, sf + std::strlen(sf), frac).ec == std::errc() and not truth.empty())
+            {
+                frac -= std::floor(frac);
+                // ⚠ ONE LAP, NOT THE WHOLE ARRAY. `truth` is the circuit repeated `laps` times, so
+                // rotating by a fraction of its LENGTH repeats after 1/laps: asked for 20 starts,
+                // got 10 distinct ones twice over (measured, byte-identical runs).
+                const auto lap = static_cast<long>(truth.size()) / std::max(1, laps);
+                const auto off = static_cast<long>(frac * static_cast<float>(lap));
+                if (off > 0 and off < static_cast<long>(truth.size()))
+                    std::rotate(truth.begin(), truth.begin() + off, truth.end());
+            }
+        }
         std::mt19937 rng(seed);
         RunConfig cfg; cfg.exec_motion = true;
 
@@ -2114,15 +2285,94 @@ int run_replay(const char* path)
         EncoderModel enc; enc.sigma_xy = cfg.odom_sigma_xy; enc.sigma_th = cfg.odom_sigma_th;
         Eigen::Vector3f exec_pose = truth[0], est = Eigen::Vector3f::Zero();
         const Eigen::Vector3f origin = truth[0];
+        // ── FLOOR OBSTACLES (WS_BOXES_OBSTACLES=N, default 5): furniture standing in the open ─────
+        // Tables, sofas, a bed: boxes the LiDAR cannot see through and the body cannot drive into.
+        // Scoring is unchanged — the truth is still the ROOM, so the question is whether the walls
+        // come back with clutter in front of them and whether the robot explores around it without
+        // hitting it. Placement is deterministic (its own stream), each box wholly inside the room,
+        // 0.3 m clear of the others and of every wall, and clear of the start pose by the body plus
+        // a margin, so the robot never starts inside one.
+        Boxes floor_obs;
+        if (const char* ob = std::getenv("WS_BOXES_OBSTACLES"))
+        {
+            int nob = 5;
+            if (int v = 0; std::from_chars(ob, ob + std::strlen(ob), v).ec == std::errc() and v > 0) nob = v;
+            std::mt19937 rgo(31415u + seed);
+            const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rgo); };
+            Eigen::Vector2f rlo(1e9f, 1e9f), rhi(-1e9f, -1e9f);
+            for (const auto& v : room) { rlo = rlo.cwiseMin(v); rhi = rhi.cwiseMax(v); }
+            for (int n = 0, tries = 0; n < nob and tries < 20000; ++tries)
+            {
+                const Eigen::Vector2f lo(U(rlo.x(), rhi.x()), U(rlo.y(), rhi.y()));
+                const Eigen::Vector2f hi = lo + Eigen::Vector2f(U(0.4f, 1.2f), U(0.4f, 1.2f));
+                bool ok = true;
+                for (int c = 0; c < 4 and ok; ++c)
+                {
+                    const Eigen::Vector2f q((c & 1) ? hi.x() : lo.x(), (c & 2) ? hi.y() : lo.y());
+                    ok = rc::corner_visibility::point_in_polygon(q, room) and point_to_poly(q, room) > 0.3f;
+                }
+                for (const auto& [l2, h2] : floor_obs)
+                    if (lo.x() < h2.x() + 0.3f and l2.x() < hi.x() + 0.3f and lo.y() < h2.y() + 0.3f and l2.y() < hi.y() + 0.3f) ok = false;
+                const Eigen::Vector2f s0 = origin.head<2>();
+                const Eigen::Vector2f cl = s0.cwiseMax(lo).cwiseMin(hi);
+                if ((cl - s0).norm() < 0.8f) ok = false;
+                if (not ok) continue;
+                floor_obs.push_back({lo, hi}); ++n;
+            }
+        }
+        R.obstacles = floor_obs;
+        // distance from a point to the nearest obstacle box (0 inside)
+        const auto obs_clear = [&](const Eigen::Vector2f& q)
+        {
+            float best = std::numeric_limits<float>::max();
+            for (const auto& [lo, hi] : floor_obs)
+                best = std::min(best, (q.cwiseMax(lo).cwiseMin(hi) - q).norm());
+            return best;
+        };
+        if (std::getenv("WS_GAUGE_PROBE"))
+            std::fprintf(stderr, "[origin] (%.3f, %.3f) heading %.4f deg: the map frame is the world turned by this\n",
+                         origin.x(), origin.y(), origin.z() * 180.0 / M_PI);
         const auto to_map = [&](const Eigen::Vector3f& p)
         {
             const float c = std::cos(-origin.z()), s = std::sin(-origin.z());
             const Eigen::Vector2f d = p.head<2>() - origin.head<2>();
             return Eigen::Vector3f(c * d.x() - s * d.y(), s * d.x() + c * d.y(), wrap(p.z() - origin.z()));
         };
+        // ⚠⚠ THE PLANNER SPEAKS MAP, THE BASE SPEAKS WORLD — CONVERT, DO NOT ASSUME.
+        // `plan_path()` is handed `est` (the MAP-frame pose) and returns MAP-frame waypoints, but
+        // `exec_pose`, `pursue()`, `base.execute()` and `compose()` all live in the WORLD frame.
+        // Feeding a map waypoint straight to pursue() displaces every goal by the robot's start
+        // pose (the map frame is the world re-origined at truth[0] and rotated by -origin.z), so
+        // the robot chases points that are nowhere near what the planner chose. Measured on the
+        // apartamento hall: the robot left a 8.5 x 9.3 m room and wandered to y = -10.7 m, and its
+        // own belief agreed — it really drove there. The symptom is a trajectory that does not fit
+        // inside its own room; it is NOT a plotting-frame artefact.
+        // ★ Every information-gain result before 2026-09-20 was produced through this defect: the
+        // objective was measured, the execution was not.
+        const auto wp_to_world = [&](const Eigen::Vector2f& m)
+        {
+            const float c = std::cos(origin.z()), s = std::sin(origin.z());
+            return Eigen::Vector2f(c * m.x() - s * m.y() + origin.x(),
+                                   s * m.x() + c * m.y() + origin.y());
+        };
 
         rc::boxch::Channel ch;
         rc::boxch::Params bp; bp.enabled = true; bp.sensor_sigma = cfg.scan_sigma;
+        // ── THE MODEL CHOICES ARE PARAMETERS NOW, NOT ENVIRONMENT READS ────────────────────
+        // They live in rc::boxch::Params so the AGENT can set them from its config; the bench keeps
+        // driving them from WS_* so every measurement in this file's history stays reproducible.
+        {
+            const auto flag = [](const char* n) { return std::getenv(n) != nullptr; };
+            bp.free_force      = flag("WS_FREEFORCE");
+            bp.gauge_ml        = flag("WS_GAUGE_ML");
+            bp.cover_layout    = flag("WS_COVER_LAYOUT");
+            bp.connected       = flag("WS_CONNECTED");
+            bp.connected_price = flag("WS_CONNECT_PRICE");
+            bp.seed_prior_span = flag("WS_SEED_VAR");
+            bp.reg_map_var     = flag("WS_REG_MAPVAR");
+            if (const char* v = std::getenv("WS_COVER_MAX_RECTS"))
+            { int x = 0; if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc() and x > 0) bp.cover_max_rects = x; }
+        }
         ch.configure(bp);
         rc::wallseg::Params wsp; wsp.sensor_sigma = cfg.scan_sigma;
 
@@ -2136,14 +2386,414 @@ int run_replay(const char* path)
             const float cr = std::cos(ra_rot), sr = std::sin(ra_rot);
             return Eigen::Vector2f(cr * p.x() - sr * p.y() + ra_c.x(), sr * p.x() + cr * p.y() + ra_c.y());
         };
+        std::vector<Eigen::Vector2f> traj_seen;   // every pose, for the boundary-visibility test
+        bool was_colliding = false;
         std::array<double, 4> perr_q{0.0, 0.0, 0.0, 0.0}; long nperr = 0;
         std::vector<Eigen::Vector2f> traj_exec, traj_est;
 
+        // ── predicted-corner validation probe (see BoxRun::cp_*) ────────────────────────────
+        const int cp_stride = std::getenv("WS_CORNER_PROBE")
+                            ? std::max(1, std::atoi(std::getenv("WS_CORNER_PROBE"))) : 0;
+        rc::CornerDetector cdet, cdet_oracle;
+        double cp_infov = 0, cp_matched = 0, cp_occl = 0, cp_matched_o = 0;
+        std::vector<float> cp_resid, cp_chi2, cp_resid_o;
+        std::ofstream cp_csv;
+        if (cp_stride and std::getenv("WS_CORNER_CSV"))
+        { cp_csv.open(std::getenv("WS_CORNER_CSV")); cp_csv.imbue(std::locale::classic());
+          cp_csv << "f,infov,matched,occl,resid,chi2,infov_o,matched_o,resid_o,poseerr\n"; }
+
+        // ── WHO CHOOSES THE TARGETS ─────────────────────────────────────────────────────────
+        // WS_BOXES_IG=1 hands the robot its own exploration: the channel plans to the frontier
+        // with the best (unknown area revealed) / (path length), over the free map IT has built,
+        // and the run ends when no frontier is left rather than when a frame budget runs out.
+        // Without it the robot follows the fixed tour, whose waypoints were validated against the
+        // TRUE polygon — information the robot does not have, and which on the apartamento hall
+        // was worth more than every algorithmic change of the day (IoU 0.229 -> 0.914).
+        const bool ig = std::getenv("WS_BOXES_IG") != nullptr;
+        std::vector<Eigen::Vector2f> plan;
+        size_t plan_i = 0;
+        int replans = 0, ig_gain = 0, last_plan_f = -100;
+        bool explored = false;
+
+        // ── WS_COLL_PROBE: IS A CONTACT A CONTROL ERROR OR A BELIEF ERROR? ──────────────────
+        // A contact can be produced two entirely different ways and the count alone cannot tell
+        // them apart:
+        //   CONTROL — the leg is legal in truth and the robot is not on it (cut the corner,
+        //             overshot, swung wide). Fixable by the controller.
+        //   BELIEF  — the leg is legal in the map the robot HAS, and that map is displaced, so
+        //             the corridor the planner sees is not where the wall is. No controller
+        //             reading its own belief can fix that one; it is pose/layout error.
+        // So log both clearances every frame: against the TRUTH polygon, and against the layout
+        // the robot BELIEVES from the pose it BELIEVES. Plus the cross-track error, which is the
+        // controller's own residual, and the true clearance of the point it is steering AT.
+        std::ofstream cprobe;
+        if (const char* cp = std::getenv("WS_COLL_PROBE"))
+        {
+            cprobe.open(cp); cprobe.imbue(std::locale::classic());
+            cprobe << "f,tx,ty,pose_err,clr_true,in_room,clr_bel,gx,gy,g_clr_true,g_in,xtrack,"
+                      "v,w,plan_i,plan_n\n";
+        }
+        Eigen::Vector2f leg_a = exec_pose.head<2>(), leg_b = exec_pose.head<2>();
+        size_t leg_i = static_cast<size_t>(-1);
+        Eigen::Vector3f last_cmd = Eigen::Vector3f::Zero();
+        bool blocked_prev = false;      // the wall refused last frame's translation
+        int  blocked_replans = 0;
+
+        // ── THE AGENT'S OWN CONTROLLER, WHOLE ──────────────────────────────────────────────
+        // Not a tracker in isolation. TrajectoryController owns the route, builds its own ESDF from
+        // the scan, runs the blockage and alignment logic and the Plain->PD fallback, and IS the
+        // PathWorld/FieldWorld the trackers query. It is what the agent drives with and what Webots
+        // will drive with, so it is what the bench must measure.
+        // ⚠ FRAME, and it is not optional. The agent's theta has FORWARD AT +90 degrees (the
+        // tracker computes theta_fwd = theta + pi/2 and returns rot = -omega, "FRAME conversion
+        // (1/2)" and "(2/2)"), and controller_session hands compute() a pose built straight from
+        // (pos, theta) with no conversion — so the agent's theta IS that convention. The bench's
+        // compose() puts forward on +X with CCW-positive yaw. Convert both ways or the robot
+        // believes it is facing 90 degrees off and steers the wrong way: measured, 0.654 against
+        // pursue()'s 0.953 on the hall before this was right.
+        // WS_PLAIN=0 falls back to pursue() for an A/B on the same binary.
+        const bool use_follower = ig and (std::getenv("WS_PLAIN") == nullptr
+                                          or std::string(std::getenv("WS_PLAIN")) != "0");
+        rc::TrajectoryController tcontrol;
+        // The scan for a frame is taken AFTER the robot moves, so at command time the freshest
+        // cloud a real robot has is the previous one. Keep it in ROOM coordinates, which is what
+        // compute() expects — it expresses the cloud in the robot frame itself, using the pose it
+        // is handed.
+        std::vector<Eigen::Vector3f> cloud_room_prev;
+        tcontrol.set_footprint(rc::RobotFootprint::shadow());
+        // How tightly the PD carrot follower (the bench never fits a PLAIN curve) holds the route.
+        // The bench otherwise runs the struct defaults, NOT the agent's etc/config.toml (which has
+        // PdCrossTrackGain 1.4). Overrides so the contact study can sweep them on one binary.
+        const auto env_f = [](const char* name, float& dst)
+        {
+            const char* v = std::getenv(name);
+            if (v == nullptr) return;
+            float x = 0.f;                                   // from_chars: locale-independent (CLAUDE.md)
+            if (std::from_chars(v, v + std::strlen(v), x).ec == std::errc()) dst = x;
+        };
+        env_f("WS_TC_LOOK",   tcontrol.params.carrot_lookahead);
+        env_f("WS_TC_CUT",    tcontrol.params.carrot_max_route_cut_m);
+        env_f("WS_TC_XTRACK", tcontrol.params.pd_cross_track_gain);
+        // ── WS_TC_PLAIN: THE AGENT'S WHOLE PATH PIPELINE, NOT JUST ITS CONTROLLER ─────────────
+        // controller_session fits every planned path to a C2 RouteSpline, variationally optimises it
+        // (bending prior + one-sided clearance to a distance field + waypoint fidelity), checks every
+        // sample against the footprint, and hands the curve to PLAIN with set_route(). The bench only
+        // ever called set_path(), so PLAIN had no curve and the whole run was driven by the PD
+        // fallback — the same defect the agent itself had ("901 consecutive cycles on PD") until it
+        // was wired; PLAIN tracks ~4.7x tighter there. The distance field is the robot's BELIEF (the
+        // estimated layout), as the agent's is its GridPlanner's EDT — never the truth. Values are the
+        // agent's etc/config.toml: RouteSpacing 0.05, RouteSmoothing 0.40, ComfortStandoff 0.6,
+        // RouteSafetyBias 0.75, RouteJerkWeight 0.5, MaxAdvSpeed 0.7, MaxLateralAccel 1.0,
+        // PdCrossTrackGain 1.4.
+        const bool tc_plain = std::getenv("WS_TC_PLAIN") != nullptr;
+        const rc::RobotFootprint body = rc::RobotFootprint::shadow();
+        rc::RouteSpline route_spline;          // lives for the run: its address identifies the curve
+        if (tc_plain) tcontrol.params.pd_cross_track_gain = 1.4f;
+
+        bool have_route = false;
+        Eigen::Vector2f route_target = Eigen::Vector2f::Zero();
+        bool route_done = false;      // the controller said it arrived
+        std::ofstream efe_probe;
+        if (const char* ep = std::getenv("WS_EFE_PROBE"))
+        { efe_probe.open(ep); efe_probe.imbue(std::locale::classic());
+          efe_probe << "f_pred,f_now,pred_dH,pred_nats,realised_dinfo,info_total,boxes_then,boxes_now\n"; }
+        float last_pred_dH = 0.f, last_pred_nats = 0.f;
+        double last_info_total = 0.0; int last_pred_f = -1; size_t last_boxes = 0;
+        int  route_installed_f = -100000;
+
         for (size_t f = 0; f < truth.size(); ++f)
         {
-            const Eigen::Vector3f cmd  = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, truth[f]);
-            const Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+            Eigen::Vector3f goal = truth[f];
+            if (ig)
+            {
+                // Re-plan when the current leg is spent, or every ~2 s so a stale plan cannot
+                // outlive the map that justified it.
+                // ⚠ THROTTLE THE REPLAN ITSELF, not just the "is the leg spent" test. The first
+                // version replanned when `spent and (plan_i >= plan.size() or f % 40 == 0)`, and
+                // an EMPTY plan makes `0 >= 0` true on every frame — so through the whole
+                // bootstrap, and any time the plan ran out, it did a full BFS and frontier scan
+                // every single frame. The run could not finish inside 280 seconds.
+                // ── A REFUSED COMMAND IS NEWS, AND THE PLANNER HAS TO HEAR IT ────────────────
+                // With the bumper in, a robot that drives at a wall simply stops — and then went on
+                // pressing for the full 25-frame replan throttle before anyone reconsidered. It
+                // burned its budget leaning on walls: terminations fell 39/100 -> 5/100 when the
+                // physics landed, which is not the planner failing to finish, it is the planner
+                // never being told its leg was impossible.
+                // A refusal means THIS LEG IS NOT TRAVERSABLE, so the plan is void: drop it and
+                // re-plan. The cooldown is COMPUTE ONLY (a full BFS + frontier scan per frame does
+                // not finish inside the run, which is what the 25 exists for) — not a bar on when
+                // a robot is allowed to change its mind.
+                // ★ NOT DONE, and the deeper answer: a bump is an OBSERVATION. The refused cell is
+                // evidence of matter the map does not have, and feeding it to the channel as
+                // occupancy would let the next plan route around it instead of rediscovering it.
+                // That writes non-LiDAR evidence into the layout's own occupancy and needs its own
+                // experiment; this only makes the planner reconsider.
+                if (blocked_prev)
+                {
+                    plan.clear(); plan_i = 0; ++blocked_replans;
+                    have_route = false;    // and the controller is told to stop driving the old one
+                }
+                // ⚠ WHO DECIDES THE LEG IS SPENT DEPENDS ON WHO IS DRIVING. The waypoint-distance
+                // test belongs to pursue(), which consumes the plan one waypoint at a time. The
+                // follower drives the whole route in ARC LENGTH and never touches plan_i, so that
+                // test asked about a waypoint the robot had long since passed: measured, 2 replans
+                // in 2600 frames, the frontier never re-evaluated, and the hall fell to IoU 0.667.
+                // Ask the follower instead — finished() is its own statement that the route is done.
+                // ⚠ AND THE FOLLOWER MUST NOT BE ALLOWED TO OUTLIVE THE MAP EITHER. Gating the
+                // replan on finished() means committing to a whole route and re-aiming once: 2
+                // replans in 2600 frames, IoU 0.667 on the hall against pursue()'s 0.953. pursue()
+                // is not better at driving — it is just forced to ask the planner again at every
+                // waypoint, and during exploration the frontier moves under you. So the follower
+                // smooths the tracking WITHIN legs and the planner keeps its own cadence: the
+                // 25-frame throttle below IS the re-aiming interval.
+                // ★ The cost is that each rebuild calls tracker.reset(), which re-acquires the
+                // nearest point on a fresh curve. RouteFollower offers resume_at() for exactly this
+                // and its header records an 18 m mis-acquisition on a folded tour; wiring arc
+                // length through a rebuild is the next refinement, not this measurement.
+                const bool spent = use_follower
+                    ? true
+                    : (plan.empty() or plan_i >= plan.size()
+                       or (wp_to_world(plan[plan_i]) - exec_pose.head<2>()).norm() < 0.18f);
+                const int throttle = blocked_prev ? 5 : 25;
+                if (spent and static_cast<int>(f) - last_plan_f >= throttle)
+                {
+                    if (plan_i < plan.size()) ++plan_i;
+                    if (plan_i >= plan.size())
+                    {
+                        last_plan_f = static_cast<int>(f);
+                        plan = ch.plan_path(est.head<2>());
+                        plan_i = 0; ++replans; ig_gain = ch.last_gain();
+                        // ── F1: DOES THE PREDICTED INFORMATION PREDICT THE REALISED? ─────────
+                        // The objective is only as good as its currency. Log the raw Fisher gain
+                        // the planner PREDICTED for the viewpoint it chose, and the change in the
+                        // estimator's own total Fisher information since the last choice. Regress
+                        // one on the other: a slope far from 1 (or no correlation) means the value
+                        // G(v) maximises is made up, and no lambda can rescue that.
+                        if (efe_probe.is_open())
+                        {
+                            const double now = ch.info_total();
+                            if (last_pred_f >= 0)
+                                efe_probe << last_pred_f << ',' << f << ',' << last_pred_dH << ','
+                                          << last_pred_nats << ',' << (now - last_info_total) << ','
+                                          << now << ',' << last_boxes << ','
+                                          << ch.layout().boxes.size() << '\n';
+                            last_boxes = ch.layout().boxes.size();
+                            last_pred_dH = ch.last_dH_sum();
+                            last_pred_nats = ch.last_info_nats();
+                            last_info_total = now;
+                            last_pred_f = static_cast<int>(f);
+                        }
+                        if (use_follower)
+                        {
+                            // set_path takes the ROOM-frame polyline and does its own smoothing,
+                            // feasibility and arc-length bookkeeping. The path starts at the robot
+                            // so the first projection is not a jump.
+                            // ⚠ INSTALL A PATH ONLY WHEN IT IS A NEW ROUTE. set_path() goes
+                            // through reset_path_state, which its own header calls "correct for a
+                            // NEW route and wrong at control rate": it clears the carrot anchor,
+                            // the blockage streak, the ALIGNMENT WATCH and — through
+                            // PlainTracker::reset() — the monotone arc-length projection. The
+                            // explorer re-aims every 25 frames and usually re-derives the SAME
+                            // target, so installing every time made the robot re-acquire and
+                            // re-align instead of drive: measured on the hall, 15.2 m driven
+                            // against pursue()'s 47.0 m in the same budget (0.13 m/s vs 0.31),
+                            // 28% of samples near-stationary, and the coverage gap that followed
+                            // (IoU 0.924 vs 0.953).
+                            // Same target and still driving => leave the controller alone; it
+                            // tracks the route in arc length and does not need re-telling.
+                            // ── COMMIT TO A VIEWPOINT, THEN RE-EVALUATE ────────────────────
+                            // ⚠ THE PLANNER RE-AIMS EVERY 25 FRAMES AND A ROUTE FOLLOWER IS BUILT
+                            // FOR STABLE ROUTES. Accepting each new target re-installed the path,
+                            // which re-armed the alignment and re-acquired the projection, so the
+                            // robot spent the run TURNING: measured, `rot` saturated at max_rot
+                            // (0.700 rad/s) with adv at 0.03-0.23 m/s, 0.11 m/s average against
+                            // pursue()'s 0.36, and 14.7 m driven in a budget where pursue() drove
+                            // 47.0. The safety gate was NOT the cause — it read 1.00 nearly
+                            // throughout. pursue() is immune because it just swings at the new
+                            // point; a curve tracker cannot be.
+                            // So the ROBOT commits: drive to the chosen viewpoint, then choose
+                            // again. Re-planning still runs every 25 frames (it keeps the gain and
+                            // the phase current, and a blocked route still voids immediately) — it
+                            // is the TARGET that is held, not the map. The staleness cap is compute
+                            // insurance, not a bar on changing one's mind.
+                            const Eigen::Vector2f tgt = plan.empty() ? exec_pose.head<2>()
+                                                                     : wp_to_world(plan.back());
+                            const bool stale = static_cast<int>(f) - route_installed_f > 400;
+                            const bool new_route = not have_route or route_done or stale;
+                            if (new_route and plan.size() >= 1)
+                            {
+                                std::vector<Eigen::Vector2f> room_path;
+                                room_path.reserve(plan.size() + 1);
+                                room_path.push_back(exec_pose.head<2>());
+                                for (const auto& w : plan) room_path.push_back(wp_to_world(w));
+                                if (room_path.size() >= 2)
+                                {
+                                    bool curved = false;
+                                    if (tc_plain)
+                                    {
+                                        // world -> map, where the channel's belief lives
+                                        const auto wm = [&](const Eigen::Vector2f& w)
+                                        {
+                                            const float c = std::cos(-origin.z()), sn = std::sin(-origin.z());
+                                            const Eigen::Vector2f d = w - origin.head<2>();
+                                            return Eigen::Vector2f(c * d.x() - sn * d.y(), sn * d.x() + c * d.y());
+                                        };
+                                        // the believed walls AND the furniture the low band has seen
+                                        const auto dist = [&](const Eigen::Vector2f& w)
+                                        { const Eigen::Vector2f m = wm(w); return std::min(-ch.model_sdf(m), ch.obstacle_clearance(m)); };
+                                        rc::RouteOptimizerConfig opt;
+                                        opt.enabled = true;
+                                        opt.distance = dist;
+                                        opt.distance_gradient = [&](const Eigen::Vector2f& w)
+                                        {
+                                            const float e = 0.01f;
+                                            return Eigen::Vector2f((dist(w + Eigen::Vector2f(e, 0.f)) - dist(w - Eigen::Vector2f(e, 0.f))) / (2.f * e),
+                                                                   (dist(w + Eigen::Vector2f(0.f, e)) - dist(w - Eigen::Vector2f(0.f, e))) / (2.f * e));
+                                        };
+                                        opt.d_target = body.circumscribed_radius() + 0.6f;
+                                        opt.rho = 0.7f * 0.7f / 1.0f;
+                                        opt.sigma_a = 0.30f;
+                                        opt.support_radius = [body](float heading_yaw, const Eigen::Vector2f& dir)
+                                        { return body.support_radius_yaw(heading_yaw, dir); };
+                                        opt.clearance_floor = body.inscribed_radius();
+                                        opt.iterations = 30;
+                                        opt.safety_bias = 0.75f;
+                                        opt.w_jerk = 0.5f;
+                                        const auto is_free = [&](const Eigen::Vector2f& w, float heading)
+                                        {
+                                            const float d = dist(w);
+                                            const Eigen::Vector2f g = opt.distance_gradient(w);
+                                            const Eigen::Vector2f toward = g.norm() > 1e-6f ? Eigen::Vector2f(-g.normalized()) : Eigen::Vector2f(1.f, 0.f);
+                                            return d >= body.support_radius_yaw(heading, toward);
+                                        };
+                                        if (route_spline.build(room_path, 0.05f, is_free, 0.40f, &opt))
+                                        {
+                                            tcontrol.set_path_presmoothed(route_spline.samples());
+                                            tcontrol.set_route(&route_spline, /*force_reset=*/true);
+                                            curved = true;
+                                        }
+                                    }
+                                    if (not curved)
+                                    {
+                                        tcontrol.set_path(room_path);
+                                        if (tc_plain) tcontrol.set_route(nullptr, true);
+                                    }
+                                    if (std::getenv("WS_ROUTE_PROBE"))
+                                    {
+                                        std::fprintf(stderr, "[route] f=%zu from=(%.2f,%.2f) n=%zu:", f,
+                                                     exec_pose.x(), exec_pose.y(), room_path.size());
+                                        for (const auto& w : room_path) std::fprintf(stderr, " (%.2f,%.2f)", w.x(), w.y());
+                                        std::fprintf(stderr, "\n");
+                                    }
+                                    route_target = tgt; have_route = true; route_done = false;
+                                    route_installed_f = static_cast<int>(f);
+                                }
+                            }
+                            else if (plan.empty() and not have_route) tcontrol.stop();
+                        }
+                        // ⚠ "NO FRONTIER" AND "NO MAP" LOOK IDENTICAL AND MEAN THE OPPOSITE.
+                        // At frame 0 the free map is empty, so there is no frontier and the first
+                        // version declared exploration COMPLETE before the robot had moved. A
+                        // robot with no map can always turn in place to make one, which needs no
+                        // knowledge of the room — so an empty plan is a cue to LOOK AROUND until
+                        // the map can support a decision, and only then a stopping condition.
+                        // Done means the planner has nothing left to propose: no frontier AND no
+                        // viewpoint that would improve the worst-known wall. That is the honest
+                        // stopping condition; a frame cap is not one, and 594/594 runs of the
+                        // previous explorer hitting the cap is why it measured NULL.
+                        if (plan.empty() and f > 150
+                            and ch.phase() == rc::boxch::Channel::Phase::Done)
+                        { explored = true; R.frames = static_cast<int>(f) + 1; break; }
+                    }
+                }
+                else if (spent) ++plan_i;
+                if (plan_i < plan.size())
+                {
+                    const Eigen::Vector2f t = wp_to_world(plan[plan_i]);
+                    if (plan_i != leg_i) { leg_a = exec_pose.head<2>(); leg_i = plan_i; }
+                    leg_b = t;
+                    goal = Eigen::Vector3f(t.x(), t.y(), exec_pose.z());
+                }
+                else
+                {
+                    // Bootstrap / recovery: turn on the spot. pursue() reduces to a pure rotation
+                    // when the goal is where you already are.
+                    goal = Eigen::Vector3f(exec_pose.x(), exec_pose.y(), wrap(exec_pose.z() + 0.6f));
+                }
+            }
+            if (ig and std::getenv("WS_IG_PROBE") and f % 100 == 0)
+            {
+                const Eigen::Vector3f tmp = to_map(exec_pose);
+                std::fprintf(stderr, "[ig] f=%4zu %s plan=%zu/%zu gain=%5d wsig=%.4f yaw=%+.2f | true=(%6.2f,%6.2f) "
+                                     "est=(%6.2f,%6.2f) poseerr=%.3f rms=%.3f boxes=%zu\n",
+                             f, ch.phase_name(), plan_i, plan.size(), ig_gain, ch.worst_face_sigma(),
+                             ch.yaw() * 180.f / kPi,
+                             tmp.x(), tmp.y(), est.x(), est.y(),
+                             (est.head<2>() - tmp.head<2>()).norm(), ch.rms(), ch.layout().boxes.size());
+            }
+            Eigen::Vector3f cmd = (f == 0) ? Eigen::Vector3f::Zero() : pursue(exec_pose, goal);
+            if (f > 0 and use_follower and have_route)
+            {
+                // The cloud goes in ROOM coordinates: compute() expresses it in the robot frame
+                // itself, for the ESDF, using the pose it is handed.
+                Eigen::Affine2f rp = Eigen::Affine2f::Identity();
+                rp.translation() = exec_pose.head<2>();
+                rp.linear() = Eigen::Rotation2Df(exec_pose.z()
+                                                 - static_cast<float>(M_PI_2)).toRotationMatrix();
+                const rc::ControlOutput out = tcontrol.compute(rp, cloud_room_prev);
+                // The controller owns arrival; when it says so, the next replan installs a new
+                // route rather than leaving the robot parked on a finished one.
+                if (out.goal_reached) route_done = true;
+                if (std::getenv("WS_IG_PROBE") and f % 200 == 0)
+                    std::fprintf(stderr, "[tc] f=%4zu adv=%.3f rot=%+.3f gate=%.2f horiz=%.2f "
+                                         "guard=%d reached=%d | plan=%zu\n",
+                                 f, out.adv, out.rot, out.gate_speed_scale, out.gate_horizon_s,
+                                 out.safety_guard_triggered ? 1 : 0, out.goal_reached ? 1 : 0,
+                                 plan.size());
+                cmd = Eigen::Vector3f(out.adv, out.side, -out.rot);   // FRAME conversion (2/2)
+            }
+            last_cmd = cmd;
+            Eigen::Vector3f body = (f == 0) ? Eigen::Vector3f::Zero() : base.execute(cmd, cfg.dt);
+
+            // ── A WALL IS NOT A SUGGESTION ───────────────────────────────────────────────────
+            // Until 2026-09-20 this bench had NO collision model: the pose was composed from the
+            // commanded motion and nothing compared it to the room. A robot that drove through a
+            // wall kept scanning FROM OUTSIDE IT, so the LiDAR observed the room from beyond its
+            // own boundary — the sensor model was violated and the run was not a worse result, it
+            // was not a result. Measured before this: the six worst rooms of a 100-room sweep had
+            // ALL left the room (54-230 frames outside, up to 0.93 m deep); 94% of rooms under
+            // IoU 0.90 had left it. Dropping those runs moved the MEAN from 0.930 to 0.960 and the
+            // worst case from 0.009 to 0.899 — i.e. the "catastrophic tail" was the bench.
+            // ⚠ It also meant the two arms were running DIFFERENT SIMULATORS: the hand tour never
+            // leaves the room, because its waypoints were validated against the true polygon. No
+            // paired comparison between planner and tour meant anything while that was true.
+            //
+            // This is a BUMPER, not contact dynamics: the translation that would penetrate is
+            // refused, the rotation is still allowed (or the robot deadlocks nose-first at a wall
+            // and can never turn away), and the base's velocity ramp is reset so it does not lean
+            // on the wall at full speed. The refusal is also applied to the ENCODER reading, so
+            // the robot's odometry agrees that it did not move. ★ The other honest choice is wheel
+            // SLIP — wheels turn, odometry lies, pose does not change — which is what a real base
+            // does against a wall. That injects a second effect (a large odometry error exactly
+            // when the map is already stressed) and deserves its own experiment; this one keeps
+            // the robot's belief consistent so that what we measure is the planner, not the slip.
+            bool blocked = false;
+            float probe_clr = 1e9f; bool probe_in = true;
+            if (f > 0)
+            {
+                const Eigen::Vector3f probe = compose(exec_pose, body);
+                probe_in  = rc::corner_visibility::point_in_polygon(probe.head<2>(), room);
+                probe_clr = point_to_poly(probe.head<2>(), room);
+                if (not floor_obs.empty()) probe_clr = std::min(probe_clr, obs_clear(probe.head<2>()));
+                if ((not probe_in) or probe_clr < bp.body_radius)
+                {
+                    blocked = true;
+                    body.x() = 0.f; body.y() = 0.f;          // translation refused, rotation kept
+                    base.vel.x() = 0.f; base.vel.y() = 0.f;  // and stop leaning on it
+                }
+            }
             exec_pose = compose(exec_pose, body);
+            blocked_prev = blocked;
             const Eigen::Vector3f meas = (f == 0) ? Eigen::Vector3f::Zero() : enc.measure(body, rng);
             const float ce = std::cos(est.z()), se = std::sin(est.z());
             est = (f == 0) ? Eigen::Vector3f::Zero()
@@ -2158,11 +2808,26 @@ int run_replay(const char* path)
                 P = F * P * F.transpose() + G * Q * G.transpose();
             }
 
+            // ── TWO LIDAR BANDS, AS ON THE ROBOT ──────────────────────────────────────────────
+            // The WALL band is high: it sees over floor furniture, so `pts` hits walls only and is the
+            // only thing the estimator ever sees. The LOW band stops at the furniture; `pts_low` goes
+            // to the controller's ESDF and to the channel's navigation-only obstacle map, never into
+            // the layout. Without furniture the two are the same scan.
             const auto pts = scan(room, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
             if (pts.size() < 20) continue;
+            const auto pts_low = floor_obs.empty() ? pts
+                               : scan_obs(room, floor_obs, exec_pose, cfg.n_rays, cfg.scan_sigma, rng);
 
             std::vector<Eigen::Vector3f> p3; p3.reserve(pts.size());
             for (const auto& q : pts) p3.emplace_back(q.x(), q.y(), 0.9f);
+            if (use_follower)
+            {
+                cloud_room_prev.clear(); cloud_room_prev.reserve(pts.size());
+                const float cw = std::cos(exec_pose.z()), sw = std::sin(exec_pose.z());
+                for (const auto& q : pts_low)          // the controller sees the furniture
+                    cloud_room_prev.emplace_back(cw * q.x() - sw * q.y() + exec_pose.x(),
+                                                 sw * q.x() + cw * q.y() + exec_pose.y(), 0.9f);
+            }
             const auto seg = rc::wallseg::segment(pts, wsp, rng);
             std::vector<float> sphi, slen;
             sphi.reserve(seg.segments.size()); slen.reserve(seg.segments.size());
@@ -2174,7 +2839,19 @@ int run_replay(const char* path)
                 const float gy = ch.yaw(), cg = std::cos(-gy), sg2 = std::sin(-gy);
                 const Eigen::Vector3f est_L(cg * est.x() - sg2 * est.y(),
                                             sg2 * est.x() + cg * est.y(), wrap(est.z() - gy));
-                const auto rr = rc::boxes::register_scan(ch.layout(), pts, est_L, cfg.scan_sigma);
+                // WS_REG_PRIOR: the propagated pose covariance, in the layout frame, as a FULL prior over
+                // (x, y, theta) — heading is then anchored by odometry, not only by the layout
+                static const bool reg_prior = std::getenv("WS_REG_PRIOR") != nullptr;
+                Eigen::Matrix3f P_L = P;
+                {
+                    Eigen::Matrix3f Rl = Eigen::Matrix3f::Identity();
+                    Rl.topLeftCorner<2, 2>() = Eigen::Rotation2Df(-gy).toRotationMatrix();
+                    P_L = Rl * P * Rl.transpose();
+                }
+                rc::boxes::RegisterOptions ro;
+                ro.map_var = bp.reg_map_var;
+                if (reg_prior) ro.prior_cov = &P_L;
+                const auto rr = rc::boxes::register_scan(ch.layout(), pts, est_L, cfg.scan_sigma, &ro);
                 if (rr.ok)
                 {
                     const float cb = std::cos(gy), sb = std::sin(gy);
@@ -2186,6 +2863,7 @@ int run_replay(const char* path)
                 }
             }
             ch.observe(p3, est, P, sphi, slen);
+            if (not floor_obs.empty()) ch.observe_obstacles(pts_low, est);   // navigation only
 
             if (reanchor_at > 0 and static_cast<int>(f) == reanchor_at and not reanchor_done)
             {
@@ -2199,7 +2877,90 @@ int run_replay(const char* path)
             }
             ch.step();
 
+            // ── collision instrument (see BoxRun::coll_*) ───────────────────────────────────
+            // ⚠ WITH THE BUMPER IN PLACE THIS COUNTS REFUSALS, NOT OCCUPANCY. The executed pose is
+            // legal by construction now, so testing it would report zero for ever. What is worth
+            // counting is the command the wall had to refuse: how often the robot drove at a wall,
+            // how long it kept pressing, and how deep it would have gone. Same fields, and they
+            // remain comparable with the pre-physics numbers because the old count was exactly
+            // "the pose the command produced was illegal".
+            {
+                const bool in_room = probe_in;
+                const float clr = probe_clr;
+                const bool hit = blocked;
+                if (not in_room) ++R.out_frames;
+                if (hit)
+                {
+                    if (R.coll_frames == 0 or not was_colliding) ++R.coll_events;
+                    ++R.coll_frames;
+                    R.coll_depth = std::max(R.coll_depth, in_room ? bp.body_radius - clr : clr);
+                }
+                was_colliding = hit;
+
+                if (cprobe.is_open())
+                {
+                    const Eigen::Vector3f tmp = to_map(exec_pose);
+                    // What the robot BELIEVES its clearance is: its own pose against its own
+                    // layout, in the layout's own frame (map -> box is R(-yaw)).
+                    float clr_bel = 1e9f;
+                    if (not ch.layout().empty())
+                    {
+                        const float cg2 = std::cos(-ch.yaw()), sg3 = std::sin(-ch.yaw());
+                        const Eigen::Vector2f ml(cg2 * est.x() - sg3 * est.y(),
+                                                 sg3 * est.x() + cg2 * est.y());
+                        clr_bel = -ch.layout().sdf(ml);      // + = inside by that much
+                    }
+                    const Eigen::Vector2f gxy = (ig and plan_i < plan.size()) ? leg_b : exec_pose.head<2>();
+                    const bool g_in = rc::corner_visibility::point_in_polygon(gxy, room);
+                    const float g_clr = point_to_poly(gxy, room);
+                    // cross-track: how far off the straight leg the robot actually is
+                    const Eigen::Vector2f ab = leg_b - leg_a;
+                    float xt = 0.f;
+                    if (ab.squaredNorm() > 1e-9f)
+                    {
+                        const float t = std::clamp((exec_pose.head<2>() - leg_a).dot(ab) / ab.squaredNorm(), 0.f, 1.f);
+                        xt = (exec_pose.head<2>() - (leg_a + t * ab)).norm();
+                    }
+                    cprobe << f << ',' << exec_pose.x() << ',' << exec_pose.y() << ','
+                           << (est.head<2>() - tmp.head<2>()).norm() << ',' << clr << ','
+                           << (in_room ? 1 : 0) << ',' << clr_bel << ',' << gxy.x() << ',' << gxy.y()
+                           << ',' << g_clr << ',' << (g_in ? 1 : 0) << ',' << xt << ','
+                           << last_cmd.x() << ',' << last_cmd.z() << ',' << plan_i << ','
+                           << plan.size() << '\n';
+                }
+            }
+
+            traj_seen.push_back(exec_pose.head<2>());
+
             const Eigen::Vector3f tm = to_map(exec_pose);
+            if (cp_stride and static_cast<int>(f) % cp_stride == 0 and not ch.layout().empty())
+            {
+                const auto poly_map = ch.polygon();          // MAP frame, the frame `est` lives in
+                if (poly_map.size() >= 4)
+                {
+                    // BELIEVED: the channel as the robot could actually run it.
+                    cdet.set_model_corners(poly_map);
+                    const auto d = cdet.detect(p3, est.x(), est.y(), est.z(), P, 15.f);
+                    int nm = 0;
+                    for (const auto& m : d.matches) if (rc::CornerDetector::matched_for_display(m)) ++nm;
+                    cp_infov += d.corners_in_fov; cp_matched += nm; cp_occl += d.rej_occluded;
+                    cp_resid.push_back(d.resid_mean);
+                    cp_chi2.push_back(d.resid_chi2_mean);
+                    // ORACLE: same layout, same scan, TRUE pose. Diagnostic control only.
+                    cdet_oracle.set_model_corners(poly_map);
+                    const auto d_o = cdet_oracle.detect(p3, tm.x(), tm.y(), tm.z(), P, 15.f);
+                    int nmo = 0;
+                    for (const auto& m : d_o.matches) if (rc::CornerDetector::matched_for_display(m)) ++nmo;
+                    cp_matched_o += nmo;
+                    cp_resid_o.push_back(d_o.resid_mean);
+                    ++R.cp_frames;
+                    if (cp_csv.is_open())
+                        cp_csv << f << ',' << d.corners_in_fov << ',' << nm << ',' << d.rej_occluded
+                               << ',' << d.resid_mean << ',' << d.resid_chi2_mean << ','
+                               << d_o.corners_in_fov << ',' << nmo << ',' << d_o.resid_mean << ','
+                               << (est.head<2>() - tm.head<2>()).norm() << '\n';
+                }
+            }
             for (int k = 0; k < 4; ++k)
             {
                 const float a4 = static_cast<float>(k) * kPi * 0.5f;
@@ -2230,6 +2991,125 @@ int run_replay(const char* path)
         R.frac_out = ch.frac_out(); R.frac_in = ch.frac_in();
         R.yaw_deg = ch.yaw() * 180.f / kPi;
         R.pose_err = nperr ? *std::min_element(perr_q.begin(), perr_q.end()) / static_cast<double>(nperr) : -1.0;
+        if (R.cp_frames > 0)
+        {
+            const double n = R.cp_frames;
+            auto med = [](std::vector<float> x)
+            { if (x.empty()) return 0.f; std::sort(x.begin(), x.end()); return x[x.size() / 2]; };
+            R.cp_infov = static_cast<float>(cp_infov / n);
+            R.cp_matched = static_cast<float>(cp_matched / n);
+            R.cp_occl = static_cast<float>(cp_occl / n);
+            R.cp_matched_oracle = static_cast<float>(cp_matched_o / n);
+            R.cp_resid = med(cp_resid); R.cp_chi2 = med(cp_chi2);
+            R.cp_resid_oracle = med(cp_resid_o);
+        }
+        // ── boundary actually observed (see BoxRun::seen_frac) ─────────────────────────────
+        // ⚠ THE SAMPLE MUST NOT SIT ON THE POLYGON. The first version put samples ON the edge, ends
+        // included, and forgave one crossing for "the wall the sample lies on". A sample at a
+        // VERTEX touches BOTH adjacent edges, so it always registered two and read as blocked:
+        // measured on the apartamento hall, 55 of 64 endpoint samples were "unseen" from every
+        // pose, and a 0.12 m fin edge (3 samples, 2 of them vertices) could never exceed 1/3.
+        // The metric reported 86% where line of sight gives ~93%, and the bias grows with vertex
+        // count. So sample the edge's INTERIOR, nudge 1 mm into the room, and demand no crossing.
+        {
+            const auto inside = [&](const Eigen::Vector2f& p)
+            {
+                bool in = false;
+                for (size_t i = 0, j = room.size() - 1; i < room.size(); j = i++)
+                    if ((room[i].y() > p.y()) != (room[j].y() > p.y())
+                        and p.x() < (room[j].x() - room[i].x()) * (p.y() - room[i].y())
+                                    / (room[j].y() - room[i].y()) + room[i].x())
+                        in = not in;
+                return in;
+            };
+            const auto blocked = [&](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+            {
+                for (size_t e = 0; e < room.size(); ++e)
+                    if (segments_cross(a, b, room[e], room[(e + 1) % room.size()])) return true;
+                return false;
+            };
+            double tot = 0.0, seen = 0.0;
+            for (size_t e = 0; e < room.size(); ++e)
+            {
+                const Eigen::Vector2f a = room[e], b = room[(e + 1) % room.size()];
+                const float len = (b - a).norm();
+                if (len < 1e-4f) continue;
+                const int ns = std::max(2, static_cast<int>(len / 0.10f));
+                Eigen::Vector2f nrm(-(b - a).y() / len, (b - a).x() / len);
+                const Eigen::Vector2f mid = 0.5f * (a + b);
+                if (not inside(mid + 1e-3f * nrm)) nrm = -nrm;          // the room side
+                int ok = 0;
+                for (int k = 0; k < ns; ++k)
+                {
+                    const float t = (static_cast<float>(k) + 0.5f) / static_cast<float>(ns);
+                    const Eigen::Vector2f q = a + t * (b - a) + 1e-3f * nrm;
+                    for (const auto& o : traj_seen)
+                        if ((q - o).norm() <= 15.f and not blocked(o, q)) { ++ok; break; }
+                }
+                tot += len; seen += len * static_cast<double>(ok) / ns;
+            }
+            R.seen_frac = tot > 0.0 ? static_cast<float>(seen / tot) : 0.f;
+        }
+        // ── the proper score (see BoxRun::log_score) ───────────────────────────────────────
+        {
+            const auto verts = ch.layout().polygon();
+            const auto vcov  = ch.layout().polygon_cov(bp.sigma_flat);
+            if (verts.size() >= 4 and vcov.size() == verts.size())
+            {
+                // the published polygon in WORLD coordinates, with its per-vertex covariance
+                Poly pw; for (const auto& v : verts) pw.push_back(to_old(v));
+                const float cy2 = std::cos(ch.yaw()), sy2 = std::sin(ch.yaw());
+                Eigen::Matrix2f Rg; Rg << cy2, -sy2, sy2, cy2;
+                double acc = 0.0; long ns = 0;
+                std::vector<float> sigs;
+                for (size_t e = 0; e < room.size(); ++e)
+                {
+                    const Eigen::Vector2f a = room[e], b = room[(e + 1) % room.size()];
+                    const float len = (b - a).norm();
+                    if (len < 1e-4f) continue;
+                    const int m = std::max(1, static_cast<int>(len / 0.10f));
+                    for (int k = 0; k <= m; ++k)
+                    {
+                        const Eigen::Vector2f q = to_map(Eigen::Vector3f(
+                            a.x() + (static_cast<float>(k) / m) * (b.x() - a.x()),
+                            a.y() + (static_cast<float>(k) / m) * (b.y() - a.y()), 0.f)).head<2>();
+                        // nearest published edge, its distance, and the sigma ACROSS it
+                        float bd = 1e9f; size_t be = 0;
+                        for (size_t j = 0; j < pw.size(); ++j)
+                        {
+                            const float dd = point_to_segment(q, pw[j], pw[(j + 1) % pw.size()]);
+                            if (dd < bd) { bd = dd; be = j; }
+                        }
+                        const Eigen::Vector2f ea = pw[be], eb = pw[(be + 1) % pw.size()];
+                        Eigen::Vector2f t = eb - ea;
+                        if (t.norm() < 1e-6f) continue;
+                        t.normalize();
+                        const Eigen::Vector2f nrm(-t.y(), t.x());
+                        // average the two endpoint covariances, rotated into the world frame, and
+                        // project onto the edge normal: the sigma the consumer would read there
+                        const Eigen::Matrix2f C =
+                            Rg * (0.5f * (vcov[be] + vcov[(be + 1) % vcov.size()])) * Rg.transpose();
+                        const float sg = std::sqrt(std::max(1e-6f, nrm.dot(C * nrm)));
+                        sigs.push_back(sg);
+                        acc += -0.5 * static_cast<double>(bd / sg) * (bd / sg)
+                             - std::log(static_cast<double>(sg));
+                        ++ns;
+                    }
+                }
+                if (ns > 0)
+                {
+                    R.log_score = static_cast<float>(acc / static_cast<double>(ns));
+                    std::sort(sigs.begin(), sigs.end());
+                    R.pub_sigma_med = sigs[sigs.size() / 2];
+                }
+            }
+        }
+        R.replans = replans; R.explored = explored; R.ig_gain = ig_gain;
+        R.blocked_replans = blocked_replans;
+        R.phase = ig ? ch.phase_name() : "fixed-tour";
+        // ⚠ FRAMES USED, NOT FRAMES OFFERED. A run that stops on its own stopping rule is the
+        // whole point of the explorer, and reporting the budget instead of the spend hides it.
+        if (not explored) R.frames = static_cast<int>(truth.size());
         R.layout = ch.layout();
         {
             float best = -1.f;
@@ -2277,8 +3157,16 @@ int run_replay(const char* path)
                 rc::boxes::Box b;
                 const int face = static_cast<int>(U(rng) * 4.f) % 4;      // 0 lo.x 1 lo.y 2 hi.x 3 hi.y
                 const bool carve = U(rng) < 0.6f;
-                const float along = 0.4f + 1.1f * U(rng);                 // extent along the wall
-                const float deep  = 0.3f + 0.8f * U(rng);                 // how far in/out
+                // ⚠ NO THIN OUTWARD FINS. A carve may be narrow — a column against a wall is a real
+                // thing and the estimator has to find it — but a narrow protrusion STICKING OUT is
+                // not a room feature worth generating: it is a spike the robot can never drive
+                // around, so it is observed from one side only and is unidentifiable by
+                // construction. Keeping them in the generator meant grading the estimator on rooms
+                // whose geometry the data cannot determine. Outward features are therefore at
+                // least 0.9 m along the wall and 0.5 m deep — an alcove or a bay, something with
+                // an inside.
+                const float along = carve ? (0.4f + 1.1f * U(rng)) : (0.9f + 1.1f * U(rng));
+                const float deep  = carve ? (0.3f + 0.8f * U(rng)) : (0.5f + 0.6f * U(rng));
                 const float t = 0.12f + 0.76f * U(rng);                   // position along the wall
                 if (face == 0 or face == 2)
                 {
@@ -2617,7 +3505,8 @@ int main()
         if (not gen) { std::printf("room %d: no drivable circuit\n", i); return 0; }
         const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
         const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
-        const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, 2, gen->second);
+        const int laps = std::getenv("WS_BOXES_LAPS") ? std::atoi(std::getenv("WS_BOXES_LAPS")) : 2;   // the frame budget
+        const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, laps, gen->second);
         if (const char* dp = std::getenv("WS_BOXES_DUMP"))
         {
             std::ofstream o(dp);
@@ -2631,13 +3520,23 @@ int main()
             o << ",\"est\":"; poly(o, r.est_poly);
             o << ",\"traj\":"; poly(o, r.traj_exec);
             o << ",\"traj_est\":"; poly(o, r.traj_est);
+            o << ",\"obstacles\":[";
+            for (size_t k = 0; k < r.obstacles.size(); ++k)
+                o << (k ? "," : "") << "[" << r.obstacles[k].first.x() << "," << r.obstacles[k].first.y() << ","
+                  << r.obstacles[k].second.x() << "," << r.obstacles[k].second.y() << "]";
+            o << "]";
             o << "}\n";
         }
         std::printf("room i=%d order=%d  IoU=%.3f  boxes=%d verts=%d (truth %d)  rms=%.3f core=%.3f"
-                    "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d\n",
+                    "  out=%.1f%% in=%.1f%%  pose_err=%.3f  yaw=%+.2f  prop=%d adm=%d rem=%d"
+                    "  | seen=%.0f%% score=%+.2f pubsig=%.3f replans=%d(%d blk) phase=%s explored=%s  coll=%d/%d(%.2fm) out=%d\n",
                     i, order, r.iou, r.boxes, r.verts, r.truth_verts, r.rms, r.rms_core,
                     100.f * r.frac_out, 100.f * r.frac_in, r.pose_err, r.yaw_deg,
-                    r.proposed, r.admitted, r.removed);
+                    r.proposed, r.admitted, r.removed, 100.f * r.seen_frac,
+                    r.log_score, r.pub_sigma_med,
+                    r.replans, r.blocked_replans, r.phase.c_str(),
+                    r.explored ? "yes" : "NO(frame cap)",
+                    r.coll_events, r.coll_frames, r.coll_depth, r.out_frames);
         // the TRUTH polygon, so the shape can be read rather than guessed at
         const auto& room = gen->first;
         Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
@@ -2667,6 +3566,12 @@ int main()
         const bool reg = std::getenv("WS_BOXES_REG") != nullptr;
         const int ranch = std::getenv("WS_BOXES_REANCHOR") ? std::atoi(std::getenv("WS_BOXES_REANCHOR")) : 0;
         const int laps = std::getenv("WS_TOUR_LAPS") ? std::max(1, std::atoi(std::getenv("WS_TOUR_LAPS"))) : 2;
+        // Every room's geometry, so a sweep can be LOOKED AT and not only summarised.
+        std::ofstream dumpall;
+        int nwritten = 0;
+        if (const char* da = std::getenv("WS_BOXES_DUMPALL"))
+        { dumpall.open(da); dumpall.imbue(std::locale::classic()); dumpall << "[\n"; }
+
         std::map<int, std::vector<BoxRun>> by_order;
         // ★ Keep the identity of every room so the tail can be REPRODUCED, not just reported.
         // A distribution with a 0.43 in it is two different claims — "the method is 95% good" and
@@ -2681,8 +3586,15 @@ int main()
         const int olo = std::getenv("WS_BOXES_ORDER_LO") ? std::atoi(std::getenv("WS_BOXES_ORDER_LO")) : 1;
         const int ohi = std::getenv("WS_BOXES_ORDER_HI") ? std::atoi(std::getenv("WS_BOXES_ORDER_HI")) : 6;
         const int nord = std::max(1, ohi - olo + 1);
-        for (int i = 0; i < N; ++i)
+        // ⚠ SHARD BY ROOM INDEX, NOT BY SEED. Every run is pinned to ONE thread for determinism
+        // (see the OMP_NUM_THREADS re-exec above), so a 100-room sweep is 100 sequential minutes of
+        // one core on a 32-core box. WS_BOXES_INDEX_LO lets several processes each take a slice
+        // while room `i` keeps its identity — same seed 1000+i, same order olo + (i % nord) — so
+        // the union of the slices IS the sweep, and the per-room JSON is what gets aggregated.
+        const int ilo = std::getenv("WS_BOXES_INDEX_LO") ? std::atoi(std::getenv("WS_BOXES_INDEX_LO")) : 0;
+        for (int ii = 0; ii < N; ++ii)
         {
+            const int i = ilo + ii;
             const int order = olo + (i % nord);
             if (std::getenv("WS_BOXES_STYLE")
                 and std::string(std::getenv("WS_BOXES_STYLE")) == "apartamento")
@@ -2702,26 +3614,68 @@ int main()
             const auto r = run_boxes(gen->first, static_cast<unsigned>(7 + i), reg, ranch, laps, gen->second);
             by_order[order].push_back(r);
             ids.push_back({i, order, r.iou, r.boxes, r.truth_verts, r.verts});
+            if (dumpall.is_open())
+            {
+                const auto poly = [&](const Poly& q, int stride)
+                {
+                    dumpall << "[";
+                    int w = 0;
+                    for (size_t k = 0; k < q.size(); k += static_cast<size_t>(stride), ++w)
+                        dumpall << (w ? "," : "") << "[" << q[k].x() << "," << q[k].y() << "]";
+                    dumpall << "]";
+                };
+                dumpall << (nwritten++ ? ",\n" : "") << "{\"i\":" << i << ",\"order\":" << order
+                        << ",\"iou\":" << r.iou << ",\"boxes\":" << r.boxes
+                        << ",\"verts\":" << r.verts << ",\"tv\":" << r.truth_verts
+                        << ",\"rms\":" << r.rms << ",\"pose\":" << r.pose_err
+                        << ",\"cp_frames\":" << r.cp_frames << ",\"cp_infov\":" << r.cp_infov
+                        << ",\"cp_matched\":" << r.cp_matched << ",\"cp_occl\":" << r.cp_occl
+                        << ",\"cp_resid\":" << r.cp_resid << ",\"cp_chi2\":" << r.cp_chi2
+                        << ",\"cp_resid_oracle\":" << r.cp_resid_oracle
+                        << ",\"cp_matched_oracle\":" << r.cp_matched_oracle
+                        << ",\"seen_frac\":" << r.seen_frac
+                        << ",\"log_score\":" << r.log_score
+                        << ",\"pub_sigma\":" << r.pub_sigma_med
+                        << ",\"blocked_replans\":" << r.blocked_replans
+                        << ",\"coll_events\":" << r.coll_events
+                        << ",\"coll_frames\":" << r.coll_frames
+                        << ",\"coll_depth\":" << r.coll_depth
+                        << ",\"out_frames\":" << r.out_frames
+                        << ",\"explored\":" << (r.explored ? 1 : 0)
+                        << ",\"frames\":" << r.frames << ",\"replans\":" << r.replans
+                        << ",\"phase\":\"" << r.phase << "\",\"truth\":";
+                poly(gen->first, 1);
+                dumpall << ",\"est\":"; poly(r.est_poly, 1);
+                dumpall << ",\"traj\":"; poly(r.traj_exec, std::max<int>(1, static_cast<int>(r.traj_exec.size()) / 40));
+                dumpall << "}";
+            }
         }
         std::printf("\nRANDOM ROOM SWEEP — %d rooms, orders %d..%d, pose=%s%s, %d laps (%d skipped: no drivable circuit)\n",
                     N, olo, ohi, reg ? "registered" : "odometry-only",
                     ranch ? " +RE-ANCHOR" : "", laps, skipped);
-        std::printf("  order  n   IoU med   min     p25   | boxes med(truth)  verts med(truth) | rms   out%%  in%%\n");
+        std::printf("  order  n   IoU med   min     p25   | boxes med(truth)  verts med(truth) | rms   out%%  in%%"
+                    " | expl%%  frames med  replans med\n");
         std::vector<float> all;
         for (auto& [ord, v] : by_order)
         {
             auto med = [](std::vector<float> x)
             { std::sort(x.begin(), x.end()); return x.empty() ? 0.f : x[x.size() / 2]; };
-            std::vector<float> iou, rms, fo, fi; std::vector<float> bx, vt, tv;
+            std::vector<float> iou, rms, fo, fi; std::vector<float> bx, vt, tv, fr, rp;
+            int nexpl = 0;
             for (const auto& r : v)
             { iou.push_back(r.iou); rms.push_back(r.rms); fo.push_back(100.f * r.frac_out);
               fi.push_back(100.f * r.frac_in); bx.push_back(static_cast<float>(r.boxes));
               vt.push_back(static_cast<float>(r.verts)); tv.push_back(static_cast<float>(r.truth_verts));
+              fr.push_back(static_cast<float>(r.frames)); rp.push_back(static_cast<float>(r.replans));
+              nexpl += r.explored ? 1 : 0;
               all.push_back(r.iou); }
             std::vector<float> s = iou; std::sort(s.begin(), s.end());
-            std::printf("  %3d  %3zu   %.3f   %.3f   %.3f | %5.1f (%3d)      %5.1f (%4.1f)  | %.3f %5.1f %5.1f\n",
+            std::printf("  %3d  %3zu   %.3f   %.3f   %.3f | %5.1f (%3d)      %5.1f (%4.1f)  | %.3f %5.1f %5.1f"
+                        " | %4.0f%%  %8.0f  %8.0f\n",
                         ord, v.size(), med(iou), s.front(), s[s.size() / 4],
-                        med(bx), ord, med(vt), med(tv), med(rms), med(fo), med(fi));
+                        med(bx), ord, med(vt), med(tv), med(rms), med(fo), med(fi),
+                        100.0 * static_cast<double>(nexpl) / static_cast<double>(v.size()),
+                        med(fr), med(rp));
         }
         if (all.empty())
         {
@@ -2730,6 +3684,7 @@ int main()
                         "  broken one; the sweep is reporting that rather than dividing by zero.\n", skipped);
             return 0;
         }
+        if (dumpall.is_open()) { dumpall << "\n]\n"; dumpall.close(); }
         std::sort(ids.begin(), ids.end(), [](const Ident& a, const Ident& b) { return a.iou < b.iou; });
         std::printf("  worst 6:");
         for (size_t k = 0; k < ids.size() and k < 6; ++k)
@@ -2862,11 +3817,25 @@ int main()
                 if (rr.ok)
                 {
                     const float cb = std::cos(gy), sb = std::sin(gy);
+                    const Eigen::Vector3f before = est;
                     est = Eigen::Vector3f(cb * rr.pose.x() - sb * rr.pose.y(),
                                           sb * rr.pose.x() + cb * rr.pose.y(), wrap(rr.pose.z() + gy));
                     Eigen::Matrix3f R3 = Eigen::Matrix3f::Identity();
                     R3.topLeftCorner<2, 2>() = Eigen::Rotation2Df(gy).toRotationMatrix();
                     P = R3 * rr.cov * R3.transpose();
+                    // WS_BOXES_TRACE=1: per-frame diagnostic of what registration did and against what.
+                    if (std::getenv("WS_BOXES_TRACE"))
+                    {
+                        const Eigen::Vector3f tm = to_map(exec_pose);
+                        Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+                        for (const auto& b : ch.layout().boxes) { lo = lo.cwiseMin(b.lo); hi = hi.cwiseMax(b.hi); }
+                        std::fprintf(stderr, "[trace] f=%4zu err=(%+.3f,%+.3f) shift=(%+.3f,%+.3f) beta=%.4f cost=%.4f it=%2d "
+                                     "L=[%.2f %.2f]x[%.2f %.2f] boxes=%d\n",
+                                     f, est.x() - tm.x(), est.y() - tm.y(),
+                                     est.x() - before.x(), est.y() - before.y(),
+                                     rr.beta, rr.cost, rr.iterations,
+                                     lo.x(), hi.x(), lo.y(), hi.y(), ch.boxes());
+                    }
                 }
             }
             ch.observe(p3, est, P, sphi, slen);
@@ -2888,7 +3857,19 @@ int main()
                 ra_c = rc_c; ra_rot = rc_rot;
                 reanchor_done = true;
             }
-            ch.step();
+            {
+                const int nb0 = ch.boxes();
+                ch.step();
+                if (std::getenv("WS_BOXES_TRACE") and ch.boxes() != nb0)
+                {
+                    const Eigen::Vector3f tm = to_map(exec_pose);
+                    std::fprintf(stderr, "[layout] f=%zu boxes %d->%d yaw=%.2fdeg est=(%.2f,%.2f) truth=(%.2f,%.2f)\n",
+                                 f, nb0, ch.boxes(), ch.yaw() * 180.f / kPi, est.x(), est.y(), tm.x(), tm.y());
+                    for (const auto& b : ch.layout().boxes)
+                        std::fprintf(stderr, "         %s [%6.2f %6.2f]x[%6.2f %6.2f]\n", b.positive ? "+" : "-",
+                                     b.lo.x(), b.hi.x(), b.lo.y(), b.hi.y());
+                }
+            }
 
             const Eigen::Vector3f tm = to_map(exec_pose);
             for (int k = 0; k < 4; ++k)

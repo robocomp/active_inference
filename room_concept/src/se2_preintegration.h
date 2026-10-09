@@ -99,6 +99,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace rc::preint
@@ -124,6 +125,24 @@ namespace rc::preint
         float sigma_omega  = 0.0447f;   // rad/√s — yaw-rate noise floor          (0.010 rad / √0.05 s)
         float scale_v      = 0.08f;     // fraction of |Δp| that is a consistent scale error
         float scale_omega  = 0.155f;    // fraction of |Δθ| that is a consistent scale error
+
+        // ── MOTION-PROPORTIONAL odometry noise (2026-10-05) ──────────────────────────────────────────
+        // Wheel odometry errs per METRE rolled and per RADIAN turned, not per second: encoders at rest
+        // read exactly zero. Measured against ground truth (sim, 7769 windows, variance components
+        // E[e²] = a_dist·dist + a_turn·turn + a_time·T): a_time = 0 on ALL three axes, forward
+        // ≈ 94 mm²/m, lateral ≈ 6 mm²/m + 10 mm²/rad, heading ≈ 190 mrad²/rad. The per-second
+        // densities above summed as a random walk even while parked (GT drift ~1 mm over 30 s against
+        // a predicted 39 mm). With this ON, the model's own per-second term becomes k_t_* (the gyro's
+        // and the producers' STATED densities still add in quadrature, as before), and rest noise
+        // falls to zero continuously — no mixture, no gate. The coefficients are what
+        // MotionNoiseVC (motion_noise_vc.h) learns; these are its priors. Variances per unit:
+        bool  motion_proportional = false;
+        float k_long     = 94e-6f;   // m²   per m rolled   — forward
+        float k_lat      = 6e-6f;    // m²   per m rolled   — lateral
+        float k_lat_turn = 10e-6f;   // m²   per rad turned — lateral (wheel scrub)
+        float k_th_turn  = 190e-6f;  // rad² per rad turned — heading
+        float k_t_trans  = 4e-6f;    // m²   per s          — model translation drift (≈0 in sim)
+        float k_t_rot    = 4e-6f;    // rad² per s          — model heading drift (gyro bias walk)
 
         // ── Zero-velocity update (ZUPT) ────────────────────────────────────────────────────────────
         // The densities above describe a body that is FREE TO DRIFT, so the interval covariance grows
@@ -231,6 +250,13 @@ namespace rc::preint
         float           sigma_scale_v     = 0.f;             // σ of the correlated speed-scale error
         float           duration_s = 0.f;
         int             samples    = 0;
+        /// One covariance per noise COMPONENT, each integrated with coefficient 1 through the same
+        /// transport as `cov` (the recursion is linear in Q, so cov's motion part = Σ k_j·unit[j]
+        /// exactly). What MotionNoiseVC regresses the corrections on. Zero unless motion_proportional.
+        enum Comp { C_DIST_LONG = 0, C_DIST_LAT, C_TURN_LAT, C_TURN_TH, C_TIME_TRANS, C_TIME_ROT, NC };
+        std::array<Eigen::Matrix3f, NC> unit{Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(),
+                                             Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(),
+                                             Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero()};
         /// Rest-hypothesis densities carried through, so covariance() and the factor below need no
         /// side channel telling them which NoiseModel produced this interval.
         float           zupt_density_v_ = 0.f, zupt_density_omega_ = 0.f, zupt_lever_ = 0.26f;
@@ -349,12 +375,27 @@ namespace rc::preint
             // claim the MODEL is better than we know it to be.
             const auto combine = [](float model, float meas)
             { return meas >= 0.f ? std::sqrt(model * model + meas * meas) : model; };
-            const float s_lat  = combine(q_.sigma_v_lat,  sigma_v_lat_meas);
-            const float s_long = combine(q_.sigma_v_long, sigma_v_long_meas);
-            const float s_om   = combine(q_.sigma_omega,  sigma_omega_meas);
+            // Motion-proportional: the model's per-second term is k_t_* (≈0 for wheels); the rest of the
+            // model noise is per metre / per radian and is added below, after the ZUPT.
+            const bool prop = q_.motion_proportional;
+            const float m_lat  = prop ? std::sqrt(std::max(q_.k_t_trans, 0.f)) : q_.sigma_v_lat;
+            const float m_long = prop ? std::sqrt(std::max(q_.k_t_trans, 0.f)) : q_.sigma_v_long;
+            const float m_om   = prop ? std::sqrt(std::max(q_.k_t_rot,   0.f)) : q_.sigma_omega;
+            const float s_lat  = combine(m_lat,  sigma_v_lat_meas);
+            const float s_long = combine(m_long, sigma_v_long_meas);
+            // ★ HEADING, motion-proportional: the stated density (the FUSED wheel×gyro heading's) and the
+            //   model's per-radian term describe the SAME error — the GT fit behind k_th_turn measured the
+            //   total error of the heading actually integrated — so they must not add (they did until
+            //   2026-10-05: heading read ~2.7x too wide). The model term is kept here and the stated one is
+            //   carried separately, then the two combine as a MAX below: a degrading sensor still loosens
+            //   the prior, it just never stacks on the model.
+            const bool om_split = prop and sigma_omega_meas >= 0.f;
+            const float s_om   = om_split ? m_om : combine(m_om, sigma_omega_meas);
+            float var_omega_stated = om_split ? sigma_omega_meas * sigma_omega_meas / dt : 0.f;
             float var_v_lat  = s_lat  * s_lat  / dt;   // (m/s)²
             float var_v_long = s_long * s_long / dt;
             float var_omega  = s_om   * s_om   / dt;   // (rad/s)²
+            const float pre_lat = var_v_lat, pre_long = var_v_long, pre_om = var_omega;
 
             if (q_.zupt_enabled and not q_.zupt_as_factor)
             {
@@ -379,12 +420,37 @@ namespace rc::preint
                 var_v_lat  = zupt(var_v_lat,  q_.zupt_density_v,     m_v);
                 var_v_long = zupt(var_v_long, q_.zupt_density_v,     m_v);
                 var_omega  = zupt(var_omega,  q_.zupt_density_omega, m_w);
+                if (om_split) var_omega_stated = zupt(var_omega_stated, q_.zupt_density_omega, m_w);
             }
 
             Eigen::Matrix3f Q = Eigen::Matrix3f::Zero();
             Q(0, 0) = var_v_lat  * dt * dt;
             Q(1, 1) = var_v_long * dt * dt;
             Q(2, 2) = var_omega  * dt * dt;
+
+            if (prop)
+            {
+                // Per metre rolled / per radian turned, in the BODY frame (B maps it to the world).
+                const float ds = std::hypot(v_lat, v_long) * dt, dth = std::abs(omega) * dt;
+                Q(1, 1) += q_.k_long * ds;
+                Q(0, 0) += q_.k_lat * ds + q_.k_lat_turn * dth;
+                Q(2, 2) += q_.k_th_turn * dth;
+                const bool stated_wins = om_split and var_omega_stated * dt * dt > Q(2, 2);
+                if (stated_wins) Q(2, 2) = var_omega_stated * dt * dt;
+                // The unit components. The time ones carry the ZUPT's shrink factor, so that
+                // k_t·unit is exactly the model's share of the per-second term above.
+                const auto f = [](float after, float before) { return before > 0.f ? after / before : 1.f; };
+                std::array<Eigen::Vector3f, Interval::NC> qd;
+                qd[Interval::C_DIST_LONG]  = {0.f, ds, 0.f};
+                qd[Interval::C_DIST_LAT]   = {ds, 0.f, 0.f};
+                qd[Interval::C_TURN_LAT]   = {dth, 0.f, 0.f};
+                // when the stated heading density wins, the model's heading components did not act
+                qd[Interval::C_TURN_TH]    = {0.f, 0.f, stated_wins ? 0.f : dth};
+                qd[Interval::C_TIME_TRANS] = {f(var_v_lat, pre_lat) * dt, f(var_v_long, pre_long) * dt, 0.f};
+                qd[Interval::C_TIME_ROT]   = {0.f, 0.f, stated_wins ? 0.f : f(var_omega, pre_om) * dt};
+                for (int j = 0; j < Interval::NC; ++j)
+                    iv_.unit[j] = A * iv_.unit[j] * A.transpose() + B * qd[j].asDiagonal() * B.transpose();
+            }
 
             iv_.cov = A * iv_.cov * A.transpose() + B * Q * B.transpose();
 
@@ -449,6 +515,8 @@ namespace rc::preint
         out.zupt_lever_         = a.zupt_lever_ > 0.f ? a.zupt_lever_ : b.zupt_lever_;
         out.delta      = a.delta + b.delta;          // both already global-frame increments
         out.cov        = A * a.cov * A.transpose() + b.cov;
+        for (int j = 0; j < Interval::NC; ++j)
+            out.unit[j] = A * a.unit[j] * A.transpose() + b.unit[j];
         out.g_omega    = A * a.g_omega + b.g_omega;
         out.g_v        = A * a.g_v     + b.g_v;
         out.duration_s = a.duration_s + b.duration_s;

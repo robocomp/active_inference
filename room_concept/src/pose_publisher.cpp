@@ -1,6 +1,7 @@
 // genericworker.h FIRST, exactly as specificworker.h has it: it pulls DSR's headers in the order the
 // library expects, and dsr_signal_emitter.h fails to compile its own ThreadPool member otherwise.
 #include <genericworker.h>
+#include "../../common/status_stream/status_sink.h"   // rc::status::Line (routed)
 
 #include "pose_publisher.h"
 
@@ -588,7 +589,7 @@ void PosePublisher::apply_base_capability_to_pose_clamp()
     const auto cap = rc::read_base_capability(*G, robots.front().id());
     if (not cap.any())
     {
-        std::cout << "[pose-clamp] the robot node publishes no base capability; keeping the configured "
+        rc::status::Line{} << "[pose-clamp] the robot node publishes no base capability; keeping the configured "
                      "fallback (v " << params.POSE_CLAMP_V_MAX << " m/s, w " << params.POSE_CLAMP_W_MAX
                   << " rad/s). Producer: robot_concept + Agent.base_config_file." << std::endl;
         return;
@@ -598,13 +599,13 @@ void PosePublisher::apply_base_capability_to_pose_clamp()
     const float v_old = params.POSE_CLAMP_V_MAX, w_old = params.POSE_CLAMP_W_MAX;
     if (cap.max_linear_speed_mps) params.POSE_CLAMP_V_MAX = *cap.max_linear_speed_mps;
     if (cap.max_rot_speed_rps)    params.POSE_CLAMP_W_MAX = *cap.max_rot_speed_rps;
-    std::cout << "[pose-clamp] bounded by what the ROBOT can do, not by a controller's preference: "
+    rc::status::Line{} << "[pose-clamp] bounded by what the ROBOT can do, not by a controller's preference: "
               << "v " << v_old << " -> " << params.POSE_CLAMP_V_MAX << " m/s, "
               << "w " << w_old << " -> " << params.POSE_CLAMP_W_MAX << " rad/s "
               << "(from robot_max_linear_speed / robot_max_rot_speed on '"
               << robots.front().name() << "')." << std::endl;
     if (params.POSE_CLAMP_W_MAX <= w_old)
-        std::cout << "[pose-clamp] note: the capability is NOT above the previous value, so this clamp "
+        rc::status::Line{} << "[pose-clamp] note: the capability is NOT above the previous value, so this clamp "
                      "was not the thing limiting the published yaw rate." << std::endl;
 }
 }   // namespace rc

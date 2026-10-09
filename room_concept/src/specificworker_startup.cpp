@@ -14,6 +14,7 @@
 // this runs on the GUI thread and every millisecond here is a millisecond the window cannot paint.
 
 #include "specificworker.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include "calib_channels.h"
 #include "ground_truth_log.h"
@@ -33,11 +34,16 @@
 #include <filesystem>
 #include <fstream>
 #include <locale>
+#include <ranges>
+
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
+#include "status_routing.h"                             // which log lines still reach the terminal
 
 void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
         return;
+    if (status_stream_) status_stream_->stopping("shutdown requested");
 
     save_window_settings();
     if (viewer_)
@@ -75,6 +81,8 @@ void SpecificWorker::request_shutdown()
     // _Exit skips all of that; the OS reclaims memory/sockets/threads. Only reached on a real shutdown
     // (shutting_down_ latched above). Brief pause lets the removal deltas + participant departure reach
     // peers first.
+    rc::status::event("lifecycle", rc::status::Obj{}.s("state", "exited").s("reason", "clean shutdown"));
+    rc::status::flush();   // _Exit runs no destructor, so the stream's own final flush never would
     std::cout.flush();
     std::cerr.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -82,8 +90,118 @@ void SpecificWorker::request_shutdown()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// The status stream starts before anything else in initialize(), so its startup timeline is whole.
+// Off ([Status] Enable = false) ⇒ no socket, no events file, no log capture — and every rc::status
+// call in the agent degrades to exactly the print it replaced.
+void SpecificWorker::start_status_stream()
+{
+    rc::load_status_config(configLoader, params);
+    if (not params.STATUS_ENABLE)
+        return;
+    rc::StatusStream::Options o;
+    o.agent = agent_name;
+    o.id = agent_id;
+    o.events_dir = "tmp";
+    // Every Qt message is recorded; status_routing.h decides which ALSO reach the terminal.
+    o.capture_min = rc::status::Level::Debug;
+    o.to_terminal = &rc::room_routing::to_terminal;
+    status_stream_ = std::make_unique<rc::StatusStream>(std::move(o));
+    rc::status::event("lifecycle", rc::status::Obj{}.s("state", "starting"));
+
+    // ── the 2 Hz state snapshot ──
+    // Everything it reads is main-thread state or an atomic; every collaborator is null-checked
+    // because the timer can fire during the processEvents() pumps of a half-built startup.
+    status_.set_sources({
+        .room = [this](rc::status::Obj& o)
+        {
+            o.s("map_mode", room_concept_.estimating() ? "estimate" : "given")
+             .b("node_created", scene_graph_ and scene_graph_->room_node_created())
+             .i("stable_frames", scene_graph_ ? scene_graph_->stable_frames() : 0)
+             .i("needed", params.STABLE_FRAMES_REQUIRED)
+             .b("map_ready", room_concept_.map_ready())
+             .b("grid_searching", room_concept_.is_grid_searching())
+             .f("height_measured", room_concept_.measured_ceiling(), 4)   // 0 until the LiDAR has seen it
+             .f("height_stated", params.room_height, 4);
+        },
+        .streams = [this]
+        {
+            std::vector<rc::StatusReporter::StreamSample> v;
+            if (lidar_ingestor_)
+                v.push_back({"lidar", static_cast<long long>(lidar_ingestor_->frames_total()),
+                             static_cast<long long>(lidar_ingestor_->ms_since_last_frame())});
+            if (imu_ingestor_)
+                v.push_back({"imu", static_cast<long long>(imu_ingestor_->served()), -1});
+            if (calib_)
+                for (const auto& st : calib_->stream_stats())
+                    v.push_back({st.name, st.frames, st.age_ms});
+            return v;
+        },
+        .missing = [this] { return presence_coordinator_.missing_required_names(); },
+        .overlay_verbose = [this] { return overlay_verbose_; },
+    });
+
+    // ── commands a viewer may send (the whitelist). Only hooks that already exist and are safe on
+    // the main thread; nothing here invents new agent behaviour. Rerun is NOT offered: its logger is
+    // initialised once when the localiser thread starts and its flag is read unsynchronised on that
+    // thread, so there is no safe runtime toggle to call. ──
+    status_stream_->register_command(
+        "reset_motion_calib",
+        "Forget the motion-calibration evidence (RoomConcept::request_calibration_reset — the Calib "
+        "window's Reset, motion half only; camera mounts are untouched)",
+        "Reset the MOTION calibration? Every parameter returns to its prior and the state file is "
+        "deleted. Camera mount evidence is NOT touched.",
+        [this](const QJsonObject&)
+        {
+            room_concept_.request_calibration_reset();   // queued; applied on the localiser thread
+            return rc::StatusStream::Reply{true, "reset queued; the localiser applies it on its next cycle", {}};
+        });
+    status_stream_->register_command(
+        "dump_state", "Write the current state snapshot to tmp/state_<time>.json", "",
+        [this](const QJsonObject&)
+        {
+            const std::string json = status_.build_state();
+            std::filesystem::create_directories("tmp");
+            const std::string path = "tmp/state_" + QDateTime::currentDateTime()
+                                                        .toString("yyyy-MM-dd_HH-mm-ss-zzz").toStdString() + ".json";
+            std::ofstream f(path, std::ios::out | std::ios::trunc);
+            if (not f.is_open())
+                return rc::StatusStream::Reply{false, "cannot open " + path, {}};
+            f.imbue(std::locale::classic());
+            f << json << '\n';
+            const std::string abs = std::filesystem::absolute(path).string();
+            return rc::StatusStream::Reply{true, "state written", rc::status::Obj{}.s("path", abs).body()};
+        });
+    status_stream_->register_command(
+        "toggle_overlay_verbose",
+        "Toggle the 2-D viewer's verbose wall-SLAM overlay (Viewer2D::set_overlay_verbose; display only)", "",
+        [this](const QJsonObject&)
+        {
+            auto* v = viewer_ ? viewer_->viewer() : nullptr;
+            if (v == nullptr)
+                return rc::StatusStream::Reply{false, "the 2-D viewer does not exist (yet)", {}};
+            overlay_verbose_ = not overlay_verbose_;
+            v->set_overlay_verbose(overlay_verbose_);
+            return rc::StatusStream::Reply{true, overlay_verbose_ ? "verbose overlay ON" : "verbose overlay OFF", {}};
+        });
+    // Serialised every 500 ms while a viewer is attached; every 5 s otherwise, for the events file.
+    auto* t = new QTimer(this);
+    connect(t, &QTimer::timeout, this, [this]
+    {
+        if (not status_stream_ or shutting_down_) return;
+        if (status_stream_->has_clients() or ++status_idle_ticks_ % 10 == 0)
+            status_.build_state();
+    });
+    t->start(500);
+    qInfo().noquote() << QString("[lifecycle] %1 id %2 starting | diagnostics -> %3 | viewer socket %4 "
+                                 "(tools/room_tui.py). The terminal shows lifecycle, [SM], warnings and errors only.")
+                             .arg(QString::fromStdString(agent_name)).arg(agent_id)
+                             .arg(QString::fromStdString(status_stream_->events_path()))
+                             .arg(status_stream_->socket_path());
+}
+
 void SpecificWorker::initialize()
 {
+    start_status_stream();
     GenericWorker::initialize();
 
     // ── STARTUP PHASES: TIMED, AND THE WINDOW STAYS ALIVE THROUGH THEM ───────────────────────────
@@ -120,6 +238,7 @@ void SpecificWorker::initialize()
             f.imbue(std::locale::classic());
             f << name << ',' << ms << ',' << init_timer.elapsed() << '\n';
         }
+        status_.phase(name, ms, init_timer.elapsed());
         if (ms > 200)
             qInfo().noquote() << QString("[startup] %1 took %2 ms (cumulative %3 ms) — the window is "
                                          "blocked for the duration of any phase on this thread")
@@ -146,13 +265,22 @@ void SpecificWorker::initialize()
     pose_pub_ = std::make_unique<rc::PosePublisher>(G, params, room_concept_,
                                                     &viewer_raw_slot_, shutting_down_);
     calib_ = std::make_unique<rc::CalibChannels>(G, params, room_concept_, *mount_, &viewer_raw_slot_);
+    if (status_stream_)
+    {
+        const rc::camcal::Sink sink = [this](const std::string& cam, const std::array<float, 4>& v,
+                                             const std::array<float, 4>& s, int informed, float cond, long pairs)
+        { status_.note_camcal(cam, v, s, informed, cond, pairs); };
+        mount_->set_camcal_sink(sink);
+        calib_->set_camcal_sink(sink);
+    }
     gt_log_ = std::make_unique<rc::GroundTruthLog>(G, room_concept_, shutting_down_);
     // AFTER gt_log_ exists. The lambda captures `this` and dereferences gt_log_, so registering it
     // first left a window in which a corrected publish would have null-dereferenced. Nothing could
     // publish in that window today, which is exactly what made the same shape survive review once
     // already — the hand-over goes after the thing it hands over, not before it.
     pose_pub_->set_on_corrected_published([this](const rc::RoomConcept::UpdateResult& res)
-                                          { gt_log_->log_ground_truth(res); });
+                                          { gt_log_->log_ground_truth(res); gt_log_->log_heading(res);
+                                            status_.accumulate_surprise(res); });
     phase("load_config");
 
     // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──
@@ -225,6 +353,8 @@ void SpecificWorker::initialize()
         // only honest option: a wrong floor plan reads downstream as a localiser fault.
         qCritical() << "[room] REFUSING TO START: no type-\"robot\" node in the graph when the"
                     << "layout must be chosen. Start robot_concept first.";
+        rc::StatusReporter::fatal("REFUSING TO START: no type-\"robot\" node in the graph when the "
+                                  "layout must be chosen. Start robot_concept first.");
         std::exit(EXIT_FAILURE);
     }
     // The other half of the overlays: values whose home is the localiser or the planner, not the
@@ -258,8 +388,14 @@ void SpecificWorker::initialize()
         // RoomShape.MapMode = estimate: no layout is loaded. The room is learnt from the LiDAR and
         // published once its polygon closes; the viewer draws the walls as they are born.
         room_concept_.configure_room_estimate();
+        // A start-up proto-room will own the published frame (frozen at the robot's initial pose): freeze the
+        // internal frame from the very first cycle, before any re-anchor can run (room_concept.cpp, map_ready).
+        if (params.STARTUP_PROTO_ENABLED)
+            room_concept_.set_freeze_internal_frame(true);
         calib_->set_room_polygon({}, Eigen::Vector2f::Zero());
         room_initialized_from_svg_polygon_ = false;
+        rc::StatusReporter::loaded("layout", "", "RoomShape.MapMode = estimate: no layout loaded; "
+                                                 "the room is learnt from the LiDAR");
         qInfo() << "[room] RoomShape.MapMode = estimate: no layout loaded; the room will be learnt from the LiDAR"
                 << "(first pose = origin until the polygon closes and is re-anchored).";
     }
@@ -268,6 +404,8 @@ void SpecificWorker::initialize()
     const std::string pose_path = pose_file_path();
     phase("room_model");
     room_concept_.set_seed_pose_file(pose_path);
+    rc::StatusReporter::loaded("seed_pose", pose_path,
+                               room_concept_.estimating() ? "ignored in estimate mode" : "");
     phase("seed_pose");
 
     // The DSR graph viewer is OPTIONAL now: the layout GUI lives in its own top-level window
@@ -377,6 +515,7 @@ void SpecificWorker::initialize()
         .on_peer_restarted = [](std::uint32_t id)
         {
             qInfo() << "[Presence] peer" << id << "restarted";
+            rc::StatusReporter::peer("restarted", "", id);
         },
         .on_optional_peer_lost = [this](const std::string &name, std::uint32_t id)
         {
@@ -393,6 +532,12 @@ void SpecificWorker::initialize()
             qInfo() << "[SM] -> Waiting";
             QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(false); });
             const auto missing = presence_coordinator_.missing_required_names();
+            {
+                std::string m;
+                for (const auto& label : missing) m += (m.empty() ? "" : " ") + label;
+                status_.sm("Waiting", m.empty() ? "" : "missing: " + m);
+                status_.reset_waiting();
+            }
             if (!missing.empty())
             {
                 QString m;
@@ -408,9 +553,13 @@ void SpecificWorker::initialize()
             const bool peers_ready = presence_coordinator_.all_required_ready();
             std::string why;
             const bool lidar_ready = lidar_stream_ready(&why);
+            {
+                const auto miss = presence_coordinator_.missing_required_names();
+                status_.waiting(peers_ready, {miss.begin(), miss.end()}, lidar_ready, why);
+            }
             if (peers_ready and lidar_ready)
             {
-                std::println("[SM] Waiting: peers ready and LiDAR stream '{}' advertised -> Operating", why);
+                rc::status::println("[SM] Waiting: peers ready and LiDAR stream '{}' advertised -> Operating", why);
                 emit presenceReady();
                 return;
             }
@@ -424,7 +573,7 @@ void SpecificWorker::initialize()
                 std::string missing;
                 for (const auto& label : presence_coordinator_.missing_required_names())
                     missing += " " + label;
-                std::println("[SM] Waiting — peers{}{} | lidar: {}",
+                rc::status::println("[SM] Waiting — peers{}{} | lidar: {}",
                              peers_ready ? " OK" : " MISSING:",
                              peers_ready ? std::string{} : missing,
                              lidar_ready ? ("OK (" + why + ")") : why);
@@ -435,6 +584,7 @@ void SpecificWorker::initialize()
             operating_since_ms_   = QDateTime::currentMSecsSinceEpoch();
             lidar_stall_reported_ = false;
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
+            status_.sm("Operating", "all required constraints satisfied");
             QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(true); });
             if (!room_concept_.is_running())
             {
@@ -461,10 +611,11 @@ void SpecificWorker::initialize()
                 {
                     lidar_stall_reported_ = true;
                     degraded_from_lidar_  = true;
-                    std::println("[SM] Operating -> Waiting: LiDAR stream STALLED ({}) — "
+                    rc::status::println("[SM] Operating -> Waiting: LiDAR stream STALLED ({}) — "
                                  "not localizing on stale evidence",
                                  age < 0 ? std::string("no sweep ever arrived")
                                          : std::format("last sweep {} ms ago", age));
+                    rc::StatusReporter::stall("lidar", age);
                     emit presenceLost();
                     return;
                 }
@@ -499,9 +650,14 @@ void SpecificWorker::initialize()
             {
                 degraded_from_lidar_ = false;
                 qInfo() << "[SM] -> Degraded (LiDAR stall, peers intact) — passing through to Waiting";
+                status_.sm("Degraded", "LiDAR stall, peers intact — passing through to Waiting");
             }
             else
+            {
                 qInfo() << "[SM] -> Degraded: required peer lost —" << REQUIRED_LOSS_GRACE_MS << "ms grace before shutdown";
+                status_.sm("Degraded", std::format("required peer lost — {} ms grace before shutdown",
+                                                               REQUIRED_LOSS_GRACE_MS));
+            }
             QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
             {
                 if (shutting_down_)
@@ -509,9 +665,11 @@ void SpecificWorker::initialize()
                 if (presence_coordinator_.all_required_ready())
                 {
                     qInfo() << "[SM] required peers recovered during grace — staying alive";
+                    status_.sm("Degraded", "required peers recovered during grace — staying alive");
                     return;
                 }
                 qWarning() << "[SM] required peer still missing after grace — shutting down cleanly";
+                status_.sm("Degraded", "required peer still missing after grace — shutting down cleanly");
                 request_shutdown();   // does cleanup + crash-free _Exit (terminal)
             });
         },
@@ -527,6 +685,42 @@ void SpecificWorker::initialize()
 
 
     restore_window_settings();
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING (common/config_report) ─────────────────────────────────
+    // Published at the END of initialize(), when the LAST reader has run: the shared presence unit
+    // reads its [Presence.*]/[Owns.*] keys in configure() above, and the [Platform.*]/[Scenario.*]
+    // overlays were applied during the graph checks — publishing earlier would name keys as unread
+    // that are read, or show file values an overlay has already replaced. Prints the deltas-only
+    // banner on the terminal (as robot_concept does) and writes the full table to
+    // etc/config_effective.csv.
+    // declare_complete() is a CLAIM that every key this agent reads goes through an rc::cfg::Reader;
+    // it ARMS the unread sweep. common/config_report/check_registry_complete.sh room_concept is the
+    // grep that keeps the claim honest — re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("room_concept");
+    const auto published = rc::cfg::Reader(configLoader, "room_concept").publish("etc/config_effective.csv");
+    // The same table, as data, for the viewer's Config gates panel.
+    {
+        rc::status::Arr recs;
+        for (const auto& r : rc::cfg::registry().records())
+            recs.raw(rc::status::Obj{}
+                         .s("key", r.key).s("type", r.type)
+                         .s("origin", rc::cfg::to_string(r.origin)).s("kind", rc::cfg::to_string(r.kind))
+                         .b("runtime", r.mut == rc::cfg::Mutability::RuntimeTuned)
+                         .s("default", r.code_default).s("effective", r.effective)
+                         .s("description", r.description).s("overlay", r.overlay_source)
+                         .i("reads", r.reads)
+                         .str());
+        rc::status::event("config", rc::status::Obj{}
+                                        .s("agent", "room_concept")
+                                        .s("fingerprint", published.fingerprint)
+                                        .s("arm", published.arm)
+                                        .i("undocumented", published.undocumented)
+                                        .i("unread", published.unread)
+                                        .b("sweep_armed", published.sweep_armed)
+                                        .s("dump", "etc/config_effective.csv")
+                                        .raw("records", recs.str()));
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

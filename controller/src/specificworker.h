@@ -216,6 +216,8 @@ private:
 		std::vector<std::function<void()>> command_queue_;
 		std::atomic<bool> command_pending_{false};
 		QTimer *render_timer_ = nullptr;
+		std::function<void(int, bool)> remote_run_;   ///< the Run button's callback, for remote_cmd.txt
+		std::function<void()>           remote_stop_;  ///< the Stop button's callback, for remote_cmd.txt
 		std::atomic<bool> shutting_down_{false};
 
 		void control_loop();

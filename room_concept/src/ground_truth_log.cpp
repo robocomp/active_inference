@@ -1,16 +1,20 @@
 #include <genericworker.h>   // FIRST: DSR's signal emitter is not self-contained
 
 #include "ground_truth_log.h"
+#include "status_reporter.h"
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
 #include <QDebug>
 #include <QString>
+#include <QDateTime>
+#include <QDir>
 
 #include <cmath>
 #include <filesystem>
 #include <locale>
+#include <limits>
 
 namespace rc
 {
@@ -34,6 +38,33 @@ void GroundTruthLog::gt_convention_report(float est_th, float gt_th_raw)
         << (Ru > Rd ? "producer sign is INVERTED, local negation is CORRECT"
                     : "producer sign looks RIGHT -- robot_concept may have been fixed; REMOVE the "
                       "local negation in log_ground_truth or every heading comparison inverts");
+}
+
+
+void GroundTruthLog::gt_frame_report(float dx, float dy, float claimed_var_xy)
+{
+    if (not std::isfinite(dx) or not std::isfinite(dy)) return;
+    if (std::isfinite(claimed_var_xy)) fr_var_ += claimed_var_xy;
+    fr_sx_ += dx; fr_sy_ += dy; fr_sxx_ += double(dx) * dx; fr_syy_ += double(dy) * dy;
+    if (++fr_n_ != fr_report_at_) return;
+    fr_report_at_ *= 10;                                   // 200, 2000, 20000 -- three checks, then quiet
+    const double n = static_cast<double>(fr_n_);
+    const double mx = fr_sx_ / n, my = fr_sy_ / n;
+    const double sx = std::sqrt(std::max(fr_sxx_ / n - mx * mx, 0.0));
+    const double sy = std::sqrt(std::max(fr_syy_ / n - my * my, 0.0));
+    const double mean = std::hypot(mx, my), scatter = std::hypot(sx, sy);
+    const double claimed = std::sqrt(fr_var_ / n);
+    const double explained = 3.0 * std::hypot(scatter, claimed);   // posterior is 2-3x overconfident vs GT (10-04)
+    qInfo().nospace().noquote()
+        << "[gt] frame check over " << fr_n_ << " samples: mean(est - gt_room) = ("
+        << QString::number(mx, 'f', 3) << ", " << QString::number(my, 'f', 3) << ") m, |mean| "
+        << QString::number(mean, 'f', 3) << " vs 3*hypot(scatter " << QString::number(scatter, 'f', 3)
+        << ", claimed sigma " << QString::number(claimed, 'f', 3) << ") = " << QString::number(explained, 'f', 3)
+        << " m (offset applied " << QString::number(off_x_.load(), 'f', 3) << ", "
+        << QString::number(off_y_.load(), 'f', 3) << ")  ->  "
+        << (mean <= explained ? "GT is in the room frame; the error columns grade the localiser"
+                              : "the mean is more than the localiser can explain: this scenario's SVG is probably NOT "
+                              "drawn in Webots world coordinates -- gt_* columns MIS-GRADE (use gt_*_world + a fitted transform)");
 }
 
 
@@ -94,7 +125,7 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        // its counterfactual travelling as one number is how a mismatch hides.
                        // fb_ts = 0 means the shadow did not produce a pair on this cycle.
                        "fb_ts,fb_cal_x,fb_cal_y,fb_cal_th,fb_nom_x,fb_nom_y,fb_nom_th,"
-                       "fb_corr_pitch,fb_corr_height,fb_corr_yaw\n";
+                       "fb_corr_pitch,fb_corr_height,fb_corr_yaw,gt_x_world,gt_y_world\n";
         }
         else
             qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
@@ -110,12 +141,15 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
     const float gt_th_raw = ga.value();
     const float gt_th     = -gt_th_raw;
     gt_convention_report(est_th, gt_th_raw);
+    gt_frame_report(p.translation().x() - (gx.value() - off_x_.load()),
+                    p.translation().y() - (gy.value() - off_y_.load()),
+                    res.covariance.rows() > 1 ? res.covariance(0, 0) + res.covariance(1, 1) : NAN);
     // Fetched once and used raw: the pose error each implies is computed from this row offline,
     // because the subtraction is the analysis and not the measurement.
     const auto fb = room_concept_.get_factor_b();
     const std::int64_t fb_ts = fb.valid ? fb.ts_ms : 0;
     gt_csv_ << res.timestamp_ms
-            << ',' << gx.value() << ',' << gy.value() << ',' << gt_th
+            << ',' << gx.value() - off_x_.load() << ',' << gy.value() - off_y_.load() << ',' << gt_th
             << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
             << ',' << gt_th_raw
             << ',' << res.sdf_mse << ',' << res.iterations_used
@@ -158,8 +192,120 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             << ',' << fb.pose_calibrated.x() << ',' << fb.pose_calibrated.y() << ',' << fb.pose_calibrated.z()
             << ',' << fb.pose_nominal.x()    << ',' << fb.pose_nominal.y()    << ',' << fb.pose_nominal.z()
             << ',' << fb.correction.x() << ',' << fb.correction.y() << ',' << fb.correction.z()
+            << ',' << gx.value() << ',' << gy.value()
             << '\n';
     gt_csv_.flush();
+}
+
+
+void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
+{
+    if (shutting_down_.load())
+        return;
+    if (not hd_csv_open_attempted_)
+    {
+        hd_csv_open_attempted_ = true;
+        // One file PER RUN, named by its start time: an A/B (HeadingFusion true/false) needs both
+        // runs to survive, and nobody should have to rename anything by hand.
+        QDir().mkpath("tmp/heading");
+        const QString path = QString("tmp/heading/heading_%1.csv")
+                                 .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss"));
+        hd_csv_.open(path.toStdString(), std::ios::out | std::ios::trunc);
+        if (not hd_csv_.is_open())
+        {
+            qWarning() << "[heading] cannot open" << path;
+            return;
+        }
+        hd_csv_.imbue(std::locale::classic());   // es_ES would write decimal COMMAS into a CSV
+        rc::StatusReporter::loaded("heading_log", path.toStdString(), "per-run heading fusion CSV (written)");
+        hd_csv_ << "# heading fusion log. fusion=1: wheel x gyro product; 0: legacy switch. Angles rad, "
+                   "times s, densities rad/sqrt(s). raw_* are UNcalibrated channel rotations this cycle. "
+                   "est/pred are the pose after/before the optimiser. gt_* NaN on the real robot. "
+                   "sur_* nats, KL(posterior||motion prediction), scored on corrected cycles (surprise.h).\n";
+        hd_csv_ << "ts_ms,fusion,est_x,est_y,est_th,pred_x,pred_y,pred_th,gt_x,gt_y,gt_th,"
+                   "iters,sdf_mse,cov_tt,dy_local,dx_local,"
+                   "dth_total,dth_gyro_share,dth_wheel_share,wheel_shadow,"
+                   "raw_wheel,raw_gyro,gyro_dt,total_dt,zupt_dt,gyro_weight,dens_w,dens_g,"
+                   "hc_th_gyro,hc_t_gyro,hc_th_wheel,hc_fwd_wheel,imu_segs,wheel_segs,";
+        // ★ The first 7 parameters only, in place: the lever (P_LEVER_X/Y, plan 2026-10-05 Task 1) is
+        // appended at the END of the row so every existing column keeps its position.
+        for (int i = 0; i < rc::calib::P_LEVER_X; ++i)
+            hd_csv_ << "v_" << rc::calib::param_name(i) << ',';
+        for (int i = 0; i < rc::calib::P_LEVER_X; ++i)
+            hd_csv_ << "s_" << rc::calib::param_name(i) << ',';
+        hd_csv_ << "calib_informed_mask,calib_cond,calib_episodes,nl_c0,nl_c1,nl_c2,nl_samples,nl_on,rest_on,rest_gain_tr,rest_gain_ro,rest_learn,rest_dens_v,rest_dens_w,"
+                   "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info,"
+                   "calib_applied,sur_open,sur_c_fwd,sur_c_lat,sur_c_th,sur_pp_fwd,sur_pp_lat,sur_pp_th,"
+                   "sur_pq_fwd,sur_pq_lat,sur_pq_th,preint,noise_prop,noise_learn,vc_k_long,vc_k_lat,vc_k_lat_turn,vc_k_th_turn,vc_k_t_trans,vc_k_t_rot,vc_rho_fwd,vc_rho_lat,vc_rho_th,vc_trained,gt_x_world,gt_y_world,sur_floor,slot_appended,drift_n,drift_fwd_m,drift_lat_m,drift_th_rad,drift_th_s,se_fwd_m,se_lat_m,se_th_rad,"
+                   "v_lever_x,v_lever_y,s_lever_x,s_lever_y,pf_sigma_b,pf_len,pf_xx,pf_tt\n";
+        qInfo() << "[heading] logging every cycle to" << path;
+    }
+    if (not hd_csv_.is_open())
+        return;
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    float gx = nan, gy = nan, gth = nan;
+    if (G)
+        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+        {
+            const auto &rn = robots.front();
+            const auto ax = G->get_attrib_by_name<robot_gt_x_att>(rn);
+            const auto ay = G->get_attrib_by_name<robot_gt_y_att>(rn);
+            const auto aa = G->get_attrib_by_name<robot_gt_angle_att>(rn);
+            // Same sign convention as gt_error.csv: the producer's angle is inverted.
+            if (ax and ay and aa) { gx = ax.value(); gy = ay.value(); gth = -aa.value(); }
+        }
+    // the supervisor pose is WORLD; the estimate is in the recentred ROOM frame (set_world_offset)
+    const float gx_world = gx, gy_world = gy;
+    gx -= off_x_.load(); gy -= off_y_.load();
+    const auto &p = res.robot_pose;
+    const float est_th = std::atan2(p.linear()(1, 0), p.linear()(0, 0));
+    const auto &d = res.heading_diag;
+    const auto &hc = res.heading_cov;
+    hd_csv_ << res.timestamp_ms << ',' << (room_concept_.params.heading_fusion ? 1 : 0)
+            << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
+            << ',' << res.pred_x << ',' << res.pred_y << ',' << res.pred_theta
+            << ',' << gx << ',' << gy << ',' << gth
+            << ',' << res.iterations_used << ',' << res.sdf_mse
+            << ',' << (res.covariance.rows() > 2 ? res.covariance(2, 2) : -1.f)
+            << ',' << res.dy_local << ',' << res.dx_local
+            << ',' << (res.imu_dtheta + res.wheel_dtheta) << ',' << res.imu_dtheta << ',' << res.wheel_dtheta
+            << ',' << res.wheel_shadow_dtheta
+            << ',' << d.raw_wheel << ',' << d.raw_gyro << ',' << d.gyro_dt << ',' << d.total_dt
+            << ',' << d.zupt_dt << ',' << res.gyro_weight << ',' << d.dens_w << ',' << d.dens_g
+            << ',' << hc.th_gyro << ',' << hc.t_gyro << ',' << hc.th_wheel << ',' << hc.fwd_wheel
+            << ',' << res.imu_segs << ',' << res.wheel_segs;
+    for (int i = 0; i < rc::calib::P_LEVER_X; ++i) hd_csv_ << ',' << res.calib_value[i];
+    for (int i = 0; i < rc::calib::P_LEVER_X; ++i) hd_csv_ << ',' << res.calib_sigma[i];
+    hd_csv_ << ',' << res.calib_informed << ',' << res.calib_condition << ',' << res.calib_episodes
+            << ',' << d.nl_c0 << ',' << d.nl_c1 << ',' << d.nl_c2 << ',' << d.nl_samples
+            << ',' << (room_concept_.params.heading_noise_learning ? 1 : 0)
+            << ',' << (room_concept_.params.zupt_on_prediction ? 1 : 0)
+            << ',' << d.rest_gain_tr << ',' << d.rest_gain_ro
+            << ',' << (room_concept_.params.zupt_pred_learn_rest ? 1 : 0)
+            << ',' << d.rest_dens_v << ',' << d.rest_dens_w
+            << ',' << (res.surprise.scored ? 1 : 0) << ',' << res.surprise.kl << ',' << res.surprise.mismatch
+            << ',' << res.surprise.expected << ',' << res.surprise.info
+            << ',' << res.calib_applied << ',' << res.surprise.open_cycles
+            << ',' << res.surprise.c_fwd << ',' << res.surprise.c_lat << ',' << res.surprise.c_th
+            << ',' << res.surprise.pp_fwd << ',' << res.surprise.pp_lat << ',' << res.surprise.pp_th
+            << ',' << res.surprise.pq_fwd << ',' << res.surprise.pq_lat << ',' << res.surprise.pq_th
+            << ',' << (room_concept_.params.motion_preintegration ? 1 : 0)
+            << ',' << (room_concept_.params.odom_preint_noise.motion_proportional ? 1 : 0)
+            << ',' << (room_concept_.params.motion_noise_learn ? 1 : 0);
+    for (const float v : res.surprise.vc) hd_csv_ << ',' << v;
+    hd_csv_ << ',' << (res.surprise.vc_trained ? 1 : 0)
+            << ',' << gx_world << ',' << gy_world << ',' << (res.surprise.floor_bound ? 1 : 0)
+            << ',' << (res.slot_appended ? 1 : 0)
+            << ',' << res.surprise.drift_n << ',' << res.surprise.drift_b[0] << ',' << res.surprise.drift_b[3]
+            << ',' << res.surprise.drift_b[7] << ',' << res.surprise.drift_b[8] << ',' << res.surprise.drift_se[0]
+            << ',' << res.surprise.drift_se[3] << ',' << res.surprise.drift_se[7]
+            << ',' << res.calib_value[rc::calib::P_LEVER_X] << ',' << res.calib_value[rc::calib::P_LEVER_Y]
+            << ',' << res.calib_sigma[rc::calib::P_LEVER_X] << ',' << res.calib_sigma[rc::calib::P_LEVER_Y]
+            // the pose-field bias term (pose_field_bias.h): its size, length, and what it adds (xx, θθ)
+            << ',' << res.surprise.pf_sigma_b << ',' << res.surprise.pf_len << ',' << res.surprise.pf_xx
+            << ',' << res.surprise.pf_tt << '\n';
+    hd_csv_.flush();
 }
 
 

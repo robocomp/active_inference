@@ -125,6 +125,13 @@ struct ChairInstance
     // cycles that resolved nothing, which is what makes a frozen decision visible instead of silent.
     rc::exist::RemovalDebounce existence_debounce;
     float exist_logodds = std::numeric_limits<float>::quiet_NaN();
+    // Classifier-free contour channel (common/contour_edge), last scored frame. ★n == 0 means NOT
+    // MEASURED, never refuted — conflating the two deleted a live door on 2026-09-09. bias is SIGNED:
+    // a low depth verdict with a large bias is a FIT error (chair nearer/farther than believed), not absence.
+    float dbg_ct_edge_excess   = 0.0f;  int dbg_ct_edge_n  = 0;   // RGB: excess over its own slid controls
+    float dbg_ct_depth_verdict = 0.0f;  int dbg_ct_depth_n = 0;   // depth: signed, [-1,+1]
+    float dbg_ct_depth_bias_m  = 0.0f;                            // mean (observed − predicted) depth
+    float dbg_ct_dL            = 0.0f;                            // what the channel contributed (p_vis-weighted)
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling
     bool model_stable       = false;
     int  model_generation   = 0;

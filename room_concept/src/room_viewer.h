@@ -19,6 +19,8 @@
 // media-plane bring-up here. Plain class (no QObject/MOC); the worker connects
 // widget signals to lambdas that call these methods.
 
+#include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -115,7 +117,8 @@ public:
     // room node exists in the DSR graph — the same condition consumers gate on — RED while the
     // localizer is still accumulating consecutive stable frames (shown as n/required). GUI thread only.
     /// `searching` (a global grid search is running or just finished) outranks the other two states.
-    void set_room_stable(bool stable, int stable_frames, int frames_required, bool searching = false);
+    void set_room_stable(bool stable, int stable_frames, int frames_required, bool searching = false,
+                         bool estimating = false);   ///< estimating: the room is still a start-up PROTO-room
 
     // Push one ~1 Hz sample of the RT-publish rate (corrected pose) and optimizer rate to the live
     // rate plot in the lower frame. Predicted poses are no longer published, so there is no pred rate.
@@ -163,6 +166,12 @@ private:
     QPointer<QLabel>             rt_rate_label_;   // RT publish-rate readout in the controls row
     QPointer<rc::Viewer2D>       viewer_2d_;
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
+    // Surprise (surprise.h) as a RATE: the scored KL of the last kSurpriseWindowS seconds of results, so a
+    // single solve that scores a long open-loop stretch reads as what it is, nats over that stretch.
+    struct SurpriseSample { std::int64_t ts_ms; float kl, mismatch; };
+    std::deque<SurpriseSample> surprise_win_;
+    std::int64_t surprise_last_ts_ = -1;
+    static constexpr float kSurpriseWindowS = 10.f;
     QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
     // Integrated odometry as the PREDICTOR consumes it — see get_predictor_delta().
     QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time
@@ -189,6 +198,11 @@ private:
     // SIMULATION ONLY: needs robot_gt_*, which robot_concept writes only while the producer reports
     // simulated. On real hardware the series stay empty and the plot is honestly flat.
     QPointer<rc::TimeSeriesPlot> ts_plot_loc_;
+    // SELF-CALIBRATION, GT-free (drift_monitor.h): systematic drift per m / per rad, its own panel.
+    // The monitor refits only on a scored correction, so the last fit is HELD and re-drawn every UI
+    // tick — otherwise the lines exist only as isolated points at the corrections.
+    QPointer<rc::TimeSeriesPlot> ts_plot_syst_;
+    std::optional<std::array<float, 3>> syst_last_;   ///< fwd mm/m, lat mm/m, heading mrad/rad
     rc::LocalizationDriftMeter   drift_pred_;   ///< ground truth vs the PREDICTED pose
     rc::LocalizationDriftMeter   drift_pose_;   ///< ground truth vs the PUBLISHED pose
     double corr_sum_m_ = 0.0;                   ///< |published - predicted| accumulated, metres

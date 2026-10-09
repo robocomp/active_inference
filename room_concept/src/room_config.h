@@ -16,6 +16,7 @@
 // the ConfigLoader. Keeps the ~150 lines of load_* boilerplate out of
 // SpecificWorker::initialize().
 
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
@@ -43,6 +44,22 @@ struct RoomConfig
     std::string LIDAR_HELIOS_NAME     = "helios";
     // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
     std::string LIDAR_ROBOT_FRAME     = "";   // empty ⇒ auto-derived from the type-"robot" node at init
+    // Joint sensor-mount + odometry calibration (plan docs/superpowers/plans/2026-10-05-joint-calibration.md).
+    bool  JOINT_CALIB_MONITOR = true;   // RoomConcept.JointCalibMonitor — LOG ONLY, changes nothing
+    bool  LIDAR_MOUNT_APPLY = false;    // RoomConcept.LidarMountApply — helios (lever, yaw) applied to the points
+    float LIDAR_MOUNT_INJECT_X = 0.f;   // RoomConcept.LidarMountInjectX (m)    ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_Y = 0.f;   // RoomConcept.LidarMountInjectY (m)    ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_YAW_DEG = 0.f;   // RoomConcept.LidarMountInjectYawDeg ⚠ SIMULATION ONLY
+    // r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF helios injection (with
+    // X/Y/YawDeg above, now a Pose6 about the SENSOR origin) + the bpearl's, and the decoupled mount factors.
+    float LIDAR_MOUNT_INJECT_Z = 0.f;          // RoomConcept.LidarMountInjectZ (m)          ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_ROLL_DEG = 0.f;   // RoomConcept.LidarMountInjectRollDeg      ⚠ SIMULATION ONLY
+    float LIDAR_MOUNT_INJECT_PITCH_DEG = 0.f;  // RoomConcept.LidarMountInjectPitchDeg     ⚠ SIMULATION ONLY
+    std::array<float, 6> BPEARL_MOUNT_INJECT{};   // RoomConcept.BpearlMountInject{X,Y,Z,RollDeg,PitchDeg,YawDeg} ⚠ SIM ONLY
+    bool  MOUNT_FACTORS = true;          // RoomConcept.MountFactors — estimate + LOG the LiDAR mounts (r2); changes no pose
+    float BPEARL_MOUNT_RATE = 2.f;       // RoomConcept.BpearlMountRate (Hz) — floor/vertical factor sweeps per second
+    float MOUNT_POSE_SIGMA_XY = 0.05f;   // RoomConcept.MountPoseSigmaXY (m) — per-sweep pose nuisance prior (WIDE)
+    float MOUNT_POSE_SIGMA_YAW_DEG = 2.f;   // RoomConcept.MountPoseSigmaYawDeg
 
     // ── PLATFORM OVERLAY: one config for every robot ────────────────────────────────────────────
     // Most of this file is POLICY and is the same everywhere. A handful of values are PHYSICAL —
@@ -200,6 +217,19 @@ struct RoomConfig
     /// this. p_cross itself is a continuous posterior with no gate inside; turning it into the discrete act
     /// of creating a node needs a loss-based decision level, and this is it. Flagged per CLAUDE.md.
     float       PROTO_ROOM_BIRTH_PROB = 0.95f;  // config: ProtoRoom.BirthProb
+    /// StartupProto.*: in an ESTIMATION run the room exists from the first second as a proto-room
+    /// (`room_1` + `proto` self-edge, frame = the robot's initial pose, frozen), whose polygon is CONFIRMED
+    /// FREE SPACE (free_space_polygon.h) and whose afford_room is driven by the live layout explorer
+    /// (layout_explorer.h); promoted in place (same id, same frame) when the learnt layout is publishable.
+    /// Enabled=false restores the old behaviour exactly: nothing is published before map_ready.
+    bool  STARTUP_PROTO_ENABLED        = false;   // config: StartupProto.Enabled
+    float STARTUP_PROTO_CELL           = 0.05f;   // config: StartupProto.Cell (m, free-space raster)
+    float STARTUP_PROTO_HALF_SPAN      = 20.f;    // config: StartupProto.HalfSpan (m, raster extent about the start)
+    float STARTUP_PROTO_ERODE_M        = -1.f;    // config: StartupProto.ErodeM (m; <0 = body radius 0.5*max(W,L))
+    int   STARTUP_PROTO_MAX_VERTS      = 64;      // config: StartupProto.MaxVerts
+    int   STARTUP_PROTO_PUBLISH_MS     = 1000;    // config: StartupProto.PublishPeriodMs (polygon republish throttle)
+    float STARTUP_PROTO_EXPLORER_CLEARANCE = -1.f; // config: StartupProto.ExplorerClearance (m; <0 = circumscribed radius)
+    float STARTUP_PROTO_REPLAN_S       = 15.f;    // config: StartupProto.ReplanS (s between explorer re-evaluations)
     /// Where the calibration WINDOW is kept between runs. Evidence (episodes + closed pivots), never
     /// the fitted parameters — restoring a fitted value as a prior mean is the ratchet that walked
     /// the gyro bias to the wrong sign. Delete the file, or press Reset in the calibration window,
@@ -334,6 +364,11 @@ struct RoomConfig
     int LIDAR_STALL_TIMEOUT_MS = 3000;   // Operating: no sweep for this long ⇒ back to Waiting
     int LIDAR_WAIT_LOG_PERIOD_MS = 2000; // Waiting: how often to reprint why we are still waiting
 
+    // [Status] — the live status stream a terminal viewer attaches to (tools/room_tui.py, launched by
+    // tools/room_run.sh). Local socket + tmp/agent_events_<start>.jsonl; never touches DSR. false =
+    // no socket, no file, no capture: every line prints exactly as it did before the stream existed.
+    bool STATUS_ENABLE = true;
+
     // Camera-overlay object projection: DSR node TYPES whose oriented boxes are projected on
     // the live RGB image (alongside the always-drawn walls). Concept agents now publish all
     // furniture as generic "object" nodes (class in object_subtype), so "object" alone covers
@@ -425,6 +460,7 @@ struct RoomConfig
     /// the estimator keeps measuring against the extrinsic it read at bind (see
     /// SpecificWorker::publish_mount_to_graph for why that separation is the whole safety argument).
     bool  IMAGE_EDGE_MOUNT_PUBLISH     = false;   // ImageEdge.mountPublish
+    std::string IMAGE_EDGE_MOUNT_DESCRIPTION;     // ImageEdge.mountDescriptionFile: the robot JSON = the mount NOMINAL
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)
@@ -437,6 +473,10 @@ struct RoomConfig
     std::vector<std::string> CALIB_CAMERAS = {};   // ImageEdge.calibCameras
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
+
+// [Status] only. Separate because the status stream starts FIRST in initialize(), before
+// GenericWorker::initialize() and long before load_room_config(), so it can time every phase.
+void load_status_config(const ConfigLoader& cl, RoomConfig& p);
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,
 // and seed the planner's robot footprint. Call once from initialize().

@@ -1,4 +1,5 @@
 #include "epistemic_planner.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 #include <fstream>
 #include <locale>
 #include <format>
@@ -480,7 +481,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
                     std::abs(ly) < obs.half_d + obstacle_clearance) { ++blocked; break; }
             }
         }
-        std::print("[planner] NO TARGET (STARVED): grid={} beyond_mindist={} blocked_by_obstacles={} "
+        rc::status::print("[planner] NO TARGET (STARVED): grid={} beyond_mindist={} blocked_by_obstacles={} "
                    "obstacles={} clearance={:.2f} robot=({:.2f},{:.2f}) min_dist={:.2f}\n",
                    cached_grid_.size(), beyond_mindist, blocked, obstacle_footprints_.size(),
                    obstacle_clearance, robot_pos().x(), robot_pos().y(), params.min_distance);
@@ -652,7 +653,7 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
     if (targets.front().rotate_in_place)
     {
         const float ratio = robot_cov_(2, 2) / std::max(1e-9f, std::max(robot_cov_(0, 0), robot_cov_(1, 1)));
-        std::print("[planner] ROTATE-IN-PLACE at ({:.2f},{:.2f}) — angular dominance {:.1f} > {:.1f} "
+        rc::status::print("[planner] ROTATE-IN-PLACE at ({:.2f},{:.2f}) — angular dominance {:.1f} > {:.1f} "
                    "(σθ={:.3f}rad σxy={:.3f}m) gain={:.3f}\n",
                    robot_pos().x(), robot_pos().y(), ratio, params.angular_dominance_ratio,
                    std::sqrt(std::max(0.f, robot_cov_(2, 2))),
@@ -675,7 +676,7 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
         // that. max_fim ≈ 0 with here_fim large is the healthy "room fully visible, nothing to learn
         // by driving" regime — the robot should then be steered purely by the neglect term, which
         // the per-target `neg=` column below shows.
-        std::print("[planner] robot=({:.2f},{:.2f}) here_fim={:.3f} max_marg_fim={:.4f} pub_gain={:.3f}"
+        rc::status::print("[planner] robot=({:.2f},{:.2f}) here_fim={:.3f} max_marg_fim={:.4f} pub_gain={:.3f}"
                    " | cand={}/{} (near={} blocked={} obst={}) masked_cells={} | top:",
                    rp.x(), rp.y(), dbg_here_fim_, dbg_max_fim_, pub_gain,
                    dbg_candidates_, dbg_grid_, dbg_near_, dbg_blocked_,
@@ -685,11 +686,11 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
         {
             const auto& t = targets[i];
             const float age = visit_grid_.age_seconds(t.position, now);
-            std::print("  #{} ({:+.2f},{:+.2f}) score={:.3f} marg_fim={:.4f} neg={:.2f} age={:.0f}s d={:.2f}",
+            rc::status::print("  #{} ({:+.2f},{:+.2f}) score={:.3f} marg_fim={:.4f} neg={:.2f} age={:.0f}s d={:.2f}",
                        i, t.position.x(), t.position.y(), t.score, t.eigenvector_score,
                        neglect_nats(t.position, now), age, t.distance);
         }
-        std::print("\n");
+        rc::status::print("\n");
         std::fflush(stdout);
     }
 

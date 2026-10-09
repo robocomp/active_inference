@@ -256,7 +256,12 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # and 0.01 + 0.08*0.10 = 18 mm over a 0.10 m keyframe step — about 13x looser than what preintegration
 # is producing. The note above already says "calibrating sigma_* against the real odometry stream is
 # the load-bearing next step, not a refinement"; this is that bill arriving.
-MotionPreintegration   = false  # was true; 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
+# ★ 2026-10-04: ON again, now with MotionNoiseProportional below. The legacy diagonal it replaces added CONSTANT per-cycle
+#   sigma floors (StationaryMotionThreshold 2 cm -- which fires below 0.4 m/s, i.e. on all normal driving --
+#   and rotation_noise_base 0.01 rad) that summed as a random walk at the localiser's rate: the per-axis
+#   surprise log read sum(c^2)/sum(Pp-Pq) = 0.58 fwd / 0.27 lat / 0.18 heading one cycle apart, ~0.01 over
+#   long stretches (heading_2026-10-04_20-38-02.csv). Densities per sqrt(s) put dt where the physics does.
+MotionPreintegration   = true  # was true; 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
                                 # 3 cm) is NULL in every moving band and +0.63 pp early exit while parked
                                 # (the only difference outside its Wilson 95% CI); cov_tt unchanged,
                                 # no boundary ratchet, timing identical. So this is kept on STRUCTURAL
@@ -267,6 +272,33 @@ MotionPreintegration   = false  # was true; 2026-08-13 LANDED ON. The controlled
                                 # the real odometry stream; today's derived floor swamps the new shape.
                                 # ARM log_2026-08-13_12-05-32.csv / BASE log_2026-08-13_12-12-57.csv.
                                 # THE WAY BACK IS ONE WORD: false — no rebuild needed.
+# ★ 2026-10-05 MOTION-PROPORTIONAL NOISE + its learner (replaces the per-axis kappa, which could not fit:
+#   GT showed odometry error grows per METRE and per RADIAN and not at all per second -- 7769 windows,
+#   a_time = 0 on every axis; parked GT drift ~1 mm/30 s against 39 mm predicted). Priors below are those GT
+#   fits (sim). The learner (src/motion_noise_vc.h) fits them plus the scan side's excess variance (rho)
+#   from every correction; heading CSV columns vc_*. false/false = the per-second densities above.
+MotionNoiseProportional = true
+MotionNoiseLearn        = false   # OFF: live window posteriors break its assumption (motion_noise_vc.h header)
+MotionNoiseMemory       = 20000   # corrections remembered (~20 runs); one run pins only the dominant terms
+MotionNoiseInnov        = true    # 2026-10-05 (Fable window memo): learn the components above from the SCAN-TO-SCAN
+                                  # innovation every cycle (motion_noise_innov.h) instead of the correction. Learns
+                                  # and logs tmp/noise_innov/innov_<ts>.csv always; the coefficients reach the
+                                  # prediction only if MotionNoiseLearn = true as well.
+ScanOnlyIters           = 3       # 2026-10-08: GN iterations for the scan-only pose z used by the noise learner, the
+                                  # pose-field bias and the kinematic mount factor. 1 step recovered only 81-88 % of a
+                                  # planted offset (tools/kinematic_shortfall_diag.py); iterate to the scan-only optimum.
+PoseFieldBias           = true    # 2026-10-06 (Fable memo §3): learn the slow POSE-FIELD bias of the scan-only pose
+                                  # GT-free (pose_field_bias.h) and log it (heading CSV pf_*). The reason the published
+                                  # pose is 5-10x overconfident: the solver's covariance is conditional on the map.
+PoseFieldPublish        = true    # ADD that bias covariance (beta * R_scan) to the PUBLISHED pose covariance. ON 2026-10-07 (user); was OFF until a
+                                  # run graded with tools/nees_report.py (pf_* columns) says it is honest. Owner: user.
+PoseFieldSigma0         = 0.02    # m, its prior sigma (50 pseudo-pairs): what a run with no driving reports
+PreintKLong             = 94e-6   # m^2 per m rolled   -- forward
+PreintKLat              = 6e-6    # m^2 per m rolled   -- lateral
+PreintKLatTurn          = 10e-6   # m^2 per rad turned -- lateral (scrub)
+PreintKThTurn           = 190e-6  # rad^2 per rad turned
+PreintKTimeTrans        = 4e-6    # m^2 per s   -- model translation drift (GT: ~0 in sim)
+PreintKTimeRot          = 4e-6    # rad^2 per s -- model heading drift (gyro bias walk)
 # PreintOdomSigmaVLat  = 0.0894   # m/√s   — derived from max(StationaryMotionThreshold, OdomNoiseBase)/√0.05
 # PreintOdomSigmaVLong = 0.0894
 # ★★ STAGED DOWN 2026-08-18, 0.0447 -> 0.010. The derived value comes from RotationNoiseBase/√0.05,
@@ -427,6 +459,66 @@ PreintZuptLeverM     = 0.26
 # over a few thousand cycles against the 210 mm above. It should also remove the residual m^2*dt
 # rate dependence the per-sample form still carries at speed (1.47x across a 3x rate change).
 PreintZuptAsFactor   = false
+
+# ── Rest as a probability on the PREDICTION (the published mean) ──────────────
+# Each predicted increment is scaled by the posterior probability of MOVING: a two-hypothesis mixture,
+# at rest (increment = odometry noise at the ZUPT densities) vs moving (uniform over what the base can
+# do in the interval). No threshold; see RoomConcept::select_motion_prior. Off since it was written.
+# ★ A/B 2026-10-01. Why now: in a 37-min truly-still stretch (sim, truth moved 2 mm / 0.63 deg) the
+#   published pose wandered 59 x 28 mm and 2.65 deg -- pure integrated odometry, because the SDF
+#   early exit accepted every prediction and the wheels report phantom motion at rest (sim noise
+#   floor) that the wheel-eps ZUPT test caught on only ~45% of cycles.
+#   Arm A = heading_2026-10-01_20-21-34.csv (false). Arm B = the next run (true). Judge with
+#   `python3 tools/heading_fusion_report.py`, section 6: wander while truly still, and the moving
+#   prediction error (it must NOT rise -- slow creeping motion is where a rest hypothesis can bite).
+# ★ RESULT 2026-10-02 (arm B2 = heading_2026-10-02_11-33-26, after c697ed9 made it reach the published
+#   pose at all -- arm B1 was invalid, see that commit). Truly still 11.9 min: wander 0.2 mm/min and
+#   0.023 deg/min against arm A's 7.9 mm/min and 0.44 deg/min; worst stretch 0.7 mm / 0.03 deg over
+#   10.7 min against 65 mm / 2.6 deg. Moving, by true speed: >20 cm/s gain 1.00, |err| 1.75 % vs 1.27 %
+#   (n=39 vs 185, route); creep <5 cm/s gain 0.61, signed error -1.2 % (no undershoot) but n=10 --
+#   INCONCLUSIVE, not passed. ADOPTED. Still owed: a registered slow-approach test (creep is where the
+#   rest hypothesis acts on real motion).
+# ★★ REGISTERED SLOW-APPROACH TEST 2026-10-02 (tools/creep_test.py, thesis §ex-rest): FAIL, decisively.
+#   off = heading_2026-10-02_14-45-58, on = heading_2026-10-02_13-44-16; predicted path vs truth by
+#   true speed: <1 cm/s off +5.5 % / on -96 %; 1-2 +0.1 / -96; 2-3.5 +0.3 / -89; 3.5-6.5 0.0 / -85;
+#   6.5-10 +0.6 / -43 (n 24-81 per band and arm). The published pose lagged too (-96 % below 2 cm/s).
+#   CAUSE, as the registration anticipated -- the rest density is too wide for THIS use: measured on
+#   truly-still cycles of three runs, the wheels' rest noise is 4.5e-4 m/sqrt(s) and 6.4e-4 rad/sqrt(s),
+#   14x and 16x below the PreintZuptDensity* the mixture borrows, so it calls anything under ~7 cm/s
+#   rest. Those densities also shape the preintegrator's parked covariance, so they are NOT simply
+#   shrunk here. OFF until the mixture has its own (learned) rest density.
+# ★★★ 2026-10-02: the mixture now has its own rest density, learnt online by EM over its own
+#   responsibilities (src/rest_density_learner.h; PreintZuptDensity* is only its 1-cycle prior), and it
+#   judges the signed sum over PreintZuptPredWindowS (rest noise random-walks, motion persists). Selftest
+#   (tools/rest_density_selftest.cpp): converges to the true rest density from the 14x-wide prior;
+#   parked gain 0.002; creep 0.5 cm/s and up passes 100 %; 5 min creeping at 0.7 cm/s leaves the density
+#   unchanged. ON again for the RE-RUN of the registered slow-approach test (on-arm only; the off arm
+#   heading_2026-10-02_14-45-58 is reused).
+# ★★★★ RE-RUN 2026-10-02 20:56 (heading_2026-10-02_20-55-42): FAIL again, improved. Signed path error
+#   on/off by band: <1 cm/s -97/+5.5, 1-2 -47/+0.1, 2-3.5 -15/+0.3, 3.5-6.5 -0.2/0.0 (PASS).
+#   CAUSE: EM RUNAWAY. The learnt density fell 1.2e-3 -> 9.5e-4 in the first parked minute (truth 4.5e-4),
+#   then the first 0.5 cm/s legs sat ~3 sigma from rest, were partly counted as rest, widened d, and more
+#   was absorbed: 4.7e-3 by minute 3, 5.6e-3 at the end. Withheld motion was then dragged back by the fit:
+#   539 optimiser cycles and 64 mm jumps in the final still minute. Model misspecification, not tuning:
+#   "moving" is a diffuse uniform up to v_max, so a widened rest Gaussian always out-explains a slow-motion
+#   cluster. The selftest missed it because it parked 10 min before creeping. OFF.
+# ★★★★★ 2026-10-02 22:xx: REBUILT around a VELOCITY STATE (rest_density_learner.h RestMotionChannel):
+#   per body-frame channel (forward, lateral, rotation) a velocity Kalman filter with smooth/jump process
+#   noise, the odometry noise learnt from its OWN INNOVATIONS (a creep is absorbed by v and cannot
+#   inflate it), P(moving) by Savage-Dickey on v = 0. Selftest REPLAYS the live failure (30 s warm-up
+#   from the 14x prior, then the creep schedule): density stable 4.2e-4 (truth 4.5e-4) throughout;
+#   creep passed 0.78 @0.5 cm/s, 1.00 @>=1 cm/s, 0.84 @0.01 rad/s; parked 0.013; onset/stop 1 cycle.
+#   ON for the third run of the registered test (on-arm only).
+# ★★★★★★ THIRD REGISTERED RUN 2026-10-03 09:07 (heading_2026-10-03_09-06-31 vs off 14-45-58): PASS in every
+#   band. Signed path error on (off): <1 cm/s +2.1 (+5.5); 1-2 +0.3 (+0.1); 2-3.5 +0.3 (+0.3); 3.5-6.5
+#   +0.3 (0.0); n 25-72. ADOPTED.
+# ★ LONG PARK 2026-10-03 19:52 (heading_2026-10-03_19-52-19): 49.8 min truly still -- wander 0.8 mm/min,
+#   0.023 deg/min (off: 7.9 mm/min, 0.44 deg/min); the 40.8 mm max is ONE 33.5 mm fit correction at t=0
+#   (start-up localisation), not drift. Normal driving afterwards 1.35 % path error (off 1.27 %). CLOSED.
+#   Still unexplained: learnt rest density (logged rest_dens_v, a |translation| density) 2.3e-4 while
+#   parked, 3.1e-4 after driving, vs 4.5e-4 measured from wheel increments.
+PreintZuptOnPrediction = true
+PreintZuptPredLearnRest = true
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
@@ -845,6 +937,23 @@ OdomVarianceInjection = true   # ★ ON 2026-08-29. The precondition this flag w
                         # not a performance number, is the whole test of this flag on Shadow.
                         # It earns its keep the day a producer reports a variance that VARIES.
 
+HeadingFusion       = true   # Heading = precision-weighted PRODUCT of the wheel factor and the gyro
+                        # factor, each corrected by its OWN calibration (wheels: k_omega_w, dk_wheel;
+                        # gyro: k_omega, b_omega). Weights come from each channel's stated density
+                        # plus its scale uncertainty, so the gyro takes fast turns and the wheels take
+                        # stops, with no gate. false = the legacy 0/1 switch with one shared scale
+                        # (gyro wherever it brackets a moving segment), kept for A/B. 2026-10-01,
+                        # UNRUN LIVE. ★Check the [ImuInject] line: gyro_weight=..% (fused).
+                        # ★Parked, the gyro now carries weight (zupt density 0.0102 vs the gyro's
+                        # stated density); if the heading walks while parked, the gyro's STATED noise
+                        # is too small -- fix that number, do not re-add the gate.
+HeadingNoiseLearning = true  # Learn the wheels' heading-noise density d_w^2 = c0 + c1|v| + c2|omega|
+                        # from wheel-minus-gyro (truth cancels), anchored on the gyro's STATED density,
+                        # and use it for the wheel weight in HeadingFusion. Needs HeadingFusion = true.
+                        # Offline, cross-validated on the two 2026-10-01 logs: rest error halved vs the
+                        # switch (.046 vs .107/.091 deg/2s, p<1e-6), slow driving equal or better, fast
+                        # turns tied. Coefficients are in tmp/heading/*.csv (nl_c0..nl_c2). UNRUN LIVE.
+
 ImuLinearInjection  = true   # Add the accelerometer's within-segment double integration to the
                         # wheel displacement. The integrator holds the reported wheel velocity flat
                         # across each segment; the true displacement is v0*dt + the double integral,
@@ -896,7 +1005,7 @@ MotionCalibEnabled  = true
 # With apply=false the covariate stays raw and the residual stays the FULL error, so recovery should
 # jump toward 100%. Any account not involving feedback predicts no change.
 # ⚠ TRUE for all normal operation. The robot drives UNCALIBRATED while this is false.
-MotionCalibApply = true    # normal operation. false = open-loop arm (estimate, do not apply).
+MotionCalibApply    = true    # normal operation. false = open-loop arm (estimate, do not apply).
 # Which parameters may ACT, bitmask: 1=k_v 2=eps_yaw 4=k_omega 8=b_omega 16=k_lat 32=dk_wheel.
 # -1 = all (normal). 1 = forward scale only. Estimation and logging are unaffected either way.
 # ⚠ THE FINDING THAT PUT THIS AT 1 WAS RETRACTED, 2026-08-31. It read: "with everything applied
@@ -908,7 +1017,7 @@ MotionCalibApply = true    # normal operation. false = open-loop arm (estimate, 
 # both. The heading parameters remain the badly-conditioned ones, which is a reason for caution,
 # not evidence against them. Setting -1 costs nothing measured and is the honest default if the
 # heading channel is ever wanted; left at 1 pending arm 4.
-MotionCalibApplyMask = 1
+MotionCalibApplyMask = -1
                         # 262 m ON vs 105 m OFF, per-60s windows, bursts excluded, err/m 0.0263 ->
                         # 0.0303 when OFF (+14.9%, t=2.67 z=2.31). It lowers the error FLOOR; it does
                         # not flatten the sawtooth — a ramp of the same slope starts lower and takes
@@ -945,6 +1054,47 @@ MotionCalibRotModelSigma = 0.030  # m per rad of turning, added in quadrature to
                         # as much as it deserves. It only sets the RELATIVE weight of turning against
                         # straight episodes, so an order of magnitude is what matters — which is why
                         # carrying it is defensible where carrying a ZUPT sigma would not be.
+MotionCalibLeverSigma = 0.05   # m. Prior on the helios lever arm (spec §5). Learnt only from ROTATION.
+                        # Estimated always, applied only through LidarMountApply. Plan
+                        # docs/superpowers/plans/2026-10-05-joint-calibration.md Task 1.
+JointCalibMonitor = true   # LOG ONLY: one joint posterior over odometry + helios mount + camera mounts per
+                           # motion solve -> tmp/joint_calib/joint_<ts>.csv. Changes nothing. Grade with
+                           # tools/joint_calib_report.py. Plan: docs/superpowers/plans/2026-10-05-joint-calibration.md
+LidarMountApply   = false  # apply the helios (lever_x, lever_y, yaw) to the points: the motion calibrator's
+                           # ACTING values (taught + MotionCalibApply + MotionCalibApplyMask bits 1/7/8), so
+                           # p_applied records exactly what acts. The yaw then acts on the points INSTEAD of
+                           # the odometry. OFF until Task 6's injection run recovers a planted error. Owner: user.
+                           # ⚠ Turning it on mid-run moves the published pose by R(theta)*lever and the
+                           # yaw in one step -- expected, not a relocalisation.
+LidarMountInjectX = 0.0    # m    ⚠ SIMULATION ONLY: plant a KNOWN helios mount error = the sensor's displacement
+LidarMountInjectY = 0.0    # m      and CCW yaw from its nominal mount, body frame (points get inverse() of it).
+LidarMountInjectYawDeg = 0.0 # deg  Leave all three at 0 on the real robot -- room_config WARNs when any is nonzero.
+# ── r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF planted mount errors ──
+# ⚠ Since 2026-10-08 ALL LidarMountInject* form ONE Pose6 rotating about the SENSOR origin (lidar_mount.h), not
+# a Planar about the body origin: for X/Y/YawDeg = (0.03, -0.02, 1) the kinematic factor now reads a body-origin
+# lever of (27.3, -20) mm; the mounts monitor reports the Pose6 (30, -20) mm. ⚠ SIMULATION ONLY, all 0 here.
+LidarMountInjectZ        = 0.0   # m
+LidarMountInjectRollDeg  = 0.0   # deg, about body X through the helios origin
+LidarMountInjectPitchDeg = 0.0   # deg, about body Y through the helios origin
+BpearlMountInjectX        = 0.0  # m    ⚠ SIMULATION ONLY: planted bpearl mount error, Pose6 about the bpearl origin
+BpearlMountInjectY        = 0.0  # m
+BpearlMountInjectZ        = 0.0  # m
+BpearlMountInjectRollDeg  = 0.0  # deg
+BpearlMountInjectPitchDeg = 0.0  # deg
+BpearlMountInjectYawDeg   = 0.0  # deg
+# The mount factors: helios (x, y, yaw) from the KINEMATIC factor (scan-only poses vs the calibrated odometry),
+# bpearl (z, roll, pitch) from the FLOOR, helios (roll, pitch) + bpearl (x, y, yaw relative to the helios) from
+# VERTICAL walls / the horizontal ceiling; fused with the cameras -> tmp/joint_calib/mounts_<ts>.csv (grade:
+# tools/joint_calib_report.py --mounts), per-cycle kinematic log tmp/mount_factors/kin_<ts>.csv. ESTIMATE + LOG
+# only: nothing here moves the published pose (LidarMountApply stays OFF).
+# ⚠ BEHAVIOUR CHANGE WHEN TRUE (r2.2 item 4, single owner): the kinematic factor owns the helios yaw, so
+# eps_yaw STOPS ACTING ON THE ODOMETRY -- room_config sets motion_calib.lidar_side_yaw AND clears the eps_yaw
+# apply bit (unless LidarMountApply puts it on the points), so p_applied records 0 for it. eps_yaw is still
+# estimated and logged. The acting value (yaw_offset) is logged per row and must read 0.
+MountFactors      = true
+BpearlMountRate   = 2.0    # Hz: floor/vertical sweeps per second (bpearl + the full helios sweep), ingest thread
+MountPoseSigmaXY  = 0.05   # m   WIDE prior of the vertical factor's per-sweep pose nuisance (pose-field sigma,
+MountPoseSigmaYawDeg = 2.0 # deg never the solver's own marginal -- r2.2 item 6)
 MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the position R. Also the
                         # header default. A correction can only be as good as the FIT that produced
                         # it: when the localiser is not tracking, the optimizer fires nearly every
@@ -1049,7 +1199,7 @@ HessianCheck            = true
 # ★ GN only. The GN Hessian is the Gauss-Newton approximation and drops second-order terms the
 #   autograd one keeps — hessian_check.csv logs both, so a regression is visible rather than
 #   theoretical. Set false to restore the old path.
-CovarianceFromSolver    = true
+CovarianceFromSolver    = true    # 2026-10-09: a false TEST was CONFOUNDED (that path never corrects the covariance in Estimate mode: sigma_x 0.32 -> 1.39 m) — reverted
 
 AdaptiveCovEnabled      = true
 WindowStrideEnabled     = true
@@ -1104,7 +1254,9 @@ BoundaryMuQualityThreshold      = 0.084
 # (d307c84) and is not being staked on an estimator whose bench ladder still has open rows: over
 # 5 seeds, growth beats no-growth on 5 of 6 structured rooms but c2 is -0.007, and c4/c2w1 find
 # nothing on some seeds. Bench: WS_BOXES=1 WS_TOUR_ROOM=<rect|c1|c2|c4|w1|w2|c2w1> bin/wall_slam_selftest
-BoxLayout = true
+# ★2026-09-24 false again, which is what the paragraph above always said: the wall map is the
+# shipped estimator and the box layout is the A/B. Turn both this and MapMode on together.
+BoxLayout = false
 # COMPUTE, not a bar: how often the structure is re-examined. Between steps the channel only folds
 # returns into its voxel map, which is a few microseconds per scan.
 BoxEveryFrames = 40
@@ -1119,9 +1271,61 @@ BoxMinCluster = 12
 # PHYSICAL, in the ROBOT frame. A 2-D layout built from 3-D returns must exclude the floor and the
 # ceiling. ⚠ The upper bound is not cosmetic: ceiling returns inside a 2-D wall SDF stopped a room
 # stabilising while every pose diagnostic still looked healthy (8164fc3).
-BoxZMin = 0.20
-BoxZMax = 1.60
+# ★2026-09-23 THE WALL BAND MOVES ABOVE THE FURNITURE. It was 0.20-1.60, which is table, sofa and
+# counter height: every one of those returns entered the layout as a wall. Measured in the bench with
+# five pieces of furniture on the floor of the apartamento hall: one band gives IoU 0.543 with the
+# frame 8.8 deg out and the robot registered against furniture faces; separating the bands gives
+# 0.983. The high LiDAR sees over a table — that is what makes the separation possible, and it is how
+# the fleet already treats the wall-SLAM band ([Media] lidar_high_min/max_height = 1.5/2.0).
+BoxZMin = 1.50
+BoxZMax = 2.00
+# Everything BELOW the wall band is furniture: recorded for navigation only (the planner erodes the
+# body against it, the route optimiser keeps clear of it) and never as evidence about the room.
+BoxObsZMin = 0.15
+BoxObsZMax = 1.45
 
+# ── MODEL CHOICES MEASURED IN tools/wall_slam_selftest (2026-09-21..24) ───────────────────────────
+# These were WS_* environment flags while they were being measured; they are parameters now, so the
+# agent runs what the bench validated instead of the defaults nobody set. ⚠ They apply to the BOX
+# SIDECAR only (BoxLayout): MapMode = "given" and the wall-map estimator are untouched by all of it.
+#
+# The layout frame is fitted by the layout's own likelihood instead of a vote of wall-segment
+# directions that never forgets. The vote landed 0.5-3.6 deg off run to run; the fit lands within
+# 0.1 deg on the hall. Needs BoxCoverLayout, or the two pull against each other (the cover's own
+# grid then rewards a frame of exactly 0) and the frame drifts to 2 deg.
+BoxGaugeML = true
+# The free-space cover is built on the LAYOUT grid. On the map grid every rectangle it proposes is
+# aligned with the map axes, so at any non-zero frame it staircases against the room.
+BoxCoverLayout = true
+# Swept space the layout excludes pushes the face that excludes it. This is what pulls a phantom
+# wall back: the hall's lower fin, published 1.3 m too long, lands 6 cm from truth with it.
+BoxFreeForce = true
+# A one-scan seed's four offsets carry the ROOM'S SPAN, not sigma_flat — a box drawn round one scan
+# is not known to a centimetre — and a residual is weighted by the sensor PLUS the posterior variance
+# of the wall it is matched to. The pair is useless split: alone, the second is destructive.
+# They matter when this channel REGISTERS (reproject); the live pose comes from the agent.
+BoxSeedPriorSpan = true
+BoxRegMapVar = true
+# ⚠ OFF, AND IT IS A TRADE, NOT A DEFECT. Refusing a cover that would leave the region disconnected
+# helps the 32-vertex apartment (mean .887 -> .917 over 20 starts, worst .473 -> .705) and costs the
+# 50 simple rooms' tail (mean .969 -> .956, worst .901 -> .772). The right form is to PRICE a second
+# component in nats rather than forbid it; until then this stays off and polygon() warns instead.
+BoxConnected = false
+# COMPUTE budget of the greedy cover, not a model statement (MDL already refuses a box that does not
+# pay). 48 measured neutral on the rooms and slightly worse on the hall, so 24 stands.
+BoxCoverMaxRects = 24
+
+# ── WHICH ROOM THE AGENT WORKS WITH ──────────────────────────────────────────────────────────────
+# "given": the layout is loaded from the SVG and the agent localises in it — the shipped behaviour,
+# and what the fleet runs. "estimate": no layout is loaded, the room is learnt from the LiDAR (wall
+# SLAM, plus the box sidecar when BoxLayout is on).
+# ★2026-09-24 BACK TO "given" BY DEFAULT. The estimation work continues on its branch and every
+# box-sidecar call sits inside `if (estimating())`, so this line alone decides whether any of it
+# runs. To work on the estimator: MapMode = "estimate" AND BoxLayout = true.
+# ★2026-10-09 "estimate" FOR THE BASIC FLEET (robot_concept + room_concept + controller + residual_concept,
+# utils/fleet_basic.toml): the room is learnt from the LiDAR, published from the first second as a START-UP
+# PROTO-ROOM ([StartupProto] below) and driven by the live layout explorer. Set "given" (and
+# [StartupProto] Enabled = false) to go back to the surveyed-layout fleet.
 MapMode = "estimate"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
@@ -1138,13 +1342,14 @@ WallMapSigmaD        = 0.04     # m
 # itself. Answers "does the rest behave as predicted when the map stops changing?". Off = normal SLAM.
 FreezeLayoutWhenPublishable = false
 # DIAGNOSTIC: record exactly what the wall step receives per frame to tmp/wall_input_<ms>.bin (offline replay). OFF normally.
+PlainSlam = true    # 2026-10-09: while the room is learnt the pose comes from plain scan-to-occupancy SLAM (scan_slam.h), not from the provisional layout. Offline on 3 live recordings vs GT: median 0.8/1.8/1.4 cm (live was 22 cm / 1.55 m / 3.13 m)
 RecordWallInput = true
 # Level-2 features: wall columns, alcoves and corner steps, found from residual free space just
 # OUTSIDE the published polygon. On by default and worth having in a real flat. ⚠ A DOORWAY is free
 # space outside a wall, so in a plain room with an opening it is read as an alcove and the published
 # outline grows a notch that the walls themselves do not have. Set false when the room is known to be
 # a simple polygon and you want exactly what the walls say.
-EnableLevel2 = false
+EnableLevel2 = true    # 2026-10-09: ON (bench, apartamento: with L2+Rederive off the wall map pins a 4-6-wall half-room; on: IoU .94-.98 from 7 starts; 4x6 rect still 4 corners on 8/8 starts)
 # ── THE WALL DATA TERM: one residual per (slot, wall), not one per point ──────────────────────────
 # S-Graphs+ Eq. 6 in 2-D. The segment is compressed into a fitted line with its own information
 # BEFORE the solver sees it, and the WALL is transformed into the sensor frame to meet it there.
@@ -1180,7 +1385,7 @@ EnableLevel2 = false
 # Measured with the gate and the death floor in place: failing recording assoc 82-100% -> 98-100%,
 # sides 4.034 x 6.012 -> 4.040 x 5.992. ⚠ TRADE: on the healthy recording association drops 83-89%
 # -> 74-78% and the short side goes 4.019 -> 4.114. Watch the birth count.
-WallLineFactor = true
+WallLineFactor = false   # 2026-10-09 set (ii)+G5: honest bench 0/15 fail (min IoU .94) only WITHOUT CMODE+LINE; they were the Sept latch cure on the rect while driving — WATCH for the latch live
 # ── THE ASSOCIATION GATE MUST KNOW THE SEGMENTS SHARE ONE POSE ───────────────────────────────────
 # Every segment in a scan is measured from the same pose, so their innovations share a rank-3
 # component. The gate used only the DIAGONAL blocks of that joint covariance, i.e. it tested S
@@ -1200,7 +1405,7 @@ WallLineFactor = true
 # under this gate it comes out looser, so `publishable` is NOT reached (0.064 m against a 0.060 bar
 # with AbsorbSchur off; 0.202 m with it on). Geometry is unaffected. Until that is fixed the layout
 # will not be re-anchored, frozen or published — a live run tests the GATE, not the publish path.
-CommonModeGate = true
+CommonModeGate = false   # 2026-10-09 set (ii)+G5 (see WallLineFactor); per-segment gate now bounded in code (FIX-G2)
 # ── GLOBAL RE-DERIVATION (re_derive) ─────────────────────────────────────────────────────────────
 # The escape hatch from a wrong local topology: every `rederive_every_frames` (40) it traces the free
 # grid's contour and proposes a whole new cycle, which the adoption judge then accepts or reverts.
@@ -1212,7 +1417,7 @@ CommonModeGate = true
 # good 3.849 x 5.934 rectangle and the orientation was stable to 0.01 deg per frame.
 # The real fix is that a proposal must not be published before it is judged; this flag only removes
 # the proposer, and with it the ability to recover from a genuinely wrong cycle.
-EnableRederive = false
+EnableRederive = true    # 2026-10-09 set (ii)+G5: safe on the honest bench WITH the twin guard (FIX-S, splice_surrender): 30 runs, no pose > 0.11 m. Without the guard it let a 3k-pt twin displace a 25k-pt wall live.
 # ── TWIN FUSION: does a fused duplicate ALSO hand over its confidence? ────────────────────────────
 # A candidate that turns out to BE an existing wall is fused into it, and fuse() adds its 2x2
 # information block. The two are NOT in the same units: a candidate's information is the line fit's
@@ -1476,6 +1681,12 @@ ExecStallProgress  = 0.10   # metres of new closest-approach that counts as prog
 
 # ---- Acceleration ramp (SpecificWorker) ---- MOVE THIS TO ROBOT
 
+[Status]
+# Live status stream for the terminal viewer (tools/room_tui.py; launcher tools/room_run.sh): a local
+# socket under $XDG_RUNTIME_DIR/rc_status/ plus tmp/agent_events_<start>.jsonl. Never touches DSR.
+# false = no socket, no events file, and every log line prints to the terminal exactly as before.
+Enable = true
+
 [Overlay]
 # DISPLAY ONLY — DSR node types projected as oriented boxes on the camera RGB overlay (walls are
 # always drawn). Nothing in the estimator reads this. Brought across from P3Bot because the header
@@ -1630,7 +1841,7 @@ maxSlots     = 1          # newest window slot only, like corners
 #   claiming the mount is better known than it is, is the one direction that can hurt.
 mountPitchSigma  = 0.0035   # rad (~0.2 deg)   ⚠ NOT MEASURED ON SHADOW
 mountHeightSigma = 0.010    # m                ⚠ NOT MEASURED ON SHADOW
-mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
+mountYawSigma    = 0.0175   # rad (1 deg)      ⚠ NOT MEASURED ON SHADOW. 2026-10-08: widened from 0.0035 for joint-calib Task 6 (a 0.2 deg prior let the per-vertex offsets absorb a planted 1 deg); revisit after
 # ── The per-vertex offset nuisance (mount_lidar_pair.h) ──────────────────────────────────────────
 # Prior sigma on a CORNER'S OWN image offset, in pixels. MEASURED 2026-09-02: per-vertex means reach
 # −17 px and spread sd 5.3 px across 23 corners, while the mount signal being estimated is 1.1 px of
@@ -1667,27 +1878,18 @@ mountApply = true
 #   SpecificWorker::publish_mount_to_graph — that separation, not a magnitude limit, is what makes
 #   it safe to leave running.
 #
-# ⚠⚠ NOT BUILT, AND THE REASON THIS IS OFF BY DEFAULT: THE VALUE IS NOT PERSISTED, AND ACROSS A
-#    RESTART IT STOPS BEING AN OUTPUT. A new process binds to whatever the edge holds, so today's
-#    published value becomes tomorrow's prior anchor and tomorrow's nominal. Within a session the
-#    loop is stationary; across sessions it can random-walk by its own posterior sigma, because
-#    after the first publish nothing outside the loop still holds the mount's independently measured
-#    value. Two consequences, both deliberate:
-#      · the graph is PERSISTENT, so the published value already survives a room_concept restart —
-#        it is not lost, it is simply no longer distinguishable from the nominal.
-#      · robot_concept rewrites body->camera from Transforms.boresight_yaw_<cam> at every start. That
-#        write now treats a configured 0 as "never measured" and leaves a non-zero edge alone, so it
-#        can no longer silently revert a published correction (robot_concept/src/specificworker.cpp).
-#
-#    THE STEP THAT CLOSES IT, and it is the right place for it: write the converged mount back into
-#    the ROBOT'S JSON (robot_concept/shadow.json), which is the description of the physical mount.
-#    Then the prior is anchored on a measurement the loop never writes, a cold start begins
-#    calibrated, and "has it converged?" becomes a question about a file rather than about a graph
-#    the estimator itself edits. robot_concept owns that file and already traps SIGINT/SIGTERM ->
-#    request_shutdown(), so doing it ON A GRACEFUL STOP is the natural home: read body->camera, write
-#    the mount block, log what changed. Not implemented. Until it is, treat a published value as
-#    good for the session and re-derivable from etc/camera_calib_<robot>_<cam>.txt.
+# ★ ON since 2026-09; the cross-restart problem it had is CLOSED (2026-10-04) by mountDescriptionFile below.
+#   Before that, the nominal the estimator measured against was read from the graph, i.e. from this
+#   loop's own earlier output, and robot_concept saved the edge over the JSON at every stop
+#   (persist_mounts_on_stop) — a ratchet: ricoh yaw crept -0.05 -> -0.14 deg over 13 restarts, and on
+#   10-04 cold-start estimates (camera evidence wiped for an experiment) were persisted as the mount:
+#   zed 14 cm high / -1.3 deg pitch, ricoh 12 cm low (robot_concept/etc/mount_calib_Shadow.txt rev 14-15).
 mountPublish = true
+# ── mountDescriptionFile: the robot description that ANCHORS the mount ───────────────────────────
+# The nominal body->camera edge is read from this file (the robot's DSR JSON), never from the graph, so
+# the graph is purely an output and a restart cannot turn last session's answer into this session's
+# prior. Empty = the old graph-anchored behaviour. Path relative to room_concept's working directory.
+mountDescriptionFile = "../robot_concept/shadow.json"
 # ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
 #   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
 #   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the
@@ -1838,7 +2040,7 @@ names = ["Shadow", "P3Bot"]
 camera            = "ricoh"
 mountPitchSigma   = 0.0035
 mountHeightSigma  = 0.010
-mountYawSigma     = 0.0035
+mountYawSigma     = 0.0175   # 2026-10-08 joint-calib Task 6: widened from 0.0035 (0.2 deg let per-vertex offsets absorb a planted 1 deg); revisit after
 wallPositionSigma = 0.015
 # ── The rest of Shadow's own values ────────────────────────────────────────────────────────────
 # MEASURED on Shadow: the ZUPT densities come from the parked-variance measurement, CmdNoiseRot from
@@ -1967,3 +2169,22 @@ Enabled   = true
 # ⚠ DECISION LEVEL on p_cross (log-odds fusion of door_open_prob and the pose's "footprint is past the
 # aperture, within its span"). The one threshold in this path; p_cross itself has no gate.
 BirthProb = 0.95
+
+# ── START-UP PROTO-ROOM (2026-10-09, docs/superpowers/plans/2026-10-09-startup-proto-room-and-layout-explorer.md)
+# Estimate mode only. From the first update the room exists as `room_1` with a `proto` self-edge, frame = the
+# robot's initial pose (FROZEN: the estimator's re-anchor is absorbed, never published). Its delimiting_polygon
+# is CONFIRMED FREE SPACE — the union of what the LiDAR's beams crossed, eroded by the body, <= MaxVerts
+# vertices — so the controller (which cannot tell proto from surveyed) plans only where it has seen floor.
+# afford_room is driven by the live layout explorer (the offline bench's EIG explorer, ported). When the
+# learnt layout becomes publishable the proto is PROMOTED IN PLACE: same id, same frame, learnt polygon, proto
+# edge deleted, afford_room handed to the epistemic planner. Everything is logged to tmp/proto_room.csv.
+# Enabled = false restores the old estimate-mode behaviour exactly (nothing published before map_ready).
+[StartupProto]
+Enabled           = true
+Cell              = 0.05    # m — free-space raster
+HalfSpan          = 20.0    # m — raster half extent about the start pose
+ErodeM            = 0.0     # m — 2026-10-09: 0 (was -1 = body radius). The controller ALREADY keeps its footprint off the polygon edge; eroding by the body too counted the margin twice and closed gaps the robot fits through. <0 = body radius
+MaxVerts          = 64      # vertex budget of the published ring
+PublishPeriodMs   = 1000    # proto polygon republish throttle
+ExplorerClearance = 0.45    # m — 2026-10-09: body circumscribed radius 0.33 + controller FootprintSafetyMarginM 0.05 + one 5 cm raster cell. At 0.33 (the old <0 default) standpoints sat where the controller's footprint could not go, and it stopped 0.2 m short. <0 = circumscribed body radius
+ReplanS           = 15.0    # s between layout-explorer re-evaluations while no claim is held

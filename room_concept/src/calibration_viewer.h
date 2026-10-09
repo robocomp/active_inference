@@ -71,7 +71,7 @@ namespace rc
 
         void update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,
                            const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& sigma,
-                           int informed_mask, float condition, int episodes);
+                           int informed_mask, int applied_mask, float condition, int episodes);
 
     private:
         struct Row

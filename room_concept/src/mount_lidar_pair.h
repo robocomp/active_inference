@@ -394,6 +394,33 @@ namespace rc::mount
         { return A.allFinite() and c.allFinite() and D.allFinite() and b.allFinite() and e.allFinite(); }
     };
 
+    /// ── THE CAMERA BLOCK'S EVIDENCE IN PHYSICAL UNITS, FOR THE JOINT SOLVE (plan 2026-10-05 Task 2) ──
+    /// Accum::solve() works in prior-sigma units with the solve vector x = -p and returns only p and
+    /// sigma. The joint calibration (joint_calibration.h) needs the MARGINALISED data information and
+    /// the prior SEPARATELY (data rows are coupled to the helios yaw; the prior is on the camera's own
+    /// body-frame mount), in rad / m, signed like Solution::p. By construction
+    ///     (H_data + H_prior)^-1 (b_data + b_prior) == Solution::p * unit     exactly.
+    /// ⚠ The camera parameters here are what Solution::p is: the error REMAINING relative to the mount
+    ///   the camera currently uses (mountApply folds each solve into `applied`); the prior's pull is
+    ///   toward the ORIGINAL graph mount, i.e. b_prior centres it at p = applied * unit.
+    struct MarginalInfo
+    {
+        Eigen::Matrix4d H_data  = Eigen::Matrix4d::Zero();  ///< data-only information on p (rad, m, rad, -)
+        Eigen::Matrix4d H_prior = Eigen::Matrix4d::Zero();  ///< prior information on p (diagonal, 1/unit^2)
+        Eigen::Vector4d b_data  = Eigen::Vector4d::Zero();  ///< data part of the right-hand side
+        Eigen::Vector4d b_prior = Eigen::Vector4d::Zero();  ///< prior pull toward the anchor (`applied`)
+        /// solve() reports sigma * sqrt(max(1, chi2/dof)) (a Birge ratio). It is NOT folded into H
+        /// here, so the mean stays exactly solve()'s; a consumer that wants the camera's own honest
+        /// sigma multiplies by this.
+        double sigma_inflation = 1.0;
+        bool   marginalised = false;   ///< the per-vertex offset nuisance was integrated out
+        /// false when solve() would refuse (n < min_n), AND when the nuisance is requested
+        /// (offset_sigma_px > 0) but the evidence cannot be marginalised -- solve() then silently
+        /// falls back to the unmarginalised model, which must not enter a joint solve as if it had
+        /// been marginalised (plan Review Focus #5).
+        bool   ok = false;
+    };
+
     /// The same 4-parameter normal-equation block stage 1 uses, so the two are directly comparable.
     /// Prior is the IDENTITY because J carries the prior sigma (see room_concept.h).
     struct Accum
@@ -542,13 +569,21 @@ namespace rc::mount
         /// `min_n` counts PAIRS. The nuisance does not change that: a solve with 30 pairs on one
         /// vertex is still one cluster, and reporting `clusters` is how that is made visible rather
         /// than defended against with a second minimum.
-        [[nodiscard]] Solution solve(long min_n = 30) const
+        /// The (possibly marginalised) DATA normal equations, in prior-sigma units and the sign of x.
+        /// Shared by solve() and marginal_information() so the two cannot diverge.
+        struct NormalEq
         {
-            Solution s;
-            if (n < min_n) return s;
-            Eigen::Matrix4d Hm = H;
-            Eigen::Vector4d bm = b;
-            double          rm = rTr;
+            Eigen::Matrix4d H = Eigen::Matrix4d::Zero();
+            Eigen::Vector4d b = Eigen::Vector4d::Zero();
+            double rTr = 0.0, eff_params = 0.0;
+            int    clusters = 0;
+            bool   marginalised = false, ok = false;
+        };
+        [[nodiscard]] NormalEq normal_equations(long min_n) const
+        {
+            NormalEq ne;
+            if (n < min_n) return ne;
+            ne.H = H; ne.b = b; ne.rTr = rTr;
             // ⚠ REFUSED, not silently skipped: unattributed evidence cannot be marginalised, and
             //   mixing it with evidence that can would produce a number belonging to neither model.
             const bool want = offset_sigma_px > 0.0 and not legacy_unattributed and not per_vertex.empty();
@@ -556,22 +591,75 @@ namespace rc::mount
             {
                 const double s2 = offset_sigma_px * offset_sigma_px;
                 const Eigen::Matrix2d Sinv = Eigen::Matrix2d::Identity() / s2;
-                Hm.setZero(); bm.setZero(); rm = 0.0;
+                ne.H.setZero(); ne.b.setZero(); ne.rTr = 0.0;
                 for (const auto& [vtx, v] : per_vertex)
                 {
                     if (v.n <= 0 or not v.finite()) continue;
                     const Eigen::Matrix2d M = (Sinv + v.D).inverse();
                     if (not M.allFinite()) continue;
-                    Hm.noalias() += v.A - v.c * M * v.c.transpose();
-                    bm.noalias() += v.b - v.c * (M * v.e);
-                    rm += v.rTr - v.e.dot(M * v.e);
-                    s.eff_params += (M * v.D).trace();
-                    ++s.clusters;
+                    ne.H.noalias() += v.A - v.c * M * v.c.transpose();
+                    ne.b.noalias() += v.b - v.c * (M * v.e);
+                    ne.rTr += v.rTr - v.e.dot(M * v.e);
+                    ne.eff_params += (M * v.D).trace();
+                    ++ne.clusters;
                 }
-                if (s.clusters == 0) return s;
-                s.marginalised = true;
+                if (ne.clusters == 0) return ne;
+                ne.marginalised = true;
             }
-            else s.clusters = static_cast<int>(per_vertex.size());
+            else ne.clusters = static_cast<int>(per_vertex.size());
+            ne.ok = true;
+            return ne;
+        }
+
+        /// The prior's contribution to the right-hand side in x units: the prior is centred on
+        /// `applied` (see the member's note), which enters the normal equations as -applied.
+        [[nodiscard]] Eigen::Vector4d prior_rhs() const { return -applied; }
+
+        /// The evidence in PHYSICAL units, data and prior apart. See MarginalInfo. `unit` =
+        /// (pitch_sigma, height_sigma, yaw_sigma, dt_sigma): the prior-sigma unit of each column.
+        [[nodiscard]] MarginalInfo marginal_information(const Eigen::Vector4d& unit, long min_n = 30) const
+        {
+            MarginalInfo mi;
+            const NormalEq ne = normal_equations(min_n);
+            if (not ne.ok) return mi;
+            if (offset_sigma_px > 0.0 and not ne.marginalised) return mi;   // requested but impossible
+            if (not unit.allFinite() or not (unit.minCoeff() > 0.0)) return mi;
+            // ne.H, ne.b are DATA-only in x = -p / unit; the prior in those units is the identity at
+            // its anchor. Change of variables p = -D x, D = diag(unit):
+            //   (H + I) x = b + prior_rhs  <=>  (Dinv H Dinv + Dinv^2) p = -Dinv (b + prior_rhs)
+            const Eigen::Matrix4d Dinv = unit.cwiseInverse().asDiagonal();
+            mi.H_data  = Dinv * ne.H * Dinv;
+            mi.H_prior = Dinv * Dinv;
+            mi.b_data  = -(Dinv * ne.b);
+            mi.b_prior = -(Dinv * prior_rhs());
+            // ★ RE-EXPRESSED AS THE TOTAL ERROR AGAINST THE GRAPH EXTRINSIC (2026-10-07). solve() returns the
+            //   INCREMENT on top of `applied` — apply_mount_solve does applied += -p and rebases the evidence —
+            //   measured: 80 M ricoh pairs solve to p = 0 while 0.503 sigma of yaw is already applied. A joint
+            //   solve needs the TOTAL (it couples this mount to the LiDAR's total yaw), so shift the mean by
+            //   the applied correction: p_total = p_incr - applied*unit. Data and prior shift together; the
+            //   prior then sits at ZERO total, i.e. anchored on the original graph extrinsic, as `applied`'s
+            //   note intends.
+            const Eigen::Vector4d p_applied = -applied.cwiseProduct(unit);   // physical, p sign
+            mi.b_data  += mi.H_data  * p_applied;
+            mi.b_prior += mi.H_prior * p_applied;
+            mi.marginalised = ne.marginalised;
+            const Solution s = solve(min_n);
+            mi.sigma_inflation = std::sqrt(std::max(1.0, s.chi2_dof));
+            mi.ok = s.ok and mi.H_data.allFinite() and mi.b_data.allFinite();
+            return mi;
+        }
+
+        [[nodiscard]] Solution solve(long min_n = 30) const
+        {
+            Solution s;
+            const NormalEq ne = normal_equations(min_n);
+            s.clusters     = ne.clusters;
+            s.eff_params   = ne.eff_params;
+            s.marginalised = ne.marginalised;
+            if (not ne.ok) return s;
+            const Eigen::Matrix4d& Hm = ne.H;
+            const Eigen::Vector4d& bm = ne.b;
+            const double           rm = ne.rTr;
 
             const Eigen::Matrix4d A = Hm + Eigen::Matrix4d::Identity();
             const Eigen::Matrix4d C = A.inverse();
@@ -579,7 +667,7 @@ namespace rc::mount
             // The prior is centred on `applied`, not on zero — see the member's note. With
             // `applied` zero this is bit-for-bit the previous solve, which is what every result
             // recorded before 2026-09-03 rests on.
-            const Eigen::Vector4d x = C * (bm - applied);
+            const Eigen::Vector4d x = C * (bm + prior_rhs());
             // Exact for any prior centre, and reduces to `rm - x·bm` when it is zero:
             //   f(x) = rm − 2xᵀ(b+c) + xᵀ(H+I)x + cᵀc,  and at the optimum (H+I)x = b+c.
             const double chi2 = std::max(0.0, rm - x.dot(bm - applied) + applied.squaredNorm());

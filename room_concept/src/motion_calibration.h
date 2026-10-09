@@ -52,6 +52,7 @@
 #include "calibration_intake.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace rc::calib
@@ -120,7 +121,8 @@ namespace rc::calib
         /// feedback. Leave it TRUE for normal operation.
         bool  apply        = true;
         /// WHICH parameters may act, as a bitmask over rc::calib::Param (bit 0 = k_v, 1 = eps_yaw,
-        /// 2 = k_omega, 3 = b_omega, 4 = k_lat, 5 = dk_wheel). -1 = all, which is normal operation.
+        /// 2 = k_omega, 3 = b_omega, 4 = k_lat, 5 = dk_wheel, 6 = k_omega_w). -1 = all, which is
+        /// normal operation.
         ///
         /// ★ It exists to separate the CHANNELS, not to tune them. Measured 2026-08-31, arm 3: with
         /// everything applied, translation drift was unchanged (39.59 -> 38.98 mm/m, d = 0.04) while
@@ -135,6 +137,20 @@ namespace rc::calib
         /// applied and the feedback undo stays exact. Masking changes what the robot DOES, never
         /// what the estimator learns -- every parameter keeps being estimated and logged.
         int   apply_mask   = -1;
+        /// ── THE HELIOS LEVER ARM MAY ACT (plan 2026-10-05, Tasks 1 and 5) ───────────────────────
+        /// The lever (P_LEVER_X/Y) is ESTIMATED always but has no odometry-side consumer: it can only
+        /// act on the LiDAR points (LidarMountApply). Until that is on, acting() is false for it, so
+        /// p_applied records 0 for an estimated-but-unapplied lever and the feedback undo stays exact
+        /// (Review Focus #2: a parameter recorded as applied that did not act manufactures the 50% cap).
+        bool  apply_lever  = false;
+        /// Prior sigma on the helios lever arm, m (RoomConcept.MotionCalibLeverSigma). Spec §5.
+        float lever_sigma  = 0.05f;
+        /// ── THE YAW ACTS ON THE LIDAR POINTS, NOT ON THE ODOMETRY (plan 2026-10-05 Task 5) ───────
+        /// Set with LidarMountApply. acting(P_EPS_YAW) is UNCHANGED, so p_applied keeps recording the
+        /// yaw that acted -- whichever side applied it -- and the r + J*p_applied undo stays exact
+        /// (clearing the apply bit instead would reproduce the 50% cap; Fable review Q4). Only the
+        /// odometry-side consumer, yaw_offset(), returns 0, so the same yaw never acts twice.
+        bool  lidar_side_yaw = false;
         float yaw_p0       = 1.0e-4f;   // (rad)^2   -> 1 sigma ~ 0.57 deg
         float yaw_q        = 1.0e-9f;   // (rad)^2 per update
         float scale_p0     = 4.0e-4f;   // fractional^2 -> 1 sigma ~ 2%
@@ -166,6 +182,9 @@ namespace rc::calib
         // own. Same rule as rot_model_sigma -- grow the covariance with the covariate that predicts
         // the model error, never a threshold on it.
         float fit_model_gain  = 2.0f;   // multiplies mean |SDF| over the episode, into the position R
+        // The localiser's SDF observation noise (RoomConcept.SigmaSdf), bound at configure time. Sets the
+        // median |SDF| a fit is EXPECTED to show (0.6745 sigma), which the heading R is inflated against.
+        float fit_sigma       = 0.15f;
         // ── HOW FAR AN UNMEASURED EPISODE MAY BE CARRIED ─────────────────────────────────────────
         // An episode that saw no correction is not flushed (see observe): its motion is carried
         // forward so the covariate survives until a real correction arrives to explain it. These cap
@@ -179,6 +198,13 @@ namespace rc::calib
     };
 
     /// Accumulates one ramp-plus-correction episode and folds it into the parameters.
+    /// One cycle's heading covariates, per channel -- the Jacobian of the fused heading with respect
+    /// to each channel's own parameters. See rc::calib::Episode for the definitions.
+    struct HeadingCovariates
+    {
+        float th_gyro = 0.f, t_gyro = 0.f, th_wheel = 0.f, fwd_wheel = 0.f;
+    };
+
     class MotionCalibrator
     {
     public:
@@ -189,6 +215,10 @@ namespace rc::calib
             pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
+            pr.sigma_lever   = std::max(c.lever_sigma, 1e-6f);
+            prior_sigma_ = { pr.sigma_k_v, pr.sigma_eps_yaw, pr.sigma_k_omega, pr.sigma_b_omega,
+                             pr.sigma_k_lat, pr.sigma_dk_wheel, pr.sigma_k_omega_w,
+                             pr.sigma_lever, pr.sigma_lever };
             // The two newest channels keep the estimator's own defaults: they have never been
             // measured on this robot, and inventing a config knob for a prior nobody has data for
             // would dress an assumption up as a setting.
@@ -228,11 +258,18 @@ namespace rc::calib
         { return enabled() and last_.informed[p]; }
         /// Taught AND allowed to act. The applied accessors below gate on this; the estimated_*
         /// accessors gate on taught() alone, so the log keeps its meaning in open-loop mode.
+        /// ★ The lever acts ONLY while cfg_.apply_lever (it has no odometry-side consumer; it acts on
+        /// the LiDAR points), so p_applied records it exactly when it acts. Plan 2026-10-05 Task 1.
         [[nodiscard]] bool acting(int p) const noexcept
-        { return taught(p) and cfg_.apply and ((cfg_.apply_mask >> p) & 1); }
+        {
+            const bool lever = p == rc::calib::P_LEVER_X or p == rc::calib::P_LEVER_Y;
+            return taught(p) and cfg_.apply and ((cfg_.apply_mask >> p) & 1) and (not lever or cfg_.apply_lever);
+        }
         /// Applied to the body->world rotation of the odometry displacement.
+        /// 0 while the yaw acts LIDAR-side (Config::lidar_side_yaw); that consumer reads the acting value
+        /// from UpdateResult (calib_value where calib_applied has the bit), on the main thread.
         [[nodiscard]] float yaw_offset() const noexcept
-        { return acting(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
+        { return (acting(rc::calib::P_EPS_YAW) and not cfg_.lidar_side_yaw) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
         /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
         [[nodiscard]] float estimated_yaw_offset() const noexcept
         { return taught(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
@@ -242,13 +279,15 @@ namespace rc::calib
         /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
         [[nodiscard]] float estimated_forward_scale() const noexcept
         { return taught(rc::calib::P_K_V) ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
-        /// Multiplies the heading increment, whichever channel produced it.
+        /// Multiplies the GYRO's heading increment only. The wheels have their own, wheel_omega_scale():
+        /// the two sensors are wrong in different ways and one number cannot serve both.
         [[nodiscard]] float omega_scale() const noexcept
         { return acting(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
         /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
         [[nodiscard]] float estimated_omega_scale() const noexcept
         { return taught(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
-        /// rad/s, subtracted from the measured rate. Separated from the SCALE only by the
+        /// rad/s, the GYRO's bias with its physical sign (the gyro reads omega + b), subtracted from the
+        /// gyro rate only -- never from a wheel segment. Separated from the SCALE only by the
         /// time-vs-rotation covariate pair, which is why it needs the joint solve to exist at all.
         [[nodiscard]] float omega_bias() const noexcept
         { return acting(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
@@ -257,18 +296,45 @@ namespace rc::calib
         { return taught(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
         /// Multiplies LATERAL wheel displacement. Separate from forward_scale(): a mecanum's lateral
         /// channel is the one roller slip corrupts, so the two are physically different errors.
+        /// ★ acting(), not taught(): p_applied records what passes the mask, so an accessor that ignored
+        /// the mask would apply a correction the feedback undo never hears about.
         [[nodiscard]] float lateral_scale() const noexcept
-        { return taught(rc::calib::P_K_LAT) ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
+        { return acting(rc::calib::P_K_LAT) ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
         /// rad per metre driven forward: unequal effective wheel radii make a commanded straight
         /// line curve. Added to the heading increment in proportion to DISTANCE, which is what
-        /// distinguishes it from a gyro scale (rotation) or a gyro bias (time).
+        /// distinguishes it from a gyro scale (rotation) or a gyro bias (time). WHEEL factor only.
+        /// acting(), not taught() -- see lateral_scale().
         [[nodiscard]] float wheel_mismatch() const noexcept
-        { return taught(rc::calib::P_DK_WHEEL) ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
+        { return acting(rc::calib::P_DK_WHEEL) ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
+        /// Multiplies the WHEELS' heading increment only (radius over track, plus scrubbing).
+        [[nodiscard]] float wheel_omega_scale() const noexcept
+        { return acting(rc::calib::P_K_OMEGA_W) ? 1.f + last_.value[rc::calib::P_K_OMEGA_W] : 1.f; }
+        [[nodiscard]] float estimated_wheel_omega_scale() const noexcept
+        { return taught(rc::calib::P_K_OMEGA_W) ? 1.f + last_.value[rc::calib::P_K_OMEGA_W] : 1.f; }
+
+        /// How uncertain the model is about parameter p AS IT IS BEING USED: the posterior sigma
+        /// while the estimate acts, the prior sigma while it does not (then the nominal is what is
+        /// applied, and the prior is exactly what is known about how wrong that nominal is). This is
+        /// what the heading fusion weights each channel by -- a channel whose scale is unknown is
+        /// worth less on a fast turn, and that falls out of the variance with no switch.
+        [[nodiscard]] float param_sigma(int p) const noexcept
+        {
+            if (acting(p) and last_.sigma[p] > 0.f) return last_.sigma[p];
+            return prior_sigma_[p];
+        }
 
         [[nodiscard]] float yaw_sigma() const noexcept { return last_.sigma[rc::calib::P_EPS_YAW]; }
         [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }
         [[nodiscard]] float k_w_sigma() const noexcept { return last_.sigma[rc::calib::P_K_OMEGA]; }
         [[nodiscard]] const rc::calib::Result& last_solve() const noexcept { return last_; }
+        /// The window's normal equations in physical units (plan 2026-10-05 Task 4). Iterates the
+        /// window: call it on the thread that owns this calibrator.
+        [[nodiscard]] rc::calib::BatchEstimator::Information information() const
+        { return intake_.estimator().information(); }
+        /// information() as of the last re-solve, cached there so a per-cycle copy into the result
+        /// (which crosses to the main thread) costs a copy and not a pass over 512 episodes.
+        [[nodiscard]] const rc::calib::BatchEstimator::Information& last_information() const noexcept
+        { return last_info_; }
         [[nodiscard]] const rc::calib::CalibrationIntake& intake() const noexcept { return intake_; }
         /// Tag episodes that follow as coming from a deliberate manoeuvre. Reporting only -- it
         /// cannot change how an episode is weighted, and must not: see calibration_intake.h.
@@ -296,6 +362,7 @@ namespace rc::calib
             if (not enabled()) return;
             intake_.offer_closure(truth_rad, turned_rad, rate_rad_s, sigma_s);
             last_ = intake_.estimate();     // re-solve now: a closure is worth minutes of robot time
+            last_info_ = information();
         }
         [[nodiscard]] std::size_t closures() const noexcept { return intake_.closures(); }
 
@@ -305,15 +372,18 @@ namespace rc::calib
         std::size_t load_state(const std::string& path)
         {
             const std::size_t n = intake_.load(path);
-            if (n > 0) last_ = intake_.estimate();   // re-solve from the restored evidence
+            if (n > 0) { last_ = intake_.estimate(); last_info_ = information(); }   // re-solve from the restored evidence
             return n;
         }
+        /// Episode rows the last load_state() refused because they predate the two-factor heading.
+        [[nodiscard]] std::size_t legacy_dropped() const noexcept { return intake_.legacy_dropped(); }
         /// Back to the priors, and the file with it — a reset that left the file behind would be
         /// undone by the next restart, which is not what anyone pressing "reset" means.
         void reset_state(const std::string& path) noexcept
         {
             intake_.reset();
             last_ = intake_.estimate();
+            last_info_ = information();
             std::error_code ec; std::filesystem::remove(path, ec);
             episodes_ = 0;
         }
@@ -321,7 +391,7 @@ namespace rc::calib
         void observe(float d_forward, float d_lateral, float d_theta,
                      float r_forward, float r_lateral, float r_theta,
                      float pos_var, float theta_var, bool corrected,
-                     float fit_residual, float dt) noexcept
+                     float fit_residual, float dt, const HeadingCovariates &hc) noexcept
         {
             if (not enabled()) return;
             const bool finite = std::isfinite(d_forward) and std::isfinite(d_theta)
@@ -330,10 +400,19 @@ namespace rc::calib
             if (not finite) { reset_episode(); prev_corrected_ = corrected; return; }
 
             acc_fwd_ += d_forward; acc_lat_ += d_lateral; acc_th_ += d_theta;
+            // The rotation since the previous CORRECTION, for the lever covariates (plan 2026-10-05
+            // Task 1, Episode::lever_s). Every cycle, corrected or not.
+            th_since_corr_ += d_theta;
             // Elapsed time: the covariate that separates a gyro BIAS from a gyro SCALE. Nothing else
             // in the episode carries it, and without it the two are collinear whenever the robot
             // turns at a steady rate -- which is most of the time.
             if (std::isfinite(dt) and dt > 0.f) acc_dur_ += dt;
+            if (std::isfinite(hc.th_gyro) and std::isfinite(hc.t_gyro)
+                and std::isfinite(hc.th_wheel) and std::isfinite(hc.fwd_wheel))
+            {
+                acc_hc_.th_gyro += hc.th_gyro;   acc_hc_.t_gyro    += hc.t_gyro;
+                acc_hc_.th_wheel += hc.th_wheel; acc_hc_.fwd_wheel += hc.fwd_wheel;
+            }
             if (corrected)
             {
                 // ── THE FIT THAT PRODUCED A CORRECTION, NOT THE DRIFT THAT PRECEDED IT ───────────
@@ -360,6 +439,11 @@ namespace rc::calib
                 //   was the fit". They are the same number only on a cycle where a fit happened.
                 if (std::isfinite(fit_residual)) acc_fit_ = std::max(acc_fit_, fit_residual);
                 acc_r_fwd_ += r_forward; acc_r_lat_ += r_lateral; acc_r_th_ += r_theta;
+                // ★ PER CORRECTION, not on the net turn: each correction's lever residual is
+                // (I - R(dth_k)^T)*lever with dth_k the rotation since the previous correction.
+                acc_lever_s_ += std::sin(th_since_corr_);
+                acc_lever_c_ += 1.f - std::cos(th_since_corr_);
+                th_since_corr_ = 0.f;
                 acc_pos_var_ = std::max(acc_pos_var_, pos_var);
                 acc_th_var_  = std::max(acc_th_var_,  theta_var);
                 acc_measured_ = true;   // this episode contains an actual measurement
@@ -432,11 +516,31 @@ namespace rc::calib
     private:
         void flush() noexcept
         {
-            const float rot_model = cfg_.rot_model_sigma * std::abs(acc_th_);
+            // ★ OFF WHILE THE LEVER ACTS (plan 2026-10-05 Task 5, Fable review Q3). This term charged
+            // turning episodes for exactly the effect the lever columns now MODEL; keeping both counts
+            // it twice and caps sigma_lever near 15 mm however long the run. Kept while the lever is
+            // only estimated (Task 1), so that arm's estimate is conservative.
+            const float rot_model = cfg_.apply_lever ? 0.f : cfg_.rot_model_sigma * std::abs(acc_th_);
             const float fit_model = cfg_.fit_model_gain * acc_fit_;
             const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var)
                               + rot_model * rot_model + fit_model * fit_model;
-            const float r_th  = std::max(acc_th_var_,  cfg_.min_obs_var) + fit_model * fit_model;
+            // ── HEADING R: THE SOLVE'S OWN VARIANCE, INFLATED BY ITS GOODNESS OF FIT (Birge ratio) ──────
+            // ★ FIXED 2026-10-04 (arm 7, leg gyro-all). This used to ADD fit_model^2 -- a quantity in
+            // METRES -- to a heading variance in RAD^2. A typical 8.8 cm worst fit became 0.031 rad^2
+            // (sigma 10 deg for half a second of driving), 7000x the solve's own 4.2e-6, so 113 episodes
+            // carried 1% of b_omega's prior information and a +0.002 rad/s injected gyro bias left it at
+            // exactly its prior, while the same episodes regressed without the prior read +0.00148.
+            // The dimensionless form: the solver's posterior variance already holds the fit's CURVATURE;
+            // what it lacks is the MISFIT, which scales it by (observed / expected residual)^2, the
+            // expected median |SDF| under the localiser's own noise being 0.6745 sigma. A fit within its
+            // noise leaves R ~ the solve's variance; a not-tracking burst (|SDF| 0.26 m, the 08-23 case)
+            // inflates it ~7x. The factor 2 is the episode's TWO ends: the residual is a difference of
+            // two corrected headings, each with the solve's variance. Offline on that leg's episodes:
+            // b_omega +0.00119 +- 0.00015 (informed) instead of +0.00001 +- 0.00050.
+            // The POSITION R keeps its additive metres form (dimensionally consistent there); changing
+            // it mid-arm would confound arm 7's k_v comparison.
+            const float birge = acc_fit_ / (0.6745f * std::max(cfg_.fit_sigma, 1e-6f));
+            const float r_th  = 2.f * std::max(acc_th_var_, cfg_.min_obs_var) * (1.f + birge * birge);
             // ── ONE ESTIMATOR, NOT THREE ──────────────────────────────────────────────────────────
             // These used to be three independent scalar Kalman filters. Independence cannot separate
             // parameters that land on the SAME component of the correction and differ only in
@@ -448,6 +552,9 @@ namespace rc::calib
             rc::calib::Episode e;
             e.d_forward = acc_fwd_;   e.d_lateral = acc_lat_;   e.d_theta = acc_th_;
             e.duration  = acc_dur_;
+            e.th_gyro   = acc_hc_.th_gyro;  e.t_gyro    = acc_hc_.t_gyro;
+            e.th_wheel  = acc_hc_.th_wheel; e.fwd_wheel = acc_hc_.fwd_wheel;
+            e.lever_s   = acc_lever_s_;     e.lever_c   = acc_lever_c_;
             e.r_forward = acc_r_fwd_; e.r_lateral = acc_r_lat_; e.r_theta = acc_r_th_;
             e.pos_var = r_pos;        e.theta_var = r_th;
             // ★ WHAT WAS ACTING WHILE THIS EPISODE WAS ACCUMULATED. Captured here, BEFORE the offer
@@ -465,6 +572,7 @@ namespace rc::calib
             // same door with a different tag, which changes the reporting and nothing else.
             last_verdict_ = intake_.offer(e, source_hint_, acc_fit_);
             last_ = intake_.estimate();
+            last_info_ = information();
             reset_episode();
         }
         void reset_episode() noexcept
@@ -472,6 +580,12 @@ namespace rc::calib
             acc_fwd_ = acc_lat_ = acc_th_ = 0.f;
             acc_r_fwd_ = acc_r_lat_ = acc_r_th_ = 0.f;
             acc_pos_var_ = acc_th_var_ = acc_fit_ = acc_dur_ = 0.f;
+            acc_hc_ = {};
+            // ★ th_since_corr_ is NOT reset here: it is the rotation since the last CORRECTION, a physical
+            // quantity independent of episode boundaries. An episode closing on the falling edge (the
+            // cycle after a correction) carries rotation that the NEXT correction's residual contains;
+            // zeroing it lost that cycle (caught by motion_calib_lever_selftest A: 0.666 vs 0.996).
+            acc_lever_s_ = acc_lever_c_ = 0.f;
             acc_measured_ = false;
             waiting_ = false;
         }
@@ -480,11 +594,18 @@ namespace rc::calib
         bool configured_ = false, prev_corrected_ = false;
         rc::calib::CalibrationIntake intake_;
         rc::calib::Result last_{};
+        rc::calib::BatchEstimator::Information last_info_{};
         rc::calib::Verdict last_verdict_ = rc::calib::Verdict::Accepted;
         rc::calib::Source  source_hint_  = rc::calib::Source::Passive;
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
         float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f, acc_dur_ = 0.f;
+        HeadingCovariates acc_hc_{};
+        /// Lever covariates (plan 2026-10-05 Task 1): rotation since the last correction, and the
+        /// per-correction sums sin / (1 - cos) of it. See rc::calib::Episode::lever_s.
+        float th_since_corr_ = 0.f, acc_lever_s_ = 0.f, acc_lever_c_ = 0.f;
+        std::array<float, rc::calib::P_COUNT> prior_sigma_{0.02f, 0.0175f, 0.02f, 5.0e-4f, 0.05f, 0.02f, 0.155f,
+                                                           0.05f, 0.05f};
         /// Has any corrected cycle contributed to the episode being accumulated? Only then is it an
         /// observation at all.
         bool acc_measured_ = false;

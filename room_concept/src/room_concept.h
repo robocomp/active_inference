@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "door_apertures.h"
+#include "scan_slam.h"
 #include "layout_estimator.h"   // DoorAperture — the snapshot below, and no cycle: it knows nothing of us
 #include <condition_variable>
 #include <atomic>
@@ -67,7 +68,16 @@
 #include "image_edge_factor.h"
 #include "se2_preintegration.h"
 #include "motion_calibration.h"
+#include "wheel_noise_learner.h"
+#include "rest_density_learner.h"
 #include "reloc_search.h"
+#include "surprise.h"
+#include "motion_noise_vc.h"
+#include "motion_noise_innov.h"
+#include "pose_field_bias.h"
+#include "mount_factors.h"
+#include "drift_monitor.h"
+#include "stride_span.h"
 
 namespace rc
 {
@@ -495,10 +505,38 @@ public:
         bool  sdf_polish_enabled = false;
         bool  zupt_on_prediction = false;
         float zupt_pred_v_max    = 1.0f;   ///< m/s   — width of the "moving" hypothesis, not a limit
-        float zupt_pred_w_max    = 2.0f;   ///< rad/s — the base's plausible range, not a clamp
+        float zupt_pred_w_max    = 2.0f;
+        /// Decide rest vs moving with RestMotionChannel (rest_density_learner.h): a velocity state per
+        /// body-frame channel whose noise is learnt from its own innovations; PreintZuptDensity* become
+        /// only a one-cycle prior. false = the legacy per-cycle mixture that failed the creep test.
+        bool  zupt_pred_learn_rest = false;
+   ///< rad/s — the base's plausible range, not a clamp
         /// Where the calibration WINDOW (evidence, never parameters) is kept between runs.
         std::string calib_state_file = "etc/motion_calib_state.csv";
         bool motion_preintegration = false;
+        /// Learn the motion-noise COMPONENT coefficients (per metre / per radian / per second) from the
+        /// localiser's corrections (motion_noise_vc.h). Needs odom_preint_noise.motion_proportional.
+        /// RoomConcept.MotionNoiseLearn / MotionNoiseMemory.
+        bool   motion_noise_learn  = false;
+        double motion_noise_memory = 20000.0;   ///< corrections remembered (~20 runs of ~1k)
+        /// Measure the SCAN-TO-SCAN innovation every cycle and learn the noise components from it
+        /// (motion_noise_innov.h, Fable window memo 2026-10-05). Always learns and logs
+        /// (tmp/noise_innov/innov_<ts>.csv); the learnt coefficients reach the prediction ONLY when
+        /// motion_noise_learn is also true. RoomConcept.MotionNoiseInnov.
+        bool   motion_noise_innov  = true;
+        /// Learn the slow POSE-FIELD bias of the scan-only pose without ground truth (pose_field_bias.h) and
+        /// log it (heading CSV pf_*). pose_field_publish additionally ADDS its covariance to the PUBLISHED pose
+        /// covariance (never to the solver's). RoomConcept.PoseFieldBias / PoseFieldPublish / PoseFieldSigma0.
+        /// Gauss-Newton iterations for the scan-only pose z (scan_only_pose). 1 = the old single step, which
+        /// under-stepped (g = 0.81-0.88). RoomConcept.ScanOnlyIters.
+        int    scan_only_iters     = 3;
+        bool   pose_field_bias     = true;
+        bool   pose_field_publish  = false;
+        double pose_field_sigma0   = 0.02;
+        /// r2 mount factors (plan 2026-10-08): feed the KINEMATIC factor (helios dx, dy, psi) from the same
+        /// innovation stream and carry its Info3 in UpdateResult; also publish the mount snapshot the ingestor's
+        /// floor/vertical factors read. Estimate + log only. RoomConcept.MountFactors.
+        bool   mount_factors       = true;
         rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
         // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base
         // 0.05 m vs odom_noise_base 0.01 m) because an open-loop command really can be wrong while the
@@ -578,6 +616,18 @@ public:
         // noise. Bounded by construction: the term is confined to one segment and never chained, so
         // it cannot drift however wrong the accelerometer is.
         bool imu_linear_injection = false;
+        // ── HEADING = PRODUCT OF TWO FACTORS, not a switch ──────────────────────────────────────────
+        // true: every segment's heading is the precision-weighted mean of the wheel factor and the
+        // gyro factor, each corrected by ITS OWN calibration (wheels: k_omega_w + dk_wheel; gyro:
+        // k_omega + b_omega). The weights come from each channel's stated noise density plus its
+        // scale uncertainty, so the gyro dominates a fast turn and the wheels a stop -- with no gate.
+        // false: the legacy 0/1 switch (gyro whenever it brackets the segment and the wheels are not
+        // stationary), one shared scale, kept for A/B. ★The bias sign fix applies to BOTH.
+        bool heading_fusion = false;
+        // Learn the wheels' heading-noise density as d_w^2 = c0 + c1|v| + c2|omega| from the
+        // wheel-minus-gyro disagreement (truth cancels), anchored on the gyro's stated density. Used
+        // for the wheel factor's weight in the fusion above. See wheel_noise_learner.h.
+        bool heading_noise_learning = false;
         // ── The WHEELS' own per-sample velocity variance, as a preintegration density ──────────────
         // OFF by default, like every channel that can move the published pose. When on, each odometry
         // sample's stated velCov (forwarded by robot_concept onto robot_current_speed_variance) is
@@ -698,6 +748,9 @@ public:
         // map-frame odometry delta, stride flag, timestamp) to tmp/wall_input_<unix_ms>.bin, so a live run can
         // be replayed through the offline harness core. Read-only: changes no estimate.
         bool  record_wall_input = false;
+        /// RoomShape.PlainSlam (2026-10-09): while SEARCHING, the pose comes from plain scan-to-occupancy SLAM
+        /// (scan_slam.h), NOT from the provisional layout. The wall map observes at that pose and never feeds it.
+        bool  plain_slam = false;
         float wall_gauge_sigma_theta = 1e-3f;  // rad
         int   wall_max_slots = 0;              // wall factors on the newest N slots (0 ⇒ every slot)
 
@@ -777,6 +830,11 @@ public:
         // alignment, so it measures the same thing on the real robot as it does here. On early-exit
         // cycles it equals robot_pose exactly; that identity is a free self-check on this plumbing.
         float pred_x = 0.f, pred_y = 0.f, pred_theta = 0.f;
+        bool  slot_appended = false;   ///< strided window: this frame was APPENDED (not a replace of the newest)
+        /// KL(posterior || motion prediction) for this cycle, in nats -- what the room evidence had to tell
+        /// the motion model (see surprise.h). Zero on an early exit; the open-loop stretch is scored whole
+        /// at the next correction. Logged per cycle in the heading CSV, drawn on the pred |SDF| plot.
+        rc::surprise::Surprise surprise;
 
         // Body-frame displacement the WHEELS claimed this cycle: dx_local = side*dt (lateral),
         // dy_local = adv*dt (forward). Heading has a second opinion (the gyro) so its errors are
@@ -820,10 +878,21 @@ public:
         Eigen::Matrix<float, rc::calib::P_COUNT, 1> calib_sigma =
             Eigen::Matrix<float, rc::calib::P_COUNT, 1>::Zero();
         float calib_b_omega = 0.f;      ///< rad/s, the gyro bias the joint solve can now separate
+        /// The motion block's normal equations as of its last re-solve (plan 2026-10-05 Task 4), for
+        /// the joint calibration monitor on the MAIN thread. A copy, because motion_calib_ is fed on
+        /// the localizer thread and its window must not be iterated from another one.
+        rc::calib::BatchEstimator::Information calib_information{};
+        /// r2 KINEMATIC mount factor (mount_factors.h), a COPY made on the localizer thread every cycle (r1
+        /// thread rule): helios (dx, dy, psi) with the odometry nuisance already Schur-marginalised.
+        rc::mountf::Info3 mount_kin_info{};
+        /// The motion calibrator's ACTING eps on the odometry (yaw_offset()): must read 0 while the mount
+        /// factors own the helios yaw (r2.2 items 4/9). Logged in the mounts CSV.
+        float mount_yaw_offset = 0.f;
         /// Bitmask over rc::calib::Param: which parameters this window actually TAUGHT (posterior
         /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at
         /// its previous value -- which a bare value cannot be distinguished from convergence.
         int   calib_informed = 0;
+        int   calib_applied = 0;        ///< bitmask: parameter i is correcting the odometry (informed AND allowed)
         float calib_condition = 0.f;    ///< of the CORRELATION-normalised information matrix
         float calib_sigma_yaw = 0.f, calib_sigma_k_v = 0.f, calib_sigma_k_w = 0.f;
         float calib_sigma_b_omega = 0.f;   ///< never leave this at 0: a displayed 0 reads as certainty
@@ -831,6 +900,26 @@ public:
 
         float imu_dtheta          = 0.f;
         float wheel_dtheta        = 0.f;
+        rc::calib::HeadingCovariates heading_cov{};   ///< per-channel heading Jacobian, this cycle
+        float gyro_weight         = -1.f;   ///< time-weighted mean w_g this cycle, <0 = no segment
+        /// Per-cycle heading diagnostics for tmp/heading/heading_*.csv. RAW channel rotations (before
+        /// any calibration) so each channel's scale can be regressed against truth offline; the
+        /// densities are the ones the weights were actually computed from (time-weighted means,
+        /// <0 = not computed this cycle, e.g. the legacy switch).
+        struct HeadingDiag
+        {
+            float raw_wheel = 0.f;    ///< rad, sum rot*dt over ALL segments
+            float raw_gyro  = 0.f;    ///< rad, integrated gyro over the segments it bracketed
+            float gyro_dt   = 0.f;    ///< s bracketed by the gyro
+            float total_dt  = 0.f;    ///< s integrated
+            float zupt_dt   = 0.f;    ///< s on which the wheels read stationary
+            float dens_w    = -1.f;   ///< rad/sqrt(s) used for the wheel factor
+            float dens_g    = -1.f;   ///< rad/sqrt(s) used for the gyro factor
+            float nl_c0 = 0.f, nl_c1 = 0.f, nl_c2 = 0.f;   ///< learned wheel density^2 coefficients
+            float rest_gain_tr = -1.f, rest_gain_ro = -1.f;  ///< P(moving) applied to the prediction; <0 = off
+            float rest_dens_v = 0.f, rest_dens_w = 0.f;      ///< the mixture's learnt rest densities
+            long  nl_samples = 0;                          ///< segments the learner has seen
+        } heading_diag;
         float wheel_shadow_dtheta = 0.f;
         int   imu_segs = 0, wheel_segs = 0;
         Eigen::Matrix<float,5,1> state = Eigen::Matrix<float,5,1>::Zero();
@@ -1157,7 +1246,12 @@ public:
     using LayoutState = LayoutEstimator::State;
     LayoutState layout_state() const
     { return (not estimating() or wall_frozen_) ? LayoutState::Localizing : LayoutState::Searching; }
+    /// Set by RoomSceneGraph while a start-up PROTO-room owns the published frame: the one-shot internal
+    /// re-anchor at map_ready is then skipped (internal frame == published frame until promotion).
+    void set_freeze_internal_frame(bool v) { freeze_internal_frame_.store(v, std::memory_order_relaxed); }
     bool searching()  const { return layout_state() == LayoutState::Searching; }
+    /// Plain SLAM owns the pose: Estimate mode, still learning the layout, and RoomShape.PlainSlam on.
+    bool plain_slam_driving() const { return params.plain_slam and estimating() and searching(); }
     bool localizing() const { return layout_state() == LayoutState::Localizing; }
     /// The LEARNT layout specifically has been frozen — i.e. this run reached LOCALIZING by
     /// estimating the room rather than by being given one. Prefer localizing() unless the difference
@@ -1169,6 +1263,45 @@ public:
     /// MAP. Until there is one (Estimate mode before closure) they have nothing to judge against.
     bool map_guided_checks_allowed() const { return map_ready(); }
     const std::vector<Eigen::Vector2f>& polygon_vertices() const { return init_polygon_vertices_; }
+    /// r2 mount factors (plan 2026-10-08 Task 5): what the INGEST thread's vertical factor needs from the
+    /// localiser -- the wall map and the pose -- as one COPY taken under a lock (never read the map from the
+    /// ingest thread). Written on the localizer thread every tracked cycle. vel = world-frame rate (per s) of
+    /// the last cycle, so the reader can carry the pose to its own sweep's stamp.
+    struct MountSnapshot
+    {
+        bool valid = false;
+        std::int64_t ts_ms = 0;
+        Eigen::Vector3f pose = Eigen::Vector3f::Zero();   ///< x, y, theta (room frame)
+        Eigen::Vector3f vel  = Eigen::Vector3f::Zero();   ///< d(x, y, theta)/dt, per second
+        std::vector<Eigen::Vector2f> polygon;             ///< the room polygon (room frame)
+    };
+    MountSnapshot mount_snapshot() const { std::scoped_lock lk(mount_snap_mutex_); return mount_snap_; }
+
+    /// LOW OBSTACLES (2026-10-09): returns between the floor and the robot's top, robot frame (xy), with the
+    /// sweep's capture stamp. Posted by the ingest thread (LidarIngestor::low_obstacle_step), taken by the
+    /// localiser thread (RoomSceneGraph) to stamp MATTER into the start-up proto's free-space raster — helios
+    /// scans ABOVE counters/tables/chairs, so its beams alone claim the floor under them as free.
+    struct LowObstacles { std::int64_t stamp_ms = 0; std::vector<Eigen::Vector2f> xy; };
+    void post_low_obstacles(LowObstacles o)
+    {
+        std::scoped_lock lk(low_obs_mutex_);
+        low_obs_.push_back(std::move(o));
+        while (low_obs_.size() > 16) low_obs_.pop_front();   // bounded: ~8 s at 2 Hz
+    }
+    std::deque<LowObstacles> take_low_obstacles()
+    {
+        std::scoped_lock lk(low_obs_mutex_);
+        return std::exchange(low_obs_, {});
+    }
+    /// ── FOR THE LIVE LAYOUT EXPLORER (layout_explorer.h), LOCALISER THREAD ONLY ──────────────────────────
+    /// The wall map has ONE owner, the localiser thread (the viewer gets a copy inside UpdateResult). The
+    /// scene graph's update() runs on that same thread (pose_publisher.cpp, maybe_publish_corrected_pose),
+    /// which is the only caller allowed: a reference valid for the calling cycle, never stored, never
+    /// handed to another thread. The polygon is the one the PUBLISH TEST sees (carried + live window
+    /// information) — the explorer predicts its gain through what the agent itself believes.
+    const wallmap::WallMap& wall_map_localiser_only() const { return wall_map_; }
+    wallmap::Polygon explorer_polygon_localiser_only() const
+    { return wall_map_.build_polygon_with(window_wall_information()); }
     std::vector<Eigen::Vector2f> nominal_room_polygon() const
     {
         if (estimating())
@@ -1583,6 +1716,7 @@ private:
    bool validate_seed_pose(const std::vector<Eigen::Vector3f>& pts);
 
    // Grid-search liveness for the UI (written on the localizer thread, read on the GUI thread).
+   std::atomic<bool>         freeze_internal_frame_{false};   // see set_freeze_internal_frame
    std::atomic<bool>         grid_search_active_{false};
    std::atomic<std::int64_t> grid_search_end_ms_{0};
 
@@ -1770,12 +1904,8 @@ private:
    // describe the whole interval back to the last admitted slot, not the last frame.
    Eigen::Vector3f stride_last_admitted_{0.f, 0.f, 0.f};
    bool            stride_has_admitted_ = false;
-   Eigen::Vector3f stride_delta_accum_  = Eigen::Vector3f::Zero();
-   Eigen::Matrix3f stride_cov_accum_    = Eigen::Matrix3f::Zero();
-   // Preintegrated form of the same accumulation (Params::motion_preintegration). Chained with
-   // rc::preint::chain() rather than summed: an error in the heading accumulated so far rotates all
-   // the translation that follows, and `stride_cov_accum_ += ...` drops exactly that term.
-   rc::preint::Interval stride_preint_accum_{};
+   // What the NEWEST slot's motion factor carries (delta, summed cov, chained preint): stride_span.h.
+   rc::StrideSpan  stride_span_;
    bool preint_announced_ = false;   // one-shot "the propagated covariance is really in force" log
 
    // ---- Debug-log mirrors, set where the newest slot is BUILT so BOTH writer paths can emit them ----
@@ -1835,6 +1965,14 @@ private:
    int   cyc_imu_lin_segs_ = 0;
    float cyc_imu_dtheta_          = 0.f;
    float cyc_wheel_dtheta_        = 0.f;
+   rc::calib::HeadingCovariates cyc_heading_cov_{};
+   double cyc_gyro_w_dt_ = 0.0, cyc_heading_dt_ = 0.0;      // for the time-weighted mean gyro weight
+   UpdateResult::HeadingDiag cyc_hdiag_{};
+   rc::calib::WheelNoiseLearner wheel_noise_;
+   rc::preint::RestMotionChannel rest_fwd_, rest_lat_, rest_rot_;   // is the body at rest? (body frame)
+   bool rest_chan_init_ = false;
+   double cyc_dens_w_dt_ = 0.0, cyc_dens_g_dt_ = 0.0;      // density * dt, for time-weighted means
+   double gyro_w_dt_sum_ = 0.0, heading_dt_sum_ = 0.0;      // same, over the 5 s [ImuInject] window
    float cyc_wheel_shadow_dtheta_ = 0.f;
    int   cyc_imu_segs_ = 0, cyc_wheel_segs_ = 0;
 
@@ -1844,6 +1982,63 @@ private:
    /// frames that actually had a prediction — a zero innovation otherwise means "no information", not
    /// "perfect agreement", and folding those in would drag the estimate back down.
    void feed_motion_calibrator(UpdateResult& res);
+   /// Fill res.surprise. corrected = the estimate was moved by evidence this cycle (solve or polish).
+   /// Must run after res.covariance and res.pred_* hold this cycle's values.
+   void score_surprise(UpdateResult& res, bool corrected);
+   /// The motion model's predictive covariance for the pose, accumulated from every cycle's selected-prior
+   /// covariance since the last scored correction, then reset to that correction's posterior. Kept HERE and
+   /// not read from current_covariance, because current_covariance does not propagate between solves
+   /// while the polish is off (the growth step is gated on it) -- it would make every prediction look
+   /// infinitely confident.
+   Eigen::Matrix3f sur_P_pred_ = Eigen::Matrix3f::Zero();
+   // The posterior at the last scored correction: sur_P_pred_ = sur_P_prev_ + the motion noise since.
+   Eigen::Matrix3f sur_P_prev_ = Eigen::Matrix3f::Zero();
+   // The motion-noise COMPONENTS accumulated over the open stretch (motion_noise_vc.h): each unit
+   // covariance, and their coefficient-weighted sum as applied. sur_mixed_: a cycle without them.
+   std::array<Eigen::Matrix3f, rc::preint::Interval::NC> sur_U_{Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(),
+       Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero(), Eigen::Matrix3f::Zero()};
+   Eigen::Matrix3f sur_QK_ = Eigen::Matrix3f::Zero();
+   bool            sur_mixed_ = false;
+   rc::DriftMonitor drift_mon_;                       // systematic drift per m / rad / s (drift_monitor.h)
+   float sur_d_ = 0.f, sur_phi_ = 0.f, sur_T_ = 0.f;  // the open stretch's odometry motion
+   // ── SCAN-TO-SCAN INNOVATION (motion_noise_innov.h, Fable window memo 2026-10-05) ──────────────
+   // Each cycle: the scan-only pose z (the newest scan's SDF Gauss-Newton step alone) and its CLAIMED
+   // covariance H_s^-1, the odometry increment, and this cycle's unit noise components. Consecutive
+   // cycles give delta = z_n - z_{n-1} - odom_n, whose second moment is linear in the coefficients.
+   rc::preint::MotionNoiseInnov noise_innov_;
+   bool            noise_innov_init_ = false;
+   std::array<Eigen::Matrix3f, rc::preint::Interval::NC> cyc_U_{};
+   bool            cyc_U_ok_ = false;                         // a measured, preintegrated prior this cycle
+   Eigen::Vector3f cyc_odom_ = Eigen::Vector3f::Zero();       // this cycle's odometry increment (world)
+   float           cyc_dt_s_ = 0.f;                           // this cycle's duration, s
+   long            innov_cycle_ = 0, innov_prev_cycle_ = -10;
+   Eigen::Vector3f innov_z_ = Eigen::Vector3f::Zero(), innov_z_prev_ = Eigen::Vector3f::Zero();
+   Eigen::Matrix3f innov_R_ = Eigen::Matrix3f::Zero(), innov_R_prev_ = Eigen::Matrix3f::Zero();
+   bool            innov_ok_ = false, innov_prev_ok_ = false;
+   int             last_scan_iters_ = 0;                      // GN iterations the last scan-only pose took
+   std::ofstream   innov_csv_;
+   // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan 2026-10-08 Task 1/1b/5) ──────────────────────
+   rc::mountf::KinematicMount kin_mount_;
+   mutable std::mutex mount_snap_mutex_;                      // guards mount_snap_ (read by the ingest thread)
+   std::mutex low_obs_mutex_;                                 // guards low_obs_ (ingest -> localiser)
+   std::deque<LowObstacles> low_obs_;
+   MountSnapshot   mount_snap_;
+   std::ofstream   kin_csv_;                                  // tmp/mount_factors/kin_<ts>.csv: per fed cycle
+   /// Feed kin_mount_ from this cycle's innovation (observe_innovation, only when `fed`).
+   void observe_kinematic_mount(const Eigen::Vector3f &delta, const Eigen::Matrix3f &T,
+                                const Eigen::Vector3f &odom_body, UpdateResult &res);
+   /// The newest scan's SDF factor alone, linearised at (x, y, th): the same query, observation weights,
+   /// IRLS Huber and Jacobian as the solver's SdfFactor (room_gn_solver.cpp). Shared by the polish.
+   bool scan_linearize(const torch::Tensor &pts, float x, float y, float th, Eigen::Matrix3f &H, Eigen::Vector3f &bb);
+   /// z = x_lin - H^-1 b and R = H^-1 into innov_z_/innov_R_ (innov_ok_ on success).
+   void scan_only_pose(const torch::Tensor &pts, float x, float y, float th);
+   void observe_innovation(UpdateResult &res);
+   rc::PoseFieldBias field_bias_;
+   bool              field_bias_init_ = false;
+   void reset_noise_stretch();
+   void fill_noise_vc(UpdateResult &res) const;
+   bool            sur_init_ = false;
+   int             sur_open_cycles_ = 0;   // cycles accumulated into sur_P_pred_ since the last scored correction   // first correction only seeds sur_P_pred_ (no pose prior before it)
    void apply_adaptive_covariance(UpdateResult& res);
 
    /// Drop the strided-window bookkeeping. MUST accompany every window_mgr_.clear(): after a recovery
@@ -1853,9 +2048,7 @@ private:
    void reset_stride_state()
    {
        stride_has_admitted_ = false;
-       stride_delta_accum_.setZero();
-       stride_cov_accum_.setZero();
-       stride_preint_accum_ = rc::preint::Interval{};
+       stride_span_.reset();
    }
 
    // Prediction-based early exit tracking
@@ -1935,6 +2128,8 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Matrix2f> window_wall_information() const;
     bool          rec_stride_replace_ = false;                       // this frame's stride decision, for the recorder
     Eigen::Vector3f rec_odom_delta_ = Eigen::Vector3f::Zero();       // this frame's map-frame odometry delta
+    rc::slam::ScanSlam plain_slam_;                                   // Estimate-mode pose (plain_slam_driving)
+    bool plain_slam_seed_ = true;                                     // (re)seed from the window's pose on next step
     /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
     /// on. From then on the layout is GIVEN: see the four guards that read it in room_concept.cpp.
     unsigned wall_mh_log_tick_ = 0;   // rate limit for the "still annealing" line

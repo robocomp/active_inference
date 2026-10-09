@@ -224,6 +224,19 @@ target_link_libraries(ai_common_media PUBLIC ai_common_core ${AI_COMMON_FASTDDS_
 add_library(ai_common::media ALIAS ai_common_media)
 
 # =====================================================================================
+# ai_common::status — rc::StatusStream: the agent's live status as NDJSON on a local socket (and a
+# per-run events file), for a terminal viewer to attach to. Qt Core + Network only; never DSR.
+# status_sink.h (the producer half) is header-only and stdlib-only, so estimator sources that are
+# also linked into offline selftests can report through it without pulling this target in.
+# =====================================================================================
+find_package(Qt6 REQUIRED COMPONENTS Network)
+add_library(ai_common_status STATIC status_stream/status_stream.cpp)
+ai_common_defaults(ai_common_status)
+set_target_properties(ai_common_status PROPERTIES AUTOMOC ON)
+target_link_libraries(ai_common_status PUBLIC Qt6::Core Qt6::Network)
+add_library(ai_common::status ALIAS ai_common_status)
+
+# =====================================================================================
 # ai_common::ui — TimeSeriesPlot. Qt Widgets only, no DSR gui. AUTOMOC handles it via the
 # same-basename rule (timeseries_plot.h + .cpp, Q_OBJECT).
 #

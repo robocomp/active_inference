@@ -226,6 +226,11 @@ struct ChairConfig
                                               // unexplained instance draws FULL vacate negative (ramps 0→1; grace vs death-spiral)
     bool  exist_occlusion_check    = true;   // Existence.OcclusionCheck — suppress the vacate negative when the chair is hidden
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
+    // Classifier-free CONTOUR channel (common/contour_edge, as in door/refrigerator): project the chair's SOLID
+    // silhouette (seat ∪ backrest — never its mostly-air bounding box) into the ZED RGB + depth and
+    // ask the IMAGE, not YOLO, whether that boundary is there. The only existence evidence that survives the
+    // detector going blind on a chair already in the model. Brings up the ZED rgb+depth media subscribers.
+    bool  exist_contour_check      = true;   // Existence.ContourCheck
     // Room-containment pose prior: P(a chair outside the room walls) ≈ 0. Applies even when the instance is out
     // of view / behind a wall (a localization glitch can birth a chair outside; the sensor then can't reach it
     // to vacate it). An out-of-room instance draws this STRONG negative log-odds each frame → removed in a few.

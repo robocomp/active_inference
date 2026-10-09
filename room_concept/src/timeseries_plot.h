@@ -37,7 +37,10 @@ public:
      *  If avg_window > 0 a companion "<name>_avg" series is auto-created
      *  with a lighter colour and the running average is updated on every add_point(). */
     void add_series(const std::string& name, QColor colour,
-                    float line_width = 1.5f, int avg_window = 0);
+                    float line_width = 1.5f, int avg_window = 0, int axis = 0);
+    // axis = 1 puts the series on an independent RIGHT-hand axis, auto-scaled on its own and labelled on
+    // the right edge. Two quantities in different units (pred |SDF| in metres, surprise in nats) can then
+    // share one time base, which is the point of drawing them together, without one flattening the other.
 
     /** Append a sample to the named series (call from any thread).
      *  If a running-average companion exists it is updated automatically. */
@@ -73,6 +76,7 @@ private:
         std::string name;
         QColor colour{Qt::white};
         float line_width = 1.5f;
+        int axis = 0;                     // 0 = left, 1 = right
         std::deque<Sample> samples;
 
         // Running-average state (0 = disabled)
@@ -105,6 +109,10 @@ private:
     static constexpr int kBottom = 22;
 
     void draw_axes(QPainter& p, float t_min, float t_max, float v_min, float v_max) const;
+    void draw_right_axis(QPainter& p, float v_min, float v_max) const;
+    bool has_right_axis() const;           // any series registered on axis 1 (caller holds mu_)
+    int  right_margin() const { return has_right_axis() ? kRightAxis : kRight; }
+    static constexpr int kRightAxis = 50;
     void draw_legend(QPainter& p) const;
     bool event(QEvent* e) override;                      // QEvent::ToolTip -> hit-test the legend
     std::map<std::string, QString> tips_;                // series name -> explanation

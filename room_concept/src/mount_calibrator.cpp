@@ -1,4 +1,9 @@
 #include "mount_calibrator.h"
+#include "status_reporter.h"
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QFile>
 
 #include "room_viewer.h"
 
@@ -27,11 +32,17 @@ void MountCalibrator::push_mount_correction(rc::CameraIngestor &ing, const Eigen
     const float yaw    = static_cast<float>(applied(2)) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
     if (std::abs(pitch) + std::abs(height) + std::abs(yaw) <= 0.f) return;
     ing.set_mount_correction(pitch, height, yaw);
-    qInfo().nospace().noquote()
-        << "[camcal] " << QString::fromStdString(cam) << " mount correction " << why << ": pitch "
-        << QString::number(pitch * 180.0 / M_PI, 'f', 4) << " deg, height "
-        << QString::number(height, 'f', 4) << " m, yaw "
-        << QString::number(yaw * 180.0 / M_PI, 'f', 4) << " deg  (total against the graph extrinsic)";
+    // Logged only when the printed values change: the zed re-applied the same total every 0.1 s.
+    const QString vals = QString("pitch %1 deg, height %2 m, yaw %3 deg")
+                             .arg(QString::number(pitch * 180.0 / M_PI, 'f', 4), QString::number(height, 'f', 4),
+                                  QString::number(yaw * 180.0 / M_PI, 'f', 4));
+    if (auto &last = last_corr_logged_[cam]; last != vals)
+    {
+        last = vals;
+        qInfo().nospace().noquote()
+            << "[camcal] " << QString::fromStdString(cam) << " mount correction " << why << ": " << vals
+            << "  (total against the graph extrinsic)";
+    }
 }
 
 /// Feed the pooled solve back into the camera mount.
@@ -91,13 +102,106 @@ void MountCalibrator::apply_mount_solve(rc::camcal::Estimator &pool, rc::CameraI
 ///   never is. Re-centring the prior on the estimator's own last answer removes the prior's pull, and
 ///   publishes happen every window — that asymmetry is the whole reason this function is not two
 ///   lines.
+std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>>
+MountCalibrator::description_mount(const std::string &parent, const std::string &cam) const
+{
+    if (params.IMAGE_EDGE_MOUNT_DESCRIPTION.empty()) return std::nullopt;
+    QFile f(QString::fromStdString(params.IMAGE_EDGE_MOUNT_DESCRIPTION));
+    if (not f.open(QIODevice::ReadOnly)) return std::nullopt;
+    const QJsonObject symbols = QJsonDocument::fromJson(f.readAll()).object()
+                                    .value("DSRModel").toObject().value("symbols").toObject();
+    QString parent_id, cam_id;
+    for (const auto &v : symbols)
+    {
+        const auto o = v.toObject();
+        if (o.value("name").toString() == QString::fromStdString(parent)) parent_id = o.value("id").toString();
+        if (o.value("name").toString() == QString::fromStdString(cam))    cam_id    = o.value("id").toString();
+    }
+    if (parent_id.isEmpty() or cam_id.isEmpty()) return std::nullopt;
+    for (const auto &link : symbols.value(parent_id).toObject().value("links").toArray())
+    {
+        const auto l = link.toObject();
+        if (l.value("dst").toString() != cam_id or l.value("label").toString() != "RT") continue;
+        const auto la = l.value("linkAttribute").toObject();
+        const auto t = la.value("rt_translation").toObject().value("value").toArray();
+        const auto r = la.value("rt_rotation_euler_xyz").toObject().value("value").toArray();
+        if (t.size() < 3 or r.size() < 3) return std::nullopt;
+        return std::pair{Eigen::Vector3f(t[0].toDouble(), t[1].toDouble(), t[2].toDouble()),
+                         Eigen::Vector3f(r[0].toDouble(), r[1].toDouble(), r[2].toDouble())};
+    }
+    return std::nullopt;
+}
+
 void MountCalibrator::reconcile_mount_nominal(rc::camcal::Estimator &pool, rc::CameraIngestor &ing,
                                              const std::string &cam)
 {
-    const Eigen::Matrix3f graph_R = ing.base_R();       // as just bound, i.e. what the graph says
-    const Eigen::Vector3f graph_t = ing.base_t();
+    Eigen::Matrix3f graph_R = ing.base_R();             // as just bound, i.e. what the graph says
+    Eigen::Vector3f graph_t = ing.base_t();
     const Eigen::Vector4d ap = pool.applied();
     const bool has_corr = ap.head<3>().cwiseAbs().maxCoeff() > 1e-12;
+
+    // The description's edge becomes the publish nominal on EVERY exit path below: adopt_external_nominal
+    // clears the stored edge nominal, so setting it once up here would be undone by that branch.
+    std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>> desc_edge;
+    struct EdgeNominalOnExit
+    {
+        rc::camcal::Estimator &pool;
+        const std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>> &edge;
+        ~EdgeNominalOnExit() { if (edge.has_value()) pool.set_edge_nominal(edge->first, edge->second); }
+    } edge_nominal_on_exit{pool, desc_edge};
+
+    // ── THE NOMINAL IS THE ROBOT DESCRIPTION, NEVER THE GRAPH (2026-10-04) ───────────────────────
+    // The graph's body->camera edge is this loop's OUTPUT (mountPublish), and robot_concept saved it
+    // back over the JSON at every graceful stop (persist_mounts_on_stop) and re-applied it at start.
+    // So the nominal this function compared against was, after any restart, the loop's own earlier
+    // answer: a slow ratchet (ricoh yaw -0.05 -> -0.14 deg over 13 restarts, 2026-09-12..10-03), and
+    // on 10-04, after the camera evidence was wiped for an experiment, cold-start estimates published
+    // and persisted as the mount: zed 14 cm high and -1.3 deg pitch, ricoh 12 cm low
+    // (robot_concept/etc/mount_calib_Shadow.txt, revisions 14-15).
+    // When the description file is configured, the base the ingestor measures against is re-derived
+    // from it: with E = parent->camera and base = cam<-robot = E^-1 * C^-1 for the chain C above it,
+    //     base_desc = E_desc^-1 * E_graph * base_graph,
+    // which needs nothing above the camera's own link. Whatever the graph holds then no longer matters:
+    // the comparisons below run against the DESCRIPTION, and the graph is purely an output again.
+    if (auto cn = G->get_node(cam); cn.has_value())
+        if (const auto pid = G->get_attrib_by_name<parent_att>(cn.value()); pid.has_value())
+            if (auto pn = G->get_node(pid.value()); pn.has_value())
+                if (const auto desc = description_mount(pn->name(), cam); desc.has_value())
+                    if (const auto e = G->get_edge(pn->id(), cn->id(), "RT"); e.has_value())
+                    {
+                        const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+                        const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
+                        if (rot.has_value() and tr.has_value() and rot.value().get().size() >= 3
+                            and tr.value().get().size() >= 3)
+                        {
+                            const auto E = [](const Eigen::Vector3f &t, const Eigen::Vector3f &r)
+                            {
+                                Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+                                T.block<3, 3>(0, 0) = (Eigen::AngleAxisf(r.x(), Eigen::Vector3f::UnitX())
+                                                     * Eigen::AngleAxisf(r.y(), Eigen::Vector3f::UnitY())
+                                                     * Eigen::AngleAxisf(r.z(), Eigen::Vector3f::UnitZ())).toRotationMatrix();
+                                T.block<3, 1>(0, 3) = t;
+                                return T;
+                            };
+                            const auto &gr = rot.value().get(); const auto &gt = tr.value().get();
+                            const Eigen::Matrix4f E_graph = E({gt[0], gt[1], gt[2]}, {gr[0], gr[1], gr[2]});
+                            const Eigen::Matrix4f E_desc  = E(desc->first, desc->second);
+                            Eigen::Matrix4f B = Eigen::Matrix4f::Identity();
+                            B.block<3, 3>(0, 0) = graph_R; B.block<3, 1>(0, 3) = graph_t;
+                            const Eigen::Matrix4f B_desc = E_desc.inverse() * E_graph * B;
+                            graph_R = B_desc.block<3, 3>(0, 0);
+                            graph_t = B_desc.block<3, 1>(0, 3);
+                            ing.set_base(graph_R, graph_t);
+                            desc_edge = desc;                                    // the publish composes on it
+                            mount_publish_[cam].have_nominal = false;            // re-read from the pool
+                            qInfo().noquote() << QString::asprintf(
+                                "[camcal] %s: nominal mount taken from the robot DESCRIPTION %s"
+                                " (t [%+.4f %+.4f %+.4f]); the graph edge differed from it by %.2e.",
+                                cam.c_str(), params.IMAGE_EDGE_MOUNT_DESCRIPTION.c_str(),
+                                desc->first.x(), desc->first.y(), desc->first.z(),
+                                static_cast<double>((E_graph - E_desc).cwiseAbs().maxCoeff()));
+                        }
+                    }
 
     if (not pool.have_base())
     {
@@ -503,10 +607,14 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
                               << " px — mount sigmas are now cluster-honest and will read LARGER; "
                                  "yaw approaches the between-vertex SEM by construction";
         const std::string path = mp_pool_.path();
-        if (const std::size_t k = mp_pool_.load(path); k > 0)
+        const std::size_t k = mp_pool_.load(path);
+        if (k > 0)
             qInfo().nospace() << "[camcal] resumed from " << QString::fromStdString(path)
                               << " (" << k << " pairs, camera "
                               << QString::fromStdString(params.IMAGE_EDGE_CAMERA) << ")";
+        rc::StatusReporter::loaded("camcal_evidence", path,
+                                   std::format("camera {}: {} pairs{}", params.IMAGE_EDGE_CAMERA, k,
+                                               k > 0 ? "" : " (none on disk: starting empty)"));
         // A correction restored from disk must reach the mount BEFORE the first frame is measured
         // against it, or this session's first window is referenced to an extrinsic the evidence
         // does not describe.
@@ -565,8 +673,21 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
 
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
+    const Eigen::Vector4d applied_before = mp_pool_.applied();   // the anchor this solve was taken against
     apply_mount_solve(mp_pool_, *driving_, pool, params.IMAGE_EDGE_CAMERA);
     mp_pool_.save(mp_pool_.path());   // per (robot, camera); a kill -9 costs at most one window
+    if (pool.ok and camcal_sink_)
+    {
+        const double psig[4] = {params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
+        std::array<float, 4> v{}, s{};
+        for (int i = 0; i < 4; ++i)   // the TOTAL correction, exactly as the Calib window below gets it
+        {
+            v[static_cast<std::size_t>(i)] = static_cast<float>((applied_before(i) - pool.p(i)) * psig[i]);
+            s[static_cast<std::size_t>(i)] = static_cast<float>(pool.sigma(i) * psig[i]);
+        }
+        camcal_sink_(params.IMAGE_EDGE_CAMERA, v, s, pool.informed, static_cast<float>(pool.cond), mp_pool_.pairs());
+    }
     if (viewer() != nullptr and pool.ok)
     {
         Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;
@@ -578,7 +699,12 @@ void MountCalibrator::mount_pair_update(const rc::ImageEdgeObs &obs,
             // The estimator works in units of the PRIOR SIGMA (h carries it), so convert back to
             // physical here — and scale the posterior sigma the same way, or the popup would show a
             // physical value with a dimensionless uncertainty beside it.
-            pv(i) = static_cast<float>(pool.p(i)     * psig[i]);
+            // ★ THE TOTAL, NOT THE INCREMENT (2026-10-04). Since the loop was closed (09-03) `p` is
+            //   what is LEFT to correct this window; it is folded into `applied` and goes to ~0 at
+            //   convergence, so plotting it showed every mount settling at zero with a tiny sigma —
+            //   "no correction needed" — while the ricoh was being corrected by -6 mm. The correction
+            //   in force after this window is applied - p (the solve vector is x = -p).
+            pv(i) = static_cast<float>((applied_before(i) - pool.p(i)) * psig[i]);
             sv(i) = static_cast<float>(pool.sigma(i) * psig[i]);
         }
         viewer()->set_camera_calibration(pv, sv, pool.informed, static_cast<float>(pool.cond),

@@ -238,6 +238,16 @@ public:
         const auto it = recs_.find(std::string(k));
         return it == recs_.end() ? Record{} : it->second;
     }
+    // Every record, COPIED under the mutex, in key order — for a consumer that renders the table
+    // elsewhere (rc::StatusStream's `config` event, the terminal viewer's Config gates panel).
+    [[nodiscard]] std::vector<Record> records() const
+    {
+        const std::lock_guard lk(m_);
+        std::vector<Record> out;
+        out.reserve(recs_.size());
+        for (const auto& [k, r] : recs_) out.push_back(r);
+        return out;
+    }
 
     // ── the one print point ───────────────────────────────────────────────────────────────────
     Published publish(const std::vector<FileKey>& file_keys, const std::string& dump_path);

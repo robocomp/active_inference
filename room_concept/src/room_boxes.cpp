@@ -1,4 +1,5 @@
 #include "room_boxes.h"
+#include "../../common/status_stream/status_sink.h"   // rc::status::print/println/cprintf (routed)
 
 #include <algorithm>
 #include <array>
@@ -53,30 +54,34 @@ namespace rc::boxes
             if (d.x() > d.y()) return {(p.x() - b.lo.x() < b.hi.x() - p.x()) ? -1.f : 1.f, 0.f};
             return {0.f, (p.y() - b.lo.y() < b.hi.y() - p.y()) ? -1.f : 1.f};
         }
-        /// Which SURFACE does this point's distance come from? The box that wins Layout::sdf's
-        /// min/max, and within it the face nearest the point. Returned as a stable id so returns
-        /// lying on one physical wall land in one group.
-        int active_face(const Layout& L, const Eigen::Vector2f& p)
-        {
-            if (L.boxes.empty()) return -1;
-            float d = std::numeric_limits<float>::infinity();
-            int win = -1;
-            for (size_t i = 0; i < L.boxes.size(); ++i)
-                if (L.boxes[i].positive)
-                { const float v = sdf_box(L.boxes[i], p); if (v < d) { d = v; win = static_cast<int>(i); } }
-            for (size_t i = 0; i < L.boxes.size(); ++i)
-                if (not L.boxes[i].positive)
-                { const float v = -sdf_box(L.boxes[i], p); if (v > d) { d = v; win = static_cast<int>(i); } }
-            if (win < 0) return -1;
-            const Box& b = L.boxes[static_cast<size_t>(win)];
-            const float dl = std::abs(p.x() - b.lo.x()), dr = std::abs(p.x() - b.hi.x());
-            const float db = std::abs(p.y() - b.lo.y()), dt = std::abs(p.y() - b.hi.y());
-            const float m = std::min(std::min(dl, dr), std::min(db, dt));
-            const int face = (m == dl) ? 0 : (m == db) ? 1 : (m == dr) ? 2 : 3;
-            return win * 4 + face;
-        }
-
     }   // namespace
+
+    /// Which SURFACE does this point's distance come from? The box that wins Layout::sdf's
+    /// min/max, and within it the face nearest the point. Returned as a stable id so returns
+    /// lying on one physical wall land in one group.
+    /// ⚠ PUBLIC BECAUSE THE PLANNER MUST ASK THE SAME QUESTION. refit() attributes every return
+    /// through this function, so it is the only rule that says which offset the evidence on a
+    /// patch of wall actually lands on — and therefore which offset a planner can hope to
+    /// improve by going to look at that patch.
+    int active_face(const Layout& L, const Eigen::Vector2f& p)
+    {
+        if (L.boxes.empty()) return -1;
+        float d = std::numeric_limits<float>::infinity();
+        int win = -1;
+        for (size_t i = 0; i < L.boxes.size(); ++i)
+            if (L.boxes[i].positive)
+            { const float v = sdf_box(L.boxes[i], p); if (v < d) { d = v; win = static_cast<int>(i); } }
+        for (size_t i = 0; i < L.boxes.size(); ++i)
+            if (not L.boxes[i].positive)
+            { const float v = -sdf_box(L.boxes[i], p); if (v > d) { d = v; win = static_cast<int>(i); } }
+        if (win < 0) return -1;
+        const Box& b = L.boxes[static_cast<size_t>(win)];
+        const float dl = std::abs(p.x() - b.lo.x()), dr = std::abs(p.x() - b.hi.x());
+        const float db = std::abs(p.y() - b.lo.y()), dt = std::abs(p.y() - b.hi.y());
+        const float m = std::min(std::min(dl, dr), std::min(db, dt));
+        const int face = (m == dl) ? 0 : (m == db) ? 1 : (m == dr) ? 2 : 3;
+        return win * 4 + face;
+    }
 
     namespace
     {
@@ -438,7 +443,8 @@ namespace rc::boxes
         }
     }   // namespace
 
-    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters)
+    float refit(Layout& L, const std::vector<CloudPoint>& cloud, const GrowParams& p, int iters,
+                const std::set<std::pair<int, int>>* freecells)
     {
         if (L.empty() or cloud.empty()) return 0.f;
         const std::vector<CloudPoint> pts = condense(cloud, p);
@@ -487,16 +493,98 @@ namespace rc::boxes
                 const size_t k = static_cast<size_t>(id);
                 if (k >= n) continue;
                 {
-                    Layout T = L;
-                    Box& b = T.boxes[k / 4];
-                    ((k % 4 == 0) ? b.lo.x() : (k % 4 == 1) ? b.lo.y() : (k % 4 == 2) ? b.hi.x() : b.hi.y()) += eps;
-                    const float jk = (T.sdf(q.p) - d) / eps;
+                    // ⚠ PERTURB IN PLACE. `Layout T = L;` here copied the whole layout — INCLUDING
+                    // `cov`, an Eigen matrix of (4*boxes)^2 floats: about 102 KB at forty boxes —
+                    // once per point, twenty thousand points per call. That is gigabytes of
+                    // allocation churn per refit; it is why the planner runs were slow and why two
+                    // of them were killed for memory on a machine with 44 GB free.
+                    Box& b = const_cast<Box&>(L.boxes[k / 4]);
+                    float& off = (k % 4 == 0) ? b.lo.x() : (k % 4 == 1) ? b.lo.y()
+                               : (k % 4 == 2) ? b.hi.x() : b.hi.y();
+                    const float keep = off;
+                    off += eps;
+                    const float jk = (L.sdf(q.p) - d) / eps;
+                    off = keep;
                     if (std::abs(jk) < 1e-4f) continue;
                     H[k] += w * jk * jk;
                     g[k] -= w * jk * static_cast<double>(d);
                 }
             }
+            // ── SWEPT SPACE THE LAYOUT EXCLUDES IS A FORCE ON THE FACE THAT EXCLUDES IT ─────
+            // Same evidence mdl_cost charges as `missed`, made differentiable. Each swept cell that
+            // falls OUTSIDE the region is a residual on the face nearest it, pulling that face out
+            // until the cell is inside. Its sigma is the CELL — the resolution at which the sweep
+            // is known — so there is no new constant, and a cell already inside says nothing.
+            // ⚠ DEFAULT OFF, AND THE REASON IS POSE ERROR. On the apartamento hall this is exact:
+            // the phantom fin's tip lands within 13 mm of truth, IoU 0.969 -> 0.977, pose 0.042 ->
+            // 0.027, and no trajectory sample is left inside published solid. Across 50 random
+            // rooms it REGRESSES badly — IoU median 0.946 -> 0.910, >=0.95 48% -> 24%, rms 0.024 ->
+            // 0.042, pose 0.104 -> 0.184, paired median -0.026 and 12/50 wins — while vertex counts
+            // improve (30 -> 33 exact), so the fin repair itself is real.
+            // The walls are being dragged off their own returns, and the mechanism is known: free
+            // marking LEAKS PAST A WALL when the pose is poor, the same leak that once let the
+            // explore gain score the outdoors. The hall runs at pose 0.027 m so its swept set is
+            // clean; a room at 0.1-0.5 m bleeds free cells beyond its walls and this force chases
+            // them outward. ★ The missing piece is per-cell evidence quality: `vmap_` stores the
+            // best pose sigma a surface cell was seen at (`smin`), `free_` stores only a count, so
+            // a cell swept from a lost robot is weighted exactly like one swept from a sure one.
+            // Give free_ an smin of its own and this becomes safe; until then it is opt-in.
+            if (p.free_force and freecells != nullptr)
+                for (const auto& fc : *freecells)
+                {
+                    const Eigen::Vector2f m((static_cast<float>(fc.first) + 0.5f) * p.cell,
+                                            (static_cast<float>(fc.second) + 0.5f) * p.cell);
+                    const float dfree = L.sdf(m);
+                    if (dfree <= 0.f) continue;              // already room: no complaint
+                    const int idf = active_face(L, m);
+                    if (idf < 0) continue;
+                    const size_t kf = static_cast<size_t>(idf);
+                    if (kf >= n) continue;
+                    Box& bf = L.boxes[kf / 4];
+                    float& off = (kf % 4 == 0) ? bf.lo.x() : (kf % 4 == 1) ? bf.lo.y()
+                               : (kf % 4 == 2) ? bf.hi.x() : bf.hi.y();
+                    const float keep = off;
+                    off += eps;
+                    const float jf = (L.sdf(m) - dfree) / eps;
+                    off = keep;
+                    if (std::abs(jf) < 1e-4f) continue;
+                    // ⚠ HOW FAR OUTSIDE MATTERS, AND THE FIRST VERSION IGNORED IT. Charging every
+                    // swept-but-excluded cell at 1/cell^2 let ~24000 cells outvote ~2000 condensed
+                    // returns by an order of magnitude: the boxes ballooned to swallow the hull —
+                    // 3 boxes, 12 vertices, rms 0.616 m, IoU 0.662 on a hall that had been at
+                    // 0.969. The walls were dragged off their own returns.
+                    // The fix is not a gain, it is the MEANING: a cell just beyond a face says
+                    // "this face is a little too tight"; a cell three metres beyond says "there is
+                    // a box missing here", which is grow()'s question and not an offset's. So the
+                    // evidence decays with how far out the cell sits, at the scale the sweep is
+                    // known to — the CELL — which adds no constant and needs no cutoff.
+                    const double zf = static_cast<double>(dfree) / static_cast<double>(p.cell);
+                    const double wf = std::exp(-0.5 * zf * zf)
+                                    / (static_cast<double>(p.cell) * p.cell);
+                    H[kf] += wf * jf * jf;
+                    g[kf] -= wf * jf * static_cast<double>(dfree);
+                }
             rms = std::sqrt(ss / static_cast<double>(pts.size()));
+            // ── THE POSTERIOR THE ESTIMATOR NEVER KEPT ──────────────────────────────────────
+            // The normal equations here are DIAGONAL — each residual depends on exactly one
+            // offset — so the variance of every offset is 1/H[k] and it is already computed. It
+            // was thrown away at the end of each call and L.cov reset to sigma_flat^2 * I, which
+            // left the estimator with no idea how well any face was known. Everything that is
+            // supposed to be driven by parameter uncertainty was then faked from geometry: the
+            // planner's "worst face" was really the face with the least floor in front of it, so
+            // standing there could not change the metric and the refine phase could not converge.
+            // An offset no point is active on keeps the prior — that IS its variance.
+            if (L.cov.rows() != static_cast<long>(n) or L.cov.cols() != static_cast<long>(n))
+                L.cov = Eigen::MatrixXf::Zero(static_cast<long>(n), static_cast<long>(n));
+            {
+                double span2 = 0.0;
+                for (const auto& b : L.boxes)
+                    span2 = std::max(span2, static_cast<double>(b.width() + b.height()));
+                const double prior = 1.0 / std::max(1e-6, span2 * span2);
+                for (size_t k = 0; k < n; ++k)
+                    L.cov(static_cast<long>(k), static_cast<long>(k)) =
+                        static_cast<float>(1.0 / std::max(prior, H[k] + prior));
+            }
             // ── DAMPED diagonal step. An offset no point is active on keeps its value. ───────
             // ⚠ AN ALMOST-UNOBSERVED OFFSET IS THE DANGEROUS CASE, NOT AN UNOBSERVED ONE.
             // With H[k] ~ 0 the undamped step g/H diverges, and ONE marginally-active point is
@@ -507,10 +595,17 @@ namespace rc::boxes
             // somewhere sensible, and an uninformative face should KEEP that value rather than be
             // dragged by one sample. lambda = 1/span^2 is a prior of sigma = the room's own size —
             // as weak as a prior can be while still being proper, and no tuned constant.
-            double span2 = 0.0;
-            for (const auto& b : L.boxes)
-                span2 = std::max(span2, static_cast<double>(b.width() + b.height()));
-            const double lambda = 1.0 / std::max(1e-6, span2 * span2);
+            // ⚠ THE PRIOR IS THE CELL, NOT THE ROOM. A cover face was PROPOSED at cell resolution,
+            // so that is the precision of the belief about where it is: 1/cell^2. Using 1/span^2
+            // instead — "as weak as a prior can be while still being proper" — is 0.012 against a
+            // typical H of 0.29, i.e. no damping at all, and the diagonal step is then free to fly.
+            // ★ The claim that each residual depends on exactly ONE offset is FALSE in a box's
+            // CORNER region, where d|q|/d(lo.x) = q.x/|q| is fractional. Measured on the plain
+            // rectangle: one point, 8 cm residual, Jacobian 0.0265, so step = -0.083/0.0265 =
+            // -3.0 m, kicking an interior seam three metres in a single iteration. That is the
+            // same defect as the 471 m runaway; the span prior only capped it to room scale, and
+            // 3 m is enough to destroy a 6 m room. Refit steps over 0.3 m on rect: 68 -> 0.
+            const double lambda = 1.0 / std::max(1e-6, static_cast<double>(p.cell) * p.cell);
             for (size_t k = 0; k < n; ++k)
             {
                 if (H[k] <= 0.0) continue;
@@ -590,10 +685,14 @@ namespace rc::boxes
                 if (id < 0 or static_cast<size_t>(id / 4) != bi) continue;   // not this box's face
                 const float d = L.sdf(q.p);
                 const int k = id % 4;
-                Layout T = L;
-                Box& b = T.boxes[bi];
-                ((k == 0) ? b.lo.x() : (k == 1) ? b.lo.y() : (k == 2) ? b.hi.x() : b.hi.y()) += eps;
-                if (std::abs((T.sdf(q.p) - d) / eps) > 1e-4f) ++n[static_cast<size_t>(k)];
+                Box& b = const_cast<Box&>(L.boxes[bi]);      // perturb in place; see refit()
+                float& off = (k == 0) ? b.lo.x() : (k == 1) ? b.lo.y()
+                           : (k == 2) ? b.hi.x() : b.hi.y();
+                const float keep = off;
+                off += eps;
+                const bool moves = std::abs((L.sdf(q.p) - d) / eps) > 1e-4f;
+                off = keep;
+                if (moves) ++n[static_cast<size_t>(k)];
             }
             return n;
         }
@@ -990,9 +1089,34 @@ namespace rc::boxes
     }
 
     RegisterResult register_scan(const Layout& L, const std::vector<Eigen::Vector2f>& pts,
-                                 const Eigen::Vector3f& odom, float sensor_sigma)
+                                 const Eigen::Vector3f& odom, float sensor_sigma, const RegisterOptions* opt)
     {
+        const bool full_prior = opt != nullptr and opt->prior_cov != nullptr;
+        // ── A RETURN'S UNCERTAINTY INCLUDES THE WALL IT IS BEING MATCHED TO (WS_REG_MAPVAR) ────
+        // ⚠ THE POSE IS BORN WRONG AT FRAME 2. The layout is then the one-scan seed — a single box
+        // for the first ~38 registrations, against rooms of 16-36 vertices — and matching a full
+        // 360-degree scan to a rectangle moves the pose 0.29-1.11 m and the heading up to 16.7 deg
+        // in ONE solve, with the map term outvoting odometry by 131-820x while odometry is two
+        // encoder ticks old. Measured across rooms 9/17/48/39/36/14; with registration off those
+        // rooms score 0.955-0.992 instead of 0.747-0.878. The 1/beta prior cannot resist because
+        // beta is the map cost AT the odometry pose, so a wrong map is indistinguishable from wrong
+        // odometry and the prior dissolves exactly when the map is the thing not to be trusted.
+        // The model-level answer: the residual's variance is the sensor PLUS the posterior variance
+        // of the offset the point is attributed to, which refit already computes (1/H, the prior
+        // span^2 for a face no evidence has landed on). A face nobody has measured then carries no
+        // weight, a well-measured wall carries all of it, and there is no gate anywhere.
+        const bool map_var = opt != nullptr and opt->map_var;
+        const bool cov_ok = L.cov.rows() == static_cast<long>(L.n_offsets())
+                        and L.cov.cols() == static_cast<long>(L.n_offsets());
+        Eigen::Matrix3f Omega = Eigen::Matrix3f::Zero();
+        if (full_prior)
+        {
+            Omega = opt->prior_cov->inverse();
+            if (not Omega.allFinite()) Omega.setZero();
+        }
+
         RegisterResult R;
+        double wsum_last = 0.0;      // WS_REG_PROBE: total map information admitted in the last iteration
         if (L.empty() or pts.size() < 10) return R;
 
         auto cost_at = [&](const Eigen::Vector3f& x)
@@ -1045,6 +1169,7 @@ namespace rc::boxes
             Eigen::Vector3f g = Eigen::Vector3f::Zero();
             const float c = std::cos(x.z()), s = std::sin(x.z());
             double loss = 0.0; long nused = 0;
+            wsum_last = 0.0;
             for (const auto& q : pts)
             {
                 const Eigen::Vector2f rp(c * q.x() - s * q.y(), s * q.x() + c * q.y());
@@ -1068,16 +1193,45 @@ namespace rc::boxes
                 Eigen::Vector3f J;
                 J.head<2>() = gr;
                 J(2) = gr.dot(Eigen::Vector2f(-rp.y(), rp.x()));   // d/dtheta of R(theta) q
-                const float w = 1.f / sig2;
+                // ⚠ A ROBUST KERNEL, WHICH "KINEMATIC-ICP STYLE" WAS MISSING. Without it a return
+                // that lands on structure the layout does not have enters at full precision, and
+                // when the layout is wrong the misfit points simply out-vote the odometry prior:
+                // measured at ~800:1, moving the pose 2.066 m in ONE solve. Cauchy is smooth, so
+                // nothing is discarded and a point regains its say as the fit improves — the same
+                // choice already made inside refit().
+                float s_eff = sig2;
+                if (map_var and cov_ok)
+                {
+                    const int off = active_face(L, m);
+                    if (off >= 0 and static_cast<size_t>(off) < L.n_offsets())
+                    {
+                        const float v = L.cov(off, off);
+                        if (std::isfinite(v) and v > 0.f) s_eff = sig2 + v;
+                    }
+                }
+                const float rres = d / std::sqrt(s_eff);
+                const float w = (1.f / s_eff) / (1.f + rres * rres);
+
                 H.noalias() += w * J * J.transpose();
                 g.noalias() += w * d * J;
+                wsum_last += static_cast<double>(w);
                 loss += static_cast<double>(d) * d;
                 ++nused;
             }
+            if (full_prior)
+            {
+                // the odometry prediction as a full Gaussian prior over (x, y, theta)
+                const Eigen::Vector3f dx(x.x() - odom.x(), x.y() - odom.y(), wrap_pi(x.z() - odom.z()));
+                H.noalias() += Omega;
+                g.noalias() += Omega * dx;
+            }
+            else
+            {
             // translation-only prior toward the odometry prediction
             H(0, 0) += w_prior; H(1, 1) += w_prior;
             g(0) += w_prior * (x.x() - odom.x());
             g(1) += w_prior * (x.y() - odom.y());
+            }
 
             const Eigen::Vector3f step = H.ldlt().solve(-g);
             if (not step.allFinite()) break;
@@ -1114,6 +1268,30 @@ namespace rc::boxes
         R.pose = x;
         R.cost = cost_at(x);
         R.ok = R.pose.allFinite() and R.cov.allFinite();
+        // ── WS_REG_PROBE: WHAT ONE SOLVE DID, AND HOW FREE IT WAS TO DO IT ───────────────────
+        // The interesting number is not the residual but `beta`: the prior's weight is 1/beta, and
+        // beta is the map cost AT THE ODOMETRY POSE. A map that is wrong therefore looks exactly
+        // like odometry that is wrong, and the prior dissolves precisely when the map is the thing
+        // that should not be trusted. Printed with the step the solve took from the prediction, so
+        // that a one-solve teleport is visible as such.
+        if (std::getenv("WS_REG_PROBE") != nullptr)
+        {
+            static int call = 0;
+            Eigen::Vector2f lo(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+            Eigen::Vector2f hi(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+            for (const auto& b : L.boxes) { lo = lo.cwiseMin(b.lo); hi = hi.cwiseMax(b.hi); }
+            rc::status::cprintf_err("[reg] call=%d npts=%zu boxes=%zu ext=%.2fx%.2f beta=%.4f w_prior=%.3f "
+                                 "map_info=%.1f ratio=%.0f "
+                                 "cost=%.4f iters=%d step=%.3f dtheta=%+.2fdeg covtr=%.5f\n",
+                         ++call, pts.size(), L.boxes.size(),
+                         static_cast<double>(hi.x() - lo.x()), static_cast<double>(hi.y() - lo.y()),
+                         static_cast<double>(R.beta), 1.0 / static_cast<double>(R.beta),
+                         wsum_last, wsum_last * static_cast<double>(R.beta),
+                         static_cast<double>(R.cost), R.iterations,
+                         static_cast<double>((x.head<2>() - odom.head<2>()).norm()),
+                         static_cast<double>(wrap_pi(x.z() - odom.z())) * 180.0 / M_PI,
+                         static_cast<double>(R.cov.trace()));
+        }
         return R;
     }
 }   // namespace rc::boxes
