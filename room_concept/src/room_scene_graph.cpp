@@ -1804,7 +1804,19 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
                 const Eigen::Vector2f cp = T_pub_int_ * c;
                 return (c - robot).norm() > path_clear and free_space_->matter_within(cp, path_clear);
             });
-        const auto admissible = [this, &ep, &robot](const Eigen::Vector2f& v)
+        // ...and the same disc is FEASIBLE whatever the outline clearance says. Live 2026-10-10 (campaign run 2, a
+        // cramped start 12-15 cm from furniture): the confirmed-free outline hugged the robot, the clearance dropped
+        // its own cell, nearest_free() handed the walk to an isolated 1-cell scrap and every target read "unreachable"
+        // for 9.5 min. The robot stands there; the floor under its body is not in question.
+        grid.free_if([&](const Eigen::Vector2f& c) { return (c - robot).norm() <= path_clear; });
+        // ★ An AREA, not a cell (2026-10-09): a refused standpoint's neighbours a few cm away are just as
+        //   unreachable; excluding only its own cell made the explorer re-offer the same spot 6 cm over.
+        //   kRefusedRadiusM is a liveness constant (~ the controller's clearance scale), flagged.
+        constexpr float kRefusedRadiusM = 0.75f;
+        const auto refused_now = [this](const Eigen::Vector2f& v)
+        { return std::ranges::any_of(layout_refused_, [&](const auto& r) { return (r.first - v).norm() < kRefusedRadiusM; }); };
+        // where the robot may STAND (permanent rules) — a recent refusal is a separate, temporary question
+        const auto standable = [this, &ep, &robot](const Eigen::Vector2f& v)
         {
             // A standpoint inside the CONTROLLER'S ARRIVAL BAND (goal threshold 0.25 m + the body's circumscribed
             // radius — its definition of "reached") is reached the moment it is offered and moves the robot nowhere:
@@ -1828,14 +1840,11 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             // Not on furniture: no low-obstacle matter within the body's clearance (the ring fills interior holes,
             // so a table island is inside it — 2026-10-09 live: standpoints among the dining chairs, no route).
             if (free_space_ and free_space_->matter_within(T_pub_int_ * v, ep.clearance)) { ++rej_furniture_; return false; }
-            // ★ An AREA, not a cell (2026-10-09): a refused standpoint's neighbours a few cm away are just as
-            //   unreachable; excluding only its own cell made the explorer re-offer the same spot 6 cm over.
-            //   kRefusedRadiusM is a liveness constant (~ the controller's clearance scale), flagged.
-            constexpr float kRefusedRadiusM = 0.75f;
-            const bool ok = std::ranges::none_of(layout_refused_, [&](const auto& r) { return (r.first - v).norm() < kRefusedRadiusM; });
-            if (not ok) ++rej_refused_;
-            return ok;
+            return true;
         };
+        const auto deferred = [this, &refused_now](const Eigen::Vector2f& v)
+        { if (refused_now(v)) { ++rej_refused_; return true; } return false; };
+        const auto admissible = [&standable, &deferred](const Eigen::Vector2f& v) { return standable(v) and not deferred(v); };
         const auto& map = room_concept_->wall_map_localiser_only();
         const auto poly = room_concept_->explorer_polygon_localiser_only();
         rej_ring_ = rej_furniture_ = rej_refused_ = 0;
@@ -1844,10 +1853,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             const float footprint = static_cast<float>(M_PI) * 0.25f
                                   * (params_->ROBOT_WIDTH * params_->ROBOT_WIDTH + params_->ROBOT_LENGTH * params_->ROBOT_LENGTH);
             const auto countable = free_space_->countable_mask(fs_published_, 0.40f);   // the outline snap's reach
-            layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, admissible,
+            layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, standable,
                 [this, &countable](const Eigen::Vector2f& v)
                 { return free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable); },
-                footprint);
+                footprint, deferred);
         }
         else if (startup_promoted_ and free_space_ and not refine_contested_.empty())
         {
@@ -1857,9 +1866,9 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             const auto& R = refiner_.last();
             const float cell2 = free_space_->params().cell * free_space_->params().cell;
             const float min_gain = (R.kappa + std::log(float(std::max<std::size_t>(4, fs_published_.size())))) / std::max(R.w, 1e-3f) * cell2;
-            layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, admissible,
+            layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, standable,
                 [this, &mask](const Eigen::Vector2f& v) { return free_space_->visible_area(T_pub_int_ * v, 8.f, 180, mask); },
-                min_gain);
+                min_gain, deferred);
         }
         else
             layout_last_plan_ = rc::layout::plan(map, poly, grid, robot, ep, admissible);
@@ -1918,6 +1927,11 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
                                              : std::string("none"),
                               layout_last_plan_.gain, layout_last_plan_.score, layout_last_plan_.candidates,
                               layout_last_plan_.with_gain, layout_last_plan_.unknowns, layout_refused_.size());
+            if (layout_last_plan_.why == "unreachable")
+                rc::status::print("[layout] unreachable: robot ({:.2f},{:.2f}) walks from ({:.2f},{:.2f}), its component "
+                                  "holds {} of {} free grid cells\n",
+                                  robot.x(), robot.y(), layout_last_plan_.start.x(), layout_last_plan_.start.y(),
+                                  layout_last_plan_.reach_cells, layout_last_plan_.free_cells);
     }
     if (not layout_target_.has_value())
         return;

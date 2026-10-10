@@ -4221,6 +4221,27 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
     // 5 s = several replans' worth of no route (a liveness constant, flagged).
     if (no_route_since_ms_ != 0 and time_source() - no_route_since_ms_ > 5000)
     {
+        // A MOUSE target has no producer to report to: mark_reached on it is a no-op, so the click outranked
+        // every affordance for ever (2026-10-10 live: a focus-click at (11.46,3.25), outside the grid, parked
+        // the robot for minutes). Drop it instead and let the affordances drive again.
+        if (manual_target_room_.has_value())
+        {
+            std::println("[controller] no route for {:.1f} s to the manual target ({:.2f},{:.2f}) — dropping it",
+                         (time_source() - no_route_since_ms_) / 1000.0,
+                         manual_target_room_->x(), manual_target_room_->y());
+            std::fflush(stdout);
+            manual_target_room_.reset();
+            manual_target_origin_room_.reset();
+            manual_target_dirty_ = false;
+            current_target_room_.reset();
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            last_target_info_.reset();
+            route_dropped_ = true;
+            approach_commit_.reset();
+            no_route_since_ms_ = 0;
+            return;
+        }
         std::println("[controller] no route for {:.1f} s — reporting Unreachable to the producer",
                      (time_source() - no_route_since_ms_) / 1000.0);
         std::fflush(stdout);

@@ -33,6 +33,11 @@
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
 #include "free_space_polygon.h"
 #include <Eigen/Dense>
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/polygon.hpp>
+#include <boost/geometry/geometries/multi_polygon.hpp>
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -306,7 +311,7 @@ private:
         }
     };
 
-    // ── raster edits: polygon ∪/∖ box, re-vectorised exactly (FreeSpacePolygon's tracer) ────────────────────
+    // ── raster: only for the contested masks (which cells are swept-free outside / never-swept inside) ────────────
     struct Raster { float u0, v0; int W, H; std::vector<std::uint8_t> m; };
     Raster rasterize(const std::vector<Eigen::Vector2f>& V, float pad) const
     {
@@ -320,33 +325,64 @@ private:
                 freespace::point_in_polygon(Eigen::Vector2f(r.u0 + (i + 0.5f) * p_.cell, r.v0 + (j + 0.5f) * p_.cell), V) ? 1 : 0;
         return r;
     }
-    void paint(Raster& r, float a0, float b0, float a1, float b1, bool on) const
+    // ── EXACT box edits (2026-10-10). A candidate is the polygon ∪/∖ ONE axis-aligned box, computed on the vector
+    // polygon. It used to go polygon → 5 cm raster → paint → re-trace, which edited the WHOLE ring as a side effect:
+    // every vertex snapped to the grid and any feature thinner than a cell vanished. Live (2026-10-10 20:37) the promoted
+    // layout's fin (a wall stub drawn 2 mm thick) was erased by a "strip" on an unrelated edge, and the MDL term paid
+    // ~4 kappa for the dropped vertices — a deletion nobody proposed and nobody scored. Now an edit changes the room
+    // only inside its own box; removing a fin needs an edit that is about the fin and pays for it in the data.
+    using BPt   = boost::geometry::model::d2::point_xy<double>;
+    using BPoly = boost::geometry::model::polygon<BPt, false>;   // CCW, closed
+    static std::optional<std::vector<Eigen::Vector2f>> box_edit(const std::vector<Eigen::Vector2f>& V, float a0, float b0, float a1, float b1, bool add)
     {
-        const int i0 = std::max(0, static_cast<int>(std::floor((a0 - r.u0) / p_.cell + 0.5f))), i1 = std::min(r.W, static_cast<int>(std::floor((a1 - r.u0) / p_.cell + 0.5f)));
-        const int j0 = std::max(0, static_cast<int>(std::floor((b0 - r.v0) / p_.cell + 0.5f))), j1 = std::min(r.H, static_cast<int>(std::floor((b1 - r.v0) / p_.cell + 0.5f)));
-        for (int j = j0; j < j1; ++j) for (int i = i0; i < i1; ++i) r.m[static_cast<std::size_t>(j) * r.W + i] = on ? 1 : 0;
-    }
-    /// The raster back to a ring (metres, room axes), or empty if it is not one simple hole-free component.
-    std::optional<std::vector<Eigen::Vector2f>> vectorize(const Raster& r) const
-    {
-        auto c = r.m; auto filled = c; freespace::FreeSpacePolygon::fill_holes(filled, r.W, r.H);
-        if (filled != c) return std::nullopt;                       // a hole: not a room polygon
-        if (freespace::FreeSpacePolygon::remove_pinches(c, r.W, r.H) > 0) return std::nullopt;
-        auto ring = freespace::FreeSpacePolygon::trace_outer(c, r.W, r.H);
-        if (ring.size() < 4) return std::nullopt;
-        std::size_t inside_cnt = 0; for (const auto& x : c) inside_cnt += x;
-        // one component: the traced ring's area must equal the painted area
-        for (auto& q : ring) q = Eigen::Vector2f(r.u0 + q.x() * p_.cell, r.v0 + q.y() * p_.cell);
+        namespace bg = boost::geometry;
+        if (not (a1 > a0 and b1 > b0)) return std::nullopt;
+        BPoly P, B;
+        for (const auto& v : V) bg::append(P.outer(), BPt(v.x(), v.y()));
+        bg::append(P.outer(), BPt(V.front().x(), V.front().y()));
+        bg::correct(P);
+        for (const auto& [x, y] : std::array<std::array<float, 2>, 5>{{{a0, b0}, {a1, b0}, {a1, b1}, {a0, b1}, {a0, b0}}})
+            bg::append(B.outer(), BPt(x, y));
+        bg::correct(B);
+        bg::model::multi_polygon<BPoly> out;
+        if (add) bg::union_(P, B, out); else bg::difference(P, B, out);
+        if (out.size() != 1 or not out.front().inners().empty()) return std::nullopt;   // split or holed: not a room
+        std::vector<Eigen::Vector2f> ring;
+        const auto& o = out.front().outer();
+        for (std::size_t k = 0; k + 1 < o.size(); ++k)   // drop the closing point
+        {
+            const Eigen::Vector2f q(static_cast<float>(o[k].x()), static_cast<float>(o[k].y()));
+            if (ring.empty() or (q - ring.back()).squaredNorm() > 0.f) ring.push_back(q);
+        }
+        while (ring.size() > 1 and (ring.front() - ring.back()).squaredNorm() == 0.f) ring.pop_back();
         ring = freespace::FreeSpacePolygon::merge_collinear(ring);
-        if (std::abs(std::abs(freespace::signed_area(ring)) - float(inside_cnt) * p_.cell * p_.cell) > 2 * p_.cell * p_.cell) return std::nullopt;
+        if (ring.size() < 4) return std::nullopt;
         if (freespace::signed_area(ring) < 0.f) std::ranges::reverse(ring);
+        if (not freespace::is_simple(ring)) return std::nullopt;
         return ring;
     }
-    std::optional<std::vector<Eigen::Vector2f>> box_edit(const std::vector<Eigen::Vector2f>& V, float a0, float b0, float a1, float b1, bool add) const
+    /// A contested rectangle comes from the 5 cm mask and stops a cell short of the walls (cells within sigma of an
+    /// edge are excluded by construction). Close that representation gap: a box side within sigma + one cell of a
+    /// parallel edge that overlaps it moves onto that edge, so the box meets the room instead of floating beside it.
+    static std::array<float, 4> snap_box(std::array<float, 4> b, const std::vector<Edge>& E, float reach)
     {
-        auto r = rasterize(V, p_.reach + 2 * p_.cell);
-        paint(r, a0, b0, a1, b1, add);
-        return vectorize(r);
+        auto snap = [&](float& side, bool vertical_side, float lo, float hi)
+        {
+            float best = reach, to = side;
+            for (const auto& e : E)
+                if (e.h != vertical_side and e.hi > lo and e.lo < hi)
+                    if (const float d = std::abs(e.v - side); d < best) { best = d; to = e.v; }
+            side = to;
+        };
+        snap(b[0], true, b[1], b[3]); snap(b[2], true, b[1], b[3]);
+        snap(b[1], false, b[0], b[2]); snap(b[3], false, b[0], b[2]);
+        return b;
+    }
+    /// The box a strip of edge `e` over [a0,a1] moved by dv paints: from the edge's line to dv along its outward normal.
+    static std::array<float, 4> strip_box(const Edge& e, float a0, float a1, float dv)
+    {
+        const float lo = std::min(e.v, e.v + e.sgn * dv), hi = std::max(e.v, e.v + e.sgn * dv);
+        return e.h ? std::array<float, 4>{a0, lo, a1, hi} : std::array<float, 4>{lo, a0, hi, a1};
     }
 
     /// Greedy maximal rectangles of a mask (histogram method), cell units.
@@ -420,12 +456,14 @@ private:
                 if (bc > 0 and std::abs(m1 - m2) >= 0.5f * p_.cell)
                 {
                     const float cp = 0.5f * (own[bc - 1].first + own[bc].first);
-                    auto r = rasterize(V, p_.reach + 2 * p_.cell);
+                    std::optional<std::vector<Eigen::Vector2f>> q = V;
                     for (const auto& [a0, a1, dv] : {std::tuple{e.lo, cp, m1}, std::tuple{cp, e.hi, m2}})
-                    {
-                        if (std::abs(dv) >= 0.25f * p_.cell) paint_strip(r, e, a0, a1, dv);
-                    }
-                    if (auto q = vectorize(r)) out.push_back({{"jog", m, m1 - m2, 0.f}, *q});
+                        if (q and std::abs(dv) >= 0.25f * p_.cell)
+                        {   // both halves are boxes on the ORIGINAL edge line; the second applies to the first's result
+                            const auto b = strip_box(e, a0, a1, dv);
+                            q = box_edit(*q, b[0], b[1], b[2], b[3], dv > 0.f);
+                        }
+                    if (q) out.push_back({{"jog", m, m1 - m2, 0.f}, *q});
                 }
             }
         }
@@ -447,20 +485,17 @@ private:
             for (const auto& [kind, M, add] : {std::tuple{"extend", &ext, true}, std::tuple{"notch", &uns, false}})
                 for (const auto& b : largest_rectangles(*M, r.W, r.H, p_.k_rect))
                 {
-                    auto rr = r; for (int j = b[1]; j < b[3]; ++j) for (int i = b[0]; i < b[2]; ++i) rr.m[static_cast<std::size_t>(j) * r.W + i] = add ? 1 : 0;
-                    if (auto q = vectorize(rr)) out.push_back({{kind, -1, float((b[2] - b[0]) * (b[3] - b[1])), 0.f}, *q});
+                    const auto bx = snap_box({r.u0 + b[0] * p_.cell, r.v0 + b[1] * p_.cell, r.u0 + b[2] * p_.cell, r.v0 + b[3] * p_.cell},
+                                             E, sc.sigma + p_.cell);
+                    if (auto q = box_edit(V, bx[0], bx[1], bx[2], bx[3], add)) out.push_back({{kind, -1, float((b[2] - b[0]) * (b[3] - b[1])), 0.f}, *q});
                 }
         }
         return out;
     }
-    void paint_strip(Raster& r, const Edge& e, float a0, float a1, float dv) const
-    {
-        const float lo = std::min(e.v, e.v + e.sgn * dv), hi = std::max(e.v, e.v + e.sgn * dv);
-        if (e.h) paint(r, a0, lo, a1, hi, dv > 0.f); else paint(r, lo, a0, hi, a1, dv > 0.f);
-    }
     std::optional<std::vector<Eigen::Vector2f>> strip(const std::vector<Eigen::Vector2f>& V, const Edge& e, float a0, float a1, float dv) const
     {
-        auto r = rasterize(V, p_.reach + 2 * p_.cell); paint_strip(r, e, a0, a1, dv); return vectorize(r);
+        const auto b = strip_box(e, a0, a1, dv);
+        return box_edit(V, b[0], b[1], b[2], b[3], dv > 0.f);
     }
 };
 } // namespace rc::refine
