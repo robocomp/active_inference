@@ -25,7 +25,7 @@
 #include "image360_frame.hpp"
 
 constexpr uint32_t rc_media_Image360Frame_max_cdr_typesize {5529640UL};
-constexpr uint32_t rc_media_Image360Frame_max_key_cdr_typesize {4UL};
+constexpr uint32_t rc_media_Image360Frame_max_key_cdr_typesize {0UL};
 
 
 namespace eprosima {

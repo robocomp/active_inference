@@ -28,6 +28,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,8 +41,9 @@
 #include "room_concept.h"           // rc::RoomConcept (notify_new_lidar)
 #include "room_config.h"            // rc::RoomConfig (shared config)
 
+#include "../../common/media_transport/lidar_plane_reader.h"   // rc::media::LidarSweep (the shared bpearl cache)
+
 namespace DSR { class InnerEigenAPI; }
-namespace rc::media { class LidarPlaneReader; }
 
 namespace rc
 {
@@ -140,12 +142,24 @@ private:
 
     // ── r2 mount factors (ingest thread only, except the snapshot) ──
     /// Throttled (BpearlMountRate): helios verticals from the FULL helios sweep, then the bpearl (permanent
-    /// reader, geom_bpearl_reader_ kept alive) for the floor and its verticals.
+    /// reader, bpearl_reader_ shared) for the floor and its verticals.
     void mount_factor_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
     /// 2 Hz: low returns (floor < z < robot top) of the full helios sweep and the bpearl -> RoomConcept mailbox.
     void low_obstacle_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
     std::int64_t low_obs_ms_ = 0, last_bp_low_stamp_ = std::numeric_limits<std::int64_t>::min();
-    std::unique_ptr<rc::media::LidarPlaneReader> low_bpearl_reader_;
+    // ── ONE bpearl reader, shared by its three consumers (2026-10-10) ──
+    // The startup floor check, the r2 mount factors and the low-obstacle mailbox each used to own a
+    // LidarPlaneReader on "bpearl" — two live DDS subscribers on the same stream, every sweep transferred
+    // twice. poll() returns nullopt when nothing is NEW, so a second consumer polling the same reader would
+    // starve; the newest sweep is therefore CACHED here and each consumer de-duplicates by its own stamp.
+    // Ingest thread only (all three consumers run there), so no lock. Consumers that modify points (the
+    // sim-only planted mount error) do so on their OWN copy, never on the cache.
+    std::unique_ptr<rc::media::LidarPlaneReader> bpearl_reader_;
+    std::optional<rc::media::LidarSweep>         bpearl_latest_;
+    /// Poll the shared reader (creating it lazily) and return the newest bpearl sweep ever seen, or
+    /// nullptr if none yet. Callers compare stamp_ms against their own last-consumed stamp.
+    const rc::media::LidarSweep* bpearl_newest();
+    std::int64_t last_bp_geom_stamp_ = std::numeric_limits<std::int64_t>::min();
     /// The localiser's wall map in the BODY frame at the pose carried to `stamp_ms`; false if none yet.
     /// gap_s / speed / heading (optional): the stamp gap sweep - snapshot, the snapshot's speed and heading
     bool walls_at(std::int64_t stamp_ms, std::vector<rc::mountf::VerticalMount::Wall>& walls,
@@ -211,7 +225,6 @@ private:
     // datum. Comes up later than helios → warm-up counter; separate reader dropped after the check.
     int   geom_bpearl_sweeps_ = 0;
     std::vector<int> geom_hist_bpearl_;
-    std::unique_ptr<rc::media::LidarPlaneReader> geom_bpearl_reader_;
 
     // Dedicated ingest thread (started at Operating-enter, joined in stop()/dtor).
     std::thread             thread_;

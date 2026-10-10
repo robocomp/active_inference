@@ -25,7 +25,7 @@
 #include "lidar_frame.hpp"
 
 constexpr uint32_t rc_media_LidarFrame_max_cdr_typesize {1572896UL};
-constexpr uint32_t rc_media_LidarFrame_max_key_cdr_typesize {4UL};
+constexpr uint32_t rc_media_LidarFrame_max_key_cdr_typesize {0UL};
 
 
 namespace eprosima {

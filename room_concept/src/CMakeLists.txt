@@ -112,6 +112,7 @@ LIST(APPEND SOURCES
   ../src/object_anchor_factor.cpp
   ../src/object_anchor_source.cpp
   ../src/camera_ingestor.cpp
+  ../src/camera_stream_hub.cpp
   ../src/image_edge_source.cpp
   ../src/image_edge_factor.cpp
   ../src/rerun_logger.cpp

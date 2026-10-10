@@ -24,8 +24,8 @@
 
 #include "imu_frame.hpp"
 
-constexpr uint32_t rc_media_ImuFrame_max_cdr_typesize {84UL};
-constexpr uint32_t rc_media_ImuFrame_max_key_cdr_typesize {4UL};
+constexpr uint32_t rc_media_ImuFrame_max_cdr_typesize {88UL};
+constexpr uint32_t rc_media_ImuFrame_max_key_cdr_typesize {0UL};
 
 
 namespace eprosima {

@@ -35,9 +35,7 @@ namespace DSR {
 }
 using DSRGraph = DSR::DSRGraph;
 
-namespace rc::media { class MediaSubscriber; class Image360Subscriber; }  // media-plane RGB consumers,
-                                                                        // forward-declared to keep fastdds
-                                                                        // out of this MOC header
+#include "camera_stream_hub.h"   // rc::CameraStreamHub — the ONE shared reader per camera (no fastdds)
 
 namespace rc {
 
@@ -67,15 +65,13 @@ class CameraVisualizer : public QDialog
         /// RGB triple points (floor/ceiling wall-wall corners) for the overlay, from the image-edge
         /// path. Drawn only when this visualiser's camera IS the one that produced them.
         void set_triple_points(std::vector<rc::TriplePoint> pts, const std::string& from_camera);
-        ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
+        ~CameraVisualizer();  // detaches from the hub (a barrier against in-flight callbacks)
 
-        // Start the dedicated media-plane ingest thread. The RGB subscriber itself is
-        // created lazily on that thread (shared descriptor-driven factory) once the "zed"
-        // node + media descriptor exist (domain/topic from that JSON — no config), and the
-        // thread then continuously drains DDS into a mutex-protected frame cache. Keeping the
-        // subscriber lifecycle + take() OFF the GUI thread both decouples camera latency from
-        // repaint and (with the media_transport entity mutex) makes concurrent bring-up
-        // alongside the LiDAR ingest thread safe. Call once after construction.
+        // Enable the media plane for this window. Frames come from the process-wide
+        // CameraStreamHub for the node (ONE subscriber shared with CameraIngestor, created lazily
+        // on the hub's thread from the node's descriptor). The window attaches while SHOWN and
+        // detaches when hidden, so a viewer-only stream is subscribed only while visible.
+        // Call once after construction.
         void start_media_plane();
 
         // Hand the latest matched corners (localizer thread → GUI) for the RGB uncertainty overlay.
@@ -136,18 +132,20 @@ class CameraVisualizer : public QDialog
         [[nodiscard]] std::string room_frame_name() const
         { return graph_ ? rc::room::current_room_frame(*graph_) : std::string{}; }
 
-        // ── Media-plane RGB consumer (dedicated ingest thread) ────────────────
-        // media_rgb_sub_ is owned EXCLUSIVELY by the ingest thread (created in
-        // try_discover_media_plane, polled in ingest_pump, destroyed after the thread joins).
-        // The GUI thread never touches the subscriber — it only reads the latest decoded frame
-        // from media_rgb_ under media_rgb_mtx_, gated by the subscriber_ready_ flag.
-        std::unique_ptr<rc::media::MediaSubscriber>    media_rgb_sub_;
-        std::unique_ptr<rc::media::Image360Subscriber> media_rgb360_sub_;   ///< the ricoh's stream
+        // ── Media-plane RGB consumer: the shared per-node CameraStreamHub ─────────
+        // No subscriber and no thread of its own (2026-10-10): the hub owns the ONE reader per
+        // camera (shared with CameraIngestor) and calls on_frame() on ITS thread; on_frame deep-
+        // copies into media_rgb_ under media_rgb_mtx_. Attached only while the window is shown.
+        std::shared_ptr<CameraStreamHub> hub_;   // GUI thread only
+        int                              hub_id_ = -1;
+        bool                             media_enabled_ = false;   // set by start_media_plane()
+        void attach_stream();                    // showEvent / start_media_plane (GUI thread)
+        void detach_stream();                    // hideEvent / destructor (GUI thread); a barrier
+        void on_frame(const CameraFrameView& f); // HUB THREAD: deep-copy into media_rgb_
         std::mutex                     triple_mtx_;
         std::vector<rc::TriplePoint>   triple_points_;
         std::string                    triple_from_;
         Eigen::Affine2f                corner_pose_ = Eigen::Affine2f::Identity();
-        bool                           discovery_reason_logged_ = false;
         struct MediaRgbCache
         {
             std::vector<std::uint8_t> bytes;
@@ -157,24 +155,9 @@ class CameraVisualizer : public QDialog
             std::uint64_t stamp = 0;
             bool valid = false;
         };
-        MediaRgbCache media_rgb_;                 // written by ingest thread, read by GUI — under media_rgb_mtx_
+        MediaRgbCache media_rgb_;                 // written by the hub thread, read by GUI — under media_rgb_mtx_
         std::mutex media_rgb_mtx_;
         std::vector<std::uint8_t> render_bytes_;  // GUI-thread scratch: a copy of the latest frame's bytes
-
-        // Ingest thread machinery (mirrors rc::LidarIngestor).
-        std::thread ingest_thread_;
-        std::atomic<bool> ingest_running_{false};
-        std::atomic<bool> subscriber_ready_{false};   // set once the RGB subscriber is live
-        std::mutex ingest_wake_mtx_;
-        std::condition_variable ingest_wake_cv_;
-        void ingest_loop();   // thread body: discover → drain → brief idle wait
-        bool ingest_pump();   // one discovery/drain step; true if a frame was taken
-        void stop_ingest();   // signal + join the ingest thread (idempotent)
-
-        // Lazily create the RGB subscriber from the "zed" media descriptor (self-throttled).
-        // Runs on the ingest thread only.
-        bool try_discover_media_plane();
-        std::chrono::steady_clock::time_point last_media_discovery_attempt_{};
 
         struct TimingStats
         {

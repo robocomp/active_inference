@@ -179,13 +179,23 @@ void serialize_key(
 
     static_cast<void>(scdr);
     static_cast<void>(data);
+                        scdr << data.frame_id();
+
+                        scdr << data.stamp_ms();
+
                         scdr << data.stream_id();
 
+                        scdr << data.width();
 
+                        scdr << data.height();
 
+                        scdr << data.step();
 
+                        scdr << data.format();
 
+                        scdr << data.size();
 
+                        scdr << data.data();
 
 }
 

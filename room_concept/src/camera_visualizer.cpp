@@ -186,8 +186,7 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
 
 CameraVisualizer::~CameraVisualizer()
 {
-    stop_ingest();          // join the ingest thread BEFORE the subscriber it owns is destroyed
-    media_rgb_sub_.reset();
+    detach_stream();        // barrier: no on_frame() in flight once this returns
 }
 
 void CameraVisualizer::set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches,
@@ -207,171 +206,70 @@ void CameraVisualizer::set_triple_points(std::vector<rc::TriplePoint> pts, const
 
 void CameraVisualizer::start_media_plane()
 {
-    // Spin up the always-on ingest thread. With a RELIABLE reader, samples that are never
-    // take()'d stay pinned in the producer's preallocated SHM pool; once it fills, the
-    // producer's loan_sample() fails and it silently stops publishing, freezing every other
-    // consumer (e.g. the retina). The thread drains continuously regardless of dialog
-    // visibility (rendering is still gated by isVisible() in update_frame()). It also owns
-    // the lazy subscriber discovery, so DDS entity bring-up happens off the GUI thread —
-    // serialized against the LiDAR ingest thread by media_transport's entity mutex.
-    if (ingest_running_.exchange(true))
-        return;   // idempotent: already started
-    ingest_thread_ = std::thread([this]
-    {
-        pthread_setname_np(pthread_self(), "camview-ingest");
-        ingest_loop();
-    });
+    // ★ 2026-10-10: NO subscriber and NO thread of its own any more. The pixels come from the
+    //   process-wide CameraStreamHub for this node — the SAME reader CameraIngestor (image-edge /
+    //   calibration channels) uses — so each frame is transferred once, not once per consumer.
+    //   And this window attaches ONLY WHILE SHOWN: a hidden window costs nothing, and a stream no
+    //   other consumer wants (the zed, unless it is a calibration camera) is then not subscribed at
+    //   all. This call just enables the attach; showEvent/hideEvent do the rest.
+    media_enabled_ = true;
+    if (isVisible()) attach_stream();
 }
 
-void CameraVisualizer::stop_ingest()
+void CameraVisualizer::attach_stream()
 {
-    if (!ingest_running_.exchange(false))
-        return;   // not running
-    ingest_wake_cv_.notify_all();
-    if (ingest_thread_.joinable())
-        ingest_thread_.join();
+    if (hub_ or not media_enabled_ or not graph_) return;
+    hub_ = CameraStreamHub::acquire(graph_, camera_node_name_);
+    if (not hub_) return;
+    hub_id_ = hub_->add_consumer("viewer", [this](const CameraFrameView& f) { on_frame(f); });
 }
 
-void CameraVisualizer::ingest_loop()
+void CameraVisualizer::detach_stream()
 {
-    // Tight drain loop on a dedicated thread (mirrors rc::LidarIngestor::ingest_loop): react
-    // to a fresh RGB frame with ~0-2 ms latency and keep the RELIABLE reader's SHM pool empty.
-    while (ingest_running_.load(std::memory_order_acquire))
-    {
-        if (ingest_pump())
-            continue;   // drained a frame — try again immediately in case more are queued
-        // Idle (no subscriber yet, or no fresh frame): brief wait, woken instantly by stop_ingest().
-        std::unique_lock<std::mutex> lk(ingest_wake_mtx_);
-        ingest_wake_cv_.wait_for(lk, std::chrono::milliseconds(5),
-                                 [this] { return !ingest_running_.load(std::memory_order_acquire); });
-    }
+    if (not hub_) return;
+    hub_->remove_consumer(hub_id_);   // blocks until any in-flight on_frame() has returned
+    hub_id_ = -1;
+    hub_.reset();                     // last holder => the hub closes the reader (zed when viewer-only)
+    std::lock_guard<std::mutex> lk(media_rgb_mtx_);
+    media_rgb_.valid = false;         // a re-shown window must not draw a frame from before it hid
 }
 
-bool CameraVisualizer::try_discover_media_plane()
+void CameraVisualizer::on_frame(const CameraFrameView& f)
 {
-    // ★ BOTH subscribers. Checking only media_rgb_sub_ meant the ricoh path never saw itself as
-    //   discovered and rebuilt its 360 reader once a second for ever, which is not a slow start —
-    //   a reader recreated before it delivers never delivers.
-    if (media_rgb_sub_ || media_rgb360_sub_ || !graph_)
-        return false;
-
-    // Self-throttle discovery attempts (ingest thread, ~200 Hz idle poll).
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_media_discovery_attempt_ < std::chrono::seconds(1))
-        return false;
-    last_media_discovery_attempt_ = now;
-
-    // Shared descriptor-driven factory (same init code as every other agent): verifies
-    // the "zed" node + descriptor exist and reads the DDS domain/topic from the JSON.
-    // ★ THE STREAM KEY COMES FROM THE NODE'S OWN DESCRIPTOR, not from an assumption. The zed
-    //   advertises "rgb" and the ricoh advertises "rgb360", and those two keys carry DIFFERENT DDS
-    //   types — ImageFrame against the ~5.5 MB Image360Frame — so asking for the wrong one does not
-    //   merely return nothing, it asks the wrong reader for the wrong thing.
-    const auto desc = rc::media::descriptor_from_graph(*graph_, camera_node_name_);
-    if (not desc.has_value())
+    // HUB THREAD, inside the loan: the view dies on return, so the pixels are DEEP-COPIED into this
+    // window's own cache under its lock (the GUI thread copies again out of it before drawing).
+    // No throttle here, as before: the window renders at its own timer rate from the newest copy.
+    const int w = f.width, h = f.height;
+    if (w <= 0 or h <= 0 or f.data == nullptr) return;
+    const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    std::size_t expected = 0;
+    std::uint32_t format = 0;
+    if (f.is360)
     {
-        // Not an error: the producer may simply not have advertised yet. Said ONCE, because a
-        // window that reports "not initialized" with no reason leaves the reader guessing between
-        // a missing node, a missing stream and a failed reader — three different problems.
-        if (not discovery_reason_logged_)
-        {
-            discovery_reason_logged_ = true;
-            qWarning() << "[camviz]" << QString::fromStdString(camera_node_name_)
-                       << "has no media descriptor yet — retrying every second";
-        }
-        return false;
+        // Displayed as RGB8, exactly as the dedicated 360 reader here always did.
+        expected = npix * 3;
+        format   = rc::media::FORMAT_RGB8;
     }
-    if (desc->streams.contains("rgb360"))
-        media_rgb360_sub_ = rc::media::make_image360_subscriber_from_graph(*graph_, camera_node_name_,
-                                                                          "rgb360");
-    else if (desc->streams.contains("rgb"))
-        media_rgb_sub_ = rc::media::make_image_subscriber_from_graph(*graph_, camera_node_name_, "rgb");
-    else if (not discovery_reason_logged_)
+    else
     {
-        discovery_reason_logged_ = true;
-        std::string keys;
-        for (const auto& [k, v] : desc->streams) { if (not keys.empty()) keys += ", "; keys += k; }
-        qWarning() << "[camviz]" << QString::fromStdString(camera_node_name_)
-                   << "advertises no stream this window can read (has:"
-                   << QString::fromStdString(keys) << ")";
-    }
-    const bool up = (media_rgb_sub_ != nullptr or media_rgb360_sub_ != nullptr);
-    if (up)
-    {
-        subscriber_ready_.store(true, std::memory_order_release);
-        qInfo() << "[camviz]" << QString::fromStdString(camera_node_name_) << "subscriber up on"
-                << (media_rgb360_sub_ ? "rgb360" : "rgb");
-    }
-    else if (not discovery_reason_logged_)
-    {
-        discovery_reason_logged_ = true;
-        qWarning() << "[camviz]" << QString::fromStdString(camera_node_name_)
-                   << "descriptor found and the stream is advertised, but the reader could not be"
-                      " created — check the media plane domain and MAX_IMAGE_BYTES";
-    }
-    return up;
-}
-
-bool CameraVisualizer::ingest_pump()
-{
-    if (!media_rgb_sub_ && !media_rgb360_sub_)
-    {
-        try_discover_media_plane();   // lazy: up once the node's descriptor exists
-        return false;
-    }
-
-    if (media_rgb360_sub_)
-    {
-        // The 360 frame is RGB8 by construction (Image360Frame carries no format field), so it is
-        // NOT checked against rc::media::FORMAT_* — doing so would compile and be wrong.
-        const int got = media_rgb360_sub_->poll([this](const rc::media::Image360Frame& f, std::int64_t)
-        {
-            const int w = static_cast<int>(f.width()), h = static_cast<int>(f.height());
-            if (w <= 0 || h <= 0) return;
-            const std::size_t need = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3;
-            if (f.data().size() < need) return;
-            std::lock_guard<std::mutex> lk(media_rgb_mtx_);
-            media_rgb_.bytes.resize(need);
-            std::memcpy(media_rgb_.bytes.data(), f.data().data(), need);
-            media_rgb_.width  = w;
-            media_rgb_.height = h;
-            media_rgb_.format = rc::media::FORMAT_RGB8;
-            media_rgb_.stamp  = f.stamp_ms();
-            media_rgb_.valid  = true;
-        });
-        return got > 0;
-    }
-
-    const int delivered = media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
-    {
-        const int w = static_cast<int>(f.width());
-        const int h = static_cast<int>(f.height());
-        if (w <= 0 || h <= 0)
-            return;
-
-        const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-        std::size_t expected = 0;
-        switch (f.format())
+        switch (f.format)
         {
             case rc::media::FORMAT_BGR8:
             case rc::media::FORMAT_RGB8:  expected = npix * 3; break;
             case rc::media::FORMAT_GRAY8: expected = npix;     break;
             default: return;  // depth / unknown formats are not consumed here
         }
-        if (f.size() < expected)
-            return;
-
-        // Publish the newest frame to the GUI thread under the cache lock.
-        std::lock_guard<std::mutex> lk(media_rgb_mtx_);
-        media_rgb_.bytes.resize(expected);
-        std::memcpy(media_rgb_.bytes.data(), f.data().data(), expected);
-        media_rgb_.width  = w;
-        media_rgb_.height = h;
-        media_rgb_.format = f.format();
-        media_rgb_.stamp  = f.stamp_ms();
-        media_rgb_.valid  = true;
-    });
-    return delivered > 0;
+        format = f.format;
+    }
+    if (f.size < expected) return;
+    std::lock_guard<std::mutex> lk(media_rgb_mtx_);
+    media_rgb_.bytes.resize(expected);
+    std::memcpy(media_rgb_.bytes.data(), f.data, expected);
+    media_rgb_.width  = w;
+    media_rgb_.height = h;
+    media_rgb_.format = format;
+    media_rgb_.stamp  = static_cast<std::uint64_t>(f.stamp_ms);
+    media_rgb_.valid  = true;
 }
 
 void CameraVisualizer::showEvent(QShowEvent* event)
@@ -385,11 +283,13 @@ void CameraVisualizer::showEvent(QShowEvent* event)
     reset_timing_window();
     if (refresh_timer_ != nullptr && !refresh_timer_->isActive())
         refresh_timer_->start(50);  // target 20 Hz to guarantee >=10 Hz in practice
+    attach_stream();   // subscribe (via the shared hub) only while this window is shown
     update_frame();
 }
 
 void CameraVisualizer::hideEvent(QHideEvent* event)
 {
+    detach_stream();   // the hub closes the reader if this window was its only consumer
     log_timing_summary("hide");
     if (refresh_timer_ != nullptr)
         refresh_timer_->stop();
@@ -469,16 +369,16 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
         fetch_camera_intrinsics();
 
     // Pixels come from the zero-copy media plane (replaces camera_api_->get_rgb_image()). The
-    // ingest thread owns the subscriber and drains DDS; here we only snapshot the newest decoded
-    // frame it published. subscriber_ready_ becomes true once that subscriber is live.
-    if (!subscriber_ready_.load(std::memory_order_acquire))
+    // shared CameraStreamHub owns the subscriber and drains DDS; here we only snapshot the newest decoded
+    // frame it published. The hub reports whether its (shared) subscriber is live.
+    if (not hub_ or not hub_->subscribed())
     {
         image_label_->setText("Media plane RGB subscriber not initialized");
         return false;
     }
 
     // Copy the latest frame out under the cache lock, then release it before the (heavier)
-    // QImage deep-copy + overlay drawing so the ingest thread is never blocked on rendering.
+    // QImage deep-copy + overlay drawing so the hub thread is never blocked on rendering.
     int width = 0, height = 0;
     std::uint32_t format = 0;
     {

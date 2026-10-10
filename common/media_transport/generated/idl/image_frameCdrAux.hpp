@@ -25,7 +25,7 @@
 #include "image_frame.hpp"
 
 constexpr uint32_t rc_media_ImageFrame_max_cdr_typesize {3686440UL};
-constexpr uint32_t rc_media_ImageFrame_max_key_cdr_typesize {4UL};
+constexpr uint32_t rc_media_ImageFrame_max_key_cdr_typesize {0UL};
 
 
 namespace eprosima {

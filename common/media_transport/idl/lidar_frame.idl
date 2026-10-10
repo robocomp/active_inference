@@ -23,7 +23,7 @@ module rc { module media {
         // 64-bit members FIRST (see ImageFrame) to keep is_plain()==true.
         unsigned long long frame_id;     // monotonic, set by producer
         unsigned long long stamp_ms;     // capture timestamp, epoch milliseconds
-        @key unsigned long stream_id;    // one DDS instance for the LiDAR stream
+        unsigned long stream_id;    // one DDS instance for the LiDAR stream  // NOT @key (2026-10-10): FastDDS AUTO data-sharing silently turns OFF for keyed types — every frame was serialised + fragmented
         unsigned long      count;        // number of valid points in points[]
         unsigned long      format;       // LIDAR_FORMAT_* code
         unsigned long      stride;       // floats per point (3 for xyz)
