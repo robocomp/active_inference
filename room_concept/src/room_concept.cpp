@@ -2751,6 +2751,50 @@ namespace rc
                        << "raise RoomShape.WallMapSigmaD (the corner detector's map_sigma lesson).";
     }
 
+    void RoomConcept::record_slam_shadow(const UpdateResult& r)
+    {
+        // ── SHADOW (2026-10-10): plain SLAM (own map, own pose) vs the pose the SDF localiser published this frame.
+        // Called on BOTH paths — the early exit ends most localizing frames, and placing this only after the full
+        // solve recorded almost nothing (the first live run's log was empty). Flushed about once a second.
+        if (not map_layout_adopted_) return;
+        const Eigen::Vector3f sp = plain_slam_.pose();
+        const Eigen::Vector2f t = r.robot_pose.translation();
+        const float th = std::atan2(r.robot_pose.linear()(1, 0), r.robot_pose.linear()(0, 0));
+        const float dpos = std::hypot(sp.x() - t.x(), sp.y() - t.y());
+        const float dth  = std::remainder(sp.z() - th, 2.f * static_cast<float>(M_PI));
+        slam_disagree_.store(dpos, std::memory_order_relaxed);
+        if (not shadow_csv_.is_open())
+        {
+            shadow_csv_.open("tmp/slam_shadow.csv", std::ios::out | std::ios::trunc);
+            shadow_csv_.imbue(std::locale::classic());
+            shadow_csv_ << "ts_ms,sdf_x,sdf_y,sdf_th,slam_x,slam_y,slam_th,d_pos_m,d_th_rad,early_exit\n";
+        }
+        shadow_csv_ << r.timestamp_ms << ',' << t.x() << ',' << t.y() << ',' << th << ',' << sp.x() << ',' << sp.y()
+                    << ',' << sp.z() << ',' << dpos << ',' << dth << ',' << (r.iterations_used <= 0 ? 1 : 0) << '\n';
+        if (r.timestamp_ms - shadow_flush_ms_ >= 1000) { shadow_csv_.flush(); shadow_flush_ms_ = r.timestamp_ms; }
+    }
+
+    void RoomConcept::adopt_map_layout_as_given()
+    {
+        std::vector<Eigen::Vector2f> L;
+        {
+            std::scoped_lock lk(wall_map_mutex_);
+            L = map_layout_;
+            if (L.size() >= 3) derived_polygon_ = L;
+        }
+        if (L.size() < 3) return;
+        map_layout_adopted_ = true;
+        map_ready_ = true;
+        wall_frozen_ = true;                              // layout_state() == Localizing from the next frame
+        init_polygon_vertices_ = L;                       // the corner channel's model (a GIVEN layout)
+        corner_detector_.set_model_corners(init_polygon_vertices_);
+        if (model_ != nullptr and model_->has_state())
+            model_->update_polygon_vertices(L);           // the SDF the localiser solves against
+        qInfo().noquote() << QString("[room][startup-proto] ESTIMATING -> LOCALIZING: the map layout (%1 vertices) is now "
+                                     "the GIVEN room; the pose is solved against its SDF from here on (plain SLAM stops).")
+                                 .arg(L.size());
+    }
+
     void RoomConcept::wall_slam_after_solve(UpdateResult& res)
     {
         // Both of the map's global repair paths are off while frozen: a merge changes the wall set
@@ -2917,8 +2961,8 @@ namespace rc
                     }
                 }
             }
-            if (model_ != nullptr and model_->has_state())
-                model_->update_polygon_vertices(poly.verts);   // in-loop consumer: RAW on purpose
+            if (model_ != nullptr and model_->has_state() and not map_layout_adopted_)
+                model_->update_polygon_vertices(poly.verts);   // in-loop consumer: RAW on purpose (an ADOPTED map layout stays)
             std::scoped_lock lk(wall_map_mutex_);
             // Publish the projected polygon only. Falling back to the raw one would alternate
             // vertex counts and a 1-2° tilt frame to frame, which the scene graph reports as a
@@ -3090,6 +3134,24 @@ namespace rc
             }
             layout_csv_ << ';' << (poly.closed ? 1 : 0) << ',' << (poly.publishable ? 1 : 0) << '\n';
             if ((layout_trace_tick_ % 20u) == 0) layout_csv_.flush();
+        }
+        // ── THE MAP LAYOUT REPLACES THE WALL MAP'S POLYGON WHILE PLAIN SLAM DRIVES (2026-10-09) ────────────────
+        // Live, the wall estimator froze at its first-frame seed or merged rooms on this apartment, while the layout
+        // read off the SLAM map scored IoU 0.95 vs ground truth. derived_polygon_ feeds nominal_room_polygon() ->
+        // the scene graph's published polygon, promotion and the wall nodes; wall_view.polygon feeds the viewer.
+        if (plain_slam_driving() or map_layout_adopted_)
+        {
+            std::scoped_lock lk(wall_map_mutex_);
+            if (map_layout_.size() >= 3)
+            {
+                derived_polygon_ = map_layout_;
+                wallmap::Polygon P;
+                P.verts = map_layout_;
+                P.closed = true;
+                P.publishable = true;
+                res.wall_view.polygon = std::move(P);
+                res.wall_view.map_ready = true;   // the viewer draws the clean room outline only when this is set
+            }
         }
     }
 
@@ -3660,7 +3722,7 @@ namespace rc
             // The scan is registered against the occupancy map of the scans already registered, from the odometry
             // prediction; the result REPLACES the newest slot's pose, and the solve below is skipped. The wall map
             // then observes at a pose it did not produce — it can no longer drag the pose it is built from.
-            if (plain_slam_driving())
+            if (plain_slam_driving() or map_layout_adopted_)   // after the switch: SHADOW only (pose untouched)
             {
                 if (plain_slam_seed_)
                 {
@@ -3671,9 +3733,13 @@ namespace rc
                 std::vector<Eigen::Vector2f> xy;
                 xy.reserve(sampled_points.size());
                 for (const auto& q : sampled_points) xy.emplace_back(q.x(), q.y());
-                wall_pose = plain_slam_.step(rec_odom_delta_, xy);
-                window_mgr_.newest().pose = torch::tensor({wall_pose.x(), wall_pose.y(), wall_pose.z()},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+                const Eigen::Vector3f slam_pose = plain_slam_.step(rec_odom_delta_, xy);
+                if (plain_slam_driving())
+                {
+                    wall_pose = slam_pose;
+                    window_mgr_.newest().pose = torch::tensor({wall_pose.x(), wall_pose.y(), wall_pose.z()},
+                        torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
+                }
             }
             wall_slam_observe(sampled_points, wall_pose, lidar.second);
         }
@@ -3916,6 +3982,7 @@ namespace rc
             if (params.image_edge.enable and params.image_edge_shadow)
                 run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second,
                                       /*probe_pose=*/false);
+            record_slam_shadow(*early);   // most LOCALIZING frames end here
             return *early;
         }
 
@@ -3946,7 +4013,9 @@ namespace rc
 
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [last_loss, iterations] =
-                  plain_slam_driving() ? std::pair<float, int>{0.f, 0}       // the pose is plain SLAM's (above)
+                  plain_slam_driving() ? std::pair<float, int>{plain_slam_.last_median_residual(),
+                                                               std::max(1, plain_slam_.last_iterations())}   // the pose is plain SLAM's (above); NOT an early exit
+
                 : (params.optimizer_type == "GN" or estimating()) ? run_gn_loop(selected_prior)
                 : (params.optimizer_type == "LBFGS") ? run_lbfgs_loop(selected_prior)
                                                      : run_adam_loop(selected_prior);
@@ -4186,6 +4255,7 @@ namespace rc
             pose.translation() = Eigen::Vector2f{x, y};
             pose.linear() = Eigen::Rotation2Df(phi).toRotationMatrix();
             res.robot_pose = pose;
+            record_slam_shadow(res);   // SHADOW: plain SLAM vs the SDF localiser (also on the early-exit path)
 
             if (model_->has_prediction)
             {
@@ -4399,6 +4469,10 @@ namespace rc
         // early-exit gate never evaluated it this frame — e.g. warmup / no odometry).
         res.early_exit_metric = last_early_exit_metric_;
         res.pred_sdf_median   = last_pred_sdf_median_;
+        // While plain SLAM owns the pose, the "pred (SDF)" readout measured the prediction against the OLD SDF room
+        // model, which does not follow the map layout — a large number about nothing. Show the SLAM's own fit instead:
+        // the median distance of this scan's returns to the mapped surface at the solved pose.
+        if (plain_slam_driving()) res.pred_sdf_median = plain_slam_.last_median_residual();
         res.pred_x = last_pred_pos_.x();
         res.slot_appended = params.window_stride_enabled and not rec_stride_replace_;
         res.pred_y = last_pred_pos_.y();

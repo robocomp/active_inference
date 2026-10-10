@@ -74,6 +74,9 @@ struct Mission
     std::string name;
     std::vector<MissionWaypoint> waypoints;
     int loops = 1;
+    /// The ROOM OUTLINE (delimiting_polygon) the waypoints were recorded in — their frame. Empty = legacy mission
+    /// (recorded before 2026-10-10): run as-is. See mission_frame.h.
+    std::vector<Eigen::Vector2f> frame_polygon;
 };
 
 // CONTINUOUS CHARACTERISATION OF ONE TRAJECTORY.
@@ -281,6 +284,11 @@ public:
     bool select(const std::string &name);
     const std::string &selected_name() const { return selected_; }
     const Mission *selected_mission() const;
+    /// The mission being RUN — the selected one moved into the current room's frame at start(). Null when idle.
+    const Mission *running_mission() const { return state_ == State::Running ? &active_ : nullptr; }
+    /// The current room's delimiting polygon (room frame), fed by the session: a new recording stores it as the
+    /// mission's frame, and start() registers a stored frame against it.
+    void set_room_polygon(const std::vector<Eigen::Vector2f> &p) { room_polygon_ = p; }
     bool remove(const std::string &name);
 
     // Smooth the SELECTED mission's waypoints in place, keeping every one feasible.
@@ -427,6 +435,7 @@ private:
     Mission *selected_writable();
 
     std::vector<Mission> library_;
+    std::vector<Eigen::Vector2f> room_polygon_;   // set_room_polygon
     std::string selected_;
     std::string csv_path_ = "mission_metrics.csv";
     std::string run_dir_ = "etc/runs";

@@ -26,6 +26,7 @@
  */
 
 #include "controller_mission.h"
+#include "mission_frame.h"
 
 #include <algorithm>
 #include <charconv>
@@ -221,7 +222,7 @@ bool MissionRunner::load(const std::string &path)
 
     std::vector<Mission> loaded;
     Mission cur;
-    std::vector<float> xs, ys, yaws;
+    std::vector<float> xs, ys, yaws, fxs, fys;
 
     const auto flush = [&]()
     {
@@ -235,9 +236,11 @@ bool MissionRunner::load(const std::string &path)
             if (i < yaws.size() and std::isfinite(yaws[i])) w.yaw_rad = yaws[i];
             cur.waypoints.push_back(w);
         }
+        cur.frame_polygon.clear();
+        for (std::size_t i = 0; i < std::min(fxs.size(), fys.size()); ++i) cur.frame_polygon.emplace_back(fxs[i], fys[i]);
         if (cur.waypoints.size() >= 2) loaded.push_back(cur);
         cur = Mission{};
-        xs.clear(); ys.clear(); yaws.clear();
+        xs.clear(); ys.clear(); yaws.clear(); fxs.clear(); fys.clear();
     };
 
     std::string line;
@@ -255,6 +258,8 @@ bool MissionRunner::load(const std::string &path)
         else if (key == "x")     xs = parse_array(value);
         else if (key == "y")     ys = parse_array(value);
         else if (key == "yaw")   yaws = parse_array(value);
+        else if (key == "frame_x") fxs = parse_array(value);
+        else if (key == "frame_y") fys = parse_array(value);
     }
     flush();
 
@@ -306,6 +311,18 @@ bool MissionRunner::save(const std::string &path) const
         emit("x", [&](const MissionWaypoint &w) { out << w.pos.x(); });
         emit("y", [&](const MissionWaypoint &w) { out << w.pos.y(); });
         emit("yaw", [&](const MissionWaypoint &w) { if (w.yaw_rad) out << *w.yaw_rad; else out << "nan"; });
+        if (not m.frame_polygon.empty())
+        {
+            out << "# recording frame: the room outline these waypoints were recorded in (mission_frame.h)\n";
+            const auto emitp = [&](const char *key, int c)
+            {
+                out << key << " = [";
+                for (std::size_t i = 0; i < m.frame_polygon.size(); ++i) { if (i) out << ", "; out << m.frame_polygon[i][c]; }
+                out << "]\n";
+            };
+            emitp("frame_x", 0);
+            emitp("frame_y", 1);
+        }
     }
     out.flush();
     const bool ok = out.good();
@@ -635,6 +652,7 @@ bool MissionRunner::finish_recording(const std::string &name)
     m.name = name;
     m.waypoints = recording_;
     m.loops = 1;
+    m.frame_polygon = room_polygon_;   // the frame these waypoints are in
     if (const auto it = std::ranges::find(library_, name, &Mission::name); it != library_.end())
         *it = m;
     else
@@ -677,7 +695,20 @@ void MissionRunner::refresh_display_waypoints()
         return;
     }
     if (const auto *m = selected_mission())
-        for (const auto &w : m->waypoints) display_wps_.push_back(w.pos);
+    {
+        // Draw a selected mission WHERE IT WILL BE DRIVEN: moved into the current room frame, exactly as start()
+        // will move it — so the alignment can be checked before pressing Run.
+        const auto r = (not m->frame_polygon.empty() and room_polygon_.size() >= 3)
+                     ? std::optional(rc::mission_frame::register_outlines(m->frame_polygon, room_polygon_)) : std::nullopt;
+        for (const auto &w : m->waypoints) display_wps_.push_back(r ? Eigen::Vector2f(r->R * w.pos + r->t) : w.pos);
+        if (r)
+        {
+            std::printf("[mission] '%s' shown in the current room frame: rotation %.1f deg, translation (%.2f, %.2f) m, "
+                        "outline IoU %.3f%s\n", m->name.c_str(), r->yaw * 57.2958f, r->t.x(), r->t.y(), r->iou,
+                        r->iou < 0.8f ? "  — POOR MATCH, Run will refuse it" : "");
+            std::fflush(stdout);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -724,6 +755,41 @@ bool MissionRunner::start(int loops, std::uint64_t now_ms)
     }
 
     active_ = *m;
+    // ── MOVE THE MISSION INTO THE CURRENT ROOM FRAME (2026-10-10, mission_frame.h) ─────────────────────────
+    // An estimated room's frame is the robot's pose when the room was born, so a mission recorded on another run
+    // (or on the surveyed layout) is in a different frame. Register the outline it was recorded in against the
+    // current one and move the waypoints; refuse if the outlines do not match (a different room).
+    if (not active_.frame_polygon.empty())
+    {
+        if (room_polygon_.size() < 3)
+        {
+            std::printf("[mission] cannot run '%s': it carries its recording frame, but there is no current room "
+                        "polygon to register it against yet.\n", m->name.c_str());
+            std::fflush(stdout);
+            return false;
+        }
+        const auto r = rc::mission_frame::register_outlines(active_.frame_polygon, room_polygon_);
+        if (r.iou < 0.8f)   // flagged: below this the two outlines are not the same room
+        {
+            std::printf("[mission] cannot run '%s': its recording room does not match this one (outline IoU %.2f "
+                        "after registration).\n", m->name.c_str(), r.iou);
+            std::fflush(stdout);
+            return false;
+        }
+        for (auto &w : active_.waypoints)
+        {
+            w.pos = r.R * w.pos + r.t;
+            if (w.yaw_rad) *w.yaw_rad = std::remainder(*w.yaw_rad + r.yaw, 2.f * static_cast<float>(M_PI));
+        }
+        std::printf("[mission] '%s' moved into the current room frame: rotation %.1f deg, translation (%.2f, %.2f) m, "
+                    "outline IoU %.3f\n", m->name.c_str(), r.yaw * 57.2958f, r.t.x(), r.t.y(), r.iou);
+        std::fflush(stdout);
+    }
+    else
+    {
+        std::printf("[mission] '%s' has no recorded frame (legacy) — running its waypoints as stored.\n", m->name.c_str());
+        std::fflush(stdout);
+    }
     loops_ = std::max(1, loops);
     lap_ = 0;
     run_start_ms_ = now_ms;

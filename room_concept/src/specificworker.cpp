@@ -345,6 +345,10 @@ void SpecificWorker::compute()
         // Room-stabilization indicator: AMBER while a global grid search is relocating the robot,
         // GREEN once the room node exists in the graph (the very condition downstream consumers gate
         // on), RED while stable frames are still accumulating.
+        {
+            const auto [stab, expl] = scene_graph_->room_readiness();
+            viewer_->set_room_readiness(stab, expl, room_concept_.slam_disagreement());
+        }
         viewer_->set_room_stable(scene_graph_->room_node_created(),
                                  scene_graph_->stable_frames(),
                                  params.STABLE_FRAMES_REQUIRED,

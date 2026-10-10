@@ -171,6 +171,12 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_conf_->set_visible_window(60.f);
     ts_plot_conf_->set_y_range(0.f, 1.f);
     ts_plot_conf_->add_series("confidence", QColor(0, 190, 255), 1.8f, 0);
+    // What PROMOTION waits for (2026-10-09): the outline has stopped changing AND the explorer has nothing
+    // reachable left. When both sit at 1 the proto-room is promoted and the localisation branch takes over.
+    ts_plot_conf_->add_series("layout stable", QColor(80, 200, 120), 1.4f, 0);
+    ts_plot_conf_->add_series("explore done", QColor(255, 160, 40), 1.4f, 0);
+    // After the switch to the given room: plain SLAM (shadow) vs the SDF localiser, in metres (clamped to 1).
+    ts_plot_conf_->add_series("SLAM vs SDF (m)", QColor(220, 60, 200), 1.4f, 0);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_conf_);
 
     // Pipeline-rate plot (Hz over time): RT-publish rate (corrected pose) and optimizer rate. Separate
@@ -878,6 +884,15 @@ void RoomViewer::set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P
 void RoomViewer::set_loop_closure(double du_deg, double dv_deg, double sd_du, double sd_dv, long n)
 {
     if (calib_viewer_) calib_viewer_->update_loop_closure(du_deg, dv_deg, sd_du, sd_dv, n);
+}
+
+void RoomViewer::set_room_readiness(float layout_stable, float explore_done, float slam_disagreement_m)
+{
+    if (not ts_plot_conf_) return;
+    if (std::isfinite(slam_disagreement_m))
+        ts_plot_conf_->add_point("SLAM vs SDF (m)", std::clamp(slam_disagreement_m, 0.f, 1.f));
+    ts_plot_conf_->add_point("layout stable", std::clamp(layout_stable, 0.f, 1.f));
+    ts_plot_conf_->add_point("explore done", std::clamp(explore_done, 0.f, 1.f));
 }
 
 }  // namespace rc

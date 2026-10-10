@@ -1017,32 +1017,55 @@ void SpecificWorker::load_params()
 	// No robot_radius: every body extent is derived from the footprint itself. d_safe is the ONE
 	// standoff knob, and it is comfort only — the hard constraint is the footprint test.
 	path_controller_.params.d_safe = params.comfort_standoff_m;
-	load_optional("Controller.PathHorizonWaypoints", params.path_horizon_waypoints);
-	load_optional("Controller.RouteContinuous", params.route_continuous);
-	load_optional("Controller.SmoothPlannedPath", params.smooth_planned_path);
-	load_optional_cast<double>("Controller.RouteSpacing", params.route_spacing_m);
-	load_optional_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m);
-	load_optional("Controller.RouteOptimize", params.route_optimize);
+	cfgr.opt("Controller.PathHorizonWaypoints", params.path_horizon_waypoints,
+         "Cross-cycle control-continuity cost in the MPPI (see TrajectoryController::Params). 0 = off, which is the pre-existing behaviour and the baseline…");
+	cfgr.opt("Controller.RouteContinuous", params.route_continuous,
+         "true = the mission is driven as ONE continuous curve (RouteFollower): no waypoint targets, no arrival radius, no per-waypoint replan,…");
+	cfgr.opt("Controller.SmoothPlannedPath", params.smooth_planned_path,
+         "Fit the C2 curve to EVERY planned path — click targets and affordance targets too, not only missions");
+	cfgr.opt_cast<double>("Controller.RouteSpacing", params.route_spacing_m,
+         "");
+	cfgr.opt_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m,
+         "");
+	cfgr.opt("Controller.RouteOptimize", params.route_optimize,
+         "Variationally optimise the route's control polygon before it is driven (route_optimizer.h)");
 	// ── Blockage -> replan trigger ──
 	// The one thing the elastic band cannot do for itself: a gradient band cannot escape an obstacle
 	// sitting ON the route (the field's gradient there is axial). A* owns homotopy, the band owns
 	// geometry, and this is the handover. Exposed because it is the mechanism that has to be TUNED
 	// against a real "someone put a box in the corridor" test, and a rebuild per trial is not that.
-	load_optional_cast<double>("Controller.BlockageEsdfThreshold", path_controller_.params.blockage_esdf_threshold);
-	load_optional("Controller.BlockageMinWaypoints", path_controller_.params.blockage_min_waypoints);
-	load_optional_cast<double>("Controller.BlockageLookahead", path_controller_.params.blockage_lookahead_m);
-	load_optional("Controller.BlockageConfirmCycles", path_controller_.params.blockage_confirm_cycles);
-	load_optional("Controller.BlockageCooldownCycles", path_controller_.params.blockage_cooldown_cycles);
-	load_optional("Controller.BandEnabled", params.band_enabled);
-	load_optional("Controller.BandIterations", params.band_iterations);
-	load_optional_cast<double>("Controller.BandLead", params.band_lead_m);
-	load_optional_cast<double>("Controller.BandWindow", params.band_window_m);
-	load_optional("Controller.BandPeriodCycles", params.band_period_cycles);
-	load_optional_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias);
-	load_optional_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight);
+	cfgr.opt_cast<double>("Controller.BlockageEsdfThreshold", path_controller_.params.blockage_esdf_threshold,
+         "ESDF below this on path = blocked (well under d_safe)");
+	cfgr.opt("Controller.BlockageMinWaypoints", path_controller_.params.blockage_min_waypoints,
+         "need N consecutive blocked waypoints");
+	cfgr.opt_cast<double>("Controller.BlockageLookahead", path_controller_.params.blockage_lookahead_m,
+         "only check waypoints within this distance ahead");
+	cfgr.opt("Controller.BlockageConfirmCycles", path_controller_.params.blockage_confirm_cycles,
+         "consecutive cycles before declaring blockage (1.5 s at 10 Hz)");
+	cfgr.opt("Controller.BlockageCooldownCycles", path_controller_.params.blockage_cooldown_cycles,
+         "minimum cycles between replan triggers");
+	cfgr.opt("Controller.BandEnabled", params.band_enabled,
+         "control_mode alone does NOT identify what drove a run: the same follower over a route whose head is re-optimised at control rate and over one…");
+	cfgr.opt("Controller.BandIterations", params.band_iterations,
+         "Gauss-Newton steps per cycle");
+	cfgr.opt_cast<double>("Controller.BandLead", params.band_lead_m,
+         "Metres of route AHEAD of the robot left frozen before the window opens");
+	cfgr.opt_cast<double>("Controller.BandProximalSigmaM", params.band_proximal_sigma_m,
+         "> 0: release the near support points and bound how far the band moves the route per solve (m) — "
+         "re-optimises the FIRST part of the spline against live obstacles (2026-10-09). 0 = old frozen lead");
+	cfgr.opt_cast<double>("Controller.BandWindow", params.band_window_m,
+         "Length of the deformable window beyond the lead");
+	cfgr.opt("Controller.BandPeriodCycles", params.band_period_cycles,
+         "Run the band every N control cycles. 1 = every cycle");
+	cfgr.opt_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias,
+         "Route optimiser: speed (0) <-> safety (1)");
+	cfgr.opt_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight,
+         "The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness of the TURN RATE is the…");
 
-	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
-	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
+	cfgr.opt_cast<double>("Controller.LambdaContinuity", params.lambda_continuity,
+         "so no --loop result was ever transferable. tools/tracker_sim inherits that warning.)");
+	cfgr.opt_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor,
+         "");
 	// ★EIGHT ASSIGNMENTS WERE HERE AND EVERY ONE OF THEM WAS WRITE-ONLY (removed 2026-09-09 with the
 	// sampler that had been their only reader): lambda_continuity, continuity_rot_factor,
 	// goal_clearance_relax_dist, goal_obstacle_margin, goal_clearance_min_ratio and the three

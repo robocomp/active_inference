@@ -337,4 +337,47 @@ Plan plan(const wallmap::WallMap& map, const wallmap::Polygon& poly, const Feasi
     return out;
 }
 
+Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
+                   const Admissible& admissible, const GainFn& gain, float min_gain)
+{
+    Plan out;
+    const auto [ri, rj] = grid.cell_of(robot);
+    out.start = grid.is_free(ri, rj) ? robot : grid.nearest_free(robot);
+    if (grid.free_count() == 0) { out.why = "no_feasible"; return out; }
+    std::vector<std::pair<float, Eigen::Vector2f>> cands;   // (gain m², standpoint)
+    for (int i = 0; i < grid.nx; i += 2)
+        for (int j = 0; j < grid.ny; j += 2)
+        {
+            if (not grid.is_free(i, j)) continue;
+            const Eigen::Vector2f v = grid.at(i, j);
+            if (admissible and not admissible(v)) continue;
+            ++out.candidates;
+            const float g = gain(v);
+            if (g < min_gain) continue;
+            ++out.with_gain;
+            cands.emplace_back(g, v);
+        }
+    out.unknowns = out.with_gain;
+    if (cands.empty()) { out.finished = true; out.why = "finished"; return out; }
+    // rank by gain per straight-line metre, then cost the best few by their REAL route
+    std::ranges::sort(cands, [&](const auto& a, const auto& b)
+                      { return a.first / (1.f + (a.second - robot).norm()) > b.first / (1.f + (b.second - robot).norm()); });
+    if (static_cast<int>(cands.size()) > p.keep_best) cands.resize(static_cast<size_t>(p.keep_best));
+    float best = -1.f;
+    for (const auto& [g, v] : cands)
+    {
+        auto path = grid.astar(out.start, v);
+        if (path.size() <= 1) continue;
+        float L = 0.f;
+        for (std::size_t k2 = 1; k2 < path.size(); ++k2) L += (path[k2] - path[k2 - 1]).norm();
+        const float sc = g / (1.f + L);
+        if (sc <= best) continue;
+        best = sc;
+        path.erase(path.begin());
+        out.ok = true; out.target = v; out.score = sc; out.gain = g; out.path = std::move(path); out.why = "ok";
+    }
+    if (not out.ok) out.why = "unreachable";
+    return out;
+}
+
 }   // namespace rc::layout

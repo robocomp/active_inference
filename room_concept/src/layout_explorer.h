@@ -124,4 +124,13 @@ using Admissible = std::function<bool(const Eigen::Vector2f&)>;
 Plan plan(const wallmap::WallMap& map, const wallmap::Polygon& poly, const FeasibleGrid& grid,
           const Eigen::Vector2f& robot, const ExplorerParams& p, const Admissible& admissible = {});
 
+/// COVERAGE PLANNER (2026-10-10, used while plain SLAM owns the pose): gain = what a standpoint's view would REVEAL
+/// of the map (m² of still-unknown cells, `gain`), cost = the A* ROUTE length; score = gain / (1 + route m). The old
+/// planner scored what a view teaches the WALL MAP — flat and small once the layout came from the SLAM map, so the
+/// distance term won and it offered spots next to the robot. `finished` = no admissible standpoint reveals at least
+/// `min_gain` (the robot's own footprint area: a view that cannot reveal even that is not worth the trip).
+using GainFn = std::function<float(const Eigen::Vector2f&)>;
+Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
+                   const Admissible& admissible, const GainFn& gain, float min_gain);
+
 }   // namespace rc::layout

@@ -37,6 +37,7 @@
 
 #include <genericworker.h>                 // DSR API + generated node/attr type tags
 
+#include <atomic>
 #include "room_concept.h"                  // rc::RoomConcept (+ UpdateResult)
 #include "epistemic_controller.h"
 #include "room_config.h"             // rc::RoomConfig (shared config)
@@ -129,6 +130,12 @@ public:
     /// The room is still the start-up PROTO-room (born, not yet promoted) — the UI says ESTIMATING. Read from
     /// the main thread; the two flags are written on the localiser thread (a stale read only delays the label).
     [[nodiscard]] bool room_is_startup_proto() const { return startup_proto_ and not startup_promoted_; }
+    /// What promotion waits for, for the confidence panel (GUI thread reads, localiser writes):
+    ///   first  = layout stability: IoU of the published outline now vs ~10 s ago (1 = no longer changing);
+    ///   second = exploration done: 1 once the explorer has nothing reachable left (after a visit), else 0.
+    /// Both read 1 once the room is promoted.
+    [[nodiscard]] std::pair<float, float> room_readiness() const
+    { return {readiness_stable_.load(std::memory_order_relaxed), readiness_explore_.load(std::memory_order_relaxed)}; }
 
     /// ── THE PUBLISHED ROOM FRAME vs THE ESTIMATOR'S INTERNAL FRAME ────────────────────────────────────
     /// Identity in every mode except one: a START-UP PROTO-ROOM (StartupProto.Enabled, Estimate mode) is
@@ -208,7 +215,11 @@ private:
     std::vector<Eigen::Vector2f> fs_free_ring_;   ///< confirmed-free raster ring (published frame) — explorer feasibility
     std::deque<std::pair<std::int64_t, Eigen::Affine2f>> pose_hist_;   ///< (stamp, robot pose in published frame), ~10 s
     std::deque<RoomConcept::LowObstacles> low_obs_pending_;
-    int layout_visits_ = 0;   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
+    int layout_visits_ = 0;
+    std::atomic<float> readiness_stable_{0.f}, readiness_explore_{0.f};
+    std::deque<std::pair<std::int64_t, std::vector<Eigen::Vector2f>>> ring_hist_;   // (stamp, published outline)
+    long low_batches_stamped_ = 0, low_batches_too_old_ = 0;   // diagnostics: furniture layer intake
+    int  rej_ring_ = 0, rej_furniture_ = 0, rej_refused_ = 0;  // diagnostics: explorer rejections, per plan   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
     void stamp_low_obstacles();
     std::int64_t  fs_last_ms_ = 0;
     std::int64_t  sweep_last_ms_ = 0;

@@ -176,6 +176,86 @@ public:
         for (const auto& q : pts)
             if (const auto [i, j] = cell_of(q); in(i, j)) low_[idx(i, j)] = 1;
     }
+    /// COVERAGE GAIN (2026-10-10): area (m²) of still-UNKNOWN cells a 360° scan from `v` would see — `beams` rays,
+    /// each stopping at mapped matter (a wall), at the raster edge or at `range`. Unknown cells do not stop a ray
+    /// (optimistic: what lies behind them is unknown too). Each cell counted once.
+    /// Which cells COUNT toward coverage gain: those inside `outline` or within `margin` of it. Unknown space behind a
+    /// wall is reached only through gaps between wall cells (measured: up to 15 m² "visible" after a 20-min run, so the
+    /// gain never reached zero); an unexplored corner of the room borders the outline and still counts.
+    [[nodiscard]] std::vector<std::uint8_t> countable_mask(const std::vector<Eigen::Vector2f>& outline, float margin) const
+    {
+        std::vector<std::uint8_t> m(st_.size(), 0);
+        if (outline.size() < 3) return m;
+        Eigen::Vector2f lo = outline.front(), hi = lo;
+        for (const auto& q : outline) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
+        const auto [i0, j0] = cell_of(lo - Eigen::Vector2f::Constant(margin));
+        const auto [i1, j1] = cell_of(hi + Eigen::Vector2f::Constant(margin));
+        // WALL vs FRONTIER edges: an edge with measured wall (surface cells within `margin`) along most of its length
+        // bounds the room; only FRONTIER edges (free space simply ended there) count what lies beyond them. Without
+        // this the unknown gaps INSIDE the wall band kept 17-18 standpoints "worth a trip" after a 20-minute run.
+        std::vector<char> frontier(outline.size(), 0);
+        for (std::size_t e = 0; e < outline.size(); ++e)
+        {
+            const Eigen::Vector2f a = outline[e], b = outline[(e + 1) % outline.size()];
+            const int ns = std::max(2, static_cast<int>((b - a).norm() / p_.cell));
+            int walled = 0;
+            for (int s = 0; s < ns; ++s)
+            {
+                const Eigen::Vector2f q = a + (b - a) * ((static_cast<float>(s) + 0.5f) / static_cast<float>(ns));
+                const int r = static_cast<int>(std::ceil(margin / p_.cell));
+                const auto [ci, cj] = cell_of(q);
+                bool hit = false;
+                for (int dj = -r; dj <= r and not hit; ++dj)
+                    for (int di = -r; di <= r and not hit; ++di)
+                        if (in(ci + di, cj + dj) and hits_.size() == st_.size() and hits_[idx(ci + di, cj + dj)] >= 2) hit = true;
+                walled += hit ? 1 : 0;
+            }
+            frontier[e] = (2 * walled < ns) ? 1 : 0;
+        }
+        for (int j = std::max(0, j0); j <= std::min(n_ - 1, j1); ++j)
+            for (int i = std::max(0, i0); i <= std::min(n_ - 1, i1); ++i)
+            {
+                const Eigen::Vector2f q(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell);
+                bool ok = point_in_polygon(q, outline);
+                for (std::size_t e = 0; not ok and e < outline.size(); ++e)
+                {
+                    if (not frontier[e]) continue;
+                    const Eigen::Vector2f a = outline[e], b = outline[(e + 1) % outline.size()], ab = b - a;
+                    const float t = std::clamp((q - a).dot(ab) / std::max(ab.squaredNorm(), 1e-9f), 0.f, 1.f);
+                    ok = (q - (a + t * ab)).norm() < margin;
+                }
+                m[idx(i, j)] = ok ? 1 : 0;
+            }
+        return m;
+    }
+    [[nodiscard]] float visible_unknown_area(const Eigen::Vector2f& v, float range = 8.f, int beams = 180,
+                                             const std::vector<std::uint8_t>* countable = nullptr) const
+    {
+        if (not ready()) return 0.f;
+        std::vector<std::size_t> seen;
+        const float step = 0.5f * p_.cell;
+        const int nsteps = static_cast<int>(range / step);
+        for (int b = 0; b < beams; ++b)
+        {
+            const float a = 2.f * static_cast<float>(M_PI) * static_cast<float>(b) / static_cast<float>(beams);
+            const Eigen::Vector2f d(std::cos(a), std::sin(a));
+            for (int s = 1; s <= nsteps; ++s)
+            {
+                const auto [i, j] = cell_of(v + d * (step * static_cast<float>(s)));
+                if (not in(i, j)) break;
+                const auto k = idx(i, j);
+                if (st_[k] == 2) break;
+                if (st_[k] == 0 and (countable == nullptr or (*countable)[k])) seen.push_back(k);
+            }
+        }
+        std::ranges::sort(seen);
+        const auto last = std::unique(seen.begin(), seen.end());
+        return static_cast<float>(std::distance(seen.begin(), last)) * p_.cell * p_.cell;
+    }
+
+    /// Cells currently marked in the low-obstacle layer (diagnostics).
+    [[nodiscard]] long low_cells() const
+    { return static_cast<long>(std::ranges::count_if(low_, [](std::uint8_t v) { return v != 0; })); }
     /// True if any low-obstacle cell lies within `radius` of `c` — a standpoint there would put the body on furniture.
     [[nodiscard]] bool matter_within(const Eigen::Vector2f& c, float radius) const
     {
@@ -312,7 +392,29 @@ public:
             { bool all = true; for (int b = -1; b <= 1 and all; ++b) for (int a = -1; a <= 1; ++a) if (not d[idx(i + a, j + b)]) { all = false; break; } e[idx(i, j)] = all; }
             for (std::size_t k = 0; k < comp.size(); ++k) comp[k] = comp[k] or e[k];
         }
-        fill_holes(comp, N, N);
+        // ★ NEVER CLOSE ACROSS MAPPED WALL (2026-10-10): the closing bridged 12 cm fins (2-4 wall cells) and the
+        //   room swallowed them. Wall cells are put back out, and only holes that are NOT mostly wall are filled
+        //   (furniture islands are inside the room; a slot bounded by wall is not).
+        for (std::size_t k = 0; k < comp.size(); ++k) if (surf(k)) comp[k] = 0;
+        {
+            auto filled = comp; fill_holes(filled, N, N);
+            std::vector<std::uint8_t> seen(comp.size(), 0);
+            for (std::size_t k0 = 0; k0 < comp.size(); ++k0)
+            {
+                if (not filled[k0] or comp[k0] or seen[k0]) continue;
+                std::vector<std::size_t> q{k0}, cells; seen[k0] = 1; long nsurf = 0;
+                while (not q.empty())
+                {
+                    const auto k = q.back(); q.pop_back(); cells.push_back(k); nsurf += surf(k) ? 1 : 0;
+                    const int i = static_cast<int>(k % N), j = static_cast<int>(k / N);
+                    const int ni[4] = {i + 1, i - 1, i, i}, nj[4] = {j, j, j + 1, j - 1};
+                    for (int t = 0; t < 4; ++t)
+                        if (in(ni[t], nj[t]))
+                            if (const auto kk = idx(ni[t], nj[t]); filled[kk] and not comp[kk] and not seen[kk]) { seen[kk] = 1; q.push_back(kk); }
+                }
+                if (2 * nsurf < static_cast<long>(cells.size())) for (const auto k : cells) comp[k] = 1;
+            }
+        }
         // 2. dominant axis: smoothed surface field (5-tap σ≈1 cell), Sobel, Σ w·e^{4iθ}
         std::vector<float> S(st_.size(), 0.f), T(st_.size(), 0.f);
         constexpr float g5[5] = {0.054f, 0.244f, 0.403f, 0.244f, 0.054f};
@@ -412,7 +514,15 @@ public:
             }
             return V;
         };
-        // 4. snap each edge onto the measured wall (hit-weighted median of surface cells near it)
+        // 4. SNAP each edge onto the measured wall (2026-10-10, offline-validated on three live recordings):
+        //    · an OUTER wall (no edge of the outline faces it across a gap within `reach`) takes the hit-weighted MEDIAN
+        //      of its band — robust to cabinets mounted in front of it;
+        //    · a SLOT side (a parallel edge faces it across a thin wall) takes its OWN face: the nearest hits on its
+        //      outward side (within 2 sigma + a cell of the closest), never past the midpoint — the old median moved both
+        //      sides of a 12 cm fin onto its centre line and the fin vanished from the room;
+        //    · a move is ACCEPTED only if the outline stays a simple polygon (largest moves first) — a self-intersecting
+        //      snap was cleaned up by dropping the fin.
+        //    Fins kept 5/6 (one fin seen from one side only stays lost), IoU vs truth .962-.968.
         std::vector<std::array<float, 3>> hu;   // (u, v, weight)
         for (int j = 0; j < N; ++j) for (int i = 0; i < N; ++i)
             if (const auto k = idx(i, j); surf(k))
@@ -421,22 +531,60 @@ public:
                 hu.push_back({ct * x + st * y, -st * x + ct * y, static_cast<float>(hits_[k])});
             }
         auto V = corners(es);
-        for (std::size_t k = 0; k < es.size(); ++k)
+        const std::size_t ne = es.size();
+        const bool ccw = signed_area(V) > 0.f;
+        struct Seg { float lo, hi, sgn; };
+        std::vector<Seg> sg(ne);
+        for (std::size_t k = 0; k < ne; ++k)
         {
-            const auto& a = V[(k + es.size() - 1) % es.size()]; const auto& b = V[k];   // edge k runs from corner k-1 to k
-            std::vector<std::pair<float, float>> cand;
+            const auto& a = V[(k + ne - 1) % ne]; const auto& b = V[k];          // edge k runs corner k-1 -> k
+            const Eigen::Vector2f d = b - a;
+            const Eigen::Vector2f out = ccw ? Eigen::Vector2f(d.y(), -d.x()) : Eigen::Vector2f(-d.y(), d.x());
+            const float lo = std::min(es[k].h ? a.x() : a.y(), es[k].h ? b.x() : b.y());
+            const float hi = std::max(es[k].h ? a.x() : a.y(), es[k].h ? b.x() : b.y());
+            sg[k] = {lo, hi, (es[k].h ? out.y() : out.x()) >= 0.f ? 1.f : -1.f};
+        }
+        constexpr float kFaceSigma = 0.03f;   // registration noise of one return (as scan_slam's sigma_lidar)
+        std::vector<float> target(ne);
+        for (std::size_t k = 0; k < ne; ++k)
+        {
+            target[k] = es[k].v;
+            float lim = std::numeric_limits<float>::infinity();
+            for (std::size_t j = 0; j < ne; ++j)
+            {
+                if (j == k or es[j].h != es[k].h or sg[j].sgn == sg[k].sgn) continue;
+                if (std::min(sg[k].hi, sg[j].hi) - std::max(sg[k].lo, sg[j].lo) <= 0.f) continue;
+                const float gap = sg[k].sgn * (es[j].v - es[k].v);
+                if (gap > 0.f and gap < reach) lim = std::min(lim, 0.5f * gap);
+            }
+            std::vector<std::pair<float, float>> cand;   // (outward offset, weight)
             for (const auto& h : hu)
             {
                 const float along = es[k].h ? h[0] : h[1], across = es[k].h ? h[1] : h[0];
-                const float lo = std::min(es[k].h ? a.x() : a.y(), es[k].h ? b.x() : b.y());
-                const float hi = std::max(es[k].h ? a.x() : a.y(), es[k].h ? b.x() : b.y());
-                if (along >= lo and along <= hi and std::abs(across - es[k].v) < reach) cand.emplace_back(across, h[2]);
+                if (along < sg[k].lo or along > sg[k].hi) continue;
+                const float dd = sg[k].sgn * (across - es[k].v);
+                if (std::isfinite(lim) ? (dd > -c and dd < lim) : (std::abs(dd) < reach)) cand.emplace_back(dd, h[2]);
             }
             if (cand.size() <= 3) continue;
             std::ranges::sort(cand);
+            if (std::isfinite(lim))
+            {
+                const float dmax = cand.front().first + 2.f * kFaceSigma + c;
+                std::erase_if(cand, [&](const auto& q) { return q.first >= dmax; });
+            }
             float tot = 0.f; for (const auto& q : cand) tot += q.second;
             float acc = 0.f;
-            for (const auto& q : cand) { acc += q.second; if (acc >= 0.5f * tot) { es[k].v = q.first; break; } }
+            for (const auto& q : cand) { acc += q.second; if (acc >= 0.5f * tot) { target[k] = es[k].v + sg[k].sgn * q.first; break; } }
+        }
+        std::vector<std::size_t> order(ne);
+        for (std::size_t k = 0; k < ne; ++k) order[k] = k;
+        std::ranges::sort(order, [&](std::size_t x, std::size_t y)
+                          { return std::abs(target[x] - es[x].v) > std::abs(target[y] - es[y].v); });
+        for (const auto k : order)
+        {
+            const float old = es[k].v;
+            es[k].v = target[k];
+            if (not is_simple(corners(es))) es[k].v = old;
         }
         V = corners(es);
         std::vector<Eigen::Vector2f> out; out.reserve(V.size());

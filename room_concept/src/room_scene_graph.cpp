@@ -1412,10 +1412,11 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     //   every afford_room target then landed beyond the real walls, the controller repaired it 6 m and found no
     //   path. The explorer's `finished` (closed polygon AND nothing left to learn) is the bench's own stopping
     //   rule — the robot keeps working inside CONFIRMED free space until the layout has actually been surveyed.
-    // Staged (2026-10-09): no promotion while plain SLAM owns the pose — promotion still freezes and localises
-    // against the WALL MAP's polygon, which is not the layout the proto publishes. Adopting the map layout as the
-    // promoted room is the next step.
-    if (room_concept_->map_ready() and layout_finished_ and not room_concept_->plain_slam_driving())
+    // With plain SLAM the promoted room is the MAP LAYOUT (room_concept's derived polygon while it drives), and the
+    // pose stays plain SLAM's afterwards — so promotion needs that layout, not the wall map's map_ready.
+    const bool layout_ready = room_concept_->plain_slam_driving() ? room_concept_->has_map_layout()
+                                                                   : room_concept_->map_ready();
+    if (layout_ready and layout_finished_)
     {
         promote_startup_proto(reason);
         return;
@@ -1465,9 +1466,16 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     // onto the measured walls IS the layout (offline vs Webots truth: IoU 0.957 on two live recordings). It replaces
     // the wall map's polygon, which on this apartment froze at its first-frame seed box. Fallback: the raw ring.
     if (room_concept_->plain_slam_driving())
-        if (auto lay = free_space_->manhattan_layout(pose_pub.translation());
+        if (auto lay = free_space_->manhattan_layout(pose_pub.translation(), 0.18f);   // 18 cm: offline 26-28 verts, IoU .954-.966 (12 cm kept 30-42 verts of small steps)
             lay.size() >= 4 and rc::freespace::point_in_polygon(pose_pub.translation(), lay))
+        {
+            // hand it to room_concept too (INTERNAL frame): viewer, published polygon, promotion, wall nodes
+            const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+            std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(lay.size());
+            for (const auto& v : lay) lay_int.push_back(T_int_pub * v);
+            room_concept_->set_map_layout(std::move(lay_int));
             ring = std::move(lay);
+        }
     if (ring.empty())
         ring = fs_free_ring_;
     if (ring.empty()) { reason = swept ? "swept_foreign_room+no_ring" : "no_ring"; return; }
@@ -1481,6 +1489,26 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     if (not G_->update_node(rn.value())) { reason = "update_node_failed"; return; }
     const bool first = fs_published_.empty();
     fs_published_ = std::move(ring);
+    {   // ── READINESS: layout stability = IoU(outline now, outline ~10 s ago), sampled on a 10 cm lattice ──
+        ring_hist_.emplace_back(res.timestamp_ms, fs_published_);
+        while (ring_hist_.size() > 2 and res.timestamp_ms - ring_hist_[1].first >= 10000) ring_hist_.pop_front();
+        const auto& old = ring_hist_.front().second;
+        if (res.timestamp_ms - ring_hist_.front().first >= 5000 and old.size() >= 3)
+        {
+            Eigen::Vector2f lo = fs_published_.front(), hi = lo;
+            for (const auto* P : std::array<const std::vector<Eigen::Vector2f>*, 2>{&fs_published_, &old}) for (const auto& v : *P) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+            long inter = 0, uni = 0;
+            for (float x = lo.x(); x <= hi.x(); x += 0.1f)
+                for (float y = lo.y(); y <= hi.y(); y += 0.1f)
+                {
+                    const Eigen::Vector2f q(x, y);
+                    const bool a = rc::freespace::point_in_polygon(q, fs_published_), b = rc::freespace::point_in_polygon(q, old);
+                    inter += (a and b); uni += (a or b);
+                }
+            readiness_stable_.store(uni > 0 ? static_cast<float>(inter) / static_cast<float>(uni) : 0.f,
+                                    std::memory_order_relaxed);
+        }
+    }
     {   // every published outline, for grading against ground truth (published frame; ';' rows, "x,y" pairs)
         static std::ofstream lay_csv;
         if (not lay_csv.is_open())
@@ -1524,7 +1552,8 @@ void RoomSceneGraph::stamp_low_obstacles()
     for (auto& b : low_obs_pending_)
     {
         if (pose_hist_.size() < 2 or b.stamp_ms > pose_hist_.back().first) { keep.push_back(std::move(b)); continue; }
-        if (b.stamp_ms < pose_hist_.front().first) continue;
+        if (b.stamp_ms < pose_hist_.front().first) { ++low_batches_too_old_; continue; }
+        ++low_batches_stamped_;
         const auto hi = std::ranges::lower_bound(pose_hist_, b.stamp_ms, {}, &std::pair<std::int64_t, Eigen::Affine2f>::first);
         const auto lo = hi == pose_hist_.begin() ? hi : std::prev(hi);
         const float span = static_cast<float>(hi->first - lo->first);
@@ -1559,6 +1588,12 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
         qWarning() << "[room][startup-proto] could not delete the proto self-edge on room" << dsr_room_id_
                    << "— consumers will keep reading it as a proto";
     startup_promoted_ = true;
+    // ESTIMATING → LOCALIZING: the promoted map layout becomes room_concept's GIVEN room (its pre-existing
+    // localisation branch takes the pose from here; plain SLAM stops).
+    if (room_concept_->plain_slam_driving())
+        room_concept_->adopt_map_layout_as_given();
+    readiness_stable_.store(1.f, std::memory_order_relaxed);
+    readiness_explore_.store(1.f, std::memory_order_relaxed);
     published_polygon_verts_ = poly_pub.size();
     free_space_.reset();
     dsr_create_wall_nodes();   // in the PUBLISHED frame (published_polygon)
@@ -1685,6 +1720,11 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             rc::status::print("[layout] afford_room COMPLETED (level) at ({:.2f},{:.2f}) — re-planning\n",
                               layout_target_->x(), layout_target_->y());
             ++layout_visits_;
+            // A VISITED standpoint is set aside like a refused one (2026-10-10): its gain is still scored on the
+            // wall map, which a visit does not change, so the explorer re-offered the spot the robot stood on —
+            // live: reach → dwell → complete → same target, for minutes. Under any information-gain model a spot
+            // just visited has nothing new; this stands in until the gain is scored on the SLAM map.
+            layout_refused_.emplace_back(*layout_target_, now + kRefusedMs);
             layout_target_.reset();
             replan = true;
         }
@@ -1711,7 +1751,13 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         std::vector<Eigen::Vector2f> feasible;
         feasible.reserve(feas_src.size());
         for (const auto& v : feas_src) feasible.push_back(T_int_pub * v);
-        rc::layout::FeasibleGrid grid(feasible, ep.cell, ep.clearance);
+        // ── TWO CLEARANCES, TWO QUESTIONS (2026-10-09) ──────────────────────────────────────────────────────────
+        // WHERE THE ROBOT MAY PASS needs only the body: circumscribed radius + the controller's footprint margin
+        // (0.05) + half a 5 cm raster cell. WHERE IT MAY STOP needs the controller's standpoint rule too (its arrival
+        // band): ExplorerClearance (0.625) — checked per candidate in `admissible` below. One clearance for both
+        // (0.625 everywhere) closed every passage out of the robot's area: live, 32 candidates, all "unreachable".
+        const float path_clear = 0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH) + 0.05f + 0.025f;
+        rc::layout::FeasibleGrid grid(feasible, ep.cell, std::min(path_clear, ep.clearance));
         // Furniture (low-obstacle matter) blocks ROUTES too, not only standpoints: the ring fills interior holes, so
         // without this the explorer's A* walked across the dining table and called its far side reachable (live
         // 2026-10-09: 0.75-nat targets refused by the stall watchdog every 25 s for 5 min). The robot's own disc is
@@ -1720,23 +1766,55 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             grid.block_if([&](const Eigen::Vector2f& c)
             {
                 const Eigen::Vector2f cp = T_pub_int_ * c;
-                return (c - robot).norm() > ep.clearance and free_space_->matter_within(cp, ep.clearance);
+                return (c - robot).norm() > path_clear and free_space_->matter_within(cp, path_clear);
             });
-        const auto admissible = [this, &ep](const Eigen::Vector2f& v)
+        const auto admissible = [this, &ep, &robot](const Eigen::Vector2f& v)
         {
-            if (not rc::freespace::point_in_polygon(T_pub_int_ * v, fs_published_)) return false;
+            // A standpoint inside the CONTROLLER'S ARRIVAL BAND (goal threshold 0.25 m + the body's circumscribed
+            // radius — its definition of "reached") is reached the moment it is offered and moves the robot nowhere:
+            // live 2026-10-10, offered at 0.37-0.42 m → reach → dwell → re-offer, for minutes. Not a tuned radius:
+            // it is what arrival means to the consumer.
+            if ((v - robot).norm() < 0.25f + 0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH))
+            { ++rej_refused_; return false; }
+            if (not rc::freespace::point_in_polygon(T_pub_int_ * v, fs_published_)) { ++rej_ring_; return false; }
+            {   // a STANDPOINT keeps the full standpoint clearance from the outline (routes only need path_clear)
+                const Eigen::Vector2f q = T_pub_int_ * v;
+                float dmin = std::numeric_limits<float>::infinity();
+                for (std::size_t i = 0; i < fs_published_.size(); ++i)
+                {
+                    const Eigen::Vector2f a = fs_published_[i], b = fs_published_[(i + 1) % fs_published_.size()];
+                    const Eigen::Vector2f ab = b - a;
+                    const float t = std::clamp((q - a).dot(ab) / std::max(ab.squaredNorm(), 1e-9f), 0.f, 1.f);
+                    dmin = std::min(dmin, (q - (a + t * ab)).norm());
+                }
+                if (dmin < ep.clearance) { ++rej_ring_; return false; }
+            }
             // Not on furniture: no low-obstacle matter within the body's clearance (the ring fills interior holes,
             // so a table island is inside it — 2026-10-09 live: standpoints among the dining chairs, no route).
-            if (free_space_ and free_space_->matter_within(T_pub_int_ * v, ep.clearance)) return false;
+            if (free_space_ and free_space_->matter_within(T_pub_int_ * v, ep.clearance)) { ++rej_furniture_; return false; }
             // ★ An AREA, not a cell (2026-10-09): a refused standpoint's neighbours a few cm away are just as
             //   unreachable; excluding only its own cell made the explorer re-offer the same spot 6 cm over.
             //   kRefusedRadiusM is a liveness constant (~ the controller's clearance scale), flagged.
             constexpr float kRefusedRadiusM = 0.75f;
-            return std::ranges::none_of(layout_refused_, [&](const auto& r) { return (r.first - v).norm() < kRefusedRadiusM; });
+            const bool ok = std::ranges::none_of(layout_refused_, [&](const auto& r) { return (r.first - v).norm() < kRefusedRadiusM; });
+            if (not ok) ++rej_refused_;
+            return ok;
         };
         const auto& map = room_concept_->wall_map_localiser_only();
         const auto poly = room_concept_->explorer_polygon_localiser_only();
-        layout_last_plan_ = rc::layout::plan(map, poly, grid, robot, ep, admissible);
+        rej_ring_ = rej_furniture_ = rej_refused_ = 0;
+        if (room_concept_->plain_slam_driving() and free_space_)
+        {
+            const float footprint = static_cast<float>(M_PI) * 0.25f
+                                  * (params_->ROBOT_WIDTH * params_->ROBOT_WIDTH + params_->ROBOT_LENGTH * params_->ROBOT_LENGTH);
+            const auto countable = free_space_->countable_mask(fs_published_, 0.40f);   // the outline snap's reach
+            layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, admissible,
+                [this, &countable](const Eigen::Vector2f& v)
+                { return free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable); },
+                footprint);
+        }
+        else
+            layout_last_plan_ = rc::layout::plan(map, poly, grid, robot, ep, admissible);
         // latched until the room is forgotten/reborn. "no_gain" with a publishable layout is the same verdict as
         // "finished" from the robot's side: nothing reachable is left worth visiting (live: 358/400 plans no_gain,
         // map_ready = 1, never promoted, robot parked).
@@ -1749,8 +1827,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         // reachable yet). Live 2026-10-09: after 13 m and the west half explored, every plan for 70 s was
         // "unreachable" (remaining gain only beyond furniture), map_ready, IoU 0.86 vs GT — and the proto never
         // promoted. A visit is a logical precondition, not a tuned number.
+        readiness_explore_.store(layout_finished_ ? 1.f : 0.f, std::memory_order_relaxed);
         if (layout_last_plan_.finished
-            or (layout_visits_ > 0 and room_concept_->map_ready()
+            or (layout_visits_ > 0
+                and (room_concept_->plain_slam_driving() ? room_concept_->has_map_layout() : room_concept_->map_ready())
                 and (layout_last_plan_.why == "no_gain" or layout_last_plan_.why == "unreachable")))
             layout_finished_ = true;
         layout_plan_ms_ = now;
@@ -1779,6 +1859,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         else
             layout_target_.reset();
         if (not prev.has_value() or not layout_target_.has_value() or (*prev - *layout_target_).norm() > 1e-3f)
+            rc::status::print("[layout] furniture layer: {} cells, {} batches stamped, {} too old | rejected this plan: "
+                              "outside ring {}, near furniture {}, refused area {}\n",
+                              free_space_ ? free_space_->low_cells() : -1L, low_batches_stamped_, low_batches_too_old_,
+                              rej_ring_, rej_furniture_, rej_refused_);
             rc::status::print("[layout] plan: {} target={} gain={:.2f} nats ({:.3f}/m) candidates={} with_gain={} "
                               "unknowns={} refused_held={}\n",
                               layout_last_plan_.why,

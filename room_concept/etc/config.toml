@@ -115,6 +115,10 @@ subtrees = ["room"]
 # the DSR Agent.domain = 0 so media discovery churn never perturbs cortex/DSR
 # resync. Must MATCH the robot_concept producer.
 [Media]
+# Lower bound of the LiDAR high band (m, body frame). 2026-10-09: 1.5 -> 2.0. Tall furniture (fridge, shelves)
+# reaches the 1.5-2.0 m band and reads as wall; above 2.0 m it is mostly walls. Offline on two live recordings vs
+# ground truth: layout IoU .968->.974 and .952->.965, plain-SLAM pose error unchanged (1.5-2.1 cm), ~half the points.
+lidar_high_min_height = 2.0
 #domain_id = 7          # media-plane DDS domain comes from the producer descriptor; leave commented
 #rgb_topic = "rc/zed/rgb"
 # Upper bound of the LiDAR high band (m, body frame).
@@ -2186,5 +2190,5 @@ HalfSpan          = 20.0    # m — raster half extent about the start pose
 ErodeM            = 0.0     # m — 2026-10-09: 0 (was -1 = body radius). The controller ALREADY keeps its footprint off the polygon edge; eroding by the body too counted the margin twice and closed gaps the robot fits through. <0 = body radius
 MaxVerts          = 64      # vertex budget of the published ring
 PublishPeriodMs   = 1000    # proto polygon republish throttle
-ExplorerClearance = 0.45    # m — 2026-10-09: body circumscribed radius 0.33 + controller FootprintSafetyMarginM 0.05 + one 5 cm raster cell. At 0.33 (the old <0 default) standpoints sat where the controller's footprint could not go, and it stopped 0.2 m short. <0 = circumscribed body radius
+ExplorerClearance = 0.625   # m — 2026-10-09 (fable review): the CONTROLLER's standpoint test is the body hull + FootprintSafetyMarginM 0.05 + goal_threshold 0.25 (the arrival band: it may stop anywhere inside it) against live returns, i.e. 0.325 + 0.05 + 0.25 = 0.625 m from the centre, heading-free. At 0.45 every standpoint with matter between 0.45 and 0.625 m passed here and was refused there ('Standpoint moved to ..., 0.05-0.08 m away'). <0 = circumscribed body radius
 ReplanS           = 15.0    # s between layout-explorer re-evaluations while no claim is held

@@ -75,6 +75,7 @@ public:
         const float st = p_.odo_t_floor + p_.odo_t_frac * dt;
         const float sr = p_.odo_r_floor + p_.odo_r_frac * dr + p_.odo_r_per_m * dt;
         const Eigen::Vector3f sig(st, st, sr);
+        last_iters_ = 0;
         if (frames_ < p_.warm_frames or not any_surface_ or pts.size() < 10)
         {
             pose_ = pred;
@@ -90,6 +91,10 @@ public:
     [[nodiscard]] const Eigen::Vector3f& pose() const { return pose_; }
     [[nodiscard]] const Eigen::Matrix3f& covariance() const { return cov_; }
     [[nodiscard]] const Params& params() const { return p_; }
+    /// Diagnostics of the last step: GN iterations run (0 = odometry only) and the median |distance| of the scan's
+    /// returns to the mapped surface at the solved pose (m) — this estimator's own "how well does the scan fit".
+    [[nodiscard]] int last_iterations() const { return last_iters_; }
+    [[nodiscard]] float last_median_residual() const { return last_median_; }
 
 private:
     Params p_;
@@ -101,6 +106,8 @@ private:
     Eigen::Vector3f pose_ = Eigen::Vector3f::Zero();
     Eigen::Matrix3f cov_ = Eigen::Matrix3f::Identity();
     long frames_ = 0;
+    int last_iters_ = 0;
+    float last_median_ = std::numeric_limits<float>::quiet_NaN();
 
     [[nodiscard]] size_t idx(int i, int j) const { return static_cast<size_t>(j) * n_ + i; }
 
@@ -179,6 +186,7 @@ private:
         Eigen::Matrix3f H = W0;
         for (int it = 0; it < p_.iters; ++it)
         {
+            last_iters_ = it + 1;
             const float c = std::cos(p.z()), s = std::sin(p.z());
             Eigen::Matrix3f Hs = Eigen::Matrix3f::Zero();
             Eigen::Vector3f bs = Eigen::Vector3f::Zero();
@@ -203,6 +211,21 @@ private:
             if (dp.head<2>().cwiseAbs().maxCoeff() < 1e-4f and std::abs(dp.z()) < 1e-5f) break;
         }
         pose_ = p;
+        {   // median |d| at the solved pose
+            std::vector<float> ds; ds.reserve(pts.size());
+            const float c = std::cos(p.z()), s = std::sin(p.z());
+            for (const auto& q : pts)
+            {
+                float d, gx, gy;
+                sample(c * q.x() - s * q.y() + p.x(), s * q.x() + c * q.y() + p.y(), d, gx, gy);
+                ds.push_back(d);
+            }
+            if (not ds.empty())
+            {
+                std::nth_element(ds.begin(), ds.begin() + static_cast<long>(ds.size() / 2), ds.end());
+                last_median_ = ds[ds.size() / 2];
+            }
+        }
         const Eigen::Matrix3f C = H.inverse();
         if (C.allFinite()) cov_ = C;
     }

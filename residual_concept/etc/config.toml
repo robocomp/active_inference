@@ -298,7 +298,7 @@ ForgetCanUnlatch = false   # true = the pre-2026-08-22 coupling (decay erodes lo
 # Deleted as unnecessary, not patched around: the z-band clearing gate and its margin, the soft blocking
 # probability, the sensor-envelope model and its whole [LidarField] block, the floor-return special case and its
 # support gate, and the running zmn/zmx hull. All of it falls out of the geometry.
-BinSpanM = 2.0        # height covered by the 64 voxel bins ⇒ 3.125 cm voxels. Matched to the ~3 cm registration
+BinSpanM = 1.6        # 2026-10-10 A/B (Fable residual review): 64 bins over 1.6 m = 2.5 cm voxels — a thin plate keeps its bin. Was 2.0 (3.125 cm)
                       # sigma: finer buys nothing, because below that the beam is genuinely within noise of the
                       # surface. Measured: 6.25 cm → 2530 releases on a standing table, 3.125 cm → 1337.
 # DO NOT CLEAR CLOSE TO THE HIT. A voxel is 3 cm tall and a tabletop is 2 cm thick, so a beam grazing just over a
@@ -398,8 +398,8 @@ ZedMinRangeM    = 0.30   # matches ZedBoost.MinDepthM
 # same footprint so a surface still being struck cannot be widened away.
 # A/B on the probe (0 = the old pencil): standing obstacle 33 → 39 of 64 cells · removal 19.5 → 3.7 s to half ·
 # a person who stood 3 s left 21 phantom cells NEVER cleared in 90 s → gone in 15.4 s. 0 ⇒ old behaviour.
-HeliosBeamSpacingRad = 0.0394   # RS-Helios-32: 70 deg over 31 gaps
-BpearlBeamSpacingRad = 0.0506   # RS-Bpearl-32: ~90 deg dome over 31 gaps
+HeliosBeamSpacingRad = 0.0   # 2026-10-10 A/B: no ring-spacing refutation footprint (it refuted ±6 cm at 3 m and made thin surfaces churn). Was 0.0394
+BpearlBeamSpacingRad = 0.0   # 2026-10-10 A/B (see Helios). Was 0.0506
 ZedBeamSpacingRad    = 0.0068   # dense depth at ZedBoost.FovSubsample=4 — effectively a pencil, as it should be
 
 [ZedBoost]

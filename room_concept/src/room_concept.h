@@ -1252,6 +1252,22 @@ public:
     bool searching()  const { return layout_state() == LayoutState::Searching; }
     /// Plain SLAM owns the pose: Estimate mode, still learning the layout, and RoomShape.PlainSlam on.
     bool plain_slam_driving() const { return params.plain_slam and estimating() and searching(); }
+    /// The layout as the SLAM map shows it (FreeSpacePolygon::manhattan_layout, INTERNAL frame), handed in by the
+    /// scene graph. While plain SLAM drives it REPLACES the wall map's derived polygon — so the viewer, the published
+    /// polygon, promotion and the wall nodes all see the same layout. Latched: the last one handed in stays.
+    void set_map_layout(std::vector<Eigen::Vector2f> poly)
+    { std::scoped_lock lk(wall_map_mutex_); map_layout_ = std::move(poly); }
+    bool has_map_layout() const { std::scoped_lock lk(wall_map_mutex_); return map_layout_.size() >= 3; }
+    /// ESTIMATING → LOCALIZING at promotion (2026-10-10): the map layout becomes the GIVEN room — the SDF model's
+    /// polygon, the corner detector's model and the derived polygon — and wall_frozen_ puts the agent in its
+    /// pre-existing localisation branch (the solve against the room's SDF). Plain SLAM stops driving (it runs only
+    /// while searching). Pose, window and covariance carry over. Localiser thread (the scene graph's promotion).
+    void adopt_map_layout_as_given();
+    bool map_layout_adopted() const { return map_layout_adopted_; }
+    /// SHADOW (2026-10-10): after the switch plain SLAM keeps running on its own map; this is the distance (m) between
+    /// its pose and the pose the SDF localiser published this frame. A MODEL-ERROR signal (where the given room does
+    /// not explain the scans), not a pose input. NaN while plain SLAM is the pose provider.
+    float slam_disagreement() const { return slam_disagree_.load(std::memory_order_relaxed); }
     bool localizing() const { return layout_state() == LayoutState::Localizing; }
     /// The LEARNT layout specifically has been frozen — i.e. this run reached LOCALIZING by
     /// estimating the room rather than by being given one. Prefer localizing() unless the difference
@@ -2092,6 +2108,12 @@ private:
     unsigned probe_frame_ = 0;       // its own frame counter (the NIS tick only advances when NIS does)
     std::mt19937     wall_rng_{12345};
     mutable std::mutex wall_map_mutex_;              // guards derived_polygon_ (read by the main thread)
+    std::vector<Eigen::Vector2f> map_layout_;          // set_map_layout (guarded by wall_map_mutex_)
+    bool map_layout_adopted_ = false;                  // adopt_map_layout_as_given has run: the room is GIVEN
+    std::atomic<float> slam_disagree_{std::numeric_limits<float>::quiet_NaN()};
+    std::ofstream shadow_csv_;                         // tmp/slam_shadow.csv
+    std::int64_t shadow_flush_ms_ = 0;
+    void record_slam_shadow(const UpdateResult& r);   // plain SLAM vs the published pose, every frame
     std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
     bool projection_failed_logged_ = false;          // one warning per stretch of unclosed projections
     std::atomic<bool> map_ready_{false};
