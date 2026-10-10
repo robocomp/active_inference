@@ -1,8 +1,8 @@
 """A differential-drive robot with a body that is not quite what its designers wrote down.
 
 The robot executes velocity commands. It reports what its encoders and gyro measured.
-Those reports carry two systematic errors the robot does not know about: a wheel-scale
-factor and a gyro bias. Day 3 is about inferring them.
+Those reports carry systematic errors the robot does not know about: a wheel-scale factor, a
+gyro scale factor and a gyro bias. Day 3 is about inferring them.
 """
 from dataclasses import dataclass
 
@@ -25,6 +25,7 @@ def integrate(pose, v, w, dt):
 @dataclass
 class Body:
     wheel_scale: float = 1.0   # encoders report wheel_scale × the true forward speed
+    gyro_scale: float = 1.0    # the gyro reports gyro_scale × the true turn rate
     gyro_bias: float = 0.0     # rad/s added to every gyro reading
     slip_v: float = 0.02       # true speed deviates from the command, sd per (m/s)
     slip_w: float = 0.02       # true turn rate deviates from the command, sd per (rad/s)
@@ -52,7 +53,7 @@ class Robot:
         w = w_cmd + b.slip_w * abs(w_cmd) * n[1]
         self.pose = integrate(self.pose, v, w, dt)
         return Odometry(v * b.wheel_scale + b.enc_sigma * n[2],
-                        w + b.gyro_bias + b.gyro_sigma * n[3], dt)
+                        w * b.gyro_scale + b.gyro_bias + b.gyro_sigma * n[3], dt)
 
 
 def motion_jacobians(pose, v, w, dt, eps=1e-6):
@@ -87,4 +88,4 @@ def predict(belief, odo, sigma_v=0.005, sigma_w=0.003):
 
 def hidden_body():
     """The body Day 3 has to discover. Do not read this cell before the lab!"""
-    return Body(wheel_scale=1.04, gyro_bias=0.012)
+    return Body(wheel_scale=1.04, gyro_scale=1.03, gyro_bias=0.012)

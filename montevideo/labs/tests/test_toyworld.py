@@ -6,9 +6,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from toyworld import Gaussian, Graph, Lidar, Robot, info_gain, laplace, se2, two_room_apartment  # noqa: E402
+from toyworld import Gaussian, Graph, Grid, Lidar, Robot, info_gain, laplace, se2, two_room_apartment  # noqa: E402
 from toyworld.beliefs import entropy, kl, linear_gaussian_update  # noqa: E402
-from toyworld.geometry import distance_to_polygon, polygon_iou  # noqa: E402
+from toyworld.geometry import distance_to_polygon, polygon_iou, segments_of  # noqa: E402
+from toyworld.grid import cell_gain, expected_gain  # noqa: E402
 from toyworld.robot import Body, integrate  # noqa: E402
 
 
@@ -140,6 +141,27 @@ def test_graph_transforms_and_removal():
     g.add_edge("robot", "table", "sees")
     g.remove("living")
     assert [n.name for n in g.nodes.values()] == ["world"] and not g.edges
+
+
+def test_gyro_scale_and_bias_in_odometry():
+    body = Body(gyro_scale=1.03, gyro_bias=0.01, slip_v=0, slip_w=0, enc_sigma=0, gyro_sigma=0)
+    odo = Robot([0, 0, 0], body, np.random.default_rng(0)).step(0.0, 0.5, 0.1)
+    assert np.isclose(odo.w, 0.5 * 1.03 + 0.01)
+
+
+def test_grid_update_and_expected_gain():
+    world = two_room_apartment()
+    room = world.room("living").polygon
+    grid = Grid()
+    inside = grid.mask(room)
+    # an unknown grid: the predicted look touches cells, each worth cell_gain(0)
+    g0 = expected_gain(grid, [3.0, 2.0], segments_of(room), inside, through_matter=True)
+    assert g0 > 0 and np.isclose(g0 / cell_gain(0.0, 2.2, 2.2), round(g0 / cell_gain(0.0, 2.2, 2.2)))
+    scan = Lidar(sigma=0.0).scan(world, np.array([3.0, 1.0, 0.0]), np.random.default_rng(0))
+    grid.update(scan)
+    assert grid.p[grid.mask(np.array([[2.9, 0.9], [3.1, 0.9], [3.1, 1.1], [2.9, 1.1]]))].max() < 0.2  # free at the robot
+    assert grid.p[0, 20] > 0.8                    # the west wall, at y = 1 m, returned beams
+    assert grid.entropy(inside) < inside.sum() * np.log(2)
 
 
 if __name__ == "__main__":
