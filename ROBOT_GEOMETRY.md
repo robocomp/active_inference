@@ -4,13 +4,23 @@ Ground truth is `robot_concept/shadow.json` (the DSR bootstrap). This file summa
 don't have to re-derive the tree each time. If the two disagree, `shadow.json` wins — re-check and
 update this doc.
 
+⚠**`shadow.json` is STRICT JSON — no `//` or `/* */` comments, no trailing commas.** Two parsers in
+two repositories read it, and both are Qt's `QJsonDocument`, which supports neither: cortex's
+`api/dsr_utils.cpp` (every agent's graph bootstrap) and the `lidar3d_dds` driver in
+`robocomp-robolab`, which reads the helios/bpearl mount straight out of this file. Relaxing it in one
+would leave the file valid for one reader and empty for the other. **Annotate with a `"_comment"`
+key** — safe as a sibling of `"DSRModel"` (there is one at the top of each robot JSON) or of a node's
+`"id"`, but NEVER inside `"attribute"`/`"linkAttribute"`, where the type checker auto-registers the
+name and it becomes a real DSR attribute published over DDS to every peer. Since 2026-09-18 a
+malformed file aborts with the offending line and column instead of seeding an EMPTY graph in
+silence; before that, a single stray character looked exactly like a DDS discovery failure.
+
 ## RT frame tree (parent → child, translation m, rotation deg)
 
 ```
 root  (world datum; z=0 at the FLOOR)
 └── Shadow   type "robot"   T[ 0,     0,     0    ]  R[0,   0, 0]   ← robot base, AT floor level
     └── body type "body"    T[ 0,     0,    +0.0325] R[0,   0, 0]   ← = the Webots world placement
-        ├── 210  (no type)  T[ 0,     0,     0    ]  R[0,   0, 0]
         ├── zed   rgbd       T[ 0,   -0.075, +0.945]  R[0,   0, 0]
         ├── imu   imu        T[ 0,     0,     0    ]  R[0,   0, 0]
         ├── ricoh rgbd       T[ 0,   -0.170, +1.275]  R[0,   0, 0]

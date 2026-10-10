@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../../common/media_transport/lidar_plane_reader.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc
 {
@@ -40,7 +41,7 @@ bool ResidualLidarIngestor::pump()
 
     // Newest "helios" sweep, transformed into the ROOM frame at its capture
     // stamp (interpolate=true — a rotating robot's room<-robot pose differs from the latest pose).
-    const auto sweep = reader_->poll("room", /*interpolate=*/true);
+    const auto sweep = reader_->poll(rc::room::current_room_frame(*G_), /*interpolate=*/true);
     if (not sweep.has_value() or sweep->points.empty())
         return false;
 

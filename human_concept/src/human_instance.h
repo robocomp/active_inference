@@ -86,7 +86,7 @@ struct HumanInstance
 
     // RT parent the person hangs from (always the room for a free-standing human).
     std::uint64_t parent_id = 0;
-    std::string   parent_name = "room";
+    std::string   parent_name;   // resolved from the graph in HumanFitter — the room is `room_1`, `room_2`, …
 };
 
 }  // namespace rc

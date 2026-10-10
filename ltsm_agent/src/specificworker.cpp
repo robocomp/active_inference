@@ -18,6 +18,8 @@
  */
 #include "specificworker.h"
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 #include <QAction>
 #include <QSettings>
 #include <QWheelEvent>
@@ -150,15 +152,25 @@ void SpecificWorker::initialize()
                "started from the component root (the path is resolved against the CWD).");
 
     // Acceptance evidence for this step: two graphs, two domains, one process.
+    // Read through the registry rather than inline in the log line, so the two domains appear in the
+    // startup table like every other key. They are the acceptance evidence for "two graphs, two
+    // domains, one process" - exactly the kind of fact worth having on the record of a run.
+    rc::cfg::Reader cfgr(configLoader, "ltsm_agent");
+    int dsr_domain = 0, ltsm_domain = 0;
+    cfgr.opt("Agent.dsr.domain", dsr_domain,
+             "DDS domain of the SHARED live graph this agent reads rooms from");
+    cfgr.opt("Agent.ltsm.domain", ltsm_domain,
+             "DDS domain of this agent's OWN long-term memory graph - separate on purpose");
     if (G_dsr)
-        qInfo() << "[ltsm_agent] dsr  graph: domain" << configLoader.get<int>("Agent.dsr.domain")
+        qInfo() << "[ltsm_agent] dsr  graph: domain" << dsr_domain
                 << "nodes" << static_cast<int>(G_dsr->size());
-    qInfo() << "[ltsm_agent] ltsm graph: domain" << configLoader.get<int>("Agent.ltsm.domain")
+    qInfo() << "[ltsm_agent] ltsm graph: domain" << ltsm_domain
             << "nodes" << static_cast<int>(G_ltsm->size())
             << "root id" << G_ltsm->get_node("root")->id();
 
-    probe_enabled = configLoader.exists("SelfTest.probe")
-                    and configLoader.get<bool>("SelfTest.probe");
+    probe_enabled = cfgr.b("SelfTest.probe", false,
+            "write a node per cycle into the MEMORY graph and check both directions for leaks",
+            rc::cfg::diagnostic);
     if (probe_enabled)
         qInfo() << "[ltsm_agent] SelfTest.probe ON -- writing a node per cycle into the MEMORY "
                    "graph and checking both directions for leaks.";
@@ -166,19 +178,27 @@ void SpecificWorker::initialize()
     // ── Eviction ────────────────────────────────────────────────────────────────────────────
     // Absent key ⇒ OFF. Moving a room into memory also moves the `current` edge, which is what
     // releases every other agent from the old room, so this must never arm itself by default.
-    const auto flag = [this](const char *key)
-    { return configLoader.exists(key) and configLoader.get<bool>(key); };
-    eviction_enabled     = flag("Eviction.enabled");
-    eviction_stage_check = flag("Eviction.stage_check");
-    eviction_backstop    = flag("Eviction.backstop_sweep");
+    // ABSENT ⇒ OFF is this component's rule, and the Reader keeps it: the default passed here IS
+    // false, so the table shows `default false` rather than leaving the reader to infer that an
+    // absent key means off. That inference is what "absent is not off, but it reads as off" warns
+    // about, and here it happens to be right - which is exactly why it should be stated, not assumed.
+    const auto flag = [&](const char *key, std::string_view what)
+    { return cfgr.b(key, false, what); };
+    eviction_enabled     = flag("Eviction.enabled",
+            "move a room out of the live graph into memory - also moves the `current` edge, which "
+            "releases every other agent from the old room, so it must never arm itself by default");
+    eviction_stage_check = flag("Eviction.stage_check",
+            "verify each eviction stage before advancing to the next");
+    eviction_backstop    = flag("Eviction.backstop_sweep",
+            "sweep for rooms a missed eviction left behind");
 
     // Persistence. Absent key ⇒ OFF, like everything else here. The path resolves against the CWD,
     // as every path in this component's config does.
     {
-        const std::string path = configLoader.exists("Memory.persist_path")
-                               ? configLoader.get<std::string>("Memory.persist_path")
-                               : std::string("etc/ltsm_memory.json");
-        store = std::make_unique<ltsm::MemoryStore>(G_ltsm, path, flag("Memory.persist"));
+        const std::string path = cfgr.s("Memory.persist_path", "etc/ltsm_memory.json",
+                "where the long-term memory graph is written; resolved against the CWD");
+        store = std::make_unique<ltsm::MemoryStore>(G_ltsm, path,
+                flag("Memory.persist", "persist the memory graph across runs"));
         if (store->enabled())
         {
             qInfo() << "[ltsm_agent] PERSISTENCE ARMED --" << path.c_str()
@@ -197,10 +217,12 @@ void SpecificWorker::initialize()
     if (G_dsr)
         evictor = std::make_unique<ltsm::RoomEviction>(G_dsr, G_ltsm);
 
-    promotion_enabled = G_dsr and flag("Promotion.enabled");
-    promotion_stage_check = flag("Promotion.stage_check");
-    if (configLoader.exists("Promotion.decision_prob"))
-        promotion_decision_prob = configLoader.get<double>("Promotion.decision_prob");
+    promotion_enabled = G_dsr and flag("Promotion.enabled",
+            "promote a proto-room to a real room once the evidence supports it");
+    promotion_stage_check = flag("Promotion.stage_check",
+            "verify each promotion stage before advancing");
+    cfgr.opt("Promotion.decision_prob", promotion_decision_prob,
+             "posterior probability at which a promotion is decided");
     if (promotion_enabled and promotion_stage_check)
     {
         // ★ FIXTURE MANIPULATION, domain 3 only: the pose covariance a JSON-seeded edge cannot carry
@@ -222,10 +244,13 @@ void SpecificWorker::initialize()
 
     // ── Live passage ────────────────────────────────────────────────────────────────────────
     // Constructed with the LIVE graph only: it can never see (or sweep) memory's own passage_N.
-    if (G_dsr and flag("LivePassage.enabled"))
+    if (G_dsr and flag("LivePassage.enabled",
+            "track door crossings on the LIVE graph only, so it can never sweep memory's own "
+            "passage_N nodes"))
     {
         live_passage = std::make_unique<ltsm::PassageLive>(G_dsr);
-        live_passage_stage_check = flag("LivePassage.stage_check");
+        live_passage_stage_check = flag("LivePassage.stage_check",
+                "verify each live-passage stage before advancing");
         const int stale = live_passage->sweep_stale();
         qInfo() << "[ltsm_agent] LIVE PASSAGE ARMED -- proto-room entry doors are matched to the current"
                    " room's door; swept" << stale << "stale live passage(s) from a previous run";
@@ -261,8 +286,8 @@ void SpecificWorker::initialize()
     {
         passages = std::make_unique<ltsm::PassageHarvest>(
             G_dsr, G_ltsm,
-            configLoader.exists("Passages.csv_path") ? configLoader.get<std::string>("Passages.csv_path")
-                                                     : std::string("etc/passages.csv"));
+            cfgr.s("Passages.csv_path", "etc/passages.csv",
+                   "where harvested door-crossing passages are logged", rc::cfg::diagnostic));
         qInfo() << "[ltsm_agent] EVICTION ARMED -- stage_check=" << eviction_stage_check
                 << "backstop_sweep=" << eviction_backstop
                 << "\n            (see EVICTION.md; the `current` edge this writes is what tells the"
@@ -274,6 +299,27 @@ void SpecificWorker::initialize()
     // No DSR signals are connected on purpose. CLAUDE.md: if you do not need a signal, do not
     // connect it -- and never with Qt::DirectConnection, which would run the slot on a FastDDS
     // reader thread and corrupt the heap.
+
+    // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
+    //
+    // ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
+    // are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
+    // keys when the coordinator is configured, further down this same function. Publishing before
+    // that armed the unread sweep on a registry those sixteen had not reached yet, and named every
+    // one of them "in the file, read by nothing" - confident false positives from the one check whose
+    // whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
+    // run, which is the end of startup, not the end of parsing.
+    //
+    // Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
+    // default - and writes the full table to etc/config_effective.csv, this run's own record of which
+    // arm it was. Config is read once at startup, so a file's mtime never says which run used it.
+    //
+    // declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
+    // ARMS the unread sweep; check_registry_complete.sh ltsm_agent is the grep that keeps the claim
+    // honest. Re-run it whenever a config read is added.
+    rc::cfg::exempt_generated_prefixes();
+    rc::cfg::registry().declare_complete("ltsm_agent");
+    rc::cfg::Reader(configLoader, "ltsm_agent").publish("etc/config_effective.csv");
 }
 
 

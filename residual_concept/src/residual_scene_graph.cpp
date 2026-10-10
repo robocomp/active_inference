@@ -9,6 +9,7 @@
 #include <print>
 #include <utility>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc
 {
@@ -208,13 +209,13 @@ void ResidualSceneGraph::write_rt_pose(ResidualInstance& inst, std::uint64_t roo
         if (chain_cov_enabled_ and gaussian_ and inner_eigen_)
         {
             const Mat::Vector3d centre_room(s.cx, s.cy, s.cz);
-            if (const auto c_src = inner_eigen_->transform(chain_src_frame_, centre_room, "room", timestamp_ms);
+            if (const auto c_src = inner_eigen_->transform(chain_src_frame_, centre_room, rc::room::current_room_frame(*G_), timestamp_ms);
                 c_src.has_value())
             {
                 DSR::GaussianPoint3D gp;
                 gp.mean = c_src.value();
                 gp.covariance = DSR::Cov3d::Zero();
-                if (const auto g_fit = gaussian_->transform_point("room", gp, chain_src_frame_, timestamp_ms);
+                if (const auto g_fit = gaussian_->transform_point(rc::room::current_room_frame(*G_), gp, chain_src_frame_, timestamp_ms);
                     g_fit.has_value())
                 {
                     const auto& C = g_fit.value().covariance;

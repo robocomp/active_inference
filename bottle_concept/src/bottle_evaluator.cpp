@@ -9,14 +9,17 @@
 #include <print>
 
 #include <Eigen/Dense>
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…
 
 namespace rc {
 
 BottleEvaluator::BottleEvaluator(BottleConfig& cfg,
+                                 std::shared_ptr<DSR::DSRGraph> graph,
                                  RoboCompWebots2Robocomp::Webots2RobocompPrxPtr proxy,
                                  DSR::InnerEigenAPI* inner_eigen,
                                  TableTopFn table_top)
-    : cfg_(cfg), proxy_(std::move(proxy)), inner_eigen_(inner_eigen), table_top_(std::move(table_top))
+    : cfg_(cfg), G_(std::move(graph)), proxy_(std::move(proxy)), inner_eigen_(inner_eigen),
+      table_top_(std::move(table_top))
 {}
 
 void BottleEvaluator::place_bottle_on_start()
@@ -72,7 +75,7 @@ bool BottleEvaluator::acquire_webots_gt()
     const Eigen::Isometry3d T_world_body   = to_iso(robot_w);
     const Eigen::Vector3d base_in_body = (T_world_body.inverse() * T_world_bottle).translation();
 
-    const auto room_T_body = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto room_T_body = inner_eigen_->get_transformation_matrix(G_ ? rc::room::current_room_frame(*G_) : std::string{}, "body", 0);
     if (not room_T_body.has_value())
         return false;
 

@@ -11,12 +11,42 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QTimer>
+#include <QEvent>
 
 namespace
 {
 constexpr auto kWinSettingsOrg = "RoboComp";
 constexpr auto kWinSettingsApp = "controller";
 constexpr auto kWinSettingsKey = "ControllerPlannerWindow_geometry";
+
+// Saves the window geometry shortly after every resize/move, not only on a clean quit. The quit-time save
+// in request_shutdown() never runs when the agent dies some other way: the terminal tab closing (SIGHUP is
+// not trapped), a crash, or kill -9. Those were exactly the restarts that came back at the old size.
+// Debounced so that a drag writes the file once, when it ends, not on every intermediate event.
+class GeometrySaver : public QObject
+{
+public:
+    GeometrySaver(QWidget *window, std::function<void()> save) : QObject(window), save_(std::move(save))
+    {
+        timer_.setSingleShot(true);
+        timer_.setInterval(500);
+        QObject::connect(&timer_, &QTimer::timeout, this, [this] { save_(); });
+        window->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Resize or event->type() == QEvent::Move)
+            timer_.start();
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    std::function<void()> save_;
+    QTimer timer_;
+};
 }  // namespace
 
 void ControllerDisplay::restore_window_geometry()
@@ -52,6 +82,7 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     custom_widget_->setWindowTitle(QStringLiteral("controller — planner"));
     restore_window_geometry();
     custom_widget_->show();
+    new GeometrySaver(custom_widget_.get(), [this] { save_window_geometry(); });   // owned by the window
 
     // No axis from the base viewer: it is pinned to the centre of this initial view rect, not to the
     // room. The only axis drawn is the one on the room polygon centroid (see Viewer2D::draw_room_polygon).

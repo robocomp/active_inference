@@ -36,7 +36,10 @@ public:
     // table_top(bx,by) → table-top z in the room frame when the bottle stands on a table (else nullopt).
     using TableTopFn = std::function<std::optional<float>(float, float)>;
 
+    // `graph` is needed for ONE thing: naming the room. It is `room_1`, `room_2`, … so the room←body
+    // lookup below cannot use a literal (rc::room::current_room_frame).
     BottleEvaluator(BottleConfig& cfg,
+                    std::shared_ptr<DSR::DSRGraph> graph,
                     RoboCompWebots2Robocomp::Webots2RobocompPrxPtr proxy,
                     DSR::InnerEigenAPI* inner_eigen,
                     TableTopFn table_top);
@@ -60,6 +63,7 @@ private:
 
     BottleConfig&                                   cfg_;
     RoboCompWebots2Robocomp::Webots2RobocompPrxPtr proxy_;
+    std::shared_ptr<DSR::DSRGraph>                 G_;
     DSR::InnerEigenAPI*                            inner_eigen_ = nullptr;
     TableTopFn                                     table_top_;
 

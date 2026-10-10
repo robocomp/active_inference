@@ -23,6 +23,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include "../../common/rt_query_probe/rt_query_probe.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -131,7 +132,7 @@ std::optional<Eigen::Matrix4d> RefrigeratorProjection::room_T_zed_matrix(std::ui
     // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
     static rc::rtprobe::Probe rt_probe{"refrigerator_projection room<-body"};
     DSR::RT_API::TimeQueryInfo rt_info;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms, "RT",
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", pose_ts_ms, "RT",
                                                              DSR::RT_API::TimeQuery::Interpolated,
                                                              &rt_info);
     rt_probe.note(rt_info, G_);

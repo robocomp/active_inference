@@ -20,6 +20,7 @@
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / ExistenceBelief
 #include "../../common/nbv/viewpoint_score.h"                  // rc::nbv:: Target / fill / visible_fraction
 #include "../../common/nbv/graph_obstacles.h"                  // rc::nbv:: sensor_from_graph / obstacles
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -88,7 +89,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         // ★PINNED to the mask's capture stamp (see Inputs::masks_stamp_ms). Reading ts=0 judges a frame by
         // a pose the robot may have left: while moving, the fill and the visibility would be computed for a
         // viewpoint that never took the picture, and absence would be charged for a look never made.
-        if (const auto T = in.inner_eigen->get_transformation_matrix("room", "zed", in.masks_stamp_ms);
+        if (const auto T = in.inner_eigen->get_transformation_matrix(rc::room::current_room_frame(*in.G), "zed", in.masks_stamp_ms);
             T.has_value())
         {
             const auto& M = T.value();

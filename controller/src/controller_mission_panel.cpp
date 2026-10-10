@@ -28,9 +28,14 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     outer->setContentsMargins(0, 0, 0, 0);
     outer->addWidget(frame);
 
-    auto *row = new QHBoxLayout(frame);
-    row->setContentsMargins(4, 2, 4, 2);
+    // TWO LINES so the panel does not set the window's minimum width: what to drive (mode, mission,
+    // actions) on the first; how to drive it (tracker L, laps, direction) on the second.
+    auto *lines = new QVBoxLayout(frame);
+    lines->setContentsMargins(4, 2, 4, 2);
+    lines->setSpacing(2);
+    auto *row = new QHBoxLayout;
     row->setSpacing(6);
+    lines->addLayout(row);
 
     // WHAT DRIVES THE ROBOT. Named explicitly rather than implied by a combination of widgets: this is the
     // experimental condition of a run, it is written into the metrics CSV, and "which mode was this?" must
@@ -61,57 +66,6 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     QObject::connect(missions_, &QComboBox::currentTextChanged, this,
                      [this](const QString &n)
                      { if (cb_.on_select and not n.isEmpty()) cb_.on_select(n.toStdString()); });
-
-    // ── HOW HARD THE ROBOT STICKS TO THE ROUTE: the plain tracker's L ──
-    // ★REPLACED the Risk <-> Safe route-optimiser dial (2026-08-12). That slider moved
-    // RouteOptimizerConfig::safety_bias, which applies only to the NEXT route BUILD — so moving it
-    // while watching the robot did nothing at all until the next replan, which is the opposite of what
-    // a live slider is for. Its value is a considered, measured one (config RouteSafetyBias = 0.75,
-    // with a clearance/length frontier recorded beside it), and it belongs in the config file where a
-    // measurement can sit next to it. L is the one that is genuinely a live judgement.
-    // L is the closed-loop error-decay LENGTH: an off-route error decays over L metres of arc at any
-    // speed, because the feedback is critically damped in the arc-length domain rather than in time
-    // (plain_tracker.cpp). Both feedback gains follow from it — 2/L on heading, 1/L^2 on cross-track —
-    // so it is the single number that says how hard the robot is pulled back onto the line.
-    // ★The labels follow the VALUE and need no inversion: the slider carries L in millimetres, small L
-    // means large gains means a tighter line, so Stick is the left (low) end and Loose the right (high)
-    // one. The same pedantry the Risk/Safe label carried — a control whose ends are mislabelled is
-    // worse than no control — but here it comes out the easy way round.
-    // ★It acts on the very next control cycle — this is a live gain, not a route property.
-    row->addWidget(new QLabel("Stick", frame));
-    plain_l_ = new QSlider(Qt::Horizontal, frame);
-    // Range in millimetres of arc. The low end is where the loop is expected to ring (below ~0.3 m the
-    // 1/L^2 term dominates and TV(w) climbs sharply); the high end is well past the point where the
-    // robot visibly cuts corners. Both ends are deliberately reachable: this is a control for finding
-    // out, and clamping it to the measured-safe band would make it useless for that.
-    plain_l_->setRange(kPlainLMinMm, kPlainLMaxMm);
-    plain_l_->setValue(500);
-    plain_l_->setFixedWidth(90);
-    plain_l_->setToolTip(
-        QStringLiteral("Plain tracker: how hard the robot sticks to the route (L, metres of arc).\n"
-                       "An off-route error decays over L metres AT ANY SPEED — the feedback is critically\n"
-                       "damped in arc length, so one gain is right at every speed.\n"
-                       "Stick (left, small L)  — 2/L and 1/L^2 grow: tighter line, more rotational effort,\n"
-                       "                         and below ~0.3 m the loop starts to ring.\n"
-                       "Loose (right, large L) — smoother and quieter, with a larger standing offset on\n"
-                       "                         curves; the robot cuts corners.\n"
-                       "Offline (tools/tracker_sim, identified plant): rms 53 mm at 0.25, 31 mm at 0.50,\n"
-                       "45 mm at 0.90, 76 mm at 1.40 — so it has an interior optimum near the shipped 0.50.\n"
-                       "The policy that set it is 'minimise cross-track rms subject to rotational effort\n"
-                       "<= 0.87 rad/m'; watch rot/m in the metrics, not rms alone.\n"
-                       "Takes effect on the NEXT control cycle."));
-    row->addWidget(plain_l_);
-    row->addWidget(new QLabel("Loose", frame));
-    plain_l_label_ = new QLabel("0.50", frame);
-    plain_l_label_->setFixedWidth(30);
-    row->addWidget(plain_l_label_);
-    QObject::connect(plain_l_, &QSlider::valueChanged, this,
-                     [this](int mm)
-                     {
-                         const float L = static_cast<float>(mm) / 1000.f;
-                         if (plain_l_label_) plain_l_label_->setText(QString::asprintf("%.2f", L));
-                         if (cb_.on_plain_l) cb_.on_plain_l(L);
-                     });
 
     // ── Mission actions ──
     // A menu, not a row of verbs. Everything here acts on the SELECTED mission, and the item list
@@ -168,6 +122,63 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                          }
                      });
     rebuild_actions(false, 0);
+
+    row->addStretch();
+
+    row = new QHBoxLayout;
+    row->setSpacing(6);
+    lines->addLayout(row);
+
+    // ── HOW HARD THE ROBOT STICKS TO THE ROUTE: the plain tracker's L ──
+    // ★REPLACED the Risk <-> Safe route-optimiser dial (2026-08-12). That slider moved
+    // RouteOptimizerConfig::safety_bias, which applies only to the NEXT route BUILD — so moving it
+    // while watching the robot did nothing at all until the next replan, which is the opposite of what
+    // a live slider is for. Its value is a considered, measured one (config RouteSafetyBias = 0.75,
+    // with a clearance/length frontier recorded beside it), and it belongs in the config file where a
+    // measurement can sit next to it. L is the one that is genuinely a live judgement.
+    // L is the closed-loop error-decay LENGTH: an off-route error decays over L metres of arc at any
+    // speed, because the feedback is critically damped in the arc-length domain rather than in time
+    // (plain_tracker.cpp). Both feedback gains follow from it — 2/L on heading, 1/L^2 on cross-track —
+    // so it is the single number that says how hard the robot is pulled back onto the line.
+    // ★The labels follow the VALUE and need no inversion: the slider carries L in millimetres, small L
+    // means large gains means a tighter line, so Stick is the left (low) end and Loose the right (high)
+    // one. The same pedantry the Risk/Safe label carried — a control whose ends are mislabelled is
+    // worse than no control — but here it comes out the easy way round.
+    // ★It acts on the very next control cycle — this is a live gain, not a route property.
+    row->addWidget(new QLabel("Stick", frame));
+    plain_l_ = new QSlider(Qt::Horizontal, frame);
+    // Range in millimetres of arc. The low end is where the loop is expected to ring (below ~0.3 m the
+    // 1/L^2 term dominates and TV(w) climbs sharply); the high end is well past the point where the
+    // robot visibly cuts corners. Both ends are deliberately reachable: this is a control for finding
+    // out, and clamping it to the measured-safe band would make it useless for that.
+    plain_l_->setRange(kPlainLMinMm, kPlainLMaxMm);
+    plain_l_->setValue(500);
+    plain_l_->setFixedWidth(90);
+    plain_l_->setToolTip(
+        QStringLiteral("Plain tracker: how hard the robot sticks to the route (L, metres of arc).\n"
+                       "An off-route error decays over L metres AT ANY SPEED — the feedback is critically\n"
+                       "damped in arc length, so one gain is right at every speed.\n"
+                       "Stick (left, small L)  — 2/L and 1/L^2 grow: tighter line, more rotational effort,\n"
+                       "                         and below ~0.3 m the loop starts to ring.\n"
+                       "Loose (right, large L) — smoother and quieter, with a larger standing offset on\n"
+                       "                         curves; the robot cuts corners.\n"
+                       "Offline (tools/tracker_sim, identified plant): rms 53 mm at 0.25, 31 mm at 0.50,\n"
+                       "45 mm at 0.90, 76 mm at 1.40 — so it has an interior optimum near the shipped 0.50.\n"
+                       "The policy that set it is 'minimise cross-track rms subject to rotational effort\n"
+                       "<= 0.87 rad/m'; watch rot/m in the metrics, not rms alone.\n"
+                       "Takes effect on the NEXT control cycle."));
+    row->addWidget(plain_l_);
+    row->addWidget(new QLabel("Loose", frame));
+    plain_l_label_ = new QLabel("0.50", frame);
+    plain_l_label_->setFixedWidth(30);
+    row->addWidget(plain_l_label_);
+    QObject::connect(plain_l_, &QSlider::valueChanged, this,
+                     [this](int mm)
+                     {
+                         const float L = static_cast<float>(mm) / 1000.f;
+                         if (plain_l_label_) plain_l_label_->setText(QString::asprintf("%.2f", L));
+                         if (cb_.on_plain_l) cb_.on_plain_l(L);
+                     });
 
     row->addWidget(new QLabel("laps", frame));
     loops_ = new QSpinBox(frame);

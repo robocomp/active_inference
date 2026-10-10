@@ -164,7 +164,8 @@ struct BottleInstance
     // RT-tree parent the bottle "hangs from": the table node when found, else the room. The fit is
     // always in the room frame; the RT edge (parent→bottle) is written in the parent frame.
     std::uint64_t parent_id = 0;
-    std::string   parent_name = "room";
+    std::string   parent_name;   // set from the graph (rc::support::decide / the node's own parent) —
+                                 // never a literal: the room is `room_1`, `room_2`, …
     // Support-surface decision hysteresis: a challenger surface must win for support_commit_cycles
     // consecutive cycles before we re-parent (anti-thrash at table edges / the floor↔table boundary).
     std::uint64_t support_challenger_id    = 0;

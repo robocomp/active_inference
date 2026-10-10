@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <print>
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc
 {
@@ -34,11 +35,12 @@ bool ResidualFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_n
     inst.node_name = node.name();
 
     ResidualState st;
+    const std::string room_frame = rc::room::current_room_frame(*G_);
     st.w      = G_->get_attrib_by_name<width_m_att> (node).value_or(0.40f);
     st.d      = G_->get_attrib_by_name<depth_m_att> (node).value_or(0.40f);
     st.height = G_->get_attrib_by_name<height_m_att>(node).value_or(0.80f);
     if (inner_eigen_)
-        if (const auto t = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), node.name(), 0);
+        if (const auto t = inner_eigen_->transform(room_frame, Mat::Vector3d(0.0, 0.0, 0.0), node.name(), 0);
             t.has_value())
         { st.cx = static_cast<float>(t->x()); st.cy = static_cast<float>(t->y()); st.cz = static_cast<float>(t->z()); }
 

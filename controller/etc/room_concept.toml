@@ -1,3 +1,8 @@
 [Owns]
 nodes    = ["room_concept 5", "afford_room"]
-subtrees = ["room"]
+# `room_*`, not `room`: room_concept names its rooms room_1, room_2, … (one per room discovered), so no
+# single literal names the subtree any more. The trailing `*` is a prefix pattern — AgentPresenceMonitor::
+# delete_subtree reaps EVERY matching root, which is what a two-room graph needs. This file is the copy a
+# PEER reads to clean up after room_concept crashes; room_concept's own graceful exit does not depend on it
+# (RoomSceneGraph::cleanup_room_graph_nodes deletes room nodes by TYPE).
+subtrees = ["room_*"]
