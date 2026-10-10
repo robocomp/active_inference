@@ -1,0 +1,19 @@
+# Shadow in Webots, with the DDS-native bridge (webots-shadow/components/shadow-bridge-dds).
+#
+# The bridge publishes LiDAR (helios + bpearl), ZED rgb/depth, the ricoh 360 and the IMU straight onto
+# the media plane (domain 7) and serves their MediaPlaneDDS descriptors on the drivers' old ports
+# (12002, 10099, 11890, 11889, 11891), so lidar3d_dds x2, zed_camera, ricoh_omni_dds and imu_dds are
+# NOT started here. sub_shadow.toml keeps the old webots-bridge + drivers chain for A/B and fallback.
+# Run ONE of the two: both bridges are the extern controller of the same Webots robot.
+
+[[components]]
+name = "bridge"
+cwd = "~/robocomp/components/webots-shadow/components/shadow-bridge-dds"
+cmd = "bin/shadow_bridge_dds etc/config.toml"
+ice_name = "Webots2Robocomp:tcp -h localhost -p 10006"
+
+[[components]]
+name = "joy"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/external_control/python_xbox_controller"
+cmd = "bin/python_xbox_controller etc/config_shadow"
+ce_name = "python_xbox_controller:tcp -h localhost -p 11230"
