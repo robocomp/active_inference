@@ -46,6 +46,7 @@
 #include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
 #include "free_space_polygon.h"      // rc::freespace (the start-up proto-room's extent)
 #include "layout_refiner.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
+#include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 
 namespace rc
@@ -228,6 +229,8 @@ private:
     // edits of the given room against its evidence cells and uploads the ones that pay (refine_given_layout).
     void step_layout_refiner(const rc::RoomConcept::UpdateResult& res);
     rc::refine::LayoutRefiner refiner_;
+    std::string learnt_layout_path_;   // this run's learnt-layout file (learnt_layout.h); empty until the first save
+    void save_learnt_layout(const std::vector<Eigen::Vector2f>& poly, const char* what);
     std::int64_t  refine_last_ms_ = 0;
     std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation

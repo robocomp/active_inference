@@ -1600,6 +1600,7 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
     readiness_stable_.store(1.f, std::memory_order_relaxed);
     readiness_explore_.store(1.f, std::memory_order_relaxed);
     published_polygon_verts_ = poly_pub.size();
+    save_learnt_layout(poly_pub, "promoted");
     // free_space_ is NOT reset (2026-10-10): it is the refiner's evidence accumulator from here on, fed at the shadow
     // SLAM pose by step_layout_refiner — the same poses it was built at while plain SLAM drove.
     refine_last_ms_ = steady_ms();
@@ -1630,6 +1631,20 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
                                  "afford_room handed to the epistemic planner.")
                              .arg(dsr_room_id_).arg(poly_pub.size()).arg(g.x(), 0, 'f', 3).arg(g.y(), 0, 'f', 3)
                              .arg(angle_of(T_pub_int_) * 180.f / static_cast<float>(M_PI), 0, 'f', 2);
+}
+
+void RoomSceneGraph::save_learnt_layout(const std::vector<Eigen::Vector2f>& poly, const char* what)
+{
+    // The accepted room, kept for RoomShape.MapMode = "last" (learnt_layout.h). One dated file per run, rewritten
+    // on every accepted refinement so the newest file always holds this run's final layout.
+    if (learnt_layout_path_.empty())
+        learnt_layout_path_ = rc::learnt::new_path(params_->LAYOUT_DIR, rc::learnt::scenario_stem(params_->ROOM_LAYOUT_SVG));
+    const auto note = std::format("{} layout, {} vertices", what, poly.size());
+    if (rc::learnt::save(learnt_layout_path_, poly, note))
+        qInfo().noquote() << QString("[room][learnt] %1 layout saved (%2 vertices) -> %3")
+                                 .arg(what).arg(poly.size()).arg(QString::fromStdString(learnt_layout_path_));
+    else
+        qWarning().noquote() << "[room][learnt] could not write" << QString::fromStdString(learnt_layout_path_);
 }
 
 void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateResult& res)
@@ -1743,6 +1758,20 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
     if (executing and not replan)
         return;   // the controller owns the claim; the goal is not moved under it
 
+    // ── AFTER PROMOTION THE EXPLORER HAS ONE JOB: SHOW THE REFINER WHAT IT IS UNSURE OF (2026-10-10) ───────────────
+    // With nothing contested there is no question left a standpoint could answer: the coverage gain is spent (that is
+    // what promoted the room) and the legacy wall-map planner below has no input any more (the wall map is not observed
+    // after promotion). Building the clearance grid anyway cost ~1/3 of the localiser thread, measured with perf
+    // (a radius search per grid cell, every replan), for a plan that could only say "no gain".
+    if (replan and startup_promoted_ and refine_contested_.empty())
+    {
+        layout_plan_ms_ = now;
+        layout_last_plan_ = {};
+        layout_last_plan_.finished = true;
+        layout_last_plan_.why = "nothing_contested";
+        readiness_explore_.store(1.f, std::memory_order_relaxed);
+        return;
+    }
     if (replan)
     {
         rc::layout::ExplorerParams ep;
@@ -3734,7 +3763,11 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     for (const auto& v : R.polygon) { px.push_back(v.x()); py.push_back(v.y()); }
     rn->attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{px, 0, 0};
     rn->attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{py, 0, 0};
-    if (G_->update_node(rn.value())) { fs_published_ = R.polygon; published_polygon_verts_ = R.polygon.size(); }
+    if (G_->update_node(rn.value()))
+    {
+        fs_published_ = R.polygon; published_polygon_verts_ = R.polygon.size();
+        save_learnt_layout(R.polygon, "refined");
+    }
 }
 
 }  // namespace rc

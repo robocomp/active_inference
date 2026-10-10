@@ -412,6 +412,7 @@ struct RoomConfig
     /// The DRAIN is never throttled (a reliable reader whose pool backs up stops the producer);
     /// only the grey conversion of frames nobody would have read. See CameraIngestor.
     int   IMAGE_EDGE_MIN_CONVERT_MS = 0;     // ImageEdge.minConvertIntervalMs
+    int   IMAGE_EDGE_LOCALIZING_CONVERT_MS = 0;   // ImageEdge.localizingConvertIntervalMs (0 = no throttle)
     /// The same throttle for the CALIBRATION channels, which is a different question: their frames
     /// never reach the loss, so a skipped one costs coverage of a fit that accumulates over minutes,
     /// not evidence for this tick's pose. Kept SEPARATE from the driving camera on purpose — one

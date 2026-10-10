@@ -280,6 +280,18 @@ void CalibChannels::pump_image_edges()
         qInfo().noquote() << QString("[imgedge] room polygon taken from the frozen layout: %1 vertices — "
                                      "RGB corner extraction can start").arg(room_polygon_.size());
     }
+    // ── THROTTLE ONCE LOCALIZING (2026-10-10) ────────────────────────────────────────────────────────────────
+    // perf, parked after promotion: the channel cost ~15-20% of a core at the camera's full rate, while the localiser
+    // early-exits on ~100% of frames — so the corners feed almost only the MOUNT estimate, which moves slowly. Fewer
+    // frames are converted (the ingest thread's own throttle) and so fewer are extracted here.
+    // ★COMPUTE BUDGET, not a model constant: ImageEdge.localizingConvertIntervalMs (0 = never throttle).
+    if (not localizing_throttled_ and room_concept_.localizing() and params.IMAGE_EDGE_LOCALIZING_CONVERT_MS > 0)
+    {
+        camera_ingestor_->set_min_convert_interval_ms(params.IMAGE_EDGE_LOCALIZING_CONVERT_MS);
+        localizing_throttled_ = true;
+        qInfo().noquote() << QString("[imgedge] LOCALIZING: camera conversion throttled to one frame per %1 ms")
+                                 .arg(params.IMAGE_EDGE_LOCALIZING_CONVERT_MS);
+    }
 
     if (not image_edge_bound_)
     {

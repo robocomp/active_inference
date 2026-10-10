@@ -2472,12 +2472,60 @@ namespace rc
         return out;
     }
 
+    void RoomConcept::record_wall_input(const std::vector<Eigen::Vector3f>& points, const std::vector<Eigen::Vector2f>& pts,
+                                        const Eigen::VectorXf& weights, const Eigen::Vector3f& pose, std::int64_t timestamp_ms)
+    {
+        if (params.record_wall_input)
+        {
+            if (not wall_input_rec_.is_open())
+            {
+                std::filesystem::create_directories("tmp");
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count();
+                wall_input_rec_.open("tmp/wall_input_" + std::to_string(ms) + ".bin", std::ios::binary | std::ios::trunc);
+                if (wall_input_rec_.is_open())
+                {
+                    // v2 (2026-10-05): odom is THIS frame's delta, not the stride accumulator (stride_span.h)
+                    const std::uint32_t version = 2;
+                    wall_input_rec_.write("WIN1", 4);
+                    wall_input_rec_.write(reinterpret_cast<const char*>(&version), sizeof(version));
+                    qInfo() << "[room][wall-slam] RecordWallInput: recording wall-step input to tmp/wall_input_" << ms << ".bin";
+                }
+            }
+            if (wall_input_rec_.is_open())
+            {
+                const auto put = [&](const auto& v) { wall_input_rec_.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+                put(static_cast<std::int64_t>(timestamp_ms));
+                put(static_cast<std::uint8_t>(rec_stride_replace_ ? 1 : 0));
+                for (int i = 0; i < 3; ++i) put(rec_odom_delta_[i]);
+                for (int i = 0; i < 3; ++i) put(pose[i]);
+                for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) put(current_covariance(r, c));
+                put(static_cast<std::uint32_t>(pts.size()));
+                for (size_t i = 0; i < pts.size(); ++i)
+                {
+                    put(pts[i].x()); put(pts[i].y()); put(points[i].z());
+                    put(weights.size() > static_cast<long>(i) ? weights(static_cast<long>(i)) : 1.f);
+                }
+            }
+        }
+    }
+
     void RoomConcept::wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
                                         std::int64_t timestamp_ms)
     {
         std::vector<Eigen::Vector2f> pts;
         pts.reserve(points.size());
         for (const auto& p : points) pts.emplace_back(p.x(), p.y());
+        // ── AFTER PROMOTION THE WALL MAP HAS NO CONSUMER (2026-10-10) ────────────────────────────────────
+        // The adopted map layout is the given room (derived_polygon_ = map_layout_), the refiner edits it from the
+        // shadow SLAM map, and the SDF localiser solves against it; the wall map's polygon is not published and the
+        // model polygon is not overwritten from it. Its segmentation + association cost 1.8-3 ms/frame (measured,
+        // t_wall_ms) for nothing. Only the input RECORDING continues (offline replays), with unit weights.
+        if (map_layout_adopted_)
+        {
+            record_wall_input(points, pts, Eigen::VectorXf::Ones(static_cast<long>(pts.size())), pose, timestamp_ms);
+            return;
+        }
         const auto seg = wallseg::segment(pts, params.wall_seg, wall_rng_);
 
         // The sidecar sees the robot-frame scan, the map-frame pose, that pose's covariance, and —
@@ -2553,39 +2601,7 @@ namespace rc
         // harness core and the live INPUT separated from the agent's INTEGRATION loop. Read-only.
         // Binary, native little-endian: "WIN1" + u32 version, then per frame: i64 ts, u8 stride_replace,
         // f32 odom[3], f32 pose[3], f32 cov[9] (row-major), u32 n, n x (f32 x, f32 y, f32 z, f32 weight).
-        if (params.record_wall_input)
-        {
-            if (not wall_input_rec_.is_open())
-            {
-                std::filesystem::create_directories("tmp");
-                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch()).count();
-                wall_input_rec_.open("tmp/wall_input_" + std::to_string(ms) + ".bin", std::ios::binary | std::ios::trunc);
-                if (wall_input_rec_.is_open())
-                {
-                    // v2 (2026-10-05): odom is THIS frame's delta, not the stride accumulator (stride_span.h)
-                    const std::uint32_t version = 2;
-                    wall_input_rec_.write("WIN1", 4);
-                    wall_input_rec_.write(reinterpret_cast<const char*>(&version), sizeof(version));
-                    qInfo() << "[room][wall-slam] RecordWallInput: recording wall-step input to tmp/wall_input_" << ms << ".bin";
-                }
-            }
-            if (wall_input_rec_.is_open())
-            {
-                const auto put = [&](const auto& v) { wall_input_rec_.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
-                put(static_cast<std::int64_t>(timestamp_ms));
-                put(static_cast<std::uint8_t>(rec_stride_replace_ ? 1 : 0));
-                for (int i = 0; i < 3; ++i) put(rec_odom_delta_[i]);
-                for (int i = 0; i < 3; ++i) put(pose[i]);
-                for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) put(current_covariance(r, c));
-                put(static_cast<std::uint32_t>(pts.size()));
-                for (size_t i = 0; i < pts.size(); ++i)
-                {
-                    put(pts[i].x()); put(pts[i].y()); put(points[i].z());
-                    put(weights.size() > static_cast<long>(i) ? weights(static_cast<long>(i)) : 1.f);
-                }
-            }
-        }
+        record_wall_input(points, pts, weights, pose, timestamp_ms);
 
         // FROZEN: observe() still runs, because association is what feeds the residual log and the
         // canvas, and a frozen map that cannot say how far the scan falls from it is worth nothing.

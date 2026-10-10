@@ -1937,6 +1937,9 @@ useTriplePoints = true
 # ⚠ Judge it on the `conv <cam> converted/delivered` field of the [pumps] line, not on CPU alone:
 #   a ratio of 1.00 means the throttle never fired, and no CPU number would have said so.
 minConvertIntervalMs = 0      # DRIVING camera: every frame. Its greyed frames feed the RGB corner
+localizingConvertIntervalMs = 500   # 2026-10-10 ★COMPUTE BUDGET: once LOCALIZING the corners feed (almost) only the mount
+                                    # estimate (~100% early exit), so ~2 Hz instead of every frame; perf: the channel was
+                                    # ~15-20% of a core at full rate. 0 = never throttle.
                               # factor that MOVES the published pose (drive = true), so a skipped
                               # frame here is evidence the localiser does not get — a different
                               # trade from the one below, which is why it is a different number.

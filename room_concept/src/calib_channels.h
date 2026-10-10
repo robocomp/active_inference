@@ -82,6 +82,7 @@ namespace rc
         std::shared_ptr<DSR::DSRGraph> G;
         RoomConfig&      params;
         RoomConcept&     room_concept_;
+        bool             localizing_throttled_ = false;   // ImageEdge.localizingConvertIntervalMs applied
         MountCalibrator& mount_;
         RoomViewer**     viewer_slot_ = nullptr;
 

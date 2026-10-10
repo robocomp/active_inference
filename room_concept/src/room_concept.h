@@ -2198,6 +2198,8 @@ private:
     Eigen::Matrix3f box_pose_cov_ = Eigen::Matrix3f::Identity() * 1e-4f;
 
     /// Segment the newest slot's scan, associate to the walls, store the associations in the slot.
+    void record_wall_input(const std::vector<Eigen::Vector3f>& points, const std::vector<Eigen::Vector2f>& pts,
+                           const Eigen::VectorXf& weights, const Eigen::Vector3f& pose, std::int64_t timestamp_ms);
     void wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
                            std::int64_t timestamp_ms);
     /// After the solve: merge, derive the polygon, re-anchor once it is publishable, fill the view.

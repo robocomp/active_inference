@@ -3,6 +3,7 @@
  *    This file is part of RoboComp — see room_config.h.
  */
 
+#include "learnt_layout.h"
 #include "room_config.h"
 #include <algorithm>
 #include <limits>
@@ -219,13 +220,32 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
 
     // ── [RoomShape] wall-SLAM: estimate the layout instead of loading it ───────────────────────
     // MapMode is the ONE switch; absent ⇒ "given" ⇒ nothing else in this block has any effect.
-    reader_apply<std::string>(reader, "RoomShape.MapMode", "given = load the layout; estimate = learn it from the LiDAR", p.MAP_MODE, [&](const std::string& m)
+    reader_apply<std::string>(reader, "RoomShape.MapMode",
+        "given = load the layout; estimate = learn it from the LiDAR; last = load the newest learnt layout", p.MAP_MODE,
+        [&](const std::string& m)
     {
         p.MAP_MODE = m;
         room_concept.params.map_mode = (m == "estimate") ? rc::RoomConcept::Params::MapMode::Estimate
                                                          : rc::RoomConcept::Params::MapMode::Given;
-        if (m != "estimate" and m != "given")
-            qWarning() << "[cfg] RoomShape.MapMode" << QString::fromStdString(m) << "is not 'given'|'estimate' — treated as given";
+        if (m == "last")
+        {
+            // 2026-10-10: the newest layout an Estimate run of THIS scenario promoted/refined (learnt_layout.h),
+            // loaded as the given room. None yet => learn one (estimate), since there is nothing to reload.
+            const auto stem = rc::learnt::scenario_stem(p.ROOM_LAYOUT_SVG);
+            if (const auto f = rc::learnt::newest(p.LAYOUT_DIR, stem))
+            {
+                p.ROOM_LAYOUT_SVG = *f;   // contains a '/': initialize_room_model_from_svg takes it as a path
+                qInfo() << "[cfg] RoomShape.MapMode = last: loading the newest learnt layout" << QString::fromStdString(*f);
+            }
+            else
+            {
+                room_concept.params.map_mode = rc::RoomConcept::Params::MapMode::Estimate;
+                qWarning() << "[cfg] RoomShape.MapMode = last: no learnt layout for" << QString::fromStdString(stem)
+                           << "in" << QString::fromStdString(p.LAYOUT_DIR) << "/learnt — estimating instead";
+            }
+        }
+        else if (m != "estimate" and m != "given")
+            qWarning() << "[cfg] RoomShape.MapMode" << QString::fromStdString(m) << "is not 'given'|'estimate'|'last' — treated as given";
     });
     {
         auto& ws = room_concept.params.wall_seg;
@@ -1026,6 +1046,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "ImageEdge.csv");
     reader.opt<int>("ImageEdge.minConvertIntervalMs", p.IMAGE_EDGE_MIN_CONVERT_MS,
             "ImageEdge.minConvertIntervalMs");
+    reader.opt<int>("ImageEdge.localizingConvertIntervalMs", p.IMAGE_EDGE_LOCALIZING_CONVERT_MS,
+            "ImageEdge.localizingConvertIntervalMs (conversion throttle once LOCALIZING; 0 = none)");
     reader.opt<int>("ImageEdge.calibMinConvertIntervalMs", p.IMAGE_EDGE_CALIB_MIN_CONVERT_MS,
             "ImageEdge.calibMinConvertIntervalMs");
 
