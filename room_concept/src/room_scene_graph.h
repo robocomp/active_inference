@@ -45,6 +45,7 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
 #include "free_space_polygon.h"      // rc::freespace (the start-up proto-room's extent)
+#include "layout_refiner.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 
 namespace rc
@@ -222,6 +223,14 @@ private:
     int  rej_ring_ = 0, rej_furniture_ = 0, rej_refused_ = 0;  // diagnostics: explorer rejections, per plan   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
     void stamp_low_obstacles();
     std::int64_t  fs_last_ms_ = 0;
+    // ── LAYOUT REFINEMENT AFTER PROMOTION (2026-10-10, layout_refiner.h) ──────────────────────────────────
+    // free_space_ is KEPT past promotion and fed at the shadow SLAM pose; every kRefinePeriodMs the refiner scores
+    // edits of the given room against its evidence cells and uploads the ones that pay (refine_given_layout).
+    void step_layout_refiner(const rc::RoomConcept::UpdateResult& res);
+    rc::refine::LayoutRefiner refiner_;
+    std::int64_t  refine_last_ms_ = 0;
+    std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
+    std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
     std::int64_t  sweep_last_ms_ = 0;
     Eigen::Vector2f lidar_origin_{0.f, 0.f};   ///< robot frame
     bool          lidar_origin_resolved_ = false;

@@ -942,6 +942,10 @@ public:
 
         // The lidar scan used for this result (robot frame, synchronized with robot_pose)
         std::vector<Eigen::Vector3f> lidar_scan;
+        // The shadow plain-SLAM pose (internal frame) once the map layout is the GIVEN room — the model-independent
+        // pose the refiner's evidence is accumulated at (layout_refiner.h). Set by record_slam_shadow on both paths.
+        Eigen::Vector3f slam_pose = Eigen::Vector3f::Zero();
+        bool slam_pose_valid = false;
 
         // Wall-SLAM snapshot for the viewer (Estimate mode only; empty otherwise).
         struct WallView
@@ -1264,6 +1268,9 @@ public:
     /// while searching). Pose, window and covariance carry over. Localiser thread (the scene graph's promotion).
     void adopt_map_layout_as_given();
     bool map_layout_adopted() const { return map_layout_adopted_; }
+    /// An ACCEPTED refinement edit (layout_refiner.h): the given room becomes `L` (INTERNAL frame) — same frame,
+    /// same gauge, the SDF the localiser solves against is rebuilt; nothing else changes. Localiser thread.
+    void refine_given_layout(const std::vector<Eigen::Vector2f>& L);
     /// SHADOW (2026-10-10): after the switch plain SLAM keeps running on its own map; this is the distance (m) between
     /// its pose and the pose the SDF localiser published this frame. A MODEL-ERROR signal (where the given room does
     /// not explain the scans), not a pose input. NaN while plain SLAM is the pose provider.
@@ -2113,7 +2120,7 @@ private:
     std::atomic<float> slam_disagree_{std::numeric_limits<float>::quiet_NaN()};
     std::ofstream shadow_csv_;                         // tmp/slam_shadow.csv
     std::int64_t shadow_flush_ms_ = 0;
-    void record_slam_shadow(const UpdateResult& r);   // plain SLAM vs the published pose, every frame
+    void record_slam_shadow(UpdateResult& r);         // plain SLAM vs the published pose, every frame
     std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
     bool projection_failed_logged_ = false;          // one warning per stretch of unclosed projections
     std::atomic<bool> map_ready_{false};
@@ -2270,6 +2277,10 @@ private:
    std::chrono::high_resolution_clock::time_point t_update_start_;
    float              last_t_adam_ms_      = 0.f;
    float              last_t_cov_ms_       = 0.f;
+   // Per-stage cost (2026-10-10), reset after each optimizer_timing.csv row: 0 = the stage did not run this frame.
+   float              last_t_slam_ms_      = 0.f;   // plain SLAM step (driving or shadow)
+   float              last_t_wall_ms_      = 0.f;   // wall-map estimator (wall_slam_observe)
+   float              last_t_polish_ms_    = 0.f;   // SDF polish on an early-exit frame
    float              last_t_breakdown_ms_ = 0.f;
    // Optimizer-timing telemetry (written on loc_thread_, drained by the worker via take_optimizer_timing).
    std::atomic<std::uint32_t> opt_total_count_{0};

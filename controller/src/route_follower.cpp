@@ -278,7 +278,7 @@ void RouteFollower::rederive_waypoint_arclengths()
 RouteOptimizerReport RouteFollower::deform_window(
     std::function<float(const Eigen::Vector2f &)> distance,
     std::function<Eigen::Vector2f(const Eigen::Vector2f &)> distance_gradient,
-    std::size_t freeze_before, std::size_t freeze_after, int iterations)
+    std::size_t freeze_before, std::size_t freeze_after, int iterations, float w_clear)
 {
     // The band holds the SAME beliefs the route was built with — bending prior, clearance preference,
     // anchor likelihood, gauge — and differs only in the field it measures them against and in being
@@ -294,6 +294,10 @@ RouteOptimizerReport RouteFollower::deform_window(
     opt.freeze_before = freeze_before;
     opt.freeze_after = freeze_after;
     opt.iterations = std::max(1, iterations);
+    // ★The ONE belief the band may hold differently (w_clear < 0 keeps the build's): the live field is
+    // re-measured every cycle, so the same precision on it re-pushes the route every cycle — 2026-10-10
+    // (user) it deformed the stretches between waypoints too much. See Controller.BandClearanceWeight.
+    if (w_clear >= 0.f) opt.w_clear = w_clear;
     opt.verbose = false;                           // this runs at control rate; per-cycle logging is noise
 
     const RouteOptimizerReport rep = spline_.deform(opt);

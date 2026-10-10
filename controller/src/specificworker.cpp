@@ -1053,6 +1053,9 @@ void SpecificWorker::load_params()
 	cfgr.opt_cast<double>("Controller.BandProximalSigmaM", params.band_proximal_sigma_m,
          "> 0: release the near support points and bound how far the band moves the route per solve (m) — "
          "re-optimises the FIRST part of the spline against live obstacles (2026-10-09). 0 = old frozen lead");
+	cfgr.opt_cast<double>("Controller.BandClearanceWeight", params.band_clearance_weight,
+         "Obstacle-repulsion (clearance) weight of the BAND only; the one-shot route smoothing keeps w_clear = 1.0 "
+         "(2026-10-10: lowered because the band deformed the stretches between waypoints too much)");
 	cfgr.opt_cast<double>("Controller.BandWindow", params.band_window_m,
          "Length of the deformable window beyond the lead");
 	cfgr.opt("Controller.BandPeriodCycles", params.band_period_cycles,

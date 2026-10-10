@@ -593,6 +593,78 @@ public:
         return out;
     }
 
+    /// ── EVIDENCE CELLS FOR LAYOUT REFINEMENT (2026-10-10, layout_refiner.h) ─────────────────────────────────────
+    /// surface = beams STOPPED here at least as often as they PASSED (hits >= passes, >= 2 hits): the MAP decision of an
+    /// occupancy log-odds with symmetric confusion; free = passes > hits (the same comparison the region uses).
+    /// A surface cell is reported at the MEAN of the returns that ended in it (sub-cell wall position); a free cell at
+    /// its centre. `conf` = the cell's occupancy posterior for its class, sigmoid(|hits - passes| * ln(q / (1 - q))),
+    /// q the per-beam reliability ESTIMATED from the well-observed cells (the minority vote share) — not a constant.
+    /// Measured live: 2512 of 3692 cells with >= 2 hits were refuted by their own passes (ceiling arcs, furniture
+    /// ghosts); those cut the region and fed the SLAM distance field.
+    void evidence_cells(std::vector<Eigen::Vector2f>& surface, std::vector<Eigen::Vector2f>& free,
+                        std::vector<float>* conf_surface = nullptr, std::vector<float>* conf_free = nullptr) const
+    {
+        surface.clear(); free.clear();
+        if (conf_surface) conf_surface->clear();
+        if (conf_free) conf_free->clear();
+        if (not ready() or hits_.size() != frees_.size()) return;
+        // per-beam reliability q: 1 - mean minority share over cells with >= 10 observations
+        double minority = 0; long nwell = 0;
+        for (std::size_t k = 0; k < st_.size(); ++k)
+            if (const int n = hits_[k] + frees_[k]; n >= 10) { minority += double(std::min(hits_[k], frees_[k])) / n; ++nwell; }
+        const float q = nwell > 100 ? static_cast<float>(1.0 - minority / nwell) : 0.9f;   // 0.9 only before 100 cells exist
+        const float lam = std::log(q / (1.f - q));
+        for (int j = 0; j < n_; ++j) for (int i = 0; i < n_; ++i)
+        {
+            const auto k = idx(i, j);
+            const float l = static_cast<float>(int(hits_[k]) - int(frees_[k])) * lam;
+            const float p = 1.f / (1.f + std::exp(-std::clamp(l, -50.f, 50.f)));
+            if (hits_[k] >= 2 and hits_[k] >= frees_[k])
+            {
+                surface.push_back(mx_.size() == st_.size() and hits_[k] > 0 ? Eigen::Vector2f(mx_[k], my_[k])
+                                  : Eigen::Vector2f(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell));
+                if (conf_surface) conf_surface->push_back(p);
+            }
+            else if (frees_[k] > hits_[k])
+            {
+                free.emplace_back(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell);
+                if (conf_free) conf_free->push_back(1.f - p);
+            }
+        }
+    }
+    /// Raster mask (this raster's indexing) of the cells containing `points` — for visible_area.
+    [[nodiscard]] std::vector<std::uint8_t> cells_mask(const std::vector<Eigen::Vector2f>& points) const
+    {
+        std::vector<std::uint8_t> m(st_.size(), 0);
+        for (const auto& q : points) if (const auto [i, j] = cell_of(q); in(i, j)) m[idx(i, j)] = 1;
+        return m;
+    }
+    /// Area (m²) of `mask` cells a 360° scan from `v` would see: rays stop at mapped matter (a masked matter cell is
+    /// counted, then stops the ray). The refiner's CONTESTED cells through this = the testing behaviour's gain.
+    [[nodiscard]] float visible_area(const Eigen::Vector2f& v, float range, int beams, const std::vector<std::uint8_t>& mask) const
+    {
+        if (not ready() or mask.size() != st_.size()) return 0.f;
+        std::vector<std::size_t> seen;
+        const float step = 0.5f * p_.cell;
+        const int nsteps = static_cast<int>(range / step);
+        for (int b = 0; b < beams; ++b)
+        {
+            const float a = 2.f * static_cast<float>(M_PI) * static_cast<float>(b) / static_cast<float>(beams);
+            const Eigen::Vector2f d(std::cos(a), std::sin(a));
+            for (int s = 1; s <= nsteps; ++s)
+            {
+                const auto [i, j] = cell_of(v + d * (step * static_cast<float>(s)));
+                if (not in(i, j)) break;
+                const auto k = idx(i, j);
+                if (mask[k]) seen.push_back(k);
+                if (st_[k] == 2) break;
+            }
+        }
+        std::ranges::sort(seen);
+        const auto last = std::unique(seen.begin(), seen.end());
+        return static_cast<float>(std::distance(seen.begin(), last)) * p_.cell * p_.cell;
+    }
+
 private:
     static constexpr float kInf = 1e20f;
     Params p_;
@@ -601,6 +673,10 @@ private:
     std::vector<std::uint8_t> st_;    // 0 unknown, 1 free, 2 matter
     std::vector<std::uint8_t> low_;   // low-obstacle layer (add_matter); explorer-only, never shapes the ring
     std::vector<std::uint16_t> hits_, frees_;   // per-cell evidence: beams ENDING here vs beams PASSING through
+    std::vector<float> mx_, my_;                // running MEAN of the return positions that ended in the cell: the
+                                                // surface's position to sub-cell precision (layout_refiner.h). A
+                                                // cell CENTRE is biased by up to cell/2 from the wall face; offline that
+                                                // bias moved every refined wall 2-3 cm and cost 2.3 cm of pose (walhit).
     long  n_free_ = 0;
     int   fi0_ = std::numeric_limits<int>::max(), fj0_ = std::numeric_limits<int>::max();
     int   fi1_ = -1, fj1_ = -1;       // bbox of cells ever marked free
@@ -621,6 +697,8 @@ private:
         st_.assign(static_cast<std::size_t>(n_) * n_, 0);
         hits_.assign(st_.size(), 0);
         frees_.assign(st_.size(), 0);
+        mx_.assign(st_.size(), 0.f);
+        my_.assign(st_.size(), 0.f);
     }
 
     // ── STATE = THE VOTE OF THE EVIDENCE (2026-10-09) ────────────────────────────────────────────────────
@@ -655,6 +733,15 @@ private:
         if (h < std::numeric_limits<std::uint16_t>::max()) ++h;
         restate(i, j);
     }
+    /// A beam ENDED at `b` inside cell (i, j): count it and fold `b` into the cell's running mean (exact, no sum overflow).
+    void set_matter(int i, int j, const Eigen::Vector2f& b)
+    {
+        set_matter(i, j);
+        if (mx_.size() != st_.size()) return;
+        const auto k = idx(i, j); const float n = static_cast<float>(hits_[k]);
+        mx_[k] += (b.x() - mx_[k]) / n;
+        my_[k] += (b.y() - my_[k]) / n;
+    }
 
     /// Amanatides–Woo walk from `a` to `b`: every cell strictly before b's cell is free, b's cell is matter.
     void trace(const Eigen::Vector2f& a, const Eigen::Vector2f& b)
@@ -675,7 +762,7 @@ private:
         {
             if (i == ie and j == je)
             {
-                if (in(i, j)) set_matter(i, j);
+                if (in(i, j)) set_matter(i, j, b);
                 return;
             }
             if (not in(i, j))
@@ -764,6 +851,7 @@ private:
     }
 
     /// Everything the 8-connected outside cannot reach becomes part of the region (see "HOLES ARE FILLED").
+public:   // raster helpers shared with rc::refine::LayoutRefiner (2026-10-10): pure functions, no instance state
     static void fill_holes(std::vector<std::uint8_t>& c, int W, int H)
     {
         std::vector<std::uint8_t> out(c.size(), 0);

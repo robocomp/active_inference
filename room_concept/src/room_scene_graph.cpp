@@ -311,6 +311,11 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
             // step_startup_proto, which also promotes it when the layout becomes publishable.
             step_startup_proto(res, startup_reason_);
         }
+        else if (startup_promoted_ and room_concept_->map_layout_adopted())
+        {
+            // The promoted room is GIVEN; the shadow SLAM's map keeps judging it (layout_refiner.h).
+            step_layout_refiner(res);
+        }
         else if (room_concept_->estimating())
         {
             // ★WHICH NODE, AND IN WHICH FRAME (2026-10-09). After a door crossing the polygon being learnt
@@ -1595,7 +1600,9 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
     readiness_stable_.store(1.f, std::memory_order_relaxed);
     readiness_explore_.store(1.f, std::memory_order_relaxed);
     published_polygon_verts_ = poly_pub.size();
-    free_space_.reset();
+    // free_space_ is NOT reset (2026-10-10): it is the refiner's evidence accumulator from here on, fed at the shadow
+    // SLAM pose by step_layout_refiner — the same poses it was built at while plain SLAM drove.
+    refine_last_ms_ = steady_ms();
     dsr_create_wall_nodes();   // in the PUBLISHED frame (published_polygon)
     // HAND-BACK to the pose-information planner, seeded with the promoted polygon in the frame it plans in
     // (internal). It was seeded only at room creation before, which the start-up path never reaches.
@@ -1812,6 +1819,18 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
                 [this, &countable](const Eigen::Vector2f& v)
                 { return free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable); },
                 footprint);
+        }
+        else if (startup_promoted_ and free_space_ and not refine_contested_.empty())
+        {
+            // gain = contested area a scan from the standpoint would see; a standpoint must see at least the cells
+            // whose terms can decide one edit: (kappa + ln n) nats at w nats per cell -> (kappa + ln n) / w cells.
+            const auto mask = free_space_->cells_mask(refine_contested_);
+            const auto& R = refiner_.last();
+            const float cell2 = free_space_->params().cell * free_space_->params().cell;
+            const float min_gain = (R.kappa + std::log(float(std::max<std::size_t>(4, fs_published_.size())))) / std::max(R.w, 1e-3f) * cell2;
+            layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, admissible,
+                [this, &mask](const Eigen::Vector2f& v) { return free_space_->visible_area(T_pub_int_ * v, 8.f, 180, mask); },
+                min_gain);
         }
         else
             layout_last_plan_ = rc::layout::plan(map, poly, grid, robot, ep, admissible);
@@ -2409,7 +2428,10 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // While the start-up proto is still proto, the layout is what is unknown, not the pose against a known
     // layout: the live LAYOUT explorer drives afford_room. The EpistemicPlanner takes over at promotion,
     // seeded with the promoted polygon (promote_startup_proto).
-    if (startup_proto_ and not startup_promoted_)
+    // TESTING BEHAVIOUR (2026-10-10): after promotion, while the refiner holds CONTESTED cells (edits that nearly pay),
+    // the layout explorer runs again with "contested cells a standpoint would see" as the gain — a look that decides
+    // an edit. Empty contested set = nothing to test = the pose planner as before.
+    if ((startup_proto_ and not startup_promoted_) or (startup_promoted_ and not refine_contested_.empty()))
     {
         dsr_update_layout_affordance(res);
         return;
@@ -3648,6 +3670,71 @@ void RoomSceneGraph::check_init_graph_is_valid()
     }
 
     load_robot_body_dimensions_from_graph();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
+// LAYOUT REFINEMENT AFTER PROMOTION (2026-10-10, layout_refiner.h)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
+void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& res)
+{
+    if (not free_space_.has_value() or not res.slam_pose_valid) return;
+    resolve_lidar_origin();
+    // ── accumulate at the SHADOW SLAM pose, never the SDF pose: the evidence must not depend on the model it judges ──
+    Eigen::Affine2f slam = Eigen::Affine2f::Identity();
+    slam.translation() = res.slam_pose.head<2>();
+    slam.linear() = Eigen::Rotation2Df(res.slam_pose.z()).toRotationMatrix();
+    const Eigen::Affine2f pose_pub = T_pub_int_ * slam;
+    const auto pts = room_concept_->filter_through_door(res.lidar_scan);
+    std::vector<Eigen::Vector2f> ends; ends.reserve(pts.size());
+    for (const auto& p : pts) if (p.allFinite()) ends.push_back(pose_pub * p.head<2>());
+    free_space_->add_scan(pose_pub * lidar_origin_, ends);
+
+    // ── evaluate, throttled ─────────────────────────────────────────────────────────────────────────────────
+    // ★kRefinePeriodMs is a CPU budget (one proposal ~ tens of ms on a 5 cm raster), not a model constant: the
+    // criterion is the same at any period; only how soon an edit that pays is noticed changes.
+    constexpr std::int64_t kRefinePeriodMs = 5000;
+    const std::int64_t now = steady_ms();
+    if (now - refine_last_ms_ < kRefinePeriodMs) return;
+    refine_last_ms_ = now;
+    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    const auto poly_pub = published_polygon();
+    if (poly_pub.size() < 4) return;
+    const auto R = refiner_.propose(poly_pub, surf, fr, cs, cf);
+    refine_contested_ = R.contested;
+    if (not refine_csv_.is_open())
+    {
+        refine_csv_.open("tmp/layout_refine.csv", std::ios::out | std::ios::trunc);
+        refine_csv_.imbue(std::locale::classic());
+        refine_csv_ << "ts_ms,surface_cells,free_cells,sigma_m,eps,ell_m,kappa,nll_before,nll_after,edits,verts,contested_cells,slam_vs_sdf_m\n";
+    }
+    refine_csv_ << res.timestamp_ms << ',' << surf.size() << ',' << fr.size() << ',' << R.sigma << ',' << R.eps << ',' << R.ell
+                << ',' << R.kappa << ',' << R.nll_before << ',' << R.nll_after << ',' << R.edits.size() << ',' << R.polygon.size()
+                << ',' << R.contested.size() << ',' << room_concept_->slam_disagreement() << '\n';
+    refine_csv_.flush();   // one row per evaluation (every few seconds): flush so the file is readable live
+    if (R.edits.empty()) return;
+    for (const auto& e : R.edits)
+    {   // extend/notch carry a CELL COUNT (a rectangle, no edge); the others an offset in metres along edge `e.edge`
+        const bool area = (e.kind == "extend" or e.kind == "notch");
+        const float cell = refiner_.params().cell;   // the refiner's evidence raster
+        if (area)
+            qInfo().noquote() << QString("[room][refine] %1 rectangle %2 m2: gain %3 nats").arg(QString::fromStdString(e.kind)).arg(e.value * cell * cell, 0, 'f', 3).arg(e.gain, 0, 'f', 1);
+        else
+            qInfo().noquote() << QString("[room][refine] %1 edge %2 by %3 m: gain %4 nats").arg(QString::fromStdString(e.kind)).arg(e.edge).arg(e.value, 0, 'f', 3).arg(e.gain, 0, 'f', 1);
+    }
+    // ── upload: the given room (internal frame) and the published polygon, same frame, no re-anchor ─────────
+    const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+    std::vector<Eigen::Vector2f> L; L.reserve(R.polygon.size());
+    for (const auto& v : R.polygon) L.push_back(T_int_pub * v);
+    room_concept_->refine_given_layout(L);
+    auto rn = G_->get_node(dsr_room_id_);
+    if (not rn.has_value()) return;
+    std::vector<float> px, py;
+    for (const auto& v : R.polygon) { px.push_back(v.x()); py.push_back(v.y()); }
+    rn->attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{px, 0, 0};
+    rn->attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{py, 0, 0};
+    if (G_->update_node(rn.value())) { fs_published_ = R.polygon; published_polygon_verts_ = R.polygon.size(); }
 }
 
 }  // namespace rc

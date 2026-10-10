@@ -233,7 +233,7 @@ public:
     RouteOptimizerReport deform_window(std::function<float(const Eigen::Vector2f &)> distance,
                                        std::function<Eigen::Vector2f(const Eigen::Vector2f &)> distance_gradient,
                                        std::size_t freeze_before, std::size_t freeze_after,
-                                       int iterations);
+                                       int iterations, float w_clear = -1.f);
     // How many control points the installed route has — the index space freeze_before/after live in.
     std::size_t control_count() const { return spline_.control_points().size(); }
 

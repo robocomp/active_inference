@@ -4100,7 +4100,7 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     if (on_mission)
     {
         rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
-                                   params_->band_iterations);
+                                   params_->band_iterations, params_->band_clearance_weight);
     }
     else
     {
@@ -4115,6 +4115,9 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
         cfg.freeze_before = freeze_before;
         cfg.freeze_after = freeze_after;
         cfg.iterations = std::max(1, params_->band_iterations);
+        // 2026-10-10 (user): the band's obstacle repulsion deformed the stretches between waypoints too
+        // much. Its OWN clearance weight, so the one-shot smoothing above (w_clear = 1.0) is unchanged.
+        cfg.w_clear = params_->band_clearance_weight;
         cfg.verbose = false;          // this runs at control rate; per-cycle logging is noise
         if (kBandProximalSigmaM > 0.f)
         {

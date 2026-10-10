@@ -930,16 +930,18 @@ namespace rc
                         opt_csv_.open("etc/optimizer_timing.csv", std::ios::out | std::ios::trunc);
                         if (opt_csv_.is_open())
                             opt_csv_ << "# device=" << (get_device().is_cuda() ? "CUDA" : "CPU") << "\n"
-                                     << "ts_ms,update_ms,iters,early_exit,window_size,t_adam_ms,t_cov_ms,sdf_mse,cov_tt\n";
+                                     << "ts_ms,update_ms,iters,early_exit,window_size,t_adam_ms,t_cov_ms,sdf_mse,cov_tt,t_slam_ms,t_wall_ms,t_polish_ms\n";
                     }
                     if (opt_csv_.is_open())
                     {
                         opt_csv_ << res.timestamp_ms << ',' << update_ms << ',' << res.iterations_used
                                  << ',' << (res.iterations_used <= 0 ? 1 : 0) << ',' << window_mgr_.size()
                                  << ',' << last_t_adam_ms_ << ',' << last_t_cov_ms_ << ',' << res.sdf_mse
-                                 << ',' << res.covariance(2, 2) << '\n';
+                                 << ',' << res.covariance(2, 2) << ',' << last_t_slam_ms_ << ',' << last_t_wall_ms_
+                                 << ',' << last_t_polish_ms_ << '\n';
                         opt_csv_.flush();
                     }
+                    last_t_slam_ms_ = last_t_wall_ms_ = last_t_polish_ms_ = 0.f;   // 0 next row = stage did not run
                 }
 
             if (params.rerun_enabled)
@@ -2751,13 +2753,15 @@ namespace rc
                        << "raise RoomShape.WallMapSigmaD (the corner detector's map_sigma lesson).";
     }
 
-    void RoomConcept::record_slam_shadow(const UpdateResult& r)
+    void RoomConcept::record_slam_shadow(UpdateResult& r)   // non-const: hands the shadow pose to the refiner (2026-10-10)
     {
         // ── SHADOW (2026-10-10): plain SLAM (own map, own pose) vs the pose the SDF localiser published this frame.
         // Called on BOTH paths — the early exit ends most localizing frames, and placing this only after the full
         // solve recorded almost nothing (the first live run's log was empty). Flushed about once a second.
         if (not map_layout_adopted_) return;
         const Eigen::Vector3f sp = plain_slam_.pose();
+        r.slam_pose = sp;   // the refiner accumulates its evidence at THIS pose (layout_refiner.h)
+        r.slam_pose_valid = true;
         const Eigen::Vector2f t = r.robot_pose.translation();
         const float th = std::atan2(r.robot_pose.linear()(1, 0), r.robot_pose.linear()(0, 0));
         const float dpos = std::hypot(sp.x() - t.x(), sp.y() - t.y());
@@ -2793,6 +2797,27 @@ namespace rc
         qInfo().noquote() << QString("[room][startup-proto] ESTIMATING -> LOCALIZING: the map layout (%1 vertices) is now "
                                      "the GIVEN room; the pose is solved against its SDF from here on (plain SLAM stops).")
                                  .arg(L.size());
+    }
+
+    void RoomConcept::refine_given_layout(const std::vector<Eigen::Vector2f>& L)
+    {
+        // ── LAYOUT REFINEMENT AFTER PROMOTION (2026-10-10, layout_refiner.h) ──────────────────────────────────
+        // The same writes as adopt_map_layout_as_given, minus the state flags: map_layout_ is what
+        // wall_slam_after_solve copies into derived_polygon_ every frame (-> nominal_room_polygon -> the published
+        // polygon), the corner channel's model, and the SDF. No re-anchor: an edit is a local change to the vertex
+        // list in the frame the room already has, so the published frame (T_pub_int_) is untouched; the POSE moves
+        // only as far as the moved wall moves the SDF solution — which is the point (toward the shadow SLAM pose).
+        if (not map_layout_adopted_ or L.size() < 4) return;
+        {
+            std::scoped_lock lk(wall_map_mutex_);
+            map_layout_ = L;
+            derived_polygon_ = L;
+        }
+        init_polygon_vertices_ = L;
+        corner_detector_.set_model_corners(init_polygon_vertices_);
+        if (model_ != nullptr and model_->has_state())
+            model_->update_polygon_vertices(L);
+        qInfo().noquote() << QString("[room][refine] given room REFINED: %1 vertices; the SDF is rebuilt, frame unchanged").arg(L.size());
     }
 
     void RoomConcept::wall_slam_after_solve(UpdateResult& res)
@@ -3733,7 +3758,9 @@ namespace rc
                 std::vector<Eigen::Vector2f> xy;
                 xy.reserve(sampled_points.size());
                 for (const auto& q : sampled_points) xy.emplace_back(q.x(), q.y());
+                const auto t_slam0 = std::chrono::steady_clock::now();
                 const Eigen::Vector3f slam_pose = plain_slam_.step(rec_odom_delta_, xy);
+                last_t_slam_ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_slam0).count();
                 if (plain_slam_driving())
                 {
                     wall_pose = slam_pose;
@@ -3741,7 +3768,9 @@ namespace rc
                         torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
                 }
             }
+            const auto t_wall0 = std::chrono::steady_clock::now();
             wall_slam_observe(sampled_points, wall_pose, lidar.second);
+            last_t_wall_ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_wall0).count();
         }
 
         // ===== CORNER DETECTION (optional, controlled by EnableCornerTracking) =====
@@ -5329,6 +5358,7 @@ namespace rc
         // further. It cannot overrule a confident prediction, and it can undo a wander the prior
         // admits could not have happened. Nothing here is tuned; both bounds come from quantities the
         // estimator already states.
+        const auto t_polish0 = std::chrono::steady_clock::now();   // per-stage timing (optimizer_timing.csv)
         if (params.sdf_polish_enabled and odometry_prior.valid)
         {
             // ★ A GAUSS-NEWTON STEP, not steepest descent. The scalar form — step L/|g|^2 on the
@@ -5387,6 +5417,7 @@ namespace rc
                 }
             }
         }
+        last_t_polish_ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_polish0).count();
 
         auto pose_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
         auto p_acc = pose_cpu.accessor<float, 1>();

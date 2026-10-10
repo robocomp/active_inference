@@ -500,6 +500,7 @@ BandIterations = 4        # warm-started incremental solve; 30 (the build value)
 # steps as the robot reaches route the band has just moved.
 BandLead = 0.6            # m of route ahead of the robot left frozen  ★NEEDS A RESTART
 BandProximalSigmaM = 0.03   # 2026-10-09 (user): re-optimise the FIRST part of the spline against live obstacles; m the route may move per solve. 0 = old frozen lead
+BandClearanceWeight = 0.5  # 2026-10-10 (user): band-only obstacle repulsion (w_clear; build/smoothing keeps 1.0). Halved: the live-field push deformed the stretches between waypoints too much
 BandWindow = 4.0          # m of deformable window beyond the lead
 BandPeriodCycles = 1      # run every N cycles
 

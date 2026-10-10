@@ -130,6 +130,7 @@ lidar_high_min_height = 2.0
 # perimeter-vs-interior test is what has to do it, and its startup line is worth reading on every run.
 
 [RoomConcept]
+SdfPolishOnEarlyExit = true   # 2026-10-10: after promotion 99.98% of frames early-exit (misfit 5-7 cm < the 10.5 cm gate) and WITHOUT the polish they publish the bare motion prediction: drift grows while driving, freezes parked (8 cm for 500 s, 0 solves). Polish = one SDF correction per early-exit frame.
 
 # ---- The calibration pivot (afford_calib) ----
 # The robot turns 120 degrees on the spot, twelve times: four complete turns back to the heading it
