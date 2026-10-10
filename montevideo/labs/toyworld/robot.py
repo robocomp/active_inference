@@ -55,6 +55,36 @@ class Robot:
                         w + b.gyro_bias + b.gyro_sigma * n[3], dt)
 
 
+def motion_jacobians(pose, v, w, dt, eps=1e-6):
+    """∂integrate/∂pose (3x3) and ∂integrate/∂(v, w) (3x2), by central differences."""
+    pose = np.asarray(pose, float)
+    F, G = np.empty((3, 3)), np.empty((3, 2))
+    for i in range(3):
+        d = np.zeros(3)
+        d[i] = eps
+        diff = integrate(pose + d, v, w, dt) - integrate(pose - d, v, w, dt)
+        diff[2] = se2.wrap(diff[2])
+        F[:, i] = diff / (2 * eps)
+    for i, du in enumerate(([eps, 0], [0, eps])):
+        diff = integrate(pose, v + du[0], w + du[1], dt) - integrate(pose, v - du[0], w - du[1], dt)
+        diff[2] = se2.wrap(diff[2])
+        G[:, i] = diff / (2 * eps)
+    return F, G
+
+
+def predict(belief, odo, sigma_v=0.005, sigma_w=0.003):
+    """Propagate a pose belief through one odometry reading.
+
+    The reading's own noise (encoder sd sigma_v in m/s, gyro sd sigma_w in rad/s) is pushed through
+    the motion's Jacobian: Σ' = F Σ Fᵀ + G diag(σ_v², σ_w²) Gᵀ. No constant process noise is added:
+    the uncertainty grows because of what the sensors cannot tell, not by decree.
+    """
+    from .beliefs import Gaussian
+    F, G = motion_jacobians(belief.mu, odo.v, odo.w, odo.dt)
+    mu = integrate(belief.mu, odo.v, odo.w, odo.dt)
+    return Gaussian(mu, F @ belief.Sigma @ F.T + G @ np.diag([sigma_v ** 2, sigma_w ** 2]) @ G.T)
+
+
 def hidden_body():
     """The body Day 3 has to discover. Do not read this cell before the lab!"""
     return Body(wheel_scale=1.04, gyro_bias=0.012)

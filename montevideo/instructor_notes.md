@@ -38,3 +38,39 @@ common-mode ceiling and to the thread of the whole course.
 **Post-thesis claim on a Day 1 slide/answer:** the layout explorer's precision term is inert
 because the map keeps one point per voxel (memory note `efe-objective-misfit-carries-it`).
 Marked as work in progress.
+
+## Day 2 — Estimating the room, and finding oneself in it (`slides/day2.pdf`, `labs/day2.ipynb`)
+
+| time | block | frames |
+|---|---|---|
+| 0:00–0:05 | Where we are | 2 |
+| 0:05–0:15 | Two regimes; why they are split; the price | 3–5 |
+| 0:15–0:40 | Acquisition: the state, the gauge, the derived band, one scan → four walls, MDL, why free space is needed | 6–12 |
+| 0:40–1:00 | Localisation: the observation model (note the 1/N), the residual floor, honest prediction, the wrong-wall NEES, symmetry | 13–18 |
+| 1:00–1:30 | Shared error: Woodbury ceiling (on the board), the toy ceiling, two case studies | 19–23 |
+| — | break | |
+| 1:45–3:00 | Lab 2 | 24–26 |
+
+**Do the Woodbury step on the board.** Students who see σ²(JᵀJ)⁻¹ → 0 leaving Σ_δ behind remember it;
+students who only see the result do not.
+
+**The two case studies are post-thesis** (memory notes `association-dies-by-common-mode-latch`,
+2026-09-18; `estimate-mode-needs-plain-slam`, 2026-10-09). Refresh both from tesis-12 before the
+course: the layout result in particular is expected to land in the thesis, with final numbers.
+
+**The NEES exercise (B) is the emotional centre of the lab**: one wall 1.5 cm out takes NEES from ~2
+to ~90. Ask students *before* running it what they expect. Most guess "a bit worse".
+
+**Expected lab numbers** (seed 0):
+- θ₀ = −17.19° (truth −17.19°); band ±6.7 cm = 3.37σ; a point on the line brings 5.69 nats;
+- walls fit to ≤5 mm / ≤0.16°; IoU 0.994, area 23.99 m²;
+- L_edge = 7.56 nats (R = 12 m, c = 5 cm); the table face earns ≈ 82 nats;
+- localisation rms ≈ 2 mm / 1 mm / 0.04°; mean NEES: true room ≈ 1.95, estimated ≈ 3.8, east wall +1.5 cm ≈ 90;
+- symmetry: identical F at the true pose and its half-turn;
+- ceiling: actual ≈ 8.8 → 6.6 mm (N = 1 → 32); independent 4.9 → 0.9 mm; Woodbury 9.3 → 7.6 mm.
+
+**A trap I fell into while building the lab, worth telling:** the first scripted route drove the
+robot through the east wall and out of the room. The localiser kept reporting a confident pose
+against the living-room polygon, and the NEES came out at ~6. It looked like a subtle modelling
+defect. It was a test that measured something other than what it claimed. The route now asserts
+that the robot stays in the room.
