@@ -1249,6 +1249,7 @@ void RoomSceneGraph::forget_room(const char* why)
     stable_frames_ = 0;
     published_polygon_verts_ = 0;
     startup_proto_ = startup_promoted_ = false;
+    layout_pool_.clear();
     layout_finished_ = false;
     pub_gauge_frozen_ = false;
     {
@@ -1373,6 +1374,7 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
     published_polygon_verts_ = 0;
     startup_proto_     = true;
     startup_promoted_  = false;
+    layout_pool_.clear();
     layout_finished_   = false;
     pub_gauge_frozen_  = true;
     {
@@ -1479,6 +1481,16 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
             std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(lay.size());
             for (const auto& v : lay) lay_int.push_back(T_int_pub * v);
             room_concept_->set_map_layout(std::move(lay_int));
+            // ── the candidate pool promotion chooses from (2026-10-11, campaign run 3) ──────────────────────────
+            // The outline is redrawn from the raster every publish and, next to furniture standing off a wall
+            // (kitchen worktops + wall cabinets 30 cm out), it FLIPS between the wall and the furniture front every
+            // few seconds. Promotion used to freeze whichever was drawn last. Keep the distinct outlines; at
+            // promotion every one is scored on the evidence accumulated by then (promote_startup_proto).
+            // kLayoutPoolSize bounds memory/CPU (one minute of 1 Hz publishes), it is not a decision threshold.
+            constexpr std::size_t kLayoutPoolSize = 60;
+            std::erase(layout_pool_, lay);   // a repeat moves to the back: back() is always the latest outline
+            layout_pool_.push_back(lay);
+            if (layout_pool_.size() > kLayoutPoolSize) layout_pool_.pop_front();
             ring = std::move(lay);
         }
     if (ring.empty())
@@ -1574,10 +1586,49 @@ void RoomSceneGraph::stamp_low_obstacles()
     while (low_obs_pending_.size() > 16) low_obs_pending_.pop_front();
 }
 
+// ── PROMOTION ADOPTS THE MOST PROBABLE OUTLINE, NOT THE LATEST (2026-10-11) ─────────────────────────────────────
+// Every outline the map produced in the last minute is a hypothesis about the same room; the evidence accumulated
+// by promotion (the refiner's surface/free cells) decides among them by description length — the criterion the
+// refiner judges its own edits by. Campaign run 3: the latest outline had the west and south walls on the kitchen
+// furniture fronts (IoU .871) while the outline of t=0 and of several later publishes had them on the walls.
+void RoomSceneGraph::adopt_most_probable_layout()
+{
+    if (not free_space_.has_value() or layout_pool_.size() < 2) return;
+    const auto latest = published_polygon();
+    if (latest.size() < 4) return;
+    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    const std::vector<std::vector<Eigen::Vector2f>> cands(layout_pool_.begin(), layout_pool_.end());
+    const auto dl = refiner_.description_lengths(cands, latest, surf, fr, cs, cf);
+    const auto best = static_cast<std::size_t>(std::ranges::distance(dl.begin(), std::ranges::min_element(dl)));
+    const float dl_latest = dl.back();   // the pool's back is the outline published last (see step_startup_proto)
+    {
+        std::ofstream f("tmp/promotion_select.csv", std::ios::out | std::ios::trunc);
+        f.imbue(std::locale::classic());
+        f << "# idx;description_length_nats;chosen;verts\n";
+        for (std::size_t i = 0; i < cands.size(); ++i)
+        {
+            f << i << ';' << dl[i] << ';' << (i == best ? 1 : 0) << ';';
+            for (const auto& v : cands[i]) f << v.x() << ',' << v.y() << ' ';
+            f << '\n';
+        }
+    }
+    qInfo().noquote() << QString("[room][startup-proto] promotion chooses outline %1 of %2 by description length: "
+                                 "%3 nats vs %4 for the latest (%5 verts)")
+                         .arg(best).arg(cands.size()).arg(dl[best], 0, 'f', 1).arg(dl_latest, 0, 'f', 1).arg(cands[best].size());
+    if (best + 1 == cands.size() or not std::isfinite(dl[best])) return;
+    const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+    std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(cands[best].size());
+    for (const auto& v : cands[best]) lay_int.push_back(T_int_pub * v);
+    room_concept_->set_map_layout(std::move(lay_int));
+}
+
 void RoomSceneGraph::promote_startup_proto(std::string& reason)
 {
     // The re-anchor that came with map_ready was absorbed at the top of this update, so the learnt polygon
     // maps into the frozen frame here without a jump.
+    if (room_concept_->plain_slam_driving())
+        adopt_most_probable_layout();
     const auto poly_pub = published_polygon();
     if (poly_pub.size() < 3) { reason = "map_ready_but_no_polygon"; return; }
     auto rn = G_->get_node(dsr_room_id_);
@@ -1884,6 +1935,22 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         // reachable yet). Live 2026-10-09: after 13 m and the west half explored, every plan for 70 s was
         // "unreachable" (remaining gain only beyond furniture), map_ready, IoU 0.86 vs GT — and the proto never
         // promoted. A visit is a logical precondition, not a tuned number.
+        // ── BOXED IN BY THE GRID, NOT BY THE WORLD (2026-10-11, campaign v3 runs 2 and 3) ────────────────────────────
+        // Two starts 0.6 m from furniture: the first standpoint was refused by the controller (occupied on the live
+        // LiDAR), then the furniture layer filled in and the robot's component shrank to its own disc plus a cell or
+        // two (7-9 of ~170 free cells). Every later plan read "unreachable", and with no standpoint visited nothing
+        // could ever promote — the robot sat still for 10 minutes. v2 drove out of the same spot: the grid is a coarse
+        // stand-in for the controller's planner. So BEFORE THE FIRST VISIT "unreachable" carries no information about
+        // the room — the robot has not yet shown where it can go — and the best candidate goes to the controller,
+        // which judges it with the real body (a refusal defers it as usual). After a visit, the 10-09 rule above holds:
+        // "unreachable" then means the remaining gain lies beyond furniture, and it promotes.
+        if (layout_last_plan_.why == "unreachable" and layout_last_plan_.best_unreached and layout_visits_ == 0)
+        {
+            layout_last_plan_.ok = true;
+            layout_last_plan_.target = *layout_last_plan_.best_unreached;
+            layout_last_plan_.path.clear();
+            layout_last_plan_.why = "boxed_in_handoff";
+        }
         readiness_explore_.store(layout_finished_ ? 1.f : 0.f, std::memory_order_relaxed);
         if (layout_last_plan_.finished
             or (layout_visits_ > 0

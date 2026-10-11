@@ -395,6 +395,7 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
     std::ranges::sort(cands, [&](const auto& a, const auto& b)
                       { return a.first / (1.f + (a.second - robot).norm()) > b.first / (1.f + (b.second - robot).norm()); });
     if (static_cast<int>(cands.size()) > p.keep_best) cands.resize(static_cast<size_t>(p.keep_best));
+    out.best_unreached = cands.front().second;
     float best = -1.f;
     for (const auto& [g, v] : cands)
     {

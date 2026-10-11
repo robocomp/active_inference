@@ -202,6 +202,7 @@ private:
     // polygon (in the frozen frame) replaces the free-space one, the `proto` edge is deleted, same id.
     bool birth_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& why);
     void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
+    void adopt_most_probable_layout();
     void promote_startup_proto(std::string& reason);
     void forget_room(const char* why);    ///< the room node vanished: reset EVERY piece of room state together
     bool sweep_foreign_rooms();           ///< leftover room nodes while the start-up proto is the room
@@ -220,6 +221,7 @@ private:
     int layout_visits_ = 0;
     std::atomic<float> readiness_stable_{0.f}, readiness_explore_{0.f};
     std::deque<std::pair<std::int64_t, std::vector<Eigen::Vector2f>>> ring_hist_;   // (stamp, published outline)
+    std::deque<std::vector<Eigen::Vector2f>> layout_pool_;   ///< distinct map layouts (published frame) promotion chooses among
     long low_batches_stamped_ = 0, low_batches_too_old_ = 0;   // diagnostics: furniture layer intake
     int  rej_ring_ = 0, rej_furniture_ = 0, rej_refused_ = 0;  // diagnostics: explorer rejections, per plan   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
     void stamp_low_obstacles();

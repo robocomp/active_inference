@@ -42,6 +42,7 @@
 #include <cmath>
 #include <cstdint>
 #include <numeric>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -94,6 +95,38 @@ public:
         return last_;
     }
     [[nodiscard]] const Result& last() const { return last_; }
+
+    /// Description length (nats) of each candidate layout on ONE evidence set: weighted NLL + kappa |V|, the same
+    /// two terms an edit is judged by in propose(). The nuisances (sigma, eps, ell, kappa) are fitted once on `ref`
+    /// and the candidates are rotated into ref's axes, so every candidate is charged on the same scale. Used at
+    /// promotion to choose among the outlines the map has produced instead of taking whichever was drawn last.
+    [[nodiscard]] std::vector<float> description_lengths(const std::vector<std::vector<Eigen::Vector2f>>& cands,
+                                                         const std::vector<Eigen::Vector2f>& ref,
+                                                         const std::vector<Eigen::Vector2f>& surf,
+                                                         const std::vector<Eigen::Vector2f>& free,
+                                                         const std::vector<float>& conf_surf = {},
+                                                         const std::vector<float>& conf_free = {}) const
+    {
+        std::vector<float> dl(cands.size(), std::numeric_limits<float>::infinity());
+        if (ref.size() < 4 or surf.size() < 20) return dl;
+        const float th = dominant_theta(ref);
+        auto norm = [&](const std::vector<Eigen::Vector2f>& P)
+        {
+            auto V = rot(P, -th); if (freespace::signed_area(V) < 0.f) std::ranges::reverse(V);
+            return snap_axes(V);
+        };
+        const auto S = rot(surf, -th), Fr = rot(free, -th);
+        Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
+                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f));
+        sc.fit(norm(ref));
+        for (std::size_t i = 0; i < cands.size(); ++i)
+            if (cands[i].size() >= 4)
+            {
+                const auto V = norm(cands[i]);
+                dl[i] = sc.nll(V) + sc.kappa * float(V.size());
+            }
+        return dl;
+    }
     [[nodiscard]] const Params& params() const { return p_; }
 
 private:

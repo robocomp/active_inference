@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -72,11 +73,14 @@ public:
     [[nodiscard]] int component_size(const Eigen::Vector2f& from) const;
     /// Mark cells for which `occupied_by_robot(centre)` holds as free: the robot is standing there, so the floor under
     /// its body is feasible whatever the polygon clearance says (live: a cramped start dropped the robot's own cell).
-    template <class F> void free_if(F&& occupied_by_robot)
+    /// Returns how many cells `occupied_by_robot` covers (freed or already free): the robot's own disc.
+    template <class F> int free_if(F&& occupied_by_robot)
     {
+        int n = 0;
         for (int i = 0; i < nx; ++i)
             for (int j = 0; j < ny; ++j)
-                if (auto& f = free_[static_cast<size_t>(j * nx + i)]; f == 0 and occupied_by_robot(at(i, j))) f = 1;
+                if (occupied_by_robot(at(i, j))) { ++n; free_[static_cast<size_t>(j * nx + i)] = 1; }
+        return n;
     }
     /// Mark cells for which `blocked(centre)` holds as not free (live: furniture the polygon's outline cannot show).
     template <class F> void block_if(F&& blocked)
@@ -122,6 +126,7 @@ struct Plan
     Eigen::Vector2f start{0.f, 0.f};       ///< where the walk started (robot, or nearest feasible cell)
     int reach_cells = -1;                  ///< free cells connected to `start` (filled on "unreachable" only)
     int free_cells  = -1;                  ///< free cells in the whole grid (idem)
+    std::optional<Eigen::Vector2f> best_unreached;   ///< on "unreachable": the best candidate by gain per straight metre
     std::string why;                       ///< one word on every path: ok | finished | no_feasible | no_gain | unreachable
 };
 
