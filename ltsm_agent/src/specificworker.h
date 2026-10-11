@@ -152,6 +152,7 @@ private:
 	bool   promotion_stage_check = false;
 	double promotion_decision_prob = 0.95;
 	int    promotions_done = 0;
+	void promote_identity_only(const ltsm::Candidate &cand);   ///< eviction OFF: move `current`, count the crossing
 	int    promotion_cycles_ = 0;
 	ltsm::Outcome   last_promotion_;          ///< for the stage assertions
 	ltsm::Candidate last_promotion_cand_;

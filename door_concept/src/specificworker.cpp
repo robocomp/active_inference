@@ -3400,7 +3400,10 @@ void SpecificWorker::step_entry_mirrors()
     for (auto it = entry_mirrors_.begin(); it != entry_mirrors_.end();)
     {
         const auto& [room_id, mir] = *it;
-        const bool room_ok   = G->get_node(room_id).has_value() and rc::room::is_proto(*G, room_id);
+        // ★ THE ROOM, NOT ITS `proto` EDGE (2026-10-11). `proto` is room_concept's "layout provisional" and may go
+        //   before ltsm moves `current`; the mirror must survive until then, when release_room ADOPTS it as this
+        //   room's door. Retiring it on promotion deleted the second face of ltsm's passage (live).
+        const bool room_ok   = G->get_node(room_id).has_value();
         const bool source_ok = fitter_->instances().contains(mir.source_id) and G->get_node(mir.source_id).has_value();
         const bool mirror_ok = G->get_node(mir.node_id).has_value();
         if (room_ok and source_ok and mirror_ok)
@@ -3425,6 +3428,11 @@ void SpecificWorker::step_entry_mirrors()
     for (const auto& room : G->get_nodes_by_type("room"))
     {
         if (not rc::room::is_proto(*G, room.id()) or entry_mirrors_.contains(room.id()))
+            continue;
+        // The room this agent is IN needs no mirror: its doors are its own instances (release_room adopted the
+        // entry mirror). Without this the adopted door — whose aperture holds the proto origin by construction —
+        // would be mirrored into its own room. A proto stays proto until room_concept promotes its LAYOUT.
+        if (room.id() == room_node_id_)
             continue;
 
         std::optional<DSR::Node> best;
@@ -3508,6 +3516,21 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     // Our own nodes, through our own teardown path — which drops the epistemic affordance AND the three
     // pragmatic ones, then the door node (whose RT edge goes with it). Collected first: retire_instance
     // erases from the map we would otherwise be iterating.
+    // ★ THE ROOM LEFT BEHIND MAY STILL BE LIVE (2026-10-11, door crossing with ltsm eviction OFF): ltsm moves `current`
+    //   and keeps the old room in the working memory. Its doors are then still true and still somebody's evidence —
+    //   the crossed one is the counterpart in ltsm's passage node — so they are HELD: this agent stops fitting them
+    //   (drops the instance and its four affordances) but leaves the door node and its RT under the old room's wall.
+    //   They go with this agent's owned nodes on exit, or with the room if ltsm ever evicts it.
+    const bool old_room_lives = G->get_node(old_room).has_value();
+    // ★ AND THE CROSSED DOOR IS ALREADY KNOWN IN THE NEW ROOM: its entry mirror (step_entry_mirrors) sits under the
+    //   new room at the exact transform of the source door. It becomes this room's door instance, so a detection of
+    //   that door from inside the new room associates with it instead of being born as a duplicate (live: door_26).
+    std::uint64_t adopt_mirror = 0;
+    if (const auto it = entry_mirrors_.find(new_room); it != entry_mirrors_.end())
+    {
+        adopt_mirror = it->second.node_id;
+        entry_mirrors_.erase(it);
+    }
     if (fitter_)
     {
         std::vector<std::uint64_t> leaving;
@@ -3523,7 +3546,21 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                               std::format("room {} -> {}", old_room, new_room));
         }
         for (const auto id : leaving)
-            retire_instance(id);
+        {
+            if (not old_room_lives) { retire_instance(id); continue; }
+            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            {
+                it->second.affordance.remove();
+                it->second.aff_approach.remove();
+                it->second.aff_open.remove();
+                it->second.aff_cross.remove();
+            }
+            fitter_->forget_node(id);
+            held_doors_.insert(id);
+        }
+        if (old_room_lives)
+            std::print("door_concept: [room] the room left behind is still live — {} door node(s) HELD there, not "
+                       "deleted\n", leaving.size());
     }
 
     // ★GHOSTS ARE ROOM-LOCAL AND MUST NOT CROSS. A ghost is "a door was removed at this (x,y), let it
@@ -3550,6 +3587,10 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     // on the wrong walls — the fail-safe direction.
     fitter_->set_room_geometry(Eigen::Vector2f::Zero(), {});
     refresh_room_geometry();         // and pick the new one up in the same cycle
+    if (adopt_mirror != 0)
+        if (const auto n = G->get_node(adopt_mirror); n.has_value() and fitter_->ensure_instance(n.value(), room_node_id_))
+            std::print("door_concept: [room] the entry mirror {} is now this room's door (the crossed door, seen from "
+                       "inside)\n", n->name());
 }
 
 

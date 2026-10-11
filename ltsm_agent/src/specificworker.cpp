@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // current_edge_room
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 
@@ -334,6 +335,11 @@ void SpecificWorker::compute()
     // nearly every crossing the robot makes.
     if (passages) passages->poll();
     if (evictor and eviction_enabled) step_eviction();
+    // ★ `current` IS THIS AGENT'S, WITH OR WITHOUT EVICTION (2026-10-11, door crossing). The edge was placed only by
+    //   step_eviction, so a fleet with eviction OFF never had one: promotion bailed ("no `current` room to promote it
+    //   from") and every consumer fell back to room_resolve's own rules. With a single room under the robot this
+    //   places it; a crossing moves it in step_promotion.
+    else if (evictor and promotion_enabled) evictor->ensure_current_edge();
 
     if (live_passage)
     {
@@ -498,7 +504,16 @@ bool SpecificWorker::step_promotion()
         // re-read, and adding them up would manufacture confidence from one measurement.
         if (r.p_inside < promotion_decision_prob) continue;
 
+        // Already the room we are in: identity was decided; the `proto` edge that is still there is room_concept's
+        // "layout provisional", not an open identity question (see promote_identity_only).
+        if (rc::room::current_edge_room(*G_dsr) == r.proto_id) continue;
+
         auto cand = evictor->promotion_candidate(r);
+        if (cand.has_value() and not eviction_enabled)
+        {
+            promote_identity_only(cand.value());
+            return true;                               // one per cycle
+        }
         if (not cand.has_value())
         {
             qWarning() << "[promotion]" << QString::fromStdString(r.proto_name)
@@ -543,6 +558,40 @@ bool SpecificWorker::step_promotion()
         return true;                                   // one per cycle
     }
     return false;
+}
+
+// ── PROMOTION WITHOUT EVICTION (2026-10-11, door crossing, user decision: eviction OFF for this phase) ──────────────
+// The identity decision alone: the robot is in the new room, so `current` moves there. Nothing is copied to memory,
+// the old room stays in the working memory (its doors are still the counterpart of the crossed one), and the `proto`
+// self-edge is LEFT ALONE: it is room_concept's "layout still provisional" (cortex dsr_edge_type.h), which room_concept
+// removes itself when the layout is promoted. Two meanings on one edge made the two agents race over it.
+// The crossing is counted on the live passage that pairs the two faces of the crossed door.
+void SpecificWorker::promote_identity_only(const ltsm::Candidate &cand)
+{
+    if (const auto robot = G_dsr->get_node(cand.robot_id); robot.has_value())
+    {
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot.value(), "current"))
+            if (e.to() != cand.new_room_id) G_dsr->delete_edge(cand.robot_id, e.to(), "current");
+        auto cur = DSR::Edge::create<current_edge_type>(cand.robot_id, cand.new_room_id);
+        G_dsr->insert_or_assign_edge(std::move(cur));
+    }
+    std::string passage_name = "<none>";
+    int crossings = 0;
+    if (live_passage)
+        if (const auto pair = live_passage->pair_for(cand.new_room_id); pair.has_value())
+            if (const auto p = live_passage->passage_of(pair->second); p.has_value())
+            {
+                auto node = p.value();
+                crossings = G_dsr->get_attrib_by_name<passage_crossings_att>(node).value_or(0) + 1;
+                G_dsr->add_or_modify_attrib_local<passage_crossings_att>(node, crossings);
+                G_dsr->update_node(node);
+                passage_name = node.name();
+            }
+    ++promotions_done;
+    qInfo().noquote() << QString::fromStdString(std::format(
+        "[promotion] DONE #{} (identity only, eviction OFF): `current` {} -> {} (P(inside)={:.3f}); {} stays live; "
+        "passage {} crossings={}", promotions_done, cand.old_room_name, cand.new_room_name, cand.p_inside,
+        cand.old_room_name, passage_name, crossings));
 }
 
 void SpecificWorker::check_eviction(const ltsm::Outcome &out, const ltsm::Candidate &cand)

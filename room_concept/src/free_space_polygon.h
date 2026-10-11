@@ -820,10 +820,20 @@ private:
         const float tdx = sx != 0 ? p_.cell / std::abs(d.x()) : kInf;
         const float tdy = sy != 0 ? p_.cell / std::abs(d.y()) : kInf;
         const int max_steps = 4 * n_;
+        // A beam that STARTS inside another room (the robot still on the threshold, its LiDAR behind the old room's
+        // outline — live 2026-10-11 the new room saw only its own footprint and was promoted at 0.2 m²) crosses that
+        // room unrecorded until it leaves it; only a beam that ENTERS another room from ours stops there.
+        bool ours = not (in(i, j) and excluded(i, j));
         for (int s = 0; s < max_steps; ++s)
         {
             if (in(i, j) and excluded(i, j))
-                return;                         // into another room through a doorway: nothing from here on is ours
+            {
+                if (ours) return;               // into another room through a doorway: nothing from here on is ours
+                if (i == ie and j == je) return;
+                if (tmx < tmy) { tmx += tdx; i += sx; } else { tmy += tdy; j += sy; }
+                continue;
+            }
+            ours = true;
             if (i == ie and j == je)
             {
                 if (in(i, j)) set_matter(i, j, b);

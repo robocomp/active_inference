@@ -7,9 +7,9 @@
 #        run_crossing.sh <out_dir> run|stop|collect   (controller run / controller stop / copy logs + stop the fleet)
 S=$(dirname "$(readlink -f "$0")"); B=/home/pbustos/robocomp/components/active_inference; R=$B/room_concept
 OUT=$(readlink -f "${1:?usage: run_crossing.sh <out_dir> [x y theta | run | stop | collect]}"); mkdir -p $OUT/logs
-FLEET="retina room_concept residual_concept controller door_concept"
+FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 log(){ echo "$(date +%T) $*" | tee -a $OUT/crossing.log; }
-stop_fleet(){ pkill -TERM -x door_concept; pkill -TERM -x controller; pkill -TERM -x residual_concep; pkill -TERM -x room_concept; pkill -TERM -x retina
+stop_fleet(){ pkill -TERM -x door_concept; pkill -TERM -x controller; pkill -TERM -x residual_concep; pkill -TERM -x room_concept; pkill -TERM -x retina; pkill -TERM -x ltsm_agent
   for i in $(seq 1 30); do sleep 1
     pgrep -x room_concept >/dev/null || pgrep -x controller >/dev/null || pgrep -x residual_concep >/dev/null \
       || pgrep -x door_concept >/dev/null || pgrep -x retina >/dev/null || return 0; done

@@ -596,10 +596,23 @@ std::vector<PromotionReading> RoomEviction::promotion_evidence(double body_radiu
     if (not robot.has_value()) return out;
     auto rt = live_->get_rt_api();
 
+    // ★ NOT ONLY WHILE IT IS A PROTO (2026-10-11). room_concept removes `proto` when the new room's LAYOUT is promoted
+    //   — its own meaning of the edge — and that can happen before this agent has decided the identity (live: 0.1 s
+    //   after birth, so `current` never moved and nothing would ever move it). The evidence is unchanged by that: the
+    //   room keeps the crossed aperture as its frame (room_concept promotes in place). So a room also qualifies when
+    //   the robot's RT to it is LIVE while its RT to the current room is RETIRED (valid=false) — the crossing hand-over.
+    const auto cur = rc::room::current_edge_room(*live_);
+    bool cur_retired = false;
+    if (cur.has_value())
+        if (const auto ce = live_->get_edge(robot->id(), cur.value(), "RT"); ce.has_value())
+            cur_retired = not live_->get_attrib_by_name<valid_att>(ce.value()).value_or(true);
     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot.value(), "RT"))
     {
         const auto proto = live_->get_node(e.to());
-        if (not proto.has_value() or proto->type() != "room" or not rc::room::is_proto(*live_, proto->id()))
+        if (not proto.has_value() or proto->type() != "room") continue;
+        const bool entered = cur_retired and proto->id() != cur.value()
+                             and live_->get_attrib_by_name<valid_att>(e).value_or(true);
+        if (not rc::room::is_proto(*live_, proto->id()) and not entered)
             continue;
 
         PromotionReading r;
@@ -763,6 +776,20 @@ bool RoomEviction::ensure_current_edge()
     const auto robot = robot_node();
     if (not robot.has_value()) return false;
 
+    // BOOTSTRAP ONLY: once ANY `current` edge exists, moving it is a decision (promotion / eviction), never this.
+    // It used to check only "is THIS room already current": after a crossing the robot has an RT edge to both
+    // rooms, and live (2026-10-11, eviction OFF) this re-added `current` -> room_1 beside the promoted room_2 — two
+    // `current` edges, door_concept stopped following and the controller flipped back to room_1.
+    // Only a `current` edge to a LIVE room counts: one left pointing at a room deleted by a previous run (the robot
+    // node outlives the rooms) is removed here, or it would block the bootstrap for ever (live 2026-10-11).
+    bool has_live_current = false;
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot.value(), "current"))
+    {
+        if (const auto dst = live_->get_node(e.to()); dst.has_value() and dst->type() == "room") has_live_current = true;
+        else if (live_->delete_edge(robot->id(), e.to(), "current"))
+            qInfo() << "[eviction] removed a stale `current` edge to node" << e.to() << "(no such room)";
+    }
+    if (has_live_current) return false;
     const auto rooms = rooms_under_robot(robot.value());
     if (rooms.size() != 1) return false;                        // 0: nothing to point at. 2+: eviction's job.
 

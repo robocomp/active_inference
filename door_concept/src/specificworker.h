@@ -249,6 +249,7 @@ private:
         std::uint64_t source_id = 0;
     };
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
+    std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     void step_entry_mirrors();
     // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
     // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The
