@@ -6,7 +6,7 @@ import sys, json, re, os, numpy as np, pandas as pd
 from shapely.geometry import Polygon
 from scipy.optimize import minimize
 FURN = []
-if os.environ.get('FURNITURE'):   # furniture.json (estimation_campaign/scripts/furniture.py), world XY, drawn in each panel
+if os.environ.get('FURNITURE'):   # furniture.json (estimation_scripts/scripts/furniture.py, e.g. estimation_scripts/apartment/furniture.json), world XY, drawn in each panel
     from shapely.geometry import shape
     FURN = [shape(o['geometry']) for o in json.load(open(os.environ['FURNITURE']))]
 D = sys.argv[1]; rooms = json.load(open(f'{D}/rooms.json')); rows = []; panels = []

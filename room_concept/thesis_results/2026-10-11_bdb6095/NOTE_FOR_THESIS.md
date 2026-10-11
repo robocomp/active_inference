@@ -45,7 +45,7 @@ The 100-layout test has not been run.
 - **New metric:** IoU is now taken after the best rigid fit of the ground-truth outline to the estimated outline. It measures shape only.
 - **Frame error:** reported separately, from an alignment anchored exactly at the start pose (the map's own frame).
 - **Precision and recall:** still use the trajectory alignment.
-- **Script:** `synthetic_rooms/scripts/regrade_anchor.py`.
+- **Script:** `estimation_scripts/scripts/regrade_anchor.py`.
 
 ## 3. Superseded numbers
 All IoU numbers below are refined (after 1 minute of refinement), shape metric unless marked SVD.
@@ -87,7 +87,7 @@ All IoU numbers below are refined (after 1 minute of refinement), shape metric u
 - **Apartment v4, start 9, first attempt:** the run timed out with no promotion and is excluded. The repeat (in the table) promoted in 31 s.
   - **What happened:** the controller judged the robot's starting pose infeasible for its footprint ("start was NOT footprint-feasible"). It refused every route, so the robot never moved. The explorer, meanwhile, rated the target reachable.
   - **Not reproducible:** same landing pose, same binaries. It did not happen in any of the 28 other apartment runs (v3, repeatability, v4).
-  - **For honesty:** 10/10 on first attempt is not true here. It is 9/10 first attempt, and 10/10 counting the one repeat. Kept in `estimation_campaign/campaign_v4/failed_run9_try1/`.
+  - **For honesty:** 10/10 on first attempt is not true here. It is 9/10 first attempt, and 10/10 counting the one repeat. Kept in `estimation_scripts/apartment/campaign_v4/failed_run9_try1/`.
 - **Open observation, not an exclusion:** in the start-anchored frame, almost every run in all four campaigns has the map rotated the same way, by +0.1° to +0.8° (one run −0.03°), relative to the true start heading. That includes both chains and both worlds. It is systematic, so it is probably a convention or mount offset (gt_theta convention or LiDAR yaw), not map error. It has not been diagnosed. It does not affect shape IoU.
 - **Pose error is higher in both new campaigns:**
   - Apartment: 1.7 cm vs 1.0 cm in v3. Confounded with the chain change.

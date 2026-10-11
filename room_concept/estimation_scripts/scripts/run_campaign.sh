@@ -1,14 +1,16 @@
 #!/bin/bash
-# Multi-start estimation campaign. usage: run_campaign.sh [first_id] [last_id]
+# Multi-start estimation campaign (apartment or synthetic world, whichever Webots has loaded).
+# usage: run_campaign.sh <campaign_dir> [first_id] [last_id]   — reads <campaign_dir>/starts.csv (id,x,y,theta), writes run_<id>/ there
 S=$(dirname "$(readlink -f "$0")"); B=/home/pbustos/robocomp/components/active_inference; R=$B/room_concept
-OUT=${OUT:-$HOME/robocomp/components/active_inference/room_concept/estimation_campaign/campaign_v4}; mkdir -p $OUT
-first=${1:-0}; last=${2:-9}; TIMEOUT_S=${TIMEOUT_S:-600}; REFINE_S=${REFINE_S:-60}
+OUT=$(readlink -f "${1:?usage: run_campaign.sh <campaign_dir> [first] [last]}"); mkdir -p $OUT
+[[ -f $OUT/starts.csv ]] || { echo "no $OUT/starts.csv"; exit 1; }
+first=${2:-0}; last=${3:-9}; TIMEOUT_S=${TIMEOUT_S:-600}; REFINE_S=${REFINE_S:-60}
 log(){ echo "$(date +%T) $*" | tee -a $OUT/campaign.log; }
 stop_fleet(){ pkill -TERM -x controller; pkill -TERM -x residual_concep; pkill -TERM -x room_concept
   for i in $(seq 1 30); do sleep 1; pgrep -x room_concept >/dev/null || pgrep -x controller >/dev/null || pgrep -x residual_concep >/dev/null || return 0; done
   log "WARN fleet did not stop in 30 s"; }
 for id in $(seq $first $last); do
-  read x y th < <(awk -F, -v k=$id 'NR>1 && $1==k{print $2,$3,$4}' $S/starts.csv)
+  read x y th < <(awk -F, -v k=$id 'NR>1 && $1==k{print $2,$3,$4}' $OUT/starts.csv)
   D=$OUT/run_$id; rm -rf $D; mkdir -p $D/logs
   log "run $id: start ($x,$y,$th)"
   stop_fleet

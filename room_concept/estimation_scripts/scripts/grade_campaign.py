@@ -2,9 +2,9 @@
 """Grade every run_<id> of the estimation campaign against the apartment ground truth -> results.csv + panel figure."""
 import sys, re, glob, os, numpy as np, pandas as pd, matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
 from shapely.geometry import Polygon
-OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/robocomp/components/active_inference/room_concept/synthetic_rooms')
-import json
-ROOMS={r['id']:np.array(r['polygon']) for r in json.load(open(os.path.join(OUT,'rooms.json')))}
+OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/robocomp/components/active_inference/room_concept/estimation_scripts/apartment/campaign_v4')
+svg = "0.2150,0.0000 0.1960,0.5940 0.5110,0.5940 0.5110,1.1940 0.1780,1.1940 0.0000,6.8920 0.2220,7.1660 4.1544,7.1639 4.1944,5.0099 4.3136,5.0241 4.2136,9.2331 5.8710,9.2560 5.8840,8.0070 6.3300,8.0260 6.3360,7.1690 5.9200,7.1630 5.9320,7.1020 8.3920,7.0900 8.4940,1.2100 8.1100,1.2100 8.1100,0.6100 8.5050,0.6100 8.5070,0.4610 8.2820,0.1790 5.1840,0.0680 5.2070,0.8220 4.3184,0.8148 4.3164,2.4978 4.1966,2.5052 4.2346,0.8192 3.2320,0.7920 3.2360,0.0780"
+GTW = np.array([[-float(p.split(',')[0]), float(p.split(',')[1])] for p in svg.split()])
 def score(V, gtp):
     Pl = Polygon(V).buffer(0); I = Pl.intersection(gtp).area
     return I / Pl.union(gtp).area, I / Pl.area, I / gtp.area
@@ -18,7 +18,7 @@ for D in sorted(glob.glob(f'{OUT}/run_*'), key=lambda d: int(d.split('_')[-1])):
         am, em = A.mean(0), E.mean(0); U, _, Vt = np.linalg.svd((A - am).T @ (E - em)); R = Vt.T @ U.T
         if np.linalg.det(R) < 0: Vt[-1] *= -1; R = Vt.T @ U.T
         err = np.linalg.norm((A - am) @ R.T + em - E, axis=1)
-        GTW = ROOMS[rid]; gtp = Polygon((GTW - am) @ R.T + em)
+        gtp = Polygon((GTW - am) @ R.T + em)
         pr = pd.read_csv(f'{D}/proto_room.csv', on_bad_lines='skip')
         prom = pr[pr.promoted == 1]
         tp = (prom.ts_ms.iloc[0] - pr.ts_ms.iloc[0]) / 1000 if len(prom) else np.nan
