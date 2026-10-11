@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{Room-layout estimation in ten furnished synthetic rooms (build bbcff1e, revised standpoint rule; one run each, random start $\geq$0.8 m from walls). Type: M = rectangle with random notches and bays, L, T. $|V|_{gt}$, $A$: ground-truth vertices and area. $t_p$: time to promotion ($t_p\approx0$: the first 360$^\circ$ scan left no standpoint worth visiting). $e$: median SLAM position error. IoU after the best rigid alignment of the ground truth to the estimate (shape only; the frame error is reported separately).}
+\label{tab:estimation-synthetic-furnished-bbcff1e}
+\begin{tabular}{r c r r r r r r r r}
+\toprule
+room & type & $|V|_{gt}$ & $A$ (m$^2$) & $t_p$ (s) & $e$ (mm) & IoU$_p$ & IoU$_r$ & $|V|_p$ & $|V|_r$ \\
+\midrule
+0 & M & 8 & 36.7 & 0 & 9 & 0.990 & 0.996 & 8 & 8 \\
+1 & L & 6 & 30.2 & 41 & 20 & 0.967 & 0.995 & 14 & 10 \\
+2 & M & 16 & 36.4 & 30 & 26 & 0.990 & 0.995 & 16 & 16 \\
+3 & T & 8 & 33.1 & 27 & 45 & 0.978 & 0.994 & 8 & 8 \\
+4 & M & 24 & 70.7 & 55 & 18 & 0.981 & 0.992 & 24 & 26 \\
+5 & M & 28 & 87.6 & 38 & 19 & 0.986 & 0.990 & 28 & 28 \\
+6 & L & 6 & 31.8 & 0 & 3 & 0.993 & 0.994 & 6 & 6 \\
+7 & M & 16 & 57.4 & 39 & 7 & 0.989 & 0.992 & 18 & 18 \\
+8 & T & 8 & 38.3 & 56 & 16 & 0.998 & 0.998 & 8 & 8 \\
+9 & M & 24 & 49.1 & 40 & 28 & 0.986 & 0.994 & 24 & 26 \\
+\midrule
+median & & & & 39 & 18 & 0.988 & 0.994 & & \\
+worst & & & & 56 & 45 & 0.967 & 0.990 & & \\
+\bottomrule
+\end{tabular}
+\end{table}
