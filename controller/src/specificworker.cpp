@@ -385,6 +385,18 @@ void SpecificWorker::initialize()
 			                                 display_, [this] { return current_time_ms(); });
 		});
 	};
+	// Door passage row (controller_door_passage_bar.h): the same two commands as the remote file's `cross <door>` /
+	// `uncross`, enqueued so the start lands on the control thread between cycles like every other button here.
+	gui.door_passage.on_cross = [this](const std::string &door)
+	{
+		enqueue_command([this, door]()
+		{
+			session_.door_passage().start(door);
+			std::println("[gui] DOOR PASSAGE through '{}'", door);
+		});
+	};
+	gui.door_passage.on_stop = [this]()
+	{ enqueue_command([this]() { session_.door_passage().stop(); std::println("[gui] door passage stopped"); }); };
 	gui.mission.on_record_begin = [this]()
 	{ enqueue_command([this]() { session_.mission().start_recording(); }); };
 	gui.mission.on_record_finish = [this](std::string name)
@@ -556,7 +568,16 @@ void SpecificWorker::initialize()
 				const QString c = raw.trimmed().toLower();
 				if (c == "run" and remote_run_)        { std::println("[remote] RUN");  remote_run_(1, false); }
 				else if (c == "stop" and remote_stop_) { std::println("[remote] STOP"); remote_stop_(); }
-				else std::println("[remote] ignored '{}' (expected run | stop)", c.toStdString());
+				// DOOR PASSAGE (controller_door_passage.h): `cross door_1` sequences approach -> open -> cross on
+				// door_concept's affordances for that door; `uncross` ends it (selection unrestricted again).
+				else if (c.startsWith("cross "))
+				{
+					const std::string door = c.mid(6).trimmed().toStdString();
+					session_.door_passage().start(door);
+					std::println("[remote] DOOR PASSAGE through '{}'", door);
+				}
+				else if (c == "uncross") { session_.door_passage().stop(); std::println("[remote] door passage stopped"); }
+				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | uncross)", c.toStdString());
 			}
 		});
 		t->start(300);

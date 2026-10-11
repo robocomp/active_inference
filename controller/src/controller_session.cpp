@@ -153,6 +153,27 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     room_polygon_ = room_polygon.value();
     mission_.set_room_polygon(room_polygon_);   // missions record their frame / are registered against it
 
+    // ── DOOR PASSAGE (controller_door_passage.h): which affordance may be selected, and the corridor through the
+    //    doorway while crossing. Before set_world below, so the grid built this cycle already includes it.
+    {
+        auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
+        if (dp.event.has_value()) std::println("{}", *dp.event);
+        door_required_ = std::move(dp.required);
+        door_passages_ = std::move(dp.passages);
+        grid_planner_.set_passages(door_passages_);
+        obstacle_tracker.set_exempt_names(std::move(dp.exempt));
+        // The window's row and corridor overlay. The door list is a node scan, so it is refreshed once a second.
+        if (timestamp_ms - door_names_ms_ >= 1000)
+        {
+            door_names_ms_ = timestamp_ms;
+            door_names_ = rc::DoorPassage::list_doors(*graph_);
+        }
+        const auto v = door_passage_.view();
+        display.set_door_passage({.door = v.door, .step = rc::DoorPassage::step_name(v.step), .step_state = v.step_state,
+                                  .attempts = v.attempts, .last_event = v.last_event, .doors = door_names_},
+                                 door_passages_);
+    }
+
     // ── THE ROBOT'S OWN BODY, ONCE, AS SOON AS ITS NODE EXISTS ───────────────────────────────────
     // ★NOT IN initialize(). The robot node may not have synced from the persistent server yet at that point
     // — the same reason the stale-node sweep runs twice (CLAUDE.md) — and a body loaded from a node that is
@@ -736,6 +757,19 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         plan_spline_valid_ = false;
     }
 
+    // Door passage: the selector may take only the step's affordance. On its start the claim on whatever was being
+    // executed (the explorer's afford_room, typically) is released, exactly as an abandoned goal is above.
+    if (door_passage_.take_just_started())
+    {
+        std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
+        affordance_manager.release_execution_claim(graph_);
+        last_target_info_.reset();
+        current_target_room_.reset();
+        active_target_id_ = 0;
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+    }
+    affordance_manager.set_required_name(door_required_);
     const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
                             ? std::nullopt
                             : world_model.read_target_in_room(timestamp_ms);
@@ -1072,7 +1106,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // would answer "no" for a reason that mis-describes what happened, and the producer would be
         // told "the body does not fit" about a place that is not in its own layout. Rejected with its
         // own word so a run full of these points at the exploration grid's extent, not at the planner.
-        if (room_polygon_.size() >= 3 and not rc::corner_visibility::point_in_polygon(step.target.room_pos, room_polygon_))
+        if (room_polygon_.size() >= 3 and not rc::corner_visibility::point_in_polygon(step.target.room_pos, room_polygon_)
+            and not grid_planner_.inside_room_or_passage(room_polygon_, step.target.room_pos))   // a door passage's corridor is in
         {
             const Eigen::Vector2f cell = step.target.room_pos;
             if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
@@ -2700,6 +2735,44 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             std::println("[controller] HOLDING — no route to '{}': {}. Not escaping: the robot is not wedged, "
                          "the planner produced no path, and reversing cannot fix a planner.",
                          step.target.node_name, grid_planner_.last_failure());
+            // DOOR PASSAGE DIAGNOSTIC (2026-10-11): which cell of the doorway corridor refuses the body. One line per
+            // 10 cm along the corridor's axis: is the body free there facing along it, and how many residual cells /
+            // obstacle polygons lie inside the corridor — so "no route through the door" names its blocker.
+            if (not door_passages_.empty() and door_passages_.front().size() == 4)
+            {
+                const auto &c = door_passages_.front();
+                const Eigen::Vector2f a = 0.5f * (c[0] + c[3]), b = 0.5f * (c[1] + c[2]);
+                const Eigen::Vector2f d = (b - a).normalized();
+                const float yaw = std::atan2(d.y(), d.x());
+                std::ofstream f("door_passage_world.txt", std::ios::out | std::ios::trunc);
+                f.imbue(std::locale::classic());
+                f << "start " << step.robot_pose.pos.x() << ' ' << step.robot_pose.pos.y() << '\n';
+                f << "goal " << step.target.room_pos.x() << ' ' << step.target.room_pos.y() << '\n';
+                for (const auto &p : c) f << "corridor " << p.x() << ' ' << p.y() << '\n';
+                for (const auto &p : room_polygon_) f << "room " << p.x() << ' ' << p.y() << '\n';
+                std::string blocked;
+                for (float s = 0.f; s <= (b - a).norm(); s += 0.1f)
+                {
+                    const Eigen::Vector2f q = a + s * d;
+                    const bool fr = grid_planner_.pose_free(q, yaw);
+                    f << "axis " << s << ' ' << q.x() << ' ' << q.y() << ' ' << (fr ? 1 : 0) << '\n';
+                    if (not fr) blocked += std::format(" {:.1f}", s);
+                }
+                int n_res = 0;
+                for (const auto &q : obstacle_tracker.residual_cells())
+                    if (rc::corner_visibility::point_in_polygon(q, c)) { ++n_res; f << "residual " << q.x() << ' ' << q.y() << '\n'; }
+                for (const auto &o : obstacle_tracker.display_obstacle_polygons())
+                    for (const auto &p : o.polygon)
+                        if (rc::corner_visibility::point_in_polygon(p, c))
+                        { f << "obs " << (o.label.empty() ? "-" : o.label) << ' ' << (o.color_key.empty() ? "-" : o.color_key)
+                            << ' ' << p.x() << ' ' << p.y() << '\n'; }
+                f << "exempt";
+                for (const auto &n : obstacle_tracker.exempt_names()) f << ' ' << n;
+                f << '\n';
+                std::println("[door-passage] no route through the corridor: body refused at axis metres [{} ] of {:.1f}; "
+                             "{} residual cells inside it — see door_passage_world.txt",
+                             blocked, (b - a).norm(), n_res);
+            }
         }
         return false;
     }
@@ -4388,7 +4461,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // of the footprint test that already keeps the body inside. The body's extent is applied where it belongs
     // — in the obstacle terms, per pose, per bearing.
     if (room_polygon_.size() >= 3)
-        path_controller.set_room_boundary(room_polygon_);
+        path_controller.set_room_boundary(room_polygon_, door_passages_);   // minus the doorway being crossed
 
     // LOCAL ELASTIC BAND: let the route absorb what the live field says, before the follower measures
     // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the

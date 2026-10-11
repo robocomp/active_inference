@@ -238,11 +238,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                 qInfo() << "[cfg] RoomShape.MapMode = last: loading the newest learnt layout" << QString::fromStdString(*f);
             }
             else
-            {
-                room_concept.params.map_mode = rc::RoomConcept::Params::MapMode::Estimate;
-                qWarning() << "[cfg] RoomShape.MapMode = last: no learnt layout for" << QString::fromStdString(stem)
-                           << "in" << QString::fromStdString(p.LAYOUT_DIR) << "/learnt — estimating instead";
-            }
+                // ★ NOT A FALLBACK TO ESTIMATE ANY MORE (2026-10-11): at this point the layout name is the config's
+                //   DEFAULT; the robot's scenario overlay replaces it later (apply_scenario), which re-resolves "last"
+                //   with the right stem. Deciding here sent a run with apartamento layouts on disk to Estimate
+                //   because "beta_layout" had none.
+                qInfo() << "[cfg] RoomShape.MapMode = last: no learnt layout for" << QString::fromStdString(stem)
+                        << "yet — resolved again once the scenario names its layout";
         }
         else if (m != "estimate" and m != "given")
             qWarning() << "[cfg] RoomShape.MapMode" << QString::fromStdString(m) << "is not 'given'|'estimate'|'last' — treated as given";
@@ -1344,7 +1345,22 @@ std::vector<std::string> RoomConfig::apply_scenario(const std::string& scenario)
     const auto& ov = it->second;
     const std::string source = "Scenario." + scenario;
     if (ov.room_layout_svg.has_value() and *ov.room_layout_svg != ROOM_LAYOUT_SVG)
-    { changed.emplace_back("RoomLayoutSvg"); ROOM_LAYOUT_SVG = *ov.room_layout_svg; note_overlay_applied("RoomLayoutSvg", ROOM_LAYOUT_SVG, source); }
+    {
+        changed.emplace_back("RoomLayoutSvg"); ROOM_LAYOUT_SVG = *ov.room_layout_svg; note_overlay_applied("RoomLayoutSvg", ROOM_LAYOUT_SVG, source);
+        // MapMode "last": the newest learnt layout of THIS scenario (see the RoomShape.MapMode reader). None => the
+        // scenario's own surveyed layout, still given — say so, since it is not what was asked for.
+        if (MAP_MODE == "last")
+        {
+            if (const auto f = rc::learnt::newest(LAYOUT_DIR, rc::learnt::scenario_stem(ROOM_LAYOUT_SVG)))
+            {
+                ROOM_LAYOUT_SVG = *f;
+                qInfo() << "[cfg] RoomShape.MapMode = last: loading the newest learnt layout" << QString::fromStdString(*f);
+            }
+            else
+                qWarning() << "[cfg] RoomShape.MapMode = last: NO learnt layout for" << QString::fromStdString(ROOM_LAYOUT_SVG)
+                           << "— loading the scenario's surveyed layout instead";
+        }
+    }
     if (ov.room_height.has_value() and *ov.room_height != room_height)
     { changed.emplace_back("RoomHeight"); room_height = *ov.room_height; note_overlay_applied("RoomHeight", room_height, source); }
     if (ov.recenter_room_polygon.has_value() and *ov.recenter_room_polygon != RECENTER_ROOM_POLYGON)

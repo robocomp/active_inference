@@ -3,6 +3,7 @@
  */
 
 #include "grid_planner.h"
+#include "door_passage_corridor.h"   // self_test (12)
 
 #include <algorithm>
 #include <cmath>
@@ -106,6 +107,12 @@ GridPlanner::OrientationCensus GridPlanner::orientation_census() const
     return c;
 }
 
+bool GridPlanner::inside_room_or_passage(const std::vector<Eigen::Vector2f>& room_polygon, const Eigen::Vector2f& p) const
+{
+    if (point_in_polygon(room_polygon, p)) return true;
+    return std::ranges::any_of(passages_, [&](const auto& pass) { return pass.size() >= 3 and point_in_polygon(pass, p); });
+}
+
 void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                             const std::vector<std::vector<Eigen::Vector2f>>& obstacles,
                             const OccupiedCells& cells)
@@ -117,6 +124,9 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
     for (const auto& p : room_polygon)
     { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
+    for (const auto& pass : passages_)
+        for (const auto& p : pass)
+        { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
     // A margin of one circumscribed radius so the footprint of a robot near the boundary is representable.
     const float pad = footprint.circumscribed_radius() + params.safety_margin_m + cell_;
     xmin_ = xmn - pad; ymin_ = ymn - pad;
@@ -139,7 +149,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     long outside = 0;
     for (int iy = 0; iy < h_; ++iy)
         for (int ix = 0; ix < w_; ++ix)
-            if (not point_in_polygon(room_polygon, cell_to_world(ix, iy)))
+            if (not inside_room_or_passage(room_polygon, cell_to_world(ix, iy)))
                 { occ_[idx(ix, iy)] = 1; ++outside; }
     room_mask_usable_ = outside < static_cast<long>(0.95 * w_ * h_);
     if (not room_mask_usable_)
@@ -1116,6 +1126,68 @@ bool GridPlanner::self_test()
         check(c.free_now == c.free_legacy and c.lost == c.gained,
               "★the correction must conserve total free C-space: it rotates the body, it does not "
               "grow it. Unequal totals mean something is being inflated, not turned");
+    }
+
+    // (12) DOOR PASSAGE. The live run of 2026-10-11 (crossing/try4_here, controller_2.log), at its own numbers:
+    // room_1's wall line at y=4.61, door_19's aperture 1.0 m wide, door_concept's cross standpoint (-0.52,5.81)
+    // at yaw 1.56 — 1.2 m past the wall, OUTSIDE the room polygon. Residual carries the open leaf (swung 90°
+    // into room_1 off the hinge jamb) and the far jamb 8 cm inside the corridor: the aperture centre door_concept
+    // remembers (-0.62) and the one its through-pose implies (-0.53) differ by that much.
+    // Three worlds, the live config's cell (0.06 m) and margin (0.05 m):
+    //   (a) the room alone — the standpoint is not in the world at all;
+    //   (b) the corridor of the live run, anchored on the door NODE (the leaf, at (-1.05,5.12)) — the standpoint is
+    //       free and unreachable, which is the "no route: 72335 expansions" the robot held on;
+    //   (c) the corridor door_passage_corridor builds now, along the standpoint's heading — a route exists, and
+    //       every point of it is inside the room or the corridor.
+    {
+        const std::vector<Eigen::Vector2f> room1{{-3.f, 0.f}, {2.f, 0.f}, {2.f, 4.61f}, {-3.f, 4.61f}};
+        const Eigen::Vector2f robot{-0.5f, 2.0f}, goal{-0.52f, 5.81f}, leaf{-1.05f, 5.12f};
+        constexpr float kHeading = 1.56f, kWidth = 1.0f;
+        OccupiedCells cells{.centres = {}, .cell_size_m = 0.05f};
+        for (float y = 3.61f; y <= 4.61f; y += 0.05f) cells.centres.emplace_back(-1.10f, y);   // the open leaf
+        for (float y = 4.61f; y <= 4.76f; y += 0.05f) cells.centres.emplace_back(-0.10f, y);   // the far jamb
+        const auto world = [&](std::vector<std::vector<Eigen::Vector2f>> passages)
+        {
+            GridPlanner p;
+            p.params.cell_size_m = 0.06f;
+            p.params.safety_margin_m = 0.05f;
+            p.set_passages(std::move(passages));
+            p.set_world(room1, {}, cells);
+            return p;
+        };
+
+        auto room_only = world({});
+        const auto pa = room_only.plan(robot, goal);
+        std::printf("  door (a) room alone: %s\n", pa ? "planned" : room_only.last_failure().c_str());
+        check(not pa.has_value(), "a standpoint outside the room polygon must not be plannable without a passage");
+
+        const Eigen::Vector2f along = (goal - leaf).normalized();
+        auto leaf_anchored = world({door_passage_corridor(leaf, std::atan2(along.y(), along.x()), kWidth,
+                                                          0.f, (goal - leaf).norm() + 0.8f)});
+        const auto pb = leaf_anchored.plan(robot, goal);
+        std::printf("  door (b) corridor from the LEAF: goal %s, %s\n",
+                    leaf_anchored.pose_free(goal, kHeading) ? "free" : "occupied",
+                    pb ? "planned" : leaf_anchored.last_failure().c_str());
+        check(not pb.has_value(), "the leaf-anchored corridor must reproduce the live 'no route'");
+
+        const auto corridor = door_passage_corridor(goal, kHeading, kWidth, 2.2f, 0.8f);
+        auto heading_anchored = world({corridor});
+        const auto pc = heading_anchored.plan(robot, goal);
+        std::printf("  door (c) corridor along the standpoint heading: %s (%zu waypoints)\n",
+                    pc ? "planned" : heading_anchored.last_failure().c_str(), pc ? pc->size() : 0);
+        check(pc.has_value(), "★a 1.0 m doorway must be plannable through the heading-anchored corridor");
+        check(heading_anchored.pose_free(goal, kHeading), "the body must fit at the cross standpoint, facing along it");
+        if (pc.has_value())
+        {
+            bool contained = true;
+            for (std::size_t i = 0; i + 1 < pc->size(); ++i)
+                for (int k = 0; k <= 10; ++k)
+                {
+                    const Eigen::Vector2f q = (*pc)[i] + (static_cast<float>(k) / 10.f) * ((*pc)[i + 1] - (*pc)[i]);
+                    contained = contained and heading_anchored.inside_room_or_passage(room1, q);
+                }
+            check(contained, "every point of the route must be inside the room or the passage");
+        }
     }
 
     std::printf("GridPlanner::self_test %s\n", ok ? "PASS" : "FAIL");

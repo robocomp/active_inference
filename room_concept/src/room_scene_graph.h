@@ -262,7 +262,8 @@ private:
     std::vector<std::pair<Eigen::Vector2f, std::int64_t>> layout_refused_;   ///< (cell, until_ms), internal frame
     std::size_t   proto_polygon_verts_ = 0;   ///< crossing proto: vertex count last written to it
     std::uint64_t   proto_room_id_ = 0;
-    std::vector<std::uint64_t> left_rooms_;   ///< rooms this agent surveyed and then left through a door: kept, never swept
+    std::vector<std::uint64_t> left_rooms_;
+    std::vector<std::vector<Eigen::Vector2f>> left_polys_int_;   ///< their outlines, INTERNAL frame: the new room's free space excludes them   ///< rooms this agent surveyed and then left through a door: kept, never swept
     Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
     Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
     Eigen::Vector2f proto_n_out_{0.f, 1.f};                         ///< its outward normal, room frame

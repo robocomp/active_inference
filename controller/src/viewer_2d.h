@@ -54,6 +54,9 @@ class Viewer2D : public QObject
 
     void update_robot(const Eigen::Affine2f &robot_pose);
     void draw_room_polygon(const std::vector<Eigen::Vector2f> &verts);
+    // The door-passage corridors (controller_door_passage.h): space outside the room the planner treats as free while
+    // a door is being crossed. Drawn over the room outline so it reads as an opening cut through it; empty clears.
+    void draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &passages);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
     void set_lidar_draw_correction(const Eigen::Affine2f &correction) { lidar_draw_correction_ = correction; }
@@ -148,6 +151,7 @@ private:
 
     AbstractGraphicViewer *agv_ = nullptr;
     QGraphicsPolygonItem *polygon_item_ = nullptr;
+    std::vector<QGraphicsPolygonItem *> passage_items_;   // draw_passages
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;

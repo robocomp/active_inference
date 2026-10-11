@@ -13,6 +13,7 @@
 #include "controller_lockon.h"
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
+#include "controller_door_passage.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
 #include "controller_motion_commander.h"
@@ -147,6 +148,7 @@ public:
     void set_route_reverse(bool reverse) { route_reverse_ = reverse; }
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
+    rc::DoorPassage &door_passage() { return door_passage_; }
     rc::MissionRunner &mission() { return mission_; }
     // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
     // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
@@ -842,6 +844,11 @@ private:
     bool route_reverse_ = false;
 
     rc::MissionRunner mission_;
+    rc::DoorPassage door_passage_;                                  // controller_door_passage.h
+    std::string door_required_;                                     // its required affordance this cycle ("" = none)
+    std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
+    std::vector<std::string> door_names_;                           // door nodes for the window's combo, re-read at 1 Hz
+    std::uint64_t door_names_ms_ = 0;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
     // The fitted curve for a NON-mission plan (affordance target, click target). Missions keep theirs

@@ -136,6 +136,16 @@ public:
                    const std::vector<std::vector<Eigen::Vector2f>>& obstacles,
                    const OccupiedCells& cells = OccupiedCells{});
 
+    // ── PASSAGES (2026-10-11, door crossing) ──────────────────────────────────────────────────────────
+    // Regions OUTSIDE the room polygon that are free all the same: the corridor through a doorway the robot has
+    // been offered to cross (controller_door_passage.h). A cell is free if it is inside the room OR inside a
+    // passage; the grid's extent grows to include them. Set before set_world; empty = the room alone (default).
+    void set_passages(std::vector<std::vector<Eigen::Vector2f>> passages) { passages_ = std::move(passages); }
+    [[nodiscard]] const std::vector<std::vector<Eigen::Vector2f>>& passages() const { return passages_; }
+    /// Inside the room polygon given, or inside a passage.
+    [[nodiscard]] bool inside_room_or_passage(const std::vector<Eigen::Vector2f>& room_polygon,
+                                              const Eigen::Vector2f& p) const;
+
     // Shortest footprint-feasible path from start to goal, in room coordinates. Returns nullopt with
     // last_failure() set. The returned path is simplified to its turning points (a dense cell chain is useless
     // to a trajectory controller and makes the MPPI's carrot jitter).
@@ -336,6 +346,7 @@ private:
     // (orientation_census / pose_free_legacy) instead of asserted. Delete with them.
     std::vector<std::vector<Eigen::Vector2i>> offsets_legacy_;
     float offsets_cell_ = 0.f, offsets_margin_ = -1.f;
+    std::vector<std::vector<Eigen::Vector2f>> passages_;   // set_passages
     bool room_mask_usable_ = true;  // false ⇒ the room polygon was discarded (see set_world)
     int last_obstacle_count_ = 0;   // polygons in the last set_world — for the failure report
     std::string last_failure_;

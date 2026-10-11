@@ -1013,7 +1013,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //   path. The branch below this one only re-opened the wall map, which no longer produces the room (the map layout
     //   does), and kept the old room's adopted layout in force, so the new room was never estimated.
     //   The room left behind keeps its node, polygon and walls exactly as promoted: nothing edits it from here on.
-    if (startup_proto_ and startup_promoted_)
+    //   Out of a GIVEN room (MapMode given/last) as well: the room left behind is the surveyed layout, the new one is
+    //   learnt the same way (2026-10-11). The branch below is kept only for a fleet without the start-up survey.
+    if (params_->STARTUP_PROTO_ENABLED)
     {
         rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross);
         return;
@@ -1262,6 +1264,7 @@ void RoomSceneGraph::forget_room(const char* why)
     startup_proto_ = startup_promoted_ = false;
     layout_pool_.clear();
     left_rooms_.clear();
+    left_polys_int_.clear();
     layout_finished_ = false;
     pub_gauge_frozen_ = false;
     {
@@ -1397,6 +1400,18 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // exactly as the robot's initial pose was the first room's. T_room_proto_ is that frame in the internal one.
     const std::uint64_t left_id = dsr_room_id_;
     left_rooms_.push_back(left_id);   // sweep_foreign_rooms must not reap it while the new room is surveyed
+    // ROOMS DO NOT OVERLAP: the room left behind is known space, not the new room's. Its outline (internal frame, read
+    // before begin_room_estimation releases it) is excluded from the new room's free-space map (FreeSpacePolygon::
+    // set_exclusion) — what the LiDAR sees of it back through the open doorway is not floor to promote.
+    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3)
+        left_polys_int_.push_back(std::move(poly));
+    // This agent's intentions (afford_room, afford_calib) are ONE node each and move with the agent's room: the
+    // affordance manager re-hangs them from the new room on its next publish (parent + has_intention), but never
+    // removes the old room's edge, which left afford_room with two parents — a link between the rooms that means
+    // nothing. Cut them here; the left room offers nothing any more.
+    if (const auto left = G_->get_node(left_id); left.has_value())
+        for (const auto& e : G_->get_node_edges_by_type(left.value(), "has_intention"))
+            G_->delete_edge(left_id, e.to(), "has_intention");
     const Eigen::Affine2f T_pub_int = T_room_proto_.inverse();
     proto_room_id_   = 0;          // not a crossing proto any more: the agent's own room, on the start-up path
     room_rt_retired_ = false;      // the RT goes to dsr_room_id_ (the new room) through the frozen-gauge branch
@@ -1446,6 +1461,16 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     fp.erode_m   = startup_erode_m();
     fp.max_verts = params_->STARTUP_PROTO_MAX_VERTS;
     free_space_.emplace(fp);
+    if (not left_polys_int_.empty())   // the rooms this agent has left, in this room's published frame
+    {
+        std::vector<std::vector<Eigen::Vector2f>> excl;
+        for (const auto& poly : left_polys_int_)
+        {
+            auto& e = excl.emplace_back();
+            for (const auto& v : poly) e.push_back(T_pub_int * v);
+        }
+        free_space_->set_exclusion(std::move(excl));
+    }
     fs_published_.clear();
     fs_free_ring_.clear();
     layout_visits_ = 0;
@@ -1741,7 +1766,16 @@ void RoomSceneGraph::save_learnt_layout(const std::vector<Eigen::Vector2f>& poly
     // The accepted room, kept for RoomShape.MapMode = "last" (learnt_layout.h). One dated file per run, rewritten
     // on every accepted refinement so the newest file always holds this run's final layout.
     if (learnt_layout_path_.empty())
-        learnt_layout_path_ = rc::learnt::new_path(params_->LAYOUT_DIR, rc::learnt::scenario_stem(params_->ROOM_LAYOUT_SVG));
+    {
+        // A room entered through a door is saved under its own name in front ("room_2-<stem>_<date>.svg"): the
+        // scenario's layout — what MapMode "last" reloads (rc::learnt::newest, files starting "<stem>_") — is the
+        // start room's. Rooms beyond a door are kept, not reloaded, until rooms are identified (ltsm_agent).
+        std::string stem = rc::learnt::scenario_stem(params_->ROOM_LAYOUT_SVG);
+        if (const auto rn = G_ ? G_->get_node(dsr_room_id_) : std::nullopt;
+            rn.has_value() and rn->name() != "room_1" and rn->name() != "room")
+            stem = rn->name() + "-" + stem;
+        learnt_layout_path_ = rc::learnt::new_path(params_->LAYOUT_DIR, stem);
+    }
     const auto note = std::format("{} layout, {} vertices", what, poly.size());
     if (rc::learnt::save(learnt_layout_path_, poly, note))
         qInfo().noquote() << QString("[room][learnt] %1 layout saved (%2 vertices) -> %3")

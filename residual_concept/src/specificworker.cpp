@@ -683,12 +683,17 @@ void SpecificWorker::compute()
 
     if (not G or not rt_api_)
         return;
-    if (room_node_id_ == 0)
+    // ★ RE-RESOLVED EVERY CYCLE (2026-10-11, door crossing): the room used to be re-resolved only after its node was
+    //   deleted, so a robot that crossed a door kept explaining room 2's scans with room 1's outline for ever (room_concept
+    //   keeps a room it left). The rule (room_resolve.h, 2a) follows the robot; nullopt keeps the room we have. A change
+    //   re-sizes the occupancy grid below ("the room changed").
+    if (const auto room = rc::room::current_room(*G); room.has_value() and *room != room_node_id_)
     {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
+        if (room_node_id_ != 0)
+            std::print("[residual] current room changed {} -> {} — re-binding\n", room_node_id_, *room);
         room_node_id_ = *room;
     }
+    if (room_node_id_ == 0) return;
 
     // Fresh LiDAR sweep is the only trigger — no sweep, no re-cluster this cycle (instances persist).
     if (not lidar_ingestor_ or not lidar_ingestor_->pump())

@@ -37,15 +37,21 @@ bool ControllerWorldModel::refresh_graph_state()
     if (!graph_)
         return false;
 
-    if (graph_state_.room_name.empty())
+    // ★ RE-RESOLVED EVERY CYCLE (2026-10-11, door crossing): the room was latched once and released only when its
+    //   node vanished, so a robot that crossed a door kept planning in the room it had left, against that room's
+    //   polygon, for as long as the node lived (for ever: room_concept keeps a room it left). The rule
+    //   (room_resolve.h) moves with the robot; nullopt is "nobody has told me", never a release, so the cached room
+    //   is kept through a moment of ambiguity.
+    if (const auto room = rc::room::current_room_node(*graph_); room.has_value() and room->id() != graph_state_.room_id)
     {
-        if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
-        {
-            graph_state_.room_id = room->id();
-            graph_state_.room_name = room->name();
-        }
+        if (not graph_state_.room_name.empty())
+            qInfo().noquote() << QString("[controller] current room changed: %1 -> %2")
+                                     .arg(QString::fromStdString(graph_state_.room_name))
+                                     .arg(QString::fromStdString(room->name()));
+        graph_state_.room_id = room->id();
+        graph_state_.room_name = room->name();
     }
-    else if (!graph_->get_node(graph_state_.room_id).has_value())
+    else if (not graph_state_.room_name.empty() and !graph_->get_node(graph_state_.room_id).has_value())
     {
         graph_state_.room_id = 0;
         graph_state_.room_name.clear();

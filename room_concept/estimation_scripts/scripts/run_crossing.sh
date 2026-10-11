@@ -2,6 +2,8 @@
 # Door-crossing test (plan 2026-10-11, Phases 0-1): estimate room 1 from a start pose, then hand over for a joystick
 # crossing; the fleet keeps running until `run_crossing.sh <dir> stop`.
 # usage: run_crossing.sh <out_dir> [x y theta]        (world: tworooms-piso-door1open.wbt loaded in Webots)
+#        NORUN=1 run_crossing.sh <out_dir> x y theta  (teleport, controller left STOPPED)
+#        run_crossing.sh <out_dir> here                (no teleport, controller left STOPPED: the robot stays put)
 #        run_crossing.sh <out_dir> run|stop|collect   (controller run / controller stop / copy logs + stop the fleet)
 S=$(dirname "$(readlink -f "$0")"); B=/home/pbustos/robocomp/components/active_inference; R=$B/room_concept
 OUT=$(readlink -f "${1:?usage: run_crossing.sh <out_dir> [x y theta | run | stop | collect]}"); mkdir -p $OUT/logs
@@ -26,14 +28,18 @@ case "$2" in
   stop)    echo stop > $B/controller/remote_cmd.txt; log "controller STOP"; exit 0;;
   collect) echo stop > $B/controller/remote_cmd.txt; collect; stop_fleet; log "collected + fleet stopped"; exit 0;;
 esac
-x=${2:--5.187}; y=${3:-8.441}; th=${4:-2.496}   # apartment start 1: the one nearest DOOR_1
 stop_fleet
-python3 $S/tp.py set $x $y $th >> $OUT/teleport.txt 2>&1; sleep 4
-python3 $S/tp.py get >> $OUT/teleport.txt 2>&1; log "start ($x,$y,$th) landed: $(tail -1 $OUT/teleport.txt)"
+if [[ "$2" == "here" ]]; then
+  python3 $S/tp.py get >> $OUT/teleport.txt 2>&1; log "start HERE (no teleport): $(tail -1 $OUT/teleport.txt)"
+else
+  x=${2:--5.187}; y=${3:-8.441}; th=${4:-2.496}   # apartment start 1: the one nearest DOOR_1
+  python3 $S/tp.py set $x $y $th >> $OUT/teleport.txt 2>&1; sleep 4
+  python3 $S/tp.py get >> $OUT/teleport.txt 2>&1; log "start ($x,$y,$th) landed: $(tail -1 $OUT/teleport.txt)"
+fi
 rm -rf $R/tmp/snapshots; rm -f $R/tmp/refine_input.bin $R/tmp/promotion_select.csv $R/tmp/proto_room.csv $R/tmp/map_layout.csv \
       $R/tmp/layout_refine.csv $R/tmp/door_filter.csv
 for a in $FLEET; do
   (cd $B/$a && DISPLAY=:0 setsid nohup bin/$a etc/config.toml > $OUT/logs/$a.log 2>&1 < /dev/null &) ; sleep 4
 done
-sleep 6; echo run > $B/controller/remote_cmd.txt
-log "fleet up: $FLEET; controller RUN"
+if [[ "$2" == "here" || -n "$NORUN" ]]; then log "fleet up: $FLEET; controller left STOPPED"
+else sleep 6; echo run > $B/controller/remote_cmd.txt; log "fleet up: $FLEET; controller RUN"; fi

@@ -5037,7 +5037,9 @@ namespace rc
             const float odo_var_tr = fed ? float(noise_innov_.odom_var_accum(0) + noise_innov_.odom_var_accum(1)) : 0.f;
             field_bias_.observe(innov_z_, innov_R_, odom_w, odo_var_tr, 0.f, fed);
             const Eigen::Matrix3f Sb = field_bias_.covariance(innov_R_);
-            res.surprise.pf_sigma_b = float(field_bias_.sigma_b());
+            res.surprise.pf_sigma_b = float(field_bias_.sigma_b());          // global (log, outlier scale)
+            res.surprise.pf_sigma_b_loc = float(field_bias_.sigma_b_local()); // at this place: what Sb carries
+            res.surprise.pf_pi_out  = float(field_bias_.pi_elsewhere());
             res.surprise.pf_len     = float(field_bias_.length());
             res.surprise.pf_xx      = 0.5f * (Sb(0, 0) + Sb(1, 1));
             res.surprise.pf_tt      = Sb(2, 2);

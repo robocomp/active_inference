@@ -461,6 +461,14 @@ public:
             toolbar_layout_->insertWidget(1, panel->pause_button());
     }
 
+    // The door-passage row, directly under the mission row (attach_mission_panel must run first).
+    void attach_door_passage_bar(QWidget *bar)
+    {
+        if (bar == nullptr) return;
+        if (auto *lay = qobject_cast<QVBoxLayout *>(layout()); lay != nullptr)
+            lay->insertWidget(mission_row_index + (mission_panel != nullptr ? 1 : 0), bar);
+    }
+
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
     rc::TimeSeriesPlot *mission_j_plot = nullptr;   // commanded adv/rot trace, below the EFE panel
     QPushButton *lidar_toggle_btn = nullptr;

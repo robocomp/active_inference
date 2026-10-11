@@ -725,7 +725,22 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     // producers (expected entropy reduction in nats: afford_table = shape-belief ΔH, afford_room =
     // pose-belief ΔH). The previously-selected affordance gets a switch-margin bonus so the choice
     // commits and does not thrash (hysteresis).
-    const auto affordances = graph->get_nodes_by_type("affordance");
+    auto affordances = graph->get_nodes_by_type("affordance");
+    // ★ A REQUIRED AFFORDANCE (2026-10-11, the controller's door-passage mission): while set, the contest has ONE
+    //   entrant, named by the mission's current step. Not offered yet ⇒ nothing is selected (the consumer waits);
+    //   every other branch below — keep the executing one, resume a claim, pick the best — runs unchanged on it.
+    if (not required_name_.empty())
+        std::erase_if(affordances, [&](const DSR::Node &n) { return n.name() != required_name_; });
+    // ★ PRAGMATIC ACTIONS ARE TAKEN ON PURPOSE, NEVER BY DEFAULT (2026-10-11). A pragmatic affordance (`aff_kind` set
+    //   by common/pragmatic_affordance: door_concept's approach / open / cross) changes the world or the robot's
+    //   place; it carries no information to gain, and its `value` is a placeholder until a goal asks for it
+    //   (door_config.h: "the honest value of cross is near zero until a mission layer asks"). In the open contest it
+    //   won by default whenever the explorer was done: live, after a clean crossing, room 2's promoted room left
+    //   afford_room with nothing to show and the robot set off back through the door it had just crossed. So they
+    //   are eligible only when a mission names them (set_required_name, the door passage).
+    else
+        std::erase_if(affordances, [&](const DSR::Node &n)
+                      { return graph->get_attrib_by_name<aff_kind_att>(n).has_value(); });
 
     // ── IS ANY OBJECT AFFORDANCE IN THE RUNNING? ──────────────────────────────────────────────────
     // Decided over the ELIGIBLE set only (Offered or Executing): an object affordance its own producer

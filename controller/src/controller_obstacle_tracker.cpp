@@ -833,8 +833,14 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     std::unordered_set<std::uint64_t> obstacle_node_ids;
     for (const char *type : kObjectTypes)
         for (const auto &node : graph_->get_nodes_by_type(type))
+        {
+            // A door being CROSSED is not an obstacle (set_exempt_names, controller_door_passage.h): its node is a
+            // box across the opening the robot has been offered to pass through. The open leaf is a real thing and
+            // still reaches the planner through the residual LiDAR cells.
+            if (exempt_names_.contains(node.name())) continue;
             if (obstacle_node_ids.insert(node.id()).second)
                 obstacle_nodes.push_back(node);
+        }
 
     bool using_fallback_nodes = false;
     if (obstacle_nodes.empty())
@@ -843,6 +849,11 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         for (const auto &node : graph_->get_nodes())
         {
             if (is_robot_body_node(node))
+                continue;
+            // The door being crossed is not an obstacle here either (2026-10-11): when it is the ONLY object node,
+            // exempting it above empties the typed list and lands HERE, which put its box straight back across
+            // the doorway (live: "no route" through the passage corridor, the box at the wall line).
+            if (exempt_names_.contains(node.name()))
                 continue;
             // Level-2 arrangements (ring_metaconcept's dining_set) publish width_m/depth_m as the
             // ring's EXTENT so a viewer can outline it — but nothing occupies that footprint, and

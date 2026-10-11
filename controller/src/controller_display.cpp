@@ -150,6 +150,8 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
         affordance_panel_visible_.store(affordance_panel_->isVisible(), std::memory_order_relaxed);
     });
     custom_widget_->attach_mission_panel(mission_panel_.get());
+    door_passage_bar_ = std::make_unique<rc::DoorPassageBar>(custom_widget_.get(), callbacks.door_passage);
+    custom_widget_->attach_door_passage_bar(door_passage_bar_.get());
 
 }
 
@@ -174,6 +176,14 @@ bool ControllerDisplay::mission_recording() const
 
 bool ControllerDisplay::confirm_mission_supersede()
 { return mission_panel_ && mission_panel_->confirm_supersede(); }
+
+void ControllerDisplay::set_door_passage(const rc::DoorPassageBar::View &view,
+                                         const std::vector<std::vector<Eigen::Vector2f>> &passages)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.door_passage_view = view;
+    snapshot_.door_passages = passages;
+}
 
 void ControllerDisplay::set_mission_state(const rc::MissionPanel::View &view,
                                           const std::vector<Eigen::Vector2f> &waypoints,
@@ -448,6 +458,7 @@ void ControllerDisplay::present()
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
+    if (door_passage_bar_) door_passage_bar_->apply(snap.door_passage_view);
     if (mission_panel_)
     {
         if (snap.mission_list_pending)
@@ -621,6 +632,7 @@ void ControllerDisplay::present()
         display_path = snap.current_plan->room_path;
 
     viewer_2d_->draw_room_polygon(snap.room_polygon);
+    viewer_2d_->draw_passages(snap.door_passages);
     viewer_2d_->set_lidar_draw_correction(snap.lidar_correction.value_or(Eigen::Affine2f::Identity()));
     viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
     viewer_2d_->draw_path({

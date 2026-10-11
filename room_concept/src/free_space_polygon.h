@@ -159,6 +159,7 @@ public:
                 if (not in(i, j)) continue;
                 const float dx = di * p_.cell, dy = dj * p_.cell;
                 if (dx * dx + dy * dy > radius * radius) continue;
+                if (excluded(i, j)) continue;   // another room's floor: the body overhangs a threshold, nothing more
                 // matter under the robot is not matter: the passes outvote whatever ended here
                 frees_[idx(i, j)] = static_cast<std::uint16_t>(std::max<int>(frees_[idx(i, j)], hits_[idx(i, j)]));
                 if (low_.size() == st_.size()) low_[idx(i, j)] = 0;
@@ -174,7 +175,7 @@ public:
         if (not ready()) return;
         if (low_.size() != st_.size()) low_.assign(st_.size(), 0);
         for (const auto& q : pts)
-            if (const auto [i, j] = cell_of(q); in(i, j)) low_[idx(i, j)] = 1;
+            if (const auto [i, j] = cell_of(q); in(i, j) and not excluded(i, j)) low_[idx(i, j)] = 1;
     }
     /// COVERAGE GAIN (2026-10-10): area (m²) of still-UNKNOWN cells a 360° scan from `v` would see — `beams` rays,
     /// each stopping at mapped matter (a wall), at the raster edge or at `range`. Unknown cells do not stop a ray
@@ -295,6 +296,17 @@ public:
                     return true;
             }
         return false;
+    }
+
+    /// SPACE THAT BELONGS TO ANOTHER ROOM (2026-10-11, door crossing): the outlines of rooms already surveyed, in this
+    /// raster's frame. Rooms do not overlap, so a beam that enters one is looking into another room through the
+    /// doorway: it stops there and records nothing, and those cells are never this room's floor nor its unknown (they
+    /// read as matter to the coverage rays, so the explorer is not drawn to look into a room it has left). Live, the
+    /// first room's floor seen through an open DOOR_1 flooded the second room's map: 53 m² promoted for a 24 m² room.
+    void set_exclusion(std::vector<std::vector<Eigen::Vector2f>> polys)
+    {
+        excl_polys_ = std::move(polys);
+        if (ready()) rasterise_exclusion();
     }
 
     void add_scan(const Eigen::Vector2f& origin, const std::vector<Eigen::Vector2f>& endpoints)
@@ -700,6 +712,8 @@ private:
                                                 // surface's position to sub-cell precision (layout_refiner.h). A
                                                 // cell CENTRE is biased by up to cell/2 from the wall face; offline that
                                                 // bias moved every refined wall 2-3 cm and cost 2.3 cm of pose (walhit).
+    std::vector<std::vector<Eigen::Vector2f>> excl_polys_;   // set_exclusion: other rooms' outlines (this frame)
+    std::vector<std::uint8_t> excl_;                         // their raster (1 = another room's cell)
     long  n_free_ = 0;
     int   fi0_ = std::numeric_limits<int>::max(), fj0_ = std::numeric_limits<int>::max();
     int   fi1_ = -1, fj1_ = -1;       // bbox of cells ever marked free
@@ -712,6 +726,30 @@ private:
                 static_cast<int>(std::floor((q.y() - y0_) / p_.cell))};
     }
 
+    [[nodiscard]] bool excluded(int i, int j) const { return not excl_.empty() and excl_[idx(i, j)] != 0; }
+    void rasterise_exclusion()
+    {
+        excl_.assign(st_.size(), 0);
+        for (const auto& poly : excl_polys_)
+        {
+            if (poly.size() < 3) continue;
+            Eigen::Vector2f lo = poly.front(), hi = lo;
+            for (const auto& v : poly) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+            const auto [i0, j0] = cell_of(lo);
+            const auto [i1, j1] = cell_of(hi);
+            for (int j = std::max(0, j0); j <= std::min(n_ - 1, j1); ++j)
+                for (int i = std::max(0, i0); i <= std::min(n_ - 1, i1); ++i)
+                    if (point_in_polygon(Eigen::Vector2f(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell), poly))
+                    {
+                        const auto k = idx(i, j);
+                        excl_[k] = 1;
+                        if (st_[k] == 1) --n_free_;
+                        st_[k] = 2;                        // stops coverage rays; never unknown, never free
+                        hits_[k] = frees_[k] = 0;          // and no evidence: the refiner sees no surface here
+                    }
+        }
+    }
+
     void init(const Eigen::Vector2f& origin)
     {
         n_  = std::max(8, static_cast<int>(std::ceil(2.f * p_.half_span / p_.cell)));
@@ -722,6 +760,7 @@ private:
         frees_.assign(st_.size(), 0);
         mx_.assign(st_.size(), 0.f);
         my_.assign(st_.size(), 0.f);
+        if (not excl_polys_.empty()) rasterise_exclusion();
     }
 
     // ── STATE = THE VOTE OF THE EVIDENCE (2026-10-09) ────────────────────────────────────────────────────
@@ -783,6 +822,8 @@ private:
         const int max_steps = 4 * n_;
         for (int s = 0; s < max_steps; ++s)
         {
+            if (in(i, j) and excluded(i, j))
+                return;                         // into another room through a doorway: nothing from here on is ours
             if (i == ie and j == je)
             {
                 if (in(i, j)) set_matter(i, j, b);
