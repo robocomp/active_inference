@@ -80,6 +80,48 @@ def solid(name, c, z, size, yaw=0.0, color='0.85 0.85 0.8'):
     }}
 '''
 
+FURNISH = '--furniture' in sys.argv     # 2026-10-11: furnished variant of the same 10 rooms
+ROBOT_R = 0.55                           # half the narrowest passage the CONTROLLER drives: body + margin (0.43 let a
+                                         # table leave 0.85 m gaps that sealed room 8's stem, 2026-10-11)
+
+def furnish(P, rng):
+    """Axis-aligned furniture for room P (rectilinear, CCW): worktops (0.9 m) and tall cabinets (2.0 m) against the
+    walls, tables (top on four legs) in the open. Each item is kept only if the room minus all items, eroded by the
+    robot radius, is still one region. Returns [dict(name, kind, box=(x0,y0,x1,y1), parts=[(cx,cy,cz,sx,sy,sz)])]."""
+    U = rng.random; items = []
+    V = np.array(P.exterior.coords)[:-1]
+    if not Polygon(V).exterior.is_ccw: V = V[::-1]
+    def ok(b, gap):
+        if not P.buffer(1e-6).contains(b): return False
+        if any(b.distance(box(*it['box'])) < gap for it in items): return False
+        free = P.difference(unary_union([box(*it['box']) for it in items] + [b]))
+        er = free.buffer(-ROBOT_R)
+        return er.geom_type == 'Polygon' and not er.is_empty and er.area > 0.5 * P.buffer(-ROBOT_R).area
+    n_wall = 2 + int(P.area // 25); tries = 0
+    while sum(it['kind'] != 'table' for it in items) < n_wall and tries < 400:
+        tries += 1
+        k = rng.randrange(len(V)); a, b = V[k], V[(k + 1) % len(V)]; L = np.linalg.norm(b - a)
+        tall = U() < 0.4; depth = 0.4 if tall else 0.6; h = 2.0 if tall else 0.9
+        ln = min(L - 0.3, (0.8 + 0.8 * U()) if tall else (1.2 + 1.2 * U()))
+        if ln < 0.6: continue
+        d = (b - a) / L; nin = np.array([-d[1], d[0]])               # CCW: interior is left of travel
+        s0 = 0.15 + U() * (L - 0.3 - ln); p0 = a + d * s0 + nin * 0.01; p1 = p0 + d * ln + nin * depth
+        bx = box(min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1]))
+        if not ok(bx, 0.9): continue
+        x0, y0, x1, y1 = bx.bounds
+        items.append(dict(name=('cabinet' if tall else 'worktop') + str(len(items)), kind='cabinet' if tall else 'worktop', box=bx.bounds,
+                          parts=[((x0 + x1) / 2, (y0 + y1) / 2, h / 2, x1 - x0, y1 - y0, h)]))
+    n_tab = 1 if P.area < 45 else 2; tries = 0
+    while sum(it['kind'] == 'table' for it in items) < n_tab and tries < 400:
+        tries += 1
+        w, l = (0.8, 1.2) if U() < 0.5 else (1.2, 0.8)
+        x0b, y0b, x1b, y1b = P.bounds; cx, cy = rng.uniform(x0b, x1b), rng.uniform(y0b, y1b)
+        bx = box(cx - w / 2, cy - l / 2, cx + w / 2, cy + l / 2)
+        if bx.distance(P.exterior) < 0.9 or not ok(bx, 0.9): continue
+        legs = [(cx + sx * (w / 2 - 0.05), cy + sy * (l / 2 - 0.05), 0.355, 0.05, 0.05, 0.71) for sx in (-1, 1) for sy in (-1, 1)]
+        items.append(dict(name='table' + str(len(items)), kind='table', box=bx.bounds, parts=[(cx, cy, 0.73, w, l, 0.04)] + legs))
+    return items
+
 orders = [2, 3, 4, 5, 6, 7, 3, 4, 5, 6]
 kinds  = ['random', 'L', 'random', 'T', 'random', 'random', 'L', 'random', 'T', 'random']   # 2026-10-11: rooms 1,6 L; 3,8 T
 rooms, body = [], []
@@ -95,13 +137,20 @@ for i, order in enumerate(orders):
     x0, y0, x1, y1 = Pw.bounds
     body.append(solid(f'room{i}_ceiling', ((x0 + x1) / 2, (y0 + y1) / 2), H_WALL + 0.025, (x1 - x0 + 1, y1 - y0 + 1, 0.05), 0, '0.95 0.95 0.95'))
     body.append(f'''    PointLight {{ attenuation 0 0 1 intensity 3.2 location {(x0+x1)/2:.3f} {(y0+y1)/2:.3f} 2.8 radius 18 }}\n''')
+    items = furnish(Pw, random.Random(500 + i)) if FURNISH else []
+    color = {'worktop': '0.55 0.4 0.3', 'cabinet': '0.35 0.35 0.45', 'table': '0.6 0.45 0.25'}
+    for it in items:
+        for q, (cx, cy, cz, sx, sy, sz) in enumerate(it['parts']):
+            body.append(solid(f"room{i}_{it['name']}_{q}", (cx, cy), cz, (sx, sy, sz), 0, color[it['kind']]))
     rng = random.Random(7 + i); inner = Pw.buffer(-0.8)          # start: >= 0.8 m from every wall, random heading
+    if items: inner = inner.difference(unary_union([box(*it['box']) for it in items]).buffer(0.8))
     while True:
         p = Point(rng.uniform(x0, x1), rng.uniform(y0, y1))
         if inner.contains(p): break
     rooms.append(dict(id=i, kind=kind, order=order if kind == 'random' else 0, seed=1000 + i, offset=off.tolist(), verts=len(P.exterior.coords) - 1,
                       area=round(P.area, 3), polygon=[list(map(float, v)) for v in np.array(Pw.exterior.coords)[:-1]],
-                      start=[round(p.x, 3), round(p.y, 3), round(rng.uniform(-math.pi, math.pi), 3)]))
+                      start=[round(p.x, 3), round(p.y, 3), round(rng.uniform(-math.pi, math.pi), 3)],
+                      furniture=[dict(name=it['name'], kind=it['kind'], box=list(it['box']), height=max(z + h / 2 for _, _, z, _, _, h in it['parts'])) for it in items]))
 xmin = -SPACING * (len(orders) - 1) - 15
 floor = solid('synthetic_floor', ((xmin + 15) / 2, 0), -0.025, (15 - xmin, 30, 0.05), 0, '0.6 0.55 0.5')
 base = open(BASE).read().split('\n')
@@ -115,4 +164,8 @@ json.dump(rooms, open(f'{OUT}/rooms.json', 'w'), indent=1)
 with open(f'{OUT}/starts.csv', 'w') as f:
     f.write('id,x,y,theta\n')
     for r in rooms: f.write(f"{r['id']},{r['start'][0]},{r['start'][1]},{r['start'][2]}\n")
-for r in rooms: print(r['id'], r['kind'], 'order', r['order'], 'verts', r['verts'], 'area', r['area'], 'start', r['start'])
+if FURNISH:   # footprints for the layout mosaic (regrade_anchor.py FURNITURE=...)
+    from shapely.geometry import mapping
+    json.dump([dict(name=f"room{r['id']}_{f['name']}", type=f['kind'], area=round(box(*f['box']).area, 3), geometry=mapping(box(*f['box'])))
+               for r in rooms for f in r['furniture']], open(f'{OUT}/furniture.json', 'w'), indent=1)
+for r in rooms: print(r['id'], r['kind'], 'furniture', len(r['furniture']), 'order', r['order'], 'verts', r['verts'], 'area', r['area'], 'start', r['start'])

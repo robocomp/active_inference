@@ -384,8 +384,14 @@ std::vector<rc::SpecialistExplainer> SpecificWorker::build_explainers(
     // 1: ROOM CEILING — overhead structure above the navigation band.
     const float cz = C.ceil_z;
     ex.push_back([cz](const Eigen::Vector3f& p) { return p.z() > cz; });
-    // 2: ROBOT — its own body returns.
-    const float rr2 = C.robot_radius_m * C.robot_radius_m;
+    // 2: ROBOT — its own body returns. The disc is at least the grid's no-clear disc (Grid.LidarClearanceM, same
+    //    centre: the sensor origin on the robot axis). A cell inside that disc can be marked but never refuted while
+    //    the robot stands still, so it is not an observation of the world and must not be published. With the read-out
+    //    disc smaller (0.45 vs 0.55 m) the 10 cm ring between them latched for ever around a parked robot, and the
+    //    controller found its own start pose footprint-infeasible (2026-10-11: apartment start 9, synthetic room 8 —
+    //    the free pocket shrank 4526 → 11 expansions while the robot waited). One body disc, derived, not a second knob.
+    const float rr = std::max(C.robot_radius_m, cfg_.grid_lidar_clearance_m);
+    const float rr2 = rr * rr;
     ex.push_back([rr2, robot_xy](const Eigen::Vector3f& p) { return (p.head<2>() - robot_xy).squaredNorm() < rr2; });
     // 3: ROOM WALLS — the room_concept delimiting polygon. A return outside the room, or within wall_margin of
     //    a wall edge, is explained by the room's wall model.
