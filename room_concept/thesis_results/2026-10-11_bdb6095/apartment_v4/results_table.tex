@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{Room-layout estimation from ten start poses in the simulated apartment (one run per start). IoU of the layout against the ground-truth floor plan after the best rigid alignment (shape only; precision and recall use the trajectory alignment), at promotion (estimating $\to$ localising) and after one minute of refinement. $t_p$: time to promotion; $d_p$: path driven until then; $e$: median position error of plain SLAM.}
+\label{tab:estimation-campaign}
+\begin{tabular}{r r r r r r r r r r}
+\toprule
+start & $t_p$ (s) & $d_p$ (m) & $e$ (cm) & IoU$_p$ & IoU$_r$ & prec$_r$ & rec$_r$ & $|V|_r$ \\
+\midrule
+0 & 25 & 2.0 & 0.6 & 0.898 & 0.976 & 0.981 & 0.992 & 34 \\
+1 & 40 & 5.2 & 2.2 & 0.966 & 0.976 & 0.978 & 0.994 & 34 \\
+2 & 184 & 12.9 & 0.7 & 0.967 & 0.977 & 0.983 & 0.992 & 36 \\
+3 & 65 & 11.6 & 1.2 & 0.969 & 0.982 & 0.986 & 0.995 & 34 \\
+4 & 42 & 6.0 & 1.7 & 0.970 & 0.980 & 0.981 & 0.995 & 30 \\
+5 & 37 & 1.9 & 1.2 & 0.964 & 0.977 & 0.975 & 0.990 & 28 \\
+6 & 44 & 4.9 & 1.8 & 0.967 & 0.978 & 0.983 & 0.994 & 30 \\
+7 & 46 & 7.1 & 1.8 & 0.966 & 0.973 & 0.983 & 0.989 & 40 \\
+8 & 37 & 4.8 & 2.4 & 0.950 & 0.975 & 0.980 & 0.991 & 34 \\
+9 & 31 & 2.3 & 1.6 & 0.966 & 0.982 & 0.984 & 0.993 & 34 \\
+\midrule
+median & 41 & 5.0 & 1.7 & 0.966 & 0.977 & 0.982 & 0.992 & 34 \\
+worst & 184 & 12.9 & 2.4 & 0.898 & 0.973 & 0.975 & 0.989 & 40 \\
+\bottomrule
+\end{tabular}
+\end{table}
