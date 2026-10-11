@@ -5,7 +5,10 @@
 
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <filesystem>
 #include <fstream>
+#include <memory>
+#include <QTimer>
 #include <locale>
 #include "room_viewer.h"
 #include "../../common/status_stream/status_sink.h"
@@ -380,6 +383,26 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     //   fire, since nothing called it.
     ricoh_viz_->start_media_plane();
     camera_media_plane_initialized_ = true;
+    // Figure snapshots: a NEW tmp/camera_snapshot opens both camera windows (a hidden window renders nothing);
+    // each window then saves its next rendered frame itself (CameraVisualizer::maybe_save_snapshot).
+    {
+        auto* snap_timer = new QTimer(custom_widget_);
+        std::error_code ec0;
+        const auto mt0 = std::filesystem::last_write_time("tmp/camera_snapshot", ec0);
+        auto seen = std::make_shared<std::int64_t>(ec0 ? 0 : static_cast<std::int64_t>(mt0.time_since_epoch().count()));
+        QObject::connect(snap_timer, &QTimer::timeout, custom_widget_, [this, seen]
+        {
+            std::error_code ec;
+            const auto mt = std::filesystem::last_write_time("tmp/camera_snapshot", ec);
+            if (ec) return;
+            const auto stamp = static_cast<std::int64_t>(mt.time_since_epoch().count());
+            if (stamp == *seen) return;
+            *seen = stamp;
+            for (auto* v : {camera_viz_.get(), ricoh_viz_.get()})
+                if (v != nullptr and not v->isVisible()) v->show();
+        });
+        snap_timer->start(500);
+    }
     vphase("camera_visualizers");
     qInfo() << "[room][camera] RGB media plane discovery started (waits for 'zed' descriptor)";
 }

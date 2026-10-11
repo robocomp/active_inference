@@ -19,6 +19,8 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <filesystem>
+#include <format>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -122,6 +124,11 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
       overlay_object_types_(std::move(overlay_object_types))
 {
     if (not camera_node.empty()) camera_node_name_ = std::move(camera_node);
+    {   // a trigger left over from an earlier process is not a request to this one
+        std::error_code ec;
+        const auto mt = std::filesystem::last_write_time("tmp/camera_snapshot", ec);
+        if (not ec) snapshot_trigger_seen_ = static_cast<std::int64_t>(mt.time_since_epoch().count());
+    }
     setWindowTitle(QString("%1 — room layout projection")
                        .arg(QString::fromStdString(camera_node_name_).toUpper()));
     setGeometry(100, 100, 800, 600);
@@ -1469,6 +1476,7 @@ void CameraVisualizer::update_frame()
         {
             stage_timer.restart();
             draw_projections(rgb_image, frame_timestamp);
+            maybe_save_snapshot(rgb_image, frame_timestamp);
             const float draw_ms = static_cast<float>(stage_timer.elapsed());
             timing_stats_.total_draw_ms += draw_ms;
 
@@ -1509,6 +1517,28 @@ void CameraVisualizer::update_frame()
         log_timing_summary("periodic");
         reset_timing_window();
     }
+}
+
+void CameraVisualizer::maybe_save_snapshot(const QImage& image, std::uint64_t frame_timestamp)
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - snapshot_last_check_ms_ < 250) return;   // a stat per frame is cheap, but there is no need
+    snapshot_last_check_ms_ = now;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path trigger{"tmp/camera_snapshot"};
+    const auto mt = fs::last_write_time(trigger, ec);
+    if (ec) return;
+    const auto stamp = static_cast<std::int64_t>(mt.time_since_epoch().count());
+    if (stamp == snapshot_trigger_seen_) return;
+    snapshot_trigger_seen_ = stamp;
+    fs::create_directories("tmp/snapshots", ec);
+    const auto path = std::format("tmp/snapshots/{}_{}.png", camera_node_name_,
+                                  frame_timestamp > 0 ? frame_timestamp : static_cast<std::uint64_t>(now));
+    if (image.save(QString::fromStdString(path)))
+        std::println("[camera-viz] snapshot {} ({}x{})", path, image.width(), image.height());
+    else
+        std::println("[camera-viz] snapshot FAILED to write {}", path);
 }
 
 }  // namespace rc

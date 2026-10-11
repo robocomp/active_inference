@@ -45,6 +45,18 @@ def l_room(seed):
     cx = W / 2 - cw if sx > 0 else -W / 2; cy = H / 2 - ch if sy > 0 else -H / 2
     return box(-W / 2, -H / 2, W / 2, H / 2).difference(box(cx, cy, cx + cw, cy + ch)).simplify(1e-6)
 
+def u_room(seed):
+    """U: a W x H rectangle with a notch cut from one side's middle, deep enough that the two arms hide each other's
+    far ends from most of the base; arms and base at least 1.8 m wide. Random orientation (multiple of 90 deg)."""
+    from shapely.affinity import rotate
+    rng = random.Random(seed); U = rng.random
+    W, H = 6.5 + 2.5 * U(), 5.5 + 2.0 * U()
+    nw = min(W - 3.6, W * (0.30 + 0.15 * U()))                     # notch width: both arms >= 1.8 m
+    nd = min(H - 1.8, H * (0.55 + 0.15 * U()))                     # notch depth: base >= 1.8 m
+    P = box(-W / 2, -H / 2, W / 2, H / 2).difference(box(-nw / 2, H / 2 - nd, nw / 2, H / 2 + 0.01)).simplify(1e-6)
+    P = Polygon(np.round(np.array(P.exterior.coords)[:-1], 4))
+    return rotate(P, 90 * rng.randrange(4), origin=(0, 0)).simplify(1e-6)
+
 def t_room(seed):
     """T: a bar plus a perpendicular stem off its middle third; random orientation (multiple of 90 deg)."""
     from shapely.affinity import rotate
@@ -124,10 +136,13 @@ def furnish(P, rng):
 
 orders = [2, 3, 4, 5, 6, 7, 3, 4, 5, 6]
 kinds  = ['random', 'L', 'random', 'T', 'random', 'random', 'L', 'random', 'T', 'random']   # 2026-10-11: rooms 1,6 L; 3,8 T
+if '--kinds' in sys.argv:            # e.g. --kinds U,U,U  (a separate world; seeds 1000+i as usual)
+    kinds = sys.argv[sys.argv.index('--kinds') + 1].split(',')
+    orders = [0] * len(kinds)
 rooms, body = [], []
 for i, order in enumerate(orders):
     kind = kinds[i]
-    P = random_room(1000 + i, order) if kind == 'random' else l_room(1000 + i) if kind == 'L' else t_room(1000 + i)
+    P = random_room(1000 + i, order) if kind == 'random' else l_room(1000 + i) if kind == 'L' else u_room(1000 + i) if kind == 'U' else t_room(1000 + i)
     P = Polygon(np.round(np.array(P.exterior.coords)[:-1], 6))
     off = np.array([-SPACING * i, 0.0])
     from shapely.affinity import translate

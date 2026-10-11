@@ -1,0 +1,17 @@
+\begin{table}[t]
+\centering
+\caption{Room-layout estimation in three furnished U-shaped rooms (before the exploration fix; one run each, first attempt, random start $\geq$0.8 m from walls). $|V|_{gt}$, $A$: ground-truth vertices and area. $t_p$: time to promotion. $e$: median SLAM position error. IoU after the best rigid alignment of the ground truth to the estimate (shape only).}
+\label{tab:estimation-synthetic-U-before}
+\begin{tabular}{r c r r r r r r r r}
+\toprule
+room & type & $|V|_{gt}$ & $A$ (m$^2$) & $t_p$ (s) & $e$ (mm) & IoU$_p$ & IoU$_r$ & $|V|_p$ & $|V|_r$ \\
+\midrule
+0 & U & 8 & 46.8 & 0 & 17 & 0.744 & 0.995 & 6 & 14 \\
+1 & U & 8 & 34.3 & 0 & 1 & 0.407 & 0.478 & 4 & 18 \\
+2 & U & 8 & 40.1 & 0 & 14 & 0.764 & 0.996 & 6 & 14 \\
+\midrule
+median & & & & 0 & 14 & 0.744 & 0.995 & & \\
+worst & & & & 0 & 17 & 0.407 & 0.478 & & \\
+\bottomrule
+\end{tabular}
+\end{table}

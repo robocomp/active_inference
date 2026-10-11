@@ -183,6 +183,11 @@ class CameraVisualizer : public QDialog
         QElapsedTimer timing_window_timer_;
         QElapsedTimer callback_gap_timer_;
         std::uint64_t last_source_timestamp_ = 0;
+        // Thesis/figure snapshots: touching tmp/camera_snapshot makes every OPEN camera window save its next rendered
+        // frame (projections drawn, no status overlay, full resolution) to tmp/snapshots/<camera>_<ms>.png.
+        void maybe_save_snapshot(const QImage& image, std::uint64_t frame_timestamp);
+        std::int64_t snapshot_trigger_seen_ = 0;   // mtime (ns) of the trigger file already served
+        qint64       snapshot_last_check_ms_ = 0;
         bool have_last_source_timestamp_ = false;
         double estimated_source_period_ms_ = 50.0;
         bool have_estimated_source_period_ = false;

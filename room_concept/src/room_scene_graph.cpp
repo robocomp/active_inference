@@ -1007,6 +1007,17 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // 1. Stamp the room's RT edge while it still holds the last pose that was true of it. Do it BEFORE
     //    retiring, so the mark and the last honest pose belong to the same edge state.
     mark_room_rt_not_current();
+    // ★ A SECOND START-UP (2026-10-11, docs/superpowers/plans/2026-10-11-cross-door-into-adjacent-room.md, Phase 1).
+    //   Out of a room this agent surveyed itself, the new space is learnt by the SAME machinery that learnt the first
+    //   one — free-space accumulator, layout pool, explorer, MDL promotion, refiner — which all live on the start-up
+    //   path. The branch below this one only re-opened the wall map, which no longer produces the room (the map layout
+    //   does), and kept the old room's adopted layout in force, so the new room was never estimated.
+    //   The room left behind keeps its node, polygon and walls exactly as promoted: nothing edits it from here on.
+    if (startup_proto_ and startup_promoted_)
+    {
+        rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross);
+        return;
+    }
     // 2. From here the proto-room is the primary child (see write_robot_room_rt).
     room_rt_retired_ = true;
     // 3. And the agent goes back to estimating. This is the point of the whole path: crossing a doorway
@@ -1250,6 +1261,7 @@ void RoomSceneGraph::forget_room(const char* why)
     published_polygon_verts_ = 0;
     startup_proto_ = startup_promoted_ = false;
     layout_pool_.clear();
+    left_rooms_.clear();
     layout_finished_ = false;
     pub_gauge_frozen_ = false;
     {
@@ -1271,7 +1283,7 @@ bool RoomSceneGraph::sweep_foreign_rooms()
     bool any = false;
     for (const auto& r : G_->get_nodes_by_type("room"))
     {
-        if (r.id() == dsr_room_id_ or r.id() == proto_room_id_)
+        if (r.id() == dsr_room_id_ or r.id() == proto_room_id_ or std::ranges::contains(left_rooms_, r.id()))
             continue;
         // A room this agent did not make while its start-up proto is the room: a leftover of a crashed or
         // SIGKILLed run that synced in after the start-up sweep (CLAUDE.md "Stopping an agent"). Left in
@@ -1368,7 +1380,51 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
         why = "proto_edge_failed";
         return false;
     }
-    dsr_room_id_       = id.value();
+    arm_startup_proto(id.value(), Eigen::Affine2f::Identity());   // the frame = the internal frame NOW = the initial pose
+    startup_event_  = "startup_born";
+    trigger_layout_();
+    qInfo().noquote() << QString("[room][startup-proto] room_1 BORN as a PROTO-ROOM (id %1): frame = the robot's "
+                                 "initial pose, frozen; polygon = confirmed free space eroded by %2 m; afford_room "
+                                 "driven by the layout explorer until the layout is publishable. See tmp/proto_room.csv.")
+                             .arg(id.value()).arg(startup_erode_m(), 0, 'f', 2);
+    return true;
+}
+
+void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name,
+                                          const std::string& door, float p_cross)
+{
+    // The proto frame (the crossed aperture: x along it, +y into the new room) becomes the new room's PUBLISHED frame,
+    // exactly as the robot's initial pose was the first room's. T_room_proto_ is that frame in the internal one.
+    const std::uint64_t left_id = dsr_room_id_;
+    left_rooms_.push_back(left_id);   // sweep_foreign_rooms must not reap it while the new room is surveyed
+    const Eigen::Affine2f T_pub_int = T_room_proto_.inverse();
+    proto_room_id_   = 0;          // not a crossing proto any more: the agent's own room, on the start-up path
+    room_rt_retired_ = false;      // the RT goes to dsr_room_id_ (the new room) through the frozen-gauge branch
+    // The estimator first: off the old room's given layout and back to plain SLAM on the SAME scan map (the pose stays
+    // continuous through the doorway; the map simply grows into the new room).
+    room_concept_->begin_room_estimation("crossed " + door + " at p_cross=" + std::to_string(p_cross));
+    arm_startup_proto(new_room_id, T_pub_int);
+    startup_event_ = "crossing_born";
+    trigger_layout_();
+    qInfo().noquote() << QString("[room][startup-proto] %1 BORN through %2 as a PROTO-ROOM (id %3): frame = the crossed "
+                                 "aperture, frozen; estimated by the start-up survey like the first room. Room %4 is left "
+                                 "as promoted (RT retired, polygon and walls untouched).")
+                             .arg(QString::fromStdString(new_name)).arg(QString::fromStdString(door))
+                             .arg(new_room_id).arg(left_id);
+}
+
+float RoomSceneGraph::startup_erode_m() const
+{
+    return params_->STARTUP_PROTO_ERODE_M >= 0.f ? params_->STARTUP_PROTO_ERODE_M
+                                                 : 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+}
+
+void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affine2f& T_pub_int)
+{
+    // Everything the start-up survey owns, set for a room that has just been born with no polygon: the agent's
+    // room, the frozen published frame, a fresh free-space accumulator and an explorer with no history. Shared by
+    // the first room (birth_startup_proto) and every room entered through a door after it (rearm_after_crossing).
+    dsr_room_id_       = room_id;
     room_node_created_ = true;
     stable_frames_     = 0;
     published_polygon_verts_ = 0;
@@ -1379,7 +1435,7 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
     pub_gauge_frozen_  = true;
     {
         std::scoped_lock lk(gauge_mutex_);
-        T_pub_int_ = Eigen::Affine2f::Identity();   // the frame = the internal frame NOW = the initial pose
+        T_pub_int_ = T_pub_int;
     }
     if (Eigen::Affine2f stale; room_concept_->take_pending_reanchor(stale))
         qWarning() << "[room][startup-proto] discarded a re-anchor pending from before the birth (it moved a"
@@ -1387,9 +1443,7 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
     rc::freespace::Params fp;
     fp.cell      = params_->STARTUP_PROTO_CELL;
     fp.half_span = params_->STARTUP_PROTO_HALF_SPAN;
-    fp.erode_m   = params_->STARTUP_PROTO_ERODE_M >= 0.f
-                 ? params_->STARTUP_PROTO_ERODE_M
-                 : 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+    fp.erode_m   = startup_erode_m();
     fp.max_verts = params_->STARTUP_PROTO_MAX_VERTS;
     free_space_.emplace(fp);
     fs_published_.clear();
@@ -1400,15 +1454,12 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
     layout_refused_.clear();
     layout_plan_ms_ = 0;
     layout_last_plan_ = {};
-    startup_event_  = "startup_born";
+    refiner_ = rc::refine::LayoutRefiner{refiner_.params()};   // no edits carried over from another room
+    refine_contested_.clear();
+    refine_last_ms_ = 0;
+    learnt_layout_path_.clear();                                // one learnt-layout file per room
     startup_reason_ = "born";
     room_concept_->set_freeze_internal_frame(true);   // no internal re-anchor while the proto owns the frame
-    trigger_layout_();
-    qInfo().noquote() << QString("[room][startup-proto] room_1 BORN as a PROTO-ROOM (id %1): frame = the robot's "
-                                 "initial pose, frozen; polygon = confirmed free space eroded by %2 m; afford_room "
-                                 "driven by the layout explorer until the layout is publishable. See tmp/proto_room.csv.")
-                             .arg(id.value()).arg(fp.erode_m, 0, 'f', 2);
-    return true;
 }
 
 void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason)
@@ -1677,11 +1728,12 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
     reason = "promoted";
     trigger_layout_();
     const Eigen::Vector2f g = T_pub_int_.translation();
-    qInfo().noquote() << QString("[room][startup-proto] room_1 PROMOTED IN PLACE (id %1): learnt layout of %2 vertices "
+    qInfo().noquote() << QString("[room][startup-proto] %6 PROMOTED IN PLACE (id %1): learnt layout of %2 vertices "
                                  "published in the frozen start-up frame (gauge %3, %4 m, %5 deg); proto edge removed; "
                                  "afford_room handed to the epistemic planner.")
                              .arg(dsr_room_id_).arg(poly_pub.size()).arg(g.x(), 0, 'f', 3).arg(g.y(), 0, 'f', 3)
-                             .arg(angle_of(T_pub_int_) * 180.f / static_cast<float>(M_PI), 0, 'f', 2);
+                             .arg(angle_of(T_pub_int_) * 180.f / static_cast<float>(M_PI), 0, 'f', 2)
+                             .arg(QString::fromStdString(rn->name()));
 }
 
 void RoomSceneGraph::save_learnt_layout(const std::vector<Eigen::Vector2f>& poly, const char* what)
@@ -1903,7 +1955,23 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         {
             const float footprint = static_cast<float>(M_PI) * 0.25f
                                   * (params_->ROBOT_WIDTH * params_->ROBOT_WIDTH + params_->ROBOT_LENGTH * params_->ROBOT_LENGTH);
-            const auto countable = free_space_->countable_mask(fs_published_, 0.40f);   // the outline snap's reach
+            auto countable = free_space_->countable_mask(fs_published_, 0.40f);   // the outline snap's reach
+            // ★ CURIOSITY ABOUT WHAT THE MAP HAS SEEN, NOT ONLY WHAT THE OUTLINE KEPT (2026-10-11, U rooms 3/3 and the
+            //   furnished T): the Manhattan outline drawn from the first scan dropped the obliquely seen floor that led
+            //   into a hidden arm, the gain counted only inside that outline (or 0.4 m beyond its open edges), so every
+            //   standpoint read zero and the room "finished" from one scan — U room 1 promoted half the room (IoU .41)
+            //   while the free-space map plainly showed the way in. Unknown space bordering the CONFIRMED-FREE region
+            //   (the free ring, same raster, same frontier rule) counts too. Offline on the recorded runs: the half-T's
+            //   remaining gain 1.48 → 2.70 m², every completed room (9 apartment, 4 furnished, the full T) unchanged.
+            if (fs_free_ring_.size() >= 3)
+            {
+                // past a FRONTIER edge of the free ring the unknown counts out to the explorer's own visibility range (8 m,
+                // the same range visible_unknown_area casts): a 0.4 m band behind a sight-line corner is invisible from
+                // almost every standpoint (U room 1: 12 candidates, zero gain). WALL edges still count nothing beyond.
+                const auto ring_mask = free_space_->countable_mask(fs_free_ring_, 0.40f, 8.f);
+                for (std::size_t k = 0; k < countable.size() and k < ring_mask.size(); ++k)
+                    countable[k] = countable[k] or ring_mask[k];
+            }
             layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, standable,
                 [this, &countable](const Eigen::Vector2f& v)
                 { return free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable); },
@@ -3445,8 +3513,32 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     const int n = static_cast<int>(polygon.size());
     if (n < 3) { qWarning() << "dsr_create_wall_nodes: polygon has fewer than 3 vertices"; return; }
 
+    // ── ONE FLOOR AND ONE WALL SET PER ROOM (2026-10-11, door crossing) ────────────────────────────────────
+    // The first room keeps the historical names (floor, wall_<i>, meshes/floor.obj); a room entered through a door
+    // prefixes its own name, so its walls neither collide with the first room's names nor are mistaken for them
+    // by the guard below (which used to treat ANY wall in the graph as this room's and re-hang it onto this floor).
+    const std::string room_name = room_node_opt->name();
+    const bool first_room = room_name == "room_1" or room_name == "room";
+    const std::string prefix = first_room ? std::string{} : room_name + "_";
+    const std::string floor_name = prefix + "floor";
+    const std::string floor_rel = first_room ? std::string(kFloorMeshRel) : "room_concept/meshes/" + prefix + "floor.obj";
+    const std::string floor_out = first_room ? std::string(kFloorMeshOut) : "meshes/" + prefix + "floor.obj";
+
     // Guard — idempotent: if wall nodes already exist under this room, skip.
-    if (const auto existing = G_->get_nodes_by_type("wall"); !existing.empty())
+    std::vector<DSR::Node> existing;
+    {
+        const auto own_floor = G_->get_node(floor_name);
+        for (auto& w : G_->get_nodes_by_type("wall"))
+        {
+            const auto par = G_->get_attrib_by_name<parent_att>(w);
+            const bool mine = first_room ? w.name().starts_with("wall_")
+                                         : w.name().starts_with(prefix);
+            if (mine or (par.has_value() and (par.value() == dsr_room_id_
+                                               or (own_floor.has_value() and par.value() == own_floor->id()))))
+                existing.push_back(std::move(w));
+        }
+    }
+    if (!existing.empty())
     {
         // ...but walls and the floor persist in the shared graph, so ones created before the display
         // meshes existed would never acquire them and every viewer would silently keep falling back
@@ -3463,13 +3555,13 @@ void RoomSceneGraph::dsr_create_wall_nodes()
             }
         // The floor mesh is REGENERATED unconditionally: it encodes the layout, so an adopted floor
         // may be carrying a mesh built from a different polygon than the one in force now.
-        if (auto f = G_->get_node("floor"); f.has_value())
+        if (auto f = G_->get_node(floor_name); f.has_value())
         {
             bool floor_changed = false;
             if (float fw = 0.f, fd = 0.f;
-                write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
+                write_floor_obj(polygon, std::filesystem::path(floor_out), fw, fd))
             {
-                G_->add_or_modify_attrib_local<mesh_path_att>(f.value(), std::string(kFloorMeshRel));
+                G_->add_or_modify_attrib_local<mesh_path_att>(f.value(), floor_rel);
                 G_->add_or_modify_attrib_local<width_m_att>(f.value(), fw);
                 G_->add_or_modify_attrib_local<depth_m_att>(f.value(), fd);
                 floor_changed = true;
@@ -3502,16 +3594,16 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     // is the identity and no wall's world pose changes by hanging from it instead of from the room.
     // It also carries `collapsed`, which folds the whole wall fan behind one "+" badge in the graph
     // viewer — n walls under the room would otherwise bury every other node in the scene.
-    DSR::Node floor_node = DSR::Node::create<floor_node_type>("floor");
+    DSR::Node floor_node = DSR::Node::create<floor_node_type>(floor_name);
     G_->add_or_modify_attrib_local<parent_att>(floor_node, dsr_room_id_);
     if (const auto room_level = G_->get_node_level(room_node_opt.value()); room_level.has_value())
         G_->add_or_modify_attrib_local<level_att>(floor_node, room_level.value() + 1);
     G_->add_or_modify_attrib_local<collapsed_att>(floor_node, true);
     // Display mesh generated from THIS polygon, so a viewer draws the actual layout instead of a
     // stand-in rectangle. width_m/depth_m carry the bbox so the unit-box OBJ can be rescaled.
-    if (float fw = 0.f, fd = 0.f; write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
+    if (float fw = 0.f, fd = 0.f; write_floor_obj(polygon, std::filesystem::path(floor_out), fw, fd))
     {
-        G_->add_or_modify_attrib_local<mesh_path_att>(floor_node, std::string(kFloorMeshRel));
+        G_->add_or_modify_attrib_local<mesh_path_att>(floor_node, floor_rel);
         G_->add_or_modify_attrib_local<width_m_att>(floor_node, fw);
         G_->add_or_modify_attrib_local<depth_m_att>(floor_node, fd);
     }
@@ -3551,7 +3643,7 @@ void RoomSceneGraph::dsr_create_wall_nodes()
         const float yaw = std::atan2(dir.y(), dir.x());
         const Eigen::Vector2f mid = (p0 + p1) * 0.5f;
 
-        DSR::Node wall_node = DSR::Node::create<wall_node_type>("wall_" + std::to_string(i));
+        DSR::Node wall_node = DSR::Node::create<wall_node_type>(prefix + "wall_" + std::to_string(i));
         G_->add_or_modify_attrib_local<width_m_att>(wall_node, L);
         G_->add_or_modify_attrib_local<height_m_att>(wall_node, params_->room_height);
         // Display mesh, same contract the furniture concepts use: a 2-triangle panel authored to the
@@ -3565,7 +3657,7 @@ void RoomSceneGraph::dsr_create_wall_nodes()
         const auto wall_id = G_->insert_node(wall_node);
         if (!wall_id.has_value())
         {
-            qWarning() << "dsr_create_wall_nodes: failed to insert wall_" + QString::number(i);
+            qWarning() << "dsr_create_wall_nodes: failed to insert" << QString::fromStdString(prefix + "wall_" + std::to_string(i));
             continue;
         }
 
@@ -3596,8 +3688,8 @@ void RoomSceneGraph::cleanup_room_graph_nodes()
     // Delete wall and floor nodes owned by this agent.
     for (const auto& n : G_->get_nodes_by_type("wall"))
         G_->delete_node(n);
-    if (auto n = G_->get_node("floor"); n.has_value())
-        G_->delete_node(n.value());
+    for (const auto& n : G_->get_nodes_by_type("floor"))   // "floor" and every "room_<k>_floor" (dsr_create_wall_nodes)
+        G_->delete_node(n);
     // Fallback: delete the affordance nodes by their known names in case they are orphaned.
     for (const char *name : {"afford_room", "afford_calib"})
         if (auto n = G_->get_node(name); n.has_value())

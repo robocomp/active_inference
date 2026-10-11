@@ -1869,7 +1869,11 @@ mountVertexOffsetSigmaPx = 5.3
 #   of the per-corner offsets. It is also a PRECONDITION for mountApply below: an estimate taken
 #   with this off has absorbed each corner's own detection bias, and must not be written into an
 #   extrinsic. The solve REFUSES to be applied unless this is on.
-mountApply = true
+# ★ 2026-10-11: OFF. The learned mounts RAN AWAY between 09-19 and 10-11 (estimate-mode campaigns, ~100 teleported
+#   runs): zed pitch -9.5 deg / yaw -9.2 deg, ricoh height +0.49 m, and drive=true put them into the post-promotion
+#   pose. Files restored to the 09-19 evidence (commit 9caf1d41); runaway copies kept in the session scratchpad.
+#   Evidence still ACCUMULATES (etc/image_edge_mount.csv) so the cause can be measured; nothing is applied until it is.
+mountApply = false
 
 # ── mountPublish: write the measured mount into the SHARED body->camera RT edge ──────────────────
 # OFF until the loop has been watched for a session or two on this robot. With mountApply on, the
@@ -1889,7 +1893,8 @@ mountApply = true
 #   (persist_mounts_on_stop) — a ratchet: ricoh yaw crept -0.05 -> -0.14 deg over 13 restarts, and on
 #   10-04 cold-start estimates (camera evidence wiped for an experiment) were persisted as the mount:
 #   zed 14 cm high / -1.3 deg pitch, ricoh 12 cm low (robot_concept/etc/mount_calib_Shadow.txt rev 14-15).
-mountPublish = true
+# ★ 2026-10-11: OFF with mountApply (see above) — the graph must not carry a mount the loop has not earned.
+mountPublish = false
 # ── mountDescriptionFile: the robot description that ANCHORS the mount ───────────────────────────
 # The nominal body->camera edge is read from this file (the robot's DSR JSON), never from the graph, so
 # the graph is purely an output and a restart cannot turn last session's answer into this session's

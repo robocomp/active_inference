@@ -182,22 +182,37 @@ public:
     /// Which cells COUNT toward coverage gain: those inside `outline` or within `margin` of it. Unknown space behind a
     /// wall is reached only through gaps between wall cells (measured: up to 15 m² "visible" after a 20-min run, so the
     /// gain never reached zero); an unexplored corner of the room borders the outline and still counts.
-    [[nodiscard]] std::vector<std::uint8_t> countable_mask(const std::vector<Eigen::Vector2f>& outline, float margin) const
+    /// `beyond` (> margin): how far past a FRONTIER edge, straight out from it, the unknown still counts. Default = margin.
+    /// A frontier edge has no wall: what lies past it is simply unexplored, and a 0.4 m band behind a sight-line corner
+    /// is invisible from almost every standpoint (U room 1, 2026-10-11: 12 candidates, zero gain, half the room promoted).
+    [[nodiscard]] std::vector<std::uint8_t> countable_mask(const std::vector<Eigen::Vector2f>& outline, float margin,
+                                                           float beyond = -1.f) const
     {
         std::vector<std::uint8_t> m(st_.size(), 0);
         if (outline.size() < 3) return m;
+        if (beyond < margin) beyond = margin;
         Eigen::Vector2f lo = outline.front(), hi = lo;
         for (const auto& q : outline) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
-        const auto [i0, j0] = cell_of(lo - Eigen::Vector2f::Constant(margin));
-        const auto [i1, j1] = cell_of(hi + Eigen::Vector2f::Constant(margin));
+        const auto [i0, j0] = cell_of(lo - Eigen::Vector2f::Constant(beyond));
+        const auto [i1, j1] = cell_of(hi + Eigen::Vector2f::Constant(beyond));
+        double area2 = 0.0;
+        for (std::size_t e = 0; e < outline.size(); ++e)
+            area2 += static_cast<double>(outline[e].x()) * outline[(e + 1) % outline.size()].y()
+                   - static_cast<double>(outline[(e + 1) % outline.size()].x()) * outline[e].y();
+        const float out_sign = area2 >= 0.0 ? 1.f : -1.f;   // CCW: outward normal = (dy, -dx)
         // WALL vs FRONTIER edges: an edge with measured wall (surface cells within `margin`) along most of its length
         // bounds the room; only FRONTIER edges (free space simply ended there) count what lies beyond them. Without
         // this the unknown gaps INSIDE the wall band kept 17-18 standpoints "worth a trip" after a 20-minute run.
         std::vector<char> frontier(outline.size(), 0);
+        // per-sample wall flags: the DEEP band (beyond > margin) opens only the stretches of an edge with no wall near
+        // them. A whole-edge majority vote threw away a doorway-sized opening at the end of a mostly-walled edge (U room
+        // 1: the free rectangle's right side was 3.8 m of notch wall and 1.8 m of opening into the base → "wall").
+        std::vector<std::vector<char>> sample_walled(outline.size());
         for (std::size_t e = 0; e < outline.size(); ++e)
         {
             const Eigen::Vector2f a = outline[e], b = outline[(e + 1) % outline.size()];
             const int ns = std::max(2, static_cast<int>((b - a).norm() / p_.cell));
+            sample_walled[e].assign(static_cast<std::size_t>(ns), 0);
             int walled = 0;
             for (int s = 0; s < ns; ++s)
             {
@@ -209,6 +224,7 @@ public:
                     for (int di = -r; di <= r and not hit; ++di)
                         if (in(ci + di, cj + dj) and hits_.size() == st_.size() and hits_[idx(ci + di, cj + dj)] >= 2) hit = true;
                 walled += hit ? 1 : 0;
+                sample_walled[e][static_cast<std::size_t>(s)] = hit ? 1 : 0;
             }
             frontier[e] = (2 * walled < ns) ? 1 : 0;
         }
@@ -219,10 +235,17 @@ public:
                 bool ok = point_in_polygon(q, outline);
                 for (std::size_t e = 0; not ok and e < outline.size(); ++e)
                 {
-                    if (not frontier[e]) continue;
                     const Eigen::Vector2f a = outline[e], b = outline[(e + 1) % outline.size()], ab = b - a;
                     const float t = std::clamp((q - a).dot(ab) / std::max(ab.squaredNorm(), 1e-9f), 0.f, 1.f);
-                    ok = (q - (a + t * ab)).norm() < margin;
+                    if (frontier[e]) ok = (q - (a + t * ab)).norm() < margin;
+                    const auto& sw = sample_walled[e];
+                    const std::size_t si = std::min(sw.size() - 1, static_cast<std::size_t>(t * static_cast<float>(sw.size())));
+                    if (not ok and beyond > margin and t > 0.f and t < 1.f and not sw[si])
+                    {   // straight out past an OPEN stretch of the edge, up to `beyond`
+                        const Eigen::Vector2f d = ab.normalized(), n_out = out_sign * Eigen::Vector2f(d.y(), -d.x());
+                        const float depth = (q - a).dot(n_out);
+                        ok = depth > 0.f and depth < beyond;
+                    }
                 }
                 m[idx(i, j)] = ok ? 1 : 0;
             }

@@ -201,6 +201,11 @@ private:
     // driven by the live layout explorer while it is proto. PROMOTED IN PLACE when map_ready: the learnt
     // polygon (in the frozen frame) replaces the free-space one, the `proto` edge is deleted, same id.
     bool birth_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& why);
+    /// The start-up survey's state for a room just born with no polygon, published frame = T_pub_int · internal.
+    void arm_startup_proto(std::uint64_t room_id, const Eigen::Affine2f& T_pub_int);
+    /// Out of a promoted room through a door: the new room becomes this agent's room, estimated by the start-up survey.
+    void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door, float p_cross);
+    [[nodiscard]] float startup_erode_m() const;
     void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
     void adopt_most_probable_layout();
     void promote_startup_proto(std::string& reason);
@@ -257,6 +262,7 @@ private:
     std::vector<std::pair<Eigen::Vector2f, std::int64_t>> layout_refused_;   ///< (cell, until_ms), internal frame
     std::size_t   proto_polygon_verts_ = 0;   ///< crossing proto: vertex count last written to it
     std::uint64_t   proto_room_id_ = 0;
+    std::vector<std::uint64_t> left_rooms_;   ///< rooms this agent surveyed and then left through a door: kept, never swept
     Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
     Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
     Eigen::Vector2f proto_n_out_{0.f, 1.f};                         ///< its outward normal, room frame

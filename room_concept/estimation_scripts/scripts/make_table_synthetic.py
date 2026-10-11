@@ -2,7 +2,7 @@
 """results_shape.csv + rooms.json -> results_table.tex (\\input-ready). usage: make_table.py <campaign dir>"""
 import sys, json, numpy as np, pandas as pd
 D = sys.argv[1]; df = pd.read_csv(f'{D}/results_shape.csv'); R = {r['id']: r for r in json.load(open(f'{D}/rooms.json'))}
-name = {'random': 'M', 'L': 'L', 'T': 'T'}
+name = {'random': 'M', 'L': 'L', 'T': 'T', 'U': 'U'}
 L = [r'\begin{table}[t]', r'\centering',
      r'\caption{Room-layout estimation in ten synthetic rooms (empty, one run each, random start $\geq$0.8 m from walls). '
      r'Type: M = rectangle with random notches and bays, L, T. $|V|_{gt}$, $A$: ground-truth vertices and area. $t_p$: time to promotion '

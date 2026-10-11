@@ -2362,9 +2362,22 @@ namespace rc
             return;
 
         const bool was_given = not estimating();
+        // ★ OUT OF A ROOM THIS RUN LEARNT (2026-10-11, door crossing): its map layout was ADOPTED as the given room and
+        //   plain SLAM kept running as its shadow. Both flags are released here — while map_layout_adopted_ stays set,
+        //   the old room's layout keeps overwriting the derived polygon every frame and the new room is never learnt.
+        //   The shadow's scan map is KEPT: it is already registered through the doorway, so the pose that plain SLAM
+        //   takes back over is continuous with the one the SDF localiser was publishing (they differ by the shadow's
+        //   disagreement, centimetres), and the map simply grows into the new room.
+        const bool keep_slam_map = map_layout_adopted_;
+        map_layout_adopted_ = false;
+        {
+            std::scoped_lock lk(wall_map_mutex_);
+            map_layout_.clear();
+        }
         runtime_estimate_.store(true, std::memory_order_relaxed);
         wall_frozen_ = false;          // layout_state() is Localizing while this is set, whatever the mode
         configure_room_estimate();     // fresh WallMap, map_ready_ = false, derived polygon gone
+        if (keep_slam_map) plain_slam_seed_ = false;
 
         // ⚠ NOT RESET HERE, and deliberately: the camera-calibration channels were handed the OLD room's
         // polygon at startup (calib_->set_room_polygon in specificworker_startup) and this class has no
