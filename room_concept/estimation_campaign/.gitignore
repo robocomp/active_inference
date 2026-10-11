@@ -1,0 +1,3 @@
+# per-run logs and binary dumps stay out of git
+*/run_*/
+*/failed_*/

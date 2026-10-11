@@ -3811,6 +3811,20 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     free_space_->evidence_cells(surf, fr, &cs, &cf);
     const auto poly_pub = published_polygon();
     if (poly_pub.size() < 4) return;
+    {   // the refiner's EXACT inputs, so a refinement can be replayed offline without re-deriving the evidence
+        // (a replay rebuilt from the LiDAR recording did not reproduce the live edits on synthetic room 2)
+        if (not refine_in_bin_.is_open()) refine_in_bin_.open("tmp/refine_input.bin", std::ios::binary | std::ios::trunc);
+        const auto put = [&](const auto& v) { refine_in_bin_.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+        const auto put_pts = [&](const std::vector<Eigen::Vector2f>& P, const std::vector<float>* c)
+        {
+            put(static_cast<std::uint32_t>(P.size()));
+            for (std::size_t i = 0; i < P.size(); ++i)
+            { put(P[i].x()); put(P[i].y()); if (c) put(i < c->size() ? (*c)[i] : 1.f); }
+        };
+        put(static_cast<std::int64_t>(res.timestamp_ms));
+        put_pts(poly_pub, nullptr); put_pts(surf, &cs); put_pts(fr, &cf);
+        refine_in_bin_.flush();
+    }
     const auto R = refiner_.propose(poly_pub, surf, fr, cs, cf);
     refine_contested_ = R.contested;
     if (not refine_csv_.is_open())

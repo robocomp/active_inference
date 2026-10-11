@@ -43,7 +43,9 @@
 #include <cstdint>
 #include <numeric>
 #include <limits>
+#include <functional>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -448,6 +450,47 @@ private:
         return out;
     }
 
+    /// Bounding boxes of the mask's 4-connected components (cell units), largest first.
+    static std::vector<std::array<int, 4>> component_boxes(const std::vector<std::uint8_t>& M, int W, int H, int K)
+    {
+        std::vector<std::pair<int, std::array<int, 4>>> comps;
+        std::vector<std::uint8_t> seen(M.size(), 0); std::vector<int> st;
+        for (int s = 0; s < W * H; ++s)
+        {
+            if (not M[s] or seen[s]) continue;
+            std::array<int, 4> b{s % W, s / W, s % W + 1, s / W + 1}; int n = 0;
+            st.assign(1, s); seen[s] = 1;
+            while (not st.empty())
+            {
+                const int k = st.back(); st.pop_back(); ++n;
+                const int i = k % W, j = k / W;
+                b = {std::min(b[0], i), std::min(b[1], j), std::max(b[2], i + 1), std::max(b[3], j + 1)};
+                for (const auto [di, dj] : {std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}})
+                    if (const int ii = i + di, jj = j + dj; ii >= 0 and jj >= 0 and ii < W and jj < H)
+                        if (const int kk = jj * W + ii; M[kk] and not seen[kk]) { seen[kk] = 1; st.push_back(kk); }
+            }
+            if (n >= 2) comps.push_back({n, b});
+        }
+        std::ranges::sort(comps, std::greater{}, &std::pair<int, std::array<int, 4>>::first);
+        std::vector<std::array<int, 4>> out;
+        for (const auto& c : comps | std::views::take(K)) out.push_back(c.second);
+        return out;
+    }
+    /// Rectangles a contested mask proposes: its largest rectangles AND the bounding box of each connected component.
+    /// ★The component box (2026-10-11, synthetic room 2): a bay seen only obliquely through its mouth is swept as a
+    /// TRIANGLE (the visibility wedge); the largest rectangles of a triangle are a staircase, each step buying back a
+    /// few free cells, so the refiner climbed it one step at a time (14 → 38 vertices). The one-rectangle bay that
+    /// covers the whole wedge was never on the table, though it is cheaper (its far walls lie in never-swept cells,
+    /// which the likelihood does not charge, and it costs 2-4 vertices instead of dozens). Proposing it changes no
+    /// criterion: the scorer still decides between the box and the steps.
+    static std::vector<std::array<int, 4>> rectangle_proposals(const std::vector<std::uint8_t>& M, int W, int H, int K)
+    {
+        auto out = largest_rectangles(M, W, H, K);
+        for (const auto& b : component_boxes(M, W, H, K))
+            if (std::ranges::find(out, b) == out.end()) out.push_back(b);
+        return out;
+    }
+
     // ── candidates from the evidence ───────────────────────────────────────────────────────────────────────
     std::vector<std::pair<Edit, std::vector<Eigen::Vector2f>>> candidates(const std::vector<Eigen::Vector2f>& V, const Scorer& sc) const
     {
@@ -516,7 +559,7 @@ private:
                 uns[k] = (r.m[k] and not freem[k] and not near) ? 1 : 0;
             }
             for (const auto& [kind, M, add] : {std::tuple{"extend", &ext, true}, std::tuple{"notch", &uns, false}})
-                for (const auto& b : largest_rectangles(*M, r.W, r.H, p_.k_rect))
+                for (const auto& b : rectangle_proposals(*M, r.W, r.H, p_.k_rect))
                 {
                     const auto bx = snap_box({r.u0 + b[0] * p_.cell, r.v0 + b[1] * p_.cell, r.u0 + b[2] * p_.cell, r.v0 + b[3] * p_.cell},
                                              E, sc.sigma + p_.cell);

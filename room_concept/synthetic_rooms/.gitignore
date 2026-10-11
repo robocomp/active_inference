@@ -1,0 +1,4 @@
+# per-run logs and binary dumps stay out of git; scripts, rooms.json, results*.csv, stats*.txt, *.tex, *.png are kept
+*/run_*/
+rerun_*/
+*.wbt

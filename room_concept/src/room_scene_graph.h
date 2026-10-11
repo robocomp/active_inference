@@ -236,6 +236,7 @@ private:
     std::int64_t  refine_last_ms_ = 0;
     std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
+    std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)
     std::int64_t  sweep_last_ms_ = 0;
     Eigen::Vector2f lidar_origin_{0.f, 0.f};   ///< robot frame
     bool          lidar_origin_resolved_ = false;
