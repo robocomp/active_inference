@@ -432,6 +432,40 @@ Outcome RoomEviction::evict(const Candidate &cand)
                     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dw, "match"))
                         if (e.to() == mem_face->second) doorway_id = dw.id();
 
+                // ★ THE SAME HOLE UNDER A NEW NAME (2026-10-12). A re-entered room's crossed door is RECREATED by
+                //   door_concept with a fresh name, so the face just written (r1_door_39) is new while memory already
+                //   holds that hole as r1_door_19 in passage_0 — and a second passage was minted for it (live try29).
+                //   Same memory room, same place (the room is archived in its own frame both times) ⇒ same hole: reuse
+                //   that passage and let the new face replace the stale one.
+                if (doorway_id == 0)
+                {
+                    auto mie = mem_->get_inner_eigen_api();
+                    const std::string mroom = old_prefix + cand.old_room_name;
+                    const auto here = mie->get_transformation_matrix(mroom, old_prefix + chosen->name());
+                    const double half_w = 0.5 * live_->get_attrib_by_name<width_m_att>(*chosen).value_or(1.f);
+                    double best_d = half_w;
+                    std::uint64_t stale_face = 0;
+                    if (here.has_value())
+                        for (const auto &dw : passages())
+                            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dw, "match"))
+                            {
+                                const auto f = mem_->get_node(e.to());
+                                if (not f.has_value() or f->id() == mem_face->second or not is_descendant(f->id(), mroom)) continue;
+                                const auto there = mie->get_transformation_matrix(mroom, f->name());
+                                if (not there.has_value()) continue;
+                                if (const double d = (there->translation() - here->translation()).head<2>().norm(); d < best_d)
+                                { best_d = d; doorway_id = dw.id(); stale_face = f->id(); }
+                            }
+                    if (stale_face != 0)
+                    {
+                        const auto stale = mem_->get_node(stale_face);
+                        qInfo().noquote() << QString::fromStdString(std::format(
+                            "[eviction] {} is the hole memory already knows as {} ({:.2f} m apart) — same passage, face replaced",
+                            old_prefix + chosen->name(), stale.has_value() ? stale->name() : std::string("?"), best_d));
+                        mem_->delete_node(stale_face);
+                    }
+                }
+
                 if (doorway_id == 0)
                 {
                     std::uint64_t n = 0;

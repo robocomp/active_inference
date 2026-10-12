@@ -50,7 +50,9 @@ enum class DriveMode
     AffordancesOnly,        // no mission; the epistemic planner has the base (the default)
     MissionOnly,            // the mission is the sole target source — the clean benchmark condition
     MissionWithAffordances, // the mission is the backbone; affordances are INSERTED BETWEEN LEGS
-    Target                  // driving to a single clicked point; entered automatically by clicking one
+    Target,                 // driving to a single clicked point; entered automatically by clicking one
+    Command                 // a (simple) natural-language mission typed in the panel, e.g. "cross door"; the
+                            // affordances drive, the command restricts what they may select (door passage)
 };
 
 const char *to_string(DriveMode m);

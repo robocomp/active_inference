@@ -34,7 +34,7 @@ class MissionPanel : public QWidget
 public:
     struct Callbacks
     {
-        std::function<void(int)>         on_drive_mode;    // 0=affordances, 1=mission, 2=mission+affordances
+        std::function<void(int)>         on_drive_mode;    // rc::from_index: 0=affordances, 1=path, 2=target, 3=mission
         std::function<void(std::string)> on_select;
         std::function<void()>            on_record_begin;
         // Empty name ⇒ the user cancelled; discard whatever was being recorded or edited.
@@ -54,6 +54,8 @@ public:
         // ★Replaced on_safety_bias, whose value only took effect on the next route BUILD — a live
         // slider for a non-live quantity. RouteSafetyBias lives in the config file now.
         std::function<void(float)>       on_plain_l;
+        // Mode "Mission": the typed command (e.g. "cross door"), sent on Enter or Send.
+        std::function<void(std::string)> on_command;
     };
 
     // What the panel needs to know each cycle to show the truth. Pushed from the GUI thread in present().
@@ -106,6 +108,12 @@ private:
     Callbacks cb_;
     QComboBox   *drive_mode_ = nullptr;
     QComboBox   *missions_ = nullptr;
+    QLabel      *path_label_ = nullptr;
+    // Mode "Mission": an editable box (typed text, with the commands understood so far as suggestions) + Send.
+    QLabel      *command_label_ = nullptr;
+    QComboBox   *command_ = nullptr;
+    QPushButton *command_send_ = nullptr;
+    void show_mode_widgets(int mode_index);
     // One action menu for everything that acts ON the selected mission, instead of a button per verb.
     // It is a MENU, not a state: it snaps back to its placeholder after firing, so it never claims to
     // show a current value it does not have.

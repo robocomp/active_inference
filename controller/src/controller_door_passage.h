@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -41,6 +42,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/world_query/door_query.h"
 #include "door_passage_corridor.h"
 
 namespace rc
@@ -123,6 +125,11 @@ public:
             // door_concept also offers to `open` is two contradictory beliefs, and the shut door wins (live try20:
             // a transient P(passable) on a SHUT door sent the robot to cross it, `open` was offered a moment later).
             const bool open_wanted = later == Step::Cross and state_of(G, name_of(Step::Open)) == State::Offered;
+            // ★ NEVER FROM APPROACH STRAIGHT TO CROSS (2026-10-12). From across the room door_concept can rate a SHUT
+            //   door passable (try20/21/26: P(passable)=1.00 at phi=0.44 rad, clear span 0.10 m); `cross` then fails
+            //   unreachable, stays offered, and the robot never goes to the door. Approach is cheap and ends within
+            //   reach, facing the door — where `open` vs `cross` is decided on the beliefs that matter.
+            if (later == Step::Cross and step_ == Step::Approach) continue;
             if (state_of(G, name_of(later)) == State::Offered and not open_wanted)
             {
                 const bool was_executing = st_cur == State::Executing;
@@ -255,16 +262,13 @@ public:
         }
         return "?";
     }
-    /// The doors a passage can be started through: door_concept's beliefs, type "object" named door_* (its own sweep's
-    /// predicate, door_concept specificworker.cpp). Read from the control thread, which owns graph access here.
-    [[nodiscard]] static std::vector<std::string> list_doors(DSR::DSRGraph& G)
-    {
-        std::vector<std::string> names;
-        for (const auto& n : G.get_nodes_by_type("object"))
-            if (n.name().starts_with("door")) names.push_back(n.name());
-        std::ranges::sort(names);
-        return names;
-    }
+    /// The doors a passage can be started through, and the one "cross door" means. Both live in the shared
+    /// common/world_query/door_query.h (2026-10-12) so chat_agent validates a request with the same predicate the
+    /// controller executes it with; these wrappers keep every existing call site unchanged.
+    [[nodiscard]] static std::vector<std::string> list_doors(DSR::DSRGraph& G) { return rc::world::list_doors(G); }
+    [[nodiscard]] static std::optional<std::string> nearest_door(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,
+                                                                 const std::string& room, const std::string& robot)
+    { return rc::world::nearest_door(G, inner, room, robot); }
 
 private:
     enum class State { Missing, Offered, Executing, Completed };

@@ -1076,6 +1076,8 @@ void SpecificWorker::compute()
     if (cfg_.pragmatic.enabled)
         for (auto& [door_id, inst] : fitter_->instances())
             step_pragmatic_affordances(inst);
+    for (const auto& [door_id, inst] : fitter_->instances())
+        remember_door(inst);
 
     // Overall compute()-cycle rate: counts every cycle, prints "Epoch time = …ms. Fps = N" once a
     // second (FPSCounter::print is throttled and self-counting).
@@ -3565,12 +3567,27 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
         adopted_from = it->second;
         entry_mirrors_.erase(it);
     }
+    // ★ NO MIRROR ⇒ RECREATE THE DOOR WE CAME THROUGH (2026-10-12). A remembered room is re-entered already promoted,
+    //   so no proto ever existed for step_entry_mirrors to put a mirror under, and the crossed door was deleted with
+    //   the room left behind before we got here (ltsm evicts first). Live try24: re-entered room_1 had NO door, and
+    //   "cross door" had nothing to go through. The door the robot just crossed is the lost one nearest to it.
+    if (adopt_mirror == 0)
+        if (auto rec = recreate_lost_door(new_room); rec.has_value())
+        {
+            adopt_mirror = rec->first;
+            adopted_from = std::move(rec->second);
+        }
+    lost_doors_.clear();
     if (fitter_)
     {
         std::vector<std::uint64_t> leaving;
         leaving.reserve(fitter_->instances().size());
         for (const auto& [id, inst] : fitter_->instances())
         {
+            // The door carried across (recreated just above) is the NEW room's door, not one of the room left: its
+            // node-added slot already gave it an instance, and retiring it here deleted the node we had just made
+            // (live try27: recreated, then gone; a phantom born mid-room took its name).
+            if (id == adopt_mirror) continue;
             leaving.push_back(id);
             // ★A door being released is NOT a door that stopped existing. Log it as a release so the
             // phantom/death record is not polluted with removals that carry no evidence about the world:
@@ -3621,6 +3638,12 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     // on the wrong walls — the fail-safe direction.
     fitter_->set_room_geometry(Eigen::Vector2f::Zero(), {});
     refresh_room_geometry();         // and pick the new one up in the same cycle
+    // A door recreated just above was inserted while room_node_id_ still named the room LEFT: our own node-added slot
+    // already built an instance for it against that (deleted) room, which reads its RT as (0,0) and makes the
+    // adoption below see "already exists" and skip (live try25: no leaf memory, the door lost, a phantom picked
+    // instead). Rebuild it against the room we are in.
+    if (adopt_mirror != 0 and fitter_->instances().contains(adopt_mirror))
+        fitter_->forget_node(adopt_mirror);
     if (adopt_mirror != 0)
         if (const auto n = G->get_node(adopt_mirror); n.has_value() and fitter_->ensure_instance(n.value(), room_node_id_))
         {
@@ -3825,6 +3848,11 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         it->second.aff_cross.remove();
         std::print("door_concept: node {} removed from DSR, destroying instance and its affordances\n", id);
         fitter_->instances().erase(it);
+        if (const auto m = door_memo_.find(id); m != door_memo_.end())
+        {
+            lost_doors_.push_back(std::move(m->second));
+            door_memo_.erase(m);
+        }
     }
 }
 
@@ -3849,3 +3877,61 @@ int SpecificWorker::startup_check()
 
 
 
+
+// ─── Doors carried across a room change ─────────────────────────────────────────────────────────────────────
+void SpecificWorker::remember_door(const rc::DoorInstance& inst)
+{
+    if (not G or not inner_eigen_ or not inst.ai2_initialized or inst.is_bearing_hypothesis) return;
+    const auto node = G->get_node(inst.node_id);
+    const auto room = G->get_node(room_node_id_);
+    const auto roots = G->get_nodes_by_type("root");
+    if (not node.has_value() or not room.has_value() or roots.empty()) return;
+    const auto Tr = inner_eigen_->get_transformation_matrix(room->name(), node->name(), 0);
+    const auto Tw = inner_eigen_->get_transformation_matrix(roots.front().name(), node->name(), 0);
+    if (not Tr.has_value() or not Tw.has_value()) return;
+    EntryMirror em;
+    const Eigen::Matrix2f R = Tr->rotation().topLeftCorner<2, 2>().cast<float>();
+    const Eigen::Vector2f o = Tr->translation().head<2>().cast<float>();
+    em.has_leaf       = true;
+    em.hinge_local    = R.transpose() * (inst.leaf_pose.hinge_xy - o);
+    em.open_local     = R.transpose() * (inst.leaf.swing * inst.aperture.across_u());
+    em.phi_est        = inst.phi_est;
+    em.phi_sigma      = inst.phi_sigma;
+    em.phi_curve      = inst.phi_curve;
+    em.matched_frames = inst.matched_frames;
+    em.T_root_door    = Eigen::Affine3d(Tw->matrix());
+    em.width  = G->get_attrib_by_name<width_m_att>(node.value()).value_or(cfg_.door_prior_w_m);
+    em.depth  = G->get_attrib_by_name<depth_m_att>(node.value()).value_or(cfg_.door_thickness_m);
+    em.height = G->get_attrib_by_name<height_m_att>(node.value()).value_or(cfg_.door_prior_h_m);
+    if (const auto v = G->get_attrib_by_name<door_open_prob_att>(node.value()); v.has_value()) em.open_prob = v.value();
+    if (const auto v = G->get_attrib_by_name<door_phi_rad_att>(node.value()); v.has_value())   em.phi_rad = v.value();
+    em.name = node->name();
+    door_memo_[inst.node_id] = std::move(em);
+}
+
+std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWorker::recreate_lost_door(std::uint64_t new_room)
+{
+    if (lost_doors_.empty() or not inner_eigen_ or not scene_graph_) return std::nullopt;
+    const auto room = G->get_node(new_room);
+    const auto roots = G->get_nodes_by_type("root");
+    if (not room.has_value() or roots.empty()) return std::nullopt;
+    const auto Trb = inner_eigen_->get_transformation_matrix(roots.front().name(), "body", 0);
+    const auto Tnr = inner_eigen_->get_transformation_matrix(room->name(), roots.front().name(), 0);
+    if (not Trb.has_value() or not Tnr.has_value()) return std::nullopt;
+    const Eigen::Vector2d robot = Trb->translation().head<2>();
+    const auto best = std::ranges::min_element(lost_doors_, {}, [&](const EntryMirror& m)
+                                               { return (m.T_root_door.translation().head<2>() - robot).norm(); });
+    const Eigen::Affine3d T = Eigen::Affine3d(Tnr->matrix()) * best->T_root_door;
+    const Eigen::Matrix3d R = T.rotation();
+    const Eigen::Vector3f euler(static_cast<float>(std::atan2(-R(1, 2), R(2, 2))),
+                                static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),
+                                static_cast<float>(std::atan2(-R(0, 1), R(0, 0))));
+    const auto names = reserved_names();
+    const auto id = scene_graph_->create_door_copy(room.value(), best->width, best->depth, best->height, best->open_prob,
+                                                   best->phi_rad, T.translation().cast<float>(), euler, names,
+                                                   std::format("'{}' (deleted with the room left behind)", best->name));
+    if (id == 0) return std::nullopt;
+    std::print("door_concept: [room] recreated the door just crossed ('{}', {:.2f} m from the robot) in '{}'\n",
+               best->name, (best->T_root_door.translation().head<2>() - robot).norm(), room->name());
+    return std::make_pair(id, *best);
+}

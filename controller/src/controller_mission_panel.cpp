@@ -44,21 +44,43 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     drive_mode_ = new QComboBox(frame);
     // Order must match rc::to_index().
     drive_mode_->addItem("Affordances");
-    drive_mode_->addItem("Mission");
-    drive_mode_->addItem("Mission+Aff");
+    drive_mode_->addItem("Path");
     drive_mode_->addItem("Target");
+    drive_mode_->addItem("Mission");
     drive_mode_->setToolTip(
         QStringLiteral("What is driving the robot.\n"
                        "Affordances — normal operation; the epistemic planner chooses.\n"
-                       "Mission — the tour is the sole target source (the clean benchmark).\n"
-                       "Mission+Aff — mission with affordances interleaved. NOT IMPLEMENTED YET;\n"
-                       "              Run will refuse and say why.\n"
-                       "Target — a single clicked point. Selected automatically when you click one."));
+                       "Path — a recorded tour is the sole target source (the clean benchmark).\n"
+                       "Target — a single clicked point. Selected automatically when you click one.\n"
+                       "Mission — a typed command, e.g. \"cross door\"."));
     row->addWidget(drive_mode_);
     QObject::connect(drive_mode_, &QComboBox::currentIndexChanged, this,
-                     [this](int i) { if (cb_.on_drive_mode) cb_.on_drive_mode(i); });
+                     [this](int i) { show_mode_widgets(i); if (cb_.on_drive_mode) cb_.on_drive_mode(i); });
 
-    row->addWidget(new QLabel("Mission:", frame));
+    // ── Mission: a typed command. Editable, with what is understood so far offered as suggestions. ──
+    command_label_ = new QLabel("Command:", frame);
+    row->addWidget(command_label_);
+    command_ = new QComboBox(frame);
+    command_->setEditable(true);
+    command_->setInsertPolicy(QComboBox::NoInsert);
+    command_->setMinimumWidth(180);
+    command_->addItem(QStringLiteral("cross door"));
+    command_->setToolTip(QStringLiteral("Type a mission and press Enter (or Send).\n"
+                                        "cross door — go through the nearest door of this room\n"
+                                        "cross door_N — go through that door"));
+    row->addWidget(command_);
+    command_send_ = new QPushButton(QStringLiteral("Send"), frame);
+    row->addWidget(command_send_);
+    const auto send = [this]
+    {
+        const QString text = command_->currentText().trimmed();
+        if (not text.isEmpty() and cb_.on_command) cb_.on_command(text.toStdString());
+    };
+    QObject::connect(command_->lineEdit(), &QLineEdit::returnPressed, this, send);
+    QObject::connect(command_send_, &QPushButton::clicked, this, send);
+
+    path_label_ = new QLabel("Path:", frame);
+    row->addWidget(path_label_);
     missions_ = new QComboBox(frame);
     missions_->setMinimumWidth(110);
     missions_->setToolTip(QStringLiteral("Recorded missions (etc/missions.toml)."));
@@ -122,6 +144,7 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                          }
                      });
     rebuild_actions(false, 0);
+    show_mode_widgets(0);
 
     row->addStretch();
 
@@ -370,6 +393,7 @@ void MissionPanel::apply(const View &view)
     {
         const QSignalBlocker block(drive_mode_);
         drive_mode_->setCurrentIndex(view.mode_index);
+        show_mode_widgets(view.mode_index);
     }
 
     // The drive button is deliberately NOT in this list: it must work in every mode.
@@ -378,6 +402,18 @@ void MissionPanel::apply(const View &view)
         if (w != nullptr and w->isEnabled() != view.controls_enabled)
             w->setEnabled(view.controls_enabled);
 
+}
+
+// The path widgets mean nothing in Mission mode and the command box means nothing elsewhere: show one set.
+void MissionPanel::show_mode_widgets(int mode_index)
+{
+    const bool command = mode_index == 3;   // rc::to_index(DriveMode::Command)
+    for (QWidget *w : {static_cast<QWidget *>(command_label_), static_cast<QWidget *>(command_),
+                       static_cast<QWidget *>(command_send_)})
+        if (w != nullptr) w->setVisible(command);
+    for (QWidget *w : {static_cast<QWidget *>(path_label_), static_cast<QWidget *>(missions_),
+                       static_cast<QWidget *>(actions_)})
+        if (w != nullptr) w->setVisible(not command);
 }
 
 bool MissionPanel::confirm_supersede()

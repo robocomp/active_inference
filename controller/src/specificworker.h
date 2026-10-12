@@ -49,6 +49,7 @@
 #include "controller_runtime_types.h"
 #include "controller_session.h"
 #include "controller_world_model.h"
+#include "chat_inbox.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
@@ -133,6 +134,22 @@ private:
 	bool startup_check_flag;
 	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api_;
 	ControllerWorldModel world_model_;
+	/// What run_mission_command decided. `kind` = "cross" | "stop" | "uncross" | "" (not understood / refused).
+	struct MissionResult
+	{
+		bool accepted = false;
+		std::string kind;
+		std::string door;     ///< cross: the door the passage was started through
+		std::string reason;   ///< refused: why, in words a person can act on
+	};
+	MissionResult run_mission_command(const std::string &text, const char *source);
+	/// The Stop button's abort (mission, click target, route/plan/trace; base output disarmed). Control thread only.
+	void abort_all(const char *source);
+	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
+	rc::ChatInbox chat_inbox_;
+	rc::ChatInbox::Tracked chat_tracked_;
+	std::uint64_t chat_poll_ms_ = 0;
+	void service_chat_inbox();
 	ControllerObstacleTracker obstacle_tracker_;
 	ControllerMotionCommander motion_commander_;
 	ControllerDisplay display_;

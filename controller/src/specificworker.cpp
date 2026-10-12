@@ -399,6 +399,9 @@ void SpecificWorker::initialize()
 			std::println("[gui] DOOR PASSAGE through '{}'", door);
 		});
 	};
+	// Mode "Mission": a typed command, parsed on the control thread (run_mission_command).
+	gui.mission.on_command = [this](std::string text)
+	{ enqueue_command([this, text]() { run_mission_command(text, "gui"); }); };
 	gui.door_passage.on_stop = [this]()
 	{ enqueue_command([this]() { session_.door_passage().stop(); std::println("[gui] door passage stopped"); }); };
 	gui.mission.on_record_begin = [this]()
@@ -529,24 +532,7 @@ void SpecificWorker::initialize()
 	};
 	gui.mission.on_stop = [this]()
 	{
-		enqueue_command([this]()
-		{
-			// STOP IS AN ABORT, not a pause. It ends the mission, drops any click target, throws away
-			// the route/plan/trace, and then STOPS TALKING TO THE BASE until Run is pressed again —
-			// the output loop otherwise keeps sending setSpeedBase(0,0,0) at 20 Hz forever, which is
-			// right under control and wrong after the user has said stop.
-			// What survives is the mission SELECTION, so Run starts whichever mission is selected.
-			session_.mission().stop("user", current_time_ms());
-			session_.mission().set_click_target(std::nullopt);
-			clear_manual_target();
-			session_.abort(path_controller_, motion_commander_);
-			display_.clear_robot_trajectory();
-			driving_enabled_ = false;
-			paused_ = false;
-			motion_commander_.set_output_enabled(false);
-			std::println("[mission] STOP: aborted — route, plan and trace cleared, base output DISARMED. "
-			             "Run starts '{}' fresh.", session_.mission().selected_name());
-		});
+		enqueue_command([this]() { abort_all("user"); });
 	};
 
 	// ★ONE BUFFER. The viewer and the control path (path_controller_ above) read the same registered
@@ -574,14 +560,10 @@ void SpecificWorker::initialize()
 				else if (c == "stop" and remote_stop_) { std::println("[remote] STOP"); remote_stop_(); }
 				// DOOR PASSAGE (controller_door_passage.h): `cross door_1` sequences approach -> open -> cross on
 				// door_concept's affordances for that door; `uncross` ends it (selection unrestricted again).
-				else if (c.startsWith("cross "))
-				{
-					const std::string door = c.mid(6).trimmed().toStdString();
-					session_.door_passage().start(door);
-					std::println("[remote] DOOR PASSAGE through '{}'", door);
-				}
+				else if (c.startsWith("cross ")) run_mission_command(c.toStdString(), "remote");
+				else if (c.startsWith("mission ")) run_mission_command(c.mid(8).trimmed().toStdString(), "remote");
 				else if (c == "uncross") { session_.door_passage().stop(); std::println("[remote] door passage stopped"); }
-				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | uncross)", c.toStdString());
+				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | mission <text> | uncross)", c.toStdString());
 			}
 		});
 		t->start(300);
@@ -1467,6 +1449,8 @@ void SpecificWorker::control_loop()
 			for (auto &command : commands)
 				if (command) command();
 		}
+		// chat_agent's intention node: a new command runs here, between cycles, like every button press above.
+		service_chat_inbox();
 
 		// Reflect mission/drive state EVERY iteration (~20 ms), independent of compute(). Selecting a mode
 		// or pressing Stop changes what the panel must show, and both leave the pipeline with nothing to
@@ -1754,3 +1738,114 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 // From the RoboCompOmniRobot you can use this types:
 // RoboCompOmniRobot::TMechParams
 
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+// MISSION COMMANDS — the (simple) natural-language missions of mode "Mission". One grammar for the panel's text box,
+// the remote file and chat_agent's intention node. Understood so far:
+//   cross door          the nearest door of the current room
+//   cross [the] door_N  that door (it must exist in the graph now)
+//   stop                the Stop button's abort, and the door passage ends too
+//   uncross             end the door passage (selection unrestricted again)
+// Runs on the control thread (enqueue_command / the chat inbox; the remote timer calls it directly, as before).
+// Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
+SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)
+{
+	std::string t = QString::fromStdString(text).trimmed().toLower().simplified().toStdString();
+	if (t == "stop")
+	{
+		session_.door_passage().stop();
+		abort_all(source);
+		std::println("[{}] mission 'stop' -> STOP (passage ended, base output disarmed)", source);
+		return {.accepted = true, .kind = "stop"};
+	}
+	if (t == "uncross")
+	{
+		session_.door_passage().stop();
+		std::println("[{}] mission 'uncross' -> door passage stopped", source);
+		return {.accepted = true, .kind = "uncross"};
+	}
+	if (t.starts_with("cross "))
+	{
+		std::string what = t.substr(6);
+		if (what.starts_with("the ")) what = what.substr(4);
+		if (what.starts_with("a ")) what = what.substr(2);
+		std::optional<std::string> door;
+		if (what == "door")
+		{
+			const auto &gs = world_model_.graph_state();
+			if (inner_eigen_api_)
+				door = rc::DoorPassage::nearest_door(*G, *inner_eigen_api_, gs.room_name, "body");
+			if (not door.has_value())
+			{
+				std::println("[{}] mission '{}': no door of room '{}' is known — nothing to cross", source, t, gs.room_name);
+				return {.kind = "cross", .reason = std::format("no door of room '{}' is known", gs.room_name)};
+			}
+		}
+		else if (what.starts_with("door")) door = what;
+		if (door.has_value())
+		{
+			if (not G->get_node(*door).has_value())
+			{
+				std::println("[{}] mission '{}': door '{}' is not in the graph — nothing to cross", source, t, *door);
+				return {.kind = "cross", .door = *door, .reason = std::format("door '{}' is not in the graph", *door)};
+			}
+			session_.mission().set_mode(rc::DriveMode::Command);
+			session_.door_passage().start(*door);
+			std::println("[{}] mission '{}' -> DOOR PASSAGE through '{}'{}", source, t, *door,
+			             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
+			return {.accepted = true, .kind = "cross", .door = *door};
+		}
+	}
+	std::println("[{}] mission '{}' not understood (known: cross door | cross door_N | stop | uncross)", source, t);
+	return {.reason = std::format("'{}' not understood (known: cross door | cross door_N | stop | uncross)", t)};
+}
+
+// The Stop button's abort, callable from the control thread by name (the button enqueues it; a chat `stop`, which
+// is already on the control thread, calls it directly). `source` = the mission's stop reason ("user" for the button).
+void SpecificWorker::abort_all(const char *source)
+{
+	// STOP IS AN ABORT, not a pause. It ends the mission, drops any click target, throws away
+	// the route/plan/trace, and then STOPS TALKING TO THE BASE until Run is pressed again —
+	// the output loop otherwise keeps sending setSpeedBase(0,0,0) at 20 Hz forever, which is
+	// right under control and wrong after the user has said stop.
+	// What survives is the mission SELECTION, so Run starts whichever mission is selected.
+	session_.mission().stop(source, current_time_ms());
+	session_.mission().set_click_target(std::nullopt);
+	clear_manual_target();
+	session_.abort(path_controller_, motion_commander_);
+	display_.clear_robot_trajectory();
+	driving_enabled_ = false;
+	paused_ = false;
+	motion_commander_.set_output_enabled(false);
+	std::println("[mission] STOP: aborted — route, plan and trace cleared, base output DISARMED. "
+	             "Run starts '{}' fresh.", session_.mission().selected_name());
+}
+
+// chat_agent's intention node (chat_inbox.h). Called every control-loop pass, throttled to 10 Hz: run a new command
+// through the same grammar as the panel and the remote file, then mirror how it is going back into the node.
+// Here rather than in compute() on purpose: compute() does not run while the LiDAR stream is stalled, and `stop`
+// must still be heard then.
+void SpecificWorker::service_chat_inbox()
+{
+	if (not G) return;
+	const std::uint64_t now = current_time_ms();
+	if (now - chat_poll_ms_ < 100) return;
+	chat_poll_ms_ = now;
+	const auto wall_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	        std::chrono::system_clock::now().time_since_epoch()).count());
+	if (const auto cmd = chat_inbox_.poll(*G, wall_ms); cmd.has_value())
+	{
+		std::println("[chat] command '{}' (stamp {})", cmd->text, cmd->stamp_ms);
+		const auto r = run_mission_command(cmd->text, "chat");
+		using K = rc::ChatInbox::Tracked::Kind;
+		if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
+		else if (r.kind == "cross") chat_tracked_ = {.kind = K::Cross, .door = r.door};
+		else if (r.kind == "stop") chat_tracked_ = {.kind = K::Stop};
+		else chat_tracked_ = {.kind = K::Uncross};
+		chat_tracked_.stamp = cmd->stamp_ms;
+	}
+	if (chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::None) return;
+	const auto [state, bt] = rc::ChatInbox::status_of(chat_tracked_, session_.door_passage().view(),
+	                                                  driving_enabled_ and not paused_);
+	chat_inbox_.publish(*G, chat_tracked_.stamp, state, bt);
+}

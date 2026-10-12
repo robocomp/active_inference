@@ -1,0 +1,65 @@
+
+# --- Common Agent Data ---
+[Agent]
+# MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH agents.
+# 25 = chat_agent (recorded in CONCEPT_AGENT_RECIPE.md §1, the source of truth).
+id = 25
+name = "chat_agent"
+
+# --- Single Instance Configuration ---
+configFile = ""
+domain = 0
+tree = false
+graph = false
+2d = false
+3d = false
+
+[Presence]
+# Nothing is REQUIRED: the chat window is useful, and says what is missing, with nothing else running.
+# controller executes the commands (the gate refuses to move the robot without it); room_concept gives the room.
+# ★required_agent_names is ABSENT on purpose, not `= []`: the RoboComp ConfigLoader throws on an empty array
+# (viewer3d/scene_graph_viewer learned this); absent reads as the empty default.
+optional_agent_names = ["controller", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+# The agent node and the ONE node it creates: the command channel to the controller (intention_node.h).
+nodes = ["chat_agent 25", "chat_intention"]
+
+[Period]
+Compute = 250
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[LLM]
+url = "http://localhost:11434"
+model = "qwen3:8b"
+num_ctx = 8192
+temperature = 0.2
+# No content and no tool call within this long ⇒ the request is aborted (a cold model load is the usual cause;
+# the agent warms the model up at start for exactly that reason).
+first_token_timeout_ms = 60000
+transfer_timeout_ms = 120000
+keep_alive = "30m"
+
+[Chat]
+max_history = 16
+digest_period_ms = 500
+status_period_ms = 250
+log_dir = "logs"
+# Who the robot is (body, senses, abilities, limits, honesty rules), prepended to every system message.
+# Read once at start; if missing, a short built-in description is used (and a warning printed).
+system_prompt_path = "etc/system_prompt.md"
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

@@ -1505,6 +1505,19 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     if (const auto left = G_->get_node(left_id); left.has_value())
         for (const auto& e : G_->get_node_edges_by_type(left.value(), "has_intention"))
             G_->delete_edge(left_id, e.to(), "has_intention");
+    // …and hang them from the new room NOW. The manager re-hangs only on a publish, and it never publishes while the
+    // node is claimed: a claim held across the crossing (its target in the left room's frame) left afford_room
+    // under no room at all, and nothing was offered in the room entered (live try24, re-entered room_1). The claim
+    // itself is on a pose of the room left behind, so it is released too — the consumer re-selects in this frame.
+    for (const char* intention : {"afford_room", "afford_calib"})
+        if (auto n = G_->get_node(intention); n.has_value())
+        {
+            G_->add_or_modify_attrib_local<parent_att>(n.value(), new_room_id);
+            G_->update_node(n.value());
+            if (not G_->get_edge(new_room_id, n->id(), "has_intention").has_value())
+                G_->insert_or_assign_edge(DSR::Edge::create<has_intention_edge_type>(new_room_id, n->id()));
+        }
+    affordance_manager_.release_execution_claim(G_);
     // A remembered room comes back in ITS OWN frame (the one memory holds), placed through the crossed door.
     const Eigen::Affine2f T_pub_int = recall.has_value() ? recall->T_int_recall.inverse() : T_room_proto_.inverse();
     std::vector<Eigen::Vector2f> recall_int;

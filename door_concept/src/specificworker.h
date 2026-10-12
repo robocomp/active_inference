@@ -255,7 +255,19 @@ private:
         float           phi_est = 0.f, phi_sigma = 0.f;
         std::vector<std::pair<float, float>> phi_curve;
         int             matched_frames = 0;
+        // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
+        // (live rooms all hang from root, so root is the one frame two rooms share) and its attributes.
+        Eigen::Affine3d T_root_door = Eigen::Affine3d::Identity();
+        float width = 0.f, depth = 0.f, height = 0.f;
+        std::optional<float> open_prob, phi_rad;
+        std::string name;
     };
+    // Every fitted door's memo, refreshed each cycle; a door deleted with its room moves to lost_doors_ until the
+    // next room switch, which recreates the one the robot just went through when nothing else carried it across.
+    std::unordered_map<std::uint64_t, EntryMirror> door_memo_;
+    std::vector<EntryMirror> lost_doors_;
+    void remember_door(const rc::DoorInstance& inst);
+    std::optional<std::pair<std::uint64_t, EntryMirror>> recreate_lost_door(std::uint64_t new_room);
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     void step_entry_mirrors();

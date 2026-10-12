@@ -10,6 +10,7 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <format>
 #include <optional>
 #include <print>
 #include <utility>
@@ -190,29 +191,43 @@ std::uint64_t DoorSceneGraph::create_entry_mirror(const DSR::Node& proto_room,
                                                   const Eigen::Vector3f& euler_xyz_proto_source,
                                                   std::span<const std::string> reserved_names)
 {
-    const std::string name = next_door_name({}, reserved_names);
-    DSR::Node m = DSR::Node::create<object_node_type>(name);
-
     // Geometry and appearance are the SOURCE's, copied once: the mirror is the same physical door. Only the
     // interaction channel (door_open_prob / door_phi_rad) is refreshed afterwards, by the worker.
-    G_->add_or_modify_attrib_local<width_m_att> (m, G_->get_attrib_by_name<width_m_att>(source_door).value_or(cfg_.door_prior_w_m));
-    G_->add_or_modify_attrib_local<depth_m_att> (m, G_->get_attrib_by_name<depth_m_att>(source_door).value_or(cfg_.door_thickness_m));
-    G_->add_or_modify_attrib_local<height_m_att>(m, G_->get_attrib_by_name<height_m_att>(source_door).value_or(cfg_.door_prior_h_m));
+    const auto op = G_->get_attrib_by_name<door_open_prob_att>(source_door);
+    const auto ph = G_->get_attrib_by_name<door_phi_rad_att>(source_door);
+    return create_door_copy(proto_room,
+                            G_->get_attrib_by_name<width_m_att> (source_door).value_or(cfg_.door_prior_w_m),
+                            G_->get_attrib_by_name<depth_m_att> (source_door).value_or(cfg_.door_thickness_m),
+                            G_->get_attrib_by_name<height_m_att>(source_door).value_or(cfg_.door_prior_h_m),
+                            op.has_value() ? std::optional<float>(op.value()) : std::nullopt,
+                            ph.has_value() ? std::optional<float>(ph.value()) : std::nullopt,
+                            t_proto_source, euler_xyz_proto_source, reserved_names,
+                            std::format("'{}' id={}", source_door.name(), source_door.id()));
+}
+
+std::uint64_t DoorSceneGraph::create_door_copy(const DSR::Node& room, float width, float depth, float height,
+                                               std::optional<float> open_prob, std::optional<float> phi_rad,
+                                               const Eigen::Vector3f& t, const Eigen::Vector3f& euler_xyz,
+                                               std::span<const std::string> reserved_names, const std::string& source_label)
+{
+    const std::string name = next_door_name({}, reserved_names);
+    DSR::Node m = DSR::Node::create<object_node_type>(name);
+    G_->add_or_modify_attrib_local<width_m_att> (m, width);
+    G_->add_or_modify_attrib_local<depth_m_att> (m, depth);
+    G_->add_or_modify_attrib_local<height_m_att>(m, height);
     G_->add_or_modify_attrib_local<mesh_path_att>(m, std::string("door_concept/meshes/door.obj"));
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(m, std::string("door_concept/meshes/door_basecolor.jpg"));
     G_->add_or_modify_attrib_local<object_subtype_att>(m, std::string("door"));
-    if (const auto v = G_->get_attrib_by_name<door_open_prob_att>(source_door); v.has_value())
-        G_->add_or_modify_attrib_local<door_open_prob_att>(m, v.value());
-    if (const auto v = G_->get_attrib_by_name<door_phi_rad_att>(source_door); v.has_value())
-        G_->add_or_modify_attrib_local<door_phi_rad_att>(m, v.value());
+    if (open_prob.has_value()) G_->add_or_modify_attrib_local<door_open_prob_att>(m, *open_prob);
+    if (phi_rad.has_value())   G_->add_or_modify_attrib_local<door_phi_rad_att>(m, *phi_rad);
 
-    // ★`parent` = the proto-room. This attribute is what rc::room::is_proto_mirror reads, and therefore what
+    // ★`parent` = the room. Under a proto-room this is what rc::room::is_proto_mirror reads, and therefore what
     //   keeps every fitting / merging / aperture-discount loop in the fleet from counting this door twice.
-    G_->add_or_modify_attrib_local<parent_att>(m, proto_room.id());
-    G_->add_or_modify_attrib_local<level_att>(m, G_->get_attrib_by_name<level_att>(proto_room).value_or(1) + 1);
+    G_->add_or_modify_attrib_local<parent_att>(m, room.id());
+    G_->add_or_modify_attrib_local<level_att>(m, G_->get_attrib_by_name<level_att>(room).value_or(1) + 1);
     {
-        const float rpx = G_->get_attrib_by_name<pos_x_att>(proto_room).value_or(200.f);
-        const float rpy = G_->get_attrib_by_name<pos_y_att>(proto_room).value_or(200.f);
+        const float rpx = G_->get_attrib_by_name<pos_x_att>(room).value_or(200.f);
+        const float rpy = G_->get_attrib_by_name<pos_y_att>(room).value_or(200.f);
         G_->add_or_modify_attrib_local<pos_x_att>(m, rpx + 150.f);
         G_->add_or_modify_attrib_local<pos_y_att>(m, rpy + 50.f);
     }
@@ -221,17 +236,14 @@ std::uint64_t DoorSceneGraph::create_entry_mirror(const DSR::Node& proto_room,
     if (not id.has_value())
         return 0;
 
-    DSR::Node parent = proto_room;   // the RT API takes a mutable node
-    rt_api_->insert_or_assign_edge_RT(parent, id.value(),
-                                      {t_proto_source.x(), t_proto_source.y(), t_proto_source.z()},
-                                      {euler_xyz_proto_source.x(), euler_xyz_proto_source.y(), euler_xyz_proto_source.z()});
+    DSR::Node parent = room;   // the RT API takes a mutable node
+    rt_api_->insert_or_assign_edge_RT(parent, id.value(), {t.x(), t.y(), t.z()}, {euler_xyz.x(), euler_xyz.y(), euler_xyz.z()});
     if (relayout_)
         relayout_();
 
-    std::print("door_concept: [proto] entry mirror '{}' id={} <- '{}' id={} under proto-room '{}' "
+    std::print("door_concept: [proto] entry mirror '{}' id={} <- {} under room '{}' "
                "(t=({:.2f},{:.2f},{:.2f}) yaw={:.3f})\n",
-               name, id.value(), source_door.name(), source_door.id(), proto_room.name(),
-               t_proto_source.x(), t_proto_source.y(), t_proto_source.z(), euler_xyz_proto_source.z());
+               name, id.value(), source_label, room.name(), t.x(), t.y(), t.z(), euler_xyz.z());
     return id.value();
 }
 

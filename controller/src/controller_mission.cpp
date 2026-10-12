@@ -161,6 +161,7 @@ const char *to_string(DriveMode m)
         case DriveMode::MissionOnly:            return "mission_only";
         case DriveMode::MissionWithAffordances: return "mission_with_affordances";
         case DriveMode::Target:                 return "target";
+        case DriveMode::Command:                return "command";
         case DriveMode::AffordancesOnly:
         default:                                return "affordances_only";
     }
@@ -168,11 +169,13 @@ const char *to_string(DriveMode m)
 
 int to_index(DriveMode m)
 {
+    // Path+Aff (MissionWithAffordances) is not offered in the selector: it is unimplemented, and run() refuses it.
     switch (m)
     {
         case DriveMode::MissionOnly:            return 1;
-        case DriveMode::MissionWithAffordances: return 2;
-        case DriveMode::Target:                 return 3;
+        case DriveMode::Target:                 return 2;
+        case DriveMode::Command:                return 3;
+        case DriveMode::MissionWithAffordances:
         case DriveMode::AffordancesOnly:
         default:                                return 0;
     }
@@ -183,8 +186,8 @@ DriveMode from_index(int index)
     switch (index)
     {
         case 1:  return DriveMode::MissionOnly;
-        case 2:  return DriveMode::MissionWithAffordances;
-        case 3:  return DriveMode::Target;
+        case 2:  return DriveMode::Target;
+        case 3:  return DriveMode::Command;
         default: return DriveMode::AffordancesOnly;
     }
 }
@@ -197,10 +200,15 @@ bool uses_mission(DriveMode m)
 void MissionRunner::set_mode(DriveMode m)
 {
     if (m == mode_) return;
+    // Affordances and Mission (a typed command) are the SAME condition as far as the base is concerned — the
+    // affordances drive, the command only restricts what they may select — so moving between them must not end the
+    // run (live try24: selecting Mission disarmed the base and the robot sat still).
+    const auto affordance_driven = [](DriveMode d) { return d == DriveMode::AffordancesOnly or d == DriveMode::Command; };
+    const bool same_condition = affordance_driven(m) and affordance_driven(mode_);
     mode_ = m;
     // Changing the condition mid-run would produce a single CSV row set spanning two conditions, which is
     // worse than either: end the run instead, and say so.
-    if (state_ == State::Running)
+    if (state_ == State::Running and not same_condition)
         stop("mode changed", last_sample_ms_);
     // Leaving Target abandons the clicked point: the mode selector says what is driving, so it must not
     // claim "Mission" while a stale click marker is still the thing on the canvas.

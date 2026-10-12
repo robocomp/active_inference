@@ -61,7 +61,31 @@ int RoomRecall::step()
         if (not room.has_value()) continue;
 
         // This door's FACE in memory, by the same prefix the eviction wrote it under.
-        const auto face = mem_->get_node(ev_.memory_prefix(room.value()) + door.name());
+        auto face = mem_->get_node(ev_.memory_prefix(room.value()) + door.name());
+        // ★ BY PLACE WHEN NOT BY NAME (2026-10-12). A re-entered room comes back with its crossed door RECREATED by
+        //   door_concept under a new name (try28: door_37 in room_1, memory face r1_door_19), so the name lookup misses
+        //   and no recall was posted for the room behind it — room_2 was then surveyed as a new room. A re-entered room
+        //   is published in its own remembered frame, so the live door and the memory faces of that room are directly
+        //   comparable: take the face of this room's memory copy whose aperture contains the live door's centre.
+        if (not face.has_value())
+            if (const auto mself = mem_->get_node(ev_.memory_prefix(room.value()) + room->name()); mself.has_value())
+                if (const auto Tl = live_->get_inner_eigen_api()->get_transformation_matrix(room->name(), door.name()); Tl.has_value())
+                {
+                    const double half_w = 0.5 * live_->get_attrib_by_name<width_m_att>(door).value_or(1.f);
+                    double best = half_w;
+                    for (const auto &pass : mem_->get_nodes_by_type("metaconcept"))
+                        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pass, "match"))
+                        {
+                            const auto f = mem_->get_node(e.to());
+                            if (not f.has_value()) continue;
+                            const auto fr = room_of(*mem_, f.value());
+                            if (not fr.has_value() or fr->id() != mself->id()) continue;
+                            const auto Tm = mie->get_transformation_matrix(mself->name(), f->name());
+                            if (not Tm.has_value()) continue;
+                            if (const double d = (Tm->translation() - Tl->translation()).head<2>().norm(); d < best)
+                            { best = d; face = f; }
+                        }
+                }
         if (not face.has_value()) continue;
 
         // The passage holding that face, and its OTHER face.

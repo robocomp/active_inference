@@ -5,14 +5,19 @@
 #        NORUN=1 run_crossing.sh <out_dir> x y theta  (teleport, controller left STOPPED)
 #        run_crossing.sh <out_dir> here                (no teleport, controller left STOPPED: the robot stays put)
 #        run_crossing.sh <out_dir> run|stop|collect   (controller run / controller stop / copy logs + stop the fleet)
+#        CHAT=1 run_crossing.sh ...                    (also start/stop chat_agent, the robot chat window; pass CHAT=1
+#                                                        to `collect` too so it is stopped — SIGTERM only, never -9)
 S=$(dirname "$(readlink -f "$0")"); B=/home/pbustos/robocomp/components/active_inference; R=$B/room_concept
 OUT=$(readlink -f "${1:?usage: run_crossing.sh <out_dir> [x y theta | run | stop | collect]}"); mkdir -p $OUT/logs
 FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
+[[ -n "$CHAT" ]] && FLEET="$FLEET chat_agent"
 log(){ echo "$(date +%T) $*" | tee -a $OUT/crossing.log; }
 stop_fleet(){ pkill -TERM -x door_concept; pkill -TERM -x controller; pkill -TERM -x residual_concep; pkill -TERM -x room_concept; pkill -TERM -x retina; pkill -TERM -x ltsm_agent
+  [[ -n "$CHAT" ]] && pkill -TERM -x chat_agent
   for i in $(seq 1 30); do sleep 1
     pgrep -x room_concept >/dev/null || pgrep -x controller >/dev/null || pgrep -x residual_concep >/dev/null \
-      || pgrep -x door_concept >/dev/null || pgrep -x retina >/dev/null || return 0; done
+      || pgrep -x door_concept >/dev/null || pgrep -x retina >/dev/null \
+      || { [[ -n "$CHAT" ]] && pgrep -x chat_agent >/dev/null; } || return 0; done
   log "WARN fleet did not stop in 30 s"; }
 collect(){
   cp $R/tmp/proto_room.csv $R/tmp/door_filter.csv $R/tmp/promotion_select.csv $R/tmp/map_layout.csv $R/tmp/layout_refine.csv \
