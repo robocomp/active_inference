@@ -19,6 +19,7 @@
 #include <print>
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "specificworker.h"
+#include "../../common/window_geometry/window_geometry_saver.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "../../common/media_transport/lidar_plane_reader.h"
@@ -116,6 +117,9 @@ void SpecificWorker::initialize()
 {
     qInfo() << "initialize worker";
 	GenericWorker::initialize();
+	// Persist the DSR window(s) on every resize/move/close, not only on a clean quit (see GeometrySaver).
+	for (const auto &[name, window] : windows)
+	    if (window != nullptr) new rc::ui::GeometrySaver(window.get(), [this] { save_window_settings(); });
 
 	 // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att>();

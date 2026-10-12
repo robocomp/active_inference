@@ -1,4 +1,5 @@
 #include "controller_display.h"
+#include "../../common/window_geometry/window_geometry_saver.h"
 
 #include <chrono>
 #include <print>
@@ -19,34 +20,8 @@ namespace
 constexpr auto kWinSettingsOrg = "RoboComp";
 constexpr auto kWinSettingsApp = "controller";
 constexpr auto kWinSettingsKey = "ControllerPlannerWindow_geometry";
+constexpr auto kAffordanceSettingsKey = "ControllerAffordancePanel_geometry";
 
-// Saves the window geometry shortly after every resize/move, not only on a clean quit. The quit-time save
-// in request_shutdown() never runs when the agent dies some other way: the terminal tab closing (SIGHUP is
-// not trapped), a crash, or kill -9. Those were exactly the restarts that came back at the old size.
-// Debounced so that a drag writes the file once, when it ends, not on every intermediate event.
-class GeometrySaver : public QObject
-{
-public:
-    GeometrySaver(QWidget *window, std::function<void()> save) : QObject(window), save_(std::move(save))
-    {
-        timer_.setSingleShot(true);
-        timer_.setInterval(500);
-        QObject::connect(&timer_, &QTimer::timeout, this, [this] { save_(); });
-        window->installEventFilter(this);
-    }
-
-protected:
-    bool eventFilter(QObject *watched, QEvent *event) override
-    {
-        if (event->type() == QEvent::Resize or event->type() == QEvent::Move)
-            timer_.start();
-        return QObject::eventFilter(watched, event);
-    }
-
-private:
-    std::function<void()> save_;
-    QTimer timer_;
-};
 }  // namespace
 
 void ControllerDisplay::restore_window_geometry()
@@ -82,7 +57,7 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     custom_widget_->setWindowTitle(QStringLiteral("controller — planner"));
     restore_window_geometry();
     custom_widget_->show();
-    new GeometrySaver(custom_widget_.get(), [this] { save_window_geometry(); });   // owned by the window
+    new rc::ui::GeometrySaver(custom_widget_.get(), [this] { save_window_geometry(); });   // owned by the window
 
     // No axis from the base viewer: it is pinned to the centre of this initial view rect, not to the
     // room. The only axis drawn is the one on the room polygon centroid (see Viewer2D::draw_room_polygon).
@@ -138,6 +113,19 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     // name in the toolbar shows it. It is a QDialog with the Tool flag, so it floats over the 2D view
     // without taking focus from it — this is meant to be watched WHILE driving.
     affordance_panel_ = std::make_unique<rc::AffordancePanel>(custom_widget_.get());
+    // Its size/position persists like the planner window's (it is hidden until clicked, so restoring now
+    // is what the first show uses).
+    {
+        const QByteArray geom = QSettings(kWinSettingsOrg, kWinSettingsApp).value(kAffordanceSettingsKey).toByteArray();
+        if (not geom.isEmpty())
+            affordance_panel_->restoreGeometry(geom);
+        new rc::ui::GeometrySaver(affordance_panel_.get(), [panel = affordance_panel_.get()]
+        {
+            QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+            settings.setValue(kAffordanceSettingsKey, panel->saveGeometry());
+            settings.sync();
+        });
+    }
     // The button runs on the GUI thread; the session it acts on lives on the control thread. The
     // callback the worker installs is an enqueue, never a direct call — same rule as every other
     // control the panels own.
