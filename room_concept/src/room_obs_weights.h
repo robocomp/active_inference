@@ -46,5 +46,6 @@ namespace rc
                                                       const RoomConcept::Params& params,
                                                       const torch::Tensor& points_robot,
                                                       const torch::Tensor& pose_theta,
-                                                      const Model::SdfQueryResult& query);
+                                                      const Model::SdfQueryResult& query,
+                                                      const std::vector<DoorAperture>* doors_robot = nullptr);
 } // namespace rc

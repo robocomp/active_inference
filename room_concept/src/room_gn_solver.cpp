@@ -65,8 +65,9 @@ namespace rc::gn
                 torch::NoGradGuard ng;
                 const auto q = query(x, /*want_grad=*/false);
                 if (not q.sdf.defined() or q.sdf.size(0) == 0) return 0.f;
+                // ★ SAME DOOR WEIGHTS AS linearize(): the step is accepted on the cost the step was computed for.
                 return compute_observation_loss_from_query(*in_.model, *in_.params, points_,
-                                                           theta_tensor(x), q).item<float>();
+                                                           theta_tensor(x), q, in_.doors_robot).item<float>();
             }
 
             float linearize(const State& x, LinearSystem& sys) const override
@@ -117,7 +118,7 @@ namespace rc::gn
                 sys.add_H(off_, off_, Eigen::MatrixXf(H));
                 sys.add_b(off_, Eigen::VectorXf(b));
                 return compute_observation_loss_from_query(*in_.model, *in_.params, points_,
-                                                           theta_tensor(x), q).item<float>();
+                                                           theta_tensor(x), q, in_.doors_robot).item<float>();
             }
 
         private:

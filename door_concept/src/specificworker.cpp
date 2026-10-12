@@ -3406,7 +3406,11 @@ void SpecificWorker::step_entry_mirrors()
         const bool room_ok   = G->get_node(room_id).has_value();
         const bool source_ok = fitter_->instances().contains(mir.source_id) and G->get_node(mir.source_id).has_value();
         const bool mirror_ok = G->get_node(mir.node_id).has_value();
-        if (room_ok and source_ok and mirror_ok)
+        // ★ A SOURCE THAT DIES WITH ITS ROOM DOES NOT END THE MIRROR (2026-10-12, eviction ON). ltsm moves `current`
+        //   to the new room and then deletes the old one, door included; if that deletion reaches this cycle before
+        //   the `current` move does, retiring here would delete the door release_room is about to adopt.
+        const bool source_node_gone = not G->get_node(mir.source_id).has_value();
+        if (room_ok and mirror_ok and (source_ok or source_node_gone))
         {
             ++it;
             continue;
@@ -3753,10 +3757,17 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         inst.aff_cross.on_node_deleted(id);
     }
 
-    if (fitter_->instances().count(id))
+    if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
     {
-        std::print("door_concept: node {} removed from DSR, destroying instance\n", id);
-        fitter_->instances().erase(id);
+        // ★ THE DOOR'S AFFORDANCES GO WITH IT. They are not RT children (nobody else's sweep reaches them), so a door
+        //   deleted by another agent — ltsm evicting the room it was in (2026-10-12, live: aff_door_19, _approach,
+        //   _cross left floating after room_1 was removed) — left them in the graph with nothing alive behind them.
+        it->second.affordance.remove();
+        it->second.aff_approach.remove();
+        it->second.aff_open.remove();
+        it->second.aff_cross.remove();
+        std::print("door_concept: node {} removed from DSR, destroying instance and its affordances\n", id);
+        fitter_->instances().erase(it);
     }
 }
 

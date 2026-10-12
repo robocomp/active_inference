@@ -21,7 +21,7 @@ namespace rc
         /// than pulled from a helper so the degenerate cases are visible: parallel beams and
         /// zero-length apertures return false, which is the safe answer (no discount).
         bool segments_cross(const Eigen::Vector2f& p, const Eigen::Vector2f& r,
-                            const Eigen::Vector2f& q, const Eigen::Vector2f& s)
+                            const Eigen::Vector2f& q, const Eigen::Vector2f& s, float* t_out = nullptr)
         {
             const float rxs = r.x() * s.y() - r.y() * s.x();
             if (std::abs(rxs) < 1e-9f) return false;          // parallel or degenerate
@@ -31,6 +31,7 @@ namespace rc
             // t in (0,1): the crossing is BEFORE the return, i.e. the beam really did pass through the
             // opening on its way. A return that lands exactly in the doorway plane (t == 1) is the door
             // frame itself and keeps its weight.
+            if (t_out != nullptr) *t_out = t;
             return t > 1e-4f and t < 1.f - 1e-4f and u >= 0.f and u <= 1.f;
         }
     }   // namespace
@@ -58,19 +59,14 @@ namespace rc
             ++tally_.subtype_ok;
 
             // ── THE CHEAP HALF: the door's own belief, read every cycle ──────────────────────────
-            // Unmeasured publishes a sentinel outside [0,1], which means "no evidence" and weighs as
-            // closed. Clamping it instead of rejecting it would turn a sentinel into a confident claim.
+            // Unmeasured publishes a sentinel outside [0,1]. ★ It no longer means "treat as shut" (2026-10-12):
+            // that switched the filter off for the whole of room_2 after a crossing, because the door adopted
+            // there is unmeasured until door_concept re-fits it (live try14: ~865 s, a ~8 cm pose bias along the
+            // door normal). Unmeasured is now an even prior, and each return's range decides (weight()).
             const auto p = G.get_attrib_by_name<door_open_prob_att>(n);
-            const float p_open = (p.has_value() and std::isfinite(p.value())
-                                  and p.value() > 0.f and p.value() <= 1.f) ? p.value() : 0.f;
+            const bool measured = p.has_value() and std::isfinite(p.value()) and p.value() >= 0.f and p.value() <= 1.f;
+            const float p_open = measured ? p.value() : -1.f;
             if (p_open > 0.f) ++tally_.believed_open;
-            if (p_open <= 0.f)
-            {
-                // Shut, or never measured. Its segment stays in the cache if we already have one —
-                // the aperture does not move, so a door that shuts and reopens costs no second walk.
-                if (const auto it = cache_.find(n.id()); it != cache_.end()) kept.insert(*it);
-                continue;
-            }
 
             // ── THE EXPENSIVE HALF: walked ONCE per door, not once per cycle ─────────────────────
             auto it = cache_.find(n.id());
@@ -109,6 +105,8 @@ namespace rc
             ap.a = it->second.first;
             ap.b = it->second.second;
             ap.p_open = p_open;
+            ap.prior_closed = measured ? 1.f - p_open : 0.5f;
+            ap.half_depth = 0.5f * G.get_attrib_by_name<depth_m_att>(n).value_or(0.04f);
             ap.id = n.id();
             ap.name = n.name();
             ++tally_.emitted;
@@ -120,17 +118,25 @@ namespace rc
     }
 
     float DoorApertures::weight(const std::vector<DoorAperture>& apertures,
-                                const Eigen::Vector2f& beam_origin, const Eigen::Vector2f& hit)
+                                const Eigen::Vector2f& beam_origin, const Eigen::Vector2f& hit, float sigma_obs)
     {
         if (apertures.empty()) return 1.f;
         const Eigen::Vector2f r = hit - beam_origin;
-        if (r.squaredNorm() < 1e-8f) return 1.f;
+        const float range = r.norm();
+        if (range < 1e-4f) return 1.f;
         float w = 1.f;
         for (const auto& ap : apertures)
         {
-            if (ap.p_open <= 0.f) continue;                  // closed, or unmeasured: nothing to discount
-            if (segments_cross(beam_origin, r, ap.a, ap.b - ap.a))
-                w *= (1.f - ap.p_open);
+            float t = 0.f;
+            if (not segments_cross(beam_origin, r, ap.a, ap.b - ap.a, &t)) continue;
+            if (ap.prior_closed >= 1.f) continue;            // measured shut: the surface hypothesis is certain
+            // d = how far past the doorway line the return landed (the crossing is at range t·|r|).
+            const float d   = (1.f - t) * range;
+            const float var = sigma_obs * sigma_obs + ap.half_depth * ap.half_depth;
+            // Half-normal (d > 0 by the crossing test) vs uniform over kBeyondExtentM.
+            const float surface = ap.prior_closed * 2.f * std::exp(-0.5f * d * d / var) / std::sqrt(2.f * float(M_PI) * var);
+            const float beyond  = (1.f - ap.prior_closed) / kBeyondExtentM;
+            w *= surface / (surface + beyond);
         }
         return w;
     }

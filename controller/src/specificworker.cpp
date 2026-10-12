@@ -1478,6 +1478,12 @@ void SpecificWorker::control_loop()
 		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media
 		//    plane (robot_concept no longer publishes the laser_* node to DSR). The shared
 		//    reader brings up its subscribers lazily and dedups by timestamp.
+		// ★ THE ROOM IS RE-RESOLVED BEFORE THE POLL, NOT ONLY INSIDE compute() (2026-10-12, eviction ON). The
+		//   tracker rejects every sweep while graph_state has no room, and compute() — the only other place the
+		//   room is re-read — does not run while the stream is stalled. When ltsm deleted the room just left
+		//   before this agent had followed `current`, that closed a loop: no room ⇒ sweeps rejected ⇒ stall ⇒ no
+		//   compute() ⇒ no room, for ever (live try15: robot halted in the doorway, 175 s and counting).
+		world_model_.refresh_graph_state();
 		last_lidar_poll_ = poll_lidar_media();
 		const bool fresh_lidar = (last_lidar_poll_ == LidarPoll::Fresh);
 		if (fresh_lidar)

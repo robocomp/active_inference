@@ -117,7 +117,7 @@ namespace rc
 
             // ── A BEAM THAT WENT THROUGH AN OPEN DOOR MEASURED THE NEXT ROOM ────────────────────
             // The apertures arrive already in the ROBOT frame, so the beam origin is the origin here.
-            // Weight is 1 - p_open, the door's own marginalised belief: a closed door keeps its returns
+            // Weight = the per-beam mixture (DoorApertures::weight), prior 1 - p_open (½ unmeasured): a shut door keeps its returns
             // at full weight, because a closed door IS a wall surface and its returns are wall evidence.
             // ⚠ WHAT THIS DOES AND DOES NOT DO. These weights are normalised to mean 1 on the last
             // line, so the door term is RELATIVE — it moves the fit away from through-the-door returns
@@ -137,7 +137,7 @@ namespace rc
                 for (long i = 0; i < pts_cpu.size(0); ++i)
                 {
                     const float w = DoorApertures::weight(*doors_robot, origin,
-                                                          Eigen::Vector2f(acc[i][0], acc[i][1]));
+                                                          Eigen::Vector2f(acc[i][0], acc[i][1]), params.rfe_obs_sigma);
                     dacc[i] = w;
                     if (w < 1.f) ++discounted;
                 }
@@ -158,7 +158,8 @@ namespace rc
                                   const RoomConcept::Params& params,
                                                           const torch::Tensor& points_robot,
                                                           const torch::Tensor& pose_theta,
-                                                          const Model::SdfQueryResult& query)
+                                                          const Model::SdfQueryResult& query,
+                                                          const std::vector<DoorAperture>* doors_robot)
         {
             if (!query.sdf.defined() || query.sdf.size(0) == 0)
                 return torch::zeros({}, points_robot.options());
@@ -170,7 +171,7 @@ namespace rc
                 torch::nn::functional::HuberLossFuncOptions()
                     .reduction(torch::kNone).delta(params.rfe_huber_delta));
 
-            auto weights = build_observation_weights(model, params, points_robot, pose_theta, query);
+            auto weights = build_observation_weights(model, params, points_robot, pose_theta, query, doors_robot);
             return 0.5f * inv_var * (per_point * weights).mean();
         }
 
@@ -2415,7 +2416,8 @@ namespace rc
             // Any crossing at all drops the point from the DRAWING. The SDF keeps the continuous
             // weight — a half-open door discounts by half there — but a canvas cannot draw half a
             // point, and "is it removing them?" is the question this view exists to answer.
-            if (DoorApertures::weight(doors_robot_, origin, p.head<2>()) >= 1.f) kept.push_back(p);
+            // ½ = the mixture's own even split: drawn when the return is more likely the room's than the next one's.
+            if (DoorApertures::weight(doors_robot_, origin, p.head<2>(), params.rfe_obs_sigma) >= 0.5f) kept.push_back(p);
             else if (removed != nullptr) ++(*removed);
         }
         return kept;
@@ -2434,7 +2436,7 @@ namespace rc
         bool any = false;
         for (long i = 0; i < pts.size(0); ++i)
         {
-            wa[i] = DoorApertures::weight(doors_robot_, origin, Eigen::Vector2f(acc[i][0], acc[i][1]));
+            wa[i] = DoorApertures::weight(doors_robot_, origin, Eigen::Vector2f(acc[i][0], acc[i][1]), params.rfe_obs_sigma);
             if (wa[i] < 1.f) any = true;
         }
         return any ? w : torch::Tensor{};   // nothing crossed an open door: report the plain median
@@ -3765,6 +3767,7 @@ namespace rc
                 doors_robot_.push_back(std::move(r));
             }
         }
+        window_mgr_.doors_newest_robot = &doors_robot_;
 
         // ===== WALL-SLAM OBSERVATION (Estimate mode) =====
         if (estimating())
@@ -8959,8 +8962,11 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             auto pose_theta = slot.pose.index({torch::indexing::Slice(2, 3)});
 
             const auto query = model.sdf_query_at_pose(slot.lidar_points, pose_xy, pose_theta);
+            // The doorways are known in the NEWEST slot's robot frame (doors_robot_), which is the only slot the
+            // SDF term runs on with SdfCurrentSlotOnly (the shipped setting); older slots get no door term.
             const auto slot_obs_loss =
-                compute_observation_loss_from_query(model, params, slot.lidar_points, pose_theta, query);
+                compute_observation_loss_from_query(model, params, slot.lidar_points, pose_theta, query,
+                                                    &slot == &window.back() ? doors_newest_robot : nullptr);
             total_loss = total_loss + slot_obs_loss;
         }
 
@@ -9098,7 +9104,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             auto pose_theta = slot.pose.detach().index({torch::indexing::Slice(2, 3)});
             const auto query = model.sdf_query_at_pose(slot.lidar_points, pose_xy, pose_theta);
             const float slot_loss = compute_observation_loss_from_query(
-                model, params, slot.lidar_points, pose_theta, query).item<float>();
+                model, params, slot.lidar_points, pose_theta, query,
+                &slot == &window.back() ? doors_newest_robot : nullptr).item<float>();
             obs_acc += slot_loss;
         }
         bd.obs = obs_acc;

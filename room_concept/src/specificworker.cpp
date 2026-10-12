@@ -170,7 +170,7 @@ void SpecificWorker::compute()
             QString which;
             for (const auto& d : open_doors)
                 which += QString(" %1(p=%2)").arg(QString::fromStdString(d.name)).arg(d.p_open, 0, 'f', 2);
-            qInfo().noquote() << QString("[room][doors] %1 open aperture(s) now discounting the scan:%2"
+            qInfo().noquote() << QString("[room][doors] %1 doorway(s) weighting the scan (per-beam mixture; p=-1 unmeasured):%2"
                                          " | chain walks so far %3")
                                      .arg(open_doors.size()).arg(which.isEmpty() ? " -" : which)
                                      .arg(doors_.resolves());

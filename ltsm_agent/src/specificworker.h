@@ -138,6 +138,10 @@ private:
 	// CSV; the Betas fold into the passage node when one exists to carry them.
 	std::unique_ptr<ltsm::PassageHarvest> passages;
 
+	/// Startup seed of long-term memory; retried from compute() until room_concept has published a room.
+	void seed_memory();
+	bool seeded_ = false;
+	bool seed_waiting_logged_ = false;
 	/// One eviction attempt, once per compute cycle. Returns false when there was nothing to do.
 	bool step_eviction();
 	/// Everything after a successful evict(): log, passage fold, persistence save, backstop.

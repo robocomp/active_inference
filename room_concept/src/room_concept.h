@@ -1868,6 +1868,9 @@ private:
    {
        std::deque<WindowSlot> window;
        BoundaryPrior boundary_prior;
+       /// The doorways in the NEWEST slot's robot frame (RoomConcept::doors_robot_), for its SDF term. Set by the
+       /// owner each cycle; null ⇒ no door term.
+       const std::vector<DoorAperture>* doors_newest_robot = nullptr;
 
        bool empty() const { return window.empty(); }
        size_t size() const { return window.size(); }
