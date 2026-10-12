@@ -58,6 +58,12 @@ public:
         // than silently wrong.
         float yaw_room  = std::numeric_limits<float>::quiet_NaN();
         float yaw_world = std::numeric_limits<float>::quiet_NaN();
+        // ★THE ROOM WHOSE FRAME room_m IS IN (2026-10-12). Every room has its OWN frame (room_1, room_2, …,
+        // each re-anchored on its own bbox), so a pair is a fact about ONE room frame, never "the" room
+        // frame. Mixing pairs from two rooms into one Procrustes fit is what produced the 1.07-1.47 m
+        // residual fits that were nevertheless USED. Rows written before this column existed have no room
+        // and are ignored on load.
+        std::string room;
     };
 
     struct Fit
@@ -76,9 +82,9 @@ public:
     // pair for the same provider id — the newest fit of the same door is the better estimate of it.
     void add(const Pair& p, const std::string& path);
 
-    // Recompute from the stored pairs. The one-pair case uses the yaws carried BY the pair, so the
-    // result is the same whether it was just recorded or reloaded from disk.
-    const Fit& solve();
+    // Recompute from the stored pairs OF ROOM `room` only (see Pair::room). The one-pair case uses the yaws
+    // carried BY the pair, so the result is the same whether it was just recorded or reloaded from disk.
+    const Fit& solve(const std::string& room);
 
     [[nodiscard]] const Fit& fit() const noexcept { return fit_; }
     [[nodiscard]] const std::vector<Pair>& pairs() const noexcept { return pairs_; }

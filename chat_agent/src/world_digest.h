@@ -10,6 +10,9 @@
  *   · remembered rooms behind doors (ltsm_agent's recall_<room> metaconcepts, parent = the door)
  *   · the active chat command and how the controller says it is going (state / bt_state on its has_intention edge)
  *   · whether the controller is present
+ *   · OBJECTS of the current room (object_facts.h: who publishes what): counts per class + the N nearest, and the
+ *     residual obstacle count. The full list (every room) is kept in Digest::objects for the query tools and for
+ *     the change tracking (births / removals between turns) that ChatSession does.
  *
  * The same pass fills GateFacts, so CommandGate validates against exactly what the model was shown.
  * Every get_transformation_matrix optional is checked; a door whose pose does not resolve is listed without one.
@@ -23,6 +26,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "command_gate.h"
+#include "object_facts.h"
 
 namespace rc::chat
 {
@@ -31,6 +35,9 @@ struct Digest
 {
     std::string text;    ///< the STATE block for the system prompt
     GateFacts facts;     ///< what CommandGate validates against
+    std::uint64_t room_id = 0;            ///< current room node id (0 = unknown)
+    std::vector<ObjectFact> objects;      ///< every object/person in the graph, any room (in_current_room marks ours)
+    int n_obstacles = 0;                  ///< residual obstacles hanging from the current room
 };
 
 struct IntentionStatus
@@ -45,13 +52,14 @@ struct IntentionStatus
 class WorldDigest
 {
 public:
-    WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame = "body");
+    WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame = "body", int objects_nearest = 6);
     /// Build the digest now. `inner` must be the main thread's instance (CLAUDE.md: ts==0 cache ownership).
     Digest build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention) const;
 
 private:
     std::shared_ptr<DSR::DSRGraph> G_;
     std::string robot_frame_;
+    int objects_nearest_ = 6;
 };
 
 }   // namespace rc::chat

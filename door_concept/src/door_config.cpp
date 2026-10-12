@@ -361,7 +361,9 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
         pg.autonomous_actuation  = getb("DoorAffordance.AutonomousActuation", pg.autonomous_actuation,
                 "★MAY THIS AGENT ASK A PROVIDER TO MOVE A DOOR WITHOUT A HUMAN? The `open` affordance's whole point is that it can, and the consumer's claim is the…");
         pg.actuation_provider_id = gets("DoorAffordance.ActuationProviderId", pg.actuation_provider_id,
-                "Which door the PROVIDER should move, by its own advertised id");
+                "FALLBACK provider door id, used only when no world frame resolves to match our door by place");
+        pg.actuation_match_max_m = getf("DoorAffordance.ActuationMatchMaxM", pg.actuation_match_max_m,
+                "max distance (m, provider world) from our door to the nearest advertised door to accept the match");
 
         // ★REFUSE AN INVERTED SCHMITT BAND AT LOAD. withdraw_prob >= offer_prob is not a band, it is a
         // single line with the two decisions on the wrong sides of it: the affordance would be offered and

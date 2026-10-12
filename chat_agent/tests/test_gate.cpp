@@ -1,18 +1,26 @@
 // CommandGate rejections / acceptances and the fast paths. Build+run: tests/run_tests.sh
 #include "../src/command_gate.h"
 #include <cassert>
+#include <clocale>
+#include <cmath>
 #include <print>
 
 int main()
 {
     using namespace rc::chat;
+    std::setlocale(LC_ALL, "");   // the agent runs under es_ES (decimal comma): parsing must not care (CLAUDE.md)
     int checks = 0;
     GateFacts f{.room = "room_1", .doors = {"door_19", "door_7"}, .nearest_door = "door_19", .controller_present = true};
 
     auto r = validate({.name = "cross_door", .door = "door_7"}, f);
     assert(r.ok and r.needs_confirmation and r.command == "cross door_7"); ++checks;
     r = validate({.name = "cross_door", .door = "nearest"}, f);
-    assert(r.ok and r.command == "cross door_19"); ++checks;                 // nearest resolved to an explicit name
+    assert(not r.ok and r.reason.find("2 doors") != std::string::npos); ++checks;   // ambiguous: two doors, ask which
+    {
+        auto one = f; one.doors = {"door_19"};
+        r = validate({.name = "cross_door", .door = "nearest"}, one);
+        assert(r.ok and r.command == "cross door_19"); ++checks;            // one door: resolved to an explicit name
+    }
     r = validate({.name = "cross_door", .door = "door_99"}, f);
     assert(not r.ok and r.reason.find("not a door of the current room") != std::string::npos); ++checks;
     auto g = f; g.controller_present = false;
@@ -50,6 +58,62 @@ int main()
     d = parse_direct("uncross");
     assert(d and d->name == "cancel_passage"); ++checks;
     assert(not parse_direct("can you cross the door please?")); ++checks;
+    // ── move_relative ──
+    {
+        const GateLimits lim;   // defaults: small 1.0 m, small turn 90 deg, max 3.0 m
+        r = validate({.name = "move_relative", .distance_m = 0.3}, f, lim);
+        assert(r.ok and not r.needs_confirmation and r.command == "move 0.30"); ++checks;      // small: straight through
+        r = validate({.name = "move_relative", .distance_m = -0.5}, f, lim);
+        assert(r.ok and not r.needs_confirmation and r.command == "move -0.50"); ++checks;     // backing up a bit
+        r = validate({.name = "move_relative", .distance_m = 1.0}, f, lim);
+        assert(r.ok and not r.needs_confirmation); ++checks;                                   // the limit itself is small
+        r = validate({.name = "move_relative", .distance_m = 1.5}, f, lim);
+        assert(r.ok and r.needs_confirmation and r.command == "move 1.50"); ++checks;          // large: card
+        r = validate({.name = "move_relative", .distance_m = 3.5}, f, lim);
+        assert(not r.ok and r.reason.find("at most 3.0 m") != std::string::npos); ++checks;   // beyond max: refused
+        r = validate({.name = "move_relative", .turn_deg = 180}, f, lim);
+        assert(r.ok and not r.needs_confirmation and r.command == "turn 180"); ++checks;       // turn around: no card
+        r = validate({.name = "move_relative", .turn_deg = -90}, f, lim);
+        assert(r.ok and not r.needs_confirmation and r.command == "turn -90"); ++checks;
+        r = validate({.name = "move_relative", .turn_deg = 360}, f, lim);
+        assert(r.ok and not r.needs_confirmation); ++checks;                                   // any pure turn: no card
+        r = validate({.name = "move_relative", .turn_deg = 400}, f, lim);
+        assert(not r.ok); ++checks;
+        r = validate({.name = "move_relative", .distance_m = 0.5, .turn_deg = 90}, f, lim);
+        assert(r.ok and not r.needs_confirmation and r.command == "turn 90 move 0.50"); ++checks;   // turn THEN move
+        assert(r.summary == "turn left 90 deg, then move forward 0.50 m"); ++checks;
+        r = validate({.name = "move_relative", .distance_m = 0.5, .turn_deg = 180}, f, lim);
+        assert(r.ok and r.needs_confirmation); ++checks;                                       // big turn + a move: card
+        r = validate({.name = "move_relative"}, f, lim);
+        assert(not r.ok and r.reason.find("nothing to do") != std::string::npos); ++checks;
+        r = validate({.name = "move_relative", .distance_m = 0.004}, f, lim);
+        assert(not r.ok); ++checks;                                                            // rounds to 0 cm
+        r = validate({.name = "move_relative", .distance_m = std::nan("")}, f, lim);
+        assert(not r.ok); ++checks;
+        auto nc = f; nc.controller_present = false;
+        r = validate({.name = "move_relative", .distance_m = 0.3}, nc, lim);
+        assert(not r.ok and r.reason.find("controller") != std::string::npos); ++checks;
+        nc = f; nc.room.clear();
+        r = validate({.name = "move_relative", .distance_m = 0.3}, nc, lim);
+        assert(not r.ok); ++checks;
+        const GateLimits tight{.small_move_max_m = 0.2};
+        r = validate({.name = "move_relative", .distance_m = 0.3}, f, tight);
+        assert(r.ok and r.needs_confirmation); ++checks;                                       // limits come from config
+
+        d = parse_direct("move 0.5");
+        assert(d and d->name == "move_relative" and d->distance_m == 0.5 and d->turn_deg == 0); ++checks;
+        d = parse_direct("Move -0.3 m");
+        assert(d and d->distance_m == -0.3); ++checks;
+        d = parse_direct("turn 90");
+        assert(d and d->turn_deg == 90 and d->distance_m == 0); ++checks;
+        d = parse_direct("turn -45 then move 1");
+        assert(d and d->turn_deg == -45 and d->distance_m == 1); ++checks;
+        assert(not parse_direct("move a bit")); ++checks;                                      // a sentence: the model's
+        assert(not parse_direct("turn around")); ++checks;
+        assert(parse_number("0.25") == 0.25 and parse_number("+1") == 1.0 and not parse_number("1,5")); ++checks;
+        assert(explain_relative_command("move -0.30") == "move -0.30 (move backward 0.30 m)"); ++checks;
+        assert(explain_relative_command("turn 90 move 0.50") == "turn 90 move 0.50 (turn left 90 deg, then move forward 0.50 m)"); ++checks;
+    }
     std::println("test_gate: {} checks passed", checks);
     return 0;
 }

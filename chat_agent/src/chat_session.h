@@ -11,9 +11,15 @@
  *      from etc/system_prompt.md + interface rules + the STATE digest) and the last
  *      ~16 history messages (a tool call and its results are never split by the trim).
  *
- * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(). Each call goes through
- * CommandGate; a rejection returns to the model as a role:"tool" message with the reason. cross_door, which moves
- * the robot, only raises a card. If a tool round produced no text, one follow-up request (without tools) lets the
+ * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg).
+ * Each call goes through CommandGate; a rejection returns to the model as a role:"tool" message with the reason.
+ * cross_door and a LARGE move_relative only raise a card; a small move/turn is sent at once (command_gate.h).
+ * Read-only queries, answered here from the digest without the controller and without a card:
+ * find_objects(subtype?) and where_is(name) (object_facts.h).
+ *
+ * OBJECT CHANGES: births/removals of the current room's objects are diffed (by node id) against two baselines — one
+ * shown in the window at most every object_change_period_ms, one put into the NEXT request's STATE ("changes in
+ * objects since the last message"). The model is never called because of them. A room change resets both silently. If a tool round produced no text, one follow-up request (without tools) lets the
  * model say what happened.
  *
  * ROBOT STATUS: the controller mirrors the command's progress into chat_intention (state / bt_state); this polls it
@@ -24,6 +30,7 @@
  */
 
 #include <deque>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,6 +62,10 @@ struct SessionConfig
     int status_period_ms = 250;
     std::string log_dir = "logs";
     std::string system_prompt_path = "etc/system_prompt.md";   ///< robot description; empty/missing ⇒ built-in
+    GateLimits limits;                 ///< move_relative ranges + when it needs a card
+    double default_step_m = 0.3;       ///< "advance a bit"
+    int objects_nearest = 6;
+    int object_change_period_ms = 2000;
 };
 
 class ChatSession
@@ -89,6 +100,9 @@ private:
     bool send_command(const std::string& command, const char* origin);
 
     void tick_digest();
+    void track_object_changes();
+    /// find_objects / where_is → the tool-result text; "" if `name` is not a query tool.
+    QString answer_query(const QString& name, const QJsonObject& args);
     void tick_status();
     void ping_llm();
     void refresh_status_bar();
@@ -104,6 +118,14 @@ private:
     ChatLog log_;
     QObject ctx_;
     QTimer digest_timer_, status_timer_, ping_timer_;
+
+    // object change tracking (current room only; node id → fact)
+    std::map<std::uint64_t, ObjectFact> objects_now_, window_baseline_, turn_baseline_;
+    std::uint64_t objects_room_ = 0;
+    bool objects_init_ = false;
+    std::int64_t window_flush_ms_ = 0;
+    QString state_extra_;          ///< lines appended to the STATE for THIS request (changes, last move)
+    std::string last_relative_;    ///< last move/turn command this chat sent ("" = none)
 
     QString robot_description_;   ///< etc/system_prompt.md, read once; empty ⇒ the built-in fallback
     std::deque<QJsonObject> history_;

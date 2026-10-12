@@ -33,7 +33,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
@@ -124,5 +126,61 @@ private:
     Caps                                          caps_;
     std::chrono::steady_clock::time_point         last_connect_attempt_{};
 };
+
+// ─── WHICH PROVIDER DOOR IS OURS — pure, header-only so an offline harness can test it ───────────
+//
+// ★THE ASSOCIATION IS OURS (property 2 above). Given our door's aperture centre already carried into the
+// provider's WORLD frame (metres), pick the advertised door nearest to it. Every distance is returned so
+// the request log can say WHY a door was chosen (nearest, how far, and how far the runner-up was), which
+// is what was missing when every request silently went to one configured id.
+//
+// ⚠THE GATE IS A THRESHOLD, and it is kept deliberately: this decides an ACT IN THE WORLD (a door swings),
+// not a belief, so "none of the advertised doors" must be a possible answer, and nothing in the model gives
+// a probability for an unadvertised door. The value is set by geometry, not tuned: advertised doors here
+// are >= 2.5 m apart, and the error budget of a correct match is the localisation error (cm) + the aperture
+// fit (~0.1-0.2 m) + the provider's door origin vs the doorway centre (~0.1 m, measured door_3/19 ↔ DOOR_1).
+struct ProviderDoorMatch
+{
+    std::string id;                 // the provider's advertised id (a Webots DEF)
+    float dist_m      = 0.0f;       // our door -> that door, world frame
+    float runner_up_m = -1.0f;      // the next-nearest advertised door; -1 when there is only one
+    Eigen::Vector2f door_world_m = Eigen::Vector2f::Zero();
+};
+
+[[nodiscard]] inline std::optional<ProviderDoorMatch>
+nearest_provider_door(const std::vector<DoorActuator::Caps::Door>& doors, const Eigen::Vector2f& ours_world_m)
+{
+    if (doors.empty())
+        return std::nullopt;
+    std::vector<std::pair<float, std::size_t>> by_dist;
+    by_dist.reserve(doors.size());
+    for (std::size_t i = 0; i < doors.size(); ++i)
+        by_dist.emplace_back((doors[i].xy_mm / 1000.0f - ours_world_m).norm(), i);
+    std::ranges::sort(by_dist);
+    const auto& d = doors[by_dist.front().second];
+    return ProviderDoorMatch{d.id, by_dist.front().first,
+                             by_dist.size() > 1 ? by_dist[1].first : -1.0f, d.xy_mm / 1000.0f};
+}
+
+// ─── world←body FROM THE SIMULATOR'S WITNESS ─────────────────────────────────────────────────────
+// robot_concept writes robot_gt_x/y/angle on the "robot" node ONLY while the producer says simulated (the
+// Webots supervisor's own node pose), so on the real robot these attributes simply do not exist and this
+// path cannot be taken by accident.
+//   • x, y are METRES in the Webots world (the bridge's "metros → mm" comment is wrong; it sends metres).
+//   • the angle is NOT the Webots yaw. The bridge sends atan2(R01, R00) - pi/2 = -theta_w - pi/2, so
+//     theta_w = -(raw + pi/2). Verified 2026-10-12 on 18031 rows of room_concept's gt_error.csv: with this
+//     convention theta_w - est_theta has a circular mean of 0.14 deg against a POSITION-ONLY Procrustes fit
+//     of 0.24 deg, i.e. the robocomp body frame (x right, y forward) IS the Webots Shadow node frame
+//     rotated by theta_w. (ground_truth_log.h documents the same inverted sign from the other side.)
+// Returns world_T_body as a 4x4 (planar; z/roll/pitch are irrelevant to a door's floor position).
+[[nodiscard]] inline Eigen::Matrix4d world_T_body_from_sim_gt(double x_m, double y_m, double raw_angle)
+{
+    const double th = -(raw_angle + M_PI / 2.0);
+    Eigen::Matrix4d M = Eigen::Matrix4d::Identity();
+    M(0, 0) = std::cos(th); M(0, 1) = -std::sin(th);
+    M(1, 0) = std::sin(th); M(1, 1) =  std::cos(th);
+    M(0, 3) = x_m;          M(1, 3) = y_m;
+    return M;
+}
 
 }   // namespace rc

@@ -802,6 +802,10 @@ private:
 
 public:
     [[nodiscard]] const std::string &hold_reason() const { return hold_reason_; }
+    // For the relative-motion executor (controller_relative_motion.h): the SAME footprint predicate the planner
+    // plans with, and the room polygon it was rasterised from — both refreshed every cycle in sync_world_state.
+    [[nodiscard]] const rc::GridPlanner &grid_planner() const { return grid_planner_; }
+    [[nodiscard]] const ControllerPolygon &room_polygon() const { return room_polygon_; }
 private:
 
     RouteChangedCallback route_changed_cb_;

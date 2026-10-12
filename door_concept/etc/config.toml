@@ -282,7 +282,14 @@ AutonomousActuation = true
 # ✅The bridge CAN actuate: its [DoorControl] Doors list is enabled and resolves DOOR_0/DOOR_1 in
 # piso.wbt (see [DoorConcept].DoorControlEndpoint above). So the remaining obstacle to an autonomous
 # `open` is identity, not capability — name an id here, or donate one correspondence with a button press.
+# ★2026-10-12 FALLBACK ONLY. The provider door is now CHOSEN PER DOOR: the nearest advertised door to our
+# aperture in the provider's world frame, which comes from the sim witness (robot_gt_* ∘ body←room; sim only)
+# or else this room's learned registration (operator picks only, per room). This id is used ONLY when neither
+# resolves (logged as "⚠CONFIGURED FALLBACK"). Set to "DOOR_1" for the 10-11 crossing test, it sent EVERY door —
+# including room 1's second door (DOOR_0) — to DOOR_1. Root cause of the wrong world pose: `root` is the robot
+# frame (root→Shadow identity, Shadow→room edge), and the registration was poisoned by config-id requests.
 ActuationProviderId = ""
+ActuationMatchMaxM  = 1.0     # ⚠gate on an ACT: nearest advertised door must be within this (m); doors here are >= 2.5 m apart
 
 [Tracker]
 # Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.

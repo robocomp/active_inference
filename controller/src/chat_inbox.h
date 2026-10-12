@@ -36,6 +36,7 @@
 #include <dsr/api/dsr_api.h>
 
 #include "controller_door_passage.h"
+#include "controller_relative_motion.h"
 
 namespace rc
 {
@@ -55,10 +56,11 @@ public:
     /// What the last chat command asked for, kept by the caller so each cycle can mirror its progress.
     struct Tracked
     {
-        enum class Kind { None, Cross, Stop, Uncross, Rejected } kind = Kind::None;
+        enum class Kind { None, Cross, Stop, Uncross, Rejected, Motion } kind = Kind::None;
         std::uint64_t stamp = 0;   ///< the command's timestamp_agent, echoed on the edge
         std::string door;     ///< Cross: the door the passage was started through
         std::string reason;   ///< Rejected: why
+        std::uint64_t motion_id = 0;   ///< Motion: RelativeMotion::View::id of the run this command started
     };
 
     /// A new command since the last call, or nullopt. Never blocks; a missing node is "no command".
@@ -71,6 +73,10 @@ public:
     /// (state, bt_state) for a tracked command given the passage's view and whether the base is armed.
     [[nodiscard]] static std::pair<std::string, std::string> status_of(const Tracked& t, const DoorPassage::View& v,
                                                                       bool driving);
+    /// The same for a `move` / `turn` command: in_progress while it runs, completed / failed|<reason> / aborted.
+    /// bt_state = "<turning|moving|done|failed|cancelled>|<progress or reason>|driving=on|off".
+    [[nodiscard]] static std::pair<std::string, std::string> status_of_motion(const Tracked& t,
+                                                                             const RelativeMotion::View& v, bool driving);
 
 private:
     std::uint64_t node_id_ = 0;      ///< the node whose stamps we follow; a different id = a new channel

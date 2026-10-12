@@ -454,8 +454,7 @@ void SpecificWorker::initialize()
     // DoorControl client. The endpoint is config, not compiled in: the provider is whatever can move a
     // door here — a Webots supervisor today, home automation or a person tomorrow.
     door_actuator_.configure(cfg_.door_control_endpoint);
-    door_registration_.load("etc/door_world_registration.csv");
-    door_registration_.solve();
+    door_registration_.load("etc/door_world_registration.csv");   // solved per request, per room
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: a door
     // is ~2 m tall, so the VERTICAL axis binds well before the horizontal one, and the horizontal-only model
@@ -2978,6 +2977,16 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     const float d_min = rc::door::safe_standoff(ap.w, pg);
     const float d_max = std::max(pg.actuation_reach_m, d_min + 0.30f);   // a band, never empty
     st.safe_standoff_m = d_min;
+    // Stand in the MIDDLE of the actuation band: furthest from both failure modes (inside the leaf's arc on
+    // one side, too far to be about this door on the other) and so the most tolerant of the pose error that
+    // put us there. ★NOT ApproachStandoffM when that is inside the arc — a configured distance cannot know
+    // how wide this particular door is.
+    st.approach_standoff_m = 0.5f * (d_min + d_max);
+    // ★WHICH SIDE is a REGION question, not a half-plane one (live try25/28: the robot, inside room_1 but
+    // beyond the plane of door_24's partition, was sent to (1.84,2.78) — outside the room). Stand on the side
+    // whose stand-off is in the same region of the room polygon as the robot; see rc::door::approach_side.
+    st.approach_side = rc::door::approach_side(ap, robot, st.robot_side, st.approach_standoff_m,
+                                               fitter_->room_polygon());
     st.p_reach       = rc::door::prob_in_band(st.robot_range_m, d_min, d_max, sigma);
     st.p_reach_known = true;
     st.range_sigma_m = sigma;
@@ -3043,13 +3052,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         rc::pragmatic::Offer o;
         o.known = located;
         o.p     = 1.0f;
-        // Stand in the MIDDLE of the actuation band: furthest from both failure modes (inside the leaf's
-        // arc on one side, too far to be about this door on the other) and so the most tolerant of the
-        // pose error that put us there. ★NOT ApproachStandoffM when that is inside the arc — a configured
-        // distance cannot know how wide this particular door is.
-        const float d_stand = 0.5f * (st.safe_standoff_m
-                                      + std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f));
-        const auto pose = rc::door::front_pose(inst.aperture, st.robot_side, d_stand);
+        // Middle of the actuation band, on the side of the aperture in the robot's own region of the room
+        // (both computed in compute_interaction_state, so the log and the offer cannot disagree).
+        const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, st.approach_standoff_m);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f);
         o.contract = rc::door::approach_contract(pg);
@@ -3078,9 +3083,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         else
             o.why = std::format("P(in reach)={:.2f} × P(shut)={:.2f}{}", st.p_reach,
                                  1.0f - st.p_open, st.p_open_from_curve ? "" : " (phi from the belief, no curve)");
-        const float d_stand = 0.5f * (st.safe_standoff_m
-                                      + std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f));
-        const auto pose = rc::door::front_pose(inst.aperture, st.robot_side, d_stand);
+        const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, st.approach_standoff_m);
         // Orient policy: the (x,y) is informational — the consumer does not navigate, it turns to face
         // the leaf and waits for the world to change. The YAW is the part that acts.
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
@@ -3097,7 +3100,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.known = located and st.p_open_known;
         o.p     = st.p_open;
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
-            inst.cross_side_latched = st.robot_side;
+            inst.cross_side_latched = st.approach_side;   // the side we stand on ⇒ the far side is the target
         const auto pose = rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_cross;
@@ -3142,7 +3145,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         else
         {
             std::string why;
-            if (request_door_actuation(inst, /*open=*/true, pg.actuation_provider_id,
+            // No provider id from here: the request path CHOOSES the provider door per door (nearest by
+            // place); pg.actuation_provider_id is only its fallback when no frame resolves.
+            if (request_door_actuation(inst, /*open=*/true, /*provider_id=*/std::string{},
                                         "robot needs to pass through", why))
                 std::print("door_concept: [open] {} claimed → asked the provider to OPEN it "
                            "(request {} of this run)\n", inst.node_name, inst.actuation_requests);
@@ -3189,8 +3194,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         }
         std::print("door_concept: [cross] {} claimed from side {:+.2f} m — through-pose ({:.2f},{:.2f})\n",
                    inst.node_name, inst.cross_side0,
-                   rc::door::through_pose(inst.aperture, st.robot_side, pg.cross_standoff_m).x,
-                   rc::door::through_pose(inst.aperture, st.robot_side, pg.cross_standoff_m).y);
+                   rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m).x,
+                   rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m).y);
     }
     if (inst.aff_cross.consume_completion())
     {
@@ -3230,38 +3235,102 @@ bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open,
     const float yaw       = ap.yaw();
     const float width_m   = ap.w;
 
-    // world←room. ★THE FRAME IS CALLED `root` HERE, not `world`: asking for "world" returned nullopt,
-    // the old code fell back to identity, and ROOM coordinates went out labelled as world — 4 m from the
-    // provider's own door, which it correctly answered UnknownDoor to. That reads as a broken interface
-    // rather than a frame-name typo.
-    // ★PREFER THE LEARNED REGISTRATION over root←room. Measured on the door_3 ↔ DOOR_1 correspondence the
-    // DSR root is NOT the provider's world frame — they are 6.45 m apart and rotated ~90.3°, so root←room
-    // resolves fine and is simply the wrong transform. It is kept as a fallback for a deployment where
-    // the two ARE the same frame.
+    // ── world←room: WHERE IS OUR DOOR IN THE PROVIDER'S FRAME ─────────────────────────────────────────
+    // ★ROOT IS NOT A WORLD FRAME (root-caused 2026-10-12). The RT tree is root→Shadow (static identity)
+    // and Shadow→room_k (room_concept writes T_robot←room on that edge), so get_transformation_matrix(
+    // "root", room) is the ROBOT's pose inverse — a frame that moves with the robot. That is the "6.45 m
+    // and ~90° out" measured on door_3, and it is why a world pose quoted through root wandered by metres.
+    // It is no longer used.
+    // ★AND THE LEARNED REGISTRATION WAS POISONED. Every request that named the CONFIGURED id
+    // (ActuationProviderId = DOOR_1) recorded "this door ↔ DOOR_1" as an operator correspondence —
+    // including requests for the OTHER door — and pairs from different rooms' frames were fitted together.
+    // Live logs show 2-pair fits with 1.07-1.47 m residual being used anyway; door_19 went out at
+    // (-5268, 10327) mm against DOOR_1's true (-4769, 9380).
+    // Sources, best first:
+    //   1. the simulator's witness: world←body from robot_gt_* (sim only; absent on the real robot) ∘
+    //      body←room from the graph. Error = the localiser's error, centimetres, in ANY room.
+    //   2. the learned registration, but only pairs recorded IN THIS ROOM by an OPERATOR pick.
+    const std::string room_name = rc::room::current_room_frame(*G);
     Eigen::Matrix4d world_T_room = Eigen::Matrix4d::Identity();
     bool have_tf = false;
-    if (const auto reg = door_registration_.world_T_room(); reg.has_value())
-    { world_T_room = *reg; have_tf = true; }
-    else if (inner_eigen_)
-        for (const char* frame : {"root", "world"})
-            if (const auto m = inner_eigen_->get_transformation_matrix(frame, rc::room::current_room_frame(*G), 0); m.has_value())
-            { world_T_room = m.value().matrix(); have_tf = true; break; }
+    std::string tf_source;
+    if (inner_eigen_)
+        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+        {
+            const auto gx = G->get_attrib_by_name<robot_gt_x_att>(robots.front());
+            const auto gy = G->get_attrib_by_name<robot_gt_y_att>(robots.front());
+            const auto ga = G->get_attrib_by_name<robot_gt_angle_att>(robots.front());
+            if (gx.has_value() and gy.has_value() and ga.has_value())
+                if (const auto rtb = inner_eigen_->get_transformation_matrix(room_name, "body", 0); rtb.has_value())
+                {
+                    world_T_room = rc::world_T_body_from_sim_gt(gx.value(), gy.value(), ga.value())
+                                 * rtb.value().matrix().inverse();
+                    have_tf = true;
+                    tf_source = std::format("sim witness: robot_gt ({:.3f}, {:.3f}) m ∘ body←{}", gx.value(),
+                                            gy.value(), room_name);
+                }
+        }
+    if (not have_tf)
+        if (const auto& f = door_registration_.solve(room_name); f.valid)
+            if (const auto reg = door_registration_.world_T_room(); reg.has_value())
+            {
+                world_T_room = *reg;
+                have_tf = true;
+                tf_source = std::format("learned registration of {} ({} pair(s), residual {:.3f} m{})", room_name,
+                                        f.n_pairs, f.residual_m, f.provisional ? ", PROVISIONAL" : "");
+            }
 
-    // ★REFUSE LOCALLY rather than send coordinates we know are wrong. Only the PLACE path needs the
-    // transform: with an explicit provider id the pose is informational and a missing transform is not a
-    // reason to refuse. Without one, a request built on a missing transform can only be rejected — or,
-    // far worse, match SOME OTHER door within the provider's 400 mm radius and open that instead.
-    // Not asking is the safe failure, and it says why.
-    const bool by_place = provider_id.empty();
-    if (by_place and not have_tf)
+    // ── WHICH PROVIDER DOOR: operator pick > nearest by place > configured fallback ──────────────────
+    // ★A CONFIGURED ID NO LONGER OVERRIDES EVERY DOOR. It used to be passed as if an operator had picked
+    // it, so every door this agent opened — including the second door of room 1 — was sent to DOOR_1.
+    // Now the provider door is CHOSEN PER DOOR, by world position, and the choice is logged with its
+    // distance. The configured id is consulted only when there is no frame to match in at all.
+    const bool operator_pick = not provider_id.empty();
+    std::string chosen_id = provider_id;
+    std::string id_reason = operator_pick ? "operator pick (strip)" : "";
+    const Eigen::Vector2f ours_world = (world_T_room * Eigen::Vector4d(xy.x(), xy.y(), 0.0, 1.0))
+                                           .head<2>().cast<float>();
+    if (not operator_pick and have_tf)
     {
-        why = "matching by place needs a root←room transform, which does not resolve — "
-              "name a provider door id (DoorAffordance.ActuationProviderId, or the strip picker)";
-        return false;
+        if (door_actuator_.caps().doors.empty())
+            door_actuator_.refresh_caps();   // the strip UI normally refreshes these; a headless run may not have
+        if (const auto m = rc::nearest_provider_door(door_actuator_.caps().doors, ours_world); m.has_value())
+        {
+            if (m->dist_m > cfg_.pragmatic.actuation_match_max_m)
+            {
+                why = std::format("nearest advertised door {} is {:.2f} m from {} at world ({:.2f}, {:.2f}) m "
+                                  "(> DoorAffordance.ActuationMatchMaxM {:.2f}) — not asking to open some other "
+                                  "door [{}]", m->id, m->dist_m, inst.node_name, ours_world.x(), ours_world.y(),
+                                  cfg_.pragmatic.actuation_match_max_m, tf_source);
+                std::println("door_concept: [actuator] REFUSED locally: {}", why);
+                return false;
+            }
+            chosen_id = m->id;
+            id_reason = m->runner_up_m >= 0.0f
+                ? std::format("nearest by place: {:.2f} m (runner-up {:.2f} m)", m->dist_m, m->runner_up_m)
+                : std::format("nearest by place: {:.2f} m (only advertised door)", m->dist_m);
+        }
+        else
+            id_reason = "provider advertises no ids — it resolves by the pose sent";
     }
+    if (chosen_id.empty() and not have_tf)
+    {
+        if (cfg_.pragmatic.actuation_provider_id.empty())
+        {
+            why = std::format("no world←{} transform (no sim witness, no registration for this room) and no "
+                              "DoorAffordance.ActuationProviderId fallback — pick a provider door in the strip",
+                              room_name);
+            return false;
+        }
+        chosen_id = cfg_.pragmatic.actuation_provider_id;
+        id_reason = "⚠CONFIGURED FALLBACK (DoorAffordance.ActuationProviderId): no frame to match by place";
+    }
+    std::println("door_concept: [actuator] {} {} -> provider door '{}' — {}; our door at world ({:.3f}, {:.3f}) m "
+                 "[{}]", open ? "OPEN" : "CLOSE", inst.node_name, chosen_id.empty() ? "(by place)" : chosen_id,
+                 id_reason, ours_world.x(), ours_world.y(), have_tf ? tf_source : "no transform");
 
     door_pending_ = door_actuator_.request(inst.node_name, xy, yaw, width_m, open, world_T_room,
-                                            purpose, provider_id);
+                                            purpose, chosen_id);
     if (not door_pending_.has_value())
     { why = "no provider"; return false; }
     ++inst.actuation_requests;
@@ -3275,7 +3344,9 @@ bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open,
     if (door_pending_->settled)
     {
         const auto& st = door_pending_->state;
-        if (st.find("UnknownDoor") != std::string::npos or st.find("NotActuable") != std::string::npos)
+        // ★The state text is DoorActuator's refusal_text ("refused: unknown door" / "not actuable"); the
+        // CamelCase enum names never appear in it, so this latch could not fire until 2026-10-12.
+        if (st.find("unknown door") != std::string::npos or st.find("not actuable") != std::string::npos)
         {
             inst.actuation_refused = true;
             std::print("door_concept: [actuator] {} is NOT ACTUABLE by this provider ({}) — "
@@ -3288,15 +3359,18 @@ bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open,
     // produced as a side effect of pressing a button. Two such pairs pin the rigid transform outright,
     // which is what makes the autonomous (by place) path possible at all: a robot deciding on its own to
     // open a door has nobody to pick a name from a list.
-    if (not provider_id.empty() and not door_pending_->settled)
+    // ★ONLY AN OPERATOR PICK IS A CORRESPONDENCE. A configured fallback id, or one this agent chose itself,
+    // asserts nothing new — recording those is exactly how "door_21 ↔ DOOR_0" AND "door_21 ↔ DOOR_1" both
+    // ended up in the file. And the pair is a fact about THIS room's frame only (Pair::room).
+    if (operator_pick and not door_pending_->settled)
         for (const auto& d : door_actuator_.caps().doors)
             if (d.id == provider_id)
             {
                 // The pair carries BOTH yaws, so a one-pair fit can recover rotation and the result is
                 // identical after a restart instead of silently assuming none.
-                door_registration_.add({xy, d.xy_mm / 1000.0f, inst.node_name, d.id, yaw, d.angle},
+                door_registration_.add({xy, d.xy_mm / 1000.0f, inst.node_name, d.id, yaw, d.angle, room_name},
                                        "etc/door_world_registration.csv");
-                const auto& f = door_registration_.solve();
+                const auto& f = door_registration_.solve(room_name);
                 std::println("door_concept: [registration] {} pair(s) -> theta {:+.3f} rad "
                              "t ({:+.3f}, {:+.3f}) m, residual {:.3f} m{}",
                              f.n_pairs, f.theta, f.t.x(), f.t.y(), f.residual_m,

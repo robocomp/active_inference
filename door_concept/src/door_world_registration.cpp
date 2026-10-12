@@ -3,6 +3,7 @@
 #include <charconv>
 #include <optional>
 #include <cmath>
+#include <format>
 #include <fstream>
 #include <locale>
 #include <print>
@@ -36,6 +37,7 @@ void DoorWorldRegistration::load(const std::string& path)
     if (not f)
         return;
     std::string line;
+    int legacy = 0;
     std::getline(f, line);   // header
     while (std::getline(f, line))
     {
@@ -49,21 +51,27 @@ void DoorWorldRegistration::load(const std::string& path)
         if (not (a and b and c and d))
             continue;
         Pair pr{{*a, *b}, {*c, *d}, our, their};
-        std::string yr, yw;   // optional: absent in files written before the yaws were persisted
+        std::string yr, yw, room;   // optional: absent in files written before the yaws were persisted
         if (std::getline(ss, yr, ',') and std::getline(ss, yw, ','))
         {
             if (const auto e = parse_float(yr)) pr.yaw_room  = *e;
             if (const auto f = parse_float(yw)) pr.yaw_world = *f;
         }
+        // A pair with no room cannot be placed in any frame — see Pair::room. Dropped, and counted.
+        if (not std::getline(ss, room, ',') or room.empty())
+        { ++legacy; continue; }
+        pr.room = room;
         pairs_.push_back(pr);
     }
-    std::println("door_concept: [registration] loaded {} door correspondence(s) from {}",
-                 pairs_.size(), path);
+    std::println("door_concept: [registration] loaded {} door correspondence(s) from {}{}",
+                 pairs_.size(), path,
+                 legacy > 0 ? std::format(" — IGNORED {} legacy row(s) with no room (frame unknown)", legacy)
+                            : std::string{});
 }
 
 void DoorWorldRegistration::add(const Pair& p, const std::string& path)
 {
-    std::erase_if(pairs_, [&](const Pair& q){ return q.their_id == p.their_id; });
+    std::erase_if(pairs_, [&](const Pair& q){ return q.their_id == p.their_id and q.room == p.room; });
     pairs_.push_back(p);
 
     // Rewritten whole: the file is a handful of lines and a full rewrite cannot leave a stale duplicate
@@ -72,26 +80,31 @@ void DoorWorldRegistration::add(const Pair& p, const std::string& path)
     if (not f)
         return;
     f.imbue(std::locale::classic());   // never emit a comma decimal separator
-    f << "our_name,their_id,room_x,room_y,world_x,world_y,yaw_room,yaw_world\n";
+    f << "our_name,their_id,room_x,room_y,world_x,world_y,yaw_room,yaw_world,room\n";
     for (const auto& q : pairs_)
         f << q.our_name << ',' << q.their_id << ',' << q.room_m.x() << ',' << q.room_m.y() << ','
-          << q.world_m.x() << ',' << q.world_m.y() << ',' << q.yaw_room << ',' << q.yaw_world << '\n';
+          << q.world_m.x() << ',' << q.world_m.y() << ',' << q.yaw_room << ',' << q.yaw_world << ','
+          << q.room << '\n';
 }
 
-const DoorWorldRegistration::Fit& DoorWorldRegistration::solve()
+const DoorWorldRegistration::Fit& DoorWorldRegistration::solve(const std::string& room)
 {
     fit_ = Fit{};
-    fit_.n_pairs = static_cast<int>(pairs_.size());
-    if (pairs_.empty())
+    std::vector<Pair> mine;   // the fit sees THIS room's pairs only
+    for (const auto& q : pairs_)
+        if (q.room == room)
+            mine.push_back(q);
+    fit_.n_pairs = static_cast<int>(mine.size());
+    if (mine.empty())
         return fit_;
 
-    if (pairs_.size() == 1)
+    if (mine.size() == 1)
     {
         // ★PROVISIONAL. Position is pinned by the pair; rotation can only come from comparing the two
         // yaws, and the two sides do not necessarily mean the same thing by "the door's angle" — ours is
         // the aperture normal, the provider's is a Webots rotation field. Usable, flagged, and replaced
         // by a measured fit the moment a second door is identified.
-        const auto& p = pairs_.front();
+        const auto& p = mine.front();
         if (not std::isfinite(p.yaw_room) or not std::isfinite(p.yaw_world))
         {
             // No yaws recorded ⇒ rotation is unknown ⇒ there is NO usable transform. Assuming zero
@@ -114,12 +127,12 @@ const DoorWorldRegistration::Fit& DoorWorldRegistration::solve()
     // are metric, and letting it float would absorb a bad correspondence into a plausible-looking fit
     // instead of showing up as residual.
     Eigen::Vector2f pbar = Eigen::Vector2f::Zero(), qbar = Eigen::Vector2f::Zero();
-    for (const auto& q : pairs_) { pbar += q.room_m; qbar += q.world_m; }
-    pbar /= static_cast<float>(pairs_.size());
-    qbar /= static_cast<float>(pairs_.size());
+    for (const auto& q : mine) { pbar += q.room_m; qbar += q.world_m; }
+    pbar /= static_cast<float>(mine.size());
+    qbar /= static_cast<float>(mine.size());
 
     float a = 0.0f, b = 0.0f;
-    for (const auto& q : pairs_)
+    for (const auto& q : mine)
     {
         const Eigen::Vector2f dp = q.room_m - pbar, dq = q.world_m - qbar;
         a += dp.x() * dq.x() + dp.y() * dq.y();
@@ -134,13 +147,13 @@ const DoorWorldRegistration::Fit& DoorWorldRegistration::solve()
     // exactly) and says nothing — reported anyway, with n_pairs beside it, so nobody reads 0.000 as
     // confirmation. From 3 on it is a real consistency check, and a mis-identified door shows as metres.
     double acc = 0.0;
-    for (const auto& q : pairs_)
+    for (const auto& q : mine)
     {
         const Eigen::Vector2f Rp(c * q.room_m.x() - s * q.room_m.y(),
                                  s * q.room_m.x() + c * q.room_m.y());
         acc += (q.world_m - (Rp + fit_.t)).norm();
     }
-    fit_.residual_m = static_cast<float>(acc / pairs_.size());
+    fit_.residual_m = static_cast<float>(acc / mine.size());
     return fit_;
 }
 

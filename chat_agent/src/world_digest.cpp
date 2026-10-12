@@ -31,17 +31,7 @@ std::string aff_state(DSR::DSRGraph& G, const std::string& name)
     return "active";
 }
 
-// Body frame: x right, y FORWARD (the robot drives along +y). Bearing 0 = straight ahead, + = to the left.
-std::string bearing_words(double deg)
-{
-    const double a = std::abs(deg);
-    if (a <= 20.0) return "ahead";
-    if (a >= 150.0) return "behind";
-    const char* side = deg > 0 ? "left" : "right";
-    if (a <= 60.0) return std::format("ahead-{}", side);
-    if (a <= 120.0) return std::format("to the {}", side);
-    return std::format("behind-{}", side);
-}
+// bearing_words: object_facts.h (doors and objects say directions with the same words).
 
 std::string clock_now()
 {
@@ -52,8 +42,8 @@ std::string clock_now()
 }
 }   // namespace
 
-WorldDigest::WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame)
-    : G_(std::move(G)), robot_frame_(std::move(robot_frame)) {}
+WorldDigest::WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame, int objects_nearest)
+    : G_(std::move(G)), robot_frame_(std::move(robot_frame)), objects_nearest_(objects_nearest) {}
 
 Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention) const
 {
@@ -71,6 +61,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
     if (room_id != 0)
         if (const auto rn = G.get_node(room_id); rn.has_value()) room_name = rn->name();
     d.facts.room = room_name;
+    d.room_id = room_id;
     std::string others;
     for (const auto& r : G.get_nodes_by_type("room"))
     {
@@ -140,6 +131,43 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
     std::string rem;
     for (const auto& [rd, rr] : recalls) rem += (rem.empty() ? "" : "; ") + rr + " (behind " + rd + ")";
     s += std::format("remembered rooms (not in the live map, known from memory): {}\n", rem.empty() ? std::string("none") : rem);
+
+    // ── objects (object_facts.h): every concept agent's beliefs; only the current room's reach the STATE ──
+    const auto room_name_of = [&G](std::uint64_t rid) -> std::string
+    {
+        if (rid == 0) return {};
+        const auto rn = G.get_node(rid);
+        return rn.has_value() ? rn->name() : std::string{};
+    };
+    for (const char* type : {"object", "person"})
+        for (const auto& n : G.get_nodes_by_type(type))
+        {
+            const std::string& name = n.name();
+            if (name.starts_with("door") or name.starts_with("aff_")) continue;   // doors: own section
+            ObjectFact o{.id = n.id(), .name = name};
+            if (const auto st = G.get_attrib_by_name<object_subtype_att>(n); st.has_value() and not st->empty())
+                o.subtype = st.value();
+            else o.subtype = std::string(type) == "person" ? "person" : name.substr(0, name.find('_'));
+            if (o.subtype == "door") continue;
+            const std::uint64_t rid = rc::world::room_of(G, n.id());
+            o.room = room_name_of(rid);
+            o.in_current_room = room_id != 0 and rid == room_id;
+            if (o.in_current_room)
+                if (const auto T = inner.get_transformation_matrix(robot_frame_, name); T.has_value())
+                {
+                    const double x = T->translation().x(), y = T->translation().y();
+                    o.dist_m = std::hypot(x, y);
+                    o.bearing_deg = std::atan2(-x, y) * kRad2Deg;
+                }
+            if (const auto v = G.get_attrib_by_name<width_m_att>(n); v.has_value()) o.width_m = v.value();
+            if (const auto v = G.get_attrib_by_name<depth_m_att>(n); v.has_value()) o.depth_m = v.value();
+            if (const auto v = G.get_attrib_by_name<height_m_att>(n); v.has_value()) o.height_m = v.value();
+            d.objects.push_back(std::move(o));
+        }
+    if (room_id != 0)
+        for (const auto& n : G.get_nodes_by_type("obstacle"))
+            if (rc::world::room_of(G, n.id()) == room_id) ++d.n_obstacles;
+    s += objects_section(d.objects, objects_nearest_, d.n_obstacles);
 
     // ── the chat's own command ──
     if (intention.command.empty()) s += "last command sent from this chat: none\n";

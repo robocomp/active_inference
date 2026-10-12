@@ -144,11 +144,16 @@ struct DoorPragmaticCfg
     // is that it can, and the consumer's claim is the trigger. Left as a switch because the request is an
     // act in the world with a real cost when the provider is a PERSON (DoorActuator::Caps::requires_human).
     bool  autonomous_actuation = true;
-    // Which door the PROVIDER should move, by its own advertised id. Empty ⇒ resolve BY PLACE from the
-    // pose we send, which requires the room↔world registration to be solved (door_world_registration) —
-    // measured live, root←room is NOT that transform (6.45 m and ~90.3° out), so a by-place request
-    // without a solved registration is refused locally rather than sent to open some other door.
+    // ★FALLBACK ONLY (2026-10-12). The provider door is chosen PER DOOR: nearest advertised door to our
+    // aperture in the provider's world frame (sim witness robot_gt_*, else this room's learned
+    // registration). This id is used only when NO such frame resolves, and the request log says so. It
+    // used to be passed as if an operator had picked it, which sent every door's request to one id.
     std::string actuation_provider_id;
+    // Max distance (m, provider world frame) between our door and the nearest advertised door for the
+    // match to be accepted. ⚠A deliberate gate on an ACT (a door swings), not on a belief: "none of
+    // these" must be a possible answer. Set by geometry: advertised doors are >= 2.5 m apart; a correct
+    // match is off by localisation (cm) + aperture fit + provider origin vs doorway centre (~0.1-0.3 m).
+    float actuation_match_max_m = 1.0f;
 };
 
 struct DoorConfig

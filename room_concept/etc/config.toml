@@ -1331,7 +1331,7 @@ BoxCoverMaxRects = 24
 # utils/fleet_basic.toml): the room is learnt from the LiDAR, published from the first second as a START-UP
 # PROTO-ROOM ([StartupProto] below) and driven by the live layout explorer. Set "given" (and
 # [StartupProto] Enabled = false) to go back to the surveyed-layout fleet.
-MapMode = "estimate"
+MapMode = "given"  # 2026-10-11 door-crossing test: room 1 = the newest learnt start-room layout (given); rooms beyond a door are estimated. Back to "estimate" for estimation campaigns.
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0

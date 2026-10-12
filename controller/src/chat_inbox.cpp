@@ -58,6 +58,7 @@ std::pair<std::string, std::string> ChatInbox::status_of(const Tracked& t, const
         case K::Rejected: return {"failed|" + t.reason, std::format("-|{}|{}", t.reason, drv)};
         case K::Stop: return {"aborted", std::format("stopped|robot stopped by chat|{}", drv)};
         case K::Uncross: return {"aborted", std::format("idle|{}|{}", v.last_event, drv)};
+        case K::Motion: return {"", ""};   // status_of_motion
         case K::Cross:
         {
             const std::string bt = std::format("{}|{}|{}", DoorPassage::step_name(v.step), v.last_event, drv);
@@ -67,6 +68,28 @@ std::pair<std::string, std::string> ChatInbox::status_of(const Tracked& t, const
             if (v.step == DoorPassage::Step::Idle) return {"aborted", bt};
             return {"in_progress", bt};
         }
+    }
+    return {"", ""};
+}
+
+std::pair<std::string, std::string> ChatInbox::status_of_motion(const Tracked& t, const RelativeMotion::View& v,
+                                                               bool driving)
+{
+    const std::string drv = driving ? "driving=on" : "driving=off";
+    // While running, the event is the STEP (it changes only between steps), not the per-cycle progress: every
+    // change of bt_state is a DDS write here and a status line in the chat window.
+    const bool running = v.phase == RelativeMotion::Phase::Turning or v.phase == RelativeMotion::Phase::Moving;
+    const std::string bt = std::format("{}|{}|{}", RelativeMotion::phase_name(v.phase), running ? v.current : v.last_event, drv);
+    if (v.id != t.motion_id) return {"aborted", std::format("superseded|another move or turn was started|{}", drv)};
+    using P = RelativeMotion::Phase;
+    switch (v.phase)
+    {
+        case P::Turning:
+        case P::Moving: return {"in_progress", bt};
+        case P::Done: return {"completed", bt};
+        case P::Failed: return {"failed|" + v.last_event, bt};
+        case P::Cancelled: return {"aborted", bt};
+        case P::Idle: break;
     }
     return {"", ""};
 }

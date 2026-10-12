@@ -60,6 +60,7 @@
 #include "../../common/pragmatic_affordance/pragmatic_affordance.h"
 #include "door_config.h"      // rc::DoorPragmaticCfg — the tunables live with every other tunable
 #include "door_geometry.h"
+#include "door_standpoint.h"   // the poses + which side of the aperture to stand on
 
 namespace rc::door
 {
@@ -85,6 +86,11 @@ struct InteractionState
     bool  crossing_known = false;
 
     float robot_side = 0.0f;          // signed distance robot→aperture plane along the aperture normal (m)
+    // The side (±1 along the aperture normal) to STAND on: the side in the robot's own region of the room
+    // polygon (rc::door::approach_side). Equals sign(robot_side) in a convex room; differs when the robot is
+    // inside the room but beyond the plane of a door it can only reach from the other side. 0 = no pose.
+    float approach_side = 0.0f;
+    float approach_standoff_m = 0.0f; // middle of the actuation band [safe_standoff, reach] — the stand-off
     float robot_range_m = 0.0f;       // |robot - aperture centre| (m)
     float range_sigma_m = 0.0f;       // σ of that range (door Σ projected + pose chain, floored)
     float safe_standoff_m = 0.0f;     // near edge of the actuation band = the leaf's swept arc + the body
@@ -201,33 +207,6 @@ inline rc::affordance::Contract cross_contract(const DoorPragmaticCfg& p)
 }
 
 // ─── the poses ───────────────────────────────────────────────────────────────────────────────────
-
-// The stand-off pose in front of the aperture, on the side the robot is currently on, facing through it.
-// `side` is the sign of the robot's own signed distance along the aperture normal; a robot exactly in the
-// plane (side == 0) is treated as +1, which is arbitrary and harmless — it is already in the doorway.
-struct Pose2
-{
-    float x = 0.0f, y = 0.0f, yaw = 0.0f;
-};
-
-inline Pose2 front_pose(const Aperture& a, float side, float standoff_m)
-{
-    const float sgn = (side < 0.0f) ? -1.0f : +1.0f;
-    const Eigen::Vector2f n = a.across_u();
-    const Eigen::Vector2f c = a.centre_xy();
-    const Eigen::Vector2f p = c + sgn * standoff_m * n;
-    // Face the aperture: the heading is from the stand-off toward the centre, i.e. -sgn·n.
-    return {p.x(), p.y(), std::atan2(-sgn * n.y(), -sgn * n.x())};
-}
-
-// The target on the FAR side, and the heading that carries the robot through.
-inline Pose2 through_pose(const Aperture& a, float side, float standoff_m)
-{
-    const float sgn = (side < 0.0f) ? -1.0f : +1.0f;
-    const Eigen::Vector2f n = a.across_u();
-    const Eigen::Vector2f c = a.centre_xy();
-    const Eigen::Vector2f p = c - sgn * standoff_m * n;
-    return {p.x(), p.y(), std::atan2(-sgn * n.y(), -sgn * n.x())};
-}
+// Pose2, front_pose, through_pose and approach_side live in door_standpoint.h (pure geometry, tested offline).
 
 }  // namespace rc::door

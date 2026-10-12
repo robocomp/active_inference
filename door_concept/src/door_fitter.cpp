@@ -3,6 +3,7 @@
  */
 
 #include "door_fitter.h"
+#include "door_standpoint.h"
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -117,71 +118,19 @@ void DoorFitter::refresh_geometry(DoorInstance& inst)
     inst.model.set_state(ms);
 }
 
-// Associate q (room frame) to the nearest room-polygon wall. The polygon has chamfered corners / door
-// notches that split one physical wall into several short edges, so — like cabinet's build_wall_ref — the
-// nearest edge is COLLINEAR-MERGED into its logical wall (walk both ways while neighbours stay within ~3°):
-// near corner O = the merged run's start corner, along-wall unit u = (far−O)/|far−O|, len = the run length.
-// s is measured along u from O; the belief clamps the panel to [0, len].
-DoorFitter::WallFrame DoorFitter::nearest_wall(const Eigen::Vector2f& q) const
+// Associate the door to the room-polygon wall that holds its aperture: rc::door::associate_wall (door_standpoint.h)
+// — one vote per observed point for the wall its sightline from the camera leaves the room through (or, with no
+// usable camera, for its nearest wall), collinear-merged into the logical wall, normal INTO the room whatever the
+// polygon's winding. ★Why sightlines and not the centroid (2026-10-12): an open leaf at a corner lies in the line
+// of the PERPENDICULAR wall, so the centroid's nearest edge is that wall and the door is fitted as a closed one
+// in it (door_24: a swung leaf behind room_1's partition became a phantom door in the partition, and its
+// approach standpoint landed outside the room). See the header of door_standpoint.h.
+DoorFitter::WallFrame DoorFitter::associate_wall(std::span<const Eigen::Vector2f> pts_xy,
+                                                 const std::optional<Eigen::Vector2f>& cam_xy) const
 {
     WallFrame w;
-    const std::size_t n = room_polygon_.size();
-    if (n < 3)
-        return w;
-    float best = std::numeric_limits<float>::max();
-    std::size_t best_i = n;
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const Eigen::Vector2f& a = room_polygon_[i];
-        const Eigen::Vector2f  ab = room_polygon_[(i + 1) % n] - a;
-        const float len2 = ab.squaredNorm();
-        if (len2 < 1e-9f) continue;
-        const float t = std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f);
-        const float d2 = (q - (a + t * ab)).squaredNorm();
-        if (d2 < best) { best = d2; best_i = i; }
-    }
-    if (best_i >= n)
-        return w;
-
-    // Collinear-merge the argmin edge with its neighbours (dir within ~3°) into one logical wall.
-    constexpr float kColinCos = 0.99863f;   // cos(3°)
-    const auto edge_dir = [&](std::size_t i)
-    { return (room_polygon_[(i + 1) % n] - room_polygon_[i]).normalized(); };
-    const Eigen::Vector2f d0 = edge_dir(best_i);
-    std::size_t lo = best_i, hi = best_i;
-    for (std::size_t step = 0; step + 1 < n; ++step)   // walk backward while collinear
-    {
-        const std::size_t prev = (lo + n - 1) % n;
-        if (std::abs(edge_dir(prev).dot(d0)) < kColinCos) break;
-        lo = prev;
-    }
-    for (std::size_t step = 0; step + 1 < n; ++step)   // walk forward while collinear
-    {
-        const std::size_t nxt = (hi + 1) % n;
-        if (nxt == lo or std::abs(edge_dir(nxt).dot(d0)) < kColinCos) break;
-        hi = nxt;
-    }
-    const Eigen::Vector2f a   = room_polygon_[lo];
-    const Eigen::Vector2f far = room_polygon_[(hi + 1) % n];
-    const Eigen::Vector2f ab  = far - a;
-    const float len = ab.norm();
-    if (len < 1e-6f)
-        return w;
-    w.O = a; w.u = ab / len; w.len = len; w.ok = true;
-    // ★ THE WALL NORMAL POINTS INTO THE ROOM, WHATEVER THE POLYGON'S WINDING (2026-10-12). LeafState::swing is a
-    //   sign against n = left normal of u, and Openable.SwingDir = +1 means "opens into the room it is seen from"
-    //   only if that normal is inward — true for a CCW polygon, false for a CW one. Measured: room_1 (the given
-    //   32-vertex map) is CW, room_2 (estimated) CCW, so the same config put door_19's leaf in room 2 and the
-    //   LiDAR found P(passable) = 0 for a door the robot was driving through; its mirror inherited the same
-    //   wrong side. A CW polygon gets the edge traversed backwards: same segment, n inward.
-    double area2 = 0.0;
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const Eigen::Vector2f& p0 = room_polygon_[i];
-        const Eigen::Vector2f& p1 = room_polygon_[(i + 1) % n];
-        area2 += static_cast<double>(p0.x()) * p1.y() - static_cast<double>(p1.x()) * p0.y();
-    }
-    if (area2 < 0.0) { w.O = far; w.u = -w.u; }
+    if (const auto r = door::associate_wall(room_polygon_, pts_xy, cam_xy); r.ok)
+    { w.O = r.O; w.u = r.u; w.len = r.len; w.ok = true; }
     return w;
 }
 
@@ -492,7 +441,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
 {
     const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
 
-    // Lazy belief init: associate the door to the nearest room-polygon wall (fixes yaw / lateral / floor),
+    // Lazy belief init: associate the door to the room-polygon wall it was seen through (fixes yaw / lateral / floor),
     // then seed the along-wall offset s from the mask centroid. w,h start at their strong template priors;
     // the belief works in the wall frame θ=[s,w,h].
     if (not inst.ai2_initialized)
@@ -513,20 +462,30 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
     {
         const auto& m = inst.model.state();
         Eigen::Vector2f centroid_xy(m.cx, m.cy);
+        std::vector<Eigen::Vector2f> pts_xy;   // plan-view mask points: each votes for the wall it was seen through
         if (npts > 0)
         {
+            pts_xy.reserve(static_cast<std::size_t>(npts));
             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-            const auto scan = [&](const std::vector<Eigen::Vector3f>& v) { for (const auto& p : v) sum += p; };
+            const auto scan = [&](const std::vector<Eigen::Vector3f>& v)
+            { for (const auto& p : v) { sum += p; pts_xy.emplace_back(p.head<2>()); } };
             scan(observation.candidate_pts); scan(observation.residual_pts);
             centroid_xy = (sum / static_cast<float>(npts)).head<2>();
         }
+        else
+            pts_xy.push_back(centroid_xy);
+        // The camera the points were seen from (room frame, current pose; ALWAYS check the optional). Without
+        // it every point votes for its nearest wall — the old rule, which is what a missing pose can support.
+        std::optional<Eigen::Vector2f> cam_xy;
+        if (const auto M = room_T_zed_matrix(); M.has_value())
+            cam_xy = Eigen::Vector2f(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
         DoorBeliefParams p = make_belief_params();
         DoorBeliefState s0;
         s0.w = cfg_.door_prior_w_m;
         s0.h = cfg_.door_prior_h_m;
         // Wall association: the belief's centre = O + (s + w/2)·u, so seed s so the panel centre lands on the
         // detection centroid. Off the wall (no polygon) → keep the identity frame and s = along-x of centroid.
-        if (const WallFrame wf = nearest_wall(centroid_xy); wf.ok)
+        if (const WallFrame wf = associate_wall(pts_xy, cam_xy); wf.ok)
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
             s0.s = std::clamp((centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w, 0.0f, std::max(0.0f, wf.len - s0.w));

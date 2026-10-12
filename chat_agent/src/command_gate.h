@@ -10,13 +10,25 @@
  *                      than the one the user confirmed. Moves the robot ⇒ needs_confirmation.
  *   stop()             always accepted, never needs confirmation (stopping is the safe direction).
  *   cancel_passage()   "uncross"; controller present. Ends a passage, does not move the robot ⇒ no confirmation.
+ *   move_relative(distance_m, turn_deg)
+ *                      robot-relative step: turn first (+ = left), then drive straight (+ = forward, − = back).
+ *                      → controller grammar "turn <deg> move <m>" (either part omitted when 0). Controller and room
+ *                      known; |distance| ≤ max_move_m, |turn| ≤ 360, not both 0. The controller re-checks the swept
+ *                      footprint against its own occupancy grid and refuses with a reason (controller_relative_motion.h).
+ *                      CONFIRMATION (user decision 2026-10-12: small moves go straight through):
+ *                        · a PURE TURN never needs a card, whatever the angle — it rotates in place and translates
+ *                          nothing, and the controller refuses a turn whose swept body would touch anything;
+ *                        · with a translation, a card is shown iff |distance| > small_move_max_m (1.0) or
+ *                          |turn| > small_turn_max_deg (90): a long drive, or a drive towards where the robot was
+ *                          not facing when the person asked, is confirmed; "advance a bit" / "back up 30 cm" is not.
  *
  * A rejected call carries a reason, which goes back to the model as a role:"tool" message so it can tell the user.
  *
  * Plus the three deterministic fast paths that bypass the model entirely:
  *   is_stop(text)       ^(stop|para|detente|alto)\b   → `stop` immediately
  *   is_yes / is_no      a typed answer to a pending confirmation card (the model can never confirm)
- *   parse_direct(text)  text already in the controller grammar (cross door / cross door_N / uncross) → a card
+ *   parse_direct(text)  text already in the controller grammar (cross door / cross door_N / uncross /
+ *                       move <m> / turn <deg> / turn <deg> move <m>) → the same validation as the tool
  *
  * Pure std (no Qt, no DSR) — tested in tests/test_gate.cpp. Callers pass text already lower-cased (UTF-8 aware,
  * QString::toLower) and trimmed; ASCII is lower-cased again here so the tests need no Qt.
@@ -24,6 +36,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <cmath>
+#include <format>
 #include <optional>
 #include <regex>
 #include <string>
@@ -43,9 +58,30 @@ struct GateFacts
 
 struct ToolCall
 {
-    std::string name;   ///< cross_door | stop | cancel_passage
+    std::string name;   ///< cross_door | stop | cancel_passage | move_relative
     std::string door{};   ///< cross_door's argument ("nearest" or a door name)
+    double distance_m = 0.0;   ///< move_relative: + forward, − backward
+    double turn_deg = 0.0;     ///< move_relative: + left (CCW), − right; executed BEFORE the distance
 };
+
+/// [Chat] limits for move_relative (etc/config.toml).
+struct GateLimits
+{
+    double small_move_max_m = 1.0;     ///< |distance| up to this goes without a card
+    double small_turn_max_deg = 90.0;  ///< a turn COMBINED with a move goes without a card up to this
+    double max_move_m = 3.0;           ///< longer is refused (the controller's own cap is 3 m)
+};
+
+/// "turn left 90 deg, then move forward 0.30 m"
+inline std::string describe_relative(double distance_m, double turn_deg)
+{
+    std::string s;
+    if (turn_deg != 0.0) s = std::format("turn {} {:.0f} deg", turn_deg > 0 ? "left" : "right", std::abs(turn_deg));
+    if (distance_m != 0.0)
+        s += std::format("{}move {} {:.2f} m", s.empty() ? "" : ", then ", distance_m > 0 ? "forward" : "backward",
+                         std::abs(distance_m));
+    return s;
+}
 
 struct GateResult
 {
@@ -65,9 +101,35 @@ inline std::string ascii_lower_trim(std::string s)
     return s.substr(a, b - a + 1);
 }
 
-inline GateResult validate(const ToolCall& call, const GateFacts& f)
+inline GateResult validate(const ToolCall& call, const GateFacts& f, const GateLimits& lim = {})
 {
     GateResult r;
+    if (call.name == "move_relative")
+    {
+        if (not f.controller_present) { r.reason = "the controller is not running, so the robot cannot move"; return r; }
+        if (f.room.empty()) { r.reason = "the current room is not known yet, so the way cannot be checked"; return r; }
+        if (not std::isfinite(call.distance_m) or not std::isfinite(call.turn_deg))
+        { r.reason = "distance and angle must be numbers"; return r; }
+        // The grammar's resolution: whole degrees, centimetres.
+        const double turn = std::round(call.turn_deg);
+        const double dist = std::round(call.distance_m * 100.0) / 100.0;
+        if (std::abs(dist) > lim.max_move_m)
+        {
+            r.reason = std::format("{:.2f} m is more than a relative step (at most {:.1f} m at a time)", std::abs(dist),
+                                   lim.max_move_m);
+            return r;
+        }
+        if (std::abs(turn) > 360.0) { r.reason = "a turn of more than 360 degrees makes no sense"; return r; }
+        if (turn == 0.0 and dist == 0.0) { r.reason = "nothing to do: distance and angle are both zero"; return r; }
+        std::string cmd;
+        if (turn != 0.0) cmd = std::format("turn {:.0f}", turn);
+        if (dist != 0.0) cmd += std::format("{}move {:.2f}", cmd.empty() ? "" : " ", dist);
+        r.ok = true;
+        r.command = cmd;
+        r.summary = describe_relative(dist, turn);
+        r.needs_confirmation = dist != 0.0 and (std::abs(dist) > lim.small_move_max_m or std::abs(turn) > lim.small_turn_max_deg);
+        return r;
+    }
     if (call.name == "stop")
     {
         r.ok = true;
@@ -93,6 +155,15 @@ inline GateResult validate(const ToolCall& call, const GateFacts& f)
         {
             if (not f.nearest_door.has_value())
             { r.reason = "no door of room '" + f.room + "' is known, so there is no nearest door"; return r; }
+            // Same rule as the controller's "cross door": an unnamed door is only unambiguous in a one-door room.
+            if (f.doors.size() > 1)
+            {
+                std::string known;
+                for (const auto& d : f.doors) known += (known.empty() ? "" : ", ") + d;
+                r.reason = "room '" + f.room + "' has " + std::to_string(f.doors.size()) + " doors (" + known +
+                           "); ask the person which one";
+                return r;
+            }
             door = *f.nearest_door;
         }
         if (std::ranges::find(f.doors, door) == f.doors.end())
@@ -132,10 +203,51 @@ inline bool is_no(const std::string& text)
     return std::regex_match(ascii_lower_trim(text), re);
 }
 
+/// Locale-proof number (CLAUDE.md: never strtod/stod under es_ES).
+inline std::optional<double> parse_number(const std::string& s)
+{
+    const char* a = s.data();
+    const char* b = s.data() + s.size();
+    if (a != b and *a == '+') ++a;
+    double v = 0.0;
+    const auto [p, ec] = std::from_chars(a, b, v);
+    if (ec != std::errc{} or p != b) return std::nullopt;
+    return v;
+}
+
+inline std::optional<ToolCall> parse_direct(const std::string& text);
+
+/// "move -0.30" → "move -0.30 (move backward 0.30 m)" — the STATE's last-move line, so "a bit more" keeps the sign.
+inline std::string explain_relative_command(const std::string& command)
+{
+    const auto c = parse_direct(command);
+    if (not c.has_value() or c->name != "move_relative") return command;
+    return command + " (" + describe_relative(c->distance_m, c->turn_deg) + ")";
+}
+
 /// Text already in the controller's grammar. English plus the obvious Spanish phrasing.
 inline std::optional<ToolCall> parse_direct(const std::string& text)
 {
     const std::string t = ascii_lower_trim(text);
+    // move <m> | turn <deg> | turn <deg> [then|and] move <m> — exactly the controller's grammar, nothing looser:
+    // "move a bit" is a sentence for the model, not a command.
+    static const std::regex move_re(R"(^(?:move|advance) ([+-]?[0-9]*\.?[0-9]+) ?(?:m|metres|meters)?$)");
+    static const std::regex turn_re(R"(^(?:turn|rotate) ([+-]?[0-9]*\.?[0-9]+) ?(?:deg|degrees)?$)");
+    static const std::regex turn_move_re(
+        R"(^(?:turn|rotate) ([+-]?[0-9]*\.?[0-9]+) ?(?:deg|degrees)?,?(?: then| and)? (?:move|advance) ([+-]?[0-9]*\.?[0-9]+) ?(?:m|metres|meters)?$)");
+    {
+        std::smatch mm;
+        if (std::regex_match(t, mm, move_re))
+            if (const auto d = parse_number(mm[1].str())) return ToolCall{.name = "move_relative", .distance_m = *d};
+        if (std::regex_match(t, mm, turn_re))
+            if (const auto a = parse_number(mm[1].str())) return ToolCall{.name = "move_relative", .turn_deg = *a};
+        if (std::regex_match(t, mm, turn_move_re))
+        {
+            const auto a = parse_number(mm[1].str());
+            const auto d = parse_number(mm[2].str());
+            if (a and d) return ToolCall{.name = "move_relative", .distance_m = *d, .turn_deg = *a};
+        }
+    }
     static const std::regex cross_re(R"(^(cross|cruza|atraviesa)( the| la| a)? (door|puerta)$)");
     static const std::regex cross_n_re(R"(^(cross|cruza|atraviesa)( the| la)? (door_[0-9]+)$)");
     static const std::regex uncross_re(R"(^(uncross|cancel passage|cancel crossing)$)");

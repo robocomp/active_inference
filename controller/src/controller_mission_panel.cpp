@@ -65,9 +65,13 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     command_->setInsertPolicy(QComboBox::NoInsert);
     command_->setMinimumWidth(180);
     command_->addItem(QStringLiteral("cross door"));
+    command_->addItem(QStringLiteral("move 0.3"));
+    command_->addItem(QStringLiteral("turn 90"));
     command_->setToolTip(QStringLiteral("Type a mission and press Enter (or Send).\n"
-                                        "cross door — go through the nearest door of this room\n"
-                                        "cross door_N — go through that door"));
+                                        "cross door — go through the door of this room (only if it has one)\n"
+                                        "cross door_N — go through that door\n"
+                                        "move <m> — drive straight, + forward / - backward (max 3 m)\n"
+                                        "turn <deg> — rotate in place, + left / - right; 'turn 90 move 0.5' chains"));
     row->addWidget(command_);
     command_send_ = new QPushButton(QStringLiteral("Send"), frame);
     row->addWidget(command_send_);

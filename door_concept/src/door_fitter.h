@@ -27,6 +27,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -257,10 +258,11 @@ public:
     bool point_in_room(const Eigen::Vector2f& q, float margin_m = 0.0f) const;
 
     // Wall frame a door is anchored to: near corner O and along-wall unit u (room frame). A door lives IN a
-    // wall, so its belief works in this frame (θ=[s,w,h]); the fitter associates the door to the nearest
-    // room-polygon wall at birth and sets it on the belief. Mirrors cabinet_concept's build_wall_ref.
+    // wall, so its belief works in this frame (θ=[s,w,h]); the fitter associates the door to the
+    // room-polygon wall it was SEEN THROUGH at birth (door_standpoint.h associate_wall) and sets it on the belief.
     struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f; };
-    WallFrame nearest_wall(const Eigen::Vector2f& q) const;
+    // The wall the observed points were SEEN THROUGH from cam_xy (nearest wall per point without a camera).
+    WallFrame associate_wall(std::span<const Eigen::Vector2f> pts_xy, const std::optional<Eigen::Vector2f>& cam_xy) const;
     bool should_log(const DoorInstance& inst) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
