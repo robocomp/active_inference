@@ -913,8 +913,28 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     const auto polygon   = room_concept_->nominal_room_polygon();
     rc::crossing::Crossing best;
     const rc::DoorAperture* best_ap = nullptr;
+    // ★ ONLY THIS ROOM'S DOORS CAN TAKE THE ROBOT OUT OF IT (2026-10-12). Every door resolves into this frame through
+    //   root, including those of the room just left. try19: room_1 was RE-ENTERED through door_33 (recall, promoted at
+    //   once, so no proto blocks this path) and 100 ms later door_33 — still room_2's, the robot still in its doorway —
+    //   "crossed" again and birthed room_3 in a fresh frame. A door belongs to the room its RT chain hangs from.
+    const auto room_of = [this](std::uint64_t id) -> std::uint64_t
+    {
+        for (int hop = 0; hop < 8 and id != 0; ++hop)
+        {
+            const auto n = G_->get_node(id);
+            if (not n.has_value()) return 0;
+            if (n->type() == "room") return id;
+            std::uint64_t up = 0;
+            for (const auto& e : G_->get_edges_to_id(id))
+                if (e.type() == "RT") { up = e.from(); break; }
+            id = up;
+        }
+        return 0;
+    };
     for (const auto& ap : apertures)
-        if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body); c.valid and c.p_cross > best.p_cross)
+        if (room_of(ap.id) != dsr_room_id_)
+            continue;
+        else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body); c.valid and c.p_cross > best.p_cross)
         {
             best = c;
             best_ap = &ap;
@@ -965,7 +985,17 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
                 k = std::max(k, v);
         }
     ++k;
-    const std::string name = "room_" + std::to_string(k);
+    std::string name = "room_" + std::to_string(k);
+    // ★ A REMEMBERED ROOM KEEPS ITS NAME (2026-10-12, return to room 1). ltsm_agent posts, under each door whose other
+    //   side it remembers, a recall of that room; crossing such a door re-creates THAT room (same name, same frame,
+    //   remembered outline) instead of surveying a new one. Only if the name is free in the live graph.
+    const auto recall = find_recall(*best_ap);
+    if (recall.has_value())
+    {
+        bool taken = false;
+        for (const auto& r : G_->get_nodes_by_type("room")) taken = taken or r.name() == recall->name;
+        if (not taken and recall->room_index > 0) { name = recall->name; k = recall->room_index; }
+    }
 
     DSR::Node proto = DSR::Node::create<room_node_type>(name);
     G_->add_or_modify_attrib_local<room_id_att>(proto, k);
@@ -1017,7 +1047,8 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //   learnt the same way (2026-10-11). The branch below is kept only for a fleet without the start-up survey.
     if (params_->STARTUP_PROTO_ENABLED)
     {
-        rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross);
+        rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross,
+                             recall.has_value() and recall->name == name ? recall : std::nullopt);
         return;
     }
     // 2. From here the proto-room is the primary child (see write_robot_room_rt).
@@ -1393,8 +1424,70 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
     return true;
 }
 
+std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::DoorAperture& ap) const
+{
+    if (ap.id == 0) return std::nullopt;
+    for (const auto& n : G_->get_nodes_by_type("metaconcept"))
+    {
+        if (G_->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) != "room_recall") continue;
+        if (G_->get_attrib_by_name<parent_att>(n).value_or(0) != ap.id) continue;
+        const auto e  = G_->get_edge(ap.id, n.id(), "RT");
+        const auto px = G_->get_attrib_by_name<delimiting_polygon_x_att>(n);
+        const auto py = G_->get_attrib_by_name<delimiting_polygon_y_att>(n);
+        if (not e.has_value() or not px.has_value() or not py.has_value()) continue;
+        const auto t = G_->get_attrib_by_name<rt_translation_att>(e.value());
+        const auto r = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+        if (not t.has_value() or not r.has_value() or t->get().size() < 2 or r->get().size() < 3) continue;
+        const auto& xs = px->get(); const auto& ys = py->get();
+        if (xs.size() < 3 or xs.size() != ys.size()) continue;
+        Recall rc_;
+        rc_.name = n.name().starts_with("recall_") ? n.name().substr(7) : n.name();
+        rc_.room_index = static_cast<std::uint64_t>(G_->get_attrib_by_name<room_id_att>(n).value_or(0));
+        for (std::size_t i = 0; i < xs.size(); ++i) rc_.poly_pub.emplace_back(xs[i], ys[i]);
+        // door <- recalled room, planar part of the RT edge (yaw from the rotated x axis, robust to Euler aliasing).
+        const auto& rv = r->get();
+        const Eigen::Matrix3f R = (Eigen::AngleAxisf(rv[2], Eigen::Vector3f::UnitZ()) *
+                                   Eigen::AngleAxisf(rv[1], Eigen::Vector3f::UnitY()) *
+                                   Eigen::AngleAxisf(rv[0], Eigen::Vector3f::UnitX())).toRotationMatrix();
+        Eigen::Affine2f T_door_recall = Eigen::Affine2f::Identity();
+        T_door_recall.linear() = Eigen::Rotation2Df(std::atan2(R(1, 0), R(0, 0))).toRotationMatrix();
+        T_door_recall.translation() = Eigen::Vector2f(t->get()[0], t->get()[1]);
+        // The door node's frame in the INTERNAL one, from the aperture itself: x = a→b (the node's own x axis,
+        // door_apertures.cpp), origin = the aperture centre, y = z × x.
+        const Eigen::Vector2f u = (ap.b - ap.a).normalized();
+        Eigen::Affine2f T_int_door = Eigen::Affine2f::Identity();
+        T_int_door.linear().col(0) = u;
+        T_int_door.linear().col(1) = Eigen::Vector2f(-u.y(), u.x());
+        T_int_door.translation() = 0.5f * (ap.a + ap.b);
+        rc_.T_int_recall = T_int_door * T_door_recall;
+        // ★ THE REMEMBERED ROOM IS ON THE OTHER SIDE OF THE DOOR (2026-10-12). The recall's transform is relative to
+        //   the door FACE as seen from the remembered room, and door_concept orients a door's frame from the room
+        //   that fits it (+y into that room) — so the face we cross through may be the same doorway turned by π.
+        //   try22: room_1 re-entered 172° rotated, the robot estimated on room_2's side of the door. Rooms do not
+        //   overlap: if the recalled outline lands on THIS room's side of the aperture, the face is the turned one.
+        if (const auto here = room_concept_->nominal_room_polygon(); here.size() >= 3)
+        {
+            const auto centroid = [](const std::vector<Eigen::Vector2f>& P)
+            { Eigen::Vector2f c = Eigen::Vector2f::Zero(); for (const auto& q : P) c += q; return Eigen::Vector2f(c / static_cast<float>(P.size())); };
+            const Eigen::Vector2f n = T_int_door.linear().col(1), o = T_int_door.translation();
+            const Eigen::Vector2f c_here = centroid(here);
+            const Eigen::Vector2f c_rec  = rc_.T_int_recall * centroid(rc_.poly_pub);
+            if (n.dot(c_here - o) * n.dot(c_rec - o) > 0.f)
+            {
+                Eigen::Affine2f flip = Eigen::Affine2f::Identity();
+                flip.linear() = Eigen::Rotation2Df(static_cast<float>(M_PI)).toRotationMatrix();
+                rc_.T_int_recall = T_int_door * flip * T_door_recall;
+                qInfo().noquote() << QString("[room][recall] %1: the door face is the turned one (recalled outline fell on "
+                                             "this room's side) — rotated π about the aperture").arg(QString::fromStdString(rc_.name));
+            }
+        }
+        return rc_;
+    }
+    return std::nullopt;
+}
+
 void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name,
-                                          const std::string& door, float p_cross)
+                                          const std::string& door, float p_cross, const std::optional<Recall>& recall)
 {
     // The proto frame (the crossed aperture: x along it, +y into the new room) becomes the new room's PUBLISHED frame,
     // exactly as the robot's initial pose was the first room's. T_room_proto_ is that frame in the internal one.
@@ -1412,7 +1505,28 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     if (const auto left = G_->get_node(left_id); left.has_value())
         for (const auto& e : G_->get_node_edges_by_type(left.value(), "has_intention"))
             G_->delete_edge(left_id, e.to(), "has_intention");
-    const Eigen::Affine2f T_pub_int = T_room_proto_.inverse();
+    // A remembered room comes back in ITS OWN frame (the one memory holds), placed through the crossed door.
+    const Eigen::Affine2f T_pub_int = recall.has_value() ? recall->T_int_recall.inverse() : T_room_proto_.inverse();
+    std::vector<Eigen::Vector2f> recall_int;
+    if (recall.has_value())
+    {
+        for (const auto& v : recall->poly_pub) recall_int.push_back(recall->T_int_recall * v);
+        // Re-entering a room this agent left: its outline is NOT excluded space any more. A left outline whose
+        // centroid lies inside the recalled one is this same room (geometric identity, not a tolerance).
+        std::erase_if(left_polys_int_, [&](const std::vector<Eigen::Vector2f>& poly)
+        {
+            Eigen::Vector2f c = Eigen::Vector2f::Zero();
+            for (const auto& v : poly) c += v;
+            c /= static_cast<float>(std::max<std::size_t>(1, poly.size()));
+            bool in = false;
+            for (std::size_t i = 0, j = recall_int.size() - 1; i < recall_int.size(); j = i++)
+                if (((recall_int[i].y() > c.y()) != (recall_int[j].y() > c.y())) and
+                    (c.x() < (recall_int[j].x() - recall_int[i].x()) * (c.y() - recall_int[i].y()) /
+                                 (recall_int[j].y() - recall_int[i].y()) + recall_int[i].x()))
+                    in = not in;
+            return in;
+        });
+    }
     proto_room_id_   = 0;          // not a crossing proto any more: the agent's own room, on the start-up path
     room_rt_retired_ = false;      // the RT goes to dsr_room_id_ (the new room) through the frozen-gauge branch
     // The estimator first: off the old room's given layout and back to plain SLAM on the SAME scan map (the pose stays
@@ -1426,6 +1540,24 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
                                  "as promoted (RT retired, polygon and walls untouched).")
                              .arg(QString::fromStdString(new_name)).arg(QString::fromStdString(door))
                              .arg(new_room_id).arg(left_id);
+
+    // ── RE-ENTRY: THE REMEMBERED OUTLINE IS THE HYPOTHESIS ─────────────────────────────────────────────────────────
+    // Adopted as the GIVEN room at once (the same transition a promotion makes): the pose is solved against its SDF
+    // from the next frame, which is what tests it — a wrong recall shows as a misfit the localiser cannot explain.
+    // ⚠ v1: no automatic fall-back to a survey on a misfit yet.
+    if (recall.has_value() and recall_int.size() >= 3)
+    {
+        room_concept_->set_map_layout(recall_int);
+        room_concept_->adopt_map_layout_as_given();
+        std::string reason;
+        promote_startup_proto(reason);
+        startup_event_ = "recalled";
+        qInfo().noquote() << QString("[room][recall] %1 RE-ENTERED through %2: remembered outline (%3 vertices) adopted in "
+                                     "its own frame (promotion: %4) — %5")
+                                 .arg(QString::fromStdString(new_name)).arg(QString::fromStdString(door))
+                                 .arg(recall->poly_pub.size()).arg(QString::fromStdString(reason))
+                                 .arg("localising against it, not surveying");
+    }
 }
 
 float RoomSceneGraph::startup_erode_m() const

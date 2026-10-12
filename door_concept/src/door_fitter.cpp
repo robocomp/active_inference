@@ -168,6 +168,20 @@ DoorFitter::WallFrame DoorFitter::nearest_wall(const Eigen::Vector2f& q) const
     if (len < 1e-6f)
         return w;
     w.O = a; w.u = ab / len; w.len = len; w.ok = true;
+    // ★ THE WALL NORMAL POINTS INTO THE ROOM, WHATEVER THE POLYGON'S WINDING (2026-10-12). LeafState::swing is a
+    //   sign against n = left normal of u, and Openable.SwingDir = +1 means "opens into the room it is seen from"
+    //   only if that normal is inward — true for a CCW polygon, false for a CW one. Measured: room_1 (the given
+    //   32-vertex map) is CW, room_2 (estimated) CCW, so the same config put door_19's leaf in room 2 and the
+    //   LiDAR found P(passable) = 0 for a door the robot was driving through; its mirror inherited the same
+    //   wrong side. A CW polygon gets the edge traversed backwards: same segment, n inward.
+    double area2 = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& p0 = room_polygon_[i];
+        const Eigen::Vector2f& p1 = room_polygon_[(i + 1) % n];
+        area2 += static_cast<double>(p0.x()) * p1.y() - static_cast<double>(p1.x()) * p0.y();
+    }
+    if (area2 < 0.0) { w.O = far; w.u = -w.u; }
     return w;
 }
 
@@ -519,6 +533,22 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         }
         else
             s0.s = centroid_xy.x() - 0.5f * s0.w;
+        if (inst.leaf_side_hint.has_value())
+        {
+            // The hinge is the aperture edge nearer the remembered hinge point; the swing is the side of THIS wall the
+            // remembered opening direction points to. Both follow from geometry, so a reversed wall frame flips them.
+            const auto& [hinge_pt, open_dir] = *inst.leaf_side_hint;
+            const Eigen::Vector2f near_edge = p.wall_O + s0.s * p.wall_u;
+            const Eigen::Vector2f far_edge  = near_edge + s0.w * p.wall_u;
+            const Eigen::Vector2f n(-p.wall_u.y(), p.wall_u.x());
+            p.leaf.hinge = (hinge_pt - near_edge).norm() <= (hinge_pt - far_edge).norm() ? door::HingeSide::Near
+                                                                                           : door::HingeSide::Far;
+            p.leaf.swing = n.dot(open_dir) >= 0.0f ? +1.0f : -1.0f;
+            std::print("door_concept: [{}] leaf side inherited from the other room: hinge {} swing {:+.0f} (opens {} this room)\n",
+                       inst.node_name, p.leaf.hinge == door::HingeSide::Near ? "near" : "far", p.leaf.swing,
+                       p.leaf.swing > 0.0f ? "INTO" : "OUT OF");
+            inst.leaf_side_hint.reset();
+        }
         inst.ai2_belief = DoorBelief(s0, p);
         inst.ai2_initialized = true;
     }
@@ -543,6 +573,14 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         }
         inst.last_belief_touch = now;
         inst.dbg_gate_fresh = false;   // no mask reached the fit ⇒ the gate flags below are STALE this cycle
+        // ★THE LEAF ANGLE IS A LIDAR QUANTITY; A MISSING CAMERA MASK MUST NOT FREEZE IT (2026-10-12).
+        // estimate_phi() has had no camera precondition since 2026-09-14, but it is only reached through
+        // refresh_geometry(), and this early return skipped that — so a door the detector stopped labelling
+        // kept its last phi, and its last phi_curve, for ever. Live try15: the crossed door's mirror door_29
+        // lost its mask at 10:23:59, sat at phi = 2.09 rad through a manual CLOSE and a re-OPEN, and published
+        // door_open_prob = 0 from a curve nobody had refreshed. The aperture belief still ages (above) and is
+        // not re-fitted; only the articulated coordinate is re-estimated, from where the rays stop.
+        refresh_geometry(inst);
         compute_projected_roi(inst);
         return inst.dbg_energy;   // HOLD last FE — an aged cycle took no measurement (no new energy)
     }

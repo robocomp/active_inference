@@ -31,6 +31,7 @@
 #include <genericworker.h>
 
 #include "room_eviction.h"
+#include "room_recall.h"
 #include "memory_store.h"
 #include "passage_harvest.h"
 #include "passage_live.h"
@@ -138,6 +139,8 @@ private:
 	// CSV; the Betas fold into the passage node when one exists to carry them.
 	std::unique_ptr<ltsm::PassageHarvest> passages;
 
+	/// Rooms remembered behind live doors, posted for room_concept (room_recall.h). Armed with eviction.
+	std::unique_ptr<ltsm::RoomRecall> recall_;
 	/// Startup seed of long-term memory; retried from compute() until room_concept has published a room.
 	void seed_memory();
 	bool seeded_ = false;

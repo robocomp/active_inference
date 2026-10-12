@@ -247,6 +247,14 @@ private:
     {
         std::uint64_t node_id   = 0;
         std::uint64_t source_id = 0;
+        // The source's leaf, taken while the source is alive (ltsm deletes it with its room BEFORE we adopt the
+        // mirror). Hinge point + opening direction in the DOOR NODE's own frame, which source and mirror share.
+        bool            has_leaf = false;
+        Eigen::Vector2f hinge_local{0.f, 0.f};
+        Eigen::Vector2f open_local{0.f, 0.f};
+        float           phi_est = 0.f, phi_sigma = 0.f;
+        std::vector<std::pair<float, float>> phi_curve;
+        int             matched_frames = 0;
     };
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)

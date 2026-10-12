@@ -149,6 +149,13 @@ public:
     [[nodiscard]] std::optional<Mat::RTMat> seam_through_passage(const std::string &passage, const std::string &room_to,
                                                                  const std::string &room_from) const;
 
+    /// The `r<idx>_` prefix this live room's nodes carry in memory (memoised, the same one evict() uses).
+    [[nodiscard]] std::string memory_prefix(const DSR::Node &live_room) const
+    { return "r" + std::to_string(room_index(live_room)) + "_"; }
+
+    /// Planar-safe packing of a transform as RT edge attributes (rt_translation / rt_rotation_euler_xyz).
+    [[nodiscard]] static std::map<std::string, DSR::Attribute> rt_attributes(const Mat::RTMat &t) { return rt_attrs(t); }
+
     /// BACKSTOP, not policy. Nodes still hanging under a non-current room whose owner is not
     /// running (crashed, SIGKILLed) cannot let go by themselves. Off unless explicitly armed.
     int sweep_orphans(std::uint64_t room_id,

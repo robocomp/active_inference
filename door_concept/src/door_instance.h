@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 #include <utility>
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
@@ -155,6 +156,15 @@ struct DoorInstance
     // along-ray Σ and NO depth yet. Authors an Orient affordance (rotate to look) instead of the normal
     // one; cleared the first time a real depth mask is observed (the glance paid off → normal instance).
     bool  is_bearing_hypothesis = false;
+    // WHICH WAY THE LEAF OPENS, inherited from the same door seen from the other room (entry mirror, 2026-10-12):
+    // the hinge point and the opening direction, in THIS room's frame. LeafState's hinge/swing are defined against the
+    // room's own wall frame (wall_u along the polygon edge, n = its left normal = inward), so the same physical leaf
+    // that opens INTO the room it was first seen from opens OUT of this one. Consumed once, at belief init.
+    std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
+    // The side of the aperture plane the robot was on when `cross` was CLAIMED. Held while the claim stands: the
+    // robot changes side by doing the crossing, and a through-pose recomputed from the live side flips back into
+    // the room being left at the doorway (live try17/try19: the robot turned round in the doorway).
+    float cross_side_latched = 0.0f;
     float hypothesis_azimuth    = 0.0f;   // room-frame bearing to look toward (the Orient affordance's target yaw)
     // ★Does this hypothesis have a RANGE, or only a bearing? Set when the birth path resolved one from the
     // precision cascade in door_bearing_range.h (today: the residual grid; soon: dense ricoh depth). With a

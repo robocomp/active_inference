@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "../../common/window_geometry/window_geometry_saver.h"
 #include "../../common/room_resolve/room_resolve.h"   // current_edge_room
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
@@ -82,6 +83,9 @@ SpecificWorker::~SpecificWorker()
 {
 	std::cout << "Destroying SpecificWorker" << std::endl;
 	// Graceful exit (SIGTERM/SIGINT, never kill -9): let go of the live passages this agent owns.
+	if (recall_)
+		if (const int n = recall_->remove_all(); n > 0)
+			std::cout << "[recall] removed " << n << " recall node(s) on shutdown" << std::endl;
 	if (live_passage)
 		if (const int n = live_passage->remove_owned(); n > 0)
 			std::cout << "[passage] removed " << n << " owned live passage(s) on shutdown" << std::endl;
@@ -102,6 +106,9 @@ void SpecificWorker::initialize()
     // MUST come first: GenericWorker::initialize() is what builds one QMainWindow + DSRViewer per
     // entry of Graphs, so removing it leaves the agent running with no UI at all.
     GenericWorker::initialize();
+    // Persist the DSR window(s) on every resize/move/close, not only on a clean quit (see GeometrySaver).
+    for (const auto &[name, window] : windows)
+        if (window != nullptr) new rc::ui::GeometrySaver(window.get(), [this] { save_window_settings(); save_graph_zoom(); });
 
     // Queued AFTER GenericWorker's own singleShot(0) restore of the window geometry, so the view is
     // re-zoomed at its final size.
@@ -267,6 +274,9 @@ void SpecificWorker::initialize()
 
     if (eviction_enabled and G_dsr and G_ltsm)
     {
+        recall_ = std::make_unique<ltsm::RoomRecall>(G_dsr, G_ltsm, *evictor);
+        if (const int n = recall_->remove_all(); n > 0)
+            qInfo() << "[recall] swept" << n << "stale recall node(s) from a previous run";
         passages = std::make_unique<ltsm::PassageHarvest>(
             G_dsr, G_ltsm,
             cfgr.s("Passages.csv_path", "etc/passages.csv",
@@ -351,6 +361,9 @@ void SpecificWorker::compute()
         ++promotion_cycles_;
         if (promotion_stage_check) check_promotion(promoted);
     }
+    // What lies behind each door memory knows the far side of (room_recall.h). After the promotion, so a room that has
+    // just become live again retires its own recall in the same cycle.
+    if (recall_) recall_->step();
 
     if (not probe_enabled)
         return;

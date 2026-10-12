@@ -204,7 +204,19 @@ private:
     /// The start-up survey's state for a room just born with no polygon, published frame = T_pub_int · internal.
     void arm_startup_proto(std::uint64_t room_id, const Eigen::Affine2f& T_pub_int);
     /// Out of a promoted room through a door: the new room becomes this agent's room, estimated by the start-up survey.
-    void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door, float p_cross);
+    /// A room REMEMBERED behind a door (ltsm_agent's `recall_<room>` metaconcept, RT child of the door node): its name,
+    /// its outline in its own frame, and that frame in this agent's INTERNAL frame (through the crossed aperture).
+    struct Recall
+    {
+        std::string name;                          ///< the remembered room's live name, e.g. "room_1"
+        std::uint64_t room_index = 0;              ///< its room_id
+        std::vector<Eigen::Vector2f> poly_pub;     ///< outline in the remembered room's own (published) frame
+        Eigen::Affine2f T_int_recall = Eigen::Affine2f::Identity();
+    };
+    /// The recall hung from the crossed door `ap`, if ltsm posted one. Reads node/edge attributes only (thread-safe).
+    [[nodiscard]] std::optional<Recall> find_recall(const rc::DoorAperture& ap) const;
+    void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door, float p_cross,
+                              const std::optional<Recall>& recall = std::nullopt);
     [[nodiscard]] float startup_erode_m() const;
     void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
     void adopt_most_probable_layout();

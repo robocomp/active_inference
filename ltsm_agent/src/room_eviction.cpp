@@ -276,6 +276,10 @@ bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_
             const auto child = live_->get_node(e.to());
             if (not child.has_value()) continue;
             if (child->type() == "robot" or child->type() == "root") continue;   // never climb out
+            // ltsm's own recall hypotheses (room_recall.cpp) hang under a live door; they are working-memory pointers
+            // INTO long-term memory, not part of the room — archiving one wrote `r2_recall_room_1` (live try22).
+            if (live_->get_attrib_by_name<object_subtype_att>(child.value()).value_or(std::string{}) == "room_recall")
+                continue;
             if (scope == Scope::Structure and child->type() != "floor" and child->type() != "wall"
                 and not is_door(*live_, child.value()))
                 continue;
@@ -551,7 +555,35 @@ std::optional<Mat::RTMat> RoomEviction::seam_through_passage(const std::string &
                                                     face_from = t->inverse();
     }
     if (not to_face.has_value() or not face_from.has_value()) return std::nullopt;
-    return Mat::RTMat(to_face.value() * face_from.value());
+    Mat::RTMat seam(to_face.value() * face_from.value());
+    // ★ THE TWO FACES MAY BE THE SAME HOLE TURNED BY π (2026-10-12). door_concept orients a door's frame from the room
+    //   that fits it (+y into that room), so the face seen from the other room is the same doorway rotated half a turn.
+    //   Rooms do not overlap: if room_from's outline lands on room_to's side of the face, the turned face is the one.
+    const auto centroid = [&](const std::string &room) -> std::optional<Eigen::Vector2d>
+    {
+        const auto r = mem_->get_node(room);
+        if (not r.has_value()) return std::nullopt;
+        const auto px = mem_->get_attrib_by_name<delimiting_polygon_x_att>(r.value());
+        const auto py = mem_->get_attrib_by_name<delimiting_polygon_y_att>(r.value());
+        if (not px.has_value() or not py.has_value() or px->get().empty() or px->get().size() != py->get().size())
+            return std::nullopt;
+        Eigen::Vector2d c = Eigen::Vector2d::Zero();
+        for (std::size_t i = 0; i < px->get().size(); ++i) c += Eigen::Vector2d(px->get()[i], py->get()[i]);
+        return c / static_cast<double>(px->get().size());
+    };
+    if (const auto c_to = centroid(room_to), c_from = centroid(room_from); c_to.has_value() and c_from.has_value())
+    {
+        const Eigen::Vector2d o = to_face->translation().head<2>();
+        const Eigen::Vector2d n = to_face->linear().col(1).head<2>();
+        const Eigen::Vector2d from_in_to = (seam * Eigen::Vector3d(c_from->x(), c_from->y(), 0.0)).head<2>();
+        if (n.dot(c_to.value() - o) * n.dot(from_in_to - o) > 0.0)
+        {
+            Mat::RTMat flip = Mat::RTMat::Identity();
+            flip.linear() = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+            seam = Mat::RTMat(to_face.value() * flip * face_from.value());
+        }
+    }
+    return seam;
 }
 
 bool RoomEviction::is_descendant(std::uint64_t node_id, const std::string &room) const

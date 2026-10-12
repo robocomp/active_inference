@@ -189,22 +189,22 @@ void SpecificWorker::compute()
                 {
                     dcsv.imbue(std::locale::classic());
                     dcsv << "ts_ms,objects,named_door,subtype_ok,believed_open,no_width,no_transform,"
-                            "emitted,resolves,door,p_open,ax,ay,bx,by\n";
+                            "emitted,resolves,door,p_open,ax,ay,bx,by,prior_closed\n";
                 }
             }
             if (dcsv.is_open())
             {
                 const auto& t = doors_.tally();
-                const auto row = [&](const char* name, float p, float ax, float ay, float bx, float by)
+                const auto row = [&](const char* name, float p, float ax, float ay, float bx, float by, float pc)
                 {
                     dcsv << now_ms << ',' << t.objects << ',' << t.named_door << ',' << t.subtype_ok
                          << ',' << t.believed_open << ',' << t.no_width << ',' << t.no_transform
                          << ',' << t.emitted << ',' << doors_.resolves() << ',' << name << ','
-                         << p << ',' << ax << ',' << ay << ',' << bx << ',' << by << '\n';
+                         << p << ',' << ax << ',' << ay << ',' << bx << ',' << by << ',' << pc << '\n';
                 };
-                if (open_doors.empty()) row("-", -1.f, 0.f, 0.f, 0.f, 0.f);
+                if (open_doors.empty()) row("-", -1.f, 0.f, 0.f, 0.f, 0.f, -1.f);
                 for (const auto& d : open_doors)
-                    row(d.name.c_str(), d.p_open, d.a.x(), d.a.y(), d.b.x(), d.b.y());
+                    row(d.name.c_str(), d.p_open, d.a.x(), d.a.y(), d.b.x(), d.b.y(), d.prior_closed);
                 dcsv.flush();
             }
         }

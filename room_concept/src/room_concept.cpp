@@ -3759,11 +3759,26 @@ namespace rc
             const Eigen::Rotation2Df R_inv(-npa[2]);
             const Eigen::Vector2f t(npa[0], npa[1]);
             doors_robot_.reserve(doors_room.size());
+            // Seat each aperture on the room's OWN boundary (the polygon the SDF scores against, same frame) before
+            // carrying it across: the crossing test runs at the mouth, the leaf δ behind it (DoorApertures::seat_in_room).
+            const auto poly = current_room_polygon();
             for (const auto& d : doors_room)
             {
                 DoorAperture r = d;
-                r.a = R_inv * (d.a - t);
-                r.b = R_inv * (d.b - t);
+                DoorApertures::seat_in_room(r, poly);
+                if (const auto it = door_recess_logged_.find(r.id);
+                    it == door_recess_logged_.end() or std::abs(it->second - r.recess) > 0.5f * params.rfe_obs_sigma)
+                {   // log on change of the seat by half the SDF noise scale — a reporting cadence, not a model gate
+                    door_recess_logged_[r.id] = r.recess;
+                    qInfo().noquote() << QString("[room][doors] %1 seated on the room boundary: mouth (%2,%3)-(%4,%5), "
+                                                 "leaf line %6 m behind it, p_open %7")
+                                             .arg(QString::fromStdString(r.name))
+                                             .arg(r.a.x(), 0, 'f', 2).arg(r.a.y(), 0, 'f', 2)
+                                             .arg(r.b.x(), 0, 'f', 2).arg(r.b.y(), 0, 'f', 2)
+                                             .arg(r.recess, 0, 'f', 3).arg(r.p_open, 0, 'f', 2);
+                }
+                r.a = R_inv * (r.a - t);
+                r.b = R_inv * (r.b - t);
                 doors_robot_.push_back(std::move(r));
             }
         }

@@ -763,6 +763,29 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     {
         std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
         affordance_manager.release_execution_claim(graph_);
+        // AND whatever it was running: a lock-on/orient left armed completes on the NEXT affordance claimed and stamps
+        // ITS outcome there (live try23: the epistemic aff_door_36 servo LOCKED after `cross` was claimed and reported
+        // `cross` Satisfied with the robot still in room 2, progress −1).
+        lockon_.reset();
+        orient_start_ms_.reset();
+        orient_stable_ = 0;
+        feedback_node_id_ = 0;
+        last_target_info_.reset();
+        current_target_room_.reset();
+        active_target_id_ = 0;
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+    }
+    // A later door step came on offer while the current one was executing: drop it NOW — claim, lock-on, orient —
+    // so the next step is selected this very cycle instead of after the current step's own (stricter) completion.
+    if (door_passage_.take_preempted())
+    {
+        std::println("[door-passage] {} — current step pre-empted, claim released", door_passage_.status());
+        affordance_manager.release_execution_claim(graph_);
+        lockon_.reset();
+        orient_start_ms_.reset();
+        orient_stable_ = 0;
+        feedback_node_id_ = 0;
         last_target_info_.reset();
         current_target_room_.reset();
         active_target_id_ = 0;
@@ -5886,7 +5909,14 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     const bool contract_wants_detection =
         std::ranges::any_of(active_contract_.goal, [](const rc::affordance::GoalClause &c)
                             { return c.attr.find("detection") != std::string::npos; });
-    if (allow_dwell and was_affordance and params_ and params_->affordance_dwell_ms > 0.f)
+    // A door-passage step chains straight into the next one: nothing is being acquired by a mask, and the dwell
+    // was 3 s of standing in front of (or inside) a doorway per step (live try16).
+    const bool door_step = last_target_info_.has_value()
+                       and last_target_info_->node_name.starts_with("aff_door_")
+                       and (last_target_info_->node_name.ends_with("_approach")
+                            or last_target_info_->node_name.ends_with("_open")
+                            or last_target_info_->node_name.ends_with("_cross"));
+    if (allow_dwell and was_affordance and not door_step and params_ and params_->affordance_dwell_ms > 0.f)
     {
         affordance_dwell_until_ms_ = now_ms + static_cast<std::uint64_t>(params_->affordance_dwell_ms);
         // The bound is on the WHOLE wait, and never shorter than the clock — a max below the floor

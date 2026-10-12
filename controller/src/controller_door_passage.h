@@ -61,6 +61,7 @@ public:
         attempts_ = 0;
         cross_room_.clear();
         just_started_ = true;
+        preempted_ = false;
         note_ = "started";
         step_state_.clear();
         last_event_ = std::format("[door-passage] {}: started", door_);
@@ -84,6 +85,14 @@ public:
         return std::exchange(just_started_, false);
     }
 
+    /// True once per pre-emption: the step being executed was superseded by a later one on offer. The caller
+    /// releases its claim and drops the lock-on/orient it was running, so the new step is selected next cycle.
+    [[nodiscard]] bool take_preempted()
+    {
+        std::scoped_lock lk(m_);
+        return std::exchange(preempted_, false);
+    }
+
     struct Out
     {
         std::string required;                               ///< "" = no restriction (passage idle or done)
@@ -100,20 +109,66 @@ public:
         Out out;
         if (step_ == Step::Idle or step_ == Step::Done) return out;
 
-        // Jump to the latest step its producer is offering, unless the current one is being executed.
+        // Jump to the latest step its producer is offering — EVEN WHILE THE CURRENT ONE IS BEING EXECUTED
+        // (2026-10-12). A later step on offer is door_concept saying the current step's purpose is already met:
+        // `open` is offered once P(in reach)·P(shut) clears its offer band, `cross` once P(passable) does. Waiting
+        // for the current step's own, stricter completion added nothing but standing still — live try16: the
+        // approach servo held the robot ~20 s while P(reach) crept 0.70→0.94, with `open` already on offer.
+        // The caller releases the dropped claim (take_preempted()), so the producer sees it Offered again.
         const auto st_cur = state_of(G, name_of(step_));
-        if (st_cur != State::Executing)
-            for (Step later : {Step::Cross, Step::Open})
+        for (Step later : {Step::Cross, Step::Open})
+        {
+            if (static_cast<int>(later) <= static_cast<int>(step_)) break;
+            // A later step skips an earlier one only while the earlier one is NOT on offer: `cross` over a door
+            // door_concept also offers to `open` is two contradictory beliefs, and the shut door wins (live try20:
+            // a transient P(passable) on a SHUT door sent the robot to cross it, `open` was offered a moment later).
+            const bool open_wanted = later == Step::Cross and state_of(G, name_of(Step::Open)) == State::Offered;
+            if (state_of(G, name_of(later)) == State::Offered and not open_wanted)
             {
-                if (static_cast<int>(later) <= static_cast<int>(step_)) break;
-                if (state_of(G, name_of(later)) == State::Offered)
-                {
-                    out.event = std::format("[door-passage] {}: {} is offered — skipping to it", door_, name_of(later));
-                    step_ = later;
-                    seen_executing_ = false;
-                    break;
-                }
+                const bool was_executing = st_cur == State::Executing;
+                out.event = std::format("[door-passage] {}: {} is offered — {} to it", door_, name_of(later),
+                                        was_executing ? std::format("pre-empting {} and continuing", name_of(step_))
+                                                      : std::string("skipping"));
+                if (was_executing) preempted_ = true;
+                step_ = later;
+                seen_executing_ = false;
+                break;
             }
+        }
+
+        // ★ A STEP THAT IS NO LONGER ON OFFER FALLS BACK to the latest earlier one that is. door_concept withdraws
+        //   `cross` when the door is believed shut and `open` when out of reach; `approach` is always offered for a
+        //   located door. Without this the passage waited for a withdrawn step for ever (live try21: `cross` taken on
+        //   a transient P(passable) of the SHUT door from across the room, then withdrawn — robot parked, door shut).
+        if (step_ == Step::Cross or step_ == Step::Open)
+        {
+            const State st_now = state_of(G, name_of(step_));
+            if (st_now != State::Offered and st_now != State::Executing and not seen_executing_)
+                for (Step earlier : {Step::Open, Step::Approach})
+                {
+                    if (static_cast<int>(earlier) >= static_cast<int>(step_)) continue;
+                    if (state_of(G, name_of(earlier)) == State::Offered)
+                    {
+                        out.event = std::format("[door-passage] {}: {} is not offered — back to {}", door_,
+                                                name_of(step_), name_of(earlier));
+                        step_ = earlier;
+                        break;
+                    }
+                }
+        }
+
+        // ★ BACK TO `open` WHEN THE DOOR TURNS OUT SHUT. `cross` may have been taken on a transient P(passable) while
+        //   the robot was still out of reach (so `open` could not be offered yet). Once door_concept offers `open` —
+        //   P(in reach)·P(shut) above its band — the door is shut in front of us: open it, whatever `cross` is doing.
+        if (step_ == Step::Cross and cross_room_ == room_frame and state_of(G, name_of(Step::Open)) == State::Offered)
+        {
+            const bool was_executing = state_of(G, name_of(Step::Cross)) == State::Executing;
+            out.event = std::format("[door-passage] {}: {} is offered — the door is shut: back from {} to it", door_,
+                                    name_of(Step::Open), name_of(Step::Cross));
+            if (was_executing) preempted_ = true;
+            step_ = Step::Open;
+            seen_executing_ = false;
+        }
 
         // ★ THE CROSSING IS ROOM_CONCEPT'S TO DECLARE. Its crossing evidence (body wholly past the doorway line)
         //   births the new room and moves the robot's RT there, and the controller's room follows (room_resolve
@@ -264,6 +319,7 @@ private:
     Step step_ = Step::Idle;
     bool seen_executing_ = false;
     bool just_started_ = false;
+    bool preempted_ = false;
     int attempts_ = 0;
     std::string cross_room_;   // the room the cross step began in
     std::string note_ = "idle";

@@ -3094,7 +3094,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         rc::pragmatic::Offer o;
         o.known = located and st.p_open_known;
         o.p     = st.p_open;
-        const auto pose = rc::door::through_pose(inst.aperture, st.robot_side, pg.cross_standoff_m);
+        if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
+            inst.cross_side_latched = st.robot_side;
+        const auto pose = rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
@@ -3481,7 +3483,27 @@ void SpecificWorker::step_entry_mirrors()
         const Eigen::Vector3f t = best_T.translation().cast<float>();
         const auto names = reserved_names();
         if (const auto id = scene_graph_->create_entry_mirror(room, best.value(), t, euler, names); id != 0)
-            entry_mirrors_[room.id()] = EntryMirror{id, best->id()};
+        {
+            EntryMirror em{id, best->id()};
+            const auto room_now = G->get_node(room_node_id_);
+            const auto src_it = fitter_->instances().find(best->id());
+            if (room_now.has_value() and src_it != fitter_->instances().end() and src_it->second.ai2_initialized)
+                if (const auto Ts = inner_eigen_->get_transformation_matrix(room_now->name(), best->name(), 0); Ts.has_value())
+                {
+                    // room <- door, as a 2-D rigid map; its inverse takes the source's room-frame leaf into the door frame.
+                    const Eigen::Matrix2f R = Ts->rotation().topLeftCorner<2, 2>().cast<float>();
+                    const Eigen::Vector2f o = Ts->translation().head<2>().cast<float>();
+                    const auto& si = src_it->second;
+                    em.has_leaf    = true;
+                    em.hinge_local = R.transpose() * (si.leaf_pose.hinge_xy - o);
+                    em.open_local  = R.transpose() * (si.leaf.swing * si.aperture.across_u());
+                    em.phi_est     = si.phi_est;
+                    em.phi_sigma   = si.phi_sigma;
+                    em.phi_curve   = si.phi_curve;
+                    em.matched_frames = si.matched_frames;
+                }
+            entry_mirrors_[room.id()] = std::move(em);
+        }
     }
 
     // 3. Refresh the interaction channel from the source — the one belief about this door.
@@ -3530,9 +3552,17 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     //   new room at the exact transform of the source door. It becomes this room's door instance, so a detection of
     //   that door from inside the new room associates with it instead of being born as a duplicate (live: door_26).
     std::uint64_t adopt_mirror = 0;
+    // ★ …AND IT KEEPS WHAT WE KNEW ABOUT ITS LEAF (2026-10-12). The robot just went through it, so the door is
+    //   open, and from the new room an open door is the one thing door_concept cannot re-detect: the leaf is beside
+    //   the doorway, there is no shut panel to fit. Live try16: the mirror sat at door_open_prob = unmeasured for the
+    //   whole stay in room 2. try17: fitted from scratch, its leaf swung the config's way — INTO room 2 — when the
+    //   real one opens OUT of it, so the LiDAR settled phi at 46° and P(passable) at 0. What carries over is captured
+    //   when the mirror is made (EntryMirror), because ltsm deletes the source with its room before we get here.
+    std::optional<EntryMirror> adopted_from;
     if (const auto it = entry_mirrors_.find(new_room); it != entry_mirrors_.end())
     {
         adopt_mirror = it->second.node_id;
+        adopted_from = it->second;
         entry_mirrors_.erase(it);
     }
     if (fitter_)
@@ -3593,8 +3623,35 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     refresh_room_geometry();         // and pick the new one up in the same cycle
     if (adopt_mirror != 0)
         if (const auto n = G->get_node(adopt_mirror); n.has_value() and fitter_->ensure_instance(n.value(), room_node_id_))
+        {
             std::print("door_concept: [room] the entry mirror {} is now this room's door (the crossed door, seen from "
                        "inside)\n", n->name());
+            const auto room_n = G->get_node(new_room);
+            if (adopted_from.has_value() and adopted_from->has_leaf and room_n.has_value())
+                if (auto it = fitter_->instances().find(adopt_mirror); it != fitter_->instances().end())
+                    if (const auto Tm = inner_eigen_->get_transformation_matrix(room_n->name(), n->name(), 0); Tm.has_value())
+                    {
+                        auto& dst = it->second;
+                        const auto& em = *adopted_from;
+                        const Eigen::Matrix2f R = Tm->rotation().topLeftCorner<2, 2>().cast<float>();
+                        const Eigen::Vector2f o = Tm->translation().head<2>().cast<float>();
+                        dst.leaf_side_hint = std::make_pair(Eigen::Vector2f(R * em.hinge_local + o),
+                                                            Eigen::Vector2f(R * em.open_local));
+                        dst.phi_est   = em.phi_est;
+                        dst.phi_sigma = em.phi_sigma;
+                        dst.phi_curve = em.phi_curve;
+                        dst.phi_last_t = std::chrono::steady_clock::now();
+                        // The robot's body just went through the aperture: an observation that it was passable, not
+                        // merely our own request.
+                        dst.phi_from_command = false;
+                        // ★ AND IT IS A CONFIRMED DOOR, so it is FITTED. process_door_node skips an instance with no
+                        //   fresh detection and fewer than 5 matched frames — from this side an open door gives neither.
+                        dst.matched_frames = em.matched_frames;
+                        std::print("door_concept: [room] {} remembers its leaf from the crossing: phi={:.0f} deg "
+                                   "sigma={:.0f} deg, curve {} pts\n", n->name(), dst.phi_est * 57.2958f,
+                                   dst.phi_sigma * 57.2958f, dst.phi_curve.size());
+                    }
+        }
 }
 
 

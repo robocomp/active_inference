@@ -94,14 +94,19 @@ struct InteractionState
 // ─── geometry ────────────────────────────────────────────────────────────────────────────────────
 
 // Along-wall clear span left by a leaf at opening angle phi. The leaf is hinged on one vertical aperture
-// edge and its projection back onto the wall line is w·|cos phi|, so the gap is what remains of w.
-// phi = 0 (flush) ⇒ 0; phi = pi/2 (fully open) ⇒ the whole aperture.
+// edge and its projection back onto the wall line is w·cos phi, measured FROM THE HINGE INTO THE APERTURE,
+// so the gap is what remains of w. phi = 0 (flush) ⇒ 0; phi >= pi/2 ⇒ the whole aperture.
+// ★ cos, NOT |cos| (fixed 2026-10-12). phi runs to DoorModel.PhiMaxRad = 120 deg; past 90 deg the leaf's
+//   projection lies BEHIND the hinge, outside the aperture, so it blocks nothing along the wall. |cos| folded
+//   120 deg onto 60 deg: live try15, the crossed door's mirror door_29 settled at phi = 2.09 rad (the bound),
+//   clear span 0.50 m < 0.70 m of body ⇒ door_open_prob = 0 for a door the robot had just driven through —
+//   and room_concept's aperture filter, reading that as "certainly shut", kept every through-door return.
 // ⚠This is the ALONG-WALL span only. A leaf swung into the corridor also eats space ACROSS the wall,
 // which this does not model — so it is an UPPER bound on passability and `passage_margin_m` is what
 // stands in for the rest until the swung leaf is a planner obstacle in its own right.
 inline float clear_width(float aperture_w, float phi)
 {
-    return std::max(0.0f, aperture_w * (1.0f - std::abs(std::cos(phi))));
+    return std::max(0.0f, aperture_w * (1.0f - std::max(0.0f, std::cos(phi))));
 }
 
 // P(passable), MARGINALISED over the leaf-angle posterior. `phi_curve` is (phi, unnormalised weight) as

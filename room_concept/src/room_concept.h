@@ -1684,6 +1684,7 @@ private:
    /// thread. Kept as a member rather than passed down through a dozen signatures: every consumer of
    /// the observation weights is inside this class's own update cycle.
    std::vector<DoorAperture> doors_robot_;
+   std::unordered_map<std::uint64_t, float> door_recess_logged_;   ///< last logged seat δ per door (log-on-change only)
    /// The early-exit criterion as it would have been WITHOUT the door weighting, and the fraction of
    /// the scan's weight the doors removed. The gate decides on the weighted value; these two say what
    /// that cost, so a discount that is silently blinding the gate is visible instead of inferred.

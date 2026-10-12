@@ -61,6 +61,10 @@ namespace rc
         float           prior_closed = 1.f;
         /// How far a return from that surface may lie from the aperture line: LiDAR noise ⊕ half the door depth.
         float           half_depth = 0.02f;
+        /// δ (m) ≥ 0: how far the aperture line (the door node = the leaf's line) lies BEHIND the room's own
+        /// boundary at the doorway. 0 until seat_in_room() runs; then a/b are the MOUTH (the aperture projected onto
+        /// the room polygon's edge) and the leaf sits δ past it. See seat_in_room().
+        float           recess = 0.f;
         std::uint64_t   id     = 0;    ///< the door node, for logging
         std::string     name;
     };
@@ -119,6 +123,17 @@ namespace rc
         ///   A return 2 m beyond the doorway gets w ≈ 0 even when door_concept has not measured the door (π = ½);
         ///   a return at the doorway line keeps w ≈ 1 unless the door is believed wide open. No threshold: the
         ///   crossing test is exact geometry and the rest is a likelihood ratio.
+        /// ★ THE ROOM'S BOUNDARY AT A DOORWAY IS NOT THE DOOR'S LINE (2026-10-12). door_concept puts the door node at
+        ///   the leaf's line — the WALL CENTRE in the apartment world — while the room polygon the SDF scores against
+        ///   draws its wall at the room-side FACE. Measured live (crossing try15, room_2, door shut): the face is at
+        ///   y = 4.84, the aperture at y = 4.62, and 8.9 % of every scan landed in between (header/frame/leaf returns
+        ///   at y 4.64–4.72, 12–20 cm outside the polygon) — 85 % of the scan's Σ sdf². None of them CROSSED the
+        ///   aperture segment, so every one kept weight 1. This moves the crossing test to the MOUTH — the aperture
+        ///   projected onto the polygon edge nearest to it — and records δ = the distance from that edge to the leaf
+        ///   line, so weight() can say how far past the room's boundary the surface hypothesis actually sits.
+        ///   Polygon in the SAME frame as the aperture. No polygon / degenerate edge ⇒ the aperture is left as is.
+        static void seat_in_room(DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon);
+
         static float weight(const std::vector<DoorAperture>& apertures,
                             const Eigen::Vector2f& beam_origin, const Eigen::Vector2f& hit, float sigma_obs);
         /// The "next room" hypothesis spreads a return uniformly over this many metres past the doorway. The
