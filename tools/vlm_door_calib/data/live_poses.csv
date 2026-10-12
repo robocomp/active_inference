@@ -1,0 +1,17 @@
+# Poses for live_calib.py (world metres, theta = the robot's HEADING = -robot_gt_angle = webots_yaw + pi/2;
+# tp.py takes the Webots yaw, i.e. theta - pi/2).
+# DOOR_1 (tworooms-piso[-door1open].wbt) is at (-4.769, 9.380), wall along x; room 1 is y < 9.38 (side +1), room 2
+# (6.0 x 4.0 m, y 9.48..13.48) is side -1. DOOR_0 poses are the 3 ZedDump frames where it was seen (side -1, ~4.5 m).
+# VERIFY each with --check before a sweep (a wall can hide the door; the ZedDump showed DOOR_0 hidden from most poses).
+label,door,x,y,theta
+r1_standpoint,DOOR_1,-4.95,7.30,1.5708
+r1_close,DOOR_1,-4.90,7.85,1.5708
+r1_mid,DOOR_1,-5.00,6.30,1.5708
+r1_far,DOOR_1,-5.07,4.40,1.5708
+r1_oblique,DOOR_1,-5.65,7.40,1.15
+r2_close,DOOR_1,-4.77,11.20,-1.5708
+r2_mid,DOOR_1,-4.60,12.00,-1.5708
+r2_far,DOOR_1,-4.30,12.90,-1.75
+r2_oblique,DOOR_1,-6.30,11.80,-1.007
+d0_far_a,DOOR_0,-3.77,2.57,2.07
+d0_far_b,DOOR_0,-3.16,2.31,2.33

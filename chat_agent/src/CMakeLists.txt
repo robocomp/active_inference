@@ -10,8 +10,14 @@ find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
 LIST(APPEND LIBS
   ai_common::presence     # agent presence monitor + coordinator
   ai_common::core         # header-only helpers (room_resolve, world_query, graph_provenance)
+  ai_common::media        # zero-copy media plane — the ZED / Ricoh frames the look() tool shows the model
   Qt6::Network
 )
+
+# OpenCV — look(): deep-copy, shrink and JPEG-encode a camera frame (camera_grabber.cpp, image_prep.h).
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
+LIST(APPEND LIBS ${OpenCV_LIBS})
 
 # Sources set
 LIST(APPEND SOURCES
@@ -22,6 +28,7 @@ LIST(APPEND SOURCES
   ../src/ollama_client.cpp
   ../src/world_digest.cpp
   ../src/intention_node.cpp
+  ../src/camera_grabber.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

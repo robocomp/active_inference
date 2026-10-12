@@ -12,6 +12,8 @@
 #include <QRegularExpression>
 
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
+#include "image_prep.h"
+#include "look_messages.h"
 
 namespace rc::chat
 {
@@ -46,7 +48,7 @@ QJsonObject tool_def(const QString& name, const QString& description, QJsonObjec
 
 ChatSession::ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg)
     : G_(std::move(G)), cfg_(std::move(cfg)), inner_(G_->get_inner_eigen_api()), digest_builder_(G_, "body", cfg_.objects_nearest),
-      intention_(G_), llm_(cfg_.llm)
+      intention_(G_), llm_(cfg_.llm), cameras_(G_)
 {
     robot_description_ = load_robot_description(cfg_.system_prompt_path);
     if (not log_.open(cfg_.log_dir)) std::println("[chat_agent] WARNING: cannot open a log under '{}'", cfg_.log_dir);
@@ -75,6 +77,7 @@ void ChatSession::start()
         {
             llm_.cancel();
             history_.clear();
+            look_jpeg_.clear();
             last_relative_.clear();   // "a bit more" has nothing to repeat in a new conversation
             pending_.reset();
             window_->hide_card();
@@ -151,6 +154,7 @@ void ChatSession::refresh_status_bar()
 void ChatSession::tick_digest()
 {
     intention_.ensure();
+    cameras_.discover();   // self-throttled; subscribers appear once the camera nodes + descriptors exist
     digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read());
     track_object_changes();
 }
@@ -255,7 +259,14 @@ const QString kInterfaceRules = QStringLiteral(
     "'A bit more' / 'more' REPEATS the last move/turn in the STATE with the SAME signs (after a backward move, "
     "distance_m stays negative).\n"
     "- Objects: you know only the OBJECTS lines of the STATE (current room) and the read-only tools find_objects and "
-    "where_is. If none of a kind is listed say \"I have not perceived any\", never \"there is none\".\n");
+    "where_is. If none of a kind is listed say \"I have not perceived any\", never \"there is none\".\n"
+    "- look(camera) shows you the current picture of a camera: 'front' (default, what is ahead) or '360' (all around, "
+    "a panorama whose centre is straight ahead and whose left and right edges are behind you). The STATE has NO "
+    "appearance: when the person asks what you see, to look, or about colours, materials or what something looks "
+    "like, CALL look() first and answer from the picture; never say you cannot see colours. Use '360' for what is "
+    "behind or around you. What you say about a picture is a visual impression, not a measurement: for how many, how "
+    "far and where, use the STATE and find_objects/where_is. Lines, dots, grids and labels drawn over a picture are "
+    "debug overlays, not part of the scene.\n");
 }   // namespace
 
 QString ChatSession::load_robot_description(const std::string& path)
@@ -321,6 +332,12 @@ QJsonArray ChatSession::tools_json() const
         "is in the current room, its distance and bearing; or that it has not been perceived. Read-only.",
         QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
         QJsonArray{"name"}));
+    tools.append(tool_def("look",
+        "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
+        QJsonObject{{"camera", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"front", "360"}},
+                                           {"description", "'front' = the camera facing ahead (default); "
+                                                           "'360' = the all-round panorama"}}}},
+        {}));
     return tools;
 }
 
@@ -354,9 +371,13 @@ void ChatSession::ask_model(bool followup)
     const QJsonArray msgs = messages_for_request();
     const QJsonArray tools = followup ? QJsonArray{} : tools_json();
     QJsonArray hist;
-    for (const auto& m : history_) hist.append(m);
+    for (const auto& m : history_)
+    {
+        hist.append(m);
+        if (has_image(m)) turn_.carries_image = true;
+    }
     log_.write("request", QJsonObject{{"followup", followup}, {"state", q(digest_.text)}, {"n_messages", msgs.size()},
-                                      {"tools", tools}, {"history", hist}});
+                                      {"tools", tools}, {"history", redact_images(hist)}});
     const bool ok = llm_.chat(msgs, tools, OllamaClient::Callbacks{
         .on_token = [this](const QString& tok)
         {
@@ -369,6 +390,7 @@ void ChatSession::ask_model(bool followup)
         {
             window_->end_assistant();
             window_->set_busy(false);
+            if (turn_.carries_image) strip_images(history_);   // an image lives for the one request that used it
             log_.write("response", QJsonObject{{"content", turn_.content}, {"tool_calls", turn_.tool_calls},
                                                {"eval_count", static_cast<qint64>(st.eval_count)}, {"prompt_eval_count", static_cast<qint64>(st.prompt_eval_count)},
                                                {"first_token_ms", st.first_token_ms}, {"wall_ms", st.wall_ms},
@@ -381,14 +403,16 @@ void ChatSession::ask_model(bool followup)
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
             const bool followup = turn_.followup;
-            handle_tool_calls(turn_.tool_calls);
+            const bool image = handle_tool_calls(turn_.tool_calls);
             // A tool round with no words: one follow-up (no tools) so the model can tell the person what happened.
-            if (content.isEmpty() and not followup) ask_model(true);
+            // A picture was asked for: the follow-up is where the model gets to see it, words or not.
+            if ((content.isEmpty() or image) and not followup) ask_model(true);
         },
         .on_error = [this](const QString& err)
         {
             window_->end_assistant();
             window_->set_busy(false);
+            if (turn_.carries_image) strip_images(history_);
             log_.write("error", QJsonObject{{"where", "llm"}, {"msg", err}});
             window_->append_system(err == "cancelled" ? QStringLiteral("(answer cancelled)") : QStringLiteral("Model error: ") + err);
             if (err != "cancelled") ping_llm();
@@ -398,8 +422,9 @@ void ChatSession::ask_model(bool followup)
     window_->set_busy(true);
 }
 
-void ChatSession::handle_tool_calls(const QJsonArray& calls)
+bool ChatSession::handle_tool_calls(const QJsonArray& calls)
 {
+    bool image = false;
     for (const auto& c : calls)
     {
         const QJsonObject fn = c.toObject().value("function").toObject();
@@ -422,12 +447,20 @@ void ChatSession::handle_tool_calls(const QJsonArray& calls)
                                 .distance_m = num("distance_m"), .turn_deg = num("turn_deg")};
             result = dispatch(call, "llm");
         }
-        push_history({{"role", "tool"}, {"tool_name", name}, {"content", result}});
+        if (not look_jpeg_.isEmpty())
+        {
+            push_history(make_look_tool_message(result, look_jpeg_));
+            look_jpeg_.clear();
+            image = true;
+        }
+        else push_history({{"role", "tool"}, {"tool_name", name}, {"content", result}});
     }
+    return image;
 }
 
 QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 {
+    if (name == "look") return do_look(args);
     QString out;
     if (name == "find_objects")
         out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room));
@@ -436,6 +469,41 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     else return {};
     log_.write("query", QJsonObject{{"tool", name}, {"args", args}, {"result", out}});
     return out.trimmed();
+}
+
+QString ChatSession::do_look(const QJsonObject& args)
+{
+    const QString arg = args.value("camera").toString();
+    const auto front = look_camera_is_front(arg);
+    if (not front.has_value())
+    {
+        log_.write("look", QJsonObject{{"camera", arg}, {"ok", false}, {"reason", "unknown camera"}});
+        return QStringLiteral("ERROR: unknown camera '%1' — use 'front' or '360'.").arg(arg);
+    }
+    const Camera cam = *front ? Camera::front : Camera::pano;
+    auto frame = cameras_.grab(cam);
+    if (not frame.has_value())
+    {
+        log_.write("look", QJsonObject{{"camera", arg}, {"ok", false}, {"reason", q(frame.error())}});
+        window_->append_system(QStringLiteral("look: ") + q(frame.error()));
+        return QStringLiteral("ERROR: ") + q(frame.error());
+    }
+    const int side = cam == Camera::front ? cfg_.look_max_side : cfg_.look_max_side_360;
+    const auto img = prepare_image(frame->bgr, side, cfg_.look_jpeg_quality);
+    if (not img.has_value())
+    {
+        log_.write("look", QJsonObject{{"camera", arg}, {"ok", false}, {"reason", "encode failed"}});
+        return QStringLiteral("ERROR: camera not available: the frame could not be encoded.");
+    }
+    const QByteArray jpeg(reinterpret_cast<const char*>(img->jpeg.data()), static_cast<qsizetype>(img->jpeg.size()));
+    const QString label = q(frame->label);
+    look_jpeg_ = jpeg;
+    log_.write("look", QJsonObject{{"camera", arg}, {"ok", true}, {"label", label}, {"age_ms", static_cast<qint64>(frame->age_ms)},
+                                   {"src_w", frame->bgr.cols}, {"src_h", frame->bgr.rows}, {"w", img->width},
+                                   {"h", img->height}, {"jpeg_bytes", static_cast<qint64>(img->jpeg.size())}});
+    window_->append_system(QStringLiteral("looking through the %1 (%2x%3, %4 ms old)")
+                               .arg(label).arg(img->width).arg(img->height).arg(frame->age_ms));
+    return look_tool_result(label, frame->age_ms, img->width, img->height);
 }
 
 QString ChatSession::dispatch(const ToolCall& call, const char* origin, QString* reply)

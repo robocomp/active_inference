@@ -9,13 +9,15 @@ questions and grades the first tool call. Also reports prompt_eval_count = the r
 """
 import json
 import re
+import statistics
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3:8b"
-REPEATS = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+REPEATS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 URL = "http://localhost:11434/api/chat"
 
 
@@ -74,6 +76,9 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
+        t("look", "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
+          {"camera": {"type": "string", "enum": ["front", "360"],
+                      "description": "'front' = the camera facing ahead (default); '360' = the all-round panorama"}}, []),
     ]
 
 
@@ -143,16 +148,26 @@ CASES = [
     ("where is the fridge", [], "none", "where is the fridge?",
      lambda n, a, c: (n == "where_is" and re.search("fridge|refrigerator", str(a.get("name", "")).lower()) is not None)
      or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
+    # look(): appearance / "what do you see" goes to the camera; counts stay with the STATE (the chairs case above).
+    ("what do you see", [], "none", "what do you see?",
+     lambda n, a, c: n == "look" and str(a.get("camera", "front")) in ("front", "")),
+    ("colour of the chair", [], "none", "what colour is the chair?",
+     lambda n, a, c: n == "look"),
+    ("look behind you", [], "none", "what do you see behind you?",
+     lambda n, a, c: n == "look" and str(a.get("camera", "")) == "360"),
 ]
 
 
 def main():
     sys_tokens = None
     results = []
+    lat = []
     for label, hist, last_move, text, ok in CASES:
         for k in range(REPEATS):
             msgs = [{"role": "system", "content": system(last_move)}] + hist + [{"role": "user", "content": text}]
+            t0 = time.monotonic()
             r = ask(msgs)
+            lat.append(time.monotonic() - t0)
             if sys_tokens is None and not hist:
                 sys_tokens = r.get("prompt_eval_count")
             n, a = first_call(r)
@@ -164,6 +179,9 @@ def main():
     sm = system()
     print(f"\nsystem message: {len(sm)} chars; STATE: {len(STATE)} chars; tools JSON: {len(json.dumps(tools()))} chars")
     print(f"prompt_eval_count (system + tools + one user line): {sys_tokens} tokens")
+    ls = sorted(lat)
+    print(f"latency: median {statistics.median(ls):.2f} s, mean {statistics.mean(ls):.2f} s, "
+          f"max {ls[-1]:.2f} s (first call includes any cold load: {lat[0]:.2f} s)")
     print(f"{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
 

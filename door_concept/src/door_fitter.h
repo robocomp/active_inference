@@ -47,6 +47,8 @@
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion::{cone_blocks, walls_block} — shared LoS occlusion
 #include "door_scene_graph.h"
 #include "door_semantic_field.h"   // rc::SemanticProbField (retina's graded posterior)
+#include "door_frame_evidence.h"   // rc::door::FrameProbe — the aperture-frame existence probe
+#include "door_room_band.h"        // rc::door::RoomBand — where a door sits relative to the room polygon
 #include <opencv2/core.hpp>
 
 namespace rc {
@@ -108,7 +110,12 @@ struct DoorSilhouette
     // HOLD branch turns on this and not on the modal count: a leaf whose fitted angle happens to point
     // it out of frame has not thereby become unobserved, and charging that as "not probed" would freeze
     // a phantom just as surely as charging it as absence would delete a real door.
-    bool probed() const { return phi_marginalised ? n_det_marg > 0.5f : n_detectable > 0; }
+    bool probed() const { return phi_marginalised ? n_det_marg > 0.5f : det_w > 0.0f; }
+    // Σ over the detectable samples of 1 − P(the sample lies past the room-side face, i.e. is seen THROUGH
+    // the opening) (door_room_band.h). Equal to n_detectable for a leaf that stays in the room or in its own
+    // aperture plane; smaller for a leaf swung OUT through the aperture, a view the silhouette model does not
+    // represent. e_occ/e_free are weighted the same way, and in_fov_frac() divides THIS by n_total.
+    float det_w        = 0.0f;
     int   n_cells      = 0;    // DISTINCT pixel cells the detectable silhouette covers (see resolvability)
     float mean_range_m = 0.0f; // mean camera→sample distance over the detectable samples
     // ── POSTERIOR SAMPLED UNDER THE CONTOUR (retina's semantic_class_probs) ──────────────────────
@@ -128,7 +135,7 @@ struct DoorSilhouette
     {
         if (phi_marginalised and n_total_marg > 0.0f)
             return std::clamp(n_det_marg / n_total_marg, 0.0f, 1.0f);
-        return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f;
+        return n_total > 0 ? det_w / static_cast<float>(n_total) : 0.0f;
     }
     // ★★CENTRALITY IS ABOUT WHERE THE OBJECT IS, NOT HOW MUCH OF IT FITS IN A BOX.
     // The old form counted the FRACTION of silhouette samples landing inside a 50%x50% central box, which
@@ -241,6 +248,18 @@ public:
 
     DoorSilhouette compute_silhouette_existence(const DoorInstance& inst,
                                                 const rc::SemanticProbField* field = nullptr);
+    // The APERTURE FRAME (jambs + lintel), projected and visibility-weighted, ready to be scored against
+    // the RGB / depth frame with rc::door::score_frame. The frame does not move when the leaf swings, so
+    // this is the existence probe that still works when the leaf is open — above all when it has swung OUT
+    // of the room the robot is in. See door_frame_evidence.h.
+    rc::door::FrameProbe compute_frame_probe(const DoorInstance& inst);
+    // The wall band this agent's existence model uses (door_room_band.h), from Existence.WallThicknessM /
+    // Existence.BoundarySigmaM. One definition for the containment prior, the leaf-beyond weight and the
+    // frame probe's seat on the room-side face.
+    [[nodiscard]] rc::door::RoomBand room_band() const
+    { return {cfg_.exist_wall_thickness_m, cfg_.exist_boundary_sigma_m}; }
+    // Signed offset of the APERTURE centre from the room polygon (> 0 outside); NaN with no polygon.
+    [[nodiscard]] float aperture_band_offset(const DoorInstance& inst) const;
     // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central" (the
     // robot is looking AT the door, not merely clipping the wide frustum edge). Set once from config.
     void set_central_region_frac(float f) { central_region_frac_ = f; }

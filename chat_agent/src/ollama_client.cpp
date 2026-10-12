@@ -99,6 +99,12 @@ bool OllamaClient::chat(const QJsonArray& messages, const QJsonArray& tools, Cal
                      {"think", false},
                      {"keep_alive", cfg_.keep_alive},
                      {"options", QJsonObject{{"temperature", cfg_.temperature}, {"num_ctx", cfg_.num_ctx}}}};
+    if (cfg_.num_predict > 0)
+    {
+        QJsonObject opts = body.value("options").toObject();
+        opts.insert("num_predict", cfg_.num_predict);
+        body.insert("options", opts);
+    }
     if (not tools.isEmpty()) body.insert("tools", tools);
 
     reply_ = nam_->post(json_request(cfg_.url + "/api/chat", cfg_.transfer_timeout_ms),

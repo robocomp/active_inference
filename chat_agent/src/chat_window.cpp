@@ -1,4 +1,8 @@
 #include "chat_window.h"
+#include <algorithm>
+#include <QKeySequence>
+#include <QKeyEvent>
+#include <QShortcut>
 
 #include <QCloseEvent>
 #include <QHBoxLayout>
@@ -9,6 +13,26 @@
 
 namespace rc::chat
 {
+
+// ↑/↓ on the input line walk the prompt history. A plain QObject with an eventFilter override: no signals, so no moc.
+class HistoryKeys : public QObject
+{
+public:
+    explicit HistoryKeys(ChatWindow* w) : QObject(w), w_(w) {}
+    bool eventFilter(QObject* obj, QEvent* e) override
+    {
+        if (e->type() == QEvent::KeyPress)
+        {
+            const auto* k = static_cast<QKeyEvent*>(e);
+            if (k->key() == Qt::Key_Up)   { w_->history_step(-1); return true; }
+            if (k->key() == Qt::Key_Down) { w_->history_step(+1); return true; }
+        }
+        return QObject::eventFilter(obj, e);
+    }
+private:
+    ChatWindow* w_;
+};
+
 
 ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std::move(cb))
 {
@@ -39,24 +63,26 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     auto* row = new QHBoxLayout();
     input_ = new QLineEdit(this);
     input_->setPlaceholderText(QStringLiteral("Ask the robot… (\"stop\" stops it at once)"));
-    send_ = new QPushButton(QStringLiteral("Send"), this);
+    input_->setToolTip(QStringLiteral("Enter sends · ↑/↓ past prompts · /new or Ctrl+L: new conversation"));
+    busy_ = new QLabel(QStringLiteral("<i>thinking…</i>"), this);
+    busy_->setVisible(false);
     cancel_ = new QPushButton(QStringLiteral("Cancel"), this);
-    new_ = new QPushButton(QStringLiteral("New conversation"), this);
+    cancel_->setToolTip(QStringLiteral("Stop the model's answer (does not stop the robot — type \"stop\" for that)"));
     cancel_->setEnabled(false);
     row->addWidget(input_, 1);
-    row->addWidget(send_);
+    row->addWidget(busy_);
     row->addWidget(cancel_);
-    row->addWidget(new_);
+    input_->installEventFilter(new HistoryKeys(this));
+    auto* clear = new QShortcut(QKeySequence(QStringLiteral("Ctrl+L")), this);
+    QObject::connect(clear, &QShortcut::activated, this, [this]() { if (cb_.on_new) cb_.on_new(); });
     lay->addLayout(row);
 
     status_ = new QLabel(this);
     status_->setTextFormat(Qt::RichText);
     lay->addWidget(status_);
 
-    QObject::connect(send_, &QPushButton::clicked, this, [this]() { send_clicked(); });
     QObject::connect(input_, &QLineEdit::returnPressed, this, [this]() { send_clicked(); });
     QObject::connect(cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_cancel) cb_.on_cancel(); });
-    QObject::connect(new_, &QPushButton::clicked, this, [this]() { if (cb_.on_new) cb_.on_new(); });
     QObject::connect(card_confirm_, &QPushButton::clicked, this, [this]() { if (cb_.on_confirm) cb_.on_confirm(); });
     QObject::connect(card_cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_reject) cb_.on_reject(); });
 
@@ -79,7 +105,24 @@ void ChatWindow::send_clicked()
     const QString t = input_->text().trimmed();
     if (t.isEmpty()) return;
     input_->clear();
+    if (history_.empty() or history_.back() != t) history_.push_back(t);
+    hist_pos_ = static_cast<int>(history_.size());
+    draft_.clear();
+    const QString low = t.toLower();
+    if (low == QStringLiteral("/new") or low == QStringLiteral("/clear") or low == QStringLiteral("nueva conversación")
+        or low == QStringLiteral("nueva conversacion") or low == QStringLiteral("new conversation"))
+    { if (cb_.on_new) cb_.on_new(); return; }
     if (cb_.on_send) cb_.on_send(t);
+}
+
+void ChatWindow::history_step(int dir)
+{
+    if (history_.empty()) return;
+    const int n = static_cast<int>(history_.size());
+    if (hist_pos_ == n) draft_ = input_->text();          // leaving the draft: keep what was being typed
+    hist_pos_ = std::clamp(hist_pos_ + dir, 0, n);
+    input_->setText(hist_pos_ == n ? draft_ : history_[static_cast<std::size_t>(hist_pos_)]);
+    input_->end(false);
 }
 
 void ChatWindow::append_html(const QString& html)
@@ -143,7 +186,7 @@ bool ChatWindow::card_visible() const { return card_->isVisible(); }
 void ChatWindow::set_busy(bool busy)
 {
     cancel_->setEnabled(busy);
-    send_->setEnabled(true);   // sending while busy is still allowed: "stop" must always get through
+    busy_->setVisible(busy);   // typing while busy is still allowed: "stop" must always get through
 }
 
 void ChatWindow::set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present)

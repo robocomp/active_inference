@@ -11,11 +11,15 @@
  *      from etc/system_prompt.md + interface rules + the STATE digest) and the last
  *      ~16 history messages (a tool call and its results are never split by the trim).
  *
- * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg).
+ * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg),
+ * find_objects(subtype?), where_is(name), look(camera?).
  * Each call goes through CommandGate; a rejection returns to the model as a role:"tool" message with the reason.
  * cross_door and a LARGE move_relative only raise a card; a small move/turn is sent at once (command_gate.h).
  * Read-only queries, answered here from the digest without the controller and without a card:
  * find_objects(subtype?) and where_is(name) (object_facts.h).
+ * look(camera?) is read-only too: the newest frame of the front (ZED) or 360 (Ricoh) camera is shrunk, JPEG-encoded
+ * and attached to its tool result; the follow-up request, always made then, shows it to the model (look_messages.h
+ * has the message layout and the one-turn lifetime of an image; camera_grabber.h the media-plane side).
  *
  * OBJECT CHANGES: births/removals of the current room's objects are diffed (by node id) against two baselines — one
  * shown in the window at most every object_change_period_ms, one put into the NEXT request's STATE ("changes in
@@ -34,6 +38,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -44,6 +49,7 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 
+#include "camera_grabber.h"
 #include "chat_log.h"
 #include "chat_window.h"
 #include "command_gate.h"
@@ -66,6 +72,9 @@ struct SessionConfig
     double default_step_m = 0.3;       ///< "advance a bit"
     int objects_nearest = 6;
     int object_change_period_ms = 2000;
+    int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
+    int look_max_side_360 = 1280;      ///< look(): the same for the 2:1 panorama
+    int look_jpeg_quality = 80;
 };
 
 class ChatSession
@@ -86,7 +95,8 @@ private:
     void reject_card(const char* how);
 
     void ask_model(bool followup);
-    void handle_tool_calls(const QJsonArray& calls);
+    /// Runs every call, pushes the tool results. Returns true if one of them attached an image (look()).
+    bool handle_tool_calls(const QJsonArray& calls);
     QJsonArray tools_json() const;
     QString system_prompt() const;
     static QString load_robot_description(const std::string& path);   ///< "" on failure (logged)
@@ -103,6 +113,8 @@ private:
     void track_object_changes();
     /// find_objects / where_is → the tool-result text; "" if `name` is not a query tool.
     QString answer_query(const QString& name, const QJsonObject& args);
+    /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
+    QString do_look(const QJsonObject& args);
     void tick_status();
     void ping_llm();
     void refresh_status_bar();
@@ -116,6 +128,8 @@ private:
     OllamaClient llm_;
     std::unique_ptr<ChatWindow> window_;
     ChatLog log_;
+    CameraGrabber cameras_;
+    QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
     QObject ctx_;
     QTimer digest_timer_, status_timer_, ping_timer_;
 
@@ -135,6 +149,7 @@ private:
         QJsonArray tool_calls;
         bool followup = false;
         bool streaming = false;
+        bool carries_image = false;   ///< this request sent an image ⇒ strip it from the history when it ends
     } turn_;
 
     struct Pending

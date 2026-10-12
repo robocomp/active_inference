@@ -103,6 +103,15 @@ struct PreparedFrame
                                                     const std::vector<cv::Point>& poly,
                                                     const std::vector<std::vector<cv::Point>>& controls);
 
+// ─── ONE BOUNDARY SAMPLE ──────────────────────────────────────────────────────────────────────────
+// The per-sample statistic every contour score above is a mean of: the strongest |∇I · n| within ±2 px
+// of (px, py) along the unit image normal (nx, ny). Exposed so a caller whose boundary is NOT one closed
+// polygon — door_concept's aperture FRAME is an open U (two jambs and a lintel, no sill) whose samples
+// carry per-sample visibility weights — scores with the identical arithmetic instead of a copy of it.
+// Returns < 0 when the sample is outside the usable frame (NOT measured), never 0 for that case.
+[[nodiscard]] float across_boundary_gradient_at(const cv::Mat& gx, const cv::Mat& gy,
+                                                int px, int py, double nx, double ny);
+
 // Build control polygons by shifting `poly` sideways by ±k widths of its own bounding box. Sideways
 // only: a door's neighbours along the wall are the honest comparison, while shifting vertically would
 // straddle floor and ceiling and compare against a different kind of surface entirely.

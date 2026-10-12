@@ -9,15 +9,18 @@
  *   ├ card (hidden unless a movement awaits confirmation) ────┤
  *   │ Confirm: cross door_19 …        [Confirm] [Cancel]      │
  *   ├─────────────────────────────────────────────────────────┤
- *   │ [ type here …                ] [Send] [Cancel] [New]    │
+ *   │ [ type here … (Enter sends, ↑↓ past prompts)] thinking… [Cancel] │
  *   │ model qwen3:8b · ollama ok · controller present          │
  *   └─────────────────────────────────────────────────────────┘
  *
+ * Enter sends; ↑/↓ walk past prompts (the line being typed is kept as the draft); /new, /clear or Ctrl+L
+ * start a new conversation.
  * No Q_OBJECT (no moc): it talks upward through std::function callbacks, like controller_mission_panel.h.
  * GUI thread only.
  */
 
 #include <functional>
+#include <vector>
 
 #include <QFrame>
 #include <QLabel>
@@ -64,6 +67,8 @@ public:
 private:
     void append_html(const QString& html);
     void send_clicked();
+    void history_step(int dir);   ///< −1 = older (↑), +1 = newer (↓)
+    friend class HistoryKeys;
 
     Callbacks cb_;
     QTextBrowser* transcript_ = nullptr;
@@ -72,10 +77,12 @@ private:
     QPushButton* card_confirm_ = nullptr;
     QPushButton* card_cancel_ = nullptr;
     QLineEdit* input_ = nullptr;
-    QPushButton* send_ = nullptr;
     QPushButton* cancel_ = nullptr;
-    QPushButton* new_ = nullptr;
+    QLabel* busy_ = nullptr;          ///< "thinking…" while a request is in flight (replaces a greyed Send button)
     QLabel* status_ = nullptr;
+    std::vector<QString> history_;    ///< prompts sent, oldest first
+    int hist_pos_ = 0;                ///< == history_.size() when editing the draft
+    QString draft_;                   ///< the line being typed when ↑ was first pressed
     bool in_assistant_ = false;
 };
 

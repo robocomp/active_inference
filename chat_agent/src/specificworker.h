@@ -20,7 +20,7 @@
 /**
  * chat_agent — a person talks to the robot (2026-10-12, phase 1 MVP).
  *
- * A local LLM (ollama, qwen3:8b) answers questions grounded in a digest of the live graph and turns requests into
+ * A local LLM (ollama, qwen3-vl:8b-instruct; it can also look through the cameras, look()) answers questions grounded in a digest of the live graph and turns requests into
  * commands for the controller. The model PROPOSES; C++ decides: every action goes through CommandGate, and anything
  * that moves the robot needs the person's confirmation on a card (or a typed yes, matched here, never by the model).
  * Commands reach the controller through ONE owned node, `chat_intention` (intention_node.h); the controller mirrors

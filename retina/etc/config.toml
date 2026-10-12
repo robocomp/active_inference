@@ -521,7 +521,7 @@ label   = "door"            # must be an ADE20K class the loaded model exposes (
 # camera pose, the robot pose estimate and the Webots ground truth (raw). A frame is kept when the
 # camera moved ≥ min_move_m or turned ≥ min_turn_deg since the last kept one.
 [ZedDump]
-enabled      = true
+enabled      = false   # switched off 2026-10-12 (was filling etc/zed_frames: 13 GB); turn on for calibration dumps
 dir          = "etc/zed_frames"
 jpeg_quality = 92
 min_move_m   = 0.05

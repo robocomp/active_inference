@@ -123,6 +123,8 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
             "abort a request with no token/tool call after this long (cold model load is the usual cause)");
     c.llm.transfer_timeout_ms = r.i("LLM.transfer_timeout_ms", 120000, "transport gives up after this long with no bytes");
     c.llm.keep_alive = QString::fromStdString(r.s("LLM.keep_alive", "30m", "how long ollama keeps the model loaded"));
+    c.llm.num_predict = r.i("LLM.num_predict", -1,
+            "cap on generated tokens per request (options.num_predict); <= 0 = no cap (a runaway answer is cut, not stopped)");
     c.max_history = r.i("Chat.max_history", 16, "messages of history sent with each request (tool pairs kept together)");
     c.digest_period_ms = r.i("Chat.digest_period_ms", 500, "period of the graph STATE digest (main thread poll)");
     c.status_period_ms = r.i("Chat.status_period_ms", 250, "period of the chat_intention state poll");
@@ -138,6 +140,12 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.objects_nearest = r.i("Chat.objects_nearest", 6, "OBJECTS section of the STATE: how many nearest objects are listed");
     c.object_change_period_ms = r.i("Chat.object_change_period_ms", 2000,
             "object births/removals are shown in the window at most this often (flaps inside the window cancel)");
+    c.look_max_side = r.i("Chat.look_max_side", 1280,
+            "look(): the front (ZED) frame is shrunk so its longest side is at most this (px) before JPEG "
+            "(ollama resizes to ~1 Mpx itself: ~1050 tokens at <=1280 px, ~1800 at 1920)");
+    c.look_max_side_360 = r.i("Chat.look_max_side_360", 1280,
+            "look(): the same for the 2:1 Ricoh panorama (1280x640 ~1070 tokens; 1920x960 ~1800 and saw no more)");
+    c.look_jpeg_quality = r.i("Chat.look_jpeg_quality", 80, "look(): JPEG quality 1..100 of the attached frame");
     return c;
 }
 

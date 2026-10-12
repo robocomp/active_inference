@@ -165,6 +165,7 @@ struct DoorInstance
     // robot changes side by doing the crossing, and a through-pose recomputed from the live side flips back into
     // the room being left at the doorway (live try17/try19: the robot turned round in the doorway).
     float cross_side_latched = 0.0f;
+    float cross_standoff_m = 1.2f;   ///< the through-pose depth last offered (past the far-side leaf), for the claim log
     float hypothesis_azimuth    = 0.0f;   // room-frame bearing to look toward (the Orient affordance's target yaw)
     // ★Does this hypothesis have a RANGE, or only a bearing? Set when the birth path resolved one from the
     // precision cascade in door_bearing_range.h (today: the residual grid; soon: dense ricoh depth). With a
@@ -254,6 +255,17 @@ struct DoorInstance
     float dbg_edge_true = 0.0f, dbg_edge_ctrl = 0.0f;
     int   dbg_edge_n = 0;
     float dbg_edge_delta = 0.0f;   // log-odds this channel contributed this cycle (signed)
+    // ── the doorway-FRAME channel (door_frame_evidence.h). dbg_frame_n == 0 ⇒ NOT MEASURED. ──
+    float dbg_frame_excess = 0.0f, dbg_frame_true = 0.0f, dbg_frame_ctrl = 0.0f;
+    float dbg_frame_depth = 0.0f, dbg_frame_vis = 0.0f;
+    int   dbg_frame_n = 0, dbg_frame_ndepth = 0;
+    // ── the WALL-BAND containment prior (door_room_band.h) ──
+    // The static log-prior term currently folded into `existence`. It is REPLACED each cycle (the old value
+    // taken out, the new one put in), never summed: the door's position relative to the wall is one fact, not
+    // a fresh observation every frame. 0 on the band.
+    float room_prior_term = 0.0f;
+    float dbg_band_delta = 0.0f;   // signed offset of the aperture centre from the polygon (> 0 outside); NaN = no polygon
+    float dbg_band_p     = 1.0f;   // π(δ) = exp(room_prior_term)
     float dbg_edge_excess = 0.0f;  // (s_true - s_ctrl) / frame mean gradient — THE evidence quantity
     int   dbg_edge_nctl = 0;       // control placements that survived; 0 ⇒ nothing to compare against,
                                    // which happens at close range as the controls fall off-frame

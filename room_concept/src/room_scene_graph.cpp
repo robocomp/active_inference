@@ -939,7 +939,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
             best = c;
             best_ap = &ap;
         }
-    room_concept_->set_outside_prob(best_ap ? rc::crossing::fuse(best_ap->p_open, best.p_past) : 0.f);
+    room_concept_->set_outside_prob(best_ap ? (best_ap->p_open < 0.f ? 0.5f : std::clamp(best_ap->p_open, 0.f, 1.f)) * best.p_past : 0.f);   // conjunction, as p_cross (door_crossing.h)
     row.n_apert = static_cast<int>(apertures.size());
     if (best_ap == nullptr)
         return;   // row keeps NaN across the aperture columns; n_apert says whether any were offered

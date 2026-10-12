@@ -47,6 +47,7 @@ struct OllamaConfig
     int first_token_timeout_ms = 60000;
     int transfer_timeout_ms = 120000;
     QString keep_alive = "30m";
+    int num_predict = -1;   ///< cap on generated tokens per request (options.num_predict); <= 0 = no cap
 };
 
 struct ChatStats

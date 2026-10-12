@@ -2080,6 +2080,13 @@ void SpecificWorker::update_existence_beliefs()
     policy.removal_prob  = cfg_.exist_removal_prob;
     policy.remove_frames = static_cast<float>(cfg_.exist_remove_frames);
 
+    // ★ONE PreparedFrame (blur + Sobel + whole-frame gradient reference) per cycle, shared by every door's
+    // leaf contour AND its aperture frame. The one-shot contour_edge_support(img, ...) recomputed all of it
+    // per door for a result identical every time; the arithmetic of the score is unchanged.
+    rc::edges::PreparedFrame rgb_prep;
+    if (cfg_.rgb_contour_check and rgb_ingestor_ and not rgb_ingestor_->frame().empty())
+        rgb_prep = rc::edges::prepare_frame(rgb_ingestor_->frame());
+
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
     {
@@ -2090,27 +2097,41 @@ void SpecificWorker::update_existence_beliefs()
             inst.existence_seeded = true;
         }
 
-        // ROOM-CONTAINMENT POSE PRIOR (runs BEFORE the sensor channel, so it reaches a door a localization glitch
-        // put OUTSIDE the walls / behind a wall where the sensor can never vacate it): P(door outside) ≈ 0, so
-        // an out-of-room centre draws a STRONG negative every frame regardless of visibility → removed in a few.
-        // This is a genuine PRIOR over pose, not a detectability heuristic, so it survives the port unchanged.
-        if (cfg_.exist_room_prior and fitter_->has_room_polygon() and not inst.is_bearing_hypothesis)
+        // ── ROOM-CONTAINMENT PRIOR: THE WALL BAND (door_room_band.h) ────────────────────────────────────
+        // A door's aperture lies IN a wall: between the room polygon (drawn at the room-side face) and the far
+        // face a wall thickness T beyond it. The old test — aperture centre inside the polygon ± 0.40 m, else
+        // −1.5 nats PER FRAME and skip every sensor channel — had both halves wrong: the normal place for a real
+        // door is OUTSIDE the polygon (it was only ever saved by the margin), and a fact about where a door is
+        // does not become new evidence ten times a second. Integrated per frame, ANY penalty short of exactly
+        // zero walks a still, unobserved door to the floor.
+        // Now: a static log-prior log π(δ) = −½(dist(δ,[0,T])/σ)², exactly 0 anywhere on the band, falling off
+        // in the door-registration ⊕ polygon-face σ on BOTH sides — a door well inside the room is as wrong as
+        // one far outside. It REPLACES its previous value in L each cycle (take the old term out, put the new
+        // one in), so a door on the band pays nothing ever, and one far off it is pushed to the floor once and
+        // held there. The removal debounce is advanced by 1 − π (how sure the prior is that this is not a door
+        // of this wall), on every cycle, probed or not — so an off-band door behind a wall, which no sensor can
+        // reach, is still removed after RemoveFrames ideal looks' worth, as before.
+        // ★ONLY ON A RESOLVED APERTURE (ai2_initialized). Before the first fit the "aperture" is the published
+        // LEAF box (door_fitter.cpp refresh_geometry), whose centre sits up to half a width INSIDE the room
+        // for a leaf open into it — a two-sided band would floor a healthy newborn. Births outside the room are
+        // suppressed at birth (RoomMarginM); a newborn holds here as it does on every sensor channel.
+        float p_band = 1.0f;
+        if (cfg_.exist_room_prior and not inst.is_bearing_hypothesis and inst.ai2_initialized)
         {
-            // The APERTURE centre, not the leaf's: a leaf swung OUTWARD moves the panel centre by w/2
-            // (0.45 m at the fitted w = 0.90 seen live) against RoomMarginM = 0.40, which would put a
-            // perfectly good door "outside the room" — and this branch `continue`s past the sensor
-            // channel, so nothing could rescue it before the 15-frame debounce deleted it.
-            const auto& ms = inst.model.state();
-            if (not fitter_->point_in_room(Eigen::Vector2f(ms.ap_cx, ms.ap_cy), cfg_.exist_room_margin_m))
-            {
-                inst.existence.set(inst.existence.logodds() - cfg_.exist_out_of_room_gain);
-                // A PRIOR is visibility-independent by construction (that is what the branch comment above
-                // argues), so it advances the debounce at FULL weight — unlike the sensor channel below.
-                if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, 1.0f).remove)
-                    to_remove.push_back(id);
-                continue;   // outside the room → no sensor evidence can rescue it; skip the normal channel
-            }
+            const float delta = fitter_->aperture_band_offset(inst);          // NaN with no polygon ⇒ term 0
+            const float term  = rc::door::band_log_prior(delta, fitter_->room_band());
+            inst.existence.set(inst.existence.logodds() - inst.room_prior_term + term);
+            inst.room_prior_term = term;
+            p_band = std::exp(term);
+            inst.dbg_band_delta = delta;
+            inst.dbg_band_p     = p_band;
         }
+        else if (inst.room_prior_term != 0.0f)
+        {
+            inst.existence.set(inst.existence.logodds() - inst.room_prior_term);   // prior switched off: take it out
+            inst.room_prior_term = 0.0f;
+        }
+        const float prior_look = 1.0f - p_band;   // the prior's own resolvability toward removal
 
         // MINIMUM-HEIGHT prior: same categorical prior as at birth, for an instance that is ALREADY alive —
         // either it predates the birth check, or it drifted onto a low blob. A door is an aperture a person
@@ -2175,12 +2196,11 @@ void SpecificWorker::update_existence_beliefs()
         if (cfg_.rgb_contour_check and rgb_ingestor_ and not rgb_ingestor_->frame().empty()
             and sil.contour.face.valid() and not sil.contour.controls.empty())
         {
-            const cv::Mat& img = rgb_ingestor_->frame();
             std::vector<std::vector<cv::Point>> ctl;
             ctl.reserve(sil.contour.controls.size());
             for (const auto& c : sil.contour.controls)
                 ctl.push_back(c.px);
-            edge = rc::edges::contour_edge_support(img, sil.contour.face.px, ctl);
+            edge = rc::edges::contour_edge_support(rgb_prep, sil.contour.face.px, ctl);
         }
         // ── THE METRIC HALF ─────────────────────────────────────────────────────────────────────────
         // The RGB check confirms "a rectangular thing with these borders is here" — its own header says
@@ -2222,6 +2242,57 @@ void SpecificWorker::update_existence_beliefs()
         inst.dbg_sil_ndet = sil.n_detectable; inst.dbg_sil_ntotal = sil.n_total;
         inst.dbg_sil_noccl = sil.n_occluded;  inst.dbg_sil_ncells = sil.n_cells;
         inst.dbg_sil_central = sil.central_frac(); inst.dbg_sil_resolv = sil.resolvability();
+        // ── THE DOORWAY FRAME (door_frame_evidence.h) ──────────────────────────────────────────────────
+        // The jambs + lintel of the APERTURE, which do not move when the leaf swings. Every channel above
+        // looks at the leaf; this is the one that still sees the door when the leaf is open, and above all
+        // when it has swung OUT of the room the robot is in (live try32: L +3.6 -> -4.0, room_2's only door
+        // deleted while the camera looked straight at the doorway). Computed BEFORE the probed() test on
+        // purpose: a leaf the camera cannot see does not make the frame around it unobservable.
+        rc::door::FrameScore frame{};
+        if (cfg_.frame_contour_check)
+        {
+            const auto probe = fitter_->compute_frame_probe(inst);
+            rc::edges::ContourDepthParams fdp;
+            const cv::Mat* fdimg = nullptr;
+            if (cfg_.frame_depth_check and depth_ingestor_ and not depth_ingestor_->frame().empty())
+            {
+                fdimg = &depth_ingestor_->frame();
+                const int fc = rgb_ingestor_ ? rgb_ingestor_->frame().cols : fdimg->cols;
+                const int fr = rgb_ingestor_ ? rgb_ingestor_->frame().rows : fdimg->rows;
+                fdp.depth_scale_x = (fc > 0) ? static_cast<float>(fdimg->cols) / fc : 1.0f;
+                fdp.depth_scale_y = (fr > 0) ? static_cast<float>(fdimg->rows) / fr : 1.0f;
+            }
+            frame = rc::door::score_frame(probe, rgb_prep.valid() ? &rgb_prep : nullptr, fdimg, fdp);
+        }
+        inst.dbg_frame_excess = frame.excess;  inst.dbg_frame_true = frame.s_true; inst.dbg_frame_ctrl = frame.s_control;
+        inst.dbg_frame_depth  = frame.depth_verdict; inst.dbg_frame_vis = frame.vis_frac;
+        inst.dbg_frame_n      = frame.n_edge;  inst.dbg_frame_ndepth = frame.n_depth;
+
+        // ── IMAGE-GEOMETRY EVIDENCE: the leaf contour (where the leaf is visible) + the doorway frame ─────
+        // ★ONE tanh, ONE observation's worth per cycle, whichever of them speak. On a SHUT door the leaf
+        // quad and the aperture frame are nearly the same pixels, so summing their verdicts inside one
+        // saturation is the common-mode treatment — two full observations would count one boundary twice.
+        // The leaf halves keep exactly their old form (RGB confirm-only + depth), so with the frame silent
+        // this reduces term for term to what ran before. The frame enters SYMMETRIC and scaled by vis_frac
+        // (how much of it the camera could resolve): on a blank wall both its halves are zero-mean, so it
+        // neither confirms nor refutes a phantom — and a confirm-only form fed that noise would be a ratchet.
+        const auto integrate_image_geometry = [&](bool leaf_visible)
+        {
+            float verdict = 0.0f;
+            int   n = 0;
+            if (leaf_visible and inst.dbg_edge_n > 0 and edge.n_controls > 0)
+            { verdict += std::max(0.0f, edge.excess); n = std::max(n, inst.dbg_edge_n); }
+            if (leaf_visible and depth.n_samples > 0)
+            { verdict += depth.verdict; n = std::max(n, depth.n_samples); }
+            if (frame.n_samples() > 0)
+            { verdict += frame.verdict(); n = std::max(n, frame.n_samples()); }
+            if (n == 0)
+            { inst.dbg_edge_delta = 0.0f; return; }   // nothing measured — NOT a refutation
+            const rc::exist::Evidence ev = rc::exist::contour_evidence(verdict, n, sm);
+            inst.existence.integrate(ev, 1.0f);
+            inst.dbg_edge_delta = ev.log_odds_delta;
+        };
+
         // ★"WAS IT LOOKED AT" IS A QUESTION ABOUT THE DOOR, NOT ABOUT ONE GUESS AT ITS HINGE ANGLE.
         // probed() answers it under the phi posterior, so a leaf the fit happened to swing out of frame
         // is not mistaken for a door the camera never pointed at. See DoorSilhouette::probed().
@@ -2231,6 +2302,13 @@ void SpecificWorker::update_existence_beliefs()
             // This branch is the whole fix for "the door disappears when the robot turns around": there is no
             // pd to fall back on, because a sensor that did not look produces no evidence either way.
             inst.dbg_sil_pdetect = 0.0f; inst.dbg_sil_free_eff = 0.0f;
+            // The leaf was not looked at; the FRAME may have been. Its evidence is integrated, but no
+            // removal decision is taken on a cycle the removal channel (the silhouette) did not probe.
+            integrate_image_geometry(/*leaf_visible=*/false);
+            // The wall-band prior needs no look: an off-band door advances its debounce here too (a door the
+            // sensor can never reach — behind a wall — is exactly the case that prior exists for).
+            if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, prior_look).remove)
+                to_remove.push_back(id);
             continue;
         }
 
@@ -2410,63 +2488,49 @@ void SpecificWorker::update_existence_beliefs()
         // both depend on the door being there, so on a frame where a mask IS present both push positive.
         // The +/-4 log-odds clamp bounds the resulting overconfidence; a proper common-mode treatment
         // (as the mask-point Woodbury marginalisation does for sigma) is the right long-term fix.
-        if (inst.dbg_edge_n > 0 and edge.n_controls > 0)
-        {
-            // ★DIFFERENCE, NOT RATIO, and NOT through mask_evidence. Both halves are scars:
-            //  · The ratio form threw away magnitude, so a near-blank frame (s_true 5.2 against controls
-            //    7.8) produced support 0.400 and a full-strength refutation that deleted a live door.
-            //    The excess for that same frame is -0.26: weak, which is the truth.
-            //  · Routing through mask_evidence() applied its tanh common-mode cap, and my sample counts
-            //    (75-182) sat so far past its knee that EVERY cycle clipped to the identical +-2.83.
-            //    The graded weight I thought I had was a binary vote on the sign. Measured: the log
-            //    contained exactly two distinct dL values across the whole run.
-            // The conversion is now rc::exist::contour_evidence (MODALITY 3), which is that reasoning
-            // written once for the fleet: scaled by ONE confident observation's worth, log(pd/pc), the
-            // same quantity every other channel is denominated in, with tanh bounding the cycle rather
-            // than quantising it. The gate stays HERE because it is this channel's own precondition —
-            // the RGB statistic is relative and means nothing without a surviving control.
-            // ★THE TWO HALVES SUM INSIDE ONE tanh, and that IS the common-mode treatment. A boundary in
-            // the image and a step in the depth at the same place are not independent events — both are
-            // consequences of the door being there — so letting each contribute a full observation's
-            // worth would count one fact twice. Both are dimensionless and bounded, so the sum is well
-            // defined, and one confident observation still bounds the cycle.
-            // ★CONFIRM-ONLY: this channel may RAISE the belief and never lower it, and that asymmetry is
-            // stated, not tuned. A contour that MATCHES is evidence the door is there. A contour that does
-            // NOT match is evidence our POSE is wrong — the leaf is not at the angle we drew it at — which
-            // is a fit error and none of the existence channel's business. The channel was introduced for
-            // exactly the first job: positive evidence that stops a blind detector from removing a door.
-            // ★MEASURED, AND IT IS NOT A SMALL EFFECT. With the leaf tracked to its true ~97 deg the
-            // contour scores a foreshortened quad out in the room against copies of itself displaced
-            // along a wall that is no longer behind it, and the excess flips sign nearly every cycle:
-            // -2.35 +0.85 -5.80 -5.68 +2.40 +1.11 -4.29 ... -7.48 over consecutive frames, up to 7.5 nats
-            // from ONE frame against a band only 8 wide. The silhouette channel was healthy throughout
-            // (free_eff 0, occ 92, detector firing) — the belief was being thrown across its whole range
-            // by a measurement with no notion of its own reliability.
-            // ⚠THE PROPER FIX IS PRECISION, NOT A CLAMP: the excess is a difference of means whose own
-            // spread across the control placements is discarded, so a wild measurement and a confident
-            // one currently weigh the same. Returning that spread and weighting by it would let a noisy
-            // contour contribute little in BOTH directions, which is strictly better than refusing one
-            // direction. This asymmetry is the honest interim: it cannot make the door immortal — the
-            // silhouette channel still removes, and it is the one with a detectability model.
-            const float verdict = std::max(0.0f, edge.excess) + depth.verdict;
-            const rc::exist::Evidence ev_rgb =
-                rc::exist::contour_evidence(verdict, std::max(inst.dbg_edge_n, depth.n_samples), sm);
-            inst.existence.integrate(ev_rgb, 1.0f);
-            inst.dbg_edge_delta = ev_rgb.log_odds_delta;
-        }
-        else if (depth.n_samples > 0)
-        {
-            // ★THE DEPTH HALF STANDS ALONE when the RGB half cannot speak — no surviving control, or no
-            // RGB frame at all. Its statistic is absolute, so it does not need the null the gradient
-            // check does, and making it wait for one would silence the only channel that can say "we are
-            // looking straight through the place the door is supposed to be".
-            const rc::exist::Evidence ev_d =
-                rc::exist::contour_evidence(depth.verdict, depth.n_samples, sm);
-            inst.existence.integrate(ev_d, 1.0f);
-            inst.dbg_edge_delta = ev_d.log_odds_delta;
-        }
-        else
-            inst.dbg_edge_delta = 0.0f;   // not measured, and no surviving control — NOT a refutation
+        // (What follows is the history of the LEAF half of integrate_image_geometry above — its confirm-only
+        // RGB term and its depth term. The doorway-FRAME half is symmetric; the reasons are at the lambda.)
+        // ★DIFFERENCE, NOT RATIO, and NOT through mask_evidence. Both halves are scars:
+        //  · The ratio form threw away magnitude, so a near-blank frame (s_true 5.2 against controls
+        //    7.8) produced support 0.400 and a full-strength refutation that deleted a live door.
+        //    The excess for that same frame is -0.26: weak, which is the truth.
+        //  · Routing through mask_evidence() applied its tanh common-mode cap, and my sample counts
+        //    (75-182) sat so far past its knee that EVERY cycle clipped to the identical +-2.83.
+        //    The graded weight I thought I had was a binary vote on the sign. Measured: the log
+        //    contained exactly two distinct dL values across the whole run.
+        // The conversion is now rc::exist::contour_evidence (MODALITY 3), which is that reasoning
+        // written once for the fleet: scaled by ONE confident observation's worth, log(pd/pc), the
+        // same quantity every other channel is denominated in, with tanh bounding the cycle rather
+        // than quantising it. The gate stays HERE because it is this channel's own precondition —
+        // the RGB statistic is relative and means nothing without a surviving control.
+        // ★THE TWO HALVES SUM INSIDE ONE tanh, and that IS the common-mode treatment. A boundary in
+        // the image and a step in the depth at the same place are not independent events — both are
+        // consequences of the door being there — so letting each contribute a full observation's
+        // worth would count one fact twice. Both are dimensionless and bounded, so the sum is well
+        // defined, and one confident observation still bounds the cycle.
+        // ★CONFIRM-ONLY: this channel may RAISE the belief and never lower it, and that asymmetry is
+        // stated, not tuned. A contour that MATCHES is evidence the door is there. A contour that does
+        // NOT match is evidence our POSE is wrong — the leaf is not at the angle we drew it at — which
+        // is a fit error and none of the existence channel's business. The channel was introduced for
+        // exactly the first job: positive evidence that stops a blind detector from removing a door.
+        // ★MEASURED, AND IT IS NOT A SMALL EFFECT. With the leaf tracked to its true ~97 deg the
+        // contour scores a foreshortened quad out in the room against copies of itself displaced
+        // along a wall that is no longer behind it, and the excess flips sign nearly every cycle:
+        // -2.35 +0.85 -5.80 -5.68 +2.40 +1.11 -4.29 ... -7.48 over consecutive frames, up to 7.5 nats
+        // from ONE frame against a band only 8 wide. The silhouette channel was healthy throughout
+        // (free_eff 0, occ 92, detector firing) — the belief was being thrown across its whole range
+        // by a measurement with no notion of its own reliability.
+        // ⚠THE PROPER FIX IS PRECISION, NOT A CLAMP: the excess is a difference of means whose own
+        // spread across the control placements is discarded, so a wild measurement and a confident
+        // one currently weigh the same. Returning that spread and weighting by it would let a noisy
+        // contour contribute little in BOTH directions, which is strictly better than refusing one
+        // direction. This asymmetry is the honest interim: it cannot make the door immortal — the
+        // silhouette channel still removes, and it is the one with a detectability model.
+        // ★THE DEPTH HALF STANDS ALONE when the RGB half cannot speak — no surviving control, or no
+        // RGB frame at all. Its statistic is absolute, so it does not need the null the gradient
+        // check does, and making it wait for one would silence the only channel that can say "we are
+        // looking straight through the place the door is supposed to be".
+        integrate_image_geometry(/*leaf_visible=*/true);
 
         // Debounce on consecutive EVIDENCE cycles (not wall-clock), so a transient hiccup cannot delete a real
         // door, and removal always reflects sustained agreement across frames.
@@ -2479,7 +2543,9 @@ void SpecificWorker::update_existence_beliefs()
         // ★And RemoveFrames is what is demanded AT the boundary. Charging the full count of ideal observations
         // AFTER L has already crossed double-counts the same evidence and is what freezes a condemned door
         // forever once the robot looks away; the shared policy lets confidence discharge the repetition.
-        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, p_detect);
+        // Either the look (p_detect) or the wall-band prior (1 − π) can resolve this cycle: probabilistic OR.
+        const float cycle_look = 1.0f - (1.0f - p_detect) * (1.0f - prior_look);
+        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, cycle_look);
         if (verdict.remove)
             to_remove.push_back(id);
         if (verdict.stalled)
@@ -2532,6 +2598,7 @@ void SpecificWorker::update_existence_beliefs()
                                     or fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m);
                 const float oblq = fitter_->door_view_obliquity(inst);   // diagnostic only (see door_fitter.h)
                 std::print("door_concept: [existence] {} L={:.2f} p={:.2f} pos=({:.2f},{:.2f}) inroom={} roomprior={} "
+                           "band d={:+.2f} pi={:.2f} "
                            "won={} since_det={} | sil occ={:.0f} free={:.0f} free_eff={:.1f} ndet={}/{} occl={} "
                            "resolv={:.2f} central={:.2f} pdet={:.2f} oblq={:.2f} gate={}/{} strk={}"
                            // The RGB-reprojection contour channel, on the line where pdet is read: without
@@ -2543,9 +2610,12 @@ void SpecificWorker::update_existence_beliefs()
                            // disagree — edge high while P(door) collapses — the disagreement IS the
                            // finding, and it was previously only visible by joining two files afterwards.
                            " | edge n={}/{}ctl sup={:.2f} exc={:+.2f} (t={:.0f} c={:.0f}) dL={:+.2f}"
-                           " | phi={:.1f}deg sup={:.2f} cmd={}\n",
+                           " | phi={:.1f}deg sup={:.2f} cmd={}"
+                           // The doorway-FRAME channel (door_frame_evidence.h). n=0 ⇒ NOT MEASURED. Its
+                           // contribution is inside the edge dL above (one tanh for all image geometry).
+                           " | frame n={} vis={:.2f} exc={:+.2f} (t={:.0f} c={:.0f}) dep={:+.2f}/{}\n",
                            inst.node_name, inst.existence.logodds(), inst.existence.p_exists(), ms.cx, ms.cy,
-                           inroom ? 1 : 0, has_poly ? 1 : 0,
+                           inroom ? 1 : 0, has_poly ? 1 : 0, inst.dbg_band_delta, inst.dbg_band_p,
                            inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection,
                            inst.dbg_sil_occ, inst.dbg_sil_free, inst.dbg_sil_free_eff,
                            inst.dbg_sil_ndet, inst.dbg_sil_ntotal, inst.dbg_sil_noccl,
@@ -2556,7 +2626,9 @@ void SpecificWorker::update_existence_beliefs()
                            inst.dbg_edge_n, inst.dbg_edge_nctl, inst.dbg_edge_support, inst.dbg_edge_excess,
                            inst.dbg_edge_true, inst.dbg_edge_ctrl, inst.dbg_edge_delta,
                            inst.phi_est * 180.0f / static_cast<float>(M_PI), inst.phi_support,
-                           inst.phi_cmd_active ? 1 : 0);
+                           inst.phi_cmd_active ? 1 : 0,
+                           inst.dbg_frame_n, inst.dbg_frame_vis, inst.dbg_frame_excess, inst.dbg_frame_true,
+                           inst.dbg_frame_ctrl, inst.dbg_frame_depth, inst.dbg_frame_ndepth);
                 // Minimum-height evidence: obs_top is the support top over UNTRUNCATED views only, so a door
                 // whose top is always clipped by the image border shows conf→0 and is never judged short.
                 std::print("door_concept: [existence] {} obs_top={:.2f} m (conf {:.2f}, trunc {:.2f}) min={:.2f} m\n",
@@ -2591,7 +2663,13 @@ void SpecificWorker::update_existence_beliefs()
                          // angle, not a single-angle rendering. phi_wmax is the largest normalised
                          // weight: ~1/phi_nhyp means the frame could not identify the angle at all, so
                          // the absence was averaged across hypotheses and is correctly near zero.
-                         "phi,phi_support,phi_cmd,phi_marg,phi_nhyp,phi_wmax\n"; return f; }();
+                         "phi,phi_support,phi_cmd,phi_marg,phi_nhyp,phi_wmax,"
+                         // The doorway-FRAME channel. frame_n==0 ⇒ NOT MEASURED; frame_vis is the
+                         // fraction of the jambs+lintel the camera could resolve (its P(detect)).
+                         "frame_n,frame_vis,frame_exc,frame_true,frame_ctrl,frame_dep,frame_ndep,"
+                         // The WALL-BAND prior (door_room_band.h): signed aperture offset from the polygon
+                         // (> 0 outside; [0, WallThicknessM] is the normal place for a door) and π = e^term.
+                         "band_delta,band_p\n"; return f; }();
                 if (ex_csv)
                 {
                     ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
@@ -2617,7 +2695,11 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.phi_est << ',' << inst.phi_support
                            << ',' << (inst.phi_cmd_active ? 1 : 0)
                            << ',' << (inst.dbg_phi_marg ? 1 : 0) << ',' << inst.dbg_phi_nhyp
-                           << ',' << inst.dbg_phi_wmax << '\n';
+                           << ',' << inst.dbg_phi_wmax
+                           << ',' << inst.dbg_frame_n << ',' << inst.dbg_frame_vis << ',' << inst.dbg_frame_excess
+                           << ',' << inst.dbg_frame_true << ',' << inst.dbg_frame_ctrl
+                           << ',' << inst.dbg_frame_depth << ',' << inst.dbg_frame_ndepth
+                           << ',' << inst.dbg_band_delta << ',' << inst.dbg_band_p << '\n';
                     ex_csv.flush();
                 }
             }
@@ -3058,8 +3140,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f);
         o.contract = rc::door::approach_contract(pg);
-        o.why      = std::format("a located door can always be approached (P(reach)={:.2f} ⇒ value {:.3f})",
-                                 st.p_reach, o.value);
+        o.why      = std::format("a located door can always be approached (P(reach)={:.2f} ⇒ value {:.3f}; range {:.2f} m "
+                                 "in band [{:.2f},{:.2f}] σ {:.2f}, w {:.2f})", st.p_reach, o.value, st.robot_range_m,
+                                 st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
+                                 st.range_sigma_m, inst.aperture.w);
         inst.aff_approach.update(o);
     }
 
@@ -3101,7 +3185,21 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.p     = st.p_open;
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
             inst.cross_side_latched = st.approach_side;   // the side we stand on ⇒ the far side is the target
-        const auto pose = rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m);
+        // ★ PAST THE LEAF, NOT INTO IT (2026-10-13). A leaf swung to the FAR side stands up to its own width deep
+        //   beside the doorway; a through-pose at the fixed CrossStandoffM (1.2 m) on the centre line put the
+        //   robot's footprint against it — live try36: `standpoint (0.03,-1.05) occupied` by the open DOOR_1 leaf,
+        //   cross unreachable, robot stuck in room_2. The leaf's own pose says how deep it reaches beyond the
+        //   aperture plane: stand past its tip by half the body + the swing clearance (never nearer than configured).
+        const float cross_standoff = [&]()
+        {
+            const float sgn = inst.cross_side_latched < 0.0f ? -1.0f : +1.0f;   // robot side; far side is −sgn·n
+            const Eigen::Vector2f n = inst.aperture.across_u(), c = inst.aperture.centre_xy();
+            const Eigen::Vector2f tip = inst.leaf_pose.hinge_xy + 2.0f * inst.leaf_pose.half_w * inst.leaf_pose.ex;
+            const float depth = std::max({0.0f, -sgn * n.dot(inst.leaf_pose.hinge_xy - c), -sgn * n.dot(tip - c)});
+            return std::max(pg.cross_standoff_m, depth + 0.5f * pg.robot_passage_width_m + pg.swing_clearance_m);
+        }();
+        inst.cross_standoff_m = cross_standoff;
+        const auto pose = rc::door::through_pose(inst.aperture, inst.cross_side_latched, cross_standoff);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
@@ -3194,8 +3292,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         }
         std::print("door_concept: [cross] {} claimed from side {:+.2f} m — through-pose ({:.2f},{:.2f})\n",
                    inst.node_name, inst.cross_side0,
-                   rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m).x,
-                   rc::door::through_pose(inst.aperture, inst.cross_side_latched, pg.cross_standoff_m).y);
+                   rc::door::through_pose(inst.aperture, inst.cross_side_latched, inst.cross_standoff_m).x,
+                   rc::door::through_pose(inst.aperture, inst.cross_side_latched, inst.cross_standoff_m).y);
     }
     if (inst.aff_cross.consume_completion())
     {
@@ -3996,6 +4094,15 @@ std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWor
     const auto best = std::ranges::min_element(lost_doors_, {}, [&](const EntryMirror& m)
                                                { return (m.T_root_door.translation().head<2>() - robot).norm(); });
     const Eigen::Affine3d T = Eigen::Affine3d(Tnr->matrix()) * best->T_root_door;
+    // A room just born has no valid robot↔room link yet (room_concept retires it at a birth): its chain can resolve to
+    // garbage (live try35: t = (3.7e13, 5.2e12) m). A door recreated there would be wrong for ever — refuse it; the
+    // next room change, or the tracker, will bring the door back from evidence.
+    if (not T.matrix().allFinite() or T.translation().head<2>().norm() > 1.0e3)
+    {
+        std::print("door_concept: [room] NOT recreating '{}' in '{}': the room<-root transform is not valid yet "
+                   "(|t| = {:.3g} m)\n", best->name, room->name(), T.translation().head<2>().norm());
+        return std::nullopt;
+    }
     const Eigen::Matrix3d R = T.rotation();
     const Eigen::Vector3f euler(static_cast<float>(std::atan2(-R(1, 2), R(2, 2))),
                                 static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),

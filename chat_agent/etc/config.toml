@@ -40,7 +40,11 @@ Verbose = false
 
 [LLM]
 url = "http://localhost:11434"
-model = "qwen3:8b"
+# qwen3-vl:8b-INSTRUCT (2026-10-12): one model for chat AND the look() camera tool. Tool choice 36/36 vs qwen3:8b
+# 31/36 on tests/check_llm_tools.py, ~0.4 s median, 7.7 GiB VRAM (qwen3:8b: 6.2). ★NOT plain "qwen3-vl:8b": that tag is
+# the THINKING variant, ignores think:false and spent 3000-6000 tokens (40-80 s) thinking before every tool call.
+# Back to text-only: model = "qwen3:8b" (look() then fails at the model, not here — it cannot see the image).
+model = "qwen3-vl:8b-instruct"
 num_ctx = 8192
 temperature = 0.2
 # No content and no tool call within this long ⇒ the request is aborted (a cold model load is the usual cause;
@@ -48,6 +52,9 @@ temperature = 0.2
 first_token_timeout_ms = 60000
 transfer_timeout_ms = 120000
 keep_alive = "30m"
+# Cap on generated tokens per request; <= 0 = none. The instruct model answers in 10-50 tokens; this only stops a
+# runaway (cuts it mid-sentence, so it is a backstop, not a style control — brevity comes from the prompt).
+num_predict = 400
 
 [Chat]
 max_history = 16
@@ -69,6 +76,13 @@ default_step_m = 0.3
 objects_nearest = 6
 # Object births/removals are shown in the window at most this often; a flap inside the window cancels out.
 object_change_period_ms = 2000
+# look() tool: the newest ZED ("front") / Ricoh ("360") frame is shrunk to this longest side and JPEG-encoded, then
+# attached to the tool result for ONE request (then dropped from the history). ollama resizes images to ~1 Mpx itself,
+# so <=1280 px all cost ~1050 prompt tokens; smaller only loses detail (src/image_prep.h). 2 images + the ~2600-token
+# system message + 16 history messages fit in num_ctx 8192.
+look_max_side = 1280
+look_max_side_360 = 1280
+look_jpeg_quality = 85
 
 [Ice]
 Warn.Connections = "0"

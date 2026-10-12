@@ -25,6 +25,48 @@
 #include "../../common/rt_query_probe/rt_query_probe.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
+namespace
+{
+// Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs every other label
+// (occluder). A CELL-px cell absorbs mask-boundary jitter and makes membership O(1); the key packs the two
+// cell indices. CELL is a discretization constant (quadrature), not a belief gate — no config key.
+// Used by BOTH the leaf silhouette and the aperture-frame probe, so "what hides a door" is one definition.
+struct MaskCells
+{
+    static constexpr float CELL = 6.0f;
+    std::unordered_set<std::int64_t> door, occluder;
+    [[nodiscard]] static std::int64_t key(float col, float row)
+    {
+        const std::int64_t kx = static_cast<std::int64_t>(std::floor(col / CELL));
+        const std::int64_t ky = static_cast<std::int64_t>(std::floor(row / CELL));
+        return (kx << 32) ^ (ky & 0xffffffffLL);
+    }
+    // A pixel covered by some NON-door mask and by no door mask: a nearer masked object hides it.
+    [[nodiscard]] bool hides(float col, float row) const
+    {
+        const std::int64_t k = key(col, row);
+        return occluder.contains(k) and not door.contains(k);
+    }
+};
+
+template <class Packet>
+MaskCells build_mask_cells(const Packet& pkt)
+{
+    MaskCells c;
+    if (not pkt.valid)
+        return c;
+    for (const auto& sl : pkt.slices)
+    {
+        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+        auto& dst = (sl.label == "door") ? c.door : c.occluder;
+        for (std::size_t i = b; i < e; ++i)
+            dst.insert(MaskCells::key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
+    }
+    return c;
+}
+}   // namespace
+
 namespace rc {
 
 DoorFitter::DoorFitter(std::shared_ptr<DSR::DSRGraph> graph,
@@ -1111,24 +1153,11 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         return out;
 
     // Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs other (occluder).
-    // A CELL-px cell absorbs mask-boundary jitter and makes membership O(1). Key packs the two cell indices.
-    // CELL is a discretization constant (quadrature), not a belief gate — no config key.
-    constexpr float CELL = 6.0f;
-    const auto key = [&](float col, float row) -> std::int64_t
-    {
-        const std::int64_t kx = static_cast<std::int64_t>(std::floor(col / CELL));
-        const std::int64_t ky = static_cast<std::int64_t>(std::floor(row / CELL));
-        return (kx << 32) ^ (ky & 0xffffffffLL);
-    };
-    std::unordered_set<std::int64_t> door_cells, occluder_cells;
-    for (const auto& sl : pkt.slices)
-    {
-        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
-        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
-        auto& dst = (sl.label == "door") ? door_cells : occluder_cells;
-        for (std::size_t i = b; i < e; ++i)
-            dst.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
-    }
+    // Shared with compute_frame_probe — see MaskCells.
+    const MaskCells cells = build_mask_cells(pkt);
+    const auto key = [&cells](float col, float row) { return cells.key(col, row); };
+    const auto& door_cells     = cells.door;
+    const auto& occluder_cells = cells.occluder;
 
     const auto& s = inst.model.state();
     const float hw = inst.leaf_pose.half_w;
@@ -1139,6 +1168,34 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
                             static_cast<float>(Mopt->coeff(2, 3)));
     const Eigen::Vector2f Oxy(O.x(), O.y());
     const float occ_margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);
+
+    // ── THE LEAF BEYOND THE APERTURE (door_room_band.h) ─────────────────────────────────────────────────
+    // A leaf swung OUT of the room the camera is in lies in the NEXT room. What reaches the camera of it is
+    // a sliver seen edge-on THROUGH the hole, and the P(detect) below (envelope × obliquity × resolvability
+    // × in-view × central) is a model of a leaf in THIS room — it does not represent that view. Live try34:
+    // the crossed door, carried into room_2 with its leaf at ~95-110° out of room_2, scored free=112-122 of
+    // 120 detectable samples (the part within walls_block's 0.30 m own-wall skip; the rest was already
+    // wall-occluded) on a door that plainly exists. The model has no term for the opening's jambs/casing as
+    // occluders of what lies past the room-side face, so each sample carries weight 1 − P(it lies past that
+    // face), measured from the APERTURE LINE: a sample on it (a shut leaf, the hinge edge) weighs exactly 1,
+    // one a few σ out weighs ~0. A weight, not a skip: occupancy and absence both scale by it, and
+    // so does the visible fraction (det_w), so a door whose whole leaf is beyond is simply not probed by
+    // this channel — the frame channel (compute_frame_probe) is what speaks for it then.
+    const auto band = room_band();
+    const float delta_ap = has_room_polygon()
+                         ? rc::door::signed_boundary_distance(room_polygon_, inst.aperture.centre_xy())
+                         : std::numeric_limits<float>::quiet_NaN();
+    const bool  band_known = std::isfinite(delta_ap);
+    const Eigen::Vector2f n_out = band_known
+        ? rc::door::outward_normal(room_polygon_, inst.aperture.centre_xy(), inst.aperture.across_u(), band)
+        : Eigen::Vector2f::Zero();
+    const float r0 = rc::door::face_offset_from_aperture(delta_ap);
+    const auto room_weight = [&](const Eigen::Vector3f& P) -> float
+    {
+        if (not band_known) return 1.0f;
+        const float a = (Eigen::Vector2f(P.x(), P.y()) - inst.aperture.wall_O).dot(n_out);
+        return 1.0f - rc::door::p_beyond_far_face(a, r0, band.sigma_m);
+    };
 
     // Classify ONE LEAF-face sample (local x hinge→free edge, z absolute): project it, then vote.
     //
@@ -1195,7 +1252,11 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
                 }
             }
         }
+        const float w_room = room_weight(Pw);                           // 1 − P(seen through the opening)
+        if (not (w_room > 0.0f))
+        { ++out.n_occluded; return; }                                   // wholly through the opening: not this view
         ++out.n_detectable;
+        out.det_w += w_room;
         if (extras) covered_cells.insert(k);
         const float f = central_region_frac_, g = 1.0f - central_region_frac_;
         // Silhouette centroid over ALL detectable samples — the size-invariant input to
@@ -1220,8 +1281,8 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
             ++out.n_central;                                            // the robot is looking AT it
         if (extras) range_sum += std::sqrt(X * X + Y * Y + Z * Z);
-        if (door_cells.contains(k)) out.e_occ  += 1.0f;                 // still there
-        else                        out.e_free += 1.0f;                 // predicted-but-absent
+        if (door_cells.contains(k)) out.e_occ  += w_room;               // still there
+        else                        out.e_free += w_room;               // predicted-but-absent
     };
 
     // Regular grid over the panel face. NX/NZ are numeric SAMPLING RESOLUTION (a quadrature density for the
@@ -1279,7 +1340,7 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
             m_occ     += w * acc.e_occ;
             m_free    += w * acc.e_free;
             m_total   += w * acc.n_total;
-            m_det     += w * acc.n_detectable;
+            m_det     += w * acc.det_w;
         }
         // Only the ABSENCE/OCCUPANCY evidence is replaced. The modal counts stay as the modal pass left
         // them, because resolvability() and central_frac() are ratios built from that one rendering.
@@ -1343,6 +1404,126 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     return out;
 }
 
+// ── THE DOORWAY FRAME: the part of a door that does not move ────────────────────────────────────────────
+// Projects the aperture's jambs + lintel and weights each sample by whether the camera could see it. The
+// scoring against the image and the reasoning behind the statistic live in door_frame_evidence.h; this
+// method owns only what needs the agent: the camera, the transform, the masks, the walls, the other doors
+// and the leaf's opening-angle posterior.
+//
+// Visibility per frame point P (a weight, never a skip-the-cycle switch):
+//   · outside the real frustum / behind the near clip                 → 0
+//   · a NON-door mask covers its pixel (a person, a chair in front)   → 0   (same cells as the silhouette)
+//   · a room WALL crosses the sightline (rc::occlusion::walls_block)  → 0   (own wall skipped, as everywhere)
+//   · another door instance stands in front (cone_blocks)             → 0
+//   · OUR OWN LEAF crosses the sightline                              → 1 − P_φ(blocked), marginalised over
+//     the same phi posterior the silhouette's absence is marginalised over, so the two cannot disagree
+//     about where the leaf is. A leaf swung toward the camera hides the jamb behind it; one swung away
+//     (out of this room — the try32 case) hides nothing, and the frame speaks in full.
+rc::door::FrameProbe DoorFitter::compute_frame_probe(const DoorInstance& inst)
+{
+    if (not inner_eigen_ or not inst.ai2_initialized)
+        return {};
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return {};
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return {};
+    }
+    const auto Mopt = room_T_zed_matrix();   // camera→room, current pose — the SAME transform the silhouette uses
+    if (not Mopt.has_value())
+        return {};
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+    const int W = camera_api_->get_width(), H = camera_api_->get_height();
+    if (W <= 0 or H <= 0)
+        return {};
+
+    // No mask packet ⇒ no KNOWN masked occluder: the cells are empty and that factor is 1. The frame is a
+    // geometric probe of the RGB image, so it does not need masks to exist — only to know what hides it.
+    const MaskCells cells = mask_ingestor_ ? build_mask_cells(mask_ingestor_->packet()) : MaskCells{};
+
+    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)), static_cast<float>(Mopt->coeff(1, 3)),
+                            static_cast<float>(Mopt->coeff(2, 3)));
+    const Eigen::Vector2f Oxy(O.x(), O.y());
+    const float occ_margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);
+
+    // The leaf hypotheses and their weights: the phi posterior when there is one, else the modal pose.
+    std::vector<std::pair<door::LeafPose, float>> leaves;
+    {
+        double w_sum = 0.0;
+        for (const auto& [phi, sup] : inst.phi_curve)
+            w_sum += std::max(0.0f, sup);
+        if (inst.phi_curve.size() > 1 and w_sum > 0.0)
+            for (const auto& [phi, sup] : inst.phi_curve)
+            {
+                const float w = static_cast<float>(std::max(0.0f, sup) / w_sum);
+                if (w <= 0.0f) continue;
+                door::LeafState ls = inst.leaf;
+                ls.phi = phi;
+                leaves.emplace_back(door::leaf_pose(inst.aperture, ls), w);
+            }
+        else
+            leaves.emplace_back(inst.leaf_pose, 1.0f);
+    }
+    const auto own_leaf_clear = [&](const Eigen::Vector3f& P) -> float
+    {
+        float blocked = 0.0f;
+        for (const auto& [L, w] : leaves)
+            if (door::leaf_blocks_sightline(L, O, P))
+                blocked += w;
+        return std::clamp(1.0f - blocked, 0.0f, 1.0f);
+    };
+
+    const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
+    {
+        const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
+        if (Pc.y() <= 0.20) return std::nullopt;                       // behind / at the near clip
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+        if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
+        rc::edges::ProjectedVertex v;
+        v.px = cv::Point2f(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
+        v.depth_m = static_cast<float>(Pc.y());                        // ZED depth = forward coordinate
+        return v;
+    };
+
+    // The frame is scored where the belief puts the aperture. (Tried 2026-10-13 and NOT adopted: seating it on
+    // the room polygon's face. With a real casing standing proud of the wall the visible occluding edge is the
+    // casing's front, which is where the fit already puts the aperture — try34's carried door sat 6 cm in front
+    // of room_2's face, a 5 cm proud Webots casing — and the synthetic scene in tests/test_door_frame_evidence.cpp
+    // scored the seated probe WORSE in 3 of 5 views, down to +0.16 from +28 on an oblique view.)
+    const door::Aperture& ap_seen = inst.aperture;
+
+    const auto visible = [&](const Eigen::Vector3f& P) -> float
+    {
+        const auto v = project(P.cast<double>());
+        if (not v.has_value()) return 0.0f;
+        if (v->px.x < 0.f or v->px.y < 0.f or v->px.x >= static_cast<float>(W) or v->px.y >= static_cast<float>(H))
+            return 0.0f;
+        if (cells.hides(v->px.x, v->px.y))
+            return 0.0f;
+        if (rc::occlusion::walls_block(Oxy, {P.x(), P.y()}, room_polygon_, /*own_wall_skip_m=*/0.30f))
+            return 0.0f;
+        Eigen::Vector3f dc = P - O;
+        const float rc_len = dc.norm();
+        if (rc_len > 1e-3f)
+        {
+            dc /= rc_len;
+            for (const auto& [jid, jinst] : instances_)
+            {
+                if (jid == inst.node_id or not jinst.ai2_initialized) continue;
+                const auto& js = jinst.model.state();
+                const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * js.h);
+                if (rc::occlusion::cone_blocks(O, dc, rc_len, Cj, 0.5f * std::max(js.w, js.thickness),
+                                               (Cj - O).norm(), occ_margin))
+                    return 0.0f;
+            }
+        }
+        return own_leaf_clear(P);
+    };
+    return rc::door::build_frame_probe(ap_seen, project, visible, own_leaf_clear, W, H, cfg_.frame_casing_m,
+                                       cfg_.exist_boundary_sigma_m);
+}
+
 // |cos| of the camera→leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. Diagnostic only
 // (a log column) — see the note in door_fitter.h. Keyed on the leaf, not the wall, so it stays meaningful
 // once phi is fitted: an open door presents its face at a different angle than its aperture does.
@@ -1390,6 +1571,14 @@ bool DoorFitter::confirm_only(const DoorInstance& inst) const
         and inst.last_centroid_radius <= cfg_.ai2_moving_update_center_radius)
         return false;
     return true;   // moving AND the mask is off-centre → confirmation only
+}
+
+float DoorFitter::aperture_band_offset(const DoorInstance& inst) const
+{
+    if (not has_room_polygon())
+        return std::numeric_limits<float>::quiet_NaN();
+    const auto& ms = inst.model.state();
+    return rc::door::signed_boundary_distance(room_polygon_, Eigen::Vector2f(ms.ap_cx, ms.ap_cy));
 }
 
 bool DoorFitter::point_in_room(const Eigen::Vector2f& q, float margin_m) const

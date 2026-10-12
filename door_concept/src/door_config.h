@@ -341,6 +341,22 @@ struct DoorConfig
     // deployment changes behaviour underneath itself.
     bool  contour_depth_check = true;
 
+    // ── THE DOORWAY-FRAME EXISTENCE CHANNEL (door_frame_evidence.h) ─────────────────────────────────
+    // Scores the APERTURE's jambs + lintel — the part of a door that does not move when the leaf swings —
+    // against the RGB image (relative to the same frame slid along the wall) and the depth plane (does the
+    // hole recede behind the wall on the other side of the edge?). It is what keeps a door alive while its
+    // leaf is open, above all a leaf swung OUT of the room the robot is in (live try32: room_2 lost its
+    // only door because every existence channel looked at the leaf). Symmetric, weighted by how much of
+    // the frame the camera could see, summed into the same single-observation tanh as the leaf contour.
+    bool  frame_contour_check = true;
+    // Its depth half. RELATIVE (wall side vs hole side, 3-6 px apart), so it does not inherit the ~20 cm
+    // common-mode ZED bias that turned ContourDepthCheck off; separately switchable all the same.
+    bool  frame_depth_check = true;
+    // Width of the CASING lining a doorway (the frame boards), m. The depth half reads the hole side past it,
+    // because the casing stands proud of the wall and is NEARER than it (door_frame_evidence.h). Webots'
+    // Door.proto: 0.05 m boards; real door linings 0.03-0.10 m.
+    float frame_casing_m = 0.06f;
+
     // RoboCompDoorControl provider endpoint. Empty ⇒ the feature is off and the UI says so.
     // ⚠The webots-bridge listens on 10017 (its etc/config.toml, which is the file it is run with).
     // An older note recorded 10008; the bridge's own config comment documents that disagreement and
@@ -394,6 +410,15 @@ struct DoorConfig
     bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
     float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls
     float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
+    // ── THE WALL BAND (door_room_band.h) ──────────────────────────────────────────────────────────────
+    // A door's aperture lies IN a wall, i.e. between the room polygon (drawn at the room-side face) and the
+    // far face T beyond it — so "outside the polygon" is the NORMAL place for a real door. The containment
+    // prior is now a static log-prior −½(dist-to-band/σ)² (0 on the band, replaced each cycle, never summed),
+    // and a leaf sample past the room-side face (a leaf swung OUT, seen through the opening) loses P(detect)
+    // by P(through) (σ below). RoomMarginM / OutOfRoomGain no longer drive the per-door prior (RoomMarginM
+    // still gates births).
+    float exist_wall_thickness_m   = 0.20f;  // Existence.WallThicknessM — T, room-side face → far face (m)
+    float exist_boundary_sigma_m   = 0.10f;  // Existence.BoundarySigmaM — σ of door registration ⊕ polygon face (m)
     // ── MINIMUM-HEIGHT prior ───────────────────────────────────────────────────────────────────────
     // A door is an aperture a person walks THROUGH: P(door | it tops out below ~1.8 m) ≈ 0. Same kind of
     // categorical prior as RoomPrior above (a fact about what a door IS, not a tuned detectability curve),

@@ -152,7 +152,13 @@ namespace rc::crossing
         c.p_past = phi((c.s - r_body) / sig_s);
         const float p_span = phi((half - c.u) / sig_t) * phi((half + c.u) / sig_t);
         c.p_geom  = c.p_past * p_span;
-        c.p_cross = fuse(ap.p_open, c.p_geom);
+        // ★ CONJUNCTION, NOT A LOGIT SUM (2026-10-13). "Crossed through this door" = door passable AND footprint
+        //   past it. The logit sum fuse() treated two readings of DIFFERENT propositions as evidence about one, so a
+        //   confident open door (+13.8 at the clamp) outvoted a confident "not past" — live try35: p_open 1,
+        //   p_past 0.006, p_cross 0.9998 ⇒ a room BORN through a door the robot was 3.5 m from. The sum existed
+        //   because door_open_prob never rose above 0.14 (flat leaf posterior); it now reaches ≈1 for an open door.
+        //   Unmeasured door (p_open < 0): ½ — no evidence either way.
+        c.p_cross = (ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f)) * c.p_geom;
         c.p_span  = p_span;
         c.sig_s   = sig_s;
         c.sig_t   = sig_t;
