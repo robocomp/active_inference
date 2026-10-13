@@ -784,6 +784,23 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
         return base[idx];
     };
 
+    // The slide's log-prior per grid cell (normalised over the grid): flat unless lat_sigma says where the aperture is.
+    std::vector<double> lprior(static_cast<std::size_t>(ln), 0.0);
+    if (nz.lat_sigma > 0.0f)
+    {
+        double z = -std::numeric_limits<double>::infinity();
+        for (int li = 0; li < ln; ++li)
+        {
+            const double r = grid(nz.lat_lo, nz.lat_hi, ln, li) / nz.lat_sigma;
+            lprior[static_cast<std::size_t>(li)] = -0.5 * r * r;
+            z = std::max(z, lprior[static_cast<std::size_t>(li)]);
+        }
+        double acc = 0.0;
+        for (const double v : lprior) acc += std::exp(v - z);
+        const double lz = z + std::log(acc / static_cast<double>(ln));   // so a flat prior is exactly 0
+        for (double& v : lprior) v -= lz;
+    }
+
     std::vector<double> ll(static_cast<std::size_t>(nstep) * NN, 0.0);
     double best = -std::numeric_limits<double>::infinity();
     int bd = 0, bl = 0;
@@ -800,7 +817,8 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
                 for (int i = 0; i < M; ++i)
                     acc += ray_term(k, di, li, i, depth, lat);
                 ll[static_cast<std::size_t>(k) * NN + di * ln + li] = acc;
-                if (acc > best) { best = acc; bd = di; bl = li; }
+                if (acc + lprior[static_cast<std::size_t>(li)] > best)
+                { best = acc + lprior[static_cast<std::size_t>(li)]; bd = di; bl = li; }
             }
         }
     }
@@ -849,9 +867,11 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     {
         const double* v = &ll[static_cast<std::size_t>(k) * NN];
         double b = -std::numeric_limits<double>::infinity();
-        for (int j = 0; j < NN; ++j) b = std::max(b, beta * v[j]);
+        // The slide prior is NOT tempered: beta discounts correlated EVIDENCE, the prior is not evidence.
+        const auto lp = [&](int j) { return lprior[static_cast<std::size_t>(j % ln)]; };
+        for (int j = 0; j < NN; ++j) b = std::max(b, beta * v[j] + lp(j));
         double acc = 0.0;
-        for (int j = 0; j < NN; ++j) acc += std::exp(beta * v[j] - b);
+        for (int j = 0; j < NN; ++j) acc += std::exp(beta * v[j] + lp(j) - b);
         m[static_cast<std::size_t>(k)] = b + std::log(std::max(1e-300, acc / static_cast<double>(NN)));
         mmax = std::max(mmax, m[static_cast<std::size_t>(k)]);
     }

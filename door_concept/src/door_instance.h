@@ -377,6 +377,7 @@ struct DoorInstance
     // Delivered says it did what it was asked, never that the world changed (door_actuator.h). Whether
     // the leaf moved is answered by door_open_prob, from the image, like everything else here.
     int  actuation_requests = 0;      // how many times we have asked, this door, this run
+    bool open_claim_unserved = false; // an `open` claim landed and no request has been sent for it yet
     bool actuation_refused  = false;  // the provider said never-ask-again (UnknownDoor / NotActuable)
     std::string actuation_note;       // last provider state or local refusal reason, for the UI/log
 

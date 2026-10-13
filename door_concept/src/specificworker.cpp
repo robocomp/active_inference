@@ -1850,6 +1850,15 @@ std::vector<std::string> SpecificWorker::reserved_names() const
 // Locale: read with std::from_chars, write through the classic locale — CLAUDE.md. These machines run
 // es_ES, where strtof would silently truncate "4.61" to 4 and put every door on the wrong side of a wall.
 
+std::string SpecificWorker::current_room_name() const
+{
+    if (room_node_id_ == 0) return {};
+    if (const auto n = G->get_node(room_node_id_); n.has_value())
+        room_name_cache_ = {room_node_id_, n->name()};
+    // ltsm evicts the room left behind BEFORE release_room runs; its doors are still written under its name.
+    return room_name_cache_.first == room_node_id_ ? room_name_cache_.second : std::string{};
+}
+
 void SpecificWorker::load_identities()
 {
     std::ifstream f("etc/door_identities.csv");
@@ -1858,28 +1867,38 @@ void SpecificWorker::load_identities()
     identities_.clear();
     std::string line;
     std::getline(f, line);                       // header
+    // A pre-2026-10-13 table (name,ap_x,ap_y) has no room column: its coordinates are in whichever room the agent sat
+    // in when each row was written, so they cannot be trusted against any one room. Start clean.
+    if (not line.starts_with("room,"))
+    {
+        std::print("door_concept: [identity] etc/door_identities.csv has the old un-keyed format — ignored "
+                   "(rewritten room-keyed on the next save)\n");
+        return;
+    }
+    const auto num = [](std::string_view v, float& out)
+    { return std::from_chars(v.data(), v.data() + v.size(), out).ec == std::errc{} and std::isfinite(out); };
     while (std::getline(f, line))
     {
-        const auto c1 = line.find(',');
-        if (c1 == std::string::npos) continue;
-        const auto c2 = line.find(',', c1 + 1);
-        if (c2 == std::string::npos) continue;
-        const std::string name = line.substr(0, c1);
+        std::vector<std::string_view> c;
+        for (std::size_t p = 0;;)
+        {
+            const auto q = line.find(',', p);
+            c.emplace_back(std::string_view(line).substr(p, q == std::string::npos ? std::string::npos : q - p));
+            if (q == std::string::npos) break;
+            p = q + 1;
+        }
         float x = 0.f, y = 0.f;
-        const char* xb = line.data() + c1 + 1;
-        const char* xe = line.data() + c2;
-        const char* yb = line.data() + c2 + 1;
-        const char* ye = line.data() + line.size();
-        if (std::from_chars(xb, xe, x).ec != std::errc{}) continue;
-        if (std::from_chars(yb, ye, y).ec != std::errc{}) continue;
-        if (not name.starts_with("door_")) continue;
-        identities_.push_back({name, Eigen::Vector2f(x, y)});
+        if (c.size() != 4 or c[0].empty() or not c[1].starts_with("door_") or not num(c[2], x) or not num(c[3], y))
+            continue;
+        if (std::hypot(x, y) > 1.0e3f)            // a transform read before the room existed — not a place
+            continue;
+        identities_.push_back({std::string(c[0]), std::string(c[1]), Eigen::Vector2f(x, y)});
     }
     if (not identities_.empty())
     {
-        std::print("door_concept: [identity] loaded {} remembered door(s):", identities_.size());
+        std::print("door_concept: [identity] loaded {} remembered door face(s):", identities_.size());
         for (const auto& i : identities_)
-            std::print(" {}@({:.2f},{:.2f})", i.name, i.xy.x(), i.xy.y());
+            std::print(" {}:{}@({:.2f},{:.2f})", i.room, i.name, i.xy.x(), i.xy.y());
         std::print("\n");
     }
 }
@@ -1892,31 +1911,35 @@ void SpecificWorker::save_identities() const
     if (not f)
         return;
     f.imbue(std::locale::classic());             // never emit a comma decimal separator
-    f << "name,ap_x,ap_y\n";
+    f << "room,name,ap_x,ap_y\n";
     for (const auto& i : identities_)
-        f << i.name << ',' << i.xy.x() << ',' << i.xy.y() << '\n';
+        f << i.room << ',' << i.name << ',' << i.xy.x() << ',' << i.xy.y() << '\n';
 }
 
-// Upsert BY PLACE: one hole in the wall carries one name. A door whose aperture drifts within the
-// re-acquisition radius updates its own row; a door somewhere else adds one.
+// Upsert BY PLACE WITHIN THE CURRENT ROOM: one hole in this room's walls carries one name. The same name may hold a
+// row in another room — that is the doorway's other face, not a conflict.
 void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2f& ap)
 {
-    if (cfg_.exist_reacquire_radius_m <= 0.0f or not name.starts_with("door_") or not ap.allFinite())
+    const std::string room = current_room_name();
+    if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty() or not name.starts_with("door_") or not ap.allFinite()
+        or ap.norm() > 1.0e3f)
         return;
     std::erase_if(identities_, [&](const DoorIdentity& i)
-                  { return i.name == name or (i.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
-    identities_.push_back({name, ap});
+                  { return i.room == room and (i.name == name or (i.xy - ap).norm() < cfg_.exist_reacquire_radius_m); });
+    identities_.push_back({room, name, ap});
     save_identities();
 }
 
 const SpecificWorker::DoorIdentity* SpecificWorker::match_identity(const Eigen::Vector2f& xy) const
 {
-    if (cfg_.exist_reacquire_radius_m <= 0.0f)
+    const std::string room = current_room_name();
+    if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty())
         return nullptr;
     const DoorIdentity* best = nullptr;
     float best_d = cfg_.exist_reacquire_radius_m;
     for (const auto& i : identities_)
-        if (const float d = (i.xy - xy).norm(); d < best_d) { best_d = d; best = &i; }
+        if (i.room != room) continue;
+        else if (const float d = (i.xy - xy).norm(); d < best_d) { best_d = d; best = &i; }
     return best;
 }
 
@@ -3184,20 +3207,21 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.known = located and st.p_open_known;
         o.p     = st.p_open;
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
-            inst.cross_side_latched = st.approach_side;   // the side we stand on ⇒ the far side is the target
+            inst.cross_side_latched = rc::door::interior_side(inst.aperture, st.approach_standoff_m,
+                                                              fitter_->room_polygon(), st.approach_side);   // leave THIS room
         // ★ PAST THE LEAF, NOT INTO IT (2026-10-13). A leaf swung to the FAR side stands up to its own width deep
         //   beside the doorway; a through-pose at the fixed CrossStandoffM (1.2 m) on the centre line put the
         //   robot's footprint against it — live try36: `standpoint (0.03,-1.05) occupied` by the open DOOR_1 leaf,
         //   cross unreachable, robot stuck in room_2. The leaf's own pose says how deep it reaches beyond the
         //   aperture plane: stand past its tip by half the body + the swing clearance (never nearer than configured).
-        const float cross_standoff = [&]()
-        {
-            const float sgn = inst.cross_side_latched < 0.0f ? -1.0f : +1.0f;   // robot side; far side is −sgn·n
-            const Eigen::Vector2f n = inst.aperture.across_u(), c = inst.aperture.centre_xy();
-            const Eigen::Vector2f tip = inst.leaf_pose.hinge_xy + 2.0f * inst.leaf_pose.half_w * inst.leaf_pose.ex;
-            const float depth = std::max({0.0f, -sgn * n.dot(inst.leaf_pose.hinge_xy - c), -sgn * n.dot(tip - c)});
-            return std::max(pg.cross_standoff_m, depth + 0.5f * pg.robot_passage_width_m + pg.swing_clearance_m);
-        }();
+        // ★THE SWEPT RADIUS, NOT THE ESTIMATED TIP (2026-10-13). The swing SIDE is never fitted (config SwingDir,
+        //   one value for every face) and phi flips; try43: room_2's face of DOOR_1 modelled its leaf in room_2, so the
+        //   far-side depth read 0, the target sat 1.27 m out — inside the real leaf at 104° (`standpoint (0.04,-1.27)
+        //   occupied`, 6361 returns), and the robot stalled IN the doorway. What the kinematics guarantee whatever the
+        //   side and the angle: the leaf never reaches past its own width from the aperture plane.
+        const float cross_standoff = std::max(pg.cross_standoff_m,
+                                              2.0f * inst.leaf_pose.half_w + 0.5f * pg.robot_passage_width_m
+                                              + pg.swing_clearance_m);
         inst.cross_standoff_m = cross_standoff;
         const auto pose = rc::door::through_pose(inst.aperture, inst.cross_side_latched, cross_standoff);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
@@ -3216,32 +3240,46 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     // ── the side effects of a claim ──────────────────────────────────────────────────────────────
     // ★ONE-SHOTS, taken from the affordance rather than recomputed from the flags. `open` has a real
     // effect in the world; firing it per cycle while the claim stands would queue a request per cycle.
+    // ★A CLAIM IS SERVED, NOT CONSUMED-AND-FORGOTTEN (2026-10-13). consume_claim() is a one-shot; if the claim
+    // could not be acted on the cycle it landed, the request used to be lost for good and the claim timed out
+    // (try43 leg 1: two timeouts, the operator had to open DOOR_1 by hand). It stays unserved until it is
+    // either acted on or the consumer lets it go.
     if (inst.aff_open.consume_claim())
+        inst.open_claim_unserved = true;
+    if (inst.open_claim_unserved and not inst.aff_open.claimed())
+        inst.open_claim_unserved = false;
+    if (inst.open_claim_unserved)
     {
         // ★PROTOCOL INVARIANT 2: ACT ON WHAT THE CONSUMER IS EXECUTING, NOT ON OUR LATEST PUBLICATION.
-        // We refresh the `open` pose every cycle while the offer stands, so by the time a claim lands the
-        // consumer may have accepted an earlier one — and asking a provider to swing a leaf is an act in
-        // the world, not a measurement to be retried. The claim carries the pose it is actually driving
-        // to after its own repairs; if that is a DIFFERENT proposal from the one now published
-        // (executing_epoch < epistemic_target_epoch) we do not know which doorway geometry the robot has
-        // committed to, and a door request built on the wrong one can open a different door. So: log it
-        // and wait for the consumer to adopt the current epoch, which it owns the decision to do.
-        if (inst.aff_open.claim_is_stale())
+        // A stale epoch (executing_epoch < epistemic_target_epoch) was refused outright because we could not
+        // tell which doorway the robot committed to. But the epoch is only a PROXY for that question, and for
+        // `open` it never resolves: the controller holds the epoch it committed to by design, while we bump
+        // ours every time the front pose refines by 0.1 mm — so the claim stays stale for its whole life.
+        // Ask the question itself: is the pose the consumer is actually driving to within actuation reach of
+        // THIS aperture? Then the request is about this door whatever the epoch, and the provider door is
+        // chosen by this door's own place (request_door_actuation), not by the robot's pose.
+        const auto& c = inst.aff_open.claim();
+        const bool same_doorway = not c.has_value()
+            or (Eigen::Vector2f(c->x, c->y) - inst.aperture.centre_xy()).norm()
+               <= std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f);
+        if (inst.aff_open.claim_is_stale() and not same_doorway)
         {
-            inst.actuation_note = "consumer accepted an older proposal; not asking until it catches up";
-            std::print("door_concept: [open] {} claimed on epoch {} while we publish {} — NOT sending a "
-                       "door request: we cannot tell which geometry the robot committed to\n",
-                       inst.node_name, inst.aff_open.claim().has_value() ? inst.aff_open.claim()->epoch : -1,
-                       inst.aff_open.epoch());
+            if (inst.actuation_note.find("older proposal") == std::string::npos)
+                std::print("door_concept: [open] {} claimed on epoch {} while we publish {}, driving to "
+                           "({:.2f},{:.2f}) — out of this door's reach, NOT sending a door request\n",
+                           inst.node_name, c->epoch, inst.aff_open.epoch(), c->x, c->y);
+            inst.actuation_note = "consumer accepted an older proposal out of reach; waiting";
         }
         else if (not pg.autonomous_actuation)
         {
+            inst.open_claim_unserved = false;
             inst.actuation_note = "autonomous actuation is disabled (DoorAffordance.AutonomousActuation)";
             std::print("door_concept: [open] {} was CLAIMED but autonomous actuation is off — "
                        "the request must come from the strip button\n", inst.node_name);
         }
         else
         {
+            inst.open_claim_unserved = false;   // served: one request per claim, whatever the provider says
             std::string why;
             // No provider id from here: the request path CHOOSES the provider door per door (nearest by
             // place); pg.actuation_provider_id is only its fallback when no frame resolves.
@@ -3568,6 +3606,7 @@ void SpecificWorker::step_room_following()
 
 void SpecificWorker::step_entry_mirrors()
 {
+    (void)current_room_name();   // keep the room-name cache warm: the room may be evicted before release_room
     if (not G or not fitter_ or not scene_graph_ or not inner_eigen_)
         return;
 
@@ -3659,6 +3698,7 @@ void SpecificWorker::step_entry_mirrors()
         if (const auto id = scene_graph_->create_entry_mirror(room, best.value(), t, euler, names); id != 0)
         {
             EntryMirror em{id, best->id()};
+            em.name = best->name();   // the doorway's name: the mirror takes it once the source has left the graph
             const auto room_now = G->get_node(room_node_id_);
             const auto src_it = fitter_->instances().find(best->id());
             if (room_now.has_value() and src_it != fitter_->instances().end() and src_it->second.ai2_initialized)
@@ -3750,6 +3790,14 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
             adopted_from = std::move(rec->second);
         }
     lost_doors_.clear();
+    // ★ ONE NAME PER DOORWAY (2026-10-13). The mirror was born under a fresh number because its source still held the
+    //   doorway's name (DSR names are unique). Once the source is gone — ltsm evicts it with the room left behind —
+    //   the mirror is re-made under that name, so the same hole is door_8 from both rooms, across every crossing, and
+    //   "cross door_8" means the same thing on the way back. A source still live (eviction off) keeps the fresh name.
+    if (adopt_mirror != 0 and adopted_from.has_value())
+        if (const auto renamed = adopt_doorway_name(adopt_mirror, new_room, adopted_from->name); renamed != 0)
+            adopt_mirror = renamed;
+    remember_live_identities();   // the room we are leaving, under ITS name: room_node_id_ has not moved yet
     if (fitter_)
     {
         std::vector<std::uint64_t> leaving;
@@ -3792,15 +3840,8 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     // silently inherit another room's identity.
     ghosts_.clear();
 
-    // ⚠KNOWN GAP, STATED RATHER THAN PAPERED OVER: etc/door_identities.csv maps name ↔ APERTURE PLACE
-    // and has NO room key. Two rooms have their own origins, so a door at the same coordinates in each
-    // is indistinguishable in that table, and cross-room identity is therefore NOT supported yet. We
-    // deliberately do NOT write the released room's doors into it here (that would actively create the
-    // collision), and we do not clear the on-disk table (a restart in the old room still recovers).
-    // ltsm_agent's passage node is the right long-term home for a doorway's identity across rooms.
-    if (not identities_.empty())
-        std::print("door_concept: [identity] ⚠the identity table is not room-keyed ({} entries); "
-                   "door names are NOT carried across a room change\n", identities_.size());
+    // The identity table is room-keyed since 2026-10-13: the released room's doors were written under ITS name above
+    // (before room_node_id_ moves), and the new room's rows are matched only against the new room.
 
     room_node_id_ = new_room;
     // ★DROP THE OLD POLYGON BEFORE PICKING UP THE NEW ONE. The containment prior is the path that can
@@ -4086,6 +4127,43 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     door_memo_[inst.node_id] = std::move(em);
 }
 
+std::uint64_t SpecificWorker::adopt_doorway_name(std::uint64_t id, std::uint64_t room_id, const std::string& name)
+{
+    if (name.empty() or not scene_graph_ or not inner_eigen_) return 0;
+    const auto node = G->get_node(id);
+    const auto room = G->get_node(room_id);
+    if (not node.has_value() or not room.has_value() or node->name() == name) return 0;
+    if (G->get_node(name).has_value())
+    {
+        std::print("door_concept: [identity] {} keeps its own name: '{}' is still a live node (the room left behind "
+                   "is still in the working memory)\n", node->name(), name);
+        return 0;
+    }
+    const auto T = inner_eigen_->get_transformation_matrix(room->name(), node->name(), 0);
+    if (not T.has_value() or not T->matrix().allFinite()) return 0;
+    const Eigen::Matrix3d R = T->rotation();
+    const Eigen::Vector3f euler(static_cast<float>(std::atan2(-R(1, 2), R(2, 2))),
+                                static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),
+                                static_cast<float>(std::atan2(-R(0, 1), R(0, 0))));
+    const auto op = G->get_attrib_by_name<door_open_prob_att>(node.value());
+    const auto ph = G->get_attrib_by_name<door_phi_rad_att>(node.value());
+    const auto names = reserved_names();
+    const auto nid = scene_graph_->create_door_copy(
+        room.value(),
+        G->get_attrib_by_name<width_m_att> (node.value()).value_or(cfg_.door_prior_w_m),
+        G->get_attrib_by_name<depth_m_att> (node.value()).value_or(cfg_.door_thickness_m),
+        G->get_attrib_by_name<height_m_att>(node.value()).value_or(cfg_.door_prior_h_m),
+        op.has_value() ? std::optional<float>(op.value()) : std::nullopt,
+        ph.has_value() ? std::optional<float>(ph.value()) : std::nullopt,
+        T->translation().cast<float>(), euler, names, std::format("'{}' id={} (renamed)", node->name(), id), name);
+    if (nid == 0) return 0;
+    if (fitter_ and fitter_->instances().contains(id)) fitter_->forget_node(id);
+    G->delete_node(id);
+    std::print("door_concept: [identity] {} is the doorway '{}' seen from '{}' — re-made under that name (id {})\n",
+               node->name(), name, room->name(), nid);
+    return nid;
+}
+
 std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWorker::recreate_lost_door(std::uint64_t new_room)
 {
     if (lost_doors_.empty() or not inner_eigen_ or not scene_graph_) return std::nullopt;
@@ -4121,7 +4199,8 @@ std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWor
     const auto names = reserved_names();
     const auto id = scene_graph_->create_door_copy(room.value(), best->width, best->depth, best->height, best->open_prob,
                                                    best->phi_rad, T.translation().cast<float>(), euler, names,
-                                                   std::format("'{}' (deleted with the room left behind)", best->name));
+                                                   std::format("'{}' (deleted with the room left behind)", best->name),
+                                                   best->name);
     if (id == 0) return std::nullopt;
     std::print("door_concept: [room] recreated the door just crossed ('{}', {:.2f} m from the robot) in '{}'\n",
                best->name, (best->T_root_door.translation().head<2>() - robot).norm(), room->name());

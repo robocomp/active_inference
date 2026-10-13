@@ -338,6 +338,9 @@ private:
 
     DoorModelParams  make_model_params() const;
 
+    void log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& rays,
+                     const std::vector<std::pair<float, float>>& loglik,
+                     float prior_mean, float prior_sigma, float post_mean, float post_sigma, bool measured);
     // Append one AI2 belief row (state + Σ diag + range/motion) to cfg_.ai2_csv_path. No-op if empty.
     void log_ai2_csv(const DoorInstance& inst, int npts, float R, bool gated, float energy);
 
@@ -368,6 +371,7 @@ private:
     bool            have_prev_cam_ = false;
     std::chrono::steady_clock::time_point prev_cam_tp_{};
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
+    std::ofstream                  phi_trace_csv_;      // one row per estimate_phi() call (ai2 path + "_phi")
     std::ofstream                  phi_curve_csv_;      // one row per HYPOTHESIS (leaf-tracker forensics)
     std::ofstream                  phi_points_csv_;     // one row per cycle: the selected cloud's geometry
 };

@@ -214,9 +214,12 @@ std::uint64_t DoorSceneGraph::create_entry_mirror(const DSR::Node& proto_room,
 std::uint64_t DoorSceneGraph::create_door_copy(const DSR::Node& room, float width, float depth, float height,
                                                std::optional<float> open_prob, std::optional<float> phi_rad,
                                                const Eigen::Vector3f& t, const Eigen::Vector3f& euler_xyz,
-                                               std::span<const std::string> reserved_names, const std::string& source_label)
+                                               std::span<const std::string> reserved_names, const std::string& source_label,
+                                               std::string_view preferred_name)
 {
-    const std::string name = next_door_name({}, reserved_names);
+    // ★ONE NAME PER DOORWAY (2026-10-13): a copy of a door we already know — the crossed door recreated on re-entry, the
+    //   entry mirror adopted under its source's name — keeps that name whenever no live node holds it.
+    const std::string name = next_door_name(preferred_name, reserved_names);
     DSR::Node m = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<width_m_att> (m, width);
     G_->add_or_modify_attrib_local<depth_m_att> (m, depth);

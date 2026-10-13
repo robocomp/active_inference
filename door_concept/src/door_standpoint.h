@@ -263,4 +263,22 @@ inline float approach_side(const Aperture& a, const Eigen::Vector2f& robot, floa
     return half_plane;
 }
 
+// Which side of the aperture is THIS ROOM's interior (+1 along across_u, −1 against it): the side whose stand-off
+// point lies inside the room polygon. A crossing LEAVES the current room, so this — not where the robot happens
+// to stand — is the side a crossing starts from. ★Not approach_side: that one follows the robot, and a robot
+// already 0.2 m past the plane (a crossing that stalled in the doorway, try43) re-latched to the far side and was
+// sent BACK into the room it was leaving. `fallback` (the robot's side) when the polygon cannot tell the two apart.
+inline float interior_side(const Aperture& a, float standoff_m, std::span<const Eigen::Vector2f> poly, float fallback)
+{
+    if (poly.size() < 3)
+        return fallback;
+    const Eigen::Vector2f n = a.across_u();
+    const Eigen::Vector2f c = a.centre_xy();
+    const bool plus_in  = polygon_contains(c + standoff_m * n, poly);
+    const bool minus_in = polygon_contains(c - standoff_m * n, poly);
+    if (plus_in != minus_in)
+        return plus_in ? +1.0f : -1.0f;
+    return fallback;
+}
+
 }  // namespace rc::door

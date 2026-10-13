@@ -187,11 +187,17 @@ private:
     // "the affordances are switched" looks like from outside. A door is a hole in a wall and outlives
     // the process, so its name must too: this table maps NAME ↔ APERTURE PLACE and is written to disk.
     // Identity only — no belief. A door coming back re-earns its geometry; it does not re-earn its name.
+    // ★KEYED BY ROOM (2026-10-13). xy is in THAT room's frame; rows from different rooms are different faces of
+    //   (possibly) the same doorway and must never be compared by place. The un-keyed table mixed room_1 and room_2
+    //   coordinates, grew to 14 rows for 3 doors and carried a 3.7e13 m row from a transform read mid-birth.
     struct DoorIdentity
     {
+        std::string     room;
         std::string     name;
         Eigen::Vector2f xy = Eigen::Vector2f::Zero();
     };
+    std::string current_room_name() const;
+    mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
     std::vector<DoorIdentity> identities_;
     void load_identities();                                            // once, at startup
     void save_identities() const;                                      // whole table, locale-independent
@@ -272,6 +278,9 @@ private:
     std::vector<EntryMirror> lost_doors_;
     void remember_door(const rc::DoorInstance& inst);
     std::optional<std::pair<std::uint64_t, EntryMirror>> recreate_lost_door(std::uint64_t new_room);
+    // Re-make door node `id` (under room `room_id`) as `name` when no live node holds that name; returns the new id,
+    // 0 when nothing was done. The doorway keeps one name from both rooms (release_room).
+    std::uint64_t adopt_doorway_name(std::uint64_t id, std::uint64_t room_id, const std::string& name);
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     void step_entry_mirrors();

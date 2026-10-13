@@ -25,7 +25,7 @@ collect(){
   cp $R/tmp/sdf_localizer/gt_error.csv $OUT/ 2>/dev/null
   [[ -d $R/tmp/snapshots ]] && cp -r $R/tmp/snapshots $OUT/
   cp $(ls -t $R/tmp/agent_events_*.jsonl | head -1) $OUT/events.jsonl 2>/dev/null
-  cp $B/door_concept/etc/door_events.csv $B/door_concept/etc/door_existence_log.csv $OUT/ 2>/dev/null
+  cp $B/door_concept/etc/door_events.csv $B/door_concept/etc/door_existence_log.csv $B/door_concept/etc/ai2_log.csv $B/door_concept/etc/ai2_log_phi.csv $OUT/ 2>/dev/null
   for f in $(ls -t $B/layouts/learnt/*.svg | head -3); do cp $f $OUT/; done
 }
 case "$2" in

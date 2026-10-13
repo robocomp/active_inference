@@ -277,6 +277,10 @@ public:
         float eps_beyond = 0.03f; // P(return beyond it: a miss, a reflective surface)
         int   max_rays = 400;     // stride-subsampled; cost is nstep * depth_n * lat_n * rays
         float ray_icc  = -1.0f;   // phi_field_loglik only: < 0 ⇒ derived from the nuisance grid (see there)
+        // phi_field_loglik only: the PRIOR over the slide — N(0, lat_sigma²), the aperture placement's own posterior
+        // width. <= 0 ⇒ uniform over the grid (the old behaviour). Uniform let a SHUT leaf slide half a door-width onto
+        // the solid wall beside the doorway and explain it perfectly (try44: every phi collapse had lat = -0.55 m).
+        float lat_sigma = -1.0f;
     };
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,

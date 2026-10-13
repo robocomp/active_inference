@@ -736,6 +736,37 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
     ai2_csv_.flush();
 }
 
+// One row per estimate_phi() call — EVERY call, mask or not. The ai2 row above is written only on the mask
+// path, so the LiDAR-only cycles (no detection: exactly the ones where the leaf angle collapsed in try42)
+// left no trace. Path = the ai2 path with "_phi" before the extension; off when that is off.
+void DoorFitter::log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& rays,
+                             const std::vector<std::pair<float, float>>& loglik,
+                             float prior_mean, float prior_sigma, float post_mean, float post_sigma, bool measured)
+{
+    if (cfg_.ai2_csv_path.empty())
+        return;
+    if (not phi_trace_csv_.is_open())
+    {
+        std::string p = cfg_.ai2_csv_path;
+        const auto dot = p.rfind('.');
+        p = (dot == std::string::npos) ? p + "_phi" : p.substr(0, dot) + "_phi" + p.substr(dot);
+        rc::diag::open_rotating(phi_trace_csv_, p);
+        if (not phi_trace_csv_.is_open()) return;
+        phi_trace_csv_ << "t_ms,node,ox,oy,nrays,off_plane,ninf,beta,lat,prior_mean,prior_sigma,post_mean,post_sigma,measured,"
+                       << "hit0,expl0,signed0,loglik\n";
+    }
+    const auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch()).count();
+    phi_trace_csv_ << t_ms << ',' << inst.node_name << ',' << leaf_origin_.x() << ',' << leaf_origin_.y() << ','
+                   << rays.endpoints.size() << ',' << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_ninf << ','
+                   << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << ',' << prior_mean << ',' << prior_sigma << ','
+                   << post_mean << ',' << post_sigma << ',' << (measured ? 1 : 0) << ','
+                   << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ',' << inst.dbg_ray_signed0 << ',';
+    for (std::size_t k = 0; k < loglik.size(); ++k)
+        phi_trace_csv_ << (k ? ";" : "") << loglik[k].second;
+    phi_trace_csv_ << '\n';
+}
+
 // ─── RGB-mask ROI projection (active-perception aid) ──────────────────────────
 
 std::optional<Eigen::Matrix4d> DoorFitter::room_T_zed_matrix(std::uint64_t pose_ts_ms) const
@@ -934,7 +965,13 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
 
     // ★THE ALONG-WALL SLIDE IS A NUISANCE OVER ITS HONEST SUPPORT (+-w/2), and the ray selection follows it
     // (door_phi_posterior.h has the why: a carried mirror sat 0.23-0.40 m from the real doorway).
-    const rc::DoorBelief::FieldNuisance nz = rc::door::phi_field_nuisance(inst.aperture);
+    rc::DoorBelief::FieldNuisance nz = rc::door::phi_field_nuisance(inst.aperture);
+    // ★THE SLIDE'S PRIOR IS WHERE THE BELIEF PUTS THE APERTURE (2026-10-13): N(0, var_s) from the aperture's own
+    // posterior. A fitted door (σ_s ≈ 6-11 cm) cannot be "explained" by a shut leaf slid 0.55 m onto the wall beside it
+    // (try44: every collapse to phi≈0 had lat = -0.55); a freshly carried mirror, whose placement IS uncertain, keeps
+    // the wide support that ±w/2 was introduced for.
+    if (inst.ai2_initialized)
+        nz.lat_sigma = std::sqrt(std::max(1e-8f, inst.ai2_belief.covariance()(0, 0)));   // 0 = known, never "uniform"
     rc::ai::LidarRays rays;
     if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
     {
@@ -1011,6 +1048,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     else
         inst.phi_sigma = PHI_MAX - PHI_MIN;   // not even a prior: HOLD the estimate, width = the whole range
     inst.phi_measured = post.measured;
+    log_phi_csv(inst, rays, loglik, phi_prior, sigma_phi, post.mean, post.sigma, post.measured);
     // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".
     inst.phi_support = -1.0f;
 

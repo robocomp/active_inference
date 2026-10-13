@@ -143,7 +143,8 @@ struct Tracker   // the carried belief, exactly as DoorInstance carries it
 static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vector<V3>& pts,
                      float prior_mean_override = std::numeric_limits<float>::quiet_NaN(), float swing_rate = 2.0f)
 {
-    const auto nz  = rc::door::phi_field_nuisance(b.aperture());
+    auto nz  = rc::door::phi_field_nuisance(b.aperture());
+    nz.lat_sigma = std::sqrt(std::max(1e-8f, b.covariance()(0, 0)));   // as DoorFitter::estimate_phi does
     const auto sel = rc::door::select_doorway_rays(b.aperture(), o, pts, std::max(-nz.lat_lo, nz.lat_hi), 1.0f);
     const float dt = t.first ? std::numeric_limits<float>::infinity() : DT;
     t.first = false;
