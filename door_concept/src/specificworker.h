@@ -258,6 +258,10 @@ private:
         // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
         // (live rooms all hang from root, so root is the one frame two rooms share) and its attributes.
         Eigen::Affine3d T_root_door = Eigen::Affine3d::Identity();
+        // The door's pose in every OTHER live room, refreshed while the door lives (room <- door, through the rooms'
+        // own chain). `root` moves with the robot, so T_root_door goes stale as the robot keeps driving between the
+        // crossing and ltsm's eviction (try41: recreated 0.43 m inside room_2, then removed by its own absence).
+        std::unordered_map<std::uint64_t, Eigen::Affine3d> T_in_room;
         float width = 0.f, depth = 0.f, height = 0.f;
         std::optional<float> open_prob, phi_rad;
         std::string name;

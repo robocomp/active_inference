@@ -64,6 +64,8 @@ public:
         cross_room_.clear();
         just_started_ = true;
         preempted_ = false;
+        reached_door_ = false;
+        opened_ = false;
         note_ = "started";
         step_state_.clear();
         last_event_ = std::format("[door-passage] {}: started", door_);
@@ -124,7 +126,7 @@ public:
             // A later step skips an earlier one only while the earlier one is NOT on offer: `cross` over a door
             // door_concept also offers to `open` is two contradictory beliefs, and the shut door wins (live try20:
             // a transient P(passable) on a SHUT door sent the robot to cross it, `open` was offered a moment later).
-            const bool open_wanted = later == Step::Cross and state_of(G, name_of(Step::Open)) == State::Offered;
+            const bool open_wanted = later == Step::Cross and not opened_ and state_of(G, name_of(Step::Open)) == State::Offered;
             // ★ NEVER FROM APPROACH STRAIGHT TO CROSS (2026-10-12). From across the room door_concept can rate a SHUT
             //   door passable (try20/21/26: P(passable)=1.00 at phi=0.44 rad, clear span 0.10 m); `cross` then fails
             //   unreachable, stays offered, and the robot never goes to the door. Approach is cheap and ends within
@@ -137,6 +139,7 @@ public:
                                         was_executing ? std::format("pre-empting {} and continuing", name_of(step_))
                                                       : std::string("skipping"));
                 if (was_executing) preempted_ = true;
+                if (step_ == Step::Approach) reached_door_ = true;   // `open`/`cross` offered ⇒ the door is within reach
                 step_ = later;
                 seen_executing_ = false;
                 break;
@@ -147,7 +150,10 @@ public:
         //   `cross` when the door is believed shut and `open` when out of reach; `approach` is always offered for a
         //   located door. Without this the passage waited for a withdrawn step for ever (live try21: `cross` taken on
         //   a transient P(passable) of the SHUT door from across the room, then withdrawn — robot parked, door shut).
-        if (step_ == Step::Cross or step_ == Step::Open)
+        // …but NOT once the robot has reached the door (2026-10-13, try36/37/40): a `cross` withdrawn for a few cycles by
+        // a flickering P(passable) sent the robot back to `approach` while it stood AT the door, inside the band the
+        // approach servo needs, and the servo gave up for ever. At the door the passage waits for `cross` instead.
+        if ((step_ == Step::Cross or step_ == Step::Open) and not reached_door_)
         {
             const State st_now = state_of(G, name_of(step_));
             if (st_now != State::Offered and st_now != State::Executing and not seen_executing_)
@@ -167,7 +173,10 @@ public:
         // ★ BACK TO `open` WHEN THE DOOR TURNS OUT SHUT. `cross` may have been taken on a transient P(passable) while
         //   the robot was still out of reach (so `open` could not be offered yet). Once door_concept offers `open` —
         //   P(in reach)·P(shut) above its band — the door is shut in front of us: open it, whatever `cross` is doing.
-        if (step_ == Step::Cross and cross_room_ == room_frame and state_of(G, name_of(Step::Open)) == State::Offered)
+        // Not once `open` has succeeded in this passage: a re-offer of `open` after that is the flicker of a door we just
+        // opened (try38: 223 open/cross alternations), not news that it shut.
+        if (step_ == Step::Cross and not opened_ and cross_room_ == room_frame
+            and state_of(G, name_of(Step::Open)) == State::Offered)
         {
             const bool was_executing = state_of(G, name_of(Step::Cross)) == State::Executing;
             out.event = std::format("[door-passage] {}: {} is offered — the door is shut: back from {} to it", door_,
@@ -204,6 +213,8 @@ public:
             if (outcome == rc::affordance::Outcome::Satisfied)
             {
                 const Step done = step_;
+                if (done == Step::Approach or done == Step::Open) reached_door_ = true;
+                if (done == Step::Open) opened_ = true;
                 step_ = done == Step::Approach ? Step::Open : done == Step::Open ? Step::Cross : Step::Done;
                 attempts_ = 0;
                 out.event = std::format("[door-passage] {}: {} SATISFIED -> {}", door_, req,
@@ -324,6 +335,8 @@ private:
     bool seen_executing_ = false;
     bool just_started_ = false;
     bool preempted_ = false;
+    bool reached_door_ = false;   ///< approach satisfied (or a later step taken from it) in this passage
+    bool opened_ = false;         ///< `open` satisfied in this passage
     int attempts_ = 0;
     std::string cross_room_;   // the room the cross step began in
     std::string note_ = "idle";

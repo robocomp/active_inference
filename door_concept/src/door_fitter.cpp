@@ -4,6 +4,7 @@
 
 #include "door_fitter.h"
 #include "door_standpoint.h"
+#include "door_phi_posterior.h"   // the phi channel as pure functions (tested offline)
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -714,7 +715,8 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
                  // OPEN one. A high off_plane with a low phi, or a low one with a high phi, is a
                  // contradiction the angle alone cannot show.
                  << "leaf_pts,w_sdf,w_mask,w_edge,phi_sigma,phi_measured,off_plane,phi_cv,"
-                 << "ray_hit0,ray_expl0,ray_signed0\n";
+                 << "ray_hit0,ray_expl0,ray_signed0,"
+                 << "phi_ninf,phi_beta,phi_lat\n";
     }
     const auto& s = inst.ai2_belief.state();
     const Eigen::Vector2f c = inst.ai2_belief.center_xy();   // APERTURE centre (see DoorBelief) — unchanged by phi
@@ -729,7 +731,8 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
              << inst.dbg_w_edge << ',' << inst.phi_sigma << ',' << (inst.phi_measured ? 1 : 0) << ','
              << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_cv << ','
              << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ','
-             << inst.dbg_ray_signed0 << '\n';
+             << inst.dbg_ray_signed0 << ','
+             << inst.dbg_phi_ninf << ',' << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << '\n';
     ai2_csv_.flush();
 }
 
@@ -874,23 +877,14 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     inst.phi_last_t = now;
     // Never tighter than the search grid can resolve (that would be a claim about phi finer than the
     // measurement) and never wider than the full range (which is the same as having no prior at all).
-    const float sigma_phi = std::isfinite(dt_phi)
-        // ★★★THE PRIOR WIDTH COMPOUNDS — IT IS A PREDICT STEP, NOT A FRESH GAUSSIAN EACH CYCLE.
-        // This used to be `rate * dt` alone: the width the leaf could have swung since the LAST frame.
-        // True per cycle, and it discards all history — so a hundred uninformative cycles grew the
-        // uncertainty by nothing, and the estimator reported the grid resolution as its confidence on a
-        // value nothing had supported since the evidence stopped. Measured 2026-09-13: with the door
-        // being closed and both likelihoods silent (w_mask 0.0000, w_sdf pinned at 1/25 = flat), sigma
-        // sat at 5.00, 5.00, 5.01, 5.01, 5.01 while the estimate froze at 47 deg on a shut door. A flat
-        // likelihood leaves the posterior equal to the prior, and a prior re-centred on the current
-        // estimate has its mean AT the current estimate — so the value stops dead and is reasserted with
-        // a confidence it never earned.
-        // Compounding the previous posterior's width with this interval's process noise is the ordinary
-        // predict step, and it makes ignorance ACCUMULATE: evidence tightens sigma, its absence widens it,
-        // and "I have not seen the leaf for three seconds" becomes a thing the estimate can express.
-        ? std::clamp(std::sqrt(inst.phi_sigma * inst.phi_sigma + swing_rate * dt_phi * swing_rate * dt_phi),
-                     cfg_.phi_step_rad, cfg_.phi_max_rad)
-        : cfg_.phi_max_rad;
+    // ★★★THE PRIOR WIDTH COMPOUNDS — IT IS A PREDICT STEP, NOT A FRESH GAUSSIAN EACH CYCLE (2026-09-13).
+    // A flat likelihood leaves the posterior equal to the prior; a prior re-centred on the current estimate
+    // with a per-cycle width would freeze the value and reassert it with a confidence it never earned
+    // (measured: sigma 5.00, 5.00, 5.01 while the estimate froze at 47 deg on a shut door). Compounding the
+    // previous posterior's width with this interval's swing makes ignorance ACCUMULATE. Never tighter than
+    // the grid resolves, never wider than the range. See rc::door::phi_prior_sigma.
+    const float sigma_phi = rc::door::phi_prior_sigma(inst.phi_sigma, swing_rate, dt_phi,
+                                                      cfg_.phi_step_rad, cfg_.phi_max_rad);
     if (inst.phi_cmd_active)
     {
         const float dt = std::chrono::duration<float>(now - inst.phi_cmd_t0).count();
@@ -932,72 +926,24 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // their endpoints are in the next room, metres from the door, so any endpoint-proximity test discards
     // precisely the evidence that an aperture is open. A ray belongs to this doorway if its SEGMENT
     // passes through the cylinder the leaf can sweep — whether it stopped there or flew on.
+    // The search grid. ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them.
+    const float PHI_MIN = 0.0f;
+    const float PHI_MAX = std::max(0.1f, cfg_.phi_max_rad);
+    const int   NSTEP   = std::clamp(
+        static_cast<int>(std::lround(PHI_MAX / std::max(0.01f, cfg_.phi_step_rad))) + 1, 5, 64);
+
+    // ★THE ALONG-WALL SLIDE IS A NUISANCE OVER ITS HONEST SUPPORT (+-w/2), and the ray selection follows it
+    // (door_phi_posterior.h has the why: a carried mirror sat 0.23-0.40 m from the real doorway).
+    const rc::DoorBelief::FieldNuisance nz = rc::door::phi_field_nuisance(inst.aperture);
     rc::ai::LidarRays rays;
     if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
     {
-        const auto& ap = inst.aperture;
-        const Eigen::Vector2f c = ap.centre_xy();
-        const float reach = ap.w + 0.15f;                       // swept radius + thickness/noise band
-        const float z_lo  = ap.floor_z + 0.05f, z_hi = ap.floor_z + ap.h;
-        rays.origin = leaf_origin_;
-        rays.endpoints.reserve(512);
-        const Eigen::Vector2f o2 = leaf_origin_.head<2>();
-        int off = 0;
-        for (const auto& p : *leaf_pts_)
-        {
-            // Closest approach of the SEGMENT origin->endpoint to the aperture centre, in plan view.
-            const Eigen::Vector2f d = p.head<2>() - o2;
-            const float len2 = d.squaredNorm();
-            if (len2 < 1e-6f) continue;
-            const float t = std::clamp((c - o2).dot(d) / len2, 0.0f, 1.0f);
-            const Eigen::Vector2f closest = o2 + t * d;
-            // ★A SLAB, NOT A DISC — AND THE DIFFERENCE IS THE WHOLE SIGNAL-TO-NOISE OF THIS CHANNEL.
-            // A ray that hits the WALL BESIDE the doorway predicts the same range at every leaf angle: its
-            // cost is identical across hypotheses and cancels exactly in F - F_min. It biases nothing, but
-            // the free energy is a MEAN, so each inert ray shrinks the differences the informative ones
-            // produce. Measured 2026-09-13: a disc of radius w + 0.15 = 1.15 m about the centre of a 1.00 m
-            // aperture admitted 694 rays, of which roughly 600 were wall — diluting the discrimination
-            // about sevenfold and leaving w_sdf varying by +-0.7% around flat while the mask, unaffected,
-            // decided the angle.
-            // The rays that can discriminate are those inside the doorway's OWN WIDTH: the column a closed
-            // leaf blocks, and the volume the leaf sweeps out perpendicular to it. So the test is lateral
-            // (along-wall) against w/2, with the perpendicular extent left free out to the swept reach —
-            // a slab through the aperture, which is the shape of the thing being asked about.
-            const float lateral = std::abs(ap.wall_u.dot(closest - c));
-            const float perp    = std::abs(ap.across_u().dot(closest - c));
-            // ★THE JAMB BAND IS NOW EVIDENCE, NOT DILUTION (widened 0.10 -> 0.40 m, 2026-09-16).
-            // Under the leaf-only model a ray hitting the wall beside the doorway predicted the same
-            // range at every phi: it cancelled in F - F_min and merely shrank the differences the
-            // informative rays produced, which is why this margin was cut to 10 cm. The field model has
-            // a WALL, and the wall is what pins the depth nuisance — the live returns sit a tight
-            // +0.112 m nearer than the modelled leaf, and it is the jamb rays that measure that offset.
-            // Cutting them out would leave the nuisance determined only by the rays whose angle we are
-            // trying to infer, which is the degeneracy this whole channel exists to avoid.
-            if (lateral > 0.5f * ap.w + 0.40f or perp > reach) continue;
-            // Height band applies to the RETURN only when it stopped inside the band; a ray that flew
-            // through is kept whatever height it ended at, because where it ended is the whole point.
-            const bool stopped_near = (p.head<2>() - c).norm() <= reach;
-            if (stopped_near and (p.z() < z_lo or p.z() > z_hi)) continue;   // floor / above the lintel
-            rays.endpoints.push_back(p);
-            if (std::abs(ap.across_u().dot(p.head<2>() - c)) > 0.10f) ++off;
-        }
-        rays.precision   = std::max(1e-3f, cfg_.lidar_bpearl_precision);
-        rays.max_range_m = 8.0f;
-        // ★★★THE ROBUST SCALE IS THE DOOR'S OWN SIZE, NOT A SURFACE TOLERANCE — AND THE DEFAULT MADE THE
-        // LIKELIHOOD PERFECTLY FLAT. A Cauchy kernel says "residuals far beyond c are outliers and carry
-        // no information". The shared default is 0.05 m, right for fitting a surface to returns that
-        // should lie ON it. Here the question is whether a ray was STOPPED or FLEW THROUGH, and that
-        // residual is metres: with c = 5 cm every ray saturates to the same constant, so every hypothesis
-        // scores identically. Measured 2026-09-13, w_sdf sat at 0.0400 = 1/25 across 25 hypotheses — the
-        // exact fingerprint of a flat curve — and the mask channel decided the angle unopposed while the
-        // LiDAR branch appeared to be running perfectly (335-415 rays, measured=1, every cycle).
-        // A ray that flew 4 m past where a closed leaf would have stopped is not an outlier; it is the
-        // whole signal. So c is the scale over which "the ray stopped somewhere else" stops being
-        // informative, which for a doorway is the doorway: one aperture width. Derived from the model, so
-        // it cannot be wrong for the next door of a different size.
-        // Now the beam model's RANGE NOISE sigma, not a robust scale: how precisely a return
-        // locates a surface. The LiDAR's own noise, not the door's size.
-        rays.robust_c_m  = 0.05f;
+        // ★SELECT BY THE PATH, NOT BY THE ENDPOINT — a slab through the aperture plus the jamb band; see
+        // rc::door::select_doorway_rays (the selection used to live here, unchanged but for the slide).
+        auto sel = rc::door::select_doorway_rays(inst.aperture, leaf_origin_, *leaf_pts_,
+                                                 std::max(std::abs(nz.lat_lo), std::abs(nz.lat_hi)),
+                                                 cfg_.lidar_bpearl_precision);
+        rays = std::move(sel.rays);
         // ★THE DIAGNOSTIC, TAKEN BEFORE ANY MODEL CHANGE. Tolerance is 3 sigma of the range noise: a ray
         // that stops within that of where a SHUT leaf would be is explained by one. On a closed door this
         // ratio should be near 1; anything near 0 says the selection is not looking at the leaf.
@@ -1008,7 +954,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
             inst.dbg_ray_signed0  = ex.mean_signed_m;
         }
         inst.dbg_leaf_pts       = static_cast<int>(rays.endpoints.size());
-        inst.dbg_leaf_off_plane = off;
+        inst.dbg_leaf_off_plane = sel.off_plane;
     }
     else
     {
@@ -1017,105 +963,56 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     }
 
     // ─── THE CURVE: LiDAR likelihood × the swing prior ─────────────────────────────────────────────
-    // ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them (a door opens past 90 deg).
-    const float PHI_MIN = 0.0f;
-    const float PHI_MAX = std::max(0.1f, cfg_.phi_max_rad);
-    const int   NSTEP   = std::clamp(
-        static_cast<int>(std::lround(PHI_MAX / std::max(0.01f, cfg_.phi_step_rad))) + 1, 5, 64);
-
-    std::vector<float> lidar(static_cast<std::size_t>(NSTEP), 0.0f);
+    // ★THE FULL-FIELD RESPONSE (2026-09-16), NOW TEMPERED BY WHAT THE FRAME DISCRIMINATES (2026-10-13).
+    // DoorBelief::phi_field_loglik: same per-ray density as phi_field_likelihood, the slide marginalised over
+    // +-w/2, and the joint log-likelihood raised to n_eff/n_inf — a frame that sees a sliver of the leaf
+    // carries a sliver of evidence instead of a delta.
+    std::vector<std::pair<float, float>> loglik;
     if (not rays.endpoints.empty())
     {
-        // ★THE FULL-FIELD RESPONSE, NOT THE PER-RAY MEAN (2026-09-16). See DoorBelief::phi_field_likelihood
-        // for why the beam model could not see an open door and why the sum needs the nuisance. Measured
-        // live the same day: the old channel went FLAT (cv 0.038, w_sdf 0.0393) with the door standing
-        // open and the robot in the doorway, and sigma_phi GREW from 0.199 to 0.647 rad as the ray count
-        // rose 71 -> 918 — a likelihood whose width increases with evidence.
-        rc::DoorBelief::FieldNuisance nz;   // defaults span the measured +0.112 m offset
-        const auto c = inst.ai2_belief.phi_field_likelihood(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
-        for (std::size_t k = 0; k < lidar.size() and k < c.size(); ++k)
-            lidar[k] = c[k].second;
+        auto fr = inst.ai2_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
+        loglik = std::move(fr.loglik);
+        inst.dbg_phi_ninf  = fr.n_inf;
+        inst.dbg_phi_beta  = fr.beta;
+        inst.dbg_phi_lat   = fr.lat_map;
     }
-    const double lsum = std::accumulate(lidar.begin(), lidar.end(), 0.0);
-
-    // ★A FLAT LIKELIHOOD IS NOT A MEASUREMENT, AND NO LIKELIHOOD IS A FLAT ONE, NOT A ZERO ONE. Bayes says a
-    // measurement that was not taken contributes a CONSTANT, so the posterior equals the prior and its
-    // width grows with the predict step above — "I have not seen the leaf" is a wide posterior, never a
-    // default angle. What decides "measured" is whether the hypotheses were DISTINGUISHED: the spread
-    // of the likelihood across them, not its sum (a uniform curve sums to 1).
-    // ⚠ A tenth of the mean (coefficient of variation) is where a shape is barely distinguishable from
-    // uniform. It gates only the MEASURED FLAG, i.e. whether ignorance accumulates — never the estimate.
-    bool measured = false;
+    else
     {
-        double cv = 0.0;
-        if (lsum > 1e-12)
-        {
-            const double mu = lsum / static_cast<double>(lidar.size());
-            double v = 0.0;
-            for (const float x : lidar) v += (x - mu) * (x - mu);
-            cv = std::sqrt(v / static_cast<double>(lidar.size())) / mu;   // 0 ⇒ perfectly flat
-        }
-        measured = (cv > 0.10);
-        inst.dbg_phi_cv = static_cast<float>(cv);
+        inst.dbg_phi_ninf = 0.0f;
+        inst.dbg_phi_beta = 1.0f;
     }
 
-    // ★THE PRIOR MULTIPLIES THE LIKELIHOOD; IT DOES NOT ADD A BONUS TO IT. A flat likelihood must leave the
-    // prior standing, and only a peaked one may move it.
-    inst.phi_curve.reserve(static_cast<std::size_t>(NSTEP));
-    float best_w = -1.0f;
-    for (int k = 0; k < NSTEP; ++k)
-    {
-        const float  phi   = PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1);
-        const float  d     = (phi - phi_prior) / sigma_phi;
-        const double prior = std::exp(-0.5 * d * d);
-        const double s_n   = lsum > 1e-12 ? lidar[static_cast<std::size_t>(k)] / lsum : 0.0;
-        const float  w     = static_cast<float>((measured ? s_n : 1.0) * prior);
-        inst.phi_curve.emplace_back(phi, w);
-        if (w > best_w)
-        {
-            best_w = w;
-            inst.dbg_w_sdf = static_cast<float>(s_n * prior);
-        }
-    }
+    // ★THE PRIOR MULTIPLIES THE LIKELIHOOD, IN LOGS. A flat likelihood leaves the prior standing; a peaked
+    // one moves it; and no likelihood, however far from the prior, can underflow the posterior to nothing
+    // (the old linear product did, and the "no curve" branch then threw the prior away — see
+    // rc::door::phi_posterior_step).
+    const auto post = rc::door::phi_posterior_step(loglik, PHI_MIN, PHI_MAX, NSTEP, phi_prior, sigma_phi);
+    inst.phi_curve  = post.curve;
+    inst.dbg_phi_cv = post.cv;
+    inst.dbg_w_sdf  = post.w_lik_best;
     inst.dbg_w_mask = 0.0f;   // kept in the log schema; the camera no longer votes on phi
     inst.dbg_w_edge = 0.0f;
 
-    // ─── COLLAPSE THE POSTERIOR: a MEAN and a WIDTH, always, with no special cases ────────────────
-    // ★THE WIDTH IS THE POINT. A point estimate with no width cannot distinguish "the leaf is flush" from
-    // "nothing looked at the leaf", and every consumer downstream is obliged to believe it either way.
-    // With the flat-likelihood rule above the curve is ALWAYS a proper posterior — the prior alone when
-    // nothing was measured — so sigma carries that state honestly: a cycle with no evidence widens toward
-    // the full range instead of silently asserting an angle.
-    // ★NO ARGMAX ANYWHERE. The mean of the posterior is what moves, for the reason already recorded in
-    // this function: the argmax of a nearly-flat curve is noise, and chasing it made the aperture slide
-    // along the wall to follow it (r = -1.000, 34 cm against 41 deg).
+    // ─── COLLAPSE THE POSTERIOR: a MEAN and a WIDTH, always ────────────────────────────────────────
+    // ★THE WIDTH IS THE POINT, and ★NO ARGMAX ANYWHERE (the argmax of a nearly-flat curve is noise; chasing
+    // it slid the aperture along the wall, r = -1.000, 34 cm against 41 deg).
+    // ★THE CARRIED BELIEF IS THE POSTERIOR'S (mean, sigma) — NO CLAMP ON THE MEAN (2026-10-13). The mean used
+    // to move at most swing_rate*dt per cycle while sigma took the posterior's width, so the NEXT prior was
+    // centred many sigma from the evidence and fought it (harness (c): first look at an open door,
+    // P(passable) 1.00 -> 0.10 -> 1.00). "A hinge cannot jump" is already the predict step: the prior's width
+    // grows by exactly what the leaf could have swung in dt (phi_prior_sigma), so a single frame moves the
+    // mean far only if its evidence outweighs that prior — and, tempered by what it actually observed
+    // (phi_field_loglik), a near-empty frame cannot.
+    if (not post.curve.empty())
     {
-        double num = 0.0, den = 0.0;
-        for (const auto& [phi, w] : inst.phi_curve) { num += static_cast<double>(phi) * w; den += w; }
-        if (den > 1e-12)
-        {
-            const float mean = static_cast<float>(num / den);
-            double var = 0.0;
-            for (const auto& [phi, w] : inst.phi_curve)
-                var += w * (phi - mean) * (phi - mean);
-            inst.phi_sigma = static_cast<float>(std::sqrt(std::max(0.0, var / den)));
-            // A hinge cannot jump: the step is bounded by what the leaf could physically have swung in the
-            // elapsed time. Same swing model as the prior's width, so the two cannot disagree.
-            const float max_step = swing_rate * (std::isfinite(dt_phi) ? dt_phi : 0.10f);
-            inst.phi_est += std::clamp(mean - inst.phi_est, -max_step, max_step);
-        }
-        else
-        {
-            // Not even a prior — the curve could not be built at all. HOLD the estimate and say the width
-            // is the whole range, rather than move it on nothing.
-            inst.phi_sigma = PHI_MAX - PHI_MIN;
-        }
-        inst.phi_measured = measured;
-        // phi_support was the camera mask overlap at the claimed angle. The camera no longer scores the
-        // leaf, so there is nothing to report: -1 (outside the [0,1] range of an overlap), never 0, which
-        // would read as "the mask saw no leaf here".
-        inst.phi_support = -1.0f;
+        inst.phi_sigma = post.sigma;
+        inst.phi_est   = post.mean;
     }
+    else
+        inst.phi_sigma = PHI_MAX - PHI_MIN;   // not even a prior: HOLD the estimate, width = the whole range
+    inst.phi_measured = post.measured;
+    // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".
+    inst.phi_support = -1.0f;
 
     inst.phi_est = std::clamp(inst.phi_est, PHI_MIN, PHI_MAX);
     inst.leaf.phi = inst.phi_est;

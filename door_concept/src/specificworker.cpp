@@ -4078,6 +4078,11 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     if (const auto v = G->get_attrib_by_name<door_open_prob_att>(node.value()); v.has_value()) em.open_prob = v.value();
     if (const auto v = G->get_attrib_by_name<door_phi_rad_att>(node.value()); v.has_value())   em.phi_rad = v.value();
     em.name = node->name();
+    for (const auto& r : G->get_nodes_by_type("room"))
+        if (r.id() != room_node_id_)
+            if (const auto Tx = inner_eigen_->get_transformation_matrix(r.name(), node->name(), 0);
+                Tx.has_value() and Tx->matrix().allFinite())
+                em.T_in_room[r.id()] = Eigen::Affine3d(Tx->matrix());
     door_memo_[inst.node_id] = std::move(em);
 }
 
@@ -4093,7 +4098,13 @@ std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWor
     const Eigen::Vector2d robot = Trb->translation().head<2>();
     const auto best = std::ranges::min_element(lost_doors_, {}, [&](const EntryMirror& m)
                                                { return (m.T_root_door.translation().head<2>() - robot).norm(); });
-    const Eigen::Affine3d T = Eigen::Affine3d(Tnr->matrix()) * best->T_root_door;
+    // Prefer the pose measured directly in this room while the door still lived; the root route is stale by however
+    // far the robot drove between the crossing and the eviction.
+    const auto direct = best->T_in_room.find(new_room);
+    const Eigen::Affine3d T = direct != best->T_in_room.end() ? direct->second
+                                                              : Eigen::Affine3d(Tnr->matrix()) * best->T_root_door;
+    std::print("door_concept: [room] recreating '{}' from its pose {} \n", best->name,
+               direct != best->T_in_room.end() ? "measured in this room before it was deleted" : "via root (fallback)");
     // A room just born has no valid robot↔room link yet (room_concept retires it at a birth): its chain can resolve to
     // garbage (live try35: t = (3.7e13, 5.2e12) m). A door recreated there would be wrong for ever — refuse it; the
     // next room change, or the tracker, will bring the door back from evidence.

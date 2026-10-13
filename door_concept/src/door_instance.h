@@ -103,6 +103,13 @@ struct DoorInstance
     int   dbg_ray_expl0 = 0;       // …of which the measured range matches, within tolerance
     float dbg_ray_signed0 = 0.0f;  // mean signed (predicted - measured) over the predicted hits, m
     float dbg_phi_cv   = 0.0f;   // spread of the combined phi likelihood; 0 = perfectly flat
+    // ★HOW MUCH THIS FRAME SAW OF THE LEAF (2026-10-13, DoorBelief::phi_field_loglik). n_inf = rays whose
+    // density changes with phi (soft count); beta = the power the frame's log-likelihood was raised to for
+    // their shared model error (1 = independent, -> 1/(rho n_inf) when many rays share one misfit); lat =
+    // the MAP slide of the aperture along the wall — a LARGE one says the aperture is misplaced, not the leaf.
+    float dbg_phi_ninf = 0.0f;
+    float dbg_phi_beta = 1.0f;
+    float dbg_phi_lat  = 0.0f;
     bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
     float phi_support  = -1.0f;   // was the camera mask overlap at phi_est; -1 since the camera stopped scoring phi (2026-09-14)
     // ★IS phi_est A MEASUREMENT, OR OUR OWN REQUEST ECHOED BACK? True when the last thing to move it was

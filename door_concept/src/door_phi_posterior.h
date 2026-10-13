@@ -1,0 +1,220 @@
+/*
+ * door_phi_posterior.h — the leaf-angle (phi) channel as PURE functions: which rays interrogate a doorway,
+ * which nuisances the field likelihood marginalises, and how one frame's likelihood updates the carried
+ * belief. DoorFitter::estimate_phi is a thin wrapper around these (plus the command prior and the clock),
+ * so tests/test_door_phi_stability.cpp exercises the SAME code the agent runs.
+ *
+ * ─── WHAT THIS FIXED (2026-10-13, live try36-try40) ──────────────────────────────────────────────────
+ * After crossing DOOR_1, the door carried into room_2 (leaf ~95 deg, opening OUT of room_2, i.e. beside
+ * the doorway on the far side of the wall) had door_open_prob flip 1.00 <-> 0.00 cycle to cycle while
+ * phi_est sat at 80-100 deg — 223 open/cross alternations in try38. The logged curve was a DELTA every
+ * frame (dbg_phi_cv = 4.90 = sqrt(24): all the weight on one of 25 angles) and phi_sigma alternated
+ * 0.00 / 2.09 rad. Three faults compounded:
+ *   1. the aperture the likelihood scored was 0.23-0.40 m along the wall from the real doorway (the
+ *      actuator's "nearest by place" on every room_2 request), and its slide nuisance spanned only
+ *      +-6 cm — so NO hypothesis explained the frame and the least-bad angle depended on the viewpoint;
+ *   2. the per-ray log densities were summed as if independent, turning that misfit into hundreds of
+ *      nats — a delta the persistence prior could not resist;
+ *   3. the posterior was formed in LINEAR float: a delta landing where the prior had underflowed made
+ *      every weight exactly 0, the code read that as "no curve" and reset phi_sigma to the full range —
+ *      so the NEXT frame had no prior at all and re-decided the angle from scratch;
+ *   4. the carried prior was centred on a RATE-LIMITED phi_est, not on the posterior it summarised: the
+ *      clamp moved the estimate at most swing_rate*dt per cycle while the posterior's width shrank to a
+ *      few degrees, so the next prior sat tens of degrees (many sigma) from where the evidence had put
+ *      the leaf, and the two fought — harness (c): a first look at an open door read P = 1.00, 0.10, 1.00.
+ * The cures are model terms, not gates: the slide is marginalised over +-w/2 (DoorBelief::
+ * phi_field_loglik), the joint likelihood is tempered by the frame's effective number of independent
+ * discriminating rays (ibid.), and the posterior is formed in the LOG domain so the prior can never be
+ * lost to underflow (phi_posterior_step below). The belief that persists is the posterior's (mean, sigma);
+ * the hinge's kinematics live where they belong, in the predict step's width (phi_prior_sigma), not as a
+ * clamp on the mean.
+ *
+ * Header-only, no DSR / Qt / OpenCV.
+ */
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <utility>
+#include <vector>
+
+#include <Eigen/Dense>
+
+#include "door_belief.h"
+#include "door_geometry.h"
+
+namespace rc::door
+{
+
+// ─── the nuisances the field likelihood marginalises, for THIS aperture ──────────────────────────────
+// Depth keeps its measured span (DoorBelief::FieldNuisance). The along-wall SLIDE spans +-w/2 — a doorway
+// misplaced by more than half its own width is a different doorway — at the depth grid's own step, so the
+// two nuisance axes are resolved equally (and the common mode they leave behind is derived from that step,
+// see DoorBelief::phi_field_loglik).
+inline rc::DoorBelief::FieldNuisance phi_field_nuisance(const Aperture& ap)
+{
+    rc::DoorBelief::FieldNuisance nz;
+    const float step = nz.depth_n > 1 ? (nz.depth_hi - nz.depth_lo) / static_cast<float>(nz.depth_n - 1) : 0.05f;
+    const float half = 0.5f * std::max(0.0f, ap.w);
+    const int   k    = static_cast<int>(std::ceil(half / std::max(1e-3f, step)));
+    nz.lat_lo = -static_cast<float>(k) * step;
+    nz.lat_hi = +static_cast<float>(k) * step;
+    nz.lat_n  = 2 * k + 1;
+    return nz;
+}
+
+// ─── rays that interrogate this doorway ───────────────────────────────────────────────────────────────
+// Unchanged from DoorFitter::estimate_phi (see the comments there for the slab and the jamb band), except
+// that the lateral band is widened by the slide the likelihood will consider: a hypothesis that places the
+// doorway `lat_half` along the wall must be scored on the rays that pass through THAT doorway too.
+struct DoorwayRays
+{
+    rc::ai::LidarRays rays;
+    int off_plane = 0;   // returns more than 10 cm off the wall plane (diagnostic only)
+};
+inline DoorwayRays select_doorway_rays(const Aperture& ap, const Eigen::Vector3f& origin,
+                                       const std::vector<Eigen::Vector3f>& pts, float lat_half,
+                                       float precision)
+{
+    DoorwayRays out;
+    auto& rays = out.rays;
+    const Eigen::Vector2f c = ap.centre_xy();
+    const float reach = ap.w + 0.15f;                       // swept radius + thickness/noise band
+    const float z_lo  = ap.floor_z + 0.05f, z_hi = ap.floor_z + ap.h;
+    rays.origin = origin;
+    rays.endpoints.reserve(512);
+    const Eigen::Vector2f o2 = origin.head<2>();
+    for (const auto& p : pts)
+    {
+        const Eigen::Vector2f d = p.head<2>() - o2;
+        const float len2 = d.squaredNorm();
+        if (len2 < 1e-6f) continue;
+        const float t = std::clamp((c - o2).dot(d) / len2, 0.0f, 1.0f);
+        const Eigen::Vector2f closest = o2 + t * d;
+        const float lateral = std::abs(ap.wall_u.dot(closest - c));
+        const float perp    = std::abs(ap.across_u().dot(closest - c));
+        if (lateral > 0.5f * ap.w + std::max(0.0f, lat_half) + 0.40f or perp > reach) continue;
+        const bool stopped_near = (p.head<2>() - c).norm() <= reach;
+        if (stopped_near and (p.z() < z_lo or p.z() > z_hi)) continue;   // floor / above the lintel
+        rays.endpoints.push_back(p);
+        if (std::abs(ap.across_u().dot(p.head<2>() - c)) > 0.10f) ++out.off_plane;
+    }
+    rays.precision   = std::max(1e-3f, precision);
+    rays.max_range_m = 8.0f;
+    rays.robust_c_m  = 0.05f;   // the beam model's RANGE NOISE sigma (see estimate_phi)
+    return out;
+}
+
+// ─── the predict step: how wide the carried belief is by now ─────────────────────────────────────────
+// Same model as before (compounded with the swing the leaf could have made in dt), factored out so the
+// harness runs it. dt = +inf ⇒ first look ⇒ no prior.
+inline float phi_prior_sigma(float prev_sigma, float swing_rate, float dt, float step_rad, float max_rad)
+{
+    if (not std::isfinite(dt))
+        return max_rad;
+    const float g = swing_rate * dt;
+    return std::clamp(std::sqrt(prev_sigma * prev_sigma + g * g), step_rad, max_rad);
+}
+
+// ─── the update step: one frame's likelihood x the carried prior ─────────────────────────────────────
+struct PhiPosteriorStep
+{
+    std::vector<std::pair<float, float>> curve;   // (phi, posterior weight), max weight == 1
+    float mean  = 0.0f;
+    float sigma = 0.0f;
+    bool  measured = false;
+    float cv = 0.0f;           // spread of the (normalised) likelihood across angles; 0 = flat
+    float w_lik_best = 0.0f;   // normalised likelihood x prior at the posterior's best angle (dbg_w_sdf)
+};
+
+// `loglik` is (phi, log-likelihood up to a constant) on the SAME grid, or empty for "not measured".
+// ★THE POSTERIOR IS FORMED IN THE LOG DOMAIN. It used to be float(s_n * prior) with s_n = L/sum(L): a
+// likelihood delta at an angle the prior had underflowed made EVERY weight exactly zero, which the caller
+// read as "no curve" and answered by resetting sigma to the whole range — the persistence prior was thrown
+// away exactly when the frame disagreed with it most, and the next frame decided the angle alone. In logs
+// the max term is exp(0) = 1, so the posterior is always a proper curve: the prior can lose an argument,
+// but it can never be deleted by rounding.
+// ★A FLAT LIKELIHOOD IS NOT A MEASUREMENT (unchanged): `measured` is the likelihood's coefficient of
+// variation across the hypotheses, and an unmeasured frame leaves the prior alone.
+inline PhiPosteriorStep phi_posterior_step(const std::vector<std::pair<float, float>>& loglik,
+                                           float phi_min, float phi_max, int nstep,
+                                           float prior_mean, float prior_sigma)
+{
+    PhiPosteriorStep out;
+    if (nstep < 2)
+        return out;
+    const std::size_t N = static_cast<std::size_t>(nstep);
+    std::vector<double> lik(N, 0.0);
+    double lsum = 0.0;
+    if (loglik.size() == N)
+    {
+        double lmax = -std::numeric_limits<double>::infinity();
+        for (const auto& [phi, l] : loglik) if (std::isfinite(l)) lmax = std::max(lmax, static_cast<double>(l));
+        if (std::isfinite(lmax))
+            for (std::size_t k = 0; k < N; ++k)
+            {
+                const double l = loglik[k].second;
+                lik[k] = std::isfinite(l) ? std::exp(l - lmax) : 0.0;
+                lsum += lik[k];
+            }
+    }
+    // ⚠ A tenth of the mean (coefficient of variation) is where a shape is barely distinguishable from
+    // uniform. It gates only the MEASURED FLAG, i.e. whether ignorance accumulates — never the estimate.
+    if (lsum > 1e-12)
+    {
+        const double mu = lsum / static_cast<double>(N);
+        double v = 0.0;
+        for (const double x : lik) v += (x - mu) * (x - mu);
+        out.cv = static_cast<float>(std::sqrt(v / static_cast<double>(N)) / mu);
+    }
+    out.measured = out.cv > 0.10f;
+
+    const float sp = std::max(1e-4f, prior_sigma);
+    std::vector<double> lp(N);
+    double lpmax = -std::numeric_limits<double>::infinity();
+    for (std::size_t k = 0; k < N; ++k)
+    {
+        const float  phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / static_cast<float>(nstep - 1);
+        const double d   = (phi - prior_mean) / sp;
+        const double ll  = (out.measured and lik[k] > 0.0) ? std::log(lik[k])
+                         : (out.measured ? -std::numeric_limits<double>::infinity() : 0.0);
+        lp[k] = ll - 0.5 * d * d;
+        lpmax = std::max(lpmax, lp[k]);
+    }
+    if (not std::isfinite(lpmax))
+    {
+        // Every hypothesis the likelihood allows has zero likelihood — cannot happen from a finite loglik,
+        // but if it does the prior stands alone rather than nothing.
+        for (std::size_t k = 0; k < N; ++k)
+        {
+            const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / static_cast<float>(nstep - 1);
+            const double d  = (phi - prior_mean) / sp;
+            lp[k] = -0.5 * d * d;
+        }
+        lpmax = *std::ranges::max_element(lp);
+        out.measured = false;
+    }
+    out.curve.reserve(N);
+    double num = 0.0, den = 0.0, best = -1.0;
+    for (std::size_t k = 0; k < N; ++k)
+    {
+        const float  phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / static_cast<float>(nstep - 1);
+        const double w   = std::exp(lp[k] - lpmax);
+        out.curve.emplace_back(phi, static_cast<float>(w));
+        num += w * phi; den += w;
+        if (w > best)
+        {
+            best = w;
+            const double d = (phi - prior_mean) / sp;
+            out.w_lik_best = static_cast<float>((lsum > 1e-12 ? lik[k] / lsum : 0.0) * std::exp(-0.5 * d * d));
+        }
+    }
+    out.mean = static_cast<float>(num / den);   // den >= 1: the max term is exp(0)
+    double var = 0.0;
+    for (const auto& [phi, w] : out.curve) var += w * (phi - out.mean) * (phi - out.mean);
+    out.sigma = static_cast<float>(std::sqrt(std::max(0.0, var / den)));
+    return out;
+}
+
+}  // namespace rc::door
