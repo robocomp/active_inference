@@ -240,7 +240,7 @@ touched to obtain a result; the numbers below are exactly what `atlas_replay` pr
 
 | Check | Criterion | Result |
 |---|---|---|
-| A. chair swaps | < 1 % | 7 / 518 = 1.35 % (FAIL) |
+| A. chair swaps | < 1 % | 7 / 518 = 1.35 % (FAIL; unchanged by the fix round) |
 | B. re-ID, yellow moved / magenta stayed | ≥ 95 % each, other chair ≤ 2 % | yellow (`Chair`, moved) 37 / 53 = 69.8 %, magenta (`chair(1)`, stayed) 20 / 20 = 100.0 %; other chair chosen 0.0 % (FAIL: yellow below 95 %) |
 | B (info, yaw unknown, not graded) | — | yellow 43 / 53 = 81.1 %, magenta 20 / 20 = 100.0 %, other chair 0.0 % |
 | C. encodings per object-minute | ≤ 60 (expect ≤ 30) | worst 1000.0 /min (FAIL), but NOT MEASURABLE on this data: see below |
@@ -249,8 +249,7 @@ touched to obtain a result; the numbers below are exactly what `atlas_replay` pr
 Reading of the results (not a change of criteria):
 
 - B: the 16 yellow windows that failed were never assigned to the *other chair* (0.0 %); the MAP was the "new object"
-  hypothesis, i.e. the moved chair was not recognised as the archived one. Knowing the yaw did not help (69.8 % known vs 81.1 % unknown:
-  the exact-yaw likelihood is the sharper and the less forgiving one).
+  hypothesis, i.e. the moved chair was not recognised as the archived one.
 - C: the `frames` recording is a sparse sampling of an apartment tour (267 distinct stamps, 647 object views, spread over
   ~11 days of wall clock with one 868 000 s gap). First-to-last stamp therefore gives ~16 000 min per object and
   ~0 encodings/min, and the single-view object `Worktop4` gives 1 encoding / 0 min (clamped to 1e-3 min = 1000 /min).
@@ -258,3 +257,30 @@ Reading of the results (not a change of criteria):
   trigger encoded nearly every sparse view (e.g. 87 of 93 `Chair`, 111 of 146 `chair(1)`, all of the other objects):
   consecutive sparse views are far apart in bearing, so each carries high learning value. A continuous recording is
   needed to grade C.
+
+### 8.1 Fix round 1: window evidence counted in views (corrected B and D)
+
+The first run (table above, "as run") summed the five per-frame log-ratios of a window raw. Evidence counts in views and
+repeat looks add about nothing (§4, §5), and the five frames of a window are mostly repeats, so that run counted the same
+look about five times. The module now has `pose_kernel` (the repeat kernel `update()` uses) and `log_ratio_window`, which
+discounts each view by its redundancy with the window's earlier views; the harness B and D use it. Only B and D change
+(A and C do not use windows). The two runs differ for that reason alone; criteria, constants and dataset are unchanged.
+
+| Check | As run (undiscounted) | Corrected (view-discounted) |
+|---|---|---|
+| B, yaw known | yellow 37/53 = 69.8 %, magenta 20/20, other chair 0.0 % | yellow 15/53 = 28.3 %, magenta 20/20 = 100.0 %, other chair 0.0 % (FAIL) |
+| B info, yaw unknown | yellow 43/53 = 81.1 %, magenta 20/20, other 0.0 % | yellow 21/53 = 39.6 %, magenta 20/20 = 100.0 %, other 0.0 % |
+| D [0.5,0.7) | n=4, mean p 0.627, acc 0.250 | n=20, mean p 0.598, acc 0.300 (gap 0.298) |
+| D [0.7,0.9) | n=5, mean p 0.828, acc 0.400 | n=21, mean p 0.779, acc 0.333 (gap 0.446) |
+| D [0.9,1.0] | n=64, mean p 0.996, acc 0.844 | n=32, mean p 0.983, acc 0.688 (gap 0.295) |
+| D verdict | FAIL | FAIL (all three bins now have >= 20 decisions and all are overconfident) |
+
+(The task review's own recomputation gave 26/53 for the yellow chair; this table is what `atlas_replay` printed with the
+module's `log_ratio_window`, whose kernel includes the log-range term as well as the bearing term.)
+
+OPEN FINDING (measured, cause not established): with the yaw labels given, the moved chair is not recognised, and the
+yaw is the suspect. The argmax over the 12 shifts of the moved chair's log-ratio in lap 1 peaks at shifts 9-10 (54 and 62
+of 268 views; mean log-ratio 1.78 / 1.83 against 1.21 at shift 0), i.e. 60-90 degrees off the labelled yaw, whereas
+`chair(1)` (stayed) peaks at shift 0 (59 of 103 views). The yaw labels were verified against
+`zed_orbit_recorder.py:84` and `piso_orbits.wbt:1566`. Candidate explanations, none verified: the object-frame
+convention for a moved PROTO; how `bin.bearing` is formed; occlusion by `desk(1)`.

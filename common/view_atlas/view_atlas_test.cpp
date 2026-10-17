@@ -179,6 +179,26 @@ static void test_shift_marginal()
     check(l_flat > l_fixed, "unknown yaw: marginalising recovers evidence a wrong yaw hid");
 }
 
+static void test_log_ratio_window()
+{
+    std::printf("window evidence discounts repeat looks\n");
+    const auto sharp = shift_log_weights(12, 0.f);
+    ViewAtlas a = atlas_with(0, 0, 0.f);
+    const ViewObs o = obs(0, 0, 0.f);
+    const float single = a.log_ratio_marginal(o, 0.f, sharp);
+    check(std::fabs(single) > 1e-3f, "single-view ratio is non-trivial (test is not vacuous)");
+    check(std::fabs(log_ratio_window(a, {o, o, o, o, o}, {0.f, 0.f, 0.f, 0.f, 0.f}, sharp) - single) < 1e-4f,
+          "5 identical views count as one view");
+    const std::vector<float> br = {0.f, 1.5f, 3.0f, -1.5f, -3.0f};
+    std::vector<ViewObs> vs;
+    float plain = 0.f;
+    for (float b : br) { vs.push_back(obs(0, 0, b)); plain += a.log_ratio_marginal(vs.back(), b, sharp); }
+    const float w = log_ratio_window(a, vs, br, sharp);
+    std::printf("    plain sum %.5f window %.5f\n", plain, w);
+    check(std::fabs(w - plain) <= 0.01f * std::fabs(plain), "5 far-apart views are within 1 % of the plain sum");
+    check(log_ratio_window(a, {}, {}, sharp) == 0.f, "empty window is 0");
+}
+
 static void test_reid()
 {
     std::printf("re-identification posterior\n");
@@ -228,6 +248,7 @@ int main()
     test_quality();
     test_log_ratio();
     test_shift_marginal();
+    test_log_ratio_window();
     test_reid();
     test_identity_value();
     std::printf("\nview_atlas_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");

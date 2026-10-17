@@ -152,8 +152,9 @@ int main(int argc, char** argv)
                 {
                     ReidCandidate c; c.log_prior = log_prior_k;
                     c.log_loc = location_log_lik({lap1[w0]->obj_x, lap1[w0]->obj_y}, last_xy[k], pose_cov, P.pi_move, room_area);
-                    for (std::size_t i = w0; i < w0 + 5; ++i)
-                        c.log_ratio += atlas.at(k).log_ratio_marginal(obs_of(*lap1[i]), bearing_of(*lap1[i]), *yaw_w);
+                    std::vector<ViewObs> wv; std::vector<float> wb;
+                    for (std::size_t i = w0; i < w0 + 5; ++i) { wv.push_back(obs_of(*lap1[i])); wb.push_back(bearing_of(*lap1[i])); }
+                    c.log_ratio = log_ratio_window(atlas.at(k), wv, wb, *yaw_w);   // evidence in views: repeat looks add ~nothing
                     cand.push_back(c);
                 }
                 const auto post = reid_posterior(cand, log_prior_new, std::log(1.f / room_area));

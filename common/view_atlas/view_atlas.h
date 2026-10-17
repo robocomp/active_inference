@@ -113,6 +113,15 @@ inline Gauss2 background(const AtlasParams& p, float quality)
     return {p.mu_bg, p.cov_bg + quality_cov(p, quality)};
 }
 
+/// Repeat kernel of two poses (bearing, log range): 1 = the same place, 0 = far apart. The one kernel
+/// both update() (repeat looks add ~nothing) and log_ratio_window() (same, for evidence) use.
+inline float pose_kernel(const AtlasParams& p, const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+{
+    const float da = wrap_pi(a.x() - b.x()) / p.repeat_ell_rad;
+    const float dr = (a.y() - b.y()) / p.repeat_ell_logr;
+    return std::exp(-0.5f * (da * da + dr * dr));
+}
+
 class ViewAtlas
 {
 public:
@@ -276,9 +285,7 @@ private:
     /// Repeat-kernel similarity of two poses (bearing, log range): 1 = the same place, 0 = far apart.
     [[nodiscard]] float pose_similarity(const Eigen::Vector2f& a, const Eigen::Vector2f& b) const
     {
-        const float da = wrap_pi(a.x() - b.x()) / p_.repeat_ell_rad;
-        const float dr = (a.y() - b.y()) / p_.repeat_ell_logr;
-        return std::exp(-0.5f * (da * da + dr * dr));
+        return pose_kernel(p_, a, b);
     }
     [[nodiscard]] float repeat_similarity(const Bin& bin, float b, float lr) const
     {
@@ -393,6 +400,26 @@ inline float identity_value(const std::vector<IdHyp>& c, float log_prior_new, fl
         expected_h += p0[t] * acc / float(n_samples);
     }
     return std::max(0.f, entropy(p0) - expected_h);   // MC noise only; mutual information is >= 0
+}
+
+/// Evidence of a WINDOW of views of one object: sum_i (1 - max_{j<i} k(pose_i, pose_j)) * log-ratio_i.
+/// Evidence counts in VIEWS, not in frames: a repeat look (same bearing and range) adds about nothing, so
+/// each view is discounted by its redundancy with the window's EARLIER views, with the same repeat kernel
+/// update() uses. Summing raw per-frame ratios would count five near-identical looks five times over.
+inline float log_ratio_window(const ViewAtlas& a, const std::vector<ViewObs>& views,
+                              const std::vector<float>& bearings, const std::vector<float>& shift_logw)
+{
+    const AtlasParams& p = a.params();
+    float total = 0.f;
+    for (std::size_t i = 0; i < views.size(); ++i)
+    {
+        const Eigen::Vector2f pi(wrap_pi(bearings[i]), std::log(views[i].range_m));
+        float k = 0.f;
+        for (std::size_t j = 0; j < i; ++j)
+            k = std::max(k, pose_kernel(p, pi, {wrap_pi(bearings[j]), std::log(views[j].range_m)}));
+        total += (1.f - k) * a.log_ratio_marginal(views[i], bearings[i], shift_logw);
+    }
+    return total;
 }
 
 } // namespace rc::atlas
