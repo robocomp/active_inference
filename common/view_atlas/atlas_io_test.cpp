@@ -34,6 +34,15 @@ static ArchiveRecord make_record(std::uint64_t uid)
     return r;
 }
 
+/// Overwrites one little-endian u32 at byte offset `at` of a file (blob header: magic 0, version 4,
+/// shape_dim 8, colour_dim 12, n_bins 16, n_records 20).
+static void patch_u32(const std::string& path, std::streamoff at, std::uint32_t v)
+{
+    std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+    f.seekp(at);
+    f.write(reinterpret_cast<const char*>(&v), 4);
+}
+
 static bool same(const ArchiveRecord& a, const ArchiveRecord& b)
 {
     if (a.object_uid != b.object_uid or a.agent != b.agent or a.cls != b.cls or a.name != b.name) return false;
@@ -65,6 +74,9 @@ int main()
     std::vector<ArchiveRecord> back;
     check(load_archive(base, P, 4, 3, back, &why), "load succeeds");
     check(back.size() == 2 and same(back[0], recs[0]) and same(back[1], recs[1]), "records read back bit-exact under es_ES");
+    check(save_archive(base, {}, &why) and load_archive(base, P, 4, 3, back, &why) and back.empty(),
+          "empty archive saves and reloads (agent with no dead objects)");
+    check(save_archive(base, recs, &why), "re-save the two records");
 
     std::printf("refusals\n");
     back.clear();
@@ -89,6 +101,25 @@ int main()
     ArchiveRecord bad = make_record(9); bad.name = "chair,2";
     check(not save_archive(base, {bad}, &why) and why.find("comma") != std::string::npos,
           "a comma in a text field is refused at save time");
+
+    std::printf("header field refusals (patched blob)\n");
+    {
+        const std::string blob = base + ".blob";
+        auto refused_with = [&](const char* field) {
+            back.clear(); why.clear();
+            return not load_archive(base, P, 4, 3, back, &why) and why.find(field) != std::string::npos and back.empty();
+        };
+        auto fresh = [&] { return save_archive(base, recs, &why); };
+        fresh(); patch_u32(blob, 4, 99);
+        check(refused_with("version"), "wrong version refused, reason names version");
+        fresh(); patch_u32(blob, 12, 2);
+        check(refused_with("colour_dim"), "wrong colour_dim refused, reason names colour_dim");
+        fresh(); patch_u32(blob, 16, 5);
+        check(refused_with("n_bins"), "wrong n_bins refused, reason names n_bins");
+        fresh(); patch_u32(blob, 20, 3);
+        check(refused_with("record count"), "bad record count refused, reason names record count");
+        fresh();
+    }
 
     std::printf("constants loader\n");
     const std::string cpath = (dir / "constants.txt").string();
@@ -121,6 +152,12 @@ int main()
     AtlasParams s;
     s.ell_rad = 0.6f;
     check(not load_params(cpath, s, &why) and s.ell_rad == 0.6f, "refused load leaves the passed AtlasParams unchanged");
+    { std::ofstream f(cpath); f << "cov_bg_dd = nan\n"; }
+    check(not load_params(cpath, r, &why) and why.find("cov_bg_dd") != std::string::npos,
+          "cov_bg_dd = nan refused, reason names cov_bg_dd");
+    { std::ofstream f(cpath); f << "ell_rad = inf\n"; }
+    check(not load_params(cpath, r, &why) and why.find("ell_rad") != std::string::npos,
+          "ell_rad = inf refused, reason names ell_rad");
 
     std::filesystem::remove_all(dir);
     std::printf("\natlas_io_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");

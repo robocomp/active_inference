@@ -11,6 +11,7 @@
 #include "view_atlas.h"
 
 #include <charconv>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -158,6 +159,8 @@ inline bool load_archive(const std::string& base, const AtlasParams& p, int shap
     if (not (detail::get(b, ver) and detail::get(b, sd) and detail::get(b, cd) and detail::get(b, nb) and detail::get(b, n)))
         return fail("blob short: header");
     if (ver != kArchiveVersion) return fail("version " + std::to_string(ver) + " != " + std::to_string(kArchiveVersion));
+    // An empty archive carries no dimensions to check (save writes 0s): it reloads as empty, whatever the caller.
+    if (n == 0 and recs.empty()) return true;
     if (int(sd) != shape_dim) return fail("shape_dim " + std::to_string(sd) + " != " + std::to_string(shape_dim));
     if (int(cd) != colour_dim) return fail("colour_dim " + std::to_string(cd) + " != " + std::to_string(colour_dim));
     if (int(nb) != p.n_bins) return fail("n_bins " + std::to_string(nb) + " != " + std::to_string(p.n_bins));
@@ -211,6 +214,7 @@ inline bool load_params(const std::string& path, AtlasParams& p, std::string* wh
         const std::string key(detail::trim(s.substr(0, eq)));
         float v;
         if (not detail::parse(detail::trim(s.substr(eq + 1)), v)) return fail("unparseable value for " + key + ": " + line);
+        if (not std::isfinite(v)) return fail("non-finite value for " + key + ": " + line);
         if      (key == "ell_rad")          q.ell_rad = v;
         else if (key == "repeat_ell_rad")   q.repeat_ell_rad = v;
         else if (key == "repeat_ell_logr")  q.repeat_ell_logr = v;
