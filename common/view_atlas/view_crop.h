@@ -25,6 +25,7 @@ struct Crop
     float   trunc_frac = 0.f;   // fraction of mask pixels on the image border row/column
 };
 
+/// mask_px are integral pixel coordinates (see CONTRACT at the lround line); geometry is computed in double.
 inline std::optional<Crop> make_crop(const cv::Mat& bgr, const std::vector<Eigen::Vector2f>& mask_px)
 {
     if (bgr.empty() or mask_px.empty()) return std::nullopt;
@@ -32,6 +33,9 @@ inline std::optional<Crop> make_crop(const cv::Mat& bgr, const std::vector<Eigen
     int x0 = bgr.cols, y0 = bgr.rows, x1 = -1, y1 = -1, n = 0, border = 0;
     for (const auto& p : mask_px)
     {
+        // CONTRACT: mask pixels are integral (retina publishes static_cast<float>(col/row) of integer pixel
+        // indices, retina/src/graph_publisher.cpp det_pixels), so lround only undoes float storage; a Python
+        // mirror builds its mask from a boolean array, so round-half-even vs half-away never arises.
         const int x = int(std::lround(p.x())), y = int(std::lround(p.y()));
         if (x < 0 or y < 0 or x >= bgr.cols or y >= bgr.rows) continue;
         if (mask.at<std::uint8_t>(y, x) == 0) { ++n; if (x == 0 or y == 0 or x == bgr.cols - 1 or y == bgr.rows - 1) ++border; }
@@ -46,10 +50,12 @@ inline std::optional<Crop> make_crop(const cv::Mat& bgr, const std::vector<Eigen
     c.bgr_box = bgr(box).clone();
     c.mask_box = mask(box).clone();
 
-    const float cx = 0.5f * float(x0 + x1 + 1), cy = 0.5f * float(y0 + y1 + 1);
-    const float s = 1.15f * float(std::max(box.width, box.height));
-    const int X1 = int(std::max(cx - s / 2, 0.f)), Y1 = int(std::max(cy - s / 2, 0.f));
-    const int X2 = int(std::min(cx + s / 2, float(bgr.cols))), Y2 = int(std::min(cy + s / 2, float(bgr.rows)));
+    // Geometry in DOUBLE on purpose: a Python mirror uses float64 1.15, and 1.15f (1.14999998) followed by
+    // int() truncation can land one pixel away from it.
+    const double cx = 0.5 * double(x0 + x1 + 1), cy = 0.5 * double(y0 + y1 + 1);
+    const double s = 1.15 * double(std::max(box.width, box.height));
+    const int X1 = int(std::max(cx - s / 2, 0.0)), Y1 = int(std::max(cy - s / 2, 0.0));
+    const int X2 = int(std::min(cx + s / 2, double(bgr.cols))), Y2 = int(std::min(cy + s / 2, double(bgr.rows)));
     const cv::Rect sq(X1, Y1, std::max(X2 - X1, 1), std::max(Y2 - Y1, 1));
     cv::Mat crop = bgr(sq).clone();
     crop.setTo(cv::Scalar(104, 116, 124), mask(sq) == 0);
