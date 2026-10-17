@@ -56,6 +56,8 @@
 #include "controller_relative_motion.h"
 #include "../../common/mission/mission_interpreter.h"
 #include "../../common/episodic/em_journal.h"
+#include "journal_node.h"
+#include "tour_journal.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
@@ -206,8 +208,9 @@ private:
 	void service_chat_inbox();
 	// ── THE EPISODIC JOURNAL (common/episodic/em_journal.h, docs/superpowers/specs/2026-10-17-episodic-memory-design.md
 	// §6): every operator command as a mission, each step attempt, each affordance claim and the drive mode, published
-	// as `em_journal` on our own agent node so episodic_agent can rebuild what was asked and what happened. Missions are
-	// "m<interpreter serial>"; single commands (cross/move/turn/uncross/stop) are one-step missions "c<n>".
+	// as `em_journal` on our own `em_journal` node (journal_node.h — NOT the agent node, which the AgentInfo heartbeat
+	// rewrites) so episodic_agent can rebuild what was asked and what happened. Missions are "m<interpreter serial>";
+	// single commands (cross/move/turn/uncross/stop) are one-step missions "c<n>"; panel tours "p<n>" (tour_journal.h).
 	// ★ Control thread only: every writer (run_mission_command — the remote timer enqueues it —, start_mission, the
 	//   interpreter, the claim observer, service_journal) runs there. journal_mx_ is a cheap guard, not a licence.
 	rc::em::Journal journal_{current_time_ms()};   ///< epoch = this process's start, so a restart is visible
@@ -223,7 +226,8 @@ private:
 	std::uint64_t journal_commands_ = 0;              ///< "c<n>" counter
 	std::optional<rc::DriveMode> journal_drive_mode_;
 	std::map<std::string, std::string, std::less<>> journal_grounding_;   ///< step id → StepStart text (MissionHost)
-	std::string journal_written_;   ///< the wire last written on our agent node (re-asserted if a co-writer reverts it)
+	rc::JournalNode journal_node_;   ///< em_journal: the node the wire is published on (written only on change)
+	rc::TourJournal journal_tours_;  ///< panel tours → MissionStart / MissionEnd, source "panel"
 	void journal_push(rc::em::JournalEntry e);                  ///< journal_mx_ held
 	void journal_steps();                                       ///< journal_mx_ held: interpreter transitions, MissionEnd
 	void journal_check_command(bool superseded);                ///< journal_mx_ held: close the command if it ended

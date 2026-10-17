@@ -469,12 +469,15 @@ void SpecificWorker::journal_claim(const rc::AffordanceManager::ClaimEvent &c)
 	                             {"target_type", QString::fromStdString(c.target_type)},
 	                             {"contract", contract.isObject() ? QJsonValue(contract.object()) : QJsonValue(QString::fromStdString(c.contract))}});
 	if (std::isfinite(c.gain)) e.promised = c.gain;   // absent is not zero
+	// The candidates that COMPETED: an ineligible one was never in the selection (not a tuning cutoff), and listing
+	// every offered affordance made each ClaimStart — and so the whole wire — grow with the scene.
 	QJsonArray candidates;
 	for (const auto &k : affordance_manager_.last_candidates())
-		candidates.append(QJsonObject{{"node_name", QString::fromStdString(k.node_name)},
-		                              {"parent_type", QString::fromStdString(k.parent_type)},
-		                              {"gain", k.gain}, {"efe_score", k.efe_score}, {"eligible", k.eligible},
-		                              {"state", QString::fromStdString(k.state)}});
+		if (k.eligible)
+			candidates.append(QJsonObject{{"node_name", QString::fromStdString(k.node_name)},
+			                              {"parent_type", QString::fromStdString(k.parent_type)},
+			                              {"gain", k.gain}, {"efe_score", k.efe_score},
+			                              {"state", QString::fromStdString(k.state)}});
 	e.candidates = QJsonDocument(candidates).toJson(QJsonDocument::Compact).toStdString();
 	journal_push(std::move(e));
 }
@@ -492,20 +495,16 @@ void SpecificWorker::service_journal()
 		journal_drive_mode_ = mode;
 		journal_push({.kind = JK::DriveMode, .op = rc::to_string(mode)});
 	}
-	// ★ cortex's AgentInfo heartbeat read-modify-writes this same node at 1 Hz, so its stale copy can revert our value
-	//   after we wrote it. So every pass checks the node still carries the last wire and re-asserts it if not; no write
-	//   when it does. The wire is built before the read, keeping the read→write window as short as possible.
-	if (journal_.dirty())
+	// Panel tours, read at the same choke point (tour_journal.h): the runner's state, not its ~5 stop() call sites.
 	{
-		journal_written_ = journal_.to_wire();
-		journal_.clear_dirty();
+		const auto &runner = session_.mission();
+		const auto *tour = runner.running_mission();
+		for (auto &e : journal_tours_.observe({.running = tour != nullptr, .name = tour ? tour->name : std::string{},
+		                                       .loops = runner.laps_remaining(), .mode = rc::to_string(runner.mode()),
+		                                       .stop_reason = runner.stop_reason()}))
+			journal_push(std::move(e));
 	}
-	if (journal_written_.empty()) return;   // nothing journaled yet
-	const auto self = rc::AffordanceManager::own_agent_node_id(G);
-	if (not self.has_value()) return;   // no agent node yet (cold start): written once it exists
-	auto node = G->get_node(self.value());
-	if (not node.has_value()) return;
-	if (G->get_attrib_by_name<em_journal_att>(node.value()) == journal_written_) return;
-	G->add_or_modify_attrib_local<em_journal_att>(node.value(), journal_written_);
-	G->update_node(node.value());
+	// The wire goes on our own em_journal node (journal_node.h), written only when it changed: nobody else writes
+	// that node, so there is nothing to re-assert.
+	if (journal_.dirty() and journal_node_.publish(*G, journal_.to_wire())) journal_.clear_dirty();
 }
