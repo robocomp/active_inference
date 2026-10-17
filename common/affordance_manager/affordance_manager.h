@@ -165,6 +165,28 @@ public:
     // decision is made; it is idempotent and only publishes when something actually changed.
     bool publish_executing(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id,
                            int epoch, float x, float y, float yaw);
+    // ── CLAIM OBSERVER: the consumer's claim history, for the episodic journal (common/episodic/em_journal.h) ──
+    // A poller cannot see claims reliably: a selector switch deletes the `executing` edge with no outcome at all and
+    // producers clear `aff_outcome` within a cycle. So the consumer, which KNOWS, reports each claim as it happens:
+    //   Start  publish_executing, only when the claimed (affordance, epoch) changes — never on a pose-only update;
+    //   End    "preempted" when the claim moves to another affordance/epoch or release_execution_claim drops it,
+    //          or to_string(outcome) from mark_reached. At most one claim is open; an End always matches the Start
+    //          before it. A pre-rollout producer (epoch 0, never published) is never claimed, so never reported.
+    struct ClaimEvent
+    {
+        enum class Kind { Start, End } kind = Kind::Start;
+        std::string affordance;   // the affordance node's name
+        std::string producer;     // the agent node that CREATED it (from the creator bits of its id); "" = unknown
+        std::string target;       // its parent node's name (the object / room / door it is about)
+        std::string target_type;  // that parent's type
+        std::string outcome;      // End: "preempted" or an aff_outcome word
+        float gain = 0.f;         // Start: the quoted epistemic_gain; NaN = the node advertises none
+        int epoch = 0;
+        std::string kind_label;   // the node's aff_kind; "epistemic" when absent (the look-at-it offer, cortex)
+        std::string contract;     // compact JSON {"policy","on_fail","timeout_ms"} of the resolved contract
+    };
+    void set_claim_observer(std::function<void(const ClaimEvent &)> observer) { claim_observer_ = std::move(observer); }
+
     // CONSUMER SIDE. Withdraw the claim. Called wherever the approach concludes.
     bool clear_executing(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id);
     // CONSUMER SIDE. The epoch the producer is currently offering. nullopt = pre-rollout peer.
@@ -399,6 +421,12 @@ private:
     std::optional<bool> last_observed_active_;
     std::optional<bool> last_observed_pending_;
     std::string selected_target_debug_report_;
+    // The claim observer (set_claim_observer) and the claim it last reported started and not yet ended.
+    std::function<void(const ClaimEvent &)> claim_observer_;
+    std::optional<ClaimEvent> open_claim_;
+    std::uint64_t open_claim_id_ = 0;
+    ClaimEvent describe_claim(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id, int epoch) const;
+    void end_claim(std::string outcome);
 };
 
 } // namespace rc

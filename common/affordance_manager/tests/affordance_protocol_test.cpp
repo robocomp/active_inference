@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -105,7 +106,7 @@ void test_multi_producer_claim_order(TestFailure &failure)
     failure.expect(table_producer.is_executing(graph), "table affordance should be executing after claim");
     failure.expect(!room_producer.is_executing(graph), "room affordance should remain offered while table is executing");
 
-    controller.mark_reached(graph);
+    controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
 
     expect_protocol_state(graph, "table_concept_affordance", false, false, failure);
     const auto second = controller.select_target(graph);
@@ -114,7 +115,7 @@ void test_multi_producer_claim_order(TestFailure &failure)
         failure.expect(second->node_name == "room_concept_affordance", "controller did not pick remaining room affordance second");
 
     expect_protocol_state(graph, "room_concept_affordance", true, true, failure);
-    controller.mark_reached(graph);
+    controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
     expect_protocol_state(graph, "room_concept_affordance", false, false, failure);
 }
 
@@ -128,7 +129,7 @@ void test_republish_same_node_after_completion(TestFailure &failure)
     failure.expect(room_producer.publish_target(graph, room_id, 1.f, 1.f, 0.0f, 0.3f), "initial affordance publish failed");
     const auto first = controller.select_target(graph);
     failure.expect(first.has_value(), "controller failed to claim first affordance");
-    controller.mark_reached(graph);
+    controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
     expect_protocol_state(graph, "room_concept_affordance", false, false, failure);
 
     failure.expect(room_producer.publish_target(graph, room_id, 4.f, 5.f, 0.7f, 0.8f), "republish on same affordance node failed");
@@ -187,10 +188,82 @@ void test_completion_event_is_consumed_once(TestFailure &failure)
     room_producer.monitor_execution(graph);
     failure.expect(!room_producer.consume_completion_event(), "completion event should not be raised while affordance is still executing");
 
-    controller.mark_reached(graph);
+    controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
     room_producer.monitor_execution(graph);
     failure.expect(room_producer.consume_completion_event(), "producer did not observe completion event after controller finished affordance");
     failure.expect(!room_producer.consume_completion_event(), "completion event should be consumable only once");
+}
+
+// The claim observer (the controller's episodic journal): Start once per claimed (affordance, epoch), End
+// "preempted" when the claim moves to another affordance or is released, End <outcome> on mark_reached.
+void claim_observer_start_preempt_outcome(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    // publish_executing writes from OUR agent node; a bare test graph may not have one yet.
+    if (not rc::AffordanceManager::own_agent_node_id(graph).has_value())
+    {
+        DSR::Node agent = DSR::Node::create<agent_node_type>("claim_observer_test_agent");
+        graph->add_or_modify_attrib_local<agent_id_att>(agent, static_cast<std::uint32_t>(graph->get_agent_id()));
+        graph->add_or_modify_attrib_local<level_att>(agent, 0);
+        failure.expect(graph->insert_node(agent).has_value(), "could not insert the test agent node");
+    }
+    rc::AffordanceManager a_producer{"aff_table_epistemic"};
+    rc::AffordanceManager b_producer{"aff_door_cross"};
+    rc::AffordanceManager controller;
+    failure.expect(a_producer.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.4f), "producer A failed to publish");
+    failure.expect(b_producer.publish_target(graph, room_id, 2.f, 2.f, 0.f, 0.9f), "producer B failed to publish");
+    const auto a = graph->get_node("aff_table_epistemic");
+    const auto b = graph->get_node("aff_door_cross");
+    failure.expect(a.has_value() and b.has_value(), "affordance nodes missing");
+    if (not a.has_value() or not b.has_value()) return;
+    {   // B carries a pragmatic kind; A has none (the epistemic look-at-it offer)
+        auto n = b.value();
+        graph->add_or_modify_attrib_local<aff_kind_att>(n, std::string("cross"));
+        graph->update_node(n);
+    }
+
+    std::vector<rc::AffordanceManager::ClaimEvent> events;
+    controller.set_claim_observer([&events](const rc::AffordanceManager::ClaimEvent &e) { events.push_back(e); });
+    using K = rc::AffordanceManager::ClaimEvent::Kind;
+
+    failure.expect(controller.publish_executing(graph, a->id(), 3, 1.f, 1.f, 0.f), "claim A failed");
+    failure.expect(controller.publish_executing(graph, a->id(), 3, 1.1f, 1.f, 0.f), "re-claim A (moved pose) failed");
+    failure.expect(events.size() == 1, "same (affordance, epoch) must fire one Start, got " + std::to_string(events.size()));
+    if (events.size() >= 1)
+    {
+        const auto &e = events[0];
+        failure.expect(e.kind == K::Start and e.affordance == "aff_table_epistemic" and e.epoch == 3,
+                       "first event must be Start A epoch 3");
+        failure.expect(std::abs(e.gain - 0.4f) < 1e-5f, "Start A must quote the advertised gain");
+        failure.expect(e.kind_label == "epistemic", "a node with no aff_kind is the epistemic offer, got '" + e.kind_label + "'");
+        failure.expect(e.target == graph->get_node(room_id)->name() and e.target_type == "room",
+                       "target must be the affordance's parent, got '" + e.target + "'/'" + e.target_type + "'");
+        failure.expect(not e.producer.empty(), "producer must name the agent that created the node");
+        failure.expect(e.contract.find("\"policy\":\"reach\"") != std::string::npos, "contract JSON must carry the policy: " + e.contract);
+    }
+
+    failure.expect(controller.publish_executing(graph, b->id(), 7, 2.f, 2.f, 0.f), "claim B failed");
+    failure.expect(events.size() == 3, "switching claims must fire End A + Start B, got " + std::to_string(events.size()));
+    if (events.size() == 3)
+    {
+        failure.expect(events[1].kind == K::End and events[1].affordance == "aff_table_epistemic"
+                       and events[1].outcome == "preempted", "second event must be End A preempted");
+        failure.expect(events[2].kind == K::Start and events[2].affordance == "aff_door_cross" and events[2].epoch == 7
+                       and events[2].kind_label == "cross", "third event must be Start B (kind cross)");
+    }
+    failure.expect(controller.publish_executing(graph, b->id(), 7, 2.f, 2.f, 0.f), "republish B failed");
+    failure.expect(events.size() == 3, "republishing the same claim must fire nothing");
+
+    controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
+    failure.expect(events.size() == 4 and events.back().kind == K::End and events.back().affordance == "aff_door_cross"
+                   and events.back().outcome == "satisfied", "mark_reached must fire End B satisfied");
+    controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
+    failure.expect(events.size() == 4, "a second mark_reached with no open claim must fire nothing");
+
+    failure.expect(controller.publish_executing(graph, a->id(), 4, 1.f, 1.f, 0.f), "claim A again failed");
+    controller.release_execution_claim(graph);
+    failure.expect(events.size() == 6 and events.back().kind == K::End and events.back().outcome == "preempted",
+                   "releasing a claim must fire End preempted");
 }
 } // namespace
 
@@ -204,6 +277,7 @@ int main()
         test_republish_same_node_after_completion(failure);
         test_invalid_state_is_not_claimed(failure);
         test_completion_event_is_consumed_once(failure);
+        claim_observer_start_preempt_outcome(failure);
     }
     catch (const std::exception &e)
     {
