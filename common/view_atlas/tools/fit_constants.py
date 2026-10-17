@@ -47,7 +47,7 @@ def pairs(v, S, C, rng, max_q=4000):
     for q in qs:
         i, c = v.inst.values[q], v.cls.values[q]; tq = v.stamp_ms.values[q] / 1000
         for k, (bb, ps, pc) in bin_protos(v, S, C, by_inst[i], tq).items():
-            own.append((abs(wrap(v.bearing.values[q] - bb)), S[q] @ ps, C[q] @ pc))
+            own.append((abs(wrap(v.bearing.values[q] - bb)), S[q] @ ps, C[q] @ pc, v.mask_px.values[q]))
         for j, idx in by_inst.items():
             if j == i or v.cls.values[idx[0]] != c: continue
             for k, (bb, ps, pc) in bin_protos(v, S, C, idx, -1e9).items():
@@ -55,13 +55,34 @@ def pairs(v, S, C, rng, max_q=4000):
                 if D < math.radians(15): bg.append((D, S[q] @ ps, C[q] @ pc))
     return np.array(own), np.array(bg)
 
+def fit_noise(near, n_bands=6):
+    """near: own pairs at gap < 15 deg, columns (D, s_d, s_c, px). Returns (cov_own, cov_n, px_scale, sse, n_bands)."""
+    edges = np.quantile(near[:, 3], np.linspace(0, 1, n_bands + 1))
+    bands = [near[(near[:, 3] >= lo) & (near[:, 3] <= hi)] for lo, hi in zip(edges[:-1], edges[1:])]
+    bands = [b for b in bands if len(b) >= 30]
+    px = np.array([np.median(b[:, 3]) for b in bands])
+    C = np.array([np.cov(b[:, 1:3].T) for b in bands])            # (B, 2, 2)
+    best = None
+    for scale in np.geomspace(100, 50000, 64):
+        q = 1 - np.exp(-px / scale); x = (1 - q) / q                 # C(b) = A + x_b * N, elementwise
+        X = np.c_[np.ones_like(x), x]
+        coef, res, *_ = np.linalg.lstsq(X, C.reshape(len(px), 4), rcond=None)
+        sse = float(((X @ coef - C.reshape(len(px), 4)) ** 2).sum())
+        if best is None or sse < best[3]:
+            best = (coef[0].reshape(2, 2), coef[1].reshape(2, 2), float(scale), sse)
+    return best + (len(bands),)
+
 def fit(own, bg, logr_pairs=None):
     p, _ = curve_fit(relax, own[:, 0], own[:, 1], p0=[0.95, 0.85, 0.8], bounds=([0, -1, 0.05], [1, 1, math.pi]))
     mu0, mubg_d_curve, ell = p
     near = own[own[:, 0] < math.radians(15)]
-    mu_own = near[:, 1:].mean(0); cov_own = np.cov(near[:, 1:].T)
-    mu_bg = bg[:, 1:].mean(0); cov_bg = np.cov(bg[:, 1:].T)
-    sd = math.sqrt(cov_own[0, 0]); drop = max(mu0 - mubg_d_curve, 1e-6)
+    mu_own = near[:, 1:3].mean(0)
+    cov_own_fit, cov_n_fit, px_scale, sse, nb = fit_noise(near)
+    for nm, M in (("cov_own", cov_own_fit), ("cov_n", cov_n_fit)):
+        ev = np.linalg.eigvalsh(M)
+        if ev.min() <= 0: print(f"WARNING: fitted {nm} not positive definite: {ev}")
+    mu_bg = bg[:, 1:3].mean(0); cov_bg = np.cov(bg[:, 1:3].T)
+    sd = math.sqrt(cov_own_fit[0, 0]); drop = max(mu0 - mubg_d_curve, 1e-6)
     ratio = sd / drop
     if ratio >= 0.5:
         print(f"WARNING: repeat derivation ill-conditioned: sd/drop = {ratio:.3f}" +
@@ -73,11 +94,12 @@ def fit(own, bg, logr_pairs=None):
     else:
         a = max(np.mean(mu0 - logr_pairs[:, 1]), 1e-6) / max(np.mean(logr_pairs[:, 0] ** 2), 1e-6)
         repeat_logr = float(math.sqrt(sd / a))
-    return dict(_repeat_ratio=ratio, ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
+    return dict(_repeat_ratio=ratio, _noise_header=f"bands={nb}, sse={sse:.3g}", ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
                 mu_own_d=mu_own[0], mu_own_c=mu_own[1], mu_bg_d=mu_bg[0], mu_bg_c=mu_bg[1],
-                cov_own_dd=cov_own[0, 0], cov_own_dc=cov_own[0, 1], cov_own_cc=cov_own[1, 1],
+                cov_own_dd=cov_own_fit[0, 0], cov_own_dc=cov_own_fit[0, 1], cov_own_cc=cov_own_fit[1, 1],
                 cov_bg_dd=cov_bg[0, 0], cov_bg_dc=cov_bg[0, 1], cov_bg_cc=cov_bg[1, 1],
-                cov_n_dd=cov_own[0, 0], cov_n_dc=cov_own[0, 1], cov_n_cc=cov_own[1, 1])
+                cov_n_dd=cov_n_fit[0, 0], cov_n_dc=cov_n_fit[0, 1], cov_n_cc=cov_n_fit[1, 1],
+                quality_px_scale=px_scale)
 
 def logr_pairs(v, S):
     """Same object, near-equal bearing (< 5 deg), >= 10 s apart (as the own pairs), different range:
@@ -98,10 +120,17 @@ def selftest():
     D = rng.uniform(0, math.pi, 4000)
     sd = relax(D, truth["mu0"], truth["mubg"], truth["ell"]) + rng.normal(0, 0.02, D.size)
     sc = 0.97 + rng.normal(0, 0.02, D.size)
-    own = np.c_[D, sd, sc]; bg = np.c_[rng.uniform(0, 0.25, 2000), 0.86 + rng.normal(0, 0.04, 2000), 0.5 + rng.normal(0, 0.2, 2000)]
+    own = np.c_[D, sd, sc, np.full(D.size, 5000.0)]; bg = np.c_[rng.uniform(0, 0.25, 2000), 0.86 + rng.normal(0, 0.04, 2000), 0.5 + rng.normal(0, 0.2, 2000)]
     k = fit(own, bg)
     ok = abs(k["ell_rad"] - truth["ell"]) / truth["ell"] < 0.1 and abs(k["mu_bg_d"] - 0.86) < 0.01 and abs(k["mu_own_c"] - 0.97) < 0.01
     print(f"selftest: ell {k['ell_rad']:.3f} (truth 0.85), mu_bg_d {k['mu_bg_d']:.3f}, mu_own_c {k['mu_own_c']:.3f} -> {'PASS' if ok else 'FAIL'}")
+    pxs = np.exp(rng.uniform(np.log(300), np.log(30000), 6000)); qq = 1 - np.exp(-pxs / 2000.0)
+    var = 4e-4 + 2e-3 * (1 - qq) / qq
+    syn = np.c_[np.zeros(6000), 0.95 + rng.normal(0, 1, 6000) * np.sqrt(var), 0.97 + rng.normal(0, 1, 6000) * np.sqrt(var), pxs]
+    a_, n_, s_, _, _ = fit_noise(syn)
+    ok2 = (2000 / 1.5 < s_ < 2000 * 1.5) and abs(n_[0, 0] - 2e-3) / 2e-3 < 0.3 and abs(n_[1, 1] - 2e-3) / 2e-3 < 0.3
+    print(f"selftest noise: scale {s_:.0f} (truth 2000), cov_n_dd {n_[0,0]:.2e} (truth 2.0e-03) -> {'PASS' if ok2 else 'FAIL'}")
+    ok = ok and ok2
     return 0 if ok else 1
 
 def main():
@@ -111,11 +140,15 @@ def main():
     v, S, C = load(a.dataset); rng = np.random.default_rng(0)
     own, bg = pairs(v, S, C, rng)
     k = fit(own, bg, logr_pairs(v, S))
-    ratio = k.pop("_repeat_ratio")
+    ratio = k.pop("_repeat_ratio"); nh = k.pop("_noise_header")
+    try: stride = [l.split("stride=", 1)[1].split()[0] for l in open(os.path.join(a.dataset, "dataset_meta.txt")) if "stride=" in l][0]
+    except Exception: stride = "unknown"
     with open(a.out, "w") as f:
         f.write(f"# view_atlas constants, fitted {datetime.date.today()} by fit_constants.py\n"
                 f"# dataset: {os.path.abspath(a.dataset)} ({len(v)} views, {v.inst.nunique()} objects)\n"
                 f"# pairs: own {len(own)}, background {len(bg)}\n"
+                f"# dataset: stride={stride}\n"
+                f"# noise model: cov(px) = cov_own + cov_n (1-q)/q, q = 1-exp(-px/quality_px_scale); {nh}\n"
                 f"# repeat derivation: sd/drop = {ratio:.6g}\n")
         for key, val in k.items(): f.write(f"{key} = {val:.9g}\n")
     print(open(a.out).read())

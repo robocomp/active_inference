@@ -1,20 +1,23 @@
 # view_atlas constants, fitted 2026-10-17 by fit_constants.py
-# dataset: /home/pbustos/robocomp/components/active_inference.worktrees/view-atlas/retina/etc/view_atlas_dataset (2715 views, 14 objects)
+# dataset: /home/pbustos/robocomp/components/active_inference.worktrees/view-atlas-2a/retina/etc/view_atlas_dataset (2715 views, 14 objects)
 # pairs: own 23941, background 1161
-# repeat derivation: sd/drop = 0.78633
-ell_rad = 0.431296715
-repeat_ell_rad = 0.75773914
-repeat_ell_logr = 0.662996043
-mu_own_d = 0.943883193
-mu_own_c = 0.955186946
-mu_bg_d = 0.875195846
-mu_bg_c = 0.426549629
-cov_own_dd = 0.00165364678
-cov_own_dc = 0.00160509055
-cov_own_cc = 0.00605189741
-cov_bg_dd = 0.00258144841
-cov_bg_dc = -0.00413931297
-cov_bg_cc = 0.153244938
-cov_n_dd = 0.00165364678
-cov_n_dc = 0.00160509055
-cov_n_cc = 0.00605189741
+# dataset: stride=2
+# noise model: cov(px) = cov_own + cov_n (1-q)/q, q = 1-exp(-px/quality_px_scale); bands=6, sse=3.64e-05
+# repeat derivation: sd/drop = 0.751722
+ell_rad = 0.434163206
+repeat_ell_rad = 0.724729069
+repeat_ell_logr = 0.644989913
+mu_own_d = 0.944042711
+mu_own_c = 0.955321125
+mu_bg_d = 0.874987088
+mu_bg_c = 0.425000836
+cov_own_dd = 0.00149799598
+cov_own_dc = 0.00175180182
+cov_own_cc = 0.00682410682
+cov_bg_dd = 0.00273971979
+cov_bg_dc = -0.0043979688
+cov_bg_cc = 0.153475073
+cov_n_dd = 2.22265302e-05
+cov_n_dc = -2.1794857e-05
+cov_n_cc = -0.000122661354
+quality_px_scale = 50000
