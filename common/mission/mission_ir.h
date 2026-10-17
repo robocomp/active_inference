@@ -6,7 +6,7 @@
  * The IR is the step tree AFTER resolution: every reference is a node name, a passage id, an anchor or a pose; every
  * predicate names a graph fact and, when it is a probability, carries the decision boundary the user stated. The LLM
  * never writes it; the controller never sees anything less grounded. It travels as JSON in chat_intention's
- * `current_intention` (mission_json.h) and is shown to people as a DSL (later: mission_text.h). Both syntaxes are
+ * `current_intention` (mission_json.h) and is shown to people as a DSL (mission_text.h). Both syntaxes are
  * driven by the registry below, so an op cannot exist in one place and not another.
  *
  * ★ OPS MAP TO CONTROLLER MECHANISMS, NOT TO OBJECT TYPES (door passage, point target, selector prior, orient, wait,
@@ -167,6 +167,7 @@ struct FieldSpec
     bool required = false;
     std::uint8_t ref_kinds = 0;   ///< Ref fields: the kinds accepted
     bool positive = false;        ///< Number fields: must be > 0
+    bool positional = false;      ///< DSL: may be written without `name=` (declaration order, before keywords)
 };
 
 struct OpSpec
@@ -227,29 +228,29 @@ inline const std::vector<OpSpec>& ops()
     static const std::vector<OpSpec> table = {
         {.name = "seq", .resource = Resource::Composite, .has_body = true, .fields = {}},
         {.name = "repeat", .resource = Resource::Composite, .has_body = true,
-         .fields = {{.name = "times", .type = Integer},
+         .fields = {{.name = "times", .type = Integer, .positional = true},
                     {.name = "until", .type = Pred},
                     {.name = "budget_s", .type = Number, .positive = true}},
          .check = check_repeat},
         {.name = "cross", .resource = Resource::Base, .has_body = false,
-         .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor},
+         .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor, .positional = true},
                     {.name = "expect", .type = String}}},
         {.name = "open", .resource = Resource::Base, .has_body = false,
-         .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor}}},
+         .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor, .positional = true}}},
         {.name = "go_to", .resource = Resource::Base, .has_body = false,
-         .fields = {{.name = "to", .type = Ref, .required = true, .ref_kinds = kPlace},
+         .fields = {{.name = "to", .type = Ref, .required = true, .ref_kinds = kPlace, .positional = true},
                     {.name = "standoff_m", .type = Number, .positive = true}}},
         {.name = "explore", .resource = Resource::Base, .has_body = false,
-         .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode},
+         .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode, .positional = true},
                     {.name = "until", .type = Pred},
                     {.name = "budget_s", .type = Number, .required = true, .positive = true}}},
         {.name = "wait", .resource = Resource::Base, .has_body = false,
          .fields = {{.name = "s", .type = Number, .positive = true}, {.name = "until", .type = Pred}},
          .check = check_wait},
         {.name = "say", .resource = Resource::Instant, .has_body = false,
-         .fields = {{.name = "text", .type = String, .required = true}}},
+         .fields = {{.name = "text", .type = String, .required = true, .positional = true}}},
         {.name = "anchor", .resource = Resource::Instant, .has_body = false,
-         .fields = {{.name = "name", .type = String, .required = true}}},
+         .fields = {{.name = "name", .type = String, .required = true, .positional = true}}},
         {.name = "move", .resource = Resource::Base, .has_body = false,
          .fields = {{.name = "distance_m", .type = Number}, {.name = "turn_deg", .type = Number}},
          .check = check_move},
