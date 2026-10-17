@@ -66,6 +66,11 @@ struct Record
     std::optional<double> promised, delivered;  // claim only
     std::string alternatives_json;              // claim only: selector candidates, verbatim JSON
     std::vector<Event> events;
+    // Back-references into the controller's journal (em_journal.h): its mission key ("m12" / "c3"; "" for a self
+    // mission) and the serials of the entries that opened / closed this record — ABSENT when EM itself opened or
+    // closed it (a self mission, `lost`, `interrupted_by_em_shutdown`).
+    std::string mission_key;
+    std::optional<std::uint64_t> serial_start, serial_end;
     bool operator==(const Record&) const = default;
 };
 
@@ -152,6 +157,9 @@ inline QJsonObject to_json(const Record& r)
     for (const Event& e : r.events)
         ev.append(QJsonObject{{"dt_ms", double(e.dt_ms)}, {"kind", q(e.kind)}, {"node", q(e.node)}});
     o["events"] = ev;
+    o["mission_key"] = q(r.mission_key);
+    if (r.serial_start) o["serial_start"] = double(*r.serial_start);
+    if (r.serial_end) o["serial_end"] = double(*r.serial_end);
     return o;
 }
 
@@ -191,17 +199,23 @@ inline std::optional<Record> record_from_json(const QJsonObject& o)
         const QJsonObject e = v.toObject();
         r.events.push_back(Event{.dt_ms = std::int64_t(e["dt_ms"].toDouble()), .kind = s(e["kind"]), .node = s(e["node"])});
     }
+    r.mission_key = s(o["mission_key"]);
+    if (o["serial_start"].isDouble()) r.serial_start = std::uint64_t(o["serial_start"].toDouble());
+    if (o["serial_end"].isDouble()) r.serial_end = std::uint64_t(o["serial_end"].toDouble());
     return r;
 }
 
-/// All-time statistics of the closed records sharing a (kind, identity) key (see em_consolidate.h). identity is
-/// target_ltsm; "" = per-kind only. dur_* is Welford over t1-t0 in seconds (dur_m2 = sum of squared deviations).
-/// n_gain counts only records carrying BOTH promised and delivered (absent is not zero).
+/// All-time statistics of the closed records sharing a (level, kind, author, identity) key (see em_consolidate.h).
+/// level = "mission"|"step"|"claim" (a step op and a claim kind may share a name); author = "human"|"self" for
+/// missions, "" otherwise; identity = target_ltsm, "" = per-kind only. n counts every record (outcomes too); dur_* is
+/// Welford over t1-t0 in seconds over the n_dur records whose t1 is the commitment's own end — `lost` and
+/// `interrupted_by_em_shutdown` are EM's stop time, not a duration. n_gain counts only records carrying BOTH promised
+/// and delivered (absent is not zero).
 struct Stats
 {
-    std::string key_kind, key_identity;
+    std::string key_level, key_kind, key_author, key_identity;
     std::map<std::string, int, std::less<>> outcomes;       // outcome word -> count
-    int n = 0;
+    int n = 0, n_dur = 0;
     double dur_mean_s = 0, dur_m2 = 0;
     int n_gain = 0;
     double promised_sum = 0, delivered_sum = 0;
@@ -213,12 +227,15 @@ inline QJsonObject to_json(const Stats& st)
 {
     using namespace detail;
     QJsonObject o;
+    o["key_level"] = q(st.key_level);
     o["key_kind"] = q(st.key_kind);
+    o["key_author"] = q(st.key_author);
     o["key_identity"] = q(st.key_identity);
     QJsonObject oc;
     for (const auto& [k, c] : st.outcomes) oc[q(k)] = c;
     o["outcomes"] = oc;
     o["n"] = st.n;
+    o["n_dur"] = st.n_dur;
     o["dur_mean_s"] = st.dur_mean_s;
     o["dur_m2"] = st.dur_m2;
     o["n_gain"] = st.n_gain;
@@ -235,11 +252,14 @@ inline std::optional<Stats> stats_from_json(const QJsonObject& o)
     using namespace detail;
     if (not o["key_kind"].isString()) return std::nullopt;
     Stats st;
+    st.key_level = s(o["key_level"]);
     st.key_kind = s(o["key_kind"]);
+    st.key_author = s(o["key_author"]);
     st.key_identity = s(o["key_identity"]);
     const QJsonObject oc = o["outcomes"].toObject();
     for (auto it = oc.begin(); it != oc.end(); ++it) st.outcomes[it.key().toStdString()] = it.value().toInt();
     st.n = o["n"].toInt();
+    st.n_dur = o["n_dur"].toInt();
     st.dur_mean_s = o["dur_mean_s"].toDouble();
     st.dur_m2 = o["dur_m2"].toDouble();
     st.n_gain = o["n_gain"].toInt();

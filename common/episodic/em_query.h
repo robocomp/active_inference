@@ -62,12 +62,15 @@ inline std::vector<Record> episode(const Store& st, std::string_view id)
     return out;
 }
 
-/// kind "" = all kinds; identity "" = all identities.
-inline std::vector<Stats> stats(const Store& st, std::string_view kind, std::string_view identity = {})
+/// kind "" = all kinds; identity "" = all identities; level ("mission"|"step"|"claim") "" = all levels.
+inline std::vector<Stats> stats(const Store& st, std::string_view kind, std::string_view identity = {},
+                                std::string_view level = {})
 {
     std::vector<Stats> out;
     for (const Stats& s : st.stats)
-        if ((kind.empty() or s.key_kind == kind) and (identity.empty() or s.key_identity == identity)) out.push_back(s);
+        if ((kind.empty() or s.key_kind == kind) and (identity.empty() or s.key_identity == identity)
+            and (level.empty() or s.key_level == level))
+            out.push_back(s);
     return out;
 }
 
@@ -103,7 +106,7 @@ inline std::string summary(const std::string& action_json)
 }   // namespace detail
 
 /// One line for the chat greeting. Counts level-Mission records authored by a Human:
-///   "<N> missions (<K> succeeded); last: <summary>[ → <room>]"
+///   "<N> mission[s] (<K> succeeded); last: <summary>[ → <room>]"   ("1 mission", "2 missions")
 /// K = outcome "succeeded" or "completed" (the controller's interpreter uses both). "last:" is the most recent
 /// (by t0) CLOSED Human mission; summary = the `title` of its action_json when that is a JSON object with one, else
 /// the raw text truncated to 60 chars; " → room" is appended when its room is non-empty. The "; last:" part is
@@ -120,7 +123,7 @@ inline std::string today_line(const Store& st)
         if (r.t1 and (lastc == nullptr or r.t0 > lastc->t0)) lastc = &r;
     }
     if (n == 0) return "no missions today";
-    std::string line = std::format("{} missions ({} succeeded)", n, ok);
+    std::string line = std::format("{} mission{} ({} succeeded)", n, n == 1 ? "" : "s", ok);
     if (lastc != nullptr)
     {
         line += "; last: " + detail::summary(lastc->action_json);

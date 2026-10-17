@@ -23,13 +23,20 @@
  *  - Times: t0/t1 are the journal's stamps for journal-driven opens/closes; now_ms for what EM itself decides
  *    (`lost`, shutdown, a self mission opened/split at a check).
  *
- * Self mission: while drive mode is "affordances_only" (assumed until a DriveMode entry is seen, R9) and no human
- * mission is open, a Self mission is open. It closes `superseded` when a human mission starts or drive mode leaves
- * affordances_only, and `room_changed` (a new one opening) when current_room() differs from its room — DEFERRED while
+ * Self mission: while drive mode is affordance-driven — "affordances_only" (assumed until a DriveMode entry is seen, R9)
+ * or "command" (the controller treats both as the affordances driving: controller_mission.cpp MissionRunner::set_mode,
+ * and a `cross door_N` leaves it in command) — and no human mission is open, a Self mission is open. It closes
+ * `superseded` when a human mission starts or drive mode leaves those two, and `room_changed` (a new one opening) when current_room() differs from its room — DEFERRED while
  * it has an open child claim (a door crossing changes room mid-claim), so the split lands on the first check after
  * that claim closed. A superseded self mission's open claim keeps its parent id and closes later. Checked after
  * each journal poll and each on_events call, never before the first journal poll; suspended after owner_lost until
  * the next journal poll. An unknown room (current_room() == "") never splits it.
+ *
+ * Back-references (finding 6): mission_key = the journal's mission field of the opening entry; serial_start /
+ * serial_end = the serials of the journal entries that opened / closed the record, absent when EM did it.
+ *
+ * Events: born / died / current_moved go to EVERY open record; affordance offered / withdrawn only to the innermost
+ * one (the latest opened) — they are the selector's world, and copying each to a whole tree was unbounded.
  *
  * Absent is not zero: a node the FactSource cannot read contributes no Fact; `delivered` exists only when both pre and
  * post carry cov_xx and cov_yy (ruling R2): 0.5*ln((cov_xx_pre*cov_yy_pre)/(cov_xx_post*cov_yy_post)).
@@ -135,14 +142,20 @@ public:
         return std::exchange(out_, {});
     }
 
-    // Attaches each event to every open record (dt from now_ms; the input dt_ms is ignored), then re-checks the self
-    // mission (a current_moved event usually means the room changed).
+    // Attaches each event to every open record — offered / withdrawn to the innermost only — (dt from now_ms; the
+    // input dt_ms is ignored), then re-checks the self mission (a current_moved event usually means the room changed).
     std::vector<Record> on_events(std::span<const Event> events, std::uint64_t now_ms)
     {
         out_.clear();
-        for (Open& o : open_)
-            for (const Event& e : events)
-                o.rec.events.push_back(Event{.dt_ms = std::int64_t(now_ms) - std::int64_t(o.rec.t0), .kind = e.kind, .node = e.node});
+        for (const Event& e : events)
+        {
+            const bool innermost_only = e.kind == "offered" or e.kind == "withdrawn";
+            for (std::size_t i = innermost_only and not open_.empty() ? open_.size() - 1 : 0; i < open_.size(); ++i)
+            {
+                Record& r = open_[i].rec;
+                r.events.push_back(Event{.dt_ms = std::int64_t(now_ms) - std::int64_t(r.t0), .kind = e.kind, .node = e.node});
+            }
+        }
         check_self(now_ms);
         return std::exchange(out_, {});
     }
@@ -184,7 +197,7 @@ private:
     std::uint64_t epoch_ = 0, last_seen_ = 0;
     std::string drive_mode_ = "affordances_only";   // R9
 
-    bool self_driving() const { return drive_mode_ == "affordances_only"; }
+    bool self_driving() const { return drive_mode_ == "affordances_only" or drive_mode_ == "command"; }
 
     Open* find_last(auto pred)
     {
@@ -228,7 +241,8 @@ private:
 
     // Closes the open record with this id. Never touches its children (R11, R13): EM never invents a claim/step
     // outcome — they close by their own *End, or by `lost` / shutdown.
-    void close(const std::string& id, const std::string& outcome, std::uint64_t t)
+    void close(const std::string& id, const std::string& outcome, std::uint64_t t,
+               std::optional<std::uint64_t> serial = std::nullopt)
     {
         const auto it = std::ranges::find(open_, id, [](const Open& o) { return o.rec.id; });
         if (it == open_.end()) return;
@@ -236,6 +250,7 @@ private:
         open_.erase(it);
         r.t1 = t;
         r.outcome = outcome;
+        r.serial_end = serial;
         if (r.level != Level::Mission)
         {
             r.post = read(r.target);
@@ -269,11 +284,14 @@ private:
             o.rec.action_json = e.text;
             o.rec.source = e.source;
             o.rec.t0 = e.t_ms;
+            o.rec.mission_key = e.mission;
+            o.rec.serial_start = e.serial;
             open_record(std::move(o));
             break;
         }
         case K::MissionEnd:
-            if (Open* m = human_mission(e.mission); m and not e.mission.empty()) close(m->rec.id, e.outcome, e.t_ms);
+            if (Open* m = human_mission(e.mission); m and not e.mission.empty())
+                close(m->rec.id, e.outcome, e.t_ms, e.serial);
             break;
         case K::StepStart:
         {
@@ -294,6 +312,8 @@ private:
             o.rec.t0 = e.t_ms;
             o.rec.attempt = e.attempt;
             o.rec.iteration = e.iteration;
+            o.rec.mission_key = e.mission;
+            o.rec.serial_start = e.serial;
             o.step_id = e.step_id;
             o.rec.pre = read(o.rec.target);
             open_record(std::move(o));
@@ -303,7 +323,7 @@ private:
             if (Open* s = find_last([&](const Open& o)
                                     { return o.rec.level == Level::Step and o.mission == e.mission and o.step_id == e.step_id
                                              and o.rec.attempt == e.attempt and o.rec.iteration == e.iteration; }))
-                close(s->rec.id, e.outcome, e.t_ms);
+                close(s->rec.id, e.outcome, e.t_ms, e.serial);
             break;
         case K::ClaimStart:
         {
@@ -324,13 +344,15 @@ private:
             o.rec.t0 = e.t_ms;
             o.rec.promised = e.promised;
             o.rec.alternatives_json = e.candidates;
+            o.rec.mission_key = e.mission;
+            o.rec.serial_start = e.serial;
             o.rec.pre = read(o.rec.target);
             open_record(std::move(o));
             break;
         }
         case K::ClaimEnd:
             if (Open* c = find_last([](const Open& o) { return o.rec.level == Level::Claim; }))
-                close(c->rec.id, e.outcome, e.t_ms);
+                close(c->rec.id, e.outcome, e.t_ms, e.serial);
             break;
         case K::DriveMode:
             drive_mode_ = e.op;

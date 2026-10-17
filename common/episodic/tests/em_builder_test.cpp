@@ -199,8 +199,9 @@ void test_composite_nesting()
     // "21" is not a child of "2": a strict DOTTED prefix only
     auto& o = s.push(K::StepStart, 140); o.mission = "m1"; o.step_id = "21"; o.op = "turn"; o.text = "{}";
     const Record* r_21 = find(b.on_journal(s.wire(), 150), Level::Step, "turn");
+    const auto open = b.open();                      // keep the copy alive: b.open() returns by value
     const Record* m = nullptr;
-    for (const Record& x : b.open()) if (x.level == Level::Mission) m = &x;
+    for (const Record& x : open) if (x.level == Level::Mission) m = &x;
     CHECK(r_21 and m);
     if (r_21 and m) CHECK(r_21->parent == m->id);
 }
@@ -311,7 +312,7 @@ void test_self_mission_superseded()
     auto& me = s.push(K::MissionEnd, 60); me.mission = "m1"; me.outcome = "succeeded";
     b.on_journal(s.wire(), 70);
     CHECK(b.open().size() == 1 and b.open()[0].author == Author::Self);
-    s.push(K::DriveMode, 80).op = "command";
+    s.push(K::DriveMode, 80).op = "mission_only";
     const auto c2 = closed(b.on_journal(s.wire(), 90));
     CHECK(c2.size() == 1 and c2[0].outcome == "superseded" and b.open().empty());
 }
@@ -476,6 +477,85 @@ void test_owner_lost_closes_all_lost()
     CHECK(c.size() == 2 and b.open().empty());
     for (const Record& r : c) CHECK(r.outcome == "lost" and r.t1 == 200u);
 }
+
+// Finding 1: Command mode is affordance-driven too (controller_mission.cpp affordance_driven). After a `cross door_N`
+// the controller stays in Command: the claims that follow belong to ONE self mission, not one zero-length self
+// mission each.
+void test_command_mode_is_self_driving()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    b.on_journal(s.wire(), 10);
+    s.push(K::DriveMode, 20).op = "command";
+    push_mission(s, 30, "c1");
+    auto& st = s.push(K::StepStart, 31); st.mission = "c1"; st.step_id = "1"; st.op = "cross"; st.text = R"({"target":"door_3"})";
+    auto& se = s.push(K::StepEnd, 40); se.mission = "c1"; se.step_id = "1"; se.op = "cross"; se.outcome = "satisfied";
+    auto& me = s.push(K::MissionEnd, 41); me.mission = "c1"; me.outcome = "completed";
+    b.on_journal(s.wire(), 50);
+    CHECK(b.open().size() == 1 and b.open()[0].author == Author::Self);
+    if (b.open().size() != 1) return;
+    const std::string self_id = b.open()[0].id;
+    push_claim(s, 60);
+    push_claim_end(s, 70, "success");
+    push_claim(s, 80);
+    push_claim_end(s, 90, "success");
+    const auto c = closed(b.on_journal(s.wire(), 100));
+    CHECK(c.size() == 2);
+    for (const Record& r : c) CHECK(r.level == Level::Claim and r.parent == self_id);
+    CHECK(b.open().size() == 1 and b.open()[0].id == self_id);
+}
+
+// Finding 6: every record names the controller's mission and the journal serials that opened / closed it.
+void test_mission_key_and_serials()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100);                                   // serial 2
+    push_step(s, K::StepStart, 110, "1");                   // serial 3
+    auto& cs = s.push(K::ClaimStart, 120);                  // serial 4
+    cs.mission = "m1"; cs.op = "cross_door"; cs.text = R"({"target":"door_3"})";
+    auto& ce = s.push(K::ClaimEnd, 130);                    // serial 5
+    ce.mission = "m1"; ce.op = "cross_door"; ce.outcome = "success";
+    push_step(s, K::StepEnd, 140, "1", 1, 0, "done");       // serial 6
+    const auto c = closed(b.on_journal(s.wire(), 150));
+    const Record* st = find(c, Level::Step, "cross");
+    const Record* cl = find(c, Level::Claim, "cross_door");
+    CHECK(st and cl);
+    if (not (st and cl)) return;
+    CHECK(st->mission_key == "m1" and st->serial_start == 3u and st->serial_end == 6u);
+    CHECK(cl->mission_key == "m1" and cl->serial_start == 4u and cl->serial_end == 5u);
+    CHECK(b.open().size() == 1);
+    if (b.open().size() != 1) return;
+    CHECK(b.open()[0].mission_key == "m1" and b.open()[0].serial_start == 2u and not b.open()[0].serial_end);
+    const auto lost = b.owner_lost(200);                    // EM-closed: no journal serial ends it
+    CHECK(lost.size() == 1 and lost[0].mission_key == "m1" and lost[0].serial_start == 2u and not lost[0].serial_end);
+}
+
+// Finding 7: affordance offered / withdrawn go to the innermost open record only; structure events go to all.
+void test_affordance_events_innermost_only()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100);
+    push_step(s, K::StepStart, 110, "1");
+    push_claim(s, 120);
+    b.on_journal(s.wire(), 130);
+    b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "offered", .node = "aff_1"},
+                                   {.dt_ms = 0, .kind = "withdrawn", .node = "aff_2"},
+                                   {.dt_ms = 0, .kind = "born", .node = "chair_1"}}, 140);
+    const auto open = b.open();
+    CHECK(open.size() == 3);
+    for (const Record& r : open)
+    {
+        if (r.level == Level::Claim) CHECK(r.events.size() == 3);
+        else CHECK(r.events.size() == 1 and r.events[0].kind == "born");
+    }
+}
 }   // namespace
 
 int main()
@@ -499,6 +579,9 @@ int main()
     test_delivered_absent_without_cov();
     test_shutdown_closes_all();
     test_owner_lost_closes_all_lost();
+    test_command_mode_is_self_driving();
+    test_mission_key_and_serials();
+    test_affordance_events_innermost_only();
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

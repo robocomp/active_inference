@@ -78,11 +78,17 @@ int main()
     CHECK(not last(s, "ghost"));
 
     // stats
-    Stats a; a.key_kind = "cross"; a.key_identity = "ltsm_a"; a.n = 1;
-    Stats b; b.key_kind = "cross"; b.key_identity = "ltsm_b"; b.n = 2;
-    Stats c; c.key_kind = "open"; c.key_identity = "ltsm_a"; c.n = 3;
+    Stats a; a.key_level = "claim"; a.key_kind = "cross"; a.key_identity = "ltsm_a"; a.n = 1;
+    Stats b; b.key_level = "claim"; b.key_kind = "cross"; b.key_identity = "ltsm_b"; b.n = 2;
+    Stats c; c.key_level = "claim"; c.key_kind = "open"; c.key_identity = "ltsm_a"; c.n = 3;
+    Stats d; d.key_level = "step"; d.key_kind = "cross"; d.key_identity = "ltsm_a"; d.n = 4;
     s.stats = {a, b, c};
     CHECK(stats(s, "cross").size() == 2);
+    s.stats = {a, b, c, d};
+    CHECK(stats(s, "cross").size() == 3);
+    CHECK(stats(s, "cross", "", "step").size() == 1 and stats(s, "cross", "", "step")[0].n == 4);
+    CHECK(stats(s, "cross", "ltsm_a", "claim").size() == 1 and stats(s, "cross", "ltsm_a", "claim")[0].n == 1);
+    s.stats = {a, b, c};
     CHECK(stats(s, "cross", "ltsm_b").size() == 1 and stats(s, "cross", "ltsm_b")[0].n == 2);
     CHECK(stats(s, "").size() == 3);
     CHECK(stats(s, "", "ltsm_a").size() == 2);
@@ -94,7 +100,7 @@ int main()
     s.today = {m1, m2};
     CHECK(today_line(s) == "2 missions (2 succeeded); last: " + m2.action_json.substr(0, 60));
     s.today = {m1};
-    CHECK(today_line(s) == "1 missions (1 succeeded); last: cross door_27 → room_2");
+    CHECK(today_line(s) == "1 mission (1 succeeded); last: cross door_27 → room_2");
     // empty / no human missions
     CHECK(today_line(Store{}) == "no missions today");
     s.today = {sm, st1};

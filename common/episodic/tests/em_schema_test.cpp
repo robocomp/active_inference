@@ -48,6 +48,9 @@ Record full_claim()
     r.delivered = 0.0;      // a real zero: must survive, unlike an absent value
     r.alternatives_json = R"([{"kind":"cross","score":0.4}])";
     r.events = {Event{.dt_ms = 1500, .kind = "current_moved", .node = "room_2"}};
+    r.mission_key = "m12";
+    r.serial_start = 41;
+    r.serial_end = 57;
     return r;
 }
 
@@ -66,11 +69,15 @@ void test_absent_stays_absent()
     r.promised.reset();
     r.delivered.reset();
     r.t1.reset();
+    r.serial_start.reset();
+    r.serial_end.reset();
     r.pre = {Fact{.node = "door_27", .type = "door", .ltsm_id = "", .values = {{"x", 1.0}}}};
     const QJsonObject j = to_json(r);
     CHECK(not j.contains("promised"));
     CHECK(not j.contains("delivered"));
     CHECK(not j.contains("t1"));
+    CHECK(not j.contains("serial_start") and not j.contains("serial_end"));
+    CHECK(j["mission_key"].toString() == "m12");
     const QJsonObject f = j["pre"].toArray().at(0).toObject();
     CHECK(not f["values"].toObject().contains("door_open_prob"));
     const auto back = record_from_json(j);
@@ -78,6 +85,7 @@ void test_absent_stays_absent()
     CHECK(back.has_value() and not back->promised.has_value());
     CHECK(back.has_value() and not back->delivered.has_value());
     CHECK(back.has_value() and not back->t1.has_value());
+    CHECK(back.has_value() and not back->serial_start and not back->serial_end and back->mission_key == "m12");
     CHECK(back.has_value() and not back->pre.at(0).values.contains("door_open_prob"));
 }
 

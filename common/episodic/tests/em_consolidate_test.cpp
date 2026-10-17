@@ -35,6 +35,7 @@ Record closed(const std::string& id, const std::string& outcome, int dur_s, std:
 {
     Record r;
     r.id = id;
+    r.level = Level::Claim;
     r.kind = "cross_door";
     r.target_ltsm = "passage_0";
     r.t0 = t0;
@@ -78,13 +79,48 @@ void test_key_without_ltsm()
 {
     Record r = closed("a", "satisfied", 1);
     r.target_ltsm.clear();
-    CHECK((stats_key(r) == std::pair<std::string, std::string>{"cross_door", ""}));
-    CHECK((stats_key(closed("b", "x", 1)) == std::pair<std::string, std::string>{"cross_door", "passage_0"}));
+    CHECK((stats_key(r) == StatsKey{"claim", "cross_door", "", ""}));
+    CHECK((stats_key(closed("b", "x", 1)) == StatsKey{"claim", "cross_door", "", "passage_0"}));
+}
+
+// A step op and a claim kind of the same name are different things; so are a person's and the robot's own missions.
+void test_key_separates_level_and_author()
+{
+    Record step = closed("s", "satisfied", 1);
+    step.level = Level::Step;
+    step.kind = "cross";
+    Record claim = closed("c", "success", 1);
+    claim.kind = "cross";
+    CHECK(stats_key(step) != stats_key(claim));
+    claim.author = Author::Self;                                   // author is part of the key for missions only
+    CHECK((stats_key(claim) == StatsKey{"claim", "cross", "", "passage_0"}));
+    Record hm = closed("h", "completed", 1);
+    hm.level = Level::Mission; hm.kind = "mission"; hm.target_ltsm.clear();
+    Record sm = hm;
+    sm.author = Author::Self;
+    CHECK((stats_key(hm) == StatsKey{"mission", "mission", "human", ""}));
+    CHECK((stats_key(sm) == StatsKey{"mission", "mission", "self", ""}));
+    Stats st;
+    fold(st, sm);
+    CHECK(st.key_level == "mission" and st.key_author == "self" and st.key_kind == "mission");
+}
+
+// lost / interrupted_by_em_shutdown durations are EM's stop time, not the commitment's: counted, never timed.
+void test_duration_skips_em_closed()
+{
+    Stats st;
+    fold(st, closed("a", "satisfied", 2));
+    fold(st, closed("b", "lost", 500));
+    fold(st, closed("c", "interrupted_by_em_shutdown", 900));
+    fold(st, closed("d", "satisfied", 4));
+    CHECK(st.n == 4 and st.n_dur == 2);
+    CHECK(st.outcomes.at("lost") == 1 and st.outcomes.at("interrupted_by_em_shutdown") == 1);
+    CHECK(std::abs(st.dur_mean_s - 3.0) < 1e-9 and std::abs(st.dur_m2 - 2.0) < 1e-9);
 }
 
 void test_rollover_skips_open()
 {
-    std::map<std::pair<std::string, std::string>, Stats> stats;
+    std::map<StatsKey, Stats> stats;
     Record open = closed("open", "", 1, noon_ms(-1));
     open.t1.reset();
     const Record done = closed("done", "satisfied", 1, noon_ms(-1));
@@ -93,7 +129,7 @@ void test_rollover_skips_open()
     const auto ids = rollover(stats, rs, day_of(noon_ms(0)));
     CHECK((ids == std::vector<std::string>{"done"}));
     CHECK(stats.size() == 1);
-    CHECK(stats.at({"cross_door", "passage_0"}).n == 1);
+    CHECK(stats.at(StatsKey{"claim", "cross_door", "", "passage_0"}).n == 1);
 }
 
 void test_stats_json_roundtrip()
@@ -105,6 +141,7 @@ void test_stats_json_roundtrip()
     fold(st, a);
     const auto back = stats_from_json(to_json(st));
     CHECK(back.has_value() and *back == st);
+    CHECK(to_json(st)["key_level"].toString() == "claim" and to_json(st)["n_dur"].toInt() == 1);
     CHECK(not stats_from_json(QJsonObject{}).has_value());
 }
 }   // namespace
@@ -114,6 +151,8 @@ int main()
     test_fold_counts_and_duration();
     test_gain_only_when_both();
     test_key_without_ltsm();
+    test_key_separates_level_and_author();
+    test_duration_skips_em_closed();
     test_rollover_skips_open();
     test_stats_json_roundtrip();
     std::println("{} checks, {} failures", checks, failures);
