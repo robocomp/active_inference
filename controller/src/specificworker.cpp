@@ -229,6 +229,8 @@ void SpecificWorker::initialize()
 	// snapshot mutex, and the GUI thread acts on it in present().
 	session_.set_route_changed_callback([this]() { display_.clear_robot_trajectory(); });
 	world_model_.set_affordance_manager(&affordance_manager_);
+	// The episodic journal's claim history: the manager reports each claim as it starts and ends (control thread).
+	affordance_manager_.set_claim_observer([this](const rc::AffordanceManager::ClaimEvent &e) { journal_claim(e); });
 	world_model_.set_dependencies(G, inner_eigen_api_.get());
 	obstacle_tracker_.set_dependencies(G, inner_eigen_api_.get(), &world_model_.graph_state());
 	obstacle_tracker_.set_graph_layout_callback([this]() { trigger_graph_layout_twopi(); });
@@ -1487,6 +1489,7 @@ void SpecificWorker::control_loop()
 		// chat_agent's intention node: a new command runs here, between cycles, like every button press above.
 		service_mission();
 		service_chat_inbox();
+		service_journal();   // the episodic journal: step transitions, command ends, drive mode → em_journal
 
 		// Reflect mission/drive state EVERY iteration (~20 ms), independent of compute(). Selecting a mode
 		// or pressing Stop changes what the panel must show, and both leave the pipeline with nothing to
@@ -1789,7 +1792,15 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 // Any other command REPLACES a running mission, which reports aborted|superseded (doc §7.5).
 // Runs on the control thread (enqueue_command / the chat inbox; the remote timer calls it directly, as before).
 // Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
+// The episodic journal records what was accepted (specificworker_mission.cpp, journal_command).
 SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)
+{
+	const MissionResult r = dispatch_mission_command(text, source);
+	journal_command(r, text, source);
+	return r;
+}
+
+SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std::string &text, const char *source)
 {
 	std::string t = QString::fromStdString(text).trimmed().toLower().simplified().toStdString();
 	if (t == "cancel" or t == "cancel mission")
