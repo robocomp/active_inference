@@ -65,6 +65,9 @@ namespace rc
         /// boundary at the doorway. 0 until seat_in_room() runs; then a/b are the MOUTH (the aperture projected onto
         /// the room polygon's edge) and the leaf sits δ past it. See seat_in_room().
         float           recess = 0.f;
+        /// Unit normal of the MOUTH pointing OUT of the room (toward the next room); zero until seat_in_room()
+        /// finds the room's edge at the doorway. Lets weight() tell which side of the doorway a return ended on.
+        Eigen::Vector2f n_out{0.f, 0.f};
         std::uint64_t   id     = 0;    ///< the door node, for logging
         std::string     name;
     };

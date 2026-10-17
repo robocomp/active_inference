@@ -150,6 +150,16 @@ namespace rc
         }
         if (not std::isfinite(best)) return;
         const Eigen::Vector2f u = (p1 - p0).normalized();
+        // Outward = the edge's right-hand normal for a counter-clockwise polygon, its left-hand one for clockwise.
+        float area2 = 0.f;
+        for (std::size_t i = 0; i < polygon.size(); ++i)
+        {
+            const Eigen::Vector2f& q0 = polygon[i];
+            const Eigen::Vector2f& q1 = polygon[(i + 1) % polygon.size()];
+            area2 += q0.x() * q1.y() - q1.x() * q0.y();
+        }
+        if (area2 != 0.f)
+            ap.n_out = (area2 > 0.f ? 1.f : -1.f) * Eigen::Vector2f(u.y(), -u.x());
         const auto onto = [&](const Eigen::Vector2f& q) -> Eigen::Vector2f { return p0 + (q - p0).dot(u) * u; };
         ap.recess = (c - onto(c)).norm();
         ap.a = onto(ap.a);
@@ -166,10 +176,34 @@ namespace rc
         float w = 1.f;
         for (const auto& ap : apertures)
         {
-            float t = 0.f;
-            if (not segments_cross(beam_origin, r, ap.a, ap.b - ap.a, &t)) continue;
-            // d = how far past the room's boundary (the mouth) the return landed (the crossing is at range t·|r|).
-            const float d   = (1.f - t) * range;
+            // d = how far past the room's boundary (the mouth) the return landed.
+            float d = 0.f;
+            // ★ WHICH SIDE THE RETURN ENDED ON, ONCE THE SENSOR IS IN THE DOORWAY (2026-10-17, crossing try47).
+            //   "The beam crossed the mouth" means "the return came from the next room" only while the sensor is
+            //   INSIDE the room. One centimetre past the mouth line it means the opposite: every beam back into the
+            //   room crosses the mouth and was discounted as next-room evidence, every return from the next room no
+            //   longer crosses it and kept full weight, and the first solve fitted room_2's walls to room_1's polygon
+            //   — median |SDF| 0.04 -> 4.2 m, the pose pulled 2.3 m back into room_1, the crossing never declared
+            //   (try46 shows the same signature at y = 4.62). So with the sensor in the opening — past the mouth
+            //   line and within its span, exact geometry like the crossing test — the question is the endpoint's
+            //   side: on the room's side it is room evidence, past the mouth it is the same surface-or-next-room
+            //   mixture as below, at its distance past the mouth. Everywhere else the crossing test is unchanged.
+            const Eigen::Vector2f ab = ap.b - ap.a;
+            const float w2 = ab.squaredNorm();
+            const float s_org = ap.n_out.dot(beam_origin - ap.a);
+            const float u_org = w2 > 1e-12f ? (beam_origin - ap.a).dot(ab) / w2 : -1.f;
+            if (ap.n_out.squaredNorm() > 0.f and s_org > 0.f and u_org >= 0.f and u_org <= 1.f)
+            {
+                const float s_hit = ap.n_out.dot(hit - ap.a);
+                if (s_hit <= 0.f) continue;   // ended on the room's side of the doorway
+                d = s_hit;
+            }
+            else
+            {
+                float t = 0.f;
+                if (not segments_cross(beam_origin, r, ap.a, ab, &t)) continue;
+                d = (1.f - t) * range;   // the crossing is at range t·|r|
+            }
             const float var = sigma_obs * sigma_obs + ap.half_depth * ap.half_depth;
             const float sd  = std::sqrt(var);
             // ★ TWO QUESTIONS, NOT ONE (2026-10-12, see seat_in_room). (1) Which surface returned this beam: the leaf,

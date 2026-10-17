@@ -308,6 +308,7 @@ namespace rc
                 }
                 r.a = R_inv * (r.a - t);
                 r.b = R_inv * (r.b - t);
+                r.n_out = R_inv * r.n_out;   // a direction: rotated, not translated
                 doors_robot_.push_back(std::move(r));
             }
         }
