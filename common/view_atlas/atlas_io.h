@@ -13,6 +13,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -86,8 +87,10 @@ inline bool save_archive(const std::string& base, const std::vector<ArchiveRecor
         if (r.atlas.shape_dim != sd or r.atlas.colour_dim != cd or int(r.atlas.bins.size()) != nb)
             return fail("records disagree on shape_dim/colour_dim/n_bins");
 
-    std::ofstream b(base + ".blob", std::ios::binary | std::ios::trunc);
-    if (not b) return fail("cannot open " + base + ".blob");
+    // Write both files as temps, then rename: a failure before the renames leaves the previous archive intact.
+    auto drop_temps = [&] { std::error_code e; std::filesystem::remove(base + ".blob.tmp", e); std::filesystem::remove(base + ".idx.tmp", e); };
+    std::ofstream b(base + ".blob.tmp", std::ios::binary | std::ios::trunc);
+    if (not b) return fail("cannot open " + base + ".blob.tmp");
     b.write("RCVA", 4);
     for (std::uint32_t f : {kArchiveVersion, std::uint32_t(sd), std::uint32_t(cd), std::uint32_t(nb),
                             std::uint32_t(recs.size())})
@@ -106,11 +109,11 @@ inline bool save_archive(const std::string& base, const std::vector<ArchiveRecor
             detail::put_vec(b, bin.mean, sd);
         }
     }
-    if (not b) return fail("write failed: " + base + ".blob");
+    if (not b) { b.close(); drop_temps(); return fail("write failed: " + base + ".blob.tmp"); }
     b.close();
 
-    std::ofstream f(base + ".idx", std::ios::trunc);
-    if (not f) return fail("cannot open " + base + ".idx");
+    std::ofstream f(base + ".idx.tmp", std::ios::trunc);
+    if (not f) { drop_temps(); return fail("cannot open " + base + ".idx.tmp"); }
     f.imbue(std::locale::classic());
     f << std::setprecision(std::numeric_limits<float>::max_digits10);
     f << "# view_atlas archive v" << kArchiveVersion << " shape_dim=" << sd << " colour_dim=" << cd
@@ -122,7 +125,14 @@ inline bool save_archive(const std::string& base, const std::vector<ArchiveRecor
           << r.cov(0, 0) << ',' << r.cov(0, 1) << ',' << r.cov(0, 2) << ','
           << r.cov(1, 1) << ',' << r.cov(1, 2) << ',' << r.cov(2, 2) << ','
           << r.born_ms << ',' << r.died_ms << '\n';
-    return bool(f) or fail("write failed: " + base + ".idx");
+    f.close();
+    if (not f) { drop_temps(); return fail("write failed: " + base + ".idx.tmp"); }
+    std::error_code ec;
+    std::filesystem::rename(base + ".blob.tmp", base + ".blob", ec);
+    if (ec) { drop_temps(); return fail("rename failed: " + base + ".blob: " + ec.message()); }
+    std::filesystem::rename(base + ".idx.tmp", base + ".idx", ec);
+    if (ec) { drop_temps(); return fail("rename failed: " + base + ".idx: " + ec.message()); }
+    return true;
 }
 
 inline bool load_archive(const std::string& base, const AtlasParams& p, int shape_dim, int colour_dim,

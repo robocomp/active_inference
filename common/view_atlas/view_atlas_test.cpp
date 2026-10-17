@@ -253,6 +253,18 @@ static void test_prototype_uncertainty()
     check(empty.log_ratio(obs(0, 0, 0.f), 0.f) == 0.f, "empty atlas: still exactly 0 with the evidence term");
 }
 
+static void test_repeat_across_bin_edge()
+{
+    std::printf("repeat check across a bin edge\n");
+    ViewAtlas a(AtlasParams{}, 4, 3);
+    const float edge = 0.f;                                   // boundary between bins 5 and 6
+    a.update(obs(0, 0, edge - 0.005f));
+    float before = 0.f; for (const auto& b : a.state().bins) before += b.n;
+    a.update(obs(0, 0, edge + 0.005f));                       // 0.6 deg away, other side of the edge
+    float after = 0.f; for (const auto& b : a.state().bins) after += b.n;
+    check(after - before < 0.01f, "a look 0.6 deg away across a bin edge is a repeat");
+}
+
 int main()
 {
     test_bins_and_wrap();
@@ -268,6 +280,7 @@ int main()
     test_reid();
     test_identity_value();
     test_prototype_uncertainty();
+    test_repeat_across_bin_edge();
     std::printf("\nview_atlas_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }

@@ -159,6 +159,16 @@ int main()
     check(not load_params(cpath, r, &why) and why.find("ell_rad") != std::string::npos,
           "ell_rad = inf refused, reason names ell_rad");
 
+    std::printf("atomic save\n");
+    check(save_archive(base, recs, &why), "baseline archive saved");
+    std::filesystem::create_directories(base + ".idx.tmp");   // the index temp cannot be created as a file
+    check(not save_archive(base, {make_record(42)}, &why), "save fails when the index temp cannot be written");
+    std::vector<ArchiveRecord> still;
+    check(load_archive(base, P, 4, 3, still, &why) and still.size() == recs.size(), "previous archive still loads");
+    check(not std::filesystem::exists(base + ".blob.tmp"), "blob temp removed after the failed save");
+    std::filesystem::remove_all(base + ".idx.tmp");
+    check(save_archive(base, recs, &why) and not std::filesystem::exists(base + ".idx.tmp"), "normal save leaves no temp files");
+
     std::filesystem::remove_all(dir);
     std::printf("\natlas_io_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;

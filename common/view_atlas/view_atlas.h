@@ -200,8 +200,9 @@ public:
 
         const float b  = wrap_pi(o.bearing_rad);
         const float lr = std::log(o.range_m);
-        Bin& bin = s_.bins[std::size_t(bin_of(b))];
-        const float w = o.quality * (1.f - repeat_similarity(bin, b, lr));
+        const int bi = bin_of(b);
+        Bin& bin = s_.bins[std::size_t(bi)];
+        const float w = o.quality * (1.f - repeat_similarity(bi, b, lr));
 
         if (w > 0.f)
         {
@@ -291,11 +292,15 @@ private:
     {
         return pose_kernel(p_, a, b);
     }
-    [[nodiscard]] float repeat_similarity(const Bin& bin, float b, float lr) const
+    [[nodiscard]] float repeat_similarity(int bin_index, float b, float lr) const
     {
         const Eigen::Vector2f view(b, lr);
         float k = 0.f;
-        for (const auto& ps : bin.poses) k = std::max(k, pose_similarity(view, ps));
+        for (int d = -1; d <= 1; ++d)                             // a repeat can sit across a bin edge
+        {
+            const int j = (bin_index + d + p_.n_bins) % p_.n_bins;
+            for (const auto& ps : s_.bins[std::size_t(j)].poses) k = std::max(k, pose_similarity(view, ps));
+        }
         return k;
     }
     /// Index of the stored pose most similar to any OTHER stored pose (ties: oldest). Redundancy-based
