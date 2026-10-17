@@ -307,7 +307,7 @@ Measured bearing histograms (views per 12 bins of 30 deg, from -180):
 | chair(1) lap 0 | 43, 47, 135, 26, 7, 0, 1, 4, 0, 0, 3, 4 |
 | chair(1) lap 1 | 40, 22, 8, 12, 6, 0, 6, 3, 0, 0, 2, 4 |
 
-About 62 % of the moved chair's lap-1 views fall on sides the archive never saw, where the information weight Lambda goes
+About 62 % of the moved chair's lap-1 views fall on sides the archive barely or never saw, where the information weight Lambda goes
 to 0 by design (§3.2). Shifts 9-10 map those views onto the populated bins, which is where the shift argmax peaked.
 chair(1)'s lap-1 views fall on bins already seen in lap 0 (peak at shift 0).
 
