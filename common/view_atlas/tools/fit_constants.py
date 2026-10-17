@@ -76,13 +76,16 @@ def fit(own, bg, logr_pairs=None):
                 cov_n_dd=cov_own[0, 0], cov_n_dc=cov_own[0, 1], cov_n_cc=cov_own[1, 1])
 
 def logr_pairs(v, S):
-    """Same object, near-equal bearing (< 5 deg), different range: (|log r ratio|, shape similarity)."""
-    out = []
+    """Same object, near-equal bearing (< 5 deg), >= 10 s apart (as the own pairs), different range:
+    (|log r ratio|, shape similarity). Up to 5 random matches per anchor (seeded)."""
+    out = []; rng = np.random.default_rng(0)
+    t = v.stamp_ms.values / 1000
     for i in v.inst.unique():
         idx = np.where(v.inst.values == i)[0]
         for a_ in idx[:300]:
             d = np.abs([wrap(v.bearing.values[a_] - v.bearing.values[b]) for b in idx])
-            for b in idx[(d < math.radians(5)) & (idx != a_)][:5]:
+            m = idx[(d < math.radians(5)) & (idx != a_) & (np.abs(t[idx] - t[a_]) >= 10)]
+            for b in rng.permutation(m)[:5]:
                 out.append((abs(math.log(v.range_m.values[a_] / v.range_m.values[b])), S[a_] @ S[b]))
     return np.array(out)
 

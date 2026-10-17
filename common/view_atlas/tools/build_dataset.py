@@ -108,7 +108,8 @@ def main():
                 x = (((rgb.astype(np.float32) / 255) - MEAN) / STD).transpose(2, 0, 1)[None].astype(np.float32).copy()
                 v = dino.run(["embedding"], {"pixel_values": x})[0][0]      # already L2-normalised
                 ctr = np.array(polys[lap][j].centroid.coords[0])
-                rows.append(dict(view_id=len(rows), dataset=ds, stamp_ms=int(r.stamp_ms), lap=lap, inst=f"{ds}:{nm}" if nm not in ("Chair", "chair(1)") else nm,
+                # inst = the physical object name: both recordings are the SAME world, so one name = one object (dataset column = origin)
+                rows.append(dict(view_id=len(rows), dataset=ds, stamp_ms=int(r.stamp_ms), lap=lap, inst=nm,
                                  inst_name=nm, cls=cls_of(nm), cam_x=cam[0], cam_y=cam[1], obj_x=ctr[0], obj_y=ctr[1],
                                  obj_yaw=YAW.get((nm, lap), 0.0), range_m=float(np.linalg.norm(ctr - cam)), mask_px=npx, trunc_frac=trunc))
                 S.append(v.astype("<f4")); C.append(colour_hist(box, mbox).astype("<f4"))
