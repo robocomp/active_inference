@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <random>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -87,6 +88,29 @@ inline float view_quality(float trunc_frac, float visible_frac, int mask_px, flo
     const float vis     = std::clamp(visible_frac, 0.f, 1.f);
     const float res     = 1.f - std::exp(-float(mask_px) / px_scale);
     return untrunc * vis * res;
+}
+
+struct Gauss2 { Eigen::Vector2f mu = Eigen::Vector2f::Zero(); Eigen::Matrix2f cov = Eigen::Matrix2f::Identity(); };
+
+inline float logpdf(const Eigen::Vector2f& x, const Gauss2& g)
+{
+    const Eigen::Vector2f d = x - g.mu;
+    const Eigen::LLT<Eigen::Matrix2f> llt(g.cov);
+    const Eigen::Vector2f z = llt.matrixL().solve(d);
+    const float logdet = 2.f * (std::log(llt.matrixL()(0, 0)) + std::log(llt.matrixL()(1, 1)));
+    return -0.5f * z.squaredNorm() - 0.5f * logdet - std::log(2.f * kPi);
+}
+
+/// Observation-quality noise added to BOTH hypotheses: q -> 0 makes them indistinguishable (ratio -> 0).
+inline Eigen::Matrix2f quality_cov(const AtlasParams& p, float quality)
+{
+    return p.cov_n * ((1.f - quality) / quality);
+}
+
+/// "Another object of this class" (H_bg).
+inline Gauss2 background(const AtlasParams& p, float quality)
+{
+    return {p.mu_bg, p.cov_bg + quality_cov(p, quality)};
 }
 
 class ViewAtlas
@@ -191,6 +215,62 @@ public:
         bin.stamp_ms = o.stamp_ms;
     }
 
+    /// (s_shape, s_colour): the view against the shape predicted at `bearing` and against the colour prototype.
+    /// A channel with no stored evidence reads 0 — its hypothesis has relaxed to the background there.
+    [[nodiscard]] Eigen::Vector2f similarities(const ViewObs& o, float bearing) const
+    {
+        const auto pr = predict(bearing);
+        const float sn = o.shape.norm(), cn = o.colour.norm();
+        const float sd = (pr.has_shape and sn > 0.f) ? o.shape.dot(pr.shape) / sn : 0.f;
+        const float sc = (s_.n_c > 0.f and cn > 0.f) ? o.colour.dot(s_.colour) / cn : 0.f;
+        return {sd, sc};
+    }
+
+    /// H_k at this bearing: relaxes from (mu_own, cov_own) to the background as the angular gap grows
+    /// (shape) or as evidence vanishes (both). Cholesky factors are blended, so the covariance is always
+    /// PSD and equals cov_bg EXACTLY when there is no evidence — that is what makes the ratio exactly 0.
+    [[nodiscard]] Gauss2 hypothesis(float bearing, float quality) const
+    {
+        const float Ns = effective_count(bearing) - p_.n0;
+        const float r_d = kernel(gap(bearing)) * Ns / (Ns + p_.n0);
+        const float r_c = s_.n_c / (s_.n_c + p_.n0);
+        const Eigen::Matrix2f R = Eigen::Vector2f(r_d, r_c).asDiagonal();
+        const Eigen::Matrix2f I = Eigen::Matrix2f::Identity();
+        const Eigen::Matrix2f Lb = Eigen::LLT<Eigen::Matrix2f>(p_.cov_bg).matrixL();
+        const Eigen::Matrix2f Lo = Eigen::LLT<Eigen::Matrix2f>(p_.cov_own).matrixL();
+        const Eigen::Matrix2f L = (I - R) * Lb + R * Lo;
+        Gauss2 g;
+        g.mu  = p_.mu_bg + R * (p_.mu_own - p_.mu_bg);
+        g.cov = L * L.transpose() + quality_cov(p_, quality);
+        return g;
+    }
+
+    /// Lambda = log N(s; H_k) - log N(s; H_bg). Exactly 0 when the atlas holds no evidence.
+    [[nodiscard]] float log_ratio(const ViewObs& o, float bearing) const
+    {
+        if (not (o.quality > 0.f)) return 0.f;
+        const Eigen::Vector2f s = similarities(o, bearing);
+        return logpdf(s, hypothesis(bearing, o.quality)) - logpdf(s, background(p_, o.quality));
+    }
+
+    /// Yaw unknown or uncertain: marginalise the cyclic shift, log sum_k w_k exp(Lambda(bearing + k*bin)).
+    [[nodiscard]] float log_ratio_marginal(const ViewObs& o, float bearing, const std::vector<float>& shift_logw) const
+    {
+        const float step = 2.f * kPi / float(p_.n_bins);
+        float m = -std::numeric_limits<float>::infinity();
+        std::vector<float> t(shift_logw.size());
+        for (std::size_t k = 0; k < shift_logw.size(); ++k)
+        {
+            t[k] = std::isinf(shift_logw[k]) ? shift_logw[k]
+                                             : shift_logw[k] + log_ratio(o, bearing + step * float(k));
+            m = std::max(m, t[k]);
+        }
+        if (std::isinf(m)) return 0.f;
+        float acc = 0.f;
+        for (float v : t) acc += std::exp(v - m);
+        return m + std::log(acc);
+    }
+
 private:
     /// Repeat-kernel similarity of two poses (bearing, log range): 1 = the same place, 0 = far apart.
     [[nodiscard]] float pose_similarity(const Eigen::Vector2f& a, const Eigen::Vector2f& b) const
@@ -225,5 +305,93 @@ private:
     AtlasParams p_;
     AtlasState  s_;
 };
+
+/// Log-weights over the n_bins cyclic shifts from a wrapped-Gaussian yaw posterior of sd sigma.
+/// sigma <= 0: all weight on shift 0. Normalised (log-sum-exp == 0).
+inline std::vector<float> shift_log_weights(int n_bins, float yaw_sigma_rad)
+{
+    std::vector<float> w(std::size_t(n_bins), -std::numeric_limits<float>::infinity());
+    if (not (yaw_sigma_rad > 0.f)) { w[0] = 0.f; return w; }
+    const float step = 2.f * kPi / float(n_bins);
+    float m = -std::numeric_limits<float>::infinity();
+    for (int k = 0; k < n_bins; ++k)
+    {
+        const float d = wrap_pi(step * float(k)) / yaw_sigma_rad;
+        w[std::size_t(k)] = -0.5f * d * d;
+        m = std::max(m, w[std::size_t(k)]);
+    }
+    float acc = 0.f;
+    for (float v : w) acc += std::exp(v - m);
+    const float lse = m + std::log(acc);
+    for (float& v : w) v -= lse;
+    return w;
+}
+
+/// Where was it? Mixture of "stayed" (Gaussian at the archived pose) and "moved" (uniform over the room).
+inline float location_log_lik(const Eigen::Vector2f& x, const Eigen::Vector2f& mu, const Eigen::Matrix2f& cov,
+                              float pi_move, float room_area_m2)
+{
+    const float stay = std::exp(logpdf(x, {mu, cov}));
+    return std::log((1.f - pi_move) * stay + pi_move / room_area_m2);
+}
+
+struct ReidCandidate { float log_ratio = 0.f, log_loc = 0.f, log_prior = 0.f; };
+
+/// Posterior over {candidate 0..n-1, new}; the last element is "new".
+inline std::vector<float> reid_posterior(const std::vector<ReidCandidate>& c, float log_prior_new, float log_loc_new)
+{
+    std::vector<float> lw;
+    for (const auto& k : c) lw.push_back(k.log_prior + k.log_loc + k.log_ratio);
+    lw.push_back(log_prior_new + log_loc_new);
+    const float m = *std::max_element(lw.begin(), lw.end());
+    float acc = 0.f;
+    for (float& v : lw) { v = std::exp(v - m); acc += v; }
+    for (float& v : lw) v /= acc;
+    return lw;
+}
+
+inline float entropy(const std::vector<float>& p)
+{
+    float h = 0.f;
+    for (float v : p) if (v > 0.f) h -= v * std::log(v);
+    return h;
+}
+
+struct IdHyp { Gauss2 own, bg; float log_prior = 0.f, log_loc = 0.f; };
+
+/// Expected entropy drop over {candidates, new} from encoding one view (nats), by Monte Carlo: under
+/// "it is j", candidate j's similarities follow its own hypothesis and every other candidate's follow
+/// that candidate's background; under "new", all follow their backgrounds.
+inline float identity_value(const std::vector<IdHyp>& c, float log_prior_new, float log_loc_new,
+                            int n_samples, std::uint32_t seed)
+{
+    if (c.empty() or n_samples <= 0) return 0.f;
+    std::vector<ReidCandidate> prior;
+    for (const auto& h : c) prior.push_back({0.f, h.log_loc, h.log_prior});
+    const auto p0 = reid_posterior(prior, log_prior_new, log_loc_new);
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> g(0.f, 1.f);
+    auto draw = [&](const Gauss2& h) {
+        const Eigen::Matrix2f L = Eigen::LLT<Eigen::Matrix2f>(h.cov).matrixL();
+        return Eigen::Vector2f(h.mu + L * Eigen::Vector2f(g(rng), g(rng)));
+    };
+    float expected_h = 0.f;
+    for (std::size_t t = 0; t <= c.size(); ++t)            // t == c.size() is "new"
+    {
+        float acc = 0.f;
+        for (int s = 0; s < n_samples; ++s)
+        {
+            std::vector<ReidCandidate> obs = prior;
+            for (std::size_t j = 0; j < c.size(); ++j)
+            {
+                const Eigen::Vector2f x = draw(t == j ? c[j].own : c[j].bg);
+                obs[j].log_ratio = logpdf(x, c[j].own) - logpdf(x, c[j].bg);
+            }
+            acc += entropy(reid_posterior(obs, log_prior_new, log_loc_new));
+        }
+        expected_h += p0[t] * acc / float(n_samples);
+    }
+    return std::max(0.f, entropy(p0) - expected_h);   // MC noise only; mutual information is >= 0
+}
 
 } // namespace rc::atlas

@@ -122,6 +122,93 @@ static void test_quality()
     check(view_quality(0.f, 1.f, 0, 2000.f) == 0.f, "empty mask has zero quality");
 }
 
+static ViewAtlas atlas_with(int k_shape, int k_col, float bearing, int n_views = 3)
+{
+    ViewAtlas a(AtlasParams{}, 4, 3);
+    for (int i = 0; i < n_views; ++i) a.update(obs(k_shape, k_col, bearing + 0.3f * float(i) - 0.3f));
+    return a;
+}
+
+static void test_log_ratio()
+{
+    std::printf("log ratio\n");
+    ViewAtlas empty(AtlasParams{}, 4, 3);
+    const float l0 = empty.log_ratio(obs(0, 0, 0.f), 0.f);
+    check(l0 == 0.f, "empty atlas: log ratio is exactly 0");
+    check(std::isfinite(l0), "empty atlas: log ratio is finite");
+
+    ViewAtlas a = atlas_with(0, 0, 0.f);
+    check(a.log_ratio(obs(0, 0, 0.f), 0.f) > 2.f, "matching shape+colour at a seen bearing: strong evidence for");
+    check(a.log_ratio(obs(1, 1, 0.f), 0.f) < -2.f, "different shape+colour at a seen bearing: evidence against");
+
+    // shape evidence must vanish on the unseen side while colour evidence stays
+    const float match_far = a.log_ratio(obs(0, 0, kPi), kPi);
+    const float other_far = a.log_ratio(obs(1, 0, kPi), kPi);
+    const float match_near = a.log_ratio(obs(0, 0, 0.f), 0.f);
+    const float other_near = a.log_ratio(obs(1, 0, 0.f), 0.f);
+    check(std::fabs(match_far - other_far) < 0.05f, "unseen side: shape no longer discriminates");
+    check(match_near - other_near > 2.f, "seen side: shape discriminates");
+    check(a.log_ratio(obs(0, 0, 0.f, 1.5f, 1e-6f), 0.f) < 1e-2f, "quality ~0: no evidence either way");
+}
+
+static void test_shift_marginal()
+{
+    std::printf("yaw shift marginalisation\n");
+    const auto sharp = shift_log_weights(12, 0.f);
+    check(sharp[0] == 0.f and std::isinf(sharp[1]), "sigma 0: all weight on shift 0");
+    const auto flat = shift_log_weights(12, 1e3f);
+    check(std::fabs(flat[0] - flat[6]) < 1e-3f, "huge sigma: flat over shifts");
+    float lse = -std::numeric_limits<float>::infinity();
+    for (float w : flat) lse = std::max(lse, w) + std::log1p(std::exp(-std::fabs(lse - w)));
+    check(std::fabs(lse) < 1e-3f, "shift weights are normalised");
+
+    ViewAtlas a = atlas_with(0, 0, 0.f);
+    const float off = 3.f * 2.f * kPi / 12.f;                 // observed 3 bins away (wrong yaw)
+    const float l_fixed = a.log_ratio(obs(0, 0, off), off);
+    const float l_flat  = a.log_ratio_marginal(obs(0, 0, off), off, flat);
+    const float l_sharp = a.log_ratio_marginal(obs(0, 0, off), off, sharp);
+    check(std::fabs(l_sharp - l_fixed) < 1e-4f, "sigma 0 reproduces the fixed-yaw ratio");
+    check(l_flat > l_fixed, "unknown yaw: marginalising recovers evidence a wrong yaw hid");
+}
+
+static void test_reid()
+{
+    std::printf("re-identification posterior\n");
+    std::vector<ReidCandidate> c = {{8.f, 0.f, 0.f}, {-3.f, 0.f, 0.f}};
+    auto p = reid_posterior(c, 0.f, 0.f);
+    float s = 0.f; for (float v : p) s += v;
+    check(p.size() == 3 and std::fabs(s - 1.f) < 1e-5f, "posterior has candidates + new and sums to 1");
+    check(p[0] > 0.99f, "strong appearance evidence picks candidate 0");
+    auto pe = reid_posterior({}, 0.f, 0.f);
+    check(pe.size() == 1 and pe[0] == 1.f, "no candidates: certainly new");
+    check(std::fabs(entropy({0.5f, 0.5f}) - std::log(2.f)) < 1e-5f, "entropy of a fair coin is log 2");
+
+    const Eigen::Vector2f mu(0.f, 0.f);
+    const Eigen::Matrix2f cov = Eigen::Matrix2f::Identity() * 0.01f;
+    const float near_stay = location_log_lik({0.f, 0.f}, mu, cov, 0.f, 50.f);
+    check(std::fabs(near_stay - (-std::log(2.f * kPi * 0.01f))) < 1e-3f, "pi_move 0: plain Gaussian at the mean");
+    const float far = location_log_lik({20.f, 0.f}, mu, cov, 0.2f, 50.f);
+    check(std::fabs(far - std::log(0.2f / 50.f)) < 1e-3f, "far away: only the moved-uniform term remains");
+}
+
+static void test_identity_value()
+{
+    std::printf("identity value of encoding\n");
+    const AtlasParams P;
+    ViewAtlas a = atlas_with(0, 0, 0.f), b = atlas_with(0, 0, 0.f);
+    std::vector<IdHyp> same = {{a.hypothesis(0.f, 1.f), background(P, 1.f), 0.f, 0.f},
+                               {b.hypothesis(0.f, 1.f), background(P, 1.f), 0.f, 0.f}};
+    std::vector<IdHyp> none = {};
+    const float v_none = identity_value(none, 0.f, 0.f, 64, 1);
+    check(v_none == 0.f, "no candidates: nothing to learn about identity");
+    ViewAtlas empty(P, 4, 3);
+    std::vector<IdHyp> blind = {{empty.hypothesis(0.f, 1.f), background(P, 1.f), 0.f, 0.f}};
+    check(identity_value(blind, 0.f, 0.f, 256, 1) < 0.02f, "an atlas that predicts nothing: ~0 value");
+    std::vector<IdHyp> one = {{a.hypothesis(0.f, 1.f), background(P, 1.f), 0.f, 0.f}};
+    check(identity_value(one, 0.f, 0.f, 256, 1) > 0.1f, "a seen candidate vs new: encoding is worth something");
+    check(std::isfinite(identity_value(same, 0.f, 0.f, 256, 1)), "two identical candidates: finite value");
+}
+
 int main()
 {
     test_bins_and_wrap();
@@ -131,6 +218,10 @@ int main()
     test_count_and_learning_value();
     test_prediction();
     test_quality();
+    test_log_ratio();
+    test_shift_marginal();
+    test_reid();
+    test_identity_value();
     std::printf("\nview_atlas_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }
