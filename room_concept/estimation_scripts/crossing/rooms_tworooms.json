@@ -1,0 +1,6 @@
+[
+ {"id": 1, "name": "apartment", "note": "same inner outline as piso.wbt (thicken_walls.py LOOP); grade with apartment/rooms.json",
+  "poly": null},
+ {"id": 2, "name": "room2", "note": "inner faces of ROOM2_WALL_* in tworooms-piso.wbt (walls 0.11 m thick); 6.0 x 4.0 m; doorway gap x -5.30..-4.24 in the south wall",
+  "poly": [[-7.77, 9.48], [-1.77, 9.48], [-1.77, 13.48], [-7.77, 13.48]]}
+]

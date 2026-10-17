@@ -19,6 +19,7 @@
 #include "controller_runtime_types.h"
 #include "controller_mission_panel.h"
 #include "controller_affordance_panel.h"
+#include "controller_door_passage_bar.h"
 #include "controller_camera_masks.h"
 #include "custom_widget.h"
 #include "viewer_2d.h"
@@ -43,6 +44,8 @@ public:
         std::function<void()>                on_skip_affordance;
         // Everything mission-shaped is the panel's own vocabulary; the display just forwards it.
         rc::MissionPanel::Callbacks          mission;
+        // The door-passage row (controller_door_passage_bar.h): Cross / Stop. Enqueued by the worker.
+        rc::DoorPassageBar::Callbacks        door_passage;
     };
 
     // Creates the planner GUI as its OWN top-level window (not docked into the DSR graph viewer),
@@ -102,6 +105,10 @@ public:
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
     void set_session_totals(float metres, float seconds);   // top row: metres and time since startup
     void set_affordance_execution(const rc::AffordanceExecution &v);   // the affordance-program window
+    // The door-passage row and its corridor on the 2-D view (controller_door_passage.h). Thread-safe staging, like
+    // update(); `passages` empty = nothing to draw (no passage, or not on its cross step).
+    void set_door_passage(const rc::DoorPassageBar::View &view,
+                          const std::vector<std::vector<Eigen::Vector2f>> &passages);
     // Stage the Orient bearing overlay for the 2D view (thread-safe; applied in present()).
     // Pass visible=false whenever the running affordance is not an Orient, so a finished turn cannot
     // leave a ray pointing at a bearing nobody is asking for any more.
@@ -240,6 +247,9 @@ private:
         std::vector<std::string> mission_names;
         std::string mission_selected;
         bool mission_list_pending = false;
+        // Door passage row + corridor overlay (set_door_passage).
+        rc::DoorPassageBar::View door_passage_view;
+        std::vector<std::vector<Eigen::Vector2f>> door_passages;
     };
 
     void restore_window_geometry();
@@ -247,6 +257,7 @@ private:
     std::unique_ptr<Custom_widget> custom_widget_;
     std::unique_ptr<rc::MissionPanel> mission_panel_;
     std::unique_ptr<rc::AffordancePanel> affordance_panel_;
+    std::unique_ptr<rc::DoorPassageBar> door_passage_bar_;
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
     std::unordered_set<std::string> efe_series_known_;   // plot series already registered

@@ -37,6 +37,7 @@
 
 #include <genericworker.h>                 // DSR API + generated node/attr type tags
 
+#include <atomic>
 #include "room_concept.h"                  // rc::RoomConcept (+ UpdateResult)
 #include "epistemic_controller.h"
 #include "room_config.h"             // rc::RoomConfig (shared config)
@@ -44,6 +45,8 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
 #include "free_space_polygon.h"      // rc::freespace (the start-up proto-room's extent)
+#include "layout_refiner.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
+#include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 
 namespace rc
@@ -129,6 +132,12 @@ public:
     /// The room is still the start-up PROTO-room (born, not yet promoted) — the UI says ESTIMATING. Read from
     /// the main thread; the two flags are written on the localiser thread (a stale read only delays the label).
     [[nodiscard]] bool room_is_startup_proto() const { return startup_proto_ and not startup_promoted_; }
+    /// What promotion waits for, for the confidence panel (GUI thread reads, localiser writes):
+    ///   first  = layout stability: IoU of the published outline now vs ~10 s ago (1 = no longer changing);
+    ///   second = exploration done: 1 once the explorer has nothing reachable left (after a visit), else 0.
+    /// Both read 1 once the room is promoted.
+    [[nodiscard]] std::pair<float, float> room_readiness() const
+    { return {readiness_stable_.load(std::memory_order_relaxed), readiness_explore_.load(std::memory_order_relaxed)}; }
 
     /// ── THE PUBLISHED ROOM FRAME vs THE ESTIMATOR'S INTERNAL FRAME ────────────────────────────────────
     /// Identity in every mode except one: a START-UP PROTO-ROOM (StartupProto.Enabled, Estimate mode) is
@@ -145,16 +154,18 @@ public:
     [[nodiscard]] int   stable_frames() const noexcept { return stable_frames_; }
     [[nodiscard]] std::uint64_t robot_id() const noexcept { return dsr_robot_id_; }
 
-    // World-frame (room) positions of the pinned-object landmarks, refreshed each frame by
-    // refresh_object_anchors(). Consumed by the viewer to draw robot→landmark sight lines.
-    [[nodiscard]] const std::vector<Eigen::Vector2f>& pinned_landmarks() const noexcept
-    { return latest_pinned_landmarks_; }
-
-    // Per-landmark "currently being measured" flag (1:1 with pinned_landmarks()): true when the
-    // object's producer is actively detecting it this frame (e.g. table_detection_alive). The viewer
-    // draws the robot→landmark sight line only while measured.
-    [[nodiscard]] const std::vector<char>& pinned_measured() const noexcept
-    { return latest_pinned_measured_; }
+    // World-frame (room) positions of the pinned-object landmarks + a parallel (1:1) "currently being
+    // measured" flag (the producer is detecting it this frame, e.g. table_detection_alive), refreshed
+    // each frame by refresh_object_anchors() on the LOCALISER thread and drawn by the GUI thread as
+    // robot→landmark sight lines. Returned BY VALUE under a lock: a const& into vectors the other thread
+    // clears and refills is a use-after-free, and the two vectors must come from the same frame.
+    struct PinnedLandmarks
+    {
+        std::vector<Eigen::Vector2f> positions;
+        std::vector<char>            measured;
+    };
+    [[nodiscard]] PinnedLandmarks pinned_landmarks() const
+    { std::scoped_lock lk(pinned_mutex_); return latest_pinned_; }
 
 private:
     void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
@@ -192,7 +203,25 @@ private:
     // driven by the live layout explorer while it is proto. PROMOTED IN PLACE when map_ready: the learnt
     // polygon (in the frozen frame) replaces the free-space one, the `proto` edge is deleted, same id.
     bool birth_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& why);
+    /// The start-up survey's state for a room just born with no polygon, published frame = T_pub_int · internal.
+    void arm_startup_proto(std::uint64_t room_id, const Eigen::Affine2f& T_pub_int);
+    /// Out of a promoted room through a door: the new room becomes this agent's room, estimated by the start-up survey.
+    /// A room REMEMBERED behind a door (ltsm_agent's `recall_<room>` metaconcept, RT child of the door node): its name,
+    /// its outline in its own frame, and that frame in this agent's INTERNAL frame (through the crossed aperture).
+    struct Recall
+    {
+        std::string name;                          ///< the remembered room's live name, e.g. "room_1"
+        std::uint64_t room_index = 0;              ///< its room_id
+        std::vector<Eigen::Vector2f> poly_pub;     ///< outline in the remembered room's own (published) frame
+        Eigen::Affine2f T_int_recall = Eigen::Affine2f::Identity();
+    };
+    /// The recall hung from the crossed door `ap`, if ltsm posted one. Reads node/edge attributes only (thread-safe).
+    [[nodiscard]] std::optional<Recall> find_recall(const rc::DoorAperture& ap) const;
+    void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door, float p_cross,
+                              const std::optional<Recall>& recall = std::nullopt);
+    [[nodiscard]] float startup_erode_m() const;
     void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
+    void adopt_most_probable_layout();
     void promote_startup_proto(std::string& reason);
     void forget_room(const char* why);    ///< the room node vanished: reset EVERY piece of room state together
     bool sweep_foreign_rooms();           ///< leftover room nodes while the start-up proto is the room
@@ -208,9 +237,25 @@ private:
     std::vector<Eigen::Vector2f> fs_free_ring_;   ///< confirmed-free raster ring (published frame) — explorer feasibility
     std::deque<std::pair<std::int64_t, Eigen::Affine2f>> pose_hist_;   ///< (stamp, robot pose in published frame), ~10 s
     std::deque<RoomConcept::LowObstacles> low_obs_pending_;
-    int layout_visits_ = 0;   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
+    int layout_visits_ = 0;
+    std::atomic<float> readiness_stable_{0.f}, readiness_explore_{0.f};
+    std::deque<std::pair<std::int64_t, std::vector<Eigen::Vector2f>>> ring_hist_;   // (stamp, published outline)
+    std::deque<std::vector<Eigen::Vector2f>> layout_pool_;   ///< distinct map layouts (published frame) promotion chooses among
+    long low_batches_stamped_ = 0, low_batches_too_old_ = 0;   // diagnostics: furniture layer intake
+    int  rej_ring_ = 0, rej_furniture_ = 0, rej_refused_ = 0;  // diagnostics: explorer rejections, per plan   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
     void stamp_low_obstacles();
     std::int64_t  fs_last_ms_ = 0;
+    // ── LAYOUT REFINEMENT AFTER PROMOTION (2026-10-10, layout_refiner.h) ──────────────────────────────────
+    // free_space_ is KEPT past promotion and fed at the shadow SLAM pose; every kRefinePeriodMs the refiner scores
+    // edits of the given room against its evidence cells and uploads the ones that pay (refine_given_layout).
+    void step_layout_refiner(const rc::RoomConcept::UpdateResult& res);
+    rc::refine::LayoutRefiner refiner_;
+    std::string learnt_layout_path_;   // this run's learnt-layout file (learnt_layout.h); empty until the first save
+    void save_learnt_layout(const std::vector<Eigen::Vector2f>& poly, const char* what);
+    std::int64_t  refine_last_ms_ = 0;
+    std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
+    std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
+    std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)
     std::int64_t  sweep_last_ms_ = 0;
     Eigen::Vector2f lidar_origin_{0.f, 0.f};   ///< robot frame
     bool          lidar_origin_resolved_ = false;
@@ -231,6 +276,8 @@ private:
     std::vector<std::pair<Eigen::Vector2f, std::int64_t>> layout_refused_;   ///< (cell, until_ms), internal frame
     std::size_t   proto_polygon_verts_ = 0;   ///< crossing proto: vertex count last written to it
     std::uint64_t   proto_room_id_ = 0;
+    std::vector<std::uint64_t> left_rooms_;
+    std::vector<std::vector<Eigen::Vector2f>> left_polys_int_;   ///< their outlines, INTERNAL frame: the new room's free space excludes them   ///< rooms this agent surveyed and then left through a door: kept, never swept
     Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
     Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
     Eigen::Vector2f proto_n_out_{0.f, 1.f};                         ///< its outward normal, room frame
@@ -443,10 +490,9 @@ private:
     // in the steady state, long after that counter has stopped being maintained.
     int           anchor_stable_frames_ = 0;
 
-    // World-frame positions of pinned-object landmarks (refreshed by refresh_object_anchors()).
-    std::vector<Eigen::Vector2f> latest_pinned_landmarks_;
-    // Parallel to latest_pinned_landmarks_: is that object being actively measured this frame?
-    std::vector<char>            latest_pinned_measured_;
+    // Pinned-object landmarks for the viewer (written by the localiser thread, read by the GUI thread).
+    PinnedLandmarks    latest_pinned_;
+    mutable std::mutex pinned_mutex_;
 
     // Latest robot-frame velocities, refreshed per update() for the RT velocity attrs.
     float last_adv_  = 0.f;

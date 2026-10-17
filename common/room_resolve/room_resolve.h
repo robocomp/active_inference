@@ -13,12 +13,14 @@
  * THE RULE (verified against the agreed split 2026-09-14: ltsm_agent decides room IDENTITY, room_concept
  * decides GEOMETRY):
  *   1. the robot --[current]--> room edge, owned by ltsm_agent, when exactly ONE such edge exists;
+ *   2a. (2026-10-11) with NO `current` edge, once room_concept has RETIRED the robot's RT to a room (valid=false,
+ *      stamped once at a door crossing): the unique room whose robot RT is still LIVE — the room the pose is being
+ *      published in. Where the robot IS, not which room that is; rule 1 overrides it, identity stays ltsm_agent's.
  *   2. otherwise the unique room that is NOT a proto-room (a single-room fleet with no ltsm running —
  *      exactly the old behaviour, now deterministic);
  *   3. (2026-10-09) otherwise, ONLY when there is no `current` edge at all AND no non-proto room, a UNIQUE
  *      proto-room — room_concept's START-UP proto in an estimation run (the robot's first room: nobody
- *      disputes its identity, so it is the room from the first second). Never fires beside a real room,
- *      so a door crossing still resolves to the old room until ltsm_agent moves `current`;
+ *      disputes its identity, so it is the room from the first second). Never fires beside a real room;
  *   4. otherwise NOTHING. Two non-proto rooms and no `current`, or two protos, is ambiguous, and guessing
  *      is worse than waiting. (Two `current` edges abstain from rule 1 and fall through to rule 2 — the
  *      code has always done that; rule 3 is disabled by them.)
@@ -39,6 +41,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -91,6 +94,15 @@ inline std::optional<std::uint64_t> current_room(DSR::DSRGraph& G)
     std::vector<RoomFact> rooms;
     for (const auto& r : G.get_nodes_by_type("room"))
         rooms.push_back({.id = r.id(), .proto = is_proto(G, r.id())});
+    // The robot→room RT edges (rule 2a). By edge type, source TYPE "robot": no platform node name assumed.
+    for (const auto& e : G.get_edges_by_type("RT"))
+    {
+        auto it = std::ranges::find(rooms, e.to(), &RoomFact::id);
+        if (it == rooms.end()) continue;
+        if (const auto src = G.get_node(e.from()); not src.has_value() or src->type() != "robot") continue;
+        const bool retired = not G.get_attrib_by_name<valid_att>(e).value_or(true);
+        it->rt = retired ? RoomFact::Rt::Retired : RoomFact::Rt::Live;
+    }
     return resolve_current_room(cur, rooms);
 }
 

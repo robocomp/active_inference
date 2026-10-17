@@ -1,0 +1,2 @@
+run,status,t_promote_s,path_to_promote_m,path_total_m,duration_s,pose_err_med_m,pose_err_p95_m,pose_err_max_m,promoted_verts,promoted_iou_svd,promoted_prec,promoted_rec,refined_verts,refined_iou_svd,refined_prec,refined_rec,prom_shape,prom_anchor,ref_anchor,ref_shape,frame_err_deg,frame_err_m,verts,promoted_iou,refined_iou
+8,ok,0.0470,0.0000,14.5553,88.6090,0.0183,0.0393,0.0603,4,0.5126,0.9146,0.5384,20,0.9960,0.9980,0.9980,0.5127,0.5114,0.9831,0.9976,0.5249,0.0047,20,0.5127,0.9976

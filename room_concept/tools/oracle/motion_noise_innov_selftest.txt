@@ -1,0 +1,52 @@
+1. clean (no bias field), 40k cycles
+    k_long     1.032e-04  (truth 9.400e-05)
+    k_lat      7.899e-06  (truth 6.000e-06)
+    k_lat_turn 1.147e-05  (truth 1.000e-05)
+    k_th_turn  1.886e-04  (truth 1.900e-04)
+    k_t_trans  8.302e-07  (truth 0.000e+00)
+    k_t_rot    8.642e-08  (truth 0.000e+00)
+    s fwd/lat/th 0.0097 0.0098 0.0095 (truth 0.0100)
+    q fwd/lat/th 0.00e+00 0.00e+00 7.72e-04 (truth eps^2 1.00e-04 / 0 / 9.00e-04)
+  [PASS] k_long within 15 %
+  [PASS] k_th_turn within 15 % (the scale error did NOT shrink it)
+  [PASS] k_lat_turn within 35 %
+  [PASS] scan excess s within 30 % (fwd, th)
+  [PASS] heading scale error lands in q_th (within 50 %)
+  [PASS] per-second terms stay near zero
+
+2. with a smooth bias FIELD over position (40 mm / 1 deg, 3 m)
+    k_long     9.858e-05  (truth 9.400e-05)
+    k_lat      5.804e-06  (truth 6.000e-06)
+    k_lat_turn 8.488e-06  (truth 1.000e-05)
+    k_th_turn  1.846e-04  (truth 1.900e-04)
+    k_t_trans  9.777e-07  (truth 0.000e+00)
+    k_t_rot    1.075e-07  (truth 0.000e+00)
+    s fwd/lat/th 0.0096 0.0098 0.0098 (truth 0.0100)
+    q fwd/lat/th 1.35e-05 0.00e+00 9.38e-04 (truth eps^2 1.00e-04 / 0 / 9.00e-04)
+  [PASS] k_long within 20 % under the bias field
+  [PASS] k_th_turn within 20 % under the bias field
+  [PASS] the bias field is NOT attributed to per-second noise
+
+4. HEAVY TAIL: 4 % of moving cycles get a gross scan error (sigma 1.5 cm / 0.21 deg)
+    plain  : k_long 3.653e-04  k_th_turn 8.664e-04
+    mixture: k_long 9.416e-05  k_th_turn 2.246e-04 | pi fwd/lat/th 0.050 0.050 0.022  kappa 90 98 34
+  [PASS] the PLAIN fit is inflated by the tail (the live defect, reproduced)
+  [PASS] mixture: k_long within 20 % despite the tail
+  [PASS] mixture: k_th_turn within 20 % despite the tail
+    clean data, mixture on: pi fwd 0.0024 (should stay near its 1 % prior or below)
+  [PASS] clean data: the outlier share does not grow
+
+5. a parked->moving variance STEP (5e-5 m^2/s while moving, no trend in speed)
+    no move term : k_long 1.958e-04 k_th_turn 4.297e-04
+    move term    : k_long 8.987e-05 k_th_turn 1.813e-04  mv fwd/lat/th 9.68e-05 1.01e-04 9.70e-06
+  [PASS] without it, the step is charged per metre (the live symptom)
+  [PASS] with it, k_long within 25 %
+  [PASS] and the step is recovered (fwd; 2v for a scan-side step, 30 %)
+
+3. parked only: nothing about the per-metre terms may be learnt
+    k_long 9.400e-05 k_th_turn 1.900e-04 (priors 9.4e-5, 1.9e-4)
+  [PASS] per-metre/radian stay at their priors
+  [PASS] s learnt from parked cycles alone
+
+ALL PASS (0 failures)
+[exit 0]

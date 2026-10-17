@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -116,7 +117,7 @@ void TableFitter::compute_object_observation(TableInstance& inst)
         const Eigen::Vector2f cen_xy{inst.obs_robot.x(), inst.obs_robot.y()};
         const auto bs = inst.ai2_belief.state();
         float box_yaw_body = bs.yaw;
-        if (const auto br = inner_eigen_->get_transformation_matrix(obs_robot_frame_, "room", 0); br.has_value())
+        if (const auto br = inner_eigen_->get_transformation_matrix(obs_robot_frame_, rc::room::current_room_frame(*G_), 0); br.has_value())
             box_yaw_body = bs.yaw + static_cast<float>(std::atan2(br.value().linear()(1, 0),
                                                                   br.value().linear()(0, 0)));
         inst.obs_robot_cov = rc::object_anchor::ray_anisotropic_cov(
@@ -145,13 +146,13 @@ void TableFitter::compute_chain_cov(TableInstance& inst)
     // room but its position is still conditional on the robot pose (camera→robot→room), so this applies.
     const auto& s = inst.model.state();
     const Mat::Vector3d centre(s.cx, s.cy, 0.0);   // table node origin = base on the floor (z=0)
-    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, "room", inst.last_mask_timestamp_ms);
+    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, rc::room::current_room_frame(*G_), inst.last_mask_timestamp_ms);
     if (not c_src.has_value())
         return;
     DSR::GaussianPoint3D gp;
     gp.mean = c_src.value();
     gp.covariance = DSR::Cov3d::Zero();
-    const auto g = gaussian_->transform_point("room", gp, chain_src_frame_, inst.last_mask_timestamp_ms);
+    const auto g = gaussian_->transform_point(rc::room::current_room_frame(*G_), gp, chain_src_frame_, inst.last_mask_timestamp_ms);
     if (not g.has_value())
         return;
     inst.chain_cov_xx = static_cast<float>(g->covariance(0, 0));

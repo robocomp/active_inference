@@ -49,6 +49,8 @@
 #include "controller_runtime_types.h"
 #include "controller_session.h"
 #include "controller_world_model.h"
+#include "chat_inbox.h"
+#include "controller_relative_motion.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
@@ -133,6 +135,30 @@ private:
 	bool startup_check_flag;
 	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api_;
 	ControllerWorldModel world_model_;
+	/// What run_mission_command decided. `kind` = "cross" | "stop" | "uncross" | "move" | "" (not understood / refused).
+	struct MissionResult
+	{
+		bool accepted = false;
+		std::string kind;
+		std::string door;     ///< cross: the door the passage was started through
+		std::string reason;   ///< refused: why, in words a person can act on
+		std::uint64_t motion_id = 0;   ///< move: RelativeMotion::View::id of the run started
+	};
+	MissionResult run_mission_command(const std::string &text, const char *source);
+	/// The Stop button's abort (mission, click target, route/plan/trace; base output disarmed). Control thread only.
+	void abort_all(const char *source);
+	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
+	rc::ChatInbox chat_inbox_;
+	rc::ChatInbox::Tracked chat_tracked_;
+	std::uint64_t chat_poll_ms_ = 0;
+	void service_chat_inbox();
+	// ── "move <m>" / "turn <deg>": short robot-relative motions (controller_relative_motion.h). Owns the base while
+	// active (compute() steps it BEFORE the planner); cancelled by Stop, a click, Run and a door passage. ──
+	rc::RelativeMotion relative_motion_;
+	/// One control cycle of the relative motion; false when none is active (compute() then plans as usual).
+	bool step_relative_motion(std::uint64_t now_ms);
+	/// Cancel a running relative motion (no-op otherwise), logging who superseded it.
+	void cancel_relative_motion(const char *why);
 	ControllerObstacleTracker obstacle_tracker_;
 	ControllerMotionCommander motion_commander_;
 	ControllerDisplay display_;

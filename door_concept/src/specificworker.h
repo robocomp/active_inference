@@ -187,11 +187,17 @@ private:
     // "the affordances are switched" looks like from outside. A door is a hole in a wall and outlives
     // the process, so its name must too: this table maps NAME ↔ APERTURE PLACE and is written to disk.
     // Identity only — no belief. A door coming back re-earns its geometry; it does not re-earn its name.
+    // ★KEYED BY ROOM (2026-10-13). xy is in THAT room's frame; rows from different rooms are different faces of
+    //   (possibly) the same doorway and must never be compared by place. The un-keyed table mixed room_1 and room_2
+    //   coordinates, grew to 14 rows for 3 doors and carried a 3.7e13 m row from a transform read mid-birth.
     struct DoorIdentity
     {
+        std::string     room;
         std::string     name;
         Eigen::Vector2f xy = Eigen::Vector2f::Zero();
     };
+    std::string current_room_name() const;
+    mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
     std::vector<DoorIdentity> identities_;
     void load_identities();                                            // once, at startup
     void save_identities() const;                                      // whole table, locale-independent
@@ -247,8 +253,36 @@ private:
     {
         std::uint64_t node_id   = 0;
         std::uint64_t source_id = 0;
+        // The source's leaf, taken while the source is alive (ltsm deletes it with its room BEFORE we adopt the
+        // mirror). Hinge point + opening direction in the DOOR NODE's own frame, which source and mirror share.
+        bool            has_leaf = false;
+        Eigen::Vector2f hinge_local{0.f, 0.f};
+        Eigen::Vector2f open_local{0.f, 0.f};
+        float           phi_est = 0.f, phi_sigma = 0.f;
+        std::vector<std::pair<float, float>> phi_curve;
+        int             matched_frames = 0;
+        // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
+        // (live rooms all hang from root, so root is the one frame two rooms share) and its attributes.
+        Eigen::Affine3d T_root_door = Eigen::Affine3d::Identity();
+        // The door's pose in every OTHER live room, refreshed while the door lives (room <- door, through the rooms'
+        // own chain). `root` moves with the robot, so T_root_door goes stale as the robot keeps driving between the
+        // crossing and ltsm's eviction (try41: recreated 0.43 m inside room_2, then removed by its own absence).
+        std::unordered_map<std::uint64_t, Eigen::Affine3d> T_in_room;
+        float width = 0.f, depth = 0.f, height = 0.f;
+        std::optional<float> open_prob, phi_rad;
+        std::string name;
     };
+    // Every fitted door's memo, refreshed each cycle; a door deleted with its room moves to lost_doors_ until the
+    // next room switch, which recreates the one the robot just went through when nothing else carried it across.
+    std::unordered_map<std::uint64_t, EntryMirror> door_memo_;
+    std::vector<EntryMirror> lost_doors_;
+    void remember_door(const rc::DoorInstance& inst);
+    std::optional<std::pair<std::uint64_t, EntryMirror>> recreate_lost_door(std::uint64_t new_room);
+    // Re-make door node `id` (under room `room_id`) as `name` when no live node holds that name; returns the new id,
+    // 0 when nothing was done. The doorway keeps one name from both rooms (release_room).
+    std::uint64_t adopt_doorway_name(std::uint64_t id, std::uint64_t room_id, const std::string& name);
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
+    std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     void step_entry_mirrors();
     // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
     // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The

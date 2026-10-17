@@ -499,6 +499,8 @@ BandIterations = 4        # warm-started incremental solve; 30 (the build value)
 # preview is not the only exposure — the deformed section then ADVANCES INTO THE PROJECTION, so e_y
 # steps as the robot reaches route the band has just moved.
 BandLead = 0.6            # m of route ahead of the robot left frozen  ★NEEDS A RESTART
+BandProximalSigmaM = 0.03   # 2026-10-09 (user): re-optimise the FIRST part of the spline against live obstacles; m the route may move per solve. 0 = old frozen lead
+BandClearanceWeight = 0.5  # 2026-10-10 (user): band-only obstacle repulsion (w_clear; build/smoothing keeps 1.0). Halved: the live-field push deformed the stretches between waypoints too much
 BandWindow = 4.0          # m of deformable window beyond the lead
 BandPeriodCycles = 1      # run every N cycles
 
@@ -522,7 +524,7 @@ AffordanceSwitchMargin = 0.5  # commitment hysteresis (nats): held affordance mu
 # what should happen when the pose belief has genuinely degraded. Inert when no object is competing,
 # so a lost robot in an empty room is unaffected. 1.0 restores the old behaviour.
 AffordanceRoomGainScale = 0.35
-MaxAdvSpeed = 0.7
+MaxAdvSpeed = 0.35   # 2026-10-09: was 0.7. With plain SLAM (mm pose) the pose-covariance limiter no longer holds speed down, and at 0.7 m/s the robot hit walls hard (WEDGE: 2.13 m commanded in 3 s). Revisit once collision handling is fixed.
 # Lateral-acceleration budget, m/s^2. Sets BOTH the curvature speed ceiling (v = sqrt(a_lat/kappa), so the
 # robot arrives at a corner already slow enough to follow it) and the route optimiser's curvature
 # normaliser. Lower = gentler corners and slower laps; it does not affect straight-line speed at all.

@@ -66,6 +66,21 @@ int main()
     expect("rule 3 never fires with two current edges",
            resolve_current_room(two_current, std::vector<RoomFact>{{9, true}}), std::nullopt);
 
+    // ── rule 2a (2026-10-11): a door crossing with no ltsm_agent ──────────────────────────────────────
+    using Rt = RoomFact::Rt;
+    expect("2a: crossing into a proto -> the proto (live RT), not the old room",
+           resolve_current_room(none, std::vector<RoomFact>{{5, false, Rt::Retired}, {9, true, Rt::Live}}), 9);
+    expect("2a: both promoted -> the live one (was ambiguous)",
+           resolve_current_room(none, std::vector<RoomFact>{{5, false, Rt::Retired}, {9, false, Rt::Live}}), 9);
+    expect("2a: a current edge still wins",
+           resolve_current_room(cur_at_7, std::vector<RoomFact>{{5, false, Rt::Retired}, {7, false, Rt::None}, {9, true, Rt::Live}}), 7);
+    expect("2a: nothing retired -> old behaviour (rule 2)",
+           resolve_current_room(none, std::vector<RoomFact>{{5, false, Rt::Live}, {9, true, Rt::Live}}), 5);
+    expect("2a: two live RTs -> abstains (rule 2 then sees two real rooms)",
+           resolve_current_room(none, std::vector<RoomFact>{{5, false, Rt::Retired}, {6, false, Rt::Live}, {9, true, Rt::Live}}), std::nullopt);
+    expect("2a: retired but no live RT yet -> rule 2",
+           resolve_current_room(none, std::vector<RoomFact>{{5, false, Rt::Retired}, {9, true, Rt::None}}), 5);
+
     std::printf("%s: %d failure(s)\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
 }

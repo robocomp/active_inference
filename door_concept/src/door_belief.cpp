@@ -590,6 +590,301 @@ DoorBelief::phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, f
 }
 
 
+// ─── phi_field_loglik: the same field density, restructured for a wide nuisance and tempered ──────
+// The density per ray is IDENTICAL to phi_field_likelihood's (test_door_phi_stability checks it to float
+// precision with beta forced to 1). What changes is (a) the cost, so the aperture slide can span +-w/2 at
+// 5 cm, and (b) the power on the joint log-likelihood — see FieldResult in the header for the model.
+// ★WHY IT IS FAST ENOUGH. The leaf changes the density of a ray only if it is met BEFORE the wall, so the
+// "wall with a hole, no leaf" density is computed once per (depth, slide) and the leaf adds a correction
+// only for the rays it actually intercepts. The ray–leaf slab test is done in the leaf's own axes, where
+// the nuisance moves the box by a scalar per axis: its direction terms are per (angle, ray), not per
+// (angle, depth, slide, ray).
+DoorBelief::FieldResult
+DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
+                             const FieldNuisance& nz) const
+{
+    FieldResult out;
+    if (nstep < 2 or rays.endpoints.empty())
+        return out;   // no rays ⇒ EMPTY = NOT MEASURED, never a vote for any angle
+
+    const float cap   = std::max(0.5f, rays.max_range_m);
+    const float sigma = std::max(0.01f, rays.robust_c_m);
+    const float w_u   = std::clamp(nz.w_unexp, 0.0f, 0.5f);
+    const float w_b   = std::clamp(nz.eps_beyond, 0.0f, 0.5f);
+    const float w_s   = std::max(0.0f, 1.0f - w_u - w_b);
+    const float inv_sqrt2pi_sig = 1.0f / (sigma * std::sqrt(2.0f * std::numbers::pi_v<float>));
+
+    // The per-ray density, exactly as phi_field_likelihood writes it. t_model: first modelled surface
+    // (wall or leaf), <= 0 if none; t_ap: where the ray leaves through the opening, <= 0 if it does not.
+    const auto log_density = [&](float t_model, float t_ap, float r) -> double
+    {
+        double p;
+        if (t_model > 0.0f and t_model < cap)
+        {
+            const float z = (r - t_model) / sigma;
+            p = static_cast<double>(w_s) * inv_sqrt2pi_sig * std::exp(-0.5f * z * z);
+            if (r < t_model) p += static_cast<double>(w_u) / std::max(1e-3f, t_model);
+            else             p += static_cast<double>(w_b) / std::max(1e-3f, cap - t_model);
+        }
+        else if (t_ap > 0.0f and t_ap < cap)
+        {
+            if (r >= t_ap) p = static_cast<double>(1.0f - w_u) / std::max(1e-3f, cap - t_ap);
+            else           p = static_cast<double>(w_u) / std::max(1e-3f, t_ap);
+        }
+        else
+            p = 1.0 / static_cast<double>(cap);
+        return std::log(std::max(1e-30, p));
+    };
+
+    // ── rays (stride-subsampled exactly as phi_field_likelihood does) ──
+    const std::size_t n_all  = rays.endpoints.size();
+    const std::size_t stride = nz.max_rays > 0 and n_all > static_cast<std::size_t>(nz.max_rays)
+                             ? (n_all + nz.max_rays - 1) / static_cast<std::size_t>(nz.max_rays) : 1;
+    std::vector<Eigen::Vector3f> U;
+    std::vector<float> Rr;
+    U.reserve(n_all / stride + 1); Rr.reserve(n_all / stride + 1);
+    for (std::size_t i = 0; i < n_all; i += stride)
+    {
+        const Eigen::Vector3f dir = rays.endpoints[i] - rays.origin;
+        const float rho = dir.norm();
+        if (rho < 1e-3f) continue;
+        U.push_back(dir / rho);
+        Rr.push_back(std::min(rho, cap - 1e-3f));   // a no-return reads as "at max range"
+    }
+    const int M = static_cast<int>(U.size());
+    out.n_rays = M;
+    if (M == 0)
+        return out;
+
+    const int dn = std::max(1, nz.depth_n), ln = std::max(1, nz.lat_n);
+    const auto grid = [](float lo, float hi, int n, int i)
+                      { return n <= 1 ? 0.5f * (lo + hi) : lo + (hi - lo) * static_cast<float>(i) / (n - 1); };
+    const int NN = dn * ln;
+
+    const door::Aperture ap0 = aperture_at(state_);
+    const Eigen::Vector2f n2 = ap0.across_u();
+    const Eigen::Vector2f uw = ap0.wall_u;
+    const Eigen::Vector3f n3(n2.x(), n2.y(), 0.0f);
+    const Eigen::Vector3f& o = rays.origin;
+
+    // ── the wall with its hole, per (depth, slide, ray): the effective wall hit and the base density ──
+    // Index: (di * ln + li) * M + i.
+    std::vector<float>  t_wall_eff(static_cast<std::size_t>(NN) * M, -1.0f);
+    std::vector<float>  t_ap_v(static_cast<std::size_t>(NN) * M, -1.0f);
+    std::vector<double> base(static_cast<std::size_t>(NN) * M, 0.0);
+    for (int di = 0; di < dn; ++di)
+    {
+        const float depth = grid(nz.depth_lo, nz.depth_hi, dn, di);
+        const Eigen::Vector2f wallO = ap0.wall_O + depth * n2;
+        const Eigen::Vector3f wallP(wallO.x(), wallO.y(), 0.0f);
+        for (int i = 0; i < M; ++i)
+        {
+            const Eigen::Vector3f& u = U[static_cast<std::size_t>(i)];
+            float t_plane = -1.0f, along = 0.0f, pz = 0.0f;
+            const float den = u.dot(n3);
+            if (std::abs(den) > 1e-6f)
+            {
+                const float t = (wallP - o).dot(n3) / den;
+                if (t > 0.0f)
+                {
+                    const Eigen::Vector3f P = o + t * u;
+                    t_plane = t;
+                    along   = (P.head<2>() - wallO).dot(uw);
+                    pz      = P.z();
+                }
+            }
+            for (int li = 0; li < ln; ++li)
+            {
+                const float lat = grid(nz.lat_lo, nz.lat_hi, ln, li);
+                const float s   = ap0.s + lat;
+                float t_wall = -1.0f, t_ap = -1.0f;
+                if (t_plane > 0.0f)
+                {
+                    const bool in_open = along >= s and along <= s + ap0.w
+                                     and pz >= ap0.floor_z and pz <= ap0.floor_z + ap0.h;
+                    if (in_open) t_ap = t_plane;
+                    else if (pz >= ap0.floor_z) t_wall = t_plane;
+                }
+                const std::size_t idx = static_cast<std::size_t>(di * ln + li) * M + i;
+                t_wall_eff[idx] = t_wall;
+                t_ap_v[idx]     = t_ap;
+                const double b  = log_density(t_wall, t_ap, Rr[static_cast<std::size_t>(i)]);
+                base[idx] = b;
+            }
+        }
+    }
+
+    // ── the leaf, per angle: a correction on the rays it intercepts before the wall ──
+    // In the leaf's own axes (ex, ey, ez) the nuisance moves the box by a scalar per axis:
+    //   e_a = a·(c_k − o) + depth (a·n) + lat (a·u_w),   f_a = a·u_i (independent of the nuisance).
+    struct LeafK { float half[3]; float exn, exu, eyn, eyu; float cz; Eigen::Vector2f ex, ey, c; };
+    std::vector<LeafK> leaves(static_cast<std::size_t>(nstep));
+    for (int k = 0; k < nstep; ++k)
+    {
+        const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / (nstep - 1);
+        door::LeafState lf = params_.leaf;
+        lf.phi = phi;
+        const door::LeafPose L = door::leaf_pose(ap0, lf);
+        LeafK& q = leaves[static_cast<std::size_t>(k)];
+        q.half[0] = L.half_w; q.half[1] = L.half_t; q.half[2] = L.half_h;
+        q.ex = L.ex; q.ey = L.ey; q.c = L.centre_xy; q.cz = L.centre_z;
+        q.exn = L.ex.dot(n2); q.exu = L.ex.dot(uw);
+        q.eyn = L.ey.dot(n2); q.eyu = L.ey.dot(uw);
+    }
+    // Slab entry, same semantics as ray_obb_entry (parallel-and-outside ⇒ miss; inside at t=0 ⇒ miss).
+    const auto slab = [](const float e[3], const float f[3], const float half[3]) -> float
+    {
+        float tmin = 0.0f, tmax = std::numeric_limits<float>::max();
+        for (int a = 0; a < 3; ++a)
+        {
+            if (std::abs(f[a]) > 1e-6f)
+            {
+                float t1 = (e[a] - half[a]) / f[a], t2 = (e[a] + half[a]) / f[a];
+                if (t1 > t2) std::swap(t1, t2);
+                tmin = std::max(tmin, t1);
+                tmax = std::min(tmax, t2);
+                if (tmin > tmax) return -1.0f;
+            }
+            else if (-e[a] - half[a] > 0.0f or -e[a] + half[a] < 0.0f)
+                return -1.0f;
+        }
+        return tmin > 0.0f ? tmin : -1.0f;
+    };
+    // Per angle: the leaf's offset from the sensor in its own axes (shared by every ray — one origin) and
+    // each ray's direction cosines on the leaf's in-plane axes.
+    std::vector<float> fx(static_cast<std::size_t>(M)), fy(static_cast<std::size_t>(M));
+    float ex0 = 0.0f, ey0 = 0.0f, ez0 = 0.0f;
+    const auto prepare = [&](int k)
+    {
+        const LeafK& q = leaves[static_cast<std::size_t>(k)];
+        const Eigen::Vector2f d = q.c - o.head<2>();
+        ex0 = q.ex.dot(d); ey0 = q.ey.dot(d); ez0 = q.cz - o.z();
+        for (int i = 0; i < M; ++i)
+        {
+            const Eigen::Vector3f& u = U[static_cast<std::size_t>(i)];
+            fx[static_cast<std::size_t>(i)] = q.ex.x() * u.x() + q.ex.y() * u.y();
+            fy[static_cast<std::size_t>(i)] = q.ey.x() * u.x() + q.ey.y() * u.y();
+        }
+    };
+    // Density of ray i under (k, di, li): the leaf's correction if it intercepts the ray before the wall,
+    // otherwise the wall-with-a-hole density computed once above.
+    const auto ray_term = [&](int k, int di, int li, int i, float depth, float lat) -> double
+    {
+        const LeafK& q = leaves[static_cast<std::size_t>(k)];
+        const std::size_t si = static_cast<std::size_t>(i);
+        const float e[3] = {ex0 + depth * q.exn + lat * q.exu,
+                            ey0 + depth * q.eyn + lat * q.eyu,
+                            ez0};
+        const float f[3] = {fx[si], fy[si], U[si].z()};
+        const float t_leaf = slab(e, f, q.half);
+        const std::size_t idx = static_cast<std::size_t>(di * ln + li) * M + si;
+        const float t_wall = t_wall_eff[idx];
+        if (t_leaf > 0.0f and (t_wall <= 0.0f or t_leaf < t_wall))
+            return log_density(t_leaf, t_ap_v[idx], Rr[si]);
+        return base[idx];
+    };
+
+    // The slide's log-prior per grid cell (normalised over the grid): flat unless lat_sigma says where the aperture is.
+    std::vector<double> lprior(static_cast<std::size_t>(ln), 0.0);
+    if (nz.lat_sigma > 0.0f)
+    {
+        double z = -std::numeric_limits<double>::infinity();
+        for (int li = 0; li < ln; ++li)
+        {
+            const double r = grid(nz.lat_lo, nz.lat_hi, ln, li) / nz.lat_sigma;
+            lprior[static_cast<std::size_t>(li)] = -0.5 * r * r;
+            z = std::max(z, lprior[static_cast<std::size_t>(li)]);
+        }
+        double acc = 0.0;
+        for (const double v : lprior) acc += std::exp(v - z);
+        const double lz = z + std::log(acc / static_cast<double>(ln));   // so a flat prior is exactly 0
+        for (double& v : lprior) v -= lz;
+    }
+
+    std::vector<double> ll(static_cast<std::size_t>(nstep) * NN, 0.0);
+    double best = -std::numeric_limits<double>::infinity();
+    int bd = 0, bl = 0;
+    for (int k = 0; k < nstep; ++k)
+    {
+        prepare(k);
+        for (int di = 0; di < dn; ++di)
+        {
+            const float depth = grid(nz.depth_lo, nz.depth_hi, dn, di);
+            for (int li = 0; li < ln; ++li)
+            {
+                const float lat = grid(nz.lat_lo, nz.lat_hi, ln, li);
+                double acc = 0.0;
+                for (int i = 0; i < M; ++i)
+                    acc += ray_term(k, di, li, i, depth, lat);
+                ll[static_cast<std::size_t>(k) * NN + di * ln + li] = acc;
+                if (acc + lprior[static_cast<std::size_t>(li)] > best)
+                { best = acc + lprior[static_cast<std::size_t>(li)]; bd = di; bl = li; }
+            }
+        }
+    }
+
+    // ── how many rays discriminate, at the MAP nuisance ──
+    {
+        const float depth = grid(nz.depth_lo, nz.depth_hi, dn, bd);
+        const float lat   = grid(nz.lat_lo, nz.lat_hi, ln, bl);
+        std::vector<double> vmin(static_cast<std::size_t>(M), std::numeric_limits<double>::infinity());
+        std::vector<double> vmax(static_cast<std::size_t>(M), -std::numeric_limits<double>::infinity());
+        for (int k = 0; k < nstep; ++k)
+        {
+            prepare(k);
+            for (int i = 0; i < M; ++i)
+            {
+                const double v = ray_term(k, bd, bl, i, depth, lat);
+                vmin[static_cast<std::size_t>(i)] = std::min(vmin[static_cast<std::size_t>(i)], v);
+                vmax[static_cast<std::size_t>(i)] = std::max(vmax[static_cast<std::size_t>(i)], v);
+            }
+        }
+        double n_inf = 0.0;
+        for (int i = 0; i < M; ++i)
+            n_inf += 1.0 - std::exp(-(vmax[static_cast<std::size_t>(i)] - vmin[static_cast<std::size_t>(i)]));
+        out.n_inf = static_cast<float>(n_inf);
+        out.lat_map = lat;
+        out.depth_map = depth;
+    }
+
+    // ── the common mode: rho from the nuisance grid's own quantisation, unless overridden ──
+    float rho = nz.ray_icc;
+    if (rho < 0.0f)
+    {
+        const float dstep = dn > 1 ? (nz.depth_hi - nz.depth_lo) / static_cast<float>(dn - 1) : 0.0f;
+        const float lstep = ln > 1 ? (nz.lat_hi - nz.lat_lo) / static_cast<float>(ln - 1) : 0.0f;
+        const float sc2 = (dstep * dstep + lstep * lstep) / 12.0f;
+        rho = sc2 / (sc2 + sigma * sigma);
+    }
+    out.rho  = rho;
+    out.beta = 1.0f / (1.0f + std::max(0.0f, out.n_inf - 1.0f) * rho);
+    const double beta = out.beta;
+
+    // ── power likelihood, then marginalise the nuisances (log-mean-exp, uniform prior over the grid) ──
+    std::vector<double> m(static_cast<std::size_t>(nstep), -std::numeric_limits<double>::infinity());
+    double mmax = -std::numeric_limits<double>::infinity();
+    for (int k = 0; k < nstep; ++k)
+    {
+        const double* v = &ll[static_cast<std::size_t>(k) * NN];
+        double b = -std::numeric_limits<double>::infinity();
+        // The slide prior is NOT tempered: beta discounts correlated EVIDENCE, the prior is not evidence.
+        const auto lp = [&](int j) { return lprior[static_cast<std::size_t>(j % ln)]; };
+        for (int j = 0; j < NN; ++j) b = std::max(b, beta * v[j] + lp(j));
+        double acc = 0.0;
+        for (int j = 0; j < NN; ++j) acc += std::exp(beta * v[j] + lp(j) - b);
+        m[static_cast<std::size_t>(k)] = b + std::log(std::max(1e-300, acc / static_cast<double>(NN)));
+        mmax = std::max(mmax, m[static_cast<std::size_t>(k)]);
+    }
+    out.loglik.reserve(static_cast<std::size_t>(nstep));
+    for (int k = 0; k < nstep; ++k)
+    {
+        const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / (nstep - 1);
+        out.loglik.emplace_back(phi, static_cast<float>(m[static_cast<std::size_t>(k)] - mmax));
+    }
+    return out;
+}
+
+
 DoorBelief::RayExplain DoorBelief::phi_ray_explain(const rc::ai::LidarRays& rays, float phi, float tol_m) const
 {
     RayExplain out;

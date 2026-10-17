@@ -1,4 +1,5 @@
 #include "controller_display.h"
+#include "../../common/window_geometry/window_geometry_saver.h"
 
 #include <chrono>
 #include <print>
@@ -11,12 +12,16 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QTimer>
+#include <QEvent>
 
 namespace
 {
 constexpr auto kWinSettingsOrg = "RoboComp";
 constexpr auto kWinSettingsApp = "controller";
 constexpr auto kWinSettingsKey = "ControllerPlannerWindow_geometry";
+constexpr auto kAffordanceSettingsKey = "ControllerAffordancePanel_geometry";
+
 }  // namespace
 
 void ControllerDisplay::restore_window_geometry()
@@ -52,6 +57,7 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     custom_widget_->setWindowTitle(QStringLiteral("controller — planner"));
     restore_window_geometry();
     custom_widget_->show();
+    new rc::ui::GeometrySaver(custom_widget_.get(), [this] { save_window_geometry(); });   // owned by the window
 
     // No axis from the base viewer: it is pinned to the centre of this initial view rect, not to the
     // room. The only axis drawn is the one on the room polygon centroid (see Viewer2D::draw_room_polygon).
@@ -107,6 +113,19 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     // name in the toolbar shows it. It is a QDialog with the Tool flag, so it floats over the 2D view
     // without taking focus from it — this is meant to be watched WHILE driving.
     affordance_panel_ = std::make_unique<rc::AffordancePanel>(custom_widget_.get());
+    // Its size/position persists like the planner window's (it is hidden until clicked, so restoring now
+    // is what the first show uses).
+    {
+        const QByteArray geom = QSettings(kWinSettingsOrg, kWinSettingsApp).value(kAffordanceSettingsKey).toByteArray();
+        if (not geom.isEmpty())
+            affordance_panel_->restoreGeometry(geom);
+        new rc::ui::GeometrySaver(affordance_panel_.get(), [panel = affordance_panel_.get()]
+        {
+            QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+            settings.setValue(kAffordanceSettingsKey, panel->saveGeometry());
+            settings.sync();
+        });
+    }
     // The button runs on the GUI thread; the session it acts on lives on the control thread. The
     // callback the worker installs is an enqueue, never a direct call — same rule as every other
     // control the panels own.
@@ -119,6 +138,8 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
         affordance_panel_visible_.store(affordance_panel_->isVisible(), std::memory_order_relaxed);
     });
     custom_widget_->attach_mission_panel(mission_panel_.get());
+    door_passage_bar_ = std::make_unique<rc::DoorPassageBar>(custom_widget_.get(), callbacks.door_passage);
+    custom_widget_->attach_door_passage_bar(door_passage_bar_.get());
 
 }
 
@@ -143,6 +164,14 @@ bool ControllerDisplay::mission_recording() const
 
 bool ControllerDisplay::confirm_mission_supersede()
 { return mission_panel_ && mission_panel_->confirm_supersede(); }
+
+void ControllerDisplay::set_door_passage(const rc::DoorPassageBar::View &view,
+                                         const std::vector<std::vector<Eigen::Vector2f>> &passages)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.door_passage_view = view;
+    snapshot_.door_passages = passages;
+}
 
 void ControllerDisplay::set_mission_state(const rc::MissionPanel::View &view,
                                           const std::vector<Eigen::Vector2f> &waypoints,
@@ -417,6 +446,7 @@ void ControllerDisplay::present()
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
+    if (door_passage_bar_) door_passage_bar_->apply(snap.door_passage_view);
     if (mission_panel_)
     {
         if (snap.mission_list_pending)
@@ -590,6 +620,7 @@ void ControllerDisplay::present()
         display_path = snap.current_plan->room_path;
 
     viewer_2d_->draw_room_polygon(snap.room_polygon);
+    viewer_2d_->draw_passages(snap.door_passages);
     viewer_2d_->set_lidar_draw_correction(snap.lidar_correction.value_or(Eigen::Affine2f::Identity()));
     viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
     viewer_2d_->draw_path({

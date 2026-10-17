@@ -143,75 +143,18 @@ Eigen::Vector3f CameraIngestor::ray_from_pixel(double u, double v) const
 
 void CameraIngestor::start()
 {
-    if (running_.exchange(true)) return;      // idempotent
-    thread_ = std::thread([this]
-    {
-        // Name the thread so a per-thread CPU sample (/proc/<pid>/task/*/stat) attributes itself.
-        // There is one ingestor per camera and they cost different amounts, so carry the node name.
-        const auto tname = ("cam:" + camera_node_).substr(0, 15);
-        pthread_setname_np(pthread_self(), tname.c_str());
-        ingest_loop();
-    });
+    if (hub_) return;                         // idempotent
+    hub_ = CameraStreamHub::acquire(G_, camera_node_);
+    if (not hub_) return;
+    hub_id_ = hub_->add_consumer("imgedge", [this](const CameraFrameView& f) { on_frame(f); });
 }
 
 void CameraIngestor::stop()
 {
-    if (not running_.exchange(false)) return;
-    wake_cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
-    sub_.reset();
-    sub360_.reset();
-}
-
-void CameraIngestor::ingest_loop()
-{
-    // Tight drain (mirrors CameraVisualizer::ingest_loop / LidarIngestor::ingest_loop): keep the
-    // RELIABLE reader's SHM pool empty, or the producer's loan_sample() eventually fails and it
-    // silently stops publishing, freezing every other consumer on the plane.
-    while (running_.load(std::memory_order_acquire))
-    {
-        if (ingest_pump()) continue;
-        std::unique_lock<std::mutex> lk(wake_mtx_);
-        wake_cv_.wait_for(lk, std::chrono::milliseconds(5),
-                          [this] { return not running_.load(std::memory_order_acquire); });
-    }
-}
-
-bool CameraIngestor::try_discover()
-{
-    if (sub_ or sub360_ or not G_) return false;
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_discovery_ < std::chrono::seconds(1)) return false;   // self-throttle
-    last_discovery_ = now;
-
-    // ── Which stream, and therefore which READER TYPE, is the producer's statement ────────────────
-    // Descriptor-driven: domain + topic come from the media_descriptor JSON the PRODUCER authored on
-    // the node, never from a config entry (CLAUDE.md). The stream KEY is read from the same place,
-    // for the same reason — the ZED advertises {"rgb","depth"} and the Ricoh advertises {"rgb360"},
-    // and those two keys carry DIFFERENT DDS TYPES (ImageFrame vs the ~5.5 MB Image360Frame).
-    //
-    // Asking the descriptor first also keeps the log clean: the make_*_from_graph factories print to
-    // stderr on a miss, so calling one speculatively once a second is a 1 Hz error stream for the
-    // life of the run. Here a camera whose descriptor has not been published yet is simply not ready.
-    const auto desc = rc::media::descriptor_from_graph(*G_, camera_node_);
-    if (not desc.has_value()) return false;         // node/descriptor not up yet — retry next second
-
-    if (desc->streams.contains("rgb360"))
-        sub360_ = rc::media::make_image360_subscriber_from_graph(*G_, camera_node_, "rgb360");
-    else if (desc->streams.contains("rgb"))
-        sub_ = rc::media::make_image_subscriber_from_graph(*G_, camera_node_, "rgb");
-    else if (not no_stream_warned_)
-    {
-        // ONCE. A camera node that publishes only depth (or only a stream key nobody here knows) is
-        // a real, permanent condition and it must say so — but exactly one line, not one per second.
-        no_stream_warned_ = true;
-        std::string keys;
-        for (const auto& [k, v] : desc->streams) { if (not keys.empty()) keys += ", "; keys += k; }
-        qWarning() << "[imgedge] node" << QString::fromStdString(camera_node_)
-                   << "advertises no image stream this subsystem can read (has:"
-                   << QString::fromStdString(keys) << ") — the RGB edge term will stay silent";
-    }
-    return sub_ != nullptr or sub360_ != nullptr;
+    if (not hub_) return;
+    hub_->remove_consumer(hub_id_);           // barrier: no on_frame() in flight after this
+    hub_id_ = -1;
+    hub_.reset();                             // last holder => the hub joins its thread + closes the reader
 }
 
 int CameraIngestor::probe_depth(const std::vector<Eigen::Vector2f>& uv, int patch_radius,
@@ -333,67 +276,51 @@ bool CameraIngestor::convert_due(std::int64_t stamp_ms) noexcept
     return true;
 }
 
-bool CameraIngestor::ingest_pump()
+void CameraIngestor::on_frame(const CameraFrameView& f)
 {
-    if (not sub_ and not sub360_) { try_discover(); return false; }
+    // Convert to grey HERE, on the hub thread, inside the loan: the boundary payload becomes a third
+    // the size and the localizer never has to know about channel order. Both stream kinds land in
+    // absorb_gray(), so the two camera kinds cannot drift apart in how their frames are measured.
+    // Returning early still ENDS THE LOAN (the hub's poll releases it), so a throttled frame costs
+    // nothing — and the throttle is this consumer's alone: it never rate-limits the viewer.
+    const int w = f.width, h = f.height;
+    if (w <= 0 or h <= 0 or f.data == nullptr) return;
+    const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
 
-    // Convert to grey HERE, on the ingest thread: the boundary payload becomes a third the size and
-    // the localizer never has to know about channel order. Both readers land in absorb_gray(), so
-    // the two camera kinds cannot drift apart in how their frames are measured.
-    if (sub360_)
+    if (f.is360)
     {
-        const int delivered = sub360_->poll([this](const rc::media::Image360Frame& f, std::int64_t)
-        {
-            const int w = static_cast<int>(f.width());
-            const int h = static_cast<int>(f.height());
-            if (w <= 0 or h <= 0) return;
-            const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-            if (f.size() < npix * 3) return;
-            // Returning here still ENDS THE LOAN, so the pool drains exactly as before — only the
-            // ~5.5 MB grey conversion is skipped.
-            if (not convert_due(f.stamp_ms())) return;
-            // ⚠ The 360 format enum is its OWN numbering — IMG360_FORMAT_BGR8 == 0 is the producer
-            //   default, whereas the plain-image enum numbers them differently. Comparing an
-            //   Image360Frame's format against rc::media::FORMAT_BGR8 would compile and be wrong.
-            std::vector<std::uint8_t> gray;
-            rc::img::gray_from_rgb8(f.data().data(), w, h,
-                                    f.format() == rc::media::IMG360_FORMAT_BGR8, gray);
-            absorb_gray(std::move(gray), w, h, f.stamp_ms());
-        });
-        return delivered > 0;
+        if (f.size < npix * 3) return;
+        if (not convert_due(f.stamp_ms)) return;
+        // ⚠ The 360 format enum is its OWN numbering — IMG360_FORMAT_BGR8 == 0 is the producer
+        //   default, whereas the plain-image enum numbers them differently. Comparing an
+        //   Image360Frame's format against rc::media::FORMAT_BGR8 would compile and be wrong.
+        std::vector<std::uint8_t> gray;
+        rc::img::gray_from_rgb8(f.data, w, h, f.format == rc::media::IMG360_FORMAT_BGR8, gray);
+        absorb_gray(std::move(gray), w, h, f.stamp_ms);
+        return;
     }
 
-    const int delivered = sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+    if (not convert_due(f.stamp_ms)) return;   // loan still released; conversion skipped
+    std::vector<std::uint8_t> gray;
+    switch (f.format)
     {
-        const int w = static_cast<int>(f.width());
-        const int h = static_cast<int>(f.height());
-        if (w <= 0 or h <= 0) return;
-        const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-        if (not convert_due(f.stamp_ms())) return;   // loan still released; conversion skipped
-
-        std::vector<std::uint8_t> gray;
-        switch (f.format())
+        case rc::media::FORMAT_RGB8:
+        case rc::media::FORMAT_BGR8:
         {
-            case rc::media::FORMAT_RGB8:
-            case rc::media::FORMAT_BGR8:
-            {
-                if (f.size() < npix * 3) return;
-                rc::img::gray_from_rgb8(f.data().data(), w, h,
-                                        f.format() == rc::media::FORMAT_BGR8, gray);
-                break;
-            }
-            case rc::media::FORMAT_GRAY8:
-            {
-                if (f.size() < npix) return;
-                gray.resize(npix);
-                std::memcpy(gray.data(), f.data().data(), npix);
-                break;
-            }
-            default: return;      // depth / unknown are not consumed here
+            if (f.size < npix * 3) return;
+            rc::img::gray_from_rgb8(f.data, w, h, f.format == rc::media::FORMAT_BGR8, gray);
+            break;
         }
-        absorb_gray(std::move(gray), w, h, f.stamp_ms());
-    });
-    return delivered > 0;
+        case rc::media::FORMAT_GRAY8:
+        {
+            if (f.size < npix) return;
+            gray.resize(npix);
+            std::memcpy(gray.data(), f.data, npix);
+            break;
+        }
+        default: return;      // depth / unknown are not consumed here
+    }
+    absorb_gray(std::move(gray), w, h, f.stamp_ms);
 }
 
 bool CameraIngestor::take_latest(GrayFrame& out)

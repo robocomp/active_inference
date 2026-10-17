@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "controller_obstacle_model.h"
@@ -27,6 +28,9 @@ class ControllerObstacleTracker
                             DSR::InnerEigenAPI *inner_eigen_api,
                             const ControllerGraphState *graph_state);
         void set_graph_layout_callback(std::function<void()> callback);
+        /// Graph nodes, by name, that are NOT obstacles right now (the door being crossed). Empty = none.
+        void set_exempt_names(std::unordered_set<std::string> names) { exempt_names_ = std::move(names); }
+        const std::unordered_set<std::string> &exempt_names() const { return exempt_names_; }
 
         // The ONE registered room cloud: the ESDF, the obstacle set, blockage detection and the
         // viewer all read this. There used to be a second, display-only buffer holding a fresher
@@ -177,6 +181,7 @@ class ControllerObstacleTracker
                                            rc::TrajectoryController &path_controller);
 
     private:
+        std::unordered_set<std::string> exempt_names_;   // set_exempt_names
         static constexpr int kRememberedEdgeCount = 4;
         static constexpr int kRememberedSlotsPerEdge = 8;
         static constexpr int kRememberedPointsPerSlot = 1;

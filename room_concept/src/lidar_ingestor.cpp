@@ -191,23 +191,19 @@ bool LidarIngestor::pump()
             // reader comes up later than helios, so gate the trigger on its warm-up (fallback 3× so a
             // missing bpearl can't stall). Source self-filter already removed the robot base/base-plate,
             // so a small near-cut is enough; source floor cut is off, so the real floor is present.
-            if (not geom_bpearl_reader_ and G_)
-                geom_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-                    G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
-            if (geom_bpearl_reader_)
-                if (auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
-                    bp.has_value() and not bp->points.empty())
+            if (const auto* bp = bpearl_newest(); bp != nullptr and bp->stamp_ms > last_bp_geom_stamp_)
+            {
+                last_bp_geom_stamp_ = bp->stamp_ms;
+                ++geom_bpearl_sweeps_;
+                const bool inject = not rc::lidar_mount::is_identity(inject_bpearl_);   // sim-only planted error
+                for (auto p : bp->points)        // BY VALUE: the cache is shared with the other consumers
                 {
-                    ++geom_bpearl_sweeps_;
-                    if (not rc::lidar_mount::is_identity(inject_bpearl_))   // sim-only planted bpearl error
-                        for (auto& p : bp->points) p = rc::lidar_mount::apply(inject_bpearl_, s_bpearl_, p);
-                    for (const auto& p : bp->points)
-                    {
-                        if (p.head<2>().norm() < 0.10f) continue;
-                        const int b = static_cast<int>(std::floor((p.z() - GEOM_Z_LO) / GEOM_BIN));
-                        if (b >= 0 and b < static_cast<int>(geom_hist_bpearl_.size())) ++geom_hist_bpearl_[b];
-                    }
+                    if (inject) p = rc::lidar_mount::apply(inject_bpearl_, s_bpearl_, p);
+                    if (p.head<2>().norm() < 0.10f) continue;
+                    const int b = static_cast<int>(std::floor((p.z() - GEOM_Z_LO) / GEOM_BIN));
+                    if (b >= 0 and b < static_cast<int>(geom_hist_bpearl_.size())) ++geom_hist_bpearl_[b];
                 }
+            }
             accumulate_geometry_sample(sweep->points);
 
             const int need = std::max(1, params_->LIDAR_STARTUP_CHECK_SWEEPS);
@@ -653,8 +649,13 @@ void LidarIngestor::run_startup_geometry_check()
 
     // Drop the one-shot bpearl probe histogram; the reader too unless the r2 mount factors keep reading the
     // bpearl (the PERMANENT throttled reader is this same one, plan 2026-10-08 Task 5).
-    if (not params_->MOUNT_FACTORS)
-        geom_bpearl_reader_.reset();
+    // ★ A reader nobody polls must not stay alive: it is RELIABLE, so an undrained pool backs up the
+    //   producer's loan_sample(). The shared reader stays only if a later consumer will keep polling it.
+    if (not params_->MOUNT_FACTORS and not params_->STARTUP_PROTO_ENABLED)
+    {
+        bpearl_reader_.reset();
+        bpearl_latest_.reset();
+    }
     std::vector<int>().swap(geom_hist_bpearl_);
 }
 
@@ -700,6 +701,18 @@ bool LidarIngestor::walls_at(std::int64_t stamp_ms, std::vector<rc::mountf::Vert
     return true;
 }
 
+const rc::media::LidarSweep* LidarIngestor::bpearl_newest()
+{
+    if (not bpearl_reader_ and G_)
+        bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+            G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
+    if (bpearl_reader_)
+        if (auto bp = bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
+            bp.has_value() and not bp->points.empty())
+            bpearl_latest_ = std::move(*bp);
+    return bpearl_latest_.has_value() ? &*bpearl_latest_ : nullptr;
+}
+
 void LidarIngestor::low_obstacle_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms)
 {
     if (not room_concept_) return;
@@ -716,12 +729,7 @@ void LidarIngestor::low_obstacle_step(const std::vector<Eigen::Vector3f>& helios
     RoomConcept::LowObstacles h{.stamp_ms = helios_stamp_ms, .xy = {}};
     for (const auto& p : helios_full) if (keep(p)) h.xy.push_back(p.head<2>());
     if (not h.xy.empty()) room_concept_->post_low_obstacles(std::move(h));
-    if (not low_bpearl_reader_ and G_)
-        low_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-            G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
-    if (low_bpearl_reader_)
-        if (auto bp = low_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
-            bp.has_value() and not bp->points.empty() and bp->stamp_ms > last_bp_low_stamp_)
+    if (const auto* bp = bpearl_newest(); bp != nullptr and bp->stamp_ms > last_bp_low_stamp_)
         {
             last_bp_low_stamp_ = bp->stamp_ms;
             RoomConcept::LowObstacles b{.stamp_ms = bp->stamp_ms, .xy = {}};
@@ -759,13 +767,10 @@ void LidarIngestor::mount_factor_step(const std::vector<Eigen::Vector3f>& helios
     //     startup check's, kept alive; while that check is still running it owns the reader.
     if (geom_check_done_ or not params_->LIDAR_STARTUP_GEOMETRY_CHECK)
     {
-        if (not geom_bpearl_reader_ and G_)
-            geom_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-                G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
-        if (geom_bpearl_reader_)
-            if (auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
-                bp.has_value() and not bp->points.empty() and bp->stamp_ms > last_bp_mount_stamp_)
+        if (const auto* bp_shared = bpearl_newest(); bp_shared != nullptr and bp_shared->stamp_ms > last_bp_mount_stamp_)
             {
+                // A private COPY: the planted error below mutates the points, and the cache is shared.
+                std::optional<rc::media::LidarSweep> bp{*bp_shared};
                 last_bp_mount_stamp_ = bp->stamp_ms;
                 if (not rc::lidar_mount::is_identity(inject_bpearl_))
                     for (auto& p : bp->points) p = rc::lidar_mount::apply(inject_bpearl_, s_bpearl_, p);

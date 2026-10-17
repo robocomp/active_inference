@@ -176,6 +176,12 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
             "RGB contour check: score the door's own projected silhouette against image edges (common/contour_edge)");
     out.contour_depth_check      = getb("DoorConcept.ContourDepthCheck", out.contour_depth_check,
             "The ZED-depth test asks the absolute question the RGB gradient cannot: is there a surface at the distance the belief predicts, with space receding…");
+    out.frame_contour_check      = getb("DoorConcept.FrameContourCheck", out.frame_contour_check,
+            "Doorway-FRAME existence evidence: score the aperture's jambs + lintel (which do not move when the leaf swings) against the RGB image, relative to the frame slid along the wall");
+    out.frame_depth_check        = getb("DoorConcept.FrameDepthCheck", out.frame_depth_check,
+            "Depth half of the frame channel: does the hole recede behind the wall across each jamb/lintel edge (relative, so blind to a common-mode ZED bias)");
+    out.frame_casing_m           = getf("DoorConcept.FrameCasingM", out.frame_casing_m,
+            "Width of the casing (frame boards) lining a doorway: the frame's depth half reads the hole side past it, since the casing stands proud of the wall");
     out.door_control_endpoint    = gets("DoorConcept.DoorControlEndpoint", out.door_control_endpoint,
             "RoboCompDoorControl provider endpoint");
 
@@ -224,6 +230,10 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
             "Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls");
     out.exist_out_of_room_gain   = getf("Existence.OutOfRoomGain", 1.5f,
             "Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)");
+    out.exist_wall_thickness_m   = getf("Existence.WallThicknessM", 0.20f,
+            "Existence.WallThicknessM — wall thickness T: an aperture lies in the band [0,T] beyond the room-side polygon face");
+    out.exist_boundary_sigma_m   = getf("Existence.BoundarySigmaM", 0.10f,
+            "Existence.BoundarySigmaM — σ of the door's registration against the room polygon face (wall-band prior + leaf-beyond weight)");
     out.exist_min_height_prior   = getb("Existence.MinHeightPrior", true,
             "Existence.MinHeightPrior");
     out.exist_min_height_m       = getf("Existence.MinHeightM", 1.80f,
@@ -361,7 +371,9 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
         pg.autonomous_actuation  = getb("DoorAffordance.AutonomousActuation", pg.autonomous_actuation,
                 "★MAY THIS AGENT ASK A PROVIDER TO MOVE A DOOR WITHOUT A HUMAN? The `open` affordance's whole point is that it can, and the consumer's claim is the…");
         pg.actuation_provider_id = gets("DoorAffordance.ActuationProviderId", pg.actuation_provider_id,
-                "Which door the PROVIDER should move, by its own advertised id");
+                "FALLBACK provider door id, used only when no world frame resolves to match our door by place");
+        pg.actuation_match_max_m = getf("DoorAffordance.ActuationMatchMaxM", pg.actuation_match_max_m,
+                "max distance (m, provider world) from our door to the nearest advertised door to accept the match");
 
         // ★REFUSE AN INVERTED SCHMITT BAND AT LOAD. withdraw_prob >= offer_prob is not a band, it is a
         // single line with the two decisions on the wrong sides of it: the affordance would be offered and

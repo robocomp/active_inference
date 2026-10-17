@@ -390,7 +390,7 @@ void SpecificWorker::step_epistemic(rc::HumanInstance& inst)
     Eigen::Vector2f camera_xy(std::numeric_limits<float>::quiet_NaN(),
                               std::numeric_limits<float>::quiet_NaN());
     if (inner_eigen_)
-        if (const auto c = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "zed", 0);
+        if (const auto c = inner_eigen_->transform(rc::room::current_room_frame(*G), Mat::Vector3d(0.0, 0.0, 0.0), "zed", 0);
             c.has_value())
             camera_xy = Eigen::Vector2f(static_cast<float>(c->x()), static_cast<float>(c->y()));
 

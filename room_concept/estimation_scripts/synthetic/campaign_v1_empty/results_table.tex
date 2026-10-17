@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{Room-layout estimation in ten synthetic Manhattan rooms (empty, one run each, random start $\geq$0.8 m from walls). $|V|_{gt}$, $A$: ground-truth vertices and area. $t_p$ = 0 means the first 360$^\circ$ scan left no standpoint worth visiting.}
+\label{tab:estimation-synthetic}
+\begin{tabular}{r r r r r r r r r}
+\toprule
+room & $|V|_{gt}$ & $A$ (m$^2$) & $t_p$ (s) & $e$ (mm) & IoU$_p$ & IoU$_r$ & $|V|_p$ & $|V|_r$ \\
+\midrule
+0 & 8 & 36.7 & 0 & 3 & 0.980 & 0.979 & 6 & 6 \\
+1 & 12 & 26.9 & 0 & 1 & 0.987 & 0.989 & 12 & 12 \\
+2 & 16 & 36.4 & 0 & 10 & 0.952 & 0.985 & 14 & 38 \\
+3 & 20 & 47.5 & 0 & 4 & 0.985 & 0.988 & 20 & 20 \\
+4 & 24 & 70.7 & 31 & 4 & 0.985 & 0.989 & 24 & 24 \\
+5 & 28 & 87.6 & 38 & 15 & 0.985 & 0.989 & 28 & 28 \\
+6 & 12 & 24.6 & 0 & 4 & 0.987 & 0.988 & 12 & 12 \\
+7 & 16 & 57.4 & 28 & 4 & 0.982 & 0.989 & 14 & 16 \\
+8 & 20 & 64.3 & 0 & 10 & 0.990 & 0.993 & 20 & 20 \\
+9 & 24 & 49.1 & 27 & 4 & 0.976 & 0.983 & 24 & 24 \\
+\midrule
+median & & & 0 & 4 & 0.985 & 0.988 & & \\
+worst & & & 38 & 15 & 0.952 & 0.979 & & \\
+\bottomrule
+\end{tabular}
+\end{table}

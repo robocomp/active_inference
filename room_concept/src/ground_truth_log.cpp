@@ -237,7 +237,7 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
                    "sur_scored,sur_kl,sur_mismatch,sur_expected,sur_info,"
                    "calib_applied,sur_open,sur_c_fwd,sur_c_lat,sur_c_th,sur_pp_fwd,sur_pp_lat,sur_pp_th,"
                    "sur_pq_fwd,sur_pq_lat,sur_pq_th,preint,noise_prop,noise_learn,vc_k_long,vc_k_lat,vc_k_lat_turn,vc_k_th_turn,vc_k_t_trans,vc_k_t_rot,vc_rho_fwd,vc_rho_lat,vc_rho_th,vc_trained,gt_x_world,gt_y_world,sur_floor,slot_appended,drift_n,drift_fwd_m,drift_lat_m,drift_th_rad,drift_th_s,se_fwd_m,se_lat_m,se_th_rad,"
-                   "v_lever_x,v_lever_y,s_lever_x,s_lever_y,pf_sigma_b,pf_len,pf_xx,pf_tt\n";
+                   "v_lever_x,v_lever_y,s_lever_x,s_lever_y,pf_sigma_b,pf_len,pf_xx,pf_tt,pf_sigma_b_loc,pf_pi_out\n";
         qInfo() << "[heading] logging every cycle to" << path;
     }
     if (not hd_csv_.is_open())
@@ -304,7 +304,9 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
             << ',' << res.calib_sigma[rc::calib::P_LEVER_X] << ',' << res.calib_sigma[rc::calib::P_LEVER_Y]
             // the pose-field bias term (pose_field_bias.h): its size, length, and what it adds (xx, θθ)
             << ',' << res.surprise.pf_sigma_b << ',' << res.surprise.pf_len << ',' << res.surprise.pf_xx
-            << ',' << res.surprise.pf_tt << '\n';
+            << ',' << res.surprise.pf_tt
+            // the LOCAL amplitude the published term uses, and the pair share it leaves to the field elsewhere
+            << ',' << res.surprise.pf_sigma_b_loc << ',' << res.surprise.pf_pi_out << '\n';
     hd_csv_.flush();
 }
 

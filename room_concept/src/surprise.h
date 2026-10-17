@@ -62,6 +62,9 @@ namespace rc::surprise
         /// pose-field bias (pose_field_bias.h): sigma_b (m), correlation length (m), and the covariance it
         /// adds to this cycle's pose (xx m², θθ rad²) — added to the PUBLISHED covariance only if publishing is on
         float pf_sigma_b = 0.f, pf_len = 0.f, pf_xx = 0.f, pf_tt = 0.f;
+        /// the amplitude AT THE CURRENT PLACE (what pf_xx/pf_tt are built from) and the share of kept pairs it
+        /// does not explain; pf_sigma_b above stays the GLOBAL fit (2026-10-11)
+        float pf_sigma_b_loc = 0.f, pf_pi_out = 0.f;
     };
 
     /// c = est - pred (heading already wrapped). P_pred, P_post: 3x3 pose covariances (x, y, theta).

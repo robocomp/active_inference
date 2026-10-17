@@ -60,6 +60,8 @@ public:
 
     /// The door pair the live passage matched for a proto-room: {the current room's door, the entry mirror}.
     [[nodiscard]] std::optional<std::pair<std::uint64_t, std::uint64_t>> pair_for(std::uint64_t proto_room_id) const;
+    /// The live passage holding a `match` to this door, if any.
+    [[nodiscard]] std::optional<DSR::Node> passage_of(std::uint64_t door_id) const;
 
     /// The live passages this agent owns (metaconcept, subtype "passage", name passage_*).
     [[nodiscard]] std::vector<DSR::Node> owned() const;

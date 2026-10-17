@@ -13,6 +13,7 @@
 #include "controller_lockon.h"
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
+#include "controller_door_passage.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
 #include "controller_motion_commander.h"
@@ -147,6 +148,7 @@ public:
     void set_route_reverse(bool reverse) { route_reverse_ = reverse; }
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
+    rc::DoorPassage &door_passage() { return door_passage_; }
     rc::MissionRunner &mission() { return mission_; }
     // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
     // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
@@ -597,6 +599,18 @@ private:
     std::uint64_t last_no_route_log_ms_ = 0;
     std::uint64_t no_route_since_ms_    = 0;   ///< first cycle of the current no-route HOLD (0 = routing fine)
     std::uint64_t short_path_since_ms_  = 0;   ///< first cycle the path ENDED short of an affordance standpoint
+    std::string   reach_unreachable_why_;      ///< non-empty ⇒ report this Reach standpoint Unreachable next cycle
+    bool          route_dropped_ = false;      ///< an Unreachable was just reported: stop and drop the old route
+    std::ofstream plan_track_csv_;             ///< plan_track.csv: per-cycle plan geometry + tracking errors
+    /// A Reach standpoint (exploration: where exactly does not matter) the body cannot take — occupied, or wedged
+    /// on the way in. Flag it; report_unreachable_if_no_route() tells the producer, which picks another.
+    bool flag_reach_unreachable(std::string why)
+    {
+        if (not last_target_info_.has_value() or not last_target_info_->from_affordance) return false;
+        if (not target_contract_known_ or target_contract_.policy != rc::affordance::Policy::Reach) return false;
+        if (reach_unreachable_why_.empty()) reach_unreachable_why_ = std::move(why);
+        return true;
+    }
 public:
     /// No route for > 5 s ⇒ report Unreachable to the affordance producer. Called on EVERY cycle the worker
     /// fails to plan (ensure_current_plan false returns before execute_plan) and from execute_plan.
@@ -788,6 +802,10 @@ private:
 
 public:
     [[nodiscard]] const std::string &hold_reason() const { return hold_reason_; }
+    // For the relative-motion executor (controller_relative_motion.h): the SAME footprint predicate the planner
+    // plans with, and the room polygon it was rasterised from — both refreshed every cycle in sync_world_state.
+    [[nodiscard]] const rc::GridPlanner &grid_planner() const { return grid_planner_; }
+    [[nodiscard]] const ControllerPolygon &room_polygon() const { return room_polygon_; }
 private:
 
     RouteChangedCallback route_changed_cb_;
@@ -830,6 +848,11 @@ private:
     bool route_reverse_ = false;
 
     rc::MissionRunner mission_;
+    rc::DoorPassage door_passage_;                                  // controller_door_passage.h
+    std::string door_required_;                                     // its required affordance this cycle ("" = none)
+    std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
+    std::vector<std::string> door_names_;                           // door nodes for the window's combo, re-read at 1 Hz
+    std::uint64_t door_names_ms_ = 0;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
     // The fitted curve for a NON-mission plan (affordance target, click target). Missions keep theirs
@@ -910,6 +933,28 @@ private:
     // Speed ceiling from the route's own curvature, looking ahead far enough to brake for what is coming.
     // Returns v_cap unchanged when there is no route (a click target has no curve).
     float route_speed_limit(float v_cap, float a_decel) const;
+    // ── SPEED FROM CLEARANCE: THE BRAKING-DISTANCE MODEL (2026-10-09) ─────────────────────────────
+    // The plain tracker queries no field by design (it is built on PathWorld), so "slow down for what
+    // the LiDAR sees" has to reach it as a CEILING, exactly as the curvature limit does. For a route
+    // sample at arc distance ds ahead whose live clearance is c (robot-frame ESDF, 1-Lipschitz), the
+    // body cannot touch anything before ds + (c - support), so v <= sqrt(2 a_dec (ds + c - support)).
+    // The minimum over the braking horizon is the fastest speed from which the robot can still stop
+    // short of the first certified contact. No gate and no cutoff: it is the same v_stop law the
+    // tracker already applies to the END of the route, applied wherever the field says the route ends
+    // early. Measured need (tracker_diag 2026-10-09 19:06:29-33): cmd_adv held at 0.35 while min_esdf
+    // fell 1.34 -> 0.20 m, then 3.5 s of commanded 0.33 at zero measured speed before any verdict.
+    // Until plain SLAM, the pose-covariance ramp did this job by accident (see TRACKER_REVIEW history
+    // in config.toml: "the broken bound had been holding the system together"); with mm sigma it is
+    // released, and nothing else bounds speed by what is in front of the robot.
+    [[nodiscard]] std::optional<float> clearance_speed_limit(const DrivenCurve &curve,
+                                                             const ControllerRobotPose &robot_pose,
+                                                             const rc::TrajectoryController &path_controller) const;
+    // Nearest live return to a probe point (ROOM frame), from the RAW buffer with the body hull as the
+    // only self-filter. The ESDF deletes every return inside max(0.40, circumscribed + 0.08) = 0.405 m
+    // of the centre (read_lidar_points_robot), so it is blind to exactly the obstacles a wedged body
+    // is touching; the escape must not decide "may I reverse" from it.
+    [[nodiscard]] float raw_return_clearance(const Eigen::Vector2f &probe_room, const ControllerRobotPose &pose,
+                                             ControllerObstacleTracker &tracker) const;
     // ROUTE REPAIR. Set by the recovery reflexes (visible blockage, or a wedge that dropped a virtual
     // disc) and consumed in the continuous-route branch of ensure_current_plan. Without it those
     // reflexes are inert in route mode: they create the obstacle and reset current_plan_, but the route
@@ -930,6 +975,7 @@ private:
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)
     float         escape_turn_sign_ = 1.0f;     // +1 / −1: rotation direction during escape
+    float         escape_rear_raw_m_ = 100.f;   // raw-return clearance behind the body at escape start
     int           escape_count_ = 0;            // consecutive escapes (alternating fallback for turn dir)
     // ── REJECT RATHER THAN STRUGGLE ──────────────────────────────────────────────────────────────
     // Escapes charged to the affordance they happened under, because escape_count_ is a session-lifetime

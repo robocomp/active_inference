@@ -133,6 +133,15 @@ struct SideScore
 
 }   // namespace
 
+float side_depth_median(const cv::Mat& depth_img, float px, float py, float nx, float ny,
+                        const ContourDepthParams& p)
+{
+    if (depth_img.empty() or depth_img.type() != CV_32F)
+        return -1.0f;
+    return side_depth(depth_img, px, py, nx, ny, p.offset_px_min, p.offset_px_max,
+                      p.depth_scale_x, p.depth_scale_y);
+}
+
 ContourDepthScore contour_depth_support(const cv::Mat& depth_img,
                                         const Contour& face,
                                         const std::vector<Contour>& controls,

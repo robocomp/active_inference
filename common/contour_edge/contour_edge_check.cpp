@@ -8,6 +8,27 @@
 namespace rc::edges
 {
 
+float across_boundary_gradient_at(const cv::Mat& gx, const cv::Mat& gy, int px, int py, double nx, double ny)
+{
+    if (gx.empty() or px < 1 or py < 1 or px >= gx.cols - 1 or py >= gx.rows - 1)
+        return -1.0f;
+    // ★Take the STRONGEST across-boundary response within ±2 px of the predicted line, not the
+    // value exactly on it. The projection carries real error — pose covariance, the door's own
+    // fitted width, RT lag — and demanding a sub-pixel hit would score a correct prediction that
+    // is 2 px off as no better than a wrong one, which is a measurement of our calibration
+    // rather than of the world.
+    float best = 0.0f;
+    for (int d = -2; d <= 2; ++d)
+    {
+        const int qx = std::clamp(px + static_cast<int>(std::lround(d * nx)), 1, gx.cols - 2);
+        const int qy = std::clamp(py + static_cast<int>(std::lround(d * ny)), 1, gx.rows - 2);
+        const float proj = std::abs(static_cast<float>(gx.at<float>(qy, qx) * nx
+                                                     + gy.at<float>(qy, qx) * ny));
+        best = std::max(best, proj);
+    }
+    return best;
+}
+
 namespace
 {
 
@@ -38,22 +59,9 @@ float mean_across_boundary_gradient(const cv::Mat& gx, const cv::Mat& gy,
             const double t = (s + 0.5) / steps;
             const int px = static_cast<int>(std::lround(a.x + t * (b.x - a.x)));
             const int py = static_cast<int>(std::lround(a.y + t * (b.y - a.y)));
-            if (px < 1 or py < 1 or px >= gx.cols - 1 or py >= gx.rows - 1)
+            const float best = across_boundary_gradient_at(gx, gy, px, py, nx, ny);
+            if (best < 0.0f)
                 continue;
-            // ★Take the STRONGEST across-boundary response within ±2 px of the predicted line, not the
-            // value exactly on it. The projection carries real error — pose covariance, the door's own
-            // fitted width, RT lag — and demanding a sub-pixel hit would score a correct prediction that
-            // is 2 px off as no better than a wrong one, which is a measurement of our calibration
-            // rather than of the world.
-            float best = 0.0f;
-            for (int d = -2; d <= 2; ++d)
-            {
-                const int qx = std::clamp(px + static_cast<int>(std::lround(d * nx)), 1, gx.cols - 2);
-                const int qy = std::clamp(py + static_cast<int>(std::lround(d * ny)), 1, gx.rows - 2);
-                const float proj = std::abs(static_cast<float>(gx.at<float>(qy, qx) * nx
-                                                             + gy.at<float>(qy, qx) * ny));
-                best = std::max(best, proj);
-            }
             acc += best;
             ++n_out;
         }

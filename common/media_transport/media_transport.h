@@ -335,6 +335,9 @@ public:
     int wait_and_poll(const FrameCallback& cb, int timeout_ms);
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+    // DDS source_timestamp (system_clock epoch ns) of the last DELIVERED sample: when the producer's
+    // write() ran. recv_ns − this = the transport hop; this − stamp_ms·1e6 = capture→publish upstream.
+    [[nodiscard]] std::int64_t last_source_ns() const { return last_source_ns_; }
 
 private:
     eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
@@ -345,6 +348,8 @@ private:
     bool participant_shm_only_ = true;
     bool has_participant_ = false;
     bool data_sharing_active_ = false;
+    std::int64_t last_source_ns_ = 0;
+    std::unique_ptr<ImageFrame> scratch_;   // reused newest-frame copy (valid prefix only): heap, not stack
 };
 
 // One reader per 360 topic. The callback receives a const Image360Frame& valid
@@ -367,6 +372,9 @@ public:
     int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+    // DDS source_timestamp (system_clock epoch ns) of the last DELIVERED sample: when the producer's
+    // write() ran. recv_ns − this = the transport hop; this − stamp_ms·1e6 = capture→publish upstream.
+    [[nodiscard]] std::int64_t last_source_ns() const { return last_source_ns_; }
 
 private:
     eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
@@ -377,6 +385,8 @@ private:
     bool participant_shm_only_ = true;
     bool has_participant_ = false;
     bool data_sharing_active_ = false;
+    std::int64_t last_source_ns_ = 0;
+    std::unique_ptr<Image360Frame> scratch_;   // reused newest-frame copy (valid prefix only): heap, not stack
 };
 
 // One reader per LiDAR topic. The callback receives a const LidarFrame& valid only
@@ -400,6 +410,9 @@ public:
     int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+    // DDS source_timestamp (system_clock epoch ns) of the last DELIVERED sample: when the producer's
+    // write() ran. recv_ns − this = the transport hop; this − stamp_ms·1e6 = capture→publish upstream.
+    [[nodiscard]] std::int64_t last_source_ns() const { return last_source_ns_; }
 
     // How many publishers this reader is currently matched with. A successful init() only means the
     // reader was CREATED — it says nothing about whether the producer was ever discovered, so a
@@ -416,6 +429,8 @@ private:
     bool participant_shm_only_ = true;
     bool has_participant_ = false;
     bool data_sharing_active_ = false;
+    std::int64_t last_source_ns_ = 0;
+    std::unique_ptr<LidarFrame> scratch_;   // reused newest-frame copy (valid prefix only): heap, not stack
 };
 
 // One reader per IMU topic. The callback receives a const ImuFrame& valid only for the
@@ -438,6 +453,9 @@ public:
     int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+    // DDS source_timestamp (system_clock epoch ns) of the last DELIVERED sample: when the producer's
+    // write() ran. recv_ns − this = the transport hop; this − stamp_ms·1e6 = capture→publish upstream.
+    [[nodiscard]] std::int64_t last_source_ns() const { return last_source_ns_; }
 
 private:
     eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
@@ -448,6 +466,7 @@ private:
     bool participant_shm_only_ = true;
     bool has_participant_ = false;
     bool data_sharing_active_ = false;
+    std::int64_t last_source_ns_ = 0;
 };
 
 // ── Descriptor-driven subscriber factories ───────────────────────────────────

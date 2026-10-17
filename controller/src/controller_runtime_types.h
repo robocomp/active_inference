@@ -142,6 +142,11 @@ struct ControllerParams
     // under the robot, and the follower's carrot looks ahead — deforming inside that lookahead steps the
     // command. Everything behind the robot is frozen too (arc length is measured from s=0).
     float band_lead_m = 1.0f;
+    float band_proximal_sigma_m = 0.f;   // >0: the band re-optimises the NEAR route (proximal prior, m per solve)
+    // RouteOptimizerConfig::w_clear used by the BAND only (the one-shot route/plan smoothing keeps the
+    // optimiser's own w_clear = 1.0). 1.0 = the band answers to the same clearance precision as the build.
+    // 2026-10-10 (user): the live-field repulsion deformed the stretches between waypoints too much.
+    float band_clearance_weight = 1.0f;
     // Length of the deformable window beyond the lead. Bounded because a band is a LOCAL edit by
     // definition, and because the live ESDF is an 8x8 m robot-frame box — asking about geometry outside
     // it returns "no obstacle" (100 m), which is honest but carries no information.

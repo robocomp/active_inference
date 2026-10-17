@@ -1,0 +1,91 @@
+
+# --- Common Agent Data ---
+[Agent]
+# MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH agents.
+# 25 = chat_agent (recorded in CONCEPT_AGENT_RECIPE.md §1, the source of truth).
+id = 25
+name = "chat_agent"
+
+# --- Single Instance Configuration ---
+configFile = ""
+domain = 0
+tree = false
+graph = false
+2d = false
+3d = false
+
+[Presence]
+# Nothing is REQUIRED: the chat window is useful, and says what is missing, with nothing else running.
+# controller executes the commands (the gate refuses to move the robot without it); room_concept gives the room.
+# ★required_agent_names is ABSENT on purpose, not `= []`: the RoboComp ConfigLoader throws on an empty array
+# (viewer3d/scene_graph_viewer learned this); absent reads as the empty default.
+optional_agent_names = ["controller", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+# The agent node and the ONE node it creates: the command channel to the controller (intention_node.h).
+nodes = ["chat_agent 25", "chat_intention"]
+
+[Period]
+Compute = 250
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[LLM]
+url = "http://localhost:11434"
+# qwen3-vl:8b-INSTRUCT (2026-10-12): one model for chat AND the look() camera tool. Tool choice 36/36 vs qwen3:8b
+# 31/36 on tests/check_llm_tools.py, ~0.4 s median, 7.7 GiB VRAM (qwen3:8b: 6.2). ★NOT plain "qwen3-vl:8b": that tag is
+# the THINKING variant, ignores think:false and spent 3000-6000 tokens (40-80 s) thinking before every tool call.
+# Back to text-only: model = "qwen3:8b" (look() then fails at the model, not here — it cannot see the image).
+model = "qwen3-vl:8b-instruct"
+num_ctx = 8192
+temperature = 0.2
+# No content and no tool call within this long ⇒ the request is aborted (a cold model load is the usual cause;
+# the agent warms the model up at start for exactly that reason).
+first_token_timeout_ms = 60000
+transfer_timeout_ms = 120000
+keep_alive = "30m"
+# Cap on generated tokens per request; <= 0 = none. The instruct model answers in 10-50 tokens; this only stops a
+# runaway (cuts it mid-sentence, so it is a backstop, not a style control — brevity comes from the prompt).
+num_predict = 400
+
+[Chat]
+max_history = 16
+digest_period_ms = 500
+status_period_ms = 250
+log_dir = "logs"
+# Who the robot is (body, senses, abilities, limits, honesty rules), prepended to every system message.
+# Read once at start; if missing, a short built-in description is used (and a warning printed).
+system_prompt_path = "etc/system_prompt.md"
+# Relative motion (move_relative tool / "move <m>", "turn <deg>"). User decision 2026-10-12: SMALL moves go straight
+# through, without a confirmation card. A pure turn never needs one (it translates nothing; the controller checks the
+# swept footprint). A move needs a card above small_move_max_m, or when combined with a turn above small_turn_max_deg.
+small_move_max_m = 1.0
+small_turn_max_deg = 90.0
+max_move_m = 3.0
+# "advance a bit" — the step the model is told to use when the person gives no number.
+default_step_m = 0.3
+# OBJECTS section of the STATE: the N nearest objects of the current room (counts per class always).
+objects_nearest = 6
+# Object births/removals are shown in the window at most this often; a flap inside the window cancels out.
+object_change_period_ms = 2000
+# look() tool: the newest ZED ("front") / Ricoh ("360") frame is shrunk to this longest side and JPEG-encoded, then
+# attached to the tool result for ONE request (then dropped from the history). ollama resizes images to ~1 Mpx itself,
+# so <=1280 px all cost ~1050 prompt tokens; smaller only loses detail (src/image_prep.h). 2 images + the ~2600-token
+# system message + 16 history messages fit in num_ctx 8192.
+look_max_side = 1280
+look_max_side_360 = 1280
+look_jpeg_quality = 85
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

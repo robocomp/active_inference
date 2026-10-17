@@ -1,0 +1,58 @@
+
+Jacobian vs central differences (max relative error over all 9 state components)
+  SDF only                                       PASS   rel err = 8.045e-03
+  motion only                                    PASS   rel err = 1.282e-05
+  corner only                                    PASS   rel err = 2.770e-05
+  corner only, SATURATED                         PASS   rel err = 1.243e-04
+  object anchor only                             PASS   rel err = 2.815e-05
+  object anchor only, SATURATED                  PASS   rel err = 1.226e-04
+  boundary only                                  PASS   rel err = 0.000e+00
+  all factors                                    PASS   rel err = 2.612e-04
+  all factors, SATURATED                         PASS   rel err = 2.337e-04
+
+Where the gradient check is valid (same Jacobians, three sample points)
+  at the optimum (DEGENERATE by construction)    PASS   rel err = 4.308e-02
+  optimum + 5 mm / 2 mrad (smooth basin)         PASS   rel err = 4.953e-03
+  optimum + 15 cm / 60 mrad (far)                PASS   rel err = 5.890e-02
+
+Recovery from a perturbed start (LM, max 10 iterations)
+  converged and improved                         PASS   start 0.03m/0.010rad -> 0.2mm/0.0000rad, loss 0.1981->0.0070, 3 it (0 rej), 0.10 ms
+  converged and improved                         PASS   start 0.13m/0.050rad -> 0.2mm/0.0000rad, loss 3.2738->0.0070, 4 it (0 rej), 0.12 ms
+  converged and improved                         PASS   start 0.32m/0.120rad -> 0.2mm/0.0000rad, loss 22.0398->0.0070, 10 it (6 rej), 0.29 ms
+
+SE(2) preintegration
+  mean matches the legacy integration            PASS   d = [-0.143030, 0.173531, 0.400000]
+  covariance recursion vs 40k Monte Carlo        PASS   rel Frobenius 0.0062  (sig_x 0.0145 vs 0.0146, sig_th 0.0354 vs 0.0354, rho_yth -0.189 vs -0.185)
+  covariance is NOT diagonal                     PASS   |rho(y,theta)| = 0.189 — a diagonal model asserts 0
+  scale Jacobians vs central differences         PASS   rel err omega 2.67e-04, v 1.71e-04
+  chain() == one continuous integration          PASS   delta 2.72e-07, cov 3.59e-07, g 6.67e-07  (naive sum: cov 7.78e-02)
+  covariance is invariant to sample rate         PASS   sigma_th 20Hz 0.03536 vs 100Hz 0.03536, cov rel 0.0001, g rel 0.0001
+  ZUPT bounds the parked interval to sqrt(a*b*T/(a+b)) PASS   300 s parked: sigma_x 0.346 m free-drift -> 0.2075 m with ZUPT (closed form 0.2075 m, err 0.0%), sigma_th 0.4456 rad
+  the parked ZUPT interval does not depend on the sample rate PASS   300 s parked at 4/16/32 ms: sigma_x 0.20744 / 0.20748 / 0.20749 m (spread 0.02%)
+  the ZUPT factor is rate-invariant and fades with real motion PASS   10 s parked: R_xx 2.238e-03 at 4 ms vs 2.242e-03 at 32 ms (0.16% apart); moving at 0.5 m/s R_xx 2.500e+01 (11154x looser)
+  ZUPT fades out as the robot moves              PASS   relative cov gap: 4.0% at 0.45 m/s -> 0.4% at 2.0 m/s
+  the lever arm is what stops a pivot being read as rest PASS   10 s: sigma_x 0.0485 m pivoting vs 0.0379 m still (1.28x); with the lever removed the pivot falls to 0.0379 m (1.00x)
+  ZUPT is continuous in speed (no hidden threshold) PASS   largest step 0.0214 of range at 60 pts -> 0.0053 at 240 pts (4.0x smaller), monotonic yes
+
+-- image edge: camera model + jacobian ------------------------------------------
+  pinhole dP/dp_cam matches finite diff          PASS   max rel err 4.95e-10
+  equirect azimuth mapping                       PASS   az0 u=960.0 (want 960), az90 u=1440.0 (want 1440)
+
+-- image edge: common-mode saturation -------------------------------------------
+  information SATURATES with sample count        PASS   trace 10 -> 2000 samples: 9554 -> 10356 (1.08x) while raw = 2.62e+08
+  capped H stays positive semi-definite          PASS   min eigenvalue -3.723e-05 vs trace 1.036e+04
+
+-- image edge: sub-pixel estimator + pose jacobian ------------------------------
+  Immerkaer noise sigma recovers the truth       PASS   measured 1.483, rendered 1.500
+  sub-pixel edge meets its CLAIMED precision     PASS   24 samples, RMS 0.0384 px vs claimed sigma 0.0441 px (ratio 0.87)
+  residual RESPONDS to a pose perturbation       PASS   RMS 0.038 px at truth -> 7.946 px at +0.5 deg yaw
+  pose Jacobian d r / d x matches finite diff    PASS   max rel err 3.21e-10 over 24 samples
+
+-- image edge: panorama seam ----------------------------------------------------
+  seam-straddling search finds the edge WITH wrap PASS   recovered s = -7.379 px, truth -7.400 px (err 0.021)
+  ... and does NOT find it without wrap (negative control) PASS   no-wrap gives s = 0.000 px (found=0) vs truth -7.400
+  wrapping changes NOTHING away from the seam    PASS   |wrap - nowrap| = 0.00e+00 px at u = 960
+
+ALL PASS (0 failures)
+
+[exit 0]

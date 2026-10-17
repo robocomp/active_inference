@@ -31,6 +31,7 @@
 #include <unordered_set>
 #include <vector>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 // ─── Room geometry (wall-flush factor + C2v yaw reference) ───────────────────────────────────────
 
@@ -221,7 +222,7 @@ void SpecificWorker::update_kitchen_ego_motion()
 {
     const auto now = std::chrono::steady_clock::now();
     if (not inner_eigen_) { have_prev_cam_ = false; return; }
-    const auto T = inner_eigen_->get_transformation_matrix("room", "zed", 0);
+    const auto T = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", 0);
     if (not T.has_value()) { have_prev_cam_ = false; return; }   // pose chain unavailable → reset baseline
     const Eigen::Vector3f pos = T->translation().cast<float>();
     const Eigen::Vector3f fwd = T->linear().col(1).cast<float>();   // zed +y is the depth/forward axis
@@ -246,6 +247,8 @@ std::vector<rc::SceneObjectBox> SpecificWorker::read_scene_objects() const
     std::vector<rc::SceneObjectBox> out;
     if (not G or not inner_eigen_) return out;
     constexpr float kMinFootprintM2 = 0.06f;
+    // Resolved ONCE: the room cannot change mid-loop, and current_room_frame walks the graph.
+    const std::string room_frame = rc::room::current_room_frame(*G);
     for (const auto& node : G->get_nodes_by_type("object"))
     {
         if (node.name().starts_with("cabinet")) continue;                 // our own kitchen runs — never self-exclude
@@ -255,7 +258,7 @@ std::vector<rc::SceneObjectBox> SpecificWorker::read_scene_objects() const
         if (not w or not d or not h) continue;
         if (w.value() <= 0.0f or d.value() <= 0.0f or h.value() <= 0.0f) continue;
         if (w.value() * d.value() < kMinFootprintM2) continue;            // drop bottles/cups (class-agnostic)
-        const auto T = inner_eigen_->get_transformation_matrix("room", node.name(), 0);
+        const auto T = inner_eigen_->get_transformation_matrix(room_frame, node.name(), 0);
         if (not T.has_value()) continue;
         rc::SceneObjectBox b;
         b.cx  = static_cast<float>(T->translation().x());
@@ -1319,7 +1322,7 @@ void SpecificWorker::process_ricoh_bearings()
     ricoh_attention_targets_.clear();
     if (not inner_eigen_ or not mask_ingestor_ or not fitter_)
         return;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);   // robot pose in room
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);   // robot pose in room
     if (not rtb.has_value())
         return;
     const Eigen::Vector2f robot_xy{static_cast<float>(rtb.value()(0, 3)),

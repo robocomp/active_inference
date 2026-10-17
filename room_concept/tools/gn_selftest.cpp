@@ -38,11 +38,11 @@ namespace
     }
 
     /// Ray-cast a rectangle from `pose` and return the hits in the ROBOT frame, as the lidar would.
-    torch::Tensor synth_scan(const Eigen::Vector3f& pose, int n, float noise_sigma, std::mt19937& rng)
+    rc::ScanPoints synth_scan(const Eigen::Vector3f& pose, int n, float noise_sigma, std::mt19937& rng)
     {
         std::normal_distribution<float> noise(0.f, noise_sigma);
-        auto t = torch::zeros({n, 3}, torch::kFloat32);
-        auto a = t.accessor<float, 2>();
+        rc::ScanPoints t(static_cast<std::size_t>(n), Eigen::Vector3f::Zero());
+        auto& a = t;
         for (int i = 0; i < n; ++i)
         {
             const float bearing = -static_cast<float>(M_PI) + 2.f * static_cast<float>(M_PI) * i / n;
@@ -68,27 +68,13 @@ namespace
                 }
             }
             const float r = best + noise(rng);
-            a[i][0] = r * std::cos(bearing);   // robot frame
-            a[i][1] = r * std::sin(bearing);
-            a[i][2] = 0.f;
+            a[i] = Eigen::Vector3f(r * std::cos(bearing), r * std::sin(bearing), 0.f);   // robot frame
         }
         return t;
     }
 
-    torch::Tensor pose_tensor(const Eigen::Vector3f& p)
-    {
-        return torch::tensor({p.x(), p.y(), p.z()},
-                             torch::TensorOptions().dtype(torch::kFloat32).requires_grad(true));
-    }
+    Eigen::Vector3f pose_tensor(const Eigen::Vector3f& p) { return p; }   // was a torch tensor
 
-    torch::Tensor mat3(const Eigen::Matrix3f& m)
-    {
-        auto t = torch::zeros({3, 3}, torch::kFloat32);
-        auto a = t.accessor<float, 2>();
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) a[r][c] = m(r, c);
-        return t;
-    }
 
     int failures = 0;
     void check(const char* what, bool ok, const std::string& detail)
@@ -100,7 +86,6 @@ namespace
 
 int main()
 {
-    torch::set_num_threads(1);
     std::mt19937 rng(12345);
 
     rc::Model model;
@@ -134,9 +119,7 @@ int main()
         slot.odometry_delta = (i == 0) ? Eigen::Vector3f::Zero()
                                        : Eigen::Vector3f(truth[i] - truth[i - 1]);
         slot.motion_cov = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
-        slot.odom_delta_tensor = torch::tensor(
-            {slot.odometry_delta.x(), slot.odometry_delta.y(), slot.odometry_delta.z()}, torch::kFloat32);
-        slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+        slot.motion_prec = slot.motion_cov.inverse();
 
         // One corner landmark (yaw-free) and one object anchor (with yaw), both consistent with truth.
         const Eigen::Vector2f corner_world(kHalfW, kHalfL);
@@ -147,7 +130,6 @@ int main()
         co.detected_robot = {c * dw.x() + s * dw.y(), -s * dw.x() + c * dw.y()};
         co.information = Eigen::Matrix2f::Identity() * 25.f;
         slot.corner_obs.push_back(co);
-        slot.rebuild_corner_batch(torch::kCPU);
 
         const Eigen::Vector3f obj_world(-1.2f, 0.8f, 0.9f);
         const Eigen::Vector2f dwo = obj_world.head<2>() - truth[i].head<2>();
@@ -174,7 +156,6 @@ int main()
     in.window = &window;
     in.boundary_prior = &bp;
     in.boundary_weight = 1.0f;
-    in.device = torch::kCPU;
 
     // ---- 1. Jacobian: each factor family alone, then all together -----------------------------
     std::printf("\nJacobian vs central differences (max relative error over all 9 state components)\n");
@@ -203,14 +184,13 @@ int main()
         // Disabling SDF/motion is done by emptying what the factor reads.
         std::deque<RoomConcept::WindowSlot> w = window;
         if (not cs.sdf)
-            for (auto& s : w) s.lidar_points = torch::Tensor{};
+            for (auto& s : w) s.lidar_points.clear();
         if (not cs.motion)
-            for (auto& s : w) s.motion_prec_tensor = mat3(Eigen::Matrix3f::Zero());
+            for (auto& s : w) s.motion_prec = Eigen::Matrix3f::Zero();
         if (cs.corrupt > 0.f)
             for (auto& s : w)
             {
                 for (auto& co : s.corner_obs) co.detected_robot.x() += cs.corrupt;
-                s.rebuild_corner_batch(torch::kCPU);
                 for (auto& oa : s.object_anchors) oa.obs_robot.x() += cs.corrupt;
             }
         RoomConcept::BoundaryPrior b = bp;

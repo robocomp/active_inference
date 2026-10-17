@@ -287,7 +287,7 @@ void SpecificWorker::initialize()
     // Validation harness (no-op unless an Eval.*/Scene.* flag is set). Table-top lookup injected as a
     // callback so the evaluator stays decoupled from the scene-graph layer.
     evaluator_ = std::make_unique<rc::BottleEvaluator>(
-        cfg_, webots2robocomp_proxy, inner_eigen_.get(),
+        cfg_, G, webots2robocomp_proxy, inner_eigen_.get(),
         [this](float bx, float by) { return scene_graph_->find_table_top(bx, by); });
 
     // Hidden-face next-best-view planner (epistemic affordance).
@@ -801,7 +801,7 @@ void SpecificWorker::run_instance_tracker()
         // the LiDAR swept, not on anything this agent decided, so it must not change behaviour. What
         // stays local is the ACTION on a confirm, which for bottle is holding the death-miss.
         Eigen::Vector2f robot_xy(0.f, 0.f);
-        if (const auto p = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); p.has_value())
+        if (const auto p = inner_eigen_->transform(rc::room::current_room_frame(*G), Eigen::Vector3d::Zero(), "zed"); p.has_value())
             robot_xy = {static_cast<float>(p->x()), static_cast<float>(p->y())};
 
         const auto dets_p = rc::peripheral::gather(pkt, "bottle", robot_xy);
@@ -1045,7 +1045,7 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
     Eigen::Vector2f camera_xy(std::numeric_limits<float>::quiet_NaN(),
                               std::numeric_limits<float>::quiet_NaN());
     if (inner_eigen_)
-        if (const auto c = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "zed", 0);
+        if (const auto c = inner_eigen_->transform(rc::room::current_room_frame(*G), Mat::Vector3d(0.0, 0.0, 0.0), "zed", 0);
             c.has_value())
             camera_xy = Eigen::Vector2f(static_cast<float>(c->x()), static_cast<float>(c->y()));
 

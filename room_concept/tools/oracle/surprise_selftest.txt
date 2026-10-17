@@ -1,0 +1,5 @@
+identical: kl=0.00e+00 scored=1
+bias 0.00 m: sum(mismatch)/sum(expected) = 0.991
+bias 0.05 m: sum(mismatch)/sum(expected) = 2.718
+PASS
+[exit 0]

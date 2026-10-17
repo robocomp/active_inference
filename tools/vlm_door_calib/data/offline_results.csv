@@ -1,0 +1,769 @@
+set,variant,id,state_pred,visible_pred,latency_s,prompt_tokens,eval_tokens,raw
+zeddump,plain,z0,open,True,0.806,1091,2,open
+zeddump,json,z0,closed,True,1.011,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z0,closed,True,0.999,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z0,open,True,1.015,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z1,closed,True,0.802,1091,2,closed
+zeddump,json,z1,closed,True,0.993,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z1,none,False,0.999,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z1,closed,True,0.968,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z2,open,True,0.815,1091,2,open
+zeddump,json,z2,open,True,0.95,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z2,none,False,0.968,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z2,open,True,0.962,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z3,closed,True,0.173,1091,2,closed
+zeddump,json,z3,closed,True,0.299,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z3,closed,True,0.306,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z3,closed,True,0.334,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z4,closed,True,0.79,1091,2,closed
+zeddump,json,z4,closed,True,0.965,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z4,none,False,0.974,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z4,closed,True,0.967,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z5,closed,True,0.791,1091,2,closed
+zeddump,json,z5,closed,True,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z5,none,False,0.938,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z5,closed,True,0.947,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z6,closed,True,0.787,1091,2,closed
+zeddump,json,z6,closed,True,1.007,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z6,none,False,1.001,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z6,closed,True,0.997,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z7,ajar,True,0.789,1091,2,ajar
+zeddump,json,z7,ajar,True,0.958,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z7,none,False,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z7,open,True,1.009,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z8,none,False,0.834,1091,2,none
+zeddump,json,z8,closed,True,0.996,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z8,closed,True,0.991,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z8,closed,True,0.947,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z9,closed,True,0.822,1091,2,closed
+zeddump,json,z9,closed,True,0.936,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z9,none,False,0.942,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z9,closed,True,0.977,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z10,closed,True,0.775,1091,2,closed
+zeddump,json,z10,closed,True,0.969,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z10,closed,True,0.963,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z10,closed,True,1.016,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z11,none,False,0.831,1091,2,none
+zeddump,json,z11,closed,True,1.006,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z11,none,False,0.954,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z11,closed,True,0.92,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z12,open,True,0.734,1091,2,open
+zeddump,json,z12,closed,True,0.943,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z12,none,False,1.027,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z12,closed,True,0.985,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z13,open,True,0.923,1091,2,open
+zeddump,json,z13,closed,True,0.997,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z13,none,False,0.931,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z13,closed,True,0.962,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z14,closed,True,0.759,1091,2,closed
+zeddump,json,z14,closed,True,0.975,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z14,none,False,0.96,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z14,closed,True,1.065,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z15,closed,True,0.918,1156,2,closed
+zeddump,json,z15,closed,True,1.088,1261,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z15,closed,True,1.068,1261,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z15,closed,True,1.075,1298,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z16,open,True,0.881,1091,2,open
+zeddump,json,z16,closed,True,0.981,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z16,none,False,0.963,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z16,closed,True,0.966,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z17,open,True,0.814,1091,2,open
+zeddump,json,z17,open,True,0.978,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z17,none,False,0.939,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z17,open,True,1.03,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z18,closed,True,0.76,1091,2,closed
+zeddump,json,z18,ajar,True,0.976,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z18,closed,True,0.994,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z18,ajar,True,1.031,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z19,closed,True,0.764,1091,2,closed
+zeddump,json,z19,closed,True,0.959,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z19,closed,True,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z19,closed,True,0.986,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z20,none,False,0.792,1091,2,none
+zeddump,json,z20,closed,True,0.93,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z20,closed,True,0.954,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z20,closed,True,1.054,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z21,none,False,0.765,1091,2,none
+zeddump,json,z21,closed,True,0.951,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z21,closed,True,0.937,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z21,closed,True,0.942,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z22,closed,True,0.813,1091,2,closed
+zeddump,json,z22,closed,True,0.961,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z22,closed,True,0.977,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z22,closed,True,1.015,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z23,closed,True,0.791,1091,2,closed
+zeddump,json,z23,closed,True,1.014,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z23,closed,True,1.064,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z23,closed,True,1.031,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z24,ajar,True,0.759,1091,2,ajar
+zeddump,json,z24,ajar,True,0.983,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z24,ajar,True,1.007,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z24,ajar,True,0.98,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z25,closed,True,0.864,1091,2,closed
+zeddump,json,z25,closed,True,1.051,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z25,closed,True,1.045,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z25,closed,True,0.986,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z26,none,False,0.762,1091,2,none
+zeddump,json,z26,closed,True,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z26,closed,True,0.961,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z26,closed,True,0.966,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z27,open,True,0.841,1091,2,open
+zeddump,json,z27,ajar,True,1.044,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z27,closed,True,0.992,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z27,ajar,True,1.016,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z28,none,False,0.816,1091,2,none
+zeddump,json,z28,none,False,0.981,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_box,z28,none,False,0.97,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z28,closed,True,0.909,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z29,closed,True,0.81,1091,2,closed
+zeddump,json,z29,closed,True,0.949,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z29,closed,True,0.971,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z29,closed,True,0.998,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z30,closed,True,0.798,1091,2,closed
+zeddump,json,z30,closed,True,0.942,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z30,closed,True,0.971,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z30,closed,True,0.908,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z31,open,True,0.777,1091,2,open
+zeddump,json,z31,closed,True,0.974,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z31,closed,True,1.054,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z31,closed,True,0.963,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z32,open,True,0.839,1091,2,open
+zeddump,json,z32,closed,True,1.001,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z32,closed,True,0.961,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z32,closed,True,0.989,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z33,open,True,0.802,1091,2,open
+zeddump,json,z33,ajar,True,0.963,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z33,closed,True,0.967,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z33,closed,True,0.977,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z34,closed,True,0.798,1091,2,closed
+zeddump,json,z34,closed,True,0.952,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z34,closed,True,1.014,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z34,closed,True,0.949,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z35,open,True,0.824,1091,2,open
+zeddump,json,z35,closed,True,0.976,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z35,closed,True,0.97,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z35,closed,True,1.047,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z36,ajar,True,0.834,1091,2,ajar
+zeddump,json,z36,ajar,True,0.982,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z36,none,False,0.956,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z36,ajar,True,0.981,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z37,none,False,0.807,1091,2,none
+zeddump,json,z37,none,False,1.011,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_box,z37,closed,True,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z37,none,False,0.969,1233,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,plain,z38,open,True,0.776,1091,2,open
+zeddump,json,z38,ajar,True,0.95,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z38,closed,True,0.958,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z38,closed,True,0.98,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z39,none,False,0.858,1091,2,none
+zeddump,json,z39,none,False,0.978,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_box,z39,closed,True,1.02,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z39,none,False,0.953,1233,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,plain,z40,open,True,0.803,1091,2,open
+zeddump,json,z40,closed,True,1.025,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z40,closed,True,0.98,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z40,closed,True,1.034,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z41,open,True,0.776,1091,2,open
+zeddump,json,z41,closed,True,0.993,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z41,closed,True,0.996,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z41,closed,True,0.977,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z42,none,False,0.827,1091,2,none
+zeddump,json,z42,none,False,0.956,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_box,z42,closed,True,1.011,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z42,none,False,0.952,1233,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,plain,z43,open,True,0.778,1091,2,open
+zeddump,json,z43,closed,True,0.984,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z43,closed,True,0.972,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z43,closed,True,0.98,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z44,closed,True,0.759,1091,2,closed
+zeddump,json,z44,closed,True,0.977,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z44,closed,True,0.952,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z44,closed,True,0.913,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z45,ajar,True,0.769,1091,2,ajar
+zeddump,json,z45,open,True,0.976,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z45,closed,True,0.95,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z45,open,True,0.95,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z46,open,True,0.767,1091,2,open
+zeddump,json,z46,closed,True,0.945,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z46,ajar,True,0.978,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z46,closed,True,1.003,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z47,ajar,True,0.795,1091,2,ajar
+zeddump,json,z47,ajar,True,0.917,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z47,ajar,True,0.983,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z47,open,True,0.95,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z48,open,True,0.811,1091,2,open
+zeddump,json,z48,open,True,0.928,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z48,ajar,True,0.976,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z48,open,True,0.942,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z49,ajar,True,0.788,1091,2,ajar
+zeddump,json,z49,closed,True,1.003,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z49,closed,True,1.06,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z49,closed,True,0.978,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z50,open,True,0.803,1091,2,open
+zeddump,json,z50,closed,True,0.953,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z50,ajar,True,0.944,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z50,closed,True,0.976,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z51,none,False,0.824,1091,2,none
+zeddump,json,z51,none,False,1.037,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_box,z51,none,False,0.995,1196,16,"{   ""state"": ""closed"",   ""visible"": false }"
+zeddump,json_ovl,z51,none,False,0.909,1233,12,"{""state"": ""closed"", ""visible"": false}"
+zeddump,plain,z52,ajar,True,0.806,1091,2,ajar
+zeddump,json,z52,ajar,True,0.976,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z52,closed,True,1.011,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z52,ajar,True,1.037,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z53,ajar,True,0.828,1091,2,ajar
+zeddump,json,z53,open,True,0.927,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z53,closed,True,1.002,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z53,open,True,1.022,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z54,ajar,True,0.784,1091,2,ajar
+zeddump,json,z54,ajar,True,0.973,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z54,ajar,True,1.0,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z54,ajar,True,0.992,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z55,ajar,True,0.799,1091,2,ajar
+zeddump,json,z55,ajar,True,0.987,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z55,ajar,True,0.992,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z55,ajar,True,1.05,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z56,ajar,True,0.814,1091,2,ajar
+zeddump,json,z56,ajar,True,0.939,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z56,ajar,True,0.981,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z56,ajar,True,0.959,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z57,ajar,True,0.777,1091,2,ajar
+zeddump,json,z57,ajar,True,0.961,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z57,ajar,True,1.001,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z57,ajar,True,0.973,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z58,ajar,True,0.789,1091,2,ajar
+zeddump,json,z58,ajar,True,1.001,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z58,ajar,True,1.029,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z58,ajar,True,1.005,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z59,ajar,True,0.811,1091,2,ajar
+zeddump,json,z59,ajar,True,0.982,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z59,ajar,True,0.941,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z59,ajar,True,1.012,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z60,open,True,0.785,1091,2,open
+zeddump,json,z60,open,True,0.924,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z60,open,True,1.028,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z60,open,True,0.977,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z61,ajar,True,0.808,1091,2,ajar
+zeddump,json,z61,ajar,True,0.978,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z61,ajar,True,0.973,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z61,ajar,True,0.971,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z62,ajar,True,0.763,1091,2,ajar
+zeddump,json,z62,ajar,True,0.985,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z62,ajar,True,0.96,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z62,ajar,True,0.967,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z63,open,True,0.797,1091,2,open
+zeddump,json,z63,closed,True,0.957,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z63,closed,True,1.026,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z63,closed,True,0.989,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z64,ajar,True,0.866,1091,2,ajar
+zeddump,json,z64,ajar,True,1.002,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z64,ajar,True,1.044,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z64,open,True,1.008,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z65,open,True,0.804,1091,2,open
+zeddump,json,z65,open,True,0.974,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z65,open,True,0.984,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z65,open,True,1.015,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z66,ajar,True,0.804,1091,2,ajar
+zeddump,json,z66,open,True,0.943,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z66,ajar,True,0.971,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z66,ajar,True,0.982,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z67,open,True,0.813,1091,2,open
+zeddump,json,z67,open,True,0.973,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z67,open,True,0.959,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z67,open,True,0.95,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z68,open,True,0.893,1091,2,open
+zeddump,json,z68,open,True,1.0,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z68,open,True,0.994,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z68,open,True,1.006,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z69,ajar,True,0.794,1091,2,ajar
+zeddump,json,z69,ajar,True,0.978,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z69,ajar,True,0.964,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z69,ajar,True,0.968,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z70,open,True,0.817,1091,2,open
+zeddump,json,z70,open,True,0.994,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z70,open,True,1.033,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z70,open,True,0.99,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z71,open,True,0.816,1091,2,open
+zeddump,json,z71,open,True,0.949,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z71,closed,True,1.019,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z71,closed,True,0.999,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z72,closed,True,0.83,1091,2,closed
+zeddump,json,z72,closed,True,0.943,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z72,closed,True,0.989,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z72,closed,True,1.026,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z73,ajar,True,0.777,1091,2,ajar
+zeddump,json,z73,open,True,0.995,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z73,open,True,0.979,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z73,open,True,1.051,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z74,ajar,True,0.797,1091,2,ajar
+zeddump,json,z74,ajar,True,1.011,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z74,open,True,0.99,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z74,ajar,True,0.959,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z75,open,True,0.786,1091,2,open
+zeddump,json,z75,open,True,1.005,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z75,open,True,1.037,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z75,open,True,1.01,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z76,ajar,True,0.857,1091,2,ajar
+zeddump,json,z76,ajar,True,1.039,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z76,open,True,0.975,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z76,ajar,True,0.959,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z77,ajar,True,0.817,1091,2,ajar
+zeddump,json,z77,open,True,0.993,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z77,open,True,0.961,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z77,ajar,True,0.988,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z78,ajar,True,0.804,1091,2,ajar
+zeddump,json,z78,ajar,True,0.975,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z78,open,True,1.005,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z78,ajar,True,0.98,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z79,ajar,True,0.772,1091,2,ajar
+zeddump,json,z79,open,True,0.939,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z79,open,True,1.027,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z79,open,True,1.009,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z80,closed,True,0.811,1091,2,closed
+zeddump,json,z80,closed,True,0.985,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z80,closed,True,0.97,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z80,closed,True,0.975,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z81,closed,True,0.776,1091,2,closed
+zeddump,json,z81,closed,True,0.958,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z81,ajar,True,0.952,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z81,closed,True,1.002,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z82,closed,True,0.817,1091,2,closed
+zeddump,json,z82,closed,True,0.943,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z82,closed,True,0.938,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z82,closed,True,0.946,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z83,ajar,True,0.862,1091,2,ajar
+zeddump,json,z83,ajar,True,0.95,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z83,open,True,1.06,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z83,ajar,True,0.979,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z84,closed,True,0.766,1091,2,closed
+zeddump,json,z84,closed,True,0.988,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z84,closed,True,0.961,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z84,closed,True,0.989,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z85,closed,True,0.81,1091,2,closed
+zeddump,json,z85,closed,True,1.015,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z85,closed,True,0.986,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z85,closed,True,1.015,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z86,closed,True,0.832,1091,2,closed
+zeddump,json,z86,closed,True,1.023,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z86,closed,True,1.047,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z86,closed,True,0.983,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z87,closed,True,0.786,1091,2,closed
+zeddump,json,z87,closed,True,0.976,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z87,closed,True,0.987,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z87,closed,True,0.982,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z88,closed,True,0.782,1091,2,closed
+zeddump,json,z88,closed,True,1.031,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z88,closed,True,0.988,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z88,closed,True,1.024,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z89,closed,True,0.782,1091,2,closed
+zeddump,json,z89,closed,True,0.947,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z89,closed,True,1.009,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z89,closed,True,1.029,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z90,closed,True,0.824,1091,2,closed
+zeddump,json,z90,closed,True,0.95,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z90,closed,True,0.998,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z90,closed,True,1.001,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z91,closed,True,0.769,1091,2,closed
+zeddump,json,z91,closed,True,0.978,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z91,closed,True,1.051,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z91,closed,True,1.021,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z92,ajar,True,0.802,1091,2,ajar
+zeddump,json,z92,ajar,True,0.944,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z92,ajar,True,1.003,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z92,closed,True,0.982,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z93,closed,True,0.811,1091,2,closed
+zeddump,json,z93,closed,True,0.96,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z93,closed,True,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z93,closed,True,0.979,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z94,ajar,True,0.82,1091,2,ajar
+zeddump,json,z94,ajar,True,0.928,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z94,closed,True,0.936,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z94,closed,True,0.936,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z95,closed,True,0.807,1091,2,closed
+zeddump,json,z95,closed,True,0.993,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z95,closed,True,0.973,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z95,closed,True,0.9,1233,12,"{""state"": ""closed"", ""visible"": true}"
+zeddump,plain,z96,ajar,True,0.771,1091,2,ajar
+zeddump,json,z96,closed,True,0.938,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z96,ajar,True,0.955,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z96,closed,True,0.991,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z97,closed,True,0.827,1091,2,closed
+zeddump,json,z97,closed,True,0.993,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z97,closed,True,0.958,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z97,closed,True,0.987,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z98,ajar,True,0.811,1091,2,ajar
+zeddump,json,z98,ajar,True,0.971,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z98,ajar,True,1.006,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z98,ajar,True,1.065,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z100,open,True,0.863,1091,2,open
+zeddump,json,z100,open,True,0.943,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z100,open,True,0.979,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z100,open,True,0.976,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z101,open,True,0.792,1091,2,open
+zeddump,json,z101,open,True,0.975,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z101,open,True,0.947,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z101,open,True,0.992,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z102,ajar,True,0.804,1091,2,ajar
+zeddump,json,z102,open,True,0.986,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z102,ajar,True,1.044,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z102,ajar,True,0.953,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z103,open,True,0.801,1091,2,open
+zeddump,json,z103,ajar,True,0.948,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z103,ajar,True,0.928,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z103,ajar,True,0.933,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z104,ajar,True,0.825,1091,2,ajar
+zeddump,json,z104,ajar,True,0.975,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z104,ajar,True,0.98,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z104,ajar,True,0.969,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z105,open,True,0.813,1091,2,open
+zeddump,json,z105,ajar,True,0.967,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z105,ajar,True,1.004,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z105,ajar,True,0.977,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z106,open,True,0.788,1091,2,open
+zeddump,json,z106,open,True,0.922,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z106,ajar,True,0.984,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z106,open,True,0.996,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z107,open,True,0.787,1091,2,open
+zeddump,json,z107,open,True,0.954,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z107,open,True,0.979,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z107,open,True,0.946,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z108,open,True,0.806,1091,2,open
+zeddump,json,z108,ajar,True,0.928,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z108,ajar,True,0.955,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z108,open,True,0.968,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z109,open,True,0.764,1091,2,open
+zeddump,json,z109,closed,True,0.973,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z109,closed,True,0.976,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z109,closed,True,1.006,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z110,open,True,0.829,1091,2,open
+zeddump,json,z110,closed,True,0.931,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z110,closed,True,0.933,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z110,closed,True,0.973,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z111,open,True,0.799,1091,2,open
+zeddump,json,z111,open,True,0.984,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z111,open,True,1.009,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z111,open,True,1.026,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z112,ajar,True,0.871,1091,2,ajar
+zeddump,json,z112,open,True,1.012,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z112,ajar,True,1.038,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z112,open,True,0.975,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z113,ajar,True,0.831,1091,2,ajar
+zeddump,json,z113,ajar,True,1.015,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z113,ajar,True,1.001,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z113,ajar,True,0.992,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z114,ajar,True,0.839,1091,2,ajar
+zeddump,json,z114,open,True,0.972,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z114,closed,True,0.948,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z114,closed,True,0.96,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z115,open,True,0.855,1091,2,open
+zeddump,json,z115,closed,True,0.983,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z115,closed,True,0.98,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z115,closed,True,0.99,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z116,open,True,0.809,1091,2,open
+zeddump,json,z116,closed,True,0.999,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z116,closed,True,0.99,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z116,closed,True,0.992,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z117,open,True,0.783,1091,2,open
+zeddump,json,z117,closed,True,0.973,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z117,open,True,1.068,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z117,closed,True,1.038,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z118,ajar,True,0.784,1091,2,ajar
+zeddump,json,z118,closed,True,0.977,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z118,ajar,True,1.006,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z118,closed,True,0.973,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z119,open,True,0.824,1091,2,open
+zeddump,json,z119,open,True,1.007,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z119,closed,True,0.992,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z119,open,True,0.976,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z120,open,True,0.803,1091,2,open
+zeddump,json,z120,closed,True,0.991,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z120,closed,True,1.018,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z120,closed,True,1.023,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z121,open,True,0.791,1091,2,open
+zeddump,json,z121,open,True,1.007,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z121,open,True,0.987,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z121,open,True,0.989,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z122,ajar,True,0.8,1091,2,ajar
+zeddump,json,z122,ajar,True,0.99,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z122,open,True,0.955,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z122,ajar,True,1.016,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z123,ajar,True,0.842,1091,2,ajar
+zeddump,json,z123,open,True,0.974,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z123,open,True,0.968,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z123,ajar,True,1.0,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z124,ajar,True,0.852,1091,2,ajar
+zeddump,json,z124,open,True,1.01,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z124,open,True,0.967,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z124,open,True,0.968,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z125,open,True,0.81,1091,2,open
+zeddump,json,z125,open,True,0.978,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z125,open,True,0.944,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z125,open,True,0.995,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z126,ajar,True,0.839,1091,2,ajar
+zeddump,json,z126,ajar,True,0.959,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z126,open,True,1.061,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z126,ajar,True,1.022,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z127,open,True,0.764,1091,2,open
+zeddump,json,z127,open,True,0.984,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z127,open,True,0.979,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z127,open,True,1.029,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z128,ajar,True,0.809,1091,2,ajar
+zeddump,json,z128,ajar,True,0.975,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z128,open,True,1.007,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z128,ajar,True,0.972,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z129,closed,True,0.813,1091,2,closed
+zeddump,json,z129,closed,True,0.965,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z129,closed,True,1.015,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z129,closed,True,0.96,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z130,closed,True,0.813,1091,2,closed
+zeddump,json,z130,closed,True,0.946,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z130,closed,True,0.976,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z130,closed,True,1.041,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z131,closed,True,0.837,1091,2,closed
+zeddump,json,z131,closed,True,0.971,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z131,closed,True,0.951,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z131,closed,True,0.953,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z132,closed,True,0.76,1091,2,closed
+zeddump,json,z132,closed,True,0.995,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z132,closed,True,0.977,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z132,closed,True,0.986,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z133,closed,True,0.813,1091,2,closed
+zeddump,json,z133,closed,True,0.972,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z133,closed,True,0.974,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z133,closed,True,0.995,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z134,closed,True,0.809,1091,2,closed
+zeddump,json,z134,closed,True,0.981,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z134,closed,True,0.975,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z134,closed,True,0.955,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z135,closed,True,0.789,1091,2,closed
+zeddump,json,z135,closed,True,0.958,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z135,closed,True,0.968,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z135,closed,True,1.007,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z136,open,True,0.836,1091,2,open
+zeddump,json,z136,open,True,0.982,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_box,z136,open,True,1.008,1196,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,json_ovl,z136,open,True,0.948,1233,16,"{   ""state"": ""open"",   ""visible"": true }"
+zeddump,plain,z137,closed,True,0.788,1091,2,closed
+zeddump,json,z137,closed,True,0.94,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z137,closed,True,1.003,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z137,closed,True,1.008,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z138,closed,True,0.781,1091,2,closed
+zeddump,json,z138,closed,True,1.015,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z138,closed,True,0.984,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z138,closed,True,0.983,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z139,closed,True,0.873,1091,2,closed
+zeddump,json,z139,closed,True,0.99,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z139,closed,True,0.972,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z139,closed,True,0.992,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z140,closed,True,0.844,1091,2,closed
+zeddump,json,z140,closed,True,0.963,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z140,closed,True,1.014,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z140,closed,True,1.012,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z141,closed,True,0.814,1091,2,closed
+zeddump,json,z141,closed,True,0.926,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z141,closed,True,1.006,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z141,closed,True,0.963,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z142,ajar,True,0.798,1091,2,ajar
+zeddump,json,z142,ajar,True,0.963,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z142,ajar,True,0.986,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z142,closed,True,1.052,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z143,ajar,True,0.799,1091,2,ajar
+zeddump,json,z143,closed,True,0.927,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z143,closed,True,0.966,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z143,closed,True,1.031,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z144,ajar,True,0.786,1091,2,ajar
+zeddump,json,z144,ajar,True,1.019,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z144,closed,True,0.959,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_ovl,z144,closed,True,0.979,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z145,ajar,True,0.817,1091,2,ajar
+zeddump,json,z145,closed,True,0.935,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z145,ajar,True,0.975,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z145,closed,True,0.962,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z146,ajar,True,0.779,1091,2,ajar
+zeddump,json,z146,ajar,True,0.95,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z146,ajar,True,1.025,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z146,ajar,True,1.01,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,plain,z147,ajar,True,0.835,1091,2,ajar
+zeddump,json,z147,closed,True,0.955,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,json_box,z147,ajar,True,0.947,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z147,closed,True,0.956,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,plain,z148,ajar,True,0.811,1091,2,ajar
+zeddump,json,z148,ajar,True,1.003,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_box,z148,ajar,True,0.999,1196,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+zeddump,json_ovl,z148,ajar,True,0.99,1233,16,"{   ""state"": ""ajar"",   ""visible"": true }"
+overlay,plain,o0,closed,True,0.828,1091,2,closed
+overlay,json,o0,closed,True,1.007,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o0,closed,True,1.007,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,plain,o3,closed,True,0.805,1091,2,closed
+overlay,json,o3,closed,True,0.978,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o3,closed,True,0.997,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,plain,o5,closed,True,0.784,1091,2,closed
+overlay,json,o5,closed,True,1.009,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o5,closed,True,0.981,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,plain,o10,closed,True,0.786,1091,2,closed
+overlay,json,o10,closed,True,0.962,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o10,closed,True,0.99,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,plain,o12,closed,True,0.866,1091,2,closed
+overlay,json,o12,closed,True,1.017,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o12,closed,True,0.971,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,plain,o15,closed,True,0.831,1091,2,closed
+overlay,json,o15,closed,True,0.98,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o15,closed,True,0.983,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,plain,o18,closed,True,0.809,1091,2,closed
+overlay,json,o18,closed,True,0.992,1196,16,"{   ""state"": ""closed"",   ""visible"": true }"
+overlay,json_ovl,o18,closed,True,1.007,1233,16,"{   ""state"": ""closed"",   ""visible"": true }"
+zeddump,passable,z0,open,True,0.856,1101,2,yes
+zeddump,passable,z1,open,True,0.784,1101,2,yes
+zeddump,passable,z2,open,True,0.746,1101,2,yes
+zeddump,passable,z3,open,True,0.771,1101,2,yes
+zeddump,passable,z4,open,True,0.774,1101,2,yes
+zeddump,passable,z5,open,True,0.767,1101,2,yes
+zeddump,passable,z6,open,True,0.772,1101,2,yes
+zeddump,passable,z7,open,True,0.779,1101,2,yes
+zeddump,passable,z8,none,False,0.773,1101,2,none
+zeddump,passable,z9,open,True,0.841,1101,2,yes
+zeddump,passable,z10,closed,True,0.789,1101,2,no
+zeddump,passable,z11,none,False,0.823,1101,2,none
+zeddump,passable,z12,open,True,0.781,1101,2,yes
+zeddump,passable,z13,open,True,0.746,1101,2,yes
+zeddump,passable,z14,none,False,0.771,1101,2,none
+zeddump,passable,z15,none,False,0.884,1166,2,none
+zeddump,passable,z16,open,True,0.8,1101,2,yes
+zeddump,passable,z17,open,True,0.76,1101,2,yes
+zeddump,passable,z18,open,True,0.732,1101,2,yes
+zeddump,passable,z19,open,True,0.836,1101,2,yes
+zeddump,passable,z20,open,True,0.788,1101,2,yes
+zeddump,passable,z21,none,False,0.824,1101,2,none
+zeddump,passable,z22,none,False,0.803,1101,2,none
+zeddump,passable,z23,closed,True,0.8,1101,2,no
+zeddump,passable,z24,closed,True,0.812,1101,2,no
+zeddump,passable,z25,closed,True,0.775,1101,2,no
+zeddump,passable,z26,none,False,0.756,1101,2,none
+zeddump,passable,z27,open,True,0.841,1101,2,yes
+zeddump,passable,z28,none,False,0.772,1101,2,none
+zeddump,passable,z29,open,True,0.775,1101,2,yes
+zeddump,passable,z30,open,True,0.808,1101,2,yes
+zeddump,passable,z31,open,True,0.801,1101,2,yes
+zeddump,passable,z32,open,True,0.774,1101,2,yes
+zeddump,passable,z33,open,True,0.772,1101,2,yes
+zeddump,passable,z34,open,True,0.769,1101,2,yes
+zeddump,passable,z35,open,True,0.764,1101,2,yes
+zeddump,passable,z36,open,True,0.754,1101,2,yes
+zeddump,passable,z37,none,False,0.817,1101,2,none
+zeddump,passable,z38,open,True,0.795,1101,2,yes
+zeddump,passable,z39,none,False,0.811,1101,2,none
+zeddump,passable,z40,open,True,0.791,1101,2,yes
+zeddump,passable,z41,open,True,0.804,1101,2,yes
+zeddump,passable,z42,none,False,0.857,1101,2,none
+zeddump,passable,z43,none,False,0.797,1101,2,none
+zeddump,passable,z44,open,True,0.823,1101,2,yes
+zeddump,passable,z45,open,True,0.778,1101,2,yes
+zeddump,passable,z46,open,True,0.786,1101,2,yes
+zeddump,passable,z47,open,True,0.793,1101,2,yes
+zeddump,passable,z48,open,True,0.832,1101,2,yes
+zeddump,passable,z49,closed,True,0.816,1101,2,no
+zeddump,passable,z50,open,True,0.809,1101,2,yes
+zeddump,passable,z51,none,False,0.773,1101,2,none
+zeddump,passable,z52,open,True,0.791,1101,2,yes
+zeddump,passable,z53,open,True,0.783,1101,2,yes
+zeddump,passable,z54,open,True,0.782,1101,2,yes
+zeddump,passable,z55,open,True,0.785,1101,2,yes
+zeddump,passable,z56,open,True,0.805,1101,2,yes
+zeddump,passable,z57,open,True,0.775,1101,2,yes
+zeddump,passable,z58,open,True,0.763,1101,2,yes
+zeddump,passable,z59,open,True,0.745,1101,2,yes
+zeddump,passable,z60,open,True,0.777,1101,2,yes
+zeddump,passable,z61,open,True,0.816,1101,2,yes
+zeddump,passable,z62,open,True,0.824,1101,2,yes
+zeddump,passable,z63,open,True,0.799,1101,2,yes
+zeddump,passable,z64,open,True,0.746,1101,2,yes
+zeddump,passable,z65,open,True,0.79,1101,2,yes
+zeddump,passable,z66,open,True,0.77,1101,2,yes
+zeddump,passable,z67,open,True,0.806,1101,2,yes
+zeddump,passable,z68,open,True,0.823,1101,2,yes
+zeddump,passable,z69,open,True,0.776,1101,2,yes
+zeddump,passable,z70,open,True,0.799,1101,2,yes
+zeddump,passable,z71,open,True,0.815,1101,2,yes
+zeddump,passable,z72,closed,True,0.816,1101,2,no
+zeddump,passable,z73,open,True,0.83,1101,2,yes
+zeddump,passable,z74,open,True,0.781,1101,2,yes
+zeddump,passable,z75,open,True,0.811,1101,2,yes
+zeddump,passable,z76,open,True,0.747,1101,2,yes
+zeddump,passable,z77,open,True,0.787,1101,2,yes
+zeddump,passable,z78,open,True,0.804,1101,2,yes
+zeddump,passable,z79,open,True,0.76,1101,2,yes
+zeddump,passable,z80,closed,True,0.785,1101,2,no
+zeddump,passable,z81,closed,True,0.819,1101,2,no
+zeddump,passable,z82,closed,True,0.852,1101,2,no
+zeddump,passable,z83,open,True,0.798,1101,2,yes
+zeddump,passable,z84,closed,True,0.838,1101,2,no
+zeddump,passable,z85,closed,True,0.798,1101,2,no
+zeddump,passable,z86,closed,True,0.818,1101,2,no
+zeddump,passable,z87,closed,True,0.772,1101,2,no
+zeddump,passable,z88,closed,True,0.842,1101,2,no
+zeddump,passable,z89,closed,True,0.794,1101,2,no
+zeddump,passable,z90,closed,True,0.764,1101,2,no
+zeddump,passable,z91,open,True,0.785,1101,2,yes
+zeddump,passable,z92,open,True,0.806,1101,2,yes
+zeddump,passable,z93,closed,True,0.846,1101,2,no
+zeddump,passable,z94,open,True,0.803,1101,2,yes
+zeddump,passable,z95,closed,True,0.832,1101,2,no
+zeddump,passable,z96,open,True,0.846,1101,2,yes
+zeddump,passable,z97,closed,True,0.799,1101,2,no
+zeddump,passable,z98,open,True,0.786,1101,2,yes
+zeddump,passable,z100,open,True,0.799,1101,2,yes
+zeddump,passable,z101,open,True,0.808,1101,2,yes
+zeddump,passable,z102,open,True,0.762,1101,2,yes
+zeddump,passable,z103,open,True,0.788,1101,2,yes
+zeddump,passable,z104,open,True,0.759,1101,2,yes
+zeddump,passable,z105,open,True,0.753,1101,2,yes
+zeddump,passable,z106,open,True,0.812,1101,2,yes
+zeddump,passable,z107,open,True,0.86,1101,2,yes
+zeddump,passable,z108,open,True,0.769,1101,2,yes
+zeddump,passable,z109,open,True,0.777,1101,2,yes
+zeddump,passable,z110,open,True,0.82,1101,2,yes
+zeddump,passable,z111,open,True,0.786,1101,2,yes
+zeddump,passable,z112,open,True,0.821,1101,2,yes
+zeddump,passable,z113,open,True,0.821,1101,2,yes
+zeddump,passable,z114,open,True,0.788,1101,2,yes
+zeddump,passable,z115,open,True,0.781,1101,2,yes
+zeddump,passable,z116,open,True,0.806,1101,2,yes
+zeddump,passable,z117,open,True,0.759,1101,2,yes
+zeddump,passable,z118,open,True,0.786,1101,2,yes
+zeddump,passable,z119,open,True,0.759,1101,2,yes
+zeddump,passable,z120,open,True,0.773,1101,2,yes
+zeddump,passable,z121,open,True,0.812,1101,2,yes
+zeddump,passable,z122,open,True,0.755,1101,2,yes
+zeddump,passable,z123,open,True,0.802,1101,2,yes
+zeddump,passable,z124,open,True,0.797,1101,2,yes
+zeddump,passable,z125,open,True,0.802,1101,2,yes
+zeddump,passable,z126,open,True,0.796,1101,2,yes
+zeddump,passable,z127,open,True,0.831,1101,2,yes
+zeddump,passable,z128,open,True,0.783,1101,2,yes
+zeddump,passable,z129,closed,True,0.769,1101,2,no
+zeddump,passable,z130,closed,True,0.81,1101,2,no
+zeddump,passable,z131,closed,True,0.824,1101,2,no
+zeddump,passable,z132,closed,True,0.805,1101,2,no
+zeddump,passable,z133,closed,True,0.8,1101,2,no
+zeddump,passable,z134,closed,True,0.816,1101,2,no
+zeddump,passable,z135,closed,True,0.774,1101,2,no
+zeddump,passable,z136,open,True,0.761,1101,2,yes
+zeddump,passable,z137,none,False,0.777,1101,2,none
+zeddump,passable,z138,closed,True,0.835,1101,2,no
+zeddump,passable,z139,closed,True,0.798,1101,2,no
+zeddump,passable,z140,closed,True,0.816,1101,2,no
+zeddump,passable,z141,closed,True,0.825,1101,2,no
+zeddump,passable,z142,none,False,0.832,1101,2,none
+zeddump,passable,z143,open,True,0.791,1101,2,yes
+zeddump,passable,z144,open,True,0.826,1101,2,yes
+zeddump,passable,z145,none,False,0.837,1101,2,none
+zeddump,passable,z146,open,True,0.796,1101,2,yes
+zeddump,passable,z147,none,False,0.837,1101,2,none
+zeddump,passable,z148,closed,True,0.723,1101,2,no
+overlay,passable,o0,open,True,0.772,1101,2,yes
+overlay,passable,o3,open,True,0.797,1101,2,yes
+overlay,passable,o5,closed,True,0.786,1101,2,no
+overlay,passable,o10,open,True,0.81,1101,2,yes
+overlay,passable,o12,closed,True,0.769,1101,2,no
+overlay,passable,o15,closed,True,0.777,1101,2,no
+overlay,passable,o18,closed,True,0.759,1101,2,no

@@ -141,6 +141,22 @@ RgbContourCheck = true
 # (retina has a LiDAR-anchored depth-correction dataset for exactly this) or the check's own sampling.
 ContourDepthCheck = false
 
+# ── THE DOORWAY FRAME: existence evidence from the part of a door that does NOT move (2026-10-12) ─────
+# Every other existence channel looks at the LEAF. Live try32: the crossed door, carried into room_2 with
+# its leaf at ~95 deg opening OUT of room_2, went L +3.6 -> -4.0 and room_2 lost its only door while the
+# camera looked straight at an obvious doorway. This scores the aperture's two jambs + lintel against the
+# RGB (vs. the same frame slid along the wall — a valid null at any phi, since the frame IS in the wall)
+# and, separately, the depth step across each edge (wall side vs hole side; relative, so the ~20 cm ZED
+# bias above cancels). Offline on try32's saved ZED frames (door_concept/tests/test_door_frame_evidence.cpp):
+# open-out door +7.8, shut door +16, phantom placements on blank wall mean -1.4 (max +0.6).
+# Log: `frame n=.. vis=.. exc=.. dep=..` on the [existence] line; frame_* columns in door_existence_log.csv.
+FrameContourCheck = true
+FrameDepthCheck = true
+# The CASING lining the opening stands proud of the wall (Webots Door.proto: 0.05 m boards, 0.05 m proud), so
+# a depth read just inside the predicted jamb lands on a surface NEARER than the wall: live try34 dep -0.45 on
+# a real open doorway seen from inside room_2. The hole side is read past this width. (2026-10-13)
+FrameCasingM = 0.06
+
 # DOOR ACTUATION — ask a provider to open/close a door (RoboCompDoorControl), from the strip UI buttons.
 # ★A CAPABILITY, NOT A SIMULATOR. The provider may be the Webots supervisor, home automation, or a
 # person asked over TTS; on the real robot there is no Webots, so this must never be a dependency on one.
@@ -282,7 +298,14 @@ AutonomousActuation = true
 # ✅The bridge CAN actuate: its [DoorControl] Doors list is enabled and resolves DOOR_0/DOOR_1 in
 # piso.wbt (see [DoorConcept].DoorControlEndpoint above). So the remaining obstacle to an autonomous
 # `open` is identity, not capability — name an id here, or donate one correspondence with a button press.
+# ★2026-10-12 FALLBACK ONLY. The provider door is now CHOSEN PER DOOR: the nearest advertised door to our
+# aperture in the provider's world frame, which comes from the sim witness (robot_gt_* ∘ body←room; sim only)
+# or else this room's learned registration (operator picks only, per room). This id is used ONLY when neither
+# resolves (logged as "⚠CONFIGURED FALLBACK"). Set to "DOOR_1" for the 10-11 crossing test, it sent EVERY door —
+# including room 1's second door (DOOR_0) — to DOOR_1. Root cause of the wrong world pose: `root` is the robot
+# frame (root→Shadow identity, Shadow→room edge), and the registration was poisoned by config-id requests.
 ActuationProviderId = ""
+ActuationMatchMaxM  = 1.0     # ⚠gate on an ACT: nearest advertised door must be within this (m); doors here are >= 2.5 m apart
 
 [Tracker]
 # Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.
@@ -356,6 +379,14 @@ OcclusionMarginM = 0.30  # a door/geometric occluder must be ≥ this many metre
 RoomPrior = true         # enforce the room-containment pose prior
 RoomMarginM = 0.40       # tolerance a door centre may sit OUTSIDE the walls (wall-hugging door + centroid noise)
 OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
+# THE WALL BAND (door_room_band.h, 2026-10-13). The polygon is the room-side FACE; a door's aperture sits IN the
+# wall, in [0, T] beyond it — the normal place for a real door, not an error. The per-door containment prior is
+# now a static log-prior −½(dist-to-band/σ)², 0 on the band, REPLACED each cycle (OutOfRoomGain no longer used
+# by it; RoomMarginM still gates births). A leaf sample past the room-side face (a leaf swung OUT, seen THROUGH the
+# opening; live try34: free=112-122 on a door that exists) is a view the silhouette model does not represent:
+# weight 1 − P(through), measured from the aperture line (a shut leaf is never "through").
+WallThicknessM = 0.20    # T: Webots walls 0.11 m; room_concept measured a 0.19-0.20 m recess
+BoundarySigmaM = 0.10    # σ: door registration (RT-cov 6-12 cm) ⊕ published corner σ 0.06; also the frame's depth window
 # MINIMUM-HEIGHT prior. A door is an aperture a person walks THROUGH, so P(door | it tops out below ~1.8 m)
 # ≈ 0 — a counter, a radiator, a window sill or a low cabinet segmented as "door" is not one. Same kind of
 # categorical prior as RoomPrior (a fact about what a door IS, not a tuned detectability curve), applied the

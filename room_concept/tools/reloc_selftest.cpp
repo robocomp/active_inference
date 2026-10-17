@@ -5,8 +5,10 @@
  *  localiser is handed a WRONG pose (a 180° flip, a mirror image, a small drift, or a uniform kidnap)
  *  together with a scan taken at the TRUE pose, and each method has to recover.
  *
- *  CONTROL   RoomConcept::legacy_grid_search_pose() — the pre-09-16 4-stage lattice, frozen verbatim.
- *  TREATMENT rc::reloc::search() — batched robust likelihood + structural yaws + mixture posterior.
+ *  rc::reloc::search() — batched robust likelihood + structural yaws + mixture posterior.
+ *  (This was an A/B against RoomConcept::legacy_grid_search_pose(), the pre-09-16 4-stage lattice. The
+ *  mixture search won — 300/300 vs 235/300 — and has been the live default since 09-16; the lattice and
+ *  its control arm were deleted with torch, 2026-10-17. It is now a regression test of the search.)
  *
  *  ENDPOINTS (per room × kidnap kind)
  *    ok      the committed / top-weight pose is within 0.10 m and 5° of the truth OR of a pose that is
@@ -18,8 +20,7 @@
  *            [0.25, 0.75] — i.e. the posterior reports the ambiguity instead of arbitrarily resolving it.
  *    nees    mean e'Σ⁻¹e / 3 of the top mode on correct recoveries (≈1 = calibrated covariance).
  *    ms      wall time per search.
- *  REFUTED if the treatment does not beat the control's ok-rate at lower ms, or its NEES is far from 1,
- *  or on the symmetric room it is NOT honest.
+ *  REGRESSION if the ok-rate drops, its NEES moves far from 1, or on the symmetric room it is NOT honest.
  *
  *  Build:  make -C build reloc_selftest && ./bin/reloc_selftest
  */
@@ -202,11 +203,10 @@ namespace
 int main()
 {
     std::setlocale(LC_ALL, "");   // behave like the Qt agent (es_ES decimal comma) — see CLAUDE.md
-    torch::set_num_threads(1);
     constexpr int kEpisodes = 25;
     std::printf("reloc_selftest: %d episodes per room x kind, 360-beam scans, 2 cm noise, 30%% clutter, "
                 "one open-door sector\n\n", kEpisodes);
-    std::printf("%-12s %-8s | %-36s | %-60s\n", "room", "kidnap", "CONTROL ok   basin  +polish     ms", "TREATMENT ok   basin  truth  honest   nees     ms  modes");
+    std::printf("%-12s %-8s | %-60s\n", "room", "kidnap", "ok   basin  truth  honest   nees     ms  modes");
 
     for (const auto& room : rooms())
     {
@@ -223,7 +223,7 @@ int main()
         for (const Kind kind : {Kind::Flip, Kind::Mirror, Kind::Drift, Kind::Uniform})
         {
             std::mt19937 rng(1000u + static_cast<unsigned>(kind) * 17u + static_cast<unsigned>(room.name.size()));
-            Tally ctl, trt;
+            Tally trt;
             double modes_sum = 0.0;
             for (int e = 0; e < kEpisodes; ++e)
             {
@@ -232,28 +232,6 @@ int main()
                 Eigen::Vector3f handed = kidnap(kind, room.poly, truth, rng);
                 if (not rc::reloc::inside_polygon(room.poly, handed.head<2>()))
                     handed.head<2>() = truth.head<2>();   // a mirror of an L can leave the room; keep yaw error
-
-                // ── CONTROL ──
-                {
-                    rc::RoomConcept rc_ctl;
-                    rc_ctl.set_polygon_room(room.poly);
-                    rc_ctl.set_robot_pose(handed.x(), handed.y(), handed.z(), false);
-                    std::vector<Eigen::Vector3f> pts3;
-                    pts3.reserve(scan.size());
-                    for (const auto& p : scan) pts3.emplace_back(p.x(), p.y(), 0.f);
-                    const auto t0 = std::chrono::steady_clock::now();
-                    rc_ctl.legacy_grid_search_pose(pts3, 0.5f);   // frozen live constants inside
-                    ctl.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                    const auto st = rc_ctl.get_current_state();
-                    const Eigen::Vector3f est(st[2], st[3], st[4]);
-                    ++ctl.n;
-                    if (near_or_twin(room, est, truth)) ++ctl.ok;
-                    if (near_or_twin(room, est, truth, 0.30f, 10.f)) ++ctl.basin;
-                    // Same continuous polish the treatment gets: the live window optimizer would refine the
-                    // committed lattice point, so what the control is really judged on is the BASIN it chose.
-                    const auto pol = rc::reloc::polish(room.poly, scan, est, rp, raster.extent());
-                    if (near_or_twin(room, pol.pose, truth)) ++ctl.truth;
-                }
 
                 // ── TREATMENT ──
                 {
@@ -319,9 +297,8 @@ int main()
             }
             char honest[16] = "   n/a";
             if (trt.honest_n > 0) std::snprintf(honest, sizeof honest, "%3d/%-3d", trt.honest, trt.honest_n);
-            std::printf("%-12s %-8s | %3d/%-3d %3d/%-3d %3d/%-3d %8.1f | %3d/%-3d %3d/%-3d %3d/%-3d %s %6.2f %6.1f  %4.2f\n",
+            std::printf("%-12s %-8s | %3d/%-3d %3d/%-3d %3d/%-3d %s %6.2f %6.1f  %4.2f\n",
                         room.name.c_str(), name(kind),
-                        ctl.ok, ctl.n, ctl.basin, ctl.n, ctl.truth, ctl.n, ctl.ms / std::max(1, ctl.n),
                         trt.ok, trt.n, trt.basin, trt.n, trt.truth, trt.n, honest,
                         trt.nees_n > 0 ? trt.nees / trt.nees_n : std::nan(""),
                         trt.ms / std::max(1, trt.n), modes_sum / std::max(1, trt.n));

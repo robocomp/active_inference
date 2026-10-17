@@ -151,6 +151,28 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     }
 
     room_polygon_ = room_polygon.value();
+    mission_.set_room_polygon(room_polygon_);   // missions record their frame / are registered against it
+
+    // ── DOOR PASSAGE (controller_door_passage.h): which affordance may be selected, and the corridor through the
+    //    doorway while crossing. Before set_world below, so the grid built this cycle already includes it.
+    {
+        auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
+        if (dp.event.has_value()) std::println("{}", *dp.event);
+        door_required_ = std::move(dp.required);
+        door_passages_ = std::move(dp.passages);
+        grid_planner_.set_passages(door_passages_);
+        obstacle_tracker.set_exempt_names(std::move(dp.exempt));
+        // The window's row and corridor overlay. The door list is a node scan, so it is refreshed once a second.
+        if (timestamp_ms - door_names_ms_ >= 1000)
+        {
+            door_names_ms_ = timestamp_ms;
+            door_names_ = rc::DoorPassage::list_doors(*graph_);
+        }
+        const auto v = door_passage_.view();
+        display.set_door_passage({.door = v.door, .step = rc::DoorPassage::step_name(v.step), .step_state = v.step_state,
+                                  .attempts = v.attempts, .last_event = v.last_event, .doors = door_names_},
+                                 door_passages_);
+    }
 
     // ── THE ROBOT'S OWN BODY, ONCE, AS SOON AS ITS NODE EXISTS ───────────────────────────────────
     // ★NOT IN initialize(). The robot node may not have synced from the persistent server yet at that point
@@ -735,6 +757,42 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         plan_spline_valid_ = false;
     }
 
+    // Door passage: the selector may take only the step's affordance. On its start the claim on whatever was being
+    // executed (the explorer's afford_room, typically) is released, exactly as an abandoned goal is above.
+    if (door_passage_.take_just_started())
+    {
+        std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
+        affordance_manager.release_execution_claim(graph_);
+        // AND whatever it was running: a lock-on/orient left armed completes on the NEXT affordance claimed and stamps
+        // ITS outcome there (live try23: the epistemic aff_door_36 servo LOCKED after `cross` was claimed and reported
+        // `cross` Satisfied with the robot still in room 2, progress −1).
+        lockon_.reset();
+        orient_start_ms_.reset();
+        orient_stable_ = 0;
+        feedback_node_id_ = 0;
+        last_target_info_.reset();
+        current_target_room_.reset();
+        active_target_id_ = 0;
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+    }
+    // A later door step came on offer while the current one was executing: drop it NOW — claim, lock-on, orient —
+    // so the next step is selected this very cycle instead of after the current step's own (stricter) completion.
+    if (door_passage_.take_preempted())
+    {
+        std::println("[door-passage] {} — current step pre-empted, claim released", door_passage_.status());
+        affordance_manager.release_execution_claim(graph_);
+        lockon_.reset();
+        orient_start_ms_.reset();
+        orient_stable_ = 0;
+        feedback_node_id_ = 0;
+        last_target_info_.reset();
+        current_target_room_.reset();
+        active_target_id_ = 0;
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+    }
+    affordance_manager.set_required_name(door_required_);
     const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
                             ? std::nullopt
                             : world_model.read_target_in_room(timestamp_ms);
@@ -1071,7 +1129,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // would answer "no" for a reason that mis-describes what happened, and the producer would be
         // told "the body does not fit" about a place that is not in its own layout. Rejected with its
         // own word so a run full of these points at the exploration grid's extent, not at the planner.
-        if (room_polygon_.size() >= 3 and not rc::corner_visibility::point_in_polygon(step.target.room_pos, room_polygon_))
+        if (room_polygon_.size() >= 3 and not rc::corner_visibility::point_in_polygon(step.target.room_pos, room_polygon_)
+            and not grid_planner_.inside_room_or_passage(room_polygon_, step.target.room_pos))   // a door passage's corridor is in
         {
             const Eigen::Vector2f cell = step.target.room_pos;
             if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
@@ -2050,7 +2109,8 @@ void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_
 
 bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
 {
-    const auto *m = mission_.selected_mission();
+    // The RUNNING copy: moved into the current room frame at start() (mission_frame.h).
+    const auto *m = mission_.running_mission() ? mission_.running_mission() : mission_.selected_mission();
     if (m == nullptr or m->waypoints.size() < 2) return false;
 
     // REPAIR EVERY WAYPOINT FIRST. A recorded waypoint is a DESIRE; what can actually be driven is the
@@ -2188,6 +2248,70 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
     // build leaves the robot on the curve it already had, so its trace is still the right picture.
     if (built) note_route_changed();
     return built;
+}
+
+std::optional<float> ControllerSession::clearance_speed_limit(const DrivenCurve &curve,
+                                                              const ControllerRobotPose &robot_pose,
+                                                              const rc::TrajectoryController &path_controller) const
+{
+    if (not curve.valid() or params_ == nullptr or not path_controller.is_active()) return std::nullopt;
+    const rc::RouteSpline &sp = *curve.spline;
+    if (not sp.valid() or sp.spacing() <= 1e-4f or sp.length() <= 0.f) return std::nullopt;
+    const float v_cap = params_->max_adv_speed_mps;
+    // The braking model the tracker's own end-of-route taper uses, never more than the base delivers
+    // (the start-up [policy] report already flags cbf_max_decel 3.0 against a capability of 1.0).
+    float a_dec = std::max(0.05f, path_controller.params.cbf_max_decel);
+    if (base_capability_.max_linear_decel_mps2.has_value())
+        a_dec = std::min(a_dec, std::max(0.05f, *base_capability_.max_linear_decel_mps2));
+    // Worst-case reach: the field carries no bearing, and the planner's exact-footprint certificate is
+    // about the ROUTE it drew, not about what the LiDAR sees beside it now.
+    const float support = path_controller.body_extent_max();
+    // Where the robot is along the curve: the mission tracks it; a plan is projected FORWARD-ONLY from
+    // the last known progress, for the same reason the follower and the band do.
+    const float s_now = curve.on_mission() ? route_.progress()
+                                           : sp.project(robot_pose.pos, plan_progress_s_, 3.0f);
+    const float horizon = v_cap * v_cap / (2.f * a_dec) + support;
+    const Eigen::Affine2f pose = robot_pose.as_transform();
+    const Eigen::Matrix2f Rt = pose.linear().transpose();
+    const Eigen::Vector2f t = pose.translation();
+    float v = v_cap;
+    for (float ds = 0.f; ds <= horizon; ds += sp.spacing())
+    {
+        const float s = s_now + ds;
+        const Eigen::Vector2f r = Rt * (sp.position_at(std::min(s, sp.length())) - t);
+        const float c = path_controller.clearance_at(r.x(), r.y());
+        // Arc length left before the body can touch: along the route to this sample, plus the sample's
+        // own slack. Negative slack means the route is already inside something at that sample, and
+        // the stopping distance is shortened by exactly that much.
+        const float d_stop = std::max(0.f, ds + (c - support));
+        v = std::min(v, std::sqrt(2.f * a_dec * d_stop));
+        if (s >= sp.length()) break;
+    }
+    return v;
+}
+
+float ControllerSession::raw_return_clearance(const Eigen::Vector2f &probe_room, const ControllerRobotPose &pose,
+                                              ControllerObstacleTracker &tracker) const
+{
+    constexpr float kFar = 100.f;
+    auto *lidar = tracker.lidar_buffer();
+    if (lidar == nullptr) return kFar;
+    const auto [cloud_opt] = lidar->read_last();
+    if (not cloud_opt.has_value()) return kFar;
+    const auto &[xs, ys, zs] = cloud_opt.value();
+    const std::size_t n = std::min({xs.size(), ys.size(), zs.size()});
+    // The same body band and the same hull self-filter recheck_standpoint_on_approach uses.
+    constexpr float kBodyZLo = 0.05f, kBodyZHi = 1.45f;
+    const float yaw = pose.theta + static_cast<float>(M_PI_2);
+    float best = kFar;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
+        const Eigen::Vector2f p{xs[i], ys[i]};
+        if (approach_body_.contains_yaw(p, pose.pos, yaw)) continue;   // the robot seeing itself
+        best = std::min(best, (p - probe_room).norm());
+    }
+    return best;
 }
 
 float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
@@ -2634,6 +2758,44 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             std::println("[controller] HOLDING — no route to '{}': {}. Not escaping: the robot is not wedged, "
                          "the planner produced no path, and reversing cannot fix a planner.",
                          step.target.node_name, grid_planner_.last_failure());
+            // DOOR PASSAGE DIAGNOSTIC (2026-10-11): which cell of the doorway corridor refuses the body. One line per
+            // 10 cm along the corridor's axis: is the body free there facing along it, and how many residual cells /
+            // obstacle polygons lie inside the corridor — so "no route through the door" names its blocker.
+            if (not door_passages_.empty() and door_passages_.front().size() == 4)
+            {
+                const auto &c = door_passages_.front();
+                const Eigen::Vector2f a = 0.5f * (c[0] + c[3]), b = 0.5f * (c[1] + c[2]);
+                const Eigen::Vector2f d = (b - a).normalized();
+                const float yaw = std::atan2(d.y(), d.x());
+                std::ofstream f("door_passage_world.txt", std::ios::out | std::ios::trunc);
+                f.imbue(std::locale::classic());
+                f << "start " << step.robot_pose.pos.x() << ' ' << step.robot_pose.pos.y() << '\n';
+                f << "goal " << step.target.room_pos.x() << ' ' << step.target.room_pos.y() << '\n';
+                for (const auto &p : c) f << "corridor " << p.x() << ' ' << p.y() << '\n';
+                for (const auto &p : room_polygon_) f << "room " << p.x() << ' ' << p.y() << '\n';
+                std::string blocked;
+                for (float s = 0.f; s <= (b - a).norm(); s += 0.1f)
+                {
+                    const Eigen::Vector2f q = a + s * d;
+                    const bool fr = grid_planner_.pose_free(q, yaw);
+                    f << "axis " << s << ' ' << q.x() << ' ' << q.y() << ' ' << (fr ? 1 : 0) << '\n';
+                    if (not fr) blocked += std::format(" {:.1f}", s);
+                }
+                int n_res = 0;
+                for (const auto &q : obstacle_tracker.residual_cells())
+                    if (rc::corner_visibility::point_in_polygon(q, c)) { ++n_res; f << "residual " << q.x() << ' ' << q.y() << '\n'; }
+                for (const auto &o : obstacle_tracker.display_obstacle_polygons())
+                    for (const auto &p : o.polygon)
+                        if (rc::corner_visibility::point_in_polygon(p, c))
+                        { f << "obs " << (o.label.empty() ? "-" : o.label) << ' ' << (o.color_key.empty() ? "-" : o.color_key)
+                            << ' ' << p.x() << ' ' << p.y() << '\n'; }
+                f << "exempt";
+                for (const auto &n : obstacle_tracker.exempt_names()) f << ' ' << n;
+                f << '\n';
+                std::println("[door-passage] no route through the corridor: body refused at axis metres [{} ] of {:.1f}; "
+                             "{} residual cells inside it — see door_passage_world.txt",
+                             blocked, (b - a).norm(), n_res);
+            }
         }
         return false;
     }
@@ -3380,6 +3542,12 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
         return;
     }
     if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
+    // ── A REACH STANDPOINT THE LIVE LiDAR SAYS IS OCCUPIED: HAND IT BACK (2026-10-09) ───────────────────────────
+    // For an exploration standpoint the exact spot does not matter, and nudging it a few cm drove the robot into
+    // the furniture that occupied it (live: moved 5 cm, then WEDGE, then 3 blind escapes into a wall). The
+    // producer owns the choice: report Unreachable and it offers another. Object approaches keep the repair.
+    if (flag_reach_unreachable(std::format("live LiDAR: standpoint ({:.2f},{:.2f}) occupied", anchor.x(), anchor.y())))
+        return;
 
 
     step.target.room_pos = *fix;      // aim_at_object reads room_pos, so the move lands first
@@ -3927,7 +4095,12 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     const bool on_mission = curve.on_mission();
     const rc::RouteSpline &spline = *curve.spline;
     const std::size_t M = curve.control_count;
-    if (M < 8) return;                       // nothing a window can be carved out of
+    // optimize_route's own minimum (M >= 4; endpoints pinned, so the smallest problem is 2 points).
+    // ★IT WAS 8, AND THAT RETURN SAT BEFORE THE DIAGNOSTIC ROW: at h = 0.40 every plan shorter than
+    // ~3.2 m was refused silently — i.e. EVERY affordance approach. Run 2026-10-09 19:06: route-opt
+    // fitted 7, 6 and 6 control points for the three approaches; band_diag.csv holds only ctrl_n = 13
+    // rows, all after the escape. The band had never run where the collisions were.
+    if (M < 4) { log_band_diagnostics(overlay_now_ms_, rc::RouteOptimizerReport{}, 0, 0, M); return; }
 
     // ── A ROUTE THE ROBOT IS NOT ADVANCING ALONG MUST NOT BE DEFORMED ────────────────────────────
     // ★★★MEASURED, LIVE, 2026-08-26 — THIS IS WHERE THE "GIANT LOOP" COMES FROM. While PLAIN holds the
@@ -3975,7 +4148,26 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     const float frac = std::clamp(progress / len, 0.f, 1.f);
     const float h = std::max(0.05f, spline.control_spacing());
     const auto i_robot = static_cast<std::size_t>(frac * static_cast<float>(M));
-    const auto lead = static_cast<std::size_t>(std::ceil(std::max(0.f, params_->band_lead_m) / h));
+    // ── THE LEAD, DERIVED FROM WHAT THE TRACKER READS INSTEAD OF A CONSTANT ────────────────────
+    // The tracker reads the curve over [s, s + v*T_lag + W/2] (its curvature preview plus the error
+    // evaluated at s). A uniform cubic B-spline segment j depends on control points j-1..j+2, so the
+    // points whose basis is non-zero over that stretch are the ones that must not move; the first free
+    // index is floor((s + preview)/h) + 3. ★This is exactly what the two live measurements say: 1.0 m
+    // (3 points at h = 0.40) tracked fine, 0.5 m (2 points) tripled cross-track rms — and the shipped
+    // 0.6 m is ALSO 2 points (ceil(0.6/0.4) = 2), the same setting as the one that failed; nobody saw
+    // it because the band was refused on every short plan (M < 8 above). BandLead is kept as a FLOOR.
+    // ★With kBandProximalSigmaM > 0 the support points are released instead and a proximal prior
+    //   (anchors = the current curve at the knots, sigma = that value) bounds how far the route may
+    //   move per cycle, so the error signal the tracker sees drifts rather than steps. OFF by default:
+    //   it is the architecture the user asked for (re-optimise the FIRST part of the spline against
+    //   live obstacles) and it needs a lap to measure. Turning it on is a decision, not a side effect.
+    const float kBandProximalSigmaM = params_->band_proximal_sigma_m;   // Controller.BandProximalSigmaM
+    const float preview_m = base_speed_lin_ * path_controller.params.plain_T_lag
+                          + 0.5f * path_controller.params.plain_W;
+    const auto lead_preview = static_cast<std::size_t>(std::floor(preview_m / h)) + 1;
+    const auto lead_cfg = static_cast<std::size_t>(std::ceil(std::max(0.f, params_->band_lead_m) / h));
+    const auto lead = kBandProximalSigmaM > 0.f ? lead_preview
+                                                : std::max(lead_cfg, lead_preview + 2);
     const auto span = static_cast<std::size_t>(std::ceil(std::max(h, params_->band_window_m) / h));
     const std::size_t freeze_before = std::min(i_robot + lead, M);
     const std::size_t freeze_after  = std::min(freeze_before + span, M);
@@ -4004,7 +4196,7 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     if (on_mission)
     {
         rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
-                                   params_->band_iterations);
+                                   params_->band_iterations, params_->band_clearance_weight);
     }
     else
     {
@@ -4019,7 +4211,24 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
         cfg.freeze_before = freeze_before;
         cfg.freeze_after = freeze_after;
         cfg.iterations = std::max(1, params_->band_iterations);
+        // 2026-10-10 (user): the band's obstacle repulsion deformed the stretches between waypoints too
+        // much. Its OWN clearance weight, so the one-shot smoothing above (w_clear = 1.0) is unchanged.
+        cfg.w_clear = params_->band_clearance_weight;
         cfg.verbose = false;          // this runs at control rate; per-cycle logging is noise
+        if (kBandProximalSigmaM > 0.f)
+        {
+            // PROXIMAL PRIOR: anchor every free knot to where the curve passes through it NOW, at the
+            // optimiser's own anchor form (the B-spline evaluated at the knot: (P[i-1] + 4 P[i] + P[i+1])/6).
+            // The clearance deficit then moves the route a bounded distance per solve and the tracker
+            // sees a drift, not a step. Warm start is already the case: the polygon IS the state.
+            const auto &P = plan_spline_.control_points();
+            for (std::size_t i = std::max<std::size_t>(1, freeze_before); i + 1 < P.size() and i < freeze_after; ++i)
+            {
+                cfg.anchors.push_back((P[i - 1] + 4.f * P[i] + P[i + 1]) / 6.f);
+                cfg.anchor_s.push_back(static_cast<float>(i) * h);
+            }
+            cfg.sigma_a = kBandProximalSigmaM;
+        }
         rep = plan_spline_.deform(cfg);
     }
     // Logged BEFORE the early return, so a rejected or no-op solve leaves a row too. A band that is on
@@ -4086,6 +4295,19 @@ void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::Route
 void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &affordance_manager,
                                                        const TimeSource &time_source)
 {
+    if (not reach_unreachable_why_.empty())
+    {
+        std::println("[controller] Reach standpoint handed back — {} — reporting Unreachable to the producer",
+                     reach_unreachable_why_);
+        std::fflush(stdout);
+        affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
+        route_dropped_ = true;
+        approach_commit_.reset();
+        approach_fix_.reset();
+        reach_unreachable_why_.clear();
+        no_route_since_ms_ = 0;
+        short_path_since_ms_ = 0;
+    }
     // ── NO ROUTE FOR LONG ⇒ REPORT UNREACHABLE (2026-10-09) ─────────────────────────────────────────────
     // The HOLD below (drive_point_target) never ended: the repair stage's unroutable_at_ record only applies
     // while world_hash() is unchanged, and the live obstacle layer changes it every cycle, so a claimed
@@ -4095,10 +4317,32 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
     // 5 s = several replans' worth of no route (a liveness constant, flagged).
     if (no_route_since_ms_ != 0 and time_source() - no_route_since_ms_ > 5000)
     {
+        // A MOUSE target has no producer to report to: mark_reached on it is a no-op, so the click outranked
+        // every affordance for ever (2026-10-10 live: a focus-click at (11.46,3.25), outside the grid, parked
+        // the robot for minutes). Drop it instead and let the affordances drive again.
+        if (manual_target_room_.has_value())
+        {
+            std::println("[controller] no route for {:.1f} s to the manual target ({:.2f},{:.2f}) — dropping it",
+                         (time_source() - no_route_since_ms_) / 1000.0,
+                         manual_target_room_->x(), manual_target_room_->y());
+            std::fflush(stdout);
+            manual_target_room_.reset();
+            manual_target_origin_room_.reset();
+            manual_target_dirty_ = false;
+            current_target_room_.reset();
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            last_target_info_.reset();
+            route_dropped_ = true;
+            approach_commit_.reset();
+            no_route_since_ms_ = 0;
+            return;
+        }
         std::println("[controller] no route for {:.1f} s — reporting Unreachable to the producer",
                      (time_source() - no_route_since_ms_) / 1000.0);
         std::fflush(stdout);
         affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
+        route_dropped_ = true;
         approach_commit_.reset();
         no_route_since_ms_ = 0;
     }
@@ -4113,6 +4357,18 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      const TimeSource &time_source)
 {
     report_unreachable_if_no_route(affordance_manager, time_source);
+    // ── A HANDED-BACK STANDPOINT ENDS THE DRIVE TO IT (2026-10-09) ───────────────────────────────────────────
+    // Reporting Unreachable without stopping left the follower on the old route: live, the robot kept driving
+    // away from the (withdrawn) target and wedged itself between obstacles. Stop, drop the plan, wait for the
+    // producer's next offer.
+    if (route_dropped_)
+    {
+        route_dropped_ = false;
+        path_controller.stop();
+        motion_commander.stop_robot();
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+    }
     if (!params_ || params_->obstacle_creation_enabled)
         obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
     // Proactive scene-level "model anything the concept agents don't" is now owned by the dedicated
@@ -4228,7 +4484,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // of the footprint test that already keeps the body inside. The body's extent is applied where it belongs
     // — in the obstacle terms, per pose, per bearing.
     if (room_polygon_.size() >= 3)
-        path_controller.set_room_boundary(room_polygon_);
+        path_controller.set_room_boundary(room_polygon_, door_passages_);   // minus the doorway being crossed
 
     // LOCAL ELASTIC BAND: let the route absorb what the live field says, before the follower measures
     // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the
@@ -4259,11 +4515,72 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     // Curvature-limited speed. Only a continuous ROUTE carries a speed profile; a plan keeps the full
     // envelope, and the ceiling is cleared rather than left stale from a previous mission.
+    // ★AND THE CLEARANCE CEILING, FOR EVERY DRIVEN CURVE (2026-10-09). See clearance_speed_limit: the
+    // plain tracker reads no field, the band does not touch the stretch the tracker is reading, and
+    // blockage detection replans only after 15 cycles of route inside 0.20 m — so until this nothing
+    // slowed the robot for an obstacle the LiDAR could already see. set_speed_limit keeps its 0.05 m/s
+    // floor on purpose: a robot held at exactly zero opens no stall window (asked = 0), so a blocked
+    // final approach would never be reported; at 0.05 the Wedge verdict fires in one window and the
+    // Reach standpoint is handed back.
+    std::optional<float> v_limit = clearance_speed_limit(driven_curve(), robot_pose,
+                                                         path_controller);
     if (route_active_ and mission_.running())
-        path_controller.set_speed_limit(route_speed_limit(params_ ? params_->max_adv_speed_mps : 0.7f,
-                                                          path_controller.params.cbf_max_decel));
-    else
-        path_controller.set_speed_limit(std::nullopt);
+    {
+        const float v_route = route_speed_limit(params_ ? params_->max_adv_speed_mps : 0.7f,
+                                                path_controller.params.cbf_max_decel);
+        v_limit = v_limit.has_value() ? std::min(*v_limit, v_route) : v_route;
+    }
+    path_controller.set_speed_limit(v_limit);
+
+    // ── PER-CYCLE PLAN/TRACK RECORD (plan_track.csv, 2026-10-09) ─────────────────────────────────────────────
+    // Instrumentation asked for after a live run where the robot drove 3.8 m AWAY from a held target on a 2 m
+    // plan and nothing recorded why: the plan's geometry and the robot's errors against it were not logged.
+    // Robot pose (room frame), target, plan length and ends, the robot's arc length along it (forward-only
+    // hint), cross-track (+ = robot LEFT of the curve) and heading error against the tangent, follower state,
+    // and the clearance speed ceiling (-1 = none).
+    {
+        if (not plan_track_csv_.is_open())
+        {
+            plan_track_csv_.open("plan_track.csv", std::ios::out | std::ios::trunc);
+            plan_track_csv_.imbue(std::locale::classic());
+            if (plan_track_csv_.is_open())
+                plan_track_csv_ << "t_ms,rob_x,rob_y,rob_th,tgt_x,tgt_y,has_target,plan_valid,plan_len,"
+                                   "plan_x0,plan_y0,plan_x1,plan_y1,progress_s,proj_s,cross_m,head_err_rad,"
+                                   "d_target,path_active,v_limit\n";
+        }
+        if (plan_track_csv_.is_open())
+        {
+            const Eigen::Affine2f T = robot_pose.as_transform();
+            const Eigen::Vector2f p = T.translation();
+            const float th = std::atan2(T.linear()(1, 0), T.linear()(0, 0));
+            const bool has_t = last_target_info_.has_value();
+            const Eigen::Vector2f tg = has_t ? last_target_info_->room_pos : Eigen::Vector2f::Zero();
+            const bool pv = plan_spline_.valid();
+            const float L = pv ? plan_spline_.length() : 0.f;
+            Eigen::Vector2f a = Eigen::Vector2f::Zero(), b = Eigen::Vector2f::Zero();
+            float s = -1.f, cross = 0.f, herr = 0.f;
+            if (pv)
+            {
+                a = plan_spline_.position_at(0.f); b = plan_spline_.position_at(L);
+                s = plan_spline_.project(p, plan_progress_s_, 3.0f);
+                const Eigen::Vector2f q = plan_spline_.position_at(s);
+                const float hd = plan_spline_.heading_at(s);
+                const Eigen::Vector2f tan(std::cos(hd), std::sin(hd));
+                const Eigen::Vector2f d = p - q;
+                cross = tan.x() * d.y() - tan.y() * d.x();
+                herr = std::remainder(th - hd, 2.f * static_cast<float>(M_PI));
+            }
+            plan_track_csv_ << static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch()).count()) << ','
+                            << p.x() << ',' << p.y() << ',' << th << ',' << tg.x() << ',' << tg.y() << ','
+                            << (has_t ? 1 : 0) << ',' << (pv ? 1 : 0) << ',' << L << ','
+                            << a.x() << ',' << a.y() << ',' << b.x() << ',' << b.y() << ','
+                            << plan_progress_s_ << ',' << s << ',' << cross << ',' << herr << ','
+                            << (has_t ? (tg - p).norm() : -1.f) << ',' << (path_controller.is_active() ? 1 : 0) << ','
+                            << v_limit.value_or(-1.f) << '\n';
+            plan_track_csv_.flush();
+        }
+    }
 
     // ★THE ONE CONSUMER THAT GETS THE FRESH POSE. compute() serves the control law AND expresses the
     // room-frame cloud in the robot frame for the ESDF, and BOTH want "where the robot is now": the
@@ -4905,6 +5222,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
                 approach_commit_.reset();
                 short_path_since_ms_ = 0;
+                route_dropped_ = true;
             }
         }
         clear_tracking_state();
@@ -5591,7 +5909,14 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     const bool contract_wants_detection =
         std::ranges::any_of(active_contract_.goal, [](const rc::affordance::GoalClause &c)
                             { return c.attr.find("detection") != std::string::npos; });
-    if (allow_dwell and was_affordance and params_ and params_->affordance_dwell_ms > 0.f)
+    // A door-passage step chains straight into the next one: nothing is being acquired by a mask, and the dwell
+    // was 3 s of standing in front of (or inside) a doorway per step (live try16).
+    const bool door_step = last_target_info_.has_value()
+                       and last_target_info_->node_name.starts_with("aff_door_")
+                       and (last_target_info_->node_name.ends_with("_approach")
+                            or last_target_info_->node_name.ends_with("_open")
+                            or last_target_info_->node_name.ends_with("_cross"));
+    if (allow_dwell and was_affordance and not door_step and params_ and params_->affordance_dwell_ms > 0.f)
     {
         affordance_dwell_until_ms_ = now_ms + static_cast<std::uint64_t>(params_->affordance_dwell_ms);
         // The bound is on the WHOLE wait, and never shorter than the clock — a max below the floor
@@ -5863,6 +6188,9 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
                      r.asked_m > 1e-6f ? 100.f * r.achieved_m / r.asked_m : 0.f,
                      100.f * params_->stuck_slip_ratio);
         log_stall_event("wedge", r, pos_room, pose_sigma_m, now_ms);
+        // Wedged on the way to a Reach standpoint: the escape below frees the body ONCE, and the standpoint is
+        // handed back instead of being retried until three escapes have pushed the robot into something else.
+        flag_reach_unreachable("wedged on the approach");
         return true;
     }
 
@@ -5889,6 +6217,11 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
                      r.asked_rot_rad > 1e-6f ? 100.f * r.achieved_rot_rad / r.asked_rot_rad : 0.f,
                      100.f * params_->stuck_slip_ratio, r.achieved_m);
         log_stall_event("spin", r, pos_room, pose_sigma_m, now_ms);
+        // ★A REACH APPROACH THAT ENDS IN THIS VERDICT IS AS BLOCKED AS A WEDGE. The judge tests Spinning
+        // BEFORE Wedge, so a robot pushing straight into furniture with any rotation in its command
+        // (live 19:06:36: cmd_adv 0.33, cmd_rot -0.47, v 0.00 for 3.5 s) is labelled "spinning" — and
+        // the hand-back added to the Wedge branch today never ran. Same response here.
+        flag_reach_unreachable("blocked on the approach (spinning verdict, translation asked)");
         return true;
     }
 
@@ -5965,8 +6298,18 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     // and since a wedge means something is in front, the sign came out the same nearly every
     // time. Do not "simplify" these back to the y axis.
     const float probe = params_ ? params_->escape_side_probe_m : 0.5f;
-    const float cl = path_controller.clearance_at(-probe, 0.f);   // left clearance  (−x = left)
-    const float cr = path_controller.clearance_at(+probe, 0.f);   // right clearance (+x = right)
+    // ★READ THE RAW RETURNS AS WELL. The ESDF these probes query has had every return inside 0.405 m of
+    // the centre deleted (its disc self-filter), so a chair leg touching the flank — the thing that
+    // wedged us — is not in it, and the probe reads the distance to whatever survived further out.
+    // Live 19:06: "clearance L 0.15 R 0.17" from a field blind to the contact itself, then the escape
+    // reversed and turned into the tighter side. The raw cloud with the HULL as self-filter sees it.
+    const Eigen::Affine2f T = robot_pose.as_transform();       // robot (x right, y forward) -> room
+    const float cl = std::min(path_controller.clearance_at(-probe, 0.f),   // left clearance  (−x = left)
+                              raw_return_clearance(T * Eigen::Vector2f(-probe, 0.f), robot_pose, obstacle_tracker));
+    const float cr = std::min(path_controller.clearance_at(+probe, 0.f),   // right clearance (+x = right)
+                              raw_return_clearance(T * Eigen::Vector2f(+probe, 0.f), robot_pose, obstacle_tracker));
+    const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
+    escape_rear_raw_m_ = raw_return_clearance(T * Eigen::Vector2f(0.f, -rear_probe), robot_pose, obstacle_tracker);
     if (std::abs(cl - cr) > 0.05f)
         escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
     else
@@ -6073,7 +6416,9 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
     // reverse into a wall behind it any time the left flank was open.
     const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
     const float rear_min   = params_ ? params_->escape_rear_min_m   : 0.30f;
-    const float rear = path_controller.clearance_at(0.f, -rear_probe);
+    // The raw-return reading taken at escape start (see begin_escape) ANDed with the live field: the
+    // field is blind inside its 0.405 m self-filter disc, which is where a wedged body's contacts are.
+    const float rear = std::min(path_controller.clearance_at(0.f, -rear_probe), escape_rear_raw_m_);
     const float adv = (rear < rear_min) ? 0.f : -(params_ ? params_->escape_adv_speed_mps : 0.15f);
     const float rot = escape_turn_sign_ * (params_ ? params_->escape_rot_speed_rps : 0.35f);
     motion_commander.send_speed_command(adv, 0.f, rot);

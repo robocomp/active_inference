@@ -46,8 +46,8 @@ MessageSizeMax = "20004800"
 probe = false
 
 [Eviction]
-# OFF: only the promotion path moves rooms here.
-enabled = false
+# ON: promotion evicts the room it leaves (the live contract since 2026-10-12).
+enabled = true
 [Memory]
 # Long-term memory that restarts from zero is not memory. OFF here so each stage run starts from a
 # known-empty graph and the assertions mean the same thing every time; the point of the flag is that

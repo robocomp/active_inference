@@ -28,9 +28,14 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     outer->setContentsMargins(0, 0, 0, 0);
     outer->addWidget(frame);
 
-    auto *row = new QHBoxLayout(frame);
-    row->setContentsMargins(4, 2, 4, 2);
+    // TWO LINES so the panel does not set the window's minimum width: what to drive (mode, mission,
+    // actions) on the first; how to drive it (tracker L, laps, direction) on the second.
+    auto *lines = new QVBoxLayout(frame);
+    lines->setContentsMargins(4, 2, 4, 2);
+    lines->setSpacing(2);
+    auto *row = new QHBoxLayout;
     row->setSpacing(6);
+    lines->addLayout(row);
 
     // WHAT DRIVES THE ROBOT. Named explicitly rather than implied by a combination of widgets: this is the
     // experimental condition of a run, it is written into the metrics CSV, and "which mode was this?" must
@@ -39,21 +44,47 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     drive_mode_ = new QComboBox(frame);
     // Order must match rc::to_index().
     drive_mode_->addItem("Affordances");
-    drive_mode_->addItem("Mission");
-    drive_mode_->addItem("Mission+Aff");
+    drive_mode_->addItem("Path");
     drive_mode_->addItem("Target");
+    drive_mode_->addItem("Mission");
     drive_mode_->setToolTip(
         QStringLiteral("What is driving the robot.\n"
                        "Affordances — normal operation; the epistemic planner chooses.\n"
-                       "Mission — the tour is the sole target source (the clean benchmark).\n"
-                       "Mission+Aff — mission with affordances interleaved. NOT IMPLEMENTED YET;\n"
-                       "              Run will refuse and say why.\n"
-                       "Target — a single clicked point. Selected automatically when you click one."));
+                       "Path — a recorded tour is the sole target source (the clean benchmark).\n"
+                       "Target — a single clicked point. Selected automatically when you click one.\n"
+                       "Mission — a typed command, e.g. \"cross door\"."));
     row->addWidget(drive_mode_);
     QObject::connect(drive_mode_, &QComboBox::currentIndexChanged, this,
-                     [this](int i) { if (cb_.on_drive_mode) cb_.on_drive_mode(i); });
+                     [this](int i) { show_mode_widgets(i); if (cb_.on_drive_mode) cb_.on_drive_mode(i); });
 
-    row->addWidget(new QLabel("Mission:", frame));
+    // ── Mission: a typed command. Editable, with what is understood so far offered as suggestions. ──
+    command_label_ = new QLabel("Command:", frame);
+    row->addWidget(command_label_);
+    command_ = new QComboBox(frame);
+    command_->setEditable(true);
+    command_->setInsertPolicy(QComboBox::NoInsert);
+    command_->setMinimumWidth(180);
+    command_->addItem(QStringLiteral("cross door"));
+    command_->addItem(QStringLiteral("move 0.3"));
+    command_->addItem(QStringLiteral("turn 90"));
+    command_->setToolTip(QStringLiteral("Type a mission and press Enter (or Send).\n"
+                                        "cross door — go through the door of this room (only if it has one)\n"
+                                        "cross door_N — go through that door\n"
+                                        "move <m> — drive straight, + forward / - backward (max 3 m)\n"
+                                        "turn <deg> — rotate in place, + left / - right; 'turn 90 move 0.5' chains"));
+    row->addWidget(command_);
+    command_send_ = new QPushButton(QStringLiteral("Send"), frame);
+    row->addWidget(command_send_);
+    const auto send = [this]
+    {
+        const QString text = command_->currentText().trimmed();
+        if (not text.isEmpty() and cb_.on_command) cb_.on_command(text.toStdString());
+    };
+    QObject::connect(command_->lineEdit(), &QLineEdit::returnPressed, this, send);
+    QObject::connect(command_send_, &QPushButton::clicked, this, send);
+
+    path_label_ = new QLabel("Path:", frame);
+    row->addWidget(path_label_);
     missions_ = new QComboBox(frame);
     missions_->setMinimumWidth(110);
     missions_->setToolTip(QStringLiteral("Recorded missions (etc/missions.toml)."));
@@ -61,57 +92,6 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     QObject::connect(missions_, &QComboBox::currentTextChanged, this,
                      [this](const QString &n)
                      { if (cb_.on_select and not n.isEmpty()) cb_.on_select(n.toStdString()); });
-
-    // ── HOW HARD THE ROBOT STICKS TO THE ROUTE: the plain tracker's L ──
-    // ★REPLACED the Risk <-> Safe route-optimiser dial (2026-08-12). That slider moved
-    // RouteOptimizerConfig::safety_bias, which applies only to the NEXT route BUILD — so moving it
-    // while watching the robot did nothing at all until the next replan, which is the opposite of what
-    // a live slider is for. Its value is a considered, measured one (config RouteSafetyBias = 0.75,
-    // with a clearance/length frontier recorded beside it), and it belongs in the config file where a
-    // measurement can sit next to it. L is the one that is genuinely a live judgement.
-    // L is the closed-loop error-decay LENGTH: an off-route error decays over L metres of arc at any
-    // speed, because the feedback is critically damped in the arc-length domain rather than in time
-    // (plain_tracker.cpp). Both feedback gains follow from it — 2/L on heading, 1/L^2 on cross-track —
-    // so it is the single number that says how hard the robot is pulled back onto the line.
-    // ★The labels follow the VALUE and need no inversion: the slider carries L in millimetres, small L
-    // means large gains means a tighter line, so Stick is the left (low) end and Loose the right (high)
-    // one. The same pedantry the Risk/Safe label carried — a control whose ends are mislabelled is
-    // worse than no control — but here it comes out the easy way round.
-    // ★It acts on the very next control cycle — this is a live gain, not a route property.
-    row->addWidget(new QLabel("Stick", frame));
-    plain_l_ = new QSlider(Qt::Horizontal, frame);
-    // Range in millimetres of arc. The low end is where the loop is expected to ring (below ~0.3 m the
-    // 1/L^2 term dominates and TV(w) climbs sharply); the high end is well past the point where the
-    // robot visibly cuts corners. Both ends are deliberately reachable: this is a control for finding
-    // out, and clamping it to the measured-safe band would make it useless for that.
-    plain_l_->setRange(kPlainLMinMm, kPlainLMaxMm);
-    plain_l_->setValue(500);
-    plain_l_->setFixedWidth(90);
-    plain_l_->setToolTip(
-        QStringLiteral("Plain tracker: how hard the robot sticks to the route (L, metres of arc).\n"
-                       "An off-route error decays over L metres AT ANY SPEED — the feedback is critically\n"
-                       "damped in arc length, so one gain is right at every speed.\n"
-                       "Stick (left, small L)  — 2/L and 1/L^2 grow: tighter line, more rotational effort,\n"
-                       "                         and below ~0.3 m the loop starts to ring.\n"
-                       "Loose (right, large L) — smoother and quieter, with a larger standing offset on\n"
-                       "                         curves; the robot cuts corners.\n"
-                       "Offline (tools/tracker_sim, identified plant): rms 53 mm at 0.25, 31 mm at 0.50,\n"
-                       "45 mm at 0.90, 76 mm at 1.40 — so it has an interior optimum near the shipped 0.50.\n"
-                       "The policy that set it is 'minimise cross-track rms subject to rotational effort\n"
-                       "<= 0.87 rad/m'; watch rot/m in the metrics, not rms alone.\n"
-                       "Takes effect on the NEXT control cycle."));
-    row->addWidget(plain_l_);
-    row->addWidget(new QLabel("Loose", frame));
-    plain_l_label_ = new QLabel("0.50", frame);
-    plain_l_label_->setFixedWidth(30);
-    row->addWidget(plain_l_label_);
-    QObject::connect(plain_l_, &QSlider::valueChanged, this,
-                     [this](int mm)
-                     {
-                         const float L = static_cast<float>(mm) / 1000.f;
-                         if (plain_l_label_) plain_l_label_->setText(QString::asprintf("%.2f", L));
-                         if (cb_.on_plain_l) cb_.on_plain_l(L);
-                     });
 
     // ── Mission actions ──
     // A menu, not a row of verbs. Everything here acts on the SELECTED mission, and the item list
@@ -168,6 +148,64 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                          }
                      });
     rebuild_actions(false, 0);
+    show_mode_widgets(0);
+
+    row->addStretch();
+
+    row = new QHBoxLayout;
+    row->setSpacing(6);
+    lines->addLayout(row);
+
+    // ── HOW HARD THE ROBOT STICKS TO THE ROUTE: the plain tracker's L ──
+    // ★REPLACED the Risk <-> Safe route-optimiser dial (2026-08-12). That slider moved
+    // RouteOptimizerConfig::safety_bias, which applies only to the NEXT route BUILD — so moving it
+    // while watching the robot did nothing at all until the next replan, which is the opposite of what
+    // a live slider is for. Its value is a considered, measured one (config RouteSafetyBias = 0.75,
+    // with a clearance/length frontier recorded beside it), and it belongs in the config file where a
+    // measurement can sit next to it. L is the one that is genuinely a live judgement.
+    // L is the closed-loop error-decay LENGTH: an off-route error decays over L metres of arc at any
+    // speed, because the feedback is critically damped in the arc-length domain rather than in time
+    // (plain_tracker.cpp). Both feedback gains follow from it — 2/L on heading, 1/L^2 on cross-track —
+    // so it is the single number that says how hard the robot is pulled back onto the line.
+    // ★The labels follow the VALUE and need no inversion: the slider carries L in millimetres, small L
+    // means large gains means a tighter line, so Stick is the left (low) end and Loose the right (high)
+    // one. The same pedantry the Risk/Safe label carried — a control whose ends are mislabelled is
+    // worse than no control — but here it comes out the easy way round.
+    // ★It acts on the very next control cycle — this is a live gain, not a route property.
+    row->addWidget(new QLabel("Stick", frame));
+    plain_l_ = new QSlider(Qt::Horizontal, frame);
+    // Range in millimetres of arc. The low end is where the loop is expected to ring (below ~0.3 m the
+    // 1/L^2 term dominates and TV(w) climbs sharply); the high end is well past the point where the
+    // robot visibly cuts corners. Both ends are deliberately reachable: this is a control for finding
+    // out, and clamping it to the measured-safe band would make it useless for that.
+    plain_l_->setRange(kPlainLMinMm, kPlainLMaxMm);
+    plain_l_->setValue(500);
+    plain_l_->setFixedWidth(90);
+    plain_l_->setToolTip(
+        QStringLiteral("Plain tracker: how hard the robot sticks to the route (L, metres of arc).\n"
+                       "An off-route error decays over L metres AT ANY SPEED — the feedback is critically\n"
+                       "damped in arc length, so one gain is right at every speed.\n"
+                       "Stick (left, small L)  — 2/L and 1/L^2 grow: tighter line, more rotational effort,\n"
+                       "                         and below ~0.3 m the loop starts to ring.\n"
+                       "Loose (right, large L) — smoother and quieter, with a larger standing offset on\n"
+                       "                         curves; the robot cuts corners.\n"
+                       "Offline (tools/tracker_sim, identified plant): rms 53 mm at 0.25, 31 mm at 0.50,\n"
+                       "45 mm at 0.90, 76 mm at 1.40 — so it has an interior optimum near the shipped 0.50.\n"
+                       "The policy that set it is 'minimise cross-track rms subject to rotational effort\n"
+                       "<= 0.87 rad/m'; watch rot/m in the metrics, not rms alone.\n"
+                       "Takes effect on the NEXT control cycle."));
+    row->addWidget(plain_l_);
+    row->addWidget(new QLabel("Loose", frame));
+    plain_l_label_ = new QLabel("0.50", frame);
+    plain_l_label_->setFixedWidth(30);
+    row->addWidget(plain_l_label_);
+    QObject::connect(plain_l_, &QSlider::valueChanged, this,
+                     [this](int mm)
+                     {
+                         const float L = static_cast<float>(mm) / 1000.f;
+                         if (plain_l_label_) plain_l_label_->setText(QString::asprintf("%.2f", L));
+                         if (cb_.on_plain_l) cb_.on_plain_l(L);
+                     });
 
     row->addWidget(new QLabel("laps", frame));
     loops_ = new QSpinBox(frame);
@@ -359,6 +397,7 @@ void MissionPanel::apply(const View &view)
     {
         const QSignalBlocker block(drive_mode_);
         drive_mode_->setCurrentIndex(view.mode_index);
+        show_mode_widgets(view.mode_index);
     }
 
     // The drive button is deliberately NOT in this list: it must work in every mode.
@@ -367,6 +406,18 @@ void MissionPanel::apply(const View &view)
         if (w != nullptr and w->isEnabled() != view.controls_enabled)
             w->setEnabled(view.controls_enabled);
 
+}
+
+// The path widgets mean nothing in Mission mode and the command box means nothing elsewhere: show one set.
+void MissionPanel::show_mode_widgets(int mode_index)
+{
+    const bool command = mode_index == 3;   // rc::to_index(DriveMode::Command)
+    for (QWidget *w : {static_cast<QWidget *>(command_label_), static_cast<QWidget *>(command_),
+                       static_cast<QWidget *>(command_send_)})
+        if (w != nullptr) w->setVisible(command);
+    for (QWidget *w : {static_cast<QWidget *>(path_label_), static_cast<QWidget *>(missions_),
+                       static_cast<QWidget *>(actions_)})
+        if (w != nullptr) w->setVisible(not command);
 }
 
 bool MissionPanel::confirm_supersede()

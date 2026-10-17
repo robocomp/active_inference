@@ -157,11 +157,6 @@ public:
 
 private:
 
-    unsigned char* key_buffer_ = nullptr;
-    std::mutex compute_key_mtx_;
-
-    unsigned char* get_key_buffer_nts();
-
 
     static constexpr bool is_plain_xcdrv1_impl()
     {

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +68,12 @@ public:
     // no ghost and no identity row. Its RT edge proto→mirror is `T_proto_source`, resolved once and never
     // rewritten — the proto-room's gauge is frozen, so the door's pose in it is a constant.
     // Returns the new node id (0 on failure). `reserved_names` as for create_instance_from_detection.
+    /// A door node under `room` with the given geometry (a door carried across from the room just left).
+    std::uint64_t create_door_copy(const DSR::Node& room, float width, float depth, float height,
+                                   std::optional<float> open_prob, std::optional<float> phi_rad,
+                                   const Eigen::Vector3f& t, const Eigen::Vector3f& euler_xyz,
+                                   std::span<const std::string> reserved_names, const std::string& source_label,
+                                   std::string_view preferred_name = {});
     std::uint64_t create_entry_mirror(const DSR::Node& proto_room,
                                       const DSR::Node& source_door,
                                       const Eigen::Vector3f& t_proto_source,

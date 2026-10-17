@@ -32,7 +32,7 @@ module rc { module media {
         // is_plain(XCDR2)==false and silently disabling data-sharing zero-copy.
         unsigned long long       frame_id;    // monotonic, set by producer
         unsigned long long       stamp_ms;    // capture timestamp, epoch milliseconds
-        @key unsigned long       stream_id;   // one DDS instance per stream
+        unsigned long       stream_id;   // one DDS instance per stream  // NOT @key (2026-10-10): FastDDS AUTO data-sharing silently turns OFF for keyed types — every frame was serialised + fragmented
         unsigned long            width;
         unsigned long            height;
         unsigned long            step;        // row stride in bytes

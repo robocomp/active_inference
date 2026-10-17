@@ -19,16 +19,19 @@
  *  the measurement path through it would (a) invert the dependency — inference on a widget — and tie
  *  the term's availability to whether a viewer exists, when room_concept must run headless; (b) tie
  *  it to the ZED node specifically, while the Ricoh path needs a SECOND stream on a SECOND node the
- *  visualizer does not subscribe to. An ingestor parameterised by node name serves both. Two
- *  consumers on media-plane domain 7 is exactly what the plane is for — LidarIngestor and
- *  CameraVisualizer already coexist.
+ *  visualizer does not subscribe to. An ingestor parameterised by node name serves both.
+ *  ★ 2026-10-10: the two still CONSUME independently, but no longer SUBSCRIBE independently. Both
+ *  attach to the same CameraStreamHub (one DDS reader per camera node per process), so each frame
+ *  is transferred once and fanned out; each consumer keeps its own rate limit and its own copy.
  *
  *  THREADING
  *  ---------
  *    main thread   : construct; bind CameraAPI; calibrate the reduced CameraModel; read + cache the
  *                    STATIC camera<-robot extrinsic (the ts==0 InnerEigen path is main-thread-only
  *                    per instance, CLAUDE.md); start().
- *    ingest thread : owns the subscriber; poll(); RGB8/BGR8 -> GRAY8 here (so the boundary payload is
+ *    hub thread    : (CameraStreamHub — ONE subscriber per camera node, shared with the viewer's
+ *                    CameraVisualizer since 2026-10-10) delivers each loaned frame to on_frame();
+ *                    RGB8/BGR8 -> GRAY8 here (so the boundary payload is
  *                    a third the size and the localizer never sees three channels); measure sigma_i;
  *                    publish under the cache lock.
  *    compute thread: take_latest() moves a std::vector<uint8_t> out from under the lock.
@@ -51,9 +54,10 @@
 #include <genericworker.h>          // DSR API
 
 #include "image_edge_types.h"
+#include "camera_stream_hub.h"
 
 namespace DSR { class InnerEigenAPI; class CameraAPI; }
-namespace rc::media { class MediaSubscriber; class Image360Subscriber; }
+namespace rc::media { class MediaSubscriber; }
 
 namespace rc
 {
@@ -131,8 +135,9 @@ public:
     [[nodiscard]] std::pair<long, long> convert_stats() noexcept
     { const auto r = std::pair{conv_seen_, conv_done_}; conv_seen_ = conv_done_ = 0; return r; }
 
-    /// Start / stop the ingest thread. START ONLY once Operating (the thread touches the DSR graph for
-    /// subscriber discovery, and doing that during the join window corrupts it). Idempotent.
+    /// Attach to / detach from the node's shared CameraStreamHub (which owns the ONE subscriber and
+    /// its drain thread). START ONLY once Operating (the hub thread touches the DSR graph for
+    /// subscriber discovery). Idempotent. stop() returns only once no frame callback is in flight.
     void start();
     void stop();
 
@@ -182,9 +187,8 @@ public:
     [[nodiscard]] std::uint64_t frames_ingested() const noexcept { return frames_.load(std::memory_order_relaxed); }
 
 private:
-    void ingest_loop();
-    bool ingest_pump();
-    bool try_discover();
+    /// The hub callback (hub thread): throttle, convert to grey, absorb. The view dies on return.
+    void on_frame(const CameraFrameView& f);
     /// The one place a decoded frame becomes the cached GrayFrame — both reader types land here, so
     /// the ZED and the Ricoh cannot drift apart in how their noise sigma is measured or stamped.
     void absorb_gray(std::vector<std::uint8_t> gray, int w, int h, std::int64_t stamp_ms);
@@ -194,16 +198,10 @@ private:
     std::string robot_frame_;
 
     std::unique_ptr<DSR::CameraAPI>          camera_api_;
-    // ★ TWO SUBSCRIBER TYPES, and exactly one of them is ever non-null. This is not a convenience:
-    //   the ZED and the Ricoh are DIFFERENT DDS TYPES on differently-named streams — "rgb" carrying
-    //   ImageFrame vs "rgb360" carrying Image360Frame (~5.5 MB inline, its own topic type). A single
-    //   MediaSubscriber on "rgb" finds no descriptor on the `ricoh` node at all, so it returns
-    //   nullptr and try_discover() retries once a second FOREVER: the agent looks healthy, the
-    //   [imgedge] liveness line never prints, and nothing says why. Which one to build is decided by
-    //   READING THE NODE'S DESCRIPTOR (CLAUDE.md: domain + topic + streams come only from there),
-    //   never by matching the node name against a hard-coded list.
-    std::unique_ptr<rc::media::MediaSubscriber>    sub_;
-    std::unique_ptr<rc::media::Image360Subscriber> sub360_;
+    // The RGB stream comes from the process-wide hub for this node (camera_stream_hub.h): ONE DDS
+    // reader per camera, shared with the viewer, chosen ("rgb" vs "rgb360") from the node's descriptor.
+    std::shared_ptr<CameraStreamHub> hub_;
+    int                              hub_id_ = -1;
 
     CameraModel     model_;
     std::unique_ptr<rc::media::MediaSubscriber>   sub_depth_;   ///< COMPUTE thread only
@@ -229,14 +227,7 @@ private:
     std::mutex  frame_mtx_;
     GrayFrame   frame_;
     bool        frame_fresh_ = false;
-    std::vector<std::uint8_t> scratch_;   // ingest-thread only: the colour staging buffer
 
-    std::thread             thread_;
-    std::atomic<bool>       running_{false};
-    std::mutex              wake_mtx_;
-    std::condition_variable wake_cv_;
-    std::chrono::steady_clock::time_point last_discovery_{};
-    bool no_stream_warned_ = false;   // the "no readable stream" line is permanent news, said once
     std::atomic<std::int64_t>  last_frame_wall_ms_{0};
     std::atomic<std::uint64_t> frames_{0};
 };

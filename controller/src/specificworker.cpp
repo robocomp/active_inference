@@ -19,11 +19,13 @@
 #include <print>
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "specificworker.h"
+#include "../../common/window_geometry/window_geometry_saver.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "../../common/media_transport/lidar_plane_reader.h"
 
 #include "custom_widget.h"
+#include "corner_visibility.h"   // point_in_polygon: a relative move must end inside the room
 #include <fps/fps.h>
 
 #include <QTimer>
@@ -116,6 +118,9 @@ void SpecificWorker::initialize()
 {
     qInfo() << "initialize worker";
 	GenericWorker::initialize();
+	// Persist the DSR window(s) on every resize/move/close, not only on a clean quit (see GeometrySaver).
+	for (const auto &[name, window] : windows)
+	    if (window != nullptr) new rc::ui::GeometrySaver(window.get(), [this] { save_window_settings(); });
 
 	 // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att>();
@@ -385,6 +390,22 @@ void SpecificWorker::initialize()
 			                                 display_, [this] { return current_time_ms(); });
 		});
 	};
+	// Door passage row (controller_door_passage_bar.h): the same two commands as the remote file's `cross <door>` /
+	// `uncross`, enqueued so the start lands on the control thread between cycles like every other button here.
+	gui.door_passage.on_cross = [this](const std::string &door)
+	{
+		enqueue_command([this, door]()
+		{
+			cancel_relative_motion("superseded by a door passage");
+			session_.door_passage().start(door);
+			std::println("[gui] DOOR PASSAGE through '{}'", door);
+		});
+	};
+	// Mode "Mission": a typed command, parsed on the control thread (run_mission_command).
+	gui.mission.on_command = [this](std::string text)
+	{ enqueue_command([this, text]() { run_mission_command(text, "gui"); }); };
+	gui.door_passage.on_stop = [this]()
+	{ enqueue_command([this]() { session_.door_passage().stop(); std::println("[gui] door passage stopped"); }); };
 	gui.mission.on_record_begin = [this]()
 	{ enqueue_command([this]() { session_.mission().start_recording(); }); };
 	gui.mission.on_record_finish = [this](std::string name)
@@ -478,6 +499,7 @@ void SpecificWorker::initialize()
 				driving_enabled_ = true;
 				return;
 			}
+			cancel_relative_motion("superseded by a mission Run");   // a tour replaces a relative move too
 			session_.mission().set_click_target(std::nullopt);   // a tour replaces a lingering click target
 			clear_manual_target();
 			const bool started = session_.mission().start(laps, current_time_ms());
@@ -513,24 +535,7 @@ void SpecificWorker::initialize()
 	};
 	gui.mission.on_stop = [this]()
 	{
-		enqueue_command([this]()
-		{
-			// STOP IS AN ABORT, not a pause. It ends the mission, drops any click target, throws away
-			// the route/plan/trace, and then STOPS TALKING TO THE BASE until Run is pressed again —
-			// the output loop otherwise keeps sending setSpeedBase(0,0,0) at 20 Hz forever, which is
-			// right under control and wrong after the user has said stop.
-			// What survives is the mission SELECTION, so Run starts whichever mission is selected.
-			session_.mission().stop("user", current_time_ms());
-			session_.mission().set_click_target(std::nullopt);
-			clear_manual_target();
-			session_.abort(path_controller_, motion_commander_);
-			display_.clear_robot_trajectory();
-			driving_enabled_ = false;
-			paused_ = false;
-			motion_commander_.set_output_enabled(false);
-			std::println("[mission] STOP: aborted — route, plan and trace cleared, base output DISARMED. "
-			             "Run starts '{}' fresh.", session_.mission().selected_name());
-		});
+		enqueue_command([this]() { abort_all("user"); });
 	};
 
 	// ★ONE BUFFER. The viewer and the control path (path_controller_ above) read the same registered
@@ -556,7 +561,16 @@ void SpecificWorker::initialize()
 				const QString c = raw.trimmed().toLower();
 				if (c == "run" and remote_run_)        { std::println("[remote] RUN");  remote_run_(1, false); }
 				else if (c == "stop" and remote_stop_) { std::println("[remote] STOP"); remote_stop_(); }
-				else std::println("[remote] ignored '{}' (expected run | stop)", c.toStdString());
+				// DOOR PASSAGE (controller_door_passage.h): `cross door_1` sequences approach -> open -> cross on
+				// door_concept's affordances for that door; `uncross` ends it (selection unrestricted again).
+				else if (c.startsWith("cross ")) run_mission_command(c.toStdString(), "remote");
+				// RELATIVE MOTION (controller_relative_motion.h): `move <m>`, `turn <deg>`, `turn <deg> move <m>`.
+				// Enqueued: this timer runs on the GUI thread, and the relative motion is stepped on the control thread.
+				else if (c.startsWith("move ") or c.startsWith("turn "))
+					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
+				else if (c.startsWith("mission ")) run_mission_command(c.mid(8).trimmed().toStdString(), "remote");
+				else if (c == "uncross") { session_.door_passage().stop(); std::println("[remote] door passage stopped"); }
+				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | uncross)", c.toStdString());
 			}
 		});
 		t->start(300);
@@ -718,6 +732,14 @@ void SpecificWorker::compute()
 
 	const auto now_ms = current_time_ms();
 	if (!sync_world_state(now_ms))
+	{
+		// No world this cycle: a relative motion must not coast on its last command.
+		if (relative_motion_.active()) motion_commander_.stop_robot();
+		return;
+	}
+	// A "move" / "turn" owns the base until it ends (controller_relative_motion.h) — before the planner, so neither
+	// an affordance nor a stale plan can take turns with it.
+	if (step_relative_motion(now_ms))
 		return;
 
 	const auto step = build_planning_step(now_ms);
@@ -1187,6 +1209,12 @@ void SpecificWorker::load_params()
          "Gauss-Newton steps per cycle");
 	cfgr.opt_cast<double>("Controller.BandLead", params.band_lead_m,
          "Metres of route AHEAD of the robot left frozen before the window opens");
+	cfgr.opt_cast<double>("Controller.BandProximalSigmaM", params.band_proximal_sigma_m,
+         "> 0: release the near support points and bound how far the band moves the route per solve (m) — "
+         "re-optimises the FIRST part of the spline against live obstacles (2026-10-09). 0 = old frozen lead");
+	cfgr.opt_cast<double>("Controller.BandClearanceWeight", params.band_clearance_weight,
+         "Obstacle-repulsion (clearance) weight of the BAND only; the one-shot route smoothing keeps w_clear = 1.0 "
+         "(2026-10-10: lowered because the band deformed the stretches between waypoints too much)");
 	cfgr.opt_cast<double>("Controller.BandWindow", params.band_window_m,
          "Length of the deformable window beyond the lead");
 	cfgr.opt("Controller.BandPeriodCycles", params.band_period_cycles,
@@ -1368,6 +1396,7 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 
 void SpecificWorker::set_manual_target(const QPointF &point)
 {
+	cancel_relative_motion("superseded by a clicked target");
 	session_.set_manual_target(point,
 	                        world_model_,
 	                        obstacle_tracker_,
@@ -1436,6 +1465,8 @@ void SpecificWorker::control_loop()
 			for (auto &command : commands)
 				if (command) command();
 		}
+		// chat_agent's intention node: a new command runs here, between cycles, like every button press above.
+		service_chat_inbox();
 
 		// Reflect mission/drive state EVERY iteration (~20 ms), independent of compute(). Selecting a mode
 		// or pressing Stop changes what the panel must show, and both leave the pipeline with nothing to
@@ -1451,6 +1482,12 @@ void SpecificWorker::control_loop()
 		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media
 		//    plane (robot_concept no longer publishes the laser_* node to DSR). The shared
 		//    reader brings up its subscribers lazily and dedups by timestamp.
+		// ★ THE ROOM IS RE-RESOLVED BEFORE THE POLL, NOT ONLY INSIDE compute() (2026-10-12, eviction ON). The
+		//   tracker rejects every sweep while graph_state has no room, and compute() — the only other place the
+		//   room is re-read — does not run while the stream is stalled. When ltsm deleted the room just left
+		//   before this agent had followed `current`, that closed a loop: no room ⇒ sweeps rejected ⇒ stall ⇒ no
+		//   compute() ⇒ no room, for ever (live try15: robot halted in the doorway, 175 s and counting).
+		world_model_.refresh_graph_state();
 		last_lidar_poll_ = poll_lidar_media();
 		const bool fresh_lidar = (last_lidar_poll_ == LidarPoll::Fresh);
 		if (fresh_lidar)
@@ -1717,3 +1754,227 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 // From the RoboCompOmniRobot you can use this types:
 // RoboCompOmniRobot::TMechParams
 
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+// MISSION COMMANDS — the (simple) natural-language missions of mode "Mission". One grammar for the panel's text box,
+// the remote file and chat_agent's intention node. Understood so far:
+//   cross door          the nearest door of the current room
+//   cross [the] door_N  that door (it must exist in the graph now)
+//   stop                the Stop button's abort, and the door passage ends too
+//   uncross             end the door passage (selection unrestricted again)
+//   move <m>            drive straight <m> metres, + forward / − backward (relative motion, controller_relative_motion.h)
+//   turn <deg>          rotate in place, + left / − right; "turn <deg> move <m>" chains them in the order given
+// Runs on the control thread (enqueue_command / the chat inbox; the remote timer calls it directly, as before).
+// Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
+SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)
+{
+	std::string t = QString::fromStdString(text).trimmed().toLower().simplified().toStdString();
+	if (t == "stop")
+	{
+		session_.door_passage().stop();
+		abort_all(source);
+		std::println("[{}] mission 'stop' -> STOP (passage ended, base output disarmed)", source);
+		return {.accepted = true, .kind = "stop"};
+	}
+	if (t == "uncross")
+	{
+		session_.door_passage().stop();
+		std::println("[{}] mission 'uncross' -> door passage stopped", source);
+		return {.accepted = true, .kind = "uncross"};
+	}
+	if (t.starts_with("move ") or t.starts_with("turn ") or t.starts_with("advance ") or t.starts_with("rotate "))
+	{
+		const auto steps = rc::RelativeMotion::parse(t);
+		if (not steps.has_value())
+		{
+			std::println("[{}] mission '{}' refused: {}", source, t, steps.error());
+			return {.kind = "move", .reason = steps.error()};
+		}
+		// A new relative command supersedes the one running, whether or not it is itself accepted.
+		cancel_relative_motion("superseded by a new move/turn");
+		const auto now = current_time_ms();
+		const auto pose = world_model_.read_robot_pose_latest(now);
+		const auto &grid = session_.grid_planner();
+		const auto &room = session_.room_polygon();
+		std::string why;
+		if (not pose.has_value()) why = "the robot's pose in the room is not known";
+		else if (not grid.has_world() or room.size() < 3) why = "there is no map of the room yet to check the way is clear";
+		if (why.empty())
+		{
+			const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.pose_free(p, yaw); };
+			const auto inside = [&room](const Eigen::Vector2f &p) { return rc::corner_visibility::point_in_polygon(p, room); };
+			if (const auto refused = relative_motion_.start(*steps, pose->pos, pose->theta, now, free, inside); refused.has_value())
+				why = *refused;
+		}
+		if (not why.empty())
+		{
+			std::println("[{}] mission '{}' refused: {}", source, t, why);
+			return {.kind = "move", .reason = why};
+		}
+		// Accepted: the person has taken the base. Everything else that could drive is ended, and the mode becomes
+		// "Target" with no target, so when the motion ends the robot STAYS where it was put (the affordance planner
+		// does not drive off again) — the same rule a clicked target follows.
+		session_.door_passage().stop();
+		if (session_.mission().running()) session_.mission().stop("superseded by a relative move", now);
+		session_.mission().set_mode(rc::DriveMode::Target);
+		session_.mission().set_click_target(std::nullopt);
+		clear_manual_target();
+		// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
+		// by chat_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
+		paused_ = false;
+		motion_commander_.set_output_enabled(true);
+		driving_enabled_ = true;
+		hibernationTick();
+		const auto v = relative_motion_.view();
+		std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
+		             v.text, pose->pos.x(), pose->pos.y(), (pose->theta + M_PI_2) * 180.0 / M_PI);
+		return {.accepted = true, .kind = "move", .motion_id = v.id};
+	}
+	if (t.starts_with("cross "))
+	{
+		std::string what = t.substr(6);
+		if (what.starts_with("the ")) what = what.substr(4);
+		if (what.starts_with("a ")) what = what.substr(2);
+		std::optional<std::string> door;
+		if (what == "door")
+		{
+			// "the door" names a door only when the room has ONE (2026-10-12). Room 1 of tworooms-piso has two (DOOR_1
+			// and DOOR_0 in an inner wall); picking the nearest sent the robot to whichever it had wandered closer to.
+			// With several, refuse and list them — the person (or the chat) says which.
+			const auto &gs = world_model_.graph_state();
+			const auto room = G->get_node(gs.room_name);
+			const auto doors = room.has_value() ? rc::world::doors_of_room(*G, room->id()) : std::vector<std::string>{};
+			if (doors.empty())
+			{
+				std::println("[{}] mission '{}': no door of room '{}' is known — nothing to cross", source, t, gs.room_name);
+				return {.kind = "cross", .reason = std::format("no door of room '{}' is known", gs.room_name)};
+			}
+			if (doors.size() > 1)
+			{
+				std::string list;
+				for (const auto &d : doors) list += (list.empty() ? "" : ", ") + d;
+				std::println("[{}] mission '{}': room '{}' has {} doors ({}) — say which: cross door_N", source, t,
+				             gs.room_name, doors.size(), list);
+				return {.kind = "cross", .reason = std::format("room '{}' has {} doors ({}); say which one (cross door_N)",
+				                                               gs.room_name, doors.size(), list)};
+			}
+			door = doors.front();
+		}
+		else if (what.starts_with("door")) door = what;
+		if (door.has_value())
+		{
+			if (not G->get_node(*door).has_value())
+			{
+				std::println("[{}] mission '{}': door '{}' is not in the graph — nothing to cross", source, t, *door);
+				return {.kind = "cross", .door = *door, .reason = std::format("door '{}' is not in the graph", *door)};
+			}
+			cancel_relative_motion("superseded by a door passage");
+			session_.mission().set_mode(rc::DriveMode::Command);
+			session_.door_passage().start(*door);
+			std::println("[{}] mission '{}' -> DOOR PASSAGE through '{}'{}", source, t, *door,
+			             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
+			return {.accepted = true, .kind = "cross", .door = *door};
+		}
+	}
+	std::println("[{}] mission '{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", source, t);
+	return {.reason = std::format("'{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", t)};
+}
+
+// The Stop button's abort, callable from the control thread by name (the button enqueues it; a chat `stop`, which
+// is already on the control thread, calls it directly). `source` = the mission's stop reason ("user" for the button).
+void SpecificWorker::abort_all(const char *source)
+{
+	// STOP IS AN ABORT, not a pause. It ends the mission, drops any click target, throws away
+	// the route/plan/trace, and then STOPS TALKING TO THE BASE until Run is pressed again —
+	// the output loop otherwise keeps sending setSpeedBase(0,0,0) at 20 Hz forever, which is
+	// right under control and wrong after the user has said stop.
+	// What survives is the mission SELECTION, so Run starts whichever mission is selected.
+	cancel_relative_motion("stopped");
+	session_.mission().stop(source, current_time_ms());
+	session_.mission().set_click_target(std::nullopt);
+	clear_manual_target();
+	session_.abort(path_controller_, motion_commander_);
+	display_.clear_robot_trajectory();
+	driving_enabled_ = false;
+	paused_ = false;
+	motion_commander_.set_output_enabled(false);
+	std::println("[mission] STOP: aborted — route, plan and trace cleared, base output DISARMED. "
+	             "Run starts '{}' fresh.", session_.mission().selected_name());
+}
+
+// chat_agent's intention node (chat_inbox.h). Called every control-loop pass, throttled to 10 Hz: run a new command
+// through the same grammar as the panel and the remote file, then mirror how it is going back into the node.
+// Here rather than in compute() on purpose: compute() does not run while the LiDAR stream is stalled, and `stop`
+// must still be heard then.
+void SpecificWorker::service_chat_inbox()
+{
+	if (not G) return;
+	const std::uint64_t now = current_time_ms();
+	if (now - chat_poll_ms_ < 100) return;
+	chat_poll_ms_ = now;
+	const auto wall_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	        std::chrono::system_clock::now().time_since_epoch()).count());
+	if (const auto cmd = chat_inbox_.poll(*G, wall_ms); cmd.has_value())
+	{
+		std::println("[chat] command '{}' (stamp {})", cmd->text, cmd->stamp_ms);
+		const auto r = run_mission_command(cmd->text, "chat");
+		using K = rc::ChatInbox::Tracked::Kind;
+		if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
+		else if (r.kind == "cross") chat_tracked_ = {.kind = K::Cross, .door = r.door};
+		else if (r.kind == "move") chat_tracked_ = {.kind = K::Motion, .motion_id = r.motion_id};
+		else if (r.kind == "stop") chat_tracked_ = {.kind = K::Stop};
+		else chat_tracked_ = {.kind = K::Uncross};
+		chat_tracked_.stamp = cmd->stamp_ms;
+	}
+	if (chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::None) return;
+	const bool driving = driving_enabled_ and not paused_;
+	const auto [state, bt] = chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Motion
+	                             ? rc::ChatInbox::status_of_motion(chat_tracked_, relative_motion_.view(), driving)
+	                             : rc::ChatInbox::status_of(chat_tracked_, session_.door_passage().view(), driving);
+	chat_inbox_.publish(*G, chat_tracked_.stamp, state, bt);
+}
+
+// ── RELATIVE MOTION (controller_relative_motion.h) ─────────────────────────────────────────────────────────────────
+// One cycle on the control thread. The pose is the FRESHEST one (the control law's), the footprint predicate is the
+// planner's own grid, rebuilt this cycle by sync_world_state. While halted (Pause) it holds still and keeps the motion.
+bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
+{
+	if (not relative_motion_.active()) return false;
+	const auto pose = world_model_.read_robot_pose_latest(now_ms);
+	if (not pose.has_value())
+	{
+		motion_commander_.stop_robot();   // no pose ⇒ no closed loop ⇒ hold
+		return true;
+	}
+	session_.update_display(pose, display_, obstacle_tracker_.display_obstacle_polygons(),
+	                        obstacle_tracker_.temporary_obstacle_rfe_points(), params.max_lidar_draw_points);
+	if (not driving_enabled_ or paused_)
+	{
+		motion_commander_.stop_robot();
+		update_custom_widget(*pose);
+		return true;
+	}
+	const auto &grid = session_.grid_planner();
+	const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.has_world() and grid.pose_free(p, yaw); };
+	const auto cmd = relative_motion_.step(pose->pos, pose->theta, now_ms, free);
+	if (relative_motion_.active())
+		motion_commander_.send_speed_command(cmd.adv, 0.f, cmd.rot);
+	else
+	{
+		motion_commander_.stop_robot();
+		const auto v = relative_motion_.view();
+		std::println("[move] relative motion #{} '{}' {}: {} — at ({:.2f},{:.2f}) yaw {:.0f} deg", v.id, v.text,
+		             rc::RelativeMotion::phase_name(v.phase), v.last_event, pose->pos.x(), pose->pos.y(),
+		             (pose->theta + M_PI_2) * 180.0 / M_PI);
+	}
+	update_custom_widget(*pose);
+	return true;
+}
+
+void SpecificWorker::cancel_relative_motion(const char *why)
+{
+	if (not relative_motion_.active()) return;
+	relative_motion_.cancel(why);
+	motion_commander_.stop_robot();
+	std::println("[move] relative motion #{} '{}' cancelled: {}", relative_motion_.view().id, relative_motion_.view().text, why);
+}

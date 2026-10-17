@@ -157,17 +157,9 @@ public:
 
 private:
 
-    unsigned char* key_buffer_ = nullptr;
-    std::mutex compute_key_mtx_;
-
-    unsigned char* get_key_buffer_nts();
-
 
     static constexpr bool is_plain_xcdrv1_impl()
     {
-        // 24 (three u64) + 4 (stream_id) + 15 floats * 4 = 88. Was 84 with 14 floats; acc_var is
-        // the fifteenth. If this constant and the real layout ever disagree, is_plain() goes false
-        // and every sample is serialized instead of loaned -- silently, as a throughput loss.
         return 88ULL ==
                (detail::ImuFrame_offset_of<ImuFrame, detail::ImuFrame_f>() +
                sizeof(float));
@@ -175,9 +167,6 @@ private:
 
     static constexpr bool is_plain_xcdrv2_impl()
     {
-        // 24 (three u64) + 4 (stream_id) + 15 floats * 4 = 88. Was 84 with 14 floats; acc_var is
-        // the fifteenth. If this constant and the real layout ever disagree, is_plain() goes false
-        // and every sample is serialized instead of loaned -- silently, as a throughput loss.
         return 88ULL ==
                (detail::ImuFrame_offset_of<ImuFrame, detail::ImuFrame_f>() +
                sizeof(float));

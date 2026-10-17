@@ -42,17 +42,11 @@ LidarFramePubSubType::LidarFramePubSubType()
     uint32_t type_size = rc_media_LidarFrame_max_cdr_typesize;
     type_size += static_cast<uint32_t>(eprosima::fastcdr::Cdr::alignment(type_size, 4)); /* possible submessage alignment */
     max_serialized_type_size = type_size + 4; /*encapsulation*/
-    is_compute_key_provided = true;
-    key_buffer_ = nullptr;
-    get_key_buffer_nts();
+    is_compute_key_provided = false;
 }
 
 LidarFramePubSubType::~LidarFramePubSubType()
 {
-    if (key_buffer_ != nullptr)
-    {
-        free(key_buffer_);
-    }
 }
 
 bool LidarFramePubSubType::serialize(
@@ -160,11 +154,10 @@ bool LidarFramePubSubType::compute_key(
         InstanceHandle_t& handle,
         bool force_md5)
 {
-    LidarFrame data;
-    if (deserialize(payload, static_cast<void*>(&data)))
-    {
-        return compute_key(static_cast<void*>(&data), handle, force_md5);
-    }
+    static_cast<void>(payload);
+    static_cast<void>(handle);
+    static_cast<void>(force_md5);
+
     return false;
 }
 
@@ -173,61 +166,11 @@ bool LidarFramePubSubType::compute_key(
         InstanceHandle_t& handle,
         bool force_md5)
 {
-    std::lock_guard<std::mutex> guard(compute_key_mtx_);
-    const LidarFrame* p_type =
-	        static_cast<const LidarFrame*>(data);
+    static_cast<void>(data);
+    static_cast<void>(handle);
+    static_cast<void>(force_md5);
 
-    // Ensure the key buffer is reserved
-    unsigned char* key_buffer = get_key_buffer_nts();
-    if (key_buffer == nullptr)
-    {
-        return false;
-    }
-
-    // Object that manages the raw buffer.
-    eprosima::fastcdr::FastBuffer fastbuffer(reinterpret_cast<char*>(key_buffer),
-            rc_media_LidarFrame_max_key_cdr_typesize);
-
-    // Object that serializes the data.
-    eprosima::fastcdr::Cdr ser(
-        fastbuffer,
-        eprosima::fastcdr::Cdr::BIG_ENDIANNESS,
-        eprosima::fastcdr::CdrVersion::XCDRv2);
-    ser.set_encoding_flag(eprosima::fastcdr::EncodingAlgorithmFlag::PLAIN_CDR2);
-    eprosima::fastcdr::serialize_key(ser, *p_type);
-    if (force_md5 || rc_media_LidarFrame_max_key_cdr_typesize > 16)
-    {
-        eprosima::fastdds::MD5 md5;
-        md5.init();
-        md5.update(key_buffer, static_cast<unsigned int>(ser.get_serialized_data_length()));
-        md5.finalize();
-        for (uint8_t i = 0; i < 16; ++i)
-        {
-            handle.value[i] = md5.digest[i];
-        }
-    }
-    else
-    {
-        for (uint8_t i = 0; i < 16; ++i)
-        {
-            handle.value[i] = key_buffer[i];
-        }
-    }
-    return true;
-}
-
-unsigned char* LidarFramePubSubType::get_key_buffer_nts()
-{
-    // If already reserved, return
-    if (key_buffer_ != nullptr)
-    {
-        return key_buffer_;
-    }
-
-    // Allocate the key buffer
-    uint32_t key_length = (std::max)(rc_media_LidarFrame_max_key_cdr_typesize, 16u);
-    key_buffer_ = reinterpret_cast<unsigned char*>(calloc(key_length, 1u));
-    return key_buffer_;
+    return false;
 }
 
 void LidarFramePubSubType::register_type_object_representation()

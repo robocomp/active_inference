@@ -22,6 +22,7 @@ LIST(APPEND SOURCES
   ../src/door_fitter.cpp
 
   ../src/door_semantic_field.cpp
+  ../src/door_frame_evidence.cpp
   ../src/door_actuator.cpp
   ../src/door_world_registration.cpp
   ../generated/DoorControl.cpp

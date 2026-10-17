@@ -10,8 +10,8 @@
  *   1. MEASURE THE SEAM.  T(room_new <- room_old), read through the robot while BOTH RT edges
  *      still exist. This window is the only time it is computable, so nothing else happens first.
  *   2. COPY the old room's subtree into the memory graph (nodes, attributes, RT edges).
- *   3. PLACE the new room in memory as a stub hanging off the old one, the seam ON that RT edge,
- *      so memory's RT tree IS the topological map and inner_eigen composes across rooms.
+ *   3. PLACE the new room in memory, under root like every room (2026-10-12): rooms are siblings, each its own
+ *      frame; what relates two rooms is the passage's two door faces (seam_through_passage).
  *   4. WRITE THE DOOR TWICE, once per side, match-linked, with the vocabulary cortex reserved for
  *      it (other_side_door_name / connected_room_name).
  *   5. VERIFY, then move the `current` edge to the new room. That flip is the fence that tells
@@ -143,6 +143,19 @@ public:
     /// nothing — which is the fleet today, and is why somebody has to write the first one.
     bool ensure_current_edge();
 
+    /// T(room_to <- room_from) composed through `passage`'s two door faces in MEMORY (one face per room). nullopt
+    /// unless the passage has a face in each room. This is the only valid cross-room transform in memory: rooms
+    /// hang from root with identities that carry no metric meaning.
+    [[nodiscard]] std::optional<Mat::RTMat> seam_through_passage(const std::string &passage, const std::string &room_to,
+                                                                 const std::string &room_from) const;
+
+    /// The `r<idx>_` prefix this live room's nodes carry in memory (memoised, the same one evict() uses).
+    [[nodiscard]] std::string memory_prefix(const DSR::Node &live_room) const
+    { return "r" + std::to_string(room_index(live_room)) + "_"; }
+
+    /// Planar-safe packing of a transform as RT edge attributes (rt_translation / rt_rotation_euler_xyz).
+    [[nodiscard]] static std::map<std::string, DSR::Attribute> rt_attributes(const Mat::RTMat &t) { return rt_attrs(t); }
+
     /// BACKSTOP, not policy. Nodes still hanging under a non-current room whose owner is not
     /// running (crashed, SIGKILLed) cannot let go by themselves. Off unless explicitly armed.
     int sweep_orphans(std::uint64_t room_id,
@@ -155,6 +168,8 @@ private:
     using IdMap = std::unordered_map<std::uint64_t, std::uint64_t>;
 
     [[nodiscard]] std::optional<DSR::Node> robot_node() const;
+    /// True when memory node `node_id` is `room` or hangs (through parent_att) below it.
+    [[nodiscard]] bool is_descendant(std::uint64_t node_id, const std::string &room) const;
     [[nodiscard]] std::vector<DSR::Node>   rooms_under_robot(const DSR::Node &robot) const;
     /// Memory's abstract passages: type `metaconcept` AND object_subtype "passage" -- the type is
     /// shared with dining-set style groupings, which eviction can copy in from a room.

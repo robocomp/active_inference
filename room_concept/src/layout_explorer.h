@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,6 +69,19 @@ public:
     /// The free standpoint nearest `p` (grid BFS), or `p` itself when no cell is free.
     [[nodiscard]] Eigen::Vector2f nearest_free(const Eigen::Vector2f& p) const;
     [[nodiscard]] int free_count() const;
+    /// Free cells 4-connected to `from`'s cell (0 when that cell is not free) — the diagnostic for "unreachable".
+    [[nodiscard]] int component_size(const Eigen::Vector2f& from) const;
+    /// Mark cells for which `occupied_by_robot(centre)` holds as free: the robot is standing there, so the floor under
+    /// its body is feasible whatever the polygon clearance says (live: a cramped start dropped the robot's own cell).
+    /// Returns how many cells `occupied_by_robot` covers (freed or already free): the robot's own disc.
+    template <class F> int free_if(F&& occupied_by_robot)
+    {
+        int n = 0;
+        for (int i = 0; i < nx; ++i)
+            for (int j = 0; j < ny; ++j)
+                if (occupied_by_robot(at(i, j))) { ++n; free_[static_cast<size_t>(j * nx + i)] = 1; }
+        return n;
+    }
     /// Mark cells for which `blocked(centre)` holds as not free (live: furniture the polygon's outline cannot show).
     template <class F> void block_if(F&& blocked)
     {
@@ -108,7 +122,11 @@ struct Plan
     int candidates = 0;                    ///< feasible standpoints evaluated
     int with_gain  = 0;                    ///< of which gain > 0
     int unknowns   = 0;                    ///< termination ledger size
+    int deferred_with_gain = 0;            ///< standpoints with gain held back only by a recent refusal (plan_coverage)
     Eigen::Vector2f start{0.f, 0.f};       ///< where the walk started (robot, or nearest feasible cell)
+    int reach_cells = -1;                  ///< free cells connected to `start` (filled on "unreachable" only)
+    int free_cells  = -1;                  ///< free cells in the whole grid (idem)
+    std::optional<Eigen::Vector2f> best_unreached;   ///< on "unreachable": the best candidate by gain per straight metre
     std::string why;                       ///< one word on every path: ok | finished | no_feasible | no_gain | unreachable
 };
 
@@ -123,5 +141,16 @@ using Admissible = std::function<bool(const Eigen::Vector2f&)>;
 /// information; offline: build_polygon()). Everything in the map frame.
 Plan plan(const wallmap::WallMap& map, const wallmap::Polygon& poly, const FeasibleGrid& grid,
           const Eigen::Vector2f& robot, const ExplorerParams& p, const Admissible& admissible = {});
+
+/// COVERAGE PLANNER (2026-10-10, used while plain SLAM owns the pose): gain = what a standpoint's view would REVEAL
+/// of the map (m² of still-unknown cells, `gain`), cost = the A* ROUTE length; score = gain / (1 + route m). The old
+/// planner scored what a view teaches the WALL MAP — flat and small once the layout came from the SLAM map, so the
+/// distance term won and it offered spots next to the robot. `finished` = no admissible standpoint reveals at least
+/// `min_gain` (the robot's own footprint area: a view that cannot reveal even that is not worth the trip).
+/// `deferred` (optional) marks standpoints held back only for NOW (a recent refusal by the controller). Their gain still
+/// counts as gain left: when only deferred standpoints would reveal anything, the plan is "deferred", never "finished".
+using GainFn = std::function<float(const Eigen::Vector2f&)>;
+Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
+                   const Admissible& admissible, const GainFn& gain, float min_gain, const Admissible& deferred = {});
 
 }   // namespace rc::layout

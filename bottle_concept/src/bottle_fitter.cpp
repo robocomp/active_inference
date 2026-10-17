@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <utility>
 #include "../../common/rt_query_probe/rt_query_probe.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -557,7 +558,7 @@ std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix(std::uint64_t tim
     // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
     static rc::rtprobe::Probe rt_probe{"bottle_fitter room<-body"};
     DSR::RT_API::TimeQueryInfo rt_info;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", timestamp_ms, "RT",
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", timestamp_ms, "RT",
                                                              DSR::RT_API::TimeQuery::Interpolated,
                                                              &rt_info);
     rt_probe.note(rt_info, G_);
@@ -746,7 +747,7 @@ void BottleFitter::update_expected_visible(BottleInstance& inst)
         if (not camera_api_) return;
     }
     const auto& s = inst.model.state();
-    const auto p = inner_eigen_->transform("zed", Mat::Vector3d(s.cx, s.cy, s.cz), "room", 0);
+    const auto p = inner_eigen_->transform("zed", Mat::Vector3d(s.cx, s.cy, s.cz), rc::room::current_room_frame(*G_), 0);
     if (not p.has_value())
         return;
     const double depth = p->y();   // camera frame: x=right, y=forward(depth), z=up (see feed_silhouette)
@@ -783,7 +784,7 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
     // bottle is parented to the room or the table — room←…←bottle is composed for us).
     if (inner_eigen_)
     {
-        if (const auto p = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), node.name(), 0);
+        if (const auto p = inner_eigen_->transform(rc::room::current_room_frame(*G_), Mat::Vector3d(0.0, 0.0, 0.0), node.name(), 0);
             p.has_value())
         {
             init_state.cx = static_cast<float>(p->x());
@@ -870,9 +871,11 @@ float BottleFitter::mover_belief(const BottleInstance& inst) const
     const auto& st = inst.ai2_belief.state();
     const float reach = std::max(0.05f, cfg_.mover_reach_m);
     float best = 0.0f;
+    // Resolved ONCE: the room cannot change mid-loop, and current_room_frame walks the graph.
+    const std::string room_frame = rc::room::current_room_frame(*G_);
     for (const auto& person : G_->get_nodes_by_type("person"))
     {
-        const auto c = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), person.name(), 0);
+        const auto c = inner_eigen_->transform(room_frame, Mat::Vector3d(0.0, 0.0, 0.0), person.name(), 0);
         if (not c.has_value())
             continue;   // un-resolvable pose => this mover cannot be reasoned about
         const float dx = static_cast<float>(c->x()) - st.cx;

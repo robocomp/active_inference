@@ -1,7 +1,7 @@
 [[components]]
 name = "bridge"
 cwd = "~/robocomp/components/webots-bridge"
-cmd = "bin/Webots2Robocomp etc/config"
+cmd = "bin/Webots2Robocomp etc/config.toml"
 ice_name = "webots2robocomp:tcp -h localhost -p 10006"
 
 [[components]]

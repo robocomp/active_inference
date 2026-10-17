@@ -493,8 +493,10 @@ table is the source of truth). Taken:
 | 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
 | 9 | retina | 14 | residual_concept | 15 | door_concept |
 | 16 | scene_graph_viewer | 24 | kitchen_metaconcept | 17 | hood_concept |
+| 18 | viewer3d | 19 | ltsm_agent | 25 | chat_agent |
 
-Next free: **18–19, 25+** (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
+Next free: **26+** (2026-10-12: 18 = viewer3d and 19 = ltsm_agent were in use but MISSING from this table —
+the same omission as 16 below; recorded now together with 25 = chat_agent.) History: (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
 second meta-concept schema, RECTILINEAR. ★16 was already taken by scene_graph_viewer and was MISSING
 from this table — the exact omission that caused both collisions below; added now.) (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never
 recorded — refrigerator moved to 22. Same cause again 2026-07-26: the ring_metaconcept scaffold shipped

@@ -13,6 +13,7 @@
 
 #include "csv_parse.h"
 #include "human_controller.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -85,7 +86,8 @@ bool HumanFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_node
     else
         inst.track_id = track_id_from_name(node.name());
     inst.parent_id   = room_node_id;
-    inst.parent_name = "room";
+    // The room is `room_1`, `room_2`, … — resolve it, never write the literal (rc::room).
+    inst.parent_name = G_ ? rc::room::current_room_frame(*G_) : std::string{};
     inst.affordance.init(G_, node.id(), node.name(), "person");
 
     // Estimator references the PER-INSTANCE model (own, online-calibrated bone lengths). Build it AFTER

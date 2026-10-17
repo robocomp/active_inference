@@ -259,21 +259,43 @@ void serialize_key(
 
     static_cast<void>(scdr);
     static_cast<void>(data);
+                        scdr << data.frame_id();
+
+                        scdr << data.stamp_ms();
+
+                        scdr << data.sim_stamp_ms();
+
                         scdr << data.stream_id();
 
+                        scdr << data.acc_x();
 
+                        scdr << data.acc_y();
 
+                        scdr << data.acc_z();
 
+                        scdr << data.gyro_x();
 
+                        scdr << data.gyro_y();
 
+                        scdr << data.gyro_z();
 
+                        scdr << data.mag_x();
 
+                        scdr << data.mag_y();
 
+                        scdr << data.mag_z();
 
+                        scdr << data.roll();
 
+                        scdr << data.pitch();
 
+                        scdr << data.yaw();
 
+                        scdr << data.temperature();
 
+                        scdr << data.gyro_var();
+
+                        scdr << data.acc_var();
 
 }
 

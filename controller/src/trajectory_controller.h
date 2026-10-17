@@ -201,6 +201,11 @@ public:
     /// to push waypoints away from walls toward the center of free space.
     void set_room_boundary(const std::vector<Eigen::Vector2f>& polygon,
                            float sample_spacing = 0.05f);
+    /// Same, minus the samples that fall inside a PASSAGE (the corridor through a doorway being crossed): the
+    /// room's outline closes across the doorway, and its samples there would be a wall in the MPPI's way.
+    void set_room_boundary(const std::vector<Eigen::Vector2f>& polygon,
+                           const std::vector<std::vector<Eigen::Vector2f>>& passages,
+                           float sample_spacing = 0.05f);
 
     bool is_active() const { return active_ && !path_room_.empty(); }
     int current_waypoint_index() const { return wp_index_; }

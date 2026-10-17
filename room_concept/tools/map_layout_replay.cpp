@@ -13,9 +13,11 @@
 #include <vector>
 int main(int argc, char** argv)
 {
-    if (argc < 3) { std::fprintf(stderr, "usage: %s wall_input.bin out_poly.csv [poses.csv]\n", argv[0]); return 2; }
+    if (argc < 3) { std::fprintf(stderr, "usage: %s wall_input.bin out_poly.csv [poses.csv|-] [tol] [zmin]\n", argv[0]); return 2; }
+    const float tol  = argc > 4 ? std::strtof(argv[4], nullptr) : 0.12f;   // CLI args, not file data: C locale here
+    const float zmin = argc > 5 ? std::strtof(argv[5], nullptr) : 0.f;
     std::map<std::int64_t, Eigen::Vector3f> ext;
-    if (argc > 3)
+    if (argc > 3 and std::string(argv[3]) != "-")
     {
         std::ifstream pf(argv[3]); std::string line; std::getline(pf, line);
         while (std::getline(pf, line))
@@ -47,13 +49,32 @@ int main(int argc, char** argv)
         const float c = std::cos(pose.z()), s = std::sin(pose.z());
         std::vector<Eigen::Vector2f> ends; ends.reserve(n);
         for (std::uint32_t i = 0; i < n; ++i)
-        { const float x = buf[4 * i], y = buf[4 * i + 1]; ends.emplace_back(c * x - s * y + pose.x(), s * x + c * y + pose.y()); }
+        {
+            if (buf[4 * i + 2] <= zmin) continue;
+            const float x = buf[4 * i], y = buf[4 * i + 1]; ends.emplace_back(c * x - s * y + pose.x(), s * x + c * y + pose.y());
+        }
         const Eigen::Vector2f org(c * lidar_off.x() - s * lidar_off.y() + pose.x(), s * lidar_off.x() + c * lidar_off.y() + pose.y());
         fs.add_scan(org, ends);
         last_pos = pose.head<2>(); ++frames;
     }
     float th = 0.f;
-    const auto poly = fs.manhattan_layout(Eigen::Vector2f(0, 0), 0.12f, 0.40f, &th);
+    const auto poly = fs.manhattan_layout(Eigen::Vector2f(0, 0), tol, 0.40f, &th);
+    {   // coverage gain left after the run: max / median of visible_unknown_area over standpoints inside the outline
+        std::vector<float> gs; const auto cm = fs.countable_mask(poly, 0.40f);
+        if (poly.size() >= 3)
+        {
+            Eigen::Vector2f lo = poly.front(), hi = lo;
+            for (const auto& v : poly) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+            for (float x = lo.x(); x <= hi.x(); x += 0.6f)
+                for (float y = lo.y(); y <= hi.y(); y += 0.6f)
+                    if (rc::freespace::point_in_polygon(Eigen::Vector2f(x, y), poly))
+                        gs.push_back(fs.visible_unknown_area(Eigen::Vector2f(x, y), 8.f, 180, &cm));
+        }
+        std::ranges::sort(gs);
+        if (not gs.empty())
+            std::fprintf(stderr, "coverage gain left: %zu standpoints, median %.2f m2, max %.2f m2, above footprint 0.35 m2: %ld\n",
+                         gs.size(), gs[gs.size() / 2], gs.back(), static_cast<long>(std::ranges::count_if(gs, [](float g) { return g >= 0.35f; })));
+    }
     std::ofstream out(argv[2]); out.imbue(std::locale::classic());
     out << "x,y\n"; for (const auto& v : poly) out << v.x() << ',' << v.y() << '\n';
     std::fprintf(stderr, "%ld frames, layout %zu verts, theta %.2f deg, area %.2f m2\n", frames, poly.size(),

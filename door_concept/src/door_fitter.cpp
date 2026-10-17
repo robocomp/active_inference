@@ -3,6 +3,8 @@
  */
 
 #include "door_fitter.h"
+#include "door_standpoint.h"
+#include "door_phi_posterior.h"   // the phi channel as pure functions (tested offline)
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -23,6 +25,48 @@
 #include <opencv2/imgproc.hpp>   // fillConvexPoly / bitwise_and — the rasterised phi score
 #include "../../common/rt_query_probe/rt_query_probe.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
+
+namespace
+{
+// Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs every other label
+// (occluder). A CELL-px cell absorbs mask-boundary jitter and makes membership O(1); the key packs the two
+// cell indices. CELL is a discretization constant (quadrature), not a belief gate — no config key.
+// Used by BOTH the leaf silhouette and the aperture-frame probe, so "what hides a door" is one definition.
+struct MaskCells
+{
+    static constexpr float CELL = 6.0f;
+    std::unordered_set<std::int64_t> door, occluder;
+    [[nodiscard]] static std::int64_t key(float col, float row)
+    {
+        const std::int64_t kx = static_cast<std::int64_t>(std::floor(col / CELL));
+        const std::int64_t ky = static_cast<std::int64_t>(std::floor(row / CELL));
+        return (kx << 32) ^ (ky & 0xffffffffLL);
+    }
+    // A pixel covered by some NON-door mask and by no door mask: a nearer masked object hides it.
+    [[nodiscard]] bool hides(float col, float row) const
+    {
+        const std::int64_t k = key(col, row);
+        return occluder.contains(k) and not door.contains(k);
+    }
+};
+
+template <class Packet>
+MaskCells build_mask_cells(const Packet& pkt)
+{
+    MaskCells c;
+    if (not pkt.valid)
+        return c;
+    for (const auto& sl : pkt.slices)
+    {
+        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+        auto& dst = (sl.label == "door") ? c.door : c.occluder;
+        for (std::size_t i = b; i < e; ++i)
+            dst.insert(MaskCells::key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
+    }
+    return c;
+}
+}   // namespace
 
 namespace rc {
 
@@ -117,57 +161,19 @@ void DoorFitter::refresh_geometry(DoorInstance& inst)
     inst.model.set_state(ms);
 }
 
-// Associate q (room frame) to the nearest room-polygon wall. The polygon has chamfered corners / door
-// notches that split one physical wall into several short edges, so — like cabinet's build_wall_ref — the
-// nearest edge is COLLINEAR-MERGED into its logical wall (walk both ways while neighbours stay within ~3°):
-// near corner O = the merged run's start corner, along-wall unit u = (far−O)/|far−O|, len = the run length.
-// s is measured along u from O; the belief clamps the panel to [0, len].
-DoorFitter::WallFrame DoorFitter::nearest_wall(const Eigen::Vector2f& q) const
+// Associate the door to the room-polygon wall that holds its aperture: rc::door::associate_wall (door_standpoint.h)
+// — one vote per observed point for the wall its sightline from the camera leaves the room through (or, with no
+// usable camera, for its nearest wall), collinear-merged into the logical wall, normal INTO the room whatever the
+// polygon's winding. ★Why sightlines and not the centroid (2026-10-12): an open leaf at a corner lies in the line
+// of the PERPENDICULAR wall, so the centroid's nearest edge is that wall and the door is fitted as a closed one
+// in it (door_24: a swung leaf behind room_1's partition became a phantom door in the partition, and its
+// approach standpoint landed outside the room). See the header of door_standpoint.h.
+DoorFitter::WallFrame DoorFitter::associate_wall(std::span<const Eigen::Vector2f> pts_xy,
+                                                 const std::optional<Eigen::Vector2f>& cam_xy) const
 {
     WallFrame w;
-    const std::size_t n = room_polygon_.size();
-    if (n < 3)
-        return w;
-    float best = std::numeric_limits<float>::max();
-    std::size_t best_i = n;
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const Eigen::Vector2f& a = room_polygon_[i];
-        const Eigen::Vector2f  ab = room_polygon_[(i + 1) % n] - a;
-        const float len2 = ab.squaredNorm();
-        if (len2 < 1e-9f) continue;
-        const float t = std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f);
-        const float d2 = (q - (a + t * ab)).squaredNorm();
-        if (d2 < best) { best = d2; best_i = i; }
-    }
-    if (best_i >= n)
-        return w;
-
-    // Collinear-merge the argmin edge with its neighbours (dir within ~3°) into one logical wall.
-    constexpr float kColinCos = 0.99863f;   // cos(3°)
-    const auto edge_dir = [&](std::size_t i)
-    { return (room_polygon_[(i + 1) % n] - room_polygon_[i]).normalized(); };
-    const Eigen::Vector2f d0 = edge_dir(best_i);
-    std::size_t lo = best_i, hi = best_i;
-    for (std::size_t step = 0; step + 1 < n; ++step)   // walk backward while collinear
-    {
-        const std::size_t prev = (lo + n - 1) % n;
-        if (std::abs(edge_dir(prev).dot(d0)) < kColinCos) break;
-        lo = prev;
-    }
-    for (std::size_t step = 0; step + 1 < n; ++step)   // walk forward while collinear
-    {
-        const std::size_t nxt = (hi + 1) % n;
-        if (nxt == lo or std::abs(edge_dir(nxt).dot(d0)) < kColinCos) break;
-        hi = nxt;
-    }
-    const Eigen::Vector2f a   = room_polygon_[lo];
-    const Eigen::Vector2f far = room_polygon_[(hi + 1) % n];
-    const Eigen::Vector2f ab  = far - a;
-    const float len = ab.norm();
-    if (len < 1e-6f)
-        return w;
-    w.O = a; w.u = ab / len; w.len = len; w.ok = true;
+    if (const auto r = door::associate_wall(room_polygon_, pts_xy, cam_xy); r.ok)
+    { w.O = r.O; w.u = r.u; w.len = r.len; w.ok = true; }
     return w;
 }
 
@@ -373,12 +379,16 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
                 inst.obs_top_last = top;
                 if (wgt > 0.0f)
                 {
-                    constexpr float kEwma = 0.05f;   // smoothing over untruncated views (a measurement filter)
+                    constexpr float kEwma = 0.05f;   // confidence accrual rate over untruncated views
                     const float a = kEwma * wgt;
-                    // Rises toward a taller observation, never falls toward a shorter one.
+                    // The best lower bound is the tallest one seen: a running MAX. ★It used to EWMA UP from
+                    // the first reading (a = 0.05), and that is the same bug as door_17 entering from the other
+                    // end: a door first seen in a fragment starts LOW and crawls up more slowly than the
+                    // confidence below accrues. try46 (2026-10-17), door_1 re-seen from room_2 after a crossing:
+                    // seeded at 0.85 m, had crawled to only 1.40 m when conf reached MinHeightConf 0.30, and the
+                    // min-height prior deleted an open door the robot had just driven through.
                     if (std::isnan(inst.obs_top_z) or top > inst.obs_top_z)
-                        inst.obs_top_z = std::isnan(inst.obs_top_z)
-                                         ? top : (1.0f - a) * inst.obs_top_z + a * top;
+                        inst.obs_top_z = top;
                     // Confidence still accumulates on EVERY untruncated look: we did examine the door,
                     // whatever the piece showed. Otherwise a run of fragments would leave the prior
                     // unable to act at all, which is a different failure from the one being fixed.
@@ -478,7 +488,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
 {
     const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
 
-    // Lazy belief init: associate the door to the nearest room-polygon wall (fixes yaw / lateral / floor),
+    // Lazy belief init: associate the door to the room-polygon wall it was seen through (fixes yaw / lateral / floor),
     // then seed the along-wall offset s from the mask centroid. w,h start at their strong template priors;
     // the belief works in the wall frame θ=[s,w,h].
     if (not inst.ai2_initialized)
@@ -499,26 +509,52 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
     {
         const auto& m = inst.model.state();
         Eigen::Vector2f centroid_xy(m.cx, m.cy);
+        std::vector<Eigen::Vector2f> pts_xy;   // plan-view mask points: each votes for the wall it was seen through
         if (npts > 0)
         {
+            pts_xy.reserve(static_cast<std::size_t>(npts));
             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-            const auto scan = [&](const std::vector<Eigen::Vector3f>& v) { for (const auto& p : v) sum += p; };
+            const auto scan = [&](const std::vector<Eigen::Vector3f>& v)
+            { for (const auto& p : v) { sum += p; pts_xy.emplace_back(p.head<2>()); } };
             scan(observation.candidate_pts); scan(observation.residual_pts);
             centroid_xy = (sum / static_cast<float>(npts)).head<2>();
         }
+        else
+            pts_xy.push_back(centroid_xy);
+        // The camera the points were seen from (room frame, current pose; ALWAYS check the optional). Without
+        // it every point votes for its nearest wall — the old rule, which is what a missing pose can support.
+        std::optional<Eigen::Vector2f> cam_xy;
+        if (const auto M = room_T_zed_matrix(); M.has_value())
+            cam_xy = Eigen::Vector2f(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
         DoorBeliefParams p = make_belief_params();
         DoorBeliefState s0;
         s0.w = cfg_.door_prior_w_m;
         s0.h = cfg_.door_prior_h_m;
         // Wall association: the belief's centre = O + (s + w/2)·u, so seed s so the panel centre lands on the
         // detection centroid. Off the wall (no polygon) → keep the identity frame and s = along-x of centroid.
-        if (const WallFrame wf = nearest_wall(centroid_xy); wf.ok)
+        if (const WallFrame wf = associate_wall(pts_xy, cam_xy); wf.ok)
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
             s0.s = std::clamp((centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w, 0.0f, std::max(0.0f, wf.len - s0.w));
         }
         else
             s0.s = centroid_xy.x() - 0.5f * s0.w;
+        if (inst.leaf_side_hint.has_value())
+        {
+            // The hinge is the aperture edge nearer the remembered hinge point; the swing is the side of THIS wall the
+            // remembered opening direction points to. Both follow from geometry, so a reversed wall frame flips them.
+            const auto& [hinge_pt, open_dir] = *inst.leaf_side_hint;
+            const Eigen::Vector2f near_edge = p.wall_O + s0.s * p.wall_u;
+            const Eigen::Vector2f far_edge  = near_edge + s0.w * p.wall_u;
+            const Eigen::Vector2f n(-p.wall_u.y(), p.wall_u.x());
+            p.leaf.hinge = (hinge_pt - near_edge).norm() <= (hinge_pt - far_edge).norm() ? door::HingeSide::Near
+                                                                                           : door::HingeSide::Far;
+            p.leaf.swing = n.dot(open_dir) >= 0.0f ? +1.0f : -1.0f;
+            std::print("door_concept: [{}] leaf side inherited from the other room: hinge {} swing {:+.0f} (opens {} this room)\n",
+                       inst.node_name, p.leaf.hinge == door::HingeSide::Near ? "near" : "far", p.leaf.swing,
+                       p.leaf.swing > 0.0f ? "INTO" : "OUT OF");
+            inst.leaf_side_hint.reset();
+        }
         inst.ai2_belief = DoorBelief(s0, p);
         inst.ai2_initialized = true;
     }
@@ -543,6 +579,14 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         }
         inst.last_belief_touch = now;
         inst.dbg_gate_fresh = false;   // no mask reached the fit ⇒ the gate flags below are STALE this cycle
+        // ★THE LEAF ANGLE IS A LIDAR QUANTITY; A MISSING CAMERA MASK MUST NOT FREEZE IT (2026-10-12).
+        // estimate_phi() has had no camera precondition since 2026-09-14, but it is only reached through
+        // refresh_geometry(), and this early return skipped that — so a door the detector stopped labelling
+        // kept its last phi, and its last phi_curve, for ever. Live try15: the crossed door's mirror door_29
+        // lost its mask at 10:23:59, sat at phi = 2.09 rad through a manual CLOSE and a re-OPEN, and published
+        // door_open_prob = 0 from a curve nobody had refreshed. The aperture belief still ages (above) and is
+        // not re-fitted; only the articulated coordinate is re-estimated, from where the rays stop.
+        refresh_geometry(inst);
         compute_projected_roi(inst);
         return inst.dbg_energy;   // HOLD last FE — an aged cycle took no measurement (no new energy)
     }
@@ -675,7 +719,8 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
                  // OPEN one. A high off_plane with a low phi, or a low one with a high phi, is a
                  // contradiction the angle alone cannot show.
                  << "leaf_pts,w_sdf,w_mask,w_edge,phi_sigma,phi_measured,off_plane,phi_cv,"
-                 << "ray_hit0,ray_expl0,ray_signed0\n";
+                 << "ray_hit0,ray_expl0,ray_signed0,"
+                 << "phi_ninf,phi_beta,phi_lat\n";
     }
     const auto& s = inst.ai2_belief.state();
     const Eigen::Vector2f c = inst.ai2_belief.center_xy();   // APERTURE centre (see DoorBelief) — unchanged by phi
@@ -690,8 +735,40 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
              << inst.dbg_w_edge << ',' << inst.phi_sigma << ',' << (inst.phi_measured ? 1 : 0) << ','
              << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_cv << ','
              << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ','
-             << inst.dbg_ray_signed0 << '\n';
+             << inst.dbg_ray_signed0 << ','
+             << inst.dbg_phi_ninf << ',' << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << '\n';
     ai2_csv_.flush();
+}
+
+// One row per estimate_phi() call — EVERY call, mask or not. The ai2 row above is written only on the mask
+// path, so the LiDAR-only cycles (no detection: exactly the ones where the leaf angle collapsed in try42)
+// left no trace. Path = the ai2 path with "_phi" before the extension; off when that is off.
+void DoorFitter::log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& rays,
+                             const std::vector<std::pair<float, float>>& loglik,
+                             float prior_mean, float prior_sigma, float post_mean, float post_sigma, bool measured)
+{
+    if (cfg_.ai2_csv_path.empty())
+        return;
+    if (not phi_trace_csv_.is_open())
+    {
+        std::string p = cfg_.ai2_csv_path;
+        const auto dot = p.rfind('.');
+        p = (dot == std::string::npos) ? p + "_phi" : p.substr(0, dot) + "_phi" + p.substr(dot);
+        rc::diag::open_rotating(phi_trace_csv_, p);
+        if (not phi_trace_csv_.is_open()) return;
+        phi_trace_csv_ << "t_ms,node,ox,oy,nrays,off_plane,ninf,beta,lat,prior_mean,prior_sigma,post_mean,post_sigma,measured,"
+                       << "hit0,expl0,signed0,loglik\n";
+    }
+    const auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch()).count();
+    phi_trace_csv_ << t_ms << ',' << inst.node_name << ',' << leaf_origin_.x() << ',' << leaf_origin_.y() << ','
+                   << rays.endpoints.size() << ',' << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_ninf << ','
+                   << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << ',' << prior_mean << ',' << prior_sigma << ','
+                   << post_mean << ',' << post_sigma << ',' << (measured ? 1 : 0) << ','
+                   << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ',' << inst.dbg_ray_signed0 << ',';
+    for (std::size_t k = 0; k < loglik.size(); ++k)
+        phi_trace_csv_ << (k ? ";" : "") << loglik[k].second;
+    phi_trace_csv_ << '\n';
 }
 
 // ─── RGB-mask ROI projection (active-perception aid) ──────────────────────────
@@ -835,23 +912,14 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     inst.phi_last_t = now;
     // Never tighter than the search grid can resolve (that would be a claim about phi finer than the
     // measurement) and never wider than the full range (which is the same as having no prior at all).
-    const float sigma_phi = std::isfinite(dt_phi)
-        // ★★★THE PRIOR WIDTH COMPOUNDS — IT IS A PREDICT STEP, NOT A FRESH GAUSSIAN EACH CYCLE.
-        // This used to be `rate * dt` alone: the width the leaf could have swung since the LAST frame.
-        // True per cycle, and it discards all history — so a hundred uninformative cycles grew the
-        // uncertainty by nothing, and the estimator reported the grid resolution as its confidence on a
-        // value nothing had supported since the evidence stopped. Measured 2026-09-13: with the door
-        // being closed and both likelihoods silent (w_mask 0.0000, w_sdf pinned at 1/25 = flat), sigma
-        // sat at 5.00, 5.00, 5.01, 5.01, 5.01 while the estimate froze at 47 deg on a shut door. A flat
-        // likelihood leaves the posterior equal to the prior, and a prior re-centred on the current
-        // estimate has its mean AT the current estimate — so the value stops dead and is reasserted with
-        // a confidence it never earned.
-        // Compounding the previous posterior's width with this interval's process noise is the ordinary
-        // predict step, and it makes ignorance ACCUMULATE: evidence tightens sigma, its absence widens it,
-        // and "I have not seen the leaf for three seconds" becomes a thing the estimate can express.
-        ? std::clamp(std::sqrt(inst.phi_sigma * inst.phi_sigma + swing_rate * dt_phi * swing_rate * dt_phi),
-                     cfg_.phi_step_rad, cfg_.phi_max_rad)
-        : cfg_.phi_max_rad;
+    // ★★★THE PRIOR WIDTH COMPOUNDS — IT IS A PREDICT STEP, NOT A FRESH GAUSSIAN EACH CYCLE (2026-09-13).
+    // A flat likelihood leaves the posterior equal to the prior; a prior re-centred on the current estimate
+    // with a per-cycle width would freeze the value and reassert it with a confidence it never earned
+    // (measured: sigma 5.00, 5.00, 5.01 while the estimate froze at 47 deg on a shut door). Compounding the
+    // previous posterior's width with this interval's swing makes ignorance ACCUMULATE. Never tighter than
+    // the grid resolves, never wider than the range. See rc::door::phi_prior_sigma.
+    const float sigma_phi = rc::door::phi_prior_sigma(inst.phi_sigma, swing_rate, dt_phi,
+                                                      cfg_.phi_step_rad, cfg_.phi_max_rad);
     if (inst.phi_cmd_active)
     {
         const float dt = std::chrono::duration<float>(now - inst.phi_cmd_t0).count();
@@ -893,72 +961,30 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // their endpoints are in the next room, metres from the door, so any endpoint-proximity test discards
     // precisely the evidence that an aperture is open. A ray belongs to this doorway if its SEGMENT
     // passes through the cylinder the leaf can sweep — whether it stopped there or flew on.
+    // The search grid. ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them.
+    const float PHI_MIN = 0.0f;
+    const float PHI_MAX = std::max(0.1f, cfg_.phi_max_rad);
+    const int   NSTEP   = std::clamp(
+        static_cast<int>(std::lround(PHI_MAX / std::max(0.01f, cfg_.phi_step_rad))) + 1, 5, 64);
+
+    // ★THE ALONG-WALL SLIDE IS A NUISANCE OVER ITS HONEST SUPPORT (+-w/2), and the ray selection follows it
+    // (door_phi_posterior.h has the why: a carried mirror sat 0.23-0.40 m from the real doorway).
+    rc::DoorBelief::FieldNuisance nz = rc::door::phi_field_nuisance(inst.aperture);
+    // ★THE SLIDE'S PRIOR IS WHERE THE BELIEF PUTS THE APERTURE (2026-10-13): N(0, var_s) from the aperture's own
+    // posterior. A fitted door (σ_s ≈ 6-11 cm) cannot be "explained" by a shut leaf slid 0.55 m onto the wall beside it
+    // (try44: every collapse to phi≈0 had lat = -0.55); a freshly carried mirror, whose placement IS uncertain, keeps
+    // the wide support that ±w/2 was introduced for.
+    if (inst.ai2_initialized)
+        nz.lat_sigma = std::sqrt(std::max(1e-8f, inst.ai2_belief.covariance()(0, 0)));   // 0 = known, never "uniform"
     rc::ai::LidarRays rays;
     if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
     {
-        const auto& ap = inst.aperture;
-        const Eigen::Vector2f c = ap.centre_xy();
-        const float reach = ap.w + 0.15f;                       // swept radius + thickness/noise band
-        const float z_lo  = ap.floor_z + 0.05f, z_hi = ap.floor_z + ap.h;
-        rays.origin = leaf_origin_;
-        rays.endpoints.reserve(512);
-        const Eigen::Vector2f o2 = leaf_origin_.head<2>();
-        int off = 0;
-        for (const auto& p : *leaf_pts_)
-        {
-            // Closest approach of the SEGMENT origin->endpoint to the aperture centre, in plan view.
-            const Eigen::Vector2f d = p.head<2>() - o2;
-            const float len2 = d.squaredNorm();
-            if (len2 < 1e-6f) continue;
-            const float t = std::clamp((c - o2).dot(d) / len2, 0.0f, 1.0f);
-            const Eigen::Vector2f closest = o2 + t * d;
-            // ★A SLAB, NOT A DISC — AND THE DIFFERENCE IS THE WHOLE SIGNAL-TO-NOISE OF THIS CHANNEL.
-            // A ray that hits the WALL BESIDE the doorway predicts the same range at every leaf angle: its
-            // cost is identical across hypotheses and cancels exactly in F - F_min. It biases nothing, but
-            // the free energy is a MEAN, so each inert ray shrinks the differences the informative ones
-            // produce. Measured 2026-09-13: a disc of radius w + 0.15 = 1.15 m about the centre of a 1.00 m
-            // aperture admitted 694 rays, of which roughly 600 were wall — diluting the discrimination
-            // about sevenfold and leaving w_sdf varying by +-0.7% around flat while the mask, unaffected,
-            // decided the angle.
-            // The rays that can discriminate are those inside the doorway's OWN WIDTH: the column a closed
-            // leaf blocks, and the volume the leaf sweeps out perpendicular to it. So the test is lateral
-            // (along-wall) against w/2, with the perpendicular extent left free out to the swept reach —
-            // a slab through the aperture, which is the shape of the thing being asked about.
-            const float lateral = std::abs(ap.wall_u.dot(closest - c));
-            const float perp    = std::abs(ap.across_u().dot(closest - c));
-            // ★THE JAMB BAND IS NOW EVIDENCE, NOT DILUTION (widened 0.10 -> 0.40 m, 2026-09-16).
-            // Under the leaf-only model a ray hitting the wall beside the doorway predicted the same
-            // range at every phi: it cancelled in F - F_min and merely shrank the differences the
-            // informative rays produced, which is why this margin was cut to 10 cm. The field model has
-            // a WALL, and the wall is what pins the depth nuisance — the live returns sit a tight
-            // +0.112 m nearer than the modelled leaf, and it is the jamb rays that measure that offset.
-            // Cutting them out would leave the nuisance determined only by the rays whose angle we are
-            // trying to infer, which is the degeneracy this whole channel exists to avoid.
-            if (lateral > 0.5f * ap.w + 0.40f or perp > reach) continue;
-            // Height band applies to the RETURN only when it stopped inside the band; a ray that flew
-            // through is kept whatever height it ended at, because where it ended is the whole point.
-            const bool stopped_near = (p.head<2>() - c).norm() <= reach;
-            if (stopped_near and (p.z() < z_lo or p.z() > z_hi)) continue;   // floor / above the lintel
-            rays.endpoints.push_back(p);
-            if (std::abs(ap.across_u().dot(p.head<2>() - c)) > 0.10f) ++off;
-        }
-        rays.precision   = std::max(1e-3f, cfg_.lidar_bpearl_precision);
-        rays.max_range_m = 8.0f;
-        // ★★★THE ROBUST SCALE IS THE DOOR'S OWN SIZE, NOT A SURFACE TOLERANCE — AND THE DEFAULT MADE THE
-        // LIKELIHOOD PERFECTLY FLAT. A Cauchy kernel says "residuals far beyond c are outliers and carry
-        // no information". The shared default is 0.05 m, right for fitting a surface to returns that
-        // should lie ON it. Here the question is whether a ray was STOPPED or FLEW THROUGH, and that
-        // residual is metres: with c = 5 cm every ray saturates to the same constant, so every hypothesis
-        // scores identically. Measured 2026-09-13, w_sdf sat at 0.0400 = 1/25 across 25 hypotheses — the
-        // exact fingerprint of a flat curve — and the mask channel decided the angle unopposed while the
-        // LiDAR branch appeared to be running perfectly (335-415 rays, measured=1, every cycle).
-        // A ray that flew 4 m past where a closed leaf would have stopped is not an outlier; it is the
-        // whole signal. So c is the scale over which "the ray stopped somewhere else" stops being
-        // informative, which for a doorway is the doorway: one aperture width. Derived from the model, so
-        // it cannot be wrong for the next door of a different size.
-        // Now the beam model's RANGE NOISE sigma, not a robust scale: how precisely a return
-        // locates a surface. The LiDAR's own noise, not the door's size.
-        rays.robust_c_m  = 0.05f;
+        // ★SELECT BY THE PATH, NOT BY THE ENDPOINT — a slab through the aperture plus the jamb band; see
+        // rc::door::select_doorway_rays (the selection used to live here, unchanged but for the slide).
+        auto sel = rc::door::select_doorway_rays(inst.aperture, leaf_origin_, *leaf_pts_,
+                                                 std::max(std::abs(nz.lat_lo), std::abs(nz.lat_hi)),
+                                                 cfg_.lidar_bpearl_precision);
+        rays = std::move(sel.rays);
         // ★THE DIAGNOSTIC, TAKEN BEFORE ANY MODEL CHANGE. Tolerance is 3 sigma of the range noise: a ray
         // that stops within that of where a SHUT leaf would be is explained by one. On a closed door this
         // ratio should be near 1; anything near 0 says the selection is not looking at the leaf.
@@ -969,7 +995,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
             inst.dbg_ray_signed0  = ex.mean_signed_m;
         }
         inst.dbg_leaf_pts       = static_cast<int>(rays.endpoints.size());
-        inst.dbg_leaf_off_plane = off;
+        inst.dbg_leaf_off_plane = sel.off_plane;
     }
     else
     {
@@ -978,105 +1004,57 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     }
 
     // ─── THE CURVE: LiDAR likelihood × the swing prior ─────────────────────────────────────────────
-    // ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them (a door opens past 90 deg).
-    const float PHI_MIN = 0.0f;
-    const float PHI_MAX = std::max(0.1f, cfg_.phi_max_rad);
-    const int   NSTEP   = std::clamp(
-        static_cast<int>(std::lround(PHI_MAX / std::max(0.01f, cfg_.phi_step_rad))) + 1, 5, 64);
-
-    std::vector<float> lidar(static_cast<std::size_t>(NSTEP), 0.0f);
+    // ★THE FULL-FIELD RESPONSE (2026-09-16), NOW TEMPERED BY WHAT THE FRAME DISCRIMINATES (2026-10-13).
+    // DoorBelief::phi_field_loglik: same per-ray density as phi_field_likelihood, the slide marginalised over
+    // +-w/2, and the joint log-likelihood raised to n_eff/n_inf — a frame that sees a sliver of the leaf
+    // carries a sliver of evidence instead of a delta.
+    std::vector<std::pair<float, float>> loglik;
     if (not rays.endpoints.empty())
     {
-        // ★THE FULL-FIELD RESPONSE, NOT THE PER-RAY MEAN (2026-09-16). See DoorBelief::phi_field_likelihood
-        // for why the beam model could not see an open door and why the sum needs the nuisance. Measured
-        // live the same day: the old channel went FLAT (cv 0.038, w_sdf 0.0393) with the door standing
-        // open and the robot in the doorway, and sigma_phi GREW from 0.199 to 0.647 rad as the ray count
-        // rose 71 -> 918 — a likelihood whose width increases with evidence.
-        rc::DoorBelief::FieldNuisance nz;   // defaults span the measured +0.112 m offset
-        const auto c = inst.ai2_belief.phi_field_likelihood(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
-        for (std::size_t k = 0; k < lidar.size() and k < c.size(); ++k)
-            lidar[k] = c[k].second;
+        auto fr = inst.ai2_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
+        loglik = std::move(fr.loglik);
+        inst.dbg_phi_ninf  = fr.n_inf;
+        inst.dbg_phi_beta  = fr.beta;
+        inst.dbg_phi_lat   = fr.lat_map;
     }
-    const double lsum = std::accumulate(lidar.begin(), lidar.end(), 0.0);
-
-    // ★A FLAT LIKELIHOOD IS NOT A MEASUREMENT, AND NO LIKELIHOOD IS A FLAT ONE, NOT A ZERO ONE. Bayes says a
-    // measurement that was not taken contributes a CONSTANT, so the posterior equals the prior and its
-    // width grows with the predict step above — "I have not seen the leaf" is a wide posterior, never a
-    // default angle. What decides "measured" is whether the hypotheses were DISTINGUISHED: the spread
-    // of the likelihood across them, not its sum (a uniform curve sums to 1).
-    // ⚠ A tenth of the mean (coefficient of variation) is where a shape is barely distinguishable from
-    // uniform. It gates only the MEASURED FLAG, i.e. whether ignorance accumulates — never the estimate.
-    bool measured = false;
+    else
     {
-        double cv = 0.0;
-        if (lsum > 1e-12)
-        {
-            const double mu = lsum / static_cast<double>(lidar.size());
-            double v = 0.0;
-            for (const float x : lidar) v += (x - mu) * (x - mu);
-            cv = std::sqrt(v / static_cast<double>(lidar.size())) / mu;   // 0 ⇒ perfectly flat
-        }
-        measured = (cv > 0.10);
-        inst.dbg_phi_cv = static_cast<float>(cv);
+        inst.dbg_phi_ninf = 0.0f;
+        inst.dbg_phi_beta = 1.0f;
     }
 
-    // ★THE PRIOR MULTIPLIES THE LIKELIHOOD; IT DOES NOT ADD A BONUS TO IT. A flat likelihood must leave the
-    // prior standing, and only a peaked one may move it.
-    inst.phi_curve.reserve(static_cast<std::size_t>(NSTEP));
-    float best_w = -1.0f;
-    for (int k = 0; k < NSTEP; ++k)
-    {
-        const float  phi   = PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1);
-        const float  d     = (phi - phi_prior) / sigma_phi;
-        const double prior = std::exp(-0.5 * d * d);
-        const double s_n   = lsum > 1e-12 ? lidar[static_cast<std::size_t>(k)] / lsum : 0.0;
-        const float  w     = static_cast<float>((measured ? s_n : 1.0) * prior);
-        inst.phi_curve.emplace_back(phi, w);
-        if (w > best_w)
-        {
-            best_w = w;
-            inst.dbg_w_sdf = static_cast<float>(s_n * prior);
-        }
-    }
+    // ★THE PRIOR MULTIPLIES THE LIKELIHOOD, IN LOGS. A flat likelihood leaves the prior standing; a peaked
+    // one moves it; and no likelihood, however far from the prior, can underflow the posterior to nothing
+    // (the old linear product did, and the "no curve" branch then threw the prior away — see
+    // rc::door::phi_posterior_step).
+    const auto post = rc::door::phi_posterior_step(loglik, PHI_MIN, PHI_MAX, NSTEP, phi_prior, sigma_phi);
+    inst.phi_curve  = post.curve;
+    inst.dbg_phi_cv = post.cv;
+    inst.dbg_w_sdf  = post.w_lik_best;
     inst.dbg_w_mask = 0.0f;   // kept in the log schema; the camera no longer votes on phi
     inst.dbg_w_edge = 0.0f;
 
-    // ─── COLLAPSE THE POSTERIOR: a MEAN and a WIDTH, always, with no special cases ────────────────
-    // ★THE WIDTH IS THE POINT. A point estimate with no width cannot distinguish "the leaf is flush" from
-    // "nothing looked at the leaf", and every consumer downstream is obliged to believe it either way.
-    // With the flat-likelihood rule above the curve is ALWAYS a proper posterior — the prior alone when
-    // nothing was measured — so sigma carries that state honestly: a cycle with no evidence widens toward
-    // the full range instead of silently asserting an angle.
-    // ★NO ARGMAX ANYWHERE. The mean of the posterior is what moves, for the reason already recorded in
-    // this function: the argmax of a nearly-flat curve is noise, and chasing it made the aperture slide
-    // along the wall to follow it (r = -1.000, 34 cm against 41 deg).
+    // ─── COLLAPSE THE POSTERIOR: a MEAN and a WIDTH, always ────────────────────────────────────────
+    // ★THE WIDTH IS THE POINT, and ★NO ARGMAX ANYWHERE (the argmax of a nearly-flat curve is noise; chasing
+    // it slid the aperture along the wall, r = -1.000, 34 cm against 41 deg).
+    // ★THE CARRIED BELIEF IS THE POSTERIOR'S (mean, sigma) — NO CLAMP ON THE MEAN (2026-10-13). The mean used
+    // to move at most swing_rate*dt per cycle while sigma took the posterior's width, so the NEXT prior was
+    // centred many sigma from the evidence and fought it (harness (c): first look at an open door,
+    // P(passable) 1.00 -> 0.10 -> 1.00). "A hinge cannot jump" is already the predict step: the prior's width
+    // grows by exactly what the leaf could have swung in dt (phi_prior_sigma), so a single frame moves the
+    // mean far only if its evidence outweighs that prior — and, tempered by what it actually observed
+    // (phi_field_loglik), a near-empty frame cannot.
+    if (not post.curve.empty())
     {
-        double num = 0.0, den = 0.0;
-        for (const auto& [phi, w] : inst.phi_curve) { num += static_cast<double>(phi) * w; den += w; }
-        if (den > 1e-12)
-        {
-            const float mean = static_cast<float>(num / den);
-            double var = 0.0;
-            for (const auto& [phi, w] : inst.phi_curve)
-                var += w * (phi - mean) * (phi - mean);
-            inst.phi_sigma = static_cast<float>(std::sqrt(std::max(0.0, var / den)));
-            // A hinge cannot jump: the step is bounded by what the leaf could physically have swung in the
-            // elapsed time. Same swing model as the prior's width, so the two cannot disagree.
-            const float max_step = swing_rate * (std::isfinite(dt_phi) ? dt_phi : 0.10f);
-            inst.phi_est += std::clamp(mean - inst.phi_est, -max_step, max_step);
-        }
-        else
-        {
-            // Not even a prior — the curve could not be built at all. HOLD the estimate and say the width
-            // is the whole range, rather than move it on nothing.
-            inst.phi_sigma = PHI_MAX - PHI_MIN;
-        }
-        inst.phi_measured = measured;
-        // phi_support was the camera mask overlap at the claimed angle. The camera no longer scores the
-        // leaf, so there is nothing to report: -1 (outside the [0,1] range of an overlap), never 0, which
-        // would read as "the mask saw no leaf here".
-        inst.phi_support = -1.0f;
+        inst.phi_sigma = post.sigma;
+        inst.phi_est   = post.mean;
     }
+    else
+        inst.phi_sigma = PHI_MAX - PHI_MIN;   // not even a prior: HOLD the estimate, width = the whole range
+    inst.phi_measured = post.measured;
+    log_phi_csv(inst, rays, loglik, phi_prior, sigma_phi, post.mean, post.sigma, post.measured);
+    // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".
+    inst.phi_support = -1.0f;
 
     inst.phi_est = std::clamp(inst.phi_est, PHI_MIN, PHI_MAX);
     inst.leaf.phi = inst.phi_est;
@@ -1114,24 +1092,11 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         return out;
 
     // Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs other (occluder).
-    // A CELL-px cell absorbs mask-boundary jitter and makes membership O(1). Key packs the two cell indices.
-    // CELL is a discretization constant (quadrature), not a belief gate — no config key.
-    constexpr float CELL = 6.0f;
-    const auto key = [&](float col, float row) -> std::int64_t
-    {
-        const std::int64_t kx = static_cast<std::int64_t>(std::floor(col / CELL));
-        const std::int64_t ky = static_cast<std::int64_t>(std::floor(row / CELL));
-        return (kx << 32) ^ (ky & 0xffffffffLL);
-    };
-    std::unordered_set<std::int64_t> door_cells, occluder_cells;
-    for (const auto& sl : pkt.slices)
-    {
-        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
-        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
-        auto& dst = (sl.label == "door") ? door_cells : occluder_cells;
-        for (std::size_t i = b; i < e; ++i)
-            dst.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
-    }
+    // Shared with compute_frame_probe — see MaskCells.
+    const MaskCells cells = build_mask_cells(pkt);
+    const auto key = [&cells](float col, float row) { return cells.key(col, row); };
+    const auto& door_cells     = cells.door;
+    const auto& occluder_cells = cells.occluder;
 
     const auto& s = inst.model.state();
     const float hw = inst.leaf_pose.half_w;
@@ -1142,6 +1107,34 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
                             static_cast<float>(Mopt->coeff(2, 3)));
     const Eigen::Vector2f Oxy(O.x(), O.y());
     const float occ_margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);
+
+    // ── THE LEAF BEYOND THE APERTURE (door_room_band.h) ─────────────────────────────────────────────────
+    // A leaf swung OUT of the room the camera is in lies in the NEXT room. What reaches the camera of it is
+    // a sliver seen edge-on THROUGH the hole, and the P(detect) below (envelope × obliquity × resolvability
+    // × in-view × central) is a model of a leaf in THIS room — it does not represent that view. Live try34:
+    // the crossed door, carried into room_2 with its leaf at ~95-110° out of room_2, scored free=112-122 of
+    // 120 detectable samples (the part within walls_block's 0.30 m own-wall skip; the rest was already
+    // wall-occluded) on a door that plainly exists. The model has no term for the opening's jambs/casing as
+    // occluders of what lies past the room-side face, so each sample carries weight 1 − P(it lies past that
+    // face), measured from the APERTURE LINE: a sample on it (a shut leaf, the hinge edge) weighs exactly 1,
+    // one a few σ out weighs ~0. A weight, not a skip: occupancy and absence both scale by it, and
+    // so does the visible fraction (det_w), so a door whose whole leaf is beyond is simply not probed by
+    // this channel — the frame channel (compute_frame_probe) is what speaks for it then.
+    const auto band = room_band();
+    const float delta_ap = has_room_polygon()
+                         ? rc::door::signed_boundary_distance(room_polygon_, inst.aperture.centre_xy())
+                         : std::numeric_limits<float>::quiet_NaN();
+    const bool  band_known = std::isfinite(delta_ap);
+    const Eigen::Vector2f n_out = band_known
+        ? rc::door::outward_normal(room_polygon_, inst.aperture.centre_xy(), inst.aperture.across_u(), band)
+        : Eigen::Vector2f::Zero();
+    const float r0 = rc::door::face_offset_from_aperture(delta_ap);
+    const auto room_weight = [&](const Eigen::Vector3f& P) -> float
+    {
+        if (not band_known) return 1.0f;
+        const float a = (Eigen::Vector2f(P.x(), P.y()) - inst.aperture.wall_O).dot(n_out);
+        return 1.0f - rc::door::p_beyond_far_face(a, r0, band.sigma_m);
+    };
 
     // Classify ONE LEAF-face sample (local x hinge→free edge, z absolute): project it, then vote.
     //
@@ -1198,7 +1191,11 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
                 }
             }
         }
+        const float w_room = room_weight(Pw);                           // 1 − P(seen through the opening)
+        if (not (w_room > 0.0f))
+        { ++out.n_occluded; return; }                                   // wholly through the opening: not this view
         ++out.n_detectable;
+        out.det_w += w_room;
         if (extras) covered_cells.insert(k);
         const float f = central_region_frac_, g = 1.0f - central_region_frac_;
         // Silhouette centroid over ALL detectable samples — the size-invariant input to
@@ -1223,8 +1220,8 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
             ++out.n_central;                                            // the robot is looking AT it
         if (extras) range_sum += std::sqrt(X * X + Y * Y + Z * Z);
-        if (door_cells.contains(k)) out.e_occ  += 1.0f;                 // still there
-        else                        out.e_free += 1.0f;                 // predicted-but-absent
+        if (door_cells.contains(k)) out.e_occ  += w_room;               // still there
+        else                        out.e_free += w_room;               // predicted-but-absent
     };
 
     // Regular grid over the panel face. NX/NZ are numeric SAMPLING RESOLUTION (a quadrature density for the
@@ -1282,7 +1279,7 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
             m_occ     += w * acc.e_occ;
             m_free    += w * acc.e_free;
             m_total   += w * acc.n_total;
-            m_det     += w * acc.n_detectable;
+            m_det     += w * acc.det_w;
         }
         // Only the ABSENCE/OCCUPANCY evidence is replaced. The modal counts stay as the modal pass left
         // them, because resolvability() and central_frac() are ratios built from that one rendering.
@@ -1346,6 +1343,126 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     return out;
 }
 
+// ── THE DOORWAY FRAME: the part of a door that does not move ────────────────────────────────────────────
+// Projects the aperture's jambs + lintel and weights each sample by whether the camera could see it. The
+// scoring against the image and the reasoning behind the statistic live in door_frame_evidence.h; this
+// method owns only what needs the agent: the camera, the transform, the masks, the walls, the other doors
+// and the leaf's opening-angle posterior.
+//
+// Visibility per frame point P (a weight, never a skip-the-cycle switch):
+//   · outside the real frustum / behind the near clip                 → 0
+//   · a NON-door mask covers its pixel (a person, a chair in front)   → 0   (same cells as the silhouette)
+//   · a room WALL crosses the sightline (rc::occlusion::walls_block)  → 0   (own wall skipped, as everywhere)
+//   · another door instance stands in front (cone_blocks)             → 0
+//   · OUR OWN LEAF crosses the sightline                              → 1 − P_φ(blocked), marginalised over
+//     the same phi posterior the silhouette's absence is marginalised over, so the two cannot disagree
+//     about where the leaf is. A leaf swung toward the camera hides the jamb behind it; one swung away
+//     (out of this room — the try32 case) hides nothing, and the frame speaks in full.
+rc::door::FrameProbe DoorFitter::compute_frame_probe(const DoorInstance& inst)
+{
+    if (not inner_eigen_ or not inst.ai2_initialized)
+        return {};
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return {};
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return {};
+    }
+    const auto Mopt = room_T_zed_matrix();   // camera→room, current pose — the SAME transform the silhouette uses
+    if (not Mopt.has_value())
+        return {};
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+    const int W = camera_api_->get_width(), H = camera_api_->get_height();
+    if (W <= 0 or H <= 0)
+        return {};
+
+    // No mask packet ⇒ no KNOWN masked occluder: the cells are empty and that factor is 1. The frame is a
+    // geometric probe of the RGB image, so it does not need masks to exist — only to know what hides it.
+    const MaskCells cells = mask_ingestor_ ? build_mask_cells(mask_ingestor_->packet()) : MaskCells{};
+
+    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)), static_cast<float>(Mopt->coeff(1, 3)),
+                            static_cast<float>(Mopt->coeff(2, 3)));
+    const Eigen::Vector2f Oxy(O.x(), O.y());
+    const float occ_margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);
+
+    // The leaf hypotheses and their weights: the phi posterior when there is one, else the modal pose.
+    std::vector<std::pair<door::LeafPose, float>> leaves;
+    {
+        double w_sum = 0.0;
+        for (const auto& [phi, sup] : inst.phi_curve)
+            w_sum += std::max(0.0f, sup);
+        if (inst.phi_curve.size() > 1 and w_sum > 0.0)
+            for (const auto& [phi, sup] : inst.phi_curve)
+            {
+                const float w = static_cast<float>(std::max(0.0f, sup) / w_sum);
+                if (w <= 0.0f) continue;
+                door::LeafState ls = inst.leaf;
+                ls.phi = phi;
+                leaves.emplace_back(door::leaf_pose(inst.aperture, ls), w);
+            }
+        else
+            leaves.emplace_back(inst.leaf_pose, 1.0f);
+    }
+    const auto own_leaf_clear = [&](const Eigen::Vector3f& P) -> float
+    {
+        float blocked = 0.0f;
+        for (const auto& [L, w] : leaves)
+            if (door::leaf_blocks_sightline(L, O, P))
+                blocked += w;
+        return std::clamp(1.0f - blocked, 0.0f, 1.0f);
+    };
+
+    const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
+    {
+        const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
+        if (Pc.y() <= 0.20) return std::nullopt;                       // behind / at the near clip
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+        if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
+        rc::edges::ProjectedVertex v;
+        v.px = cv::Point2f(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
+        v.depth_m = static_cast<float>(Pc.y());                        // ZED depth = forward coordinate
+        return v;
+    };
+
+    // The frame is scored where the belief puts the aperture. (Tried 2026-10-13 and NOT adopted: seating it on
+    // the room polygon's face. With a real casing standing proud of the wall the visible occluding edge is the
+    // casing's front, which is where the fit already puts the aperture — try34's carried door sat 6 cm in front
+    // of room_2's face, a 5 cm proud Webots casing — and the synthetic scene in tests/test_door_frame_evidence.cpp
+    // scored the seated probe WORSE in 3 of 5 views, down to +0.16 from +28 on an oblique view.)
+    const door::Aperture& ap_seen = inst.aperture;
+
+    const auto visible = [&](const Eigen::Vector3f& P) -> float
+    {
+        const auto v = project(P.cast<double>());
+        if (not v.has_value()) return 0.0f;
+        if (v->px.x < 0.f or v->px.y < 0.f or v->px.x >= static_cast<float>(W) or v->px.y >= static_cast<float>(H))
+            return 0.0f;
+        if (cells.hides(v->px.x, v->px.y))
+            return 0.0f;
+        if (rc::occlusion::walls_block(Oxy, {P.x(), P.y()}, room_polygon_, /*own_wall_skip_m=*/0.30f))
+            return 0.0f;
+        Eigen::Vector3f dc = P - O;
+        const float rc_len = dc.norm();
+        if (rc_len > 1e-3f)
+        {
+            dc /= rc_len;
+            for (const auto& [jid, jinst] : instances_)
+            {
+                if (jid == inst.node_id or not jinst.ai2_initialized) continue;
+                const auto& js = jinst.model.state();
+                const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * js.h);
+                if (rc::occlusion::cone_blocks(O, dc, rc_len, Cj, 0.5f * std::max(js.w, js.thickness),
+                                               (Cj - O).norm(), occ_margin))
+                    return 0.0f;
+            }
+        }
+        return own_leaf_clear(P);
+    };
+    return rc::door::build_frame_probe(ap_seen, project, visible, own_leaf_clear, W, H, cfg_.frame_casing_m,
+                                       cfg_.exist_boundary_sigma_m);
+}
+
 // |cos| of the camera→leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. Diagnostic only
 // (a log column) — see the note in door_fitter.h. Keyed on the leaf, not the wall, so it stays meaningful
 // once phi is fitted: an open door presents its face at a different angle than its aperture does.
@@ -1393,6 +1510,14 @@ bool DoorFitter::confirm_only(const DoorInstance& inst) const
         and inst.last_centroid_radius <= cfg_.ai2_moving_update_center_radius)
         return false;
     return true;   // moving AND the mask is off-centre → confirmation only
+}
+
+float DoorFitter::aperture_band_offset(const DoorInstance& inst) const
+{
+    if (not has_room_polygon())
+        return std::numeric_limits<float>::quiet_NaN();
+    const auto& ms = inst.model.state();
+    return rc::door::signed_boundary_distance(room_polygon_, Eigen::Vector2f(ms.ap_cx, ms.ap_cy));
 }
 
 bool DoorFitter::point_in_room(const Eigen::Vector2f& q, float margin_m) const

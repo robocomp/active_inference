@@ -1,4 +1,5 @@
 {
+    "_comment": "Frame tree and sensor mounts are documented in ../ROBOT_GEOMETRY.md. THIS FILE is the ground truth; the doc summarises it, so a change here must be mirrored there. Runtime mount corrections are overlaid from robot_concept/etc/mount_calib_<robot>.txt and never written back into this file. STRICT JSON ONLY: Qt's parser (cortex dsr_utils.cpp and the lidar3d_dds driver, which reads its mount straight out of this file) rejects // and /* */ comments and trailing commas - use a \"_comment\" key like this one. A _comment is safe as a sibling of \"DSRModel\" or of a node's \"id\", but NEVER inside \"attribute\" or \"linkAttribute\": the type checker auto-registers unknown names there, so it would become a real DSR attribute published over DDS to every peer.",
     "DSRModel": {
         "symbols": {
             "101": {

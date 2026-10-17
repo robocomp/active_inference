@@ -6,7 +6,7 @@ startup crashes that are very hard to diagnose. Mirror bottle_concept (known-goo
 
 **Robot frames & sensor mounts: see [ROBOT_GEOMETRY.md](ROBOT_GEOMETRY.md)** — the frame tree
 (root→Shadow→body→sensors), which frame is the localization frame (`Shadow`, type `"robot"`) vs the
-de-facto base frame everyone reads (`body`, +4.5 cm z), and each sensor's mount + purpose (incl.
+de-facto base frame everyone reads (`body`, +3.25 cm z), and each sensor's mount + purpose (incl.
 `bpearl` = downward dome, not a floor sensor). Derived from `robot_concept/shadow.json` (the truth).
 
 **Agent lifecycle: see [CONCEPT_AGENT_LIFECYCLE.md](CONCEPT_AGENT_LIFECYCLE.md)** — the NORMATIVE contract for
@@ -224,7 +224,9 @@ pins `LC_NUMERIC`; existing agents are NOT retrofitted). Re-run before trusting 
 
 ## Build
 
-`cbuild` = `cmake -B build && make -C build -j32`. After adding sources via an INCLUDEd
+`cbuild` (a function in `~/.bashrc`) = `cmake -B build` then `make -C build -j16 "$@"` inside a
+`systemd-run --user --scope` capped at MemoryHigh=40G / MemoryMax=44G / MemorySwapMax=8G, so a memory
+blow-up kills only the build's cgroup, never the terminal. Raw `make` outside it is uncapped. After adding sources via an INCLUDEd
 `src/CMakeLists.txt`, do a clean reconfigure (nuke `build/CMakeCache.txt`) — incremental
 cmake can miss appended sources. Match the prebuilt libdsr's Eigen alignment: NO
 `-march=native` and NO `-DEIGEN_MAX_ALIGN_BYTES=0` (both change
@@ -235,7 +237,9 @@ dirs' `flags.make`, not just CMakeLists.
 units (`room_concept.cpp`, `wall_map.cpp`, the selftest) and each `cc1plus` peaks in the GIGABYTES,
 not the hundreds of megabytes. Measured at a real OOM kill (2026-09-12 14:04, `journalctl -k`):
 **20 `cc1plus` holding 43.7 GB of the 60.1 GB in use, the largest one 4.88 GB.** This box has 62 GB
-and **NO SWAP**, so there is no soft failure mode — the kernel fires the global OOM killer.
+and had **NO SWAP** then, so there was no soft failure mode. Since 2026-10-04 there is a 16 GB
+`/swapfile` (swappiness 10) — a buffer for spikes, not extra build capacity. `systemd-oomd` still kills
+a WHOLE scope under sustained pressure (it took the entire yakuake terminal on 10-04), hence `cbuild`'s cap.
 
 - **The build is not the victim; something else is.** The killer scores by `oom_score_adj`, and the
   desktop apps carry a positive one — that run killed the user's *browser* while every compiler

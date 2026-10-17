@@ -27,6 +27,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +47,8 @@
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion::{cone_blocks, walls_block} — shared LoS occlusion
 #include "door_scene_graph.h"
 #include "door_semantic_field.h"   // rc::SemanticProbField (retina's graded posterior)
+#include "door_frame_evidence.h"   // rc::door::FrameProbe — the aperture-frame existence probe
+#include "door_room_band.h"        // rc::door::RoomBand — where a door sits relative to the room polygon
 #include <opencv2/core.hpp>
 
 namespace rc {
@@ -107,7 +110,12 @@ struct DoorSilhouette
     // HOLD branch turns on this and not on the modal count: a leaf whose fitted angle happens to point
     // it out of frame has not thereby become unobserved, and charging that as "not probed" would freeze
     // a phantom just as surely as charging it as absence would delete a real door.
-    bool probed() const { return phi_marginalised ? n_det_marg > 0.5f : n_detectable > 0; }
+    bool probed() const { return phi_marginalised ? n_det_marg > 0.5f : det_w > 0.0f; }
+    // Σ over the detectable samples of 1 − P(the sample lies past the room-side face, i.e. is seen THROUGH
+    // the opening) (door_room_band.h). Equal to n_detectable for a leaf that stays in the room or in its own
+    // aperture plane; smaller for a leaf swung OUT through the aperture, a view the silhouette model does not
+    // represent. e_occ/e_free are weighted the same way, and in_fov_frac() divides THIS by n_total.
+    float det_w        = 0.0f;
     int   n_cells      = 0;    // DISTINCT pixel cells the detectable silhouette covers (see resolvability)
     float mean_range_m = 0.0f; // mean camera→sample distance over the detectable samples
     // ── POSTERIOR SAMPLED UNDER THE CONTOUR (retina's semantic_class_probs) ──────────────────────
@@ -127,7 +135,7 @@ struct DoorSilhouette
     {
         if (phi_marginalised and n_total_marg > 0.0f)
             return std::clamp(n_det_marg / n_total_marg, 0.0f, 1.0f);
-        return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f;
+        return n_total > 0 ? det_w / static_cast<float>(n_total) : 0.0f;
     }
     // ★★CENTRALITY IS ABOUT WHERE THE OBJECT IS, NOT HOW MUCH OF IT FITS IN A BOX.
     // The old form counted the FRACTION of silhouette samples landing inside a 50%x50% central box, which
@@ -240,6 +248,18 @@ public:
 
     DoorSilhouette compute_silhouette_existence(const DoorInstance& inst,
                                                 const rc::SemanticProbField* field = nullptr);
+    // The APERTURE FRAME (jambs + lintel), projected and visibility-weighted, ready to be scored against
+    // the RGB / depth frame with rc::door::score_frame. The frame does not move when the leaf swings, so
+    // this is the existence probe that still works when the leaf is open — above all when it has swung OUT
+    // of the room the robot is in. See door_frame_evidence.h.
+    rc::door::FrameProbe compute_frame_probe(const DoorInstance& inst);
+    // The wall band this agent's existence model uses (door_room_band.h), from Existence.WallThicknessM /
+    // Existence.BoundarySigmaM. One definition for the containment prior, the leaf-beyond weight and the
+    // frame probe's seat on the room-side face.
+    [[nodiscard]] rc::door::RoomBand room_band() const
+    { return {cfg_.exist_wall_thickness_m, cfg_.exist_boundary_sigma_m}; }
+    // Signed offset of the APERTURE centre from the room polygon (> 0 outside); NaN with no polygon.
+    [[nodiscard]] float aperture_band_offset(const DoorInstance& inst) const;
     // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central" (the
     // robot is looking AT the door, not merely clipping the wide frustum edge). Set once from config.
     void set_central_region_frac(float f) { central_region_frac_ = f; }
@@ -257,10 +277,11 @@ public:
     bool point_in_room(const Eigen::Vector2f& q, float margin_m = 0.0f) const;
 
     // Wall frame a door is anchored to: near corner O and along-wall unit u (room frame). A door lives IN a
-    // wall, so its belief works in this frame (θ=[s,w,h]); the fitter associates the door to the nearest
-    // room-polygon wall at birth and sets it on the belief. Mirrors cabinet_concept's build_wall_ref.
+    // wall, so its belief works in this frame (θ=[s,w,h]); the fitter associates the door to the
+    // room-polygon wall it was SEEN THROUGH at birth (door_standpoint.h associate_wall) and sets it on the belief.
     struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f; };
-    WallFrame nearest_wall(const Eigen::Vector2f& q) const;
+    // The wall the observed points were SEEN THROUGH from cam_xy (nearest wall per point without a camera).
+    WallFrame associate_wall(std::span<const Eigen::Vector2f> pts_xy, const std::optional<Eigen::Vector2f>& cam_xy) const;
     bool should_log(const DoorInstance& inst) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
@@ -317,6 +338,9 @@ private:
 
     DoorModelParams  make_model_params() const;
 
+    void log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& rays,
+                     const std::vector<std::pair<float, float>>& loglik,
+                     float prior_mean, float prior_sigma, float post_mean, float post_sigma, bool measured);
     // Append one AI2 belief row (state + Σ diag + range/motion) to cfg_.ai2_csv_path. No-op if empty.
     void log_ai2_csv(const DoorInstance& inst, int npts, float R, bool gated, float energy);
 
@@ -347,6 +371,7 @@ private:
     bool            have_prev_cam_ = false;
     std::chrono::steady_clock::time_point prev_cam_tp_{};
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
+    std::ofstream                  phi_trace_csv_;      // one row per estimate_phi() call (ai2 path + "_phi")
     std::ofstream                  phi_curve_csv_;      // one row per HYPOTHESIS (leaf-tracker forensics)
     std::ofstream                  phi_points_csv_;     // one row per cycle: the selected cloud's geometry
 };

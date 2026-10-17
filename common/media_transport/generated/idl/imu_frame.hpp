@@ -118,7 +118,7 @@ public:
                     m_temperature = x.m_temperature;
 
                     m_gyro_var = x.m_gyro_var;
-        m_acc_var = x.m_acc_var;
+
                     m_acc_var = x.m_acc_var;
 
     }
@@ -194,7 +194,7 @@ public:
                     m_temperature = x.m_temperature;
 
                     m_gyro_var = x.m_gyro_var;
-        m_acc_var = x.m_acc_var;
+
                     m_acc_var = x.m_acc_var;
 
         return *this;
@@ -789,6 +789,7 @@ public:
         return m_gyro_var;
     }
 
+
     /*!
      * @brief This function sets a value in member acc_var
      * @param _acc_var New value for member acc_var
@@ -816,7 +817,6 @@ public:
     {
         return m_acc_var;
     }
-
 
 
 

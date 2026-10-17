@@ -623,7 +623,7 @@ std::vector<float> SpecificWorker::compute_slot_visibility(const rc::RingBeliefS
         return vis;   // empty ⇒ the belief treats every slot as fully visible
 
     // ★Always check the optional: the chain bails to {} at any missing node/edge/rtmat.
-    const auto room_T_zed = inner_eigen_->get_transformation_matrix("room", "zed", 0);
+    const auto room_T_zed = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", 0);
     if (not room_T_zed.has_value())
         return vis;
 

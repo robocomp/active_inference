@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 #include <utility>
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
@@ -102,6 +103,13 @@ struct DoorInstance
     int   dbg_ray_expl0 = 0;       // …of which the measured range matches, within tolerance
     float dbg_ray_signed0 = 0.0f;  // mean signed (predicted - measured) over the predicted hits, m
     float dbg_phi_cv   = 0.0f;   // spread of the combined phi likelihood; 0 = perfectly flat
+    // ★HOW MUCH THIS FRAME SAW OF THE LEAF (2026-10-13, DoorBelief::phi_field_loglik). n_inf = rays whose
+    // density changes with phi (soft count); beta = the power the frame's log-likelihood was raised to for
+    // their shared model error (1 = independent, -> 1/(rho n_inf) when many rays share one misfit); lat =
+    // the MAP slide of the aperture along the wall — a LARGE one says the aperture is misplaced, not the leaf.
+    float dbg_phi_ninf = 0.0f;
+    float dbg_phi_beta = 1.0f;
+    float dbg_phi_lat  = 0.0f;
     bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
     float phi_support  = -1.0f;   // was the camera mask overlap at phi_est; -1 since the camera stopped scoring phi (2026-09-14)
     // ★IS phi_est A MEASUREMENT, OR OUR OWN REQUEST ECHOED BACK? True when the last thing to move it was
@@ -155,6 +163,16 @@ struct DoorInstance
     // along-ray Σ and NO depth yet. Authors an Orient affordance (rotate to look) instead of the normal
     // one; cleared the first time a real depth mask is observed (the glance paid off → normal instance).
     bool  is_bearing_hypothesis = false;
+    // WHICH WAY THE LEAF OPENS, inherited from the same door seen from the other room (entry mirror, 2026-10-12):
+    // the hinge point and the opening direction, in THIS room's frame. LeafState's hinge/swing are defined against the
+    // room's own wall frame (wall_u along the polygon edge, n = its left normal = inward), so the same physical leaf
+    // that opens INTO the room it was first seen from opens OUT of this one. Consumed once, at belief init.
+    std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
+    // The side of the aperture plane the robot was on when `cross` was CLAIMED. Held while the claim stands: the
+    // robot changes side by doing the crossing, and a through-pose recomputed from the live side flips back into
+    // the room being left at the doorway (live try17/try19: the robot turned round in the doorway).
+    float cross_side_latched = 0.0f;
+    float cross_standoff_m = 1.2f;   ///< the through-pose depth last offered (past the far-side leaf), for the claim log
     float hypothesis_azimuth    = 0.0f;   // room-frame bearing to look toward (the Orient affordance's target yaw)
     // ★Does this hypothesis have a RANGE, or only a bearing? Set when the birth path resolved one from the
     // precision cascade in door_bearing_range.h (today: the residual grid; soon: dense ricoh depth). With a
@@ -244,6 +262,17 @@ struct DoorInstance
     float dbg_edge_true = 0.0f, dbg_edge_ctrl = 0.0f;
     int   dbg_edge_n = 0;
     float dbg_edge_delta = 0.0f;   // log-odds this channel contributed this cycle (signed)
+    // ── the doorway-FRAME channel (door_frame_evidence.h). dbg_frame_n == 0 ⇒ NOT MEASURED. ──
+    float dbg_frame_excess = 0.0f, dbg_frame_true = 0.0f, dbg_frame_ctrl = 0.0f;
+    float dbg_frame_depth = 0.0f, dbg_frame_vis = 0.0f;
+    int   dbg_frame_n = 0, dbg_frame_ndepth = 0;
+    // ── the WALL-BAND containment prior (door_room_band.h) ──
+    // The static log-prior term currently folded into `existence`. It is REPLACED each cycle (the old value
+    // taken out, the new one put in), never summed: the door's position relative to the wall is one fact, not
+    // a fresh observation every frame. 0 on the band.
+    float room_prior_term = 0.0f;
+    float dbg_band_delta = 0.0f;   // signed offset of the aperture centre from the polygon (> 0 outside); NaN = no polygon
+    float dbg_band_p     = 1.0f;   // π(δ) = exp(room_prior_term)
     float dbg_edge_excess = 0.0f;  // (s_true - s_ctrl) / frame mean gradient — THE evidence quantity
     int   dbg_edge_nctl = 0;       // control placements that survived; 0 ⇒ nothing to compare against,
                                    // which happens at close range as the controls fall off-frame
@@ -348,6 +377,7 @@ struct DoorInstance
     // Delivered says it did what it was asked, never that the world changed (door_actuator.h). Whether
     // the leaf moved is answered by door_open_prob, from the image, like everything else here.
     int  actuation_requests = 0;      // how many times we have asked, this door, this run
+    bool open_claim_unserved = false; // an `open` claim landed and no request has been sent for it yet
     bool actuation_refused  = false;  // the provider said never-ask-again (UnknownDoor / NotActuable)
     std::string actuation_note;       // last provider state or local refusal reason, for the UI/log
 

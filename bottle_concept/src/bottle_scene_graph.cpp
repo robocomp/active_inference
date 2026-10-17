@@ -15,6 +15,7 @@
 
 #include <QDebug>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -53,7 +54,7 @@ std::optional<DSR::Node> BottleSceneGraph::find_table_node(float bx, float by) c
     if (h <= 0.0f)
         return std::nullopt;
     // Table origin (its base) expressed in the room frame — a Vector3d, so no Transform-block hazard.
-    const auto org = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "table", 0);
+    const auto org = inner_eigen_->transform(rc::room::current_room_frame(*G_), Mat::Vector3d(0.0, 0.0, 0.0), "table", 0);
     if (not org.has_value())
         return std::nullopt;
     // Footprint gate (loose, yaw-agnostic): the bottle centre must lie over the table.
@@ -69,7 +70,7 @@ std::optional<float> BottleSceneGraph::find_table_top(float bx, float by) const
     if (not t.has_value())
         return std::nullopt;
     const float h = G_->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
-    const auto org = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "table", 0);
+    const auto org = inner_eigen_->transform(rc::room::current_room_frame(*G_), Mat::Vector3d(0.0, 0.0, 0.0), "table", 0);
     if (not org.has_value())
         return std::nullopt;
     return static_cast<float>(org->z()) + h;       // table top = base origin z + height
@@ -145,7 +146,7 @@ std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vect
         return 0;
 
     Mat::Vector3d c_parent(centroid_room.x(), centroid_room.y(), cz);
-    if (const auto cp = inner_eigen_->transform(parent_node.name(), c_parent, "room", 0); cp.has_value())
+    if (const auto cp = inner_eigen_->transform(parent_node.name(), c_parent, rc::room::current_room_frame(*G_), 0); cp.has_value())
         c_parent = cp.value();
     rt_api_->insert_or_assign_edge_RT(parent_node, id_opt.value(),
                                       {static_cast<float>(c_parent.x()), static_cast<float>(c_parent.y()),
@@ -287,7 +288,7 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
     // table→bottle when hung from the table). The table is a pure translation from room, so the
     // pose_covariance (room frame) carries unchanged to the table-frame edge below.
     Mat::Vector3d p_parent(s.cx, s.cy, s.cz);
-    if (const auto pp = inner_eigen_->transform(inst.parent_name, p_parent, "room", 0); pp.has_value())
+    if (const auto pp = inner_eigen_->transform(inst.parent_name, p_parent, rc::room::current_room_frame(*G_), 0); pp.has_value())
         p_parent = pp.value();
     rt_api_->insert_or_assign_edge_RT(parent_opt.value(), inst.node_id,
                                       {static_cast<float>(p_parent.x()), static_cast<float>(p_parent.y()),
@@ -318,13 +319,13 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
         {
             const std::uint64_t ts = inst.last_mask_timestamp_ms;
             const Mat::Vector3d centre_fit(s.cx, s.cy, s.cz);
-            if (const auto c_src = inner_eigen_->transform(chain_src_frame_, centre_fit, cfg_.masks_target_frame, ts);
+            if (const auto c_src = inner_eigen_->transform(chain_src_frame_, centre_fit, rc::room::resolve_frame(*G_, cfg_.masks_target_frame), ts);
                 c_src.has_value())
             {
                 DSR::GaussianPoint3D gp;
                 gp.mean = c_src.value();
                 gp.covariance = DSR::Cov3d::Zero();
-                if (const auto g_fit = gaussian_->transform_point(cfg_.masks_target_frame, gp, chain_src_frame_, ts);
+                if (const auto g_fit = gaussian_->transform_point(rc::room::resolve_frame(*G_, cfg_.masks_target_frame), gp, chain_src_frame_, ts);
                     g_fit.has_value())
                 {
                     const auto& C = g_fit.value().covariance;

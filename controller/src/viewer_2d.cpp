@@ -291,6 +291,23 @@ void Viewer2D::clear_polygon_item(QGraphicsPolygonItem *&item)
     item = nullptr;
 }
 
+void Viewer2D::draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &passages)
+{
+    for (auto *item : passage_items_) clear_polygon_item(item);
+    passage_items_.clear();
+    for (const auto &verts : passages)
+    {
+        if (verts.size() < 3) continue;
+        QPolygonF poly;
+        for (const auto &v : verts) poly << QPointF(v.x(), v.y());
+        poly << QPointF(verts.front().x(), verts.front().y());
+        QPen pen(QColor(230, 140, 20), 0.05, Qt::DashLine);
+        auto *item = agv_->scene.addPolygon(poly, pen, QBrush(QColor(230, 140, 20, 60)));
+        item->setZValue(9);   // above the room outline (8): the corridor is an opening cut through it
+        passage_items_.push_back(item);
+    }
+}
+
 void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)
 {
     clear_polygon_item(polygon_item_);

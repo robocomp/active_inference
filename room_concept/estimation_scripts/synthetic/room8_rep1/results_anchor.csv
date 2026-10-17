@@ -1,0 +1,2 @@
+run,prom_shape,prom_anchor,ref_anchor,ref_shape,frame_err_deg,frame_err_m,verts
+8,0.5127,0.5114,0.9831,0.9976,0.5249,0.0047,20

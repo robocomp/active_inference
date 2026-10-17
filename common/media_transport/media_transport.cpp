@@ -2,6 +2,7 @@
 
 #include "media_transport.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -43,6 +44,112 @@ std::int64_t now_ns()
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+// ── Is zero-copy POSSIBLE, not merely REQUESTED ──────────────────────────────────────────────────
+// Reading back data_sharing().kind() only echoes the QoS we set: AUTOMATIC stays AUTOMATIC even when
+// FastDDS silently falls back to serialising every sample through the SHM transport, so a log line
+// built on it proved nothing. Data-sharing needs a PLAIN type in the representation the endpoint
+// actually uses (an empty representation list means DEFAULT_DATA_REPRESENTATION, which is XCDR1 in
+// FastDDS 3). A layout regression (a 32-bit member ahead of the 64-bit ones, an unbounded sequence)
+// flips this to false, and that must be LOUD — it turns a 0.1 ms hop into a multi-MB serialise.
+bool zero_copy_possible(const efd::TypeSupport& type, const efd::DataRepresentationQosPolicy& rep,
+                        bool requested, const char* role, const std::string& topic)
+{
+    if (not requested)
+        return false;
+    const efd::DataRepresentationId_t id =
+        rep.m_value.empty() ? efd::DEFAULT_DATA_REPRESENTATION : rep.m_value.front();
+    if (type.is_plain(id))
+        return true;
+    std::print(stderr,
+               "[media] ★ ZERO-COPY IMPOSSIBLE on {} '{}': type '{}' is NOT plain in representation {} — "
+               "data-sharing was requested but every sample will be SERIALISED and copied. Check the IDL "
+               "layout (64-bit members first, no unbounded sequences/strings).\n",
+               role, topic, type.get_type_name(), static_cast<int>(id));
+    return false;
+}
+
+// Header + the VALID PREFIX of the payload only. The old poll() did `latest = data[i]`, copying the
+// whole fixed-capacity struct (1.57 MB LidarFrame, 3.69 MB ImageFrame, 5.5 MB Image360Frame) for EVERY
+// backlog sample, into a std::optional on the stack, whatever `count`/`size` said. A 50k-point scan is
+// 0.6 MB of the 1.57. The bytes past the valid prefix are stale in `dst`; no reader may look there.
+void copy_valid(rc::media::LidarFrame& dst, const rc::media::LidarFrame& src)
+{
+    dst.frame_id(src.frame_id());
+    dst.stamp_ms(src.stamp_ms());
+    dst.stream_id(src.stream_id());
+    dst.count(src.count());
+    dst.format(src.format());
+    dst.stride(src.stride());
+    const std::size_t n = std::min<std::size_t>(
+        static_cast<std::size_t>(src.count()) * (src.stride() > 0 ? src.stride() : 3), src.points().size());
+    std::memcpy(dst.points().data(), src.points().data(), n * sizeof(float));
+}
+
+template <class ImageT>   // ImageFrame, Image360Frame: identical header, different capacity
+void copy_valid_image(ImageT& dst, const ImageT& src)
+{
+    dst.frame_id(src.frame_id());
+    dst.stamp_ms(src.stamp_ms());
+    dst.stream_id(src.stream_id());
+    dst.width(src.width());
+    dst.height(src.height());
+    dst.step(src.step());
+    dst.format(src.format());
+    dst.size(src.size());
+    const std::size_t n = std::min<std::size_t>(src.size(), src.data().size());
+    std::memcpy(dst.data().data(), src.data().data(), n);
+}
+void copy_valid(rc::media::ImageFrame& d, const rc::media::ImageFrame& s)       { copy_valid_image(d, s); }
+void copy_valid(rc::media::Image360Frame& d, const rc::media::Image360Frame& s) { copy_valid_image(d, s); }
+
+// Latest-only delivery shared by the three large-frame subscribers: drain the WHOLE backlog (else the
+// reader's bounded pool fills and the writer blocks), but copy out only the newest valid sample of each
+// take() batch, and only its valid prefix, into a per-subscriber heap scratch that is reused. cb runs
+// AFTER every loan is returned, so a slow callback cannot pin writer slots.
+// is_sample_valid(): with data-sharing the loan is a view into the WRITER's pool, and a KEEP_LAST writer
+// may recycle the slot while we copy; FastDDS detects that after the fact. A torn copy is dropped.
+// `source_ns` is the writer's DDS source_timestamp (system_clock, ns), so recv_ns − source_ns is the
+// TRANSPORT hop alone and source_ns − stamp_ms the producer's capture→publish time — the split the ms
+// capture stamp alone could never give.
+template <class Frame, class Seq>
+int drain_newest(efd::DataReader* reader, std::unique_ptr<Frame>& scratch, std::int64_t& source_ns,
+                 const std::function<void(const Frame&, std::int64_t)>& cb)
+{
+    int delivered = 0;
+    bool have = false;
+    std::int64_t latest_recv = 0;
+    Seq data;
+    efd::SampleInfoSeq infos;
+    while (reader->take(data, infos) == efd::RETCODE_OK)
+    {
+        const std::int64_t recv = now_ns();
+        efd::LoanableCollection::size_type newest = infos.length();
+        for (efd::LoanableCollection::size_type i = 0; i < infos.length(); ++i)
+            if (infos[i].valid_data)
+            {
+                newest = i;
+                ++delivered;
+            }
+        if (newest < infos.length())
+        {
+            if (not scratch)
+                scratch = std::make_unique<Frame>();
+            copy_valid(*scratch, data[newest]);
+            // A torn newer copy has overwritten any older good one in scratch, so `have` follows it.
+            have = reader->is_sample_valid(&data[newest], &infos[newest]);
+            if (have)
+            {
+                latest_recv = recv;
+                source_ns = infos[newest].source_timestamp.to_ns();
+            }
+        }
+        reader->return_loan(data, infos);
+    }
+    if (have)
+        cb(*scratch, latest_recv);
+    return delivered;   // total received, for stats
 }
 
 struct ParticipantKey
@@ -265,8 +372,9 @@ bool detail::WriterCore::init(const PublisherConfig& cfg, detail::FrameKind kind
         return false;
     }
 
-    data_sharing_active_ =
-        writer_->get_qos().data_sharing().kind() != efd::OFF;
+    data_sharing_active_ = zero_copy_possible(type, writer_->get_qos().representation(),
+                                              writer_->get_qos().data_sharing().kind() != efd::OFF,
+                                              "writer", cfg.topic_name);
     return true;
 }
 
@@ -395,8 +503,9 @@ bool MediaSubscriber::init(const SubscriberConfig& cfg)
         return false;
     }
 
-    data_sharing_active_ =
-        reader_->get_qos().data_sharing().kind() != efd::OFF;
+    data_sharing_active_ = zero_copy_possible(type, reader_->get_qos().representation(),
+                                              reader_->get_qos().data_sharing().kind() != efd::OFF,
+                                              "reader", cfg.topic_name);
     return true;
 }
 
@@ -404,32 +513,8 @@ int MediaSubscriber::poll(const FrameCallback& cb)
 {
     if (!reader_)
         return 0;
-
-    int delivered = 0;
-    // Real-time media: DRAIN the whole backlog (else the reader's bounded pool fills and the writer
-    // blocks), but deliver only the SINGLE most-recent valid sample — acting on a stale queued frame
-    // is worse than useless. Copy it out (survives return_loan) and invoke cb once. See DDS_SHADOW.md §2.3.
-    std::optional<ImageFrame> latest;
-    std::int64_t latest_recv = 0;
-    ImageFrameSeq data;
-    efd::SampleInfoSeq infos;
-    while (reader_->take(data, infos) == efd::RETCODE_OK)
-    {
-        const std::int64_t recv = now_ns();
-        for (efd::LoanableCollection::size_type i = 0; i < infos.length(); ++i)
-        {
-            if (infos[i].valid_data)
-            {
-                latest = data[i];
-                latest_recv = recv;
-                ++delivered;
-            }
-        }
-        reader_->return_loan(data, infos);
-    }
-    if (latest)
-        cb(*latest, latest_recv);
-    return delivered;   // total received, for stats
+    // Latest-only delivery (drain backlog, act on the newest frame only). See DDS_SHADOW.md §2.3.
+    return drain_newest<ImageFrame, ImageFrameSeq>(reader_, scratch_, last_source_ns_, cb);
 }
 
 int MediaSubscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)
@@ -532,8 +617,9 @@ bool Image360Subscriber::init(const SubscriberConfig& cfg)
         return false;
     }
 
-    data_sharing_active_ =
-        reader_->get_qos().data_sharing().kind() != efd::OFF;
+    data_sharing_active_ = zero_copy_possible(type, reader_->get_qos().representation(),
+                                              reader_->get_qos().data_sharing().kind() != efd::OFF,
+                                              "reader", cfg.topic_name);
     return true;
 }
 
@@ -541,30 +627,8 @@ int Image360Subscriber::poll(const FrameCallback& cb)
 {
     if (!reader_)
         return 0;
-
-    int delivered = 0;
     // Latest-only delivery (drain backlog, act on the newest frame only). See DDS_SHADOW.md §2.3.
-    std::optional<Image360Frame> latest;
-    std::int64_t latest_recv = 0;
-    Image360FrameSeq data;
-    efd::SampleInfoSeq infos;
-    while (reader_->take(data, infos) == efd::RETCODE_OK)
-    {
-        const std::int64_t recv = now_ns();
-        for (efd::LoanableCollection::size_type i = 0; i < infos.length(); ++i)
-        {
-            if (infos[i].valid_data)
-            {
-                latest = data[i];
-                latest_recv = recv;
-                ++delivered;
-            }
-        }
-        reader_->return_loan(data, infos);
-    }
-    if (latest)
-        cb(*latest, latest_recv);
-    return delivered;   // total received, for stats
+    return drain_newest<Image360Frame, Image360FrameSeq>(reader_, scratch_, last_source_ns_, cb);
 }
 
 int Image360Subscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)
@@ -653,7 +717,9 @@ bool LidarSubscriber::init(const SubscriberConfig& cfg)
     reader_ = subscriber_->create_datareader(rtopic, rqos);
     if (!reader_) { close(); return false; }
 
-    data_sharing_active_ = reader_->get_qos().data_sharing().kind() != efd::OFF;
+    data_sharing_active_ = zero_copy_possible(type, reader_->get_qos().representation(),
+                                              reader_->get_qos().data_sharing().kind() != efd::OFF,
+                                              "reader", cfg.topic_name);
     return true;
 }
 
@@ -671,30 +737,8 @@ int LidarSubscriber::poll(const FrameCallback& cb)
 {
     if (!reader_)
         return 0;
-
-    int delivered = 0;
-    // Latest-only delivery (drain backlog, act on the newest cloud only). See DDS_SHADOW.md §2.3.
-    std::optional<LidarFrame> latest;
-    std::int64_t latest_recv = 0;
-    LidarFrameSeq data;
-    efd::SampleInfoSeq infos;
-    while (reader_->take(data, infos) == efd::RETCODE_OK)
-    {
-        const std::int64_t recv = now_ns();
-        for (efd::LoanableCollection::size_type i = 0; i < infos.length(); ++i)
-        {
-            if (infos[i].valid_data)
-            {
-                latest = data[i];
-                latest_recv = recv;
-                ++delivered;
-            }
-        }
-        reader_->return_loan(data, infos);
-    }
-    if (latest)
-        cb(*latest, latest_recv);
-    return delivered;   // total received, for stats
+    // Latest-only delivery (drain backlog, act on the newest frame only). See DDS_SHADOW.md §2.3.
+    return drain_newest<LidarFrame, LidarFrameSeq>(reader_, scratch_, last_source_ns_, cb);
 }
 
 int LidarSubscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)
@@ -781,7 +825,9 @@ bool ImuSubscriber::init(const SubscriberConfig& cfg)
     reader_ = subscriber_->create_datareader(rtopic, rqos);
     if (!reader_) { close(); return false; }
 
-    data_sharing_active_ = reader_->get_qos().data_sharing().kind() != efd::OFF;
+    data_sharing_active_ = zero_copy_possible(type, reader_->get_qos().representation(),
+                                              reader_->get_qos().data_sharing().kind() != efd::OFF,
+                                              "reader", cfg.topic_name);
     return true;
 }
 
@@ -800,6 +846,7 @@ int ImuSubscriber::poll(const FrameCallback& cb)
         {
             if (infos[i].valid_data)
             {
+                last_source_ns_ = infos[i].source_timestamp.to_ns();
                 cb(data[i], recv);
                 ++delivered;
             }

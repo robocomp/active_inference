@@ -171,7 +171,7 @@ void register_ImuFrame_type_identifier(
                 return;
             }
             StructMemberFlag member_flags_stream_id = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
-                    false, false, true, false);
+                    false, false, false, false);
             MemberId member_id_stream_id = 0x00000003;
             bool common_stream_id_ec {false};
             CommonStructMember common_stream_id {TypeObjectUtils::build_common_struct_member(member_id_stream_id, member_flags_stream_id, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_stream_id, common_stream_id_ec))};
@@ -183,19 +183,6 @@ void register_ImuFrame_type_identifier(
             MemberName name_stream_id = "stream_id";
             eprosima::fastcdr::optional<AppliedBuiltinMemberAnnotations> member_ann_builtin_stream_id;
             ann_custom_ImuFrame.reset();
-            AppliedAnnotationSeq tmp_ann_custom_stream_id;
-            eprosima::fastcdr::optional<std::string> unit_stream_id;
-            eprosima::fastcdr::optional<AnnotationParameterValue> min_stream_id;
-            eprosima::fastcdr::optional<AnnotationParameterValue> max_stream_id;
-            eprosima::fastcdr::optional<std::string> hash_id_stream_id;
-            if (unit_stream_id.has_value() || min_stream_id.has_value() || max_stream_id.has_value() || hash_id_stream_id.has_value())
-            {
-                member_ann_builtin_stream_id = TypeObjectUtils::build_applied_builtin_member_annotations(unit_stream_id, min_stream_id, max_stream_id, hash_id_stream_id);
-            }
-            if (!tmp_ann_custom_stream_id.empty())
-            {
-                ann_custom_ImuFrame = tmp_ann_custom_stream_id;
-            }
             CompleteMemberDetail detail_stream_id = TypeObjectUtils::build_complete_member_detail(name_stream_id, member_ann_builtin_stream_id, ann_custom_ImuFrame);
             CompleteStructMember member_stream_id = TypeObjectUtils::build_complete_struct_member(common_stream_id, detail_stream_id);
             TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_stream_id);

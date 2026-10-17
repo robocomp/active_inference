@@ -47,6 +47,11 @@ public:
     explicit Custom_widget(QWidget *parent = nullptr) : QWidget(parent)
     {
         auto *main_layout = new QVBoxLayout(this);
+        // The window's size is the USER's (it is saved and restored), never the content's. With the default
+        // constraint a long status text in any row raises the layout's minimum width and Qt GROWS the
+        // window to fit it; that grown size was then saved and every restart came back wider (916 -> 1142 px
+        // measured). Without a constraint an over-long row is clipped instead; the user can still widen it.
+        main_layout->setSizeConstraint(QLayout::SetNoConstraint);
         main_layout->setContentsMargins(8, 8, 8, 8);
         main_layout->setSpacing(8);
 
@@ -58,9 +63,14 @@ public:
         pose_panel->setFrameShape(QFrame::StyledPanel);
         pose_panel->setFrameShadow(QFrame::Raised);
 
-        auto *pose_row = new QHBoxLayout(pose_panel);
-        pose_row->setContentsMargins(4, 3, 4, 3);
+        // ★TWO LINES, NOT ONE. A single line of nine LCDs set the window's minimum width; the command
+        // readings (what the base is told) go on the first line, session + arrival on the second.
+        auto *pose_lines = new QVBoxLayout(pose_panel);
+        pose_lines->setContentsMargins(4, 3, 4, 3);
+        pose_lines->setSpacing(2);
+        auto *pose_row = new QHBoxLayout;
         pose_row->setSpacing(3);
+        pose_lines->addLayout(pose_row);
 
         const auto make_lcd = [&](QWidget *parent, int digits, const QString &tip)
         {
@@ -114,14 +124,18 @@ public:
         alert_label_->setStyleSheet("QLabel { background-color: #c0392b; color: white; font-weight: bold;"
                                     " border-radius: 4px; padding: 2px 8px; }");
         pose_row->addWidget(alert_label_);
+        pose_row->addStretch();
+
+        // Second line: session totals, then what the arrival test is waiting on.
+        pose_row = new QHBoxLayout;
+        pose_row->setSpacing(3);
+        pose_lines->addLayout(pose_row);
 
         // ★A FIXED GAP, NOT A STRETCH. Two addStretch() calls used to float the session pair mid-row and
         // push the goal pair to the far right, which reads as three widely separated islands and gives
         // the window no reason to be narrow. A fixed gap keeps the groups legibly apart while letting
         // the row pack to its natural width, and the single trailing stretch below takes up whatever
         // slack is left rather than distributing it between the numbers.
-        pose_row->addSpacing(14);
-
         // ── SESSION TOTALS ──────────────────────────────────────────────────────────────────────
         // Distance driven and time elapsed since the agent started — every mission, click target and
         // affordance, NOT per run. MissionRunner integrates both, but only while a mission is RUNNING,
@@ -450,6 +464,14 @@ public:
             toolbar_layout_->insertWidget(0, panel->drive_button());
         if (toolbar_layout_ != nullptr and panel->pause_button() != nullptr)
             toolbar_layout_->insertWidget(1, panel->pause_button());
+    }
+
+    // The door-passage row, directly under the mission row (attach_mission_panel must run first).
+    void attach_door_passage_bar(QWidget *bar)
+    {
+        if (bar == nullptr) return;
+        if (auto *lay = qobject_cast<QVBoxLayout *>(layout()); lay != nullptr)
+            lay->insertWidget(mission_row_index + (mission_panel != nullptr ? 1 : 0), bar);
     }
 
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;

@@ -384,8 +384,14 @@ std::vector<rc::SpecialistExplainer> SpecificWorker::build_explainers(
     // 1: ROOM CEILING — overhead structure above the navigation band.
     const float cz = C.ceil_z;
     ex.push_back([cz](const Eigen::Vector3f& p) { return p.z() > cz; });
-    // 2: ROBOT — its own body returns.
-    const float rr2 = C.robot_radius_m * C.robot_radius_m;
+    // 2: ROBOT — its own body returns. The disc is at least the grid's no-clear disc (Grid.LidarClearanceM, same
+    //    centre: the sensor origin on the robot axis). A cell inside that disc can be marked but never refuted while
+    //    the robot stands still, so it is not an observation of the world and must not be published. With the read-out
+    //    disc smaller (0.45 vs 0.55 m) the 10 cm ring between them latched for ever around a parked robot, and the
+    //    controller found its own start pose footprint-infeasible (2026-10-11: apartment start 9, synthetic room 8 —
+    //    the free pocket shrank 4526 → 11 expansions while the robot waited). One body disc, derived, not a second knob.
+    const float rr = std::max(C.robot_radius_m, cfg_.grid_lidar_clearance_m);
+    const float rr2 = rr * rr;
     ex.push_back([rr2, robot_xy](const Eigen::Vector3f& p) { return (p.head<2>() - robot_xy).squaredNorm() < rr2; });
     // 3: ROOM WALLS — the room_concept delimiting polygon. A return outside the room, or within wall_margin of
     //    a wall edge, is explained by the room's wall model.
@@ -677,12 +683,17 @@ void SpecificWorker::compute()
 
     if (not G or not rt_api_)
         return;
-    if (room_node_id_ == 0)
+    // ★ RE-RESOLVED EVERY CYCLE (2026-10-11, door crossing): the room used to be re-resolved only after its node was
+    //   deleted, so a robot that crossed a door kept explaining room 2's scans with room 1's outline for ever (room_concept
+    //   keeps a room it left). The rule (room_resolve.h, 2a) follows the robot; nullopt keeps the room we have. A change
+    //   re-sizes the occupancy grid below ("the room changed").
+    if (const auto room = rc::room::current_room(*G); room.has_value() and *room != room_node_id_)
     {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
+        if (room_node_id_ != 0)
+            std::print("[residual] current room changed {} -> {} — re-binding\n", room_node_id_, *room);
         room_node_id_ = *room;
     }
+    if (room_node_id_ == 0) return;
 
     // Fresh LiDAR sweep is the only trigger — no sweep, no re-cluster this cycle (instances persist).
     if (not lidar_ingestor_ or not lidar_ingestor_->pump())

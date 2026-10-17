@@ -219,6 +219,14 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| chat_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+
+**chat_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
+(`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
+command channel to the controller: listed in `[Owns]` (`["chat_agent 25", "chat_intention"]`, id matches `[Agent].id`),
+stamped with `rc::provenance::stamp_creation`, swept at `initialize()` and again on first Operating, deleted by the
+shared coordinator on SIGTERM/SIGINT (verified 2026-10-12: `[Graph] node 'chat_intention' deleted`). It connects no
+DSR signal; the digest and the command status are polled on the main thread.
 
 ⚠️ **unattributable** = the agent records births and deaths, but retires on *divergence* (clutter), not on
 sensor absence, so it has no `p_detect` to report. Those deaths carry an explicit

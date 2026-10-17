@@ -170,7 +170,7 @@ void SpecificWorker::compute()
             QString which;
             for (const auto& d : open_doors)
                 which += QString(" %1(p=%2)").arg(QString::fromStdString(d.name)).arg(d.p_open, 0, 'f', 2);
-            qInfo().noquote() << QString("[room][doors] %1 open aperture(s) now discounting the scan:%2"
+            qInfo().noquote() << QString("[room][doors] %1 doorway(s) weighting the scan (per-beam mixture; p=-1 unmeasured):%2"
                                          " | chain walks so far %3")
                                      .arg(open_doors.size()).arg(which.isEmpty() ? " -" : which)
                                      .arg(doors_.resolves());
@@ -189,22 +189,22 @@ void SpecificWorker::compute()
                 {
                     dcsv.imbue(std::locale::classic());
                     dcsv << "ts_ms,objects,named_door,subtype_ok,believed_open,no_width,no_transform,"
-                            "emitted,resolves,door,p_open,ax,ay,bx,by\n";
+                            "emitted,resolves,door,p_open,ax,ay,bx,by,prior_closed\n";
                 }
             }
             if (dcsv.is_open())
             {
                 const auto& t = doors_.tally();
-                const auto row = [&](const char* name, float p, float ax, float ay, float bx, float by)
+                const auto row = [&](const char* name, float p, float ax, float ay, float bx, float by, float pc)
                 {
                     dcsv << now_ms << ',' << t.objects << ',' << t.named_door << ',' << t.subtype_ok
                          << ',' << t.believed_open << ',' << t.no_width << ',' << t.no_transform
                          << ',' << t.emitted << ',' << doors_.resolves() << ',' << name << ','
-                         << p << ',' << ax << ',' << ay << ',' << bx << ',' << by << '\n';
+                         << p << ',' << ax << ',' << ay << ',' << bx << ',' << by << ',' << pc << '\n';
                 };
-                if (open_doors.empty()) row("-", -1.f, 0.f, 0.f, 0.f, 0.f);
+                if (open_doors.empty()) row("-", -1.f, 0.f, 0.f, 0.f, 0.f, -1.f);
                 for (const auto& d : open_doors)
-                    row(d.name.c_str(), d.p_open, d.a.x(), d.a.y(), d.b.x(), d.b.y());
+                    row(d.name.c_str(), d.p_open, d.a.x(), d.a.y(), d.b.x(), d.b.y(), d.prior_closed);
                 dcsv.flush();
             }
         }
@@ -308,7 +308,8 @@ void SpecificWorker::compute()
     {
         section_timer.restart();
         viewer_->update_viewer(loc_res, have_loc, pose_for_draw, lidar_for_canvas, loc_pose, use_loc);
-        viewer_->draw_landmarks(scene_graph_->pinned_landmarks(), scene_graph_->pinned_measured(), pose_for_draw);
+        const auto pinned = scene_graph_->pinned_landmarks();   // snapshot: the localiser thread refills it
+        viewer_->draw_landmarks(pinned.positions, pinned.measured, pose_for_draw);
         t_viewer_us = section_timer.nsecsElapsed() / 1000;
     }
 
@@ -345,6 +346,10 @@ void SpecificWorker::compute()
         // Room-stabilization indicator: AMBER while a global grid search is relocating the robot,
         // GREEN once the room node exists in the graph (the very condition downstream consumers gate
         // on), RED while stable frames are still accumulating.
+        {
+            const auto [stab, expl] = scene_graph_->room_readiness();
+            viewer_->set_room_readiness(stab, expl, room_concept_.slam_disagreement());
+        }
         viewer_->set_room_stable(scene_graph_->room_node_created(),
                                  scene_graph_->stable_frames(),
                                  params.STABLE_FRAMES_REQUIRED,

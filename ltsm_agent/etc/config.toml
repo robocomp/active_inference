@@ -88,3 +88,16 @@ enabled = true
 [Promotion]
 enabled       = true
 decision_prob = 0.95
+
+# ── Eviction (2026-10-12) ───────────────────────────────────────────────────────────────────────
+# ON: when promotion moves `current` to the room the robot has entered, the room it left is copied to long-term memory
+# (with the crossed door's two faces matched into a memory passage_N that counts crossings) and DELETED from the
+# working memory. With Promotion on, the identity decision is the only trigger (see compute()).
+[Eviction]
+enabled        = true
+backstop_sweep = false
+
+# Long-term memory survives runs: room 1 is written at start-up only if it is not already remembered.
+[Memory]
+persist      = true
+persist_path = "etc/ltsm_memory.json"

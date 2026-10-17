@@ -163,11 +163,19 @@ void serialize_key(
 
     static_cast<void>(scdr);
     static_cast<void>(data);
+                        scdr << data.frame_id();
+
+                        scdr << data.stamp_ms();
+
                         scdr << data.stream_id();
 
+                        scdr << data.count();
 
+                        scdr << data.format();
 
+                        scdr << data.stride();
 
+                        scdr << data.points();
 
 }
 

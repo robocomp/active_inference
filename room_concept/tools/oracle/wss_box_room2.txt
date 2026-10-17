@@ -1,0 +1,11 @@
+[boxes] ⚠ layout has 2 components — polygon() publishes ONE of them (5 boxes). The published room is missing area.
+room i=2 order=3  IoU=0.864  boxes=5 verts=18 (truth 12)  rms=0.220 core=0.000  out=0.0% in=0.0%  pose_err=0.225  yaw=-6.62  prop=0 adm=0 rem=5  | seen=96% score=-1.45 pubsig=0.011 replans=0(0 blk) phase=fixed-tour explored=NO(frame cap)  coll=0/0(0.00m) out=0
+  truth bbox 4.95 x 3.61 m, 12 verts; circuit (-1.18,-0.50) (1.18,-0.50) (1.18,0.50) (-1.18,0.50)  + box 2.37 x 3.61 m  [ -1.32   1.06]x[ -1.28   2.33]
+  + box 4.84 x 2.35 m  [ -1.32   3.53]x[ -0.60   1.75]
+  + box 1.69 x 0.39 m  [  1.95   3.64]x[ -1.22  -0.82]
+  + box 3.27 x 3.15 m  [ -1.32   1.95]x[ -0.82   2.33]
+  + box 0.85 x 3.16 m  [  2.78   3.64]x[ -0.76   2.40]
+  est bbox (world) 5.35 x 4.09 m, 18 verts
+
+  truth verts: (-0.11,-1.80) (-0.11,-1.38) (0.75,-1.38) (0.75,-1.80) (2.48,-1.80) (2.48,1.80) (1.61,1.80) (1.61,1.17) (0.85,1.17) (0.85,1.80) (-2.48,1.80) (-2.48,-1.80)
+[exit 0]

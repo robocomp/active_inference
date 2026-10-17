@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{Room-layout estimation in the same ten synthetic rooms, now furnished (worktops 0.9 m high and tall cabinets 2.0 m high against the walls, tables on legs in the middle; one run each, first attempt, random start $\geq$0.8 m from walls). Type: M = rectangle with random notches and bays, L, T. $|V|_{gt}$, $A$: ground-truth vertices and area. $t_p$: time to promotion ($t_p\approx0$: the first 360$^\circ$ scan left no standpoint worth visiting). $e$: median SLAM position error. IoU after the best rigid alignment of the ground truth to the estimate (shape only; the frame error is reported separately).}
+\label{tab:estimation-synthetic-furnished}
+\begin{tabular}{r c r r r r r r r r}
+\toprule
+room & type & $|V|_{gt}$ & $A$ (m$^2$) & $t_p$ (s) & $e$ (mm) & IoU$_p$ & IoU$_r$ & $|V|_p$ & $|V|_r$ \\
+\midrule
+0 & M & 8 & 36.7 & 0 & 10 & 0.992 & 0.997 & 8 & 8 \\
+1 & L & 6 & 30.2 & 44 & 14 & 0.985 & 0.998 & 14 & 12 \\
+2 & M & 16 & 36.4 & 0 & 14 & 0.954 & 0.994 & 14 & 16 \\
+3 & T & 8 & 33.1 & 26 & 17 & 0.980 & 0.995 & 12 & 12 \\
+4 & M & 24 & 70.7 & 0 & 4 & 0.970 & 0.989 & 22 & 26 \\
+5 & M & 28 & 87.6 & 80 & 10 & 0.985 & 0.993 & 28 & 28 \\
+6 & L & 6 & 31.8 & 0 & 6 & 0.993 & 0.994 & 6 & 6 \\
+7 & M & 16 & 57.4 & 31 & 12 & 0.985 & 0.993 & 18 & 18 \\
+8 & T & 8 & 38.3 & 51 & 16 & 0.994 & 0.999 & 8 & 8 \\
+9 & M & 24 & 49.1 & 27 & 4 & 0.983 & 0.989 & 24 & 24 \\
+\midrule
+median & & & & 27 & 11 & 0.985 & 0.994 & & \\
+worst & & & & 80 & 17 & 0.954 & 0.989 & & \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,8 @@
+id,file,cx,cy,side,state,phi_deg,note
+o0,room_concept/estimation_scripts/apartment/campaign_v5_curious/run_0/snapshots/zed_1791745901549.png,676,356,300,closed,0,far corridor door
+o3,room_concept/estimation_scripts/apartment/campaign_v5_curious/run_1/snapshots/zed_1791746082547.png,672,344,400,closed,0,far corridor door
+o5,room_concept/estimation_scripts/apartment/campaign_v5_curious/run_3/snapshots/zed_1791746275780.png,508,350,420,closed,0,behind purple wall fill
+o10,room_concept/estimation_scripts/apartment/campaign_v5_curious/run_6/snapshots/zed_1791746645271.png,450,350,380,closed,0,
+o12,room_concept/estimation_scripts/apartment/campaign_v5_curious/run_7/snapshots/zed_1791746776772.png,124,310,600,closed,0,partial at image edge
+o15,room_concept/estimation_scripts/apartment/campaign_v5_curious/run_8/snapshots/zed_1791746953855.png,650,340,520,closed,0,
+o18,room_concept/estimation_scripts/crossing/try7/snapshots/zed_1791753485762.png,720,340,620,closed,0,door ahead (check_vision.py frame)

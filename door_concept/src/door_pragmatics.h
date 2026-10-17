@@ -60,6 +60,8 @@
 #include "../../common/pragmatic_affordance/pragmatic_affordance.h"
 #include "door_config.h"      // rc::DoorPragmaticCfg — the tunables live with every other tunable
 #include "door_geometry.h"
+#include "door_passability.h"  // clear_width, passable_prob
+#include "door_standpoint.h"   // the poses + which side of the aperture to stand on
 
 namespace rc::door
 {
@@ -78,13 +80,26 @@ struct InteractionState
     // marginalisation over different weights, and a log that cannot tell them apart cannot be audited.
     bool  p_open_from_curve = false;
 
-    float p_reach = 0.0f;             // P(the robot is inside the actuation zone)
+    // P(the robot is AT the door for whatever comes next), marginalised over the door's state:
+    //   P(open)·P(d ≤ reach) + P(shut)·P(in band).
+    // The band's near edge is the leaf's swept arc, a hazard only for a door that still has to be SWUNG. An
+    // open door has nothing left to swing, so being closer than the arc is being at it, not short of it.
+    // ★Before 2026-10-17 this was the band alone: try46 leg 2 stood 1.29 m from an OPEN door (band
+    // [1.50, 2.00]), P(reach)=0.02, `approach` could never complete, `open` is never offered for an open
+    // door, and the passage never goes approach→cross — so the robot stalled at the door for ever.
+    float p_reach = 0.0f;
     bool  p_reach_known = false;      // false ⇒ no robot pose this cycle
+    float p_band  = 0.0f;             // P(d_min ≤ d ≤ d_max): `open`'s half — it is the step that swings the leaf
 
     float crossing_progress = 0.0f;   // -1 .. +1, signed against the latched side
     bool  crossing_known = false;
 
     float robot_side = 0.0f;          // signed distance robot→aperture plane along the aperture normal (m)
+    // The side (±1 along the aperture normal) to STAND on: the side in the robot's own region of the room
+    // polygon (rc::door::approach_side). Equals sign(robot_side) in a convex room; differs when the robot is
+    // inside the room but beyond the plane of a door it can only reach from the other side. 0 = no pose.
+    float approach_side = 0.0f;
+    float approach_standoff_m = 0.0f; // middle of the actuation band [safe_standoff, reach] — the stand-off
     float robot_range_m = 0.0f;       // |robot - aperture centre| (m)
     float range_sigma_m = 0.0f;       // σ of that range (door Σ projected + pose chain, floored)
     float safe_standoff_m = 0.0f;     // near edge of the actuation band = the leaf's swept arc + the body
@@ -93,36 +108,8 @@ struct InteractionState
 
 // ─── geometry ────────────────────────────────────────────────────────────────────────────────────
 
-// Along-wall clear span left by a leaf at opening angle phi. The leaf is hinged on one vertical aperture
-// edge and its projection back onto the wall line is w·|cos phi|, so the gap is what remains of w.
-// phi = 0 (flush) ⇒ 0; phi = pi/2 (fully open) ⇒ the whole aperture.
-// ⚠This is the ALONG-WALL span only. A leaf swung into the corridor also eats space ACROSS the wall,
-// which this does not model — so it is an UPPER bound on passability and `passage_margin_m` is what
-// stands in for the rest until the swung leaf is a planner obstacle in its own right.
-inline float clear_width(float aperture_w, float phi)
-{
-    return std::max(0.0f, aperture_w * (1.0f - std::abs(std::cos(phi))));
-}
-
-// P(passable), MARGINALISED over the leaf-angle posterior. `phi_curve` is (phi, unnormalised weight) as
-// DoorFitter::estimate_phi leaves it — image support x the persistence/command prior. Returns nullopt when
-// the curve is empty or carries no weight: that is "not measured", never "not passable".
-inline std::optional<float> passable_prob(const std::vector<std::pair<float, float>>& phi_curve,
-                                          float aperture_w, float needed_m)
-{
-    double num = 0.0, den = 0.0;
-    for (const auto& [phi, w] : phi_curve)
-    {
-        if (not std::isfinite(phi) or not std::isfinite(w) or w <= 0.0f)
-            continue;
-        den += w;
-        if (clear_width(aperture_w, phi) >= needed_m)
-            num += w;
-    }
-    if (den <= 0.0)
-        return std::nullopt;
-    return static_cast<float>(num / den);
-}
+// clear_width() and passable_prob() live in door_passability.h (dependency-free, so the offline phi harness
+// tests/test_door_phi_stability.cpp marginalises with the SAME function the agent publishes).
 
 // P(d <= R) for a distance d known to +/- sigma. Normal CDF; sigma is floored by the caller so this can
 // never degenerate into a step function.
@@ -196,33 +183,6 @@ inline rc::affordance::Contract cross_contract(const DoorPragmaticCfg& p)
 }
 
 // ─── the poses ───────────────────────────────────────────────────────────────────────────────────
-
-// The stand-off pose in front of the aperture, on the side the robot is currently on, facing through it.
-// `side` is the sign of the robot's own signed distance along the aperture normal; a robot exactly in the
-// plane (side == 0) is treated as +1, which is arbitrary and harmless — it is already in the doorway.
-struct Pose2
-{
-    float x = 0.0f, y = 0.0f, yaw = 0.0f;
-};
-
-inline Pose2 front_pose(const Aperture& a, float side, float standoff_m)
-{
-    const float sgn = (side < 0.0f) ? -1.0f : +1.0f;
-    const Eigen::Vector2f n = a.across_u();
-    const Eigen::Vector2f c = a.centre_xy();
-    const Eigen::Vector2f p = c + sgn * standoff_m * n;
-    // Face the aperture: the heading is from the stand-off toward the centre, i.e. -sgn·n.
-    return {p.x(), p.y(), std::atan2(-sgn * n.y(), -sgn * n.x())};
-}
-
-// The target on the FAR side, and the heading that carries the robot through.
-inline Pose2 through_pose(const Aperture& a, float side, float standoff_m)
-{
-    const float sgn = (side < 0.0f) ? -1.0f : +1.0f;
-    const Eigen::Vector2f n = a.across_u();
-    const Eigen::Vector2f c = a.centre_xy();
-    const Eigen::Vector2f p = c - sgn * standoff_m * n;
-    return {p.x(), p.y(), std::atan2(-sgn * n.y(), -sgn * n.x())};
-}
+// Pose2, front_pose, through_pose and approach_side live in door_standpoint.h (pure geometry, tested offline).
 
 }  // namespace rc::door

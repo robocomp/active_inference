@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 // ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
 
@@ -307,7 +308,7 @@ void SpecificWorker::process_ricoh_bearings()
     ricoh_attention_targets_.clear();
     if (not inner_eigen_ or not mask_ingestor_ or not fitter_)
         return;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);   // robot pose in room
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);   // robot pose in room
     if (not rtb.has_value())
         return;
     const Eigen::Vector2f robot_xy{static_cast<float>(rtb.value()(0, 3)),
@@ -377,14 +378,14 @@ void SpecificWorker::log_detect_probe()
     // No pose ⇒ no row.
     if (not inner_eigen_)
         return;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);
     if (not rtb.has_value())
         return;
     const auto& Tb = rtb.value();
     const float rx = static_cast<float>(Tb(0, 3)), ry = static_cast<float>(Tb(1, 3));
     const float rtheta = static_cast<float>(std::atan2(Tb(1, 0), Tb(0, 0)));
     float cam_z = static_cast<float>(Tb(2, 3));
-    if (const auto rtz = inner_eigen_->get_transformation_matrix("room", "zed", 0); rtz.has_value())
+    if (const auto rtz = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", 0); rtz.has_value())
         cam_z = static_cast<float>(rtz.value()(2, 3));
 
     const auto& pkt = mask_ingestor_->packet();

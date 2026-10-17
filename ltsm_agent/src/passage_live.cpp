@@ -78,6 +78,13 @@ std::optional<std::pair<std::uint64_t, std::uint64_t>> PassageLive::pair_for(std
     return {};
 }
 
+std::optional<DSR::Node> PassageLive::passage_of(std::uint64_t door_id) const
+{
+    for (const auto &p : owned())
+        if (G_->get_edge(p.id(), door_id, "match").has_value()) return p;
+    return {};
+}
+
 int PassageLive::sweep_stale()
 {
     int removed = 0;
@@ -168,21 +175,13 @@ PassageLive::Step PassageLive::step()
             for (const auto &p : owned())
                 if (G_->get_edge(p.id(), entry.id(), "match").has_value()) { passage = p; break; }
 
-            if (passage.has_value())
-            {
-                std::uint64_t other = 0;
-                for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(passage.value(), "match"))
-                    if (e.to() != entry.id()) other = e.to();
-                if (other == best->id()) continue;
-                if (other != 0) G_->delete_edge(passage->id(), other, "match");
-                auto m = DSR::Edge::create<match_edge_type>(passage->id(), best->id());
-                G_->insert_or_assign_edge(std::move(m));
-                ++st.rematched;
-                qInfo().noquote() << QString::fromStdString(std::format(
-                    "[passage] {} rematch {} ↔ {} (was {})", passage->name(), best->name(), entry.name(),
-                    other != 0 ? door_name(other) : std::string("<none>")));
-                continue;
-            }
+            // ★ A PAIRING IS KEPT ONCE MADE (2026-10-11). It is made right at the crossing, when the robot is in the
+            //   doorway and the two faces are measured through a fresh pose. Later the only route from the old room's
+            //   doors to the new room runs through the robot's RETIRED RT edge (frozen at the crossing), so distances
+            //   drift with every metre driven, and once `current` moves to the new room the "current room's doors" are
+            //   the new room's own — a re-match would then pick a duplicate of the entry instead of its counterpart.
+            //   The passage ends only when one of its doors is gone (step 1).
+            if (passage.has_value()) continue;
 
             std::uint64_t n = 0;
             for (const auto &p : owned())

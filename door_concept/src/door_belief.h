@@ -276,10 +276,59 @@ public:
         float w_unexp  = 0.10f;   // P(return short of the model: a person, clutter, the frame)
         float eps_beyond = 0.03f; // P(return beyond it: a miss, a reflective surface)
         int   max_rays = 400;     // stride-subsampled; cost is nstep * depth_n * lat_n * rays
+        float ray_icc  = -1.0f;   // phi_field_loglik only: < 0 ⇒ derived from the nuisance grid (see there)
+        // phi_field_loglik only: the PRIOR over the slide — N(0, lat_sigma²), the aperture placement's own posterior
+        // width. <= 0 ⇒ uniform over the grid (the old behaviour). Uniform let a SHUT leaf slide half a door-width onto
+        // the solid wall beside the doorway and explain it perfectly (try44: every phi collapse had lat = -0.55 m).
+        float lat_sigma = -1.0f;
     };
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
                          const FieldNuisance& nz) const;
+
+    // ── THE SAME FIELD MODEL, TEMPERED BY WHAT THE FRAME ACTUALLY OBSERVES (2026-10-13) ───────────
+    // ★WHY phi_field_likelihood ALONE FLIPPED THE CROSS AFFORDANCE. Its per-ray log densities are SUMMED
+    // over every selected ray as if each were an independent observation. They are not: every ray in a
+    // doorway shares the same structural model error (the aperture's placement, the wall's thickness,
+    // the reveal and casing the model does not have), so a misfit common to all of them is counted
+    // hundreds of times. Live (try36-try40, the crossed door carried into room_2 with its leaf at ~95 deg
+    // OUT of that room) the curve came out as a DELTA every frame — dbg_phi_cv = 4.90 = sqrt(24), all of
+    // the weight on ONE of 25 hypotheses — on a viewpoint-dependent angle, so P(passable) went 1 -> 0 -> 1.
+    // Two changes, both in the generative model:
+    //  1. ★THE APERTURE'S PLACEMENT IS A NUISANCE OVER ITS HONEST SUPPORT, NOT +-6 cm. The carried mirror
+    //     sat 0.23-0.40 m along the wall from the real doorway (actuator log, "nearest by place", every
+    //     room_2 request). With +-6 cm the model had NO hypothesis that fits the frame, so whichever
+    //     angle best covered the real wall inside the misplaced opening won by hundreds of nats. The
+    //     caller now sets lat_lo/lat_hi to +-w/2 (a doorway misplaced by more than half its own width is a
+    //     different doorway); the jamb rays pin the offset, so a right aperture is unaffected.
+    //  2. ★THE FRAME'S EVIDENCE COUNTS WHAT IT DISCRIMINATES, ONCE PER INDEPENDENT ERROR. A ray's density
+    //     that does not change with phi (it hits the wall beside the doorway, it cannot reach the leaf under
+    //     ANY hypothesis) is no observation of the leaf: n_inf = sum_i (1 - exp(-D_i)), D_i = the spread of
+    //     ray i's log density across the phi grid at the MAP nuisance — 0 for a ray no hypothesis can tell
+    //     apart, -> 1 for one that separates them by nats. And n_inf rays sharing a common-mode error of
+    //     intraclass correlation rho carry n_eff = n_inf / (1 + (n_inf - 1) rho) independent observations
+    //     (Kish's design effect; the Woodbury common mode this codebase already uses on mask points). The
+    //     joint log-likelihood is raised to beta = n_eff / n_inf before the nuisances are marginalised —
+    //     a power likelihood, continuous in both counts, no gate. A frame that sees a sliver of the leaf
+    //     carries a sliver of evidence; a frame that sees it whole is decisive, but saturates at 1/rho
+    //     observations instead of growing without bound with the ray count.
+    //     rho is NOT tuned: the nuisances are marginalised on a GRID, so every ray carries the same
+    //     residual offset of up to half a grid step, variance step^2/12 per nuisance axis — the minimum
+    //     common mode the model itself guarantees: rho = s_c^2 / (s_c^2 + sigma^2), sigma = range noise.
+    //     (FieldNuisance::ray_icc >= 0 overrides it.)
+    struct FieldResult
+    {
+        std::vector<std::pair<float, float>> loglik;   // (phi, tempered log-likelihood), max == 0
+        float n_inf    = 0.0f;   // rays that discriminate between angles (soft count)
+        float beta     = 1.0f;   // power applied to the joint log-likelihood
+        float rho      = 0.0f;   // the intraclass correlation used
+        float lat_map  = 0.0f;   // MAP aperture slide along the wall (m) — a placement error, if large
+        float depth_map = 0.0f;  // MAP wall/leaf offset across the wall (m)
+        int   n_rays   = 0;      // rays scored (after stride subsampling)
+    };
+    [[nodiscard]] FieldResult
+    phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
+                     const FieldNuisance& nz) const;
 
     // Argmin over a grid, plus the whole curve so a consumer can marginalise instead of conditioning on
     // the winner. Weights are exp(-(F - F_min)): a proper likelihood over phi, normalised by the caller.

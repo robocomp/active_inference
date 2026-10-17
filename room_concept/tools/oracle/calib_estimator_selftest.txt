@@ -1,0 +1,66 @@
+1. STRAIGHT-ONLY window (60 episodes)
+   k_v      -0.01179 (truth -0.01200) sigma 0.00018 informed=1
+   eps_yaw  +0.00908 (truth +0.00930) sigma 0.00018 informed=1
+   k_omega  +0.00000 (truth  0.00000) sigma 0.02000 informed=0
+   k_v recovered                                              PASS
+   eps_yaw recovered                                          PASS
+   k_omega correctly reported UNINFORMED (no rotation)        PASS
+
+2. ROTATION, VARIED rate (90 episodes)  condition 14.5
+   k_omega  -0.02919 (truth -0.02900) sigma 0.00023 informed=1
+   b_omega  +0.000234 (truth +0.000300) sigma 0.000111 informed=1
+   k_omega recovered                                          PASS
+   b_omega separated from scale                               PASS
+
+3. ROTATION, CONSTANT rate -- scale and bias are COLLINEAR (90 episodes)
+   condition 216.4 (large = a direction is unobserved)
+   k_omega  -0.02892 sigma 0.00084 informed=1
+   b_omega  +0.000030 sigma 0.000500 informed=0
+   b_omega correctly reported UNINFORMED when collinear       PASS
+   normalised condition number RANKS collinear worse than separable PASS
+   (separable window scored 14.5, this one 216.4)
+
+4. MIXED driving (240 episodes)  condition 89.0
+   k_v      -0.011956 (truth -0.012000) sigma 0.000118 informed=1
+   eps_yaw  +0.009448 (truth +0.009300) sigma 0.000118 informed=1
+   k_omega  -0.028885 (truth -0.029000) sigma 0.000115 informed=1
+   b_omega  +0.000014 (truth +0.000200) sigma 0.000129 informed=1
+   k_lat    +0.035676 (truth +0.035000) sigma 0.000556 informed=1
+   dk_wheel +0.005666 (truth +0.006000) sigma 0.000281 informed=1
+   k_omega_w +0.000000 (truth +0.000000) sigma 0.155000 informed=0
+   lever_x  +0.000000 (truth +0.000000) sigma 0.050000 informed=0
+   lever_y  +0.000000 (truth +0.000000) sigma 0.050000 informed=0
+   k_v recovered under mixed driving                          PASS
+   k_omega recovered under mixed driving                      PASS
+   eps_yaw NOT contaminated by turns                          PASS
+   lateral scale separated from mount yaw (same component)    PASS
+   per-wheel mismatch separated from gyro scale AND bias (same component) PASS
+
+5. TWO HEADING FACTORS (400 episodes)  condition 9.3
+   k_omega   +0.009966 (truth +0.010000) sigma 0.000091 informed=1
+   b_omega   +0.000316 (truth +0.000300) sigma 0.000043 informed=1
+   dk_wheel  +0.005972 (truth +0.006000) sigma 0.000362 informed=1
+   k_omega_w -0.069856 (truth -0.070000) sigma 0.000698 informed=1
+   WHEEL rotation scale recovered (-7%)                       PASS
+   GYRO scale recovered separately (+1%)                      PASS
+   gyro bias recovered with its PHYSICAL sign                 PASS
+   wheel curvature recovered on the wheel factor              PASS
+
+6. CLOSED LOOP bias: final +0.000318 (truth +0.000400), worst |err| over rounds 0.000161
+   posterior sigma 0.000076
+   closed-loop bias converges to the truth (3 sigma)          PASS
+   and never overshoots on the way (no gain-2 ratchet)        PASS
+
+7A. lever x +0.0300 (truth +0.0300) +- 0.0004 | y -0.0199 (truth -0.0200) +- 0.0004 | eps +0.0095
+   7A lever x recovered (3 sigma)                             PASS
+   7A lever y recovered (3 sigma)                             PASS
+   7A lever informed under rotation                           PASS
+   7A eps_yaw still recovered beside the lever                PASS
+7B. straight-only: lever sigma x 0.0476 y 0.0476 (prior 0.0500)
+   7B straight-only: lever uninformed                         PASS
+   7C closed loop: TOTAL lever recovered                      PASS
+   7D information() reproduces solve()                        PASS
+   7E a pre-lever (13+7) row still loads: p_applied lever = 0 (exact), lever_s = d_theta, lever_c = 0 (first-order APPROXIMATION) PASS
+
+ALL PASS (0 failures)
+[exit 0]

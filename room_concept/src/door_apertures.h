@@ -55,7 +55,16 @@ namespace rc
     {
         Eigen::Vector2f a{0.f, 0.f};   ///< one edge of the opening
         Eigen::Vector2f b{0.f, 0.f};   ///< the other
-        float           p_open = 0.f;  ///< door_open_prob; 0 when unmeasured (= no discount)
+        float           p_open = -1.f; ///< door_open_prob as published; -1 = unmeasured (logging only)
+        /// π = P(the aperture holds a SURFACE: the leaf, or the door shut) — the prior of the per-beam mixture
+        /// (weight()). 1 − p_open when door_concept has measured the door, ½ when it has not.
+        float           prior_closed = 1.f;
+        /// How far a return from that surface may lie from the aperture line: LiDAR noise ⊕ half the door depth.
+        float           half_depth = 0.02f;
+        /// δ (m) ≥ 0: how far the aperture line (the door node = the leaf's line) lies BEHIND the room's own
+        /// boundary at the doorway. 0 until seat_in_room() runs; then a/b are the MOUTH (the aperture projected onto
+        /// the room polygon's edge) and the leaf sits δ past it. See seat_in_room().
+        float           recess = 0.f;
         std::uint64_t   id     = 0;    ///< the door node, for logging
         std::string     name;
     };
@@ -66,8 +75,8 @@ namespace rc
     ///   · door_open_prob and width_m are ordinary attribute reads — serialised by DSRGraph's own
     ///     shared_mutex, safe from any thread, no cache involved.
     ///   · the APERTURE DOES NOT MOVE WHEN THE LEAF SWINGS (door_concept's invariant). A door's
-    ///     segment is therefore constant for as long as its wall is, so it is resolved ONCE, the
-    ///     first time that door is open, and reused from then on.
+    ///     segment is therefore constant for as long as its wall is, so it is resolved ONCE and
+    ///     reused from then on.
     /// So the per-cycle cost of a room whose doors are shut is a handful of attribute reads and
     /// nothing else: no transform walk, no cache touched, nothing to hand across a thread boundary.
     /// The chain is only walked when a door's own belief says it is open and we have no segment for
@@ -78,8 +87,8 @@ namespace rc
         /// Refresh from the graph. Safe from any thread PROVIDED `inner` is the instance owned by the
         /// main thread (see the threading note above); it is called from compute() here because that
         /// is where that instance lives, not because the call site must be there.
-        /// Returns the apertures currently worth discounting (p_open > 0). All doors shut ⇒ empty,
-        /// and empty costs the scan nothing at all.
+        /// Returns EVERY door with a resolvable aperture (2026-10-12: an unmeasured door is no longer treated as
+        /// shut; the per-beam mixture decides from each return's range). No doors ⇒ empty, which costs nothing.
         std::vector<DoorAperture> refresh(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,
                                           const std::string& room_frame);
 
@@ -107,8 +116,30 @@ namespace rc
         /// The weight this scan point keeps, given where the beam came from. Room frame, both.
         /// 1 when no aperture lies between them; the product of (1 - p_open) over those that do, so
         /// two open doors in line discount once each rather than cancelling.
+        /// ★ PER-BEAM MIXTURE (2026-10-12). A beam that crosses the aperture segment and returns d metres past
+        ///   it is explained either by a SURFACE in the aperture (the leaf, a shut door: d ~ N(0, σ), σ² =
+        ///   sigma_obs² + half_depth²) or by the NEXT ROOM (d uniform over kBeyondExtentM). Its weight is the
+        ///   posterior of the surface:   w = π·N(d) / (π·N(d) + (1 − π)·U).
+        ///   A return 2 m beyond the doorway gets w ≈ 0 even when door_concept has not measured the door (π = ½);
+        ///   a return at the doorway line keeps w ≈ 1 unless the door is believed wide open. No threshold: the
+        ///   crossing test is exact geometry and the rest is a likelihood ratio.
+        /// ★ THE ROOM'S BOUNDARY AT A DOORWAY IS NOT THE DOOR'S LINE (2026-10-12). door_concept puts the door node at
+        ///   the leaf's line — the WALL CENTRE in the apartment world — while the room polygon the SDF scores against
+        ///   draws its wall at the room-side FACE. Measured live (crossing try15, room_2, door shut): the face is at
+        ///   y = 4.84, the aperture at y = 4.62, and 8.9 % of every scan landed in between (header/frame/leaf returns
+        ///   at y 4.64–4.72, 12–20 cm outside the polygon) — 85 % of the scan's Σ sdf². None of them CROSSED the
+        ///   aperture segment, so every one kept weight 1. This moves the crossing test to the MOUTH — the aperture
+        ///   projected onto the polygon edge nearest to it — and records δ = the distance from that edge to the leaf
+        ///   line, so weight() can say how far past the room's boundary the surface hypothesis actually sits.
+        ///   Polygon in the SAME frame as the aperture. No polygon / degenerate edge ⇒ the aperture is left as is.
+        static void seat_in_room(DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon);
+
         static float weight(const std::vector<DoorAperture>& apertures,
-                            const Eigen::Vector2f& beam_origin, const Eigen::Vector2f& hit);
+                            const Eigen::Vector2f& beam_origin, const Eigen::Vector2f& hit, float sigma_obs);
+        /// The "next room" hypothesis spreads a return uniformly over this many metres past the doorway. The
+        /// weight depends on it only through log(L) (the crossover moves ~1 cm per doubling), so any value of the
+        /// order of the sensor range will do.
+        static constexpr float kBeyondExtentM = 20.f;
 
     private:
         /// Door node id -> its aperture segment in the room frame, resolved once. Nothing here

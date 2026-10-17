@@ -27,7 +27,24 @@
  *  gate); σ_b shrunk toward a weak prior σ0 by `prior_pairs` pseudo-pairs so a run with no driving reports the
  *  prior, not zero. σ_b² is projected onto ≥ 0 (a variance).
  *
- *  THE PUBLISHED TERM: Σ_b = β·R, β = σ_b² / (tr R_xy / 2), R = the current scan's CLAIMED covariance. The bias
+ *  ★ THE AMPLITUDE IS A FIELD TOO (2026-10-11, Given-mode confidence 0)
+ *  --------------------------------------------------------------------
+ *  One global σ_b was published everywhere. Measured on the apartment layout (log 22-18-08): a 3.7 m stretch where
+ *  the given layout does not explain the scan (median |SDF| 0.43-0.69 m, published pose 0.49-0.72 m off ground
+ *  truth) drove σ_b from 3 cm to 24-28 cm; the robot then parked where its error was 9 mm and published
+ *  sigma 28 cm for the rest of the session, because σ_b only changes when path accrues. That number was HONEST
+ *  about the door region and WRONG about the parked spot: the bias field's amplitude is itself place-dependent,
+ *  and a stationary model with one amplitude must summarise both places with one number. The published term is
+ *  therefore the amplitude NEAR THE CURRENT PLACE: the same pair statistics, fitted with each pair weighted by
+ *  how close BOTH of its ends are to where the robot is (kernel exp(−d/ℓ) at the fitted ℓ — no new constant),
+ *  and under a two-component likelihood: a pair is explained by the local amplitude, or it belongs to the field
+ *  elsewhere (the global plateau is that component's scale). Responsibilities, not a gate: the door pairs count
+ *  for nothing at the parked spot because they cannot be explained by the amplitude there, and the parked-spot
+ *  pairs count for nothing at the door for the same reason. Pairs are kept across chain breaks (they are facts
+ *  about places), so a parked robot keeps what it learnt on the way in. The global fit is kept for ℓ, for the
+ *  outlier scale and for the log.
+ *
+ *  THE PUBLISHED TERM: Σ_b = β·R, β = σ_b(x)² / (tr R_xy / 2), R = the current scan's CLAIMED covariance. The bias
  *  has the scan's own geometry: a common-mode error of the points that made the fix, so heading follows the
  *  scan's lever (R_θθ / R_xx) instead of needing its own estimate — GT-free heading was not identifiable
  *  (pivots pile odometry heading noise into short path lags). Added to the PUBLISHED covariance only, never to
@@ -39,6 +56,8 @@
 #include <array>
 #include <cmath>
 #include <deque>
+#include <limits>
+#include <vector>
 
 namespace rc
 {
@@ -55,9 +74,12 @@ namespace rc
             double sigma0 = 0.02;                                      ///< m, the prior bias sigma
             double prior_pairs = 50.0;                                 ///< its weight, in pairs
             double memory_pairs = 20000.0;                             ///< forgetting, in pairs per lag
+            std::size_t pair_store = 4096;                             ///< pairs kept for the LOCAL fit (~16 m of path)
+            double scan_noise_var = 2.0e-6;                            ///< m², e_n − e_m for the ~1 mm scan noise (the ignored e)
+            int local_em_iters = 3;                                    ///< EM passes per local fit, warm-started
         };
 
-        void set_params(const Params &p) { p_ = p; reset_chain(); bins_ = {}; }
+        void set_params(const Params &p) { p_ = p; reset_chain(); bins_ = {}; pairs_store_.clear(); pairs_ = 0; fit_valid_ = false; A_loc_ = 4.0 * p_.sigma0 * p_.sigma0; sigma_b_local_ = p_.sigma0; }
         [[nodiscard]] const Params &params() const noexcept { return p_; }
 
         /// One cycle. z: scan-only pose (world x, y, θ); R: its claimed covariance (world); odom: the odometry
@@ -68,16 +90,20 @@ namespace rc
         {
             if (not z.allFinite() or not odom.allFinite() or not std::isfinite(odo_var_tr)) { reset_chain(); return; }
             (void)R;
+            // The place the term is asked about is where the robot IS, parked or not: the scan-only pose's own
+            // position (world frame, so it is comparable across chains; its error is the bias itself, well inside ℓ).
+            xc_ = z.head<2>().cast<double>();
             if (not chain_ok or buf_.empty())
             {
                 reset_chain();
                 buf_.push_back({z.head<2>().cast<double>(), Eigen::Vector2d::Zero(), 0.0, 0.0});
+                fit_local();
                 return;
             }
             O_ += odom.head<2>().cast<double>();
             V_ += std::max(0.0, static_cast<double>(odo_var_tr));
             S_ += odom.head<2>().cast<double>().norm();
-            if (S_ - buf_.back().S < p_.sample_spacing) return;
+            if (S_ - buf_.back().S < p_.sample_spacing) { fit_local(); return; }
             const Sample now{z.head<2>().cast<double>(), O_, V_, S_};
             const double forget = std::exp(-1.0 / p_.memory_pairs);
             for (const auto &m : buf_)
@@ -94,27 +120,35 @@ namespace rc
                 bn.y = forget * bn.y + y;
                 bn.L = forget * bn.L + r;
                 ++pairs_;
+                // the same pair, kept with its two PLACES for the local amplitude (outlives the chain)
+                pairs_store_.push_back({y, r, now.z, m.z, pairs_});
             }
+            while (pairs_store_.size() > p_.pair_store) pairs_store_.pop_front();
             buf_.push_back(now);
             while (buf_.size() > p_.buffer) buf_.pop_front();
             fit();
+            fit_local();
         }
 
-        [[nodiscard]] double sigma_b() const noexcept { return sigma_b_; }
+        [[nodiscard]] double sigma_b() const noexcept { return sigma_b_; }               ///< GLOBAL amplitude (log, outlier scale)
+        [[nodiscard]] double sigma_b_local() const noexcept { return sigma_b_local_; }   ///< amplitude at the current place: what is published
+        [[nodiscard]] double pi_elsewhere() const noexcept { return pi_out_; }           ///< share of kept pairs the local amplitude does not explain
         [[nodiscard]] double length()  const noexcept { return len_; }
         [[nodiscard]] long   pairs()   const noexcept { return pairs_; }
 
-        /// The covariance this bias adds to a pose fixed by a scan of claimed covariance R: β·R.
+        /// The covariance this bias adds to a pose fixed by a scan of claimed covariance R: β·R, with the
+        /// amplitude of the field AT THE CURRENT PLACE.
         [[nodiscard]] Eigen::Matrix3f covariance(const Eigen::Matrix3f &R) const
         {
             const double rxy = 0.5 * (static_cast<double>(R(0, 0)) + static_cast<double>(R(1, 1)));
             if (not (rxy > 0.0) or not R.allFinite()) return Eigen::Matrix3f::Zero();
-            return static_cast<float>(sigma_b_ * sigma_b_ / rxy) * R;
+            return static_cast<float>(sigma_b_local_ * sigma_b_local_ / rxy) * R;
         }
 
     private:
         struct Sample { Eigen::Vector2d z, O; double V, S; };
         struct Bin { double w = 0.0, y = 0.0, L = 0.0; };
+        struct Pair { double y, r; Eigen::Vector2d a, b; long id; };
 
         void reset_chain() { buf_.clear(); O_.setZero(); V_ = 0.0; S_ = 0.0; }
 
@@ -136,12 +170,88 @@ namespace rc
             }
         }
 
+        /// The amplitude at xc_: the same structure-function regression, over the kept pairs, with each pair
+        /// weighted by (i) forgetting, (ii) how near BOTH its places are to xc_ (exp(−d/ℓ), ℓ the fitted
+        /// correlation length — a pair whose ends are a correlation length away says little about b here), and
+        /// (iii) its responsibility under a two-component likelihood. Under the model y/m is ½χ²₂, i.e. y is
+        /// exponential with mean m = A·g + e; the other component has the GLOBAL plateau added to its mean
+        /// (4(σ_b² + σ0²)·g: the field as it is elsewhere, never narrower than the prior).
+        /// ★ EM from THREE starts (last fit, the global plateau, the prior), the one with the higher weighted
+        ///   log-likelihood wins — model selection like the ℓ grid, not a gate. One start is not enough: the
+        ///   exponential likelihood lets a fit SHRINK into small-y pairs from anywhere, but a small amplitude can
+        ///   never grow into big-y pairs (exp(−y/m) underflows), so warm-starting alone would under-report where
+        ///   the field really is large. The prior pseudo-pairs stay in the first component and one pseudo-pair in
+        ///   the second, so neither mixing weight can reach 0 or 1 and switch the other component off.
+        void fit_local()
+        {
+            const double A0 = 4.0 * p_.sigma0 * p_.sigma0;
+            if (pairs_store_.empty() or not (len_ > 0.0)) { A_loc_ = A0; sigma_b_local_ = p_.sigma0; pi_out_ = 0.5; return; }
+            // compute cache only: the field cannot change over 5% of its own correlation length, and a parked
+            // robot would otherwise refit the same pairs every cycle
+            if (fit_valid_ and (xc_ - xc_fit_).norm() < 0.05 * len_ and pairs_ == pairs_fit_) return;
+            const double forget = std::exp(-1.0 / p_.memory_pairs);
+            const double A_out = 4.0 * (sigma_b_ * sigma_b_ + p_.sigma0 * p_.sigma0);
+            // per-pair constants of this fit: g(r), the forgetting x place kernel, y and y⁺ (y < 0 = the odometry
+            // variance over-stated; it still pulls A down in the regression, as in the global fit)
+            struct Term { double g, k, y, yp; };
+            std::vector<Term> terms;
+            terms.reserve(pairs_store_.size());
+            for (const auto &q : pairs_store_)
+                terms.push_back({1.0 - std::exp(-q.r / len_),
+                                 std::pow(forget, static_cast<double>(pairs_ - q.id))
+                                     * std::exp(-((q.a - xc_).norm() + (q.b - xc_).norm()) / len_),
+                                 q.y, std::max(q.y, 0.0)});
+            const auto run = [&](double A, double pi, double &ll_out)
+            {
+                double ll = 0.0;
+                for (int it = 0; it < std::max(1, p_.local_em_iters); ++it)
+                {
+                    double num = p_.prior_pairs * A0, den = p_.prior_pairs, sum_out = 1.0, sum_w = p_.prior_pairs + 1.0;
+                    ll = 0.0;
+                    for (const auto &q : terms)
+                    {
+                        const double m_in = A * q.g + p_.scan_noise_var;
+                        const double m_out = m_in + A_out * q.g;
+                        const double li = (1.0 - pi) / m_in * std::exp(-q.yp / m_in);
+                        const double lo = pi / m_out * std::exp(-q.yp / m_out);
+                        const double resp = (li + lo > 0.0) ? li / (li + lo) : 1.0;   // P(explained by the amplitude here)
+                        const double w = q.k * resp;
+                        num += w * q.g * q.y;
+                        den += w * q.g * q.g;
+                        sum_out += q.k * (1.0 - resp);
+                        sum_w += q.k;
+                        ll += q.k * std::log(std::max(li + lo, 1e-300));
+                    }
+                    A = std::max(num / den, 0.0);
+                    pi = sum_out / sum_w;
+                }
+                ll -= p_.prior_pairs * (A - A0) * (A - A0) / (A0 * A0);        // the prior pseudo-pairs, as in fit()
+                ll_out = ll;
+                return std::pair{A, pi};
+            };
+            double best_ll = -std::numeric_limits<double>::infinity();
+            std::pair<double, double> best{A0, 0.5};
+            for (const double A_start : {std::max(A_loc_, 0.0), A_out, A0})
+            {
+                double ll;
+                const auto r = run(A_start, pi_out_, ll);
+                if (ll > best_ll) { best_ll = ll; best = r; }
+            }
+            A_loc_ = best.first;
+            pi_out_ = best.second;
+            sigma_b_local_ = std::sqrt(A_loc_ / 4.0);
+            xc_fit_ = xc_; pairs_fit_ = pairs_; fit_valid_ = true;
+        }
+
         Params p_{};
         std::deque<Sample> buf_;
-        Eigen::Vector2d O_ = Eigen::Vector2d::Zero();
+        std::deque<Pair> pairs_store_;
+        Eigen::Vector2d O_ = Eigen::Vector2d::Zero(), xc_ = Eigen::Vector2d::Zero(), xc_fit_ = Eigen::Vector2d::Zero();
         double V_ = 0.0, S_ = 0.0;
         std::array<Bin, NL> bins_{};
-        long pairs_ = 0;
+        long pairs_ = 0, pairs_fit_ = -1;
+        bool fit_valid_ = false;
         double sigma_b_ = 0.02, len_ = 1.0;
+        double A_loc_ = 4.0 * 0.02 * 0.02, sigma_b_local_ = 0.02, pi_out_ = 0.5;
     };
 }

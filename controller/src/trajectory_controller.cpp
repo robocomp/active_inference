@@ -244,6 +244,25 @@ void TrajectoryController::set_room_boundary(const std::vector<Eigen::Vector2f>&
     }
 }
 
+void TrajectoryController::set_room_boundary(const std::vector<Eigen::Vector2f>& polygon,
+                                              const std::vector<std::vector<Eigen::Vector2f>>& passages,
+                                              float sample_spacing)
+{
+    set_room_boundary(polygon, sample_spacing);
+    if (passages.empty()) return;
+    const auto inside = [](const std::vector<Eigen::Vector2f>& poly, const Eigen::Vector2f& p)
+    {
+        bool in = false;
+        for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+            if ((poly[i].y() > p.y()) != (poly[j].y() > p.y())
+                and p.x() < (poly[j].x() - poly[i].x()) * (p.y() - poly[i].y()) / (poly[j].y() - poly[i].y()) + poly[i].x())
+                in = not in;
+        return in;
+    };
+    std::erase_if(room_boundary_points_room_, [&](const Eigen::Vector2f& q)
+    { return std::ranges::any_of(passages, [&](const auto& pass) { return pass.size() >= 3 and inside(pass, q); }); });
+}
+
 // ============================================================================
 // Elastic-band path relaxation: push waypoints toward center of free space
 // ============================================================================

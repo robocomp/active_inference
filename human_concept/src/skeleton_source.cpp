@@ -15,6 +15,7 @@
 #include <dsr/api/dsr_eigen_defs.h>
 
 #include "csv_parse.h"   // ★locale-independent parsing — NEVER strtof here (see the header)
+#include "../../common/room_resolve/room_resolve.h"   // rc::room — the room is room_1/room_2/…, never the literal "room"
 
 namespace rc {
 
@@ -150,7 +151,7 @@ std::vector<SkeletonBody> DsrSkeletonSource::poll()
     Mat::RTMat world_T_cam = Mat::RTMat::Identity();
     bool have_tf = false;
     if (inner_eigen_)
-        if (const auto T = inner_eigen_->get_transformation_matrix(world_frame_, camera_frame_, capture_ts); T.has_value())
+        if (const auto T = inner_eigen_->get_transformation_matrix(rc::room::resolve_frame(*G_, world_frame_), camera_frame_, capture_ts); T.has_value())
         {
             world_T_cam = T.value();
             have_tf = true;

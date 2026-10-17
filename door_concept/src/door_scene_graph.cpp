@@ -10,7 +10,9 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <format>
 #include <optional>
+#include <set>
 #include <print>
 #include <utility>
 
@@ -88,34 +90,39 @@ DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, cons
 std::string DoorSceneGraph::next_door_name(std::string_view preferred_name,
                                            std::span<const std::string> reserved_names) const
 {
-    // Auto-name: one past the highest "door_<N>" that is LIVE OR REMEMBERED. Doors are now generic `object`
-    // nodes named "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
-    int max_n = 0;
-    const auto bump = [&](std::string_view nm)
+    // Auto-name: the LOWEST "door_<N>" (N >= 1) that is neither LIVE nor REMEMBERED (2026-10-12, was one past the
+    // highest — names only ever grew: door_40 after a few crossings). Doors are generic `object` nodes named
+    // "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
+    std::set<int> taken;
+    const auto take = [&](std::string_view nm)
     {
         if (not nm.starts_with("door_")) return;
         int v = 0;
         const std::string_view digits = nm.substr(5);   // "door_" = 5 chars
-        if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
-            max_n = std::max(max_n, v);
+        if (const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), v);
+            ec == std::errc{} and p == digits.data() + digits.size())
+            taken.insert(v);
     };
     bool preferred_free = not preferred_name.empty();
     for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("door_", 0) == 0)
         {
             if (n.name() == preferred_name) preferred_free = false;   // still occupied → don't collide
-            bump(n.name());
+            take(n.name());
         }
-    // A number a GHOST still holds is not free either. Recycling it was the identity defect: `door_1` died,
-    // its number went straight to a different door across the room, and when THAT one died it overwrote the
-    // original's ghost — so the real door_1 came back as door_3. Reserved names only raise the counter; they
-    // never mark `preferred_name` occupied, since that ghost is precisely the one being consumed here.
+    // A number a GHOST or a stored identity still holds is not free either. Recycling it was the identity defect:
+    // `door_1` died, its number went straight to a different door across the room, and when THAT one died it
+    // overwrote the original's ghost — so the real door_1 came back as door_3. Reserved names never mark
+    // `preferred_name` occupied, since that ghost is precisely the one being consumed here.
     for (const auto& nm : reserved_names)
-        bump(nm);
+        take(nm);
     // RE-ACQUISITION: a door that flickered out and came back keeps its name, so downstream consumers see the
     // same object rather than a fresh one. (The DSR id necessarily changes — the old node was deleted.)
-    return preferred_free ? std::string(preferred_name)
-                          : "door_" + std::to_string(max_n + 1);
+    if (preferred_free)
+        return std::string(preferred_name);
+    int n = 1;
+    while (taken.contains(n)) ++n;
+    return "door_" + std::to_string(n);
 }
 
 std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
@@ -190,29 +197,46 @@ std::uint64_t DoorSceneGraph::create_entry_mirror(const DSR::Node& proto_room,
                                                   const Eigen::Vector3f& euler_xyz_proto_source,
                                                   std::span<const std::string> reserved_names)
 {
-    const std::string name = next_door_name({}, reserved_names);
-    DSR::Node m = DSR::Node::create<object_node_type>(name);
-
     // Geometry and appearance are the SOURCE's, copied once: the mirror is the same physical door. Only the
     // interaction channel (door_open_prob / door_phi_rad) is refreshed afterwards, by the worker.
-    G_->add_or_modify_attrib_local<width_m_att> (m, G_->get_attrib_by_name<width_m_att>(source_door).value_or(cfg_.door_prior_w_m));
-    G_->add_or_modify_attrib_local<depth_m_att> (m, G_->get_attrib_by_name<depth_m_att>(source_door).value_or(cfg_.door_thickness_m));
-    G_->add_or_modify_attrib_local<height_m_att>(m, G_->get_attrib_by_name<height_m_att>(source_door).value_or(cfg_.door_prior_h_m));
+    const auto op = G_->get_attrib_by_name<door_open_prob_att>(source_door);
+    const auto ph = G_->get_attrib_by_name<door_phi_rad_att>(source_door);
+    return create_door_copy(proto_room,
+                            G_->get_attrib_by_name<width_m_att> (source_door).value_or(cfg_.door_prior_w_m),
+                            G_->get_attrib_by_name<depth_m_att> (source_door).value_or(cfg_.door_thickness_m),
+                            G_->get_attrib_by_name<height_m_att>(source_door).value_or(cfg_.door_prior_h_m),
+                            op.has_value() ? std::optional<float>(op.value()) : std::nullopt,
+                            ph.has_value() ? std::optional<float>(ph.value()) : std::nullopt,
+                            t_proto_source, euler_xyz_proto_source, reserved_names,
+                            std::format("'{}' id={}", source_door.name(), source_door.id()));
+}
+
+std::uint64_t DoorSceneGraph::create_door_copy(const DSR::Node& room, float width, float depth, float height,
+                                               std::optional<float> open_prob, std::optional<float> phi_rad,
+                                               const Eigen::Vector3f& t, const Eigen::Vector3f& euler_xyz,
+                                               std::span<const std::string> reserved_names, const std::string& source_label,
+                                               std::string_view preferred_name)
+{
+    // ★ONE NAME PER DOORWAY (2026-10-13): a copy of a door we already know — the crossed door recreated on re-entry, the
+    //   entry mirror adopted under its source's name — keeps that name whenever no live node holds it.
+    const std::string name = next_door_name(preferred_name, reserved_names);
+    DSR::Node m = DSR::Node::create<object_node_type>(name);
+    G_->add_or_modify_attrib_local<width_m_att> (m, width);
+    G_->add_or_modify_attrib_local<depth_m_att> (m, depth);
+    G_->add_or_modify_attrib_local<height_m_att>(m, height);
     G_->add_or_modify_attrib_local<mesh_path_att>(m, std::string("door_concept/meshes/door.obj"));
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(m, std::string("door_concept/meshes/door_basecolor.jpg"));
     G_->add_or_modify_attrib_local<object_subtype_att>(m, std::string("door"));
-    if (const auto v = G_->get_attrib_by_name<door_open_prob_att>(source_door); v.has_value())
-        G_->add_or_modify_attrib_local<door_open_prob_att>(m, v.value());
-    if (const auto v = G_->get_attrib_by_name<door_phi_rad_att>(source_door); v.has_value())
-        G_->add_or_modify_attrib_local<door_phi_rad_att>(m, v.value());
+    if (open_prob.has_value()) G_->add_or_modify_attrib_local<door_open_prob_att>(m, *open_prob);
+    if (phi_rad.has_value())   G_->add_or_modify_attrib_local<door_phi_rad_att>(m, *phi_rad);
 
-    // ★`parent` = the proto-room. This attribute is what rc::room::is_proto_mirror reads, and therefore what
+    // ★`parent` = the room. Under a proto-room this is what rc::room::is_proto_mirror reads, and therefore what
     //   keeps every fitting / merging / aperture-discount loop in the fleet from counting this door twice.
-    G_->add_or_modify_attrib_local<parent_att>(m, proto_room.id());
-    G_->add_or_modify_attrib_local<level_att>(m, G_->get_attrib_by_name<level_att>(proto_room).value_or(1) + 1);
+    G_->add_or_modify_attrib_local<parent_att>(m, room.id());
+    G_->add_or_modify_attrib_local<level_att>(m, G_->get_attrib_by_name<level_att>(room).value_or(1) + 1);
     {
-        const float rpx = G_->get_attrib_by_name<pos_x_att>(proto_room).value_or(200.f);
-        const float rpy = G_->get_attrib_by_name<pos_y_att>(proto_room).value_or(200.f);
+        const float rpx = G_->get_attrib_by_name<pos_x_att>(room).value_or(200.f);
+        const float rpy = G_->get_attrib_by_name<pos_y_att>(room).value_or(200.f);
         G_->add_or_modify_attrib_local<pos_x_att>(m, rpx + 150.f);
         G_->add_or_modify_attrib_local<pos_y_att>(m, rpy + 50.f);
     }
@@ -221,17 +245,14 @@ std::uint64_t DoorSceneGraph::create_entry_mirror(const DSR::Node& proto_room,
     if (not id.has_value())
         return 0;
 
-    DSR::Node parent = proto_room;   // the RT API takes a mutable node
-    rt_api_->insert_or_assign_edge_RT(parent, id.value(),
-                                      {t_proto_source.x(), t_proto_source.y(), t_proto_source.z()},
-                                      {euler_xyz_proto_source.x(), euler_xyz_proto_source.y(), euler_xyz_proto_source.z()});
+    DSR::Node parent = room;   // the RT API takes a mutable node
+    rt_api_->insert_or_assign_edge_RT(parent, id.value(), {t.x(), t.y(), t.z()}, {euler_xyz.x(), euler_xyz.y(), euler_xyz.z()});
     if (relayout_)
         relayout_();
 
-    std::print("door_concept: [proto] entry mirror '{}' id={} <- '{}' id={} under proto-room '{}' "
+    std::print("door_concept: [proto] entry mirror '{}' id={} <- {} under room '{}' "
                "(t=({:.2f},{:.2f},{:.2f}) yaw={:.3f})\n",
-               name, id.value(), source_door.name(), source_door.id(), proto_room.name(),
-               t_proto_source.x(), t_proto_source.y(), t_proto_source.z(), euler_xyz_proto_source.z());
+               name, id.value(), source_label, room.name(), t.x(), t.y(), t.z(), euler_xyz.z());
     return id.value();
 }
 

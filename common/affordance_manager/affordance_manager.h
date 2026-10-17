@@ -193,6 +193,11 @@ public:
     // on the node as epistemic_refused, which is a statement about the APPROACH — not a completion,
     // and not a claim that anything was observed.
     void suppress_target(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t node_id, int rounds);
+    /// Restrict selection to the affordance node with this NAME (empty = no restriction, the default). Used by a
+    /// consumer that sequences affordances itself (controller door passage): until that node is Offered,
+    /// select_target returns nothing.
+    void set_required_name(std::string name) { required_name_ = std::move(name); }
+    [[nodiscard]] const std::string &required_name() const { return required_name_; }
 
     // ── A VERDICT READ OFF THE MAP, REMEMBERED AGAINST THE MAP ───────────────────────────────────
     // "The body does not fit in that cell" and "there is no route to it and nowhere closer" are
@@ -388,6 +393,7 @@ private:
     std::string   suppressed_name_;         // what that skip cost, for the viewer
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     std::vector<Candidate> last_candidates_;
+    std::string required_name_;        // set_required_name: "" = every affordance competes
     std::string last_reject_reason_;   // all affordances evaluated in the last select_target()
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;

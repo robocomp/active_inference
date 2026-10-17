@@ -128,4 +128,13 @@ struct ContourDepthParams
                                                       const std::vector<Contour>& controls,
                                                       const ContourDepthParams& p = {});
 
+// ─── ONE SIDE OF ONE BOUNDARY SAMPLE ────────────────────────────────────────────────────────────
+// The median valid depth read between offset_px_min and offset_px_max along the unit image direction
+// (nx, ny) from contour pixel (px, py) — the same read score_contour takes on each side of an edge.
+// Exposed for callers whose boundary is not one closed contour with a solid INSIDE: door_concept's
+// aperture frame has the solid (the wall) OUTSIDE and the hole inside, so it reads both sides itself
+// and compares them. Returns < 0 when there is no valid read (no return / outside the plane).
+[[nodiscard]] float side_depth_median(const cv::Mat& depth_img, float px, float py, float nx, float ny,
+                                      const ContourDepthParams& p = {});
+
 }   // namespace rc::edges

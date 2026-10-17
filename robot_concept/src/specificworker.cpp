@@ -51,6 +51,7 @@
 #include <iterator>
 #include <iostream>
 #include <print>
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…
 
 // ── SVD48VBase config reader ──────────────────────────────────────────────────────────────────
 // The base component owns its own kinematics and geometry, and it is the SAME file on the real
@@ -336,22 +337,23 @@ void SpecificWorker::initialize()
 	// building while every number downstream stays self-consistent.
 	cfgr.opt("Agent.scenario", scenario_name_,
 	           "WHERE the robot is; published as scenario_name on its node - room_concept REFUSES to start without it");
+	// WHAT this base can do, as opposed to where it is — read from the BASE COMPONENT's own config,
+	// which is the same file on the real robot as in simulation. An earlier version of this declared
+	// `Agent.holonomic` here by hand; that was a second copy of `baseType`, which SVD48VBase already
+	// states, so it is gone. One fact, one file, owned by the component that owns the hardware.
 	// The base's LINEAR velocity unit. Webots bridge: m/s. Real SVD48VBase: mm/s -- found 2026-10-02 by
 	// reading its publisher (wheel radius and track in mm, so adv/side come out in mm/s while rot is
 	// rad/s). Unconverted, the real robot would have reported every forward speed 1000x too large.
 	{
 		std::string units = "m";
-		cfgr.opt("Odometry.linear_units", units, "base linear velocity unit: \"m\" (Webots bridge) or \"mm\" (real SVD48VBase)");
+		cfgr.opt("Odometry.linear_units", units,
+		         "unit of adv/side in the base's FullPoseEuler: \"m\" (Webots bridge) or \"mm\" (real SVD48VBase)");
 		if (units == "mm")      odom_linear_scale_ = 1e-3f;
 		else if (units == "m")  odom_linear_scale_ = 1.f;
 		else qFatal("[Odometry] linear_units must be \"m\" or \"mm\", got \"%s\"", units.c_str());
 		qInfo().nospace() << "[Odometry] base linear velocity in " << QString::fromStdString(units)
 		                  << "/s -> scale " << odom_linear_scale_ << " to m/s";
 	}
-	// WHAT this base can do, as opposed to where it is — read from the BASE COMPONENT's own config,
-	// which is the same file on the real robot as in simulation. An earlier version of this declared
-	// `Agent.holonomic` here by hand; that was a second copy of `baseType`, which SVD48VBase already
-	// states, so it is gone. One fact, one file, owned by the component that owns the hardware.
 	std::string base_config_path;
 	cfgr.opt("Agent.base_config_file", base_config_path,
 	         "the BASE component's own config - the one file that states what this hardware CAN do");
@@ -620,7 +622,9 @@ void SpecificWorker::initialize()
 				parent, child, t.x(), t.y(), t.z(), yaw_deg(T),
 				child, parent, ti.x(), ti.y(), ti.z(), yaw_deg(Ti));
 		};
-		dump("room", robot_name.c_str());
+		// The room is `room_1`, `room_2`, … — ask the graph which one, never the literal (rc::room).
+		const std::string room_frame = rc::room::current_room_frame(*G);
+		dump(room_frame.c_str(), robot_name.c_str());
 		dump("kinova_arm_r", "body");
 	}
 

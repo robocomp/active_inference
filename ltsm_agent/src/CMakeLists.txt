@@ -5,6 +5,7 @@ LIST(APPEND SOURCES
   ../src/memory_store.cpp
   ../src/passage_harvest.cpp
   ../src/passage_live.cpp
+  ../src/room_recall.cpp
 )
 
 # Headers set
@@ -14,6 +15,7 @@ LIST(APPEND HEADERS
   ../src/memory_store.h
   ../src/passage_harvest.h
   ../src/passage_live.h
+  ../src/room_recall.h
 )
 
 LIST(APPEND LIBS ${LIBS})

@@ -24,7 +24,7 @@ module rc { module media {
         // already paid for once (6.5%). 0 doubles as the "not simulated" flag, so no separate boolean
         // is needed and the plain layout is untouched.
         unsigned long long sim_stamp_ms;
-        @key unsigned long stream_id;    // one DDS instance for the IMU stream
+        unsigned long stream_id;    // one DDS instance for the IMU stream  // NOT @key (2026-10-10): FastDDS AUTO data-sharing silently turns OFF for keyed types — every frame was serialised + fragmented
 
         float acc_x;  float acc_y;  float acc_z;    // linear acceleration
         float gyro_x; float gyro_y; float gyro_z;   // angular velocity
