@@ -74,8 +74,10 @@ inline std::string line(const Record& r)
     switch (r.level)
     {
         case Level::Mission:
-            what = r.action_json.empty() ? "mission " + r.kind + (r.target.empty() ? "" : " " + r.target)
-                                         : "mission \"" + rc::em::detail::summary(r.action_json) + "\"";
+            // A self mission (em_builder.h open_self, ruling R10) has kind "mission" and no action: just "mission".
+            what = not r.action_json.empty() ? "mission \"" + rc::em::detail::summary(r.action_json) + "\""
+                 : "mission" + (r.kind.empty() or r.kind == "mission" ? std::string{} : " " + r.kind)
+                             + (r.target.empty() ? std::string{} : " " + r.target);
             if (not r.room.empty()) what += " in " + r.room;
             what += r.author == Author::Human ? ", asked by a person" + (r.source.empty() ? "" : " (" + r.source + ")")
                                               : std::string(", on its own");
@@ -286,10 +288,12 @@ inline std::string stats_line(const Stats& s, std::string_view label)
     return out;
 }
 
-/// The STATE's "today: …" line (em_query.h today_line); nullopt when no EM graph is joined (the line is omitted).
+/// The STATE's "today: …" line (em_query.h today_line); nullopt — the line omitted — whenever the tools would say
+/// "not available" (no EM graph joined, or joined but empty, e.g. just after the join before its import lands), so
+/// the STATE and the tools never disagree.
 [[nodiscard]] inline std::optional<std::string> today_digest_line(const std::optional<rc::em::Store>& st)
 {
-    if (not st) return std::nullopt;
+    if (em_detail::unavailable(st)) return std::nullopt;
     return "today: " + rc::em::today_line(*st);
 }
 

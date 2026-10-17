@@ -37,9 +37,14 @@
  * purpose: the generated code joins every [Agent.<name>] graph at startup, and a DSRGraph built with configFile ""
  * waits for a peer to send it the graph and qFatal()s the whole process after ~15 s when none answers (cortex
  * dsr_api.cpp) — chat_agent must keep running when episodic_agent is not. episodic_agent being present on domain 0
- * means its domain-4 graph (built before its presence node) is already up to answer. The graph is dropped when
- * episodic_agent goes away or restarts (and re-joined on its return), so a restarted episodic_agent, which re-seeds
- * domain 4, never meets the old graph still held here (README's double-seeder note).
+ * means its domain-4 graph (built before its presence node) is already up to answer.
+ * WHICH PROCESS: the graph belongs to one episodic_agent PROCESS, identified by its agent node's timestamp_creation.
+ * It is KEPT through a stale period (heartbeat silent, node present, same stamp — the monitor reports that as
+ * "optional peer lost" too): re-joining the same live process would make it answer our second graph request with
+ * the "repeated participant" reply, a qFatal here. It is LEFT only when that agent node is gone from the live graph
+ * or carries a new stamp (a new process; checked by sync_em on every compute tick and on each presence hook), and
+ * joined again on the new process's ready/restart — so a restarted episodic_agent, which re-seeds domain 4, never
+ * meets the old graph still held here (README's double-seeder note).
  * Residual risk: episodic_agent dying within the ~1.3 s of the join itself still aborts chat_agent (not catchable).
  */
 
@@ -49,6 +54,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <genericworker.h>
@@ -89,11 +95,15 @@ private:
     void on_peer_restarted(std::uint32_t id);
 
     // ── episodic memory (domain 4), joined lazily — see the header comment ──
-    void join_em();
+    /// timestamp_creation of episodic_agent's agent node on the live graph; nullopt = no such node.
+    std::optional<std::uint64_t> em_process_stamp() const;
+    /// Leave if the process we joined is gone or replaced; with `may_join`, join the present process.
+    void sync_em(bool may_join);
     void leave_em();
     int em_domain_ = 4;
     std::uint32_t em_peer_id_ = 0;             ///< episodic_agent's agent id once seen (0 = never)
     std::shared_ptr<DSR::DSRGraph> em_G_;      ///< nullptr = not joined
+    std::uint64_t em_joined_stamp_ = 0;        ///< em_process_stamp() of the process em_G_ was joined from
 
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;

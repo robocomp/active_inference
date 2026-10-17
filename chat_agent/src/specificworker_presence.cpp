@@ -28,7 +28,8 @@ void SpecificWorker::on_optional_peer_lost(const std::string& name, std::uint32_
 {
     qInfo() << "[Presence] optional peer lost:" << QString::fromStdString(name);
     if (name == "controller" and session_) session_->set_controller_present(false);
-    if (name == "episodic_agent") leave_em();
+    // Stale (node still there, same process) keeps the graph; gone or replaced leaves it (specificworker.h).
+    if (name == "episodic_agent") sync_em(false);
 }
 
 void SpecificWorker::on_optional_peer_ready(const std::string& name, std::uint32_t id)
@@ -38,7 +39,7 @@ void SpecificWorker::on_optional_peer_ready(const std::string& name, std::uint32
     if (name == "episodic_agent")
     {
         em_peer_id_ = id;
-        join_em();
+        sync_em(true);
     }
 }
 
@@ -46,19 +47,33 @@ void SpecificWorker::on_peer_restarted(std::uint32_t id)
 {
     qInfo() << "[Presence] peer" << id << "restarted";
     if (em_peer_id_ == 0 or id != em_peer_id_) return;
-    // A new episodic_agent re-seeded domain 4: drop the old graph and join the new one. Deferred: this hook can run
-    // inside the presence monitor's tick, and the join blocks for ~1 s.
-    QTimer::singleShot(0, this, [this]()
-    {
-        leave_em();
-        join_em();
-    });
+    // A new episodic_agent process re-seeded domain 4: sync_em sees the new stamp, drops the old graph and joins the
+    // new one. Deferred: this hook can run inside the presence monitor's tick, and the join blocks for ~1 s.
+    QTimer::singleShot(0, this, [this]() { sync_em(true); });
 }
 
 // ── episodic memory: a read-only domain-4 graph while episodic_agent is present (specificworker.h) ──
-void SpecificWorker::join_em()
+std::optional<std::uint64_t> SpecificWorker::em_process_stamp() const
 {
-    if (em_G_ or shutting_down_) return;
+    if (not G or em_peer_id_ == 0) return std::nullopt;
+    for (const auto& n : G->get_nodes_by_type("agent"))
+        if (const auto id = G->get_attrib_by_name<agent_id_att>(n); id.has_value() and std::uint32_t(id.value()) == em_peer_id_)
+            if (const auto ts = G->get_attrib_by_name<timestamp_creation_att>(n); ts.has_value())
+                return std::uint64_t(ts.value());
+    return std::nullopt;
+}
+
+void SpecificWorker::sync_em(bool may_join)
+{
+    if (shutting_down_ or em_peer_id_ == 0) return;
+    const auto stamp = em_process_stamp();
+    if (em_G_ and (not stamp or *stamp != em_joined_stamp_))
+    {
+        qInfo(stamp ? "[EM] episodic_agent restarted (new process)" : "[EM] episodic_agent's node is gone");
+        leave_em();
+    }
+    if (em_G_ or not may_join or not stamp) return;
+    em_joined_stamp_ = *stamp;
     qInfo("[EM] episodic_agent present: joining its memory graph on domain %d", em_domain_);
     // configFile "" = request the graph from the peer (blocks ~1 s). Same name/id as on domain 0: a different DDS
     // domain, and nothing is ever written here, so no CRDT actor clash.

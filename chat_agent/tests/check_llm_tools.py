@@ -46,6 +46,7 @@ objects perceived in the current room (only this room is perceived): 1 bottle, 2
   - bottle_1 2.9 m, +12 deg ahead, 0.07x0.07x0.25 m
   - chair_2 3.4 m, -100 deg to the right, 0.45x0.50x0.90 m
 last command sent from this chat: none
+today: 2 missions (1 succeeded); last: cross door_0 → room_1
 """
 
 
@@ -88,6 +89,28 @@ def tools():
         t("inspect", "Every attribute and edge of ONE node of the robot's graph, by name (e.g. door_1, Shadow, "
           "controller 7) or id. Read-only.", {"node": {"type": "string", "description": "the node's name or id"}},
           ["node"]),
+        # episodic memory (chat_session.cpp tools_json; answers in src/em_answers.h)
+        t("episodes", "What the robot did TODAY, from its episodic memory: missions, their steps and the claims under "
+          "them, with start and end time and outcome, oldest first. All filters optional. Read-only.",
+          {"since": {"type": "string", "description": "only episodes that started at or after this time: HH:MM (today, "
+                                                      "local time) or epoch milliseconds"},
+           "until": {"type": "string", "description": "only episodes that started before this time: HH:MM (today, local "
+                                                      "time) or epoch milliseconds"},
+           "author": {"type": "string", "enum": ["human", "self"],
+                      "description": "human = asked by a person, self = on the robot's own"},
+           "kind": {"type": "string", "description": "mission, or a step/claim kind such as cross, open, approach"},
+           "target": {"type": "string", "description": "a door, room or object name, e.g. door_27"}}, []),
+        t("episode", "One episode from today's episodic memory in detail, by id (as listed by episodes): its steps and "
+          "claims, the beliefs read before and after (e.g. P(open) of a door) and what happened meanwhile. Read-only.",
+          {"id": {"type": "string", "description": "the episode id, e.g. 20261017-3"}}, ["id"]),
+        t("outcome_stats", "How often something succeeded, failed or was lost over ALL TIME (not only today), its mean "
+          "duration and information gain, from the episodic memory. Read-only.",
+          {"kind": {"type": "string", "description": "mission, or a step/claim kind such as cross, open, approach"},
+           "target": {"type": "string", "description": "optional: a door/room/object name, e.g. door_27; empty = all "
+                                                       "of that kind"}}, ["kind"]),
+        t("last_episode", "The most recent episode today about one door, room or object (aimed at it or that read its "
+          "beliefs). Read-only.",
+          {"target": {"type": "string", "description": "a door, room or object name, e.g. door_27"}}, ["target"]),
         t("look", "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
           {"camera": {"type": "string", "enum": ["front", "360"],
                       "description": "'front' = the camera facing ahead (default); '360' = the all-round panorama"}}, []),
@@ -191,6 +214,24 @@ CASES = [
      lambda n, a, c: n == "inspect" and str(a.get("node", "")) == "door_1"),
     ("look behind you", [], "none", "what do you see behind you?",
      lambda n, a, c: n == "look" and str(a.get("camera", "")) == "360"),
+    # episodic memory: what happened earlier goes to the memory tools, never to the live STATE or a guess.
+    ("what did you do this morning", [], "none", "what did you do this morning?",
+     lambda n, a, c: n == "episodes"),
+    ("what did you do today", [], "none", "what have you done today?",
+     lambda n, a, c: n == "episodes" or (n is None and re.search(r"\b(2|two)\b", c.lower()) is not None)),
+    ("since 10:00", [], "none", "what missions did I give you since 10:00?",
+     lambda n, a, c: n == "episodes" and str(a.get("since", "")).startswith("10:00")),
+    ("qué hiciste hoy (es)", [], "none", "¿qué has hecho hoy?",
+     lambda n, a, c: n == "episodes" or (n is None and re.search(r"\b(2|dos)\b", c.lower()) is not None)),
+    ("how often door shut", [], "none", "how often was door_1 shut?",
+     lambda n, a, c: n == "outcome_stats" and str(a.get("target", "")) == "door_1"),
+    ("how often crossing failed", [], "none", "how often have door crossings failed?",
+     lambda n, a, c: n == "outcome_stats" and "cross" in str(a.get("kind", "")).lower()),
+    ("last time at door_0", [], "none", "when did you last go through door_0?",
+     lambda n, a, c: n == "last_episode" and str(a.get("target", "")) == "door_0"
+     or (n == "episodes" and str(a.get("target", "")) == "door_0")),
+    ("details of an episode", [], "none", "tell me more about episode 20261017-3",
+     lambda n, a, c: n == "episode" and str(a.get("id", "")) == "20261017-3"),
 ]
 
 

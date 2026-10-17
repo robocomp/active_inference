@@ -236,7 +236,9 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::compute()
 {
-    // Everything runs on the session's QTimers (main thread); the GRAFCET loop only keeps the presence protocol.
+    // Everything runs on the session's QTimers (main thread); the GRAFCET loop only keeps the presence protocol —
+    // and notices episodic_agent's node vanishing or being replaced (no presence hook fires after a stale period).
+    sync_em(false);
 }
 
 void SpecificWorker::emergency() { std::print("chat_agent: emergency()\n"); }

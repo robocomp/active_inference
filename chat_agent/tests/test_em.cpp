@@ -64,7 +64,9 @@ Store fixed()
     c1.promised = 0.5; c1.delivered = 0.25;
     Record m2 = rec("20261017-4", "", Level::Mission, Author::Human, "mission", "", at(11, 0), at(11, 5), "failed");
     m2.action_json = "go to the kitchen"; m2.room = "room_3"; m2.source = "chat";
-    Record m3 = rec("20261017-5", "", Level::Mission, Author::Self, "explore", "room_5", at(12, 0));
+    // A self mission as em_builder.h opens it (ruling R10): kind "mission", no action, no target; room at t0.
+    Record m3 = rec("20261017-5", "", Level::Mission, Author::Self, "mission", "", at(12, 0));
+    m3.room = "room_5"; m3.source = "self";
     s.today = {m1, s1, c1, m2, m3};
 
     Stats cross{.key_kind = "cross", .key_identity = "", .outcomes = {{"succeeded", 9}, {"failed", 3}}, .n = 12,
@@ -105,14 +107,16 @@ int main()
     CHECK(has(all, "20261017-1 10:00-10:03 mission \"cross door_27\" in room_2, asked by a person (chat): succeeded"));
     CHECK(has(all, "20261017-2 10:00-10:03 step cross door_27, attempt 2 (part of 20261017-1): succeeded"));
     CHECK(has(all, "20261017-3 10:01-10:02 claim open door_27, promised 0.50 delivered 0.25 nats (part of 20261017-2): kept"));
-    CHECK(has(all, "20261017-5 12:00-now mission explore room_5, on its own: still open"));
+    CHECK(has(all, "20261017-5 12:00-now mission in room_5, on its own: still open"));
+    CHECK(not has(all, "mission mission"));
     CHECK(all.find("20261017-1 ") < all.find("20261017-4 "));   // by start time
 
-    const std::string missions = answer_episodes(st, at(10, 30), {}, "", "mission", "");
-    show("episodes(since 10:30, kind mission)", missions);
+    const std::string missions = answer_episodes(st, at(10, 30), {}, "human", "mission", "");
+    show("episodes(since 10:30, human, kind mission)", missions);
     CHECK(has(missions, "1 episode today"));
     CHECK(has(missions, "go to the kitchen"));
-    CHECK(not has(missions, "explore"));   // kind "explore" is not "mission"
+    const std::string self_missions = answer_episodes(st, {}, {}, "self", "mission", "");
+    CHECK(has(self_missions, "1 episode today") and has(self_missions, "20261017-5"));
 
     const std::string selfs = answer_episodes(st, {}, at(12, 0), "self", "", "");
     CHECK(has(selfs, "1 episode today") and has(selfs, "claim open door_27"));   // until exclusive: 12:00 not in
@@ -164,7 +168,7 @@ int main()
 
     // ── the STATE line ──
     CHECK(not today_digest_line(absent).has_value());
-    CHECK(today_digest_line(empty) == "today: no missions today");
+    CHECK(not today_digest_line(empty).has_value());   // the tools say "not available" here: the STATE agrees
     CHECK(today_digest_line(st) == "today: 2 missions (1 succeeded); last: go to the kitchen → room_3");
 
     std::println("test_em: {} checks, {} failures", checks, failures);
