@@ -82,6 +82,21 @@ for c in "${CASES[@]}"; do
     [[ -x ${cmd%% *} ]] || { echo "MISSING BINARY for $name: ${cmd%% *}"; exit 1; }
 done
 
+# ★ PINNED INPUT STATE. reloc_selftest restores the motion calibrator from etc/motion_calib_state.csv, a file
+#   the LIVE agent rewrites on every run (try46, 2026-10-17: 80 -> 226 measurements), so the oracle drifted
+#   with no code change. The recorded copy lives beside the outputs; it is swapped in for the run and the
+#   live file is put back on exit, whatever happens.
+PINNED=(etc/motion_calib_state.csv)
+for f in "${PINNED[@]}"; do
+    snap=$ORACLE/pinned_$(basename "$f")
+    if (( record )); then cp "$f" "$snap"; fi
+    [[ -f $snap ]] || { echo "no pinned copy $snap — run with --record"; exit 1; }
+    cp "$f" "$WORK/live_$(basename "$f")"
+    cp "$snap" "$f"
+done
+restore_pinned() { for f in "${PINNED[@]}"; do cp "$WORK/live_$(basename "$f")" "$f"; done; }
+trap restore_pinned EXIT
+
 echo "running ${#CASES[@]} cases ..."
 for c in "${CASES[@]}"; do
     IFS='|' read -r name envs cmd <<< "$c"

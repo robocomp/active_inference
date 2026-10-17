@@ -16,9 +16,9 @@ Where the gradient check is valid (same Jacobians, three sample points)
   optimum + 15 cm / 60 mrad (far)                PASS   rel err = 5.890e-02
 
 Recovery from a perturbed start (LM, max 10 iterations)
-  converged and improved                         PASS   start 0.03m/0.010rad -> 0.2mm/0.0000rad, loss 0.1981->0.0070, 3 it (0 rej), 0.10 ms
-  converged and improved                         PASS   start 0.13m/0.050rad -> 0.2mm/0.0000rad, loss 3.2738->0.0070, 4 it (0 rej), 0.12 ms
-  converged and improved                         PASS   start 0.32m/0.120rad -> 0.2mm/0.0000rad, loss 22.0398->0.0070, 10 it (6 rej), 0.29 ms
+  converged and improved                         PASS   start 0.03m/0.010rad -> 0.2mm/0.0000rad, loss 0.1981->0.0070, 3 it (0 rej), 0.20 ms
+  converged and improved                         PASS   start 0.13m/0.050rad -> 0.2mm/0.0000rad, loss 3.2738->0.0070, 4 it (0 rej), 0.25 ms
+  converged and improved                         PASS   start 0.32m/0.120rad -> 0.2mm/0.0000rad, loss 22.0398->0.0070, 10 it (6 rej), 0.59 ms
 
 SE(2) preintegration
   mean matches the legacy integration            PASS   d = [-0.143030, 0.173531, 0.400000]

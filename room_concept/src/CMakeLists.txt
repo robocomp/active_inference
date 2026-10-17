@@ -75,6 +75,20 @@ set(RC_ESTIMATOR_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/room_model.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_obs_weights.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_diagnostics.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_reloc_bootstrap.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_reloc.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_wall_slam.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_wall_slam_after.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_update.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_motion_prior.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_prediction.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_odometry_window.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_early_exit.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_solve.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_image_edge.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_mount.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_window.cpp
   ${CMAKE_CURRENT_LIST_DIR}/reloc_search.cpp
   ${CMAKE_CURRENT_LIST_DIR}/door_apertures.cpp
   ${CMAKE_CURRENT_LIST_DIR}/object_anchor_factor.cpp

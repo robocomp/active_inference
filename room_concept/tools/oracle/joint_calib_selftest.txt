@@ -13,7 +13,7 @@
   [PASS] limit sigma_h -> 0: joint == chained
   [PASS] re-anchored camera evidence + lidar_yaw_applied == the unrotated solution
   [PASS] a refused camera block changes nothing
-  monitor wrote /tmp/joint_calib_selftest_out/joint_2026-10-17_13-42-54.csv (3 rows)
+  monitor wrote /tmp/joint_calib_selftest_out/joint_2026-10-17_20-15-32.csv (3 rows)
   [PASS] monitor CSV: header and rows as the report expects
 ALL PASS (0 failures)
 [exit 0]
