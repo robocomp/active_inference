@@ -81,6 +81,25 @@ def fit(own, bg, logr_pairs=None):
     for nm, M in (("cov_own", cov_own_fit), ("cov_n", cov_n_fit)):
         ev = np.linalg.eigvalsh(M)
         if ev.min() <= 0: print(f"WARNING: fitted {nm} not positive definite: {ev}")
+    # Two roles of "cov_n" (controller ruling): fit_noise measures the EXCESS covariance of small masks. Branch on
+    # whether that excess is positive definite.
+    #  * PD excess: the data support a mask-size term; write cov_n = excess and quality_px_scale = best scale.
+    #  * not PD: the excess is not supported (here: covariance is flat in mask size). cov_n then keeps its phase-1
+    #    meaning, the per-view scatter used by the prototype-uncertainty term, i.e. cov_n = cov_own, and
+    #    quality_px_scale is NOT written (stays the flagged AtlasParams default). The finding goes in the header.
+    ev_n = np.linalg.eigvalsh(cov_n_fit)
+    excess_ok = bool(ev_n.min() > 0)
+    px_lo, px_hi = float(near[:, 3].min()), float(near[:, 3].max())
+    edge = bool(px_scale >= 50000 * (1 - 1e-9) or px_scale <= 100 * (1 + 1e-9))
+    if excess_ok:
+        noise_header = f"noise model: cov(px) = cov_own + cov_n (1-q)/q, q = 1-exp(-px/quality_px_scale); bands={nb}, sse={sse:.3g}"
+        cov_n_out, scale_out = cov_n_fit, {"quality_px_scale": px_scale}
+    else:
+        noise_header = (f"noise vs mask size: excess term NOT supported by the data over px [{px_lo:.0f}, {px_hi:.0f}] "
+                        f"(fitted excess cov eigenvalues {ev_n[0]:.3g}, {ev_n[1]:.3g}; best scale {px_scale:.0f} at grid edge = "
+                        f"{'yes' if edge else 'no'}; bands={nb}, sse={sse:.3g}); cov_n = per-view scatter, "
+                        f"quality_px_scale left at its flagged default")
+        cov_n_out, scale_out = cov_own_fit, {}
     mu_bg = bg[:, 1:3].mean(0); cov_bg = np.cov(bg[:, 1:3].T)
     sd = math.sqrt(cov_own_fit[0, 0]); drop = max(mu0 - mubg_d_curve, 1e-6)
     ratio = sd / drop
@@ -94,12 +113,11 @@ def fit(own, bg, logr_pairs=None):
     else:
         a = max(np.mean(mu0 - logr_pairs[:, 1]), 1e-6) / max(np.mean(logr_pairs[:, 0] ** 2), 1e-6)
         repeat_logr = float(math.sqrt(sd / a))
-    return dict(_repeat_ratio=ratio, _noise_header=f"bands={nb}, sse={sse:.3g}", ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
+    return dict(_repeat_ratio=ratio, _noise_header=noise_header, ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
                 mu_own_d=mu_own[0], mu_own_c=mu_own[1], mu_bg_d=mu_bg[0], mu_bg_c=mu_bg[1],
                 cov_own_dd=cov_own_fit[0, 0], cov_own_dc=cov_own_fit[0, 1], cov_own_cc=cov_own_fit[1, 1],
                 cov_bg_dd=cov_bg[0, 0], cov_bg_dc=cov_bg[0, 1], cov_bg_cc=cov_bg[1, 1],
-                cov_n_dd=cov_n_fit[0, 0], cov_n_dc=cov_n_fit[0, 1], cov_n_cc=cov_n_fit[1, 1],
-                quality_px_scale=px_scale)
+                cov_n_dd=cov_n_out[0, 0], cov_n_dc=cov_n_out[0, 1], cov_n_cc=cov_n_out[1, 1], **scale_out)
 
 def logr_pairs(v, S):
     """Same object, near-equal bearing (< 5 deg), >= 10 s apart (as the own pairs), different range:
@@ -148,7 +166,7 @@ def main():
                 f"# dataset: {os.path.abspath(a.dataset)} ({len(v)} views, {v.inst.nunique()} objects)\n"
                 f"# pairs: own {len(own)}, background {len(bg)}\n"
                 f"# dataset: stride={stride}\n"
-                f"# noise model: cov(px) = cov_own + cov_n (1-q)/q, q = 1-exp(-px/quality_px_scale); {nh}\n"
+                f"# {nh}\n"
                 f"# repeat derivation: sd/drop = {ratio:.6g}\n")
         for key, val in k.items(): f.write(f"{key} = {val:.9g}\n")
     print(open(a.out).read())
