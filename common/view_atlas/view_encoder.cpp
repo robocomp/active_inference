@@ -48,6 +48,13 @@ std::optional<Eigen::VectorXf> ViewEncoder::encode(const cv::Mat& rgb224) const
         const char* in_names[] = {"pixel_values"};
         const char* out_names[] = {"embedding"};
         auto outs = session_->Run(Ort::RunOptions{nullptr}, in_names, &in, 1, out_names, 1);
+        const auto n_out = outs[0].GetTensorTypeAndShapeInfo().GetElementCount();
+        if (n_out != 384)
+        {
+            static bool logged = false;
+            if (not logged) { logged = true; std::println("[ViewEncoder] unexpected output size {}", n_out); }
+            return std::nullopt;
+        }
         const float* o = outs[0].GetTensorData<float>();
         Eigen::VectorXf v = Eigen::Map<const Eigen::VectorXf>(o, 384);
         const float n = v.norm();

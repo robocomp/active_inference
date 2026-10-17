@@ -1,6 +1,6 @@
 # View Atlas — per-object appearance memory for visual re-identification
 
-Design spec, 2026-10-17. Status: **APPROVED DESIGN, NOT BUILT.** Nothing in this directory compiles yet.
+Design spec, 2026-10-17. Status: **phase 1 BUILT and tested** (module, archive IO, crop/encoder, tools, fitted constants, offline replay); the four offline replay criteria **FAILED** (see §8); phase 2 (agent integration) not started.
 
 A concept agent keeps, for every object it owns, a small map from **viewing direction in the object's
 own frame** to **expected appearance**, filled in as the robot moves around the object. The map lets the
@@ -236,19 +236,31 @@ the descriptors were chosen to ignore. A per-bin stored thumbnail covers the dis
 
 Dataset: `retina/etc/view_atlas_dataset` (2715 views, 14 physical objects), constants `view_atlas_constants.txt`.
 Criteria were declared before the run (§6). **Verdict: A, B, C, D all FAIL.** The criteria and constants were not
-touched to obtain a result; the numbers below are exactly what `atlas_replay` printed (exit code 1).
+touched to obtain a result. The primary table below is the corrected (repeat-discounted, §8.1) run, which is what
+`atlas_replay` prints now (exit code 1); the first, undiscounted run is kept further down as superseded.
 
-| Check | Criterion | Result |
+| Check | Criterion | Result (current code) |
 |---|---|---|
-| A. chair swaps | < 1 % | 7 / 518 = 1.35 % (FAIL; unchanged by the fix round) |
-| B. re-ID, yellow moved / magenta stayed | ≥ 95 % each, other chair ≤ 2 % | yellow (`Chair`, moved) 37 / 53 = 69.8 %, magenta (`chair(1)`, stayed) 20 / 20 = 100.0 %; other chair chosen 0.0 % (FAIL: yellow below 95 %) |
-| B (info, yaw unknown, not graded) | — | yellow 43 / 53 = 81.1 %, magenta 20 / 20 = 100.0 %, other chair 0.0 % |
-| C. encodings per object-minute | ≤ 60 (expect ≤ 30) | worst 1000.0 /min (FAIL), but NOT MEASURABLE on this data: see below |
-| D. calibration | ±0.1 per bin with ≥ 20 decisions | [0.5,0.7) n=4 mean p 0.627 acc 0.250; [0.7,0.9) n=5 mean p 0.828 acc 0.400; [0.9,1.0] n=64 mean p 0.996 acc 0.844 (gap 0.152; only this bin has ≥ 20 decisions) (FAIL) |
+| A. chair swaps | < 1 % | 7 / 518 = 1.35 % (FAIL) |
+| B. re-ID, yellow moved / magenta stayed (yaw known) | >= 95 % each, other chair <= 2 % | yellow (`Chair`, moved) 15 / 53 = 28.3 %, magenta (`chair(1)`, stayed) 20 / 20 = 100.0 %; other chair chosen 0.0 % (FAIL) |
+| B (info, yaw unknown, not graded) | none | yellow 21 / 53 = 39.6 %, magenta 20 / 20 = 100.0 %, other chair 0.0 % |
+| C. encodings per object-minute | <= 60 (expect <= 30) | worst 1000.0 /min (FAIL), but NOT MEASURABLE on this data: see below |
+| D. calibration | +-0.1 per bin with >= 20 decisions | [0.5,0.7) n=20 mean p 0.598 acc 0.300 (gap 0.298); [0.7,0.9) n=21 mean p 0.779 acc 0.333 (gap 0.446); [0.9,1.0] n=32 mean p 0.983 acc 0.688 (gap 0.295) (FAIL, all three bins overconfident) |
+
+Superseded: the first run, **as run, superseded by the repeat-discount fix** (§8.1; it summed the five per-frame
+log-ratios of a window raw):
+
+| Check | As run (undiscounted, superseded) |
+|---|---|
+| B, yaw known | yellow 37 / 53 = 69.8 %, magenta 20 / 20 = 100.0 %, other chair 0.0 % |
+| B info, yaw unknown | yellow 43 / 53 = 81.1 %, magenta 20 / 20, other 0.0 % |
+| D | [0.5,0.7) n=4, p 0.627, acc 0.250; [0.7,0.9) n=5, p 0.828, acc 0.400; [0.9,1.0] n=64, p 0.996, acc 0.844 (gap 0.152; only this bin has >= 20 decisions) |
+
+A and C do not use windows and did not change.
 
 Reading of the results (not a change of criteria):
 
-- B: the 16 yellow windows that failed were never assigned to the *other chair* (0.0 %); the MAP was the "new object"
+- B: the yellow windows that failed were never assigned to the *other chair* (0.0 %); the MAP was the "new object"
   hypothesis, i.e. the moved chair was not recognised as the archived one.
 - C: the `frames` recording is a sparse sampling of an apartment tour (267 distinct stamps, 647 object views, spread over
   ~11 days of wall clock with one 868 000 s gap). First-to-last stamp therefore gives ~16 000 min per object and
@@ -258,29 +270,75 @@ Reading of the results (not a change of criteria):
   consecutive sparse views are far apart in bearing, so each carries high learning value. A continuous recording is
   needed to grade C.
 
+**Harness assumptions that shape B and D** (hand-set in `atlas_replay.cpp`; spec §3.4 says the "new" prior should come
+from the class birth rate):
+
+- priors: new = 0.5, each chair = 0.25; `pose_cov` = (5 cm)^2; room area 60 m^2. With zero appearance evidence these give
+  p(new) ~ 0.83, so yellow windows on an unseen side become confident "new" answers.
+- magenta's 20 / 20 is carried by LOCATION (its position is the exact ground-truth centroid, about a 7.6-nat margin) and
+  says nothing about appearance.
+- windows are disjoint blocks of 5 consecutive views, not every 5-view window as the criterion text says.
+- the fitted repeat scale is ill-conditioned: `fit_constants.py` derives `repeat_ell_rad` from sd/drop = 0.786 (>= 0.5
+  warns; the value is recorded in the constants header). It is a derived number, not a robust fit.
+
 ### 8.1 Fix round 1: window evidence counted in views (corrected B and D)
 
-The first run (table above, "as run") summed the five per-frame log-ratios of a window raw. Evidence counts in views and
+The first run (the superseded table in §8) summed the five per-frame log-ratios of a window raw. Evidence counts in views and
 repeat looks add about nothing (§4, §5), and the five frames of a window are mostly repeats, so that run counted the same
 look about five times. The module now has `pose_kernel` (the repeat kernel `update()` uses) and `log_ratio_window`, which
 discounts each view by its redundancy with the window's earlier views; the harness B and D use it. Only B and D change
 (A and C do not use windows). The two runs differ for that reason alone; criteria, constants and dataset are unchanged.
 
-| Check | As run (undiscounted) | Corrected (view-discounted) |
+The task review's own recomputation gave 26/53 for the yellow chair; the harness prints 15/53. The log-range term of the
+kernel is inert here (all orbit ranges are 1.0). The difference comes from the fitted `repeat_ell_rad` = 0.758 rad (43 deg)
+against a 5 deg frame spacing, which makes a window of 5 views count as about 1 view.
+
+OPEN FINDING (measured; leading candidate: coverage). With the yaw labels given, the moved chair is not recognised. The
+argmax over the 12 shifts of its lap-1 log-ratio peaks at shifts 9-10 (54 and 62 of 268 views; mean log-ratio 1.78 / 1.83
+against 1.21 at shift 0), i.e. 60-90 degrees off the labelled yaw, whereas `chair(1)` (stayed) peaks at shift 0 (59 of 103
+views). The yaw labels were verified against `zed_orbit_recorder.py:84` and `piso_orbits.wbt:1566`.
+
+Measured bearing histograms (views per 12 bins of 30 deg, from -180):
+
+| | bins |
+|---|---|
+| Chair lap 0 (archive) | 1, 3, 5, 12, 18, 56, 116, 37, 2, 0, 0, 0 |
+| Chair lap 1 (test) | 26, 9, 7, 7, 12, 25, 27, 23, 25, 36, 40, 31 |
+| chair(1) lap 0 | 43, 47, 135, 26, 7, 0, 1, 4, 0, 0, 3, 4 |
+| chair(1) lap 1 | 40, 22, 8, 12, 6, 0, 6, 3, 0, 0, 2, 4 |
+
+About 62 % of the moved chair's lap-1 views fall on sides the archive never saw, where the information weight Lambda goes
+to 0 by design (§3.2). Shifts 9-10 map those views onto the populated bins, which is where the shift argmax peaked.
+chair(1)'s lap-1 views fall on bins already seen in lap 0 (peak at shift 0).
+
+Gap-band table (yaw known, informative, not graded): window gap = angular distance from the first view's object-frame
+bearing to the nearest populated bin of the correct chair's archive atlas.
+
+| gap band | Chair (moved): n, re-ID | chair(1) (stayed): n, re-ID |
 |---|---|---|
-| B, yaw known | yellow 37/53 = 69.8 %, magenta 20/20, other chair 0.0 % | yellow 15/53 = 28.3 %, magenta 20/20 = 100.0 %, other chair 0.0 % (FAIL) |
-| B info, yaw unknown | yellow 43/53 = 81.1 %, magenta 20/20, other 0.0 % | yellow 21/53 = 39.6 %, magenta 20/20 = 100.0 %, other 0.0 % |
-| D [0.5,0.7) | n=4, mean p 0.627, acc 0.250 | n=20, mean p 0.598, acc 0.300 (gap 0.298) |
-| D [0.7,0.9) | n=5, mean p 0.828, acc 0.400 | n=21, mean p 0.779, acc 0.333 (gap 0.446) |
-| D [0.9,1.0] | n=64, mean p 0.996, acc 0.844 | n=32, mean p 0.983, acc 0.688 (gap 0.295) |
-| D verdict | FAIL | FAIL (all three bins now have >= 20 decisions and all are overconfident) |
+| [0,15) deg | 26, 46.2 % | 15, 100.0 % |
+| [15,45) deg | 14, 14.3 % | 5, 100.0 % |
+| [45,90) deg | 13, 7.7 % | 0 |
+| [90,180] deg | 0 | 0 |
 
-(The task review's own recomputation gave 26/53 for the yellow chair; this table is what `atlas_replay` printed with the
-module's `log_ratio_window`, whose kernel includes the log-range term as well as the bearing term.)
+Decisions per posterior band by window colour (info): [0.5,0.7) yellow 20 / magenta 0; [0.7,0.9) yellow 21 / 0;
+[0.9,1.0] yellow 12 / magenta 20.
 
-OPEN FINDING (measured, cause not established): with the yaw labels given, the moved chair is not recognised, and the
-yaw is the suspect. The argmax over the 12 shifts of the moved chair's log-ratio in lap 1 peaks at shifts 9-10 (54 and 62
-of 268 views; mean log-ratio 1.78 / 1.83 against 1.21 at shift 0), i.e. 60-90 degrees off the labelled yaw, whereas
-`chair(1)` (stayed) peaks at shift 0 (59 of 103 views). The yaw labels were verified against
-`zed_orbit_recorder.py:84` and `piso_orbits.wbt:1566`. Candidate explanations, none verified: the object-frame
-convention for a moved PROTO; how `bin.bearing` is formed; occlusion by `desk(1)`.
+Re-ID accuracy of the moved chair falls monotonically with the gap (46 %, 14 %, 8 %), so the cause is most likely
+coverage, consistent with the gap-band table. Even in the smallest band the moved chair reaches only 46 %, so coverage
+alone does not explain every miss; that remainder is not explained.
+
+## 9. Before phase 2 (open)
+
+(a) **The live mask producer is decimated.** `retina/src/graph_publisher.cpp` pushes every second pixel
+    (`VOXEL_DECIMATION_FACTOR = 2`, `retina_params.h`), so `make_crop` on live masks blanks about 3/4 of the object into a
+    lattice and `mask_px` / `trunc_frac` come out about 4x wrong. The dataset used dense masks. This must be settled
+    (stride-aware dilation/closing, or a stride-1 publication) and pinned by a golden crop test against the Python mirror
+    before any live run.
+(b) **H_k covariance.** The code blends cov_bg to cov_own by R with Sigma_n only as view-quality noise, the fitter sets
+    cov_n = cov_own, and the effective gap is the nearest populated bin. Sections 3.2 and 3.5 say Sigma_own + Sigma_n / N(beta),
+    with Sigma_n fitted per pixel-count bin and the gap from kernel weights. The USER must rule whether to change the spec
+    or the code.
+(c) **Repeat check scope.** It looks only at the current bin's poses; with repeat_ell 43 deg > bin width 30 deg this biases
+    counts at bin edges.
+(d) **The archive save is non-atomic.** Fix before any live writer.

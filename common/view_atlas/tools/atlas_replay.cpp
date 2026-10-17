@@ -10,7 +10,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <iomanip>
 #include <map>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -62,6 +65,7 @@ int main(int argc, char** argv)
     std::filesystem::create_directories(argv[3]);
     std::ofstream log(std::string(argv[3]) + "/replay_views.csv");
     log.imbue(std::locale::classic());
+    log << std::setprecision(std::numeric_limits<float>::max_digits10);
     log << "view_id,inst,lap,bearing,quality,learning_value,encoded,lr_own,lr_rival\n";
 
     auto obs_of = [&](const Row& r) {
@@ -133,7 +137,9 @@ int main(int argc, char** argv)
     const float room_area = 60.f;                               // apartment free space (rooms.json id 0: 60.41 m^2)
     const Eigen::Matrix2f pose_cov = Eigen::Matrix2f::Identity() * 0.05f * 0.05f;
     const float log_prior_new = std::log(0.5f), log_prior_k = std::log(0.25f);
-    struct Dec { float p; bool right; };
+    struct Dec { float p; bool right; bool yellow; };
+    struct Win { std::string truth; float gap_deg; bool right; };
+    std::vector<Win> wins;
     std::vector<Dec> decisions;
     bool b_ok = true;
     for (const auto* yaw_w : {&known_yaw, &unknown_yaw})
@@ -163,7 +169,11 @@ int main(int argc, char** argv)
                 auto& cr = correct[truth]; ++cr.second; if (map == want) ++cr.first;
                 if (map < chairs.size() and map != want) ++wrong_chair;
                 ++total_windows;
-                if (known) decisions.push_back({post[map], map == want});
+                if (known)
+                {
+                    decisions.push_back({post[map], map == want, truth == "Chair"});
+                    wins.push_back({truth, atlas.at(truth).gap(bearing_of(*lap1[w0])) * 180.f / std::numbers::pi_v<float>, map == want});
+                }
             }
         }
         bool ok = true;
@@ -181,13 +191,37 @@ int main(int argc, char** argv)
                     known ? "B." : "  (info)", known ? "known" : "unknown", 100.f * wrong_rate, ok ? "PASS" : "FAIL");
     }
 
+    // ── coverage-stratified view of the yaw-known run (info, not graded) ──────────────────────────
+    {
+        std::printf("   coverage by gap band, yaw known (info, not graded): window gap = angular distance from its first view's\n"
+                    "   bearing to the nearest populated bin of the correct chair's archive atlas\n");
+        const std::pair<float, float> gb[] = {{0.f, 15.f}, {15.f, 45.f}, {45.f, 90.f}, {90.f, 180.001f}};
+        for (auto [lo, hi] : gb)
+        {
+            std::printf("   gap [%3.0f,%3.0f) deg:", lo, hi);
+            int tn = 0, tr = 0;
+            for (const auto& c : chairs)
+            {
+                int n = 0, rt = 0;
+                for (const auto& w : wins) if (w.truth == c and w.gap_deg >= lo and w.gap_deg < hi) { ++n; rt += w.right; }
+                tn += n; tr += rt;
+                if (n) std::printf("  %-9s n=%2d re-ID %5.1f %%", c.c_str(), n, 100.f * float(rt) / float(n));
+                else   std::printf("  %-9s n= 0 re-ID   -  ", c.c_str());
+            }
+            std::printf("  | all n=%d %s\n", tn, tn ? (std::to_string(100.f * float(tr) / float(tn)).substr(0, 5) + " %").c_str() : "-");
+        }
+    }
+
     bool d_ok = true;
     const std::pair<float, float> bands[] = {{0.5f, 0.7f}, {0.7f, 0.9f}, {0.9f, 1.0001f}};
     for (auto [lo, hi] : bands)
     {
         float ps = 0.f, rs = 0.f; int n = 0;
         for (const auto& dd : decisions) if (dd.p >= lo and dd.p < hi) { ps += dd.p; rs += dd.right; ++n; }
+        int ny = 0, nm = 0;
+        for (const auto& dd : decisions) if (dd.p >= lo and dd.p < hi) { if (dd.yellow) ++ny; else ++nm; }
         if (n == 0) { std::printf("   posterior [%.1f,%.1f): no decisions\n", lo, hi); continue; }
+        std::printf("   (info, not graded) posterior [%.1f,%.1f) decisions from yellow windows %d, magenta windows %d\n", lo, hi, ny, nm);
         const float gap = std::fabs(ps / float(n) - rs / float(n));
         if (n >= 20) d_ok = d_ok and gap <= 0.1f;
         std::printf("   posterior [%.1f,%.1f): n=%d mean p %.3f, accuracy %.3f\n", lo, hi, n, ps / float(n), rs / float(n));

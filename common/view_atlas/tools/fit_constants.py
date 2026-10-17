@@ -62,6 +62,10 @@ def fit(own, bg, logr_pairs=None):
     mu_own = near[:, 1:].mean(0); cov_own = np.cov(near[:, 1:].T)
     mu_bg = bg[:, 1:].mean(0); cov_bg = np.cov(bg[:, 1:].T)
     sd = math.sqrt(cov_own[0, 0]); drop = max(mu0 - mubg_d_curve, 1e-6)
+    ratio = sd / drop
+    if ratio >= 0.5:
+        print(f"WARNING: repeat derivation ill-conditioned: sd/drop = {ratio:.3f}" +
+              ("; >= 1: undefined, repeat_ell_rad is a clamp artefact" if ratio >= 1 else ""))
     repeat = ell * math.sqrt(-2 * math.log(max(1 - sd / drop, 1e-6)))
     # small-step model s(x) = mu0 - a x^2 in x = |log range ratio|; a repeat is a step whose drop a x^2 < sd
     if logr_pairs is None or len(logr_pairs) < 20:
@@ -69,7 +73,7 @@ def fit(own, bg, logr_pairs=None):
     else:
         a = max(np.mean(mu0 - logr_pairs[:, 1]), 1e-6) / max(np.mean(logr_pairs[:, 0] ** 2), 1e-6)
         repeat_logr = float(math.sqrt(sd / a))
-    return dict(ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
+    return dict(_repeat_ratio=ratio, ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
                 mu_own_d=mu_own[0], mu_own_c=mu_own[1], mu_bg_d=mu_bg[0], mu_bg_c=mu_bg[1],
                 cov_own_dd=cov_own[0, 0], cov_own_dc=cov_own[0, 1], cov_own_cc=cov_own[1, 1],
                 cov_bg_dd=cov_bg[0, 0], cov_bg_dc=cov_bg[0, 1], cov_bg_cc=cov_bg[1, 1],
@@ -107,10 +111,12 @@ def main():
     v, S, C = load(a.dataset); rng = np.random.default_rng(0)
     own, bg = pairs(v, S, C, rng)
     k = fit(own, bg, logr_pairs(v, S))
+    ratio = k.pop("_repeat_ratio")
     with open(a.out, "w") as f:
         f.write(f"# view_atlas constants, fitted {datetime.date.today()} by fit_constants.py\n"
                 f"# dataset: {os.path.abspath(a.dataset)} ({len(v)} views, {v.inst.nunique()} objects)\n"
-                f"# pairs: own {len(own)}, background {len(bg)}\n")
+                f"# pairs: own {len(own)}, background {len(bg)}\n"
+                f"# repeat derivation: sd/drop = {ratio:.6g}\n")
         for key, val in k.items(): f.write(f"{key} = {val:.9g}\n")
     print(open(a.out).read())
 

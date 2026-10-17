@@ -1,6 +1,7 @@
 # view_atlas constants, fitted 2026-10-17 by fit_constants.py
 # dataset: /home/pbustos/robocomp/components/active_inference.worktrees/view-atlas/retina/etc/view_atlas_dataset (2715 views, 14 objects)
 # pairs: own 23941, background 1161
+# repeat derivation: sd/drop = 0.78633
 ell_rad = 0.431296715
 repeat_ell_rad = 0.75773914
 repeat_ell_logr = 0.662996043
