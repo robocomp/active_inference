@@ -9,9 +9,14 @@
  * `current_intention` (mission_json.h) and is shown to people as a DSL (mission_text.h). Both syntaxes are
  * driven by the registry below, so an op cannot exist in one place and not another.
  *
- * ★ OPS MAP TO CONTROLLER MECHANISMS, NOT TO OBJECT TYPES (door passage, point target, selector prior, orient, wait,
- *   relative motion). A new concept agent becomes reachable without an IR change; ops multiplying per object type is
- *   the failure mode this registry exists to prevent.
+ * ★ THE IR STATES GOALS OVER OUTCOMES AND BELIEFS; OBJECT-SPECIFIC ACTIONS BELONG TO THE PRODUCERS (§7.1, §7.6).
+ *   Which action is possible on which object, with what preconditions and expected information gain, is the
+ *   producer's knowledge (the affordance protocol); which offer to take is the selector's choice. An op is justified
+ *   only by a controller mechanism the selector cannot reach through a goal prior (point target, relative motion,
+ *   wait, …). So a new concept agent is reachable without an IR change, and so is exploring an UNKNOWN object by
+ *   manipulating it — the mission says `learn obj_12 until gain < x`, never which push or grasp to try.
+ *   `cross` and `open` are LEGACY by this rule: door-specific verbs kept for Phase 1, to be replaced by
+ *   `achieve in_room(R)` / `achieve door_open(D)` with door_concept owning the sequence (L4).
  *
  * ★ COMPATIBILITY (§7.1): an unknown op / ref kind / predicate rejects the WHOLE mission before anything moves; an
  *   unknown optional field is ignored; a field listed in `requires_fields` that this build does not know rejects;
@@ -157,8 +162,11 @@ struct Error
 
 enum class FieldType { Number, Integer, String, Ref, Pred };
 
-/// Who a step occupies while it runs. At most one step owns the base (a future `parallel` relies on it, §7.4).
-enum class Resource { Base, Observer, Instant, Composite };
+/// What a step occupies while it runs, as a SET: at most one running step owns each resource (a future `parallel`
+/// relies on it, §7.4). Manipulation claims the arm and gripper separately from the base (§7.6). A composite claims
+/// what its body claims (claims_of); an op that claims nothing either completes at once (instant) or observes.
+using Resources = std::uint8_t;
+inline constexpr Resources kNone = 0, kBase = 1u << 0, kArm = 1u << 1, kGripper = 1u << 2;
 
 struct FieldSpec
 {
@@ -173,7 +181,8 @@ struct FieldSpec
 struct OpSpec
 {
     std::string_view name;
-    Resource resource;
+    Resources claims;   ///< what the step owns while it runs (kNone for composites: see claims_of)
+    bool instant;       ///< completes in the cycle it starts (say, anchor, stop)
     bool has_body;
     std::vector<FieldSpec> fields;
     std::optional<Error> (*check)(const Step&) = nullptr;   ///< constraints across fields
@@ -220,41 +229,43 @@ constexpr std::uint8_t kNode = kind_bit(Ref::Kind::Node);
 constexpr std::uint8_t kPlace = kind_bit(Ref::Kind::Anchor) | kind_bit(Ref::Kind::Pose);
 }   // namespace detail
 
-/// Phase-1 ops (doc §6.2 + amendment 3). Adding an op = one entry here + its interpreter case.
+/// Phase-1 ops (doc §6.2 + amendment 3). Adding an op = one entry here + its interpreter case — and first ask
+/// whether it is a goal a producer could serve instead (§7.6).
 inline const std::vector<OpSpec>& ops()
 {
     using enum FieldType;
     using namespace detail;
     static const std::vector<OpSpec> table = {
-        {.name = "seq", .resource = Resource::Composite, .has_body = true, .fields = {}},
-        {.name = "repeat", .resource = Resource::Composite, .has_body = true,
+        {.name = "seq", .claims = kNone, .instant = false, .has_body = true, .fields = {}},
+        {.name = "repeat", .claims = kNone, .instant = false, .has_body = true,
          .fields = {{.name = "times", .type = Integer, .positional = true},
                     {.name = "until", .type = Pred},
                     {.name = "budget_s", .type = Number, .positive = true}},
          .check = check_repeat},
-        {.name = "cross", .resource = Resource::Base, .has_body = false,
+        // LEGACY door verbs (§7.6): kept for Phase 1; `achieve` + door_concept's offers replace them.
+        {.name = "cross", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor, .positional = true},
                     {.name = "expect", .type = String}}},
-        {.name = "open", .resource = Resource::Base, .has_body = false,
+        {.name = "open", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor, .positional = true}}},
-        {.name = "go_to", .resource = Resource::Base, .has_body = false,
+        {.name = "go_to", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "to", .type = Ref, .required = true, .ref_kinds = kPlace, .positional = true},
                     {.name = "standoff_m", .type = Number, .positive = true}}},
-        {.name = "explore", .resource = Resource::Base, .has_body = false,
+        {.name = "explore", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode, .positional = true},
                     {.name = "until", .type = Pred},
                     {.name = "budget_s", .type = Number, .required = true, .positive = true}}},
-        {.name = "wait", .resource = Resource::Base, .has_body = false,
+        {.name = "wait", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "s", .type = Number, .positive = true}, {.name = "until", .type = Pred}},
          .check = check_wait},
-        {.name = "say", .resource = Resource::Instant, .has_body = false,
+        {.name = "say", .claims = kNone, .instant = true, .has_body = false,
          .fields = {{.name = "text", .type = String, .required = true, .positional = true}}},
-        {.name = "anchor", .resource = Resource::Instant, .has_body = false,
+        {.name = "anchor", .claims = kNone, .instant = true, .has_body = false,
          .fields = {{.name = "name", .type = String, .required = true, .positional = true}}},
-        {.name = "move", .resource = Resource::Base, .has_body = false,
+        {.name = "move", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "distance_m", .type = Number}, {.name = "turn_deg", .type = Number}},
          .check = check_move},
-        {.name = "stop", .resource = Resource::Instant, .has_body = false, .fields = {}},
+        {.name = "stop", .claims = kNone, .instant = true, .has_body = false, .fields = {}},
     };
     return table;
 }
@@ -286,6 +297,15 @@ inline const std::vector<PredSpec>& preds()
     for (const auto& s : preds())
         if (s.name == name) return &s;
     return nullptr;
+}
+
+/// What a step owns while it runs: its op's claims, plus everything its body claims.
+[[nodiscard]] inline Resources claims_of(const Step& s)
+{
+    const OpSpec* spec = op_spec(s.op);
+    Resources r = spec != nullptr ? spec->claims : kNone;
+    for (const auto& child : s.steps) r |= claims_of(child);
+    return r;
 }
 
 /// Every field name this build understands (what `requires_fields` is checked against).

@@ -746,15 +746,19 @@ grounded.
 | New combinator | `parallel`, `for_each` | one interpreter node (the expensive case, §7.2) |
 | New optional field | `speed:"slow"` | the field and its default |
 
-**Rule: ops map to controller mechanisms, not to object types.** The mechanisms are few — door passage, point target,
-selector goal prior, orient, wait, relative motion. `look_at` works on any `aff_<x>` through `set_goal_prior`; there
-is no `look_at_table`. A new concept agent is then reachable from chat the day it publishes its affordance, with no IR
-change. Ops multiplying per object type is the failure mode to avoid.
+**Rule: the IR states goals over outcomes and beliefs; object-specific actions belong to the producers.** Which
+action is possible on which object, with what preconditions and expected information gain, is the producer's
+knowledge (the affordance protocol); which offer to take is the selector's choice. An op is justified only by a
+controller mechanism the selector cannot reach through a goal prior — point target, relative motion, wait. `look_at`
+works on any `aff_<x>` through `set_goal_prior`; there is no `look_at_table`. A new concept agent is then reachable
+from chat the day it publishes its affordance, with no IR change. *(Revised 2026-10-17: the first wording, "ops map to
+controller mechanisms, not to object types", read as a fixed verb applied to a known noun, which breaks for
+interactive perception — §7.6.)*
 
 **Mechanisms that keep the agents in agreement**
 
-1. **One registry, one source of truth.** Each op is one entry in `common/mission/` declaring its fields, resource
-   class (§7.4), validation, text form and JSON-schema fragment. The LLM schema, the resolver's validation, the
+1. **One registry, one source of truth.** Each op is one entry in `common/mission/` declaring its fields, the
+   resources it claims (§7.4), validation, text form and JSON-schema fragment. The LLM schema, the resolver's validation, the
    interpreter's dispatch, and the DSL parser/printer (§7.3) are all generated from that table, so an op cannot exist
    in one place and not another. Same reasoning as `common/world_query/door_query.h`, applied to the language.
 2. **Compatibility rules.**
@@ -824,7 +828,7 @@ block      := INDENT step+ DEDENT  ('else' INDENT step+ DEDENT)?
 value      := NUMBER unit? | STRING | NAME | ref | pred
 ref        := NAME                         -- a live node:            door_27, table_1, room_2
             | 'anchor:' NAME               -- a captured pose:        anchor:start
-            | 'passage:' NAME              -- resolved on arrival:    passage:passage_0
+            | 'passage:' NAME '@' NAME     -- resolved on arrival:    passage:passage_0@room_2
             | '$' NAME                     -- a binding (L1):         $found
 pred       := NAME '(' ref (',' ref)* ')' (('>=' | '<') NUMBER)?
 unit       := 's' | 'm' | 'deg'
@@ -834,7 +838,7 @@ unit       := 's' | 'm' | 'deg'
 mission "explore room_2 and return"
   cross door_27 expect=room_2 retry=2
   explore room_2 until=explored(room_2)>=0.9 budget=300s
-  cross passage:passage_0 from=room_2 expect=room_1 retry=2
+  cross passage:passage_0@room_2 expect=room_1 retry=2
   go_to anchor:start
 ```
 
@@ -859,8 +863,10 @@ Implement only the Phase-1 ops, but put these in the format from day one — add
 
 1. **A step id on every step** (`"1"`, `"2.3"`), used by `mission_progress`, `bind`, `ask` and replies.
 2. **`bind` / `{"var":…}` / `$name`** accepted by the grammar, rejected by v1's validation.
-3. **A resource class per op** (`base` · `observer` · `instant`) in the registry, so `parallel` can be added later
-   and the interpreter already enforces one owner of the base.
+3. **The resources each op claims, as a set** (`base` · `arm` · `gripper`, plus an `instant` flag) in the registry,
+   so `parallel` can be added later and the interpreter enforces one owner per resource. A composite claims the union
+   of its body. *(Revised 2026-10-17 from a single class with one owner of the base: manipulation claims the arm and
+   gripper separately — §7.6.)*
 4. **A mission-level `prefs` slot**, empty in v1.
 5. **The compatibility rules** of §7.1: whole-mission reject on unknown op/kind/predicate, unknown optional fields
    ignored, `requires`, `v`.
@@ -884,3 +890,63 @@ Agreed 2026-10-17:
 4. **The 3 s first-sight rule does not apply to a mission whose edge says `in_progress`**: a restarted controller
    resumes it rather than adopting its stamp. A protocol rule, so it belongs in v1 of the spec even if it is
    implemented in Phase 4.
+
+### 7.6 Interactive perception: where the action/object line really is (added 2026-10-17)
+
+**The edge.** Read literally, "ops map to mechanisms, not object types" assumes every object-directed act is a fixed
+verb applied to a known noun. Exploring an unknown object by manipulating it, to learn its *affordance signature*,
+breaks that three ways:
+
+1. **The affordance does not exist before the action.** Poking, pushing or lifting is how the robot finds out what
+   the object affords. A grounded ref needs a node, and `look_at` needs that node to offer an `aff_<x>` already; an
+   unknown object has neither a type nor an offer.
+2. **The right action depends on the object, and the mission author cannot choose it.** Where to push, which grasp,
+   how hard — these come from the object's uncertain geometry and the predicted information gain. A fixed `poke` op
+   with planning-time parameters puts that decision in the wrong place.
+3. **Action and object are defined together.** An affordance is a relation between agent and thing, not a property
+   of either. A grammar with verbs in one table and nouns in another has no place for "the action whose outcome tells
+   me what this object is".
+
+The Phase-1 registry already leaks the other way: `cross` and `open` are door-specific verbs.
+
+**The line that survives manipulation.** Not action vs. object, but:
+
+- the **mission** states *what it wants*: an outcome, or a belief made certain enough;
+- the **producers** own the coupling of actions to objects: which actions are possible on which thing, with what
+  preconditions, at what expected information gain;
+- the **selector** chooses which offer to take, and the **controller** executes it.
+
+That is the existing affordance protocol (producers offer, contracts define completion, the selector minimises G);
+the IR only has to address it at the right level.
+
+**Planned path** (all new ops and predicates — no wire change; the §7.1 compatibility rules cover them):
+
+| Addition | Meaning | Compiles to |
+|---|---|---|
+| `learn {target: Ref, belief?, until?, budget_s}` | reduce uncertainty about one node's belief | a goal prior on the epistemic affordances that target that node, whatever the producer offers |
+| `gain(node, belief) < nats` | remaining expected information gain of a belief (amendment 2, generalised) | a read of the producer's published gain |
+| `affords(node, kind) >= p` | the learnt signature: probability the node affords `kind` | a read of the signature on the node |
+| `achieve {pred}` (L4) | a declarative goal | a prior on the affordances whose completion clauses make `pred` true |
+
+Example — explore an unknown object and act on what was learnt:
+
+```
+mission "what is that"
+  learn obj_12 until=gain(obj_12, affordances)<0.1 budget_s=120s
+  if affords(obj_12, grasp)>=0.7
+    achieve near(obj_12, person_1)
+```
+
+A manipulation producer offers `aff_obj12_push(dir)`, `aff_obj12_lift`, … each with its expected gain about the
+signature; the selector picks among them. No manipulation verb appears in the IR.
+
+The same pattern unifies what exists: `explore room_2` is `learn room_2` (layout readiness = `gain(room_2, layout)`),
+and `cross door_19` becomes `achieve in_room(room_2)` with door_concept owning approach → open → cross. So the change
+that removes the door special case also removes the manipulation edge.
+
+**What is already in place.**
+- Refs are type-agnostic: `{"node":"obj_12"}` works for an object of unknown type. Missing, on the resolver side:
+  deictic references ("that thing", from what the robot sees or where the person points).
+- Resources are a set (§7.4 point 3): base, arm and gripper have one owner each.
+- `cross` and `open` are marked LEGACY in the registry.
+

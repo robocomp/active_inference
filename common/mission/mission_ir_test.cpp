@@ -92,11 +92,22 @@ int main()
         CHECK(again.has_value() and again.value() == m);
     }
 
-    // ── Resource class comes from the registry (one owner of the base; §7.4 point 3) ─────────────────────────────
-    CHECK(op_spec("cross") != nullptr and op_spec("cross")->resource == Resource::Base);
-    CHECK(op_spec("say") != nullptr and op_spec("say")->resource == Resource::Instant);
-    CHECK(op_spec("repeat") != nullptr and op_spec("repeat")->resource == Resource::Composite);
+    // ── Resources come from the registry as a SET (one owner per resource; §7.4 point 3, §7.6) ─────────────────
+    CHECK(op_spec("cross") != nullptr and op_spec("cross")->claims == kBase and not op_spec("cross")->instant);
+    CHECK(op_spec("wait") != nullptr and op_spec("wait")->claims == kBase);     // holding still is owning the base
+    CHECK(op_spec("say") != nullptr and op_spec("say")->claims == kNone and op_spec("say")->instant);
+    CHECK(op_spec("repeat") != nullptr and op_spec("repeat")->claims == kNone and op_spec("repeat")->has_body);
     CHECK(op_spec("fly") == nullptr);
+    CHECK((kBase & kArm) == 0 and (kArm & kGripper) == 0 and (kBase & kGripper) == 0);   // distinct resources
+    {
+        Step body{.op = "seq"};
+        body.steps = {Step{.op = "say"}, Step{.op = "cross"}};
+        Step rep{.op = "repeat"};
+        rep.steps = {body};
+        CHECK(claims_of(rep) == kBase);                       // a composite claims what its body claims
+        CHECK(claims_of(Step{.op = "say"}) == kNone);
+        CHECK(claims_of(Step{.op = "fly"}) == kNone);          // unknown op: nothing (validate rejects it anyway)
+    }
 
     // ── Compatibility rules (§7.1) ──────────────────────────────────────────────────────────────────────────────
     CHECK(rejected(R"({"v":2,"steps":[{"id":"1","op":"stop"}]})") == "unsupported_version");
