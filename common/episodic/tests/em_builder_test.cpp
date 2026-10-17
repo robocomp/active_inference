@@ -226,25 +226,72 @@ void test_self_mission_split_on_room()
     Script s;
     b.on_journal(s.wire(), 10);
     s.push(K::DriveMode, 20).op = "affordances_only";
+    const auto r1 = b.on_journal(s.wire(), 30);
+    CHECK(r1.size() == 1 and r1[0].author == Author::Self and r1[0].source == "self" and r1[0].target.empty());
+    if (r1.size() != 1) return;
+    const std::string id1 = r1[0].id;
+    fs.room = "room_2";       // no claim open: the split is immediate
+    const auto r2 = b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "current_moved", .node = "room_2"}}, 50);
+    const auto c = closed(r2);
+    CHECK(c.size() == 1 and c[0].id == id1 and c[0].outcome == "room_changed" and c[0].t1 == 50u
+          and c[0].events.size() == 1);
+    CHECK(b.open().size() == 1 and b.open()[0].author == Author::Self and b.open()[0].room == "room_2"
+          and b.open()[0].id != id1);
+}
+
+// (a) a door-crossing claim changes room mid-claim: the split waits for its ClaimEnd, which keeps its real outcome.
+void test_self_split_deferred_while_claim_open()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    b.on_journal(s.wire(), 10);
+    s.push(K::DriveMode, 20).op = "affordances_only";
     push_claim(s, 30);
     const auto r1 = b.on_journal(s.wire(), 40);
     const Record* self1 = find(r1, Level::Mission, "mission");
     const Record* cl = find(r1, Level::Claim, "cross_door");
     CHECK(self1 and cl);
     if (not (self1 and cl)) return;
-    CHECK(self1->author == Author::Self and self1->source == "self" and self1->target.empty());
     CHECK(cl->parent == self1->id and cl->author == Author::Self);
-    const std::string id1 = self1->id;
+    const std::string id1 = self1->id, cid = cl->id;
 
     fs.room = "room_2";
-    const auto r2 = b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "current_moved", .node = "room_2"}}, 50);
-    const auto c = closed(r2);
-    bool self_closed = false;
-    for (const Record& r : c)
-        if (r.id == id1) self_closed = r.outcome == "room_changed" and r.t1 == 50u and r.events.size() == 1;
-    CHECK(self_closed);
+    CHECK(b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "current_moved", .node = "room_2"}}, 50).empty());
+    CHECK(b.on_journal(s.wire(), 60).empty());
+    CHECK(b.open().size() == 2);                     // self mission + claim, unsplit
+
+    push_claim_end(s, 70, "success");
+    const auto r3 = b.on_journal(s.wire(), 80);
+    const auto c = closed(r3);
+    CHECK(c.size() == 2 and c[0].id == cid and c[0].outcome == "success" and c[0].parent == id1);
+    CHECK(c.size() == 2 and c[1].id == id1 and c[1].outcome == "room_changed" and c[1].t1 == 80u);
     CHECK(b.open().size() == 1 and b.open()[0].author == Author::Self and b.open()[0].room == "room_2"
-          and b.open()[0].id != id1);
+          and b.open()[0].t0 == 80);
+}
+
+// (b) a human mission supersedes the self mission at once; its open claim stays open and closes by its ClaimEnd.
+void test_supersede_leaves_self_claim_open()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    b.on_journal(s.wire(), 10);
+    s.push(K::DriveMode, 20).op = "affordances_only";
+    push_claim(s, 30);
+    b.on_journal(s.wire(), 40);
+    push_mission(s, 50);
+    const auto c = closed(b.on_journal(s.wire(), 60));
+    CHECK(c.size() == 1 and c[0].author == Author::Self and c[0].level == Level::Mission
+          and c[0].outcome == "superseded" and c[0].t1 == 50u);
+    if (c.size() != 1) return;
+    const std::string self_id = c[0].id;
+    CHECK(b.open().size() == 2);                     // the human mission + the orphaned self claim
+    push_claim_end(s, 70, "preempted");
+    const auto c2 = closed(b.on_journal(s.wire(), 80));
+    CHECK(c2.size() == 1 and c2[0].level == Level::Claim and c2[0].outcome == "preempted"
+          and c2[0].parent == self_id and c2[0].author == Author::Self);
+    CHECK(b.open().size() == 1 and b.open()[0].author == Author::Human);
 }
 
 void test_self_mission_superseded()
@@ -390,6 +437,8 @@ int main()
     test_composite_nesting();
     test_preempted_claim();
     test_self_mission_split_on_room();
+    test_self_split_deferred_while_claim_open();
+    test_supersede_leaves_self_claim_open();
     test_self_mission_superseded();
     test_controller_epoch_change();
     test_journal_gap();

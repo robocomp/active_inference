@@ -16,14 +16,17 @@
  *    whose step_id is a strict dotted prefix ("2" for "2.1"), else the mission; ClaimStart a claim whose parent is the
  *    innermost open step, else the open human mission, else the open self mission, else a self mission opened now.
  *  - *End closes its match (mission key; (mission, step_id, attempt, iteration); the most recent open claim), with the
- *    journal's outcome. An *End with no open match is ignored. Closing a MISSION closes its open descendants first
- *    with the same outcome; closing a step does not touch its children (their own *End closes them).
+ *    journal's outcome. An *End with no open match is ignored. Closing a HUMAN mission closes its open descendants
+ *    first with the same outcome; closing a step or a self mission does not touch its children (their own *End, or
+ *    `lost` / shutdown, closes them — EM never invents an outcome for a claim).
  *  - Times: t0/t1 are the journal's stamps for journal-driven opens/closes; now_ms for what EM itself decides
  *    (`lost`, shutdown, a self mission opened/split at a check).
  *
  * Self mission: while drive mode is "affordances_only" (assumed until a DriveMode entry is seen, R9) and no human
  * mission is open, a Self mission is open. It closes `superseded` when a human mission starts or drive mode leaves
- * affordances_only, and `room_changed` (a new one opening) when current_room() differs from its room. Checked after
+ * affordances_only, and `room_changed` (a new one opening) when current_room() differs from its room — DEFERRED while
+ * it has an open child claim (a door crossing changes room mid-claim), so the split lands on the first check after
+ * that claim closed. A superseded self mission's open claim keeps its parent id and closes later. Checked after
  * each journal poll and each on_events call; suspended after owner_lost until the next journal poll.
  *
  * Absent is not zero: a node the FactSource cannot read contributes no Fact; `delivered` exists only when both pre and
@@ -219,12 +222,12 @@ private:
         return open_.back();
     }
 
-    // Closes the open record with this id; a mission takes its open descendants with it (innermost first).
+    // Closes the open record with this id; a HUMAN mission takes its open descendants with it (innermost first).
     void close(const std::string& id, const std::string& outcome, std::uint64_t t)
     {
         const auto it = std::ranges::find(open_, id, [](const Open& o) { return o.rec.id; });
         if (it == open_.end()) return;
-        if (it->rec.level == Level::Mission)
+        if (it->rec.level == Level::Mission and not it->self)
         {
             std::vector<std::string> family{id};
             std::vector<std::string> doomed;
@@ -357,7 +360,9 @@ private:
         const bool wanted = self_driving() and not human_mission();
         if (s and not wanted) { close(s->rec.id, "superseded", now_ms); return; }
         if (not wanted) return;
-        if (s and s->rec.room != facts_.current_room())
+        const auto has_open_child = [&](const Open& p)
+        { return std::ranges::any_of(open_, [&](const Open& o) { return o.rec.parent == p.rec.id; }); };
+        if (s and s->rec.room != facts_.current_room() and not has_open_child(*s))
         {
             close(s->rec.id, "room_changed", now_ms);
             s = nullptr;
