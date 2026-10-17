@@ -33,6 +33,7 @@
 #include <atomic>
 #include <string_view>
 #include <condition_variable>
+#include <expected>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -51,6 +52,7 @@
 #include "controller_world_model.h"
 #include "chat_inbox.h"
 #include "controller_relative_motion.h"
+#include "../../common/mission/mission_interpreter.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
@@ -147,6 +149,48 @@ private:
 	MissionResult run_mission_command(const std::string &text, const char *source);
 	/// The Stop button's abort (mission, click target, route/plan/trace; base output disarmed). Control thread only.
 	void abort_all(const char *source);
+	/// The door-passage start shared by `cross door_N` and a mission's cross / open (the door must exist).
+	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source);
+	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
+	MissionResult start_relative_motion(const std::string &text, const char *source);
+
+	// ── GROUNDED MISSIONS (common/mission/, chat_agent/docs/mission_language_2026-10-13.md) ──
+	// The interpreter owns the control flow (seq, repeat, on_fail, until, budgets, anchors); this Host maps each leaf
+	// to what the controller already does. Everything runs on the control thread (specificworker_mission.cpp).
+	class MissionHost final : public rc::mission::Host
+	{
+	public:
+		explicit MissionHost(SpecificWorker &w) : w_(w) {}
+		std::optional<std::string> start(const rc::mission::Step &leaf) override;
+		rc::mission::LeafStatus poll(const rc::mission::Step &leaf) override;
+		void cancel(const rc::mission::Step &leaf) override;
+		void say(const std::string &text) override;
+		void halt() override;
+		std::optional<rc::mission::Pose> pose() override;
+		std::optional<double> eval(const rc::mission::Pred &p) override;
+	private:
+		SpecificWorker &w_;
+		std::string door_;                 ///< cross / open: the door the passage runs through
+		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
+		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started
+		std::string room_;                 ///< explore: the room it explores (leaving it ends the step)
+	};
+	MissionHost mission_host_{*this};
+	rc::mission::Interpreter interpreter_{mission_host_};
+	std::string mission_source_;           ///< who started the running mission: "chat" | "remote"
+	std::uint64_t mission_poll_ms_ = 0;
+	/// Validate and start a mission (it supersedes a running one). The refusal, or nullopt when it runs.
+	std::optional<rc::mission::Error> start_mission(rc::mission::Mission m, const char *source);
+	/// Cancel the running mission (no-op otherwise), reporting `outcome`. hold = the base is then held, still armed;
+	/// false when the caller is about to give the base to something else (a new command, Stop's own disarm).
+	void cancel_mission(const std::string &outcome, bool hold = true);
+	std::uint64_t mission_serial_ = 0;     ///< +1 per started mission: which one a chat report is about
+	/// One step of the running mission (10 Hz) + its log lines; holds the base when it ends. Control thread.
+	void service_mission();
+	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
+	void hold_base();
+	/// The live door a door reference names now: a node by name, or the face of a passage in the current room.
+	std::expected<std::string, std::string> resolve_door(const rc::mission::Ref &r);
 	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
 	rc::ChatInbox chat_inbox_;
 	rc::ChatInbox::Tracked chat_tracked_;

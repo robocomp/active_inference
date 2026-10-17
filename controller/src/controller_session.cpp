@@ -4326,6 +4326,7 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
                          (time_source() - no_route_since_ms_) / 1000.0,
                          manual_target_room_->x(), manual_target_room_->y());
             std::fflush(stdout);
+            end_manual_target(ManualTargetEnd::NoRoute);
             manual_target_room_.reset();
             manual_target_origin_room_.reset();
             manual_target_dirty_ = false;
@@ -5993,6 +5994,8 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     // The final-approach correction belongs to the standpoint just retired. Re-selecting the same
     // affordance later must re-measure, not inherit an answer taken against a scan that is now old.
     approach_fix_.reset();
+    end_manual_target(outcome_override == rc::affordance::Outcome::Abandoned ? ManualTargetEnd::Cleared
+                                                                             : ManualTargetEnd::Reached);
     manual_target_room_.reset();
     manual_target_origin_room_.reset();
     manual_target_dirty_ = false;
@@ -6112,7 +6115,9 @@ void ControllerSession::set_manual_target(const QPointF &point,
                                           const TimeSource &time_source,
                                           const WakeCallback &wake_callback)
 {
+    end_manual_target(ManualTargetEnd::Cleared);   // a target replaced before it ended
     manual_target_room_ = Eigen::Vector2f(static_cast<float>(point.x()), static_cast<float>(point.y()));
+    manual_target_status_ = {.epoch = manual_target_status_.epoch + 1, .end = ManualTargetEnd::Pending};
     current_target_room_ = manual_target_room_;
     manual_target_origin_room_.reset();
     if (world_model.graph_state().ready() || world_model.refresh_graph_state())
@@ -6139,6 +6144,7 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
                                             ControllerMotionCommander &motion_commander,
                                             const WakeCallback &wake_callback)
 {
+    end_manual_target(ManualTargetEnd::Cleared);
     manual_target_room_.reset();
     current_target_room_.reset();
     affordance_manager.clear_current();

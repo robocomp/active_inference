@@ -56,11 +56,12 @@ public:
     /// What the last chat command asked for, kept by the caller so each cycle can mirror its progress.
     struct Tracked
     {
-        enum class Kind { None, Cross, Stop, Uncross, Rejected, Motion } kind = Kind::None;
+        enum class Kind { None, Cross, Stop, Uncross, Rejected, Motion, Mission } kind = Kind::None;
         std::uint64_t stamp = 0;   ///< the command's timestamp_agent, echoed on the edge
         std::string door;     ///< Cross: the door the passage was started through
         std::string reason;   ///< Rejected: why
         std::uint64_t motion_id = 0;   ///< Motion: RelativeMotion::View::id of the run this command started
+        std::uint64_t mission_serial = 0;   ///< Mission: SpecificWorker::mission_serial_ of the mission it started
     };
 
     /// A new command since the last call, or nullopt. Never blocks; a missing node is "no command".

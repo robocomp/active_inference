@@ -18,6 +18,7 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/specificworker_mission.cpp
   ../src/controller_display.cpp
   ../src/controller_camera_masks.cpp
   ../src/controller_motion_commander.cpp

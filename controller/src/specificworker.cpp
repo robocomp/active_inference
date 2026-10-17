@@ -26,10 +26,13 @@
 
 #include "custom_widget.h"
 #include "corner_visibility.h"   // point_in_polygon: a relative move must end inside the room
+#include "../../common/mission/mission_json.h"   // a chat mission arrives as JSON
+#include "../../common/mission/mission_text.h"   // a remote_cmd.txt mission script is the DSL
 #include <fps/fps.h>
 
 #include <QTimer>
 #include <QFile>
+#include <QRegularExpression>
 
 #include <algorithm>
 #include <chrono>
@@ -302,6 +305,7 @@ void SpecificWorker::initialize()
 			// canvas shows the target the robot is actually driving to and not the tour it abandoned.
 			if (session_.mission().running())
 				session_.mission().stop("superseded by click", current_time_ms());
+			cancel_mission("superseded", /*hold=*/false);
 			// The selector names what is driving, so clicking a point puts it on "Target". Mode first, then
 			// the point: set_mode clears the click target on any transition AWAY from Target.
 			session_.mission().set_mode(rc::DriveMode::Target);
@@ -500,6 +504,7 @@ void SpecificWorker::initialize()
 				return;
 			}
 			cancel_relative_motion("superseded by a mission Run");   // a tour replaces a relative move too
+			cancel_mission("superseded", /*hold=*/false);            // and a grounded mission
 			session_.mission().set_click_target(std::nullopt);   // a tour replaces a lingering click target
 			clear_manual_target();
 			const bool started = session_.mission().start(laps, current_time_ms());
@@ -556,6 +561,17 @@ void SpecificWorker::initialize()
 			const QString all = QString::fromUtf8(f.readAll());
 			f.close();
 			f.remove();
+			// A MISSION SCRIPT (mission_text.h): `mission ["title"]` at column 0 and indented steps below it — the whole
+			// file is one mission, run by the interpreter with no LLM in the loop (doc amendment 3). A single line
+			// `mission <text>` is still the one-command grammar below.
+			if (all.startsWith("mission") and all.contains(QRegularExpression("\n +\\S")))
+			{
+				auto m = rc::mission::parse_text(all.toStdString());
+				if (not m.has_value()) { std::println("[remote] mission script refused: {}", m.error().message()); return; }
+				std::println("[remote] mission script:\n{}", rc::mission::print_text(*m));
+				enqueue_command([this, m = std::move(*m)]() mutable { start_mission(std::move(m), "remote"); });
+				return;
+			}
 			for (const QString &raw : all.split('\n', Qt::SkipEmptyParts))
 			{
 				const QString c = raw.trimmed().toLower();
@@ -570,7 +586,10 @@ void SpecificWorker::initialize()
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else if (c.startsWith("mission ")) run_mission_command(c.mid(8).trimmed().toStdString(), "remote");
 				else if (c == "uncross") { session_.door_passage().stop(); std::println("[remote] door passage stopped"); }
-				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | uncross)", c.toStdString());
+				else if (c == "cancel" or c == "resume")
+					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
+				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | "
+				                  "uncross | cancel | resume, or a mission script)", c.toStdString());
 			}
 		});
 		t->start(300);
@@ -1466,6 +1485,7 @@ void SpecificWorker::control_loop()
 				if (command) command();
 		}
 		// chat_agent's intention node: a new command runs here, between cycles, like every button press above.
+		service_mission();
 		service_chat_inbox();
 
 		// Reflect mission/drive state EVERY iteration (~20 ms), independent of compute(). Selecting a mode
@@ -1764,11 +1784,27 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 //   uncross             end the door passage (selection unrestricted again)
 //   move <m>            drive straight <m> metres, + forward / − backward (relative motion, controller_relative_motion.h)
 //   turn <deg>          rotate in place, + left / − right; "turn <deg> move <m>" chains them in the order given
+//   cancel [mission]    end the running grounded mission (specificworker_mission.cpp); the base is held, armed
+//   resume              end the mission's current `wait` (the person says "I'm here")
+// Any other command REPLACES a running mission, which reports aborted|superseded (doc §7.5).
 // Runs on the control thread (enqueue_command / the chat inbox; the remote timer calls it directly, as before).
 // Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
 SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)
 {
 	std::string t = QString::fromStdString(text).trimmed().toLower().simplified().toStdString();
+	if (t == "cancel" or t == "cancel mission")
+	{
+		const bool running = interpreter_.state() == rc::mission::Interpreter::State::Running;
+		cancel_mission("cancelled");
+		std::println("[{}] mission 'cancel' -> {}", source, running ? "mission cancelled, base held" : "no mission was running");
+		return {.accepted = running, .kind = "cancel", .reason = running ? "" : "no mission is running"};
+	}
+	if (t == "resume")
+	{
+		const bool ended = interpreter_.resume(current_time_ms());
+		std::println("[{}] mission 'resume' -> {}", source, ended ? "the wait ended" : "nothing was waiting");
+		return {.accepted = ended, .kind = "resume", .reason = ended ? "" : "the mission is not waiting"};
+	}
 	if (t == "stop")
 	{
 		session_.door_passage().stop();
@@ -1776,59 +1812,18 @@ SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::str
 		std::println("[{}] mission 'stop' -> STOP (passage ended, base output disarmed)", source);
 		return {.accepted = true, .kind = "stop"};
 	}
+	// A command that is understood replaces a running mission (stop cancels it inside abort_all); a typo does not.
 	if (t == "uncross")
 	{
+		cancel_mission("superseded", /*hold=*/false);
 		session_.door_passage().stop();
 		std::println("[{}] mission 'uncross' -> door passage stopped", source);
 		return {.accepted = true, .kind = "uncross"};
 	}
 	if (t.starts_with("move ") or t.starts_with("turn ") or t.starts_with("advance ") or t.starts_with("rotate "))
 	{
-		const auto steps = rc::RelativeMotion::parse(t);
-		if (not steps.has_value())
-		{
-			std::println("[{}] mission '{}' refused: {}", source, t, steps.error());
-			return {.kind = "move", .reason = steps.error()};
-		}
-		// A new relative command supersedes the one running, whether or not it is itself accepted.
-		cancel_relative_motion("superseded by a new move/turn");
-		const auto now = current_time_ms();
-		const auto pose = world_model_.read_robot_pose_latest(now);
-		const auto &grid = session_.grid_planner();
-		const auto &room = session_.room_polygon();
-		std::string why;
-		if (not pose.has_value()) why = "the robot's pose in the room is not known";
-		else if (not grid.has_world() or room.size() < 3) why = "there is no map of the room yet to check the way is clear";
-		if (why.empty())
-		{
-			const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.pose_free(p, yaw); };
-			const auto inside = [&room](const Eigen::Vector2f &p) { return rc::corner_visibility::point_in_polygon(p, room); };
-			if (const auto refused = relative_motion_.start(*steps, pose->pos, pose->theta, now, free, inside); refused.has_value())
-				why = *refused;
-		}
-		if (not why.empty())
-		{
-			std::println("[{}] mission '{}' refused: {}", source, t, why);
-			return {.kind = "move", .reason = why};
-		}
-		// Accepted: the person has taken the base. Everything else that could drive is ended, and the mode becomes
-		// "Target" with no target, so when the motion ends the robot STAYS where it was put (the affordance planner
-		// does not drive off again) — the same rule a clicked target follows.
-		session_.door_passage().stop();
-		if (session_.mission().running()) session_.mission().stop("superseded by a relative move", now);
-		session_.mission().set_mode(rc::DriveMode::Target);
-		session_.mission().set_click_target(std::nullopt);
-		clear_manual_target();
-		// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
-		// by chat_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
-		paused_ = false;
-		motion_commander_.set_output_enabled(true);
-		driving_enabled_ = true;
-		hibernationTick();
-		const auto v = relative_motion_.view();
-		std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
-		             v.text, pose->pos.x(), pose->pos.y(), (pose->theta + M_PI_2) * 180.0 / M_PI);
-		return {.accepted = true, .kind = "move", .motion_id = v.id};
+		cancel_mission("superseded", /*hold=*/false);
+		return start_relative_motion(t, source);
 	}
 	if (t.starts_with("cross "))
 	{
@@ -1863,21 +1858,81 @@ SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::str
 		else if (what.starts_with("door")) door = what;
 		if (door.has_value())
 		{
-			if (not G->get_node(*door).has_value())
-			{
-				std::println("[{}] mission '{}': door '{}' is not in the graph — nothing to cross", source, t, *door);
-				return {.kind = "cross", .door = *door, .reason = std::format("door '{}' is not in the graph", *door)};
-			}
-			cancel_relative_motion("superseded by a door passage");
-			session_.mission().set_mode(rc::DriveMode::Command);
-			session_.door_passage().start(*door);
-			std::println("[{}] mission '{}' -> DOOR PASSAGE through '{}'{}", source, t, *door,
-			             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
-			return {.accepted = true, .kind = "cross", .door = *door};
+			cancel_mission("superseded", /*hold=*/false);
+			return start_door_passage(*door, rc::DoorPassage::Step::Cross, source);
 		}
 	}
 	std::println("[{}] mission '{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", source, t);
 	return {.reason = std::format("'{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", t)};
+}
+
+// `cross door_N` and a mission's cross / open: the door must exist now; the passage restricts the selector to its steps.
+SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after,
+                                                                 const char *source)
+{
+	const char *kind = stop_after == rc::DoorPassage::Step::Open ? "open" : "cross";
+	if (not G->get_node(door).has_value())
+	{
+		std::println("[{}] {} '{}': the door is not in the graph — nothing to {}", source, kind, door, kind);
+		return {.kind = kind, .door = door, .reason = std::format("door '{}' is not in the graph", door)};
+	}
+	cancel_relative_motion("superseded by a door passage");
+	session_.mission().set_mode(rc::DriveMode::Command);
+	session_.door_passage().start(door, stop_after);
+	std::println("[{}] {} '{}' -> DOOR PASSAGE{}{}", source, kind, door,
+	             stop_after == rc::DoorPassage::Step::Open ? " (stops once open)" : "",
+	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
+	return {.accepted = true, .kind = kind, .door = door};
+}
+
+// `move` / `turn` and a mission's move. A new relative command supersedes the one running, accepted or not.
+SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::string &t, const char *source)
+{
+	const auto steps = rc::RelativeMotion::parse(t);
+	if (not steps.has_value())
+	{
+		std::println("[{}] mission '{}' refused: {}", source, t, steps.error());
+		return {.kind = "move", .reason = steps.error()};
+	}
+	// A new relative command supersedes the one running, whether or not it is itself accepted.
+	cancel_relative_motion("superseded by a new move/turn");
+	const auto now = current_time_ms();
+	const auto pose = world_model_.read_robot_pose_latest(now);
+	const auto &grid = session_.grid_planner();
+	const auto &room = session_.room_polygon();
+	std::string why;
+	if (not pose.has_value()) why = "the robot's pose in the room is not known";
+	else if (not grid.has_world() or room.size() < 3) why = "there is no map of the room yet to check the way is clear";
+	if (why.empty())
+	{
+		const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.pose_free(p, yaw); };
+		const auto inside = [&room](const Eigen::Vector2f &p) { return rc::corner_visibility::point_in_polygon(p, room); };
+		if (const auto refused = relative_motion_.start(*steps, pose->pos, pose->theta, now, free, inside); refused.has_value())
+			why = *refused;
+	}
+	if (not why.empty())
+	{
+		std::println("[{}] mission '{}' refused: {}", source, t, why);
+		return {.kind = "move", .reason = why};
+	}
+	// Accepted: the person has taken the base. Everything else that could drive is ended, and the mode becomes
+	// "Target" with no target, so when the motion ends the robot STAYS where it was put (the affordance planner
+	// does not drive off again) — the same rule a clicked target follows.
+	session_.door_passage().stop();
+	if (session_.mission().running()) session_.mission().stop("superseded by a relative move", now);
+	session_.mission().set_mode(rc::DriveMode::Target);
+	session_.mission().set_click_target(std::nullopt);
+	clear_manual_target();
+	// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
+	// by chat_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
+	paused_ = false;
+	motion_commander_.set_output_enabled(true);
+	driving_enabled_ = true;
+	hibernationTick();
+	const auto v = relative_motion_.view();
+	std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
+	             v.text, pose->pos.x(), pose->pos.y(), (pose->theta + M_PI_2) * 180.0 / M_PI);
+	return {.accepted = true, .kind = "move", .motion_id = v.id};
 }
 
 // The Stop button's abort, callable from the control thread by name (the button enqueues it; a chat `stop`, which
@@ -1889,6 +1944,7 @@ void SpecificWorker::abort_all(const char *source)
 	// the output loop otherwise keeps sending setSpeedBase(0,0,0) at 20 Hz forever, which is
 	// right under control and wrong after the user has said stop.
 	// What survives is the mission SELECTION, so Run starts whichever mission is selected.
+	cancel_mission("stopped_by_user", /*hold=*/false);
 	cancel_relative_motion("stopped");
 	session_.mission().stop(source, current_time_ms());
 	session_.mission().set_click_target(std::nullopt);
@@ -1916,18 +1972,53 @@ void SpecificWorker::service_chat_inbox()
 	        std::chrono::system_clock::now().time_since_epoch()).count());
 	if (const auto cmd = chat_inbox_.poll(*G, wall_ms); cmd.has_value())
 	{
-		std::println("[chat] command '{}' (stamp {})", cmd->text, cmd->stamp_ms);
-		const auto r = run_mission_command(cmd->text, "chat");
 		using K = rc::ChatInbox::Tracked::Kind;
-		if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
-		else if (r.kind == "cross") chat_tracked_ = {.kind = K::Cross, .door = r.door};
-		else if (r.kind == "move") chat_tracked_ = {.kind = K::Motion, .motion_id = r.motion_id};
-		else if (r.kind == "stop") chat_tracked_ = {.kind = K::Stop};
-		else chat_tracked_ = {.kind = K::Uncross};
-		chat_tracked_.stamp = cmd->stamp_ms;
+		// ★ ONE NODE, TWO PAYLOADS (doc §7.5 decision 1): `{` = a grounded mission (mission_json.h), anything else = the
+		//   single-command grammar below.
+		if (cmd->text.starts_with('{'))
+		{
+			std::println("[chat] mission (stamp {}, {} bytes)", cmd->stamp_ms, cmd->text.size());
+			auto m = rc::mission::decode_json(cmd->text);
+			std::optional<rc::mission::Error> refused;
+			if (not m.has_value()) refused = m.error();
+			else refused = start_mission(std::move(*m), "chat");
+			if (refused.has_value())
+			{
+				if (not m.has_value()) std::println("[chat] mission refused: {}", refused->message());
+				chat_tracked_ = {.kind = K::Rejected, .reason = refused->status()};
+			}
+			else chat_tracked_ = {.kind = K::Mission, .mission_serial = mission_serial_};
+			chat_tracked_.stamp = cmd->stamp_ms;
+		}
+		else
+		{
+			std::println("[chat] command '{}' (stamp {})", cmd->text, cmd->stamp_ms);
+			const auto r = run_mission_command(cmd->text, "chat");
+			if (r.kind == "cancel" or r.kind == "resume")
+			{
+				// About the mission, not a new one: the report on this stamp is the mission's own.
+				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = mission_serial_};
+				else chat_tracked_ = {.kind = K::Rejected, .reason = r.reason};
+			}
+			else if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
+			else if (r.kind == "cross") chat_tracked_ = {.kind = K::Cross, .door = r.door};
+			else if (r.kind == "move") chat_tracked_ = {.kind = K::Motion, .motion_id = r.motion_id};
+			else if (r.kind == "stop") chat_tracked_ = {.kind = K::Stop};
+			else chat_tracked_ = {.kind = K::Uncross};
+			chat_tracked_.stamp = cmd->stamp_ms;
+		}
 	}
 	if (chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::None) return;
 	const bool driving = driving_enabled_ and not paused_;
+	if (chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Mission)
+	{
+		const std::string drv = driving ? "driving=on" : "driving=off";
+		if (chat_tracked_.mission_serial != mission_serial_)
+			chat_inbox_.publish(*G, chat_tracked_.stamp, "aborted|superseded",
+			                    std::format("superseded|another mission was started|{}", drv));
+		else chat_inbox_.publish(*G, chat_tracked_.stamp, interpreter_.status(), interpreter_.progress() + "|" + drv);
+		return;
+	}
 	const auto [state, bt] = chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Motion
 	                             ? rc::ChatInbox::status_of_motion(chat_tracked_, relative_motion_.view(), driving)
 	                             : rc::ChatInbox::status_of(chat_tracked_, session_.door_passage().view(), driving);

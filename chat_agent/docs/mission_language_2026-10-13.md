@@ -390,7 +390,10 @@ it cannot make an impossible offer appear — which is the safety property the p
 
 Outcome words are a closed set shared with `aff_outcome` where they coincide, extended with mission-level ones:
 `satisfied, timeout, unreachable, infeasible, refused, abandoned, outside_room, not_found, no_route, door_wont_open,
-door_lost, budget_exhausted, stopped_by_user, superseded`.
+door_lost, budget_exhausted, stopped_by_user, superseded`. Added by the interpreter (2026-10-17): `wrong_room` (a
+`cross expect` that ended elsewhere, or a step addressed to a room the robot is not in), `no_pose`, `no_anchor`,
+`passage_unresolved`, `cancelled`; a satisfied step records why it ended: `until`, `budget` (an explore with no
+`until`), `resumed`.
 
 ### 3.2 Routes through memory (go_to room)
 
@@ -696,6 +699,15 @@ you to wait" resolves) and holds.
 Order of first commits inside Phase 1: (a) `mission_schema.h` + `mission_ir.h` + `mission_resolver.h` as pure
 headers with tests next to `test_gate.cpp`; (b) controller `MissionInterpreter` driven by the text form from
 `remote_cmd.txt` (no LLM in the loop — the bench must run the agent's code); (c) the planner request; (d) the card.
+
+**Status 2026-10-17.** (a) is `common/mission/` (IR + registry, JSON codec, DSL; the resolver is still to come).
+(b) is built: `common/mission/mission_interpreter.h` (the step machine over a `Host` interface, tested on a scripted
+host) and `controller/src/specificworker_mission.cpp` (the controller's Host). A `remote_cmd.txt` whose first line
+is `mission ["title"]` with indented steps below is run as one mission; `cancel` and `resume` are words in both the
+remote file and the chat grammar; a chat payload starting with `{` is decoded as a mission (§7.5). Limits of (b):
+`go_to` takes a pose in the current room only (no final facing yet); a passage ref resolves only through ltsm's live
+`passage_<n>` (while the room beyond is proto); `explored(room)` is unknown until its Phase-0 attribute exists;
+progress travels in `bt_state` (no `mission_progress` attribute yet).
 
 ### 6.3 Risks and mitigations
 
