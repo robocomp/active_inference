@@ -242,22 +242,12 @@ namespace
         return tr;
     }
 
-    torch::Tensor pose_tensor(const Eigen::Vector3f& p)
+    Eigen::Vector3f pose_tensor(const Eigen::Vector3f& p) { return p; }   // was a torch tensor
+    rc::ScanPoints points_tensor(const std::vector<Eigen::Vector2f>& pts)
     {
-        return torch::tensor({p.x(), p.y(), p.z()}, torch::TensorOptions().dtype(torch::kFloat32).requires_grad(true));
-    }
-    torch::Tensor points_tensor(const std::vector<Eigen::Vector2f>& pts)
-    {
-        auto t = torch::zeros({static_cast<long>(pts.size()), 3}, torch::kFloat32);
-        auto a = t.accessor<float, 2>();
-        for (size_t i = 0; i < pts.size(); ++i) { a[i][0] = pts[i].x(); a[i][1] = pts[i].y(); a[i][2] = 0.f; }
-        return t;
-    }
-    torch::Tensor mat3(const Eigen::Matrix3f& m)
-    {
-        auto t = torch::zeros({3, 3}, torch::kFloat32);
-        auto a = t.accessor<float, 2>();
-        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) a[r][c] = m(r, c);
+        rc::ScanPoints t;
+        t.reserve(pts.size());
+        for (const auto& p : pts) t.emplace_back(p.x(), p.y(), 0.f);
         return t;
     }
 
@@ -893,13 +883,12 @@ namespace
             slot.odometry_delta = (f == 0) ? Eigen::Vector3f::Zero() : odom;
             slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
                                               cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
-            slot.odom_delta_tensor = torch::tensor({odom.x(), odom.y(), odom.z()}, torch::kFloat32);
-            slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+            slot.odometry_delta = odom;
+            slot.motion_prec = slot.motion_cov.inverse();
             slot.wall_assoc = fr.assoc;
 
             rc::gn::Input in;
             in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
-            in.device = torch::kCPU;
             in.walls = &R.map; in.no_sdf = not cfg.with_sdf; in.gauge_fix = true; in.gauge_persist = cfg.gauge_persist;
 
             if (static_cast<int>(window.size()) >= cfg.window)
@@ -907,8 +896,8 @@ namespace
                 // Drop the oldest: fold its wall observations into the map first (at its converged pose),
                 // then anchor the new front with a plain prior at its converged pose (the legacy
                 // boundary anchor; the agent uses FEJ+Schur).
-                auto front_pose = window.front().pose.detach();
-                const Eigen::Vector3f fp(front_pose[0].item<float>(), front_pose[1].item<float>(), front_pose[2].item<float>());
+                auto front_pose = window.front().pose;
+                const Eigen::Vector3f fp(front_pose[0], front_pose[1], front_pose[2]);
                 // REAL MARGINALISATION (cfg.real_marginal), the thing this bench never did.
                 // Until now it ASSERTED diag(400,400,1600) — a constant the agent never gets — so
                 // FEJ+Schur had never executed in any bench run, and the one component Fable's
@@ -927,9 +916,9 @@ namespace
                 {
                     std::deque<RoomConcept::WindowSlot> pair2;
                     pair2.push_back(window[0]); pair2.push_back(window[1]);
-                    auto p1 = window[1].pose.detach();
+                    auto p1 = window[1].pose;
                     std::vector<Eigen::Vector3f> pp = {fp,
-                        Eigen::Vector3f(p1[0].item<float>(), p1[1].item<float>(), p1[2].item<float>())};
+                        Eigen::Vector3f(p1[0], p1[1], p1[2])};
                     rc::gn::Input in2 = in;
                     in2.window = &pair2;
                     // NOT nullptr: build_factors dereferences boundary_prior unconditionally
@@ -953,9 +942,9 @@ namespace
                 }
                 rc::gn::absorb_wall_observations(in, window.front(), fp);
                 window.pop_front();
-                auto nf = window.front().pose.detach();
+                auto nf = window.front().pose;
                 bp.valid = true;
-                bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
+                bp.mu = Eigen::Vector3f(nf[0], nf[1], nf[2]);
                 bp.precision = marg;
                 R.marg_real += marg_ok ? 1 : 0; R.marg_total += 1;
             }
@@ -964,8 +953,8 @@ namespace
             std::vector<Eigen::Vector3f> poses;
             for (const auto& s : window)
             {
-                auto p = s.pose.detach();
-                poses.emplace_back(p[0].item<float>(), p[1].item<float>(), p[2].item<float>());
+                auto p = s.pose;
+                poses.emplace_back(p[0], p[1], p[2]);
             }
             rc::gn::Options opts;
             const auto r = rc::gn::solve(in, poses, opts);
@@ -1380,29 +1369,28 @@ namespace
             slot.odometry_delta = (f == 0) ? Eigen::Vector3f::Zero() : odom;
             slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
                                               cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
-            slot.odom_delta_tensor = torch::tensor({odom.x(), odom.y(), odom.z()}, torch::kFloat32);
-            slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+            slot.odometry_delta = odom;
+            slot.motion_prec = slot.motion_cov.inverse();
             slot.wall_assoc = fr.assoc;
 
             rc::gn::Input in;
             in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
-            in.device = torch::kCPU;
             in.walls = &R.map; in.no_sdf = true; in.gauge_fix = true;
             if (static_cast<int>(window.size()) >= cfg.window)
             {
-                auto fp = window.front().pose.detach();
+                auto fp = window.front().pose;
                 rc::gn::absorb_wall_observations(in, window.front(),
-                    Eigen::Vector3f(fp[0].item<float>(), fp[1].item<float>(), fp[2].item<float>()));
+                    Eigen::Vector3f(fp[0], fp[1], fp[2]));
                 window.pop_front();
-                auto nf = window.front().pose.detach();
+                auto nf = window.front().pose;
                 bp.valid = true;
-                bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
+                bp.mu = Eigen::Vector3f(nf[0], nf[1], nf[2]);
                 bp.precision = Eigen::Vector3f(400.f, 400.f, 1600.f).asDiagonal();
             }
             window.push_back(std::move(slot));
             std::vector<Eigen::Vector3f> poses;
             for (const auto& sl : window)
-            { auto pp = sl.pose.detach(); poses.emplace_back(pp[0].item<float>(), pp[1].item<float>(), pp[2].item<float>()); }
+            { auto pp = sl.pose; poses.emplace_back(pp[0], pp[1], pp[2]); }
             rc::gn::Options opts;
             const auto r = rc::gn::solve(in, poses, opts);
             if (r.ok) for (size_t i = 0; i < window.size(); ++i) window[i].pose = pose_tensor(poses[i]);
@@ -2010,14 +1998,11 @@ int run_replay(const char* path)
         slot.odometry_delta = (k == 0) ? Eigen::Vector3f::Zero() : slot_delta;
         slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
                                           cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
-        slot.odom_delta_tensor = torch::tensor({slot.odometry_delta.x(), slot.odometry_delta.y(), slot.odometry_delta.z()},
-                                               torch::kFloat32);
-        slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+        slot.motion_prec = slot.motion_cov.inverse();
         slot.wall_assoc = res.assoc;
 
         rc::gn::Input in;
-        in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
-        in.device = torch::kCPU; in.walls = &map; in.no_sdf = true; in.gauge_fix = true;
+        in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp; in.walls = &map; in.no_sdf = true; in.gauge_fix = true;
         // ⚠ HONOUR THE STRIDE FLAG. The agent creates a NEW window slot only when the robot has
         // actually moved (WindowMinTravel 0.10 m / WindowMinTurn 0.15 rad); on every other frame it
         // OVERWRITES the newest slot (`stride_replace`, 91-99% of frames here). Pushing every frame
@@ -2033,8 +2018,8 @@ int run_replay(const char* path)
         {
             if (static_cast<int>(window.size()) >= cfg.window)
             {
-                auto fpt = window.front().pose.detach();
-                const Eigen::Vector3f fp(fpt[0].item<float>(), fpt[1].item<float>(), fpt[2].item<float>());
+                auto fpt = window.front().pose;
+                const Eigen::Vector3f fp(fpt[0], fpt[1], fpt[2]);
                 for (const auto& aa : window.front().wall_assoc) { pda_total += aa.pda; ++n_assoc_absorbed; }
                 ++n_absorbs;
                 {   // WHAT DOES ONE ABSORB ACTUALLY ADD? Track one wall's carried precision across
@@ -2052,15 +2037,15 @@ int run_replay(const char* path)
                 }
                 rc::gn::absorb_wall_observations(in, window.front(), fp);
                 window.pop_front();
-                auto nf = window.front().pose.detach();
+                auto nf = window.front().pose;
                 bp.valid = true;
-                bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
+                bp.mu = Eigen::Vector3f(nf[0], nf[1], nf[2]);
                 bp.precision = Eigen::Vector3f(400.f, 400.f, 500.f).asDiagonal();
             }
             window.push_back(std::move(slot));
         }
         std::vector<Eigen::Vector3f> poses;
-        for (const auto& sl : window) { auto q = sl.pose.detach(); poses.emplace_back(q[0].item<float>(), q[1].item<float>(), q[2].item<float>()); }
+        for (const auto& sl : window) { auto q = sl.pose; poses.emplace_back(q[0], q[1], q[2]); }
         rc::gn::Options opts;
         const auto r = rc::gn::solve(in, poses, opts);
         if (r.ok) for (size_t i = 0; i < window.size(); ++i) window[i].pose = pose_tensor(poses[i]);
@@ -3460,7 +3445,6 @@ int main()
 #ifdef _OPENMP
     omp_set_num_threads(1);
 #endif
-    torch::set_num_threads(1);
     std::mt19937 rng(7);
 
     // ═══ BOX ESTIMATOR (WS_BOXES=1) ═══════════════════════════════════════════════════════════
@@ -4060,8 +4044,7 @@ int main()
             slot.lidar_points = points_tensor(pts);
             slot.odometry_delta = (i == 0) ? Eigen::Vector3f::Zero() : Eigen::Vector3f(truth[i] - truth[i - 1]);
             slot.motion_cov = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
-            slot.odom_delta_tensor = torch::tensor({slot.odometry_delta.x(), slot.odometry_delta.y(), slot.odometry_delta.z()}, torch::kFloat32);
-            slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+            slot.motion_prec = slot.motion_cov.inverse();
             // Associate every point to its true wall (the harness knows), one WallAssoc per wall.
             const float c = std::cos(truth[i].z()), s = std::sin(truth[i].z());
             std::vector<std::vector<Eigen::Vector2f>> per_wall(tw.size());
@@ -4090,7 +4073,7 @@ int main()
         RoomConcept::BoundaryPrior bp; bp.valid = false;
 
         rc::gn::Input in;
-        in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp; in.device = torch::kCPU;
+        in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
         in.walls = &map; in.no_sdf = true; in.gauge_fix = true;
 
         std::vector<Eigen::Vector3f> at = truth;
@@ -4109,7 +4092,7 @@ int main()
             rc::wallmap::WallMap m = map;
             std::deque<RoomConcept::WindowSlot> w = window;
             if (not cs.points) for (auto& s : w) s.wall_assoc.clear();
-            if (not cs.motion) for (auto& s : w) s.motion_prec_tensor = mat3(Eigen::Matrix3f::Zero());
+            if (not cs.motion) for (auto& s : w) s.motion_prec = Eigen::Matrix3f::Zero();
             if (not cs.room) for (auto& wl : m.walls) wl.manhattan_var = 0.f;
             if (not cs.priors) { for (auto& wl : m.walls) wl.information.setZero(); m.theta0_information = 0.f; }
             if (cs.corrupt > 0.f) for (auto& wl : m.walls) wl.d += cs.corrupt;   // every point past the Huber knee

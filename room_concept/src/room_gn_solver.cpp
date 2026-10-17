@@ -42,104 +42,34 @@ namespace rc::gn
         //  Row of J for point p (robot frame), g = ∇SDF at its room-frame image, q = R(θ)p:
         //      ∂d/∂(x,y) = gᵀ ,   ∂d/∂θ = gᵀ·(J·q) = -g_x·q_y + g_y·q_x
         // =====================================================================================
+        //  The arithmetic lives in rc::linearize_observation (room_obs_weights.cpp) so the window
+        //  marginalisation and the posterior covariance use the SAME linearization this factor adds.
         class SdfFactor final : public IFactor
         {
         public:
             SdfFactor(const Input& in, int offset, const RoomConcept::WindowSlot& slot)
-                : in_(in), off_(offset), points_(slot.lidar_points)
-            {
-                // Robot-frame xy pulled to CPU once per solve, not once per iteration.
-                const auto cpu = points_.detach().to(torch::kCPU).contiguous();
-                const auto n = static_cast<int>(cpu.size(0));
-                const auto acc = cpu.accessor<float, 2>();
-                pts_.resize(n, 2);
-                for (int i = 0; i < n; ++i)
-                {
-                    pts_(i, 0) = acc[i][0];
-                    pts_(i, 1) = acc[i][1];
-                }
-            }
+                : in_(in), off_(offset), points_(slot.lidar_points) {}
 
             float evaluate(const State& x) const override
             {
-                torch::NoGradGuard ng;
-                const auto q = query(x, /*want_grad=*/false);
-                if (not q.sdf.defined() or q.sdf.size(0) == 0) return 0.f;
                 // ★ SAME DOOR WEIGHTS AS linearize(): the step is accepted on the cost the step was computed for.
-                return compute_observation_loss_from_query(*in_.model, *in_.params, points_,
-                                                           theta_tensor(x), q, in_.doors_robot).item<float>();
+                return compute_observation_loss(*in_.model, *in_.params, points_, pose(x), in_.doors_robot);
             }
 
             float linearize(const State& x, LinearSystem& sys) const override
             {
-                torch::NoGradGuard ng;
-                const auto q = query(x, /*want_grad=*/true);
-                if (not q.sdf.defined() or q.sdf.size(0) == 0) return 0.f;
-
-                const auto w = build_observation_weights(*in_.model, *in_.params, points_,
-                                                         theta_tensor(x), q, in_.doors_robot);
-                const auto sdf_cpu  = q.sdf.detach().to(torch::kCPU).contiguous();
-                const auto grad_cpu = q.grad.detach().to(torch::kCPU).contiguous();
-                const auto w_cpu    = w.detach().to(torch::kCPU).contiguous();
-
-                const int n = static_cast<int>(sdf_cpu.size(0));
-                const auto d_acc = sdf_cpu.accessor<float, 1>();
-                const auto g_acc = grad_cpu.accessor<float, 2>();
-                const auto w_acc = w_cpu.accessor<float, 1>();
-
-                const auto& P = *in_.params;
-                const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
-                const float delta = P.rfe_huber_delta;
-                const float theta = x(off_ + 2);
-                const float c = std::cos(theta), s = std::sin(theta);
-
-                Eigen::Matrix3f H = Eigen::Matrix3f::Zero();
-                Eigen::Vector3f b = Eigen::Vector3f::Zero();
-                for (int i = 0; i < n; ++i)
-                {
-                    const float d = d_acc[i];
-                    if (not std::isfinite(d)) continue;
-                    const float ad = std::abs(d);
-                    const float u = (ad <= delta or ad < 1e-9f) ? 1.0f : delta / ad;   // IRLS Huber
-                    const float a = 0.5f * inv_var * w_acc[i] * u / static_cast<float>(n);
-
-                    // q = R(θ)·p, so ∂d/∂θ = gᵀ(J·q) = -g_x·q_y + g_y·q_x
-                    const float px = pts_(i, 0), py = pts_(i, 1);
-                    const float qx = c * px - s * py;
-                    const float qy = s * px + c * py;
-                    const float gx = g_acc[i][0], gy = g_acc[i][1];
-
-                    Eigen::Vector3f J;
-                    J << gx, gy, -gx * qy + gy * qx;
-                    H.noalias() += a * J * J.transpose();
-                    b.noalias() += (a * d) * J;
-                }
-
-                sys.add_H(off_, off_, Eigen::MatrixXf(H));
-                sys.add_b(off_, Eigen::VectorXf(b));
-                return compute_observation_loss_from_query(*in_.model, *in_.params, points_,
-                                                           theta_tensor(x), q, in_.doors_robot).item<float>();
+                const auto lin = linearize_observation(*in_.model, *in_.params, points_, pose(x), in_.doors_robot);
+                sys.add_H(off_, off_, Eigen::MatrixXf(lin.H));
+                sys.add_b(off_, Eigen::VectorXf(lin.g));
+                return lin.loss;
             }
 
         private:
-            Model::SdfQueryResult query(const State& x, bool want_grad) const
-            {
-                const int o = off_;
-                const auto opt = torch::TensorOptions().dtype(torch::kFloat32).device(in_.device);
-                const auto xy = torch::tensor({x(o), x(o + 1)}, opt);
-                const auto th = torch::tensor({x(o + 2)}, opt);
-                return in_.model->sdf_query_at_pose(points_, xy, th, want_grad);
-            }
-            torch::Tensor theta_tensor(const State& x) const
-            {
-                return torch::tensor({x(off_ + 2)},
-                                     torch::TensorOptions().dtype(torch::kFloat32).device(in_.device));
-            }
+            Eigen::Vector3f pose(const State& x) const { return x.segment<3>(off_); }
 
             const Input& in_;
             int off_ = 0;
-            torch::Tensor points_;
-            Eigen::MatrixX2f pts_;
+            const ScanPoints& points_;
         };
 
         // =====================================================================================
@@ -840,7 +770,7 @@ namespace rc::gn
         if (in.walls == nullptr or in.params == nullptr or slot.wall_assoc.empty()) return;
         const auto& P = *in.params;
         const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
-        const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
+        const int n_slot = static_cast<int>(slot.lidar_points.size());
         for (const auto& a : slot.wall_assoc)
         {
             auto* w = in.walls->find(a.wall_id);
@@ -951,7 +881,7 @@ namespace rc::gn
         if (in.walls == nullptr or in.params == nullptr or slot.wall_assoc.empty()) return out;
         const auto& P = *in.params;
         const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
-        const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
+        const int n_slot = static_cast<int>(slot.lidar_points.size());
         const float sensor = std::max(1e-4f, P.wall_seg.sensor_sigma);
         // With the line factor the carried information is ALREADY physical — the segment fit's own
         // Lambda, saturated by the common mode — so there is nothing to rescale. k exists only to
@@ -1027,7 +957,7 @@ namespace rc::gn
         {
             if (P.sdf_current_slot_only and i != n - 1) continue;
             const auto& slot = W[static_cast<size_t>(i)];
-            if (not slot.lidar_points.defined() or slot.lidar_points.size(0) == 0) continue;
+            if (slot.lidar_points.empty()) continue;
             fs.push_back(std::make_unique<SdfFactor>(in, idx.offset(i), slot));
         }
 
@@ -1035,14 +965,7 @@ namespace rc::gn
         for (int i = 1; i < n; ++i)
         {
             const auto& curr = W[static_cast<size_t>(i)];
-            Eigen::Matrix3f prec = Eigen::Matrix3f::Identity();
-            if (curr.motion_prec_tensor.defined())
-            {
-                const auto cpu = curr.motion_prec_tensor.detach().to(torch::kCPU).contiguous();
-                const auto a = cpu.accessor<float, 2>();
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) prec(r, c) = a[r][c];
-            }
+            const Eigen::Matrix3f& prec = curr.motion_prec;
             fs.push_back(std::make_unique<MotionFactor>(idx.offset(i - 1), idx.offset(i),
                                                          curr.odometry_delta, prec));
 
@@ -1053,13 +976,9 @@ namespace rc::gn
             // Present only when the interval supplied a precision, i.e. only when the feature is on
             // — and its precision already fades with the motion the interval measured, so in motion
             // it contributes nothing without anything having to switch it off.
-            if (curr.zupt_prec_tensor.defined())
+            if (curr.zupt_prec.has_value())
             {
-                Eigen::Matrix3f zprec = Eigen::Matrix3f::Zero();
-                const auto zcpu = curr.zupt_prec_tensor.detach().to(torch::kCPU).contiguous();
-                const auto za = zcpu.accessor<float, 2>();
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) zprec(r, c) = za[r][c];
+                const Eigen::Matrix3f& zprec = *curr.zupt_prec;
                 fs.push_back(std::make_unique<MotionFactor>(idx.offset(i - 1), idx.offset(i),
                                                              Eigen::Vector3f::Zero(), zprec));
             }
@@ -1166,7 +1085,7 @@ namespace rc::gn
             for (int i = first; i < n; ++i)
             {
                 const auto& slot = W[static_cast<size_t>(i)];
-                const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
+                const int n_slot = static_cast<int>(slot.lidar_points.size());
                 for (const auto& a : slot.wall_assoc)
                 {
                     const int wk = in.walls->index_of(a.wall_id);

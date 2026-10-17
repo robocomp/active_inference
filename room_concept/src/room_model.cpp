@@ -1,66 +1,38 @@
 #include "room_model.h"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace rc
 {
 
-void Model::set_device(torch::Device device)
-{
-    device_ = device;
-}
-
 void Model::init_from_state(float width, float length, float x, float y, float phi, float wall_height)
 {
     use_polygon = false;
-    const float half_w = width * 0.5f;
-    const float half_l = length * 0.5f;
     half_height = wall_height * 0.5f;
-
-    // fixed room size
-    half_extents = torch::tensor({half_w, half_l},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-
-    // optimized robot pose
-    robot_pos = torch::tensor({x, y},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_).requires_grad(true));
-    robot_theta = torch::tensor({phi},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_).requires_grad(true));
-
-    register_parameter("robot_pos", robot_pos);
-    register_parameter("robot_theta", robot_theta);
-
+    half_extents = {width * 0.5f, length * 0.5f};   // fixed room size
+    robot_pos = {x, y};
+    robot_theta = phi;
     init_common();
 }
 
-void Model::init_from_polygon(const std::vector<Eigen::Vector2f>& vertices,
-                               float x, float y, float phi, float wall_height)
+void Model::set_polygon_geometry(const std::vector<Eigen::Vector2f>& vertices)
 {
-    use_polygon = true;
-    half_height = wall_height * 0.5f;
-
-    // Store polygon vertices as tensor [N, 2]
-    std::vector<float> verts_flat;
-    verts_flat.reserve(vertices.size() * 2);
-    for (const auto& v : vertices)
+    polygon_vertices = vertices;
+    // Pre-compute segment data for the SDF: segment k runs from vertex k to vertex k+1 (closed).
+    const auto n = vertices.size();
+    seg_a_.resize(n);
+    seg_ab_.resize(n);
+    seg_ab_sq_.resize(n);
+    for (std::size_t k = 0; k < n; ++k)
     {
-        verts_flat.push_back(v.x());
-        verts_flat.push_back(v.y());
+        seg_a_[k] = vertices[k];
+        seg_ab_[k] = vertices[(k + 1) % n] - vertices[k];
+        seg_ab_sq_[k] = seg_ab_[k].x() * seg_ab_[k].x() + seg_ab_[k].y() * seg_ab_[k].y();
     }
-    polygon_vertices = torch::from_blob(verts_flat.data(),
-        {static_cast<long>(vertices.size()), 2}, torch::kFloat32).clone().to(device_);
-
-    // Pre-compute segment data for faster SDF
-    const int64_t num_verts = polygon_vertices.size(0);
-    auto indices_a = torch::arange(num_verts,
-        torch::TensorOptions().dtype(torch::kLong).device(device_));
-    auto indices_b = (indices_a + 1) % num_verts;
-    seg_a_ = polygon_vertices.index_select(0, indices_a).contiguous();
-    const auto seg_b = polygon_vertices.index_select(0, indices_b).contiguous();
-    seg_ab_ = (seg_b - seg_a_).contiguous();
-    seg_ab_sq_ = torch::sum(seg_ab_ * seg_ab_, /*dim=*/1).contiguous();
-
-    // Compute bounding box for half_extents (for compatibility)
+    // Bounding box for half_extents (for compatibility)
     float min_x = vertices[0].x(), max_x = vertices[0].x();
     float min_y = vertices[0].y(), max_y = vertices[0].y();
     for (const auto& v : vertices)
@@ -68,18 +40,17 @@ void Model::init_from_polygon(const std::vector<Eigen::Vector2f>& vertices,
         min_x = std::min(min_x, v.x()); max_x = std::max(max_x, v.x());
         min_y = std::min(min_y, v.y()); max_y = std::max(max_y, v.y());
     }
-    half_extents = torch::tensor({(max_x - min_x) / 2.f, (max_y - min_y) / 2.f},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    half_extents = {(max_x - min_x) / 2.f, (max_y - min_y) / 2.f};
+}
 
-    // optimized robot pose
-    robot_pos = torch::tensor({x, y},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_).requires_grad(true));
-    robot_theta = torch::tensor({phi},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_).requires_grad(true));
-
-    register_parameter("robot_pos", robot_pos);
-    register_parameter("robot_theta", robot_theta);
-
+void Model::init_from_polygon(const std::vector<Eigen::Vector2f>& vertices,
+                              float x, float y, float phi, float wall_height)
+{
+    use_polygon = true;
+    half_height = wall_height * 0.5f;
+    set_polygon_geometry(vertices);
+    robot_pos = {x, y};
+    robot_theta = phi;
     init_common();
 }
 
@@ -87,301 +58,150 @@ void Model::update_polygon_vertices(const std::vector<Eigen::Vector2f>& vertices
 {
     if (vertices.size() < 3) return;
     use_polygon = true;
-    std::vector<float> verts_flat;
-    verts_flat.reserve(vertices.size() * 2);
-    for (const auto& v : vertices)
-    {
-        verts_flat.push_back(v.x());
-        verts_flat.push_back(v.y());
-    }
-    polygon_vertices = torch::from_blob(verts_flat.data(),
-        {static_cast<long>(vertices.size()), 2}, torch::kFloat32).clone().to(device_);
-    const int64_t num_verts = polygon_vertices.size(0);
-    auto indices_a = torch::arange(num_verts,
-        torch::TensorOptions().dtype(torch::kLong).device(device_));
-    auto indices_b = (indices_a + 1) % num_verts;
-    seg_a_ = polygon_vertices.index_select(0, indices_a).contiguous();
-    const auto seg_b = polygon_vertices.index_select(0, indices_b).contiguous();
-    seg_ab_ = (seg_b - seg_a_).contiguous();
-    seg_ab_sq_ = torch::sum(seg_ab_ * seg_ab_, /*dim=*/1).contiguous();
-    float min_x = vertices[0].x(), max_x = vertices[0].x();
-    float min_y = vertices[0].y(), max_y = vertices[0].y();
-    for (const auto& v : vertices)
-    {
-        min_x = std::min(min_x, v.x()); max_x = std::max(max_x, v.x());
-        min_y = std::min(min_y, v.y()); max_y = std::max(max_y, v.y());
-    }
-    half_extents = torch::tensor({(max_x - min_x) / 2.f, (max_y - min_y) / 2.f},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    set_polygon_geometry(vertices);
 }
 
 void Model::init_common()
 {
-    // Initialize prediction tensors (detached from graph)
-    predicted_pos = torch::zeros({2},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-    predicted_theta = torch::zeros({1},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-    prediction_precision_matrix = torch::eye(3,
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    predicted_pos.setZero();
+    predicted_theta = 0.f;
+    prediction_precision_matrix.setIdentity();
     has_prediction = false;
-
-    // Initialize covariance for EKF prediction (moderate initial uncertainty)
-    prev_cov = 0.1f * torch::eye(3,
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-
-    // Initialize previous pose
+    prev_cov = 0.1f * Eigen::Matrix3f::Identity();   // moderate initial uncertainty for EKF prediction
     robot_prev_pose = std::nullopt;
+    initialised_ = true;
 }
 
 void Model::set_prediction(const Eigen::Vector2f& pred_pos, float pred_theta,
                            const Eigen::Matrix3f& precision)
 {
-    predicted_pos = torch::tensor({pred_pos.x(), pred_pos.y()},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-    predicted_theta = torch::tensor({pred_theta},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-
-    // Convert Eigen Matrix to Tensor
-    prediction_precision_matrix = torch::from_blob(
-        const_cast<float*>(precision.data()),
-        {3, 3},
-        torch::kFloat32).clone().to(device_);
-
+    predicted_pos = pred_pos;
+    predicted_theta = pred_theta;
+    prediction_precision_matrix = precision;
     has_prediction = true;
 }
 
-torch::Tensor Model::prior_loss() const
+Eigen::VectorXf Model::sdf(const ScanPoints& points_robot) const
 {
-    if (!has_prediction)
-        return torch::tensor(0.0f, torch::TensorOptions().device(device_));
-
-    // Current state vector [x, y, theta]
-    auto current_state = torch::cat({robot_pos, robot_theta}, 0); // [3]
-    auto pred_state = torch::cat({predicted_pos, predicted_theta}, 0); // [3]
-
-    auto diff = (current_state - pred_state).unsqueeze(1); // [3, 1]
-
-    // (s - mu)^T * Sigma^-1 * (s - mu)
-    // [1, 3] * [3, 3] * [3, 1] -> [1, 1]
-    auto loss = torch::matmul(diff.t(), torch::matmul(prediction_precision_matrix, diff));
-
-    return 0.5f * loss.squeeze();
+    return sdf_at_pose(points_robot, pose());
 }
 
-torch::Tensor Model::sdf(const torch::Tensor& points_robot) const
+Eigen::VectorXf Model::sdf_at_pose(const ScanPoints& points_robot, const Eigen::Vector3f& pose) const
 {
-    return sdf_at_pose(points_robot, robot_pos, robot_theta);
+    return sdf_query_at_pose(points_robot, pose).sdf;
 }
 
-torch::Tensor Model::sdf_at_pose(const torch::Tensor& points_robot,
-                                  const torch::Tensor& pose_xy,
-                                  const torch::Tensor& pose_theta) const
-{
-    return sdf_query_at_pose(points_robot, pose_xy, pose_theta).sdf;
-}
-
-Model::SdfQueryResult Model::sdf_query_at_pose(const torch::Tensor& points_robot,
-                                               const torch::Tensor& pose_xy,
-                                               const torch::Tensor& pose_theta,
+Model::SdfQueryResult Model::sdf_query_at_pose(const ScanPoints& points_robot,
+                                               const Eigen::Vector3f& pose,
                                                bool want_grad) const
 {
-    if (!points_robot.defined())
-        return {
-            torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
-            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
-            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(device_))
-        };
-
-    if (points_robot.dim() != 2 || points_robot.size(1) < 2)
-        return {
-            torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
-            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
-            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()))
-        };
-
-    if (points_robot.size(0) == 0)
-        return {
-            torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
-            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
-            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()))
-        };
-
-    // Transform points from robot frame to room frame
-    // Use the device of input points as the reference
-    const auto device = points_robot.device();
-    const auto pxy = points_robot.index({torch::indexing::Slice(), torch::indexing::Slice(0,2)});
-
-    // Move model parameters to the same device as points (no-op if already there)
-    torch::Tensor theta_src = pose_theta.defined() ? pose_theta : robot_theta;
-    torch::Tensor pos_src = pose_xy.defined() ? pose_xy : robot_pos;
-    if (!theta_src.defined())
-        theta_src = torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-    if (!pos_src.defined())
-        pos_src = torch::zeros({2}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-
-    const auto theta = theta_src.to(device);
-    const auto pos = pos_src.to(device);
-
-    const auto c = torch::cos(theta);
-    const auto s = torch::sin(theta);
-
-    // Build rotation matrix on the same device as points
-    auto rot = torch::zeros({2, 2}, pxy.options());
-    rot[0][0] = c.squeeze();
-    rot[0][1] = -s.squeeze();
-    rot[1][0] = s.squeeze();
-    rot[1][1] = c.squeeze();
+    SdfQueryResult out;
+    const auto n = static_cast<Eigen::Index>(points_robot.size());
+    out.sdf.resize(n);
+    out.closest_normals.resize(n, 2);
+    if (want_grad) out.grad.resize(n, 2);
+    if (n == 0) return out;
 
     // Map points to room frame: p_room = R(phi) * p_robot + t
-    const auto points_room_xy = torch::matmul(pxy, rot.transpose(0,1)) + pos;
+    const float c = std::cos(pose.z()), s = std::sin(pose.z());
+    Eigen::Matrix<float, -1, 2> room_xy(n, 2);
+    for (Eigen::Index i = 0; i < n; ++i)
+    {
+        const auto& p = points_robot[static_cast<std::size_t>(i)];
+        room_xy(i, 0) = c * p.x() - s * p.y() + pose.x();
+        room_xy(i, 1) = s * p.x() + c * p.y() + pose.y();
+    }
 
     if (use_polygon)
-    {
-        return sdf_polygon_query(points_room_xy, want_grad);
-    }
+        sdf_polygon_query(room_xy, want_grad, out);
     else
-    {
-        return sdf_box_query(points_robot, points_room_xy, want_grad);
-    }
+        sdf_box_query(points_robot, room_xy, want_grad, out);
+    return out;
 }
 
-Model::SdfQueryResult Model::sdf_box_query(const torch::Tensor& points_robot,
-                                           const torch::Tensor& points_room_xy,
-                                           bool want_grad) const
+void Model::sdf_box_query(const ScanPoints& points_robot, const Eigen::Matrix<float, -1, 2>& room_xy,
+                          bool want_grad, SdfQueryResult& out) const
 {
-    const auto device = points_room_xy.device();
-    const auto pz = points_robot.index({torch::indexing::Slice(), 2}).reshape({-1,1});
-    const auto points_room = torch::cat({points_room_xy, pz.to(device)}, 1);
+    const float hx = half_extents.x(), hy = half_extents.y(), hz = half_height;
+    for (Eigen::Index i = 0; i < room_xy.rows(); ++i)
+    {
+        const float px = room_xy(i, 0), py = room_xy(i, 1);
+        const float pz = points_robot[static_cast<std::size_t>(i)].z();
+        const float dx = std::abs(px) - hx, dy = std::abs(py) - hy, dz = std::abs(pz) - hz;
+        const float ox = std::max(dx, 0.f), oy = std::max(dy, 0.f), oz = std::max(dz, 0.f);
+        const float outside = std::sqrt(ox * ox + oy * oy + oz * oz);
+        const float inside = std::min(std::max(std::max(dx, dy), dz), 0.f);
+        out.sdf(i) = outside + inside;
 
-    const auto hz = torch::full({1}, half_height, points_room.options());
-    const auto half_ext = half_extents.defined()
-                          ? half_extents.to(device)
-                          : torch::zeros({2}, points_room.options());
-    const auto half_sizes = torch::cat({half_ext, hz}, 0);
-
-    const auto abs_points = torch::abs(points_room);
-    const auto d = abs_points - half_sizes;
-
-    const auto outside = torch::norm(torch::max(d, torch::zeros_like(d)), 2, 1);
-    const auto inside = torch::clamp_max(
-        torch::max(torch::max(d.select(1,0), d.select(1,1)), d.select(1,2)), 0.0);
-
-    const auto px = points_room_xy.select(1, 0);
-    const auto py = points_room_xy.select(1, 1);
-    const auto half_ext_cpu = half_ext.defined() ? half_ext : torch::zeros({2}, points_room_xy.options());
-    const auto hx = half_ext_cpu.index({0});
-    const auto hy = half_ext_cpu.index({1});
-
-    const auto dist_left = torch::abs(px + hx);
-    const auto dist_right = torch::abs(hx - px);
-    const auto dist_bottom = torch::abs(py + hy);
-    const auto dist_top = torch::abs(hy - py);
-    const auto face_dists = torch::stack({dist_left, dist_right, dist_bottom, dist_top}, 1);
-    const auto min_indices = std::get<1>(torch::min(face_dists, 1));
-
-    auto normals = torch::zeros({points_room_xy.size(0), 2}, points_room_xy.options());
-    const auto left_mask = min_indices == 0;
-    const auto right_mask = min_indices == 1;
-    const auto bottom_mask = min_indices == 2;
-    const auto top_mask = min_indices == 3;
-    normals.index_put_({left_mask, 0}, -1.0f);
-    normals.index_put_({right_mask, 0}, 1.0f);
-    normals.index_put_({bottom_mask, 1}, -1.0f);
-    normals.index_put_({top_mask, 1}, 1.0f);
-
+        // Closest face (first minimum, as torch::min): left, right, bottom, top.
+        const float faces[4] = {std::abs(px + hx), std::abs(hx - px), std::abs(py + hy), std::abs(hy - py)};
+        int k = 0;
+        for (int f = 1; f < 4; ++f) if (faces[f] < faces[k]) k = f;
+        static constexpr float nx[4] = {-1.f, 1.f, 0.f, 0.f};
+        static constexpr float ny[4] = {0.f, 0.f, -1.f, 1.f};
+        out.closest_normals(i, 0) = nx[k];
+        out.closest_normals(i, 1) = ny[k];
+    }
     // For the box the signed distance's gradient IS the closest face's outward unit normal: exact for
     // interior points (the branch lidar hits fall in) and for exterior points outside a single face.
     // It degrades only in the corner wedge outside two faces at once, where the true gradient is the
     // normalized max(d,0) vector — an approximation the Gauss-Newton step tolerates (LM damping
     // covers it), and one the polygon branch below does not need.
-    return {outside + inside, normals, want_grad ? normals.detach() : torch::Tensor{}};
+    if (want_grad) out.grad = out.closest_normals;
 }
 
-Model::SdfQueryResult Model::sdf_polygon_query(const torch::Tensor& points_room_xy,
-                                               bool want_grad) const
+void Model::sdf_polygon_query(const Eigen::Matrix<float, -1, 2>& room_xy, bool want_grad,
+                              SdfQueryResult& out) const
 {
-    // Fully vectorized: broadcast [N,1,2] vs [1,S,2] for all segments at once
-    // Segment tensors (seg_a_, seg_ab_, seg_ab_sq_) are already on device_ from init
-
-    // points: [N, 2] → [N, 1, 2];  segments: [S, 2] → [1, S, 2]
-    const auto pts = points_room_xy.unsqueeze(1);  // [N, 1, 2]
-    const auto a_  = seg_a_.unsqueeze(0);           // [1, S, 2]
-    const auto ab_ = seg_ab_.unsqueeze(0);          // [1, S, 2]
-
-    // ap = pts - a  →  [N, S, 2]
-    const auto ap = pts - a_;
-
-    // t = clamp(dot(ap, ab) / |ab|², 0, 1)  →  [N, S]
-    auto t = torch::sum(ap * ab_, /*dim=*/2) / (seg_ab_sq_.unsqueeze(0) + 1e-8f);
-    t = torch::clamp(t, 0.0f, 1.0f);
-
-    // closest = a + t * ab  →  [N, S, 2]
-    const auto closest = a_ + t.unsqueeze(2) * ab_;
-
-    // dist² = |pts - closest|²  →  [N, S]
-    const auto diff = pts - closest;
-    const auto dist_sq = torch::sum(diff * diff, /*dim=*/2);
-
-    // Min over segments → [N]
-    const auto min_result = torch::min(dist_sq, /*dim=*/1);
-    const auto min_dist_sq = std::get<0>(min_result);
-    const auto min_indices = std::get<1>(min_result);
-
-    const auto seg_len = torch::sqrt(seg_ab_sq_ + 1e-8f).unsqueeze(1);
-    const auto tangent = seg_ab_ / seg_len;
-    auto seg_normals = torch::zeros_like(seg_a_);
-    seg_normals.index_put_({torch::indexing::Slice(), 0}, -tangent.index({torch::indexing::Slice(), 1}));
-    seg_normals.index_put_({torch::indexing::Slice(), 1}, tangent.index({torch::indexing::Slice(), 0}));
-    const auto closest_normals = seg_normals.index_select(0, min_indices);
-
-    const auto dist = torch::sqrt(min_dist_sq + 1e-8f);
-
-    // ∇SDF for the UNSIGNED polygon distance = (p − closest)/|p − closest|: the unit vector pointing
-    // from the closest boundary point towards p. Built entirely from DETACHED inputs so it never
-    // becomes part of the autograd graph (the Adam/LBFGS path must not pay for it).
-    torch::Tensor grad;
-    if (want_grad)
+    const auto S = seg_a_.size();
+    if (S == 0)   // no geometry yet: report zero distance rather than index an empty segment list
     {
-        const auto sel = closest.detach()                          // [N, S, 2]
-            .gather(1, min_indices.view({-1, 1, 1}).expand({-1, 1, 2}))
-            .squeeze(1);                                           // [N, 2]
-        grad = (points_room_xy.detach() - sel) / dist.detach().unsqueeze(1).clamp_min(1e-6f);
+        out.sdf.setZero(); out.closest_normals.setZero();
+        if (want_grad) out.grad.setZero();
+        return;
     }
-
-    return {dist, closest_normals, grad};
+    for (Eigen::Index i = 0; i < room_xy.rows(); ++i)
+    {
+        const float px = room_xy(i, 0), py = room_xy(i, 1);
+        float best_d2 = std::numeric_limits<float>::infinity();
+        std::size_t best = 0;
+        float best_cx = 0.f, best_cy = 0.f;
+        for (std::size_t k = 0; k < S; ++k)
+        {
+            const float apx = px - seg_a_[k].x(), apy = py - seg_a_[k].y();
+            const float abx = seg_ab_[k].x(), aby = seg_ab_[k].y();
+            // t = clamp(dot(ap, ab) / |ab|², 0, 1)
+            float t = (apx * abx + apy * aby) / (seg_ab_sq_[k] + 1e-8f);
+            t = std::clamp(t, 0.0f, 1.0f);
+            const float cx = seg_a_[k].x() + t * abx, cy = seg_a_[k].y() + t * aby;
+            const float ddx = px - cx, ddy = py - cy;
+            const float d2 = ddx * ddx + ddy * ddy;
+            if (d2 < best_d2) { best_d2 = d2; best = k; best_cx = cx; best_cy = cy; }   // first minimum
+        }
+        const float len = std::sqrt(seg_ab_sq_[best] + 1e-8f);
+        out.closest_normals(i, 0) = -seg_ab_[best].y() / len;
+        out.closest_normals(i, 1) =  seg_ab_[best].x() / len;
+        const float dist = std::sqrt(best_d2 + 1e-8f);
+        out.sdf(i) = dist;
+        // ∇SDF for the UNSIGNED polygon distance = (p − closest)/|p − closest|: the unit vector pointing
+        // from the closest boundary point towards p.
+        if (want_grad)
+        {
+            const float inv = 1.f / std::max(dist, 1e-6f);
+            out.grad(i, 0) = (px - best_cx) * inv;
+            out.grad(i, 1) = (py - best_cy) * inv;
+        }
+    }
 }
 
 Eigen::Matrix<float, 5, 1> Model::get_state() const
 {
-    // Say WHICH tensor is missing. Without this the caller gets ATen's
-    // "tensor does not have a device", which names neither the tensor nor this function and
-    // surfaces as an unhandled throw out of a Qt timer handler.
     if (not has_state())
-        throw std::runtime_error(
-            std::string("Model::get_state() on an uninitialised model - undefined:") +
-            (half_extents.defined() ? "" : " half_extents") +
-            (robot_pos.defined()    ? "" : " robot_pos") +
-            (robot_theta.defined()  ? "" : " robot_theta") +
-            " (init_from_state/init_from_polygon has not run, or ran only partly)");
-
-    // Must convert to CPU for accessor
-    auto ext_cpu = half_extents.to(torch::kCPU);
-    auto pos_cpu = robot_pos.to(torch::kCPU);
-    auto th_cpu  = robot_theta.to(torch::kCPU);
-    const auto ext = ext_cpu.accessor<float,1>();
-    const auto pos = pos_cpu.accessor<float,1>();
-    const auto th  = th_cpu.accessor<float,1>();
-    Eigen::Matrix<float,5,1> s;
-    s << 2.f*ext[0], 2.f*ext[1], pos[0], pos[1], th[0];
+        throw std::runtime_error("Model::get_state() on an uninitialised model "
+                                 "(init_from_state/init_from_polygon has not run)");
+    Eigen::Matrix<float, 5, 1> s;
+    s << 2.f * half_extents.x(), 2.f * half_extents.y(), robot_pos.x(), robot_pos.y(), robot_theta;
     return s;
 }
 
-std::vector<torch::Tensor> Model::optim_parameters() const
-{
-    return {robot_pos, robot_theta};
-}
-
-
 } // namespace rc
-

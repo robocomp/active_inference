@@ -113,7 +113,6 @@ struct RoomConfig
         std::optional<float> boundary_mu_quality_threshold;
         std::optional<float> gn_loss_rel_tol;
         std::optional<int> gn_max_iters;
-        std::optional<int> torch_num_threads;
         std::optional<bool> adaptive_cov_enabled;
         std::optional<bool> window_stride_enabled;
         std::optional<bool> boundary_fej_schur;

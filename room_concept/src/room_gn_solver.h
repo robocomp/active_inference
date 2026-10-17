@@ -44,8 +44,6 @@
 #include <memory>
 #include <vector>
 
-#include <torch/torch.h>
-
 #include "room_concept.h"
 #include "room_model.h"
 #include "wall_map.h"
@@ -154,7 +152,7 @@ namespace rc::gn
     };
 
     /// Everything the solver reads. Assembled by the caller because WindowManager is private to
-    /// RoomConcept; the solver deliberately owns no torch state of its own.
+    /// RoomConcept.
     struct Input
     {
         const Model*                              model = nullptr;
@@ -162,7 +160,6 @@ namespace rc::gn
         const std::deque<RoomConcept::WindowSlot>* window = nullptr;
         const RoomConcept::BoundaryPrior*         boundary_prior = nullptr;
         float                                     boundary_weight = 1.0f;
-        torch::Device                             device = torch::kCPU;
         // Landmarks to optimise JOINTLY with the poses. Empty ⇒ the classic behaviour, where every
         // object anchor is a fixed constant taken from ObjectAnchorObs::pose_world.
         std::vector<Landmark>*                    landmarks = nullptr;

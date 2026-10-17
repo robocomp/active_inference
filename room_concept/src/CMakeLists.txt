@@ -1,7 +1,6 @@
 cmake_policy(SET CMP0074 NEW)
 
-# Keep generated CMake changes from pushing an unsupported host dialect into
-# libtorch/CUDA configure checks when templates are regenerated.
+# Keep generated CMake changes from pushing an unsupported host dialect when templates are regenerated.
 if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD GREATER 23)
   set(CMAKE_CXX_STANDARD 23)
 endif()
@@ -9,49 +8,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 COMPONENTS Xml PrintSupport REQUIRED)
 find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
-
-# Find PyTorch
-set(CUDAToolkit_ROOT "/usr/local/cuda-13.2")
-find_package(CUDAToolkit REQUIRED)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_EXTENSIONS OFF)
-set(CMAKE_CUDA_COMPILER "/usr/local/cuda-13.2/bin/nvcc")
-
-# Allow an external Torch_DIR/CMAKE_PREFIX_PATH to win, then try common local installs.
-if(NOT Torch_DIR)
-  if(EXISTS "/home/robocomp/software/libtorch/share/cmake/Torch/TorchConfig.cmake")
-    set(Torch_DIR "/home/robocomp/software/libtorch/share/cmake/Torch")
-  else()
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
-      execute_process(
-        COMMAND ${Python3_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path, end='')"
-        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
-        RESULT_VARIABLE TORCH_CMAKE_PREFIX_RESULT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-      if(TORCH_CMAKE_PREFIX_RESULT EQUAL 0 AND EXISTS "${TORCH_CMAKE_PREFIX}/Torch/TorchConfig.cmake")
-        set(Torch_DIR "${TORCH_CMAKE_PREFIX}/Torch")
-      endif()
-    endif()
-  endif()
-endif()
-
-set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures")
-find_package(Torch REQUIRED)
-# Torch injects -D_GLIBCXX_USE_CXX11_ABI=0 via INTERFACE_COMPILE_OPTIONS on the imported `torch`
-# target (TorchConfig.cmake), not via CMAKE_CXX_FLAGS, so it propagates at link time no matter what
-# CMAKE_CXX_FLAGS says here. Strip it from the target itself: prebuilt libdsr_api/core/gui, Qt6, Ice
-# and FastDDS are all built with the default (CXX11) ABI.
-# (The ai_common::* targets never link torch, so they are not exposed to this either way.)
-if(TARGET torch)
-  get_target_property(_torch_compile_opts torch INTERFACE_COMPILE_OPTIONS)
-  if(_torch_compile_opts)
-    list(REMOVE_ITEM _torch_compile_opts "-D_GLIBCXX_USE_CXX11_ABI=0")
-    set_property(TARGET torch PROPERTY INTERFACE_COMPILE_OPTIONS "${_torch_compile_opts}")
-  endif()
-endif()
 
 find_package(Eigen3 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem)
@@ -104,7 +60,7 @@ LIST(APPEND SOURCES
   ../src/custom_widget.h
 )
 
-LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml
+LIST(APPEND LIBS ${LIBS} Qt6PrintSupport Qt6Xml
             Boost::system Boost::filesystem)
 
 # ── rc_room_estimator: the estimator, compiled ONCE ─────────────────────────────
@@ -117,6 +73,7 @@ LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml
 set(RC_ESTIMATOR_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/room_gn_solver.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_model.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_obs_weights.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept.cpp
   ${CMAKE_CURRENT_LIST_DIR}/reloc_search.cpp
   ${CMAKE_CURRENT_LIST_DIR}/door_apertures.cpp

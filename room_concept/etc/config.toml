@@ -779,10 +779,6 @@ FarPointsExponent    = 2.0   # α — exponente de la distancia.
                               #   Mayor α → gradiente dominado por puntos en paredes lejanas,
                               #   mejor precisión angular pero más sensible a puntos espurios.
 FarPointsMinWeight   = 0.1   # Floor de peso (evita anular puntos muy cercanos).
-UseCuda              = false   # CPU is FASTER here: windowed LBFGS (3-30 DOF, few-hundred pts) is
-                               # launch/sync-overhead-bound on GPU — measured 2.4× slower early-exit,
-                               # full-opt 82/397ms vs CPU 68/112ms. GPU path is crash-free now (host
-                               # memcpy→device bug fixed) but not worth it. Flip true only to re-measure.
 DebugLog             = true   # ON 2026-09-18 for the rotation-prior hunt: the agent adds +56%
                               # of rotation on top of the wheel odometry it is given (measured
                               # offline from the wall_input recording), and this is the only log
@@ -1146,17 +1142,6 @@ HierPrecBoundaryEnabled = true
 CornerEarlyExitCheck    = true
 GnMaxIters              = 20
 GnLossRelTol            = 1e-5
-TorchNumThreads         = 1   # intra-op CPU threads for the Torch forward pass. Adam is gone, but
-                              # Torch still runs the SDF/model forward that GN reads its Jacobian
-                              # from, and the double-backward Hessian behind the posterior sigma —
-                              # so this knob still bites. Was unified at 1 on 2026-08-29 and set
-                              # back to 2 the same day: it is a CORE BUDGET, and 1 was Shadow's
-                              # number arriving on P3Bot, which runs a 16 ms period against 50.
-                              # ★ Back to 1 the SAME EVENING, and the reason changed under it:
-                              #   CovarianceFromSolver removed the double-backward Hessian that was
-                              #   108 ms of a 131 ms optimised frame, so the Torch path now runs a
-                              #   forward pass on optimised frames only. Two intra-op threads were
-                              #   sized for work that no longer happens.
 
 
 # ── 2026-08-29: the last drift pairs, merged ───────────────────────────────────────────────────

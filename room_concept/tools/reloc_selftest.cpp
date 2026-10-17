@@ -203,7 +203,6 @@ namespace
 int main()
 {
     std::setlocale(LC_ALL, "");   // behave like the Qt agent (es_ES decimal comma) — see CLAUDE.md
-    torch::set_num_threads(1);
     constexpr int kEpisodes = 25;
     std::printf("reloc_selftest: %d episodes per room x kind, 360-beam scans, 2 cm noise, 30%% clutter, "
                 "one open-door sector\n\n", kEpisodes);

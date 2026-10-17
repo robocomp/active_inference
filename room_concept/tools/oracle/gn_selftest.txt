@@ -1,13 +1,13 @@
 
 Jacobian vs central differences (max relative error over all 9 state components)
-  SDF only                                       PASS   rel err = 8.044e-03
+  SDF only                                       PASS   rel err = 8.045e-03
   motion only                                    PASS   rel err = 1.282e-05
   corner only                                    PASS   rel err = 2.770e-05
   corner only, SATURATED                         PASS   rel err = 1.243e-04
   object anchor only                             PASS   rel err = 2.815e-05
   object anchor only, SATURATED                  PASS   rel err = 1.226e-04
   boundary only                                  PASS   rel err = 0.000e+00
-  all factors                                    PASS   rel err = 2.605e-04
+  all factors                                    PASS   rel err = 2.612e-04
   all factors, SATURATED                         PASS   rel err = 2.337e-04
 
 Where the gradient check is valid (same Jacobians, three sample points)
@@ -16,9 +16,9 @@ Where the gradient check is valid (same Jacobians, three sample points)
   optimum + 15 cm / 60 mrad (far)                PASS   rel err = 5.890e-02
 
 Recovery from a perturbed start (LM, max 10 iterations)
-  converged and improved                         PASS   start 0.03m/0.010rad -> 0.2mm/0.0000rad, loss 0.1981->0.0070, 3 it (0 rej), 1.24 ms
-  converged and improved                         PASS   start 0.13m/0.050rad -> 0.2mm/0.0000rad, loss 3.2738->0.0070, 4 it (0 rej), 1.54 ms
-  converged and improved                         PASS   start 0.32m/0.120rad -> 0.2mm/0.0000rad, loss 22.0398->0.0070, 10 it (6 rej), 3.49 ms
+  converged and improved                         PASS   start 0.03m/0.010rad -> 0.2mm/0.0000rad, loss 0.1981->0.0070, 3 it (0 rej), 0.10 ms
+  converged and improved                         PASS   start 0.13m/0.050rad -> 0.2mm/0.0000rad, loss 3.2738->0.0070, 4 it (0 rej), 0.12 ms
+  converged and improved                         PASS   start 0.32m/0.120rad -> 0.2mm/0.0000rad, loss 22.0398->0.0070, 10 it (6 rej), 0.29 ms
 
 SE(2) preintegration
   mean matches the legacy integration            PASS   d = [-0.143030, 0.173531, 0.400000]

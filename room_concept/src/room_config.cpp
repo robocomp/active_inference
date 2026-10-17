@@ -544,8 +544,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m — above this: keep previous mu");
     reader.opt<float, double>("RoomConcept.EigenvalueClampBoundaryMax", room_concept.params.eigenvalue_clamp_boundary_max,
             "Max eigenvalue — prevents over-confident prior from contaminated scans");
-    reader.opt<int>("RoomConcept.TorchNumThreads", room_concept.params.torch_num_threads,
-            "intra-op CPU threads (was hard-coded 5 = the 4-core budget)");
     reader.opt<bool>("RoomConcept.BoundaryFejSchur", room_concept.params.boundary_fej_schur,
             "===== FEJ + Schur marginalization boundary prior (replaces Solutions B/C when ON) ===== The legacy boundary prior above is a rough approximation to…");
     reader.opt<float, double>("RoomConcept.BoundaryQualitySigma", room_concept.params.boundary_quality_sigma,
@@ -943,7 +941,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             f("BoundaryMuQualityThreshold",        ov.boundary_mu_quality_threshold);
             f("GnLossRelTol",                      ov.gn_loss_rel_tol);
             i("GnMaxIters",                        ov.gn_max_iters);
-            i("TorchNumThreads",                   ov.torch_num_threads);
             b("AdaptiveCovEnabled",                ov.adaptive_cov_enabled);
             b("WindowStrideEnabled",               ov.window_stride_enabled);
             b("BoundaryFejSchur",                  ov.boundary_fej_schur);
@@ -1039,8 +1036,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "β — exponent of the incidence weight");
     reader.opt<float, double>("RoomConcept.IncidenceAngleMinWeight", room_concept.params.incidence_angle_min_weight,
             "floor weight for grazing rays");
-    reader.opt<bool>("RoomConcept.UseCuda", room_concept.params.use_cuda,
-            "GPU/CPU selection Note: For small tensors (~200 points), CPU is faster due to GPU transfer overhead");
     reader.opt<bool>("RoomConcept.DebugLog", room_concept.params.debug_log_enabled,
             "Write per-frame CSV to tmp/sdf_localizer/log.csv");
     reader.opt<bool>("RoomConcept.OptimizerTimingCsv", room_concept.params.optimizer_timing_csv,
@@ -1259,7 +1254,6 @@ std::vector<std::string> RoomConfig::apply_platform_to(const std::string& robot,
     set(ov.boundary_mu_quality_threshold,   rp.boundary_mu_quality_threshold,         "BoundaryMuQualityThreshold");
     set(ov.gn_loss_rel_tol,                 rp.gn_loss_rel_tol,                       "GnLossRelTol");
     set(ov.gn_max_iters,                    rp.gn_max_iters,                          "GnMaxIters");
-    set(ov.torch_num_threads,               rp.torch_num_threads,                     "TorchNumThreads");
     set(ov.adaptive_cov_enabled,            rp.adaptive_cov_enabled,                  "AdaptiveCovEnabled");
     set(ov.window_stride_enabled,           rp.window_stride_enabled,                 "WindowStrideEnabled");
     set(ov.boundary_fej_schur,              rp.boundary_fej_schur,                    "BoundaryFejSchur");
