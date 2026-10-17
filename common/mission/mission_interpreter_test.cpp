@@ -422,6 +422,35 @@ int main()
         CHECK(not in.take_events().empty() and in.take_events().empty());   // drained once
     }
 
+    // ── steps(): a repeat reports how many iterations it has finished ─────────────────────────────────────────────
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  repeat 3\n    cross door_1\n"), 0);
+        in.tick(0);
+        CHECK(in.steps().at(0).id == "1" and in.steps().at(0).iteration == 0);
+        h.done("1.1");
+        in.tick(10);
+        CHECK(in.steps().at(0).iteration == 1);
+        CHECK(in.steps().at(1).id == "1.1" and in.steps().at(1).state == Interpreter::StepState::Running);   // iteration 2 began
+    }
+
+    // ── a cancel names its outcome on every step it closes, and the serial counts missions ────────────────────────
+    {
+        FakeHost h;
+        Interpreter in(h);
+        CHECK(in.serial() == 0);
+        in.start(parse("mission\n  repeat 2\n    cross door_1\n"), 0);
+        CHECK(in.serial() == 1);
+        in.tick(0);
+        in.cancel("stopped_by_user", 5);
+        CHECK(in.steps().at(0).state == Interpreter::StepState::Cancelled and in.steps().at(0).outcome == "stopped_by_user");
+        CHECK(in.steps().at(1).state == Interpreter::StepState::Cancelled and in.steps().at(1).outcome == "stopped_by_user");
+        CHECK(in.span().first == 0 and in.span().second == 5);
+        in.start(parse("mission\n  say hi\n"), 10);
+        CHECK(in.serial() == 2);
+    }
+
     std::println("mission_interpreter_test: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }
