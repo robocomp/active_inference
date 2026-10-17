@@ -77,14 +77,21 @@ An encoded view (q_d, q_c) at object-frame bearing β is reduced to two similari
 
 The prediction at β is the kernel-weighted mean of populated bins,
 `m̂(β) = normalise(Σ_b n_b κ(Δ_b) m_b)`, `κ(Δ) = exp(−Δ²/2ℓ²)`, and its **effective angular gap**
-Δ(β) is taken from the same weights.
+Δ(β) is taken from the same weights in the spec's wording; as implemented the effective gap is the
+distance to the **nearest populated bin**.
 
 Two hypotheses, each a **2-D Gaussian over (s_d, s_c)** — one joint Gaussian, not two independent
 channels, because both similarities come from one crop under one illumination and are correlated:
 
 - **H_k (it is object k):** mean `(μ_d(Δ), μ_c)` with
-  `μ_d(Δ) = μ_bg,d + (μ_0,d − μ_bg,d)·exp(−Δ²/2ℓ²)`, covariance `Σ_own + Σ_n / N(β)` (shrinks with
-  evidence).
+  `μ_d(Δ) = μ_bg,d + (μ_0,d − μ_bg,d)·exp(−Δ²/2ℓ²)`. Covariance (as implemented): with
+  `R = diag(r_d, r_c)`, `r_d = κ(Δ)·N_s/(N_s+n0)`, `r_c = n_c/(n_c+n0)` (N_s the evidence behind the shape
+  channel at β, n_c behind colour), the Cholesky factors blend, `L = (I−R)·L_bg + R·L_own`, where `L_bg`
+  factors Σ_bg and `L_own` factors `Σ_own + D Σ_n D` with `D = diag(1/√(N_s+n0), 1/√(n_c+n0))` (prototype
+  uncertainty: a bin mean built from few views is itself noisy; shrinks with evidence). The covariance is
+  `Σ_bg + (L Lᵀ − L_bg L_bgᵀ) + Σ_n(1−q)/q`, the last term being the view-quality noise added to BOTH
+  hypotheses (`q` = view quality from mask pixel count). At no evidence `R = 0`, so `L` is bit-identical to
+  `L_bg` and the bracket is exactly 0 for any constants: H_k equals H_bg exactly and Λ = 0.
 - **H_bg (another object of the same class):** fixed `(μ_bg, Σ_bg)` per class.
 
 Score `Λ_k = log N((s_d,s_c); H_k) − log N((s_d,s_c); H_bg)`. As Δ grows, H_k relaxes into H_bg, so
@@ -115,11 +122,15 @@ Hypotheses {archived object 1…n of this class, new}. Log-weight of each:
 |---|---|---|
 | μ_0,d, μ_bg,d, ℓ | shape similarity at Δ=0, background, angular length scale (expect ℓ ≈ 45–60°) | fit on `zed_orbits` |
 | μ_c, Σ_own, Σ_bg, ρ(s_d,s_c) | colour mean, covariances, cross-channel correlation | fit on `zed_orbits` + `zed_frames` |
-| Σ_n | per-view noise, with a term falling with mask pixel count | fit, binned by pixel count |
+| Σ_own, Σ_n | own-object covariance and per-view noise | `fit_noise`. Phase 2a: the mask-size excess term was NOT supported by the data (§10), so Σ_n = Σ_own = pooled per-view scatter |
+| quality_px_scale | mask pixel count at which view quality is 1 − 1/e | FLAGGED, default 2000. `fit_noise` found no support for a fit (§10); it stays a flagged constant |
 | σ²_illum | colour variance growth with brightness change obs↔prototype | **real robot only** — sim lighting is fixed |
 | π_move | prior probability an archived object was moved | model constant, FLAGGED |
 | N₀ | prior pseudo-count: "the prior is worth one view" (= 1) | model constant, FLAGGED |
 | ℓ_r (repeat) | azimuth / log-range step below which a view is a repeat look | DERIVED: the step at which expected shape similarity drops by one per-view sd |
+
+Hypothesis priors are uniform over {archived candidates of the class, new} until phase 2b measures the
+class birth rate live (the replay harness uses the same uniform prior).
 
 The fitting script writes them to a constants file with dataset provenance and fit date. Re-fit before
 trusting them on new data.
@@ -234,7 +245,7 @@ the descriptors were chosen to ignore. A per-bin stored thumbnail covers the dis
 
 ## 8. Phase 1 results (offline replay, 2026-10-17)
 
-Dataset: `retina/etc/view_atlas_dataset` (2715 views, 14 physical objects), constants `view_atlas_constants.txt`.
+Dataset (phase 1: dense masks; the stride-2 rebuild and later results are in §10): `retina/etc/view_atlas_dataset` (2715 views, 14 physical objects), constants `view_atlas_constants.txt`.
 Criteria were declared before the run (§6). **Verdict: A, B, C, D all FAIL.** The criteria and constants were not
 touched to obtain a result. The primary table below is the corrected (repeat-discounted, §8.1) run, which is what
 `atlas_replay` prints now (exit code 1); the first, undiscounted run is kept further down as superseded.
@@ -273,7 +284,7 @@ Reading of the results (not a change of criteria):
 **Harness assumptions that shape B and D** (hand-set in `atlas_replay.cpp`; spec §3.4 says the "new" prior should come
 from the class birth rate):
 
-- priors: new = 0.5, each chair = 0.25; `pose_cov` = (5 cm)^2; room area 60 m^2. With zero appearance evidence these give
+- priors (phase 1; uniform since phase 2a, §10): new = 0.5, each chair = 0.25; `pose_cov` = (5 cm)^2; room area 60 m^2. With zero appearance evidence these give
   p(new) ~ 0.83, so yellow windows on an unseen side become confident "new" answers.
 - magenta's 20 / 20 is carried by LOCATION (its position is the exact ground-truth centroid, about a 7.6-nat margin) and
   says nothing about appearance.
@@ -328,17 +339,85 @@ Re-ID accuracy of the moved chair falls monotonically with the gap (46 %, 14 %, 
 coverage, consistent with the gap-band table. Even in the smallest band the moved chair reaches only 46 %, so coverage
 alone does not explain every miss; that remainder is not explained.
 
-## 9. Before phase 2 (open)
+## 9. Before phase 2 (status after phase 2a)
 
-(a) **The live mask producer is decimated.** `retina/src/graph_publisher.cpp` pushes every second pixel
-    (`VOXEL_DECIMATION_FACTOR = 2`, `retina_params.h`), so `make_crop` on live masks blanks about 3/4 of the object into a
-    lattice and `mask_px` / `trunc_frac` come out about 4x wrong. The dataset used dense masks. This must be settled
-    (stride-aware dilation/closing, or a stride-1 publication) and pinned by a golden crop test against the Python mirror
-    before any live run.
-(b) **H_k covariance.** The code blends cov_bg to cov_own by R with Sigma_n only as view-quality noise, the fitter sets
-    cov_n = cov_own, and the effective gap is the nearest populated bin. Sections 3.2 and 3.5 say Sigma_own + Sigma_n / N(beta),
-    with Sigma_n fitted per pixel-count bin and the gap from kernel weights. The USER must rule whether to change the spec
-    or the code.
-(c) **Repeat check scope.** It looks only at the current bin's poses; with repeat_ell 43 deg > bin width 30 deg this biases
-    counts at bin edges.
-(d) **The archive save is non-atomic.** Fix before any live writer.
+(a) **Decimated mask producer: done in the crop path.** `make_crop` infers the stride from the in-image samples (gcd of
+    offsets) and fills stride x stride blocks. Golden crop test (Task 2): C++ vs Python dense PASS (pixel diff 0, colour
+    cosine 1.000000); stride-2 block reconstruction vs the dense crop FAILED (worst mask IoU 0.9235, DINO cosine 0.9191,
+    colour cosine 0.9890), i.e. block reconstruction does not reproduce dense crops. The dataset was therefore rebuilt from
+    masks decimated exactly as retina decimates them (stride 2, bbox truncated, grid anchored at the clipped bbox corner;
+    the labeller still uses dense masks) through a Python mirror of the C++ stride path. Golden (iii), Python sparse vs C++
+    sparse, PASS (pixel diff 0); sensitivity to a 1-px anchor disagreement: worst DINO cosine 0.9752. The dense dataset is
+    kept at `retina/etc/view_atlas_dataset_dense`; `retina/etc/view_atlas_dataset` is stride 2 (`dataset_meta.txt`).
+(b) **H_k covariance: done (code and spec agree).** The own-hypothesis covariance blends toward `Σ_own + D Σ_n D` (§3.2);
+    exact zero at no evidence is preserved. `fit_noise` (Task 4) found the mask-size excess NOT supported by the data
+    (fitted excess not positive definite; best scale at the grid edge; px range [288, 285048]), so Σ_n = Σ_own = pooled
+    per-view scatter and `quality_px_scale` was not fitted (§10).
+(c) **Repeat check: partly done.** It now looks at the neighbouring bins (+-1). OPEN: the fitted `repeat_ell_rad` (0.776 rad,
+    44 deg) exceeds the 30 deg bin width, so +-1 bin may still miss repeats.
+(d) **Archive save: done** (atomic, temp file + rename).
+(e) **Still open:** criterion C is not measurable on the sparse recording; priors are uniform, not the class birth rate
+    (phase 2b); the fitted repeat scale is ill-conditioned (sd/drop 0.798, warned).
+
+## 10. Phase 2a results (offline replay, 2026-10-17)
+
+Same replay (`atlas_replay`, exit code 1), criteria A-D unchanged. Phase 1 and phase 2a differ in THREE ways at once:
+(1) the dataset is stride 2 (decimated as retina decimates) instead of dense; (2) the constants and the noise term changed
+(Task 3 covariance, Task 4 refit, Task 5 repeat check; table below); (3) the harness prior is uniform
+(new = each chair = 1/3) instead of new 0.5 / chair 0.25. The numbers cannot be attributed to any one of them.
+Phase 1 column = corrected run of §8.
+
+| Check | Criterion | Phase 1 (corrected) | Phase 2a |
+|---|---|---|---|
+| A. chair swaps | < 1 % | 7 / 518 = 1.35 % FAIL | 7 / 518 = 1.35 % FAIL |
+| B. yellow (`Chair`, moved), yaw known | >= 95 % | 15 / 53 = 28.3 % | 20 / 53 = 37.7 % |
+| B. magenta (`chair(1)`, stayed), yaw known | >= 95 % | 20 / 20 = 100.0 % | 20 / 20 = 100.0 % |
+| B. other chair chosen | <= 2 % | 0.0 % | 0.0 % FAIL (verdict) |
+| B info, yaw unknown, yellow | none | 21 / 53 = 39.6 % | 30 / 53 = 56.6 % (magenta 20 / 20) |
+| C. encodings per object-minute | <= 60 | worst 1000.0 FAIL | worst 1000.0 FAIL (`Worktop4`, 1 view / 0 min; sparse recording, not measurable) |
+| D. calibration | +-0.1 per bin, >= 20 decisions | gaps 0.298 / 0.446 / 0.295 FAIL | gaps 0.212 / 0.429 / 0.109 FAIL |
+
+D bins, phase 2a (yaw known; n, mean p, accuracy): [0.5,0.7) n=32, 0.587, 0.375; [0.7,0.9) n=16, 0.804, 0.375;
+[0.9,1.0] n=25, 0.989, 0.880. Phase 1: n=20, 0.598, 0.300; n=21, 0.779, 0.333; n=32, 0.983, 0.688. Only the first and
+third phase-2a bins reach 20 decisions; [0.7,0.9) has 16 and is informative only. Decisions by colour in [0.9,1.0]:
+yellow 5, magenta 20. All bins with enough decisions stay outside +-0.1 (the first by 0.212, the third by 0.109).
+
+Gap-band table (yaw known, informative; gap to the nearest populated bin of the correct chair's archive):
+
+| gap band | Chair (moved): n, re-ID, phase 1 -> phase 2a | chair(1) (stayed): n, re-ID, phase 2a |
+|---|---|---|
+| [0,15) deg | 26, 46.2 % -> 42.3 % | 16, 100.0 % |
+| [15,45) deg | 14, 14.3 % -> 35.7 % | 4, 100.0 % |
+| [45,90) deg | 13, 7.7 % -> 30.8 % | 0 |
+| [90,180) deg | 0 | 0 |
+
+(Phase-1 chair(1) bands held 15 and 5 windows; the stride-2 dataset assigns 16 and 4. The moved chair's re-ID is 42.3 %,
+35.7 %, 30.8 % across the three populated bands, against 46.2 %, 14.3 %, 7.7 % in phase 1: still decreasing with the gap
+but with a much smaller spread.)
+
+Golden-crop worst values (Task 2): dense C++ vs Python mask/DINO/colour 1.0 / pixel diff 0 / 1.000000; stride-2 block vs
+dense mask IoU 0.9235, DINO 0.9191, colour 0.9890; sparse Python vs C++ pixel diff 0; 1-px anchor disagreement worst DINO
+0.9752.
+
+Fitted constants, phase 1 -> phase 2a (`view_atlas_constants.txt`; 14 objects, pairs own 23941 / background 1161 in both):
+
+| constant | phase 1 | phase 2a |
+|---|---|---|
+| ell_rad | 0.4313 | 0.4342 |
+| repeat_ell_rad | 0.7577 | 0.7761 |
+| repeat_ell_logr | 0.6630 | 0.6644 |
+| repeat sd/drop | 0.786 | 0.798 (ill-conditioned, warned) |
+| mu_own (d, c) | 0.9439, 0.9552 | 0.9440, 0.9553 |
+| mu_bg (d, c) | 0.8752, 0.4265 | 0.8750, 0.4250 |
+| cov_own (dd, dc, cc) | 0.001654, 0.001605, 0.006052 | 0.001687, 0.001667, 0.006155 |
+| cov_bg (dd, dc, cc) | 0.002581, -0.004139, 0.153245 | 0.002740, -0.004398, 0.153475 |
+| cov_n | = cov_own | = cov_own (excess not supported) |
+| quality_px_scale | 2000 (flagged) | 2000 (flagged; not fitted) |
+
+Reading the change in D: on the stride-2 dataset, with the new constants and the uniform prior, the [0.5,0.7) gap fell
+from 0.298 to 0.212 and the [0.9,1.0] gap from 0.295 to 0.109, while [0.7,0.9) went from 0.446 to 0.429; yellow
+re-ID rose from 28.3 % to 37.7 % and the [0.9,1.0] bin now holds 5 yellow decisions against 20 magenta. Criterion D
+still FAILs in every bin with enough decisions, and B still FAILs at 37.7 % for the moved chair. These differences
+come from the three simultaneous changes (stride-2 dataset, constants and noise term, uniform prior); no experiment here
+separates them, and the cause of the remaining B miss is not established. Criteria and constants were not altered to
+obtain these numbers.

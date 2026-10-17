@@ -136,7 +136,10 @@ int main(int argc, char** argv)
     for (const auto& r : views) if (r.lap == 0 and (r.inst == "Chair" or r.inst == "chair(1)")) last_xy[r.inst] = {r.obj_x, r.obj_y};
     const float room_area = 60.f;                               // apartment free space (rooms.json id 0: 60.41 m^2)
     const Eigen::Matrix2f pose_cov = Eigen::Matrix2f::Identity() * 0.05f * 0.05f;
-    const float log_prior_new = std::log(0.5f), log_prior_k = std::log(0.25f);
+    // Uniform over {archived candidates of the class, new}: the spec's class-birth-rate prior needs live
+    // statistics (phase 2b shadow mode); until then no hypothesis is favoured a priori.
+    const float log_prior_each = -std::log(float(chairs.size() + 1));
+    const float log_prior_new = log_prior_each, log_prior_k = log_prior_each;
     struct Dec { float p; bool right; bool yellow; };
     struct Win { std::string truth; float gap_deg; bool right; };
     std::vector<Win> wins;
