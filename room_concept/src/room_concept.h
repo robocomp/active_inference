@@ -1269,6 +1269,15 @@ private:
                                                    rc::preint::Interval *preint_out = nullptr,
                                                    const std::vector<ImuReading> *imu_history = nullptr,
                                                    const SimClockMap *sim_clock = nullptr);
+    // Its parts (room_concept_odometry_window.cpp): the interval's clock + per-segment sensor integrals,
+    // one segment's wheel/gyro heading fusion, and the channel health logging.
+    struct OdomSources;
+    struct SegmentHeading { float dtheta, w_g, sig_om_fused, rot_eff; };
+    SegmentHeading fuse_segment_heading(const OdometryReading &odom, float dt, float dy_local,
+                                        std::int64_t effective_start_ms, std::int64_t effective_end_ms,
+                                        const OdomSources &src, int &imu_segments, int &wheel_segments);
+    void report_odometry_channels(const OdomSources &src, const std::vector<OdometryReading> &odometry_history,
+                                  std::int64_t t_end_ms, int imu_segments, int wheel_segments, int odom_var_segments);
 
     /// Compute odometry prior from measured velocities (encoder/IMU feedback)
     OdometryPrior compute_measured_odometry_prior(

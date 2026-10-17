@@ -27,6 +27,145 @@
 namespace rc
 {
 
+    // The interval's clock and sensor streams, and the per-segment integrals over them. Until refactor step 2c
+    // (2026-10-17) these were lambdas inside integrate_odometry_over_window; the bodies are unchanged.
+    struct RoomConcept::OdomSources
+    {
+        bool use_sim_clock = false;
+        const std::vector<ImuReading> *imu_history = nullptr;
+        double odom_dt_sample = -1.0;           // measured wheel sample period (s); <0 = unmeasurable
+        bool odom_variance_injection = false;   // Params::odom_variance_injection
+
+        std::int64_t stamp_of(const OdometryReading &o) const
+        { return use_sim_clock ? o.integration_ts_ms() : o.effective_ts_ms(); }
+        std::int64_t imu_stamp(const ImuReading &s) const
+        { return use_sim_clock ? s.integration_ts_ms() : s.effective_ts_ms(); }
+        // ── Linear channel from the accelerometer ──────────────────────────────────────────────────
+        // Returns the velocity CHANGE over [seg_start, seg_end] in the body frame, and the
+        // displacement that change contributes within the same interval (the double integration).
+        //
+        // Both are INCREMENTS confined to one interval and are never chained. That distinction is the
+        // whole design: over ~50 ms the accelerometer estimates dv ~15x more precisely than the
+        // wheels (0.1-0.4 mm/s of noise against their 67 mm/s per sample), but an accelerometer
+        // cannot observe velocity itself, only its change, and chaining the same 0.5 deg tilt error
+        // reaches 0.086 m/s after 1 s and 5.1 m/s after 60 s. So this supplies dv; the wheels supply
+        // the absolute v that dv is a change TO.
+        //
+        // dp here is the correction to the constant-velocity assumption inside the interval
+        // (0.5*a*T^2), not a position estimate. At 50 ms it is sub-millimetre and its only job is to
+        // stop a hard acceleration being modelled as if the velocity had been constant throughout.
+        //
+        // GRAVITY IS NOT REMOVED. The samples carry it, and the horizontal components are honest
+        // horizontal acceleration only insofar as the mount is level; the residual is a slowly
+        // varying bias, which is why this is logged and cross-checked before it is ever fused.
+        bool imu_dvel(std::int64_t seg_start, std::int64_t seg_end,
+                                  float &dvx_out, float &dvy_out,
+                                  float &dpx_out, float &dpy_out) const
+        {
+            if (imu_history == nullptr or imu_history->size() < 2) return false;
+            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
+                return false;                       // partial coverage refused, as for imu_dtheta
+            double vx = 0, vy = 0, px = 0, py = 0;
+            bool any = false;
+            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
+            {
+                const auto &a0 = (*imu_history)[k];
+                const auto &a1 = (*imu_history)[k + 1];
+                const std::int64_t t0 = std::max(imu_stamp(a0), seg_start);
+                const std::int64_t t1 = std::min(imu_stamp(a1), seg_end);
+                if (t1 <= t0) continue;
+                const double h = static_cast<double>(t1 - t0) * 1e-3;
+                // Trapezoid on acceleration: the sample rate is ~5x the interval, so the ramp between
+                // samples is real information and a zero-order hold would systematically lag it.
+                const double ax = 0.5 * (a0.acc_x + a1.acc_x);
+                const double ay = 0.5 * (a0.acc_y + a1.acc_y);
+                px += vx * h + 0.5 * ax * h * h;    // v already accumulated within THIS interval only
+                py += vy * h + 0.5 * ay * h * h;
+                vx += ax * h;
+                vy += ay * h;
+                any = true;
+            }
+            if (not any) return false;
+            dvx_out = static_cast<float>(vx); dvy_out = static_cast<float>(vy);
+            dpx_out = static_cast<float>(px); dpy_out = static_cast<float>(py);
+            return true;
+        }
+
+        // Mean per-sample variance a channel reported over [seg_start, seg_end], converted to the
+        // NOISE DENSITY the preintegrator wants: sigma = sqrt(var_sample * dt_sample). Returns <0
+        // when the producer said "unknown" (negative variance) or the segment is not bracketed, and
+        // the caller then falls back to the asserted constant. See the conversion note in
+        // se2_preintegration.h: handing it the raw per-sample variance over-states the noise by
+        // dt_sample/dt, a factor of five at 100 Hz across a 50 ms segment.
+        float imu_sigma(std::int64_t seg_start, std::int64_t seg_end,
+                                   bool want_gyro) const
+        {
+            if (imu_history == nullptr or imu_history->size() < 2) return -1.f;
+            double var_sum = 0.0; int n = 0;
+            std::int64_t first = 0, last = 0;
+            for (const auto &sm : *imu_history)
+            {
+                const std::int64_t st = imu_stamp(sm);
+                if (st < seg_start or st > seg_end) continue;
+                const float v = want_gyro ? sm.gyro_var : sm.acc_var;
+                if (not (v >= 0.f)) return -1.f;      // producer does not know -> use the model
+                var_sum += v; ++n;
+                if (first == 0) first = st;
+                last = st;
+            }
+            if (n < 2 or last <= first) return -1.f;
+            const double dt_sample = static_cast<double>(last - first) * 1e-3 / (n - 1);
+            return static_cast<float>(std::sqrt(var_sum / n * dt_sample));
+        }
+        // Returns <0 for "use the model": the channel is off, the producer said "unknown" (negative
+        // variance), or the period could not be measured. A zero variance is REFUSED for the same
+        // reason: it would claim infinite confidence in a channel, and no wheel is that good.
+        float wheel_sigma(float var_sample) const
+        {
+            if (not odom_variance_injection) return -1.f;
+            if (not (var_sample > 0.f) or odom_dt_sample <= 0.0) return -1.f;
+            return static_cast<float>(std::sqrt(static_cast<double>(var_sample) * odom_dt_sample));
+        }
+        // Two independent noise contributions to the same channel add in quadrature. Either being
+        // "unstated" (<0) leaves the other alone, and both unstated falls back to the model.
+        static float quad(float a, float b)
+        {
+            if (a < 0.f) return b;
+            if (b < 0.f) return a;
+            return std::sqrt(a * a + b * b);
+        }
+
+        bool imu_dtheta(std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) const
+        {
+            if (imu_history == nullptr or imu_history->size() < 2) return false;
+            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
+                return false;
+            double acc = 0.0;
+            bool any = false;
+            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
+            {
+                const std::int64_t a = imu_stamp((*imu_history)[k]);
+                const std::int64_t b = imu_stamp((*imu_history)[k + 1]);
+                if (b <= a) continue;
+                const std::int64_t s = std::max(a, seg_start);
+                const std::int64_t e = std::min(b, seg_end);
+                if (e <= s) continue;
+                // Trapezoid across the sample pair, so a rate ramping through the segment is not
+                // biased by holding the leading sample flat.
+                const double w0 = (*imu_history)[k].gyro_z, w1 = (*imu_history)[k + 1].gyro_z;
+                const double span = static_cast<double>(b - a);
+                const double f0 = static_cast<double>(s - a) / span;
+                const double f1 = static_cast<double>(e - a) / span;
+                const double wm = 0.5 * ((w0 + (w1 - w0) * f0) + (w0 + (w1 - w0) * f1));
+                acc += wm * static_cast<double>(e - s) * 0.001;
+                any = true;
+            }
+            if (not any) return false;
+            dtheta_out = static_cast<float>(acc);
+            return true;
+        }
+    };
+
     Eigen::Vector3f RoomConcept::integrate_odometry_over_window(
                 const Eigen::Affine2f& robot_pose,
                 const std::vector<OdometryReading> &odometry_history,
@@ -57,10 +196,14 @@ namespace rc
         const bool use_sim_clock = sim_clock != nullptr and sim_clock->valid()
                                    and not odometry_history.empty()
                                    and odometry_history.front().simulated;
+        OdomSources src;
+        src.use_sim_clock = use_sim_clock;
+        src.imu_history = imu_history;
+        src.odom_variance_injection = params.odom_variance_injection;
         const auto to_clock = [&](std::int64_t wall_ms) -> std::int64_t
         { return use_sim_clock ? sim_clock->to_sim(wall_ms) : wall_ms; };
-        const auto stamp_of = [&](const OdometryReading &o) -> std::int64_t
-        { return use_sim_clock ? o.integration_ts_ms() : o.effective_ts_ms(); };
+        const auto stamp_of = [&](const OdometryReading &o) -> std::int64_t { return src.stamp_of(o); };
+
 
         const std::int64_t win_start_ms = to_clock(t_start_ms);
         const std::int64_t win_end_ms   = to_clock(t_end_ms);
@@ -78,85 +221,7 @@ namespace rc
         // Returns false unless the IMU brackets the WHOLE segment; partial coverage is deliberately
         // refused, because a Δθ covering part of a segment silently under-rotates, which is worse
         // than a consistent wheel estimate.
-        const auto imu_stamp = [&](const ImuReading &s) -> std::int64_t
-        { return use_sim_clock ? s.integration_ts_ms() : s.effective_ts_ms(); };
-        // ── Linear channel from the accelerometer ──────────────────────────────────────────────────
-        // Returns the velocity CHANGE over [seg_start, seg_end] in the body frame, and the
-        // displacement that change contributes within the same interval (the double integration).
-        //
-        // Both are INCREMENTS confined to one interval and are never chained. That distinction is the
-        // whole design: over ~50 ms the accelerometer estimates dv ~15x more precisely than the
-        // wheels (0.1-0.4 mm/s of noise against their 67 mm/s per sample), but an accelerometer
-        // cannot observe velocity itself, only its change, and chaining the same 0.5 deg tilt error
-        // reaches 0.086 m/s after 1 s and 5.1 m/s after 60 s. So this supplies dv; the wheels supply
-        // the absolute v that dv is a change TO.
-        //
-        // dp here is the correction to the constant-velocity assumption inside the interval
-        // (0.5*a*T^2), not a position estimate. At 50 ms it is sub-millimetre and its only job is to
-        // stop a hard acceleration being modelled as if the velocity had been constant throughout.
-        //
-        // GRAVITY IS NOT REMOVED. The samples carry it, and the horizontal components are honest
-        // horizontal acceleration only insofar as the mount is level; the residual is a slowly
-        // varying bias, which is why this is logged and cross-checked before it is ever fused.
-        const auto imu_dvel = [&](std::int64_t seg_start, std::int64_t seg_end,
-                                  float &dvx_out, float &dvy_out,
-                                  float &dpx_out, float &dpy_out) -> bool
-        {
-            if (imu_history == nullptr or imu_history->size() < 2) return false;
-            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
-                return false;                       // partial coverage refused, as for imu_dtheta
-            double vx = 0, vy = 0, px = 0, py = 0;
-            bool any = false;
-            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
-            {
-                const auto &a0 = (*imu_history)[k];
-                const auto &a1 = (*imu_history)[k + 1];
-                const std::int64_t t0 = std::max(imu_stamp(a0), seg_start);
-                const std::int64_t t1 = std::min(imu_stamp(a1), seg_end);
-                if (t1 <= t0) continue;
-                const double h = static_cast<double>(t1 - t0) * 1e-3;
-                // Trapezoid on acceleration: the sample rate is ~5x the interval, so the ramp between
-                // samples is real information and a zero-order hold would systematically lag it.
-                const double ax = 0.5 * (a0.acc_x + a1.acc_x);
-                const double ay = 0.5 * (a0.acc_y + a1.acc_y);
-                px += vx * h + 0.5 * ax * h * h;    // v already accumulated within THIS interval only
-                py += vy * h + 0.5 * ay * h * h;
-                vx += ax * h;
-                vy += ay * h;
-                any = true;
-            }
-            if (not any) return false;
-            dvx_out = static_cast<float>(vx); dvy_out = static_cast<float>(vy);
-            dpx_out = static_cast<float>(px); dpy_out = static_cast<float>(py);
-            return true;
-        };
-
-        // Mean per-sample variance a channel reported over [seg_start, seg_end], converted to the
-        // NOISE DENSITY the preintegrator wants: sigma = sqrt(var_sample * dt_sample). Returns <0
-        // when the producer said "unknown" (negative variance) or the segment is not bracketed, and
-        // the caller then falls back to the asserted constant. See the conversion note in
-        // se2_preintegration.h: handing it the raw per-sample variance over-states the noise by
-        // dt_sample/dt, a factor of five at 100 Hz across a 50 ms segment.
-        const auto imu_sigma = [&](std::int64_t seg_start, std::int64_t seg_end,
-                                   bool want_gyro) -> float
-        {
-            if (imu_history == nullptr or imu_history->size() < 2) return -1.f;
-            double var_sum = 0.0; int n = 0;
-            std::int64_t first = 0, last = 0;
-            for (const auto &sm : *imu_history)
-            {
-                const std::int64_t st = imu_stamp(sm);
-                if (st < seg_start or st > seg_end) continue;
-                const float v = want_gyro ? sm.gyro_var : sm.acc_var;
-                if (not (v >= 0.f)) return -1.f;      // producer does not know -> use the model
-                var_sum += v; ++n;
-                if (first == 0) first = st;
-                last = st;
-            }
-            if (n < 2 or last <= first) return -1.f;
-            const double dt_sample = static_cast<double>(last - first) * 1e-3 / (n - 1);
-            return static_cast<float>(std::sqrt(var_sum / n * dt_sample));
-        };
+        // (imu_stamp, imu_dvel, imu_sigma, wheel_sigma, quad and imu_dtheta are OdomSources members now.)
 
         // ── The WHEELS' own stated noise, as a density ─────────────────────────────────────────────
         // Same conversion as imu_sigma, and it exists for the same reason: the producer states a
@@ -182,53 +247,7 @@ namespace rc
                 odom_dt_sample = static_cast<double>(last - first) * 1e-3
                                / static_cast<double>(odometry_history.size() - 1);
         }
-        // Returns <0 for "use the model": the channel is off, the producer said "unknown" (negative
-        // variance), or the period could not be measured. A zero variance is REFUSED for the same
-        // reason: it would claim infinite confidence in a channel, and no wheel is that good.
-        const auto wheel_sigma = [&](float var_sample) -> float
-        {
-            if (not params.odom_variance_injection) return -1.f;
-            if (not (var_sample > 0.f) or odom_dt_sample <= 0.0) return -1.f;
-            return static_cast<float>(std::sqrt(static_cast<double>(var_sample) * odom_dt_sample));
-        };
-        // Two independent noise contributions to the same channel add in quadrature. Either being
-        // "unstated" (<0) leaves the other alone, and both unstated falls back to the model.
-        const auto quad = [](float a, float b) -> float
-        {
-            if (a < 0.f) return b;
-            if (b < 0.f) return a;
-            return std::sqrt(a * a + b * b);
-        };
-
-        const auto imu_dtheta = [&](std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) -> bool
-        {
-            if (imu_history == nullptr or imu_history->size() < 2) return false;
-            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
-                return false;
-            double acc = 0.0;
-            bool any = false;
-            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
-            {
-                const std::int64_t a = imu_stamp((*imu_history)[k]);
-                const std::int64_t b = imu_stamp((*imu_history)[k + 1]);
-                if (b <= a) continue;
-                const std::int64_t s = std::max(a, seg_start);
-                const std::int64_t e = std::min(b, seg_end);
-                if (e <= s) continue;
-                // Trapezoid across the sample pair, so a rate ramping through the segment is not
-                // biased by holding the leading sample flat.
-                const double w0 = (*imu_history)[k].gyro_z, w1 = (*imu_history)[k + 1].gyro_z;
-                const double span = static_cast<double>(b - a);
-                const double f0 = static_cast<double>(s - a) / span;
-                const double f1 = static_cast<double>(e - a) / span;
-                const double wm = 0.5 * ((w0 + (w1 - w0) * f0) + (w0 + (w1 - w0) * f1));
-                acc += wm * static_cast<double>(e - s) * 0.001;
-                any = true;
-            }
-            if (not any) return false;
-            dtheta_out = static_cast<float>(acc);
-            return true;
-        };
+        src.odom_dt_sample = odom_dt_sample;
         int imu_segments = 0, wheel_segments = 0;
         int odom_var_segments = 0;   // segments whose noise the WHEELS themselves stated
         cyc_imu_dtheta_ = cyc_wheel_dtheta_ = cyc_wheel_shadow_dtheta_ = 0.f;
@@ -290,7 +309,7 @@ namespace rc
             }
             float imu_dpx_seg = 0.f, imu_dpy_seg = 0.f;
             if (float dvx = 0.f, dvy = 0.f, dpx = 0.f, dpy = 0.f;
-                imu_dvel(effective_start_ms, effective_end_ms, dvx, dvy, dpx, dpy))
+                src.imu_dvel(effective_start_ms, effective_end_ms, dvx, dvy, dpx, dpy))
             {
                 cyc_imu_dvx_ += dvx; cyc_imu_dvy_ += dvy;
                 cyc_imu_dpx_ += dpx; cyc_imu_dpy_ += dpy;
@@ -317,6 +336,66 @@ namespace rc
             //
             // Translation stays on the wheels either way -- an accelerometer cannot supply it without
             // a drifting double integration, and the wheels are already exact there.
+        const auto [dtheta, w_g, sig_om_fused, rot_eff] =
+            fuse_segment_heading(odom, dt, dy_local, effective_start_ms, effective_end_ms, src,
+                                 imu_segments, wheel_segments);
+
+
+            // Transform to global frame using MIDPOINT theta (reduces integration bias)
+            // The learned yaw offset rotates the body->world mapping: it absorbs a mount or
+            // body-axis misalignment, which shows up as travel drifting off the fitted heading.
+            const float theta_mid = running_theta + 0.5f * dtheta + motion_calib_.yaw_offset();
+            total_delta[0] += dx_use * std::cos(theta_mid) - dy_use * std::sin(theta_mid);
+            total_delta[1] += dx_use * std::sin(theta_mid) + dy_use * std::cos(theta_mid);
+            total_delta[2] += dtheta;
+
+            // Preintegration sees the SAME rate the mean used, or its covariance would describe a
+            // trajectory that was not integrated.
+            if (preint_out != nullptr)
+            {
+                // Densities from what the producers actually stated this segment, falling back to
+                // the asserted constants per channel. The gyro's covers the heading it supplied; the
+                // accelerometer's covers the translation only when its correction is actually being
+                // used, because otherwise the displacement came from the wheels and it is the wheels'
+                // noise that describes it.
+                // Yaw: the density of the heading that was actually integrated -- the fused one
+                // (product of the two channels' variances) under fusion, the supplying channel's
+                // under the legacy switch. <0 leaves the model constant in charge.
+                const float sig_om = sig_om_fused;
+                // Translation always comes from the wheels. When the accelerometer's within-segment
+                // correction is enabled it is ADDED to that displacement, so its noise is an extra
+                // independent contribution to the same channel, not a replacement for the wheels'.
+                const float sig_acc = params.imu_linear_injection
+                                    ? src.imu_sigma(effective_start_ms, effective_end_ms, false) : -1.f;
+                const float sig_lat  = src.quad(src.wheel_sigma(odom.var_side), sig_acc);
+                const float sig_long = src.quad(src.wheel_sigma(odom.var_adv),  sig_acc);
+                // The accelerometer's within-segment correction enters as an EFFECTIVE mean velocity,
+                // so the preintegrator's constant-velocity step reproduces the corrected displacement
+                // without changing its structure -- and the correction is then covered by Q and by
+                // the transport term A, which it would not be if it were added to the mean afterwards.
+                const float v_lat_eff  = odom.side + (params.imu_linear_injection ? imu_dpx_seg / dt : 0.f);
+                const float v_long_eff = odom.adv  + (params.imu_linear_injection ? imu_dpy_seg / dt : 0.f);
+                preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lat, sig_long, sig_om);
+                if (sig_lat >= 0.f or sig_long >= 0.f or (w_g < 1.f and src.wheel_sigma(odom.var_rot) >= 0.f))
+                    ++odom_var_segments;
+            }
+
+            running_theta += dtheta;
+        }
+        report_odometry_channels(src, odometry_history, t_end_ms, imu_segments, wheel_segments,
+                                 odom_var_segments);
+
+        if (preint_out != nullptr)
+            *preint_out = preint.result();
+
+        return total_delta;
+    }
+
+    RoomConcept::SegmentHeading RoomConcept::fuse_segment_heading(
+                const OdometryReading &odom, float dt, float dy_local,
+                std::int64_t effective_start_ms, std::int64_t effective_end_ms,
+                const OdomSources &src, int &imu_segments, int &wheel_segments)
+    {
             const float k_g   = motion_calib_.omega_scale();
             const float b_g   = motion_calib_.omega_bias();          // physical sign: gyro reads w + b
             const float k_ww  = motion_calib_.wheel_omega_scale();
@@ -333,7 +412,7 @@ namespace rc
             if (wheel_stationary)
                 ++zupt_segs_;
             float dth_imu = 0.f;
-            const bool have_gyro = imu_dtheta(effective_start_ms, effective_end_ms, dth_imu);
+            const bool have_gyro = src.imu_dtheta(effective_start_ms, effective_end_ms, dth_imu);
             cyc_hdiag_.raw_wheel += wheel_raw;
             cyc_hdiag_.total_dt  += dt;
             if (have_gyro) { cyc_hdiag_.raw_gyro += dth_imu; cyc_hdiag_.gyro_dt += dt; }
@@ -346,7 +425,7 @@ namespace rc
             if (params.heading_fusion)
             {
                 const float dpsi_w = wheel_raw * k_ww + curve;
-                const float ws = wheel_sigma(odom.var_rot);
+                const float ws = src.wheel_sigma(odom.var_rot);
                 const float dens_w_stated = wheel_stationary ? params.odom_preint_noise.zupt_density_omega
                                           : (ws >= 0.f ? ws : params.odom_preint_noise.sigma_omega);
                 // Learned: the wheels' density at THIS motion, from their disagreement with the gyro.
@@ -365,7 +444,7 @@ namespace rc
                 if (have_gyro)
                 {
                     const float dpsi_g = dth_imu * k_g - b_g * dt;
-                    const float gs = imu_sigma(effective_start_ms, effective_end_ms, true);
+                    const float gs = src.imu_sigma(effective_start_ms, effective_end_ms, true);
                     const float dens_g = gs >= 0.f ? gs : params.odom_preint_noise.sigma_omega;
                     const float s_kg = motion_calib_.param_sigma(rc::calib::P_K_OMEGA) * dth_imu;
                     const float s_bg = motion_calib_.param_sigma(rc::calib::P_B_OMEGA) * dt;
@@ -411,7 +490,7 @@ namespace rc
                     cyc_wheel_shadow_dtheta_ += wheel_raw * k_g - b_g * dt + curve;
                     dtheta = dth_imu * k_g - b_g * dt + curve;
                     w_g = 1.f;
-                    sig_om_fused = imu_sigma(effective_start_ms, effective_end_ms, true);
+                    sig_om_fused = src.imu_sigma(effective_start_ms, effective_end_ms, true);
                     hc.th_gyro = dth_imu;
                     ++cyc_imu_segs_;
                     ++imu_segments;
@@ -419,7 +498,7 @@ namespace rc
                 else
                 {
                     dtheta = wheel_raw * k_g - b_g * dt + curve;
-                    sig_om_fused = wheel_sigma(odom.var_rot);
+                    sig_om_fused = src.wheel_sigma(odom.var_rot);
                     hc.th_gyro = wheel_raw;           // the shared scale acted on the wheels here
                     ++cyc_wheel_segs_;
                     ++wheel_segments;
@@ -434,49 +513,13 @@ namespace rc
             cyc_heading_cov_.th_wheel += hc.th_wheel; cyc_heading_cov_.fwd_wheel += hc.fwd_wheel;
             cyc_gyro_w_dt_ += static_cast<double>(w_g) * dt; cyc_heading_dt_ += dt;
             gyro_w_dt_sum_ += static_cast<double>(w_g) * dt; heading_dt_sum_ += dt;
+        return {dtheta, w_g, sig_om_fused, rot_eff};
+    }
 
-            // Transform to global frame using MIDPOINT theta (reduces integration bias)
-            // The learned yaw offset rotates the body->world mapping: it absorbs a mount or
-            // body-axis misalignment, which shows up as travel drifting off the fitted heading.
-            const float theta_mid = running_theta + 0.5f * dtheta + motion_calib_.yaw_offset();
-            total_delta[0] += dx_use * std::cos(theta_mid) - dy_use * std::sin(theta_mid);
-            total_delta[1] += dx_use * std::sin(theta_mid) + dy_use * std::cos(theta_mid);
-            total_delta[2] += dtheta;
-
-            // Preintegration sees the SAME rate the mean used, or its covariance would describe a
-            // trajectory that was not integrated.
-            if (preint_out != nullptr)
-            {
-                // Densities from what the producers actually stated this segment, falling back to
-                // the asserted constants per channel. The gyro's covers the heading it supplied; the
-                // accelerometer's covers the translation only when its correction is actually being
-                // used, because otherwise the displacement came from the wheels and it is the wheels'
-                // noise that describes it.
-                // Yaw: the density of the heading that was actually integrated -- the fused one
-                // (product of the two channels' variances) under fusion, the supplying channel's
-                // under the legacy switch. <0 leaves the model constant in charge.
-                const float sig_om = sig_om_fused;
-                // Translation always comes from the wheels. When the accelerometer's within-segment
-                // correction is enabled it is ADDED to that displacement, so its noise is an extra
-                // independent contribution to the same channel, not a replacement for the wheels'.
-                const float sig_acc = params.imu_linear_injection
-                                    ? imu_sigma(effective_start_ms, effective_end_ms, false) : -1.f;
-                const float sig_lat  = quad(wheel_sigma(odom.var_side), sig_acc);
-                const float sig_long = quad(wheel_sigma(odom.var_adv),  sig_acc);
-                // The accelerometer's within-segment correction enters as an EFFECTIVE mean velocity,
-                // so the preintegrator's constant-velocity step reproduces the corrected displacement
-                // without changing its structure -- and the correction is then covered by Q and by
-                // the transport term A, which it would not be if it were added to the mean afterwards.
-                const float v_lat_eff  = odom.side + (params.imu_linear_injection ? imu_dpx_seg / dt : 0.f);
-                const float v_long_eff = odom.adv  + (params.imu_linear_injection ? imu_dpy_seg / dt : 0.f);
-                preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lat, sig_long, sig_om);
-                if (sig_lat >= 0.f or sig_long >= 0.f or (w_g < 1.f and wheel_sigma(odom.var_rot) >= 0.f))
-                    ++odom_var_segments;
-            }
-
-            running_theta += dtheta;
-        }
-
+    void RoomConcept::report_odometry_channels(const OdomSources &src,
+                const std::vector<OdometryReading> &odometry_history, std::int64_t t_end_ms,
+                int imu_segments, int wheel_segments, int odom_var_segments)
+    {
         // ── Proof of life, then periodic health ────────────────────────────────────────────────────
         // A channel that silently fails to bind is a recurring failure mode here, and an unused or
         // degrading IMU is invisible in every outcome metric until it has already cost accuracy. The
@@ -484,7 +527,7 @@ namespace rc
         // the IMU actually covers, and how much heading it is removing from the wheel estimate.
         imu_seg_used_  += imu_segments;
         imu_seg_total_ += imu_segments + wheel_segments;
-        imu_stats_sim_clock_ = use_sim_clock;
+        imu_stats_sim_clock_ = src.use_sim_clock;
 
         // Proof of life for the wheel-variance channel. It must be printed from the segment counter
         // and not from "the flag is on", because every way this can fail -- producer silent, producer
@@ -495,11 +538,11 @@ namespace rc
         {
             odom_var_announced_ = true;
             const auto& o = odometry_history.back();
-            const float s_lat  = wheel_sigma(o.var_side);
-            const float s_long = wheel_sigma(o.var_adv);
-            const float s_om   = wheel_sigma(o.var_rot);
+            const float s_lat  = src.wheel_sigma(o.var_side);
+            const float s_long = src.wheel_sigma(o.var_adv);
+            const float s_om   = src.wheel_sigma(o.var_rot);
             qInfo().nospace() << "[OdomVar] wheels' stated variance ACTIVE | dt_sample="
-                              << QString::number(odom_dt_sample * 1e3, 'f', 1) << " ms"
+                              << QString::number(src.odom_dt_sample * 1e3, 'f', 1) << " ms"
                               << " | var(adv,side,rot)=" << o.var_adv << "," << o.var_side << "," << o.var_rot
                               << " -> sigma(lat,long,om)="
                               << QString::number(s_lat,  'g', 3) << ","
@@ -516,7 +559,7 @@ namespace rc
         {
             imu_injection_announced_ = true;
             qInfo().nospace() << "[ImuInject] gyro heading ACTIVE | clock="
-                              << (use_sim_clock ? "SIM (producer)" : "WALL — sim map NOT bound")
+                              << (src.use_sim_clock ? "SIM (producer)" : "WALL — sim map NOT bound")
                               << " | " << imu_segments << "/" << (imu_segments + wheel_segments)
                               << " segments from IMU";
         }
@@ -573,11 +616,6 @@ namespace rc
             zupt_segs_ = 0;
             gyro_w_dt_sum_ = heading_dt_sum_ = 0.0;
         }
-
-        if (preint_out != nullptr)
-            *preint_out = preint.result();
-
-        return total_delta;
     }
 
 } // namespace rc
