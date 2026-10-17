@@ -6,10 +6,15 @@ an episodic memory. It never acts, never claims and is no agent's required peer.
 
 ## What it does
 Every `[EM] poll_ms` (250 ms) it polls, on the main thread, with no DSR signals connected:
-1. the `controller` agent node's `em_journal`. This goes through `journal_from_wire` → `Builder::on_journal`. If that
-   node disappears after it has been seen → `Builder::owner_lost`, and the open records close `lost`.
+1. the controller's journal: the `em_journal` attribute of its dedicated node (type `intention`, name `em_journal`,
+   `Shadow --has--> em_journal`; not the controller's agent node, which cortex's 1 Hz heartbeat rewrites). This goes
+   through `journal_from_wire` → `Builder::on_journal`. If that node disappears after it has been seen (a graceful
+   controller stop deletes it), or the presence monitor loses the `controller` peer (a crash / `kill -9` leaves the
+   node behind) → `Builder::owner_lost`, and the open records close `lost`.
 2. a structural diff of the live graph (born/died, offered/withdrawn, current_moved) → `Builder::on_events`.
 3. every record returned → `Recorder::write`, which appends to the archive and upserts to the domain-4 graph.
+4. every 10 s, one row of `<archive_dir>/metrics_<YYYYMMDD>_<HHMMSS>.csv` (one file per run, `src/em_metrics.h`):
+   journal bytes and updates, open / closed records, the largest record and most events on one record, poll time.
 
 Startup (`src/em_recorder.h`):
 - records that a crashed run left **open** in the archive are closed `lost` and their closing line is appended (R21);
@@ -23,7 +28,7 @@ deleted. Each record is folded exactly once.
 | table | domain | role |
 |---|---|---|
 | `[Agent.dsr]`  | 0 | live working graph. Read only, apart from the presence agent node `episodic_agent 26`. |
-| `[Agent.em]`   | 4 | episodic memory, seeded from `em_root.json`, **owned**. One `metaconcept` per record of today: name = id, `em_record` JSON, `has` edge parent→child. One `stats_<kind>_<identity\|any>` node per stats key, carrying `em_stats`. Read back with `common/episodic/em_query_dsr.h` `load_store`. |
+| `[Agent.em]`   | 4 | episodic memory, seeded from `em_root.json`, **owned**. One `metaconcept` per record of today: name = id, `em_record` JSON, `has` edge parent→child. One `stats_<level>_<kind>[_<author>]_<identity\|any>` node per stats key (author for missions only), carrying `em_stats`. Read back with `common/episodic/em_query_dsr.h` `load_store`. |
 | `[Agent.ltsm]` | 2 | ltsm memory, joined read-only. Resolves a door's `passage_N` identity. |
 
 `dsr` must stay alphabetically first, so that `G` is the live graph.
@@ -41,14 +46,14 @@ cd episodic_agent && bin/episodic_agent etc/config.toml
 - **Stop with SIGTERM or Ctrl-C (`kill <pid>`), never `kill -9`.** A graceful stop closes every open record as
   `interrupted_by_em_shutdown`, writes those records to the archive and to domain 4, and deletes the presence node.
   SIGKILL skips all of that. The next start still closes those records, as `lost`.
-- **After restarting episodic_agent, restart chat_agent too** (or any other domain-4 reader). This agent re-seeds
-  domain 4 from `em_root.json` on every launch. A reader that kept the old domain-4 graph alive would leave two
-  seeders on one domain (R22).
+- **chat_agent re-joins by itself.** This agent re-seeds domain 4 from `em_root.json` on every launch. chat_agent
+  joins domain 4 only while `episodic_agent` is present on domain 0, leaves it when this agent's node is gone or
+  carries a new process stamp (a restart), and joins the fresh graph again (R23, R24) — no reader restart needed.
 
 ## Build and tests
 - Build: `cmake -B build && make -C build -j8` (no `-march=native`; see `src/CMakeLists.txt`).
 - Adapter tests (DSR on private domains 60–62, plus the pure Recorder test):
-  `cmake -S tests -B tests/build && make -C tests/build -j8 && tests/build/dsr_adapters_test && tests/build/recorder_test`
+  `cmake -S tests -B tests/build && make -C tests/build -j8 && tests/build/dsr_adapters_test && tests/build/recorder_test && tests/build/metrics_test`
 - Pure library tests: `common/episodic/tests/run_tests.sh`.
 
 ## ⚠ Hand-patched generated code

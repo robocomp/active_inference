@@ -11,6 +11,11 @@
  * ClaimStart text = {"affordance","producer","target","target_type","contract"}).
  *
  * The journal keeps the newest `capacity` entries; serials keep counting, so a gap tells the reader it missed some.
+ *
+ * Where it lives (final review, finding 4): the `em_journal` attribute of a DEDICATED controller-owned node — type
+ * `intention`, name kJournalNodeName, `has` edge from the robot node — NOT the controller's agent node, which cortex's
+ * 1 Hz AgentInfo heartbeat read-modify-writes (a stale copy reverted the journal, and re-asserting it re-broadcast
+ * the whole wire). The controller creates it when missing, replaces a previous run's, deletes it on a graceful stop.
  */
 
 #include <cstdint>
@@ -28,6 +33,9 @@
 
 namespace rc::em
 {
+
+inline constexpr const char* kJournalNodeName = "em_journal";   // the controller's journal node (type intention)
+inline constexpr const char* kJournalNodeType = "intention";
 
 struct JournalEntry
 {

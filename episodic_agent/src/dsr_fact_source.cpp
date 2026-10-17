@@ -152,4 +152,13 @@ std::vector<Event> LiveDiff::poll(DSR::DSRGraph& G)
     return out;
 }
 
+std::optional<std::string> read_journal(DSR::DSRGraph& G)
+{
+    const auto n = G.get_node(kJournalNodeName);
+    if (not n.has_value() or n->type() != kJournalNodeType) return std::nullopt;
+    const auto wire = G.get_attrib_by_name<em_journal_att>(n.value());
+    if (not wire.has_value()) return std::nullopt;
+    return std::string(wire.value());
+}
+
 }   // namespace rc::em

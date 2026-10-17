@@ -190,14 +190,16 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(g.upsert(s));                             // update in place, no second node
     CHECK(em.get_nodes_by_type("metaconcept").size() == before);
 
-    rc::em::Stats st{.key_kind = "cross", .key_identity = "passage_0", .outcomes = {{"succeeded", 2}}, .n = 2,
-                     .dur_mean_s = 3.0, .dur_m2 = 2.0, .n_gain = 0, .promised_sum = 0, .delivered_sum = 0,
+    rc::em::Stats st{.key_level = "claim", .key_kind = "cross", .key_identity = "passage_0", .outcomes = {{"succeeded", 2}},
+                     .n = 2, .n_dur = 2, .dur_mean_s = 3.0, .dur_m2 = 2.0, .n_gain = 0, .promised_sum = 0, .delivered_sum = 0,
                      .first_t0 = 10, .last_t0 = 20};
     rc::em::Stats any = st;
+    any.key_level = "mission";
     any.key_kind = "mission";
+    any.key_author = "human";
     any.key_identity = "";
-    CHECK(rc::em::EmGraph::stats_name(st) == "stats_cross_passage_0");
-    CHECK(rc::em::EmGraph::stats_name(any) == "stats_mission_any");
+    CHECK(rc::em::EmGraph::stats_name(st) == "stats_claim_cross_passage_0");
+    CHECK(rc::em::EmGraph::stats_name(any) == "stats_mission_mission_human_any");
     CHECK(g.upsert(st));
     CHECK(g.upsert(any));
     st.n = 3;
@@ -241,6 +243,26 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(rc::em::load_store(em).today.size() == 2);   // m (re-upserted) + s
 }
 
+// Finding 4: the journal lives on its own intention node "em_journal", not on the controller's agent node.
+static void journal_node(DSR::DSRGraph& live)
+{
+    CHECK(not rc::em::read_journal(live).has_value());
+    const auto root = live.get_node("root")->id();
+    auto agent = DSR::Node::create<agent_node_type>("controller 4");   // the old place: no longer read
+    live.add_or_modify_attrib_local<em_journal_att>(agent, std::string(R"({"epoch":1,"entries":[]})"));
+    add_node(live, agent, root);
+    CHECK(not rc::em::read_journal(live).has_value());
+    auto n = DSR::Node::create<intention_node_type>(rc::em::kJournalNodeName);
+    const auto id = add_node(live, n, root);
+    CHECK(not rc::em::read_journal(live).has_value());             // no journal yet
+    auto got = live.get_node(id);
+    live.add_or_modify_attrib_local<em_journal_att>(*got, std::string(R"({"epoch":2,"entries":[]})"));
+    live.update_node(*got);
+    CHECK(rc::em::read_journal(live) == std::string(R"({"epoch":2,"entries":[]})"));
+    live.delete_node(id);
+    CHECK(not rc::em::read_journal(live).has_value());
+}
+
 int main()
 {
     if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
@@ -251,6 +273,7 @@ int main()
         auto em = make_graph("em_test_em", 963, 62);
         fact_source(*live, *mem, live, mem);
         live_diff(*live);
+        journal_node(*live);
         em_graph(em);
     }
     catch (const std::exception& e)

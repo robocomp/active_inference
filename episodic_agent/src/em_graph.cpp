@@ -16,7 +16,9 @@ EmGraph::EmGraph(std::shared_ptr<DSR::DSRGraph> em) : G_(std::move(em)) {}
 
 std::string EmGraph::stats_name(const Stats& st)
 {
-    return "stats_" + st.key_kind + "_" + (st.key_identity.empty() ? std::string("any") : st.key_identity);
+    // stats_<level>_<kind>[_<author>]_<identity|any>: the author only for missions (key_author is "" otherwise).
+    return "stats_" + st.key_level + "_" + st.key_kind + (st.key_author.empty() ? std::string{} : "_" + st.key_author) + "_"
+           + (st.key_identity.empty() ? std::string("any") : st.key_identity);
 }
 
 std::optional<DSR::Node> EmGraph::ensure_node(const std::string& name, std::uint64_t parent_id)

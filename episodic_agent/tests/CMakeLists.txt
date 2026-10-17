@@ -35,3 +35,8 @@ set_target_properties(dsr_adapters_test PROPERTIES CXX_STANDARD 23 CXX_STANDARD_
 add_executable(recorder_test recorder_test.cpp)
 target_link_libraries(recorder_test Qt6::Core)
 set_target_properties(recorder_test PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# Pure: the per-run metrics CSV of src/em_metrics.h (classic locale under es_ES).
+add_executable(metrics_test metrics_test.cpp)
+target_link_libraries(metrics_test Qt6::Core)
+set_target_properties(metrics_test PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

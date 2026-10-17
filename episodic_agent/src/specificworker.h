@@ -21,10 +21,12 @@
  * SpecificWorker — episodic_agent (2026-10-17). An OBSERVER: it never acts, never claims, is never required.
  *
  * Every [EM] poll_ms, on the main thread (a QTimer; no DSR signal is connected):
- *   1. the `controller` agent node's em_journal → journal_from_wire → Builder::on_journal; the node vanishing after
- *      having been seen → Builder::owner_lost;
+ *   1. the controller's journal node (`em_journal`, type intention — em_journal.h) → journal_from_wire →
+ *      Builder::on_journal; the node vanishing after having been seen, or the presence monitor losing the
+ *      `controller` peer (a crash / kill -9 leaves the node behind) → Builder::owner_lost;
  *   2. the structural diff of the live graph (LiveDiff) → Builder::on_events;
- *   3. every record those return → Recorder::write → Archive::append + the domain-4 graph (EmGraph).
+ *   3. every record those return → Recorder::write → Archive::append + the domain-4 graph (EmGraph);
+ *   4. every 10 s a row of <archive_dir>/metrics_<YYYYMMDD>_<HHMMSS>.csv (em_metrics.h).
  * At startup the Recorder recomputes the all-time stats from the archive and reseeds today's records into domain 4.
  * On a graceful stop (SIGTERM/SIGINT, never kill -9) Builder::shutdown closes what is open as
  * `interrupted_by_em_shutdown`, and those records are archived.
@@ -40,6 +42,7 @@
 
 #include "dsr_fact_source.h"
 #include "em_graph.h"
+#include "em_metrics.h"
 #include "em_recorder.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/episodic/em_archive.h"
@@ -104,6 +107,7 @@ private:
     std::unique_ptr<rc::em::Recorder> recorder_;
     std::unique_ptr<rc::em::Builder> builder_;
     rc::em::LiveDiff diff_;
+    std::unique_ptr<rc::em::Metrics> metrics_;
     QTimer poll_timer_;
 
     std::string last_wire_;                         // identical wire ⇒ not re-parsed
@@ -111,8 +115,8 @@ private:
     bool bad_wire_logged_ = false, absent_logged_ = false;
 
     void poll();
-    /// The live agent node of the `controller` (cortex names it "<agent_name> <id>"; matched without the id).
-    std::optional<DSR::Node> controller_node() const;
+    /// Archive + graph + metrics for what the Builder returned.
+    void write(const std::vector<rc::em::Record>& out);
     static std::uint64_t now_ms();
 
 signals:

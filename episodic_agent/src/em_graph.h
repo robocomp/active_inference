@@ -4,7 +4,8 @@
  * Layout (read back by common/episodic/em_query_dsr.h load_store):
  *   - one node per record: type `metaconcept`, name = record id, attr em_record = to_json(Record) compact;
  *     a `has` edge parent→child (a mission, or a record whose parent node is not in the graph, hangs from root);
- *   - one node per Stats: type `metaconcept`, name `stats_<kind>_<identity or "any">`, attr em_stats, under root.
+ *   - one node per Stats: type `metaconcept`, name `stats_<level>_<kind>[_<author>]_<identity or "any">` (author for
+ *     missions only), attr em_stats, under root.
  * Upsert = update the attribute when a node of that name exists, insert it otherwise.
  */
 #pragma once

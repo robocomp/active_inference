@@ -29,7 +29,11 @@ struct FakeSink : rc::em::RecordSink
     std::map<std::string, rc::em::Stats> stats;   // by kind|identity
     int stats_writes = 0;
     void upsert(const rc::em::Record& r) override { records[r.id] = r; }
-    void upsert(const rc::em::Stats& s) override { stats[s.key_kind + "|" + s.key_identity] = s; ++stats_writes; }
+    void upsert(const rc::em::Stats& s) override
+    {
+        stats[s.key_level + "|" + s.key_kind + "|" + s.key_author + "|" + s.key_identity] = s;
+        ++stats_writes;
+    }
     void remove(const std::string& id) override { records.erase(id); }
 };
 
@@ -87,12 +91,12 @@ int main()
     CHECK(sink.records.size() == 2);                            // today's records reseeded, nothing else
     CHECK(sink.records.contains("20261017-1") and sink.records.contains("20261017-4"));
     CHECK(sink.records["20261017-4"].outcome == "lost" and sink.records["20261017-4"].t1 == boot);
-    const auto key = std::pair<std::string, std::string>{"cross", "passage_0"};
-    const auto mkey = std::pair<std::string, std::string>{"mission", "passage_0"};
+    const auto key = rc::em::StatsKey{"claim", "cross", "", "passage_0"};
+    const auto mkey = rc::em::StatsKey{"claim", "mission", "", "passage_0"};   // rec() makes claims, kind "mission"
     CHECK(rc.stats().size() == 1);
     CHECK(rc.stats().contains(key) and rc.stats().at(key).n == 4);   // 15-1, 15-2, 16-1 + 16-2 closed lost
     CHECK(rc.stats().at(key).outcomes.at("lost") == 1);
-    CHECK(sink.stats.size() == 1 and sink.stats["cross|passage_0"].n == 4);
+    CHECK(sink.stats.size() == 1 and sink.stats["claim|cross||passage_0"].n == 4);
     {
         const auto d16r = archive.load_day("20261016");
         const auto it = std::ranges::find(d16r, std::string("20261016-2"), &rc::em::Record::id);
@@ -132,7 +136,7 @@ int main()
     CHECK(not sink.records.contains("20261017-4"));
     CHECK(sink.records.contains("20261017-6"));                 // still open: stays as a node
     CHECK(sink.records.contains("20261018-1"));
-    CHECK(sink.stats["cross|passage_0"].n == 6);
+    CHECK(sink.stats["claim|cross||passage_0"].n == 6);
 
     // A second record of the new day folds nothing again.
     rc.write({rec("20261018-1", d18, d18 + 100)});

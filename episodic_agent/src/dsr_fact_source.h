@@ -4,6 +4,7 @@
  *   DsrFactSource  rc::em::FactSource over DSR: what the Builder snapshots as a record's pre/post facts.
  *   LiveDiff       the structural events the Builder attaches to open records (born/died, offered/withdrawn,
  *                  current_moved), from one id-per-type snapshot per poll.
+ *   read_journal   the controller's journal wire: `em_journal` on its dedicated node (em_journal.h kJournalNodeName).
  *
  * Fact.values (ruling R2): the kFactAttrs attributes the node actually carries (type-attributed getters; a bool
  * reads 0/1), "x","y","yaw" from the RT edge parent→node (rt_translation, rt_rotation_euler_xyz), and
@@ -20,6 +21,7 @@
 #pragma once
 
 #include "../../common/episodic/em_builder.h"
+#include "../../common/episodic/em_journal.h"
 #include "../../common/episodic/em_schema.h"
 
 #include <cstdint>
@@ -67,5 +69,9 @@ private:
     std::map<std::uint64_t, std::pair<std::string, std::string>> known_;   // id -> (type, name)
     std::optional<std::uint64_t> current_;
 };
+
+/// The controller's journal wire: the em_journal attribute of the node named kJournalNodeName of type
+/// kJournalNodeType. nullopt when that node is absent (or carries no journal yet).
+std::optional<std::string> read_journal(DSR::DSRGraph& G);
 
 }   // namespace rc::em

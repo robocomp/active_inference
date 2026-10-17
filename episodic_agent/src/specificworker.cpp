@@ -96,7 +96,7 @@ void SpecificWorker::request_shutdown()
     if (builder_ and recorder_)
     {
         const auto closed = builder_->shutdown(now_ms());
-        recorder_->write(closed);
+        write(closed);
         std::println("[episodic] shutdown: {} open record(s) closed as interrupted_by_em_shutdown", closed.size());
     }
     save_window_settings();
@@ -227,6 +227,8 @@ void SpecificWorker::initialize()
     if (const int lost = recorder_->start(now_ms()); lost > 0)
         std::println("[episodic] {} record(s) left open by a previous run closed as lost (R21)", lost);
     builder_ = std::make_unique<rc::em::Builder>(*facts_, [this](std::uint64_t t0) { return recorder_->next_id(t0); });
+    metrics_ = std::make_unique<rc::em::Metrics>(rc::em::Metrics::path_for(archive_dir, now_ms()), now_ms());
+    if (not metrics_->ok()) qWarning() << "[episodic] could not open the metrics CSV under" << QString::fromStdString(archive_dir);
     std::println("[episodic] archive {}: {} past day(s) folded into {} stats key(s); today {} reseeded with {} record(s)",
                  archive_dir, std::ranges::count_if(archive_->days(), [&](const std::string& d) { return d < recorder_->today(); }),
                  recorder_->stats().size(), recorder_->today(), archive_->load_day(recorder_->today()).size());
@@ -251,41 +253,35 @@ std::uint64_t SpecificWorker::now_ms()
     return std::uint64_t(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
 }
 
-std::optional<DSR::Node> SpecificWorker::controller_node() const
+void SpecificWorker::write(const std::vector<rc::em::Record>& out)
 {
-    std::optional<DSR::Node> any;
-    for (auto& n : G->get_nodes_by_type("agent"))
-    {
-        const std::string& name = n.name();
-        const auto sp = name.rfind(' ');
-        const std::string base = sp == std::string::npos ? name : name.substr(0, sp);
-        if (base != "controller") continue;
-        if (G->get_attrib_by_name<em_journal_att>(n).has_value()) return n;   // the one carrying a journal wins
-        if (not any) any = n;
-    }
-    return any;
+    if (out.empty()) return;
+    recorder_->write(out);
+    if (metrics_) metrics_->on_written(out);
 }
 
 void SpecificWorker::poll()
 {
     if (shutting_down_ or not builder_) return;
+    const auto t_start = std::chrono::steady_clock::now();
     const std::uint64_t now = now_ms();
     std::vector<rc::em::Record> out;
     const auto take = [&](std::vector<rc::em::Record> v) { std::ranges::move(v, std::back_inserter(out)); };
 
-    // Structural events are kept only if the controller node had been seen BEFORE this poll: until the builder has
+    // Structural events are kept only if the journal node had been seen BEFORE this poll: until the builder has
     // primed on a journal nothing is open to carry them, and the initial graph sync — which can land in the same poll
-    // as the controller node — must not be reported as a burst of births. Diffing every poll keeps the snapshot current.
+    // as the journal node — must not be reported as a burst of births. Diffing every poll keeps the snapshot current.
     const bool controller_seen_before = controller_seen_;
     std::vector<rc::em::Event> events = diff_.poll(*G);
 
-    if (const auto node = controller_node(); node.has_value())
+    if (const auto wire = rc::em::read_journal(*G); wire.has_value())
     {
-        if (not controller_seen_) std::println("[episodic] controller agent node found ({})", node->name());
+        if (not controller_seen_) std::println("[episodic] controller journal node '{}' found", rc::em::kJournalNodeName);
         controller_seen_ = controller_present_ = true;
-        if (const auto wire = G->get_attrib_by_name<em_journal_att>(*node); wire.has_value() and wire.value() != last_wire_)
+        if (*wire != last_wire_)
         {
-            last_wire_ = wire.value();
+            last_wire_ = *wire;
+            if (metrics_) metrics_->on_wire(last_wire_.size());
             if (const auto w = rc::em::journal_from_wire(last_wire_); w.has_value())
             {
                 take(builder_->on_journal(*w, now));
@@ -303,7 +299,7 @@ void SpecificWorker::poll()
         controller_present_ = false;
         last_wire_.clear();
         auto lost = builder_->owner_lost(now);
-        std::println("[episodic] controller agent node gone — {} open record(s) closed as lost", lost.size());
+        std::println("[episodic] controller journal node gone — {} open record(s) closed as lost", lost.size());
         take(std::move(lost));
     }
     else if (not controller_seen_ and not absent_logged_)
@@ -314,7 +310,12 @@ void SpecificWorker::poll()
 
     if (not controller_seen_before) events.clear();
     take(builder_->on_events(events, now));     // also re-checks the self mission (room changes)
-    if (not out.empty()) recorder_->write(out);
+    write(out);
+    if (metrics_)
+    {
+        metrics_->on_poll(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count());
+        metrics_->maybe_row(now, builder_->open());
+    }
 }
 
 void SpecificWorker::GraphSink::upsert(const rc::em::Record& r)

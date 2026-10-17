@@ -43,7 +43,7 @@ struct RecordSink                                // the domain-4 graph in the ag
 class Recorder
 {
 public:
-    using Key = std::pair<std::string, std::string>;
+    using Key = StatsKey;
 
     Recorder(Archive& archive, RecordSink& sink, std::string today)
         : archive_(archive), sink_(sink), today_(std::move(today)) {}
