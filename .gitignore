@@ -96,3 +96,7 @@ caca/
 # Per-run archives created by ControllerMission::archive_on_stop (a timestamped copy of each
 # diagnostic beside the run). The live files are ignored above; these are their history.
 **/etc/runs/
+retina/etc/zed_orbits
+retina/etc/zed_frames
+retina/etc/view_atlas_dataset
+retina/models/dinov3

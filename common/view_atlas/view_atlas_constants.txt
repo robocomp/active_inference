@@ -1,0 +1,19 @@
+# view_atlas constants, fitted 2026-10-17 by fit_constants.py
+# dataset: /home/pbustos/robocomp/components/active_inference.worktrees/view-atlas/retina/etc/view_atlas_dataset (2715 views, 23 objects)
+# pairs: own 22569, background 3213
+ell_rad = 0.411596962
+repeat_ell_rad = 0.722534054
+repeat_ell_logr = 0.761801274
+mu_own_d = 0.943859976
+mu_own_c = 0.956400126
+mu_bg_d = 0.90070105
+mu_bg_c = 0.751508822
+cov_own_dd = 0.00164616486
+cov_own_dc = 0.00166384121
+cov_own_cc = 0.00615025244
+cov_bg_dd = 0.00399036722
+cov_bg_dc = 0.00403744338
+cov_bg_cc = 0.117914659
+cov_n_dd = 0.00164616486
+cov_n_dc = 0.00166384121
+cov_n_cc = 0.00615025244

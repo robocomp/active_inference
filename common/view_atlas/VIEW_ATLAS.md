@@ -118,7 +118,8 @@ Hypotheses {archived object 1…n of this class, new}. Log-weight of each:
 | Σ_n | per-view noise, with a term falling with mask pixel count | fit, binned by pixel count |
 | σ²_illum | colour variance growth with brightness change obs↔prototype | **real robot only** — sim lighting is fixed |
 | π_move | prior probability an archived object was moved | model constant, FLAGGED |
-| N₀ | prior pseudo-count (class background) | from Σ_bg |
+| N₀ | prior pseudo-count: "the prior is worth one view" (= 1) | model constant, FLAGGED |
+| ℓ_r (repeat) | azimuth / log-range step below which a view is a repeat look | DERIVED: the step at which expected shape similarity drops by one per-view sd |
 
 The fitting script writes them to a constants file with dataset provenance and fit date. Re-fit before
 trusting them on new data.
