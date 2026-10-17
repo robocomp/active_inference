@@ -49,6 +49,7 @@ Record full_claim()
     r.alternatives_json = R"([{"kind":"cross","score":0.4}])";
     r.events = {Event{.dt_ms = 1500, .kind = "current_moved", .node = "room_2"}};
     r.mission_key = "m12";
+    r.step_id = "2.1";
     r.serial_start = 41;
     r.serial_end = 57;
     return r;

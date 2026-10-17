@@ -313,6 +313,7 @@ private:
             o.rec.attempt = e.attempt;
             o.rec.iteration = e.iteration;
             o.rec.mission_key = e.mission;
+            o.rec.step_id = e.step_id;
             o.rec.serial_start = e.serial;
             o.step_id = e.step_id;
             o.rec.pre = read(o.rec.target);

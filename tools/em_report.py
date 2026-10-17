@@ -6,6 +6,11 @@
 
 One JSON object per line; the same id may appear several times (open line, then closing line):
 the LAST line per id wins. Unparseable (truncated) lines are skipped with a warning.
+Structural failures: a mission with a parent, a step/claim without one or with an unknown one, t1 < t0, a CLOSED
+record with an empty outcome (EM never invents one, so a closed record must carry its owner's word or EM's own
+lost / interrupted_by_em_shutdown), two step records with the same (mission_key, step_id, attempt, iteration)
+(records that carry both keys), and with --expect-closed any record still open.
+Also reported: records per mission_key (the controller's journal mission, "" = a self mission).
 Exit status 1 on any structural failure.
 """
 import argparse, json, statistics, sys
@@ -50,6 +55,17 @@ def analyze(recs, also_ids, expect_closed):
                 fails.append((id, "open (no t1) with --expect-closed"))
         elif t0 is not None and t1 < t0:
             fails.append((id, f"t1 {t1} < t0 {t0}"))
+        if t1 is not None and not r.get("outcome"):
+            fails.append((id, "closed with an empty outcome"))
+    seen = {}
+    for id, r in sorted(recs.items()):
+        if r.get("level") != "step" or not r.get("mission_key") or not r.get("step_id"):
+            continue
+        key = (r["mission_key"], r["step_id"], r.get("attempt", 0), r.get("iteration", 0))
+        if key in seen:
+            fails.append((id, f"duplicate step record of {seen[key]} (mission_key, step_id, attempt, iteration) = {key}"))
+        else:
+            seen[key] = id
     return fails
 
 
@@ -63,6 +79,7 @@ def summarize(recs, fails):
     lost_lv = Counter(r.get("level") for r in recs.values() if r.get("outcome") == "lost")
     return {
         "records": len(recs), "by_level": c("level"), "by_author": c("author"), "by_outcome": c("outcome"),
+        "by_mission_key": c("mission_key"),
         "median_duration_s_by_kind": {k: round(statistics.median(v), 3) for k, v in sorted(dur.items())},
         "outcome_words": {w: outcomes.get(w, 0) for w in WORDS},
         "lost": {"total": outcomes.get("lost", 0), "by_level": dict(sorted(lost_lv.items()))},
@@ -92,7 +109,7 @@ def main(argv=None):
         for w in warnings:
             print("warning:", w)
         print(f"records: {s['records']}")
-        for k in ("by_level", "by_author", "by_outcome"):
+        for k in ("by_level", "by_author", "by_outcome", "by_mission_key"):
             print(f"{k}: {s[k]}")
         print(f"median duration s by kind: {s['median_duration_s_by_kind']}")
         print(f"outcome words: {s['outcome_words']}")

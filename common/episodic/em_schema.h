@@ -70,6 +70,7 @@ struct Record
     // mission) and the serials of the entries that opened / closed this record — ABSENT when EM itself opened or
     // closed it (a self mission, `lost`, `interrupted_by_em_shutdown`).
     std::string mission_key;
+    std::string step_id;                        // step only: the IR step id ("2.1"; single commands "1")
     std::optional<std::uint64_t> serial_start, serial_end;
     bool operator==(const Record&) const = default;
 };
@@ -158,6 +159,7 @@ inline QJsonObject to_json(const Record& r)
         ev.append(QJsonObject{{"dt_ms", double(e.dt_ms)}, {"kind", q(e.kind)}, {"node", q(e.node)}});
     o["events"] = ev;
     o["mission_key"] = q(r.mission_key);
+    o["step_id"] = q(r.step_id);
     if (r.serial_start) o["serial_start"] = double(*r.serial_start);
     if (r.serial_end) o["serial_end"] = double(*r.serial_end);
     return o;
@@ -200,6 +202,7 @@ inline std::optional<Record> record_from_json(const QJsonObject& o)
         r.events.push_back(Event{.dt_ms = std::int64_t(e["dt_ms"].toDouble()), .kind = s(e["kind"]), .node = s(e["node"])});
     }
     r.mission_key = s(o["mission_key"]);
+    r.step_id = s(o["step_id"]);
     if (o["serial_start"].isDouble()) r.serial_start = std::uint64_t(o["serial_start"].toDouble());
     if (o["serial_end"].isDouble()) r.serial_end = std::uint64_t(o["serial_end"].toDouble());
     return r;

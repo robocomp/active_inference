@@ -84,6 +84,36 @@ class T(unittest.TestCase):
         self.assertEqual(j["lost"]["by_level"], {"claim": 1})
         self.assertEqual(j["failures"], [])
 
+    # final review, finding 6
+    def test_closed_with_empty_outcome_fails(self):
+        rc, out, _ = self.run_(self.write("a.jsonl", self.clean() + [rec("20261017-6", "step", "20261017-1", outcome="")]))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("20261017-6", out)
+        self.assertIn("empty outcome", out)
+
+    def test_records_per_mission_key(self):
+        lines = [rec("20261017-1", mission_key="m3"),
+                 rec("20261017-2", "step", "20261017-1", mission_key="m3", step_id="1", attempt=1),
+                 rec("20261017-3", "claim", "20261017-2", mission_key="m3"),
+                 rec("20261017-4", author="self", source="self")]
+        rc, out, _ = self.run_(self.write("a.jsonl", lines), "--json")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(json.loads(out)["by_mission_key"], {"": 1, "m3": 3})
+        rc, out, _ = self.run_(self.write("b.jsonl", lines))
+        self.assertIn("by_mission_key", out)
+
+    def test_duplicate_step_record_fails(self):
+        step = dict(mission_key="m3", step_id="2.1", attempt=1, iteration=2)
+        lines = [rec("20261017-1", mission_key="m3"),
+                 rec("20261017-2", "step", "20261017-1", **step),
+                 rec("20261017-3", "step", "20261017-1", **step),
+                 rec("20261017-4", "step", "20261017-1", **{**step, "iteration": 3})]
+        rc, out, _ = self.run_(self.write("a.jsonl", lines))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("duplicate step", out)
+        self.assertIn("20261017-3", out)
+        self.assertNotIn("FAIL 20261017-4", out)
+
 
 if __name__ == "__main__":
     unittest.main()

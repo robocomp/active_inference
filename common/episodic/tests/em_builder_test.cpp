@@ -525,7 +525,7 @@ void test_mission_key_and_serials()
     const Record* cl = find(c, Level::Claim, "cross_door");
     CHECK(st and cl);
     if (not (st and cl)) return;
-    CHECK(st->mission_key == "m1" and st->serial_start == 3u and st->serial_end == 6u);
+    CHECK(st->mission_key == "m1" and st->serial_start == 3u and st->serial_end == 6u and st->step_id == "1");
     CHECK(cl->mission_key == "m1" and cl->serial_start == 4u and cl->serial_end == 5u);
     CHECK(b.open().size() == 1);
     if (b.open().size() != 1) return;
