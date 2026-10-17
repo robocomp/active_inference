@@ -1,0 +1,25 @@
+1. cov == sum k_j unit_j : add 2.6e-07, chain 1.6e-07  (ok)
+1b. heading var, stated 0.001: got 8.025e-06 want max(model 8.025e-06, stated 5.000e-08)  (ok)
+1b. heading var, stated 0.200: got 2.000e-03 want max(model 8.025e-06, stated 2.000e-03)  (ok)
+-- consistent posteriors
+2. k_long     true 9.00e-05 learnt 8.89e-05  (rel err 0.01, bar 0.15)  ok
+2. k_lat      true 8.00e-06 learnt 7.02e-06  (rel err 0.12, bar 0.35)  ok
+2. k_lat_turn true 1.20e-05 learnt 1.10e-05  (rel err 0.08, bar 0.35)  ok
+2. k_th_turn  true 2.00e-04 learnt 2.01e-04  (rel err 0.01, bar 0.15)  ok
+2. k_t_trans  true 1.00e-06 learnt 1.10e-06  (rel err 0.10, bar 0.60)  ok
+2. k_t_rot    true 5.00e-07 learnt 5.99e-07  (rel err 0.20, bar 0.60)  ok
+2. rho[0]     true 2.00e-05 learnt 2.04e-05  (rel err 0.02, bar 0.50)  ok
+2. rho[1]     true 1.00e-05 learnt 1.12e-05  (rel err 0.12, bar 0.50)  ok
+2. rho[2]     true 1.00e-05 learnt 9.05e-06  (rel err 0.10, bar 0.50)  ok
+-- adversarial posteriors
+2. k_long     true 9.00e-05 learnt 2.00e-04  (rel err 1.22, bar 0.15)  FAIL
+2. k_lat      true 8.00e-06 learnt 2.18e-04  (rel err 26.23, bar 0.35)  FAIL
+2. k_lat_turn true 1.20e-05 learnt 7.39e-05  (rel err 5.16, bar 0.35)  FAIL
+2. k_th_turn  true 2.00e-04 learnt 1.53e+00  (rel err 7673.79, bar 0.15)  FAIL
+2. k_t_trans  true 1.00e-06 learnt 3.16e+08  (rel err 315717951058462.12, bar 0.60)  FAIL
+2. k_t_rot    true 5.00e-07 learnt 0.00e+00  (rel err 1.00, bar 0.60)  FAIL
+2. rho[0]     true 2.00e-05 learnt -1.91e+08  (rel err 9529401469954.21, bar 0.50)  FAIL
+2. rho[1]     true 1.00e-05 learnt 6.69e+09  (rel err 668818026590640.00, bar 0.50)  FAIL
+2. rho[2]     true 1.00e-05 learnt 1.33e-01  (rel err 13347.38, bar 0.50)  FAIL
+PASS
+[exit 0]

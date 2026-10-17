@@ -1,0 +1,16 @@
+1. COLD START: density at rest before any data = 0.0037 (prior 0.0037)
+   cold start reports the PRIOR density, not zero                 PASS
+2. RECOVERY over 25000 segments: c0 1.34e-06 (truth 4.90e-07)  c1 2.62e-04 (2.40e-04)  c2 7.58e-04 (7.60e-04)
+   density at v=.35 w=0: 0.0096 (truth 0.0092)   at v=0 w=.9: 0.0262 (truth 0.0262)
+   speed term recovered within 15%                                PASS
+   turn-rate term recovered within 15%                            PASS
+   rest density driven well below the pessimistic prior           PASS
+   no anchor (gyro density unstated) => no samples taken          PASS
+3. LONG STOP after driving: c1 2.15e-04 -> 2.57e-04, c2 7.50e-04 -> 7.66e-04 (truth 2.40e-04, 7.60e-04)
+   speed term survives a 40-minute stop                           PASS
+   turn-rate term survives a 40-minute stop                       PASS
+4. NEVER MOVED: density at v=.3 0.0447, at w=.5 0.0447 (motion prior 0.0447)
+   unexcited motion terms stay at the conservative prior, not at zero PASS
+
+ALL PASS (0 failures)
+[exit 0]

@@ -1,0 +1,15 @@
+  [PASS] A: a current-format episode row was written
+  A: last row d_theta +0.0000 lever_s +0.00000 lever_c +0.000000
+  A: spin row d_theta +0.1500 lever_s/d_theta 0.99625 (expect 0.99625) lever_c/d_theta 0.07486 (expect 0.07486)
+  [PASS] A: lever covariates accumulated PER CORRECTION (not on the net turn)
+  B: lever x +0.0304 +- 0.0037 (truth +0.0300) | y -0.0199 +- 0.0037 (truth -0.0200) | eps +0.0181
+  [PASS] B: lever informed from spins
+  [PASS] B: lever recovered from live-style accumulation
+  [PASS] B: lever NOT acting without apply_lever
+  [PASS] B: p_applied lever recorded as 0 while not acting
+  [PASS] B: lever acting with apply_lever
+  C: eps +0.01817 +- 0.00361 taught 1 acting 1 yaw_offset +0.00000
+  [PASS] C: lidar_side_yaw: eps acting (p_applied) but yaw_offset() == 0
+  [PASS] C: without it the odometry side applies the yaw
+ALL PASS (0 failures)
+[exit 0]

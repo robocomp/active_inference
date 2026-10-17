@@ -1,0 +1,24 @@
+joint_mounts_selftest: rc::joint::solve_mounts
+  [PASS] (a) solve ok
+    helios dx +30.00 dy -20.00 mm yaw +1.000 deg | bpearl dx +10.00 dy +20.00 mm yaw +0.500 deg
+  [PASS] (a) helios (dx, dy, dyaw) and bpearl ABSOLUTE (dx, dy, dyaw) recovered (bpearl = relative + helios)
+  [PASS] (a) the kinematic block's BODY-origin lever is mapped onto the sensor-origin Pose6 (2.7 mm/deg)
+    ricoh.yaw body -0.4000 deg (truth -0.4000) | relative measured -1.4000 deg
+  [PASS] (b) camera body-frame yaw = relative + helios yaw (kCam = -1 on the psi_h column, DIRECTLY)
+    helios.dz +0.0000 +- 0.0200 m (prior sd 0.0200), information share prior = 1.000
+  [PASS] (c) helios dz stays EXACTLY at its prior
+  [PASS] (c) its information share is 100 % prior
+    tilt plant: bpearl dx +0.00 dy +0.00 mm, helios dx -0.00 dy -0.00 mm
+    (d1) no coupling:            bpearl dx +0.00 dy +0.00 mm, helios dx -4.49 dy -7.85 mm
+    (d2) bpearl coupling only:   bpearl dx -4.49 dy -7.85 mm, helios dx -4.49 dy -7.85 mm
+  [PASS] (d) helios tilt alone: bpearl planar AND helios planar stay at 0 (coupling sign right)
+  [PASS] (d) and the tilt itself is recovered
+  [PASS] (d1) control: no coupling -> the helios planar reads ~0.64 m x tilt (the bite)
+  [PASS] (d2) control: item 7's bpearl coupling alone -> the bpearl moves (why the kinematic coupling is needed)
+  [PASS] (e) r1 solve(): the motion block's eps moves the camera yaw (the coupling it was built on)
+  [PASS] (e) solve_mounts has NO motion-block input: eps/lever cannot double-anchor the helios
+  [PASS] (f) mounts CSV: header carries value, sd and per-factor shares; yaw_offset logged per row
+  [PASS] (f) helios.dx information: kinematic share > 45 %, prior < 0.1 %, shares sum to 1
+  [PASS] (f) bpearl.droll information comes from the floor factor
+ALL PASS (0 failures)
+[exit 0]

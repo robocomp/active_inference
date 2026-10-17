@@ -1,0 +1,11 @@
+scan  6 at (3.75,1.00): verts=18 area=18.355 m2 worst clearance=0.300 m free_cells=10400
+scan 12 at (2.25,1.00): verts=10 area=19.846 m2 worst clearance=0.300 m free_cells=11974
+scan 18 at (1.50,1.75): verts=10 area=19.917 m2 worst clearance=0.300 m free_cells=13780
+scan 24 at (1.50,3.25): verts= 9 area=19.916 m2 worst clearance=0.300 m free_cells=15577
+scan 30 at (1.50,4.75): verts= 9 area=20.051 m2 worst clearance=0.300 m free_cells=16476
+scan 31 at (1.50,5.00): verts= 9 area=20.051 m2 worst clearance=0.300 m free_cells=16476
+  (0.30,0.30)  (5.70,0.30)  (5.65,1.30)  (5.70,2.70)  (2.85,2.70)  (2.70,2.85)  (2.70,5.70)  (2.30,5.65)  (0.30,5.70)
+final area 20.05 m2 vs 21.24 m2 eroded room (94%)
+pillar room: verts=5 samples=7170 too-close-to-outer-wall=0 inside-pillar=64 (filled hole, documented) PASS
+ALL PASS: 0 failure(s)
+[exit 0]

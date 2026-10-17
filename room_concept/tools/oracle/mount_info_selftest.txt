@@ -1,0 +1,13 @@
+  [PASS] A: both solve, marginalised
+  A: p (info) +0.00092 -0.00401 +0.00215 | p (solve) +0.00092 -0.00401 +0.00215 | planted +0.00200 -0.00600 +0.00300
+  [PASS] A: (H_data + H_prior)^-1 (b_data + b_prior) == the TOTAL (Solution::p - applied) in physical units
+  [PASS] A: the prior is centred at ZERO total (the graph extrinsic)
+  [PASS] A: sigmas agree (with solve()'s Birge inflation)
+  [PASS] A: prior information = 1/unit^2
+  A2: data-only yaw +0.002176 -> +0.006176 (shift +0.004000, expect +0.004000)
+  [PASS] A2: rebase(+dpsi/sigma) shifts the DATA solution by exactly +dpsi on yaw only
+  [PASS] A2: the prior anchor does not move
+  [PASS] B: unmarginalisable evidence (nuisance requested) is refused
+  [PASS] C: refuses exactly when solve() refuses (n < min_n)
+ALL PASS (0 failures)
+[exit 0]

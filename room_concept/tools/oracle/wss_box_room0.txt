@@ -1,0 +1,6 @@
+room i=0 order=1  IoU=0.990  boxes=1 verts=4 (truth 4)  rms=0.192 core=0.067  out=0.1% in=0.0%  pose_err=0.206  yaw=-0.32  prop=0 adm=0 rem=3  | seen=100% score=+3.38 pubsig=0.010 replans=0(0 blk) phase=fixed-tour explored=NO(frame cap)  coll=0/0(0.00m) out=0
+  truth bbox 6.79 x 4.01 m, 4 verts; circuit (-2.09,-0.71) (2.09,-0.71) (2.09,0.71) (-2.09,0.71)  + box 6.79 x 4.02 m  [ -1.28   5.51]x[ -1.29   2.73]
+  est bbox (world) 6.81 x 4.05 m, 4 verts
+
+  truth verts: (3.39,-2.01) (3.39,2.01) (-3.39,2.01) (-3.39,-2.01)
+[exit 0]

@@ -1,0 +1,20 @@
+motion_calib selftest — synthetic truth, exact
+
+  scale only, no noise   PASS
+      s_omega      0.07 (truth      0.07)   sigma_omega   3.172e-07 (truth           0)
+      s_v          0.05 (truth      0.05)   sigma_v       1.034e-06 (truth           0)
+  noise only, no scale   PASS
+      s_omega -0.003493 (truth         0)   sigma_omega     0.03035 (truth        0.03)
+      s_v     0.0009456 (truth         0)   sigma_v        0.009999 (truth        0.01)
+  both, realistic        PASS
+      s_omega   0.06651 (truth      0.07)   sigma_omega     0.03035 (truth        0.03)
+      s_v       0.05095 (truth      0.05)   sigma_v        0.009999 (truth        0.01)
+  both, hardware-ish     PASS
+      s_omega   0.02977 (truth      0.03)   sigma_omega    0.002023 (truth       0.002)
+      s_v       0.02009 (truth      0.02)   sigma_v       0.0009999 (truth       0.001)
+  constant speed (degenerate) PASS
+      |Delta| span/mean = 4.77e-05 over 499 windows — a slope fitted here is not identified
+
+ALL PASS (0 failures)
+
+[exit 0]

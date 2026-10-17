@@ -1,0 +1,38 @@
+=== corner gather: explain-away OFF (committed, the default) ===
+
+  CLEAN        2004 returns, 4 in FOV, 4 detected, 4 accepted (rej: fewpts 0, dist 0, convex 0, occl 0)
+    corner   err(m)  ori_in ori_out in n(eff/raw) out n(eff/raw)   prop  sig_det rival in/out
+    0        0.0066   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    1        0.0052   1.000   1.000    150/150       150/150         1    0.060     0/0    
+    2        0.0018   1.000   1.000    151/151       149/149         1    0.060     0/0    
+    3        0.0035   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    == over 20 seeds: mean corner error 0.0038 m | collapsed 0/80 (0%) | fallback 0/80 | responsibility kept 1.00
+
+  STEP         2006 returns, 5 in FOV, 5 detected, 5 accepted (rej: fewpts 0, dist 0, convex 0, occl 1)
+    corner   err(m)  ori_in ori_out in n(eff/raw) out n(eff/raw)   prop  sig_det rival in/out
+    0        0.0070   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    1        0.0052   1.000   1.000    150/150       150/150         1    0.060     0/0    
+    2        0.0018   1.000   1.000    151/151       149/149         1    0.060     0/0    
+    4        0.0692   0.649   1.000    114/114       153/153         1    0.062     0/0    
+    5        0.0049   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    == over 20 seeds: mean corner error 0.0161 m | collapsed 0/100 (0%) | fallback 0/100 | responsibility kept 1.00
+
+  SUBDIVIDED   2004 returns, 4 in FOV, 4 detected, 4 accepted (rej: fewpts 0, dist 0, convex 0, occl 0)
+    corner   err(m)  ori_in ori_out in n(eff/raw) out n(eff/raw)   prop  sig_det rival in/out
+    0        0.0066   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    2        0.0040   1.000   1.000     71/71        150/150         1    0.060     0/0    
+    3        0.0018   1.000   1.000    151/151       149/149         1    0.060     0/0    
+    4        0.0035   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    == over 20 seeds: mean corner error 0.0041 m | collapsed 0/80 (0%) | fallback 0/80 | responsibility kept 1.00
+
+  PILLAR       2108 returns, 7 in FOV, 7 detected, 7 accepted (rej: fewpts 0, dist 0, convex 0, occl 1)
+    corner   err(m)  ori_in ori_out in n(eff/raw) out n(eff/raw)   prop  sig_det rival in/out
+    0        0.0051   1.000   1.000    149/149       151/151         1    0.060     0/0    
+    1        0.0052   1.000   1.000    150/150       150/150         1    0.060     0/0    
+    2        0.0018   1.000   1.000    151/151       149/149         1    0.060     0/0    
+    4        0.0773   0.539   0.661     78/78         86/86          1    0.063     0/0    
+    5        0.0717   0.651   0.579     86/86         78/78          1    0.063     0/0    
+    6        0.0553   0.556   1.000     76/76        150/150         1    0.062     0/0    
+    7        0.0057   1.000   1.000    150/150       150/150         1    0.060     0/0    
+    == over 20 seeds: mean corner error 0.0294 m | collapsed 0/140 (0%) | fallback 0/140 | responsibility kept 1.00
+[exit 0]

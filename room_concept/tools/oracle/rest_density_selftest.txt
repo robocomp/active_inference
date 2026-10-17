@@ -1,0 +1,25 @@
+1. SHORT WARM-UP: 30 s parked from the 14x-wide prior
+   parked P(moving) 0.012   learnt density lin 3.89e-04 rot 6.35e-04 (truth 4.5e-04, 6.4e-04)
+2. THE REGISTERED CREEP SCHEDULE, learning throughout (mean P(moving) after the first 1 s of each leg)
+    0.5 cm/s  fwd 0.805  back 0.752   density lin 4.20e-04
+    1.0 cm/s  fwd 0.999  back 1.000   density lin 4.31e-04
+    2.0 cm/s  fwd 1.000  back 1.000   density lin 4.25e-04
+    3.0 cm/s  fwd 1.000  back 1.000   density lin 4.19e-04
+    5.0 cm/s  fwd 1.000  back 1.000   density lin 4.17e-04
+    8.0 cm/s  fwd 1.000  back 1.000   density lin 4.18e-04
+   0.01 rad/s  ccw 0.829  cw 0.845   density rot 6.17e-04
+   0.02 rad/s  ccw 1.000  cw 1.000   density rot 6.25e-04
+   0.05 rad/s  ccw 1.000  cw 1.000   density rot 6.20e-04
+   every leg at >= 1 cm/s passes after its first second (P(moving) > 0.9) PASS
+   the learnt rest density never runs away (< 3x truth at any point)      PASS
+3. PARKED AGAIN, 2 min
+   parked P(moving) 0.013   density lin 4.13e-04
+   parked increments are suppressed (P(moving) < 0.05)                    PASS
+   and the rest density sits within 30 % of the truth                     PASS
+4. TRANSITIONS: onset at 5 cm/s from rest, then a stop
+   P(moving) > 0.5 after 0 cycles (0.00 s); < 0.1 after stopping in 0 cycles (0.00 s)
+   motion is recognised within 0.25 s of onset                            PASS
+   rest is recognised within 1.5 s of stopping                            PASS
+
+ALL PASS (0 failures)
+[exit 0]

@@ -2,6 +2,7 @@
 # Door-crossing reliability test: fresh fleet, 3 round trips (6 crossings) through the main door, then stop.
 # usage: round_trips.sh <run_name>   (e.g. try43). Logs in crossing/<run_name>/logs. Webots tworooms-piso must be running.
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
+echo run > $B/controller/remote_cmd.txt   # a leftover "stop" from the previous run would park the new fleet
 python3 scripts/door.py close; python3 scripts/door.py close DOOR_0; rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.0 6.8 0 >/dev/null 2>&1
 until grep -a -q "created instance for node 'door_" $L/door_concept.log 2>/dev/null; do sleep 2; done; sleep 5

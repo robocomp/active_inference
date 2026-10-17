@@ -142,6 +142,18 @@ if(ENABLE_ASAN)
   add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
 endif()
 
+# ── Refactor guardrail: file/function length + layering lint ──────────────────
+# docs/refactor_proposal_2026-10-13.md §5. Grandfathered offenders live in tools/lint_allow.txt and may
+# only shrink. At configure time a violation is a WARNING (so ongoing feature work is never blocked by a
+# reconfigure); `make -C build room_lint` is the hard check, run before committing a refactor step.
+set(RC_ROOM_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
+execute_process(COMMAND ${RC_ROOM_ROOT}/tools/lint_file_lengths.sh
+                OUTPUT_VARIABLE _rc_lint_out ERROR_VARIABLE _rc_lint_out RESULT_VARIABLE _rc_lint_rc)
+if(NOT _rc_lint_rc EQUAL 0)
+  message(WARNING "room_concept lint (tools/lint_file_lengths.sh):\n${_rc_lint_out}")
+endif()
+add_custom_target(room_lint COMMAND ${RC_ROOM_ROOT}/tools/lint_file_lengths.sh VERBATIM)
+
 # ── gn_selftest ───────────────────────────────────────────────────────────────
 # Offline validation of the Gauss-Newton backend (analytic Jacobians vs finite differences, and
 # recovery of a known pose on a synthetic room). EXCLUDE_FROM_ALL: never built by a plain `make`,
