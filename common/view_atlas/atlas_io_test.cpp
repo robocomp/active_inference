@@ -1,0 +1,128 @@
+/*
+ * atlas_io_test.cpp — archive round-trip, locale, corruption; constants loader. PARSES FILES, so it sets
+ * the agents' locale first (CLAUDE.md): a "C"-locale harness would answer a different question.
+ */
+#include "atlas_io.h"
+
+#include <clocale>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
+using namespace rc::atlas;
+static int g_fail = 0;
+static void check(bool ok, const char* what)
+{
+    std::printf("  %-62s %s\n", what, ok ? "ok" : "FAIL");
+    if (not ok) ++g_fail;
+}
+
+static ArchiveRecord make_record(std::uint64_t uid)
+{
+    AtlasParams P;
+    ViewAtlas a(P, 4, 3);
+    ViewObs o; o.shape = Eigen::Vector4f(0.1f, 0.2f, 0.3f, 0.9f); o.colour = Eigen::Vector3f(0.3f, 0.3f, 0.9f);
+    o.bearing_rad = 0.123456789f; o.range_m = 1.987654321f; o.quality = 0.7f; o.stamp_ms = 1790000000123ull;
+    a.update(o);
+    o.bearing_rad = -2.5f; a.update(o);
+    ArchiveRecord r;
+    r.object_uid = uid; r.agent = "chair_concept"; r.cls = "chair"; r.name = "chair_2";
+    r.pose = Eigen::Vector3f(-6.90769f, 1.43326f, 1.0472f);
+    r.cov = Eigen::Matrix3f::Identity() * 0.0123456f; r.cov(0, 1) = r.cov(1, 0) = 0.001f;
+    r.born_ms = 1790000000000ull; r.died_ms = 1790000099999ull;
+    r.atlas = a.state();
+    return r;
+}
+
+static bool same(const ArchiveRecord& a, const ArchiveRecord& b)
+{
+    if (a.object_uid != b.object_uid or a.agent != b.agent or a.cls != b.cls or a.name != b.name) return false;
+    if (a.pose != b.pose or a.cov != b.cov or a.born_ms != b.born_ms or a.died_ms != b.died_ms) return false;
+    if (a.atlas.n_c != b.atlas.n_c or a.atlas.colour != b.atlas.colour) return false;
+    for (std::size_t i = 0; i < a.atlas.bins.size(); ++i)
+    {
+        const auto &x = a.atlas.bins[i], &y = b.atlas.bins[i];
+        if (x.n != y.n or x.bearing != y.bearing or x.stamp_ms != y.stamp_ms or x.mean != y.mean) return false;
+        if (x.poses.size() != y.poses.size()) return false;
+        for (std::size_t k = 0; k < x.poses.size(); ++k) if (x.poses[k] != y.poses[k]) return false;
+    }
+    return true;
+}
+
+int main()
+{
+    if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
+    std::printf("locale: %s\n", std::setlocale(LC_NUMERIC, nullptr));
+    const auto dir = std::filesystem::temp_directory_path() / "atlas_io_test";
+    std::filesystem::create_directories(dir);
+    const std::string base = (dir / "atlas_chair_concept_22").string();
+    const AtlasParams P;
+
+    std::printf("round trip\n");
+    std::vector<ArchiveRecord> recs = {make_record(7), make_record(8)};
+    std::string why;
+    check(save_archive(base, recs, &why), "save succeeds");
+    std::vector<ArchiveRecord> back;
+    check(load_archive(base, P, 4, 3, back, &why), "load succeeds");
+    check(back.size() == 2 and same(back[0], recs[0]) and same(back[1], recs[1]), "records read back bit-exact under es_ES");
+
+    std::printf("refusals\n");
+    back.clear();
+    check(not load_archive(base, P, 5, 3, back, &why) and why.find("shape_dim") != std::string::npos,
+          "wrong shape dimension refused, reason names it");
+    check(back.empty(), "refused load leaves output empty");
+    {
+        std::ifstream in(base + ".blob", std::ios::binary);
+        std::string bytes((std::istreambuf_iterator<char>(in)), {});
+        std::ofstream out(base + ".blob", std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), std::streamsize(bytes.size() / 2));
+    }
+    check(not load_archive(base, P, 4, 3, back, &why) and why.find("blob short") != std::string::npos,
+          "truncated blob refused");
+    {
+        std::ofstream out(base + ".blob", std::ios::binary | std::ios::trunc);
+        out.write("XXXX", 4);
+    }
+    check(not load_archive(base, P, 4, 3, back, &why) and why.find("magic") != std::string::npos,
+          "wrong magic refused");
+    check(not load_archive((dir / "missing").string(), P, 4, 3, back, &why), "missing files refused");
+    ArchiveRecord bad = make_record(9); bad.name = "chair,2";
+    check(not save_archive(base, {bad}, &why) and why.find("comma") != std::string::npos,
+          "a comma in a text field is refused at save time");
+
+    std::printf("constants loader\n");
+    const std::string cpath = (dir / "constants.txt").string();
+    {
+        std::ofstream f(cpath);
+        f << "# fitted test\nell_rad = 0.873\nmu_own_d = 0.9512\ncov_bg_dc = -0.00125\nrepeat_ell_rad=0.0912\n";
+    }
+    AtlasParams q;
+    check(load_params(cpath, q, &why), "constants file loads");
+    check(q.ell_rad == 0.873f and q.mu_own.x() == 0.9512f, "decimals parsed with points under es_ES");
+    check(q.cov_bg(0, 1) == -0.00125f and q.cov_bg(1, 0) == -0.00125f, "off-diagonal set symmetrically");
+    check(q.repeat_ell_rad == 0.0912f, "no spaces around '=' is fine");
+    { std::ofstream f(cpath); f << "ell_radd = 0.5\n"; }
+    check(not load_params(cpath, q, &why) and why.find("ell_radd") != std::string::npos, "unknown key refused");
+    { std::ofstream f(cpath); f << "ell_rad = 0,5\n"; }
+    check(not load_params(cpath, q, &why), "a comma decimal is refused, not read as 0");
+
+    std::printf("constants invariants\n");
+    {
+        std::ofstream f(cpath); f << "n0 = 0\n";
+    }
+    AtlasParams r;
+    check(not load_params(cpath, r, &why) and why.find("n0") != std::string::npos, "n0 = 0 refused, reason names n0");
+    { std::ofstream f(cpath); f << "cov_bg_dd = 0.001\ncov_bg_dc = 0.01\n"; }
+    check(not load_params(cpath, r, &why) and why.find("cov_bg") != std::string::npos,
+          "cov_bg not positive definite refused, reason names cov_bg");
+    {
+        std::ofstream f(cpath); f << "ell_rad = 0.5\nn0 = 0\n";
+    }
+    AtlasParams s;
+    s.ell_rad = 0.6f;
+    check(not load_params(cpath, s, &why) and s.ell_rad == 0.6f, "refused load leaves the passed AtlasParams unchanged");
+
+    std::filesystem::remove_all(dir);
+    std::printf("\natlas_io_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
+    return g_fail == 0 ? 0 : 1;
+}

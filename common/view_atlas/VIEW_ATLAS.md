@@ -178,6 +178,11 @@ entropy), per-run files + a report script.
 | OWNERSHIP | Archive file keyed by `[Agent].id`; only the owner reads/writes it. |
 | Identity | New typed attribute `object_uid` (agent-local persistent id). Needs a `REGISTER_TYPE` line in cortex's `dsr_attr_name.h` and **a cortex reinstall by the user**. |
 
+`object_uid` is also the key the episodic memory needs (`docs/superpowers/specs/2026-10-17-episodic-memory-design.md`
+snapshots object beliefs keyed by object node): without it a resurrected object reads there as a new one.
+That archive is the intended home of the future long-term object memory; the per-agent atlas archive must
+not grow into a second long-term store.
+
 **Widening appearance beyond display-only is deliberate.** `appearance_belief.h` warns that colour
 evidence from thousands of correlated pixels would out-precision geometry. The atlas avoids that by
 counting evidence in **views, not pixels** (one similarity pair per encoded view, repeat-discounted) and
