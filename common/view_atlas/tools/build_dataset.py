@@ -53,6 +53,45 @@ def make_crop(bgr, mask):
     box, mbox = bgr[y0:y1 + 1, x0:x1 + 1], mask[y0:y1 + 1, x0:x1 + 1]
     return rgb, box, mbox, len(xs), border / len(xs)
 
+def retina_samples(mask, xyxy, stride):
+    """Retina's decimation (retina/src/graph_publisher.cpp:509-539, yolo_seg_detector.cpp:445-448): bbox =
+    Rect(trunc(x1), trunc(y1), trunc(x2-x1), trunc(y2-y1)) from the float32 box, then every stride-th pixel of
+    [max(0,x), min(W,x+w)) x [max(0,y), min(H,y+h)) anchored at that corner, kept where the mask is set.
+    Returns an (N,2) int array of (col,row)."""
+    x1, y1, x2, y2 = (np.float32(v) for v in xyxy)
+    x, y, w, h = (math.trunc(float(v)) for v in (x1, y1, np.float32(x2 - x1), np.float32(y2 - y1)))
+    H, W = mask.shape
+    min_x, min_y, max_x, max_y = max(0, x), max(0, y), min(W, x + w), min(H, y + h)
+    rows = np.arange(min_y, max_y, stride); cols = np.arange(min_x, max_x, stride)
+    if len(rows) == 0 or len(cols) == 0: return np.zeros((0, 2), np.int64)
+    sub = mask[np.ix_(rows, cols)]
+    ri, ci = np.nonzero(sub)                                   # row-major: same order as retina's loops
+    return np.stack([cols[ci], rows[ri]], 1).astype(np.int64)
+
+def infer_stride(samples):
+    """Mirror of view_crop.h::infer_stride (gcd of offsets from the min sample, 1 if 0/empty)."""
+    if len(samples) == 0: return 1
+    off = samples - samples.min(axis=0)
+    g = int(np.gcd.reduce(off.reshape(-1)))
+    return g if g > 0 else 1
+
+def make_crop_sparse(bgr, samples):
+    """Exact mirror of view_crop.h::make_crop on a sample list (N,2) of (col,row): in-image filter, inferred
+    stride, each sample fills [x,x+s) x [y,y+s) clipped to the image; everything after the filled mask is the
+    dense make_crop, so the two paths cannot diverge."""
+    H, W = bgr.shape[:2]
+    samples = np.asarray(samples, np.int64).reshape(-1, 2)
+    inside = samples[(samples[:, 0] >= 0) & (samples[:, 1] >= 0) & (samples[:, 0] < W) & (samples[:, 1] < H)]
+    if len(inside) == 0: return None
+    s = infer_stride(inside)
+    mask = np.zeros((H, W), bool)
+    for dy in range(s):
+        for dx in range(s):
+            xx, yy = inside[:, 0] + dx, inside[:, 1] + dy
+            k = (xx < W) & (yy < H)
+            mask[yy[k], xx[k]] = True
+    return make_crop(bgr, mask)
+
 def colour_hist(box, mbox):
     """Mirror of view_crop.h::colour_hist."""
     hsv = cv2.cvtColor(box, cv2.COLOR_BGR2HSV)[mbox]
@@ -68,6 +107,7 @@ def sources(a):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--stride", type=int, default=2, help="retina VOXEL_DECIMATION_FACTOR; 1 = dense masks")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     spec = importlib.util.spec_from_file_location("exp", os.path.join(RETINA, "tools", "export_yoloe_household.py"))
     exp = importlib.util.module_from_spec(spec); spec.loader.exec_module(exp); VOCAB = exp.VOCAB
@@ -102,7 +142,8 @@ def main():
                 cand = [j for j, P in enumerate(polys[lap]) if lab in ok_labels(names[j]) and P.distance(Point(p)) < 0.25]
                 if len(cand) != 1: continue
                 j = cand[0]; nm = names[j]
-                cr = make_crop(img, m)
+                cr = make_crop(img, m) if a.stride == 1 else make_crop_sparse(
+                    img, retina_samples(m, res.boxes.xyxy[k].cpu().numpy(), a.stride))
                 if cr is None: continue
                 rgb, box, mbox, npx, trunc = cr
                 x = (((rgb.astype(np.float32) / 255) - MEAN) / STD).transpose(2, 0, 1)[None].astype(np.float32).copy()
@@ -116,6 +157,7 @@ def main():
             if fi % 200 == 0: print(f"{ds} {fi}/{len(poses)} views={len(rows)}", flush=True)
     with open(os.path.join(a.out, "views.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+    with open(os.path.join(a.out, "dataset_meta.txt"), "w") as f: f.write(f"# stride={a.stride}\n")
     np.stack(S).tofile(os.path.join(a.out, "shape.f32")); np.stack(C).tofile(os.path.join(a.out, "colour.f32"))
     print("views:", len(rows)); print(pd.DataFrame(rows).groupby(["dataset", "inst"]).size().to_string())
 
