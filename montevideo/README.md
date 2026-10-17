@@ -37,9 +37,14 @@ error.** It appears in many guises — the common-mode ceiling on how much a mas
 re-centred on its own estimate, a fused precision better than its best member, a metric that
 scores what the robot never saw.
 
-### Day 1 — The challenge, and free energy
+### Day 1 — The challenge, probability, and free energy
 We watch the full cycle run in simulation, and name what each stage must infer. Then we set up the
-mathematics:
+mathematics, starting from the beginning:
+- joint distributions and the three operations everything is built from: marginalisation,
+  conditioning and factorisation (the product rule, and Bayes' rule as a consequence of it);
+- the same operations on Gaussians, in covariance and in precision form;
+- the chain rule: a joint of N variables factorises into N factors, in N! equivalent orders, and
+  why we write the causal one (sparse, physical, modular, and it can generate predictions);
 - generative models, variational inference and the evidence lower bound;
 - free energy as complexity minus accuracy;
 - perception as inference under a model rather than reconstruction from data;
@@ -48,7 +53,7 @@ mathematics:
 - why action needs a second functional: expected free energy, its pragmatic and epistemic terms,
   and the identity of information gain, mutual information and D-optimal design.
 
-*Lab:* meet the toy world. Fit a wall from a LiDAR scan as a Laplace belief, and choose the next
+*Lab:* a warm-up on a door/LiDAR probability table and a Gaussian; then meet the toy world. Fit a wall from a LiDAR scan as a Laplace belief, and choose the next
 viewpoint by the information it is expected to buy.
 
 ### Day 2 — Estimating the room, and finding oneself in it

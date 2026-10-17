@@ -3,18 +3,29 @@
 Every number on a slide carries a `source:` line: either a thesis file and line, or a lab exercise.
 Before each session, re-check the thesis lines; the thesis is still moving.
 
-## Day 1 — The challenge, and free energy (`slides/day1.pdf`, `labs/day1.ipynb`)
+## Day 1 — The challenge, probability, and free energy (`slides/day1.pdf`, `labs/day1.ipynb`)
 
 | time | block | frames |
 |---|---|---|
-| 0:00–0:20 | The challenge: the video, the cycle, every stage is a belief, toyworld | 1–6 |
-| 0:20–0:30 | Behind a sensory boundary; where exact inference dies | 7–8 |
-| 0:30–0:55 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), Rényi aside | 9–14 |
-| 0:55–1:10 | Laplace: Σ = H⁻¹, Gauss–Newton, the wall, honesty, Occam | 15–20 |
-| 1:10–1:30 | Action: ∂F/∂a = 0, EFE, three names for one number, where to look, ln 2, travel, time scales | 21–29 |
+| 0:00–0:15 | The challenge: the video, the cycle, every stage is a belief, toyworld | 1–6 |
+| 0:15–0:50 | The grammar of uncertainty: variables, the joint table, marginalise, condition, product rule, the Gaussian picture and its two forms, chain rule, N! orderings, causal order, the robot's joint, Bayes as the three operations | 7–19 |
+| 0:50–0:55 | Behind a sensory boundary; where exact inference dies (now a short recap: Bayes is already on the board) | 20–21 |
+| 0:55–1:15 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), Rényi aside | 22–27 |
+| 1:15–1:30 | Laplace: Σ = H⁻¹, Gauss–Newton, the wall, honesty, Occam | 28–33 |
+| 1:30–1:50 | Action: ∂F/∂a = 0, EFE, three names for one number, where to look, ln 2, travel, time scales | 34–42 |
 | — | break | |
-| 1:45–1:55 | What measurement said: explorer equivalence, F ≠ computation, stopping as an epistemic act, inherited errors | 30–34 |
-| 1:55–3:00 | Lab 1 | 35–36 |
+| 2:05–2:15 | What measurement said: explorer equivalence, F ≠ computation, stopping as an epistemic act, inherited errors | 43–47 |
+| 2:15–3:00 | Lab 1: warm-up P1–P4 (~15 min), then exercises 1–7; 8–10 as homework if time runs out | 48–49 |
+
+⚠ The probability block costs ~35 min, taken from the opening, VFE, Laplace, action and the lab.
+The day is now tight; if it overruns, move "What measurement said" to the start of Day 2.
+
+**Probability block.** Keep the door table (0.27 / 0.03 / 0.14 / 0.56) on the board for the whole
+block: marginals in the margins, the gap column for conditioning, both products for the product
+rule. The causal-order frames carry the argument the rest of the week depends on: every
+ordering is exactly equal, so the data cannot choose one; physics chooses. Modularity is the
+argument students remember (swap the sensor and only one causal factor changes). The precision-
+form table pays off on Day 2 and later: forgetting an old pose is a Schur complement.
 
 **Video.** The user supplies a Webots or real-apartment recording of the full cycle; drop it on
 frame 2. If it is a file, `\usepackage{multimedia}` + `\movie` works in Okular / Acrobat only, so
@@ -29,6 +40,9 @@ let students skip it. The answer (independent errors across looks) is the bridge
 common-mode ceiling and to the thread of the whole course.
 
 **Expected lab numbers** (seed 0; students' numbers differ slightly with other seeds):
+- warm-up: p(O=gap) = 0.41, p(open | gap) = 0.659; p(C | D, O) independent of O (0.95, 0.95),
+  p(D=open | O, C=through) = 0.973 / 0.504; a new sensor changes p(O|C) and p(D|O,C) but not p(C);
+  Gaussian conditional 2.517 ± 0.186 in both forms;
 - wall fit: α ≈ 89.9° ± 0.12°, d ≈ 4.01 ± 0.01 m, ρ(α, d) ≈ −0.97;
 - honesty: uniform σ ratio ≈ 1.10 / 1.13; incidence σ ≈ 1.02–1.05;
 - Occam: ΔF from +0.1 (s = 0.1°) to +5.2 nats (s = 30°); tilted wall −70 nats;

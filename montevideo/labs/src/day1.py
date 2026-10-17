@@ -2,7 +2,7 @@
 # # Day 1 — A wall as a belief, and where to look next
 #
 # **The challenge, stage 0.** Before the robot can estimate a room, it must be able to hold a belief
-# about one wall. Today you will:
+# about one wall. After a warm-up on the three operations of probability, you will:
 #
 # 1. fit a wall to a LiDAR scan as a **Laplace belief**, a Gaussian whose covariance is the inverse
 #    curvature of the free energy;
@@ -29,6 +29,117 @@ from toyworld.geometry import point_segment_distance
 
 rng = np.random.default_rng(0)
 world = two_room_apartment()
+
+# %% [markdown]
+# ## Warm-up — joint, marginal, conditional
+#
+# Before any robot, the three operations everything else is built from, on a table small enough to
+# check by hand. $D$: is the door open? $O$: does the LiDAR see a gap where the door is?
+# We store a joint over discrete variables as a numpy array with one axis per variable.
+
+# %%
+p_D = np.array([0.3, 0.7])                    # [open, closed]
+p_O_given_D = np.array([[0.9, 0.1],           # row d: p(O = [gap, wall] | D = d)
+                        [0.2, 0.8]])
+
+# %% [markdown]
+# **Exercise P1 — factorise, marginalise, condition.** Build the joint `joint[d, o]` with the
+# product rule $p(d, o) = p(o \mid d)\,p(d)$. Then compute the marginal $p(O)$ by summing out $D$,
+# and the posterior $p(D \mid O = \text{gap})$ by slicing the gap column and renormalising.
+# (Check yourself: $p(O=\text{gap}) = 0.41$ and $p(\text{open} \mid \text{gap}) \approx 0.66$.)
+
+# %%
+# BEGIN SOLUTION
+joint = p_O_given_D * p_D[:, None]
+p_O = joint.sum(axis=0)
+p_D_given_gap = joint[:, 0] / p_O[0]
+# END SOLUTION
+print("joint:\n", joint, "\nsums to", joint.sum())
+print("p(O) =", p_O, "  p(D | gap) =", p_D_given_gap.round(3))
+
+# %% [markdown]
+# **Exercise P2 — the other factorisation.** Compute $p(D \mid O)$ for both values of $O$ and
+# check that $p(D \mid O)\,p(O)$ rebuilds the same joint. Bayes' rule is nothing but this identity.
+
+# %%
+# BEGIN SOLUTION
+p_D_given_O = joint / p_O[None, :]            # column o is p(D | O = o)
+# END SOLUTION
+print("rebuilt from p(D|O) p(O):", np.allclose(p_D_given_O * p_O[None, :], joint))
+
+# %% [markdown]
+# ### Three variables, six orderings, one causal order
+#
+# Add $C$: does the robot get through the doorway? It depends on the door and on nothing the
+# LiDAR saw. The causal model is $p(D)\,p(O \mid D)\,p(C \mid D)$: 1 + 2 + 2 = 5 numbers.
+
+# %%
+p_C_given_D = np.array([[0.95, 0.05],         # row d: p(C = [through, blocked] | D = d)
+                        [0.05, 0.95]])
+
+
+def causal_joint(p_D, p_O_given_D, p_C_given_D):
+    return p_D[:, None, None] * p_O_given_D[:, :, None] * p_C_given_D[:, None, :]   # [d, o, c]
+
+
+joint3 = causal_joint(p_D, p_O_given_D, p_C_given_D)
+
+# %% [markdown]
+# **Exercise P3 — read the factors of an anti-causal order off the joint.** From `joint3` alone,
+# compute the three factors of the ordering $p(C)\,p(O \mid C)\,p(D \mid O, C)$, and check that their
+# product is `joint3` again. Then answer two questions numerically:
+#
+# 1. Does $p(C \mid D, O)$ depend on $O$? Does $p(D \mid O, C)$ depend on $O$?
+# 2. Replace the LiDAR by a worse sensor, `p_O_given_D = [[0.6, 0.4], [0.4, 0.6]]`. Which causal
+#    factors change? Which anti-causal factors change?
+
+# %%
+def anticausal_factors(j):
+    # BEGIN SOLUTION
+    p_C = j.sum(axis=(0, 1))
+    p_OC = j.sum(axis=0)                       # [o, c]
+    p_O_given_C = p_OC / p_C[None, :]
+    p_D_given_OC = j / p_OC[None, :, :]
+    return p_C, p_O_given_C, p_D_given_OC
+    # END SOLUTION
+
+
+p_C, p_O_given_C, p_D_given_OC = anticausal_factors(joint3)
+print("anti-causal product == joint:", np.allclose(p_C[None, None, :] * p_O_given_C[None] * p_D_given_OC, joint3))
+p_C_given_DO = joint3 / joint3.sum(axis=2, keepdims=True)
+print("p(C=through | D=open, O) for O = gap, wall:", p_C_given_DO[0, :, 0].round(3), " <- O drops out")
+print("p(D=open | O, C=through) for O = gap, wall:", p_D_given_OC[0, :, 0].round(3), " <- O does not")
+
+worse = np.array([[0.6, 0.4], [0.4, 0.6]])
+new = anticausal_factors(causal_joint(p_D, worse, p_C_given_D))
+for name, a, b in zip(["p(C)", "p(O|C)", "p(D|O,C)"], (p_C, p_O_given_C, p_D_given_OC), new):
+    print(f"new sensor changes anti-causal {name:9s}: {not np.allclose(a, b)}")
+
+# %% [markdown] solution
+# In the causal order only $p(O \mid D)$ changes with the sensor: that is the modularity argument.
+# In the anti-causal order $p(C)$ survives (the sensor does not touch the door or the crossing)
+# but $p(O \mid C)$ and $p(D \mid O, C)$ both change, and neither of them is something anyone could
+# write down from physics.
+
+# %% [markdown]
+# **Exercise P4 — the same operations on a Gaussian.** $s$ is the distance to a wall, prior
+# $\mathcal N(2, 0.5^2)$; $o$ is a range reading, $o \mid s \sim \mathcal N(s, 0.2^2)$. The joint
+# over $(s, o)$ is Gaussian with the covariance below. Condition on $o = 2.6$ twice: with the
+# Schur complement in covariance form, and by keeping the $ss$ block in precision form
+# ($\Lambda = \Sigma^{-1}$; the conditional mean is $\mu_s - \Lambda_{ss}^{-1}\Lambda_{so}(o - \mu_o)$).
+# They must agree: $2.52 \pm 0.19$ m.
+
+# %%
+mu_so = np.array([2.0, 2.0])
+Sigma_so = np.array([[0.25, 0.25], [0.25, 0.29]])
+# BEGIN SOLUTION
+m_cov = mu_so[0] + Sigma_so[0, 1] / Sigma_so[1, 1] * (2.6 - mu_so[1])
+v_cov = Sigma_so[0, 0] - Sigma_so[0, 1] ** 2 / Sigma_so[1, 1]
+Lam = np.linalg.inv(Sigma_so)
+m_prec = mu_so[0] - Lam[0, 1] / Lam[0, 0] * (2.6 - mu_so[1])
+v_prec = 1 / Lam[0, 0]
+# END SOLUTION
+print(f"covariance form: {m_cov:.3f} ± {np.sqrt(v_cov):.3f}   precision form: {m_prec:.3f} ± {np.sqrt(v_prec):.3f}")
 
 # %% [markdown]
 # ## 0. Meet the world
