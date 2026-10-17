@@ -33,7 +33,7 @@ namespace rc::chat
 
 struct Digest
 {
-    std::string text;    ///< the STATE block for the system prompt
+    std::string text;    ///< the STATE message (the last message of every request)
     GateFacts facts;     ///< what CommandGate validates against
     std::uint64_t room_id = 0;            ///< current room node id (0 = unknown)
     std::vector<ObjectFact> objects;      ///< every object/person in the graph, any room (in_current_room marks ours)

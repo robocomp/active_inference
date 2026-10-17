@@ -99,7 +99,8 @@ private:
     /// Runs every call, pushes the tool results. Returns true if one of them attached an image (look()).
     bool handle_tool_calls(const QJsonArray& calls);
     QJsonArray tools_json() const;
-    QString system_prompt() const;
+    QString system_prompt() const;   ///< fixed for the whole run: description + interface rules
+    QString state_message() const;   ///< "STATE:\n" + digest + this turn's extras: the LAST message of a request
     static QString load_robot_description(const std::string& path);   ///< "" on failure (logged)
     void push_history(QJsonObject m);
     QJsonArray messages_for_request() const;

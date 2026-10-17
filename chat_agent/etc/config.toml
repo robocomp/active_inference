@@ -45,7 +45,11 @@ url = "http://localhost:11434"
 # the THINKING variant, ignores think:false and spent 3000-6000 tokens (40-80 s) thinking before every tool call.
 # Back to text-only: model = "qwen3:8b" (look() then fails at the model, not here — it cannot see the image).
 model = "qwen3-vl:8b-instruct"
-num_ctx = 8192
+# 16k (2026-10-17, was 8k): room for the planned LTSM / EM / system tools and a longer history. The KV cache is
+# ~144 KB/token (~2.3 GB at 16k, beside ~6 GB of weights) on a 16 GB GPU shared with retina's YOLO and the ZED SDK —
+# check nvidia-smi with the fleet up before going higher. The STATE is the LAST message of a request so the rest of
+# the prompt stays cached between turns (chat_session.cpp messages_for_request).
+num_ctx = 16384
 temperature = 0.2
 # No content and no tool call within this long ⇒ the request is aborted (a cold model load is the usual cause;
 # the agent warms the model up at start for exactly that reason).
@@ -57,7 +61,7 @@ keep_alive = "30m"
 num_predict = 400
 
 [Chat]
-max_history = 16
+max_history = 32
 digest_period_ms = 500
 status_period_ms = 250
 log_dir = "logs"
@@ -79,7 +83,7 @@ object_change_period_ms = 2000
 # look() tool: the newest ZED ("front") / Ricoh ("360") frame is shrunk to this longest side and JPEG-encoded, then
 # attached to the tool result for ONE request (then dropped from the history). ollama resizes images to ~1 Mpx itself,
 # so <=1280 px all cost ~1050 prompt tokens; smaller only loses detail (src/image_prep.h). 2 images + the ~2600-token
-# system message + 16 history messages fit in num_ctx 8192.
+# system message + 32 history messages fit in num_ctx 16384.
 look_max_side = 1280
 look_max_side_360 = 1280
 look_jpeg_quality = 85

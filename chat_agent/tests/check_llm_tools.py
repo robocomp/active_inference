@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Live check (needs ollama): does the model map motion / object questions to the right tool calls?
 
-Builds the same system message chat_agent builds — etc/system_prompt.md + the interface rules extracted from
-src/chat_session.cpp (so they cannot drift) + a SYNTHETIC STATE — and the same tool schema, then asks a few
-questions and grades the first tool call. Also reports prompt_eval_count = the real token size of system+tools.
+Builds the same request chat_agent builds — a system message of etc/system_prompt.md + the interface rules extracted
+from src/chat_session.cpp (so they cannot drift), the history, the question, and LAST a system message with a
+SYNTHETIC STATE — and the same tool schema, then asks a few questions and grades the first tool call. Also reports
+prompt_eval_count = the real token size of system+tools+STATE.
 
     python3 tests/check_llm_tools.py [model] [repeats]
 """
@@ -82,16 +83,19 @@ def tools():
     ]
 
 
-def system(last_move="none"):
+def system():
     desc = (ROOT / "etc/system_prompt.md").read_text().strip()
+    return desc + "\n" + interface_rules()
+
+
+def state(last_move="none"):
     expl = {"move 0.30": "move 0.30 (move forward 0.30 m)", "move -0.30": "move -0.30 (move backward 0.30 m)"}
-    return desc + "\n" + interface_rules() + "\nSTATE:\n" + STATE + \
-        f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
+    return "STATE:\n" + STATE + f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
 
 
 def ask(messages):
     body = {"model": MODEL, "messages": messages, "tools": tools(), "stream": False, "think": False,
-            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 8192}}
+            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 16384}}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=180) as r:
         return json.loads(r.read())
@@ -164,7 +168,8 @@ def main():
     lat = []
     for label, hist, last_move, text, ok in CASES:
         for k in range(REPEATS):
-            msgs = [{"role": "system", "content": system(last_move)}] + hist + [{"role": "user", "content": text}]
+            msgs = [{"role": "system", "content": system()}] + hist + [{"role": "user", "content": text},
+                                                                       {"role": "system", "content": state(last_move)}]
             t0 = time.monotonic()
             r = ask(msgs)
             lat.append(time.monotonic() - t0)
@@ -178,7 +183,7 @@ def main():
             print(f"{'PASS' if good else 'FAIL'}  {label:<30} -> {shown}")
     sm = system()
     print(f"\nsystem message: {len(sm)} chars; STATE: {len(STATE)} chars; tools JSON: {len(json.dumps(tools()))} chars")
-    print(f"prompt_eval_count (system + tools + one user line): {sys_tokens} tokens")
+    print(f"prompt_eval_count (system + tools + one user line + STATE): {sys_tokens} tokens")
     ls = sorted(lat)
     print(f"latency: median {statistics.median(ls):.2f} s, mean {statistics.mean(ls):.2f} s, "
           f"max {ls[-1]:.2f} s (first call includes any cold load: {lat[0]:.2f} s)")

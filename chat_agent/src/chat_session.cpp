@@ -240,7 +240,7 @@ namespace
 const QString kFallbackDescription = QStringLiteral(
     "You are the voice of Shadow, a mobile robot in a home, talking with a person through a chat window.\n"
     "Rules:\n"
-    "- Answer ONLY from the STATE block below: it is the robot's live knowledge, rebuilt for this turn. "
+    "- Answer ONLY from the STATE (the last system message): it is the robot's live knowledge, rebuilt for this turn. "
     "If the STATE does not contain the answer, say you do not know.\n"
     "- Never invent doors, rooms, objects, distances or events.\n"
     "- Reply in the language the person writes in. Be brief: one to three sentences.\n");
@@ -290,8 +290,12 @@ QString ChatSession::load_robot_description(const std::string& path)
 QString ChatSession::system_prompt() const
 {
     const QString& description = robot_description_.isEmpty() ? kFallbackDescription : robot_description_;
-    return description + QStringLiteral("\n") + kInterfaceRules.arg(cfg_.default_step_m, 0, 'f', 1) +
-           QStringLiteral("\nSTATE:\n") + q(digest_.text) + state_extra_;
+    return description + QStringLiteral("\n") + kInterfaceRules.arg(cfg_.default_step_m, 0, 'f', 1);
+}
+
+QString ChatSession::state_message() const
+{
+    return QStringLiteral("STATE:\n") + q(digest_.text) + state_extra_;
 }
 
 QJsonArray ChatSession::tools_json() const
@@ -349,11 +353,17 @@ void ChatSession::push_history(QJsonObject m)
     while (not history_.empty() and history_.front().value("role").toString() == "tool") history_.pop_front();
 }
 
+// ★ THE STATE GOES LAST. ollama reuses the processed prompt up to the first token that differs from the previous
+//   request. The STATE changes every turn, so inside the leading system message it forced the whole prompt —
+//   description, rules, tools, history — to be processed again on every request: 1.8 s at 11k tokens on the RTX
+//   5070 Ti, against 44 ms with the STATE as a trailing system message (measured 2026-10-17). The model reads a
+//   trailing system message (qwen3-vl renderer; checked the same day: it answers from it, and invents without it).
 QJsonArray ChatSession::messages_for_request() const
 {
     QJsonArray msgs;
     msgs.append(QJsonObject{{"role", "system"}, {"content", system_prompt()}});
     for (const auto& m : history_) msgs.append(m);
+    msgs.append(QJsonObject{{"role", "system"}, {"content", state_message()}});
     return msgs;
 }
 
