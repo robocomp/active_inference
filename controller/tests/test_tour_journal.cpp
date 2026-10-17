@@ -1,6 +1,6 @@
 // TourJournal (tour_journal.h): panel tours as human missions in the episodic journal (source "panel").
 // Build+run (Qt Core + std):
-//   g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -o /tmp/ttj test_tour_journal.cpp $(pkg-config --cflags --libs Qt6Core) && /tmp/ttj
+//   g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -Wno-missing-field-initializers -o /tmp/ttj test_tour_journal.cpp $(pkg-config --cflags --libs Qt6Core) && /tmp/ttj
 #include "../src/tour_journal.h"
 
 #include <print>
