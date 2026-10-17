@@ -8,7 +8,7 @@ file src/lidar_ingestor.cpp 823
 file src/mount_calibrator.cpp 838
 file src/room_boxes.cpp 1297
 file src/room_boxes_channel.cpp 2368
-file src/room_concept.h 2482
+file src/room_concept.h 1515
 file src/room_config.cpp 1341
 file src/room_gn_solver.cpp 1396
 file src/room_scene_graph.cpp 4142

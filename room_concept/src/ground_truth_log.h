@@ -16,12 +16,13 @@
 #include <cstdint>
 #include <fstream>
 
-#include "room_concept.h"
+#include "update_result.h"
 
 namespace DSR { class DSRGraph; }
 
 namespace rc
 {
+    class RoomConcept;   // held by reference only; the .cpp includes room_concept.h
     class GroundTruthLog
     {
     public:
@@ -31,12 +32,12 @@ namespace rc
 
         /// One row per accepted CORRECTED publish. Wired to PosePublisher's hook — this is a
         /// diagnostic ABOUT a published pose, not part of publishing one.
-        void log_ground_truth(const RoomConcept::UpdateResult& res);
+        void log_ground_truth(const loc::UpdateResult& res);
         /// One row per localiser result into tmp/heading/heading_<start>.csv -- real robot AND
         /// simulation (gt columns are NaN without ground truth). Everything needed to judge the
         /// wheel x gyro heading fusion offline: raw channel rotations, weights, densities, ZUPT time,
         /// all calibration values/sigmas, and the pose before and after the optimiser.
-        void log_heading(const RoomConcept::UpdateResult& res);
+        void log_heading(const loc::UpdateResult& res);
         /// The room frame is the layout recentred on its bbox (RecenterRoomPolygon): room = world - offset.
         /// The supervisor pose is WORLD, so gt_x/gt_y are written minus this offset (the raw values go to
         /// gt_x_world/gt_y_world). Set once from initialize_room_model_from_svg(); zero = frames coincide.

@@ -1,6 +1,7 @@
 #include <genericworker.h>   // FIRST: DSR's signal emitter is not self-contained
 
 #include "ground_truth_log.h"
+#include "room_concept.h"
 #include "status_reporter.h"
 
 #include <dsr/api/dsr_api.h>

@@ -47,7 +47,7 @@ namespace rc::gn
         class SdfFactor final : public IFactor
         {
         public:
-            SdfFactor(const Input& in, int offset, const RoomConcept::WindowSlot& slot)
+            SdfFactor(const Input& in, int offset, const loc::WindowSlot& slot)
                 : in_(in), off_(offset), points_(slot.lidar_points) {}
 
             float evaluate(const State& x) const override
@@ -764,7 +764,7 @@ namespace rc::gn
         return lay;
     }
 
-    void absorb_wall_observations(const Input& in, const RoomConcept::WindowSlot& slot,
+    void absorb_wall_observations(const Input& in, const loc::WindowSlot& slot,
                                   const Eigen::Vector3f& pose)
     {
         if (in.walls == nullptr or in.params == nullptr or slot.wall_assoc.empty()) return;
@@ -874,7 +874,7 @@ namespace rc::gn
     }
 
     std::vector<std::pair<std::uint64_t, Eigen::Matrix2f>>
-    wall_marginal_information_of_slot(const Input& in, const RoomConcept::WindowSlot& slot,
+    wall_marginal_information_of_slot(const Input& in, const loc::WindowSlot& slot,
                                       const Eigen::Vector3f& pose, const Eigen::Matrix3f* pose_prec)
     {
         std::vector<std::pair<std::uint64_t, Eigen::Matrix2f>> out;

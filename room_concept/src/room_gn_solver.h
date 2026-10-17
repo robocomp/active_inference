@@ -44,7 +44,8 @@
 #include <memory>
 #include <vector>
 
-#include "room_concept.h"
+#include "localizer_params.h"
+#include "window_types.h"
 #include "room_model.h"
 #include "wall_map.h"
 
@@ -156,9 +157,9 @@ namespace rc::gn
     struct Input
     {
         const Model*                              model = nullptr;
-        const RoomConcept::Params*                params = nullptr;
-        const std::deque<RoomConcept::WindowSlot>* window = nullptr;
-        const RoomConcept::BoundaryPrior*         boundary_prior = nullptr;
+        const loc::Params*                params = nullptr;
+        const std::deque<loc::WindowSlot>* window = nullptr;
+        const loc::BoundaryPrior*         boundary_prior = nullptr;
         float                                     boundary_weight = 1.0f;
         // Landmarks to optimise JOINTLY with the poses. Empty ⇒ the classic behaviour, where every
         // object anchor is a fixed constant taken from ObjectAnchorObs::pose_world.
@@ -214,7 +215,7 @@ namespace rc::gn
     /// count it twice. ⚠ Block-diagonal approximation: the 2×2 wall block of that slot's Hessian,
     /// treating the dropped pose as known; the exact Schur complement against the pose is the
     /// planned follow-up (it can only LOOSEN these numbers).
-    void absorb_wall_observations(const Input& in, const RoomConcept::WindowSlot& slot,
+    void absorb_wall_observations(const Input& in, const loc::WindowSlot& slot,
                                   const Eigen::Vector3f& pose);
 
     /// The (φ, d) information ONE slot gives each wall it observed, as a POSTERIOR MARGINAL, for the PUBLISH
@@ -222,7 +223,7 @@ namespace rc::gn
     /// undone and the physical per-return SensorSigma used (k = 2·σ_obs²·N_slot/σ_sensor²); the systematic
     /// part stays in corner_model_sigma. The slot's pose is Schur-complemented out against `pose_prec`.
     std::vector<std::pair<std::uint64_t, Eigen::Matrix2f>>
-    wall_marginal_information_of_slot(const Input& in, const RoomConcept::WindowSlot& slot,
+    wall_marginal_information_of_slot(const Input& in, const loc::WindowSlot& slot,
                                       const Eigen::Vector3f& pose, const Eigen::Matrix3f* pose_prec);
 
     /// Minimise the window RFE. `poses` is in/out: one [x, y, θ] per window slot, same order as the

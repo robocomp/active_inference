@@ -31,7 +31,7 @@ namespace rc
     //  WindowManager methods
     // =====================================================================
 
-    bool RoomConcept::WindowManager::append(WindowSlot slot, int max_window_size,
+    bool loc::WindowManager::append(WindowSlot slot, int max_window_size,
                                              float mu_quality_threshold, bool fej_schur)
     {
         bool slid = false;
@@ -58,7 +58,7 @@ namespace rc
         return slid;
     }
 
-    void RoomConcept::WindowManager::subsample_old_slots(int max_pts_per_slot)
+    void loc::WindowManager::subsample_old_slots(int max_pts_per_slot)
     {
         if (window.size() <= 1 || max_pts_per_slot <= 0) return;
         for (size_t i = 0; i < window.size() - 1; i++)
@@ -78,8 +78,8 @@ namespace rc
         }
     }
 
-    RoomConcept::WindowManager::LossBreakdown
-    RoomConcept::WindowManager::compute_rfe_loss_breakdown(const Model& model, const Params& params) const
+    loc::WindowManager::LossBreakdown
+    loc::WindowManager::compute_rfe_loss_breakdown(const Model& model, const Params& params) const
     {
         LossBreakdown bd;
         if (window.empty()) return bd;
@@ -156,7 +156,7 @@ namespace rc
         return bd;
     }
 
-    void RoomConcept::WindowManager::recompute_boundary_prior(
+    void loc::WindowManager::recompute_boundary_prior(
         const Model& model, const Params& params)
     {
         if (window.empty())
@@ -242,7 +242,7 @@ namespace rc
     //  estimates x₀*, x₁* and then frozen — that fixed linearization point is what
     //  prevents the "erroneous information gain" ratchet (loss_boundary 0→559).
     // =====================================================================
-    void RoomConcept::WindowManager::marginalize_oldest(
+    void loc::WindowManager::marginalize_oldest(
         const Model& model, const Params& params)
     {
         // Only meaningful when a slide is imminent (window full) and there IS a blanket slot.

@@ -19,7 +19,7 @@ namespace rc
     }
 
     Eigen::VectorXf build_observation_weights(const Model& /*model*/,
-                                              const RoomConcept::Params& params,
+                                              const loc::Params& params,
                                               const ScanPoints& points_robot,
                                               float pose_theta,
                                               const Model::SdfQueryResult& query,
@@ -28,7 +28,7 @@ namespace rc
         return weights_from_normals(params, points_robot, pose_theta, query.closest_normals, doors_robot);
     }
 
-    Eigen::VectorXf weights_from_normals(const RoomConcept::Params& params,
+    Eigen::VectorXf weights_from_normals(const loc::Params& params,
                                          const ScanPoints& points_robot,
                                          float pose_theta,
                                          const Eigen::Matrix<float, -1, 2>& normals,
@@ -111,7 +111,7 @@ namespace rc
     }
 
     float compute_observation_loss_from_query(const Model& model,
-                                              const RoomConcept::Params& params,
+                                              const loc::Params& params,
                                               const ScanPoints& points_robot,
                                               float pose_theta,
                                               const Model::SdfQueryResult& query,
@@ -129,7 +129,7 @@ namespace rc
     }
 
     float compute_observation_loss(const Model& model,
-                                   const RoomConcept::Params& params,
+                                   const loc::Params& params,
                                    const ScanPoints& points_robot,
                                    const Eigen::Vector3f& pose,
                                    const std::vector<DoorAperture>* doors_robot)
@@ -139,7 +139,7 @@ namespace rc
     }
 
     ObsLinearization linearize_observation(const Model& model,
-                                           const RoomConcept::Params& params,
+                                           const loc::Params& params,
                                            const ScanPoints& points_robot,
                                            const Eigen::Vector3f& pose,
                                            const std::vector<DoorAperture>* doors_robot)

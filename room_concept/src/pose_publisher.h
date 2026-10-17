@@ -23,7 +23,7 @@
 #include <optional>
 
 #include "room_config.h"
-#include "room_concept.h"   // UpdateResult crosses the hook below, so the full type is needed
+#include "update_result.h"   // UpdateResult crosses the hook below, so the full type is needed
 
 namespace DSR { class DSRGraph; class RT_API; }
 namespace rc
@@ -57,7 +57,7 @@ namespace rc
         /// Called on every accepted CORRECTED publish, on the localiser thread. The worker hangs its
         /// ground-truth comparison here: that is a diagnostic ABOUT a published pose, not part of
         /// publishing one, and routing it through a hook keeps this class from depending on it.
-        void set_on_corrected_published(std::function<void(const RoomConcept::UpdateResult&)> f)
+        void set_on_corrected_published(std::function<void(const loc::UpdateResult&)> f)
         { on_corrected_ = std::move(f); }
 
         bool maybe_publish_corrected_pose();
@@ -130,6 +130,6 @@ namespace rc
         std::atomic<int> rt_corr_count_ {0};   ///< written from the localiser thread, read from compute()
         std::int64_t rt_rate_window_start_ms_ = 0;
         bool         pose_clamp_from_capability_ = false;
-        std::function<void(const RoomConcept::UpdateResult&)> on_corrected_;
+        std::function<void(const loc::UpdateResult&)> on_corrected_;
     };
 }   // namespace rc

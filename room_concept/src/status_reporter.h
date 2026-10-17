@@ -26,7 +26,7 @@
 #include <string_view>
 #include <vector>
 
-#include "room_concept.h"
+#include "update_result.h"
 
 namespace rc
 {
@@ -93,10 +93,10 @@ public:
     void set_sources(Sources s) { src_ = std::move(s); }
 
     /// compute(): the result it ALREADY fetched. Only scalars are kept — never the scan.
-    void observe(const RoomConcept::UpdateResult& r);
+    void observe(const loc::UpdateResult& r);
     /// EVERY corrected localiser result (PosePublisher's hand-over, LOCALISER thread): accumulates the
     /// surprise so the snapshot reports a true rate in nats/s, not a 2 Hz sample of a 20 Hz quantity.
-    void accumulate_surprise(const RoomConcept::UpdateResult& r);
+    void accumulate_surprise(const loc::UpdateResult& r);
     /// compute(): this tick's cost.
     void observe_compute(long long us);
     /// The camera mount solve, in physical units, from the same place the Calib window gets it.

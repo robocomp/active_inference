@@ -30,7 +30,7 @@ void StatusReporter::waiting(bool peers_ok, const std::vector<std::string>& miss
                               .s("why", why));
 }
 
-void StatusReporter::observe(const RoomConcept::UpdateResult& r)
+void StatusReporter::observe(const loc::UpdateResult& r)
 {
     auto& l = loc_;
     l.have = true;
@@ -71,7 +71,7 @@ void StatusReporter::observe(const RoomConcept::UpdateResult& r)
     l.dropped = r.calib_dropped;
 }
 
-void StatusReporter::accumulate_surprise(const RoomConcept::UpdateResult& r)
+void StatusReporter::accumulate_surprise(const loc::UpdateResult& r)
 {
     std::lock_guard lk(sur_mtx_);
     ++sur_results_;
