@@ -2250,6 +2250,21 @@ private:
     // ===== update() helper methods =====
     static std::string_view motion_prior_source_name(MotionPriorSource source);
 
+    // update()'s phases, in call order (room_concept_update*.cpp); UpdateCycle is in update_cycle.h.
+    struct UpdateCycle;
+    void update_predict(UpdateCycle& c);
+    void update_build_slot(UpdateCycle& c);
+    void update_carry_doors();
+    void update_observe_walls(UpdateCycle& c);
+    void update_observe_corners(UpdateCycle& c);
+    void update_open_cycle(UpdateCycle& c);
+    std::optional<UpdateResult> update_early_exit(UpdateCycle& c);
+    void update_solve(UpdateCycle& c);
+    void update_extract(UpdateCycle& c);
+    void update_finalize(UpdateCycle& c);
+    void update_write_debug_row(UpdateCycle& c);
+    void update_publish_diagnostics(UpdateCycle& c);
+
     /// Compute command and measured priors, then select a single motion prior.
     MotionPriorSelection build_motion_prior_selection(
         const std::vector<VelocityCommand>& velocity_history,

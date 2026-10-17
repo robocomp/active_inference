@@ -81,6 +81,7 @@ set(RC_ESTIMATOR_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_wall_slam.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_wall_slam_after.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_update.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_update_solve.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_motion_prior.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_prediction.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_odometry_window.cpp

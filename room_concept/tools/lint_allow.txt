@@ -8,8 +8,7 @@ file src/lidar_ingestor.cpp 823
 file src/mount_calibrator.cpp 838
 file src/room_boxes.cpp 1297
 file src/room_boxes_channel.cpp 2368
-file src/room_concept.h 2467
-file src/room_concept_update.cpp 1045
+file src/room_concept.h 2482
 file src/room_config.cpp 1341
 file src/room_gn_solver.cpp 1396
 file src/room_scene_graph.cpp 4142
@@ -29,7 +28,6 @@ func src/room_concept_early_exit.cpp:RoomConcept::try_prediction_early_exit 539
 func src/room_concept_image_edge.cpp:RoomConcept::run_image_edge_shadow 322
 func src/room_concept_mount.cpp:RoomConcept::mount_pooled_solve 302
 func src/room_concept_odometry_window.cpp:RoomConcept::integrate_odometry_over_window 552
-func src/room_concept_update.cpp:RoomConcept::update 1014
 func src/room_concept_wall_slam_after.cpp:RoomConcept::wall_slam_after_solve 355
 func src/room_config.cpp:load_room_config 1120
 func src/room_scene_graph.cpp:RoomSceneGraph::dsr_update_affordance 383
