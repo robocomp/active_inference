@@ -10,8 +10,11 @@
  *    created by discover() on the MAIN thread, after the graph is loaded and only once the sensor node exists.
  *    discover() is called from the session's digest timer and self-throttles; a robot without a camera node is a
  *    permanent, quiet state.
- *  - frames are pulled ON DEMAND in grab(): the subscribers deliver latest-only (drain_newest), so one poll() at
- *    look() time yields the newest sample; nothing is decoded or copied while nobody asks.
+ *  - frames are pulled by refresh(): the subscribers deliver latest-only (drain_newest), so one poll() yields the
+ *    newest sample, which is deep-copied into a per-camera cache and its (frame_id, source time) fed to a RateMeter.
+ *    The session's digest timer refreshes both cameras (2 Hz) so the measured rate is always current for the
+ *    sensors() tool (2026-10-17; before, frames were pulled only at look() time). A poll takes the frame, so
+ *    everything that reads a camera goes through refresh(); grab() refreshes and returns the cache.
  *  - the ImageFrame handed to poll()'s callback is a loaned SHM view valid only during the call ⇒ DEEP-COPIED
  *    (clone / cvtColor into an owned buffer) before it returns.
  *  - main thread only; nothing here is shared with another thread.
@@ -29,6 +32,8 @@
 #include <opencv2/core.hpp>
 
 #include <dsr/api/dsr_api.h>
+
+#include "system_facts.h"   // RateMeter
 
 namespace rc::media { class MediaSubscriber; class Image360Subscriber; }
 
@@ -52,8 +57,19 @@ public:
 
     /// Bring up the subscribers whose sensor node + descriptor exist. Self-throttled (retry_period); main thread.
     void discover();
+    /// Take the newest frame if one arrived: cache it, measure the rate. Main thread.
+    void refresh(Camera cam);
     /// The newest frame of that camera, or why there is none ("camera not available: ...").
     [[nodiscard]] std::expected<GrabbedFrame, std::string> grab(Camera cam);
+
+    struct StreamStats
+    {
+        bool subscribed = false;
+        std::optional<double> fps;                  ///< measured over the last RateMeter::kRateWindowNs
+        std::optional<std::uint64_t> frame_age_ms;  ///< now − the newest frame's producer write time
+        int width = 0, height = 0;
+    };
+    [[nodiscard]] StreamStats stats(Camera cam) const;
 
     [[nodiscard]] static const char* label(Camera cam) { return cam == Camera::front ? "front camera" : "360-degree camera"; }
 
@@ -62,6 +78,7 @@ private:
     {
         cv::Mat bgr;
         std::int64_t source_ns = 0;   ///< DDS source timestamp of `bgr` (system_clock epoch ns)
+        RateMeter rate;
     };
 
     std::shared_ptr<DSR::DSRGraph> G_;

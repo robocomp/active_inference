@@ -77,6 +77,17 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
+        t("agents", "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), "
+          "uptime, CPU and memory. Read-only.", {}, []),
+        t("sensors", "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, "
+          "resolution, age of the last frame and bandwidth. Read-only.",
+          {"name": {"type": "string", "description": "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
+                                                     "lidar); empty = all"}}, []),
+        t("graph_summary", "What the robot's working memory (its graph) holds: node and edge counts by type and by the "
+          "agent that created them. Read-only.", {}, []),
+        t("inspect", "Every attribute and edge of ONE node of the robot's graph, by name (e.g. door_1, Shadow, "
+          "controller 7) or id. Read-only.", {"node": {"type": "string", "description": "the node's name or id"}},
+          ["node"]),
         t("look", "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
           {"camera": {"type": "string", "enum": ["front", "360"],
                       "description": "'front' = the camera facing ahead (default); '360' = the all-round panorama"}}, []),
@@ -157,6 +168,27 @@ CASES = [
      lambda n, a, c: n == "look" and str(a.get("camera", "front")) in ("front", "")),
     ("colour of the chair", [], "none", "what colour is the chair?",
      lambda n, a, c: n == "look"),
+    # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
+    ("how many agents", [], "none", "how many agents are running?",
+     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),
+    ("cuántos agentes (es)", [], "none", "¿cuántos agentes están funcionando?",
+     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|catorce)\b", c.lower()) is not None)),
+    ("which agent is degraded", [], "none", "is any agent in trouble?",
+     lambda n, a, c: n == "agents" or (n is None and "door_concept" in c)),
+    ("agent memory use", [], "none", "how much memory is the controller using?",
+     lambda n, a, c: n == "agents" or (n == "inspect" and "controller" in str(a.get("node", "")).lower())),
+    ("ricoh frame rate", [], "none", "what is the frame rate of the Ricoh camera?",
+     lambda n, a, c: (n == "sensors" and re.search("ricoh|360", str(a.get("name", "")).lower()) is not None)
+     or (n is None and "15" in c)),
+    ("ricoh resolution", [], "none", "what resolution does the 360 camera stream at?",
+     lambda n, a, c: n == "sensors" and re.search("ricoh|360|^$", str(a.get("name", "")).lower()) is not None),
+    ("fps de la cámara (es)", [], "none", "¿a cuántos fps va la cámara frontal?",
+     lambda n, a, c: (n == "sensors" and re.search("zed|front|frontal|^$", str(a.get("name", "")).lower()) is not None)
+     or (n is None and re.search(r"29[.,]9|30", c) is not None)),
+    ("working memory", [], "none", "how many nodes are in your working memory?",
+     lambda n, a, c: n == "graph_summary"),
+    ("inspect a node", [], "none", "show me all the attributes of door_1",
+     lambda n, a, c: n == "inspect" and str(a.get("node", "")) == "door_1"),
     ("look behind you", [], "none", "what do you see behind you?",
      lambda n, a, c: n == "look" and str(a.get("camera", "")) == "360"),
 ]

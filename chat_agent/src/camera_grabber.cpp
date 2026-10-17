@@ -59,16 +59,10 @@ void CameraGrabber::discover()
         pano_ = rc::media::make_image360_subscriber_from_graph(*G_, kPanoNode, kPanoStream);
 }
 
-std::expected<GrabbedFrame, std::string> CameraGrabber::grab(Camera cam)
+void CameraGrabber::refresh(Camera cam)
 {
     const bool front = cam == Camera::front;
-    if (front ? not front_ : not pano_)
-    {
-        discover();   // maybe the node appeared since the last timer tick (throttled all the same)
-        if (front ? not front_ : not pano_)
-            return std::unexpected(std::format("camera not available: no '{}' media stream on node '{}' yet",
-                                               front ? kFrontStream : kPanoStream, front ? kFrontNode : kPanoNode));
-    }
+    if (front ? not front_ : not pano_) return;
     Cached& last = front ? front_last_ : pano_last_;
     if (front)
     {
@@ -82,6 +76,7 @@ std::expected<GrabbedFrame, std::string> CameraGrabber::grab(Camera cam)
             if (m.empty()) return;
             last.bgr = std::move(m);
             last.source_ns = front_->last_source_ns();
+            last.rate.push(f.frame_id(), static_cast<std::uint64_t>(last.source_ns));
         });
     }
     else
@@ -95,8 +90,35 @@ std::expected<GrabbedFrame, std::string> CameraGrabber::grab(Camera cam)
             if (m.empty()) return;
             last.bgr = std::move(m);
             last.source_ns = pano_->last_source_ns();
+            last.rate.push(f.frame_id(), static_cast<std::uint64_t>(last.source_ns));
         });
     }
+}
+
+CameraGrabber::StreamStats CameraGrabber::stats(Camera cam) const
+{
+    const bool front = cam == Camera::front;
+    const Cached& last = front ? front_last_ : pano_last_;
+    StreamStats s{.subscribed = front ? bool(front_) : bool(pano_)};
+    s.fps = last.rate.fps();
+    if (last.source_ns > 0) s.frame_age_ms = std::uint64_t(std::max<std::int64_t>(0, now_ns() - last.source_ns) / 1'000'000);
+    s.width = last.bgr.cols;
+    s.height = last.bgr.rows;
+    return s;
+}
+
+std::expected<GrabbedFrame, std::string> CameraGrabber::grab(Camera cam)
+{
+    const bool front = cam == Camera::front;
+    if (front ? not front_ : not pano_)
+    {
+        discover();   // maybe the node appeared since the last timer tick (throttled all the same)
+        if (front ? not front_ : not pano_)
+            return std::unexpected(std::format("camera not available: no '{}' media stream on node '{}' yet",
+                                               front ? kFrontStream : kPanoStream, front ? kFrontNode : kPanoNode));
+    }
+    refresh(cam);
+    const Cached& last = front ? front_last_ : pano_last_;
     if (last.bgr.empty())
         return std::unexpected(std::format("camera not available: the {} has not delivered a frame yet", label(cam)));
     GrabbedFrame g;

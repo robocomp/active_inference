@@ -155,6 +155,8 @@ void ChatSession::tick_digest()
 {
     intention_.ensure();
     cameras_.discover();   // self-throttled; subscribers appear once the camera nodes + descriptors exist
+    cameras_.refresh(Camera::front);   // keeps the measured frame rates current for sensors() (camera_grabber.h)
+    cameras_.refresh(Camera::pano);
     digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read());
     track_object_changes();
 }
@@ -266,7 +268,11 @@ const QString kInterfaceRules = QStringLiteral(
     "like, CALL look() first and answer from the picture; never say you cannot see colours. Use '360' for what is "
     "behind or around you. What you say about a picture is a visual impression, not a measurement: for how many, how "
     "far and where, use the STATE and find_objects/where_is. Lines, dots, grids and labels drawn over a picture are "
-    "debug overlays, not part of the scene.\n");
+    "debug overlays, not part of the scene.\n"
+    "- The robot's own software is NOT in the STATE: for any question about it CALL a tool, never guess: agents() "
+    "(which programs run, their health, CPU, memory, uptime), sensors(name) (cameras, LiDAR, IMU: streams, measured "
+    "frame rate, resolution, bandwidth), graph_summary() (how many nodes and edges the working memory, i.e. the "
+    "graph, holds) or inspect(node) (every attribute of one node).\n");
 }   // namespace
 
 QString ChatSession::load_robot_description(const std::string& path)
@@ -336,6 +342,24 @@ QJsonArray ChatSession::tools_json() const
         "is in the current room, its distance and bearing; or that it has not been perceived. Read-only.",
         QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
         QJsonArray{"name"}));
+    tools.append(tool_def("agents",
+        "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU and "
+        "memory. Read-only.", QJsonObject{}, {}));
+    tools.append(tool_def("sensors",
+        "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, resolution, age of the "
+        "last frame and bandwidth. Read-only.",
+        QJsonObject{{"name", QJsonObject{{"type", "string"},
+                                         {"description", "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
+                                                         "lidar); empty = all"}}}},
+        {}));
+    tools.append(tool_def("graph_summary",
+        "What the robot's working memory (its graph) holds: node and edge counts by type and by the agent that created "
+        "them. Read-only.", QJsonObject{}, {}));
+    tools.append(tool_def("inspect",
+        "Every attribute and edge of ONE node of the robot's graph, by name (e.g. door_1, Shadow, controller 7) or id. "
+        "Read-only.",
+        QJsonObject{{"node", QJsonObject{{"type", "string"}, {"description", "the node's name or id"}}}},
+        QJsonArray{"node"}));
     tools.append(tool_def("look",
         "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
         QJsonObject{{"camera", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"front", "360"}},
@@ -476,6 +500,18 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room));
     else if (name == "where_is")
         out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room));
+    else if (name == "agents")
+        out = q(answer_agents(system_.agents()));
+    else if (name == "sensors")
+        out = q(answer_sensors(system_.sensors(), args.value("name").toString().toStdString()));
+    else if (name == "graph_summary")
+        out = q(answer_graph(system_.graph(digest_.facts.room)));
+    else if (name == "inspect")
+    {
+        const std::string node = args.value("node").toString().toStdString();
+        const auto v = system_.inspect(node);
+        out = v.has_value() ? q(answer_inspect(*v)) : QStringLiteral("no node named '%1' in the graph").arg(q(node));
+    }
     else return {};
     log_.write("query", QJsonObject{{"tool", name}, {"args", args}, {"result", out}});
     return out.trimmed();

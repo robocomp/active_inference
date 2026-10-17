@@ -55,6 +55,7 @@
 #include "command_gate.h"
 #include "intention_node.h"
 #include "mission_watch.h"
+#include "system_reader.h"
 #include "ollama_client.h"
 #include "world_digest.h"
 
@@ -132,6 +133,7 @@ private:
     std::unique_ptr<ChatWindow> window_;
     ChatLog log_;
     CameraGrabber cameras_;
+    SystemReader system_{G_, cameras_};   ///< agents / sensors / graph / inspect (after cameras_: it reads their rates)
     QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
     QObject ctx_;
     QTimer digest_timer_, status_timer_, ping_timer_;

@@ -31,6 +31,7 @@ LIST(APPEND SOURCES
   ../src/camera_grabber.cpp
   ../src/plan_view.cpp
   ../src/mission_watch.cpp
+  ../src/system_reader.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.
