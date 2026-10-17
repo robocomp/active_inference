@@ -542,6 +542,17 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     const auto from = own_agent_node_id(graph);
     if (!from.has_value()) return false;          // no agent node yet (cold start) — say nothing false
 
+    // The journal's claim history: a new (affordance, epoch) ends the open claim and starts this one.
+    // BEFORE the idempotent return: an edge persisted from a previous run is still a claim this run must report.
+    if (open_claim_.has_value() and (open_claim_id_ != affordance_id or open_claim_->epoch != epoch))
+        end_claim("preempted");
+    if (not open_claim_.has_value())
+    {
+        open_claim_ = describe_claim(graph, affordance_id, epoch);
+        open_claim_id_ = affordance_id;
+        if (claim_observer_) claim_observer_(*open_claim_);
+    }
+
     // ★IDEMPOTENT. This is called every cycle the target decision is made, at 20 Hz. Publishing an
     // unchanged edge would put a delta on the wire per cycle per consumer, which is exactly the kind of
     // per-cycle chatter that has bitten this graph before. Compare first; write only on change.
@@ -556,16 +567,6 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
             and std::abs(cx.value() - x) < 1e-4f and std::abs(cy.value() - y) < 1e-4f
             and std::abs(cw.value() - yaw) < 1e-4f)
             return true;                          // nothing changed; the standing claim is still true
-    }
-
-    // The journal's claim history: a new (affordance, epoch) ends the open claim and starts this one.
-    if (open_claim_.has_value() and (open_claim_id_ != affordance_id or open_claim_->epoch != epoch))
-        end_claim("preempted");
-    if (not open_claim_.has_value())
-    {
-        open_claim_ = describe_claim(graph, affordance_id, epoch);
-        open_claim_id_ = affordance_id;
-        if (claim_observer_) claim_observer_(*open_claim_);
     }
 
     // ── INV-6: A CONSUMER CLAIMS AT MOST ONE AFFORDANCE, AND THAT IS STRUCTURAL ──────────────────
@@ -1190,7 +1191,11 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
             j.flush();
         }
     }
-    end_claim(std::string(rc::affordance::to_string(outcome)));   // before the early return: the claim is over
+    // The claim is over, whatever happens below. Its outcome is this one only if it is the affordance being completed:
+    // clear_current() (a click target, a mission owning the base) zeroes the current affordance while the claim stays
+    // open, and a later mark_reached on a click target must not be stamped on that abandoned claim.
+    end_claim(open_claim_id_ == current_affordance_id_ and current_affordance_id_ != 0
+                  ? std::string(rc::affordance::to_string(outcome)) : std::string("preempted"));
     if (!graph || current_affordance_id_ == 0)
         return;
 

@@ -382,14 +382,23 @@ void SpecificWorker::journal_check_command(bool superseded)
 	if (not journal_command_.has_value()) return;
 	const bool driving = driving_enabled_ and not paused_;
 	const auto &tr = journal_command_->tracked;
-	std::string state = tr.kind == rc::ChatInbox::Tracked::Kind::Motion
-	                        ? rc::ChatInbox::status_of_motion(tr, relative_motion_.view(), driving).first
-	                        : rc::ChatInbox::status_of(tr, session_.door_passage().view(), driving).first;
+	const bool motion = tr.kind == rc::ChatInbox::Tracked::Kind::Motion;
+	const auto passage = session_.door_passage().view();
+	std::string state = motion ? rc::ChatInbox::status_of_motion(tr, relative_motion_.view(), driving).first
+	                           : rc::ChatInbox::status_of(tr, passage, driving).first;
+	// A passage never fails by itself — it waits for its step to be offered again — so its failure is SEEN while it
+	// runs (the same word MissionHost::poll reports) and becomes the outcome if it then ends without succeeding.
+	if (not motion and passage.door == tr.door and passage.attempts > 0 and passage.step != rc::DoorPassage::Step::Idle
+	    and passage.step != rc::DoorPassage::Step::Done)
+		journal_command_->failure = passage.step == rc::DoorPassage::Step::Open
+		                                ? std::string("door_wont_open")
+		                                : std::format("{}_{}", rc::DoorPassage::step_name(passage.step), passage.last_outcome);
 	if (state == "in_progress" or state.empty())
 	{
 		if (not superseded) return;
 		state = "aborted|superseded";
 	}
+	if (state.starts_with("aborted") and not journal_command_->failure.empty()) state = "failed|" + journal_command_->failure;
 	journal_push({.kind = JK::StepEnd, .mission = journal_command_->id, .step_id = "1", .op = tr.kind == rc::ChatInbox::Tracked::Kind::Motion ? "move" : "cross",
 	              .outcome = command_step_outcome(state), .attempt = 1});
 	journal_push({.kind = JK::MissionEnd, .mission = journal_command_->id, .outcome = state});
@@ -483,11 +492,20 @@ void SpecificWorker::service_journal()
 		journal_drive_mode_ = mode;
 		journal_push({.kind = JK::DriveMode, .op = rc::to_string(mode)});
 	}
-	if (not journal_.dirty()) return;
+	// ★ cortex's AgentInfo heartbeat read-modify-writes this same node at 1 Hz, so its stale copy can revert our value
+	//   after we wrote it. So every pass checks the node still carries the last wire and re-asserts it if not; no write
+	//   when it does. The wire is built before the read, keeping the read→write window as short as possible.
+	if (journal_.dirty())
+	{
+		journal_written_ = journal_.to_wire();
+		journal_.clear_dirty();
+	}
+	if (journal_written_.empty()) return;   // nothing journaled yet
 	const auto self = rc::AffordanceManager::own_agent_node_id(G);
-	if (not self.has_value()) return;   // no agent node yet (cold start): kept dirty, written once it exists
+	if (not self.has_value()) return;   // no agent node yet (cold start): written once it exists
 	auto node = G->get_node(self.value());
 	if (not node.has_value()) return;
-	G->add_or_modify_attrib_local<em_journal_att>(node.value(), journal_.to_wire());
-	if (G->update_node(node.value())) journal_.clear_dirty();
+	if (G->get_attrib_by_name<em_journal_att>(node.value()) == journal_written_) return;
+	G->add_or_modify_attrib_local<em_journal_att>(node.value(), journal_written_);
+	G->update_node(node.value());
 }

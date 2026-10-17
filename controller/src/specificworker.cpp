@@ -578,16 +578,26 @@ void SpecificWorker::initialize()
 			{
 				const QString c = raw.trimmed().toLower();
 				if (c == "run" and remote_run_)        { std::println("[remote] RUN");  remote_run_(1, false); }
-				else if (c == "stop" and remote_stop_) { std::println("[remote] STOP"); remote_stop_(); }
+				// Every command below is ENQUEUED: this timer runs on the GUI thread, and the commands (and the episodic
+				// journal that records them) belong to the control thread.
+				// STOP: the Stop button's abort plus the end of a door passage (run_mission_command's `stop`).
+				else if (c == "stop")
+				{
+					std::println("[remote] STOP");
+					enqueue_command([this]() { run_mission_command("stop", "remote"); });
+				}
 				// DOOR PASSAGE (controller_door_passage.h): `cross door_1` sequences approach -> open -> cross on
 				// door_concept's affordances for that door; `uncross` ends it (selection unrestricted again).
-				else if (c.startsWith("cross ")) run_mission_command(c.toStdString(), "remote");
+				else if (c.startsWith("cross "))
+					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				// RELATIVE MOTION (controller_relative_motion.h): `move <m>`, `turn <deg>`, `turn <deg> move <m>`.
 				// Enqueued: this timer runs on the GUI thread, and the relative motion is stepped on the control thread.
 				else if (c.startsWith("move ") or c.startsWith("turn "))
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
-				else if (c.startsWith("mission ")) run_mission_command(c.mid(8).trimmed().toStdString(), "remote");
-				else if (c == "uncross") { session_.door_passage().stop(); std::println("[remote] door passage stopped"); }
+				else if (c.startsWith("mission "))
+					enqueue_command([this, cmd = c.mid(8).trimmed().toStdString()]() { run_mission_command(cmd, "remote"); });
+				else if (c == "uncross")
+					enqueue_command([this]() { run_mission_command("uncross", "remote"); });
 				else if (c == "cancel" or c == "resume")
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | "
@@ -1790,7 +1800,7 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 //   cancel [mission]    end the running grounded mission (specificworker_mission.cpp); the base is held, armed
 //   resume              end the mission's current `wait` (the person says "I'm here")
 // Any other command REPLACES a running mission, which reports aborted|superseded (doc §7.5).
-// Runs on the control thread (enqueue_command / the chat inbox; the remote timer calls it directly, as before).
+// Runs on the control thread (enqueue_command / the chat inbox; the remote timer enqueues every command).
 // Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
 // The episodic journal records what was accepted (specificworker_mission.cpp, journal_command).
 SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)

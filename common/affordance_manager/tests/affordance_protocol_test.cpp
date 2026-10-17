@@ -254,16 +254,42 @@ void claim_observer_start_preempt_outcome(TestFailure &failure)
     failure.expect(controller.publish_executing(graph, b->id(), 7, 2.f, 2.f, 0.f), "republish B failed");
     failure.expect(events.size() == 3, "republishing the same claim must fire nothing");
 
+    // mark_reached stamps its outcome only on the claim it completes: the selector takes A (B is pragmatic, never
+    // taken by default), so claiming it makes A the current affordance.
+    const auto sel = controller.select_target(graph);
+    failure.expect(sel.has_value() and sel->node_name == "aff_table_epistemic", "the selector should hold A");
+    failure.expect(controller.publish_executing(graph, a->id(), 3, 1.f, 1.f, 0.f), "claim the selected A failed");
+    failure.expect(events.size() == 5 and events[3].outcome == "preempted" and events[4].kind == K::Start,
+                   "claiming A must end B preempted and start A");
     controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
-    failure.expect(events.size() == 4 and events.back().kind == K::End and events.back().affordance == "aff_door_cross"
-                   and events.back().outcome == "satisfied", "mark_reached must fire End B satisfied");
+    failure.expect(events.size() == 6 and events.back().kind == K::End and events.back().affordance == "aff_table_epistemic"
+                   and events.back().outcome == "satisfied", "mark_reached must fire End A satisfied");
     controller.mark_reached(graph, rc::affordance::Outcome::Satisfied);
-    failure.expect(events.size() == 4, "a second mark_reached with no open claim must fire nothing");
+    failure.expect(events.size() == 6, "a second mark_reached with no open claim must fire nothing");
+
+    // An ABANDONED claim (clear_current: a click target or a mission took the base) is preempted, never stamped
+    // with the outcome of whatever mark_reached completes next.
+    failure.expect(controller.publish_executing(graph, a->id(), 5, 1.f, 1.f, 0.f), "claim A for the abandon case failed");
+    controller.clear_current();
+    controller.mark_reached(graph, rc::affordance::Outcome::Unreachable);
+    failure.expect(events.size() == 8 and events.back().kind == K::End and events.back().affordance == "aff_table_epistemic"
+                   and events.back().outcome == "preempted",
+                   "mark_reached after clear_current must end the abandoned claim 'preempted', got '"
+                   + (events.empty() ? std::string() : events.back().outcome) + "'");
 
     failure.expect(controller.publish_executing(graph, a->id(), 4, 1.f, 1.f, 0.f), "claim A again failed");
     controller.release_execution_claim(graph);
-    failure.expect(events.size() == 6 and events.back().kind == K::End and events.back().outcome == "preempted",
+    failure.expect(events.size() == 10 and events.back().kind == K::End and events.back().outcome == "preempted",
                    "releasing a claim must fire End preempted");
+
+    // An executing edge persisted from a previous run (same affordance, epoch and pose): the new run still reports it.
+    failure.expect(controller.publish_executing(graph, a->id(), 6, 1.f, 1.f, 0.f), "claim A epoch 6 failed");
+    rc::AffordanceManager next_run;
+    std::vector<rc::AffordanceManager::ClaimEvent> next_events;
+    next_run.set_claim_observer([&next_events](const rc::AffordanceManager::ClaimEvent &e) { next_events.push_back(e); });
+    failure.expect(next_run.publish_executing(graph, a->id(), 6, 1.f, 1.f, 0.f), "next run's re-claim failed");
+    failure.expect(next_events.size() == 1 and next_events[0].kind == K::Start and next_events[0].epoch == 6,
+                   "an unchanged persisted edge must still fire Start once in a new run");
 }
 } // namespace
 

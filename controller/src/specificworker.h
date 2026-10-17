@@ -208,15 +208,22 @@ private:
 	// §6): every operator command as a mission, each step attempt, each affordance claim and the drive mode, published
 	// as `em_journal` on our own agent node so episodic_agent can rebuild what was asked and what happened. Missions are
 	// "m<interpreter serial>"; single commands (cross/move/turn/uncross/stop) are one-step missions "c<n>".
-	// ★ Locked: run_mission_command also runs on the GUI thread (the remote file's timer calls it directly).
+	// ★ Control thread only: every writer (run_mission_command — the remote timer enqueues it —, start_mission, the
+	//   interpreter, the claim observer, service_journal) runs there. journal_mx_ is a cheap guard, not a licence.
 	rc::em::Journal journal_{current_time_ms()};   ///< epoch = this process's start, so a restart is visible
 	std::mutex journal_mx_;
 	std::string journal_mission_;                  ///< the interpreter mission open in the journal ("m3"); "" = none
-	struct JournalCommand { std::string id; rc::ChatInbox::Tracked tracked; };
+	struct JournalCommand
+	{
+		std::string id;
+		rc::ChatInbox::Tracked tracked;
+		std::string failure;   ///< cross: the passage's last failed step ("cross_unreachable"), seen while it ran
+	};
 	std::optional<JournalCommand> journal_command_;   ///< the single command open in the journal
 	std::uint64_t journal_commands_ = 0;              ///< "c<n>" counter
 	std::optional<rc::DriveMode> journal_drive_mode_;
 	std::map<std::string, std::string, std::less<>> journal_grounding_;   ///< step id → StepStart text (MissionHost)
+	std::string journal_written_;   ///< the wire last written on our agent node (re-asserted if a co-writer reverts it)
 	void journal_push(rc::em::JournalEntry e);                  ///< journal_mx_ held
 	void journal_steps();                                       ///< journal_mx_ held: interpreter transitions, MissionEnd
 	void journal_check_command(bool superseded);                ///< journal_mx_ held: close the command if it ended
