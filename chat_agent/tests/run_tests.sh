@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline checks for chat_agent's pure pieces (no DSR, no ollama): NDJSON splitter, CommandGate, object facts,
-# look()'s frame preparation + request JSON (OpenCV + Qt Core), and the mission IR + its JSON and text forms (Qt Core).
+# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), and the mission interpreter's step machine.
 set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
@@ -18,4 +18,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/mission_text_test" \
     ../../common/mission/mission_text_test.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/mission_text_test"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -o "$out/mission_interpreter_test" \
+    ../../common/mission/mission_interpreter_test.cpp
+"$out/mission_interpreter_test"
 rm -rf "$out"
