@@ -16,9 +16,11 @@
 #include <fstream>
 #include <locale>
 #include <map>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace rc::em
@@ -29,13 +31,23 @@ class Archive
 public:
     explicit Archive(std::filesystem::path dir) : dir_(std::move(dir)) { std::filesystem::create_directories(dir_); }
 
-    /// One compact JSON line, flushed; the file is the local day of r.t0.
-    void append(const Record& r)
+    /// One compact JSON line, flushed; the file is the local day of r.t0. False (and a warning) when it could not be written.
+    /// A crash mid-write leaves a last line with no '\n'; terminate it first so this record is not glued onto the fragment.
+    bool append(const Record& r)
     {
-        std::ofstream f(file_of(day_of(r.t0)), std::ios::app);
+        const auto path = file_of(day_of(r.t0));
+        const bool heal = unterminated(path);
+        std::ofstream f(path, std::ios::app);
         f.imbue(std::locale::classic());
+        if (heal) f << '\n';
         f << QJsonDocument(to_json(r)).toJson(QJsonDocument::Compact).toStdString() << '\n';
         f.flush();
+        if (not f)
+        {
+            std::println(stderr, "[episodic] cannot write {}: record {} lost", path.string(), r.id);
+            return false;
+        }
+        return true;
     }
 
     /// Last line per id wins; ordered by t0 (ties keep first-seen order).
@@ -85,12 +97,21 @@ public:
             int seq = 0;
             const char* b = r.id.data() + dash + 1;
             const char* e = r.id.data() + r.id.size();
-            if (std::from_chars(b, e, seq).ec == std::errc{}) mx = std::max(mx, seq);
+            const auto res = std::from_chars(b, e, seq);
+            if (res.ec == std::errc{} and res.ptr == e) mx = std::max(mx, seq);
         }
         return mx + 1;
     }
 
 private:
+    /// True when the file exists, is non-empty and its last byte is not '\n' (a torn tail).
+    static bool unterminated(const std::filesystem::path& p)
+    {
+        std::ifstream in(p, std::ios::binary | std::ios::ate);
+        if (not in or in.tellg() <= 0) return false;
+        in.seekg(-1, std::ios::end);
+        return in.get() != '\n';
+    }
     std::filesystem::path file_of(std::string_view day) const { return dir_ / (std::string(day) + ".jsonl"); }
     std::filesystem::path dir_;
 };

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <clocale>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <print>
 #include <string>
@@ -104,6 +105,40 @@ void test_truncated_tail_skipped()
     CHECK(a.next_seq("20261017") == 3);
 }
 
+void test_append_heals_torn_tail()
+{
+    TempDir d("heal");
+    Archive a(d.p);
+    CHECK(a.append(rec("20261017-1", noon_ms())));
+    {
+        std::ofstream f(d.p / "20261017.jsonl", std::ios::app);
+        f << R"({"id":"20261017-2","level":"step","aut)";               // crash mid-write, no newline
+    }
+    CHECK(a.append(rec("20261017-3", noon_ms(2))));
+    const auto got = a.load_day("20261017");
+    CHECK(got.size() == 2);                                             // the post-crash record survives
+    CHECK(got.size() == 2 and got[1].id == "20261017-3");
+    CHECK(a.next_seq("20261017") == 4);
+}
+
+void test_append_reports_failure()
+{
+    TempDir d("fail");
+    Archive a(d.p / "arch");
+    fs::remove_all(d.p / "arch");
+    { std::ofstream f(d.p / "arch"); f << "not a directory"; }          // the archive dir is now a regular file
+    CHECK(not a.append(rec("20261017-1", noon_ms())));
+}
+
+void test_next_seq_rejects_garbage_suffix()
+{
+    TempDir d("garb");
+    Archive a(d.p);
+    a.append(rec("20261017-2", noon_ms()));
+    a.append(rec("20261017-12abc", noon_ms(1)));
+    CHECK(a.next_seq("20261017") == 3);
+}
+
 void test_locale_roundtrip()
 {
     TempDir d("loc");
@@ -126,6 +161,9 @@ int main()
     test_reload_last_line_wins();
     test_next_seq();
     test_truncated_tail_skipped();
+    test_append_heals_torn_tail();
+    test_append_reports_failure();
+    test_next_seq_rejects_garbage_suffix();
     test_locale_roundtrip();
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
