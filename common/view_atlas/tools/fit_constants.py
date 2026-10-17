@@ -85,8 +85,9 @@ def fit(own, bg, logr_pairs=None):
     # whether that excess is positive definite.
     #  * PD excess: the data support a mask-size term; write cov_n = excess and quality_px_scale = best scale.
     #  * not PD: the excess is not supported (here: covariance is flat in mask size). cov_n then keeps its phase-1
-    #    meaning, the per-view scatter used by the prototype-uncertainty term, i.e. cov_n = cov_own, and
-    #    quality_px_scale is NOT written (stays the flagged AtlasParams default). The finding goes in the header.
+    #    meaning, the per-view scatter used by the prototype-uncertainty term: cov_own = cov_n = the POOLED
+    #    np.cov of the near pairs (not the model intercept, which extrapolates an unsupported model), also used
+    #    for the repeat-scale sd. quality_px_scale is NOT written (stays the flagged AtlasParams default). The finding goes in the header.
     ev_n = np.linalg.eigvalsh(cov_n_fit)
     excess_ok = bool(ev_n.min() > 0)
     px_lo, px_hi = float(near[:, 3].min()), float(near[:, 3].max())
@@ -94,14 +95,15 @@ def fit(own, bg, logr_pairs=None):
     if excess_ok:
         noise_header = f"noise model: cov(px) = cov_own + cov_n (1-q)/q, q = 1-exp(-px/quality_px_scale); bands={nb}, sse={sse:.3g}"
         cov_n_out, scale_out = cov_n_fit, {"quality_px_scale": px_scale}
+        cov_own_out = cov_own_fit
     else:
         noise_header = (f"noise vs mask size: excess term NOT supported by the data over px [{px_lo:.0f}, {px_hi:.0f}] "
                         f"(fitted excess cov eigenvalues {ev_n[0]:.3g}, {ev_n[1]:.3g}; best scale {px_scale:.0f} at grid edge = "
                         f"{'yes' if edge else 'no'}; bands={nb}, sse={sse:.3g}); cov_n = per-view scatter, "
                         f"quality_px_scale left at its flagged default")
-        cov_n_out, scale_out = cov_own_fit, {}
+        cov_own_out = cov_n_out = np.cov(near[:, 1:3].T); scale_out = {}
     mu_bg = bg[:, 1:3].mean(0); cov_bg = np.cov(bg[:, 1:3].T)
-    sd = math.sqrt(cov_own_fit[0, 0]); drop = max(mu0 - mubg_d_curve, 1e-6)
+    sd = math.sqrt(cov_own_out[0, 0]); drop = max(mu0 - mubg_d_curve, 1e-6)
     ratio = sd / drop
     if ratio >= 0.5:
         print(f"WARNING: repeat derivation ill-conditioned: sd/drop = {ratio:.3f}" +
@@ -115,7 +117,7 @@ def fit(own, bg, logr_pairs=None):
         repeat_logr = float(math.sqrt(sd / a))
     return dict(_repeat_ratio=ratio, _noise_header=noise_header, ell_rad=ell, repeat_ell_rad=repeat, repeat_ell_logr=repeat_logr,
                 mu_own_d=mu_own[0], mu_own_c=mu_own[1], mu_bg_d=mu_bg[0], mu_bg_c=mu_bg[1],
-                cov_own_dd=cov_own_fit[0, 0], cov_own_dc=cov_own_fit[0, 1], cov_own_cc=cov_own_fit[1, 1],
+                cov_own_dd=cov_own_out[0, 0], cov_own_dc=cov_own_out[0, 1], cov_own_cc=cov_own_out[1, 1],
                 cov_bg_dd=cov_bg[0, 0], cov_bg_dc=cov_bg[0, 1], cov_bg_cc=cov_bg[1, 1],
                 cov_n_dd=cov_n_out[0, 0], cov_n_dc=cov_n_out[0, 1], cov_n_cc=cov_n_out[1, 1], **scale_out)
 
@@ -149,6 +151,14 @@ def selftest():
     ok2 = (2000 / 1.5 < s_ < 2000 * 1.5) and abs(n_[0, 0] - 2e-3) / 2e-3 < 0.3 and abs(n_[1, 1] - 2e-3) / 2e-3 < 0.3
     print(f"selftest noise: scale {s_:.0f} (truth 2000), cov_n_dd {n_[0,0]:.2e} (truth 2.0e-03) -> {'PASS' if ok2 else 'FAIL'}")
     ok = ok and ok2
+    # flat in px: pure sampling noise, so the excess is PD only by chance; fixed seed keeps the case deterministic
+    r2 = np.random.default_rng(0); Df = r2.uniform(0, math.pi, 6000)
+    flat = np.c_[Df, relax(Df, 0.95, 0.86, 0.85) + r2.normal(0, 0.04, 6000), 0.97 + r2.normal(0, 0.08, 6000),
+                 np.exp(r2.uniform(np.log(300), np.log(30000), 6000))]
+    kf = fit(flat, bg)
+    ok3 = "quality_px_scale" not in kf and all(kf[f"cov_n_{c}"] == kf[f"cov_own_{c}"] for c in ("dd", "dc", "cc"))
+    print(f"selftest flat-in-px through fit(): no quality_px_scale, cov_n == cov_own -> {'PASS' if ok3 else 'FAIL'}")
+    ok = ok and ok3
     return 0 if ok else 1
 
 def main():

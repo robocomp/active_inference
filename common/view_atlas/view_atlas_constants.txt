@@ -3,20 +3,20 @@
 # pairs: own 23941, background 1161
 # dataset: stride=2
 # noise vs mask size: excess term NOT supported by the data over px [288, 285048] (fitted excess cov eigenvalues -0.000126, 2.54e-05; best scale 50000 at grid edge = yes; bands=6, sse=3.64e-05); cov_n = per-view scatter, quality_px_scale left at its flagged default
-# repeat derivation: sd/drop = 0.751722
+# repeat derivation: sd/drop = 0.797628
 ell_rad = 0.434163206
-repeat_ell_rad = 0.724729069
-repeat_ell_logr = 0.644989913
+repeat_ell_rad = 0.776083331
+repeat_ell_logr = 0.664392062
 mu_own_d = 0.944042711
 mu_own_c = 0.955321125
 mu_bg_d = 0.874987088
 mu_bg_c = 0.425000836
-cov_own_dd = 0.00149799598
-cov_own_dc = 0.00175180182
-cov_own_cc = 0.00682410682
+cov_own_dd = 0.0016865402
+cov_own_dc = 0.00166716903
+cov_own_cc = 0.0061546161
 cov_bg_dd = 0.00273971979
 cov_bg_dc = -0.0043979688
 cov_bg_cc = 0.153475073
-cov_n_dd = 0.00149799598
-cov_n_dc = 0.00175180182
-cov_n_cc = 0.00682410682
+cov_n_dd = 0.0016865402
+cov_n_dc = 0.00166716903
+cov_n_cc = 0.0061546161
