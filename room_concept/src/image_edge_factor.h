@@ -11,20 +11,17 @@
 #pragma once
 
 /*
- *  image_edge_factor.h — the torch/autograd side of the RGB edge-alignment subsystem.
+ *  image_edge_factor.h — the RGB edge-alignment loss, evaluated at a pose (loss-breakdown logging).
  *
- *  The MIRROR of the GN factor in room_gn_solver.cpp. It must evaluate the same objective, term for
- *  term, or two things break at once: LM's accept/reject test measures a different function than the
- *  one it linearizes, and compute_posterior_covariance() — which differentiates compute_rfe_loss
- *  through autograd — reports a sigma that omits this term entirely. The second matters more than
- *  the shadow log, because the pre-registered success criterion IS that sigma.
+ *  The same objective as the GN factor in room_gn_solver.cpp, term for term. Until 2026-10-17 this was
+ *  the torch/autograd mirror of it; with GN the only backend it is now a plain evaluation.
  *
- *  Pure torch — no DSR, no image, no OpenCV (see image_edge_types.h for the rationale). The pixel
+ *  No DSR, no image, no OpenCV (see image_edge_types.h for the rationale). The pixel
  *  search has already happened upstream on the compute thread; what arrives here is a fixed set of
  *  (p_room, n_hat, uv_meas, sigma, pi_vis, h) tuples, i.e. plain measurements.
  */
 
-#include <torch/torch.h>
+#include <Eigen/Dense>
 #include <vector>
 
 #include "image_edge_types.h"
@@ -69,10 +66,7 @@ namespace rc
         /// computed by the caller for this linearisation — NOT the true mixture NLL. That choice is
         /// what lets evaluate() and linearize() use one identical expression and avoids the
         /// IRLS-weight-vs-loss-weight split that Se2LandmarkFactor:274-286 records as a real past bug.
-        static torch::Tensor loss(const ImageEdgeObs& obs,
-                                  const torch::Tensor& pose_xy,
-                                  const torch::Tensor& pose_theta,
-                                  const Params& params,
-                                  torch::Device device);
+        /// pose = [x, y, θ] of the robot in the room frame.
+        static float loss(const ImageEdgeObs& obs, const Eigen::Vector3f& pose, const Params& params);
     };
 }  // namespace rc

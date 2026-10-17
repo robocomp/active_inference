@@ -1,7 +1,6 @@
 cmake_policy(SET CMP0074 NEW)
 
-# Keep generated CMake changes from pushing an unsupported host dialect into
-# libtorch/CUDA configure checks when templates are regenerated.
+# Keep generated CMake changes from pushing an unsupported host dialect when templates are regenerated.
 if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD GREATER 23)
   set(CMAKE_CXX_STANDARD 23)
 endif()
@@ -9,49 +8,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 COMPONENTS Xml PrintSupport REQUIRED)
 find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
-
-# Find PyTorch
-set(CUDAToolkit_ROOT "/usr/local/cuda-13.2")
-find_package(CUDAToolkit REQUIRED)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_EXTENSIONS OFF)
-set(CMAKE_CUDA_COMPILER "/usr/local/cuda-13.2/bin/nvcc")
-
-# Allow an external Torch_DIR/CMAKE_PREFIX_PATH to win, then try common local installs.
-if(NOT Torch_DIR)
-  if(EXISTS "/home/robocomp/software/libtorch/share/cmake/Torch/TorchConfig.cmake")
-    set(Torch_DIR "/home/robocomp/software/libtorch/share/cmake/Torch")
-  else()
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
-      execute_process(
-        COMMAND ${Python3_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path, end='')"
-        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
-        RESULT_VARIABLE TORCH_CMAKE_PREFIX_RESULT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-      if(TORCH_CMAKE_PREFIX_RESULT EQUAL 0 AND EXISTS "${TORCH_CMAKE_PREFIX}/Torch/TorchConfig.cmake")
-        set(Torch_DIR "${TORCH_CMAKE_PREFIX}/Torch")
-      endif()
-    endif()
-  endif()
-endif()
-
-set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures")
-find_package(Torch REQUIRED)
-# Torch injects -D_GLIBCXX_USE_CXX11_ABI=0 via INTERFACE_COMPILE_OPTIONS on the imported `torch`
-# target (TorchConfig.cmake), not via CMAKE_CXX_FLAGS, so it propagates at link time no matter what
-# CMAKE_CXX_FLAGS says here. Strip it from the target itself: prebuilt libdsr_api/core/gui, Qt6, Ice
-# and FastDDS are all built with the default (CXX11) ABI.
-# (The ai_common::* targets never link torch, so they are not exposed to this either way.)
-if(TARGET torch)
-  get_target_property(_torch_compile_opts torch INTERFACE_COMPILE_OPTIONS)
-  if(_torch_compile_opts)
-    list(REMOVE_ITEM _torch_compile_opts "-D_GLIBCXX_USE_CXX11_ABI=0")
-    set_property(TARGET torch PROPERTY INTERFACE_COMPILE_OPTIONS "${_torch_compile_opts}")
-  endif()
-endif()
 
 find_package(Eigen3 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem)
@@ -84,16 +40,10 @@ LIST(APPEND SOURCES
   ../src/pose_publisher.cpp
   ../src/calib_channels.cpp
   ../src/ground_truth_log.cpp
-  ../src/door_apertures.cpp
   ../src/specificworker_presence.cpp
   ../src/status_reporter.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
-  ../src/room_concept.cpp
-  ../src/room_gn_solver.cpp
-  ../src/reloc_search.cpp
-  ../src/room_model.cpp
-  ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
   ../src/room_scene_graph.cpp
   ../src/layout_explorer.cpp
@@ -101,27 +51,45 @@ LIST(APPEND SOURCES
   ../src/imu_ingestor.cpp
   ../src/room_viewer.cpp
   ../src/room_config.cpp
-  ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
   ../src/calibration_viewer.cpp
-  ../src/corner_detector.cpp
-  ../src/wall_segmenter.cpp
-  ../src/wall_map.cpp
-  ../src/room_boxes.cpp
-  ../src/room_boxes_channel.cpp
-  ../src/object_anchor_factor.cpp
   ../src/object_anchor_source.cpp
   ../src/camera_ingestor.cpp
   ../src/camera_stream_hub.cpp
-  ../src/image_edge_source.cpp
-  ../src/image_edge_factor.cpp
-  ../src/rerun_logger.cpp
   ../src/camera_visualizer.cpp
   ../src/custom_widget.h
 )
 
-LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml
+LIST(APPEND LIBS ${LIBS} Qt6PrintSupport Qt6Xml
             Boost::system Boost::filesystem)
+
+# ── rc_room_estimator: the estimator, compiled ONCE ─────────────────────────────
+# Refactor step 1 (docs/refactor_proposal_2026-10-13.md). These sources used to be listed in the agent AND
+# hand-listed again in every selftest, so room_concept.cpp (9.4k lines, the heaviest TU) was compiled up to
+# five times, and a new .cpp in the agent was a silent link error in whichever selftest was not updated
+# (gn_selftest was unlinkable that way for days, 2026-09-13). Now the agent and every selftest link this
+# one library: they cannot drift apart, and the bench runs exactly the code the agent runs.
+# Pure estimator code: no Q_OBJECT, no DSR calls (door_apertures only includes DSR headers).
+set(RC_ESTIMATOR_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/room_gn_solver.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_model.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_obs_weights.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/reloc_search.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/door_apertures.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/object_anchor_factor.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/image_edge_factor.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/image_edge_source.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/corner_detector.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/wall_segmenter.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/wall_map.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_boxes.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_boxes_channel.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/pointcloud_center_estimator.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/rerun_logger.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/epistemic_planner.cpp
+)
+set(RC_EXTERNAL_LIBS ${LIBS})
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 # CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).
@@ -142,31 +110,31 @@ if(ENABLE_ASAN)
   add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
 endif()
 
+# Defined AFTER add_definitions()/ENABLE_ASAN above: those are directory-scoped and only reach targets
+# created after them — the library must be compiled with exactly the agent's flags (Eigen ABI, see above).
+add_library(rc_room_estimator STATIC ${RC_ESTIMATOR_SOURCES})
+target_include_directories(rc_room_estimator PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(rc_room_estimator PUBLIC ${RC_EXTERNAL_LIBS})
+set(LIBS rc_room_estimator ${RC_EXTERNAL_LIBS})
+
+# ── Refactor guardrail: file/function length + layering lint ──────────────────
+# docs/refactor_proposal_2026-10-13.md §5. Grandfathered offenders live in tools/lint_allow.txt and may
+# only shrink. At configure time a violation is a WARNING (so ongoing feature work is never blocked by a
+# reconfigure); `make -C build room_lint` is the hard check, run before committing a refactor step.
+set(RC_ROOM_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
+execute_process(COMMAND ${RC_ROOM_ROOT}/tools/lint_file_lengths.sh
+                OUTPUT_VARIABLE _rc_lint_out ERROR_VARIABLE _rc_lint_out RESULT_VARIABLE _rc_lint_rc)
+if(NOT _rc_lint_rc EQUAL 0)
+  message(WARNING "room_concept lint (tools/lint_file_lengths.sh):\n${_rc_lint_out}")
+endif()
+add_custom_target(room_lint COMMAND ${RC_ROOM_ROOT}/tools/lint_file_lengths.sh VERBATIM)
+
 # ── gn_selftest ───────────────────────────────────────────────────────────────
 # Offline validation of the Gauss-Newton backend (analytic Jacobians vs finite differences, and
 # recovery of a known pose on a synthetic room). EXCLUDE_FROM_ALL: never built by a plain `make`,
 # so it cannot affect the agent build. Build it with:  make -C build gn_selftest && ./bin/gn_selftest
 add_executable(gn_selftest EXCLUDE_FROM_ALL
-  ../tools/gn_selftest.cpp
-  ../src/room_gn_solver.cpp
-  ../src/room_model.cpp
-  ../src/room_concept.cpp
-  ../src/reloc_search.cpp   # room_concept.cpp calls into it (2026-09-16)
-  # ⚠ room_concept.cpp calls into the door-aperture filter, so this target needs it too. It was added
-  # to wall_slam_selftest on 2026-09-13 and not here, which left gn_selftest unlinkable — invisible,
-  # because both selftests are EXCLUDE_FROM_ALL and neither runs in the normal build. If you add a
-  # source to one selftest, check the other.
-  ../src/door_apertures.cpp
-  ../src/object_anchor_factor.cpp
-  ../src/image_edge_factor.cpp
-  ../src/image_edge_source.cpp
-  ../src/corner_detector.cpp
-  ../src/wall_segmenter.cpp
-  ../src/wall_map.cpp
-  ../src/room_boxes.cpp
-  ../src/room_boxes_channel.cpp
-  ../src/pointcloud_center_estimator.cpp
-  ../src/rerun_logger.cpp
+  ../tools/gn_selftest.cpp   # the estimator comes from rc_room_estimator (via LIBS)
 )
 target_include_directories(gn_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(gn_selftest ${LIBS})
@@ -179,21 +147,6 @@ set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CU
 #   make -C build mp3d_replay && ../bin/mp3d_replay datasets/mp3d_fpe
 add_executable(mp3d_replay EXCLUDE_FROM_ALL
   ../tools/mp3d_replay.cpp
-  ../src/room_gn_solver.cpp
-  ../src/room_model.cpp
-  ../src/room_concept.cpp
-  ../src/door_apertures.cpp   # missing since the 09-13 door filter: this target had not linked since
-  ../src/reloc_search.cpp   # room_concept.cpp calls into it (2026-09-16)
-  ../src/object_anchor_factor.cpp
-  ../src/image_edge_factor.cpp
-  ../src/image_edge_source.cpp
-  ../src/corner_detector.cpp
-  ../src/wall_segmenter.cpp
-  ../src/wall_map.cpp
-  ../src/room_boxes.cpp
-  ../src/room_boxes_channel.cpp
-  ../src/pointcloud_center_estimator.cpp
-  ../src/rerun_logger.cpp
 )
 target_include_directories(mp3d_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(mp3d_replay ${LIBS})
@@ -205,22 +158,6 @@ set_target_properties(mp3d_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CU
 #   make -C build reloc_selftest && ../bin/reloc_selftest
 add_executable(reloc_selftest EXCLUDE_FROM_ALL
   ../tools/reloc_selftest.cpp
-  ../src/reloc_search.cpp
-  ../src/epistemic_planner.cpp
-  ../src/room_gn_solver.cpp
-  ../src/room_model.cpp
-  ../src/room_concept.cpp
-  ../src/door_apertures.cpp
-  ../src/object_anchor_factor.cpp
-  ../src/image_edge_factor.cpp
-  ../src/image_edge_source.cpp
-  ../src/corner_detector.cpp
-  ../src/wall_segmenter.cpp
-  ../src/wall_map.cpp
-  ../src/room_boxes.cpp
-  ../src/room_boxes_channel.cpp
-  ../src/pointcloud_center_estimator.cpp
-  ../src/rerun_logger.cpp
 )
 target_include_directories(reloc_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(reloc_selftest ${LIBS})
@@ -234,7 +171,6 @@ set_target_properties(reloc_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 #     && RC_CORNER_EXPLAIN_AWAY=1 ../bin/corner_gather_test
 add_executable(corner_gather_test EXCLUDE_FROM_ALL
   ../tools/corner_gather_test.cpp
-  ../src/corner_detector.cpp
 )
 target_include_directories(corner_gather_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(corner_gather_test ${LIBS})
@@ -247,25 +183,7 @@ set_target_properties(corner_gather_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${C
 # polygon error against the synthetic truth. EXCLUDE_FROM_ALL like gn_selftest. Build with:
 #     make -C build wall_slam_selftest && ./bin/wall_slam_selftest
 add_executable(wall_slam_selftest EXCLUDE_FROM_ALL
-  ../tools/wall_slam_selftest.cpp
-  ../src/room_gn_solver.cpp
-  # room_concept.cpp gained a dependency on DoorApertures when the open-door scan filter landed
-  # (2026-09-13). The bench links room_concept.cpp, so it needs this too — the harness is a second
-  # consumer of that file and a new .cpp in the agent is a link error here, silently, until built.
-  ../src/door_apertures.cpp
-  ../src/room_model.cpp
-  ../src/room_concept.cpp
-  ../src/reloc_search.cpp   # room_concept.cpp calls into it (2026-09-16)
-  ../src/object_anchor_factor.cpp
-  ../src/image_edge_factor.cpp
-  ../src/image_edge_source.cpp
-  ../src/corner_detector.cpp
-  ../src/wall_segmenter.cpp
-  ../src/wall_map.cpp
-  ../src/room_boxes.cpp
-  ../src/room_boxes_channel.cpp
-  ../src/pointcloud_center_estimator.cpp
-  ../src/rerun_logger.cpp
+  ../tools/wall_slam_selftest.cpp   # the estimator comes from rc_room_estimator (via LIBS)
 )
 # ── THE BENCH DRIVES THE AGENT'S OWN FOLLOWER ────────────────────────────────────────────────
 # `pursue()` was a six-line P controller written for the hand tour, whose waypoints were safe by

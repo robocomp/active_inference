@@ -1,0 +1,5 @@
+old accumulator : worst factor-vs-truth error 0.0994 m  (reproduces the over-span, as expected)
+StrideSpan      : worst factor-vs-truth error 1.45e-06 m  (ok)
+covariance span : replace 2.0e-04 (want 2e-04), append 1.0e-04 (want 1e-04)  (ok)
+PASS
+[exit 0]

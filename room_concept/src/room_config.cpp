@@ -84,8 +84,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // ── RoomConcept params ─────────────────────────────────────────────────
     reader.req<bool>("RoomConcept.PredictionEarlyExit", p.PREDICTION_EARLY_EXIT,
             "Localizer");
-    reader.req<int>("RoomConcept.NumIterations", room_concept.params.num_iterations,
-            "Balance between speed and convergence");
     reader.req<int>("RoomConcept.WindowSize", room_concept.params.rfe_window_size,
             "Number of past timesteps to retain");
     reader.req<int>("RoomConcept.MaxLidarPoints", room_concept.params.max_lidar_points,
@@ -117,8 +115,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m — support of the lost emission (log-uniform)");
     reader.opt<float, double>("RoomConcept.RelocLostSMax", room_concept.params.reloc_lost_s_max,
             "m");
-    reader.opt<bool>("RoomConcept.RelocLegacyGridSearch", room_concept.params.reloc_legacy_grid_search,
-            "A/B: true = the pre-09-16 4-stage lattice for the commit");
     reader.opt<bool>("RoomConcept.RelocEnabled", room_concept.params.reloc_enabled,
             "false = relocalisation never moves the pose (lost, mode_switch, seed_validation)");
 
@@ -147,8 +143,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "config: RoomConcept.CalibStateFile");
     reader.opt<float, double>("RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale,
             "Multiplier on all odom noise params (>1 simulates worse odometry)");
-    reader.opt<bool>("RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled,
-            "Enable shadow single-step evaluator for RFE vs baseline comparison");
     reader.opt<bool>("RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only,
             "If true, SDF obs evaluated only for the newest slot");
     // Raise the published covariance to at least what the innovations demonstrate, so the sigma stops
@@ -206,11 +200,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "Outlier-aware: a residual bigger than these is a relocalization/jump (the gentle slew would take ~30 s to catch up → the pose strands metres from…");
     reader.opt<float, double>("PredictPublish.snap_thresh_rad", p.PREDICT_SNAP_THRESH_RAD,
             "");
-    reader_apply<std::string>(reader, "RoomConcept.OptimizerType", "pose optimiser backend: LBFGS | ADAM | GN", p.OptimizerType, [&](const std::string& optimizer_type)
-    {
-        p.OptimizerType = optimizer_type;
-        room_concept.params.optimizer_type = optimizer_type;
-    });
     reader_apply<std::string>(reader, "RoomConcept.RoomLayoutSvg", "layout SVG (a [Scenario.*] overlay may replace it)", p.ROOM_LAYOUT_SVG, [&](const std::string& svg_file)
     {
         p.ROOM_LAYOUT_SVG = svg_file;
@@ -540,25 +529,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     reader.opt<float, double>("RoomConcept.RotationSdfCoupling", room_concept.params.rotation_sdf_coupling,
             "m/rad — extra SDF tolerance per radian of rotation");
 
-    reader.opt<float, double>("RoomConcept.LbfgsLr", room_concept.params.lbfgs_lr,
-            "Initial step size");
-    reader.opt<int>("RoomConcept.LbfgsHistorySize", room_concept.params.lbfgs_history_size,
-            "(s,y) pairs kept for H^-1 approximation");
-    reader.opt<double>("RoomConcept.LbfgsToleranceGrad", room_concept.params.lbfgs_tolerance_grad,
-            "Stop when ||grad||_inf < tol");
-    reader.opt<double>("RoomConcept.LbfgsToleranceChange", room_concept.params.lbfgs_tolerance_change,
-            "Stop when |Δloss| < tol");
-
     reader.opt<float, double>("RoomConcept.LearningRatePos", room_concept.params.learning_rate_pos,
             "Uniform LR for all pose DoF (x, y, θ)");
     reader.opt<float, double>("RoomConcept.ObsSigma", room_concept.params.rfe_obs_sigma,
             "σ_obs for SDF observation noise (m)");
     reader.opt<float, double>("RoomConcept.HuberDelta", room_concept.params.rfe_huber_delta,
             "Huber threshold (m)");
-    reader.opt<float, double>("RoomConcept.ConvergenceRelTol", room_concept.params.convergence_relative_tol,
-            "Relative loss-change stopping criterion");
-    reader.opt<int>("RoomConcept.ConvergenceMinIters", room_concept.params.convergence_min_iters,
-            "Minimum iterations before convergence check");
 
     reader.opt<bool>("RoomConcept.BoundaryQualityGate", room_concept.params.rfe_boundary_quality_gate,
             "===== Boundary Prior Quality Gate ===== When the previous frame's localization was poor (sdf_mse_prev > sigma_sdf), the boundary prior anchors ADAM…");
@@ -568,8 +544,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m — above this: keep previous mu");
     reader.opt<float, double>("RoomConcept.EigenvalueClampBoundaryMax", room_concept.params.eigenvalue_clamp_boundary_max,
             "Max eigenvalue — prevents over-confident prior from contaminated scans");
-    reader.opt<int>("RoomConcept.TorchNumThreads", room_concept.params.torch_num_threads,
-            "intra-op CPU threads (was hard-coded 5 = the 4-core budget)");
     reader.opt<bool>("RoomConcept.BoundaryFejSchur", room_concept.params.boundary_fej_schur,
             "===== FEJ + Schur marginalization boundary prior (replaces Solutions B/C when ON) ===== The legacy boundary prior above is a rough approximation to…");
     reader.opt<float, double>("RoomConcept.BoundaryQualitySigma", room_concept.params.boundary_quality_sigma,
@@ -807,14 +781,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "global scale on corner precision vs the SDF term");
     reader.opt<float, double>("RoomConcept.CornerHuberSigma", room_concept.params.corner_huber_sigma,
             "Huber saturation in WHITENED (σ) units, not meters");
-    // Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h). All OFF by default: GnShadow
-    // only LOGS, and driving the pose with it additionally requires OptimizerType = "GN".
-    reader.opt<bool>("RoomConcept.GnShadow", room_concept.params.gn_shadow,
-            "");
-    reader.opt<bool>("RoomConcept.GnGradCheck", room_concept.params.gn_grad_check,
-            "Finite-difference check of the analytic Jacobian, logged as grad_relerr in the shadow CSV");
-    reader.opt<std::string>("RoomConcept.GnShadowCsv", room_concept.params.gn_shadow_csv_path,
-            "");
+    // Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) — the only pose backend.
     reader.opt<int>("RoomConcept.GnMaxIters", room_concept.params.gn_max_iters,
             "");
     reader.opt<float, double>("RoomConcept.GnLambdaInit", room_concept.params.gn_lambda_init,
@@ -863,16 +830,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     reader.opt<float, double>("ObjectAnchor.freshnessAgeScale", p.OBJECT_ANCHOR_FRESHNESS_AGE_SCALE,
             "ObjectAnchor.freshnessAgeScale — frames→σ doubles");
     room_concept.params.object_anchor.enable      = p.OBJECT_ANCHOR_ENABLE;
-    // GN-only: the autograd backends have no landmark variables, so silently honouring this under
-    // LBFGS/ADAM would mean the flag reads true while nothing optimises. Refuse loudly instead.
     room_concept.params.object_anchor_optimize_landmark = p.OBJECT_ANCHOR_OPTIMIZE_LANDMARK;
-    if (p.OBJECT_ANCHOR_OPTIMIZE_LANDMARK and room_concept.params.optimizer_type != "GN")
-    {
-        qWarning() << "[room] ObjectAnchor.optimizeLandmark needs OptimizerType = \"GN\" (have"
-                   << QString::fromStdString(room_concept.params.optimizer_type) << ") — landmark "
-                      "optimisation DISABLED, anchors stay pinned";
-        room_concept.params.object_anchor_optimize_landmark = false;
-    }
     room_concept.params.object_anchor.weight      = p.OBJECT_ANCHOR_WEIGHT;
     room_concept.params.object_anchor.huber_delta = p.OBJECT_ANCHOR_HUBER;
     room_concept.params.object_anchor_max_slots   = p.OBJECT_ANCHOR_MAX_SLOTS;
@@ -884,7 +842,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     reader.opt<bool>("ImageEdge.shadow", p.IMAGE_EDGE_SHADOW,
             "ImageEdge.shadow");
     reader.opt<bool>("ImageEdge.drive", p.IMAGE_EDGE_DRIVE,
-            "ImageEdge.drive (refused unless OptimizerType == 'GN')");
+            "ImageEdge.drive");
     reader.opt<std::string>("ImageEdge.camera", p.IMAGE_EDGE_CAMERA,
             "ImageEdge.camera — DSR node name ('zed' | 'ricoh')");
     reader.opt<bool>("ImageEdge.useWallCorners", p.IMAGE_EDGE_USE_WALL_CORNERS,
@@ -983,7 +941,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             f("BoundaryMuQualityThreshold",        ov.boundary_mu_quality_threshold);
             f("GnLossRelTol",                      ov.gn_loss_rel_tol);
             i("GnMaxIters",                        ov.gn_max_iters);
-            i("TorchNumThreads",                   ov.torch_num_threads);
             b("AdaptiveCovEnabled",                ov.adaptive_cov_enabled);
             b("WindowStrideEnabled",               ov.window_stride_enabled);
             b("BoundaryFejSchur",                  ov.boundary_fej_schur);
@@ -1064,18 +1021,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     room_concept.params.image_edge_shadow             = p.IMAGE_EDGE_SHADOW;
     room_concept.params.image_edge_csv                = p.IMAGE_EDGE_CSV;
     room_concept.params.calib_state_file              = p.CALIB_STATE_FILE;
-    // GN-only, and refused LOUDLY rather than honoured silently: the autograd backends evaluate the
-    // term (the torch mirror exists) but only the GN factor list can be driven by it, so under
-    // LBFGS/ADAM the flag would read true while nothing moved. Same rule, same reason, as
-    // ObjectAnchor.optimizeLandmark above.
-    if (p.IMAGE_EDGE_DRIVE and room_concept.params.optimizer_type != "GN")
-    {
-        qWarning() << "[room] ImageEdge.drive needs OptimizerType = \"GN\" (have"
-                   << QString::fromStdString(room_concept.params.optimizer_type)
-                   << ") — RGB edge term DEMOTED to shadow (evaluated + logged, does not move the pose)";
-        room_concept.params.image_edge.drive  = false;
-        room_concept.params.image_edge_shadow = true;
-    }
     if (p.IMAGE_EDGE_DRIVE and not p.IMAGE_EDGE_ENABLE)
         qWarning() << "[room] ImageEdge.drive = true but ImageEdge.enable = false — nothing is built, "
                       "the term is INERT. Set enable = true.";
@@ -1091,8 +1036,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "β — exponent of the incidence weight");
     reader.opt<float, double>("RoomConcept.IncidenceAngleMinWeight", room_concept.params.incidence_angle_min_weight,
             "floor weight for grazing rays");
-    reader.opt<bool>("RoomConcept.UseCuda", room_concept.params.use_cuda,
-            "GPU/CPU selection Note: For small tensors (~200 points), CPU is faster due to GPU transfer overhead");
     reader.opt<bool>("RoomConcept.DebugLog", room_concept.params.debug_log_enabled,
             "Write per-frame CSV to tmp/sdf_localizer/log.csv");
     reader.opt<bool>("RoomConcept.OptimizerTimingCsv", room_concept.params.optimizer_timing_csv,
@@ -1311,7 +1254,6 @@ std::vector<std::string> RoomConfig::apply_platform_to(const std::string& robot,
     set(ov.boundary_mu_quality_threshold,   rp.boundary_mu_quality_threshold,         "BoundaryMuQualityThreshold");
     set(ov.gn_loss_rel_tol,                 rp.gn_loss_rel_tol,                       "GnLossRelTol");
     set(ov.gn_max_iters,                    rp.gn_max_iters,                          "GnMaxIters");
-    set(ov.torch_num_threads,               rp.torch_num_threads,                     "TorchNumThreads");
     set(ov.adaptive_cov_enabled,            rp.adaptive_cov_enabled,                  "AdaptiveCovEnabled");
     set(ov.window_stride_enabled,           rp.window_stride_enabled,                 "WindowStrideEnabled");
     set(ov.boundary_fej_schur,              rp.boundary_fej_schur,                    "BoundaryFejSchur");

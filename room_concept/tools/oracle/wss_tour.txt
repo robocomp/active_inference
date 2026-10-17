@@ -1,0 +1,11 @@
+
+=== TOUR: rectangle room, 3 laps, 1440 frames (36 m of reference path) ===
+case                           IoU   Hausd  rmse_xy   max_xy  walls closed mapRot
+asserted bp (old bench)      0.988   0.022    0.015    0.038      4    yes   1.67  0/1435
+REAL marginal, cap 500       0.987   0.024    0.015    0.039      4    yes   1.80  1435/1435
+REAL marginal, cap 1e9       0.987   0.024    0.015    0.039      4    yes   1.80  1435/1435
+REAL marginal, cap 50        0.987   0.028    0.017    0.041      4    yes   1.87  1435/1435
+rot 1.41, asserted bp        0.000   9.990    2.280    4.962      5     NO   5.97  0/1435
+rot 1.41, REAL marginal      0.190  14.849    9.719   14.833      6    yes   2.63  1435/1435
+
+[exit 0]

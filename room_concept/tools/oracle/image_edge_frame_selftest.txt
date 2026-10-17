@@ -1,0 +1,6 @@
+1. heading info 8 -> 128 segments: frame 7.96e+04 -> 8.15e+04 (bound 8.16e+04); per-segment 5.43e+05 -> 8.68e+06  (ok)
+2. residuals x1: pi 0.975 (want ~1.000)  (ok)
+2. residuals x3: pi 0.123 (want ~0.111)  (ok)
+3. no shared nuisance: frame == per-segment sum to 1.6e-07  (ok)
+PASS
+[exit 0]

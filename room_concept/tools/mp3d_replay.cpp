@@ -23,7 +23,6 @@
  *      MP3D_POLY=<pfx>   write the per-frame layout+sigma trace, <pfx>_<i>.csv
  *      MP3D_VERBOSE=1    per-frame detail
  */
-#include <torch/torch.h>
 
 #include <algorithm>
 #include <charconv>
@@ -51,22 +50,13 @@ namespace
 
     float wrap(float a) { return std::atan2(std::sin(a), std::cos(a)); }
 
-    torch::Tensor pose_tensor(const Eigen::Vector3f& p)
-    { return torch::tensor({p.x(), p.y(), p.z()},
-                           torch::TensorOptions().dtype(torch::kFloat32).requires_grad(true)); }
+    Eigen::Vector3f pose_tensor(const Eigen::Vector3f& p) { return p; }   // was a torch tensor
 
-    torch::Tensor points_tensor(const std::vector<Eigen::Vector2f>& pts)
+    rc::ScanPoints points_tensor(const std::vector<Eigen::Vector2f>& pts)
     {
-        auto t = torch::zeros({static_cast<long>(pts.size()), 3}, torch::kFloat32);
-        auto a = t.accessor<float, 2>();
-        for (size_t i = 0; i < pts.size(); ++i) { a[i][0] = pts[i].x(); a[i][1] = pts[i].y(); a[i][2] = 0.f; }
-        return t;
-    }
-    torch::Tensor mat3(const Eigen::Matrix3f& m)
-    {
-        auto t = torch::zeros({3, 3}, torch::kFloat32);
-        auto a = t.accessor<float, 2>();
-        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) a[r][c] = m(r, c);
+        rc::ScanPoints t;
+        t.reserve(pts.size());
+        for (const auto& p : pts) t.emplace_back(p.x(), p.y(), 0.f);
         return t;
     }
 
@@ -163,7 +153,6 @@ namespace
 
 int main(int argc, char** argv)
 {
-    torch::set_num_threads(1);
     if (argc < 2) { std::printf("usage: mp3d_replay <dataset_root> [room_substring]\n"); return 2; }
     const std::filesystem::path root = argv[1];
     const std::string filter = (argc > 2) ? argv[2] : "";
@@ -333,30 +322,29 @@ int main(int argc, char** argv)
             slot.lidar_points = points_tensor(pts);
             slot.odometry_delta = odom;
             slot.motion_cov = Eigen::Vector3f(0.02f * 0.02f, 0.02f * 0.02f, 0.01f * 0.01f).asDiagonal();
-            slot.odom_delta_tensor = torch::tensor({odom.x(), odom.y(), odom.z()}, torch::kFloat32);
-            slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+            slot.odometry_delta = odom;
+            slot.motion_prec = slot.motion_cov.inverse();
             slot.wall_assoc = fr.assoc;
 
             rc::gn::Input in;
             in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
-            in.device = torch::kCPU;
             in.walls = &map; in.no_sdf = true; in.gauge_fix = true;
             if (static_cast<int>(window.size()) >= 5)
             {
-                auto fp = window.front().pose.detach();
+                auto fp = window.front().pose;
                 rc::gn::absorb_wall_observations(in, window.front(),
-                    Eigen::Vector3f(fp[0].item<float>(), fp[1].item<float>(), fp[2].item<float>()));
+                    Eigen::Vector3f(fp[0], fp[1], fp[2]));
                 window.pop_front();
-                auto nf = window.front().pose.detach();
+                auto nf = window.front().pose;
                 bp.valid = true;
-                bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
+                bp.mu = Eigen::Vector3f(nf[0], nf[1], nf[2]);
                 bp.precision = Eigen::Vector3f(400.f, 400.f, 1600.f).asDiagonal();
             }
             window.push_back(std::move(slot));
             std::vector<Eigen::Vector3f> poses;
             for (const auto& sl : window)
-            { auto pp = sl.pose.detach();
-              poses.emplace_back(pp[0].item<float>(), pp[1].item<float>(), pp[2].item<float>()); }
+            { auto pp = sl.pose;
+              poses.emplace_back(pp[0], pp[1], pp[2]); }
             rc::gn::Options opts;
             const auto r = rc::gn::solve(in, poses, opts);
             if (r.ok) for (size_t i = 0; i < window.size(); ++i) window[i].pose = pose_tensor(poses[i]);

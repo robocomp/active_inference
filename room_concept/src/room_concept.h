@@ -23,36 +23,6 @@
 #include <functional>
 #include <random>
 
-// ---- PyTorch vs Qt macros (slots/signals/emit) ----
-// Qt uses 'slots' as a macro. PyTorch/libtorch has methods named slots(), which breaks compilation.
-// We temporarily undefine Qt macros *only* while including torch headers, then restore them.
-#ifdef slots
-  #define RC_QT_SLOTS_WAS_DEFINED
-  #undef slots
-#endif
-#ifdef signals
-  #define RC_QT_SIGNALS_WAS_DEFINED
-  #undef signals
-#endif
-#ifdef emit
-  #define RC_QT_EMIT_WAS_DEFINED
-  #undef emit
-#endif
-
-#include <torch/torch.h>
-
-#ifdef RC_QT_SLOTS_WAS_DEFINED
-  #define slots Q_SLOTS
-  #undef RC_QT_SLOTS_WAS_DEFINED
-#endif
-#ifdef RC_QT_SIGNALS_WAS_DEFINED
-  #define signals Q_SIGNALS
-  #undef RC_QT_SIGNALS_WAS_DEFINED
-#endif
-#ifdef RC_QT_EMIT_WAS_DEFINED
-  #define emit Q_EMIT
-  #undef RC_QT_EMIT_WAS_DEFINED
-#endif
 
 #include <Eigen/Dense>
 #include "common_types.h"
@@ -100,9 +70,7 @@ class RoomConcept
 public:
     struct Params
     {
-        int num_iterations = 25;          // Balance between speed and convergence
         float learning_rate_pos = 0.05f;  // Uniform LR for all pose DoF (x, y, θ)
-        float min_loss_threshold = 0.1f;  // Early exit threshold
 
         float wall_thickness = 0.1f;
         float wall_height = 2.4f;        // meters
@@ -164,7 +132,6 @@ public:
 
         // GPU/CPU selection
         // Note: For small tensors (~200 points), CPU is faster due to GPU transfer overhead
-        bool use_cuda = false;
         bool optimizer_timing_csv = true;   // lean per-update timing CSV (etc/optimizer_timing.csv)
 
         // ===== Prediction-based Early Exit =====
@@ -184,7 +151,6 @@ public:
         float rotation_sdf_coupling = 0.5f;   // m/rad — extra SDF tolerance per radian of rotation
 
         // ===== Differential Test (A/B comparison) =====
-        bool differential_test_enabled = false;  // Enable shadow single-step evaluator for RFE vs baseline comparison
 
         // ===== Velocity-Adaptive Gradient Weights =====
         // Adjust optimization emphasis based on current motion profile
@@ -302,25 +268,13 @@ public:
         int   reloc_track_memory_frames= 200;    // forgetting timescale of the learnt tracking emission
         float reloc_lost_s_min         = 0.01f;  // m — support of the lost emission (log-uniform)
         float reloc_lost_s_max         = 5.0f;   // m
-        bool  reloc_legacy_grid_search = false;  // A/B: true = the pre-09-16 4-stage lattice for the commit
         bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (lost, mode_switch, seed_validation)
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 
-        // ===== Optimizer Selection =====
-        // "ADAM"  — adaptive moment estimation (current default)
-        // "LBFGS" — limited-memory BFGS with Wolfe line search (faster convergence)
-        // "GN"    — Levenberg-Marquardt on analytic Jacobians (room_gn_solver), no autograd
-        // "CAVI"  — coordinate-ascent variational inference (reserved, not yet implemented)
-        std::string optimizer_type = "LBFGS";
-
-        // ===== Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) =====
-        // Same objective as compute_rfe_loss, solved as a 15×15 normal-equation system instead of
-        // ~29 torch forward+backward passes. OFF by default in every sense: `optimizer_type` must say
-        // "GN" for it to drive the pose, and gn_shadow must be set for it to run at all otherwise.
-        //
-        // gn_shadow runs BOTH backends on the SAME starting window state, keeps the authoritative
-        // one's answer, and logs the pair to gn_shadow_csv_path. It is a numerical comparison on
-        // identical inputs, not a behavioural A/B — the live pose is untouched.
+        // ===== Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) =====
+        // The only pose backend. The Adam and L-BFGS backends, the GN-vs-them shadow and the single-step
+        // differential test were deleted with torch (2026-10-17); GN had been the default since its
+        // 72.7 -> ~4 ms switch, and its fallback to Adam fired 0 times in try42-45.
         // Room optimises each object anchor's position as a PRIVATE variable (birth prior = the
         // producing agent's own belief) instead of pinning it to a frozen snapshot. Never written back
         // to the graph: the producer stays the sole authority for the published pose, so the gap
@@ -328,28 +282,10 @@ public:
         // backends have no landmark variables. Default off.
         bool  object_anchor_optimize_landmark = false;
 
-        bool  gn_shadow = false;
-        // Finite-difference check of the analytic Jacobian, logged as grad_relerr in the shadow CSV.
-        // Costs 2·15 extra loss evaluations per optimized frame, so keep it on only for a validation
-        // run, not for a timing run — it inflates ms_gn.
-        bool  gn_grad_check = false;
-        std::string gn_shadow_csv_path = "etc/gn_shadow.csv";
         int   gn_max_iters    = 10;
         float gn_lambda_init  = 1e-3f;   // Levenberg damping relative to diag(H)
         float gn_step_tol     = 1e-5f;   // ‖δ‖∞ (m / rad) convergence test
         float gn_loss_rel_tol = 1e-4f;   // relative loss-improvement convergence test
-
-        // ===== Adam Convergence =====
-        float convergence_relative_tol = 0.01f;       // Relative loss-change stopping criterion
-        int convergence_min_iters = 8;                 // Minimum iterations before convergence check
-
-        // ===== L-BFGS parameters =====
-        // Used only when optimizer_type == "LBFGS".
-        // lr=1 is the standard initial Newton step; strong_wolfe line search adjusts it.
-        float  lbfgs_lr               = 1.0f;   // Initial step size
-        int    lbfgs_history_size     = 5;      // (s,y) pairs kept for H^-1 approximation
-        double lbfgs_tolerance_grad   = 1e-5;   // Stop when ||grad||_inf < tol
-        double lbfgs_tolerance_change = 1e-7;   // Stop when |Δloss| < tol
 
         // ===== Covariance Numerics =====
         float eigenvalue_clamp_posterior = 1e-4f;      // Min eigenvalue for posterior precision
@@ -754,12 +690,6 @@ public:
         float wall_gauge_sigma_theta = 1e-3f;  // rad
         int   wall_max_slots = 0;              // wall factors on the newest N slots (0 ⇒ every slot)
 
-        // Torch threading configuration. The window solve is a tiny problem (3 DOF × ~5 slots ×
-        // ~400 pts), so intra-op parallelism mostly buys thread-dispatch overhead, not speed, while
-        // pinning that many cores. Applied in start() (set_num_threads is runtime-safe), config key
-        // RoomConcept.TorchNumThreads. Lower this to shed CPU cores; A/B against t_adam_ms.
-        int torch_num_threads = 2;          // intra-op CPU threads (was hard-coded 5 = the 4-core budget)
-        int torch_num_interop_threads = 2;  // inter-op threads (set once at static init; not runtime-tunable)
 
         // ===== Debug Logging =====
         bool debug_log_enabled = false;      // Write per-frame CSV to tmp/sdf_localizer/log.csv
@@ -773,13 +703,6 @@ public:
         int rerun_max_queue = 30;
     };
 
-    // Get the torch device based on params
-    torch::Device get_device() const
-    {
-        if (params.use_cuda && torch::cuda::is_available())
-            return torch::kCUDA;
-        return torch::kCPU;
-    }
 
     struct UpdateResult
     {
@@ -969,7 +892,6 @@ public:
         bool fresh = false;
         bool is_measured = false;
         Eigen::Vector3f delta_pose;      // [dx, dy, dtheta] in meters & radians
-        torch::Tensor covariance;        // 3x3 covariance matrix
         Eigen::Matrix3f covariance_eigen = Eigen::Matrix3f::Identity();
         VelocityCommand velocity_cmd;    // The actual velocity command
         float dt;                        // Time delta
@@ -983,7 +905,6 @@ public:
 
         OdometryPrior()
             : delta_pose(Eigen::Vector3f::Zero())
-            , covariance(torch::zeros({3,3}, torch::kFloat32))
             , covariance_eigen(Eigen::Matrix3f::Identity())
             , dt(0.0f)
         {}
@@ -1380,9 +1301,6 @@ public:
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                    float grid_resolution = 0.5f,  // meters
                                    float angle_resolution = M_PI_4);  // 45 degrees
-    /// The pre-2026-09-16 4-stage lattice, kept verbatim as the CONTROL arm of tools/reloc_selftest and
-    /// behind params.reloc_legacy_grid_search. Delete once the mixture search has run live.
-    bool legacy_grid_search_pose(const std::vector<Eigen::Vector3f>& lidar_points, float grid_resolution);
     /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
     std::vector<rc::reloc::PoseHypothesis> pose_hypotheses() const
     {
@@ -1399,19 +1317,17 @@ public:
     // ===== Sliding Window (RFE) types =====
     struct WindowSlot
     {
-        torch::Tensor pose;             // [3] = {x, y, theta}, requires_grad=true
-        torch::Tensor lidar_points;     // [N, 3] stored observation (no grad)
+        Eigen::Vector3f pose = Eigen::Vector3f::Zero();   // {x, y, theta}
+        ScanPoints      lidar_points;                     // stored observation, robot frame
         Eigen::Vector3f odometry_delta = Eigen::Vector3f::Zero(); // delta from prev slot
         Eigen::Matrix3f motion_cov = Eigen::Matrix3f::Identity(); // Σ_dyn
         Eigen::Matrix3f pose_cov = Eigen::Matrix3f::Identity() * 0.1f;   // pose covariance at slot creation (publish-test marginal)
         int64_t timestamp_ms = 0;
 
-        // Cached tensors (computed once at append-time, reused every Adam iteration)
-        torch::Tensor odom_delta_tensor;   // [3], on device
-        torch::Tensor motion_prec_tensor;  // [3,3], Σ_dyn^{-1} on device
-        // [3,3] precision of the "this interval had no motion" hypothesis, for the ZERO-delta motion
-        // factor. Undefined unless Params::zupt_as_factor — see NoiseModel::zupt_as_factor.
-        torch::Tensor zupt_prec_tensor;
+        Eigen::Matrix3f motion_prec = Eigen::Matrix3f::Identity();   // Σ_dyn^{-1}, set at append time
+        // Precision of the "this interval had no motion" hypothesis, for the ZERO-delta motion factor.
+        // Empty unless Params::zupt_as_factor — see NoiseModel::zupt_as_factor.
+        std::optional<Eigen::Matrix3f> zupt_prec;
         bool subsampled = false;           // true once old-slot subsampling has been applied
 
         // Quality of this slot's localization (set after Adam/early-exit, read when slot
@@ -1434,44 +1350,6 @@ public:
         // frame, as the segmenter/associator left them. Consumed by gn::WallPointFactor; folded into
         // the walls' carried information when the slot is dropped (gn::absorb_wall_observations).
         std::vector<wallmap::WallAssoc> wall_assoc;
-
-        // Batched corner constants (built ONCE from corner_obs, reused every optimizer closure).
-        // The per-corner world corner / robot-frame detection / anisotropic precision Λ_det do NOT
-        // depend on the pose being optimized, so building them per-iteration (as tiny torch::tensor
-        // allocations) was pure dispatch overhead that scaled O(corners × closures). Stacked here they
-        // let compute_rfe_loss evaluate the whole corner factor as a handful of batched ops.
-        // Defined (non-empty) iff corner_obs is non-empty; rebuilt by rebuild_corner_batch().
-        torch::Tensor corner_cw;           // [N,2] world-frame model corners
-        torch::Tensor corner_detected;     // [N,2] detected positions in robot frame
-        torch::Tensor corner_information;  // [N,2,2] graded precision Λ_det (robot frame)
-
-        // Rebuild the batched corner tensors from corner_obs (call after populating corner_obs).
-        void rebuild_corner_batch(torch::Device device)
-        {
-            const int n = static_cast<int>(corner_obs.size());
-            if (n == 0)
-            {
-                corner_cw = corner_detected = corner_information = torch::Tensor{};
-                return;
-            }
-            auto cw   = torch::empty({n, 2}, torch::kFloat32);
-            auto det  = torch::empty({n, 2}, torch::kFloat32);
-            auto info = torch::empty({n, 2, 2}, torch::kFloat32);
-            auto acw = cw.accessor<float, 2>();
-            auto adet = det.accessor<float, 2>();
-            auto ainfo = info.accessor<float, 3>();
-            for (int i = 0; i < n; ++i)
-            {
-                const auto& o = corner_obs[i];
-                acw[i][0] = o.model_corner_world.x(); acw[i][1] = o.model_corner_world.y();
-                adet[i][0] = o.detected_robot.x();    adet[i][1] = o.detected_robot.y();
-                ainfo[i][0][0] = o.information(0,0);   ainfo[i][0][1] = o.information(0,1);
-                ainfo[i][1][0] = o.information(1,0);   ainfo[i][1][1] = o.information(1,1);
-            }
-            corner_cw = cw.to(device);
-            corner_detected = det.to(device);
-            corner_information = info.to(device);
-        }
 
         // Object-anchor observations for this slot (validated modelled objects as SE(2) landmarks).
         std::vector<ObjectAnchorObs> object_anchors;
@@ -1693,7 +1571,7 @@ private:
    /// Per-point door weight for a robot-frame scan, or an undefined tensor when no door is open —
    /// which makes every consumer fall back to the plain unweighted reduction, i.e. exactly the
    /// behaviour of a room without doors.
-   torch::Tensor door_point_weights(const torch::Tensor& points_robot) const;
+   Eigen::VectorXf door_point_weights(const ScanPoints& points_robot) const;
 
 public:
    /// The scan with every through-an-open-door return REMOVED, robot frame in and out. The canvas
@@ -1891,15 +1769,6 @@ private:
        /// Subsample lidar in all slots except the newest.
        void subsample_old_slots(int max_pts_per_slot);
 
-       /// Collect all pose tensors for the optimizer.
-       std::vector<torch::Tensor> collect_params() const;
-
-       /// Build the full RFE loss over the current window (Eq. 27).
-       /// boundary_weight scales the boundary prior term (1.0 = full, 0.0 = disabled).
-       torch::Tensor compute_rfe_loss(const Model& model, const Params& params,
-                                       torch::Device device,
-                                       float boundary_weight = 1.0f) const;
-
        /// Per-term loss breakdown — called once after Adam for diagnostic logging.
        struct LossBreakdown {
            float boundary = 0.f;
@@ -1909,19 +1778,17 @@ private:
            float object   = 0.f;
            float image    = 0.f;   ///< RGB structural-contour term (0 unless ImageEdge.enable)
        };
-       LossBreakdown compute_rfe_loss_breakdown(const Model& model, const Params& params,
-                                                 torch::Device device) const;
+       LossBreakdown compute_rfe_loss_breakdown(const Model& model, const Params& params) const;
 
        /// Recompute boundary prior Hessian from oldest surviving slot (LEGACY path).
-       void recompute_boundary_prior(const Model& model, const Params& params,
-                                      torch::Device device);
+       void recompute_boundary_prior(const Model& model, const Params& params);
 
        /// FEJ + Schur marginalization (boundary_fej_schur path). Call BEFORE append() pops, while
        /// both the dropping slot (window.front() = x₀) and its blanket (window[1] = x₁) are live.
        /// Forms the exact Schur complement of x₀ over x₁ from {previous marginal on x₀, x₀'s obs
        /// factor (soft quality-weighted), x₀↔x₁ motion factor}, and stores a FEJ-frozen prior on x₁.
        /// No-op unless the window is full (>= max_window_size) with size > 1.
-       void marginalize_oldest(const Model& model, const Params& params, torch::Device device);
+       void marginalize_oldest(const Model& model, const Params& params);
    };
    WindowManager window_mgr_;
 
@@ -2056,9 +1923,9 @@ private:
                                 const Eigen::Vector3f &odom_body, UpdateResult &res);
    /// The newest scan's SDF factor alone, linearised at (x, y, th): the same query, observation weights,
    /// IRLS Huber and Jacobian as the solver's SdfFactor (room_gn_solver.cpp). Shared by the polish.
-   bool scan_linearize(const torch::Tensor &pts, float x, float y, float th, Eigen::Matrix3f &H, Eigen::Vector3f &bb);
+   bool scan_linearize(const ScanPoints &pts, float x, float y, float th, Eigen::Matrix3f &H, Eigen::Vector3f &bb);
    /// z = x_lin - H^-1 b and R = H^-1 into innov_z_/innov_R_ (innov_ok_ on success).
-   void scan_only_pose(const torch::Tensor &pts, float x, float y, float th);
+   void scan_only_pose(const ScanPoints &pts, float x, float y, float th);
    void observe_innovation(UpdateResult &res);
    rc::PoseFieldBias field_bias_;
    bool              field_bias_init_ = false;
@@ -2278,7 +2145,7 @@ private:
    /// Append one row to etc/hier_prec.csv (lazy-opened). src ∈ {opt, ee, reloc}. Loc-thread only, no lock.
    void               log_hier_prec_row(const char *src, float r_b, float quad, float trace, bool reloc_fired);
    WindowManager::LossBreakdown last_loss_breakdown_;  // FE term breakdown after last Adam
-   float              last_lbfgs_grad_norm_ = 0.f; // final gradient inf-norm after L-BFGS (0 for Adam/early-exit)
+   float              last_lbfgs_grad_norm_ = 0.f; // gradient norm at the end of the GN solve (0 on early-exit); name kept for the debug-CSV column
    // Per-frame timing — t_update_start_ set at entry of update(), shared with early-exit path
    std::chrono::high_resolution_clock::time_point t_update_start_;
    float              last_t_adam_ms_      = 0.f;
@@ -2318,43 +2185,6 @@ private:
    std::vector<float> trans_noise_sample_buf_;
    void            service_calibration();
 
-   // ===== Differential test: RFE vs single-step =====
-   struct DiffTestStats
-   {
-       double pred_sdf_sum = 0;     // sum of prediction-only SDF median
-       double single_sdf_sum = 0;   // sum of single-step Adam SDF median
-       double rfe_sdf_sum = 0;      // sum of full-RFE SDF median
-       int count = 0;
-       int adam_frames = 0;         // frames where Adam actually ran
-       int rfe_wins = 0;            // frames where RFE < single-step (SDF)
-       int single_wins = 0;         // frames where single-step < RFE (SDF)
-       int early_exit_seen = 0;     // total early-exit frames seen (for sampling)
-
-       // Pose jitter: residual motion after subtracting odometry prediction.
-       // Lower jitter = more temporally consistent.
-       double rfe_jitter_sum = 0;       // sum of ||RFE_pose - predicted_pose||₂
-       double single_jitter_sum = 0;    // sum of ||single_pose - predicted_pose||₂
-       double rfe_theta_jitter_sum = 0; // sum of |wrap(RFE_theta - pred_theta)|
-       double single_theta_jitter_sum = 0;
-
-       // Correction consistency: how much each method's correction vector
-       // changes between consecutive frames. Lower = smoother.
-       // correction[t] = optimised_pose[t] - predicted_pose[t]
-       float prev_rfe_cx = 0, prev_rfe_cy = 0, prev_rfe_ctheta = 0;
-       float prev_single_cx = 0, prev_single_cy = 0, prev_single_ctheta = 0;
-       bool has_prev = false;
-       double rfe_corr_consistency_sum = 0;     // sum ||rfe_corr[t] - rfe_corr[t-1]||₂
-       double single_corr_consistency_sum = 0;  // sum ||single_corr[t] - single_corr[t-1]||₂
-       double rfe_theta_consistency_sum = 0;    // sum |wrap(rfe_θcorr[t] - rfe_θcorr[t-1])|
-       double single_theta_consistency_sum = 0;
-   };
-   DiffTestStats diff_test_;
-
-   /// Run a single-step Adam (no window) on the given scan at the predicted pose.
-   /// Returns the SDF median-absolute-error after optimisation.
-   float shadow_single_step_adam(const torch::Tensor& points_tensor,
-                                 float pred_x, float pred_y, float pred_theta) const;
-
    // Compute velocity-adaptive weights based on motion profile
    Eigen::Vector3f compute_velocity_adaptive_weights(const OdometryPrior& odometry_prior);
     float estimate_orientation_from_points(const std::vector<Eigen::Vector3f>& pts) const;
@@ -2363,16 +2193,12 @@ private:
 
     struct PredictionState
     {
-        torch::Tensor propagated_cov;  // Predicted covariance
+        Eigen::Matrix3f propagated_cov = Eigen::Matrix3f::Zero();  // Predicted covariance
         bool have_propagated = false;   // Whether prediction was performed
         std::vector<float> previous_pose;  // Robot pose BEFORE prediction (for prior loss)
         std::vector<float> predicted_pose; // Robot pose after prediction
     };
 
-    // Pre-allocated tensors for predict_step (avoid per-frame allocation)
-    torch::Tensor predict_F_;   // [dim x dim] Jacobian
-    torch::Tensor predict_Q_;   // [dim x dim] process noise
-    int predict_alloc_dim_ = 0; // dimension they were allocated for
 
 public:
     /// PUBLIC so the offline bench can exercise the REAL fusion instead of imitating it. Both depend
@@ -2437,19 +2263,11 @@ private:
     /// ever deciding to skip the solve. Used while the layout is still being estimated, where the early
     /// exit must not fire (no fixed map) but the plot must still show the prediction's fit.
     std::optional<UpdateResult> try_prediction_early_exit(
-        const torch::Tensor& points_tensor,
+        const ScanPoints& scan_pts,
         const Eigen::Vector3f& slot_odom_delta,
         const OdometryPrior& odometry_prior,
         std::int64_t lidar_timestamp_ms,
         bool measure_only = false);
-
-    /// Run the Adam optimisation loop over the sliding window.
-    /// Returns {last_loss, iterations_used}.
-    std::pair<float, int> run_adam_loop(const OdometryPrior& odometry_prior);
-
-    /// Run the L-BFGS optimisation loop over the sliding window.
-    /// Returns {last_loss, func_evaluations}.
-    std::pair<float, int> run_lbfgs_loop(const OdometryPrior& odometry_prior);
 
     /// Run the Levenberg-Marquardt backend (room_gn_solver) over the sliding window, writing the
     /// solution back into the slot pose tensors. Returns {last_loss, iterations}. On failure the
@@ -2569,11 +2387,6 @@ private:
     Eigen::Vector4d mnt_p_sum2_ = Eigen::Vector4d::Zero();
     long            mnt_p_n_ = 0;
 
-    void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
-                       const std::vector<Eigen::Vector3f>& poses_after,
-                       float authority_loss, int authority_iters, float authority_ms,
-                       std::int64_t timestamp_ms);
-
     /// The boundary-prior precision scale for this frame (hierarchical π=exp(u_b) when enabled, else
     /// the legacy quality gate). One definition, so every backend minimises the same objective.
     float boundary_weight_now() const;
@@ -2582,35 +2395,15 @@ private:
     std::vector<Eigen::Vector3f> read_window_poses() const;
     void write_window_poses(const std::vector<Eigen::Vector3f>& poses);
 
-    std::ofstream gn_shadow_csv_;
 
-    /// Compute posterior covariance via autograd Hessian.
+    /// Posterior covariance of the newest pose: the GN window marginal when the solve produced one,
+    /// otherwise the Gauss-Newton information of this scan + the motion prior.
     /// Updates current_covariance and returns {covariance, condition_number}.
-    std::pair<Eigen::Matrix3f, float> compute_posterior_covariance(
-        const torch::Tensor& points_tensor);
-
-    // Compute the exact 3×3 Hessian of a scalar loss w.r.t. a 3-vector via double-backprop.
-    static Eigen::Matrix3f autograd_hessian_3x3(const torch::Tensor& loss,
-                                                 const torch::Tensor& param);
+    std::pair<Eigen::Matrix3f, float> compute_posterior_covariance(const ScanPoints& scan_pts);
 
     // Find best initial orientation by testing multiple candidates (0°, 90°, 180°, 270°)
     float find_best_initial_orientation(const std::vector<Eigen::Vector3f>& lidar_points,
                                         float x, float y, float base_phi);
-
-    // points to tensor [N,3] - overload for Eigen::Vector3f
-    static torch::Tensor points_to_tensor_xyz(const std::vector<Eigen::Vector3f> &points,
-                                               torch::Device device = torch::kCPU)
-    {
-        const auto N = static_cast<long>(points.size());
-        // Build on CPU first: data_ptr() of a CUDA tensor is a DEVICE pointer, and a host std::memcpy
-        // into it SIGSEGVs (the UseCuda=true crash). Fill host-side, then move to the target device.
-        auto tensor = torch::empty({N, 3}, torch::TensorOptions().dtype(torch::kFloat32));
-        auto ptr = tensor.data_ptr<float>();
-        // Eigen::Vector3f is 3 contiguous floats — bulk-copy each point
-        for (long i = 0; i < N; ++i)
-            std::memcpy(ptr + i * 3, points[i].data(), 3 * sizeof(float));
-        return device.is_cpu() ? tensor : tensor.to(device);
-    }
 
     /// THE fit metric for this class: median |SDF| in METRES, robust to the outliers that furniture
     /// (absent from the polygon) always contributes. Every pose-quality number must be reduced with
@@ -2618,9 +2411,16 @@ private:
     /// the symmetry check's candidate scores and the stability gate are all judged against each other,
     /// and each was previously computing its own variant (mean-squared m², sqrt-of-a-length) while
     /// being compared as though the units matched. See UpdateResult::sdf_mse.
-    static float median_abs_sdf(const torch::Tensor &sdf_vals)
+    /// The LOWER median for an even count, as torch::median returned — every reported sdf_mse
+    /// series (and every threshold calibrated against it) was produced that way.
+    static float median_abs_sdf(const Eigen::VectorXf &sdf_vals)
     {
-        return torch::median(torch::abs(sdf_vals)).item<float>();
+        if (sdf_vals.size() == 0) return std::numeric_limits<float>::quiet_NaN();
+        std::vector<float> a(static_cast<std::size_t>(sdf_vals.size()));
+        for (Eigen::Index i = 0; i < sdf_vals.size(); ++i) a[static_cast<std::size_t>(i)] = std::abs(sdf_vals(i));
+        const auto mid = a.begin() + static_cast<std::ptrdiff_t>((a.size() - 1) / 2);
+        std::nth_element(a.begin(), mid, a.end());
+        return *mid;
     }
 
     /// ── THE SAME MEDIAN, WITH THE DOOR WEIGHTS ──────────────────────────────────────────────────
@@ -2631,21 +2431,20 @@ private:
     /// This is the ordinary weighted median — the value at which cumulative weight crosses half the
     /// total — so a point behind a certainly-open door contributes NOTHING, one behind a half-open
     /// door contributes half, and nothing anywhere decides whether a door is "open enough".
-    /// Empty or all-equal weights reproduce torch::median exactly, so a room with no open door
+    /// Empty or mismatched weights fall back to the plain median, so a room with no open door
     /// reports precisely what it reported before.
-    static float weighted_median_abs_sdf(const torch::Tensor &sdf_vals, const torch::Tensor &weights)
+    static float weighted_median_abs_sdf(const Eigen::VectorXf &sdf_vals, const Eigen::VectorXf &weights)
     {
-        if (not weights.defined() or weights.numel() != sdf_vals.numel())
+        if (weights.size() == 0 or weights.size() != sdf_vals.size())
             return median_abs_sdf(sdf_vals);
-        const auto a = torch::abs(sdf_vals).detach().to(torch::kCPU).contiguous();
-        const auto w = weights.detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
-        const auto aa = a.accessor<float, 1>();
-        const auto wa = w.accessor<float, 1>();
         std::vector<std::pair<float, float>> v;
-        v.reserve(static_cast<size_t>(a.numel()));
+        v.reserve(static_cast<size_t>(sdf_vals.size()));
         double total = 0.0;
-        for (long i = 0; i < a.numel(); ++i)
-            if (wa[i] > 0.f and std::isfinite(aa[i])) { v.emplace_back(aa[i], wa[i]); total += wa[i]; }
+        for (Eigen::Index i = 0; i < sdf_vals.size(); ++i)
+        {
+            const float aa = std::abs(sdf_vals(i)), wa = weights(i);
+            if (wa > 0.f and std::isfinite(aa)) { v.emplace_back(aa, wa); total += wa; }
+        }
         if (v.empty() or total <= 0.0) return median_abs_sdf(sdf_vals);   // every return discounted
         std::sort(v.begin(), v.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
         double acc = 0.0;
@@ -2658,7 +2457,7 @@ private:
     }
 
     // Fit metric at the model's CURRENT pose.
-    static float compute_sdf_median_abs(const torch::Tensor &points_xyz, const Model &m)
+    static float compute_sdf_median_abs(const ScanPoints &points_xyz, const Model &m)
     {
         return median_abs_sdf(m.sdf(points_xyz));
     }

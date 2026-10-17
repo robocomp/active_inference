@@ -543,87 +543,22 @@ PoseClampVMax          = 0.7    # m/s
 PoseClampWMax          = 0.8    # rad/s
 PoseClampMaxDt         = 0.5    # s; longer gap => skip the clamp (stream restart / long silence)
 
-# ── Selección de optimizador ──────────────────────────────────────────────────
-# "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
-# "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)
-# "GN"    — Levenberg-Marquardt on ANALYTIC Jacobians (room_gn_solver.h)
-# "CAVI"  — reservado para implementación futura
-#
-# 2026-08-10: GN now DRIVES the pose, after 4 shadow runs (~300 optimized frames):
-# objective identity 5.3e-06; Jacobian validated (grad_relerr_basin median 5.8e-4, and its tail does
-# NOT land on the frames where the poses disagree); quality better on 41 / tied 51 / worse on 10, and
-# of the 18 frames differing by more than 2 mm GN is CLOSER to the minimum on 14. Cost: ms_gn 8.87
-# with instrumentation still running (1.3-4.1 ms offline) against 66.8 ms for L-BFGS.
-#
-# WARNING: setting "GN" switches shadow mode OFF by itself (gn_shadow and optimizer_type != "GN"), so
-# etc/gn_shadow.csv stops growing and keeps the PREVIOUS run's data. Going back to "LBFGS" re-arms it
-# with nothing else to change -- that is the way back if something goes wrong.
-#
-# WARNING: one path shadow mode could not test -- compute_posterior_covariance runs AFTER the
-# optimizer, and until now always on L-BFGS's poses. Watch cov_tt in the debug log (baseline: median
-# 5.8e-4, sigma_theta ~1.4 deg; 1.75 deg on rotating early-exit frames).
-OptimizerType          = "GN"
-
-# ── Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) ─────────────
-# Same objective as compute_rfe_loss, solved as a 15x15 normal-equation system with ANALYTIC
-# Jacobians (Model::sdf_query_at_pose already returns the SDF gradient) instead of ~29 autograd
-# forward+backward passes. Measured on the autograd backend: t_update median 72.7 ms.
-#
-# Two independent levels:
-#   OptimizerType = "GN"  -> GN drives the pose (authority).
-#   GnShadow = true       -> GN runs BESIDE the authoritative backend, from the SAME starting state,
-#                            and only WRITES the CSV. The live pose is untouched: a numerical
-#                            comparison on identical inputs, not a behavioural A/B. Automatically
-#                            inert while OptimizerType is "GN" (there is nothing to compare against).
-#
-# Acceptance criteria that were used before setting OptimizerType = "GN" (read etc/gn_shadow.csv):
-#   - grad_relerr_basin < 1e-2   (needs GnGradCheck = true: analytic Jacobian matches the numeric one.
-#                                 Sampled 5 mm / 2 mrad OFF the converged pose, which is the only band
-#                                 where a RELATIVE check means anything -- at the optimum the true
-#                                 gradient is ~0 so both terms are float noise, and far out the polygon
-#                                 SDF is piecewise and the finite difference is not a fair reference.)
-#   - |dx|,|dy| ~ mm and |dth| ~ 5e-4 rad     (same solution as Adam/L-BFGS)
-#   - torch_obj_at_gn <= torch_obj_at_auth    (GN's answer is no worse ON TORCH'S OBJECTIVE; compare
-#                                              against torch_obj_at_auth, NOT loss_auth -- the latter
-#                                              is reported before the authority's final step)
-#   - ms_gn << ms_auth                        (the whole reason this exists)
-GnShadow      = false
-# ★ SET false 2026-08-26 to match what it actually does. OptimizerType = "GN" above, and under GN this
-# flag is inert — the shadow compares GN against the authority, and GN IS the authority. Leaving a
-# no-op reading as armed is how a reader concludes a comparison is running when nothing is being
-# compared. The rationale below was already the argument for switching it off.
-# OFF since run 4: the Jacobian is validated (grad_relerr_basin median 5.8e-4, p90 6.2e-3, and its tail
-# does NOT land on the frames where the poses disagree -- correlation with max_dxy is +0.013). Leaving it
-# on costs 2x30 extra loss evaluations per optimized frame, which both inflate ms_gn and lengthen the
-# frame itself, delaying the next one. Turn it back on only if the Jacobians are touched.
-GnGradCheck   = false
-GnShadowCsv   = "etc/gn_shadow.csv"
+# ── Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) ─────────────────────
+# The only pose backend: analytic Jacobians, a 15x15 normal-equation system per frame (t_update median
+# 72.7 ms on the old autograd backend, ~4 ms on GN). It DROVE the pose from 2026-08-10, after 4 shadow
+# runs (objective identity 5.3e-06; Jacobian grad_relerr_basin median 5.8e-4; better on 41 / tied 51 /
+# worse on 10 frames). The Adam and L-BFGS backends, the GN shadow and the differential test were
+# deleted with torch on 2026-10-17 (keys OptimizerType, GnShadow, GnGradCheck, GnShadowCsv, Lbfgs*,
+# NumIterations, Convergence*, DifferentialTest, RelocLegacyGridSearch are gone).
 GnLambdaInit  = 1e-3   # Levenberg damping, relative to diag(H)
 GnStepTol     = 1e-5   # ||delta||_inf (m / rad) convergence test
                        # (one slow step is not convergence: Levenberg damping drops after every
                        #  accepted step, so the next one usually advances much further)
 
-# ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
-# Activos solo cuando OptimizerType = "LBFGS"
-# LbfgsLr: paso inicial; el line search strong-Wolfe lo ajusta automáticamente.
-# Usar 1.0 (paso Newton completo). No requiere escalar como Adam.
-LbfgsLr               = 1.0    # Paso inicial (el line search lo ajusta)
-LbfgsHistorySize      = 10     # Pares (s,y) para H^-1; igualado a W=10 (30 DOF)
-LbfgsToleranceGrad    = 1e-4   # Para cuando ||grad||_inf < tol (convergencia fina)
-LbfgsToleranceChange  = 1e-7   # Para cuando |Δloss| < tol entre pasos
-
-# ── Optimizador Adam ──────────────────────────────────────────────────────────
-NumIterations          = 25    # Iteraciones Adam (o pasos Newton máx para LBFGS).
-                                # Con W=1 solo hay término SDF; Adam converge en ~15-20 iters.
+# ── Pérdida SDF ───────────────────────────────────────────────────────────────
 LearningRatePos        = 0.05  # LR base; escalado a lr/√W internamente
 ObsSigma               = 0.05  # σ ruido SDF en la función de pérdida (m)
 HuberDelta             = 0.15  # Umbral Huber para saturar outliers (m)
-ConvergenceRelTol      = 0.001 # FIX 2: de 0.01 a 0.001. El criterio anterior
-                                # paraba en escalones intermedios de la cola
-                                # larga del motion factor (loss ~15-20 cuando
-                                # el mínimo real era ~10). Con 0.001 sólo para
-                                # en el plateau verdadero.
-ConvergenceMinIters    = 5     # Iters mínimas antes de aplicar el criterio
 
 # ── Ventana deslizante (RFE) ──────────────────────────────────────────────────
 WindowSize             = 5  # Slots retenidos. Objetivo del experimento.
@@ -666,7 +601,6 @@ RelocBodyClearance     = 0.30   # m — robot body radius: no pose hypothesis cl
 RelocHazard            = 0.001  # per-frame P(kidnap / silent loss): HMM transition AND the SPRT error rate
 RelocTrackSMedian      = 0.034  # m — prior median |SDF| while tracking (measured p50, optimizer_timing 09-16)
 RelocTrackLogSigma     = 0.30   # prior spread of ln s while tracking (p99/p50 = 0.069/0.034); learnt online
-RelocLegacyGridSearch  = false  # A/B: true = the pre-09-16 4-stage lattice commits the pose instead
 RelocEnabled           = true    # false = relocalisation never moves the pose (lost / mode_switch / seed_validation).
                                 # It is also inert by design while an estimated layout is still SEARCHING (09-17).
 
@@ -779,7 +713,6 @@ StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
 # in the same function: closures never reached the solve, the state file was never written. One
 # switch, two unrelated features. MotionCalibEnabled below is the learner that replaced this one.
 
-DifferentialTest     = false  # Sin overhead A/B: experimento limpio
 SdfCurrentSlotOnly   = true   # SDF obs solo en el slot actual; slots antiguos aportan
                               # solo via motion factors + corners. ~67% menos SDF evals.
 EnableCornerTracking = true  # Activa factores de esquinas en la perdida RFE
@@ -846,10 +779,6 @@ FarPointsExponent    = 2.0   # α — exponente de la distancia.
                               #   Mayor α → gradiente dominado por puntos en paredes lejanas,
                               #   mejor precisión angular pero más sensible a puntos espurios.
 FarPointsMinWeight   = 0.1   # Floor de peso (evita anular puntos muy cercanos).
-UseCuda              = false   # CPU is FASTER here: windowed LBFGS (3-30 DOF, few-hundred pts) is
-                               # launch/sync-overhead-bound on GPU — measured 2.4× slower early-exit,
-                               # full-opt 82/397ms vs CPU 68/112ms. GPU path is crash-free now (host
-                               # memcpy→device bug fixed) but not worth it. Flip true only to re-measure.
 DebugLog             = true   # ON 2026-09-18 for the rotation-prior hunt: the agent adds +56%
                               # of rotation on top of the wheel odometry it is given (measured
                               # offline from the wall_input recording), and this is the only log
@@ -1213,17 +1142,6 @@ HierPrecBoundaryEnabled = true
 CornerEarlyExitCheck    = true
 GnMaxIters              = 20
 GnLossRelTol            = 1e-5
-TorchNumThreads         = 1   # intra-op CPU threads for the Torch forward pass. Adam is gone, but
-                              # Torch still runs the SDF/model forward that GN reads its Jacobian
-                              # from, and the double-backward Hessian behind the posterior sigma —
-                              # so this knob still bites. Was unified at 1 on 2026-08-29 and set
-                              # back to 2 the same day: it is a CORE BUDGET, and 1 was Shadow's
-                              # number arriving on P3Bot, which runs a 16 ms period against 50.
-                              # ★ Back to 1 the SAME EVENING, and the reason changed under it:
-                              #   CovarianceFromSolver removed the double-backward Hessian that was
-                              #   108 ms of a 131 ms optimised frame, so the Torch path now runs a
-                              #   forward pass on optimised frames only. Two intra-op threads were
-                              #   sized for work that no longer happens.
 
 
 # ── 2026-08-29: the last drift pairs, merged ───────────────────────────────────────────────────
@@ -1549,9 +1467,6 @@ enable   = false   # OFF for layout-estimation tests (09-17): stale anchors from
 #   - Observability: robot and landmark slide together as a pair under robot-only observations. What
 #     pins the gauge is the SDF against the walls plus the corners; where those constrain the robot the
 #     landmark is determined, and where they do not both inflate -- which is the honest answer.
-#
-# Requires OptimizerType = "GN" (the autograd backends have no landmark variables); the loader refuses
-# it loudly otherwise rather than leaving a flag that reads true while nothing optimises.
 optimizeLandmark = false
 weight   = 1.0     # global scale (keep < walls: objects refine, never outvote geometry)
 huber    = 3.0     # robust cutoff in whitened σ units
@@ -1759,14 +1674,11 @@ shadow = true    # MEASURE THE MOUNT, do not use the factor. Solves twice and lo
 drive  = true    # ★ 2026-08-29: the RGB term now MOVES the published pose. CORNERS ONLY —
                  # useTriplePoints below is already exclusive (one residual per corner INSTEAD
                  # of the ~43 per-sample contour residuals), so no edge family enters the loss.
-                 # Refused unless OptimizerType == "GN", which it is.
                  # ⚠ Once true, the term also enters compute_posterior_covariance() — the
                  #   reported sigma moves too, and that is deliberate: an agent must not act on
                  #   evidence it does not admit to having.
                  # MUST STAY false on Shadow until bias_const_px has been read here and is small and
-                 # stable. It also requires OptimizerType = "GN" (which this file sets); the loader
-                 # refuses drive without it rather than leaving a flag that reads true while nothing
-                 # optimises.
+                 # stable.
 camera = "ricoh"          # ★ 2026-08-29: the PANORAMA, matching the P3Bot setup. Verified present on
                           # Shadow — shadow.json has body->ricoh at [0, -0.17, 1.275] alongside zed
                           # at 0.945 and helios at 1.075, so the three-sensor triangle is available

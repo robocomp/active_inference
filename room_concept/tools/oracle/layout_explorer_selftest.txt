@@ -1,0 +1,12 @@
+frame  0 robot ( 0.00, 0.00) walls=4 closed=1 | offline (-0.25,-0.25) | port (-0.25,-0.25) (ok, 163.281 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame  3 robot (-0.75, 0.00) walls=4 closed=1 | offline (-1.45,2.75) | port (-1.45,2.75) (ok, 61.728 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame  6 robot (-1.50, 0.00) walls=4 closed=1 | offline (-1.45,2.75) | port (-1.45,2.75) (ok, 42.729 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame  9 robot (-2.25, 0.00) walls=4 closed=1 | offline (-1.45,2.75) | port (-1.45,2.75) (ok, 30.182 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame 12 robot (-2.50, 0.50) walls=6 closed=1 | offline (-2.65,0.95) | port (-2.65,0.95) (ok, 16.106 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame 15 robot (-2.50, 1.25) walls=6 closed=1 | offline (-1.45,4.55) | port (-1.45,4.55) (ok, 12.424 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame 18 robot (-2.50, 2.00) walls=6 closed=1 | offline (-2.05,4.55) | port (-2.05,4.55) (ok, 4.381 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame 21 robot (-2.50, 2.75) walls=6 closed=1 | offline (-3.25,2.15) | port (-3.25,2.15) (ok, 1.284 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+frame 22 robot (-2.50, 3.00) walls=6 closed=1 | offline (-2.65,3.35) | port (-2.65,3.35) (ok, 1.130 nats/m, 56/56 with gain) | gain mismatches 0/56 PASS
+wall-hugging start (-3.85,-0.85): offline NOTHING (parks), port a target from (-3.55,-0.55) PASS
+9 states compared. ALL PASS: 0 failure(s)
+[exit 0]

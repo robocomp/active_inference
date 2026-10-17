@@ -1,0 +1,14 @@
+   ordinary driving admitted                                  PASS
+   NaN refused as non-finite                                  PASS
+   poor localiser fit refused as not-tracking                 PASS
+   kinematically impossible episode refused                   PASS
+   partial manoeuvre data kept, not discarded                 PASS
+   manoeuvre provenance recorded                              PASS
+   passive provenance recorded separately                     PASS
+   passive-tagged k_v -0.011979 vs manoeuvre-tagged -0.011979
+   provenance does not change the estimate                    PASS
+   idle: offered 0, pool 0 | broken: offered 20, pool 0, refused-not-tracking 20
+   'nothing arrived' and 'all refused' are distinguishable    PASS
+
+ALL PASS (0 failures)
+[exit 0]

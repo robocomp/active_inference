@@ -80,8 +80,16 @@ struct InteractionState
     // marginalisation over different weights, and a log that cannot tell them apart cannot be audited.
     bool  p_open_from_curve = false;
 
-    float p_reach = 0.0f;             // P(the robot is inside the actuation zone)
+    // P(the robot is AT the door for whatever comes next), marginalised over the door's state:
+    //   P(open)·P(d ≤ reach) + P(shut)·P(in band).
+    // The band's near edge is the leaf's swept arc, a hazard only for a door that still has to be SWUNG. An
+    // open door has nothing left to swing, so being closer than the arc is being at it, not short of it.
+    // ★Before 2026-10-17 this was the band alone: try46 leg 2 stood 1.29 m from an OPEN door (band
+    // [1.50, 2.00]), P(reach)=0.02, `approach` could never complete, `open` is never offered for an open
+    // door, and the passage never goes approach→cross — so the robot stalled at the door for ever.
+    float p_reach = 0.0f;
     bool  p_reach_known = false;      // false ⇒ no robot pose this cycle
+    float p_band  = 0.0f;             // P(d_min ≤ d ≤ d_max): `open`'s half — it is the step that swings the leaf
 
     float crossing_progress = 0.0f;   // -1 .. +1, signed against the latched side
     bool  crossing_known = false;

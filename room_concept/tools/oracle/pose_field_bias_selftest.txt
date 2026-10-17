@@ -1,0 +1,20 @@
+1. bias field sigma_b = 40 mm, l = 2 m, odometry 4e-4 m^2/m (the live forward level)
+    sigma_b 46.7 mm  l 4.00 m  pairs 473566
+  [PASS] sigma_b recovered within 10 mm (25 %)
+  [PASS] correlation length in the right octave band
+
+2. no field: the estimator must not invent one
+    sigma_b 0.0 mm
+  [PASS] sigma_b < 10 mm with no field
+
+3. the published term has the SCAN'S geometry: Sigma_b = beta * R, beta = sigma_b^2 / (tr R_xy / 2)
+    Sigma_b: xy 0.0 mm, heading 0.000 deg
+  [FAIL] xy diagonal == sigma_b^2
+  [FAIL] heading follows the scan's own lever (R_tt / R_xx)
+
+4. parked only: no path, no pairs, the prior stands
+    sigma_b 20.0 mm (prior 20.0 mm), pairs 0
+  [PASS] parked: the prior, untouched
+
+FAILED (2 failures)
+[exit 1]
