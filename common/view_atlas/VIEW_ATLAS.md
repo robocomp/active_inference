@@ -222,3 +222,6 @@ Rollout, `[ViewAtlas] enabled = false` by default:
 Ricoh crops; publishing live atlases to the graph; cross-agent / cross-class re-ID; elevation bins (the
 robot's camera height is fixed; the arm could add them later); per-surface-point feature clouds (the
 alternative kept in reserve if per-view pooling turns out to be the bottleneck).
+No decoder (latent → image): the model predicts in descriptor space, which is the observation the
+likelihood scores; a pixel decoder would add a trained model and score lighting and background, which
+the descriptors were chosen to ignore. A per-bin stored thumbnail covers the display/debug use.
