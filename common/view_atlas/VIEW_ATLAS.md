@@ -231,3 +231,30 @@ alternative kept in reserve if per-view pooling turns out to be the bottleneck).
 No decoder (latent → image): the model predicts in descriptor space, which is the observation the
 likelihood scores; a pixel decoder would add a trained model and score lighting and background, which
 the descriptors were chosen to ignore. A per-bin stored thumbnail covers the display/debug use.
+
+## 8. Phase 1 results (offline replay, 2026-10-17)
+
+Dataset: `retina/etc/view_atlas_dataset` (2715 views, 14 physical objects), constants `view_atlas_constants.txt`.
+Criteria were declared before the run (§6). **Verdict: A, B, C, D all FAIL.** The criteria and constants were not
+touched to obtain a result; the numbers below are exactly what `atlas_replay` printed (exit code 1).
+
+| Check | Criterion | Result |
+|---|---|---|
+| A. chair swaps | < 1 % | 7 / 518 = 1.35 % (FAIL) |
+| B. re-ID, yellow moved / magenta stayed | ≥ 95 % each, other chair ≤ 2 % | yellow (`Chair`, moved) 37 / 53 = 69.8 %, magenta (`chair(1)`, stayed) 20 / 20 = 100.0 %; other chair chosen 0.0 % (FAIL: yellow below 95 %) |
+| B (info, yaw unknown, not graded) | — | yellow 43 / 53 = 81.1 %, magenta 20 / 20 = 100.0 %, other chair 0.0 % |
+| C. encodings per object-minute | ≤ 60 (expect ≤ 30) | worst 1000.0 /min (FAIL), but NOT MEASURABLE on this data: see below |
+| D. calibration | ±0.1 per bin with ≥ 20 decisions | [0.5,0.7) n=4 mean p 0.627 acc 0.250; [0.7,0.9) n=5 mean p 0.828 acc 0.400; [0.9,1.0] n=64 mean p 0.996 acc 0.844 (gap 0.152; only this bin has ≥ 20 decisions) (FAIL) |
+
+Reading of the results (not a change of criteria):
+
+- B: the 16 yellow windows that failed were never assigned to the *other chair* (0.0 %); the MAP was the "new object"
+  hypothesis, i.e. the moved chair was not recognised as the archived one. Knowing the yaw did not help (69.8 % known vs 81.1 % unknown:
+  the exact-yaw likelihood is the sharper and the less forgiving one).
+- C: the `frames` recording is a sparse sampling of an apartment tour (267 distinct stamps, 647 object views, spread over
+  ~11 days of wall clock with one 868 000 s gap). First-to-last stamp therefore gives ~16 000 min per object and
+  ~0 encodings/min, and the single-view object `Worktop4` gives 1 encoding / 0 min (clamped to 1e-3 min = 1000 /min).
+  Neither is a real encoding rate; the line fails by arithmetic of the sparse stamps. The informative number is that the
+  trigger encoded nearly every sparse view (e.g. 87 of 93 `Chair`, 111 of 146 `chair(1)`, all of the other objects):
+  consecutive sparse views are far apart in bearing, so each carries high learning value. A continuous recording is
+  needed to grade C.
