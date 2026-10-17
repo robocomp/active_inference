@@ -7,6 +7,7 @@
 #include "mission_text.h"
 
 #include <clocale>
+#include <format>
 #include <map>
 #include <print>
 #include <string>
@@ -75,6 +76,93 @@ Mission parse(std::string_view text)
 }
 
 using S = Interpreter::State;
+
+/// "1 a1 i0 running" / "1 a1 i0 failed unreachable @10": one transition, compact, so a whole sequence is one CHECK.
+std::string tx(const Interpreter::StepTransition& t)
+{
+    static constexpr const char* kNames[] = {"pending", "running", "satisfied", "failed", "skipped", "cancelled"};
+    std::string out = std::format("{} {} a{} i{} {}", t.id, t.op, t.attempt, t.iteration, kNames[int(t.state)]);
+    if (not t.outcome.empty()) out += " " + t.outcome;
+    return out + std::format(" @{}", t.t);
+}
+std::vector<std::string> txs(Interpreter& in)
+{
+    std::vector<std::string> out;
+    for (const auto& t : in.take_transitions()) out.push_back(tx(t));
+    return out;
+}
+
+/// on_fail retry: every attempt is its own pair of transitions, and the failed one carries its outcome.
+void test_transitions_per_attempt()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  cross door_27 retry=1\n"), 0);
+    CHECK(in.take_transitions().empty());   // nothing has started before the first tick
+    in.tick(0);
+    CHECK((txs(in) == std::vector<std::string>{"1 cross a1 i0 running @0"}));
+    h.fail("1", "unreachable");
+    in.tick(10);
+    CHECK((txs(in) == std::vector<std::string>{"1 cross a1 i0 failed unreachable @10", "1 cross a2 i0 running @10"}));
+    in.tick(15);
+    CHECK(in.take_transitions().empty());   // still running: no news
+    h.done("1");
+    in.tick(20);
+    CHECK((txs(in) == std::vector<std::string>{"1 cross a2 i0 satisfied satisfied @20"}));
+    CHECK(in.state() == S::Completed);
+}
+
+/// repeat: each iteration of the repeat is its own pair; the body's steps carry the iteration they ran in.
+void test_transitions_per_iteration()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  repeat 2\n    cross door_1\n"), 0);
+    in.tick(0);
+    CHECK((txs(in) == std::vector<std::string>{"1 repeat a1 i0 running @0", "1.1 cross a1 i0 running @0"}));
+    h.done("1.1");
+    in.tick(10);
+    CHECK((txs(in) == std::vector<std::string>{"1.1 cross a1 i0 satisfied satisfied @10",
+                                               "1 repeat a1 i0 satisfied satisfied @10",
+                                               "1 repeat a1 i1 running @10", "1.1 cross a1 i1 running @10"}));
+    h.done("1.1");
+    in.tick(20);
+    CHECK((txs(in) == std::vector<std::string>{"1.1 cross a1 i1 satisfied satisfied @20",
+                                               "1 repeat a1 i1 satisfied satisfied @20"}));
+    CHECK(in.state() == S::Completed);
+}
+
+/// skip, cancel and supersede close what they end, once each; a refusal opens and closes in the same tick.
+void test_transitions_close_every_open_step()
+{
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  open door_19 on_fail=skip\n"), 0);
+        in.tick(0);
+        h.fail("1", "door_wont_open");
+        in.tick(10);
+        CHECK((txs(in) == std::vector<std::string>{"1 open a1 i0 running @0", "1 open a1 i0 skipped door_wont_open @10"}));
+    }
+    {
+        FakeHost h;
+        Interpreter in(h);
+        h.refuse["1"] = "passage_unresolved";
+        in.start(parse("mission\n  cross door_9\n"), 0);
+        in.tick(0);
+        CHECK((txs(in) == std::vector<std::string>{"1 cross a1 i0 running @0", "1 cross a1 i0 failed passage_unresolved @0"}));
+    }
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  seq\n    explore room_2 budget_s=60s\n"), 0);
+        in.tick(0);
+        txs(in);
+        in.start(parse("mission\n  say hi\n"), 5);   // supersedes: the old steps close before the new mission ticks
+        CHECK((txs(in) == std::vector<std::string>{"1.1 explore a1 i0 cancelled superseded @5",
+                                                   "1 seq a1 i0 cancelled superseded @5"}));
+    }
+}
 }   // namespace
 
 int main()
@@ -450,6 +538,10 @@ int main()
         in.start(parse("mission\n  say hi\n"), 10);
         CHECK(in.serial() == 2);
     }
+
+    test_transitions_per_attempt();
+    test_transitions_per_iteration();
+    test_transitions_close_every_open_step();
 
     std::println("mission_interpreter_test: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
