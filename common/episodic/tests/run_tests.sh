@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-for t in em_schema_test em_archive_test em_consolidate_test em_journal_test em_builder_test; do
+for t in em_schema_test em_archive_test em_consolidate_test em_journal_test em_builder_test em_query_test; do
     g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/$t" "$t.cpp" \
         $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
     "$out/$t"
