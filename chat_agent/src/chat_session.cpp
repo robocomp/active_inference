@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 
+#include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
 #include "image_prep.h"
 #include "look_messages.h"
@@ -157,7 +158,7 @@ void ChatSession::tick_digest()
     cameras_.discover();   // self-throttled; subscribers appear once the camera nodes + descriptors exist
     cameras_.refresh(Camera::front);   // keeps the measured frame rates current for sensors() (camera_grabber.h)
     cameras_.refresh(Camera::pano);
-    digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read());
+    digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read(), today_digest_line(em_store()));
     track_object_changes();
 }
 
@@ -272,7 +273,12 @@ const QString kInterfaceRules = QStringLiteral(
     "- The robot's own software is NOT in the STATE: for any question about it CALL a tool, never guess: agents() "
     "(which programs run, their health, CPU, memory, uptime), sensors(name) (cameras, LiDAR, IMU: streams, measured "
     "frame rate, resolution, bandwidth), graph_summary() (how many nodes and edges the working memory, i.e. the "
-    "graph, holds) or inspect(node) (every attribute of one node).\n");
+    "graph, holds) or inspect(node) (every attribute of one node).\n"
+    "- What the robot did EARLIER TODAY is in its episodic memory; the STATE has only the one-line 'today:' summary. "
+    "For missions, steps, door crossings, claims and how they ended CALL episodes(...) (filters: since/until as HH:MM, "
+    "author, kind, target), episode(id) for one in detail, last_episode(target) for the latest about a door, room or "
+    "object, outcome_stats(kind, target) for how often something succeeded or failed over all time. If a tool says the "
+    "episodic memory is not available, say you do not remember, never guess.\n");
 }   // namespace
 
 QString ChatSession::load_robot_description(const std::string& path)
@@ -360,6 +366,33 @@ QJsonArray ChatSession::tools_json() const
         "Read-only.",
         QJsonObject{{"node", QJsonObject{{"type", "string"}, {"description", "the node's name or id"}}}},
         QJsonArray{"node"}));
+    const auto str = [](const char* d) { return QJsonObject{{"type", "string"}, {"description", d}}; };
+    tools.append(tool_def("episodes",
+        "What the robot did TODAY, from its episodic memory: missions, their steps and the claims under them, with start "
+        "and end time and outcome, oldest first. All filters optional. Read-only.",
+        QJsonObject{{"since", str("only episodes that started at or after this time: HH:MM (today, local time) or "
+                                  "epoch milliseconds")},
+                    {"until", str("only episodes that started before this time: HH:MM (today, local time) or epoch "
+                                  "milliseconds")},
+                    {"author", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"human", "self"}},
+                                           {"description", "human = asked by a person, self = on the robot's own"}}},
+                    {"kind", str("mission, or a step/claim kind such as cross, open, approach")},
+                    {"target", str("a door, room or object name, e.g. door_27")}},
+        {}));
+    tools.append(tool_def("episode",
+        "One episode from today's episodic memory in detail, by id (as listed by episodes): its steps and claims, the "
+        "beliefs read before and after (e.g. P(open) of a door) and what happened meanwhile. Read-only.",
+        QJsonObject{{"id", str("the episode id, e.g. 20261017-3")}}, QJsonArray{"id"}));
+    tools.append(tool_def("outcome_stats",
+        "How often something succeeded, failed or was lost over ALL TIME (not only today), its mean duration and "
+        "information gain, from the episodic memory. Read-only.",
+        QJsonObject{{"kind", str("mission, or a step/claim kind such as cross, open, approach")},
+                    {"target", str("optional: a door/room/object name, e.g. door_27; empty = all of that kind")}},
+        QJsonArray{"kind"}));
+    tools.append(tool_def("last_episode",
+        "The most recent episode today about one door, room or object (aimed at it or that read its beliefs). "
+        "Read-only.",
+        QJsonObject{{"target", str("a door, room or object name, e.g. door_27")}}, QJsonArray{"target"}));
     tools.append(tool_def("look",
         "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
         QJsonObject{{"camera", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"front", "360"}},
@@ -496,7 +529,8 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 {
     if (name == "look") return do_look(args);
     QString out;
-    if (name == "find_objects")
+    if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
+    else if (name == "find_objects")
         out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room));
     else if (name == "where_is")
         out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room));
@@ -515,6 +549,38 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     else return {};
     log_.write("query", QJsonObject{{"tool", name}, {"args", args}, {"result", out}});
     return out.trimmed();
+}
+
+std::optional<rc::em::Store> ChatSession::em_store() const
+{
+    if (not em_G_) return std::nullopt;
+    return rc::em::load_store(*em_G_);
+}
+
+QString ChatSession::answer_memory(const QString& name, const QJsonObject& args) const
+{
+    if (name != "episodes" and name != "episode" and name != "outcome_stats" and name != "last_episode") return {};
+    const auto arg = [&](const char* k) { return args.value(k).toString().toStdString(); };
+    const auto st = em_store();
+    if (name == "episode") return q(answer_episode(st, arg("id")));
+    if (name == "outcome_stats") return q(answer_outcome_stats(st, arg("kind"), arg("target")));
+    if (name == "last_episode") return q(answer_last_episode(st, arg("target")));
+    // episodes: since/until as "HH:MM" or epoch ms (a string, or a JSON number the model may send instead)
+    std::optional<std::uint64_t> t[2];
+    const char* keys[2] = {"since", "until"};
+    for (int i = 0; i < 2; ++i)
+    {
+        const QJsonValue v = args.value(keys[i]);
+        if (v.isDouble() and v.toDouble() >= 0) t[i] = std::uint64_t(v.toDouble());
+        else if (const std::string s = v.toString().trimmed().toStdString(); not s.empty())
+        {
+            t[i] = parse_em_time(s);
+            if (not t[i])
+                return QStringLiteral("ERROR: %1 '%2' not understood — use HH:MM (today, local time) or epoch milliseconds")
+                    .arg(keys[i], q(s));
+        }
+    }
+    return q(answer_episodes(st, t[0], t[1], arg("author"), arg("kind"), arg("target")));
 }
 
 QString ChatSession::do_look(const QJsonObject& args)

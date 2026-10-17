@@ -12,7 +12,8 @@
  *      ~16 history messages (a tool call and its results are never split by the trim).
  *
  * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg),
- * find_objects(subtype?), where_is(name), look(camera?).
+ * find_objects(subtype?), where_is(name), look(camera?), and the episodic-memory queries episodes(since?, until?,
+ * author?, kind?, target?), episode(id), outcome_stats(kind, target?), last_episode(target) (em_answers.h).
  * Each call goes through CommandGate; a rejection returns to the model as a role:"tool" message with the reason.
  * cross_door and a LARGE move_relative only raise a card; a small move/turn is sent at once (command_gate.h).
  * Read-only queries, answered here from the digest without the controller and without a card:
@@ -29,6 +30,10 @@
  * ROBOT STATUS: the controller mirrors the command's progress into chat_intention (state / bt_state); this polls it
  * every 250 ms and prints transitions as robot status lines; completion/failure is appended to the history as a
  * role:"tool" message so the model knows how the last command ended.
+ *
+ * EPISODIC MEMORY: episodic_agent's domain-4 graph, joined LAZILY by SpecificWorker while that agent is present
+ * (set_em_graph; nullptr = not joined). The memory tools and the STATE's "today:" line read it with
+ * rc::em::load_store on demand; absent or empty ⇒ "episodic memory is not available" (em_answers.h).
  *
  * Main (GUI) thread only — graph reads use the main thread's InnerEigenAPI (CLAUDE.md ts==0 ownership rule).
  */
@@ -53,6 +58,7 @@
 #include "chat_log.h"
 #include "chat_window.h"
 #include "command_gate.h"
+#include "em_answers.h"
 #include "intention_node.h"
 #include "mission_watch.h"
 #include "system_reader.h"
@@ -89,6 +95,8 @@ public:
     void set_controller_present(bool present);
     /// Startup / first-Operating sweep of a crashed run's chat_intention.
     void sweep_stale() { intention_.sweep_stale(); }
+    /// episodic_agent's domain-4 graph (joined by SpecificWorker while it is present); nullptr = not joined.
+    void set_em_graph(std::shared_ptr<DSR::DSRGraph> em) { em_G_ = std::move(em); }
 
 private:
     // ── the three entry points from the window ──
@@ -118,11 +126,16 @@ private:
     QString answer_query(const QString& name, const QJsonObject& args);
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
+    /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.
+    QString answer_memory(const QString& name, const QJsonObject& args) const;
+    /// Today's records + the all-time stats from the domain-4 graph; nullopt when it is not joined.
+    std::optional<rc::em::Store> em_store() const;
     void tick_status();
     void ping_llm();
     void refresh_status_bar();
 
     std::shared_ptr<DSR::DSRGraph> G_;
+    std::shared_ptr<DSR::DSRGraph> em_G_;   ///< episodic memory (domain 4), nullptr = not joined
     SessionConfig cfg_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_;
     WorldDigest digest_builder_;

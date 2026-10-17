@@ -31,6 +31,16 @@
  *
  * Presence: required [] — the chat window is useful (and says so) with nothing else running; controller and
  * room_concept are OPTIONAL peers, tracked for the status bar and the gate.
+ *
+ * EPISODIC MEMORY (2026-10-17): episodic_agent's graph on DDS domain [EM].domain (4) is joined LAZILY, read-only,
+ * only while episodic_agent is present on the live graph (an optional peer). Not a config [Agent.em] sub-table on
+ * purpose: the generated code joins every [Agent.<name>] graph at startup, and a DSRGraph built with configFile ""
+ * waits for a peer to send it the graph and qFatal()s the whole process after ~15 s when none answers (cortex
+ * dsr_api.cpp) — chat_agent must keep running when episodic_agent is not. episodic_agent being present on domain 0
+ * means its domain-4 graph (built before its presence node) is already up to answer. The graph is dropped when
+ * episodic_agent goes away or restarts (and re-joined on its return), so a restarted episodic_agent, which re-seeds
+ * domain 4, never meets the old graph still held here (README's double-seeder note).
+ * Residual risk: episodic_agent dying within the ~1.3 s of the join itself still aborts chat_agent (not catchable).
  */
 
 #ifndef SPECIFICWORKER_H
@@ -76,6 +86,14 @@ private:
     static constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
     void on_optional_peer_lost(const std::string& name, std::uint32_t id);
     void on_optional_peer_ready(const std::string& name, std::uint32_t id);
+    void on_peer_restarted(std::uint32_t id);
+
+    // ── episodic memory (domain 4), joined lazily — see the header comment ──
+    void join_em();
+    void leave_em();
+    int em_domain_ = 4;
+    std::uint32_t em_peer_id_ = 0;             ///< episodic_agent's agent id once seen (0 = never)
+    std::shared_ptr<DSR::DSRGraph> em_G_;      ///< nullptr = not joined
 
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
