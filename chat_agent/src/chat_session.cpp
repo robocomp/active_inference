@@ -368,8 +368,10 @@ QJsonArray ChatSession::tools_json() const
         QJsonArray{"node"}));
     const auto str = [](const char* d) { return QJsonObject{{"type", "string"}, {"description", d}}; };
     tools.append(tool_def("episodes",
-        "What the robot did TODAY, from its episodic memory: missions, their steps and the claims under them, with start "
-        "and end time and outcome, oldest first. All filters optional. Read-only.",
+        "What the robot did TODAY, from its episodic memory, with start and end time and outcome, oldest first. With no "
+        "kind and no target it lists only the MISSIONS; pass kind (e.g. cross, open) for the steps and claims of that "
+        "kind, target for everything aimed at one node, or call episode(id) for one mission's steps and claims. All "
+        "filters optional. Read-only.",
         QJsonObject{{"since", str("only episodes that started at or after this time: HH:MM (today, local time) or "
                                   "epoch milliseconds")},
                     {"until", str("only episodes that started before this time: HH:MM (today, local time) or epoch "
@@ -384,8 +386,9 @@ QJsonArray ChatSession::tools_json() const
         "beliefs read before and after (e.g. P(open) of a door) and what happened meanwhile. Read-only.",
         QJsonObject{{"id", str("the episode id, e.g. 20261017-3")}}, QJsonArray{"id"}));
     tools.append(tool_def("outcome_stats",
-        "How often something succeeded, failed or was lost over ALL TIME (not only today), its mean duration and "
-        "information gain, from the episodic memory. Read-only.",
+        "How often something succeeded, failed or was lost over ALL TIME (today included), its mean duration and "
+        "information gain, from the episodic memory. Steps and claims of the same kind are separate rows; missions are "
+        "split into asked-by-a-person and on-its-own. Read-only.",
         QJsonObject{{"kind", str("mission, or a step/claim kind such as cross, open, approach")},
                     {"target", str("optional: a door/room/object name, e.g. door_27; empty = all of that kind")}},
         QJsonArray{"kind"}));

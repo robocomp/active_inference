@@ -90,8 +90,10 @@ def tools():
           "controller 7) or id. Read-only.", {"node": {"type": "string", "description": "the node's name or id"}},
           ["node"]),
         # episodic memory (chat_session.cpp tools_json; answers in src/em_answers.h)
-        t("episodes", "What the robot did TODAY, from its episodic memory: missions, their steps and the claims under "
-          "them, with start and end time and outcome, oldest first. All filters optional. Read-only.",
+        t("episodes", "What the robot did TODAY, from its episodic memory, with start and end time and outcome, oldest "
+          "first. With no kind and no target it lists only the MISSIONS; pass kind (e.g. cross, open) for the steps and "
+          "claims of that kind, target for everything aimed at one node, or call episode(id) for one mission's steps "
+          "and claims. All filters optional. Read-only.",
           {"since": {"type": "string", "description": "only episodes that started at or after this time: HH:MM (today, "
                                                       "local time) or epoch milliseconds"},
            "until": {"type": "string", "description": "only episodes that started before this time: HH:MM (today, local "
@@ -103,8 +105,9 @@ def tools():
         t("episode", "One episode from today's episodic memory in detail, by id (as listed by episodes): its steps and "
           "claims, the beliefs read before and after (e.g. P(open) of a door) and what happened meanwhile. Read-only.",
           {"id": {"type": "string", "description": "the episode id, e.g. 20261017-3"}}, ["id"]),
-        t("outcome_stats", "How often something succeeded, failed or was lost over ALL TIME (not only today), its mean "
-          "duration and information gain, from the episodic memory. Read-only.",
+        t("outcome_stats", "How often something succeeded, failed or was lost over ALL TIME (today included), its mean "
+          "duration and information gain, from the episodic memory. Steps and claims of the same kind are separate "
+          "rows; missions are split into asked-by-a-person and on-its-own. Read-only.",
           {"kind": {"type": "string", "description": "mission, or a step/claim kind such as cross, open, approach"},
            "target": {"type": "string", "description": "optional: a door/room/object name, e.g. door_27; empty = all "
                                                        "of that kind"}}, ["kind"]),

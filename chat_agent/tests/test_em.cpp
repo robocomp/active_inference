@@ -61,7 +61,7 @@ Store fixed()
                            .values = {{"door_open_prob", 0.93}, {"x", 1.5}}});
     s1.events.push_back(Event{.dt_ms = 12000, .kind = "current_moved", .node = "room_3"});
     Record c1 = rec("20261017-3", "20261017-2", Level::Claim, Author::Self, "open", "door_27", at(10, 1), at(10, 2), "kept");
-    c1.promised = 0.5; c1.delivered = 0.25;
+    c1.promised = 0.5; c1.delivered = 0.25; c1.target_ltsm = "passage_0";
     Record m2 = rec("20261017-4", "", Level::Mission, Author::Human, "mission", "", at(11, 0), at(11, 5), "failed");
     m2.action_json = "go to the kitchen"; m2.room = "room_3"; m2.source = "chat";
     // A self mission as em_builder.h opens it (ruling R10): kind "mission", no action, no target; room at t0.
@@ -69,12 +69,13 @@ Store fixed()
     m3.room = "room_5"; m3.source = "self";
     s.today = {m1, s1, c1, m2, m3};
 
-    Stats cross{.key_kind = "cross", .key_identity = "", .outcomes = {{"succeeded", 9}, {"failed", 3}}, .n = 12,
-                .dur_mean_s = 20.0, .dur_m2 = 44.0, .n_gain = 0, .promised_sum = 0, .delivered_sum = 0,
+    Stats cross{.key_level = "step", .key_kind = "cross", .key_author = "", .key_identity = "", .outcomes = {{"succeeded", 9}, {"failed", 3}},
+                .n = 12, .n_dur = 12, .dur_mean_s = 20.0, .dur_m2 = 44.0, .n_gain = 0, .promised_sum = 0, .delivered_sum = 0,
                 .first_t0 = at(9, 0), .last_t0 = at(10, 0)};
     Stats cross27 = cross;
     cross27.key_identity = "passage_0"; cross27.outcomes = {{"succeeded", 4}, {"lost", 1}}; cross27.n = 5;
-    Stats open{.key_kind = "open", .key_identity = "", .outcomes = {{"kept", 2}}, .n = 2, .dur_mean_s = 4.0,
+    Stats open{.key_level = "claim", .key_kind = "open", .key_author = "", .key_identity = "", .outcomes = {{"kept", 2}}, .n = 2, .n_dur = 2,
+               .dur_mean_s = 4.0,
                .dur_m2 = 0.0, .n_gain = 2, .promised_sum = 1.0, .delivered_sum = 0.5, .first_t0 = 0, .last_t0 = 0};
     s.stats = {cross, cross27, open};
     return s;
@@ -101,15 +102,21 @@ int main()
     CHECK(std::string(kEmUnavailable) == "episodic memory is not available");
 
     // ── episodes ──
+    // No kind and no target: the MISSIONS (finding 13), with a pointer to the steps / claims under them.
     const std::string all = answer_episodes(st, {}, {}, "", "", "");
     show("episodes()", all);
-    CHECK(has(all, "5 episodes today"));
+    CHECK(has(all, "3 missions today"));
     CHECK(has(all, "20261017-1 10:00-10:03 mission \"cross door_27\" in room_2, asked by a person (chat): succeeded"));
-    CHECK(has(all, "20261017-2 10:00-10:03 step cross door_27, attempt 2 (part of 20261017-1): succeeded"));
-    CHECK(has(all, "20261017-3 10:01-10:02 claim open door_27, promised 0.50 delivered 0.25 nats (part of 20261017-2): kept"));
     CHECK(has(all, "20261017-5 12:00-now mission in room_5, on its own: still open"));
+    CHECK(not has(all, "step cross") and not has(all, "claim open"));
+    CHECK(has(all, "kind=") and has(all, "episode(id)"));
     CHECK(not has(all, "mission mission"));
     CHECK(all.find("20261017-1 ") < all.find("20261017-4 "));   // by start time
+    const std::string steps = answer_episodes(st, {}, {}, "", "cross", "");
+    CHECK(has(steps, "20261017-2 10:00-10:03 step cross door_27, attempt 2 (part of 20261017-1): succeeded"));
+    const std::string claims = answer_episodes(st, {}, {}, "", "open", "");
+    CHECK(has(claims, "20261017-3 10:01-10:02 claim open door_27, promised 0.50 delivered 0.25 nats (part of 20261017-2): kept"));
+    CHECK(has(answer_episodes(st, {}, {}, "", "", "door_27"), "2 episodes today"));   // a target lists what aimed at it
 
     const std::string missions = answer_episodes(st, at(10, 30), {}, "human", "mission", "");
     show("episodes(since 10:30, human, kind mission)", missions);
@@ -118,7 +125,7 @@ int main()
     const std::string self_missions = answer_episodes(st, {}, {}, "self", "mission", "");
     CHECK(has(self_missions, "1 episode today") and has(self_missions, "20261017-5"));
 
-    const std::string selfs = answer_episodes(st, {}, at(12, 0), "self", "", "");
+    const std::string selfs = answer_episodes(st, {}, at(12, 0), "self", "open", "");
     CHECK(has(selfs, "1 episode today") and has(selfs, "claim open door_27"));   // until exclusive: 12:00 not in
     CHECK(answer_episodes(st, {}, {}, "", "", "door_99") == "no episode recorded today matches that");
     CHECK(has(answer_episodes(st, {}, {}, "robot", "", ""), "author must be"));
@@ -137,19 +144,20 @@ int main()
     // ── outcome_stats ──
     const std::string sc = answer_outcome_stats(st, "cross", "");
     show("outcome_stats(cross)", sc);
-    CHECK(has(sc, "cross (all time): 12 times: succeeded 9, failed 3; mean duration 20.0 s (sd 2.0 s)"));
+    CHECK(has(sc, "step cross (all time): 12 times: succeeded 9, failed 3; mean duration 20.0 s (sd 2.0 s)"));
     CHECK(not has(sc, "passage_0"));   // only the per-kind row when no target is given
     const std::string s27 = answer_outcome_stats(st, "cross", "door_27");   // live name -> memory identity passage_0
     show("outcome_stats(cross, door_27)", s27);
-    CHECK(has(s27, "cross door_27 (all time): 5 times: succeeded 4, lost 1"));
-    CHECK(has(answer_outcome_stats(st, "cross", "passage_0"), "5 times"));   // the identity itself works too
+    // today's closed step cross door_27 is folded in (finding 3): 5 + 1
+    CHECK(has(s27, "step cross door_27 (all time): 6 times: succeeded 5, lost 1"));
+    CHECK(has(answer_outcome_stats(st, "cross", "passage_0"), "6 times"));   // the identity itself works too
     const std::string so = answer_outcome_stats(st, "open", "");
     CHECK(has(so, "information promised 0.50, delivered 0.25 nats on average over 2"));
     CHECK(not has(so, "first"));   // no first/last time recorded: omitted, not 1970
     const std::string s99 = answer_outcome_stats(st, "cross", "door_99");
     show("outcome_stats(cross, door_99)", s99);
     CHECK(has(s99, "no statistics for cross on door_99"));
-    CHECK(has(s99, "cross (all time): 12 times"));   // falls back to the per-kind row, said as such
+    CHECK(has(s99, "step cross (all time): 12 times"));   // falls back to the per-kind row, said as such
     CHECK(answer_outcome_stats(st, "fly", "") == "no statistics for fly");
 
     // ── last_episode ──
@@ -170,6 +178,39 @@ int main()
     CHECK(not today_digest_line(absent).has_value());
     CHECK(not today_digest_line(empty).has_value());   // the tools say "not available" here: the STATE agrees
     CHECK(today_digest_line(st) == "today: 2 missions (1 succeeded); last: go to the kitchen → room_3");
+
+    // ── finding 3: "all time" includes today — empty stats + closed records today ──
+    {
+        Store t = fixed();
+        t.stats.clear();
+        const std::optional<Store> ts = t;
+        const std::string sm = answer_outcome_stats(ts, "mission", "");
+        show("outcome_stats(mission), no stats yet", sm);
+        CHECK(has(sm, "missions asked by a person (all time): 2 times"));   // m1 + m2; the open self mission is not
+        CHECK(not has(sm, "on its own"));
+        CHECK(has(answer_outcome_stats(ts, "cross", "door_27"), "step cross door_27 (all time): 1 time: succeeded 1"));
+        CHECK(has(answer_outcome_stats(ts, "open", "door_27"), "claim open door_27 (all time): 1 time"));
+    }
+
+    // ── finding 11: a record from yesterday still in the graph (not yet rolled over) is not "today" ──
+    {
+        Store y = fixed();
+        Record old = rec("20261016-9", "", Level::Mission, Author::Human, "mission", "", at(10, 0) - 86400000ULL,
+                         at(10, 1) - 86400000ULL, "succeeded");
+        old.action_json = "yesterday's walk";
+        Record oldc = rec("20261016-10", "20261016-9", Level::Claim, Author::Self, "open", "door_27",
+                          at(23, 0) - 86400000ULL, at(23, 1) - 86400000ULL, "kept");
+        oldc.target_ltsm = "passage_0";
+        y.today.insert(y.today.begin(), {old, oldc});
+        const std::optional<Store> ys = y;
+        CHECK(not has(answer_episodes(ys, {}, {}, "", "", ""), "yesterday's walk"));
+        CHECK(has(answer_episodes(ys, {}, {}, "", "", ""), "3 missions today"));
+        CHECK(answer_episode(ys, "20261016-9") == "no episode with id '20261016-9' today");
+        CHECK(has(answer_last_episode(ys, "door_27"), "20261017-3"));
+        CHECK(today_digest_line(ys) == "today: 2 missions (1 succeeded); last: go to the kitchen → room_3");
+        // ... but it is part of "all time"
+        CHECK(has(answer_outcome_stats(ys, "open", "door_27"), "claim open door_27 (all time): 2 times"));
+    }
 
     std::println("test_em: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
