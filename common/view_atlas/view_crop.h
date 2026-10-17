@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <optional>
 #include <vector>
 
@@ -25,22 +26,51 @@ struct Crop
     float   trunc_frac = 0.f;   // fraction of mask pixels on the image border row/column
 };
 
+/// Sampling stride of a published mask: retina keeps every s-th pixel on a grid anchored at the YOLO bbox
+/// corner (retina/src/graph_publisher.cpp). Every sample's offset from the minimum sample is then a
+/// multiple of s, so the gcd of all offsets recovers s; a dense mask (offsets 0,1,2,...) gives 1.
+inline int infer_stride(const std::vector<Eigen::Vector2f>& mask_px)
+{
+    if (mask_px.empty()) return 1;
+    long xmin = std::lround(mask_px[0].x()), ymin = std::lround(mask_px[0].y());
+    for (const auto& p : mask_px) { xmin = std::min(xmin, std::lround(p.x())); ymin = std::min(ymin, std::lround(p.y())); }
+    long g = 0;
+    for (const auto& p : mask_px)
+    {
+        g = std::gcd(g, std::lround(p.x()) - xmin);
+        g = std::gcd(g, std::lround(p.y()) - ymin);
+        if (g == 1) break;
+    }
+    return g == 0 ? 1 : int(g);
+}
+
 /// mask_px are integral pixel coordinates (see CONTRACT at the lround line); geometry is computed in double.
+/// Decimated masks (retina's VOXEL_DECIMATION_FACTOR) are rasterised as stride x stride blocks, which reproduces
+/// the dense mask up to a one-block rim; Task 2's golden test bounds the effect.
 inline std::optional<Crop> make_crop(const cv::Mat& bgr, const std::vector<Eigen::Vector2f>& mask_px)
 {
     if (bgr.empty() or mask_px.empty()) return std::nullopt;
     cv::Mat mask = cv::Mat::zeros(bgr.size(), CV_8U);
     int x0 = bgr.cols, y0 = bgr.rows, x1 = -1, y1 = -1, n = 0, border = 0;
+    const int stride = infer_stride(mask_px);
     for (const auto& p : mask_px)
     {
         // CONTRACT: mask pixels are integral (retina publishes static_cast<float>(col/row) of integer pixel
         // indices, retina/src/graph_publisher.cpp det_pixels), so lround only undoes float storage; a Python
         // mirror builds its mask from a boolean array, so round-half-even vs half-away never arises.
-        const int x = int(std::lround(p.x())), y = int(std::lround(p.y()));
-        if (x < 0 or y < 0 or x >= bgr.cols or y >= bgr.rows) continue;
-        if (mask.at<std::uint8_t>(y, x) == 0) { ++n; if (x == 0 or y == 0 or x == bgr.cols - 1 or y == bgr.rows - 1) ++border; }
-        mask.at<std::uint8_t>(y, x) = 255;
-        x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+        const int px = int(std::lround(p.x())), py = int(std::lround(p.y()));
+        for (int y = py; y < py + stride; ++y)
+            for (int x = px; x < px + stride; ++x)
+            {
+                if (x < 0 or y < 0 or x >= bgr.cols or y >= bgr.rows) continue;
+                if (mask.at<std::uint8_t>(y, x) == 0)
+                {
+                    ++n;
+                    if (x == 0 or y == 0 or x == bgr.cols - 1 or y == bgr.rows - 1) ++border;
+                }
+                mask.at<std::uint8_t>(y, x) = 255;
+                x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+            }
     }
     if (n == 0) return std::nullopt;
     Crop c;

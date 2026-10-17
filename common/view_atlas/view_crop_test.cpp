@@ -62,6 +62,39 @@ int main()
     cv::Mat src = img.clone(); fh.push(500, src); src.setTo(cv::Scalar(0, 0, 0));
     check(fh.at(500)->at<cv::Vec3b>(0, 0) == cv::Vec3b(0, 0, 255), "push deep-copies (caller may reuse its buffer)");
 
+    std::printf("stride inference\n");
+    check(infer_stride(rect_px(10, 10, 20, 20)) == 1, "dense mask: stride 1");
+    auto dec = [](const std::vector<Eigen::Vector2f>& v, int s, int ax, int ay) {
+        std::vector<Eigen::Vector2f> o;
+        for (const auto& p : v)
+            if ((int(p.x()) - ax) % s == 0 and (int(p.y()) - ay) % s == 0) o.push_back(p);
+        return o;
+    };
+    check(infer_stride(dec(rect_px(600, 300, 700, 400), 2, 600, 300)) == 2, "decimated by 2: stride 2");
+    check(infer_stride(dec(rect_px(600, 300, 700, 400), 3, 600, 300)) == 3, "decimated by 3: stride 3");
+    check(infer_stride({Eigen::Vector2f(5.f, 5.f)}) == 1, "single pixel: stride 1");
+    check(infer_stride({}) == 1, "empty: stride 1");
+    check(infer_stride(dec(rect_px(600, 300, 700, 301), 2, 600, 300)) == 2, "one row: stride from x alone");
+    {
+        auto holes = rect_px(10, 10, 30, 30);
+        holes.erase(holes.begin() + 5);                         // a dense mask with a hole stays stride 1
+        check(infer_stride(holes) == 1, "dense mask with a hole: stride 1");
+    }
+
+    std::printf("stride-aware crop\n");
+    auto dense = make_crop(img, rect_px(600, 300, 700, 400));
+    auto sparse = make_crop(img, dec(rect_px(600, 300, 700, 400), 2, 600, 300));
+    check(sparse.has_value() and dense.has_value(), "decimated mask yields a crop");
+    if (sparse and dense)
+    {
+        check(sparse->mask_px == dense->mask_px, "decimated mask counts dense-equivalent pixels");
+        cv::Mat diff;
+        cv::absdiff(sparse->rgb224, dense->rgb224, diff);
+        check(cv::countNonZero(diff.reshape(1)) == 0, "grid-aligned decimated rectangle: crop identical to dense");
+    }
+    auto edge = make_crop(img, dec(rect_px(1200, 300, 1280, 400), 2, 1200, 300));
+    check(edge.has_value() and edge->trunc_frac > 0.f, "decimated mask at the right border still reports truncation");
+
     std::printf("\nview_crop_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }
