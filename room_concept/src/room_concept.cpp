@@ -1076,9 +1076,10 @@ namespace rc
                     loc_initialized_ = true;
 
                 // Wake the owner to publish this fresh correction to the DSR graph IMMEDIATELY rather
-                // than waiting for the next compute() tick (the callback marshals the graph write to the
-                // main thread via a Qt::QueuedConnection). Fired OUTSIDE result_mutex_ so we never hold
-                // the lock across the hop. Removes ~one compute-period of lidar→RT latency.
+                // than waiting for the next compute() tick. The callback runs ON THIS (localiser) THREAD —
+                // it reaches scene_graph_->update() directly, no Qt marshal — so any scene-graph state the
+                // GUI thread also reads must be published under a lock (see pinned_landmarks()). Fired
+                // OUTSIDE result_mutex_. Removes ~one compute-period of lidar→RT latency.
                 if (res.ok && on_result_ready_)
                     on_result_ready_();
 

@@ -3581,13 +3581,12 @@ void RoomSceneGraph::refresh_object_anchors()
     // (robot→landmark sight lines). "Measured" = the producer's per-frame detection flag; for tables
     // that is `table_detection_alive` (type-attributed read, compile-checked). Absent flag ⇒
     // default to measured, so an object type that doesn't publish it still shows its sight line.
-    latest_pinned_landmarks_.clear();
-    latest_pinned_measured_.clear();
-    latest_pinned_landmarks_.reserve(anchors.size());
-    latest_pinned_measured_.reserve(anchors.size());
+    PinnedLandmarks pinned;
+    pinned.positions.reserve(anchors.size());
+    pinned.measured.reserve(anchors.size());
     for (const auto& a : anchors)
     {
-        latest_pinned_landmarks_.emplace_back(a.pose_world.x(), a.pose_world.y());
+        pinned.positions.emplace_back(a.pose_world.x(), a.pose_world.y());
         bool measured = true;
         if (const auto n = G_->get_node(a.node_id); n.has_value())
         {
@@ -3595,7 +3594,11 @@ void RoomSceneGraph::refresh_object_anchors()
             if (const auto v = G_->get_attrib_by_name<table_detection_alive_att>(n.value()); v.has_value())
                 measured = v.value();
         }
-        latest_pinned_measured_.push_back(measured ? 1 : 0);
+        pinned.measured.push_back(measured ? 1 : 0);
+    }
+    {
+        std::scoped_lock lk(pinned_mutex_);
+        latest_pinned_ = std::move(pinned);
     }
 
     room_concept_->set_object_anchors(std::move(anchors));

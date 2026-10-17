@@ -154,16 +154,18 @@ public:
     [[nodiscard]] int   stable_frames() const noexcept { return stable_frames_; }
     [[nodiscard]] std::uint64_t robot_id() const noexcept { return dsr_robot_id_; }
 
-    // World-frame (room) positions of the pinned-object landmarks, refreshed each frame by
-    // refresh_object_anchors(). Consumed by the viewer to draw robot→landmark sight lines.
-    [[nodiscard]] const std::vector<Eigen::Vector2f>& pinned_landmarks() const noexcept
-    { return latest_pinned_landmarks_; }
-
-    // Per-landmark "currently being measured" flag (1:1 with pinned_landmarks()): true when the
-    // object's producer is actively detecting it this frame (e.g. table_detection_alive). The viewer
-    // draws the robot→landmark sight line only while measured.
-    [[nodiscard]] const std::vector<char>& pinned_measured() const noexcept
-    { return latest_pinned_measured_; }
+    // World-frame (room) positions of the pinned-object landmarks + a parallel (1:1) "currently being
+    // measured" flag (the producer is detecting it this frame, e.g. table_detection_alive), refreshed
+    // each frame by refresh_object_anchors() on the LOCALISER thread and drawn by the GUI thread as
+    // robot→landmark sight lines. Returned BY VALUE under a lock: a const& into vectors the other thread
+    // clears and refills is a use-after-free, and the two vectors must come from the same frame.
+    struct PinnedLandmarks
+    {
+        std::vector<Eigen::Vector2f> positions;
+        std::vector<char>            measured;
+    };
+    [[nodiscard]] PinnedLandmarks pinned_landmarks() const
+    { std::scoped_lock lk(pinned_mutex_); return latest_pinned_; }
 
 private:
     void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
@@ -488,10 +490,9 @@ private:
     // in the steady state, long after that counter has stopped being maintained.
     int           anchor_stable_frames_ = 0;
 
-    // World-frame positions of pinned-object landmarks (refreshed by refresh_object_anchors()).
-    std::vector<Eigen::Vector2f> latest_pinned_landmarks_;
-    // Parallel to latest_pinned_landmarks_: is that object being actively measured this frame?
-    std::vector<char>            latest_pinned_measured_;
+    // Pinned-object landmarks for the viewer (written by the localiser thread, read by the GUI thread).
+    PinnedLandmarks    latest_pinned_;
+    mutable std::mutex pinned_mutex_;
 
     // Latest robot-frame velocities, refreshed per update() for the RT velocity attrs.
     float last_adv_  = 0.f;

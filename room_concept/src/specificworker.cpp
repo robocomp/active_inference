@@ -308,7 +308,8 @@ void SpecificWorker::compute()
     {
         section_timer.restart();
         viewer_->update_viewer(loc_res, have_loc, pose_for_draw, lidar_for_canvas, loc_pose, use_loc);
-        viewer_->draw_landmarks(scene_graph_->pinned_landmarks(), scene_graph_->pinned_measured(), pose_for_draw);
+        const auto pinned = scene_graph_->pinned_landmarks();   // snapshot: the localiser thread refills it
+        viewer_->draw_landmarks(pinned.positions, pinned.measured, pose_for_draw);
         t_viewer_us = section_timer.nsecsElapsed() / 1000;
     }
 
