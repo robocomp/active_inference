@@ -1,7 +1,7 @@
 #pragma once
 /*
  * em_query.h — the pure query library chat_agent answers from (2026-10-17): filters over today's records and the
- * all-time Stats. Header-only, no DSR; the DSR adapter `load_store` comes later. Absent is not zero: last() is
+ * all-time Stats. Header-only, no DSR; the DSR adapter `load_store` is in em_query_dsr.h. Absent is not zero: last() is
  * an optional, an empty result is an empty vector.
  */
 
