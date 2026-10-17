@@ -352,32 +352,8 @@ namespace rc
         // we validate the SAME predicted pose against the corner factor: if the worst corner's whitened
         // residual m=√(rᵀΛ_det r) exceeds the tolerance, the prediction is inconsistent with the corners
         // (the flip signature) → reject the early-exit so Adam runs and the corner factor pulls it back.
-        if (params.corner_early_exit_check)
-        {
-            const auto& slot = window_mgr_.newest();
-            if (!slot.corner_obs.empty())
-            {
-                const float px = slot.pose[0], py = slot.pose[1], pth = slot.pose[2];
-                const float ct = std::cos(pth), st = std::sin(pth);
-                int n_bad = 0;
-                for (const auto& obs : slot.corner_obs)
-                {
-                    const float dx = obs.model_corner_world.x() - px;
-                    const float dy = obs.model_corner_world.y() - py;
-                    // Predicted observation z_hat = R(-θ)·(c_world - t), residual = detected - z_hat.
-                    const float rx = obs.detected_robot.x() - ( ct * dx + st * dy);
-                    const float ry = obs.detected_robot.y() - (-st * dx + ct * dy);
-                    const Eigen::Vector2f r(rx, ry);
-                    const float maha_sq = params.corner_precision_gain * r.dot(obs.information * r);
-                    if (std::sqrt(std::max(0.f, maha_sq)) > params.corner_early_exit_sigma)
-                        ++n_bad;
-                }
-                // CONSENSUS: force Adam only when enough corners disagree — a lone outlier is outvoted by
-                // the corroborating majority, but a rot180 flip (ALL corners disagree) still trips it.
-                if (n_bad >= params.corner_early_exit_min_bad)
-                    return give_up_to_optimizer(EeReason::CornerVeto);
-            }
-        }
+        if (params.corner_early_exit_check and corner_veto_fires())   // body: corner_veto_fires()
+            return give_up_to_optimizer(EeReason::CornerVeto);
 
         // NOTE: the object-anchor early-exit GATE was reverted (2026-07-12) to A/B whether it was the
         // source of the localization instability. The anchor is now FACTOR-ONLY: it refines the pose
@@ -388,21 +364,7 @@ namespace rc
         ++ee_taken_;
         // Report the split, not just the rate. "99% early exit" is the same number whether the SDF
         // is doing all the work or the corner veto is quietly forcing a third of the solves.
-        {
-            const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                         std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (ee_report_last_ms_ == 0) ee_report_last_ms_ = now;
-            else if (now - ee_report_last_ms_ > 10000)
-            {
-                ee_report_last_ms_ = now;
-                const int f = ee_forced_[0] + ee_forced_[1] + ee_forced_[2] + ee_forced_[3];
-                qInfo().nospace()
-                    << "[earlyexit] taken " << ee_taken_ << " / forced " << f
-                    << "  (not_tracking " << ee_forced_[0] << ", sdf_residual " << ee_forced_[1]
-                    << ", unopt_drift " << ee_forced_[2] << ", CORNER_VETO " << ee_forced_[3] << ")";
-                ee_taken_ = 0; ee_forced_ = {};
-            }
-        }
+        report_early_exit_split();
         last_t_adam_ms_ = 0.f;
         last_t_cov_ms_ = 0.f;
         last_t_breakdown_ms_ = 0.f;
@@ -426,6 +388,69 @@ namespace rc
         // further. It cannot overrule a confident prediction, and it can undo a wander the prior
         // admits could not have happened. Nothing here is tuned; both bounds come from quantities the
         // estimator already states.
+        sdf_polish_step(scan_pts, pose0, odometry_prior);
+
+        const Eigen::Vector3f p_acc = window_mgr_.newest().pose;
+        const float x = p_acc[0], y = p_acc[1], phi = p_acc[2];
+
+        UpdateResult res = build_early_exit_result(scan_pts, sdf_pred, mean_sdf_pred, lidar_timestamp_ms,
+                                                   x, y, phi);
+
+        write_early_exit_debug_row(res, odometry_prior, lidar_timestamp_ms, mean_sdf_pred, x, y, phi);
+
+
+        return res;
+    }
+
+    bool RoomConcept::corner_veto_fires() const
+    {
+            const auto& slot = window_mgr_.newest();
+            if (!slot.corner_obs.empty())
+            {
+                const float px = slot.pose[0], py = slot.pose[1], pth = slot.pose[2];
+                const float ct = std::cos(pth), st = std::sin(pth);
+                int n_bad = 0;
+                for (const auto& obs : slot.corner_obs)
+                {
+                    const float dx = obs.model_corner_world.x() - px;
+                    const float dy = obs.model_corner_world.y() - py;
+                    // Predicted observation z_hat = R(-θ)·(c_world - t), residual = detected - z_hat.
+                    const float rx = obs.detected_robot.x() - ( ct * dx + st * dy);
+                    const float ry = obs.detected_robot.y() - (-st * dx + ct * dy);
+                    const Eigen::Vector2f r(rx, ry);
+                    const float maha_sq = params.corner_precision_gain * r.dot(obs.information * r);
+                    if (std::sqrt(std::max(0.f, maha_sq)) > params.corner_early_exit_sigma)
+                        ++n_bad;
+                }
+                // CONSENSUS: force Adam only when enough corners disagree — a lone outlier is outvoted by
+                // the corroborating majority, but a rot180 flip (ALL corners disagree) still trips it.
+                return n_bad >= params.corner_early_exit_min_bad;
+            }
+        return false;
+    }
+
+    void RoomConcept::report_early_exit_split()
+    {
+        {
+            const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (ee_report_last_ms_ == 0) ee_report_last_ms_ = now;
+            else if (now - ee_report_last_ms_ > 10000)
+            {
+                ee_report_last_ms_ = now;
+                const int f = ee_forced_[0] + ee_forced_[1] + ee_forced_[2] + ee_forced_[3];
+                qInfo().nospace()
+                    << "[earlyexit] taken " << ee_taken_ << " / forced " << f
+                    << "  (not_tracking " << ee_forced_[0] << ", sdf_residual " << ee_forced_[1]
+                    << ", unopt_drift " << ee_forced_[2] << ", CORNER_VETO " << ee_forced_[3] << ")";
+                ee_taken_ = 0; ee_forced_ = {};
+            }
+        }
+    }
+
+    void RoomConcept::sdf_polish_step(const ScanPoints& scan_pts, const Eigen::Vector3f& pose0,
+                                      const OdometryPrior& odometry_prior)
+    {
         const auto t_polish0 = std::chrono::steady_clock::now();   // per-stage timing (optimizer_timing.csv)
         if (params.sdf_polish_enabled and odometry_prior.valid)
         {
@@ -481,10 +506,12 @@ namespace rc
             }
         }
         last_t_polish_ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_polish0).count();
+    }
 
-        const Eigen::Vector3f p_acc = window_mgr_.newest().pose;
-        const float x = p_acc[0], y = p_acc[1], phi = p_acc[2];
-
+    RoomConcept::UpdateResult RoomConcept::build_early_exit_result(const ScanPoints& scan_pts,
+                const Eigen::VectorXf& sdf_pred, float mean_sdf_pred, std::int64_t lidar_timestamp_ms,
+                float x, float y, float phi)
+    {
         UpdateResult res;
         res.ok = true;
         res.final_loss = mean_sdf_pred;
@@ -577,8 +604,12 @@ namespace rc
         last_update_result = res;
         prev_sdf_mse_ = res.sdf_mse;   // track for boundary quality gate next frame
         last_lidar_timestamp = lidar_timestamp_ms;
+        return res;
+    }
 
-        // Debug log for early-exit frames
+    void RoomConcept::write_early_exit_debug_row(const UpdateResult& res, const OdometryPrior& odometry_prior,
+                std::int64_t lidar_timestamp_ms, float mean_sdf_pred, float x, float y, float phi)
+    {
         if (debug_log_.is_open())
         {
             const auto wall_now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -712,8 +743,6 @@ namespace rc
             debug_log_ << '\n';
             debug_log_.flush();
         }
-
-        return res;
     }
 
 } // namespace rc

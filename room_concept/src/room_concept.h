@@ -1325,6 +1325,15 @@ private:
         const OdometryPrior& odometry_prior,
         std::int64_t lidar_timestamp_ms,
         bool measure_only = false);
+    // Its parts (room_concept_early_exit.cpp): the corner consensus veto, the periodic taken/forced report,
+    // the one damped SDF step, the early-exit UpdateResult, and that path's debug-log row.
+    bool corner_veto_fires() const;
+    void report_early_exit_split();
+    void sdf_polish_step(const ScanPoints& scan_pts, const Eigen::Vector3f& pose0, const OdometryPrior& odometry_prior);
+    UpdateResult build_early_exit_result(const ScanPoints& scan_pts, const Eigen::VectorXf& sdf_pred, float mean_sdf_pred,
+                                         std::int64_t lidar_timestamp_ms, float x, float y, float phi);
+    void write_early_exit_debug_row(const UpdateResult& res, const OdometryPrior& odometry_prior,
+                                    std::int64_t lidar_timestamp_ms, float mean_sdf_pred, float x, float y, float phi);
 
     /// Run the Levenberg-Marquardt backend (room_gn_solver) over the sliding window, writing the
     /// solution back into the slot pose tensors. Returns {last_loss, iterations}. On failure the
