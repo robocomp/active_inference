@@ -54,6 +54,7 @@
 #include "chat_window.h"
 #include "command_gate.h"
 #include "intention_node.h"
+#include "mission_watch.h"
 #include "ollama_client.h"
 #include "world_digest.h"
 
@@ -125,6 +126,7 @@ private:
     WorldDigest digest_builder_;
     Digest digest_;
     IntentionNode intention_;
+    MissionWatch mission_watch_;   ///< the controller's controller_mission node → the plan window
     OllamaClient llm_;
     std::unique_ptr<ChatWindow> window_;
     ChatLog log_;

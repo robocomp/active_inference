@@ -42,6 +42,7 @@ void SpecificWorker::cleanup_owned_nodes()
     stop_control_thread();
 
     obstacle_tracker_.clear_published_obstacles();
+    mission_node_.remove(*G);
     presence_coordinator_.cleanup_owned_nodes();
 }
 

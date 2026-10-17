@@ -48,7 +48,7 @@ QJsonObject tool_def(const QString& name, const QString& description, QJsonObjec
 
 ChatSession::ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg)
     : G_(std::move(G)), cfg_(std::move(cfg)), inner_(G_->get_inner_eigen_api()), digest_builder_(G_, "body", cfg_.objects_nearest),
-      intention_(G_), llm_(cfg_.llm), cameras_(G_)
+      intention_(G_), mission_watch_(G_), llm_(cfg_.llm), cameras_(G_)
 {
     robot_description_ = load_robot_description(cfg_.system_prompt_path);
     if (not log_.open(cfg_.log_dir)) std::println("[chat_agent] WARNING: cannot open a log under '{}'", cfg_.log_dir);
@@ -600,6 +600,12 @@ void ChatSession::reject_card(const char* how)
 // The controller's report on the last command, every 250 ms.
 void ChatSession::tick_status()
 {
+    if (window_)   // whatever the mission's source: chat, remote_cmd.txt, the panel
+    {
+        auto u = mission_watch_.poll();
+        if (u.mission.has_value()) window_->set_plan(u.mission->first, QString::fromStdString(u.mission->second));
+        if (u.progress.has_value()) window_->set_plan_progress(*u.progress);
+    }
     if (sent_command_.empty()) return;
     const IntentionStatus s = intention_.read();
     if (s.command != sent_command_ or s.stamp != sent_stamp_) return;   // our node was re-created

@@ -1987,7 +1987,7 @@ void SpecificWorker::service_chat_inbox()
 				if (not m.has_value()) std::println("[chat] mission refused: {}", refused->message());
 				chat_tracked_ = {.kind = K::Rejected, .reason = refused->status()};
 			}
-			else chat_tracked_ = {.kind = K::Mission, .mission_serial = mission_serial_};
+			else chat_tracked_ = {.kind = K::Mission, .mission_serial = interpreter_.serial()};
 			chat_tracked_.stamp = cmd->stamp_ms;
 		}
 		else
@@ -1997,7 +1997,7 @@ void SpecificWorker::service_chat_inbox()
 			if (r.kind == "cancel" or r.kind == "resume")
 			{
 				// About the mission, not a new one: the report on this stamp is the mission's own.
-				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = mission_serial_};
+				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = interpreter_.serial()};
 				else chat_tracked_ = {.kind = K::Rejected, .reason = r.reason};
 			}
 			else if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
@@ -2013,7 +2013,7 @@ void SpecificWorker::service_chat_inbox()
 	if (chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Mission)
 	{
 		const std::string drv = driving ? "driving=on" : "driving=off";
-		if (chat_tracked_.mission_serial != mission_serial_)
+		if (chat_tracked_.mission_serial != interpreter_.serial())
 			chat_inbox_.publish(*G, chat_tracked_.stamp, "aborted|superseded",
 			                    std::format("superseded|another mission was started|{}", drv));
 		else chat_inbox_.publish(*G, chat_tracked_.stamp, interpreter_.status(), interpreter_.progress() + "|" + drv);

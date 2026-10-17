@@ -22,6 +22,7 @@
 #include <format>
 #include <print>
 
+#include "../../common/mission/mission_json.h"
 #include "../../common/world_query/door_query.h"
 
 using rc::mission::LeafState;
@@ -211,13 +212,14 @@ std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred 
 std::optional<rc::mission::Error> SpecificWorker::start_mission(rc::mission::Mission m, const char *source)
 {
 	const std::string title = m.title;
+	std::string ir = rc::mission::encode_json(m);
 	if (auto e = interpreter_.start(std::move(m), current_time_ms()); e.has_value())
 	{
 		std::println("[{}] mission '{}' refused: {}", source, title, e->message());
 		return e;
 	}
 	mission_source_ = source;
-	++mission_serial_;
+	mission_ir_json_ = std::move(ir);
 	// ★ A MISSION IS A "GO", like a click or a relative move: it arms the base output (Stop disarmed it). It reached
 	//   here through the chat's confirmation card or a script someone dropped on purpose.
 	paused_ = false;
@@ -235,6 +237,7 @@ void SpecificWorker::cancel_mission(const std::string &outcome, bool hold)
 	if (interpreter_.state() != rc::mission::Interpreter::State::Running) return;
 	interpreter_.cancel(outcome, current_time_ms());
 	for (const auto &e : interpreter_.take_events()) std::println("[mission] {}", e);
+	mission_node_.publish(*G, interpreter_, mission_source_, mission_ir_json_);
 	if (hold) hold_base();
 }
 
@@ -247,6 +250,7 @@ void SpecificWorker::service_mission()
 	mission_poll_ms_ = now;
 	interpreter_.tick(now);
 	for (const auto &e : interpreter_.take_events()) std::println("[mission] {}", e);
+	mission_node_.publish(*G, interpreter_, mission_source_, mission_ir_json_);   // written only on change
 	if (interpreter_.state() != S::Running) hold_base();   // completed or failed: the robot stays where it is
 }
 

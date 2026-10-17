@@ -29,6 +29,8 @@ LIST(APPEND SOURCES
   ../src/world_digest.cpp
   ../src/intention_node.cpp
   ../src/camera_grabber.cpp
+  ../src/plan_view.cpp
+  ../src/mission_watch.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

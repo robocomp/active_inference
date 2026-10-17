@@ -51,6 +51,7 @@
 #include "controller_session.h"
 #include "controller_world_model.h"
 #include "chat_inbox.h"
+#include "mission_node.h"
 #include "controller_relative_motion.h"
 #include "../../common/mission/mission_interpreter.h"
 #include "../../common/affordance_manager/affordance_manager.h"
@@ -178,13 +179,14 @@ private:
 	MissionHost mission_host_{*this};
 	rc::mission::Interpreter interpreter_{mission_host_};
 	std::string mission_source_;           ///< who started the running mission: "chat" | "remote"
+	std::string mission_ir_json_;          ///< the running (or last) mission's IR, as published on controller_mission
+	rc::MissionNode mission_node_;         ///< controller_mission: the mission, its steps' states, its step history
 	std::uint64_t mission_poll_ms_ = 0;
 	/// Validate and start a mission (it supersedes a running one). The refusal, or nullopt when it runs.
 	std::optional<rc::mission::Error> start_mission(rc::mission::Mission m, const char *source);
 	/// Cancel the running mission (no-op otherwise), reporting `outcome`. hold = the base is then held, still armed;
 	/// false when the caller is about to give the base to something else (a new command, Stop's own disarm).
 	void cancel_mission(const std::string &outcome, bool hold = true);
-	std::uint64_t mission_serial_ = 0;     ///< +1 per started mission: which one a chat report is about
 	/// One step of the running mission (10 Hz) + its log lines; holds the base when it ends. Control thread.
 	void service_mission();
 	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
