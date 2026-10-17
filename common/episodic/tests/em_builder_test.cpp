@@ -364,6 +364,55 @@ void test_first_wire_only_adopts()
     CHECK(b.on_journal(s.wire(), 140).empty());
 }
 
+// R13: priming adopts the latest DriveMode op (state only) — history says mission_only, so no self mission.
+void test_priming_adopts_drive_mode()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    s.push(K::DriveMode, 10).op = "affordances_only";
+    s.push(K::DriveMode, 20).op = "mission_only";
+    CHECK(b.on_journal(s.wire(), 30).empty());
+    CHECK(b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "born", .node = "chair_1"}}, 40).empty());
+    CHECK(b.on_journal(s.wire(), 50).empty());
+    CHECK(b.open().empty());
+}
+
+// No self mission before the first journal poll; an unknown room ("") never splits a self mission.
+void test_unprimed_and_unknown_room()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    CHECK(b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "born", .node = "chair_1"}}, 10).empty());
+    CHECK(b.open().empty());
+    Script s;
+    b.on_journal(s.wire(), 20);
+    CHECK(b.on_journal(s.wire(), 30).size() == 1);      // R9: affordances_only, a self mission in room_1
+    fs.room = "";
+    CHECK(b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "current_moved", .node = ""}}, 40).empty());
+    CHECK(b.open().size() == 1 and b.open()[0].room == "room_1");
+}
+
+// R13: a MissionEnd never stamps its outcome onto an open child; the child's own *End closes it.
+void test_mission_end_leaves_children_open()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100);
+    push_claim(s, 110);
+    b.on_journal(s.wire(), 120);
+    auto& me = s.push(K::MissionEnd, 130); me.mission = "m1"; me.outcome = "succeeded";
+    const auto c = closed(b.on_journal(s.wire(), 140));
+    CHECK(c.size() == 1 and c[0].level == Level::Mission and c[0].outcome == "succeeded");
+    CHECK(b.open().size() == 1 and b.open()[0].level == Level::Claim);
+    push_claim_end(s, 150, "failure");
+    const auto c2 = closed(b.on_journal(s.wire(), 160));
+    CHECK(c2.size() == 1 and c2[0].level == Level::Claim and c2[0].outcome == "failure" and c2[0].t1 == 150u);
+    CHECK(b.open().empty());
+}
+
 void test_idempotent_repoll()
 {
     FakeFactSource fs;
@@ -443,6 +492,9 @@ int main()
     test_controller_epoch_change();
     test_journal_gap();
     test_first_wire_only_adopts();
+    test_priming_adopts_drive_mode();
+    test_unprimed_and_unknown_room();
+    test_mission_end_leaves_children_open();
     test_idempotent_repoll();
     test_delivered_absent_without_cov();
     test_shutdown_closes_all();

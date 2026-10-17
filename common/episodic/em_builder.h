@@ -8,7 +8,8 @@
  * that opens and closes in one call is returned twice, open then closed — the archive keeps the last line per id.
  *
  * Journal rules (spec §5–§6 + rulings R8–R10):
- *  - The FIRST wire only adopts its epoch and max serial; it creates no records (its history has no valid pre-facts).
+ *  - The FIRST wire only adopts its epoch, max serial and latest DriveMode op (R13); it creates no records (its
+ *    history has no valid pre-facts).
  *  - A later wire with a different epoch (controller restarted): close every open record `lost`, then process ALL
  *    its entries. Same epoch: entries with serial <= last seen are ignored (idempotent polling); a gap (first new
  *    serial > last+1) closes every open record `lost` — any closing entry may have been dropped — then processes.
@@ -16,9 +17,9 @@
  *    whose step_id is a strict dotted prefix ("2" for "2.1"), else the mission; ClaimStart a claim whose parent is the
  *    innermost open step, else the open human mission, else the open self mission, else a self mission opened now.
  *  - *End closes its match (mission key; (mission, step_id, attempt, iteration); the most recent open claim), with the
- *    journal's outcome. An *End with no open match is ignored. Closing a HUMAN mission closes its open descendants
- *    first with the same outcome; closing a step or a self mission does not touch its children (their own *End, or
- *    `lost` / shutdown, closes them — EM never invents an outcome for a claim).
+ *    journal's outcome. An *End with no open match is ignored. Closing any record (mission, self mission, step) never
+ *    touches its open children (R11, R13): they keep their parent id and close by their own *End, or by `lost` /
+ *    shutdown — EM never stamps a parent's outcome onto a child.
  *  - Times: t0/t1 are the journal's stamps for journal-driven opens/closes; now_ms for what EM itself decides
  *    (`lost`, shutdown, a self mission opened/split at a check).
  *
@@ -27,7 +28,8 @@
  * affordances_only, and `room_changed` (a new one opening) when current_room() differs from its room — DEFERRED while
  * it has an open child claim (a door crossing changes room mid-claim), so the split lands on the first check after
  * that claim closed. A superseded self mission's open claim keeps its parent id and closes later. Checked after
- * each journal poll and each on_events call; suspended after owner_lost until the next journal poll.
+ * each journal poll and each on_events call, never before the first journal poll; suspended after owner_lost until
+ * the next journal poll. An unknown room (current_room() == "") never splits it.
  *
  * Absent is not zero: a node the FactSource cannot read contributes no Fact; `delivered` exists only when both pre and
  * post carry cov_xx and cov_yy (ruling R2): 0.5*ln((cov_xx_pre*cov_yy_pre)/(cov_xx_post*cov_yy_post)).
@@ -106,9 +108,11 @@ public:
         const std::uint64_t max_serial =
             std::ranges::fold_left(w.entries, std::uint64_t{0}, [](std::uint64_t m, const JournalEntry& e)
                                    { return std::max(m, e.serial); });
-        if (not primed_)                        // R8: adopt only
+        if (not primed_)                        // R8: adopt only (+ drive mode state, R13)
         {
             primed_ = true;
+            for (const JournalEntry& e : w.entries)
+                if (e.kind == JournalEntry::Kind::DriveMode) drive_mode_ = e.op;
             epoch_ = w.epoch;
             last_seen_ = max_serial;
             return {};
@@ -222,27 +226,9 @@ private:
         return open_.back();
     }
 
-    // Closes the open record with this id; a HUMAN mission takes its open descendants with it (innermost first).
+    // Closes the open record with this id. Never touches its children (R11, R13): EM never invents a claim/step
+    // outcome — they close by their own *End, or by `lost` / shutdown.
     void close(const std::string& id, const std::string& outcome, std::uint64_t t)
-    {
-        const auto it = std::ranges::find(open_, id, [](const Open& o) { return o.rec.id; });
-        if (it == open_.end()) return;
-        if (it->rec.level == Level::Mission and not it->self)
-        {
-            std::vector<std::string> family{id};
-            std::vector<std::string> doomed;
-            for (const Open& o : open_)        // open order: a parent precedes its children
-                if (o.rec.id != id and std::ranges::contains(family, o.rec.parent))
-                {
-                    family.push_back(o.rec.id);
-                    doomed.push_back(o.rec.id);
-                }
-            for (const std::string& d : doomed | std::views::reverse) finish(d, outcome, t);
-        }
-        finish(id, outcome, t);
-    }
-
-    void finish(const std::string& id, const std::string& outcome, std::uint64_t t)
     {
         const auto it = std::ranges::find(open_, id, [](const Open& o) { return o.rec.id; });
         if (it == open_.end()) return;
@@ -265,7 +251,7 @@ private:
 
     void close_all(const std::string& outcome, std::uint64_t t)
     {
-        while (not open_.empty()) finish(open_.back().rec.id, outcome, t);
+        while (not open_.empty()) close(open_.back().rec.id, outcome, t);
     }
 
     void apply(const JournalEntry& e)
@@ -355,14 +341,15 @@ private:
 
     void check_self(std::uint64_t now_ms)
     {
-        if (not owner_present_) return;
+        if (not primed_ or not owner_present_) return;
         Open* s = self_mission();
         const bool wanted = self_driving() and not human_mission();
         if (s and not wanted) { close(s->rec.id, "superseded", now_ms); return; }
         if (not wanted) return;
         const auto has_open_child = [&](const Open& p)
         { return std::ranges::any_of(open_, [&](const Open& o) { return o.rec.parent == p.rec.id; }); };
-        if (s and s->rec.room != facts_.current_room() and not has_open_child(*s))
+        const std::string room = facts_.current_room();
+        if (s and not room.empty() and s->rec.room != room and not has_open_child(*s))
         {
             close(s->rec.id, "room_changed", now_ms);
             s = nullptr;
