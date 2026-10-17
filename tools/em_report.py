@@ -8,9 +8,9 @@ One JSON object per line; the same id may appear several times (open line, then 
 the LAST line per id wins. Unparseable (truncated) lines are skipped with a warning.
 Structural failures: a mission with a parent, a step/claim without one or with an unknown one, t1 < t0, a CLOSED
 record with an empty outcome (EM never invents one, so a closed record must carry its owner's word or EM's own
-lost / interrupted_by_em_shutdown), two step records with the same (mission_key, step_id, attempt, iteration)
+lost / interrupted_by_em_shutdown), two step records with the same (root mission id, step_id, attempt, iteration)
 (records that carry both keys), and with --expect-closed any record still open.
-Also reported: records per mission_key (the controller's journal mission, "" = a self mission).
+Also reported: records per ROOT mission (id, with its mission_key; keys restart per controller process).
 Exit status 1 on any structural failure.
 """
 import argparse, json, statistics, sys
@@ -38,8 +38,32 @@ def load(path, warnings):
     return recs
 
 
-def analyze(recs, also_ids, expect_closed):
+def root_of(id, recs, also):
+    """(root id, cycle ids or None): follow parent links to the mission with no parent; if the chain breaks,
+    the topmost reachable record. Mission keys restart per controller process, so the root record id is the
+    only identity that is unique across the controller runs sharing one archive day."""
+    chain, cur = [], id
+    while True:
+        chain.append(cur)
+        r = recs.get(cur) or also.get(cur) or {}
+        par = r.get("parent", "")
+        if not par or (par not in recs and par not in also):
+            return cur, None
+        if par in chain:
+            return cur, chain[chain.index(par):]
+        cur = par
+
+
+def analyze(recs, also_ids, expect_closed, roots=None):
     fails = []
+    roots = {} if roots is None else roots
+    cycles = set()
+    for id in sorted(recs):
+        root, cyc = root_of(id, recs, also_ids)
+        roots[id] = root
+        if cyc and frozenset(cyc) not in cycles:
+            cycles.add(frozenset(cyc))
+            fails.append((id, "parent cycle: " + " -> ".join(cyc + [cyc[0]])))
     for id, r in sorted(recs.items()):
         lvl, par = r.get("level"), r.get("parent", "")
         if lvl == "mission":
@@ -61,15 +85,15 @@ def analyze(recs, also_ids, expect_closed):
     for id, r in sorted(recs.items()):
         if r.get("level") != "step" or not r.get("mission_key") or not r.get("step_id"):
             continue
-        key = (r["mission_key"], r["step_id"], r.get("attempt", 0), r.get("iteration", 0))
+        key = (roots[id], r["step_id"], r.get("attempt", 0), r.get("iteration", 0))
         if key in seen:
-            fails.append((id, f"duplicate step record of {seen[key]} (mission_key, step_id, attempt, iteration) = {key}"))
+            fails.append((id, f"duplicate step record of {seen[key]} (root mission, step_id, attempt, iteration) = {key}"))
         else:
             seen[key] = id
     return fails
 
 
-def summarize(recs, fails):
+def summarize(recs, fails, roots):
     c = lambda key: dict(sorted(Counter(r.get(key, "") or "" for r in recs.values()).items()))
     dur = defaultdict(list)
     for r in recs.values():
@@ -77,9 +101,16 @@ def summarize(recs, fails):
             dur[r.get("kind", "")].append((r["t1"] - r["t0"]) / 1000.0)
     outcomes = Counter(r.get("outcome", "") for r in recs.values())
     lost_lv = Counter(r.get("level") for r in recs.values() if r.get("outcome") == "lost")
+    by_mission = {}
+    for id, r in sorted(recs.items()):
+        g = by_mission.setdefault(roots[id], {"mission_key": "", "records": 0})
+        g["records"] += 1
+        if id == roots[id] or not g["mission_key"]:
+            g["mission_key"] = r.get("mission_key", "") or g["mission_key"]
+    by_mission = dict(sorted(by_mission.items()))
     return {
         "records": len(recs), "by_level": c("level"), "by_author": c("author"), "by_outcome": c("outcome"),
-        "by_mission_key": c("mission_key"),
+        "by_mission": by_mission,
         "median_duration_s_by_kind": {k: round(statistics.median(v), 3) for k, v in sorted(dur.items())},
         "outcome_words": {w: outcomes.get(w, 0) for w in WORDS},
         "lost": {"total": outcomes.get("lost", 0), "by_level": dict(sorted(lost_lv.items()))},
@@ -97,11 +128,12 @@ def main(argv=None):
     a = ap.parse_args(argv)
     warnings = []
     recs = load(a.archive, warnings)
-    also = set()
+    also = {}
     for p in a.also:
-        also |= set(load(p, warnings))
-    fails = analyze(recs, also, a.expect_closed)
-    s = summarize(recs, fails)
+        also.update(load(p, warnings))
+    roots = {}
+    fails = analyze(recs, also, a.expect_closed, roots)
+    s = summarize(recs, fails, roots)
     if a.json:
         s["warnings"] = warnings
         print(json.dumps(s, indent=1))
@@ -109,8 +141,11 @@ def main(argv=None):
         for w in warnings:
             print("warning:", w)
         print(f"records: {s['records']}")
-        for k in ("by_level", "by_author", "by_outcome", "by_mission_key"):
+        for k in ("by_level", "by_author", "by_outcome"):
             print(f"{k}: {s[k]}")
+        print("by_mission (root id: mission_key, records):")
+        for rid, g in s["by_mission"].items():
+            print(f"  {rid}: {g['mission_key'] or '-'} {g['records']}")
         print(f"median duration s by kind: {s['median_duration_s_by_kind']}")
         print(f"outcome words: {s['outcome_words']}")
         print(f"lost: {s['lost']['total']} by level {s['lost']['by_level']}")

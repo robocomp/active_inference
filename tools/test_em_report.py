@@ -98,9 +98,11 @@ class T(unittest.TestCase):
                  rec("20261017-4", author="self", source="self")]
         rc, out, _ = self.run_(self.write("a.jsonl", lines), "--json")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(json.loads(out)["by_mission_key"], {"": 1, "m3": 3})
+        bm = json.loads(out)["by_mission"]
+        self.assertEqual(sorted((v["mission_key"], v["records"]) for v in bm.values()), [("", 1), ("m3", 3)])
+        self.assertEqual(bm["20261017-1"], {"mission_key": "m3", "records": 3})
         rc, out, _ = self.run_(self.write("b.jsonl", lines))
-        self.assertIn("by_mission_key", out)
+        self.assertIn("by_mission", out)
 
     def test_duplicate_step_record_fails(self):
         step = dict(mission_key="m3", step_id="2.1", attempt=1, iteration=2)
@@ -113,6 +115,36 @@ class T(unittest.TestCase):
         self.assertIn("duplicate step", out)
         self.assertIn("20261017-3", out)
         self.assertNotIn("FAIL 20261017-4", out)
+
+    def two_runs(self):
+        step = dict(mission_key="c1", step_id="1", attempt=1, iteration=0)
+        return [rec("20261017-1", mission_key="c1"),
+                rec("20261017-2", "step", "20261017-1", **step),
+                rec("20261017-3", mission_key="c1"),
+                rec("20261017-4", "step", "20261017-3", **step)]
+
+    def test_controller_restart_same_key_passes(self):
+        rc, out, _ = self.run_(self.write("a.jsonl", self.two_runs()), "--json")
+        self.assertEqual(rc, 0, out)
+        bm = json.loads(out)["by_mission"]
+        self.assertEqual(bm, {"20261017-1": {"mission_key": "c1", "records": 2},
+                              "20261017-3": {"mission_key": "c1", "records": 2}})
+
+    def test_duplicate_under_same_root_via_claim_chain_fails(self):
+        lines = self.two_runs() + [rec("20261017-5", "step", "20261017-3", mission_key="c1", step_id="1",
+                                       attempt=1, iteration=0)]
+        rc, out, _ = self.run_(self.write("a.jsonl", lines))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("duplicate step", out)
+        self.assertIn("FAIL 20261017-5", out)
+
+    def test_parent_cycle_fails(self):
+        lines = [rec("20261017-1", "step", "20261017-2"), rec("20261017-2", "step", "20261017-1")]
+        rc, out, _ = self.run_(self.write("a.jsonl", lines))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("parent cycle", out)
+        self.assertIn("20261017-1", out)
+        self.assertIn("20261017-2", out)
 
 
 if __name__ == "__main__":
