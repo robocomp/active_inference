@@ -20,6 +20,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <QJsonArray>
@@ -191,6 +192,62 @@ inline std::optional<Record> record_from_json(const QJsonObject& o)
         r.events.push_back(Event{.dt_ms = std::int64_t(e["dt_ms"].toDouble()), .kind = s(e["kind"]), .node = s(e["node"])});
     }
     return r;
+}
+
+/// All-time statistics of the closed records sharing a (kind, identity) key (see em_consolidate.h). identity is
+/// target_ltsm; "" = per-kind only. dur_* is Welford over t1-t0 in seconds (dur_m2 = sum of squared deviations).
+/// n_gain counts only records carrying BOTH promised and delivered (absent is not zero).
+struct Stats
+{
+    std::string key_kind, key_identity;
+    std::map<std::string, int, std::less<>> outcomes;       // outcome word -> count
+    int n = 0;
+    double dur_mean_s = 0, dur_m2 = 0;
+    int n_gain = 0;
+    double promised_sum = 0, delivered_sum = 0;
+    std::uint64_t first_t0 = 0, last_t0 = 0;
+    bool operator==(const Stats&) const = default;
+};
+
+inline QJsonObject to_json(const Stats& st)
+{
+    using namespace detail;
+    QJsonObject o;
+    o["key_kind"] = q(st.key_kind);
+    o["key_identity"] = q(st.key_identity);
+    QJsonObject oc;
+    for (const auto& [k, c] : st.outcomes) oc[q(k)] = c;
+    o["outcomes"] = oc;
+    o["n"] = st.n;
+    o["dur_mean_s"] = st.dur_mean_s;
+    o["dur_m2"] = st.dur_m2;
+    o["n_gain"] = st.n_gain;
+    o["promised_sum"] = st.promised_sum;
+    o["delivered_sum"] = st.delivered_sum;
+    o["first_t0"] = double(st.first_t0);
+    o["last_t0"] = double(st.last_t0);
+    return o;
+}
+
+/// nullopt when the mandatory key_kind is missing.
+inline std::optional<Stats> stats_from_json(const QJsonObject& o)
+{
+    using namespace detail;
+    if (not o["key_kind"].isString()) return std::nullopt;
+    Stats st;
+    st.key_kind = s(o["key_kind"]);
+    st.key_identity = s(o["key_identity"]);
+    const QJsonObject oc = o["outcomes"].toObject();
+    for (auto it = oc.begin(); it != oc.end(); ++it) st.outcomes[it.key().toStdString()] = it.value().toInt();
+    st.n = o["n"].toInt();
+    st.dur_mean_s = o["dur_mean_s"].toDouble();
+    st.dur_m2 = o["dur_m2"].toDouble();
+    st.n_gain = o["n_gain"].toInt();
+    st.promised_sum = o["promised_sum"].toDouble();
+    st.delivered_sum = o["delivered_sum"].toDouble();
+    st.first_t0 = std::uint64_t(o["first_t0"].toDouble());
+    st.last_t0 = std::uint64_t(o["last_t0"].toDouble());
+    return st;
 }
 
 }   // namespace rc::em
