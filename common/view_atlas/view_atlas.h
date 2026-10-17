@@ -227,8 +227,9 @@ public:
     }
 
     /// H_k at this bearing: relaxes from (mu_own, cov_own) to the background as the angular gap grows
-    /// (shape) or as evidence vanishes (both). Cholesky factors are blended, so the covariance is always
-    /// PSD and equals cov_bg EXACTLY when there is no evidence — that is what makes the ratio exactly 0.
+    /// (shape) or as evidence vanishes (both). The covariance is written as cov_bg plus a bracket that is
+    /// (L Lᵀ − Lb Lbᵀ): at R = 0, L is bit-identical to Lb, so the bracket is exactly zero and the covariance
+    /// equals cov_bg EXACTLY for any cov_bg. That exact zero is what makes the empty-atlas ratio exactly 0.
     [[nodiscard]] Gauss2 hypothesis(float bearing, float quality) const
     {
         const float Ns = effective_count(bearing) - p_.n0;
@@ -241,7 +242,7 @@ public:
         const Eigen::Matrix2f L = (I - R) * Lb + R * Lo;
         Gauss2 g;
         g.mu  = p_.mu_bg + R * (p_.mu_own - p_.mu_bg);
-        g.cov = L * L.transpose() + quality_cov(p_, quality);
+        g.cov = p_.cov_bg + (L * L.transpose() - Lb * Lb.transpose()) + quality_cov(p_, quality);
         return g;
     }
 

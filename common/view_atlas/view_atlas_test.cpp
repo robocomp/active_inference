@@ -149,6 +149,14 @@ static void test_log_ratio()
     check(std::fabs(match_far - other_far) < 0.05f, "unseen side: shape no longer discriminates");
     check(match_near - other_near > 2.f, "seen side: shape discriminates");
     check(a.log_ratio(obs(0, 0, 0.f, 1.5f, 1e-6f), 0.f) < 1e-2f, "quality ~0: no evidence either way");
+
+    // exact zero must hold for ANY background covariance, not just the default diagonal one
+    AtlasParams Pn;
+    Pn.cov_bg << 0.0031f, 0.0007f,
+                 0.0007f, 0.0517f;
+    ViewAtlas blank(Pn, 4, 3);
+    check(blank.log_ratio(obs(0, 0, 0.f, 1.5f, 1.f), 0.f) == 0.f, "empty atlas, off-diagonal cov_bg, q=1: exactly 0");
+    check(blank.log_ratio(obs(0, 0, 0.f, 1.5f, 0.37f), 0.f) == 0.f, "empty atlas, off-diagonal cov_bg, q=0.37: exactly 0");
 }
 
 static void test_shift_marginal()
