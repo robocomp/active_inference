@@ -65,7 +65,19 @@ bool EmGraph::upsert(const Stats& st)
 
 bool EmGraph::remove(const std::string& record_id)
 {
-    if (not G_ or not G_->get_node(record_id).has_value()) return false;
+    if (not G_) return false;
+    const auto n = G_->get_node(record_id);
+    const auto root = G_->get_node("root");
+    if (not n or not root) return false;
+    // cortex delete_node neither cascades nor re-parents: a child still open when its parent is folded (a claim that
+    // outlives its mission across midnight) would keep a dangling parent attr and no incoming `has`. Re-hang it.
+    for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(*n, "has"))
+        if (auto child = G_->get_node(e.to()); child.has_value())
+        {
+            G_->add_or_modify_attrib_local<parent_att>(*child, root->id());
+            G_->update_node(*child);
+            G_->insert_or_assign_edge(DSR::Edge::create<has_edge_type>(root->id(), child->id()));
+        }
     return G_->delete_node(record_id);
 }
 

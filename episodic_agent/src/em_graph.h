@@ -26,7 +26,8 @@ public:
 
     bool upsert(const Record& r);
     bool upsert(const Stats& st);
-    /// Deletes the record node of that id (and with it its edges). False when there is none.
+    /// Deletes the record node of that id (and with it its edges); its children are re-hung under root first.
+    /// False when there is none.
     bool remove(const std::string& record_id);
 
     static std::string stats_name(const Stats& st);

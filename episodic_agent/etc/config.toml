@@ -41,6 +41,9 @@ graph      = true
 2d         = false
 
 [Agent.ltsm]
+# ⚠ START ORDER (ruling R20): ltsm_agent MUST already be running. Joining a domain with configFile "" waits for a
+# peer to send the graph and ABORTS the whole process after 15 s when none answers ("DSRGraph aborting: could not
+# get DSR from the network after timeout") — measured in the 2026-10-17 smoke run. Same for [Agent.dsr] and the fleet.
 configFile = ""
 domain     = 2
 tree       = false

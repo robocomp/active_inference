@@ -5,12 +5,14 @@
  * tested without DSR (tests/recorder_test.cpp).
  *
  * FOLD EACH RECORD EXACTLY ONCE (rollover is not idempotent — Task 3 review):
- *   - start(): the all-time stats are RECOMPUTED FROM SCRATCH by folding every closed record of every past day in the
- *     archive; today's records are reseeded into the sink; the stats are upserted. Safe to call twice.
+ *   - start(now): first, every record a crashed previous run left OPEN in the archive (any day) is closed `lost` at
+ *     `now` and its closing line appended (ruling R21: nobody else will ever close it). Then the all-time stats are
+ *     RECOMPUTED FROM SCRATCH by folding every closed record of every past day; today's records are reseeded into the
+ *     sink; the stats are upserted. Safe to call twice (the second call finds nothing open and refolds from zero).
  *   - write(): a record whose day is AFTER today is the day change: the closed records of the old day are folded
  *     (rollover), their nodes deleted, today advances. A record of an already-rolled day that CLOSES later (opened
  *     before midnight) is folded at that close and its node deleted. Everything else is upserted.
- * A record left open by a crash is never folded (no t1) and is not reseeded once its day has passed.
+ * Shutdown-closed records (`interrupted_by_em_shutdown`) go through write() like any other: archive AND graph (R22).
  * Ids: "<day of t0>-<seq>", seq continuing after the archive's largest for that day.
  */
 
@@ -46,13 +48,25 @@ public:
     Recorder(Archive& archive, RecordSink& sink, std::string today)
         : archive_(archive), sink_(sink), today_(std::move(today)) {}
 
-    void start()
+    /// Returns how many crash-open records it closed `lost`.
+    int start(std::uint64_t now_ms)
     {
+        int closed = 0;
+        for (const std::string& d : archive_.days())
+            for (Record r : archive_.load_day(d))
+                if (not r.t1)
+                {
+                    r.t1 = std::max(now_ms, r.t0);
+                    r.outcome = "lost";
+                    archive_.append(r);
+                    ++closed;
+                }
         stats_.clear();
         for (const std::string& d : archive_.days())
             if (d < today_) rollover(stats_, archive_.load_day(d), today_);
         for (const Record& r : archive_.load_day(today_)) sink_.upsert(r);
         for (const auto& [k, st] : stats_) sink_.upsert(st);
+        return closed;
     }
 
     std::string next_id(std::uint64_t t0)
@@ -63,15 +77,14 @@ public:
         return std::format("{}-{}", day, it->second++);
     }
 
-    /// Archive every record; with to_graph (all but the shutdown path) also keep the sink and the stats current.
-    void write(const std::vector<Record>& records, bool to_graph = true)
+    /// Archive every record and keep the sink and the stats current.
+    void write(const std::vector<Record>& records)
     {
         for (const Record& r : records)
         {
             const std::string day = day_of(r.t0);
-            if (to_graph and day > today_) change_day(day);
+            if (day > today_) change_day(day);
             archive_.append(r);
-            if (not to_graph) continue;
             if (day < today_ and r.t1)          // its day already rolled over: fold it now, once
             {
                 Stats& st = stats_[stats_key(r)];

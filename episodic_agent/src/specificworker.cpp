@@ -91,12 +91,12 @@ void SpecificWorker::request_shutdown()
     if (shutting_down_.exchange(true))
         return;
     poll_timer_.stop();
-    // EM's own stop: whatever is open closes `interrupted_by_em_shutdown` and goes to the ARCHIVE only (the domain-4
-    // graph is about to go away; the next start reseeds it from the archive).
+    // EM's own stop: whatever is open closes `interrupted_by_em_shutdown` and goes to the archive AND to domain 4
+    // (ruling R22) — both callers (destructor, terminal_shutdown) run this before any graph is torn down.
     if (builder_ and recorder_)
     {
         const auto closed = builder_->shutdown(now_ms());
-        recorder_->write(closed, /*to_graph=*/false);
+        recorder_->write(closed);
         std::println("[episodic] shutdown: {} open record(s) closed as interrupted_by_em_shutdown", closed.size());
     }
     save_window_settings();
@@ -224,7 +224,8 @@ void SpecificWorker::initialize()
     sink_.g = em_graph_.get();
     archive_ = std::make_unique<rc::em::Archive>(archive_dir);
     recorder_ = std::make_unique<rc::em::Recorder>(*archive_, sink_, rc::em::day_of(now_ms()));
-    recorder_->start();
+    if (const int lost = recorder_->start(now_ms()); lost > 0)
+        std::println("[episodic] {} record(s) left open by a previous run closed as lost (R21)", lost);
     builder_ = std::make_unique<rc::em::Builder>(*facts_, [this](std::uint64_t t0) { return recorder_->next_id(t0); });
     std::println("[episodic] archive {}: {} past day(s) folded into {} stats key(s); today {} reseeded with {} record(s)",
                  archive_dir, std::ranges::count_if(archive_->days(), [&](const std::string& d) { return d < recorder_->today(); }),
@@ -272,10 +273,10 @@ void SpecificWorker::poll()
     std::vector<rc::em::Record> out;
     const auto take = [&](std::vector<rc::em::Record> v) { std::ranges::move(v, std::back_inserter(out)); };
 
-    // Structural events are only meaningful once the builder has a journal (before that nothing is open to carry
-    // them). Diffing every poll anyway keeps the snapshot current, so the initial graph sync — which can land in the
-    // same poll as the controller node — is never reported as a burst of births.
-    const bool had_journal = controller_seen_;
+    // Structural events are kept only if the controller node had been seen BEFORE this poll: until the builder has
+    // primed on a journal nothing is open to carry them, and the initial graph sync — which can land in the same poll
+    // as the controller node — must not be reported as a burst of births. Diffing every poll keeps the snapshot current.
+    const bool controller_seen_before = controller_seen_;
     std::vector<rc::em::Event> events = diff_.poll(*G);
 
     if (const auto node = controller_node(); node.has_value())
@@ -311,7 +312,7 @@ void SpecificWorker::poll()
         std::println("[episodic] controller absent — idling until its journal appears");
     }
 
-    if (not had_journal) events.clear();
+    if (not controller_seen_before) events.clear();
     take(builder_->on_events(events, now));     // also re-checks the self mission (room changes)
     if (not out.empty()) recorder_->write(out);
 }

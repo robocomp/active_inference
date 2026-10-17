@@ -215,10 +215,30 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(std::ranges::count(store.stats, st) == 1);
     CHECK(std::ranges::count(store.stats, any) == 1);
 
+    // Folding a parent while its child is still open (a mission closed before midnight, its claim not): deleting the
+    // parent must re-hang the child under root — cortex delete_node does not cascade or re-parent.
+    CHECK(g.remove(m.id));
+    CHECK(not em.get_node(m.id).has_value());
+    {
+        const auto rid = em.get_node("root")->id();
+        const auto child = em.get_node(s.id);
+        CHECK(child.has_value());
+        if (child)
+        {
+            CHECK(em.get_edge(rid, child->id(), "has").has_value());
+            CHECK(em.get_attrib_by_name<parent_att>(*child).value_or(0) == rid);
+        }
+        s.post = s.pre;                             // a later upsert keeps it hung
+        CHECK(g.upsert(s));
+        CHECK(em.get_edge(rid, em.get_node(s.id)->id(), "has").has_value());
+    }
+    CHECK(rc::em::load_store(em).today.size() == 2);
+    CHECK(g.upsert(m));                             // restore the mission for the checks below
+
     CHECK(g.remove(orphan.id));
     CHECK(not em.get_node(orphan.id).has_value());
     CHECK(not g.remove(orphan.id));
-    CHECK(rc::em::load_store(em).today.size() == 2);
+    CHECK(rc::em::load_store(em).today.size() == 2);   // m (re-upserted) + s
 }
 
 int main()
