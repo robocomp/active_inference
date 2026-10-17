@@ -193,7 +193,6 @@ struct RoomConfig
 
     // Localizer
     bool        PREDICTION_EARLY_EXIT = true;
-    std::string OptimizerType         = "LBFGS";
     /// RoomShape.MapMode: "given" (load the layout — today's agent) or "estimate" (learn it).
     std::string MAP_MODE              = "given";
     std::string ROOM_LAYOUT_SVG       = "beta_layout.svg";  // config: RoomConcept.RoomLayoutSvg
@@ -406,7 +405,7 @@ struct RoomConfig
     // per-sample precision. Do not add one.
     bool  IMAGE_EDGE_ENABLE = false;   // ImageEdge.enable
     bool  IMAGE_EDGE_SHADOW = false;   // ImageEdge.shadow
-    bool  IMAGE_EDGE_DRIVE  = false;   // ImageEdge.drive   (refused unless OptimizerType == "GN")
+    bool  IMAGE_EDGE_DRIVE  = false;   // ImageEdge.drive
     std::string IMAGE_EDGE_CAMERA = "zed";   // ImageEdge.camera — DSR node name ("zed" | "ricoh")
     /// Convert at most one camera frame per this many ms, per ingestor. 0 = every frame.
     /// The DRAIN is never throttled (a reliable reader whose pool backs up stops the producer);

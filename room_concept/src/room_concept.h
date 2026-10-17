@@ -100,9 +100,7 @@ class RoomConcept
 public:
     struct Params
     {
-        int num_iterations = 25;          // Balance between speed and convergence
         float learning_rate_pos = 0.05f;  // Uniform LR for all pose DoF (x, y, θ)
-        float min_loss_threshold = 0.1f;  // Early exit threshold
 
         float wall_thickness = 0.1f;
         float wall_height = 2.4f;        // meters
@@ -184,7 +182,6 @@ public:
         float rotation_sdf_coupling = 0.5f;   // m/rad — extra SDF tolerance per radian of rotation
 
         // ===== Differential Test (A/B comparison) =====
-        bool differential_test_enabled = false;  // Enable shadow single-step evaluator for RFE vs baseline comparison
 
         // ===== Velocity-Adaptive Gradient Weights =====
         // Adjust optimization emphasis based on current motion profile
@@ -302,25 +299,13 @@ public:
         int   reloc_track_memory_frames= 200;    // forgetting timescale of the learnt tracking emission
         float reloc_lost_s_min         = 0.01f;  // m — support of the lost emission (log-uniform)
         float reloc_lost_s_max         = 5.0f;   // m
-        bool  reloc_legacy_grid_search = false;  // A/B: true = the pre-09-16 4-stage lattice for the commit
         bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (lost, mode_switch, seed_validation)
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 
-        // ===== Optimizer Selection =====
-        // "ADAM"  — adaptive moment estimation (current default)
-        // "LBFGS" — limited-memory BFGS with Wolfe line search (faster convergence)
-        // "GN"    — Levenberg-Marquardt on analytic Jacobians (room_gn_solver), no autograd
-        // "CAVI"  — coordinate-ascent variational inference (reserved, not yet implemented)
-        std::string optimizer_type = "LBFGS";
-
-        // ===== Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) =====
-        // Same objective as compute_rfe_loss, solved as a 15×15 normal-equation system instead of
-        // ~29 torch forward+backward passes. OFF by default in every sense: `optimizer_type` must say
-        // "GN" for it to drive the pose, and gn_shadow must be set for it to run at all otherwise.
-        //
-        // gn_shadow runs BOTH backends on the SAME starting window state, keeps the authoritative
-        // one's answer, and logs the pair to gn_shadow_csv_path. It is a numerical comparison on
-        // identical inputs, not a behavioural A/B — the live pose is untouched.
+        // ===== Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) =====
+        // The only pose backend. The Adam and L-BFGS backends, the GN-vs-them shadow and the single-step
+        // differential test were deleted with torch (2026-10-17); GN had been the default since its
+        // 72.7 -> ~4 ms switch, and its fallback to Adam fired 0 times in try42-45.
         // Room optimises each object anchor's position as a PRIVATE variable (birth prior = the
         // producing agent's own belief) instead of pinning it to a frozen snapshot. Never written back
         // to the graph: the producer stays the sole authority for the published pose, so the gap
@@ -328,28 +313,10 @@ public:
         // backends have no landmark variables. Default off.
         bool  object_anchor_optimize_landmark = false;
 
-        bool  gn_shadow = false;
-        // Finite-difference check of the analytic Jacobian, logged as grad_relerr in the shadow CSV.
-        // Costs 2·15 extra loss evaluations per optimized frame, so keep it on only for a validation
-        // run, not for a timing run — it inflates ms_gn.
-        bool  gn_grad_check = false;
-        std::string gn_shadow_csv_path = "etc/gn_shadow.csv";
         int   gn_max_iters    = 10;
         float gn_lambda_init  = 1e-3f;   // Levenberg damping relative to diag(H)
         float gn_step_tol     = 1e-5f;   // ‖δ‖∞ (m / rad) convergence test
         float gn_loss_rel_tol = 1e-4f;   // relative loss-improvement convergence test
-
-        // ===== Adam Convergence =====
-        float convergence_relative_tol = 0.01f;       // Relative loss-change stopping criterion
-        int convergence_min_iters = 8;                 // Minimum iterations before convergence check
-
-        // ===== L-BFGS parameters =====
-        // Used only when optimizer_type == "LBFGS".
-        // lr=1 is the standard initial Newton step; strong_wolfe line search adjusts it.
-        float  lbfgs_lr               = 1.0f;   // Initial step size
-        int    lbfgs_history_size     = 5;      // (s,y) pairs kept for H^-1 approximation
-        double lbfgs_tolerance_grad   = 1e-5;   // Stop when ||grad||_inf < tol
-        double lbfgs_tolerance_change = 1e-7;   // Stop when |Δloss| < tol
 
         // ===== Covariance Numerics =====
         float eigenvalue_clamp_posterior = 1e-4f;      // Min eigenvalue for posterior precision
@@ -1380,9 +1347,6 @@ public:
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                    float grid_resolution = 0.5f,  // meters
                                    float angle_resolution = M_PI_4);  // 45 degrees
-    /// The pre-2026-09-16 4-stage lattice, kept verbatim as the CONTROL arm of tools/reloc_selftest and
-    /// behind params.reloc_legacy_grid_search. Delete once the mixture search has run live.
-    bool legacy_grid_search_pose(const std::vector<Eigen::Vector3f>& lidar_points, float grid_resolution);
     /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
     std::vector<rc::reloc::PoseHypothesis> pose_hypotheses() const
     {
@@ -2278,7 +2242,7 @@ private:
    /// Append one row to etc/hier_prec.csv (lazy-opened). src ∈ {opt, ee, reloc}. Loc-thread only, no lock.
    void               log_hier_prec_row(const char *src, float r_b, float quad, float trace, bool reloc_fired);
    WindowManager::LossBreakdown last_loss_breakdown_;  // FE term breakdown after last Adam
-   float              last_lbfgs_grad_norm_ = 0.f; // final gradient inf-norm after L-BFGS (0 for Adam/early-exit)
+   float              last_lbfgs_grad_norm_ = 0.f; // gradient norm at the end of the GN solve (0 on early-exit); name kept for the debug-CSV column
    // Per-frame timing — t_update_start_ set at entry of update(), shared with early-exit path
    std::chrono::high_resolution_clock::time_point t_update_start_;
    float              last_t_adam_ms_      = 0.f;
@@ -2317,43 +2281,6 @@ private:
    // Robust buffer for trans-noise samples: collect N then take median for one EMA step.
    std::vector<float> trans_noise_sample_buf_;
    void            service_calibration();
-
-   // ===== Differential test: RFE vs single-step =====
-   struct DiffTestStats
-   {
-       double pred_sdf_sum = 0;     // sum of prediction-only SDF median
-       double single_sdf_sum = 0;   // sum of single-step Adam SDF median
-       double rfe_sdf_sum = 0;      // sum of full-RFE SDF median
-       int count = 0;
-       int adam_frames = 0;         // frames where Adam actually ran
-       int rfe_wins = 0;            // frames where RFE < single-step (SDF)
-       int single_wins = 0;         // frames where single-step < RFE (SDF)
-       int early_exit_seen = 0;     // total early-exit frames seen (for sampling)
-
-       // Pose jitter: residual motion after subtracting odometry prediction.
-       // Lower jitter = more temporally consistent.
-       double rfe_jitter_sum = 0;       // sum of ||RFE_pose - predicted_pose||₂
-       double single_jitter_sum = 0;    // sum of ||single_pose - predicted_pose||₂
-       double rfe_theta_jitter_sum = 0; // sum of |wrap(RFE_theta - pred_theta)|
-       double single_theta_jitter_sum = 0;
-
-       // Correction consistency: how much each method's correction vector
-       // changes between consecutive frames. Lower = smoother.
-       // correction[t] = optimised_pose[t] - predicted_pose[t]
-       float prev_rfe_cx = 0, prev_rfe_cy = 0, prev_rfe_ctheta = 0;
-       float prev_single_cx = 0, prev_single_cy = 0, prev_single_ctheta = 0;
-       bool has_prev = false;
-       double rfe_corr_consistency_sum = 0;     // sum ||rfe_corr[t] - rfe_corr[t-1]||₂
-       double single_corr_consistency_sum = 0;  // sum ||single_corr[t] - single_corr[t-1]||₂
-       double rfe_theta_consistency_sum = 0;    // sum |wrap(rfe_θcorr[t] - rfe_θcorr[t-1])|
-       double single_theta_consistency_sum = 0;
-   };
-   DiffTestStats diff_test_;
-
-   /// Run a single-step Adam (no window) on the given scan at the predicted pose.
-   /// Returns the SDF median-absolute-error after optimisation.
-   float shadow_single_step_adam(const torch::Tensor& points_tensor,
-                                 float pred_x, float pred_y, float pred_theta) const;
 
    // Compute velocity-adaptive weights based on motion profile
    Eigen::Vector3f compute_velocity_adaptive_weights(const OdometryPrior& odometry_prior);
@@ -2442,14 +2369,6 @@ private:
         const OdometryPrior& odometry_prior,
         std::int64_t lidar_timestamp_ms,
         bool measure_only = false);
-
-    /// Run the Adam optimisation loop over the sliding window.
-    /// Returns {last_loss, iterations_used}.
-    std::pair<float, int> run_adam_loop(const OdometryPrior& odometry_prior);
-
-    /// Run the L-BFGS optimisation loop over the sliding window.
-    /// Returns {last_loss, func_evaluations}.
-    std::pair<float, int> run_lbfgs_loop(const OdometryPrior& odometry_prior);
 
     /// Run the Levenberg-Marquardt backend (room_gn_solver) over the sliding window, writing the
     /// solution back into the slot pose tensors. Returns {last_loss, iterations}. On failure the
@@ -2569,11 +2488,6 @@ private:
     Eigen::Vector4d mnt_p_sum2_ = Eigen::Vector4d::Zero();
     long            mnt_p_n_ = 0;
 
-    void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
-                       const std::vector<Eigen::Vector3f>& poses_after,
-                       float authority_loss, int authority_iters, float authority_ms,
-                       std::int64_t timestamp_ms);
-
     /// The boundary-prior precision scale for this frame (hierarchical π=exp(u_b) when enabled, else
     /// the legacy quality gate). One definition, so every backend minimises the same objective.
     float boundary_weight_now() const;
@@ -2582,7 +2496,6 @@ private:
     std::vector<Eigen::Vector3f> read_window_poses() const;
     void write_window_poses(const std::vector<Eigen::Vector3f>& poses);
 
-    std::ofstream gn_shadow_csv_;
 
     /// Compute posterior covariance via autograd Hessian.
     /// Updates current_covariance and returns {covariance, condition_number}.

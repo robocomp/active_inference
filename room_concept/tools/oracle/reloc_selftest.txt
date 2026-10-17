@@ -37,143 +37,151 @@
 [reloc] P(lost)=0.500 at s=0.683 m — mixture search
 [reloc] lost: best mode (1.17 m / 1° away) leaves median |SDF| 0.562 m — no pose explains this view; keeping the pose
 [reloc] P(lost)=0.500 at s=0.744 m — mixture search
-[reloc] lost: moved 0.63 m / 60° to (1.26, 0.70, 107°), w=0.50, 3 rival mode(s), 15.1 ms
+[reloc] lost: moved 0.63 m / 60° to (1.26, 0.70, 107°), w=0.50, 3 rival mode(s), 15.3 ms
 [reloc] P(lost)=0.500 at s=1.101 m — mixture search
-[reloc] lost: moved 3.36 m / 11° to (-2.05, -0.35, 56°), w=0.50, 3 rival mode(s), 21.0 ms
+[reloc] lost: moved 3.36 m / 11° to (-2.05, -0.35, 56°), w=0.50, 3 rival mode(s), 21.1 ms
 [reloc] P(lost)=0.500 at s=0.806 m — mixture search
-[reloc] lost: moved 2.61 m / 140° to (-0.52, -0.12, -102°), w=0.50, 3 rival mode(s), 18.5 ms
+[reloc] lost: moved 2.61 m / 140° to (-0.52, -0.12, -102°), w=0.50, 3 rival mode(s), 19.0 ms
 [reloc] P(lost)=0.500 at s=0.673 m — mixture search
-[reloc] lost: moved 1.69 m / 151° to (0.99, 0.62, 54°), w=0.50, 3 rival mode(s), 18.1 ms
+[reloc] lost: moved 1.69 m / 151° to (0.99, 0.62, 54°), w=0.50, 3 rival mode(s), 16.8 ms
 [reloc] P(lost)=0.500 at s=1.278 m — mixture search
-[reloc] lost: moved 1.71 m / 20° to (-0.57, 0.81, 13°), w=0.50, 3 rival mode(s), 18.3 ms
+[reloc] lost: moved 1.71 m / 20° to (-0.57, 0.81, 13°), w=0.50, 3 rival mode(s), 18.5 ms
 [reloc] P(lost)=0.500 at s=1.236 m — mixture search
-[reloc] lost: moved 3.27 m / 76° to (-1.45, -0.47, 41°), w=0.50, 3 rival mode(s), 17.2 ms
+[reloc] lost: moved 3.27 m / 76° to (-1.45, -0.47, 41°), w=0.50, 3 rival mode(s), 17.5 ms
 [reloc] P(lost)=0.500 at s=0.732 m — mixture search
 [reloc] lost: moved 1.76 m / 3° to (-1.61, -0.20, -154°), w=0.50, 3 rival mode(s), 16.0 ms
 [reloc] P(lost)=0.500 at s=0.827 m — mixture search
-[reloc] lost: moved 1.60 m / 9° to (0.65, -0.79, -11°), w=0.50, 3 rival mode(s), 18.3 ms
+[reloc] lost: moved 1.60 m / 9° to (0.65, -0.79, -11°), w=0.50, 3 rival mode(s), 33.6 ms
 [reloc] P(lost)=0.500 at s=1.210 m — mixture search
-[reloc] lost: moved 1.66 m / 75° to (0.55, -0.54, -139°), w=0.50, 3 rival mode(s), 16.3 ms
+[reloc] lost: moved 1.66 m / 75° to (0.55, -0.54, -139°), w=0.50, 3 rival mode(s), 16.6 ms
 [reloc] P(lost)=0.500 at s=0.800 m — mixture search
-[reloc] lost: moved 2.02 m / 71° to (-1.05, 0.44, 14°), w=0.50, 3 rival mode(s), 18.3 ms
+[reloc] lost: moved 2.02 m / 71° to (-1.05, 0.44, 14°), w=0.50, 3 rival mode(s), 19.1 ms
 [reloc] P(lost)=0.500 at s=0.905 m — mixture search
-[reloc] lost: moved 2.13 m / 49° to (-1.32, 0.23, -139°), w=0.50, 3 rival mode(s), 16.4 ms
+[reloc] lost: moved 2.13 m / 49° to (-1.32, 0.23, -139°), w=0.50, 3 rival mode(s), 17.7 ms
 [reloc] P(lost)=0.500 at s=1.249 m — mixture search
-[reloc] lost: moved 3.02 m / 62° to (-0.82, 0.92, -15°), w=0.50, 3 rival mode(s), 16.7 ms
+[reloc] lost: moved 3.02 m / 62° to (-0.82, 0.92, -15°), w=0.50, 3 rival mode(s), 16.6 ms
 [reloc] P(lost)=0.500 at s=0.524 m — mixture search
-[reloc] lost: moved 3.30 m / 141° to (-2.02, 1.12, -112°), w=0.50, 3 rival mode(s), 17.6 ms
+[reloc] lost: moved 3.30 m / 141° to (-2.02, 1.12, -112°), w=0.50, 3 rival mode(s), 35.8 ms
 [reloc] P(lost)=0.500 at s=1.256 m — mixture search
-[reloc] lost: moved 1.52 m / 45° to (1.37, -0.41, 18°), w=0.50, 3 rival mode(s), 16.7 ms
+[reloc] lost: moved 1.52 m / 45° to (1.37, -0.41, 18°), w=0.50, 3 rival mode(s), 17.1 ms
 [reloc] P(lost)=0.500 at s=1.041 m — mixture search
-[reloc] lost: moved 3.01 m / 123° to (2.10, -0.08, -170°), w=0.50, 3 rival mode(s), 15.9 ms
+[reloc] lost: moved 3.01 m / 123° to (2.10, -0.08, -170°), w=0.50, 3 rival mode(s), 16.0 ms
 [reloc] P(lost)=0.500 at s=0.825 m — mixture search
-[reloc] lost: moved 2.60 m / 47° to (0.88, 3.90, 167°), w=1.00, 3 rival mode(s), 16.0 ms
+[reloc] lost: moved 2.60 m / 47° to (0.88, 3.90, 167°), w=1.00, 3 rival mode(s), 17.1 ms
 [reloc] P(lost)=0.500 at s=0.378 m — mixture search
-[reloc] lost: moved 3.07 m / 95° to (4.24, 1.48, -40°), w=1.00, 3 rival mode(s), 18.2 ms
+[reloc] lost: moved 3.07 m / 95° to (4.24, 1.48, -40°), w=1.00, 3 rival mode(s), 18.9 ms
 [reloc] P(lost)=0.500 at s=0.826 m — mixture search
-[reloc] lost: moved 3.14 m / 17° to (1.14, 3.17, -93°), w=1.00, 3 rival mode(s), 16.0 ms
+[reloc] lost: moved 3.14 m / 17° to (1.14, 3.17, -93°), w=1.00, 3 rival mode(s), 16.8 ms
 [reloc] P(lost)=0.500 at s=0.802 m — mixture search
-[reloc] lost: moved 2.40 m / 30° to (2.60, 1.44, 148°), w=1.00, 3 rival mode(s), 19.3 ms
+[reloc] lost: moved 2.40 m / 30° to (2.60, 1.44, 148°), w=1.00, 3 rival mode(s), 19.6 ms
 [reloc] P(lost)=0.500 at s=0.530 m — mixture search
-[reloc] lost: moved 5.24 m / 119° to (6.05, 1.21, -24°), w=1.00, 3 rival mode(s), 18.0 ms
+[reloc] lost: moved 5.24 m / 119° to (6.05, 1.21, -24°), w=1.00, 3 rival mode(s), 23.2 ms
 [reloc] P(lost)=0.500 at s=0.692 m — mixture search
-[reloc] lost: moved 2.16 m / 128° to (1.56, 1.20, -157°), w=1.00, 3 rival mode(s), 18.6 ms
+[reloc] lost: moved 2.16 m / 128° to (1.56, 1.20, -157°), w=1.00, 3 rival mode(s), 18.3 ms
 [reloc] P(lost)=0.500 at s=0.955 m — mixture search
-[reloc] lost: moved 2.55 m / 0° to (0.92, 2.46, 170°), w=1.00, 3 rival mode(s), 17.3 ms
+[reloc] lost: moved 2.55 m / 0° to (0.92, 2.46, 170°), w=1.00, 3 rival mode(s), 18.0 ms
 [reloc] P(lost)=0.500 at s=0.410 m — mixture search
-[reloc] lost: moved 1.73 m / 3° to (4.72, 1.28, 93°), w=1.00, 3 rival mode(s), 18.4 ms
+[reloc] lost: moved 1.73 m / 3° to (4.72, 1.28, 93°), w=1.00, 3 rival mode(s), 18.2 ms
 [reloc] P(lost)=0.500 at s=0.573 m — mixture search
-[reloc] lost: moved 4.07 m / 139° to (1.43, 2.49, 9°), w=1.00, 3 rival mode(s), 16.9 ms
+[reloc] lost: moved 4.07 m / 139° to (1.43, 2.49, 9°), w=1.00, 3 rival mode(s), 17.5 ms
 [reloc] P(lost)=0.500 at s=0.679 m — mixture search
-[reloc] lost: moved 3.17 m / 153° to (2.50, 1.65, -154°), w=1.00, 3 rival mode(s), 17.3 ms
+[reloc] lost: moved 3.17 m / 153° to (2.50, 1.65, -154°), w=1.00, 3 rival mode(s), 17.1 ms
 [reloc] P(lost)=0.500 at s=0.781 m — mixture search
-[reloc] lost: moved 4.43 m / 113° to (0.92, 3.12, 179°), w=1.00, 3 rival mode(s), 22.8 ms
+[reloc] lost: moved 4.43 m / 113° to (0.92, 3.12, 179°), w=1.00, 3 rival mode(s), 17.2 ms
 [reloc] P(lost)=0.500 at s=0.518 m — mixture search
-[reloc] lost: moved 1.91 m / 152° to (2.10, 1.72, -18°), w=1.00, 3 rival mode(s), 18.0 ms
+[reloc] lost: moved 1.91 m / 152° to (2.10, 1.72, -18°), w=1.00, 3 rival mode(s), 17.5 ms
 [reloc] P(lost)=0.500 at s=0.720 m — mixture search
-[reloc] lost: moved 1.52 m / 110° to (3.62, 1.03, 148°), w=1.00, 3 rival mode(s), 16.8 ms
+[reloc] lost: moved 1.52 m / 110° to (3.62, 1.03, 148°), w=1.00, 3 rival mode(s), 17.1 ms
 [reloc] P(lost)=0.500 at s=0.601 m — mixture search
-[reloc] lost: moved 4.20 m / 31° to (0.87, 4.09, -70°), w=1.00, 3 rival mode(s), 17.3 ms
+[reloc] lost: moved 4.20 m / 31° to (0.87, 4.09, -70°), w=1.00, 3 rival mode(s), 17.4 ms
 [reloc] P(lost)=0.500 at s=0.741 m — mixture search
 [reloc] lost: best mode (4.89 m / 126° away) leaves median |SDF| 0.083 m — no pose explains this view; keeping the pose
 [reloc] P(lost)=0.500 at s=1.182 m — mixture search
-[reloc] lost: moved 1.78 m / 157° to (0.82, 1.62, 1°), w=1.00, 3 rival mode(s), 19.4 ms
+[reloc] lost: moved 1.78 m / 157° to (0.82, 1.62, 1°), w=1.00, 3 rival mode(s), 19.7 ms
 [reloc] P(lost)=0.500 at s=1.122 m — mixture search
-[reloc] lost: moved 3.15 m / 130° to (1.99, 2.74, -41°), w=1.00, 3 rival mode(s), 19.3 ms
+[reloc] lost: moved 3.15 m / 130° to (1.99, 2.74, -41°), w=1.00, 3 rival mode(s), 19.7 ms
 [reloc] P(lost)=0.500 at s=1.127 m — mixture search
-[reloc] lost: moved 1.82 m / 114° to (4.10, 2.80, -164°), w=1.00, 3 rival mode(s), 17.9 ms
+[reloc] lost: moved 1.82 m / 114° to (4.10, 2.80, -164°), w=1.00, 3 rival mode(s), 17.7 ms
 [reloc] P(lost)=0.500 at s=1.241 m — mixture search
-[reloc] lost: moved 4.76 m / 27° to (6.05, 3.16, 153°), w=1.00, 3 rival mode(s), 17.8 ms
+[reloc] lost: moved 4.76 m / 27° to (6.05, 3.16, 153°), w=1.00, 3 rival mode(s), 18.4 ms
 [reloc] P(lost)=0.500 at s=1.485 m — mixture search
-[reloc] lost: moved 3.41 m / 92° to (5.06, 3.94, 129°), w=1.00, 3 rival mode(s), 26.1 ms
+[reloc] lost: moved 3.41 m / 92° to (5.06, 3.94, 129°), w=1.00, 3 rival mode(s), 18.7 ms
 [reloc] P(lost)=0.500 at s=1.385 m — mixture search
-[reloc] lost: moved 4.15 m / 49° to (1.97, 1.85, 173°), w=1.00, 3 rival mode(s), 18.2 ms
+[reloc] lost: moved 4.15 m / 49° to (1.97, 1.85, 173°), w=1.00, 3 rival mode(s), 18.9 ms
 [reloc] P(lost)=0.500 at s=1.337 m — mixture search
-[reloc] lost: moved 1.75 m / 101° to (5.52, 3.79, 13°), w=1.00, 3 rival mode(s), 18.6 ms
+[reloc] lost: moved 1.75 m / 101° to (5.52, 3.79, 13°), w=1.00, 3 rival mode(s), 19.3 ms
 [reloc] P(lost)=0.500 at s=1.199 m — mixture search
-[reloc] lost: moved 2.43 m / 78° to (6.04, 1.22, 175°), w=1.00, 3 rival mode(s), 19.9 ms
+[reloc] lost: moved 2.43 m / 78° to (6.04, 1.22, 175°), w=1.00, 3 rival mode(s), 19.7 ms
 [reloc] P(lost)=0.500 at s=0.703 m — mixture search
-[reloc] lost: moved 4.78 m / 146° to (5.17, 4.24, -130°), w=1.00, 3 rival mode(s), 19.9 ms
+[reloc] lost: moved 4.78 m / 146° to (5.17, 4.24, -130°), w=1.00, 3 rival mode(s), 19.8 ms
 [reloc] P(lost)=0.500 at s=1.207 m — mixture search
-[reloc] lost: moved 5.67 m / 48° to (1.48, 1.10, 4°), w=1.00, 3 rival mode(s), 18.0 ms
+[reloc] lost: moved 5.67 m / 48° to (1.48, 1.10, 4°), w=1.00, 3 rival mode(s), 17.8 ms
 [reloc] P(lost)=0.500 at s=1.423 m — mixture search
-[reloc] lost: moved 1.93 m / 46° to (3.78, 4.08, 86°), w=1.00, 3 rival mode(s), 19.3 ms
+[reloc] lost: moved 1.93 m / 46° to (3.78, 4.08, 86°), w=1.00, 3 rival mode(s), 19.7 ms
 [reloc] P(lost)=0.500 at s=1.137 m — mixture search
-[reloc] lost: moved 1.85 m / 174° to (0.99, 2.88, -111°), w=1.00, 3 rival mode(s), 16.1 ms
+[reloc] lost: moved 1.85 m / 174° to (0.99, 2.88, -111°), w=1.00, 3 rival mode(s), 26.7 ms
 [reloc] P(lost)=0.500 at s=1.228 m — mixture search
 [reloc] lost: moved 1.95 m / 77° to (2.71, 3.86, 17°), w=1.00, 3 rival mode(s), 19.9 ms
 [reloc] P(lost)=0.500 at s=0.854 m — mixture search
-[reloc] lost: moved 4.39 m / 70° to (5.71, 4.10, 14°), w=1.00, 3 rival mode(s), 19.2 ms
+[reloc] lost: moved 4.39 m / 70° to (5.71, 4.10, 14°), w=1.00, 3 rival mode(s), 20.1 ms
 [reloc] P(lost)=0.500 at s=1.149 m — mixture search
-[reloc] lost: moved 1.92 m / 7° to (1.78, 3.53, -158°), w=1.00, 3 rival mode(s), 19.1 ms
+[reloc] lost: moved 1.92 m / 7° to (1.78, 3.53, -158°), w=1.00, 3 rival mode(s), 19.7 ms
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=1.428 m — mixture search
-[reloc] lost: moved 4.66 m / 37° to (1.51, 3.69, 34°), w=1.00, 3 rival mode(s), 17.7 ms
+[hess] sigma_theta  window(marg) 0.0501115  window(block) 0.0501115  filter 0.0501115  published 0.0501115  | marg/pub 1 block/marg 1 | NIS 0.0622036 | cov update TAKEN det 4.66483e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=1.434 m — mixture search
+[reloc] lost: moved 4.66 m / 37° to (1.51, 3.69, 34°), w=1.00, 3 rival mode(s), 18.4 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=0.940 m — mixture search
-[reloc] lost: moved 2.56 m / 121° to (2.77, 2.12, 136°), w=1.00, 3 rival mode(s), 20.0 ms
+[hess] sigma_theta  window(marg) 0.0470408  window(block) 0.0470408  filter 0.0470408  published 0.0470408  | marg/pub 1 block/marg 1 | NIS 0.0145304 | cov update TAKEN det 4.3212e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=0.935 m — mixture search
+[reloc] lost: moved 2.55 m / 121° to (2.77, 2.12, 136°), w=1.00, 3 rival mode(s), 20.1 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=1.051 m — mixture search
-[reloc] lost: moved 2.76 m / 83° to (5.95, 3.48, 58°), w=1.00, 3 rival mode(s), 19.2 ms
+[hess] sigma_theta  window(marg) 0.049099  window(block) 0.049099  filter 0.049099  published 0.049099  | marg/pub 1 block/marg 1 | NIS 0.0104422 | cov update TAKEN det 5.40531e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=1.048 m — mixture search
+[reloc] lost: moved 2.77 m / 83° to (5.95, 3.48, 58°), w=1.00, 3 rival mode(s), 19.5 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
+[hess] sigma_theta  window(marg) 0.0501682  window(block) 0.0501682  filter 0.0501681  published 0.0501681  | marg/pub 1 block/marg 1 | NIS 0.00808243 | cov update TAKEN det 5.20937e-07 | slots 1 dof_marg 0 rows 1
 [reloc] P(lost)=0.500 at s=1.758 m — mixture search
-[reloc] lost: moved 2.39 m / 163° to (5.94, 1.48, -149°), w=1.00, 3 rival mode(s), 23.2 ms
+[reloc] lost: moved 2.40 m / 163° to (5.94, 1.48, -149°), w=1.00, 3 rival mode(s), 20.7 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=1.323 m — mixture search
-[reloc] lost: moved 3.03 m / 170° to (4.09, 2.68, -51°), w=1.00, 3 rival mode(s), 18.6 ms
+[hess] sigma_theta  window(marg) 0.0546999  window(block) 0.0546999  filter 0.0546999  published 0.0546999  | marg/pub 1 block/marg 1 | NIS 0.0972367 | cov update TAKEN det 5.69144e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=1.326 m — mixture search
+[reloc] lost: moved 3.01 m / 170° to (4.09, 2.68, -51°), w=1.00, 3 rival mode(s), 18.7 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=0.908 m — mixture search
-[reloc] lost: moved 2.85 m / 50° to (5.08, 2.67, -69°), w=1.00, 3 rival mode(s), 17.5 ms
+[hess] sigma_theta  window(marg) 0.0489518  window(block) 0.0489518  filter 0.0489518  published 0.0489518  | marg/pub 1 block/marg 1 | NIS 0.014682 | cov update TAKEN det 4.60509e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=0.910 m — mixture search
+[reloc] lost: moved 2.84 m / 50° to (5.08, 2.67, -69°), w=1.00, 3 rival mode(s), 17.8 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=1.286 m — mixture search
+[hess] sigma_theta  window(marg) 0.0463891  window(block) 0.0463891  filter 0.0463891  published 0.0463891  | marg/pub 1 block/marg 1 | NIS 0.00571839 | cov update TAKEN det 4.10098e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=1.290 m — mixture search
 [reloc] lost: moved 2.15 m / 25° to (5.91, 3.49, 166°), w=1.00, 3 rival mode(s), 19.5 ms
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 [calib] restored 80 measurements from "etc/motion_calib_state.csv" (0 closed pivot(s)) — the window resumes, the priors do not move
-[reloc] P(lost)=0.500 at s=2.038 m — mixture search
+[hess] sigma_theta  window(marg) 0.0512893  window(block) 0.0512893  filter 0.0512893  published 0.0512893  | marg/pub 1 block/marg 1 | NIS 0.0183375 | cov update TAKEN det 5.26236e-07 | slots 1 dof_marg 0 rows 1
+[reloc] P(lost)=0.500 at s=2.040 m — mixture search
 [reloc] lost: moved 2.77 m / 100° to (6.95, 1.75, 108°), w=1.00, 3 rival mode(s), 20.5 ms
-[reloc] P(lost)=0.500 at s=0.065 m — mixture search
+[reloc] P(lost)=0.501 at s=0.078 m — mixture search
 [ImuInject] clock=WALL(unbound) coverage="0.0"% (0/505 seg) dtheta wheel/gyro="n/a (needs >0.5 rad of turning)" over "0.000" rad zupt=505/505 seg gyro_weight="0.0%" (switch)
 reloc_selftest: 25 episodes per room x kind, 360-beam scans, 2 cm noise, 30% clutter, one open-door sector
 
-room         kidnap   | CONTROL ok   basin  +polish     ms   | TREATMENT ok   basin  truth  honest   nees     ms  modes    
-rect_6x4     flip180  |  25/25   25/25   25/25       8,1 |  25/25   25/25   25/25   25/25    1,79   42,6  4,00
-rect_6x4     mirror   |  10/25   21/25   25/25     148,2 |  25/25   25/25   25/25   23/25    1,44   18,1  4,00
-rect_6x4     drift    |  11/25   25/25   25/25     144,7 |  25/25   25/25   25/25   24/25    1,06   17,4  4,00
-rect_6x4     uniform  |   6/25   20/25   24/25     141,6 |  25/25   25/25   25/25   25/25    0,86   18,1  4,00
-L_7x5        flip180  |  25/25   25/25   25/25       2,8 |  25/25   25/25   25/25     n/a   1,73   17,9  4,00
-L_7x5        mirror   |   6/25   18/25   20/25     121,5 |  24/25   25/25   24/25     n/a   3,22   18,0  4,00
-L_7x5        drift    |  12/25   21/25   23/25     146,1 |  24/25   25/25   24/25     n/a   1,54   17,7  4,00
-L_7x5        uniform  |   5/25   14/25   20/25     169,5 |  25/25   25/25   25/25     n/a   0,90   17,7  4,00
-notched_8x5  flip180  |  25/25   25/25   25/25       2,8 |  25/25   25/25   25/25     n/a   0,93   19,6  4,00
-notched_8x5  mirror   |   3/25    7/25   12/25     159,8 |  25/25   25/25   25/25     n/a   0,88   18,7  4,00
-notched_8x5  drift    |  14/25   24/25   24/25     113,9 |  24/25   25/25   24/25     n/a   3,02   18,4  4,00
-notched_8x5  uniform  |   3/25   10/25   16/25     195,4 |  25/25   25/25   25/25     n/a   1,14   19,0  4,00
+room         kidnap   | ok   basin  truth  honest   nees     ms  modes              
+rect_6x4     flip180  |  25/25   25/25   25/25   25/25    1,79   20,5  4,00
+rect_6x4     mirror   |  25/25   25/25   25/25   23/25    1,44   32,2  4,00
+rect_6x4     drift    |  25/25   25/25   25/25   24/25    1,06   16,6  4,00
+rect_6x4     uniform  |  25/25   25/25   25/25   25/25    0,86   17,5  4,00
+L_7x5        flip180  |  25/25   25/25   25/25     n/a   1,73   19,1  4,00
+L_7x5        mirror   |  24/25   25/25   24/25     n/a   3,22   19,2  4,00
+L_7x5        drift    |  24/25   25/25   24/25     n/a   1,54   17,6  4,00
+L_7x5        uniform  |  25/25   25/25   25/25     n/a   0,90   19,6  4,00
+notched_8x5  flip180  |  25/25   25/25   25/25     n/a   0,93   24,1  4,00
+notched_8x5  mirror   |  25/25   25/25   25/25     n/a   0,88   20,6  4,00
+notched_8x5  drift    |  24/25   25/25   24/25     n/a   3,02   18,8  4,00
+notched_8x5  uniform  |  25/25   25/25   25/25     n/a   1,14   21,0  4,00
 
 closed loop (RoomConcept lost belief + rival modes, live defaults)
   A symmetric: twin committed, truth rival (llr 0)     switches=0 (expect 0), first at frame -1, final pose ok 20/20, clamp releases != switches in 0 runs (expect 0)
@@ -184,9 +192,9 @@ closed loop (RoomConcept lost belief + rival modes, live defaults)
   F kidnap end-to-end notched_8x5                      fired 15/15 (after 1,0 frames), final pose right 15/15, right but clamp never released 0 (expect 0)
   G rect: twin vs truth (expect ~0 everywhere)         J here=0,00  min=0,00  max=0,00 nats at (2,5,-1,5)
   G notched: mirror vs truth (expect max near a notch view) J here=16,62  min=14,33  max=19,26 nats at (0,5,1,0)
-[FLIP] dyaw=-121deg dxy=(-2.52,+0.71) | SDF old=0.950 new=0.372 | anchorSD old=0.0 new=0.0 (n=0) | FE obs=9.95 corner=0.00 object=0.00 | iters=15
-[FLIP] dyaw=-163deg dxy=(+2.44,+0.29) | SDF old=1.843 new=0.339 | anchorSD old=0.0 new=0.0 (n=0) | FE obs=8.75 corner=0.00 object=0.00 | iters=20
-[FLIP] dyaw=-170deg dxy=(+2.80,-1.12) | SDF old=1.446 new=0.399 | anchorSD old=0.0 new=0.0 (n=0) | FE obs=10.81 corner=0.00 object=0.00 | iters=20
+[FLIP] dyaw=-122deg dxy=(-2.52,+0.70) | SDF old=0.949 new=0.372 | anchorSD old=0.0 new=0.0 (n=0) | FE obs=9.95 corner=0.00 object=0.00 | iters=10
+[FLIP] dyaw=-164deg dxy=(+2.45,+0.28) | SDF old=1.841 new=0.339 | anchorSD old=0.0 new=0.0 (n=0) | FE obs=8.75 corner=0.00 object=0.00 | iters=4
+[FLIP] dyaw=-170deg dxy=(+2.78,-1.11) | SDF old=1.440 new=0.399 | anchorSD old=0.0 new=0.0 (n=0) | FE obs=10.81 corner=0.00 object=0.00 | iters=3
   H kidnap THROUGH update() (notched)                 pose right 8/8, stayed right 8/8; most relocalisations in one run 1 (expect 1); searching+map-ready relocalised in 0 runs (expect 0)
   D healthy stream                                     false fires=26 in 40000 healthy frames (5% turn spikes x3)
   E kidnap (s -> 0.40 m)                               fired in 1,1 frames on average, missed 0/20
