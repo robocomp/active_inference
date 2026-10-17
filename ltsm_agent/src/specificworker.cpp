@@ -22,6 +22,8 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 
+#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+
 #include <QAction>
 #include <QSettings>
 #include <QWheelEvent>
