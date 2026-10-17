@@ -237,6 +237,22 @@ static void test_identity_value()
     check(std::isfinite(identity_value(same, 0.f, 0.f, 256, 1)), "two identical candidates: finite value");
 }
 
+static void test_prototype_uncertainty()
+{
+    std::printf("prototype uncertainty\n");
+    // cov_bg == cov_own isolates the evidence term: the blend then cannot change the covariance, so only
+    // D·Σn·D can make one view less certain than twenty.
+    AtlasParams P; P.cov_bg = P.cov_own;
+    ViewAtlas one(P, 4, 3), many(P, 4, 3);
+    one.update(obs(0, 0, 0.f));
+    for (int i = 0; i < 20; ++i) many.update(obs(0, 0, -0.5f + 0.05f * float(i), 1.0f + 0.3f * float(i)));
+    const Gauss2 h1 = one.hypothesis(0.f, 1.f), h20 = many.hypothesis(0.f, 1.f);
+    check(h1.cov(1, 1) > h20.cov(1, 1), "colour: one view is less certain than twenty");
+    check(h1.cov(0, 0) > h20.cov(0, 0), "shape: one view is less certain than twenty");
+    ViewAtlas empty(AtlasParams{}, 4, 3);
+    check(empty.log_ratio(obs(0, 0, 0.f), 0.f) == 0.f, "empty atlas: still exactly 0 with the evidence term");
+}
+
 int main()
 {
     test_bins_and_wrap();
@@ -251,6 +267,7 @@ int main()
     test_log_ratio_window();
     test_reid();
     test_identity_value();
+    test_prototype_uncertainty();
     std::printf("\nview_atlas_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }

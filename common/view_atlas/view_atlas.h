@@ -247,7 +247,11 @@ public:
         const Eigen::Matrix2f R = Eigen::Vector2f(r_d, r_c).asDiagonal();
         const Eigen::Matrix2f I = Eigen::Matrix2f::Identity();
         const Eigen::Matrix2f Lb = Eigen::LLT<Eigen::Matrix2f>(p_.cov_bg).matrixL();
-        const Eigen::Matrix2f Lo = Eigen::LLT<Eigen::Matrix2f>(p_.cov_own).matrixL();
+        // Prototype uncertainty (spec §3.2, Σ_own + Σ_n/N): a bin mean built from few views is itself noisy.
+        // D scales the per-view noise by the evidence behind each channel; n0 keeps it finite at N = 0, where
+        // R = 0 removes Lo from the blend anyway (so the exact-zero property is untouched).
+        const Eigen::Matrix2f D = Eigen::Vector2f(1.f / std::sqrt(Ns + p_.n0), 1.f / std::sqrt(s_.n_c + p_.n0)).asDiagonal();
+        const Eigen::Matrix2f Lo = Eigen::LLT<Eigen::Matrix2f>(p_.cov_own + D * p_.cov_n * D).matrixL();
         const Eigen::Matrix2f L = (I - R) * Lb + R * Lo;
         Gauss2 g;
         g.mu  = p_.mu_bg + R * (p_.mu_own - p_.mu_bg);
