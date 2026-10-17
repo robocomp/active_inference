@@ -3092,7 +3092,12 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // whose stand-off is in the same region of the room polygon as the robot; see rc::door::approach_side.
     st.approach_side = rc::door::approach_side(ap, robot, st.robot_side, st.approach_standoff_m,
                                                fitter_->room_polygon());
-    st.p_reach       = rc::door::prob_in_band(st.robot_range_m, d_min, d_max, sigma);
+    st.p_band        = rc::door::prob_in_band(st.robot_range_m, d_min, d_max, sigma);
+    // Marginalise the near edge over the door's state (see InteractionState::p_reach). Without a leaf-angle
+    // posterior this cycle the door is treated as one that may need swinging: the band alone, as before.
+    const float p_open_now = st.p_open_known ? std::clamp(st.p_open, 0.0f, 1.0f) : 0.0f;
+    st.p_reach       = p_open_now * rc::door::prob_within(st.robot_range_m, d_max, sigma)
+                     + (1.0f - p_open_now) * st.p_band;
     st.p_reach_known = true;
     st.range_sigma_m = sigma;
 
@@ -3151,8 +3156,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     // the robot arrives is its VALUE, not its availability — approaching a door you are already at is
     // worth nothing, and saying so as a value rather than as a withdrawal is what stops the
     // complete→re-offer→complete ping-pong a preconditioned version would produce at the doorway. Its
-    // completion predicate is door_reach_prob, which IS `open`'s precondition: "approach succeeded" and
-    // "open became possible" are one measurement, not two numbers that can drift apart.
+    // completion predicate is door_reach_prob. For a door believed SHUT that is the band, i.e. `open`'s own
+    // precondition, so "approach succeeded" and "open became possible" are one measurement; for a door
+    // believed OPEN the leaf's arc no longer matters and anywhere within reach counts (InteractionState::p_reach).
     {
         rc::pragmatic::Offer o;
         o.known = located;
@@ -3163,8 +3169,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f);
         o.contract = rc::door::approach_contract(pg);
-        o.why      = std::format("a located door can always be approached (P(reach)={:.2f} ⇒ value {:.3f}; range {:.2f} m "
-                                 "in band [{:.2f},{:.2f}] σ {:.2f}, w {:.2f})", st.p_reach, o.value, st.robot_range_m,
+        o.why      = std::format("a located door can always be approached (P(reach)={:.2f} = P(open) {:.2f} mix of "
+                                 "P(band) {:.2f} ⇒ value {:.3f}; range {:.2f} m "
+                                 "in band [{:.2f},{:.2f}] σ {:.2f}, w {:.2f})", st.p_reach,
+                                 st.p_open_known ? st.p_open : 0.0f, st.p_band, o.value, st.robot_range_m,
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
                                  st.range_sigma_m, inst.aperture.w);
         inst.aff_approach.update(o);
@@ -3178,7 +3186,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     {
         rc::pragmatic::Offer o;
         o.known = located and st.p_open_known and not cfg_.door_control_endpoint.empty();
-        o.p     = st.p_reach * std::clamp(1.0f - st.p_open, 0.0f, 1.0f);
+        // The BAND, not the marginal p_reach: this is the step that swings the leaf, so the robot must be
+        // outside its arc whatever the door is believed to be.
+        o.p     = st.p_band * std::clamp(1.0f - st.p_open, 0.0f, 1.0f);
         if (inst.actuation_refused)
         {
             // ★A REFUSAL IS INFORMATION, and this kind is permanent: UnknownDoor / NotActuable mean never
@@ -3188,7 +3198,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             o.why = "the provider cannot actuate this door: " + inst.actuation_note;
         }
         else
-            o.why = std::format("P(in reach)={:.2f} × P(shut)={:.2f}{}", st.p_reach,
+            o.why = std::format("P(in band)={:.2f} × P(shut)={:.2f}{}", st.p_band,
                                  1.0f - st.p_open, st.p_open_from_curve ? "" : " (phi from the belief, no curve)");
         const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, st.approach_standoff_m);
         // Orient policy: the (x,y) is informational — the consumer does not navigate, it turns to face

@@ -379,12 +379,16 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
                 inst.obs_top_last = top;
                 if (wgt > 0.0f)
                 {
-                    constexpr float kEwma = 0.05f;   // smoothing over untruncated views (a measurement filter)
+                    constexpr float kEwma = 0.05f;   // confidence accrual rate over untruncated views
                     const float a = kEwma * wgt;
-                    // Rises toward a taller observation, never falls toward a shorter one.
+                    // The best lower bound is the tallest one seen: a running MAX. ★It used to EWMA UP from
+                    // the first reading (a = 0.05), and that is the same bug as door_17 entering from the other
+                    // end: a door first seen in a fragment starts LOW and crawls up more slowly than the
+                    // confidence below accrues. try46 (2026-10-17), door_1 re-seen from room_2 after a crossing:
+                    // seeded at 0.85 m, had crawled to only 1.40 m when conf reached MinHeightConf 0.30, and the
+                    // min-height prior deleted an open door the robot had just driven through.
                     if (std::isnan(inst.obs_top_z) or top > inst.obs_top_z)
-                        inst.obs_top_z = std::isnan(inst.obs_top_z)
-                                         ? top : (1.0f - a) * inst.obs_top_z + a * top;
+                        inst.obs_top_z = top;
                     // Confidence still accumulates on EVERY untruncated look: we did examine the door,
                     // whatever the piece showed. Otherwise a run of fragments would leave the prior
                     // unable to act at all, which is a different failure from the one being fixed.
