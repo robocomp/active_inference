@@ -1,5 +1,5 @@
 # view_atlas constants, fitted 2026-10-17 by fit_constants.py
-# dataset: /home/pbustos/robocomp/components/active_inference.worktrees/view-atlas-2a/retina/etc/view_atlas_dataset (2715 views, 14 objects)
+# dataset: retina/etc/view_atlas_dataset (2715 views, 14 objects)
 # pairs: own 23941, background 1161
 # dataset: stride=2
 # noise vs mask size: excess term NOT supported by the data over px [288, 285048] (fitted excess cov eigenvalues -0.000126, 2.54e-05; best scale 50000 at grid edge = yes; bands=6, sse=3.64e-05); cov_n = per-view scatter, quality_px_scale left at its flagged default

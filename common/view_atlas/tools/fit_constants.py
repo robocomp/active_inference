@@ -89,9 +89,11 @@ def fit(own, bg, logr_pairs=None):
     #    np.cov of the near pairs (not the model intercept, which extrapolates an unsupported model), also used
     #    for the repeat-scale sd. quality_px_scale is NOT written (stays the flagged AtlasParams default). The finding goes in the header.
     ev_n = np.linalg.eigvalsh(cov_n_fit)
-    excess_ok = bool(ev_n.min() > 0)
     px_lo, px_hi = float(near[:, 3].min()), float(near[:, 3].max())
     edge = bool(px_scale >= 50000 * (1 - 1e-9) or px_scale <= 100 * (1 + 1e-9))
+    # A best scale at either end of the search grid means the scale is not identified: the excess is UNSUPPORTED
+    # even if it happens to be PD, so take the non-PD branch.
+    excess_ok = bool(ev_n.min() > 0) and not edge
     if excess_ok:
         noise_header = f"noise model: cov(px) = cov_own + cov_n (1-q)/q, q = 1-exp(-px/quality_px_scale); bands={nb}, sse={sse:.3g}"
         cov_n_out, scale_out = cov_n_fit, {"quality_px_scale": px_scale}
@@ -171,9 +173,12 @@ def main():
     ratio = k.pop("_repeat_ratio"); nh = k.pop("_noise_header")
     try: stride = [l.split("stride=", 1)[1].split()[0] for l in open(os.path.join(a.dataset, "dataset_meta.txt")) if "stride=" in l][0]
     except Exception: stride = "unknown"
+    root = os.path.dirname(os.path.abspath(__file__))
+    while root != os.path.dirname(root) and not os.path.exists(os.path.join(root, ".git")): root = os.path.dirname(root)
+    ds = os.path.relpath(os.path.abspath(a.dataset), root)             # relative to the repo root, not the worktree
     with open(a.out, "w") as f:
         f.write(f"# view_atlas constants, fitted {datetime.date.today()} by fit_constants.py\n"
-                f"# dataset: {os.path.abspath(a.dataset)} ({len(v)} views, {v.inst.nunique()} objects)\n"
+                f"# dataset: {ds} ({len(v)} views, {v.inst.nunique()} objects)\n"
                 f"# pairs: own {len(own)}, background {len(bg)}\n"
                 f"# dataset: stride={stride}\n"
                 f"# {nh}\n"

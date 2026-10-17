@@ -265,6 +265,24 @@ static void test_repeat_across_bin_edge()
     check(after - before < 0.01f, "a look 0.6 deg away across a bin edge is a repeat");
 }
 
+static void test_repeat_scale_beyond_bin()
+{
+    std::printf("repeat check spans bins when the repeat scale exceeds a bin\n");
+    auto added = [](float ell) {
+        AtlasParams P; P.repeat_ell_rad = ell;
+        ViewAtlas a(P, 4, 3);
+        a.update(obs(0, 0, 0.f));
+        float before = 0.f; for (const auto& b : a.state().bins) before += b.n;
+        a.update(obs(0, 0, 0.7f));                            // two bins away
+        float after = 0.f; for (const auto& b : a.state().bins) after += b.n;
+        return after - before;
+    };
+    const float wide = added(0.776f), narrow = added(0.10f);
+    std::printf("    added: wide %.4f narrow %.4f\n", wide, narrow);
+    check(wide < 0.6f, "0.7 rad repeat under repeat_ell_rad 0.776 is discounted");
+    check(narrow > 0.95f, "same look under the default 0.10 adds ~1 view");
+}
+
 int main()
 {
     test_bins_and_wrap();
@@ -281,6 +299,7 @@ int main()
     test_identity_value();
     test_prototype_uncertainty();
     test_repeat_across_bin_edge();
+    test_repeat_scale_beyond_bin();
     std::printf("\nview_atlas_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }

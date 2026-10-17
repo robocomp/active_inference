@@ -10,6 +10,9 @@
 
 #include "view_atlas.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -17,6 +20,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <chrono>
+#include <random>
 #include <locale>
 #include <string>
 #include <string_view>
@@ -26,7 +31,7 @@
 namespace rc::atlas
 {
 
-inline constexpr std::uint32_t kArchiveVersion = 1;
+inline constexpr std::uint32_t kArchiveVersion = 2;
 
 struct ArchiveRecord
 {
@@ -51,6 +56,21 @@ inline bool get_vec(std::ifstream& b, Eigen::VectorXf& v, int dim)
     v.resize(dim);
     for (int i = 0; i < dim; ++i) if (not get<float>(b, v[i])) return false;
     return true;
+}
+/// A per-save value that differs between saves; written into BOTH files so a torn pair is detectable.
+inline std::uint64_t new_generation()
+{
+    std::random_device rd;
+    const std::uint64_t t = std::uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
+    return (std::uint64_t(rd()) << 32) ^ std::uint64_t(rd()) ^ t;
+}
+inline bool fsync_path(const std::string& path)
+{
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    const bool ok = ::fsync(fd) == 0;
+    ::close(fd);
+    return ok;
 }
 template <class T> bool parse(std::string_view s, T& out)
 {
@@ -91,10 +111,12 @@ inline bool save_archive(const std::string& base, const std::vector<ArchiveRecor
     auto drop_temps = [&] { std::error_code e; std::filesystem::remove(base + ".blob.tmp", e); std::filesystem::remove(base + ".idx.tmp", e); };
     std::ofstream b(base + ".blob.tmp", std::ios::binary | std::ios::trunc);
     if (not b) return fail("cannot open " + base + ".blob.tmp");
+    const std::uint64_t gen = detail::new_generation();
     b.write("RCVA", 4);
     for (std::uint32_t f : {kArchiveVersion, std::uint32_t(sd), std::uint32_t(cd), std::uint32_t(nb),
                             std::uint32_t(recs.size())})
         detail::put(b, f);
+    detail::put<std::uint64_t>(b, gen);                       // after n_records (offset 24)
     for (const auto& r : recs)
     {
         detail::put_vec(b, r.atlas.colour, cd);
@@ -117,7 +139,7 @@ inline bool save_archive(const std::string& base, const std::vector<ArchiveRecor
     f.imbue(std::locale::classic());
     f << std::setprecision(std::numeric_limits<float>::max_digits10);
     f << "# view_atlas archive v" << kArchiveVersion << " shape_dim=" << sd << " colour_dim=" << cd
-      << " n_bins=" << nb << "\n"
+      << " n_bins=" << nb << " generation=" << gen << "\n"
       << "uid,agent,cls,name,x,y,yaw,c00,c01,c02,c11,c12,c22,born_ms,died_ms\n";
     for (const auto& r : recs)
         f << r.object_uid << ',' << r.agent << ',' << r.cls << ',' << r.name << ','
@@ -127,6 +149,10 @@ inline bool save_archive(const std::string& base, const std::vector<ArchiveRecor
           << r.born_ms << ',' << r.died_ms << '\n';
     f.close();
     if (not f) { drop_temps(); return fail("write failed: " + base + ".idx.tmp"); }
+    if (not detail::fsync_path(base + ".blob.tmp") or not detail::fsync_path(base + ".idx.tmp"))
+    { drop_temps(); return fail("fsync failed: " + base + ".{blob,idx}.tmp"); }
+    // Blob first, idx LAST: the idx commits the pair (a crash between leaves new blob + old idx, which the
+    // generation check refuses).
     std::error_code ec;
     std::filesystem::rename(base + ".blob.tmp", base + ".blob", ec);
     if (ec) { drop_temps(); return fail("rename failed: " + base + ".blob: " + ec.message()); }
@@ -145,8 +171,17 @@ inline bool load_archive(const std::string& base, const AtlasParams& p, int shap
     if (not f) return fail("cannot open " + base + ".idx");
     std::vector<ArchiveRecord> recs;
     std::string line;
+    std::uint64_t idx_gen = 0;
+    bool have_gen = false;
     while (std::getline(f, line))
     {
+        if (line.starts_with("# view_atlas archive"))
+        {
+            const auto k = line.find("generation=");
+            if (k != std::string::npos)
+                have_gen = detail::parse(detail::trim(std::string_view(line).substr(k + 11)), idx_gen);
+            continue;
+        }
         if (line.empty() or line[0] == '#' or line.starts_with("uid,")) continue;
         const auto c = detail::split(line, ',');
         if (c.size() != 15) return fail("index line has " + std::to_string(c.size()) + " fields, expected 15");
@@ -169,6 +204,11 @@ inline bool load_archive(const std::string& base, const AtlasParams& p, int shap
     if (not (detail::get(b, ver) and detail::get(b, sd) and detail::get(b, cd) and detail::get(b, nb) and detail::get(b, n)))
         return fail("blob short: header");
     if (ver != kArchiveVersion) return fail("version " + std::to_string(ver) + " != " + std::to_string(kArchiveVersion));
+    std::uint64_t gen;
+    if (not detail::get(b, gen)) return fail("blob short: generation");
+    if (not have_gen or gen != idx_gen)
+        return fail("generation mismatch: blob " + std::to_string(gen) + ", index " +
+                    (have_gen ? std::to_string(idx_gen) : std::string("missing")) + " (torn or mixed archive pair)");
     // An empty archive carries no dimensions to check (save writes 0s): it reloads as empty, whatever the caller.
     if (n == 0 and recs.empty()) return true;
     if (int(sd) != shape_dim) return fail("shape_dim " + std::to_string(sd) + " != " + std::to_string(shape_dim));

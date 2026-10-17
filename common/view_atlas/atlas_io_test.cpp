@@ -35,7 +35,7 @@ static ArchiveRecord make_record(std::uint64_t uid)
 }
 
 /// Overwrites one little-endian u32 at byte offset `at` of a file (blob header: magic 0, version 4,
-/// shape_dim 8, colour_dim 12, n_bins 16, n_records 20).
+/// shape_dim 8, colour_dim 12, n_bins 16, n_records 20, generation u64 24).
 static void patch_u32(const std::string& path, std::streamoff at, std::uint32_t v)
 {
     std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
@@ -118,7 +118,23 @@ int main()
         check(refused_with("n_bins"), "wrong n_bins refused, reason names n_bins");
         fresh(); patch_u32(blob, 20, 3);
         check(refused_with("record count"), "bad record count refused, reason names record count");
+        fresh(); patch_u32(blob, 4, 1);
+        check(refused_with("version"), "version-1 blob refused, reason names version");
         fresh();
+    }
+
+    std::printf("torn pair (crash between the two renames)\n");
+    {
+        std::vector<ArchiveRecord> A = {make_record(1), make_record(2)}, B = {make_record(3), make_record(4)};
+        B[0].atlas.colour = Eigen::Vector3f(0.9f, 0.1f, 0.1f);   // same count, different content
+        const std::string a = (dir / "tornA").string(), bb = (dir / "tornB").string();
+        check(save_archive(a, A, &why) and save_archive(bb, B, &why), "save A and B");
+        std::filesystem::copy_file(bb + ".blob", a + ".blob", std::filesystem::copy_options::overwrite_existing);
+        back.clear();
+        check(not load_archive(a, P, 4, 3, back, &why) and why.find("generation") != std::string::npos and back.empty(),
+              "A.idx + B.blob refused, reason names generation");
+        std::filesystem::copy_file(bb + ".idx", a + ".idx", std::filesystem::copy_options::overwrite_existing);
+        check(load_archive(a, P, 4, 3, back, &why) and back.size() == 2, "a consistent pair loads");
     }
 
     std::printf("constants loader\n");

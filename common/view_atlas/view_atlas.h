@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -127,6 +128,7 @@ class ViewAtlas
 public:
     ViewAtlas(const AtlasParams& p, int shape_dim, int colour_dim) : p_(p)
     {
+        assert(p_.n0 > 0.f);   // n0 = 0 makes D infinite at N = 0 and breaks the exact-zero property
         s_.shape_dim = shape_dim; s_.colour_dim = colour_dim;
         s_.bins.resize(std::size_t(p_.n_bins));
         for (auto& b : s_.bins) b.mean = Eigen::VectorXf::Zero(shape_dim);
@@ -202,7 +204,7 @@ public:
         const float lr = std::log(o.range_m);
         const int bi = bin_of(b);
         Bin& bin = s_.bins[std::size_t(bi)];
-        const float w = o.quality * (1.f - repeat_similarity(bi, b, lr));
+        const float w = o.quality * (1.f - repeat_similarity(b, lr));
 
         if (w > 0.f)
         {
@@ -292,15 +294,14 @@ private:
     {
         return pose_kernel(p_, a, b);
     }
-    [[nodiscard]] float repeat_similarity(int bin_index, float b, float lr) const
+    /// Checks the stored poses of ALL bins: the fitted repeat scale (repeat_ell_rad, 44 deg) exceeds the
+    /// 30 deg bin, so a repeat can sit several bins away, not just across an edge.
+    [[nodiscard]] float repeat_similarity(float b, float lr) const
     {
         const Eigen::Vector2f view(b, lr);
         float k = 0.f;
-        for (int d = -1; d <= 1; ++d)                             // a repeat can sit across a bin edge
-        {
-            const int j = (bin_index + d + p_.n_bins) % p_.n_bins;
-            for (const auto& ps : s_.bins[std::size_t(j)].poses) k = std::max(k, pose_similarity(view, ps));
-        }
+        for (const auto& bin : s_.bins)
+            for (const auto& ps : bin.poses) k = std::max(k, pose_similarity(view, ps));
         return k;
     }
     /// Index of the stored pose most similar to any OTHER stored pose (ties: oldest). Redundancy-based
