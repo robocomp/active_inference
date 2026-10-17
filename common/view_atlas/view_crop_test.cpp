@@ -94,6 +94,16 @@ int main()
     }
     auto edge = make_crop(img, dec(rect_px(1200, 300, 1280, 400), 2, 1200, 300));
     check(edge.has_value() and edge->trunc_frac > 0.f, "decimated mask at the right border still reports truncation");
+    auto with_outlier = dec(rect_px(600, 300, 700, 400), 2, 600, 300);
+    with_outlier.emplace_back(-5.f, 3.f);                       // one off-image sample must not change the stride
+    auto outlier_crop = make_crop(img, with_outlier);
+    check(outlier_crop.has_value() and sparse.has_value(), "decimated mask plus an off-image sample yields a crop");
+    if (outlier_crop and sparse)
+    {
+        cv::Mat diff;
+        cv::absdiff(outlier_crop->rgb224, sparse->rgb224, diff);
+        check(cv::countNonZero(diff.reshape(1)) == 0, "off-image sample: crop still equals the stride-2 crop");
+    }
 
     std::printf("\nview_crop_test: %s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;

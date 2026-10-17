@@ -50,14 +50,23 @@ inline int infer_stride(const std::vector<Eigen::Vector2f>& mask_px)
 inline std::optional<Crop> make_crop(const cv::Mat& bgr, const std::vector<Eigen::Vector2f>& mask_px)
 {
     if (bgr.empty() or mask_px.empty()) return std::nullopt;
-    cv::Mat mask = cv::Mat::zeros(bgr.size(), CV_8U);
-    int x0 = bgr.cols, y0 = bgr.rows, x1 = -1, y1 = -1, n = 0, border = 0;
-    const int stride = infer_stride(mask_px);
+    // CONTRACT: mask pixels are integral (retina publishes static_cast<float>(col/row) of integer pixel
+    // indices, retina/src/graph_publisher.cpp det_pixels), so lround only undoes float storage; a Python
+    // mirror builds its mask from a boolean array, so round-half-even vs half-away never arises.
+    // The stride is inferred from the IN-IMAGE samples only: an off-image sample would otherwise corrupt the gcd.
+    std::vector<Eigen::Vector2f> inside;
+    inside.reserve(mask_px.size());
     for (const auto& p : mask_px)
     {
-        // CONTRACT: mask pixels are integral (retina publishes static_cast<float>(col/row) of integer pixel
-        // indices, retina/src/graph_publisher.cpp det_pixels), so lround only undoes float storage; a Python
-        // mirror builds its mask from a boolean array, so round-half-even vs half-away never arises.
+        const int x = int(std::lround(p.x())), y = int(std::lround(p.y()));
+        if (x >= 0 and y >= 0 and x < bgr.cols and y < bgr.rows) inside.push_back(p);
+    }
+    if (inside.empty()) return std::nullopt;
+    cv::Mat mask = cv::Mat::zeros(bgr.size(), CV_8U);
+    int x0 = bgr.cols, y0 = bgr.rows, x1 = -1, y1 = -1, n = 0, border = 0;
+    const int stride = infer_stride(inside);
+    for (const auto& p : inside)
+    {
         const int px = int(std::lround(p.x())), py = int(std::lround(p.y()));
         for (int y = py; y < py + stride; ++y)
             for (int x = px; x < px + stride; ++x)
