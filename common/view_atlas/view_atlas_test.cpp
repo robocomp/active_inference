@@ -74,6 +74,21 @@ static void test_update_and_repeat_discount()
     check(a.state().bins[6].n > before + 0.5f, "same bearing at a very different range is a new view");
 }
 
+static void test_repeats_do_not_flush_history()
+{
+    std::printf("repeats do not flush a distinct pose\n");
+    ViewAtlas a(AtlasParams{}, 4, 3);
+    a.update(obs(0, 0, 0.f));                          // distinct pose at bearing 0
+    for (int i = 0; i < 6; ++i)
+        a.update(obs(0, 0, 0.4f));                     // one new view, then five repeats from 23 deg
+    bool kept = false;
+    for (const auto& ps : a.state().bins[6].poses) kept = kept or std::fabs(ps.x()) < 1e-3f;
+    check(kept, "the bin still holds the pose at bearing 0 after the repeats");
+    const float before = a.state().bins[6].n;
+    a.update(obs(0, 0, 0.f));                          // back to the first place
+    check(a.state().bins[6].n - before < 0.01f, "a return to the first pose is still a repeat");
+}
+
 static void test_count_and_learning_value()
 {
     std::printf("effective count and learning value\n");
@@ -112,6 +127,7 @@ int main()
     test_bins_and_wrap();
     test_empty_atlas();
     test_update_and_repeat_discount();
+    test_repeats_do_not_flush_history();
     test_count_and_learning_value();
     test_prediction();
     test_quality();

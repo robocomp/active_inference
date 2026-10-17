@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <numbers>
@@ -185,21 +186,40 @@ public:
             }
         }
         bin.poses.emplace_back(b, lr);
-        if (int(bin.poses.size()) > p_.poses_per_bin) bin.poses.erase(bin.poses.begin());
+        if (int(bin.poses.size()) > p_.poses_per_bin)
+            bin.poses.erase(bin.poses.begin() + most_redundant(bin.poses));
         bin.stamp_ms = o.stamp_ms;
     }
 
 private:
+    /// Repeat-kernel similarity of two poses (bearing, log range): 1 = the same place, 0 = far apart.
+    [[nodiscard]] float pose_similarity(const Eigen::Vector2f& a, const Eigen::Vector2f& b) const
+    {
+        const float da = wrap_pi(a.x() - b.x()) / p_.repeat_ell_rad;
+        const float dr = (a.y() - b.y()) / p_.repeat_ell_logr;
+        return std::exp(-0.5f * (da * da + dr * dr));
+    }
     [[nodiscard]] float repeat_similarity(const Bin& bin, float b, float lr) const
     {
+        const Eigen::Vector2f view(b, lr);
         float k = 0.f;
-        for (const auto& ps : bin.poses)
-        {
-            const float da = wrap_pi(b - ps.x()) / p_.repeat_ell_rad;
-            const float dr = (lr - ps.y()) / p_.repeat_ell_logr;
-            k = std::max(k, std::exp(-0.5f * (da * da + dr * dr)));
-        }
+        for (const auto& ps : bin.poses) k = std::max(k, pose_similarity(view, ps));
         return k;
+    }
+    /// Index of the stored pose most similar to any OTHER stored pose (ties: oldest). Redundancy-based
+    /// eviction keeps the distinct views; recency eviction let a run of repeat looks flush them.
+    [[nodiscard]] std::ptrdiff_t most_redundant(const std::vector<Eigen::Vector2f>& poses) const
+    {
+        std::ptrdiff_t arg = 0;
+        float best = -1.f;
+        for (std::size_t i = 0; i < poses.size(); ++i)
+        {
+            float k = 0.f;
+            for (std::size_t j = 0; j < poses.size(); ++j)
+                if (j != i) k = std::max(k, pose_similarity(poses[i], poses[j]));
+            if (k > best) { best = k; arg = std::ptrdiff_t(i); }
+        }
+        return arg;
     }
 
     AtlasParams p_;
