@@ -147,7 +147,7 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
     // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.
     static int dbg = 0;
-    if (++dbg % 30 == 0)
+    if (log_period_ > 0 and ++dbg % log_period_ == 0)
     {
         // Dominant-uncertainty DOF, normalised by a common scale (10 cm / 0.1 rad) so metres and radians
         // are comparable — "which DOF is least known relative to its natural scale". (The gain decision

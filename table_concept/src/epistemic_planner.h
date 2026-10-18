@@ -98,12 +98,16 @@ public:
     // stand-inside test allows. A physical dimension, not a knob.
     void set_robot_radius(float m) { robot_radius_m_ = m; }
 
+    // Diagnostic readout period in calls; 0 = silent.
+    void set_log_period(int n) { log_period_ = n; }
+
 private:
     float d_obs_;
     // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
     // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
     rc::detect::DetectorEnvelope det_env_{};
     float robot_radius_m_ = 0.30f;   // Shadow
+    int   log_period_     = 0;
 };
 
 }  // namespace rc

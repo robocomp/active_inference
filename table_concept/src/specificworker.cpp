@@ -292,6 +292,7 @@ void SpecificWorker::initialize()
     // defaults are still the fleet prior, so nothing changes until etc/config.toml sets them.
     const rc::detect::DetectorEnvelope det_env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
     epistemic_planner_.set_detector_envelope(det_env);
+    epistemic_planner_.set_log_period(cfg_.table_log_period_frames);
     existence_->set_detector_envelope(det_env);   // …and REMOVAL weights absence by the very same model, which
                                                   // is what "both directions" above has always meant. Until
                                                   // 2026-08-06 only the planner used it and removal kept a
@@ -524,7 +525,6 @@ void SpecificWorker::compute()
     refresh_evidence_monitor();
     prune_dead_series();   // drop timeseries lines for tables that were removed from the graph
     log_birth_surprise();  // EXPERIMENTAL read-only: residual grid → birth-surprise regions (cfg-gated, off by default)
-    fps_counter_.print("[table_concept Compute]");
 }
 
 // EXPERIMENTAL, read-only. Reinterpret residual_concept's `grid` node (under room) as an unexplained-occupancy

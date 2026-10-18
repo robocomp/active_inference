@@ -362,7 +362,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
         const auto verdict = rc::exist::decide_removal(
                 inst.existence, inst.existence_debounce, policy, cycle_p_detect);
         doomed_now = verdict.remove;
-        if (verdict.stalled)
+        if (verdict.stalled and verdict.starved == policy.stall_warn_cycles)   // once per episode
             std::print("table_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
                                                                     inst.existence_debounce, verdict));
 
@@ -371,7 +371,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
         // early return, so a belief pinned at the +4 clamp by evidence no look can contradict said
         // NOTHING — a phantom refrigerator held there by a DOOR's returns sat silent for an hour with
         // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
-        if (verdict.unfalsifiable)
+        if (verdict.unfalsifiable and verdict.starved == policy.stall_warn_cycles)   // once per episode
             std::print("table_concept: {}\n",
                        rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
         if (integrated)

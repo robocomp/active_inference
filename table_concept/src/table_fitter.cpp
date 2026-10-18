@@ -309,8 +309,8 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
         if (foreign_claims_ and rc::exclusion::explained_by_other(p.x(), p.y(), p.z(), *foreign_claims_))
         {
             // NOT gated on a verbose flag: this is the one line that says whether the rule is running at
-            // all, which is the first thing anyone asks. Throttled rather than silenced.
-            if ((n_explained_away_++ % 200) == 0)
+            // all, which is the first thing anyone asks. Said once per run, not repeated.
+            if (n_explained_away_++ == 0)
                 std::print("[{}] [exclusion] point dropped — already explained by another object "
                            "({} so far this run)\n", inst.node_name, n_explained_away_);
             continue;
@@ -343,11 +343,11 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     return TableObservation{};
 }
 
-// True on the config-driven log period (one in table_log_period_frames cycles).
+// True on the config-driven log period (one in table_log_period_frames cycles); period <= 0 silences them.
 bool TableFitter::should_log(const TableInstance& inst) const
 {
-    const int period = std::max(1, cfg_.table_log_period_frames);
-    return (inst.processed_cycles % period) == 0;
+    const int period = cfg_.table_log_period_frames;
+    return period > 0 and (inst.processed_cycles % period) == 0;
 }
 
 // May this mask frame move geometry? — see table_fitter.h. The FIXATION gate's conditions, evaluated on a raw
@@ -774,7 +774,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
             inst.last_completeness = inst.dbg_completeness;   // persist for NEXT cycle's coverage common-mode
             constexpr float kYawJumpLogRad = 0.087f;   // ≈5°: diagnostic PRINT trigger only (no fit effect)
             constexpr float kRad2Deg       = 57.29578f;
-            if (std::abs(d_total) > kYawJumpLogRad)
+            if (cfg_.table_log_period_frames > 0 and std::abs(d_total) > kYawJumpLogRad)
                 std::print("[yaw-jump] {} dpsi={:.1f}deg (pts={:.1f} mom={:.1f} flip={:.1f}) | oblq_cos={:.2f} compl={:.2f} "
                            "aniso={:.2f} r_yaw={:.3f} | trunc={:.2f} mvar={:.4f} dotd={:.2f} range={:.2f} npts={}\n",
                            inst.node_name, d_total * kRad2Deg, inst.dbg_dyaw_points * kRad2Deg,

@@ -148,7 +148,12 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
     // Inferred shape subtype (round/square), chosen by free-energy model evidence in TableFitter::evaluate_shape.
     // The retina reads this to render the matching mesh (disc vs box).
-    G_->add_or_modify_attrib_local<object_subtype_att>(node, std::string("table"));  // CLASS (uniform convention); the round/square SHAPE lives in mesh_path (round_table.obj vs table.obj)
+    G_->add_or_modify_attrib_local<object_subtype_att>(node, std::string("table"));  // CLASS (uniform convention)
+    // The tabletop SHAPE as a qualifier: the winner of the round-vs-square comparison and its probability.
+    // shape_evidence is the accumulated log-Bayes factor (round − square) that already decides inst.subtype,
+    // so P(winner) = σ(|shape_evidence|) — the same decision, stated with its confidence (0.5 = undecided).
+    G_->add_or_modify_attrib_local<obj_shape_att>(node, inst.subtype);
+    G_->add_or_modify_attrib_local<obj_shape_prob_att>(node, 1.0f / (1.0f + std::exp(-std::abs(inst.shape_evidence))));
     // Publish the display mesh matching the inferred shape (agent picks the variant from its own belief; the
     // viewer just loads it, cached by path, and scales to the fitted box). Flips with the subtype. Paths are
     // relative to the retina's meshes/ asset root — see the cortex mesh_path contract.

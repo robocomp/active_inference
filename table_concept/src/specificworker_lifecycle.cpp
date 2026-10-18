@@ -209,7 +209,7 @@ void SpecificWorker::run_instance_tracker()
                     {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who,
                     0.0f, cfg_.tracker_birth_height_m);
                 dv.birth_evidence *= unclaimed;
-                if (unclaimed < 0.99f)
+                if (cfg_.table_log_period_frames > 0 and unclaimed < 0.99f)
                     std::print("[table] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed);
             }
@@ -223,8 +223,7 @@ void SpecificWorker::run_instance_tracker()
 
     const auto res = tracker_.update(tracks, dets);
 
-    // Diagnostic (throttled, plus on any birth/death): reveals "1 slice" (upstream) vs "N slices, no birth".
-    static int dbg = 0;
+    // Diagnostic on any birth/death: reveals "1 slice" (upstream) vs "N slices, no birth".
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
                                                           [](int a){ return a >= 0; }));
 
@@ -236,17 +235,10 @@ void SpecificWorker::run_instance_tracker()
     ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
     ev_g_.births       += static_cast<int>(res.births.size());
     ev_g_.births_cum   += static_cast<long>(res.births.size());
-    if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
-    {
+    if (not res.births.empty() or not res.deaths.empty())
         std::print("[tracker] instances={} table_dets={} assigned={} unassigned={} births={} deaths={}\n",
                    tracks.size(), dets.size(), n_assigned,
                    static_cast<int>(dets.size()) - n_assigned, res.births.size(), res.deaths.size());
-        for (const auto& t : tracks)
-            std::print("[tracker]   track id={} xy=({:.2f},{:.2f}) has_cov={}\n",
-                       t.id, t.xy.x(), t.xy.y(), t.has_cov);
-        for (const auto& d : dets)
-            std::print("[tracker]   det slice={} xy=({:.2f},{:.2f})\n", d.slice_index, d.xy.x(), d.xy.y());
-    }
 
     // DEATH: a table is rigid, persistent furniture, so a long occlusion (no mask for many frames) is NOT
     // absence and must never retire it. The ONLY way a table is removed is the MERGE operator (two tables

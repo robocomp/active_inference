@@ -412,7 +412,7 @@ KStable = 30                # consecutive converged cycles before the belief is 
 DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_alive → false
 MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
 CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
-TableLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
+TableLogPeriodFrames = 0    # per-cycle log throttle (cosmetic; no effect on the fit); 0 = periodic logs off
 ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)

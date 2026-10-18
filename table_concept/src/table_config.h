@@ -27,7 +27,7 @@ struct TableConfig
                                                   // sample inside it counts toward central_frac → p_detect → removal
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
-    int   table_log_period_frames      = 30;      // per-cycle log throttle
+    int   table_log_period_frames      = 0;       // per-cycle log throttle; 0 = periodic logs off
     int   support_bank_max_points        = 4000;    // cap on the table-owned support-point memory bank
     float support_bank_quantization_m    = 0.02f;   // support-bank dedup grid (m)
     float support_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for support-bank selection

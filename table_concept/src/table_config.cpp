@@ -74,8 +74,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
             "d_obs, the standoff distance (m) the epistemic planner aims for");
     out.epistemic_cooldown_cycles= geti("TableConcept.EpistemicCooldownCycles", 200,
             "min cycles an affordance stays withdrawn after satisfaction");
-    out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames", 30,
-            "per-cycle log throttle (frames)", rc::cfg::diagnostic);
+    out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames", 0,
+            "per-cycle log throttle (frames); 0 = periodic logs off", rc::cfg::diagnostic);
     out.support_bank_max_points    = geti("TableConcept.SupportBankMaxPoints", 4000,
             "cap on the table-owned support-point memory bank");
     out.support_bank_quantization_m= getf("TableConcept.SupportBankQuantizationM", 0.02f,
