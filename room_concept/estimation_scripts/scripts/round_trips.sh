@@ -6,7 +6,9 @@
 # ★ The first leg targets the main door BY NAME. It used to take the first door born, which was the main door only
 #   because it was seen first from the start pose; try46 (10-17) birthed DOOR_0 (shut, no room behind) first.
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
-echo run > $B/controller/remote_cmd.txt   # a leftover "stop" from the previous run would park the new fleet
+echo stop > $B/controller/remote_cmd.txt  # DISARMED until the main door is born: the start pose faces it, and an armed
+                                          # controller explores furniture meanwhile (try52: wedged on the table, door never seen).
+                                          # Each leg arms it with `run` + `cross` below.
 python3 scripts/door.py close; python3 scripts/door.py close DOOR_0; rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.0 6.8 0 >/dev/null 2>&1
 MAIN=${2:-door_1}
