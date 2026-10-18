@@ -601,8 +601,12 @@ void SpecificWorker::step_passage_anchor()
     const bool measured = not rays.empty() or mask_pts.size() >= 2;
     if (measured)
     {
+        // The door's own P(open) (its leaf-angle posterior): what the visibility check predicts in the opening — a gap
+        // or a leaf. Unknown this cycle ⇒ the last known value; never known ⇒ 0.5.
+        if (inst != nullptr and inst->interaction.p_open_known)
+            pa.p_open_belief = std::clamp(inst->interaction.p_open, 0.f, 1.f);
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
-                                                      lidar_origin, rays, mask_pts, cam);
+                                                      lidar_origin, rays, mask_pts, cam, pa.p_open_belief);
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;

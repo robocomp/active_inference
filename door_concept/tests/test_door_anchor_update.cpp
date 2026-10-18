@@ -26,6 +26,9 @@
 //                                  doorway stays in the sampled dome)
 //   mid_crossing_360_keeps_view    — open door, 360° scan, the robot driving along the normal from s = -0.5 to +0.8 m:
 //                                  p_view ≥ 0.6 at every step, lateral error < 0.05 m
+//   pview_low_in_free_space / pview_low_when_rotated / pview_low_on_solid_wall (fix round 2) — open door (P(open)
+//                                  0.95), 360° scan from the try64 start: a prior 1.2 m in front of the wall, yawed
+//                                  +90°, or 1.5 m along onto solid wall reads P(door in view) < 0.5
 //   shut_door_reads_shut_with_floor — 3-D bpearl-like scan (z = 0.67, downward layers) with floor returns, shut door,
 //                                  prior 0.25 m in front of the wall, rays through select_anchor_rays: p_open < 0.1,
 //                                  depth < 0.05 m within 3 updates
@@ -368,7 +371,7 @@ int main()
             rc::rt::Twist tw; tw.angular = V3(0.f, 0.f, omega);
             belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), dt);
             robot.psi += omega * dt;
-            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 90.f, 7 + k), {});
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 90.f, 7 + k), {}, {}, 0.05f);
             belief = post;
             const V3 tr = anchor_truth(robot);
             worst_pos = std::max(worst_pos, (post.x.head<2>() - tr.head<2>()).norm());
@@ -403,7 +406,7 @@ int main()
             rc::rt::Twist tw; tw.angular = V3(0.f, 0.f, omega);
             belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
             robot.psi += omega * 0.1f;
-            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 180.f, 7 + k), {});
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 180.f, 7 + k), {}, {}, 0.05f);
             belief = post;
             const V3 tr = anchor_truth(robot);
             worst_pos = std::max(worst_pos, (post.x.head<2>() - tr.head<2>()).norm());
@@ -431,19 +434,40 @@ int main()
                 belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
                 robot.p.y() += ds;
             }
-            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 180.f, 21 + k), {});
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 180.f, 21 + k), {}, {}, 0.95f);
             belief = post;
             const V3 tr = anchor_truth(robot);
             const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
             pv_min = std::min(pv_min, ev.p_view);
             worst_lat = std::max(worst_lat, lat);
-            if (k % 2 == 0)
+            if (k % 2 == 0 or ev.p_view < 0.6f)
                 std::print("    s={:+.2f} p_view={:.3f} lat err={:.3f} depth err={:.3f} p_open={:.3f}\n", robot.p.y() + kSensor.y(),
                            ev.p_view, lat, (post.x.head<2>() - tr.head<2>()).norm(), ev.p_open);
         }
         std::print("    min p_view {:.3f}, worst lateral {:.3f} m\n", pv_min, worst_lat);
         check(pv_min >= 0.6f, "p_view ≥ 0.6 at every step of the crossing");
         check(worst_lat < 0.05f, "lateral error < 0.05 m throughout");
+    }
+
+    // ─── fix round 2: "seen" means seen AS PREDICTED ───────────────────────────────────────────────────────────
+    {
+        WorldOpts wo; wo.shut = false; wo.back_wall = true;
+        const auto segs = world(wo);
+        const Pose2 robot = try64_start();
+        const auto rays = scan(segs, robot, 180.f, 41);
+        auto view_of = [&](const RelPose& pr)
+        { return update_door_anchor(pr, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f).second.p_view; };
+        const RelPose truth = creation_prior(robot);
+        const V2 along(std::cos(truth.x.z()), std::sin(truth.x.z())), normal(-along.y(), along.x());
+        RelPose free_space = truth; free_space.x.head<2>() -= 1.2f * normal;
+        RelPose rotated = truth;    rotated.x.z() = rc::interaction::wrap_pi(truth.x.z() + float(M_PI_2));
+        RelPose solid = truth;      solid.x.head<2>() += 1.5f * along;
+        const float pv_t = view_of(truth), pv_f = view_of(free_space), pv_r = view_of(rotated), pv_s = view_of(solid);
+        std::print("pview: truth {:.3f}  free space {:.3f}  rotated {:.3f}  solid wall {:.3f}\n", pv_t, pv_f, pv_r, pv_s);
+        std::print("pview_low_in_free_space\n");  check(pv_f < 0.5f, "prior 1.2 m in front of the wall: p_view < 0.5");
+        std::print("pview_low_when_rotated\n");   check(pv_r < 0.5f, "prior yawed +90°: p_view < 0.5");
+        std::print("pview_low_on_solid_wall\n");  check(pv_s < 0.5f, "open door, prior 1.5 m along onto solid wall: p_view < 0.5");
+        check(pv_t > 0.5f, "and the true pose reads in view (> 0.5)");
     }
 
     std::print("shut_door_reads_shut_with_floor\n");

@@ -317,6 +317,7 @@ private:
         float axis_sign = 1.f;
         float wall_u_min = 0.f, wall_u_max = 0.f;         // the door's wall run, anchor coordinates (refreshed per cycle)
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
+        float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
     };
     std::optional<PassageAnchor> passage_anchor_;
