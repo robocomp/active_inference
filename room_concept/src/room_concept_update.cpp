@@ -309,6 +309,13 @@ namespace rc
                 r.a = R_inv * (r.a - t);
                 r.b = R_inv * (r.b - t);
                 r.n_out = R_inv * r.n_out;   // a direction: rotated, not translated
+                // ★ The doorway rule (DoorApertures::weight) needs the polygon of the room BEING MODELLED to say which side
+                //   of the doorway is "inside". While a room is estimated there is none: the model polygon is still the
+                //   room just LEFT (try48, 2026-10-17: seated on room_1, the robot standing in room_2 inside door_1's span
+                //   counted as "in room_1's doorway", every room_2 return was dropped from the survey and the new room's
+                //   free space came out 0.33 m2 instead of 24 — promoted on its first view). So the rule is used only
+                //   while localising against a known room; estimating falls back to the crossing test.
+                if (estimating()) r.n_out = Eigen::Vector2f::Zero();
                 doors_robot_.push_back(std::move(r));
             }
         }
