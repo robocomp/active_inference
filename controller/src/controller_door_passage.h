@@ -258,7 +258,7 @@ public:
         return door_.empty() ? std::string("idle") : door_ + ": " + note_;
     }
 
-    /// What the controller window shows (controller_door_passage_bar.h). A copy, so the GUI never holds the lock.
+    /// What the controller window shows (its status line, controller_status_line.h). A copy, so the GUI never holds the lock.
     struct View
     {
         std::string door;          ///< "" = never started

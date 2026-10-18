@@ -466,12 +466,13 @@ public:
             toolbar_layout_->insertWidget(1, panel->pause_button());
     }
 
-    // The door-passage row, directly under the mission row (attach_mission_panel must run first).
-    void attach_door_passage_bar(QWidget *bar)
+    // The status line (controller_status_line.h), directly under the mission row (attach_mission_panel must run
+    // first). It took the place of the door-passage row.
+    void attach_status_line(QWidget *line)
     {
-        if (bar == nullptr) return;
+        if (line == nullptr) return;
         if (auto *lay = qobject_cast<QVBoxLayout *>(layout()); lay != nullptr)
-            lay->insertWidget(mission_row_index + (mission_panel != nullptr ? 1 : 0), bar);
+            lay->insertWidget(mission_row_index + (mission_panel != nullptr ? 1 : 0), line);
     }
 
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;

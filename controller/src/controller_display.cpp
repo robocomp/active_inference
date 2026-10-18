@@ -1,6 +1,8 @@
 #include "controller_display.h"
 #include "../../common/window_geometry/window_geometry_saver.h"
+#include "controller_mission.h"
 
+#include <cctype>
 #include <chrono>
 #include <format>
 #include <fstream>
@@ -159,8 +161,8 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
         affordance_panel_visible_.store(affordance_panel_->isVisible(), std::memory_order_relaxed);
     });
     custom_widget_->attach_mission_panel(mission_panel_.get());
-    door_passage_bar_ = std::make_unique<rc::DoorPassageBar>(custom_widget_.get(), callbacks.door_passage);
-    custom_widget_->attach_door_passage_bar(door_passage_bar_.get());
+    status_line_ = std::make_unique<rc::StatusLine>(custom_widget_.get());
+    custom_widget_->attach_status_line(status_line_.get());
 
 }
 
@@ -186,7 +188,7 @@ bool ControllerDisplay::mission_recording() const
 bool ControllerDisplay::confirm_mission_supersede()
 { return mission_panel_ && mission_panel_->confirm_supersede(); }
 
-void ControllerDisplay::set_door_passage(const rc::DoorPassageBar::View &view,
+void ControllerDisplay::set_door_passage(const rc::DoorPassageStatus &view,
                                          const std::vector<std::vector<Eigen::Vector2f>> &passages)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -283,6 +285,12 @@ void ControllerDisplay::set_stuck_active(bool active)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
     snapshot_.stuck_active = active;
+}
+
+void ControllerDisplay::set_hold_reason(const std::string &why)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.hold_reason = why;
 }
 
 void ControllerDisplay::set_session_totals(float metres, float seconds)
@@ -426,6 +434,68 @@ void ControllerDisplay::set_lidar_stall(bool stalled, float seconds)
     snapshot_.lidar_stall_s = seconds;
 }
 
+// ── THE STATUS LINE ──────────────────────────────────────────────────────────────────────────────
+// Composed from the snapshot alone: every field below was already staged for some other widget, so the line can
+// never disagree with the rest of the window, and it adds no state of its own. Ordered from the coarsest fact to
+// the finest — is the base allowed to move, in which mode, doing which task, in which step — and then whatever is
+// stopping it, which is the reason anyone looks at a status line in the first place.
+QString ControllerDisplay::compose_status(const DisplaySnapshot &snap)
+{
+    std::vector<std::string> parts;
+    const auto &mv = snap.mission_view;
+    const auto mode = rc::from_index(mv.mode_index);
+    parts.push_back(not mv.driving ? (mv.paused ? "PAUSED" : "STOPPED") : "RUN");
+    parts.emplace_back(rc::to_string(mode));
+    // The mission readout only when it says something the mode does not: a run, a recording, or a clicked target.
+    if (mv.running or mv.recording or mode == rc::DriveMode::Target) parts.push_back(mv.status);
+
+    // Door passage (approach → open → cross), once one has been started.
+    if (const auto &dp = snap.door_passage_view; not dp.door.empty() and dp.step != "idle")
+    {
+        std::string s = "passage " + dp.door + ": ";
+        if (dp.step == "done") s += "done";
+        else
+        {
+            for (const char c : dp.step) s += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (not dp.step_state.empty()) s += " (" + dp.step_state + ")";
+            if (dp.attempts > 0) s += std::format(" x{} failed", dp.attempts);
+        }
+        parts.push_back(std::move(s));
+    }
+
+    // The affordance being executed and its stage (lock-on phase / pipeline stage), or the dwell after it.
+    if (const auto &a = snap.affordance; a.active)
+    {
+        std::string s = "aff " + a.affordance;
+        if (not a.phase.empty()) s += " [" + a.phase + "]";
+        s += a.timeout_s > 0.f ? std::format(" {:.0f}/{:.0f} s", a.elapsed_s, a.timeout_s)
+                               : std::format(" {:.0f} s", a.elapsed_s);
+        parts.push_back(std::move(s));
+    }
+    else if (a.dwell_left_s > 0.f)
+        parts.push_back(std::format("dwell after {} {:.1f} s", a.affordance, a.dwell_left_s));
+    else if (a.phase.starts_with("idle"))
+        parts.push_back("aff: " + a.phase);
+    else if (not a.affordance.empty() and not a.phase.empty())
+        parts.push_back("last aff " + a.affordance + ": " + a.phase);
+
+    if (snap.goal_dist_m.has_value())
+        parts.push_back(std::format("goal {:.2f} m{}", *snap.goal_dist_m, snap.goal_aligning ? " aligning" : ""));
+    // What is stopping it.
+    if (snap.stuck_active) parts.emplace_back("STUCK — recovery manoeuvre");
+    if (snap.lidar_stalled) parts.push_back(std::format("LIDAR STALLED {:.1f} s", snap.lidar_stall_s));
+    if (not snap.hold_reason.empty()) parts.push_back("hold: " + snap.hold_reason);
+
+    std::string line;
+    for (const auto &p : parts)
+    {
+        if (p.empty()) continue;
+        if (not line.empty()) line += "  ·  ";
+        line += p;
+    }
+    return QString::fromStdString(line);
+}
+
 void ControllerDisplay::present()
 {
     // GUI thread only. Consume the latest staged snapshot and draw it.
@@ -467,7 +537,7 @@ void ControllerDisplay::present()
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
-    if (door_passage_bar_) door_passage_bar_->apply(snap.door_passage_view);
+    if (status_line_) status_line_->apply(compose_status(snap));
     if (mission_panel_)
     {
         if (snap.mission_list_pending)

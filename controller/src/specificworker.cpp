@@ -396,22 +396,9 @@ void SpecificWorker::initialize()
 			                                 display_, [this] { return current_time_ms(); });
 		});
 	};
-	// Door passage row (controller_door_passage_bar.h): the same two commands as the remote file's `cross <door>` /
-	// `uncross`, enqueued so the start lands on the control thread between cycles like every other button here.
-	gui.door_passage.on_cross = [this](const std::string &door)
-	{
-		enqueue_command([this, door]()
-		{
-			cancel_relative_motion("superseded by a door passage");
-			session_.door_passage().start(door);
-			std::println("[gui] DOOR PASSAGE through '{}'", door);
-		});
-	};
 	// Mode "Mission": a typed command, parsed on the control thread (run_mission_command).
 	gui.mission.on_command = [this](std::string text)
 	{ enqueue_command([this, text]() { run_mission_command(text, "gui"); }); };
-	gui.door_passage.on_stop = [this]()
-	{ enqueue_command([this]() { session_.door_passage().stop(); std::println("[gui] door passage stopped"); }); };
 	gui.mission.on_record_begin = [this]()
 	{ enqueue_command([this]() { session_.mission().start_recording(); }); };
 	gui.mission.on_record_finish = [this](std::string name)
@@ -816,6 +803,7 @@ void SpecificWorker::compute()
 		{
 			const auto &why = session_.hold_reason();
 			const auto now_ms = current_time_ms();
+			display_.set_hold_reason(why);   // the window's status line says it too
 			if (not holding_)
 			{
 				holding_ = true;
@@ -842,6 +830,7 @@ void SpecificWorker::compute()
 	if (holding_)
 	{
 		holding_ = false;
+		display_.set_hold_reason("");
 		log_hold("end", hold_started_reason_, &step->robot_pose);
 		hold_started_ms_ = 0;
 	}
@@ -1375,7 +1364,10 @@ void SpecificWorker::push_mission_view()
 	                               .recording = mission.recording(),
 	                               .driving = driving_enabled_ and not paused_,
 	                               .paused = paused_,
-	                               .mode_index = rc::to_index(mission.mode()),
+	                               // A running mission is shown as Mission even while a go_to step drives in Target.
+	                               .mode_index = interpreter_.state() == rc::mission::Interpreter::State::Running
+	                                                 ? rc::to_index(rc::DriveMode::Command)
+	                                                 : rc::to_index(mission.mode()),
 	                               .recorded_points = static_cast<int>(mission.recorded().size()),
 	                               .laps_remaining = mission.laps_remaining()},
 	                           mission.display_waypoints(),
@@ -1901,6 +1893,7 @@ SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::stri
 	}
 	cancel_relative_motion("superseded by a door passage");
 	session_.mission().set_mode(rc::DriveMode::Command);
+	session_.set_command_explore(false);   // the passage's own steps are the order now
 	session_.door_passage().start(door, stop_after);
 	std::println("[{}] {} '{}' -> DOOR PASSAGE{}{}", source, kind, door,
 	             stop_after == rc::DoorPassage::Step::Open ? " (stops once open)" : "",
@@ -1974,6 +1967,7 @@ void SpecificWorker::abort_all(const char *source)
 	if (G and affordance_manager_.release_execution_claim(G))
 		std::println("[mission] STOP: released the affordance execution claim");
 	session_.mission().stop(source, current_time_ms());
+	session_.set_command_explore(false);   // no order stands after a stop: Mission mode idles
 	session_.mission().set_click_target(std::nullopt);
 	clear_manual_target();
 	session_.abort(path_controller_, motion_commander_);
@@ -2000,6 +1994,9 @@ void SpecificWorker::service_chat_inbox()
 	if (const auto cmd = chat_inbox_.poll(*G, wall_ms); cmd.has_value())
 	{
 		using K = rc::ChatInbox::Tracked::Kind;
+		// ★ AN ORDER FROM CHAT PUTS THE CONTROLLER IN MISSION MODE (2026-10-18, user): the panel's combo follows the
+		//   mode, so it shows who is in charge. Set BEFORE the order runs, so a go_to step can still take Target.
+		session_.mission().set_mode(rc::DriveMode::Command);
 		// ★ ONE NODE, TWO PAYLOADS (doc §7.5 decision 1): `{` = a grounded mission (mission_json.h), anything else = the
 		//   single-command grammar below.
 		if (cmd->text.starts_with('{'))

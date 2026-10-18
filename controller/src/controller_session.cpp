@@ -162,15 +162,10 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         door_passages_ = std::move(dp.passages);
         grid_planner_.set_passages(door_passages_);
         obstacle_tracker.set_exempt_names(std::move(dp.exempt));
-        // The window's row and corridor overlay. The door list is a node scan, so it is refreshed once a second.
-        if (timestamp_ms - door_names_ms_ >= 1000)
-        {
-            door_names_ms_ = timestamp_ms;
-            door_names_ = rc::DoorPassage::list_doors(*graph_);
-        }
+        // The window's status line and corridor overlay.
         const auto v = door_passage_.view();
         display.set_door_passage({.door = v.door, .step = rc::DoorPassage::step_name(v.step), .step_state = v.step_state,
-                                  .attempts = v.attempts, .last_event = v.last_event, .doors = door_names_},
+                                  .attempts = v.attempts, .last_event = v.last_event},
                                  door_passages_);
     }
 
@@ -793,7 +788,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         plan_spline_valid_ = false;
     }
     affordance_manager.set_required_name(door_required_);
+    // ★ MISSION (COMMAND) MODE TAKES ORDERS, IT DOES NOT FORAGE (2026-10-18, user). The selector runs there only
+    //   for an order: a door passage (door_required_ names its step) or an `explore`, which opens the contest on
+    //   purpose. With no order standing — after `stop`, or before the first — the contest stayed open and the robot
+    //   went off on its own: live, after a chat `stop` it claimed aff_door_1 (an inspect look) over and over.
+    const bool command_without_order = mission_.mode() == rc::DriveMode::Command
+                                   and door_required_.empty() and not command_explore_;
     const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
+                            or command_without_order
                             ? std::nullopt
                             : world_model.read_target_in_room(timestamp_ms);
     // Read straight after the selection that produced it — it is a per-call report, and any later read

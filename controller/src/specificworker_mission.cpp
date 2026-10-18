@@ -97,6 +97,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission:
 		w_.session_.mission().set_click_target(std::nullopt);
 		w_.clear_manual_target();
 		w_.session_.mission().set_mode(rc::DriveMode::Command);   // no door required: the selector chooses freely
+		w_.session_.set_command_explore(true);                     // …and is opened on purpose by this order
 		room_ = room->name;
 		ground(leaf, room_, {{"room", QString::fromStdString(room_)}});
 		return std::nullopt;
@@ -266,6 +267,7 @@ void SpecificWorker::cancel_mission(const std::string &outcome, bool hold)
 {
 	if (interpreter_.state() != rc::mission::Interpreter::State::Running) return;
 	interpreter_.cancel(outcome, current_time_ms());
+	session_.set_command_explore(false);   // a cancelled mission's explore no longer holds the contest open
 	{
 		std::lock_guard lock(journal_mx_);
 		journal_steps();   // now, so a command that replaces the mission is journaled after its end

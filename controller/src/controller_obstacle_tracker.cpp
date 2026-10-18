@@ -1117,8 +1117,10 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             // object_subtype attribute (cosmetic log label). Fall back to type() for legacy nodes.
             const auto subtype_attr = graph_->get_attrib_by_name<object_subtype_att>(node);
             const std::string subtype = subtype_attr.value_or(node.type());
-            const std::string prefix = object_label_prefix(subtype);
-            visual_label = prefix + "_" + std::to_string(++object_label_counts_[prefix]);
+            // ★ THE NODE'S OWN NAME (2026-10-18, user). The canvas used to print a per-rebuild counter ("d_1"),
+            //   so the door every other agent and window calls door_5 read d_1 here, and which object was which had
+            //   to be guessed. Every concept agent names its nodes (door_5, table_1, …); that IS the identity.
+            visual_label = node.name();
             // ROUND-vs-SQUARE comes off mesh_path, not off a shape attribute, because that IS the
             // contract: object_subtype carries the CLASS ("table") for every table, and table_concept
             // publishes its inferred SHAPE by choosing round_table.obj over table.obj (free-energy
