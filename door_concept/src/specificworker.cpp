@@ -2411,6 +2411,7 @@ void SpecificWorker::update_existence_beliefs()
         // in_fov_frac() below, and passing it twice would square it.
         const rc::detect::DetectorEnvelope env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
         const float p_env = rc::detect::p_detect(inst.roi_fill, 1.0f, env);
+        inst.dbg_p_env = p_env;
         // ★OBLIQUITY OF THE LEAF, which only became a live variable when phi did. A panel seen edge-on
         // presents almost no area to segment: |ray . leaf face normal| falls from 0.99 at phi=5 deg to
         // 0.43 at 60 deg and 0.21 at 85 deg. door_view_obliquity() has computed exactly this all along —
@@ -2692,7 +2693,10 @@ void SpecificWorker::update_existence_beliefs()
                          "frame_n,frame_vis,frame_exc,frame_true,frame_ctrl,frame_dep,frame_ndep,"
                          // The WALL-BAND prior (door_room_band.h): signed aperture offset from the polygon
                          // (> 0 outside; [0, WallThicknessM] is the normal place for a door) and π = e^term.
-                         "band_delta,band_p\n"; return f; }();
+                         "band_delta,band_p,"
+                         // The detector envelope's input (door_fitter.cpp compute_projected_roi): the leaf box's
+                         // extent INSIDE the image per axis (≤ 1), and p_env, the envelope factor of p_detect.
+                         "roi_fill,roi_fill_h,roi_fill_v,roi_valid,p_env\n"; return f; }();
                 if (ex_csv)
                 {
                     ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
@@ -2722,7 +2726,9 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.dbg_frame_n << ',' << inst.dbg_frame_vis << ',' << inst.dbg_frame_excess
                            << ',' << inst.dbg_frame_true << ',' << inst.dbg_frame_ctrl
                            << ',' << inst.dbg_frame_depth << ',' << inst.dbg_frame_ndepth
-                           << ',' << inst.dbg_band_delta << ',' << inst.dbg_band_p << '\n';
+                           << ',' << inst.dbg_band_delta << ',' << inst.dbg_band_p
+                           << ',' << inst.roi_fill << ',' << inst.roi_fill_h << ',' << inst.roi_fill_v
+                           << ',' << (inst.roi_valid ? 1 : 0) << ',' << inst.dbg_p_env << '\n';
                     ex_csv.flush();
                 }
             }

@@ -1580,43 +1580,62 @@ void DoorFitter::compute_projected_roi(DoorInstance& inst)
         return;
     const float cx_px = W * 0.5f, cy_px = H * 0.5f;
 
-    // Project the 8 LEAF corners into the image (door_geometry.h — the ROI must frame the panel the camera
-    // actually sees, so this follows the leaf, not the aperture). Camera convention matches the producer:
+    // Project the LEAF box into the image (door_geometry.h — the ROI must frame the panel the camera actually
+    // sees, so this follows the leaf, not the aperture). Camera convention matches the producer:
     // X=right, Y=forward(depth), Z=up ⇒ col=cx+X/Y·fx, row=cy−Z/Y·fy.
+    // ★ CLIPPED, NOT SKIPPED (2026-10-18). Corners behind a near plane used to be dropped, and with ≥ 4 left
+    //   the bbox of the survivors was used: a corner just in front of the plane has X/Y exploding, so a leaf
+    //   swung toward the camera read roi_fill ≈ 3-4 image widths, the detector envelope gave p_detect ≈ 1e-20,
+    //   and NO absence was ever charged — misplaced doors after a pose flip (live 10-18: door_2 condemned at
+    //   p 0.018 for ever, debounce streak 0). With fewer than 4 the function returned and roi_fill kept a
+    //   stale value. Now each of the 12 box edges is clipped to the near plane, fill is the part of the box
+    //   inside the image (≤ 1); nothing in front ⇒ fill 0.
+    constexpr double kNear = 0.20;
+    std::array<Eigen::Vector3d, 8> P{};
+    {
+        const auto corners = door::leaf_corners(inst.leaf_pose);
+        for (std::size_t i = 0; i < corners.size(); ++i)
+            P[i] = (zed_T_room * Eigen::Vector4d(corners[i].x(), corners[i].y(), corners[i].z(), 1.0)).head<3>();
+    }
     float min_col = 1e9f, min_row = 1e9f, max_col = -1e9f, max_row = -1e9f;
     int in_front = 0;
+    const auto add = [&](const Eigen::Vector3d& q)
     {
-        for (const auto& corner : door::leaf_corners(inst.leaf_pose))
+        const float col = cx_px + static_cast<float>(q.x() / q.y()) * fx;
+        const float row = cy_px - static_cast<float>(q.z() / q.y()) * fy;
+        min_col = std::min(min_col, col); max_col = std::max(max_col, col);
+        min_row = std::min(min_row, row); max_row = std::max(max_row, row);
+    };
+    for (const auto& q : P) if (q.y() >= kNear) { add(q); ++in_front; }
+    for (int i = 0; i < 8; ++i)   // corner k = 4·ix + 2·iy + iz: an edge joins two corners one bit apart
+        for (const int bit : {1, 2, 4})
         {
-            const Eigen::Vector4d Pr(corner.x(), corner.y(), corner.z(), 1.0);
-            const Eigen::Vector4d Pc = zed_T_room * Pr;
-            const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-            if (Y <= 0.20) continue;   // skip corners at/near the image plane: X/Y explodes there
-            ++in_front;
-            const float col = cx_px + static_cast<float>(X / Y) * fx;
-            const float row = cy_px - static_cast<float>(Z / Y) * fy;
-            min_col = std::min(min_col, col); max_col = std::max(max_col, col);
-            min_row = std::min(min_row, row); max_row = std::max(max_row, row);
+            if (i & bit) continue;
+            const Eigen::Vector3d& a = P[i]; const Eigen::Vector3d& b = P[i | bit];
+            if ((a.y() >= kNear) == (b.y() >= kNear)) continue;
+            const double t = (kNear - a.y()) / (b.y() - a.y());
+            add(a + t * (b - a));
         }
-    }
-
-    if (in_front < 4)   // need most of the box in front of the camera to trust the ROI
+    if (in_front == 0)   // the whole leaf is behind the camera: not projectable, nothing to see
+    {
+        inst.roi_fill = inst.roi_fill_h = inst.roi_fill_v = 0.f;
         return;
-
+    }
+    // Centring (door_roi_offset, the base's err_vec) keeps the near-clipped box, so a door off to one side
+    // still says which way to turn; |offset| > 1 ⇒ the door's centre is off the image.
     const float roi_cx = 0.5f * (min_col + max_col);
     const float roi_cy = 0.5f * (min_row + max_row);
-    const float off_x = (roi_cx - cx_px) / (0.5f * W);   // [-1,1], 0 = centred
+    const float off_x = (roi_cx - cx_px) / (0.5f * W);   // [-1,1] on the image, 0 = centred
     const float off_y = (roi_cy - cy_px) / (0.5f * H);
-    const float fill  = std::max((max_col - min_col) / W, (max_row - min_row) / H);
-    // Reject degenerate projections (robot too close / a corner grazing the image plane → the bbox
-    // explodes). Mark invalid and clamp so consumers/logs never see garbage.
-    const bool sane = std::isfinite(off_x) && std::isfinite(off_y) && std::isfinite(fill)
-                      && std::abs(off_x) < 3.0f && std::abs(off_y) < 3.0f && fill < 4.0f;
-    inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
-    inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
-    inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
-    inst.roi_fill_h   = std::clamp((max_col - min_col) / W, 0.0f, 4.0f);
-    inst.roi_fill_v   = std::clamp((max_row - min_row) / H, 0.0f, 4.0f);
+    // FILL is what the detector would actually get: the part of the box inside the image (≤ 1 per axis).
+    const float fh = std::max(0.f, std::min(max_col, W) - std::max(min_col, 0.f)) / W;
+    const float fv = std::max(0.f, std::min(max_row, H) - std::max(min_row, 0.f)) / H;
+    const bool sane = std::isfinite(off_x) and std::isfinite(off_y) and std::isfinite(fh) and std::isfinite(fv);
+    inst.roi_offset_x = std::clamp(sane ? off_x : 0.f, -3.0f, 3.0f);
+    inst.roi_offset_y = std::clamp(sane ? off_y : 0.f, -3.0f, 3.0f);
+    inst.roi_fill_h   = sane ? fh : 0.f;
+    inst.roi_fill_v   = sane ? fv : 0.f;
+    inst.roi_fill     = std::max(inst.roi_fill_h, inst.roi_fill_v);
     inst.roi_valid    = sane;
 }
 
