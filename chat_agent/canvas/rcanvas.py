@@ -23,6 +23,10 @@ The API:
     save(fig)                       REQUIRED last call: writes out.png, which the canvas shows
     plt, np, math                   also exported by `from rcanvas import *` (matplotlib on Agg)
     save_image(img)                 the same for a numpy/PIL image (no matplotlib, faster)
+    g = graph()                     the robot's working memory (its DSR graph), when the script mentions graph():
+                                    g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] (node ids)
+    img = draw_graph(focus=None)    that graph laid out by Graphviz as a PIL image (RT edges = the tree, others
+                                    dashed); focus = a node name or id: it, its RT ancestors and subtree, its neighbours
 """
 import json
 import math
@@ -32,7 +36,7 @@ from types import SimpleNamespace
 OUT = "out.png"
 
 __all__ = ["world", "image", "figure", "save", "save_image", "layout_axes", "draw_room", "draw_doors", "draw_objects",
-           "draw_robot", "draw_target", "draw_layout", "fit_view", "plt", "np", "math"]
+           "draw_robot", "draw_target", "draw_layout", "fit_view", "graph", "draw_graph", "plt", "np", "math"]
 
 
 def __getattr__(name):
@@ -203,3 +207,118 @@ def draw_layout(ax, w):
     draw_target(ax, w)
     draw_robot(ax, w)
     fit_view(ax, w)
+
+
+# ─── the working-memory graph ────────────────────────────────────────────────────────────────────────────────────
+
+def graph():
+    try:
+        with open("graph.json", encoding="utf-8") as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        d = {"nodes": [], "edges": []}
+    nodes = [SimpleNamespace(id=n["id"], name=n["name"], type=n["type"], agent=n.get("agent")) for n in d["nodes"]]
+    edges = [SimpleNamespace(src=e["from"], dst=e["to"], type=e["type"]) for e in d["edges"]]
+    return SimpleNamespace(nodes=nodes, edges=edges)
+
+
+_TYPE_COLOUR = {"world": "#cfd8dc", "root": "#cfd8dc", "room": "#c8e6c9", "robot": "#bbdefb", "object": "#ffe0b2",
+                "person": "#f8bbd0", "affordance": "#e1bee7", "metaconcept": "#d1c4e9", "agent": "#fff9c4",
+                "obstacle": "#ffccbc", "rgbd": "#b2ebf2", "lidar": "#b2ebf2", "imu": "#b2ebf2", "camera": "#b2ebf2"}
+
+
+def _subgraph(g, focus):
+    by_id = {n.id: n for n in g.nodes}
+    root = next((n for n in g.nodes if n.name == focus or n.id == str(focus)), None)
+    if root is None:
+        raise ValueError(f"no node named '{focus}' in the graph")
+    rt_children, rt_parent = {}, {}
+    for e in g.edges:
+        if e.type == "RT":
+            rt_children.setdefault(e.src, []).append(e.dst)
+            rt_parent[e.dst] = e.src
+    keep = {root.id}
+    up = root.id
+    while up in rt_parent:                       # the RT chain to the top
+        up = rt_parent[up]
+        keep.add(up)
+    stack = [root.id]
+    while stack:                                 # the RT subtree
+        for c in rt_children.get(stack.pop(), []):
+            if c not in keep:
+                keep.add(c)
+                stack.append(c)
+    for e in g.edges:                            # direct neighbours of the focus, any edge
+        if root.id in (e.src, e.dst):
+            keep.update((e.src, e.dst))
+    return SimpleNamespace(nodes=[by_id[i] for i in keep if i in by_id],
+                           edges=[e for e in g.edges if e.src in keep and e.dst in keep])
+
+
+def _dot_esc(s):
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _dot_quote(s):
+    return '"' + _dot_esc(s) + '"'
+
+
+def draw_graph(focus=None, g=None):
+    """The graph as a PIL image, fitted to the canvas: Graphviz `dot`, RT edges as the tree (solid), every other edge
+    dashed and labelled. Falls back to a networkx spring layout when `dot` is not installed."""
+    import shutil
+    import subprocess
+    from io import BytesIO
+    from PIL import Image
+    g = g or graph()
+    if focus:
+        g = _subgraph(g, focus)
+    w, h = _canvas_px()
+    if not g.nodes:
+        img = Image.new("RGB", (w, h), (255, 255, 255))
+        from PIL import ImageDraw
+        ImageDraw.Draw(img).text((20, h // 2), "the graph is empty (or not available)", fill=(90, 90, 90))
+        return img
+    if shutil.which("dot") is None:
+        return _draw_graph_networkx(g, w, h)
+    lines = ["digraph G {", "rankdir=TB; nodesep=0.15; ranksep=0.35; bgcolor=white;",
+             'node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10, margin="0.06,0.03"];',
+             'edge [fontname="Helvetica", fontsize=8, arrowsize=0.6];']
+    for n in g.nodes:
+        colour = _TYPE_COLOUR.get(n.type, "#eeeeee")
+        label = '"' + _dot_esc(n.name) + "\\n" + _dot_esc(n.type) + '"'   # \\n = a line break inside a DOT label
+        lines.append(f"{_dot_quote(n.id)} [label={label}, fillcolor={_dot_quote(colour)}"
+                     + (", penwidth=2.5" if focus and (n.name == focus or n.id == str(focus)) else "") + "];")
+    for e in g.edges:
+        if e.type == "RT":
+            lines.append(f"{_dot_quote(e.src)} -> {_dot_quote(e.dst)} [color=\"#455a64\"];")
+        else:
+            lines.append(f"{_dot_quote(e.src)} -> {_dot_quote(e.dst)} [style=dashed, color=\"#9e9e9e\", "
+                         f"fontcolor=\"#757575\", label={_dot_quote(e.type)}, constraint=false];")
+    lines.append("}")
+    p = subprocess.run(["dot", "-Tpng", "-Gdpi=96", f"-Gsize={w / 96:.2f},{h / 96:.2f}"],
+                       input="\n".join(lines).encode(), capture_output=True, timeout=20)
+    if p.returncode != 0:
+        raise RuntimeError("graphviz failed: " + p.stderr.decode(errors="replace")[-500:])
+    return Image.open(BytesIO(p.stdout)).convert("RGB")
+
+
+def _draw_graph_networkx(g, w, h):
+    import networkx as nx
+    from io import BytesIO
+    from PIL import Image
+    G = nx.DiGraph()
+    for n in g.nodes:
+        G.add_node(n.id)
+    for e in g.edges:
+        G.add_edge(e.src, e.dst)
+    pos = nx.spring_layout(G, seed=1)
+    fig = figure()
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+    names = {n.id: n.name for n in g.nodes}
+    nx.draw_networkx(G, pos, ax=ax, labels=names, node_size=300, font_size=7,
+                     node_color=[_TYPE_COLOUR.get(n.type, "#eeeeee") for n in g.nodes])
+    buf = BytesIO()
+    fig.savefig(buf, format="png")
+    return Image.open(buf).convert("RGB")

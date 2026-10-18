@@ -161,16 +161,37 @@ QJsonObject build_canvas_snapshot(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner, c
     return s;
 }
 
-bool write_canvas_snapshot(const QString& dir, const QJsonObject& snapshot)
+QJsonObject build_canvas_graph(DSR::DSRGraph& G, const std::map<std::uint32_t, std::string>& agent_names)
 {
-    const QString tmp = dir + QStringLiteral("/snapshot.json.tmp");
+    QJsonArray nodes, edges;
+    for (const auto& n : G.get_nodes())
+    {
+        const auto it = agent_names.find(n.agent_id());
+        nodes.append(QJsonObject{{"id", QString::number(n.id())}, {"name", q(n.name())}, {"type", q(n.type())},
+                                 {"agent", it != agent_names.end() ? q(it->second)
+                                                                   : QStringLiteral("agent %1").arg(n.agent_id())}});
+        for (const auto& [key, e] : n.fano())
+            edges.append(QJsonObject{{"from", QString::number(n.id())}, {"to", QString::number(key.first)},
+                                     {"type", q(key.second)}});
+    }
+    return QJsonObject{{"nodes", nodes}, {"edges", edges}};
+}
+
+bool write_canvas_json(const QString& dir, const QString& file, const QJsonObject& json)
+{
+    const QString tmp = dir + "/" + file + QStringLiteral(".tmp");
     QFile f(tmp);
     if (not f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    f.write(QJsonDocument(snapshot).toJson(QJsonDocument::Compact));
+    f.write(QJsonDocument(json).toJson(QJsonDocument::Compact));
     f.close();
-    const QString dst = dir + QStringLiteral("/snapshot.json");
+    const QString dst = dir + "/" + file;
     QFile::remove(dst);
     return QFile::rename(tmp, dst);
+}
+
+bool write_canvas_snapshot(const QString& dir, const QJsonObject& snapshot)
+{
+    return write_canvas_json(dir, QStringLiteral("snapshot.json"), snapshot);
 }
 
 }   // namespace rc::chat

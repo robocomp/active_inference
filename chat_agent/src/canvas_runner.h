@@ -52,6 +52,7 @@ struct CanvasJob
     QString source;        ///< the script's text (shown under "</>" and saved to the library)
     bool live = false;
     bool wants_images = false;   ///< the script mentions image(): the session writes the camera frames
+    bool wants_graph = false;    ///< the script mentions graph(): the session writes graph.json
 };
 
 struct CanvasRunResult

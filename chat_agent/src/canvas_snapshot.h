@@ -20,7 +20,10 @@
  * QJsonDocument formats numbers itself (locale-free), so the CLAUDE.md comma-decimal trap does not apply here.
  */
 
+#include <cstdint>
+#include <map>
 #include <memory>
+#include <string>
 
 #include <QJsonObject>
 #include <QString>
@@ -39,6 +42,13 @@ struct SnapshotSize { int w = 800, h = 600; };
 [[nodiscard]] QJsonObject build_canvas_snapshot(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner, const Digest& digest,
                                                 const rc::mission::Progress& mission, double robot_radius_m,
                                                 SnapshotSize canvas);
+
+/// The whole graph for graph() in rcanvas.py: nodes {id, name, type, agent} and edges {from, to, type} (ids as
+/// strings: they exceed a double's 53 bits). `agent_names` maps agent_id → name; an unknown id is written as "agent N".
+[[nodiscard]] QJsonObject build_canvas_graph(DSR::DSRGraph& G, const std::map<std::uint32_t, std::string>& agent_names);
+
+/// Writes `json` as <dir>/<file> atomically (tmp + rename). False on an I/O error.
+bool write_canvas_json(const QString& dir, const QString& file, const QJsonObject& json);
 
 /// Writes `snapshot` as <dir>/snapshot.json (atomically: tmp + rename). False on an I/O error.
 bool write_canvas_snapshot(const QString& dir, const QJsonObject& snapshot);

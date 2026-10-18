@@ -1,5 +1,7 @@
 #include "canvas_panel.h"
 
+#include "../../common/viewers/gl_mesh_viewer.h"
+
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -40,7 +42,14 @@ CanvasPanel::CanvasPanel(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(s
     stack_->addWidget(picture_);
     plan_ = new PlanView();          // a top-level window by default; adding it to the stack reparents it as a page
     stack_->addWidget(plan_);
+    model_ = new rc::viewers::GLMeshViewer();   // the same: a page, not a window
+    model_->setMinimumSize(160, 120);
+    stack_->addWidget(model_);
     lay->addWidget(stack_, 1);
+    caption_ = new QLabel(this);
+    caption_->setWordWrap(true);
+    caption_->setVisible(false);
+    lay->addWidget(caption_);
 
     code_ = new QPlainTextEdit(this);
     code_->setReadOnly(true);
@@ -64,6 +73,7 @@ CanvasPanel::CanvasPanel(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(s
 
 void CanvasPanel::set_title(const QString& title, bool live)
 {
+    caption_->setVisible(false);   // only the 3-D page has one; show_model sets it after this
     title_text_ = title;
     live_ = live;
     title_->setText(QStringLiteral("<b>%1</b>%2").arg(title.toHtmlEscaped(),
@@ -105,6 +115,19 @@ void CanvasPanel::show_plan()
     code_btn_->setEnabled(false);
     save_btn_->setEnabled(false);
     stack_->setCurrentWidget(plan_);
+}
+
+void CanvasPanel::show_model(const QString& title, std::span<const QVector3D> triangles, const QString& caption)
+{
+    set_title(title, false);
+    code_->setPlainText(QString());
+    code_btn_->setChecked(false);
+    code_btn_->setEnabled(false);
+    save_btn_->setEnabled(false);
+    stack_->setCurrentWidget(model_);
+    model_->set_mesh(triangles);
+    caption_->setText(QStringLiteral("<small>%1 &nbsp;·&nbsp; drag to orbit, wheel to zoom</small>").arg(caption.toHtmlEscaped()));
+    caption_->setVisible(true);
 }
 
 bool CanvasPanel::showing_plan() const { return stack_->currentWidget() == plan_; }

@@ -129,20 +129,29 @@ def tools():
         # the side canvas (chat_session.cpp tools_json; canvas_runner.h)
         t("show", "Show the PERSON a ready-made picture on the canvas beside the chat (you do not see it: look is for "
           "you). camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
-          "above with the robot, doors and objects; plan = the mission the robot runs; other names are drawings "
+          "above with the robot, doors and objects; plan = the mission the robot runs; graph = the robot's working "
+          "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
+          "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
+          "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
+          "'robot', an object name like chair_1, or a class like table); "
+          "other names are drawings "
           "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
-          {"name": {"type": "string", "enum": ["camera", "layout", "plan"], "description": "which drawing"},
+          {"name": {"type": "string", "enum": ["camera", "graph", "layout", "model", "plan"], "description": "which drawing"},
            "args": {"type": "string", "description": "camera: 'zed' (front, default) or 'ricoh' (360)"},
            "live": {"type": "boolean", "description": "true = keep redrawing it (default for camera and "
                                                       "layout); false = draw once"}}, ["name"]),
-        t("draw", "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script: a chart, "
+        t("draw", "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script (NOT for "
+          "the camera, the room map, the plan, the working-memory graph or a 3-D model: show has those, even when the "
+          "person says 'draw'): a chart, "
           "a plot, a table, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
           "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
           ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
           "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
           "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
           "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
-          "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w). Metres, room frame. The script MUST end "
+          "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w); g = graph() (the working-memory graph: "
+          "g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] by node id), draw_graph(focus=None) "
+          "-> a PIL image of it. Metres, room frame. The script MUST end "
           "with save(fig) (or save_image(img)). If it fails you get the error back: fix it and call draw again.",
           {"script": {"type": "string", "description": "the Python source"},
            "title": {"type": "string", "description": "a short caption, e.g. 'distance to each object'"},
@@ -238,6 +247,14 @@ CASES = [
      lambda n, a, c: (n == "show" and a.get("name") == "layout") or (n == "draw" and draw_script_runs(a))),
     ("show the front camera", [], "none", "put the front camera on the screen for me",
      lambda n, a, c: n == "show" and a.get("name") == "camera" and str(a.get("args", "zed")) in ("zed", "front", "")),
+    ("draw the graph", [], "none", "can you draw the graph of your memory for me?",
+     lambda n, a, c: n == "show" and a.get("name") == "graph"),
+    ("graph around a door", [], "none", "show me the part of the graph around door_1",
+     lambda n, a, c: n == "show" and a.get("name") == "graph" and "door_1" in str(a.get("args", ""))),
+    ("3d model of the chair", [], "none", "let me see what the chair looks like in 3D",
+     lambda n, a, c: n == "show" and a.get("name") == "model" and "chair" in str(a.get("args", ""))),
+    ("what do you look like", [], "none", "what do you look like? show me",
+     lambda n, a, c: n == "show" and a.get("name") == "model" and str(a.get("args", "robot")) in ("robot", "Shadow", "")),
     ("bar chart of distances", [], "none", "plot a bar chart of how far each object is from you",
      lambda n, a, c: n == "draw" and draw_script_runs(a)),
     # (label, history, last_move, user text, grader(name, args, content) -> bool)

@@ -18,6 +18,7 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include "approach.h"
+#include "canvas_model.h"
 #include "canvas_snapshot.h"
 #include "controller_facts.h"
 #include "image_prep.h"
@@ -304,7 +305,8 @@ const QString kInterfaceRules = QStringLiteral(
     "debug overlays, not part of the scene.\n"
     "- show(...) and draw(...) are for the PERSON: they put a picture on the canvas beside the chat. 'Show me', "
     "'display', 'put on the screen', 'draw', 'plot', 'map' ⇒ show or draw, never look (look shows a picture only to "
-    "YOU). show = a ready-made picture (the camera, the room map, the mission plan); draw = anything else (a chart, a "
+    "YOU). show = a ready-made picture (the camera, the room map, the mission plan, the working-memory graph, a 3-D "
+    "model of the robot or an object) — also when they say 'draw' it; draw = anything else (a chart, a "
     "plot, a marked map), as a Python script. After it, say in one short sentence what is on the canvas; do not "
     "describe a picture you have not seen.\n"
     "- Of the robot's own software the STATE has only the names of the agents alive ('agents alive now'); for "
@@ -453,7 +455,12 @@ QJsonArray ChatSession::tools_json() const
         tools.append(tool_def("show",
             "Show the PERSON a ready-made picture on the canvas beside the chat (you do not see it: look is for you). "
             "camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
-            "above with the robot, doors and objects; plan = the mission the robot runs; other names are drawings "
+            "above with the robot, doors and objects; plan = the mission the robot runs; graph = the robot's working "
+            "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
+            "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
+            "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
+            "'robot', an object name like chair_1, or a class like table); "
+            "other names are drawings "
             "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
             QJsonObject{{"name", QJsonObject{{"type", "string"}, {"enum", names}, {"description", "which drawing"}}},
                         {"args", QJsonObject{{"type", "string"},
@@ -463,14 +470,18 @@ QJsonArray ChatSession::tools_json() const
                                                              "and layout); false = draw once"}}}},
             QJsonArray{"name"}));
         tools.append(tool_def("draw",
-            "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script: a chart, a "
+            "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script (NOT for the "
+            "camera, the room map, the plan, the working-memory graph or a 3-D model: show has those, even when the "
+            "person says 'draw'): a chart, a "
             "plot, a table, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
             "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
             ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
             "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
             "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
             "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
-            "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w). Metres, room frame. The script MUST end "
+            "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w); g = graph() (the working-memory graph: "
+            "g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] by node id), draw_graph(focus=None) "
+            "-> a PIL image of it. Metres, room frame. The script MUST end "
             "with save(fig) (or save_image(img)). If it fails you get the error back: fix it and call draw again.",
             QJsonObject{{"script", QJsonObject{{"type", "string"}, {"description", "the Python source"}}},
                         {"title", QJsonObject{{"type", "string"}, {"description", "a short caption, e.g. 'distance to "
@@ -766,7 +777,8 @@ QStringList ChatSession::canvas_library() const
     for (const char* sub : {"/stock", "/library"})
         for (const QFileInfo& f : QDir(canvas_runner_.canvas_dir() + sub).entryInfoList({"*.py"}, QDir::Files, QDir::Name))
             if (not names.contains(f.completeBaseName())) names.append(f.completeBaseName());
-    if (not names.contains("plan")) names.append("plan");   // not a script: the plan page of the canvas
+    if (not names.contains("plan")) names.append("plan");     // not a script: the plan page of the canvas
+    if (not names.contains("model")) names.append("model");   // not a script: the 3-D page (canvas_model.h)
     return names;
 }
 
@@ -779,6 +791,7 @@ std::optional<CanvasJob> ChatSession::library_job(const QString& name, const QSt
         if (not f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
         CanvasJob job{.title = name, .script_path = path, .args = args, .source = QString::fromUtf8(f.readAll())};
         job.wants_images = job.source.contains("image(");
+        job.wants_graph = job.source.contains("graph(");
         return job;
     }
     return std::nullopt;
@@ -800,6 +813,14 @@ void ChatSession::write_canvas_inputs(const CanvasJob& job)
             cv::imwrite(path, fr->bgr, {cv::IMWRITE_JPEG_QUALITY, 90});
         else QFile::remove(QString::fromStdString(path));   // no stale frame from an earlier run
     }
+    // The whole graph only for a script that reads it (graph() in rcanvas.py).
+    if (job.wants_graph)
+    {
+        std::map<std::uint32_t, std::string> agent_names;
+        for (const auto& a : system_.agents()) agent_names[a.id] = a.name;
+        write_canvas_json(canvas_runner_.run_dir(), QStringLiteral("graph.json"), build_canvas_graph(*G_, agent_names));
+    }
+    else QFile::remove(canvas_runner_.run_dir() + QStringLiteral("/graph.json"));
 }
 
 namespace
@@ -881,6 +902,21 @@ void ChatSession::tick_canvas()
     });
 }
 
+QString ChatSession::show_model(const std::string& what)
+{
+    const auto m = find_model(*G_, digest_.objects, what);
+    log_.write("draw_model", QJsonObject{{"what", q(what)}, {"ok", m.has_value()},
+                                         {"result", q(m.has_value() ? m->description : m.error())}});
+    if (not m.has_value()) return QStringLiteral("ERROR: ") + q(m.error());
+    canvas_live_ = false;
+    canvas_runner_.kill();
+    canvas_camera_.reset();
+    window_->show_canvas();
+    window_->canvas()->show_model(QStringLiteral("3-D model: %1").arg(q(m->node)), m->triangles, q(m->description));
+    return QStringLiteral("OK: the 3-D model of %1 is on the canvas (%2 triangles; the person can turn it with the mouse).")
+        .arg(q(m->node)).arg(m->triangles.size() / 3);
+}
+
 void ChatSession::show_request(const ShowRequest& r, const QString& text)
 {
     log_.write("fast_path", QJsonObject{{"kind", "show"}, {"what", int(r.kind)}, {"arg", q(r.arg)}});
@@ -900,6 +936,27 @@ void ChatSession::show_request(const ShowRequest& r, const QString& text)
         window_->canvas()->show_plan();
         reply = window_->canvas()->plan()->has_mission() ? QStringLiteral("The mission plan is on the canvas.")
                                                           : QStringLiteral("No mission yet: the canvas shows an empty plan.");
+    }
+    else if (r.kind == ShowRequest::Kind::model)
+    {
+        const QString res = show_model(r.arg);
+        reply = res.startsWith("OK") ? QStringLiteral("Showing the 3-D model of %1 on the canvas (drag to turn it).")
+                                           .arg(r.arg == "robot" ? QStringLiteral("the robot") : q(r.arg))
+                                     : QStringLiteral("I cannot show that model: ") + res.mid(7);
+    }
+    else if (r.kind == ShowRequest::Kind::graph)
+    {
+        auto job = library_job("graph", r.arg.empty() ? QStringList{} : QStringList{q(r.arg)});
+        if (not job.has_value()) reply = QStringLiteral("I cannot draw: the stock canvas scripts are missing.");
+        else
+        {
+            job->title = r.arg.empty() ? QStringLiteral("working memory graph")
+                                       : QStringLiteral("working memory around %1").arg(q(r.arg));
+            const QString title = job->title;
+            const QString err = draw_now(std::move(*job), false);
+            reply = err.isEmpty() ? QStringLiteral("Showing the %1 on the canvas.").arg(title)
+                                  : QStringLiteral("I could not draw the %1: %2").arg(title, err.trimmed().section('\n', -1));
+        }
     }
     else
     {
@@ -937,6 +994,12 @@ QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
         draw_failed_ = true;
         return QStringLiteral("ERROR: ") + why;
     };
+    if (stock == "model")
+    {
+        const QString res = show_model(args.value("args").toString().trimmed().toStdString());
+        if (res.startsWith("ERROR")) draw_failed_ = false;   // not a script to fix: the model just reports it
+        return res;
+    }
     if (stock == "plan")
     {
         canvas_live_ = false;
@@ -955,7 +1018,8 @@ QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
         f.write(script.toUtf8());
         f.close();
         job = CanvasJob{.title = title.isEmpty() ? QStringLiteral("drawing") : title, .script_path = path, .args = extra,
-                        .source = script, .live = live, .wants_images = script.contains("image(")};
+                        .source = script, .live = live, .wants_images = script.contains("image("),
+                        .wants_graph = script.contains("graph(")};
         savable = true;
     }
     else if (not stock.isEmpty())

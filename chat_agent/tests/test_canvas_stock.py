@@ -28,6 +28,23 @@ SNAPSHOT = {
     "mission": None,
 }
 
+# a small working-memory graph: the RT tree world -> room_1 -> {Shadow -> zed, table_1, door_1}, plus an affordance,
+# an agent node and non-RT edges (ids as strings, as canvas_snapshot.cpp writes them)
+GRAPH = {
+    "nodes": [{"id": "1", "name": "world", "type": "world", "agent": "robot_concept"},
+              {"id": "2", "name": "room_1", "type": "room", "agent": "room_concept"},
+              {"id": "3", "name": "Shadow", "type": "robot", "agent": "robot_concept"},
+              {"id": "4", "name": "zed", "type": "rgbd", "agent": "robot_concept"},
+              {"id": "5", "name": "table_1", "type": "object", "agent": "table_concept"},
+              {"id": "6", "name": "door_1", "type": "object", "agent": "door_concept"},
+              {"id": "7", "name": "aff_door_1_cross", "type": "affordance", "agent": "door_concept"},
+              {"id": "8", "name": "controller 7", "type": "agent", "agent": "controller"}],
+    "edges": [{"from": "1", "to": "2", "type": "RT"}, {"from": "2", "to": "3", "type": "RT"},
+              {"from": "3", "to": "4", "type": "RT"}, {"from": "2", "to": "5", "type": "RT"},
+              {"from": "2", "to": "6", "type": "RT"}, {"from": "6", "to": "7", "type": "has"},
+              {"from": "8", "to": "7", "type": "executing"}, {"from": "3", "to": "5", "type": "sees"}],
+}
+
 BAD_NET = "import urllib.request\nurllib.request.urlopen('http://example.com', timeout=2)\n"
 
 
@@ -48,9 +65,13 @@ def main():
             json.dump(SNAPSHOT, f)
         from PIL import Image
         Image.new("RGB", (1280, 720), (90, 120, 160)).save(os.path.join(rundir, "zed.jpg"))
+        with open(os.path.join(rundir, "graph.json"), "w") as f:
+            json.dump(GRAPH, f)
         cases = [("layout", [os.path.join(CANVAS, "stock", "layout.py")]),
                  ("camera_zed", [os.path.join(CANVAS, "stock", "camera.py"), "zed"]),
-                 ("camera_ricoh_missing", [os.path.join(CANVAS, "stock", "camera.py"), "ricoh"])]
+                 ("camera_ricoh_missing", [os.path.join(CANVAS, "stock", "camera.py"), "ricoh"]),
+                 ("graph", [os.path.join(CANVAS, "stock", "graph.py")]),
+                 ("graph_focus_door", [os.path.join(CANVAS, "stock", "graph.py"), "door_1"])]
         for name, argv in cases:
             rc, err, png = run(rundir, *argv)
             ok = rc == 0 and png
@@ -59,6 +80,11 @@ def main():
             if ok and keep:
                 os.makedirs(keep, exist_ok=True)
                 shutil.copy(os.path.join(rundir, "out.png"), os.path.join(keep, name + ".png"))
+        # a focus that is not in the graph fails with a clear message
+        rc, err, _ = run(rundir, os.path.join(CANVAS, "stock", "graph.py"), "door_99")
+        ok = rc != 0 and "no node named 'door_99'" in err
+        print(f"{'PASS' if ok else 'FAIL'}  graph unknown focus")
+        fails += not ok
         with open(os.path.join(rundir, "net.py"), "w") as f:
             f.write(BAD_NET)
         rc, err, _ = run(rundir, os.path.join(rundir, "net.py"))

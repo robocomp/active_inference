@@ -6,6 +6,7 @@
  *   │                                                          │
  *   │        the PNG a canvas script drew (canvas_runner.h),   │   page 0: a drawing, scaled to fit
  *   │        or the mission plan (plan_view.h)                 │   page 1: the plan, live
+ *   │        or a node's 3-D model (gl_mesh_viewer.h)          │   page 2: drag to orbit, wheel to zoom
  *   │                                                          │
  *   ├ script (read-only, toggled by </>) ──────────────────────┤
  *   └──────────────────────────────────────────────────────────┘
@@ -25,7 +26,13 @@
 #include <QString>
 #include <QWidget>
 
+#include <span>
+
+#include <QVector3D>
+
 #include "plan_view.h"
+
+namespace rc::viewers { class GLMeshViewer; }
 
 namespace rc::chat
 {
@@ -47,6 +54,8 @@ public:
     void update_image(const QImage& image);   ///< a live re-run's new picture, nothing else changes
     void show_message(const QString& title, const QString& text);   ///< no picture: why (a failed script)
     void show_plan();
+    /// A 3-D model (canvas_model.h): a triangle soup, shown in an orbit/zoom view; `caption` under the title.
+    void show_model(const QString& title, std::span<const QVector3D> triangles, const QString& caption);
     [[nodiscard]] PlanView* plan() const { return plan_; }
     [[nodiscard]] bool showing_plan() const;
     void set_live(bool live);
@@ -67,6 +76,8 @@ private:
     QStackedWidget* stack_ = nullptr;
     QLabel* picture_ = nullptr;
     PlanView* plan_ = nullptr;
+    rc::viewers::GLMeshViewer* model_ = nullptr;
+    QLabel* caption_ = nullptr;
     QPlainTextEdit* code_ = nullptr;
     QImage image_;
     QString title_text_;

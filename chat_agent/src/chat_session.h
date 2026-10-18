@@ -138,6 +138,7 @@ private:
     /// Run `job` now and put its picture on the canvas; "" on success, else why (also shown on the canvas).
     QString draw_now(CanvasJob job, bool savable);
     void show_request(const ShowRequest& r, const QString& text);   ///< the canvas fast path
+    QString show_model(const std::string& what);   ///< the 3-D page (canvas_model.h); "OK: …" or "ERROR: …"
     std::optional<CanvasJob> library_job(const QString& name, const QStringList& args) const;
     QStringList canvas_library() const;   ///< stock + saved script names
     void write_canvas_inputs(const CanvasJob& job);

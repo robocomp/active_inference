@@ -41,7 +41,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-depreca
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
     -DCANVAS_DIR="\"$(realpath ../canvas)\"" -o "$out/test_canvas_runner" test_canvas_runner.cpp \
     ../src/canvas_runner.cpp ../src/canvas_panel.cpp ../src/plan_view.cpp \
-    $(pkg-config --cflags Qt6Widgets | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Widgets)
+    $(pkg-config --cflags Qt6Widgets Qt6OpenGLWidgets | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Widgets Qt6OpenGLWidgets)
 "$out/test_canvas_runner" 2>&1 | grep -v propagateSizeHints
 python3 test_canvas_stock.py
 rm -rf "$out"
