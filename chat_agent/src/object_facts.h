@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <numbers>
 #include <map>
 #include <optional>
 #include <set>
@@ -55,6 +56,18 @@ inline std::string bearing_words(double deg)
     if (a <= 60.0) return std::format("ahead-{}", side);
     if (a <= 120.0) return std::format("to the {}", side);
     return std::format("behind-{}", side);
+}
+
+/// The robot's measured velocity, robot frame (robot_concept writes it on the robot node from odometry): advance
+/// + forward, angular + left (CCW, rad/s). Numbers, not a moving/still verdict — any cutoff would be a threshold;
+/// the reading's age is said so a stale one is not mistaken for the present.
+inline std::string motion_line(float advance_mps, float side_mps, float angular_rps, std::uint64_t age_ms)
+{
+    const double turn_deg = std::abs(angular_rps) * 180.0 / std::numbers::pi;
+    const std::string turn = angular_rps == 0.f ? "not turning"
+                           : std::format("turning {} {:.0f} deg/s", angular_rps > 0 ? "left" : "right", turn_deg);
+    return std::format("robot motion now (odometry, {} ms old): {} {:.2f} m/s, sideways {:.2f} m/s, {}", age_ms,
+                       advance_mps < 0 ? "backward" : "forward", std::abs(advance_mps), std::abs(side_mps), turn);
 }
 
 /// "chair_1 (chair) 2.1 m, +35 deg ahead-left, 0.45x0.50x0.90 m"

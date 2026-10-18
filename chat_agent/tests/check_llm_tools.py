@@ -36,6 +36,7 @@ can move: yes
 current room: room_1
 other rooms in the live map: none
 robot pose in room_1: x=0.42 m, y=-1.10 m, yaw=88 deg
+robot motion now (odometry, 80 ms old): forward 0.00 m/s, sideways 0.00 m/s, not turning
 doors of the current room (2):
   - door_0: 3.1 m away, bearing +62 deg (ahead-left), P(open)=0.91, affordances: approach=offered open=absent cross=offered [nearest]
   - door_1: 4.4 m away, bearing -120 deg (behind-right), P(open)=0.12, affordances: approach=offered open=offered cross=absent
@@ -130,6 +131,8 @@ def system():
 def state(last_move="none", extra=""):
     expl = {"move 0.30": "move 0.30 (move forward 0.30 m)", "move -0.30": "move -0.30 (move backward 0.30 m)"}
     base = STATE.replace("last command sent from this chat: none\n", "") if "last command sent" in extra else STATE
+    if "robot motion now" in extra:   # the case's own motion line replaces the standing-still one
+        base = "\n".join(l for l in base.split("\n") if not l.startswith("robot motion now"))
     return "STATE:\n" + base + extra + f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
 
 
@@ -225,6 +228,17 @@ CASES = [
      "doors gone since the last message: door_3 (deleted from the map: it is not there any more, whatever earlier "
      "messages said)\nlast command sent from this chat: \"cross door_3\", status: in_progress, step: open, WARNING: "
      "door_3 is NO LONGER in the map (deleted), so this crossing cannot finish; call cancel_passage() yourself to end it\n"),
+    # live 2026-10-18: "you ARE moving" — the controller drove on its own, the chat had sent nothing, and the model
+    # said it was not moving. The STATE now carries the measured motion (world_digest.cpp, motion_line).
+    ("where are you going (moving)", [], "none", "where are you going?",
+     lambda n, a, c: re.search(r"not (currently )?moving|standing still|stationary|not going anywhere|no active",
+                               c.lower()) is None,
+     "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\n"),
+    ("are you moving (moving)", [], "none", "are you moving?",
+     lambda n, a, c: re.search(r"\byes\b|i am moving|i'm moving|moving forward", c.lower()) is not None,
+     "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\n"),
+    ("are you moving (still)", [], "none", "are you moving?",
+     lambda n, a, c: re.search(r"\bno\b|not moving|standing still|stationary", c.lower()) is not None),
     # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
     ("how many agents", [], "none", "how many agents are running?",
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),

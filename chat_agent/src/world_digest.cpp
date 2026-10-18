@@ -87,6 +87,24 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
         else s += "robot pose: unknown (no transform room -> robot)\n";
     }
     else s += "robot pose: unknown (no current room)\n";
+    // ── the robot's measured motion (robot_concept: odometry on the robot node, Shadow) ──
+    // The controller moves the robot on its own (exploring, a mission, a joystick), so "no command from this chat"
+    // is not "standing still": without this the model said it was not moving while it was (live 2026-10-18).
+    {
+        const auto robots = G.get_nodes_by_type("robot");
+        const auto adv = robots.empty() ? std::nullopt : G.get_attrib_by_name<robot_current_advance_speed_att>(robots.front());
+        if (adv.has_value())
+        {
+            const auto& rn = robots.front();
+            const std::uint64_t ts = G.get_attrib_by_name<robot_current_speed_timestamp_att>(rn).value_or(0);
+            const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count());
+            s += motion_line(*adv, G.get_attrib_by_name<robot_current_side_speed_att>(rn).value_or(0.f),
+                             G.get_attrib_by_name<robot_current_angular_speed_att>(rn).value_or(0.f),
+                             ts != 0 and now > ts ? now - ts : 0) + "\n";
+        }
+        else s += "robot motion now: unknown (no odometry on the robot node)\n";
+    }
 
     // ── doors of the current room ──
     if (room_id != 0)

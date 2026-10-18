@@ -78,6 +78,15 @@ int main()
     // Token budget: the section with N=6 nearest stays a few hundred characters (~4 chars/token).
     std::println("OBJECTS section: {} chars (~{} tokens)", sec.size(), sec.size() / 4);
     assert(sec.size() < 800); ++checks;
+    {
+        // The robot's MEASURED motion (live 2026-10-18: "you ARE moving" — the model said it was not, since no
+        // command of its own was running; the STATE carried no velocity at all).
+        const std::string m = motion_line(0.42f, 0.0f, 0.21f, 120);
+        assert(m == "robot motion now (odometry, 120 ms old): forward 0.42 m/s, sideways 0.00 m/s, turning left 12 deg/s"); ++checks;
+        assert(motion_line(-0.30f, 0.05f, -0.5f, 40) ==
+               "robot motion now (odometry, 40 ms old): backward 0.30 m/s, sideways 0.05 m/s, turning right 29 deg/s"); ++checks;
+        assert(motion_line(0.f, 0.f, 0.f, 3000).find("3000 ms old") != std::string::npos); ++checks;   // stale: said, not hidden
+    }
     std::println("test_objects: {} checks passed", checks);
     return 0;
 }

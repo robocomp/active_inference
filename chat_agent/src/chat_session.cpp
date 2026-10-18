@@ -250,6 +250,8 @@ const QString kInterfaceRules = QStringLiteral(
     "plans its own path there, whatever a short move ran into. Nobody has to confirm anything: never ask the person "
     "to confirm a crossing, a move or the opening of a door. When they ask for an action, or answer yes to one you "
     "offered, call its tool now.\n"
+    "- 'robot motion now' in the STATE is the MEASURED velocity: if it is not zero you ARE moving (the controller "
+    "also drives on its own: exploring, a mission, a joystick), whatever your last command says.\n"
     "- stop() halts the robot at once. cancel_passage() abandons a door crossing in progress.\n"
     "- Directions: bearing 0 deg = straight ahead of the robot, positive = to its left, negative = to its right.\n"
     "- P(open) is a probability, not a fact: near 0 = probably shut, near 1 = probably open, in between = unsure.\n"
