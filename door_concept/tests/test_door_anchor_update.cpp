@@ -18,6 +18,7 @@
 //                                  0.35 rad/s (6 s out, 6 s back) from the try64 start pose with exact odometry and a
 //                                  ±90 deg scanner: the posterior stays within 0.10 m / 0.05 rad of the truth; p_view
 //                                  falls while the doorway is outside the sampled sector and rises when it returns
+//                                  (to its in-view level, which for a SHUT door is < 0.5 by design — fix round 3)
 //   other_wall_outside_extent_ignored — the door's wall ends 0.3 m past its jamb (u_max); a 1 m gap and a collinear
 //                                  wall beyond it; the prior 0.3 m toward them (door shut): the posterior is not pulled past the extent
 //   shut_door_reads_shut           — the try64-like start pose, door shut, corner present: p_open < 0.1
@@ -29,6 +30,13 @@
 //   pview_low_in_free_space / pview_low_when_rotated / pview_low_on_solid_wall (fix round 2) — open door (P(open)
 //                                  0.95), 360° scan from the try64 start: a prior 1.2 m in front of the wall, yawed
 //                                  +90°, or 1.5 m along onto solid wall reads P(door in view) < 0.5
+//   crossing_with_leaf_at_moderate_pi (fix round 3) — open door with its leaf at 90° beside the jamb on the robot
+//                                  side (the door's leaf belief passed in), π = 0.7 and 0.8, 3-D scan through
+//                                  select_anchor_rays, s = -0.5 … +0.8 m:
+//                                  min p_view ≥ 0.6, lateral < 0.05 m
+//   true_pose_outscores_wrong_wall (fix round 3) — open door, π ∈ {0.05, 0.5, 0.95}: p_view(truth) > p_view(1.5 m
+//                                  along on solid wall); for π ≥ 0.5 the wrong pose < 0.5 (at π = 0.05 it may be
+//                                  ambiguous: the documented shut-door unobservability, door_anchor_update.h)
 //   shut_door_reads_shut_with_floor — 3-D bpearl-like scan (z = 0.67, downward layers) with floor returns, shut door,
 //                                  prior 0.25 m in front of the wall, rays through select_anchor_rays: p_open < 0.1,
 //                                  depth < 0.05 m within 3 updates
@@ -151,7 +159,7 @@ static Pose2 try64_start() { return {V2(-0.172f, -2.440f), 0.84f}; }
 // Door wall u in [u0, u1] (the door's own run) with the opening; a corner wall at u = u0 running toward the robot's
 // side; optionally a 1 m gap after u1 and a collinear wall beyond it; a far wall 4 m behind.
 static const V3 kSensor(0.f, 0.14f, 0.67f);   // the bpearl in the robot frame
-struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false; };
+struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false, leaf90 = false; };
 static std::vector<Seg> world(const WorldOpts& o)
 {
     std::vector<Seg> s;
@@ -162,6 +170,7 @@ static std::vector<Seg> world(const WorldOpts& o)
     if (o.shut) box(s, -0.5f * W, 0.5f * W, -0.5f * T, -0.5f * T + 0.04f);
     box(s, -6.f, 6.f, 4.f, 4.1f);
     if (o.back_wall) box(s, -6.f, 6.f, -4.1f, -4.f);   // the robot's own room closes behind it
+    if (o.leaf90) box(s, 0.5f * W - 0.04f, 0.5f * W, -0.5f * T - W, -0.5f * T);   // open 90°, beside the +u jamb, robot side
     return s;
 }
 // A 3-D bpearl-like scan: the sensor at kSensor (z = 0.67), 360° in azimuth at 1°, layers from 0 to -60° at 2°. A beam
@@ -390,7 +399,11 @@ int main()
         check(worst_pos < 0.10f, "posterior within 0.10 m of the truth throughout");
         check(worst_yaw < 0.05f, "posterior within 0.05 rad of the truth throughout");
         check(n_out > 0 and pv_min_out < 0.1f, "p_view falls (< 0.1) while the doorway is out of the sampled sector");
-        check(pv_first > 0.9f and pv_last > 0.9f, "p_view high (> 0.9) before it leaves and after it returns");
+        // A SHUT door's opening is indistinguishable from wall (fix round 3: P(H_door) ≤ (1 − π)/(2 − π) < 0.5), so its
+        // in-view level is just under the publication level BY DESIGN: try64's shut-door anchor is never published, and
+        // the cross needs the door open anyway. What must hold: it returns to that level when the doorway comes back.
+        check(pv_first > 0.4f and pv_last > 0.9f * pv_first, "p_view back at its in-view level after the doorway returns");
+        check(pv_first < 0.5f, "a shut door reads below the publication level (unobservable vs wall)");
     }
 
     std::print("turning_away_360\n");
@@ -468,6 +481,57 @@ int main()
         std::print("pview_low_when_rotated\n");   check(pv_r < 0.5f, "prior yawed +90°: p_view < 0.5");
         std::print("pview_low_on_solid_wall\n");  check(pv_s < 0.5f, "open door, prior 1.5 m along onto solid wall: p_view < 0.5");
         check(pv_t > 0.5f, "and the true pose reads in view (> 0.5)");
+    }
+
+    // ─── fix round 3: p_view must not scale with π ─────────────────────────────────────────────────────────────
+    for (const float pi : {0.7f, 0.8f})
+    {
+        std::print("crossing_with_leaf_at_moderate_pi (π = {:.1f})\n", pi);
+        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true; wo.leaf90 = true;
+        const auto segs = world(wo);
+        Pose2 robot{V2(0.f, -0.5f - kSensor.y()), 0.f};
+        RelPose belief = creation_prior(robot);
+        float pv_min = 1.f, worst_lat = 0.f;
+        for (int k = 0; k <= 26; ++k)
+        {
+            if (k > 0)
+            {
+                rc::rt::Twist tw; tw.linear = V3(0.f, 0.5f, 0.f);
+                belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+                robot.p.y() += 0.05f;
+            }
+            const auto rays = rc::door::select_anchor_rays(belief, W, T, 0.05f, 2.0f, kSensor, scan3d(segs, robot, 51 + k), 2.0f);
+            // The door's own leaf belief: hinged at the +u jamb, swung 90° toward the robot (σ_φ 0.25, the live config).
+            rc::door::LeafPrior lp; lp.known = true; lp.hinge_u = 0.5f * W; lp.dir_u = -1.f; lp.swing_y = -1.f;
+            lp.phi = float(M_PI_2); lp.phi_sigma = 0.25f;
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi, lp);
+            belief = post;
+            const V3 tr = anchor_truth(robot);
+            const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
+            pv_min = std::min(pv_min, ev.p_view);
+            worst_lat = std::max(worst_lat, lat);
+            if (k % 4 == 0 or ev.p_view < 0.6f)
+                std::print("    s={:+.2f} p_view={:.3f} lat err={:.3f} p_open={:.3f}\n", robot.p.y() + kSensor.y(), ev.p_view, lat, ev.p_open);
+        }
+        std::print("    min p_view {:.3f}, worst lateral {:.3f} m\n", pv_min, worst_lat);
+        check(pv_min >= 0.6f, std::format("π = {:.1f}: p_view ≥ 0.6 at every step of the crossing", pi));
+        check(worst_lat < 0.05f, std::format("π = {:.1f}: lateral error < 0.05 m throughout", pi));
+    }
+    {
+        WorldOpts wo; wo.shut = false; wo.back_wall = true;
+        const auto segs = world(wo);
+        const Pose2 robot = try64_start();
+        const auto rays = scan(segs, robot, 180.f, 41);
+        const RelPose truth = creation_prior(robot);
+        RelPose wrong = truth; wrong.x.head<2>() += 1.5f * V2(std::cos(truth.x.z()), std::sin(truth.x.z()));
+        for (const float pi : {0.05f, 0.5f, 0.95f})
+        {
+            const float pt = update_door_anchor(truth, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi).second.p_view;
+            const float pw = update_door_anchor(wrong, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi).second.p_view;
+            std::print("true_pose_outscores_wrong_wall (π = {:.2f}): truth {:.3f}, 1.5 m along on solid wall {:.3f}\n", pi, pt, pw);
+            check(pt > pw, std::format("π = {:.2f}: the true pose outscores the wrong one", pi));
+            if (pi >= 0.5f) check(pw < 0.5f, std::format("π = {:.2f}: the wrong pose reads < 0.5", pi));
+        }
     }
 
     std::print("shut_door_reads_shut_with_floor\n");
