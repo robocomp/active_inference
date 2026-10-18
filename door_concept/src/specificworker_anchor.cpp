@@ -566,10 +566,14 @@ void SpecificWorker::step_passage_anchor()
                 }
             }
         }
+    bool new_mask_frame = false;          // Task 8 fix 1: a NEW mask frame was consumed this cycle (door slice or not)
+    std::int64_t mask_stamp = now;        // ...captured at
     if (mask_ingestor_ and robot_T_zed.has_value())
         if (const auto& pkt = mask_ingestor_->packet(); pkt.valid and pkt.frame_id != pa.last_mask_frame)
         {
             pa.last_mask_frame = pkt.frame_id;
+            new_mask_frame = true;
+            if (pkt.timestamp_ms > 0) mask_stamp = std::int64_t(pkt.timestamp_ms);
             const float age_s = pkt.timestamp_ms > 0 ? std::max<std::int64_t>(0, now - std::int64_t(pkt.timestamp_ms)) * 1e-3f : 0.f;
             const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
             if (not pa.frames_checked_mask)
@@ -599,6 +603,8 @@ void SpecificWorker::step_passage_anchor()
         }
     rc::door::AnchorEvidence ev;
     const bool measured = not rays.empty() or mask_pts.size() >= 2;
+    const rc::interaction::RelPose prior_pose = pa.pose;   // for the frame record (fix 3)
+    rc::door::LeafPrior leaf;                              // the door's leaf belief (below), also recorded
     if (measured)
     {
         // The door's own P(open) (its leaf-angle posterior): what the visibility check predicts in the opening — a gap
@@ -628,7 +634,6 @@ void SpecificWorker::step_passage_anchor()
         // range, plus a "not as believed" branch (LeafPrior::p_not_as_believed). door_concept carries NO posterior over
         // hinge / swing (they are Openable config pins or a side inherited from the other room; the M2 hypotheses are
         // not built), so p_hinge = p_swing = 0.5: uniform, the data decide. Without an AI2 belief φ is unknown too.
-        rc::door::LeafPrior leaf;
         if (inst != nullptr)
         {
             const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
@@ -644,11 +649,49 @@ void SpecificWorker::step_passage_anchor()
             leaf.p_hinge   = 0.5f;
             leaf.p_swing   = 0.5f;
         }
+        // Floor returns (below the wall band) are told apart by z: in the visibility they PASS, never end (Task 8).
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
-                                                      lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf);
+                                                      lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf, kFloorBandM);
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;
+    }
+    // ── Task 8 fix 1: the camera's view evidence persists within the controller's staleness window ────────────────
+    //    A new mask frame sets it (0 when the frame carried no door slice: the camera looked and saw none); a cycle
+    //    without one keeps the last frame's while that frame is younger than kAnchorStaleMs.
+    {
+        std::optional<float> cam_new;
+        if (new_mask_frame) cam_new = (measured and mask_pts.size() >= 2) ? ev.p_cam : 0.f;
+        const float p_cam = rc::door::held_camera_view(pa.cam_hold, cam_new, mask_stamp, now, rc::interaction::kAnchorStaleMs);
+        if (measured)
+        {
+            ev.p_cam  = p_cam;
+            ev.p_view = rc::door::combine_view(ev.p_lidar, p_cam);
+        }
+    }
+    // ── Task 8 fix 3: the frame record (etc/anchor_frames.bin) — every measured cycle, inputs and outputs ──────────
+    if (measured)
+    {
+        rc::door::rec::Frame fr;
+        fr.t_ms = now;
+        fr.prior = prior_pose;
+        fr.width = pa.width; fr.thickness = pa.thickness; fr.wall_u_min = pa.wall_u_min; fr.wall_u_max = pa.wall_u_max;
+        fr.floor_below = kFloorBandM;
+        fr.lidar_origin = lidar_origin;
+        fr.rays = rays;
+        fr.n_budget = std::uint32_t(std::max(0, ev.n_budget));
+        fr.mask = mask_pts;
+        fr.cam = cam;
+        fr.leaf = leaf;
+        fr.pi_open = pa.p_open_belief;
+        fr.post = pa.pose;
+        fr.p_lidar = ev.p_lidar; fr.p_cam = ev.p_cam; fr.p_view = ev.p_view;
+        fr.lidar_open = ev.lidar_open; fr.lidar_door = ev.lidar_door; fr.lidar_wall = ev.lidar_wall;
+        const bool was_capped = anchor_frames_.capped();
+        anchor_frames_.append(fr);
+        if (anchor_frames_.capped() and not was_capped)
+            std::print("door_concept: [anchor] etc/anchor_frames.bin reached its {} MB cap — frame recording stopped for this run\n",
+                       rc::door::rec::kMaxBytes / (1024 * 1024));
     }
 
     // ── WRITE (Task 7, fix 3): only on a cycle whose update consumed evidence of a door IN VIEW ─────────────────
@@ -658,8 +701,10 @@ void SpecificWorker::step_passage_anchor()
     if (measured and publish != pa.publishing)   // a transition is judged on a MEASURED cycle only
     {
         pa.publishing = publish;
-        std::print("door_concept: [anchor] {}@robot {} publishing — P(door in view) {:.2f} (p_lidar {:.2f}, p_cam {:.2f})\n",
-                   pa.door_name, publish ? "RESUMED" : "PAUSED", ev.p_view, ev.p_lidar, ev.p_cam);
+        std::print("door_concept: [anchor] {}@robot {} publishing — P(door in view) {:.2f} (p_lidar {:.2f} = opening {:.2f} · "
+                   "P(door) {:.2f} · walls {:.2f}; p_cam {:.2f})\n",
+                   pa.door_name, publish ? "RESUMED" : "PAUSED", ev.p_view, ev.p_lidar, ev.lidar_open, ev.lidar_door,
+                   ev.lidar_wall, ev.p_cam);
     }
     const bool alive = publish ? (pa.anchor->write(*G, pa.pose) or G->get_node(pa.anchor->id()).has_value())
                                : G->get_node(pa.anchor->id()).has_value();

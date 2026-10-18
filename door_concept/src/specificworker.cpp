@@ -338,6 +338,9 @@ void SpecificWorker::initialize()
     // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
     // log_phantom_event(). Truncating: one file per run.
     phantom_log_.open("etc/door_phantom_events.csv");
+    // Task 8 fix 3: the interaction anchor's measured cycles, truncated here (one file per run; replay_anchor_frames).
+    if (not anchor_frames_.open("etc/anchor_frames.bin"))
+        std::print("door_concept: [anchor] could NOT open etc/anchor_frames.bin — the anchor's frame record is off this run\n");
     GenericWorker::initialize();
  
     // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data

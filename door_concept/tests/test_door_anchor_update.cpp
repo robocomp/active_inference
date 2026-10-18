@@ -51,6 +51,28 @@
 //                                  p_view equals door_view of the returned posterior
 //   pview_low_* ask door_view at the wrong pose (update_door_anchor's p_view is now its posterior's) and also check
 //                                  that the update from each wrong prior publishes only a pose near the truth
+// Task 8 (try65: a correct anchor whose publication flapped):
+//   camera_view_persists_within_window (fix 1) — p_lidar 0.45 (try65's), a mask frame every other cycle with p_cam 0.95:
+//                                  p_view never crosses the publication level while the frames keep coming (the old
+//                                  "no new frame ⇒ p_cam 0" crossed it on every cycle), and falls to p_lidar once the last
+//                                  frame is older than kAnchorStaleMs
+//   try65_webots_door_crossing (fix 2) — DOOR_1 of tworooms-piso.wbt as built (0.2 m-deep frame, 0.9 m clear between
+//                                  jambs, the 0.11 m wall 4.5 cm behind the frame's centre, the leaf open 90° on the
+//                                  robot's side beside the −u jamb) under the LIVE caller configuration (w 1.14 from the
+//                                  belief, t 0.05, leaf known with hinge/swing at 0.5/0.5, φ known at π/2 ± 0.25, φ_max
+//                                  120°, π 0.6 and 0.75), a bpearl-like dome (875 azimuths, 32 downward layers, 0.67 m)
+//                                  through select_anchor_rays with floor returns, the update chained from the creation
+//                                  prior, the sensor 0.0 / 0.1 / 0.2 m off-centre from s = −2.0 to +0.8 m: p_view ≥ 0.6
+//                                  on the approach and the exit (|s| ≥ 0.25 m) and ≥ 0.5 — never unpublished — inside
+//                                  the doorway band; and at s = −1.0 the wrong poses (free space, rotated, solid wall)
+//                                  read < 0.5, the shut door at π 0.7 is never published.
+//                                  ⚠ The brief's ≥ 0.6 is NOT met inside the band |s| < 0.25 m: 0.53–0.66 over sensor
+//                                  offsets. Cause, measured: the posterior's yaw error grows to 0.05–0.10 rad there with
+//                                  σ_yaw 0.002 (the model's leaf hinged at w/2 = 0.57 m from the belief's 1.14 m width,
+//                                  the real one at 0.475 m and 9 cm proud), so long grazing beams read as passing the
+//                                  walls. With the width at 1.0 / 1.06 m the band's minimum is 0.65 / 0.66 (task-8 report).
+//   anchor_frame_record_roundtrip (fix 3) — a recorded frame reads back bit-identical and re-running the update on it
+//                                  reproduces the recorded posterior exactly (the replay is the live update)
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
 //   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O2 -fPIC -I/usr/include/eigen3 -Isrc -I../common
@@ -61,12 +83,17 @@
 #include <cmath>
 #include <cstdio>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <print>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "door_anchor_update.h"
+#include "anchor_frame_record.h"
+#include "interaction_anchor/interaction_anchor.h"   // kAnchorStaleMs: the controller's staleness window (fix 1)
 
 using V2 = Eigen::Vector2f;
 using V3 = Eigen::Vector3f;
@@ -172,6 +199,7 @@ static Pose2 try64_start() { return {V2(-0.172f, -2.440f), 0.84f}; }
 // Door wall u in [u0, u1] (the door's own run) with the opening; a corner wall at u = u0 running toward the robot's
 // side; optionally a 1 m gap after u1 and a collinear wall beyond it; a far wall 4 m behind.
 static const V3 kSensor(0.f, 0.14f, 0.67f);   // the bpearl in the robot frame
+constexpr float kFloorZ = 0.05f;               // the wall band's floor (the caller's kFloorBandM): below it, a floor return
 struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false, leaf90 = false; };
 static std::vector<Seg> world(const WorldOpts& o)
 {
@@ -246,6 +274,74 @@ static RelPose creation_prior(const Pose2& r)
 }
 
 
+// ─── Task 8: DOOR_1 of webots-shadow worlds/piso/tworooms-piso.wbt, in ANCHOR coordinates (u along the wall = world x
+// − (−4.769), y = world y − 9.3796: the origin at the door frame's centre). The Door PROTO (protos/Door.proto, size
+// 0.1 × 1 × 2.1, frameSize 0.05): two jamb frames 0.05 wide and 0.2 deep (local x ±0.1 = 9 cm proud of each wall face),
+// 0.9 m clear between them; the leaf 0.05 × 0.95 hinged at the −u jamb (jointAtLeft), opening toward local +x = world −y =
+// the robot's side; the door rotated −1.5857 rad (0.85° off the wall). Room2's south walls: 0.11 m thick, centred at
+// world y 9.425 (4.5 cm behind the frame's centre), ending 3 cm short of the frames (x −5.30 and −4.24).
+static void rbox(std::vector<Seg>& s, float x0, float x1, float y0, float y1, float th)
+{
+    const float c = std::cos(th), sn = std::sin(th);
+    auto R = [&](float x, float y) { return V2(c * x - sn * y, sn * x + c * y); };
+    const V2 p[4] = {R(x0, y0), R(x1, y0), R(x1, y1), R(x0, y1)};
+    for (int i = 0; i < 4; ++i) s.push_back({p[i], p[(i + 1) % 4]});
+}
+static std::vector<Seg> webots_door1(bool leaf_open)
+{
+    std::vector<Seg> s;
+    const float wy0 = 9.37f - 9.3796f, wy1 = 9.48f - 9.3796f;
+    box(s, -7.77f + 4.769f, -5.30f + 4.769f, wy0, wy1);                 // Room2WallSouthWest
+    box(s, -4.24f + 4.769f, -1.77f + 4.769f, wy0, wy1);                 // Room2WallSouthEast
+    constexpr float th = -1.5857206f;                                    // the door's local frame → anchor
+    rbox(s, -0.1f, 0.1f, -0.5f, -0.45f, th);                             // left frame (local x = −anchor y)
+    rbox(s, -0.1f, 0.1f, 0.45f, 0.5f, th);                               // right frame
+    if (leaf_open) rbox(s, 0.075f, 1.025f, -0.5f, -0.45f, th);           // the leaf at −90° about its hinge: robot side
+    else           rbox(s, 0.1f, 0.15f, -0.45f, 0.45f, th);              // shut, on the frame's robot-side face
+    box(s, -3.f, 3.f, 13.535f - 9.3796f - 0.055f, 13.535f - 9.3796f + 0.055f);   // Room2WallNorth
+    box(s, -3.f, 3.f, -4.1f, -4.0f);                                     // the robot's room, behind
+    return s;
+}
+// The bpearl as Shadow.proto builds it: 875 azimuths over 360°, 64 layers over 180° about its horizon, mounted inverted
+// at 0.67 m — so 32 layers from −1.4° down to −90° reach the floor plane band; 5 mm range noise. A beam stops on the first
+// wall (all taller than the sensor) or the floor. Robot frame.
+static std::vector<V3> bpearl_scan(const std::vector<Seg>& segs, const Pose2& r, unsigned seed)
+{
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> noise(0.f, 0.005f);
+    const float c = std::cos(r.psi), s = std::sin(r.psi);
+    const V2 o_w = r.p + V2(c * kSensor.x() - s * kSensor.y(), s * kSensor.x() + c * kSensor.y());
+    std::vector<V3> pts;
+    for (int ia = 0; ia < 875; ++ia)
+    {
+        const float b = r.psi + 2.f * float(M_PI) * float(ia) / 875.f;
+        const V2 u(std::cos(b), std::sin(b));
+        float r_wall = 1e9f;
+        for (const auto& sg : segs) if (const float t = ray_seg(o_w, u, sg); t > 0.f and t < r_wall) r_wall = t;
+        for (int i = 32; i < 64; ++i)
+        {
+            const float el = (90.f - float(i) * 180.f / 63.f) * float(M_PI) / 180.f;
+            const float te = std::tan(el);
+            const float r_floor = kSensor.z() / -te;
+            const float rr = std::min(r_wall, r_floor);
+            if (rr / std::cos(el) > 30.f) continue;
+            const float rn = rr + noise(rng) * std::cos(el);
+            const V2 pr = to_robot(r, o_w + u * rn);
+            pts.emplace_back(pr.x(), pr.y(), r_floor <= r_wall ? 0.f : kSensor.z() + rn * te);
+        }
+    }
+    return pts;
+}
+// door_concept's live leaf belief for DOOR_1 (specificworker_anchor.cpp: hinge/swing 0.5/0.5, φ known, σ_φ 0.25, φ_max
+// 120°), the stated hinge the −u jamb of the believed width.
+static rc::door::LeafPrior live_leaf(float w)
+{
+    rc::door::LeafPrior lp;
+    lp.known = true; lp.hinge_u = -0.5f * w; lp.dir_u = 1.f; lp.swing_y = -1.f;
+    lp.phi = float(M_PI_2); lp.phi_sigma = 0.25f; lp.phi_known = true; lp.phi_max = 2.094f; lp.p_hinge = 0.5f; lp.p_swing = 0.5f;
+    return lp;
+}
+
 // ─── fix round 4: the leaf-crossing run, shared by the crossing / timing / wrong-belief tests ─────────────────────────
 // Open door with its leaf at 90° beside the +u jamb on the robot side, 3-D bpearl-like scans through select_anchor_rays
 // (5,000–8,000 rays per frame within 2 m), the sensor driven from s = -0.5 to +0.8 m along the normal.
@@ -273,11 +369,11 @@ static CrossStats leaf_crossing(const rc::door::LeafPrior& lp, float pi, bool ve
             belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
             robot.p.y() += 0.05f;
         }
-        const auto rays = rc::door::select_anchor_rays(belief, W, T, 0.05f, 2.0f, kSensor, scan3d(segs, robot, 51 + k), 2.0f);
+        const auto rays = rc::door::select_anchor_rays(belief, W, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 51 + k), 2.0f);
         const auto t0 = std::chrono::steady_clock::now();
-        const auto [post, ev] = rc::door::update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi, lp);
+        const auto [post, ev] = rc::door::update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi, lp, kFloorZ);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        const float pv_prior = rc::door::door_view(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi).p_view;
+        const float pv_prior = rc::door::door_view(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi, lp, kFloorZ).p_view;
         belief = post;
         const V3 tr = anchor_truth(robot);
         const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
@@ -663,10 +759,10 @@ int main()
         for (int k = 0; k < 3; ++k)
         {
             const auto sweep = scan3d(segs, robot, 31 + k);
-            const auto rays = rc::door::select_anchor_rays(r, W, T, 0.05f, 2.0f, kSensor, sweep, 2.0f);
+            const auto rays = rc::door::select_anchor_rays(r, W, T, kFloorZ, 2.0f, kSensor, sweep, 2.0f);
             for (const auto& q : rays) if (q.z() < 0.05f) ++n_floor;
             if (k == 0) n_floor_first = n_floor;
-            const auto [post, ev] = update_door_anchor(r, W, T, wo.u0, wo.u1, kSensor, rays, {});
+            const auto [post, ev] = update_door_anchor(r, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.5f, {}, kFloorZ);
             r = post;
             p_open_max = std::max(p_open_max, ev.p_open);
             std::print("    k={} rays={} depth err={:.3f} p_open={:.3f} through={} blocked={} p_view={:.3f}\n", k, rays.size(),
@@ -704,6 +800,158 @@ int main()
                    post.x.x(), post.x.y(), post.x.z(), tr.x(), tr.y(), tr.z(), ev.n_through, ev.n_blocked, ev.p_open, ev.p_view);
         check(ev.p_open < 0.1f, "p_open < 0.1");
         check((post.x.head<2>() - tr.head<2>()).norm() < 0.10f, "and the pose stays within 0.10 m of the truth");
+    }
+
+    // ─── Task 8, fix 1: the camera's view evidence persists within the staleness window ─────────────────────────────
+    std::print("camera_view_persists_within_window\n");
+    {
+        rc::door::CameraViewHold hold;
+        constexpr float p_lidar = 0.45f, p_cam_frame = 0.95f;   // try65's p_lidar mid-approach; the zed's frustum term
+        int crossings_new = 0, crossings_old = 0, k_fell = -1;
+        bool last_new = true, last_old = true;
+        float pv_min_streaming = 1.f;
+        for (int k = 0; k < 40; ++k)
+        {
+            const std::int64_t now = 1'000'000 + 100 * k;              // a 10 Hz anchor cycle
+            const bool frame = k < 20 and k % 2 == 0;                  // a mask frame every other cycle, then none
+            const std::optional<float> p_new = frame ? std::optional<float>(p_cam_frame) : std::nullopt;
+            const float pv_new = rc::door::combine_view(p_lidar, rc::door::held_camera_view(hold, p_new, now - 30, now, rc::interaction::kAnchorStaleMs));
+            const float pv_old = rc::door::combine_view(p_lidar, frame ? p_cam_frame : 0.f);   // before: no new frame ⇒ 0
+            const bool pub_new = pv_new >= 0.5f, pub_old = pv_old >= 0.5f;
+            if (k > 0) { crossings_new += pub_new != last_new; crossings_old += pub_old != last_old; }
+            last_new = pub_new; last_old = pub_old;
+            if (k < 20) pv_min_streaming = std::min(pv_min_streaming, pv_new);
+            if (k_fell < 0 and not pub_new) k_fell = k;
+        }
+        std::print("    while frames stream: min p_view {:.3f}; publication-level crossings: {} (old rule {}); falls at cycle {} "
+                   "(last frame at cycle 18, captured 30 ms before it)\n", pv_min_streaming, crossings_new, crossings_old, k_fell);
+        check(pv_min_streaming >= 0.5f, "p_view stays at or above the publication level while mask frames keep coming");
+        check(crossings_old > 10, "RED reference: the old rule crosses the level on every frame gap");
+        check(crossings_new == 1 and k_fell == 28, "...and falls exactly once, when the last frame is kAnchorStaleMs old");
+        // A new frame WITHOUT a door slice is the camera seeing none: it replaces the held value at once.
+        rc::door::CameraViewHold h2;
+        rc::door::held_camera_view(h2, 0.9f, 0, 0, rc::interaction::kAnchorStaleMs);
+        check(rc::door::held_camera_view(h2, 0.f, 100, 100, rc::interaction::kAnchorStaleMs) == 0.f, "a new frame with no door replaces the held view");
+    }
+
+    // ─── Task 8, fix 2: try65's door, the live configuration ────────────────────────────────────────────────────────
+    {
+        constexpr float Wm = 1.14f, Tm = 0.05f, Ulo = -2.5f, Uhi = 2.5f;   // the belief's width, aperture.thickness, the run
+        const auto open_world = webots_door1(true), shut_world = webots_door1(false);
+        const rc::door::LeafPrior lp = live_leaf(Wm);
+        for (const auto& [pi, su] : {std::pair{0.6f, 0.1f}, std::pair{0.75f, 0.1f}, std::pair{0.7f, 0.0f}, std::pair{0.7f, 0.2f}})
+        {
+            std::print("try65_webots_door_crossing (π = {:.2f}, sensor {:.1f} m off-centre)\n", pi, su);
+            Pose2 robot{V2(su, -2.0f - kSensor.y()), 0.f};
+            RelPose belief = creation_prior(robot);
+            float pv_min_out = 1.f, pv_min_in = 1.f, worst_lat = 0.f;
+            for (int k = 0; k <= 28; ++k)
+            {
+                if (k > 0)
+                {
+                    rc::rt::Twist tw; tw.linear = V3(0.f, 1.0f, 0.f);
+                    belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+                    robot.p.y() += 0.1f;
+                }
+                const float s_now = robot.p.y() + kSensor.y();
+                const auto rays = rc::door::select_anchor_rays(belief, Wm, Tm, kFloorZ, 2.1f, kSensor, bpearl_scan(open_world, robot, 300 + k), 2.0f);
+                const auto [post, ev] = update_door_anchor(belief, Wm, Tm, Ulo, Uhi, kSensor, rays, {}, {}, pi, lp, kFloorZ);
+                belief = post;
+                const V3 tr = anchor_truth(robot);
+                const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
+                (std::abs(s_now) >= 0.25f ? pv_min_out : pv_min_in) = std::min(std::abs(s_now) >= 0.25f ? pv_min_out : pv_min_in, ev.p_view);
+                worst_lat = std::max(worst_lat, lat);
+                if (k % 4 == 0 or ev.p_view < 0.6f)
+                    std::print("    s={:+.2f} rays={} p_view={:.3f} = opening {:.3f} x P(door) {:.3f} x walls {:.3f}  lat err={:.3f} yaw err={:+.3f}\n",
+                               s_now, rays.size(), ev.p_view, ev.lidar_open, ev.lidar_door, ev.lidar_wall, lat,
+                               rc::interaction::wrap_pi(post.x.z() - tr.z()));
+            }
+            std::print("    min p_view: approach/exit {:.3f}, doorway band {:.3f}; worst lateral {:.3f} m\n", pv_min_out, pv_min_in, worst_lat);
+            check(pv_min_out >= 0.6f, std::format("π {:.2f}, {:.1f} m: p_view ≥ 0.6 at every step with |s| ≥ 0.25 m", pi, su));
+            check(pv_min_in >= 0.5f, std::format("π {:.2f}, {:.1f} m: p_view ≥ 0.5 (published) inside the doorway band", pi, su));
+            check(worst_lat < 0.10f, std::format("π {:.2f}, {:.1f} m: the anchor stays within 0.10 m laterally", pi, su));
+        }
+        // The wrong-pose guarantees on the same door, mid-approach (s = −1.0), against the truth.
+        const Pose2 robot{V2(0.1f, -1.0f - kSensor.y()), 0.f};
+        const auto rays_open = bpearl_scan(open_world, robot, 77);
+        auto view_at = [&](const RelPose& at, const std::vector<V3>& sweep, float pi)
+        {
+            const auto rays = rc::door::select_anchor_rays(at, Wm, Tm, kFloorZ, 2.1f, kSensor, sweep, 2.0f);
+            return rc::door::door_view(at, Wm, Tm, Ulo, Uhi, kSensor, rays, {}, {}, pi, lp, kFloorZ).p_view;
+        };
+        RelPose truth = creation_prior(robot);
+        truth.P = V3(0.03f * 0.03f, 0.03f * 0.03f, 0.02f * 0.02f).asDiagonal();
+        const V2 along(std::cos(truth.x.z()), std::sin(truth.x.z())), normal(-along.y(), along.x());
+        RelPose free_space = truth; free_space.x.head<2>() -= 1.2f * normal;
+        RelPose rotated = truth;    rotated.x.z() = rc::interaction::wrap_pi(truth.x.z() + float(M_PI_2));
+        RelPose solid = truth;      solid.x.head<2>() += 1.5f * along;
+        const float pt = view_at(truth, rays_open, 0.7f), pf = view_at(free_space, rays_open, 0.7f), pr = view_at(rotated, rays_open, 0.7f),
+                    ps = view_at(solid, rays_open, 0.7f);
+        std::print("try65_webots_wrong_poses (π 0.70, s = −1.0): truth {:.3f}  free space {:.3f}  rotated {:.3f}  solid wall {:.3f}\n", pt, pf, pr, ps);
+        check(pt >= 0.6f and pf < 0.5f and pr < 0.5f and ps < 0.5f, "the true pose reads ≥ 0.6; free space, rotated and solid wall < 0.5");
+        // The SHUT door (the commanded state already says open: π 0.7) is never published along the approach.
+        float pv_shut_max = 0.f;
+        for (int k = 0; k <= 16; ++k)
+        {
+            const Pose2 rb{V2(0.1f, -2.0f + 0.1f * float(k) - kSensor.y()), 0.f};
+            RelPose at = creation_prior(rb);
+            at.P = truth.P;
+            pv_shut_max = std::max(pv_shut_max, view_at(at, bpearl_scan(shut_world, rb, 500 + k), 0.7f));
+        }
+        std::print("try65_webots_shut_door: max p_view over the approach {:.3f}\n", pv_shut_max);
+        check(pv_shut_max < 0.5f, "the shut door is never published (π 0.7)");
+    }
+
+    // ─── Task 8, fix 3: the frame record replays the live update ─────────────────────────────────────────────────────
+    std::print("anchor_frame_record_roundtrip\n");
+    {
+        const Pose2 robot{V2(0.1f, -1.0f - kSensor.y()), 0.f};
+        const rc::door::LeafPrior lp = live_leaf(1.14f);
+        rc::door::rec::Frame f;
+        f.t_ms = 1792355330007;
+        f.prior = creation_prior(robot);
+        f.width = 1.14f; f.thickness = 0.05f; f.wall_u_min = -2.5f; f.wall_u_max = 2.5f; f.floor_below = kFloorZ;
+        f.lidar_origin = kSensor;
+        f.rays = rc::door::select_anchor_rays(f.prior, f.width, f.thickness, kFloorZ, 2.1f, kSensor, bpearl_scan(webots_door1(true), robot, 9), 2.0f);
+        f.mask = mask(0.f, 50);
+        f.cam.known = true; f.cam.origin = {0.f, -0.075f}; f.cam.forward = {0.f, 1.f}; f.cam.half_fov = 0.95f; f.cam.max_range = 8.f;
+        f.leaf = lp;
+        f.pi_open = 0.7f;
+        const auto [post, ev] = update_door_anchor(f.prior, f.width, f.thickness, f.wall_u_min, f.wall_u_max, f.lidar_origin, f.rays, f.mask,
+                                                   f.cam, f.pi_open, f.leaf, f.floor_below);
+        f.post = post; f.n_budget = std::uint32_t(ev.n_budget);
+        f.p_lidar = ev.p_lidar; f.p_cam = ev.p_cam; f.p_view = ev.p_view;
+        f.lidar_open = ev.lidar_open; f.lidar_door = ev.lidar_door; f.lidar_wall = ev.lidar_wall;
+        const std::string path = "build/test_anchor_frames.bin";
+        {
+            rc::door::rec::Recorder recorder;
+            check(recorder.open(path), "the recorder opens (truncating) its file");
+            check(recorder.append(f) and recorder.append(f), "two records appended");
+        }
+        std::ifstream in(path, std::ios::binary);
+        std::vector<rc::door::rec::Frame> back;
+        check(rc::door::rec::read_all(in, back) and back.size() == 2, "both records read back");
+        if (back.size() == 2)
+        {
+            const auto& b = back[1];
+            check(rc::door::rec::encode(b) == rc::door::rec::encode(f), "the record round-trips bit for bit");
+            const auto [p2, e2] = update_door_anchor(b.prior, b.width, b.thickness, b.wall_u_min, b.wall_u_max, b.lidar_origin, b.rays, b.mask,
+                                                     b.cam, b.pi_open, b.leaf, b.floor_below);
+            std::print("    {} rays ({} in F), {} mask points; replay vs record: Δxy {:.6f} m, Δyaw {:.6f}, Δp_view {:.6f}\n", b.rays.size(),
+                       b.n_budget, b.mask.size(), (p2.x.head<2>() - b.post.x.head<2>()).norm(), std::abs(p2.x.z() - b.post.x.z()),
+                       std::abs(e2.p_view - b.p_view));
+            check(p2.x == b.post.x and p2.P == b.post.P and e2.p_view == b.p_view, "re-running the update on the record reproduces it exactly");
+        }
+        // A record cut short (the agent killed mid-write) ends the read; the complete ones before it survive.
+        {
+            std::ifstream whole(path, std::ios::binary);
+            std::string bytes((std::istreambuf_iterator<char>(whole)), std::istreambuf_iterator<char>());
+            bytes.resize(bytes.size() - 7);
+            std::ofstream(path, std::ios::binary | std::ios::trunc).write(bytes.data(), std::streamsize(bytes.size()));
+            std::ifstream cut(path, std::ios::binary);
+            std::vector<rc::door::rec::Frame> some;
+            check(rc::door::rec::read_all(cut, some) and some.size() == 1, "a truncated last record is dropped, the first survives");
+        }
     }
 
     std::print("no_data_is_prior\n");

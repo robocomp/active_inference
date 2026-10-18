@@ -75,6 +75,7 @@
 #include "door_semantic_field.h"   // rc::SemanticProbField
 #include "door_actuator.h"          // rc::DoorActuator (RoboCompDoorControl client)
 #include "door_pragmatics.h"        // rc::door::InteractionState + the three contracts
+#include "anchor_frame_record.h"    // rc::door::rec::Recorder + rc::door::CameraViewHold (Task 8: the anchor's frame record)
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"   // rc::ConceptLidarIngestor (SHARED)
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::Anchor (SHARED)
 #include "door_world_registration.h" // rc::DoorWorldRegistration (room→world from named doors)
@@ -319,9 +320,11 @@ private:
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
         float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
+        rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame's P(in view), held kAnchorStaleMs
     };
     std::optional<PassageAnchor> passage_anchor_;
     std::ofstream anchor_log_;
+    rc::door::rec::Recorder anchor_frames_;   // Task 8 fix 3: etc/anchor_frames.bin, every measured anchor cycle (replay_anchor_frames)
     void step_passage_anchor();
     bool create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff);
     std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,

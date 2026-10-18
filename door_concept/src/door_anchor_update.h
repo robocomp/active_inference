@@ -111,6 +111,8 @@
  * prior, i.e. the odometry prediction, whose covariance grows with the motion.
  * REPORTED (fix round 4): p_view = 1 − (1 − p_lidar)(1 − p_cam), p_cam = p_cam_geom when a mask was consumed, else 0,
  * evaluated at the POSTERIOR (door_view): the pose the caller publishes is the pose whose visibility it reads.
+ * The CALLER then holds the last mask frame's p_cam while that frame is younger than kAnchorStaleMs (Task 8 fix 1:
+ * held_camera_view / combine_view): a cycle without a new frame is not "the camera sees nothing".
  * (The neighbourhood's half a width of wall each side is a DEFINITION of "the doorway", soft at its edges.)
  *
  * ─── THE ONLY DECISION LEVELS (deliberate, not model terms) ──────────────────────────────────────────
@@ -132,6 +134,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -150,7 +153,9 @@ struct AnchorEvidence
     // ─── Task 7: is the door being OBSERVED this frame (see "VISIBILITY" in the header) ─────────────────────
     float v_lidar = 0.f;                              // predicted beams on the doorway neighbourhood (Σ membership)
     float o_lidar = 0.f;                              // of those, explained by the doorway's own structure (Σ m·r)
-    float p_lidar = 0.f;                              // mean coverage of the doorway's cells (lidar_view)
+    float p_lidar = 0.f;                              // = lidar_open · lidar_door · lidar_wall (lidar_view)
+    float lidar_open = 0.f, lidar_door = 0.f, lidar_wall = 0.f;   // its three factors (diagnostics: the replay prints them)
+    int   n_budget = 0;                               // rays that entered F (after the ray budget), for the frame record
     float p_cam   = 0.f;                              // P(opening in the zed frustum) when a mask was consumed, else 0
     float p_view  = 0.f;                              // P(door in view) = 1 − (1 − p_lidar)(1 − p_cam)
 };
@@ -299,7 +304,8 @@ inline double log1m_exp(double a)
 }
 
 // A 2-D ray in ROBOT coordinates.
-struct Ray2 { Eigen::Vector2d o, e; };
+// floor: the return is on the FLOOR (below the caller's wall band): it hit no wall (Task 8, visibility only).
+struct Ray2 { Eigen::Vector2d o, e; bool floor = false; };
 
 // The ray in anchor coordinates: along-wall crossing u, the endpoint's signed depth d and the ORIGIN's signed
 // depth d_o (both along the ray's travel; d_o < 0 while the beam starts in front of the plane).
@@ -465,6 +471,7 @@ struct LeafModel
     // The configurations this stage's F marginalises: those carrying the posterior at the stage's start (see
     // select_leaf_configs); index -1 = the no-leaf branch.
     std::vector<int> active;
+    std::vector<double> active_w;   // their posterior weights, normalised over the active set (select_leaf_configs)
 };
 // Where this ray's segment-line meets the leaf segment at angle φ: log membership (soft at the leaf's ends, the hit
 // AHEAD of the origin) and the hit's signed depth in the ray's own convention (as UD::d).
@@ -499,6 +506,24 @@ inline LeafHit leaf_hit(const Eigen::Vector2d& oa, const Eigen::Vector2d& ea, co
     const double sgn = oa.y() <= 0 ? 1.0 : -1.0;
     h.d_hit = sgn * (oa.y() + t * v.y());
     return h;
+}
+// P(the line of sight origin → target is BLOCKED by configuration L's leaf) (Task 8, visibility only): the sight line
+// meets the leaf's centre line between its hinge and free edge, ahead of the origin and before the target — each of
+// the four soft at the jamb blur τ, as leaf_hit is. oa, target: anchor coordinates.
+inline double leaf_occlusion(const Eigen::Vector2d& oa, const Eigen::Vector2d& target, const LeafCfg& L, double len, double half_t,
+                             double tau)
+{
+    const Eigen::Vector2d v = target - oa;
+    const Eigen::Vector2d D(L.Dx, L.Dy);
+    const Eigen::Vector2d n_off = (L.du * L.sy) * Eigen::Vector2d(L.Dy, -L.Dx);
+    const Eigen::Vector2d H = Eigen::Vector2d(L.hu, L.sy * half_t) + kLeafHalfThick * n_off;   // the slab's centre line
+    const double den = v.x() * D.y() - v.y() * D.x();
+    if (std::abs(den) < 1e-12) return 0.0;
+    const Eigen::Vector2d q = H - oa;
+    const double t   = (q.x() * D.y() - q.y() * D.x()) / den;
+    const double lam = (q.x() * v.y() - q.y() * v.x()) / den;
+    const double vl  = v.norm();
+    return std::exp(log_sigmoid(lam / tau) + log_sigmoid((len - lam) / tau) + log_sigmoid(t * vl / tau) + log_sigmoid((1.0 - t) * vl / tau));
 }
 // The configurations and their prior weights from the door's belief (see LeafPrior).
 inline LeafModel make_leaf_model(const LeafPrior& lp, double w)
@@ -588,6 +613,7 @@ struct Problem
     double mask_var = 0;
     double beta_lidar = 1.0, beta_cam = 1.0;   // visibility tempering (fix 1): P(door in view) per sensor
     LeafModel leaf;                            // the open branch's swung leaf configurations (fix round 4)
+    double az_step = 0.0;                      // the frame's azimuth step (rad), measured from its rays (stage_rays); 0 = unknown
 
     // Fix the predictive spreads at the linearisation point x under belief P (P = 0: the measurement model alone).
     void linearise(const V3d& x, const M3d& P)
@@ -666,7 +692,7 @@ struct Problem
     // what the first found (fix round 4: COST, the full grid is ~130 configurations).
     void select_leaf_configs(const V3d& x, bool global)
     {
-        if (leaf.cfgs.empty()) { leaf.active.clear(); return; }
+        if (leaf.cfgs.empty()) { leaf.active.clear(); leaf.active_w.clear(); return; }
         std::vector<int> cand;
         for (std::size_t c = 0; c < leaf.cfgs.size(); ++c)
         {
@@ -678,6 +704,7 @@ struct Problem
             if (take) cand.push_back(int(c));
         }
         leaf.active.clear();
+        leaf.active_w.clear();
         const std::size_t nc = cand.size();
         std::vector<double> d(nc, 0.0);
         const double cz = std::cos(x.z()), sz = std::sin(x.z());
@@ -700,8 +727,10 @@ struct Problem
         {
             if (int(leaf.active.size()) >= kMaxLeafConfigs or kept >= 1.0 - 1e-6) break;
             leaf.active.push_back(c);
+            leaf.active_w.push_back(std::exp(l - z));
             kept += std::exp(l - z);
         }
+        for (double& w : leaf.active_w) w /= std::max(kept, 1e-300);
     }
     double F(const V3d& x) const
     {
@@ -761,7 +790,11 @@ inline M3d psd_information(const M3d& H, const M3d& Pinv)
 //   THE WALLS (cells weighted by 1 − m, m = σ((w/2 − |u|)/τ) the opening membership): a beam ENDING in a cell is
 //   consistent with the predicted wall (κ = 1 − m), one PASSING through it is not (κ = m) — passing through a
 //   predicted WALL is evidence the wall is not there. Per cell N = Σ g, C = Σ g·κ, coverage 1 − (2ε)^N (each beam may
-//   be clutter), score = coverage · C/N; the wall factor is the (1 − m)-weighted mean score.
+//   be clutter), score = coverage · C/N. Task 8: per SIDE, factor = 1 − Σ(1 − m)·[vis·(1 − coverage) + coverage·
+//   (1 − C/N)] / Σ(1 − m), vis = the cell's PREDICTED visibility (P(detect) from the angle its face subtends over the
+//   frame's measured azimuth step, × P(no predicted leaf in the line of sight)); the wall factor is the geometric mean
+//   of the two sides. A FLOOR return never ends in a cell (view_visit), and an ending beam's path through the structure
+//   band counts as passing only if the beam started inside it.
 //   THE OPENING is scored as a MODEL POSTERIOR (fix round 3): H_door — a doorway here, open with π = P(open) (the
 //   door's own belief, passed in) or shut with 1 − π, ONE state for the whole frame — against H_wall — solid wall
 //   here — at equal prior odds, from the beams that observed the opening cells (each observation weighted g·m):
@@ -778,11 +811,14 @@ inline M3d psd_information(const M3d& H, const M3d& Pinv)
 //  door open (review probe; tests pview_low_*). "Seen" must mean seen AS PREDICTED. (4) Scoring the opening by
 //  κ = m·π made p ∝ π: a correctly anchored open door read ≈ 0.86·π, under the publication level mid-cross at π ≤ 0.8,
 //  and a STALE π = 0.05 made a wrong pose on solid wall outscore the truth (review round 3; tests
-//  crossing_with_leaf_at_moderate_pi, true_pose_outscores_wrong_wall). Hence the posterior.
+//  crossing_with_leaf_at_moderate_pi, true_pose_outscores_wrong_wall). Hence the posterior. (5) Task 8, try65: at the
+//  CORRECT pose p_lidar read 0.44–0.47 live and 0.43–0.49 reproduced (the Webots door, the live caller configuration):
+//  the leaf swung 90° toward the robot HID the wall on its hinge side, those cells scored 0, and the wall factor sat at
+//  0.46 — half the doorway "unseen". Now 0.82–0.92 on the approach (test try65_webots_door_crossing).
 // ⚠ ACCEPTED LIMIT: a SHUT door offset ALONG its wall is unobservable by LiDAR — a flush leaf is the wall — so p stays
 //   high there and the anchor's lateral error is not corrected by the rays. Only the camera's door mask can resolve
 //   it, and the crossing needs the door open anyway (an open door's jambs pull the anchor into place).
-struct LidarView { double v = 0, o = 0, p = 0; };
+struct LidarView { double v = 0, o = 0, p = 0, open_cover = 0, p_door = 0, wall = 0; };   // p = open_cover · p_door · wall
 // Under the spreads pb.linearise(x, P) staged (the prior's). pi_open = P(open) from the door's belief.
 // The doorway region's cells: |u| < w in steps of the model's lateral resolution.
 struct ViewGrid
@@ -797,9 +833,13 @@ struct ViewGrid
 // The cells ONE beam observes (oa, ea: origin and endpoint in anchor coordinates; sd2 / su2: its depth spread and
 // lateral blur²), reported as observe(cell, weight, ends). The geometry described above; returns whether any cell was
 // observed (a beam that observes none says nothing about the doorway's visibility).
+// ★Task 8 — a FLOOR return (floor = true) never ENDS in a cell: the floor under a wall is hidden by the wall, so a beam
+//  that reached the floor inside the slab PASSED every cell it crossed there, its last one included. Projected to the
+//  floor plane and scored as an ending, a floor return inside a wall cell read as "the wall seen as predicted"; a pose
+//  dragged 90° onto the swung leaf collected 35 % consistent endings on a wall that was not there from them.
 template <class Observe>
 bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa, const Eigen::Vector2d& ea, double sd2,
-                double su2, Observe&& observe)
+                double su2, bool floor, Observe&& observe)
 {
     const double w = G.w;
     bool any = false;
@@ -816,7 +856,7 @@ bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa
         t0 = std::max(0.0, ta); t1 = std::min(1.0, tb);
         if (t0 > t1)
         {
-            if (ta < 0.0) return false;                                    // the slab is behind the beam's origin
+            if (ta < 0.0 or floor) return false;                           // the slab is behind the beam's origin / floor in front
             const double u_in = oa.x() + ta * (ea.x() - oa.x());
             if (std::abs(u_in) >= w) return false;
             const double gap = std::abs(ea.y()) - hs;                      // stopped SHORT: "ends" there, softly
@@ -824,7 +864,7 @@ bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa
             return any;
         }
     }
-    const bool ends_inside = t1 >= 1.0;                                     // the endpoint lies in the (outer) slab
+    const bool ends_inside = t1 >= 1.0 and not floor;                       // the endpoint lies in the (outer) slab
     auto pass_cells = [&](double pa_, double pb_)
     {
         if (pa_ > pb_) return;
@@ -843,12 +883,14 @@ bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa
         const double hc = 0.5 * model.t;
         const double len = (ea - oa).norm();
         const double t_stop = len > kRangeSigma ? 1.0 - kRangeSigma / len : 0.0;
-        if (std::abs(dy) < 1e-12) { if (std::abs(oa.y()) <= hc) pass_cells(0.0, t_stop); }
-        else
+        // ★Task 8: only a beam that STARTED inside the band (the sensor in the doorway) has such a path. A beam that
+        //  ENTERED the band from in front and ended in it was approaching its own return: on the try65 door (frame 20 cm
+        //  deep, the model's wall 5 cm thick) a grazing beam ending on the real wall face 1.5 cm behind the model's near
+        //  face ran ~9 cm "inside the wall" by the model, and those passes read the walls as absent at the doorway's mouth.
+        if (std::abs(oa.y()) <= hc)
         {
-            double ta = (-hc - oa.y()) / dy, tb = (hc - oa.y()) / dy;
-            if (ta > tb) std::swap(ta, tb);
-            pass_cells(std::max(0.0, ta), std::min(t_stop, tb));
+            if (std::abs(dy) < 1e-12) pass_cells(0.0, t_stop);
+            else pass_cells(0.0, std::min(t_stop, std::max((-hc - oa.y()) / dy, (hc - oa.y()) / dy)));
         }
         // A return ON A JAMB FACE observes the wall's END: the wall cells beside that jamb.
         const double tau = std::sqrt(kRangeSigma * kRangeSigma + su2);
@@ -876,6 +918,44 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x, double pi_open)
     for (int cc = 0; cc < G.n; ++cc)
         m[std::size_t(cc)] = std::exp(log_sigmoid((0.5 * w - std::abs(G.centre(cc))) / kRangeSigma));
     const double cz = std::cos(x.z()), sz = std::sin(x.z());
+    // ─── PREDICTED VISIBILITY of each cell (Task 8) = P(detect) × P(no leaf stands between the sensor and the cell), the
+    //     latter under the leaf configurations this frame's beams hold (select_leaf_configs; no leaf model ⇒ 1). A wall cell
+    //     the door's OWN swung leaf hides, or that the scanner's beams are not expected to reach (grazing, far), is not
+    //     expected to be observed, so its silence is not "the doorway is not seen": it does not count as MISSED (below).
+    //     It cannot excuse a contradiction: a cell some beam PASSED through is scored by its beams, hidden or not.
+    std::vector<double> vis(nc, 1.0);
+    if (not pb.rays.empty())
+    {
+        const Eigen::Vector2d qo = pb.rays.front().o - x.head<2>();
+        const Eigen::Vector2d oa(cz * qo.x() + sz * qo.y(), -sz * qo.x() + cz * qo.y());   // the LiDAR origin, anchor coords
+        const double side = oa.y() <= 0.0 ? -1.0 : 1.0;
+        for (int cc = 0; cc < G.n; ++cc)
+        {
+            // What the cell shows the sensor: the wall face turned toward it, one cell long.
+            const double y_face = side * 0.5 * pb.model.t;
+            const Eigen::Vector2d a(G.centre(cc) - 0.5 * G.cell, y_face), b(G.centre(cc) + 0.5 * G.cell, y_face);
+            // P(detect): the beams the scanner puts on the face, its subtended angle over the measured azimuth step —
+            // a face seen at grazing incidence, or far, is expected to catch none (Poisson, mean Δθ / step).
+            double v = 1.0;
+            if (pb.az_step > 0.0)
+            {
+                const Eigen::Vector2d da = a - oa, db = b - oa;
+                const double dtheta = std::abs(std::atan2(da.x() * db.y() - da.y() * db.x(), da.dot(db)));
+                v = -std::expm1(-dtheta / pb.az_step);
+            }
+            // ...times P(no swung leaf stands in the way), under the configurations this frame's beams hold.
+            if (not pb.leaf.active.empty())
+            {
+                double lv_ = 0.0;
+                const Eigen::Vector2d target(G.centre(cc), y_face);
+                for (std::size_t q = 0; q < pb.leaf.active.size(); ++q)
+                    lv_ += pb.leaf.active_w[q] * (pb.leaf.active[q] < 0 ? 1.0
+                           : 1.0 - leaf_occlusion(oa, target, pb.leaf.cfgs[std::size_t(pb.leaf.active[q])], pb.leaf.len, 0.5 * pb.model.t, kRangeSigma));
+                v *= lv_;
+            }
+            vis[std::size_t(cc)] = v;
+        }
+    }
     for (std::size_t i = 0; i < pb.rays.size(); ++i)
     {
         const auto r = Problem::at(pb.rays[i], x, cz, sz);
@@ -887,7 +967,7 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x, double pi_open)
         lv.v += wi * ne;
         lv.o += wi * ne * pb.model.responsibility(k, r.a);
         // Each observation counts for the beams this ray stands for (budget_rays): N and log r are SUMS over beams.
-        view_visit(pb.model, G, r.oa, r.ea, k.sd2, pb.spread[i].su2, [&](int cc, double g, bool ends)
+        view_visit(pb.model, G, r.oa, r.ea, k.sd2, pb.spread[i].su2, pb.rays[i].floor, [&](int cc, double g, bool ends)
         {
             const double mm = m[std::size_t(cc)];
             const double kappa = ends ? 1.0 - mm : mm;   // the WALL hypothesis' consistency (wall factor)
@@ -896,26 +976,42 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x, double pi_open)
             log_r += wi * g * mm * (ends ? -lambda : lambda);
         });
     }
-    double so = 0, wo = 0, sw = 0, ww = 0;
+    // THE WALLS, one per side of the opening (Task 8). Per cell: score = coverage 1 − (2ε)^N times consistency C/N (as
+    // before); a side's factor is 1 − (its MISSED mass)/(its mass), the missed mass Σ (1 − m)·vis·(1 − score): a cell the
+    // predicted leaf hides is not missed, a cell seen as predicted is not missed, a visible cell nobody saw or a beam
+    // passed through is. With every cell visible this is the side's mean score, the pre-Task-8 wall factor.
+    // The doorway needs BOTH walls: the factor is the GEOMETRIC mean of the sides — equal sides give the side's value (the
+    // old mean), one contradicted side pulls the pair down by its own factor. ★The arithmetic mean gave a pose dragged 90°
+    // onto the swung leaf (one side all passes, the other all endings) 0.5–0.55, on the publication level: 24 wrong frames
+    // published (dragged_posterior_not_published). The plain PRODUCT ruled those out too but squared every side
+    // (0.92 → 0.85) and failed the leaf crossing (0.44); the minimum failed it at 0.55 — both measured.
+    double so = 0, wo = 0, miss[2] = {0, 0}, mass[2] = {0, 0};
     for (std::size_t c = 0; c < nc; ++c)
     {
         const double cover = 1.0 - std::pow(2.0 * kClutter, N[c]);
         so += m[c] * cover; wo += m[c];
-        sw += (1.0 - m[c]) * (N[c] > 0 ? cover * (C[c] / N[c]) : 0.0); ww += (1.0 - m[c]);
+        const double consistent = N[c] > 0 ? C[c] / N[c] : 1.0;
+        const int side = G.centre(int(c)) < 0.0 ? 0 : 1;
+        miss[side] += (1.0 - m[c]) * (vis[c] * (1.0 - cover) + cover * (1.0 - consistent));
+        mass[side] += (1.0 - m[c]);
     }
-    // P(H_door | beams) with r = exp(log_r), in a form that cannot overflow.
-    double p_door;
+    // P(H_door | beams) = (π·r + 1 − π) / (π·r + 1 − π + 1), in a form that cannot overflow.
     if (log_r > 0.0)
     {
-        const double ir = std::exp(-log_r);                                   // 1/r
-        p_door = (pi_open + (1.0 - pi_open) * ir) / (pi_open + (1.0 - pi_open) * ir + ir);
+        const double ir = std::exp(-log_r);
+        lv.p_door = (pi_open + (1.0 - pi_open) * ir) / (pi_open + (1.0 - pi_open) * ir + ir);
     }
     else
     {
         const double r = std::exp(log_r);
-        p_door = (pi_open * r + 1.0 - pi_open) / (pi_open * r + 1.0 - pi_open + 1.0);
+        lv.p_door = (pi_open * r + 1.0 - pi_open) / (pi_open * r + 1.0 - pi_open + 1.0);
     }
-    lv.p = (wo > 0 ? so / wo : 0.0) * p_door * (ww > 0 ? sw / ww : 0.0);
+    lv.open_cover = wo > 0 ? so / wo : 0.0;
+    {
+        const double a = std::max(0.0, mass[0] > 0 ? 1.0 - miss[0] / mass[0] : 1.0), b = std::max(0.0, mass[1] > 0 ? 1.0 - miss[1] / mass[1] : 1.0);
+        lv.wall = std::sqrt(a * b);
+    }
+    lv.p = lv.open_cover * lv.p_door * lv.wall;
     return lv;
 }
 // Camera: both jambs inside the frustum (azimuth and range), blurred by their predictive spread under P.
@@ -1032,15 +1128,32 @@ inline Mask make_mask(const std::vector<Eigen::Vector3f>& mask_pts_robot, const 
     mask.valid = mask.sigma2 > 0;   // all points at one abscissa: no spread ⇒ no measured σ
     return mask;
 }
-inline std::vector<Ray2> make_rays(const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot)
+inline std::vector<Ray2> make_rays(const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot,
+                                   float floor_below = -std::numeric_limits<float>::infinity())
 {
     const Eigen::Vector2d o = lidar_origin_robot.head<2>().cast<double>();
     std::vector<Ray2> all_rays;
     all_rays.reserve(rays_robot.size());
     for (const auto& p : rays_robot)
         if (const Eigen::Vector2d e = p.head<2>().cast<double>(); (e - o).squaredNorm() > 1e-12)   // a zero-length ray has no direction
-            all_rays.push_back({o, e});
+            all_rays.push_back({o, e, p.z() < floor_below});
     return all_rays;
+}
+// The scanner's azimuth step, MEASURED from the frame (Task 8): the median gap between its distinct beam azimuths. The
+// elevation layers of one azimuth share it to float rounding (the same rigid transform moved every point), so azimuths
+// closer than ⚑ 1e-5 rad (ARITHMETIC: float rounding of a direction at metres of range is ~1e-7 rad) are one azimuth.
+inline double azimuth_step(const std::vector<Ray2>& rays)
+{
+    std::vector<double> az;
+    az.reserve(rays.size());
+    for (const auto& r : rays) { const Eigen::Vector2d v = r.e - r.o; az.push_back(std::atan2(v.y(), v.x())); }
+    std::ranges::sort(az);
+    std::vector<double> gaps;
+    for (std::size_t i = 1; i < az.size(); ++i)
+        if (const double g = az[i] - az[i - 1]; g > 1e-5) gaps.push_back(g);
+    if (gaps.empty()) return 0.0;
+    std::ranges::nth_element(gaps, gaps.begin() + std::ptrdiff_t(gaps.size() / 2));
+    return gaps[gaps.size() / 2];
 }
 // The frame's rays staged on pb at belief (x, P): this door's wall RUN decided at x (fix 2) and the RAY BUDGET.
 // A ray is a CANDIDATE when it is on this door's wall run (membership above 1e-9: below it the ray adds the
@@ -1060,9 +1173,10 @@ inline void stage_rays(Problem& pb, const std::vector<Ray2>& all_rays, const V3d
         sp_all[i] = predictive_spread(all_rays[i], x, P);
         const auto r = Problem::at(all_rays[i], x, cz, sz);
         run_all[i] = pb.model.run_membership(r.a, sp_all[i]);
-        if (run_all[i] > std::log(1e-9) or view_visit(pb.model, G, r.oa, r.ea, sp_all[i].var_d, sp_all[i].su2, [](int, double, bool) {}))
+        if (run_all[i] > std::log(1e-9) or view_visit(pb.model, G, r.oa, r.ea, sp_all[i].var_d, sp_all[i].su2, all_rays[i].floor, [](int, double, bool) {}))
             candidates.push_back(i);
     }
+    pb.az_step = azimuth_step(all_rays);
     const Budget bud = budget_rays(all_rays, candidates, x, pb.model.w);
     pb.rays.clear(); pb.run_log.clear(); pb.spread.clear();
     pb.rays.reserve(bud.idx.size());
@@ -1119,6 +1233,25 @@ inline std::vector<Eigen::Vector3f> select_anchor_rays(const rc::interaction::Re
     return out;
 }
 
+// ─── THE CAMERA'S VIEW EVIDENCE PERSISTS (Task 8, fix 1) ────────────────────────────────────────────────────────
+// A cycle without a NEW mask frame is a cycle the camera did not report on, not a cycle it saw nothing: the mask stream
+// runs slower than the LiDAR and each frame is consumed once. ★try65: p_cam read 0 on every cycle without a new frame, so
+// p_view alternated between 1 − (1 − p_lidar)(1 − p_cam) ≈ 1.00 and p_lidar ≈ 0.45 — 21 PAUSED/RESUMED transitions on a
+// correct anchor, and the controller fell back to a room route that failed. The last frame's P(opening in the frustum)
+// therefore stands while that frame is younger than the controller's own staleness window (kAnchorStaleMs, passed in:
+// the same level, no new constant); past it the camera says nothing (0).
+struct CameraViewHold { float p_cam = 0.f; std::int64_t stamp_ms = 0; bool valid = false; };
+// One cycle: a NEW mask frame (p_cam_new, captured at frame_stamp_ms) replaces the held value; the held value is then
+// returned while now_ms − its stamp < window_ms.
+inline float held_camera_view(CameraViewHold& h, std::optional<float> p_cam_new, std::int64_t frame_stamp_ms, std::int64_t now_ms,
+                              std::int64_t window_ms)
+{
+    if (p_cam_new.has_value()) h = {*p_cam_new, frame_stamp_ms, true};
+    return (h.valid and now_ms - h.stamp_ms < window_ms) ? h.p_cam : 0.f;
+}
+// P(door in view) from the two sensors, either of which may see it: 1 − (1 − p_lidar)(1 − p_cam).
+inline float combine_view(float p_lidar, float p_cam) { return 1.f - (1.f - p_lidar) * (1.f - p_cam); }
+
 // ─── P(door in view) OF A GIVEN POSE (fix round 4) ─────────────────────────────────────────────────────────────
 // The visibility of the doorway as predicted by the belief `at` (its mean and its covariance's predictive spread), from
 // one frame's rays (+ mask): the v_lidar / o_lidar / p_lidar / p_cam / p_view fields of AnchorEvidence (the rest stay
@@ -1127,25 +1260,29 @@ inline std::vector<Eigen::Vector3f> select_anchor_rays(const rc::interaction::Re
 inline AnchorEvidence door_view(const rc::interaction::RelPose& at, float width, float thickness, float wall_u_min, float wall_u_max,
                                 const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot,
                                 const std::vector<Eigen::Vector3f>& mask_pts_robot, const CameraFrustum& cam = {},
-                                float p_open_prior = 0.5f)
+                                float p_open_prior = 0.5f, const LeafPrior& leaf = {},
+                                float floor_below = -std::numeric_limits<float>::infinity())
 {
     using namespace anchor_detail;
     AnchorEvidence ev;
     const V3d x = at.x.cast<double>();
     const M3d P = at.P.cast<double>();
     const Mask mask = make_mask(mask_pts_robot, x);
-    const std::vector<Ray2> all_rays = make_rays(lidar_origin_robot, rays_robot);
+    const std::vector<Ray2> all_rays = make_rays(lidar_origin_robot, rays_robot, floor_below);
     if (all_rays.empty() and not mask.valid) return ev;
     Problem pb{x, P.inverse(), Model(width, thickness, wall_u_min, wall_u_max)};
     pb.mask = &mask;
+    pb.leaf = make_leaf_model(leaf, pb.model.w);
     stage_rays(pb, all_rays, x, P);
+    pb.select_leaf_configs(x, true);   // the leaf configurations this frame's beams hold at x: who hides what (Task 8)
     const LidarView lv = lidar_view(pb, x, std::clamp(double(p_open_prior), 0.0, 1.0));
     const double pc = camera_view(cam, pb.model.w, x, P);
     ev.v_lidar = float(lv.v);
     ev.o_lidar = float(lv.o);
     ev.p_lidar = float(lv.p);
+    ev.lidar_open = float(lv.open_cover); ev.lidar_door = float(lv.p_door); ev.lidar_wall = float(lv.wall);
     ev.p_cam   = mask.valid ? float(pc) : 0.f;
-    ev.p_view  = float(1.0 - (1.0 - lv.p) * (1.0 - double(ev.p_cam)));
+    ev.p_view  = combine_view(ev.p_lidar, ev.p_cam);
     return ev;
 }
 
@@ -1160,7 +1297,8 @@ inline std::pair<rc::interaction::RelPose, AnchorEvidence>
 update_door_anchor(const rc::interaction::RelPose& prior, float width, float thickness, float wall_u_min, float wall_u_max,
                    const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot,
                    const std::vector<Eigen::Vector3f>& mask_pts_robot, const CameraFrustum& cam = {},
-                   float p_open_prior = 0.5f, const LeafPrior& leaf = {})
+                   float p_open_prior = 0.5f, const LeafPrior& leaf = {},
+                   float floor_below = -std::numeric_limits<float>::infinity())
 {
     using namespace anchor_detail;
     AnchorEvidence ev;
@@ -1170,7 +1308,7 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     Problem pb{prior.x.cast<double>(), prior.P.cast<double>().inverse(), Model(width, thickness, wall_u_min, wall_u_max)};
     pb.mask = &mask;
     pb.leaf = make_leaf_model(leaf, pb.model.w);
-    const std::vector<Ray2> all_rays = make_rays(lidar_origin_robot, rays_robot);   // the counts below see them all
+    const std::vector<Ray2> all_rays = make_rays(lidar_origin_robot, rays_robot, floor_below);   // the counts below see them all
 
     if (all_rays.empty() and not mask.valid)
         return {prior, ev};   // nothing measured: the prior IS the posterior, bit for bit
@@ -1179,6 +1317,7 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     M3d P = prior.P.cast<double>();
     // ─── THIS DOOR'S WALL RUN, decided at the prior (fix 2), and the RAY BUDGET (fix round 4): stage_rays ───────────
     stage_rays(pb, all_rays, x, P);
+    ev.n_budget = int(pb.rays.size());
     pb.select_leaf_configs(x, true);
     // ─── VISIBILITY at the prior: how much of this frame's evidence is about THIS doorway (fix 1) — it TEMPERS the
     //     evidence. What is PUBLISHED (ev.p_view) is re-evaluated at the posterior below (fix round 4).
@@ -1299,8 +1438,9 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     //  covariance), the same frame says whether the pose being PUBLISHED is the one the beams see.
     {
         const AnchorEvidence vw = door_view(post, width, thickness, wall_u_min, wall_u_max, lidar_origin_robot, rays_robot,
-                                            mask_pts_robot, cam, p_open_prior);
+                                            mask_pts_robot, cam, p_open_prior, leaf, floor_below);
         ev.v_lidar = vw.v_lidar; ev.o_lidar = vw.o_lidar; ev.p_lidar = vw.p_lidar; ev.p_cam = vw.p_cam; ev.p_view = vw.p_view;
+        ev.lidar_open = vw.lidar_open; ev.lidar_door = vw.lidar_door; ev.lidar_wall = vw.lidar_wall;
     }
 
     // ─── Evidence at the posterior mean (COUNTING ONLY — see the header) ─────────────────────────────────────
