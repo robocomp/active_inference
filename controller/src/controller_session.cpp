@@ -1610,6 +1610,7 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     opt.clearance_floor = approach_body_.inscribed_radius();
     opt.iterations = 30;
     opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
+    opt.safety_margin = params_ ? params_->route_safety_margin_m : 0.10f;   // safe, not comfortable: see safety_margin
     opt.w_jerk = params_ ? params_->route_jerk_weight : 0.f;
     return opt;
 }

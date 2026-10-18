@@ -157,6 +157,7 @@ struct ControllerParams
     // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.
     float route_safety_bias = 0.5f;
+    float route_safety_margin_m = 0.10f;   // Controller.RouteSafetyMargin: clearance target = body extent + this (< 0 ⇒ old comfort form)
     // ── dkappa/ds PRIOR (see route_optimizer.h w_jerk) ───────────────────────────────────────────
     // The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed
     // roughly held, the roughness of the TURN RATE is the curvature RATE. Smoothing it in the geometry

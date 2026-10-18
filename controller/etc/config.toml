@@ -216,6 +216,13 @@ RouteOptimize = true
 # before that, extra cusps were what made it diverge.
 RouteSafetyBias = 0.75
 
+# ── SAFE, NOT COMFORTABLE (2026-10-18, user) ─────────────────────────────────────────────────────────
+# The route optimiser's clearance term only asks that the robot can GO THROUGH: its target at each point
+# is the body's exact extent toward the nearest obstacle at the route heading, plus this margin. It used
+# to be circumscribed radius + ComfortStandoff (~0.93 m), which pushed every stretch near a wall away
+# from it against the waypoint anchors and made the route spiky. < 0 restores that comfort target.
+RouteSafetyMargin = 0.10
+
 # ── SMOOTHNESS OF THE TURN, ATTACKED IN THE GEOMETRY ──────────────────────────────────────────────
 # Penalises dkappa/ds (the clothoid criterion) in the route objective. The robot must deliver
 # omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness

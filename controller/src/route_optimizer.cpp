@@ -332,6 +332,7 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
         // The elastic band gets this right by accident: it pushes each point individually.
         const float sc = std::sqrt(sc_t.clear * (cfg.w_clear * bias_g) / static_cast<float>(std::max<std::size_t>(1, n_quad)));
         const float dstar = std::max(0.05f, cfg.d_target);
+        const bool safe_only = cfg.safety_margin >= 0.f and static_cast<bool>(cfg.support_radius);
         for (std::size_t s = 0; s < n_spans; ++s)
             for (int q = 0; q < kQuadPerSpan; ++q)
             {
@@ -342,19 +343,31 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
 
                 const float d = cfg.distance ? cfg.distance(c) : 1e6f;
                 if (min_clearance) *min_clearance = std::min(*min_clearance, d);
-                const float deficit = dstar - d;
+                const Eigen::Vector2f g = cfg.distance_gradient ? cfg.distance_gradient(c)
+                                                                : Eigen::Vector2f::Zero();
+                // The target at THIS sample: the body's extent toward the obstacle at the curve's heading,
+                // plus the safety margin (see safety_margin) — or the global d_target in the old form. Held
+                // constant within an iteration: its dependence on the heading is not differentiated.
+                float target = dstar;
+                if (safe_only)
+                {
+                    const auto B1 = basis_d1(t);
+                    Eigen::Vector2f tan = Eigen::Vector2f::Zero();
+                    for (int k = 0; k < 4; ++k) tan += B1[k] * pad[s + k];
+                    if (tan.squaredNorm() > 1e-12f)
+                        target = std::max(0.05f, cfg.support_radius(std::atan2(tan.y(), tan.x()), -g) + cfg.safety_margin);
+                }
+                const float deficit = target - d;
                 if (deficit <= 0.f) { ++row; continue; }      // clear here: zero residual, zero gradient
 
-                const float u = deficit / dstar;                 // in [0,1]
+                const float u = deficit / target;                // in [0,1]
                 // r^2 = u^2 + peak*u^4 — see clear_peak. One residual, both behaviours.
                 const float pk = std::max(0.f, cfg.clear_peak);
                 const float g_u = std::sqrt(1.f + pk * u * u);
                 out.r(row) = sc * u * g_u;
-                const Eigen::Vector2f g = cfg.distance_gradient ? cfg.distance_gradient(c)
-                                                                : Eigen::Vector2f::Zero();
                 // d(deficit)/dc = -grad d, and dc/dp_m = sum of the basis weights that map to m.
                 // d/du [ u*sqrt(1+pk*u^2) ] = (1 + 2*pk*u^2) / sqrt(1+pk*u^2);  du/dc = -grad(d)/dstar
-                const float dru = -sc * (1.f + 2.f * pk * u * u) / (g_u * dstar);
+                const float dru = -sc * (1.f + 2.f * pk * u * u) / (g_u * target);
                 for (int k = 0; k < 4; ++k)
                 {
                     const int v = var_of(pad_to_ctrl(s + k, M), lo, hi);

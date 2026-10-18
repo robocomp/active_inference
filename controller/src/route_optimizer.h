@@ -81,6 +81,16 @@ struct RouteOptimizerConfig
 
     float h         = 0.40f;   // control spacing == the prior's length scale
     float d_target  = 0.60f;   // body reach + comfort standoff; deficit below this is what is penalised
+    // ── SAFE, NOT COMFORTABLE (2026-10-18, user) ─────────────────────────────────────────────────
+    // ≥ 0 and support_radius set ⇒ the clearance target at each curve sample is the body's EXACT extent
+    // toward the nearest obstacle at the route's own heading, plus this margin: the term only asks that the
+    // robot can go through, and is silent wherever it already can. d_target is then unused. A comfort
+    // standoff here pushed every stretch within ~0.9 m of a wall away from it while the anchors pulled the
+    // curve back to the waypoints, so the route bulged between waypoints and came out spiky (live capture,
+    // tour around room_1). Comfort is the tracker's/MPPI's job (ComfortStandoff), not the route's shape.
+    // ⚠ A stated margin, flagged: it stands for the cross-track error the tracker leaves, which is measured
+    //   (tracker_diag) but not yet fed back here. < 0 ⇒ the old d_target form.
+    float safety_margin = -1.f;
     float rho       = 0.49f;   // curvature normaliser, v_max^2 / a_lat_max
     float sigma_a   = 0.30f;   // how far the route may drift from what was clicked
     // Below this the route is not drivable at all, so a solve that lands there has failed rather than
