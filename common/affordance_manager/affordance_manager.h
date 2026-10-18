@@ -225,8 +225,20 @@ public:
     /// Restrict selection to the affordance node with this NAME (empty = no restriction, the default). Used by a
     /// consumer that sequences affordances itself (controller door passage): until that node is Offered,
     /// select_target returns nothing.
-    void set_required_name(std::string name) { required_name_ = std::move(name); }
+    /// `option` (2026-10-18) picks one of the options a PARAMETERISED node lists (aff_option_names, e.g. an object's
+    /// `approach` sides): the target is that option's pose, the claim names it (executing_option), and an option the
+    /// node does not list is not on offer. Empty = the node's own target, its default.
+    void set_required_name(std::string name, std::string option = {})
+    {
+        required_name_   = std::move(name);
+        required_option_ = std::move(option);
+    }
     [[nodiscard]] const std::string &required_name() const { return required_name_; }
+    [[nodiscard]] const std::string &required_option() const { return required_option_; }
+    /// The pose (x, y, yaw) a parameterised node lists for `option` (aff_option_names / _x_m / _y_m / _yaw_rad);
+    /// nullopt when it does not list it, or the lists are malformed.
+    static std::optional<Eigen::Vector3f> option_pose(const std::shared_ptr<DSR::DSRGraph> &graph, const DSR::Node &node,
+                                                      std::string_view option);
 
     // ── A VERDICT READ OFF THE MAP, REMEMBERED AGAINST THE MAP ───────────────────────────────────
     // "The body does not fit in that cell" and "there is no route to it and nowhere closer" are
@@ -424,6 +436,7 @@ private:
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     std::vector<Candidate> last_candidates_;
     std::string required_name_;        // set_required_name: "" = every affordance competes
+    std::string required_option_;      // set_required_name: the option of that node ("" = its default)
     std::string last_reject_reason_;   // all affordances evaluated in the last select_target()
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;

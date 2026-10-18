@@ -251,6 +251,11 @@ inline const std::vector<OpSpec>& ops()
         {.name = "go_to", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "to", .type = Ref, .required = true, .ref_kinds = kPlace, .positional = true},
                     {.name = "standoff_m", .type = Number, .positive = true}}},
+        // An object's ONE approach affordance (common/pragmatic_affordance/object_approach.h), optionally from a side the
+        // object offers (its aff_option_names). The object proposes where to stand; go_to keeps poses only.
+        {.name = "approach", .claims = kBase, .instant = false, .has_body = false,
+         .fields = {{.name = "object", .type = Ref, .required = true, .ref_kinds = kNode, .positional = true},
+                    {.name = "side", .type = String}}},
         {.name = "explore", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode, .positional = true},
                     {.name = "until", .type = Pred},

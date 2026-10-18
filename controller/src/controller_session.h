@@ -13,6 +13,7 @@
 #include "controller_lockon.h"
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
+#include "controller_approach_order.h"
 #include "controller_door_passage.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -159,6 +160,7 @@ public:
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
     rc::DoorPassage &door_passage() { return door_passage_; }
+    rc::ApproachOrder &approach_order() { return approach_order_; }
     /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open.
     void set_command_explore(bool on) { command_explore_ = on; }
     rc::MissionRunner &mission() { return mission_; }
@@ -869,6 +871,8 @@ private:
     rc::MissionRunner mission_;
     rc::DoorPassage door_passage_;                                  // controller_door_passage.h
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
+    rc::ApproachOrder approach_order_;                              // controller_approach_order.h
+    std::string approach_required_, approach_option_;               // its node and side this cycle ("" = none)
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
     float passage_door_width_ = 1.0f;                               // its width_m (caps a door line's clearance)

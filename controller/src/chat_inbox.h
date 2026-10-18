@@ -35,6 +35,7 @@
 
 #include <dsr/api/dsr_api.h>
 
+#include "controller_approach_order.h"
 #include "controller_door_passage.h"
 #include "controller_relative_motion.h"
 
@@ -56,12 +57,13 @@ public:
     /// What the last chat command asked for, kept by the caller so each cycle can mirror its progress.
     struct Tracked
     {
-        enum class Kind { None, Cross, Stop, Uncross, Rejected, Motion, Mission } kind = Kind::None;
+        enum class Kind { None, Cross, Stop, Uncross, Rejected, Motion, Mission, Approach } kind = Kind::None;
         std::uint64_t stamp = 0;   ///< the command's timestamp_agent, echoed on the edge
         std::string door;     ///< Cross: the door the passage was started through
         std::string reason;   ///< Rejected: why
         std::uint64_t motion_id = 0;   ///< Motion: RelativeMotion::View::id of the run this command started
         std::uint64_t mission_serial = 0;   ///< Mission: SpecificWorker::mission_serial_ of the mission it started
+        std::uint64_t approach_id = 0;      ///< Approach: ApproachOrder::View::id of the order it started
     };
 
     /// A new command since the last call, or nullopt. Never blocks; a missing node is "no command".
@@ -78,6 +80,11 @@ public:
     /// bt_state = "<turning|moving|done|failed|cancelled>|<progress or reason>|driving=on|off".
     [[nodiscard]] static std::pair<std::string, std::string> status_of_motion(const Tracked& t,
                                                                              const RelativeMotion::View& v, bool driving);
+    /// The same for `approach <object> [from <side>]`: in_progress while the order runs; completed when the object's
+    /// approach was SATISFIED, failed|<outcome> when it ended otherwise (or failed|gone), aborted when stopped or
+    /// superseded. bt_state = "approach|<object> [from <side>]: <node state or outcome>|driving=on|off".
+    [[nodiscard]] static std::pair<std::string, std::string> status_of_approach(const Tracked& t,
+                                                                               const ApproachOrder::View& v, bool driving);
 
 private:
     std::uint64_t node_id_ = 0;      ///< the node whose stamps we follow; a different id = a new channel

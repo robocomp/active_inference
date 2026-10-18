@@ -106,6 +106,7 @@ requires standoff_m
   wait s=5s until=door_open(passage:passage_0@room_1)<0.5
   explore room_1 budget_s=120s
   cross door_19
+  approach table_1 side=yp
 )";
         const auto m = parse_text(all);
         CHECK(m.has_value());

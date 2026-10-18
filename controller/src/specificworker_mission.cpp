@@ -74,6 +74,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission:
 		}
 		w_.cancel_relative_motion("superseded by a mission go_to");
 		w_.session_.door_passage().stop();
+		w_.session_.approach_order().stop();
 		w_.session_.mission().set_mode(rc::DriveMode::Target);   // mode first: set_mode drops a click target
 		const Eigen::Vector2f p{static_cast<float>(to->pose.x), static_cast<float>(to->pose.y)};
 		w_.session_.mission().set_click_target(p);
@@ -94,12 +95,27 @@ std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission:
 		}
 		w_.cancel_relative_motion("superseded by a mission explore");
 		w_.session_.door_passage().stop();
+		w_.session_.approach_order().stop();
 		w_.session_.mission().set_click_target(std::nullopt);
 		w_.clear_manual_target();
 		w_.session_.mission().set_mode(rc::DriveMode::Command);   // no door required: the selector chooses freely
 		w_.session_.set_command_explore(true);                     // …and is opened on purpose by this order
 		room_ = room->name;
 		ground(leaf, room_, {{"room", QString::fromStdString(room_)}});
+		return std::nullopt;
+	}
+	if (op == "approach")
+	{
+		const Ref ref = *leaf.ref("object");
+		const std::string side = leaf.string("side").value_or(std::string{});
+		w_.session_.mission().set_click_target(std::nullopt);
+		w_.clear_manual_target();
+		const auto r = w_.start_approach(ref.name, side, "mission", rc::ApproachOrder::After::Return);
+		if (not r.accepted) return r.reason;
+		approach_id_ = r.approach_id;
+		QJsonObject g{{"object", QString::fromStdString(ref.name)}};
+		if (not side.empty()) g["side"] = QString::fromStdString(side);
+		ground(leaf, ref.name, g);
 		return std::nullopt;
 	}
 	if (op == "wait")
@@ -162,6 +178,14 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		if (w_.world_model_.graph_state().room_name != room_) return {.state = LeafState::Failed, .detail = "outside_room"};
 		return {};
 	}
+	if (op == "approach")
+	{
+		const auto v = w_.session_.approach_order().view();
+		if (v.id != approach_id_) return {.state = LeafState::Failed, .detail = "abandoned"};
+		if (v.active) return {};
+		if (v.outcome == "satisfied") return {.state = LeafState::Succeeded};
+		return {.state = LeafState::Failed, .detail = v.outcome.empty() ? std::string("abandoned") : v.outcome};
+	}
 	if (op == "move")
 	{
 		using P = rc::RelativeMotion::Phase;
@@ -194,6 +218,10 @@ void SpecificWorker::MissionHost::cancel(const rc::mission::Step &leaf)
 	else if (op == "move")
 	{
 		if (w_.relative_motion_.view().id == motion_id_) w_.cancel_relative_motion("the mission step ended");
+	}
+	else if (op == "approach")
+	{
+		if (w_.session_.approach_order().view().id == approach_id_) w_.session_.approach_order().stop();
 	}
 	// explore / wait: what the next step (or the end of the mission) starts replaces them
 }
@@ -294,6 +322,7 @@ void SpecificWorker::hold_base()
 {
 	cancel_relative_motion("the mission holds the base");
 	session_.door_passage().stop();
+	session_.approach_order().stop();
 	session_.mission().set_mode(rc::DriveMode::Target);
 	session_.mission().set_click_target(std::nullopt);
 	clear_manual_target();
@@ -385,12 +414,14 @@ void SpecificWorker::journal_check_command(bool superseded)
 	const bool driving = driving_enabled_ and not paused_;
 	const auto &tr = journal_command_->tracked;
 	const bool motion = tr.kind == rc::ChatInbox::Tracked::Kind::Motion;
+	const bool approach = tr.kind == rc::ChatInbox::Tracked::Kind::Approach;
 	const auto passage = session_.door_passage().view();
 	std::string state = motion ? rc::ChatInbox::status_of_motion(tr, relative_motion_.view(), driving).first
+	                  : approach ? rc::ChatInbox::status_of_approach(tr, session_.approach_order().view(), driving).first
 	                           : rc::ChatInbox::status_of(tr, passage, driving).first;
 	// A passage never fails by itself — it waits for its step to be offered again — so its failure is SEEN while it
 	// runs (the same word MissionHost::poll reports) and becomes the outcome if it then ends without succeeding.
-	if (not motion and passage.door == tr.door and passage.attempts > 0 and passage.step != rc::DoorPassage::Step::Idle
+	if (not motion and not approach and passage.door == tr.door and passage.attempts > 0 and passage.step != rc::DoorPassage::Step::Idle
 	    and passage.step != rc::DoorPassage::Step::Done)
 		journal_command_->failure = passage.step == rc::DoorPassage::Step::Open
 		                                ? std::string("door_wont_open")
@@ -401,7 +432,7 @@ void SpecificWorker::journal_check_command(bool superseded)
 		state = "aborted|superseded";
 	}
 	if (state.starts_with("aborted") and not journal_command_->failure.empty()) state = "failed|" + journal_command_->failure;
-	journal_push({.kind = JK::StepEnd, .mission = journal_command_->id, .step_id = "1", .op = tr.kind == rc::ChatInbox::Tracked::Kind::Motion ? "move" : "cross",
+	journal_push({.kind = JK::StepEnd, .mission = journal_command_->id, .step_id = "1", .op = motion ? "move" : approach ? "approach" : "cross",
 	              .outcome = command_step_outcome(state), .attempt = 1});
 	journal_push({.kind = JK::MissionEnd, .mission = journal_command_->id, .outcome = state});
 	journal_command_.reset();
@@ -417,12 +448,17 @@ void SpecificWorker::journal_command(const MissionResult &r, const std::string &
 	journal_check_command(true);     // the command it replaced: its own end if it had one, else superseded
 	const std::string id = std::format("c{}", ++journal_commands_);
 	journal_push({.kind = JK::MissionStart, .mission = id, .op = r.kind, .source = journal_source(source), .text = text});
-	QJsonObject step{{"grounding", r.door.empty() ? QJsonObject{} : QJsonObject{{"door", QString::fromStdString(r.door)}}}};
+	QJsonObject step{{"grounding", not r.door.empty() ? QJsonObject{{"door", QString::fromStdString(r.door)}}
+	                               : not r.object.empty() ? QJsonObject{{"object", QString::fromStdString(r.object)}}
+	                                                      : QJsonObject{}}};
 	if (not r.door.empty()) step["target"] = QString::fromStdString(r.door);
+	if (not r.object.empty()) step["target"] = QString::fromStdString(r.object);
 	journal_push({.kind = JK::StepStart, .mission = id, .step_id = "1", .op = r.kind, .text = compact(step), .attempt = 1});
 	using TK = rc::ChatInbox::Tracked::Kind;
 	if (r.kind == "cross") journal_command_ = JournalCommand{.id = id, .tracked = {.kind = TK::Cross, .door = r.door}};
 	else if (r.kind == "move") journal_command_ = JournalCommand{.id = id, .tracked = {.kind = TK::Motion, .motion_id = r.motion_id}};
+	else if (r.kind == "approach")
+		journal_command_ = JournalCommand{.id = id, .tracked = {.kind = TK::Approach, .approach_id = r.approach_id}};
 	else
 	{
 		// stop / uncross: done the moment they are accepted.

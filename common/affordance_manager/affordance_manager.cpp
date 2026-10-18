@@ -175,6 +175,32 @@ bool AffordanceManager::consume_completion_event()
     return true;
 }
 
+std::optional<Eigen::Vector3f> AffordanceManager::option_pose(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                                             const DSR::Node &node, std::string_view option)
+{
+    const auto names = graph->get_attrib_by_name<aff_option_names_att>(node);
+    const auto xs = graph->get_attrib_by_name<aff_option_x_m_att>(node);
+    const auto ys = graph->get_attrib_by_name<aff_option_y_m_att>(node);
+    const auto ws = graph->get_attrib_by_name<aff_option_yaw_rad_att>(node);
+    if (not names.has_value() or not xs.has_value() or not ys.has_value() or not ws.has_value()) return std::nullopt;
+    const std::vector<float> &x = xs.value().get(), &y = ys.value().get(), &w = ws.value().get();
+    std::size_t i = 0, a = 0;
+    const std::string &s = names.value();
+    while (a <= s.size())
+    {
+        const auto b = std::min(s.find(',', a), s.size());
+        if (std::string_view(s).substr(a, b - a) == option)
+        {
+            if (i >= x.size() or i >= y.size() or i >= w.size()) return std::nullopt;   // malformed: not an offer
+            if (not std::isfinite(x[i]) or not std::isfinite(y[i]) or not std::isfinite(w[i])) return std::nullopt;
+            return Eigen::Vector3f(x[i], y[i], w[i]);
+        }
+        a = b + 1;
+        ++i;
+    }
+    return std::nullopt;
+}
+
 std::optional<AffordanceManager::Target> AffordanceManager::read_target(const std::shared_ptr<DSR::DSRGraph> &graph,
                                                                         const DSR::Node &node) const
 {
@@ -196,6 +222,15 @@ std::optional<AffordanceManager::Target> AffordanceManager::read_target(const st
     target.node_name = node.name();
     target.room_pos = Eigen::Vector2f(tx.value(), ty.value());
     target.yaw_rad = yaw.value();
+    // ★ A REQUIRED OPTION of a parameterised node: drive to THAT option's pose. One the producer does not list is
+    //   not on offer (the object proposes, the consumer only chooses), so the node is not a target at all.
+    if (not required_option_.empty() and node.name() == required_name_)
+    {
+        const auto pose = option_pose(graph, node, required_option_);
+        if (not pose.has_value()) return std::nullopt;
+        target.room_pos = Eigen::Vector2f(pose->x(), pose->y());
+        target.yaw_rad  = pose->z();
+    }
     target.epistemic_gain = gain.value();
     target.epistemic_pending = pending.value();
     // The contract's policy, straight off the node. Absent ⇒ Reach, which is how a contract-less node
@@ -546,6 +581,12 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     // claim this run must report.
     note_claim(graph, affordance_id, epoch);
 
+    // The option this claim chose, when the required node is the one claimed (set_required_name); "" = its default.
+    std::string option;
+    if (not required_option_.empty())
+        if (const auto n = graph->get_node(affordance_id); n.has_value() and n->name() == required_name_)
+            option = required_option_;
+
     // ★IDEMPOTENT. This is called every cycle the target decision is made, at 20 Hz. Publishing an
     // unchanged edge would put a delta on the wire per cycle per consumer, which is exactly the kind of
     // per-cycle chatter that has bitten this graph before. Compare first; write only on change.
@@ -555,8 +596,9 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
         const auto cx = graph->get_attrib_by_name<executing_target_x_m_att>(cur.value());
         const auto cy = graph->get_attrib_by_name<executing_target_y_m_att>(cur.value());
         const auto cw = graph->get_attrib_by_name<executing_target_yaw_rad_att>(cur.value());
+        const auto co = graph->get_attrib_by_name<executing_option_att>(cur.value()).value_or(std::string{});
         if (e.has_value() and cx.has_value() and cy.has_value() and cw.has_value()
-            and e.value() == epoch
+            and e.value() == epoch and co == option
             and std::abs(cx.value() - x) < 1e-4f and std::abs(cy.value() - y) < 1e-4f
             and std::abs(cw.value() - yaw) < 1e-4f)
             return true;                          // nothing changed; the standing claim is still true
@@ -586,6 +628,7 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     graph->add_or_modify_attrib_local<executing_target_x_m_att>(edge, x);
     graph->add_or_modify_attrib_local<executing_target_y_m_att>(edge, y);
     graph->add_or_modify_attrib_local<executing_target_yaw_rad_att>(edge, yaw);
+    if (not option.empty()) graph->add_or_modify_attrib_local<executing_option_att>(edge, option);
     return graph->insert_or_assign_edge(std::move(edge));
 }
 

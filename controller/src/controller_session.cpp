@@ -190,6 +190,20 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                  door_passages_);
     }
 
+    // ── APPROACH ORDER (controller_approach_order.h): `approach <object> [from <side>]` — the object's ONE approach
+    //    affordance and the side asked for. A single command HOLDS position when it ends (2026-10-18, user): the mode
+    //    stays Command with no order standing, where the selector does not forage.
+    {
+        auto ao = approach_order_.update(*graph_);
+        if (ao.event.has_value()) std::println("{}", *ao.event);
+        if (approach_order_.take_finished())
+            std::println("[approach] order finished — {}", approach_order_.view().after == rc::ApproachOrder::After::Hold
+                                                               ? "holding position until the next command or mission"
+                                                               : "back to the mission");
+        approach_required_ = std::move(ao.required);
+        approach_option_ = std::move(ao.option);
+    }
+
     // ── THE ROBOT'S OWN BODY, ONCE, AS SOON AS ITS NODE EXISTS ───────────────────────────────────
     // ★NOT IN initialize(). The robot node may not have synced from the persistent server yet at that point
     // — the same reason the stale-node sweep runs twice (CLAUDE.md) — and a body loaded from a node that is
@@ -775,9 +789,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
     // Door passage: the selector may take only the step's affordance. On its start the claim on whatever was being
     // executed (the explorer's afford_room, typically) is released, exactly as an abandoned goal is above.
-    if (door_passage_.take_just_started())
+    const bool door_started = door_passage_.take_just_started();
+    const bool approach_started = approach_order_.take_just_started();   // evaluated whatever door_started is
+    if (door_started or approach_started)
     {
-        std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
+        if (door_started)
+            std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
+        else
+            std::println("{} — releasing the current claim; selection now restricted", approach_order_.view().last_event);
         affordance_manager.release_execution_claim(graph_);
         // AND whatever it was running: a lock-on/orient left armed completes on the NEXT affordance claimed and stamps
         // ITS outcome there (live try23: the epistemic aff_door_36 servo LOCKED after `cross` was claimed and reported
@@ -808,13 +827,15 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         current_plan_.reset();
         plan_spline_valid_ = false;
     }
-    affordance_manager.set_required_name(door_required_);
+    // One order at a time (starting either stops the other, specificworker.cpp); the door's has the base if both name one.
+    if (not door_required_.empty()) affordance_manager.set_required_name(door_required_);
+    else affordance_manager.set_required_name(approach_required_, approach_option_);
     // ★ MISSION (COMMAND) MODE TAKES ORDERS, IT DOES NOT FORAGE (2026-10-18, user). The selector runs there only
     //   for an order: a door passage (door_required_ names its step) or an `explore`, which opens the contest on
     //   purpose. With no order standing — after `stop`, or before the first — the contest stayed open and the robot
     //   went off on its own: live, after a chat `stop` it claimed aff_door_1 (an inspect look) over and over.
     const bool command_without_order = mission_.mode() == rc::DriveMode::Command
-                                   and door_required_.empty() and not command_explore_;
+                                   and door_required_.empty() and approach_required_.empty() and not command_explore_;
     const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
                             or command_without_order
                             ? std::nullopt
