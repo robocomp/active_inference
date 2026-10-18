@@ -17,6 +17,7 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/specificworker_anchor.cpp
   ../src/door_config.cpp
   ../src/door_scene_graph.cpp
   ../src/door_fitter.cpp

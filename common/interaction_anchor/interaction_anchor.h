@@ -76,6 +76,13 @@ public:
                                         int agent_id, const RelPose& init);
     bool write(DSR::DSRGraph& G, const RelPose& r);              // the stamped RT edge Shadow → anchor
     bool relink(DSR::DSRGraph& G, std::uint64_t new_object_id);  // the original, after re-identification
+    // Name this anchor on `affordance_id` (fresh read, whole-node update, written only when the link is
+    // missing or names something else). If it differs from the affordance held so far, that one's link is
+    // dropped first (only if it still names us) and this becomes the affordance remove() unlinks. Two uses:
+    // ONE anchor serving successive affordances on the same object (door: approach → cross), and re-asserting
+    // the link every cycle — a consumer's whole-node update of the affordance can erase an attribute it never
+    // read. false if the affordance node is missing or the write fails.
+    bool link_affordance(DSR::DSRGraph& G, std::uint64_t affordance_id);
     void remove(DSR::DSRGraph& G);                               // node, edge, and the affordance's link
     [[nodiscard]] std::uint64_t id() const { return id_; }
     [[nodiscard]] std::uint64_t object_id() const { return object_id_; }

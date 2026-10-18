@@ -102,6 +102,10 @@ void SpecificWorker::cleanup_owned_nodes()
     // door_1 on the same physical door instead of renumbering by whatever it sees first.
     remember_live_identities();
 
+    // The passage anchor first: its link lives on an affordance about to be swept, and the copy hangs from the
+    // robot, outside every room the sweeps below walk.
+    remove_passage_anchor("agent shutting down");
+
     // Sweep every affordance node parented to a door (robust to renames / orphans not tracked in
     // instances_), while the door parents still exist for the parent-type lookup.
     remove_stale_affordance_nodes();

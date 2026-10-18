@@ -32,6 +32,8 @@
 #define SPECIFICWORKER_H
 
 #include <atomic>
+#include <fstream>
+#include <string_view>
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
 #include <limits>
 #include <memory>
@@ -74,6 +76,7 @@
 #include "door_actuator.h"          // rc::DoorActuator (RoboCompDoorControl client)
 #include "door_pragmatics.h"        // rc::door::InteractionState + the three contracts
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"   // rc::ConceptLidarIngestor (SHARED)
+#include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::Anchor (SHARED)
 #include "door_world_registration.h" // rc::DoorWorldRegistration (room→world from named doors)
 #include "../../common/rgb_ingestor/rgb_ingestor.h"
 #include "../../common/rgb_ingestor/depth_ingestor.h"   // rc::RgbIngestor (SHARED media-plane RGB)
@@ -285,6 +288,38 @@ private:
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     void step_entry_mirrors();
+
+    // ── THE INTERACTION ANCHOR: the passage door hung from the robot (specificworker_anchor.cpp) ──────────
+    // While the controller executes this door's `approach` or `cross` (its `executing` edge, read through
+    // PragmaticAffordance::claimed()/claim() = AffordanceManager::read_executing), a shallow copy
+    // `door_N@robot` hangs from the robot node (common/interaction_anchor). Its robot-relative pose is
+    // initialised ONCE from the room frames, then predicted by odometry and corrected by the bpearl rays and
+    // the door mask in the ROBOT frame (door_anchor_update.h), so a room-frame jump cannot move the target.
+    // ONE anchor per passage: it survives approach → open → cross, the room switch (relink, never removed by
+    // it) and the gaps between claims, and goes when the cross ends, the consumer turns to something else, or
+    // the agent exits. See step_passage_anchor() for the state machine.
+    struct PassageAnchor
+    {
+        std::optional<rc::interaction::Anchor> anchor;    // engaged while the node exists
+        std::uint64_t door_id = 0;                        // the original door (follows relink)
+        std::string   door_name;                          // its name at creation (one name per doorway)
+        std::uint64_t linked_aff = 0;                     // the affordance that names the anchor now
+        int           linked_epoch = -1;                  // the executing epoch seen on it; -1 = unknown
+        rc::interaction::RelPose pose;                    // the belief, robot frame
+        float width = 0.9f, thickness = 0.05f, height = 2.0f;   // refreshed from the door while it is fitted
+        bool  approach_was_claimed = false, cross_was_claimed = false;
+        int   last_mask_frame = -1;                       // each mask frame is evidence ONCE
+        std::int64_t last_lidar_stamp = 0;                // each bpearl capture is evidence ONCE
+    };
+    std::optional<PassageAnchor> passage_anchor_;
+    std::ofstream anchor_log_;
+    void step_passage_anchor();
+    bool create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff);
+    std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,
+                                                             const std::optional<rc::interaction::RelPose>& keep_side_of) const;
+    void remove_passage_anchor(std::string_view why);
+    void relink_passage_anchor(std::uint64_t new_door_id, std::string_view why);
+    std::string robot_node_name() const;
     // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
     // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The
     // same attribute trio table/cabinet/refrigerator already consume, so this is one more reader, not a

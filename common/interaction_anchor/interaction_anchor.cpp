@@ -151,6 +151,23 @@ bool Anchor::relink(DSR::DSRGraph& G, std::uint64_t new_object_id)
     return true;
 }
 
+bool Anchor::link_affordance(DSR::DSRGraph& G, std::uint64_t affordance_id)
+{
+    if (id_ == 0 or affordance_id == 0) return false;
+    if (affordance_id != affordance_id_)
+    {
+        unlink_affordance(G, affordance_id_, id_);   // the old one must not keep pointing at a copy it no longer uses
+        affordance_id_ = affordance_id;
+    }
+    auto aff = G.get_node(affordance_id);
+    if (not aff.has_value()) return false;
+    if (const auto link = G.get_attrib_by_name<interaction_node_id_att>(aff.value());
+        link.has_value() and link.value() == id_)
+        return true;                                 // already there: no write, no churn
+    G.add_or_modify_attrib_local<interaction_node_id_att>(aff.value(), id_);
+    return G.update_node(aff.value());
+}
+
 void Anchor::remove(DSR::DSRGraph& G)
 {
     if (id_ == 0) return;

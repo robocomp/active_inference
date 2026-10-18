@@ -373,7 +373,11 @@ void SpecificWorker::initialize()
             .terminal_shutdown  = [this] { terminal_shutdown(); },
             // One-shot, POST-SYNC: leftovers from a crashed previous run. The initialize() sweep can run before
             // those nodes arrive from the persistent DSR server, and this fires before the first compute().
-            .on_first_operating = [this] { remove_stale_affordance_nodes(); },
+            .on_first_operating = [this] {
+                remove_stale_affordance_nodes();
+                // Anchors a SIGKILLed previous run left hanging from the robot (they may sync in after initialize()).
+                if (G) rc::interaction::sweep_stale(*G, agent_id);
+            },
             .on_optional_peer_lost  = [this](const std::string &name, std::uint32_t id)
                                       { on_optional_peer_lost(name, id); },
             .on_optional_peer_ready = [this](const std::string &name, std::uint32_t id)
@@ -396,6 +400,9 @@ void SpecificWorker::initialize()
     // Connecting after this sweep (and after fitter_ is built) both avoids that null-deref SIGSEGV and
     // skips a pointless self-notification for our own cleanup deletions.
     remove_owned_door_nodes();
+    // …and any passage anchor (`door_N@robot`) of ours a crashed run left under the robot, with the links our
+    // affordances still hold to it. Again once on the first Operating entry (post-sync), like the affordances.
+    rc::interaction::sweep_stale(*G, agent_id);
 
     // Resolve room node
     if (const auto room = rc::room::current_room(*G); room.has_value())
@@ -1062,7 +1069,8 @@ void SpecificWorker::compute()
     // Doors are generic `object` nodes named "door_*" (schema migration); filter by name prefix.
     const auto door_nodes = G->get_nodes_by_type("object");
     for (const auto& node : door_nodes)
-        if (node.name().starts_with("door") and not rc::room::is_proto_mirror(*G, node))   // a mirror is not a belief
+        if (node.name().starts_with("door") and not rc::room::is_proto_mirror(*G, node)   // a mirror is not a belief
+            and not rc::interaction::is_anchor(*G, node))   // nor is the passage door's robot-relative copy
             process_door_node(node);
 
     // ── The three PRAGMATIC affordances: approach / open / cross ──────────────────────────────────
@@ -1077,6 +1085,9 @@ void SpecificWorker::compute()
             step_pragmatic_affordances(inst);
     for (const auto& [door_id, inst] : fitter_->instances())
         remember_door(inst);
+    // The passage door hung from the robot while its approach/cross executes — AFTER the pragmatic step, so the
+    // claims it reads were polled this cycle (specificworker_anchor.cpp).
+    step_passage_anchor();
 
     // Overall compute()-cycle rate: counts every cycle, prints "Epoch time = …ms. Fps = N" once a
     // second (FPSCounter::print is throttled and self-counting).
@@ -3991,6 +4002,12 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                                    dst.phi_sigma * 57.2958f, dst.phi_curve.size());
                     }
         }
+    // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
+    //   one thing the room switch owes it is its ORIGINAL: when the door carried across is the anchored one (same
+    //   source node, or the same doorway name — one name per doorway), the anchor now names that door.
+    if (passage_anchor_.has_value() and adopt_mirror != 0 and adopted_from.has_value()
+        and (adopted_from->source_id == passage_anchor_->door_id or adopted_from->name == passage_anchor_->door_name))
+        relink_passage_anchor(adopt_mirror, "room switch: the crossed door, re-identified in the new room");
 }
 
 
@@ -4119,6 +4136,8 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
         return;
     if (rc::room::is_proto_mirror(*G, node_opt.value()))
         return;   // an entry mirror under a proto-room — never a fitted instance (see step_entry_mirrors)
+    if (rc::interaction::is_anchor(*G, node_opt.value()))
+        return;   // `door_N@robot`: the passage door's robot-relative copy, never a fitted instance
 
     fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }

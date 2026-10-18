@@ -90,6 +90,17 @@ public:
     std::optional<LidarSweep> poll(const std::string& target_frame,
                                    bool interpolate = true, bool enabled = true);
 
+    // The SAME cached sweeps poll() last staged, transformed into ANOTHER frame — drains nothing, so a
+    // consumer that needs one sweep in two frames (door_concept: room frame for the leaf, robot frame for the
+    // interaction anchor) calls poll() once and restage() for the second frame. A second poll() would find
+    // nothing fresh and return nullopt. poll() builds its own result through this same function.
+    // nullopt when no plane has a cache yet or no transform resolves. Main-thread only (reads the graph).
+    std::optional<LidarSweep> restage(const std::string& target_frame, bool interpolate = true) const;
+
+    // The newest capture stamp among the cached planes (0 = nothing cached): lets a restage() consumer
+    // tell a new sweep from one it has already used.
+    [[nodiscard]] std::int64_t newest_cache_stamp() const noexcept;
+
     // True once at least one plane has a live subscriber.
     [[nodiscard]] bool any_live() const noexcept;
 

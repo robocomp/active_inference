@@ -37,6 +37,7 @@ bool ConceptLidarIngestor::pump()
 {
     helios_fresh_ = false;
     bpearl_fresh_ = false;
+    bpearl_robot_fresh_ = false;
 
     const LidarGates g = gates_ ? gates_() : LidarGates{};
 
@@ -65,6 +66,19 @@ bool ConceptLidarIngestor::pump()
             origin_bpearl_room_ = bp->origin;
             bpearl_fresh_       = true;
         }
+        // The same capture in the ROBOT frame, from the reader's cache (no second drain). Keyed on the cache's
+        // stamp, not on bpearl_fresh_, so a sweep whose ROOM transform failed is still staged here.
+        if (g.bpearl_precision > 0.0f)
+            if (const auto ts = reader_bpearl_->newest_cache_stamp(); ts > bpearl_robot_stamp_ms_)
+                if (const auto robots = G_->get_nodes_by_type("robot"); not robots.empty())
+                    if (auto rb = reader_bpearl_->restage(robots.front().name(), /*interpolate=*/false);
+                        rb.has_value() and not rb->points.empty())
+                    {
+                        sweep_bpearl_robot_    = std::move(rb->points);
+                        origin_bpearl_robot_   = rb->origin;
+                        bpearl_robot_stamp_ms_ = ts;
+                        bpearl_robot_fresh_    = true;
+                    }
     }
     return helios_fresh_ or bpearl_fresh_;
 }

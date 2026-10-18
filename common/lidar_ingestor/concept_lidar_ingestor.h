@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -69,6 +70,15 @@ public:
     const std::vector<Eigen::Vector3f>& sweep_bpearl_room()  const { return sweep_bpearl_room_; }
     const Eigen::Vector3f&              origin_bpearl_room() const { return origin_bpearl_room_; }
     bool                                bpearl_fresh() const { return bpearl_fresh_; }
+    // The SAME bpearl sweep in the ROBOT frame (the node of type "robot", e.g. "Shadow"; the robot base at floor
+    // level), restaged from the reader's cache — no second drain, the room-frame path above is untouched.
+    // Robot-fixed target ⇒ only static mount edges are crossed, so the stamp does not matter (Nearest).
+    // Staged on every pump() that sees a new bpearl capture, even when the ROOM transform did not resolve:
+    // a robot-frame consumer (the interaction anchor) must not depend on the room existing.
+    const std::vector<Eigen::Vector3f>& sweep_bpearl_robot()  const { return sweep_bpearl_robot_; }
+    const Eigen::Vector3f&              origin_bpearl_robot() const { return origin_bpearl_robot_; }
+    bool                                bpearl_robot_fresh()  const { return bpearl_robot_fresh_; }
+    std::int64_t                        bpearl_robot_stamp_ms() const { return bpearl_robot_stamp_ms_; }   // capture stamp
 
 private:
     std::shared_ptr<DSR::DSRGraph>               G_;
@@ -86,6 +96,10 @@ private:
     std::vector<Eigen::Vector3f> sweep_bpearl_room_;                       // latest bpearl sweep, ROOM frame
     Eigen::Vector3f              origin_bpearl_room_ = Eigen::Vector3f::Zero();
     bool                         bpearl_fresh_ = false;
+    std::vector<Eigen::Vector3f> sweep_bpearl_robot_;                      // latest bpearl sweep, ROBOT frame
+    Eigen::Vector3f              origin_bpearl_robot_ = Eigen::Vector3f::Zero();
+    bool                         bpearl_robot_fresh_ = false;
+    std::int64_t                 bpearl_robot_stamp_ms_ = 0;               // capture stamp of the staged sweep
 };
 
 }  // namespace rc

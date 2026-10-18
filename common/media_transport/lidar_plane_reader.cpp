@@ -5,6 +5,7 @@
 
 #include "lidar_plane_reader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <print>
 #include <utility>
@@ -44,6 +45,15 @@ bool LidarPlaneReader::any_live() const noexcept
         if (p.sub)
             return true;
     return false;
+}
+
+std::int64_t LidarPlaneReader::newest_cache_stamp() const noexcept
+{
+    std::int64_t t = 0;
+    for (const auto& p : preferred_planes_)
+        if (not p.raw_cache.empty())
+            t = std::max(t, p.cache_ts);
+    return t;
 }
 
 void LidarPlaneReader::ensure_subscribers()
@@ -221,9 +231,15 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
     if (not any_fresh)
         return std::nullopt;
 
-    // 2) Build the sweep from EVERY plane's LATEST cache — not only the planes fresh this poll — so an
-    //    out-of-phase plane (helios vs bpearl) never drops out and the merged cloud stays whole. Each plane
-    //    is transformed at ITS OWN capture stamp (correct per-plane registration on a moving robot).
+    // 2) Build the sweep from EVERY plane's LATEST cache — see restage().
+    return restage(target_frame, interpolate);
+}
+
+std::optional<LidarSweep> LidarPlaneReader::restage(const std::string& target_frame, bool interpolate) const
+{
+    // Build the sweep from EVERY plane's LATEST cache — not only the planes fresh this poll — so an
+    // out-of-phase plane (helios vs bpearl) never drops out and the merged cloud stays whole. Each plane
+    // is transformed at ITS OWN capture stamp (correct per-plane registration on a moving robot).
     LidarSweep sweep;
     bool any = false;
     // One slot per emitted plane id, so a consumer can recover WHEN each plane's points were taken
