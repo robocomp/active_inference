@@ -37,6 +37,7 @@ current room: room_1
 other rooms in the live map: none
 robot pose in room_1: x=0.42 m, y=-1.10 m, yaw=88 deg
 robot motion now (odometry, 80 ms old): forward 0.00 m/s, sideways 0.00 m/s, not turning
+controller target now: none (it is executing no affordance)
 doors of the current room (2):
   - door_0: 3.1 m away, bearing +62 deg (ahead-left), P(open)=0.91, affordances: approach=offered open=absent cross=offered [nearest]
   - door_1: 4.4 m away, bearing -120 deg (behind-right), P(open)=0.12, affordances: approach=offered open=offered cross=absent
@@ -134,8 +135,9 @@ def system():
 def state(last_move="none", extra=""):
     expl = {"move 0.30": "move 0.30 (move forward 0.30 m)", "move -0.30": "move -0.30 (move backward 0.30 m)"}
     base = STATE.replace("last command sent from this chat: none\n", "") if "last command sent" in extra else STATE
-    if "robot motion now" in extra:   # the case's own motion line replaces the standing-still one
-        base = "\n".join(l for l in base.split("\n") if not l.startswith("robot motion now"))
+    for key in ("robot motion now", "controller target now"):   # the case's own line replaces the default one
+        if key in extra:
+            base = "\n".join(l for l in base.split("\n") if not l.startswith(key))
     return "STATE:\n" + base + extra + f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
 
 
@@ -237,6 +239,16 @@ CASES = [
      lambda n, a, c: re.search(r"not (currently )?moving|standing still|stationary|not going anywhere|no active",
                                c.lower()) is None,
      "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\n"),
+    # where it is going: the controller's own target (world_digest.cpp; controller_facts.h), not an invention.
+    ("where to (affordance)", [], "none", "where are you going?",
+     lambda n, a, c: "door_0" in c and "table" not in c.lower(),
+     "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\ncontroller target now: cross door_0 (aff_door_0_cross), its goal 2.9 m away, ahead-left\n"),
+    ("where to (mission)", [], "none", "what are you doing?",
+     lambda n, a, c: "table_1" in c,
+     "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\ncontroller mission now: \"approach table_1\" (from chat), running: go_to pose(room_1 0.95 -0.25)\n"),
+    ("where to (exploring)", [], "none", "where are you going?",
+     lambda n, a, c: re.search(r"explor", c.lower()) is not None,
+     "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\ncontroller target now: explore the room (afford_room), its goal 1.8 m away, to the left\n"),
     ("are you moving (moving)", [], "none", "are you moving?",
      lambda n, a, c: re.search(r"\byes\b|i am moving|i'm moving|moving forward", c.lower()) is not None,
      "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\n"),

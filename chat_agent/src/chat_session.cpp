@@ -14,6 +14,7 @@
 #include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
 #include "approach.h"
+#include "controller_facts.h"
 #include "image_prep.h"
 #include "look_messages.h"
 
@@ -450,6 +451,7 @@ void ChatSession::ask_model(bool followup)
                                        "any more, whatever earlier messages said)\n").arg(q(names));
     }
     turn_doors_ = digest_.facts.doors;
+    if (const auto m = mission_now_line(mission_progress_); m.has_value()) state_extra_ += q(*m) + "\n";
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
     const QJsonArray msgs = messages_for_request();
@@ -716,11 +718,12 @@ bool ChatSession::send_command(const std::string& command, const char* origin)
 // The controller's report on the last command, every 250 ms.
 void ChatSession::tick_status()
 {
-    if (window_)   // whatever the mission's source: chat, remote_cmd.txt, the panel
-    {
+    {   // whatever the mission's source: chat, remote_cmd.txt, the panel
         auto u = mission_watch_.poll();
-        if (u.mission.has_value()) window_->set_plan(u.mission->first, QString::fromStdString(u.mission->second));
-        if (u.progress.has_value()) window_->set_plan_progress(*u.progress);
+        if (u.mission.has_value()) mission_progress_ = {};   // a new mission: the old one's progress is not its
+        if (u.progress.has_value()) mission_progress_ = *u.progress;   // the STATE's mission line (ask_model)
+        if (window_ and u.mission.has_value()) window_->set_plan(u.mission->first, QString::fromStdString(u.mission->second));
+        if (window_ and u.progress.has_value()) window_->set_plan_progress(*u.progress);
     }
     if (sent_command_.empty()) return;
     const IntentionStatus s = intention_.read();

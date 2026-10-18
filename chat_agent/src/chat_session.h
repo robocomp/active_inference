@@ -142,6 +142,7 @@ private:
     Digest digest_;
     IntentionNode intention_;
     MissionWatch mission_watch_;   ///< the controller's controller_mission node → the plan window
+    rc::mission::Progress mission_progress_;   ///< its last progress (the STATE's "controller mission now" line)
     OllamaClient llm_;
     std::unique_ptr<ChatWindow> window_;
     ChatLog log_;

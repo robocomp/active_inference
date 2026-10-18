@@ -10,6 +10,7 @@
 #include "../../common/room_resolve/room_resolve.h"
 #include "../../common/world_query/door_query.h"
 #include "approach.h"
+#include "controller_facts.h"
 
 namespace rc::chat
 {
@@ -105,6 +106,39 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
                              ts != 0 and now > ts ? now - ts : 0) + "\n";
         }
         else s += "robot motion now: unknown (no odometry on the robot node)\n";
+    }
+    // ── what the controller is executing (controller_facts.h has the why) ──
+    {
+        std::optional<TargetFact> target;
+        for (const auto& a : G.get_nodes_by_type("affordance"))
+        {
+            if (not G.get_attrib_by_name<active_att>(a).value_or(false) or
+                not G.get_attrib_by_name<epistemic_pending_att>(a).value_or(false))
+                continue;   // not Executing
+            target = TargetFact{.affordance = a.name()};
+            // The goal: the consumer's claim edge when it carries one, else the producer's proposal. Room frame.
+            std::optional<float> gx, gy;
+            for (const auto& e : G.get_edges_to_id(a.id()))
+                if (e.type() == "executing")
+                {
+                    gx = G.get_attrib_by_name<executing_target_x_m_att>(e);
+                    gy = G.get_attrib_by_name<executing_target_y_m_att>(e);
+                }
+            if (not gx.has_value() or not gy.has_value())
+            {
+                gx = G.get_attrib_by_name<epistemic_target_x_m_att>(a);
+                gy = G.get_attrib_by_name<epistemic_target_y_m_att>(a);
+            }
+            if (gx.has_value() and gy.has_value() and not room_name.empty())
+                if (const auto T = inner.get_transformation_matrix(robot_frame_, room_name); T.has_value())
+                {
+                    const Eigen::Vector3d p = *T * Eigen::Vector3d(*gx, *gy, 0.0);   // body frame: x right, y forward
+                    target->dist_m = std::hypot(p.x(), p.y());
+                    target->bearing_deg = std::atan2(-p.x(), p.y()) * kRad2Deg;
+                }
+            break;   // one consumer claims at most one affordance (affordance_manager.h INV-6)
+        }
+        s += target_line(target) + "\n";
     }
 
     // ── doors of the current room ──
