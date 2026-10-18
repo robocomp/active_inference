@@ -29,6 +29,8 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 
+#include "../interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor
+
 namespace rc::world
 {
 
@@ -36,7 +38,8 @@ namespace rc::world
 {
     std::vector<std::string> names;
     for (const auto& n : G.get_nodes_by_type("object"))
-        if (n.name().starts_with("door")) names.push_back(n.name());
+        // A door's interaction anchor ("door_N@robot") is a pose handle hung from the robot, not a door.
+        if (n.name().starts_with("door") and not rc::interaction::is_anchor(G, n)) names.push_back(n.name());
     std::ranges::sort(names);
     return names;
 }

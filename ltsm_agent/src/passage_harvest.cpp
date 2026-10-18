@@ -1,5 +1,7 @@
 #include "passage_harvest.h"
 
+#include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor
+
 #include <QDebug>
 
 #include <algorithm>
@@ -82,6 +84,7 @@ int PassageHarvest::poll()
     for (const auto &n : live_->get_nodes_by_type("object"))
     {
         if (not is_door(*live_, n)) continue;
+        if (rc::interaction::is_anchor(*live_, n)) continue;   // a door's robot-relative copy, not a door
         const auto seq = live_->get_attrib_by_name<passage_seq_att>(n);
         if (not seq.has_value() or seq.value() <= 0) continue;
 

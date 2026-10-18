@@ -1,6 +1,7 @@
 #include "dsr_fact_source.h"
 
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_edge_room (SHARED)
+#include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (SHARED)
 
 #include <algorithm>
 #include <cctype>
@@ -127,7 +128,9 @@ std::vector<Event> LiveDiff::poll(DSR::DSRGraph& G)
 {
     std::map<std::uint64_t, std::pair<std::string, std::string>> now;
     for (const char* type : kEventNodeTypes)
-        for (const auto& n : G.get_nodes_by_type(type)) now.emplace(n.id(), std::pair{n.type(), n.name()});
+        for (const auto& n : G.get_nodes_by_type(type))
+            if (not rc::interaction::is_anchor(G, n))   // an execution's robot-relative copy: not a birth
+                now.emplace(n.id(), std::pair{n.type(), n.name()});
     const auto cur = rc::room::current_edge_room(G);
 
     std::vector<Event> out;

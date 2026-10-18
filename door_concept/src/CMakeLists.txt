@@ -34,6 +34,8 @@ LIST(APPEND SOURCES
   ../src/door_model.cpp
   ../src/door_belief.cpp
   ../src/epistemic_planner.cpp
+  # The robot-relative copy of a door hung from the robot while its affordance executes.
+  ../../common/interaction_anchor/interaction_anchor.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

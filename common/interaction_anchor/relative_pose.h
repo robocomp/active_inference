@@ -13,7 +13,7 @@
 
 #include <Eigen/Dense>
 
-#include "rt_twist/rt_twist.h"
+#include "../rt_twist/rt_twist.h"   // relative: pure readers (ltsm) carry no common/ include dir
 
 namespace rc::interaction
 {

@@ -5,6 +5,7 @@
 #include "room_eviction.h"
 
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto
+#include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor
 
 #include <QDebug>
 
@@ -25,6 +26,9 @@ namespace ltsm
 // (door_scene_graph.cpp:128-137.) The name check is the belt to that braces.
 bool is_door(DSR::DSRGraph &g, const DSR::Node &n)
 {
+    // A door's interaction anchor (hung from the robot while it is being crossed) copies the subtype and
+    // the name; it is a pose handle, not a door, and must never be archived as one.
+    if (rc::interaction::is_anchor(g, n)) return false;
     if (const auto st = g.get_attrib_by_name<object_subtype_att>(n); st.has_value() and st.value() == "door")
         return true;
     return n.name().starts_with("door_");

@@ -1,5 +1,6 @@
 #include "graph3d_scene_builder.h"
 #include "../room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -279,6 +280,10 @@ Scene SceneBuilder::build()
 
 	for (const auto &n : graph_nodes)
 	{
+		// An interaction anchor duplicates an object for the length of one execution; drawing it would
+		// show the object twice, once hanging from the robot.
+		if (rc::interaction::is_anchor(*g_, n))
+			continue;
 		const std::string subtype = g_->get_attrib_by_name<object_subtype_att>(n).value_or("");
 		const auto        cls     = classify(n.type(), subtype, n.name());
 		if (not cls.has_value())

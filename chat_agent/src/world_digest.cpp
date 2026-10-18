@@ -7,6 +7,7 @@
 #include <numbers>
 #include <ranges>
 
+#include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/room_resolve/room_resolve.h"
 #include "../../common/world_query/door_query.h"
 #include "approach.h"
@@ -198,6 +199,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
     for (const char* type : {"object", "person"})
         for (const auto& n : G.get_nodes_by_type(type))
         {
+            if (rc::interaction::is_anchor(G, n)) continue;   // an execution's robot-relative copy, not an object
             const std::string& name = n.name();
             if (name.starts_with("door") or name.starts_with("aff_")) continue;   // doors: own section
             ObjectFact o{.id = n.id(), .name = name};

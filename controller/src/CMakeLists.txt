@@ -42,6 +42,8 @@ LIST(APPEND SOURCES
   ../src/trackers/plain_tracker.cpp
   ../src/trackers/pd_tracker.cpp
   ../src/viewer_2d.cpp
+  # Reads the robot-relative anchor an executing affordance names (read_affordance_anchor).
+  ../../common/interaction_anchor/interaction_anchor.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

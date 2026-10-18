@@ -1,0 +1,215 @@
+/*
+ * interaction_anchor.cpp — see interaction_anchor.h for the contract (who writes what, and why the
+ * link to the original is interaction_node_id rather than `parent`).
+ */
+
+#include "interaction_anchor.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <exception>
+#include <print>
+#include <string>
+#include <vector>
+
+#include "../graph_provenance/creation_stamp.h"
+
+namespace rc::interaction
+{
+
+namespace
+{
+// (x, y, yaw) inside the row-major 6x6 SE(3) block [x,y,z,rx,ry,rz] RT_API stores on an edge.
+constexpr std::array<int, 3> kSe3OfSe2{0, 1, 5};
+
+std::optional<DSR::Node> robot_node(DSR::DSRGraph& G)
+{
+    // By TYPE, as rc::rt and mask_ingestor do: the name ("Shadow") belongs to one robot model.
+    const auto robots = G.get_nodes_by_type("robot");
+    if (robots.empty()) return std::nullopt;
+    return robots.front();
+}
+
+// Drop affordance.interaction_node_id if (and only if) it still names `anchor_id`. Fresh read, then a
+// whole-node update: update_node is a replace, so a cached copy would revert the producer's other
+// attributes.
+void unlink_affordance(DSR::DSRGraph& G, std::uint64_t affordance_id, std::uint64_t anchor_id)
+{
+    auto aff = G.get_node(affordance_id);
+    if (not aff.has_value()) return;
+    const auto link = G.get_attrib_by_name<interaction_node_id_att>(aff.value());
+    if (not link.has_value() or link.value() != anchor_id) return;      // relinked to another, or never set
+    G.remove_attrib_local<interaction_node_id_att>(aff.value());
+    G.update_node(aff.value());
+}
+}  // namespace
+
+std::optional<Anchor> Anchor::create(DSR::DSRGraph& G, std::uint64_t object_id, std::uint64_t affordance_id,
+                                     int agent_id, const RelPose& init)
+{
+    const auto obj   = G.get_node(object_id);
+    const auto aff   = G.get_node(affordance_id);
+    const auto robot = robot_node(G);
+    if (not obj.has_value() or not aff.has_value() or not robot.has_value())
+        return std::nullopt;
+
+    // One anchor per object. A same-named node is a copy a previous execution left behind (or a
+    // crashed run's, if the sweep has not reached it yet): reclaim it. Anything else is not ours.
+    const std::string name = obj->name() + "@robot";
+    if (const auto old = G.get_node(name); old.has_value())
+    {
+        if (not is_anchor(G, old.value())) return std::nullopt;
+        G.delete_node(old->id());
+    }
+
+    // Shallow copy: identity and size, nothing the owner's belief keeps (the copy is a pose handle).
+    DSR::Node n = DSR::Node::create<object_node_type>(name);
+    if (const auto v = G.get_attrib_by_name<object_subtype_att>(obj.value()); v.has_value())
+        G.add_or_modify_attrib_local<object_subtype_att>(n, v.value());
+    if (const auto v = G.get_attrib_by_name<width_m_att>(obj.value()); v.has_value())
+        G.add_or_modify_attrib_local<width_m_att>(n, v.value());
+    if (const auto v = G.get_attrib_by_name<height_m_att>(obj.value()); v.has_value())
+        G.add_or_modify_attrib_local<height_m_att>(n, v.value());
+    if (const auto v = G.get_attrib_by_name<depth_m_att>(obj.value()); v.has_value())
+        G.add_or_modify_attrib_local<depth_m_att>(n, v.value());
+    G.add_or_modify_attrib_local<interaction_node_id_att>(n, object_id);
+    G.add_or_modify_attrib_local<agent_id_att>(n, static_cast<std::uint32_t>(agent_id));
+    rc::provenance::stamp_creation(G, n);
+    const auto id = G.insert_node(n);
+    if (not id.has_value())
+        return std::nullopt;
+
+    Anchor a;
+    a.id_ = id.value();
+    a.object_id_ = object_id;
+    a.affordance_id_ = affordance_id;
+    a.robot_id_ = robot->id();
+    a.rt_ = G.get_rt_api();
+    if (not a.write(G, init))
+    {
+        G.delete_node(a.id_);
+        return std::nullopt;
+    }
+
+    // Name the copy on the affordance only once the edge exists: a reader that follows the link must
+    // never find a node with no pose.
+    auto aff_now = G.get_node(affordance_id);
+    if (not aff_now.has_value())
+    {
+        G.delete_node(a.id_);
+        return std::nullopt;
+    }
+    G.add_or_modify_attrib_local<interaction_node_id_att>(aff_now.value(), a.id_);
+    if (not G.update_node(aff_now.value()))
+    {
+        G.delete_node(a.id_);
+        return std::nullopt;
+    }
+    std::print("[interaction_anchor] '{}' id={} under '{}' for affordance {}\n", name, a.id_, robot->name(),
+               affordance_id);
+    return a;
+}
+
+bool Anchor::write(DSR::DSRGraph& G, const RelPose& r)
+{
+    if (id_ == 0 or not rt_) return false;
+    auto robot = G.get_node(robot_id_);
+    if (not robot.has_value()) return false;
+
+    std::vector<float> cov(36, 0.f);                  // z, roll, pitch: not estimated, left at 0 (room_concept does the same)
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            cov[kSe3OfSe2[i] * 6 + kSe3OfSe2[j]] = r.P(i, j);
+    const std::uint64_t ts = r.stamp_ms > 0 ? static_cast<std::uint64_t>(r.stamp_ms) : rc::provenance::now_ms();
+    try
+    {
+        rt_->insert_or_assign_edge_RT(robot.value(), id_,
+                                      DSR::RT_API::RTBlock{
+                                          .translation    = {r.x.x(), r.x.y(), 0.f},
+                                          .rotation_euler = {0.f, 0.f, r.x.z()},
+                                          .covariance     = std::move(cov)},
+                                      ts);
+    }
+    catch (const std::exception& e)
+    {
+        std::print(stderr, "[interaction_anchor] RT write to {} failed: {}\n", id_, e.what());
+        return false;
+    }
+    return true;
+}
+
+bool Anchor::relink(DSR::DSRGraph& G, std::uint64_t new_object_id)
+{
+    if (id_ == 0) return false;
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    G.add_or_modify_attrib_local<interaction_node_id_att>(n.value(), new_object_id);
+    if (not G.update_node(n.value())) return false;
+    object_id_ = new_object_id;                       // the NAME keeps the old original's: DSR names are fixed
+    return true;
+}
+
+void Anchor::remove(DSR::DSRGraph& G)
+{
+    if (id_ == 0) return;
+    unlink_affordance(G, affordance_id_, id_);        // the link first: nobody may follow it to a dead node
+    G.delete_node(id_);                               // drops the robot→anchor RT edge with it
+    id_ = 0;
+}
+
+void sweep_stale(DSR::DSRGraph& G, int agent_id)
+{
+    std::vector<std::uint64_t> gone;
+    for (const auto& n : G.get_nodes_by_type("object"))
+    {
+        if (not is_anchor(G, n)) continue;
+        const auto owner = G.get_attrib_by_name<agent_id_att>(n);
+        if (not owner.has_value() or owner.value() != static_cast<std::uint32_t>(agent_id)) continue;
+        if (G.delete_node(n.id())) gone.push_back(n.id());
+    }
+    if (gone.empty()) return;
+    // Only links pointing at anchors THIS agent just deleted: those affordances are ours to write.
+    for (const auto& a : G.get_nodes_by_type("affordance"))
+        if (const auto link = G.get_attrib_by_name<interaction_node_id_att>(a);
+            link.has_value() and std::ranges::contains(gone, link.value()))
+            unlink_affordance(G, a.id(), link.value());
+    std::print("[interaction_anchor] swept {} stale anchor(s) of agent {}\n", gone.size(), agent_id);
+}
+
+std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G, const DSR::Node& affordance,
+                                                                std::int64_t now_ms)
+{
+    const auto link = G.get_attrib_by_name<interaction_node_id_att>(affordance);
+    if (not link.has_value() or link.value() == 0) return std::nullopt;
+    const auto anchor = G.get_node(link.value());
+    if (not anchor.has_value() or not is_anchor(G, anchor.value())) return std::nullopt;
+    const auto parent = G.get_attrib_by_name<parent_att>(anchor.value());
+    if (not parent.has_value()) return std::nullopt;
+    const auto edge = G.get_edge(parent.value(), anchor->id(), "RT");
+    if (not edge.has_value()) return std::nullopt;
+
+    // The newest block, by scanning the stamps: the ring is overwritten in place (see rc::rt::newest_twist).
+    const auto stamps = G.get_attrib_by_name<rt_timestamps_att>(edge.value());
+    if (not stamps.has_value()) return std::nullopt;
+    std::uint64_t newest = 0;
+    for (const auto s : stamps->get()) newest = std::max(newest, s);
+    if (newest == 0) return std::nullopt;
+    if (now_ms - static_cast<std::int64_t>(newest) > kAnchorStaleMs) return std::nullopt;   // see kAnchorStaleMs
+
+    const auto rt = G.get_rt_api();
+    const auto T = rt->get_edge_RT_as_rtmat(edge.value(), newest);
+    const auto C = rt->get_edge_RT_covariance(edge.value(), newest);
+    if (not T.has_value() or not C.has_value()) return std::nullopt;   // no covariance = no claim to execute on
+
+    RelPose r;
+    r.x = {static_cast<float>(T->translation().x()), static_cast<float>(T->translation().y()),
+           wrap_pi(static_cast<float>(std::atan2(T->linear()(1, 0), T->linear()(0, 0))))};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            r.P(i, j) = static_cast<float>((*C)(kSe3OfSe2[i], kSe3OfSe2[j]));
+    r.stamp_ms = static_cast<std::int64_t>(newest);
+    return std::pair{r, G.get_attrib_by_name<width_m_att>(anchor.value()).value_or(0.f)};
+}
+
+}  // namespace rc::interaction
