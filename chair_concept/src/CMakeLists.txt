@@ -17,6 +17,8 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/specificworker_dashboard.cpp
+  ../src/chair_existence.cpp
   ../src/chair_config.cpp
   ../src/chair_scene_graph.cpp
   ../src/chair_fitter.cpp

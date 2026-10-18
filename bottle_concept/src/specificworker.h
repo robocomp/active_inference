@@ -219,6 +219,7 @@ private:
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
     FPSCounter                            fps_counter_;         // overall compute()-cycle rate (std::cout heartbeat)
+    void build_dashboard();             // SHARED construction (specificworker_dashboard.cpp)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 
