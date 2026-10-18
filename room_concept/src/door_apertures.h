@@ -152,5 +152,11 @@ namespace rc
         std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> cache_;
         long resolves_ = 0;
         Tally tally_;
+        /// ★ OCCLUSION HOLDS (2026-10-18). The apertures emitted last refresh, and those whose door node has since
+        /// left the graph. A deleted node is not evidence that the opening closed (CONCEPT_AGENT_LIFECYCLE: absence
+        /// removes, occlusion HOLDS) — door_concept deletes its nodes on every restart. Held until a door node
+        /// reappears on the same doorway or the room frame changes; see refresh().
+        std::unordered_map<std::uint64_t, DoorAperture> last_emitted_, held_;
+        std::string frame_;
     };
 }   // namespace rc

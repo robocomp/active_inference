@@ -665,7 +665,9 @@ void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_requ
     // layout while the robot is still exploring it. Shown until the proto is promoted.
     const int state = searching ? 2 : estimating ? 3 : (stable ? 1 : 0);
 
-    const QString text = searching  ? QStringLiteral("SEARCHING…")
+    // RELOCALISING, not SEARCHING (2026-10-18): this is the pose search, and SEARCHING is also the name of the
+    // LAYOUT state a door crossing enters — one word for two different states sent a diagnosis the wrong way.
+    const QString text = searching  ? QStringLiteral("RELOCALISING…")
                        : estimating ? QStringLiteral("ESTIMATING ROOM…")
                        : stable     ? QStringLiteral("ROOM STABLE")
                                    : QStringLiteral("STABILIZING %1/%2")

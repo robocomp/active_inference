@@ -44,6 +44,12 @@ namespace rc
         std::vector<DoorAperture> out;
         std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> kept;
         tally_ = Tally{};
+        if (room_frame != frame_)   // another room: its doorways are not this one's, held or not
+        {
+            frame_ = room_frame;
+            last_emitted_.clear();
+            held_.clear();
+        }
 
         // Doors are generic `object` nodes named door_* carrying object_subtype == "door"
         // (door_scene_graph.cpp). Every get_nodes_by_type("object") here MUST keep that filter, or a
@@ -127,6 +133,39 @@ namespace rc
         }
         // Doors that left the graph leave the cache with them; nothing here expires on a timer.
         cache_.swap(kept);
+
+        // ── A VANISHED DOOR NODE KEEPS ITS DOORWAY (2026-10-18) ─────────────────────────────────────────
+        // Live: door_1's node was deleted under a parked robot (a door_concept restart) and came back a minute
+        // later. In between, the ~195 returns through it stopped being discounted, the predicted misfit jumped
+        // 0.017 → 0.22 m with the robot still, and the relocaliser fired 9 searches in 10 s. Holding the last
+        // aperture is cheap when wrong: the per-beam mixture explains a return AT the aperture line as a surface
+        // and keeps its weight, so a held doorway that is really a wall costs almost nothing; dropping one that is
+        // really open costs every through-door return. A held aperture is released by EVIDENCE that replaces it —
+        // a door node whose aperture covers its centre — or by leaving the room, never by a clock.
+        const auto covers = [](const DoorAperture& d, const Eigen::Vector2f& p)
+        {
+            const Eigen::Vector2f ab = d.b - d.a;
+            const float L2 = ab.squaredNorm();
+            if (L2 < 1e-12f) return false;
+            const float t = std::clamp((p - d.a).dot(ab) / L2, 0.f, 1.f);
+            return (d.a + t * ab - p).norm() <= 0.5f * std::sqrt(L2);
+        };
+        std::unordered_map<std::uint64_t, DoorAperture> now;
+        for (const auto& d : out) now.emplace(d.id, d);
+        for (auto& [id, d] : last_emitted_)
+            if (not now.contains(id) and held_.emplace(id, d).second)
+                qInfo().noquote() << QString("[room][doors] %1 left the graph — its doorway is HELD (a deleted node is "
+                                             "not a closed opening) until a door node covers it again or the room changes")
+                                         .arg(QString::fromStdString(d.name));
+        std::erase_if(held_, [&](const auto& kv)
+        {
+            if (now.contains(kv.first)) return true;   // the node came back under its own id
+            const Eigen::Vector2f c = 0.5f * (kv.second.a + kv.second.b);
+            return std::ranges::any_of(out, [&](const DoorAperture& d) { return covers(d, c); });
+        });
+        last_emitted_ = std::move(now);
+        for (const auto& [id, d] : held_)
+            out.push_back(d);
         return out;
     }
 
