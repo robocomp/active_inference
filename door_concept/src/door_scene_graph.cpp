@@ -61,6 +61,20 @@ DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, cons
     for (const auto& wn : G_->get_nodes_by_type("wall"))
     {
         const auto parent_id = G_->get_attrib_by_name<parent_att>(wn).value_or(room_id);
+        // ★ ONLY THIS ROOM'S WALLS (2026-10-18). Every wall's RT is in ITS OWN room's frame, and a room left behind
+        //   keeps its walls in the graph. Taking the nearest wall over all of them compared room_1 coordinates
+        //   with a room_2 point: live, after crossing into room_2, door_5 (on room_2's doorway wall, y ≈ 0.04)
+        //   resolved to room_1's middle partition — which runs through that point in room_1's frame — so it was
+        //   drawn perpendicular to its wall, slid onto the partition's line 0.47 m outside room_2, and the wall-band
+        //   prior removed it every few seconds while the ZED plainly saw it. A wall belongs to the room when it
+        //   hangs from it directly or from that room's floor.
+        if (parent_id != room_id)
+        {
+            const auto pn = G_->get_node(parent_id);
+            if (not pn.has_value() or pn->type() != "floor"
+                or G_->get_attrib_by_name<parent_att>(pn.value()).value_or(0) != room_id)
+                continue;
+        }
         auto edge = G_->get_edge(parent_id, wn.id(), "RT");
         if (not edge.has_value() and parent_id != room_id)
             edge = G_->get_edge(room_id, wn.id(), "RT");   // pre-floor graphs
