@@ -421,6 +421,14 @@ public:
     /// exists because the GUI polls at ~15-30 Hz from another thread: a search that completes between
     /// two polls would otherwise never be seen, and the operator would have no way to tell a search
     /// from a freeze. Safe to call from any thread (two atomics, no lock).
+    /// "RELOCALISING" as the operator means it: a search is running, OR the localiser's own lost-belief filter no
+    /// longer believes it is tracking (P(TRACKING) < ½ — the label names the more probable state). The search alone
+    /// lasts ~80 ms; after a kidnap the pose can be wrong for tens of seconds between searches, and the window said
+    /// ROOM STABLE throughout (2026-10-18, user). Safe from any thread.
+    bool is_relocalising() const
+    {
+        return is_grid_searching() or p_track_display_.load(std::memory_order_relaxed) < 0.5f;
+    }
     bool is_grid_searching(int hold_ms = 1500) const
     {
         if (grid_search_active_.load(std::memory_order_relaxed))
@@ -721,6 +729,7 @@ private:
    enum BeliefState : std::size_t { kTrack = 0, kLost = 1, kMismatch = 2 };
    std::array<double, 3> belief_{1.0, 0.0, 0.0};
    bool  belief_init_       = false;
+   std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)
    float lost_logodds_      = std::numeric_limits<float>::quiet_NaN();   // logit P(LOST) — for the logs
    float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params
    float track_var_ln_s_    = std::numeric_limits<float>::quiet_NaN();

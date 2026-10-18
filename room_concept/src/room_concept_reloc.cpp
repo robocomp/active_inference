@@ -427,6 +427,7 @@ namespace rc
         belief_ = {1.0 - 2.0 * h, h, h};
         belief_init_ = true;
         lost_logodds_ = static_cast<float>(std::log(h / (1.0 - h)));
+        p_track_display_.store(static_cast<float>(belief_[kTrack]), std::memory_order_relaxed);
     }
 
     void RoomConcept::set_belief_mismatch()
@@ -435,6 +436,7 @@ namespace rc
         belief_ = {h, h, 1.0 - 2.0 * h};
         belief_init_ = true;
         lost_logodds_ = static_cast<float>(std::log(h / (1.0 - h)));
+        p_track_display_.store(static_cast<float>(belief_[kTrack]), std::memory_order_relaxed);
     }
 
     double RoomConcept::log_tracking_emission(float s, double extra_var)
@@ -507,6 +509,7 @@ namespace rc
             post = pr;
         belief_ = post;
         lost_logodds_ = static_cast<float>(std::log(std::max(belief_[kLost], 1e-300) / std::max(1.0 - belief_[kLost], 1e-300)));
+        p_track_display_.store(static_cast<float>(belief_[kTrack]), std::memory_order_relaxed);
 
         // LEARN the tracking emission from the frames it explains, weighted by P(TRACKING), forgetting over
         // reloc_track_memory_frames. A lost robot or a changed view stops teaching it.
@@ -548,6 +551,7 @@ namespace rc
             const double qt = std::exp(lt - m) / (std::exp(lt - m) + std::exp(lb - m));
             belief_ = {(1.0 - l) * qt, l, (1.0 - l) * (1.0 - qt)};
             belief_init_ = true;
+            p_track_display_.store(static_cast<float>(belief_[kTrack]), std::memory_order_relaxed);
             lost_logodds_ = static_cast<float>(std::log(l / (1.0 - l)));
         }
         else

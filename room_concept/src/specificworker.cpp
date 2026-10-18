@@ -353,7 +353,7 @@ void SpecificWorker::compute()
         viewer_->set_room_stable(scene_graph_->room_node_created(),
                                  scene_graph_->stable_frames(),
                                  params.STABLE_FRAMES_REQUIRED,
-                                 room_concept_.is_grid_searching(),
+                                 room_concept_.is_relocalising(),
                                  scene_graph_->room_is_startup_proto());
         t_ui_us = section_timer.nsecsElapsed() / 1000;
     }
