@@ -31,7 +31,22 @@
  * On a graceful stop (SIGTERM/SIGINT, never kill -9) Builder::shutdown closes what is open as
  * `interrupted_by_em_shutdown`, and those records are archived.
  *
- * Graphs (etc/config.toml): G == "dsr" (live, domain 0, read), "em" (domain 4, owned), "ltsm" (domain 2, read).
+ * Graphs (etc/config.toml): G == "dsr" (live, domain 0, read), "em" (domain 4, owned).
+ *
+ * LTSM MEMORY (domain [EM].ltsm_domain = 2) is joined LAZILY, read-only, only while ltsm_agent is up — the scheme of
+ * chat_agent's domain-4 join (chat_agent/src/specificworker.h). Not an [Agent.ltsm] sub-table on purpose: the generated
+ * code joins every [Agent.<name>] graph at startup, and a DSRGraph built with configFile "" qFatal()s the whole process
+ * after ~15 s when no peer answers — EM must start and run with ltsm_agent down; doors then carry no ltsm_id, and their
+ * stats are keyed by action kind alone (spec §7).
+ * HOW "UP" IS SEEN: ltsm_agent runs no presence coordinator, so it has no agent node to stamp (chat_agent's test). EM
+ * reads cortex's DDS participant set on the live graph instead (G->get_connected_agents(), names
+ * "Participant_<id> ( ltsm_agent )"), every poll. Its domain-0 participant exists ~1 s before its domain-2 graph is
+ * seeded; harmless, the joiner re-sends its graph request every second for 15 s (cortex fullgraph_request_thread).
+ * WHICH PROCESS: a graceful ltsm_agent exit removes its participant at once, so a restart (round_trips.sh wipes its
+ * memory) is seen as a gap and the old graph is dropped before the new process's is joined.
+ * Residual risks (not catchable): ltsm_agent dying within the ~1 s of the join aborts EM; a CRASHED ltsm_agent is only
+ * dropped when its DDS lease lapses, and cortex keys the participant set by name, so a crash-restart inside that lease
+ * can leave EM holding the old graph.
  * The logic lives in common/episodic/ (pure, tested); this file is the shell.
  */
 
@@ -85,6 +100,14 @@ private:
     void on_optional_peer_lost(const std::string& name, std::uint32_t id);
     void on_optional_peer_ready(const std::string& name, std::uint32_t id);
 
+    // ── ltsm memory (domain 2), joined lazily — see the header comment ──
+    /// ltsm_agent's DDS participant is on the live graph (domain 0).
+    bool ltsm_connected() const;
+    /// Leave if ltsm_agent's participant is gone; join when it is there and we are not joined.
+    void sync_ltsm();
+    void leave_ltsm();
+    int ltsm_domain_ = 2;
+
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
     std::atomic<bool> shutting_down_{false};
@@ -99,7 +122,8 @@ private:
         void remove(const std::string& id) override;
     };
 
-    std::shared_ptr<DSR::DSRGraph> G_em_, G_ltsm_;  // G is the live graph
+    std::shared_ptr<DSR::DSRGraph> G_em_;           // G is the live graph
+    std::shared_ptr<DSR::DSRGraph> G_ltsm_;         // nullptr = not joined (sync_ltsm)
     std::unique_ptr<rc::em::DsrFactSource> facts_;
     std::unique_ptr<rc::em::EmGraph> em_graph_;
     GraphSink sink_;

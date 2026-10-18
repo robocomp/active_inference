@@ -29,7 +29,7 @@ deleted. Each record is folded exactly once.
 |---|---|---|
 | `[Agent.dsr]`  | 0 | live working graph. Read only, apart from the presence agent node `episodic_agent 26`. |
 | `[Agent.em]`   | 4 | episodic memory, seeded from `em_root.json`, **owned**. One `metaconcept` per record of today: name = id, `em_record` JSON, `has` edge parent→child. One `stats_<level>_<kind>[_<author>]_<identity\|any>` node per stats key (author for missions only), carrying `em_stats`. Read back with `common/episodic/em_query_dsr.h` `load_store`. |
-| `[Agent.ltsm]` | 2 | ltsm memory, joined read-only. Resolves a door's `passage_N` identity. |
+| `[EM] ltsm_domain` | 2 | ltsm memory, joined read-only and **lazily** while ltsm_agent is up. Resolves a door's `passage_N` identity. |
 
 `dsr` must stay alphabetically first, so that `G` is the live graph.
 
@@ -41,8 +41,10 @@ last line per id.
 ```
 cd episodic_agent && bin/episodic_agent etc/config.toml
 ```
-- **Start order:** start it after the fleet (domain 0) **and after ltsm_agent** (domain 2). Joining a domain with
-  `configFile ""` aborts the process after 15 s if no peer answers (R20).
+- **Start order:** start it after the fleet (domain 0); joining a domain with `configFile ""` aborts the process after
+  15 s if no peer answers. ltsm_agent's order does NOT matter: its memory graph is not an `[Agent.*]` sub-table but is
+  joined when ltsm_agent's DDS participant appears on domain 0 and left when it goes (a restart is a gap, so the
+  re-seeded memory is joined fresh). Without it, doors carry no `ltsm_id` and their stats are keyed by kind alone.
 - **Stop with SIGTERM or Ctrl-C (`kill <pid>`), never `kill -9`.** A graceful stop closes every open record as
   `interrupted_by_em_shutdown`, writes those records to the archive and to domain 4, and deletes the presence node.
   SIGKILL skips all of that. The next start still closes those records, as `lost`.

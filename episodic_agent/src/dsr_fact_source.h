@@ -50,6 +50,8 @@ public:
 
     /// The passage_N in ltsm memory matching this live door's memory face; "" when unknown.
     std::string ltsm_id_of(const DSR::Node& door) const;
+    /// The memory graph is joined lazily (specificworker.h): null while ltsm_agent is absent.
+    void set_ltsm(std::shared_ptr<DSR::DSRGraph> ltsm) { ltsm_ = std::move(ltsm); }
 
 private:
     std::shared_ptr<DSR::DSRGraph> live_, ltsm_;

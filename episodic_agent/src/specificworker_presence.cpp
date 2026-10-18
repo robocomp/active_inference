@@ -2,6 +2,8 @@
 
 #include <QString>
 
+#include <dsr/api/dsr_api.h>
+
 #include <print>
 
 // ── GRAFCET state hooks → the shared presence coordinator (copied from chat_agent / the level-1 protocol) ──
@@ -39,4 +41,38 @@ void SpecificWorker::on_optional_peer_lost(const std::string& name, std::uint32_
 void SpecificWorker::on_optional_peer_ready(const std::string& name, std::uint32_t /*id*/)
 {
     qInfo() << "[Presence] optional peer ready:" << QString::fromStdString(name);
+}
+
+// ── ltsm memory: a read-only domain-2 graph while ltsm_agent's participant is up (specificworker.h) ──
+bool SpecificWorker::ltsm_connected() const
+{
+    return G and std::ranges::any_of(G->get_connected_agents(),
+                                     [](const std::string& p) { return p.ends_with("( ltsm_agent )"); });
+}
+
+void SpecificWorker::sync_ltsm()
+{
+    if (shutting_down_) return;
+    const bool up = ltsm_connected();
+    if (G_ltsm_ and not up)
+    {
+        std::println("[episodic] ltsm_agent's participant is gone");
+        leave_ltsm();
+    }
+    if (G_ltsm_ or not up) return;
+    std::println("[episodic] ltsm_agent present: joining its memory graph on domain {}", ltsm_domain_);
+    // configFile "" = request the graph from the peer (blocks ~1 s). Same name/id as on domains 0 and 4: a different
+    // DDS domain, and nothing is ever written here, so no CRDT actor clash.
+    G_ltsm_ = std::make_shared<DSR::DSRGraph>(agent_name, static_cast<std::uint32_t>(agent_id), std::string{}, true,
+                                              static_cast<std::int8_t>(ltsm_domain_));
+    if (facts_) facts_->set_ltsm(G_ltsm_);
+    std::println("[episodic] joined domain {}: doors now carry their ltsm passage identity", ltsm_domain_);
+}
+
+void SpecificWorker::leave_ltsm()
+{
+    if (not G_ltsm_) return;
+    if (facts_) facts_->set_ltsm(nullptr);
+    G_ltsm_.reset();   // facts_ held the only other reference; ~DSRGraph removes the DDS participant
+    std::println("[episodic] left domain {} (doors carry no ltsm_id until ltsm_agent returns)", ltsm_domain_);
 }

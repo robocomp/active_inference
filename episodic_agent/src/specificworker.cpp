@@ -91,6 +91,7 @@ void SpecificWorker::request_shutdown()
     if (shutting_down_.exchange(true))
         return;
     poll_timer_.stop();
+    leave_ltsm();
     // EM's own stop: whatever is open closes `interrupted_by_em_shutdown` and goes to the archive AND to domain 4
     // (ruling R22) — both callers (destructor, terminal_shutdown) run this before any graph is torn down.
     if (builder_ and recorder_)
@@ -151,7 +152,6 @@ void SpecificWorker::initialize()
         return it == Graphs.end() ? nullptr : it->second;
     };
     G_em_ = pick("em");
-    G_ltsm_ = pick("ltsm");
     if (not G or G.get() != pick("dsr").get() or not G_em_)
     {
         std::string found;
@@ -161,8 +161,8 @@ void SpecificWorker::initialize()
     }
     if (not G_em_->get_node("root").has_value())
         qFatal("the episodic-memory graph has no root node -- is em_root.json reachable from the CWD?");
-    if (not G_ltsm_)
-        qWarning() << "[episodic] no [Agent.ltsm] graph: doors will carry no ltsm_id";
+    if (pick("ltsm"))
+        qFatal("episodic_agent: remove [Agent.ltsm] from the config -- ltsm memory is joined lazily ([EM] ltsm_domain)");
 
     // Heavy payloads are never read here.
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att, laser_X_att, laser_Y_att, laser_Z_att>();
@@ -218,8 +218,9 @@ void SpecificWorker::initialize()
     const std::string archive_dir = r.s("EM.archive_dir", "etc/episodes",
             "append-only archive, one JSONL file per local day (relative to the CWD: run from the component root)");
     const int poll_ms = r.i("EM.poll_ms", 250, "poll period of the live graph + the controller's journal (main thread)");
+    ltsm_domain_ = r.i("EM.ltsm_domain", 2, "DDS domain of ltsm_agent's memory graph; joined read-only while ltsm_agent is present");
 
-    facts_ = std::make_unique<rc::em::DsrFactSource>(G, G_ltsm_);
+    facts_ = std::make_unique<rc::em::DsrFactSource>(G, nullptr);   // memory graph set by sync_ltsm
     em_graph_ = std::make_unique<rc::em::EmGraph>(G_em_);
     sink_.g = em_graph_.get();
     archive_ = std::make_unique<rc::em::Archive>(archive_dir);
@@ -267,6 +268,8 @@ void SpecificWorker::poll()
     const std::uint64_t now = now_ms();
     std::vector<rc::em::Record> out;
     const auto take = [&](std::vector<rc::em::Record> v) { std::ranges::move(v, std::back_inserter(out)); };
+
+    sync_ltsm();   // ltsm_agent gone ⇒ drop its memory graph before any fact is read from it; back ⇒ join (~1 s)
 
     // Structural events are kept only if the journal node had been seen BEFORE this poll: until the builder has
     // primed on a journal nothing is open to carry them, and the initial graph sync — which can land in the same poll
