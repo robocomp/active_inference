@@ -98,6 +98,12 @@ int main()
         CHECK(has(s, "nodes by type: agent 18, object 14, affordance 6, room 1"));   // most first
         CHECK(has(s, "edges by type: RT 40, has 19"));
         CHECK(has(s, "nodes created by: robot_concept 12, door_concept 6, chair_concept 4"));
+        // "how many agents are alive in the WM?" picks graph_summary as often as agents (the WM IS the graph), so the
+        // summary carries the agents census too: whichever tool the model calls, the answer is in the result.
+        g.agents = agents;
+        const std::string w = answer_graph(g);
+        CHECK(has(w, "agents: 3 running (controller, door_concept, retina); 2 not running (bottle_concept, chat_agent)"));
+        CHECK(not has(answer_graph(GraphSummary{}), "agents:"));   // no agent nodes, no line
     }
 
     // ── inspect: every attribute, long values cut, edges both ways ─────────────────────────────────────────────

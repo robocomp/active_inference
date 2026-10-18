@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <deque>
 #include <format>
 #include <map>
@@ -187,14 +188,28 @@ struct GraphSummary
 {
     std::map<std::string, int> nodes_by_type, edges_by_type, nodes_by_agent;
     std::string room;
+    /// The agents census, also here: "how many agents are alive in the WM?" calls graph_summary as often as agents.
+    std::vector<AgentFact> agents;
 };
 
 [[nodiscard]] inline std::string answer_graph(const GraphSummary& g)
 {
     using namespace system_detail;
-    return std::format("{} nodes, {} edges; current room {}\nnodes by type: {}\nedges by type: {}\nnodes created by: {}\n",
-                       total(g.nodes_by_type), total(g.edges_by_type), g.room.empty() ? "unknown" : g.room,
-                       counts(g.nodes_by_type), counts(g.edges_by_type), counts(g.nodes_by_agent));
+    std::string out = std::format("{} nodes, {} edges; current room {}\nnodes by type: {}\nedges by type: {}\n"
+                                  "nodes created by: {}\n",
+                                  total(g.nodes_by_type), total(g.edges_by_type), g.room.empty() ? "unknown" : g.room,
+                                  counts(g.nodes_by_type), counts(g.edges_by_type), counts(g.nodes_by_agent));
+    if (g.agents.empty()) return out;
+    std::string running, silent;
+    for (const auto& a : g.agents)
+    {
+        std::string& list = agent_running(a) ? running : silent;
+        list += (list.empty() ? "" : ", ") + a.name;
+    }
+    const auto n = std::ranges::count_if(g.agents, agent_running);
+    out += std::format("agents: {} running ({})", n, running);
+    if (std::cmp_less(n, g.agents.size())) out += std::format("; {} not running ({})", g.agents.size() - n, silent);
+    return out + "\n";
 }
 
 struct NodeView

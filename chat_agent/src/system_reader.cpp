@@ -103,9 +103,9 @@ std::vector<SensorFact> SystemReader::sensors() const
 
 GraphSummary SystemReader::graph(const std::string& current_room) const
 {
-    GraphSummary g{.room = current_room};
+    GraphSummary g{.room = current_room, .agents = agents()};
     std::map<std::uint32_t, std::string> agent_names;
-    for (const auto& a : agents()) agent_names[a.id] = a.name;
+    for (const auto& a : g.agents) agent_names[a.id] = a.name;
     for (const auto& n : G_->get_nodes())
     {
         ++g.nodes_by_type[n.type()];

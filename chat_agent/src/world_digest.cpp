@@ -53,7 +53,9 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
     d.facts.controller_present = controller_present;
     std::string s;
     s += std::format("time: {}\n", clock_now());
-    s += std::format("controller (the agent that drives the robot): {}\n", controller_present ? "running" : "NOT running");
+    // Worded as what it means for commands, not as an agent's status: "controller: running" read as the whole agents
+    // answer and stopped agents() being called (check_llm_tools.py "which agent is degraded", 2026-10-18).
+    s += std::format("can move: {}\n", controller_present ? "yes" : "NO (the motion controller is not running)");
 
     // ── rooms ──
     std::uint64_t room_id = 0;
