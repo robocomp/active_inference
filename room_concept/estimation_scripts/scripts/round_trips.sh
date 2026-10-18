@@ -9,15 +9,18 @@ B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimati
 echo stop > $B/controller/remote_cmd.txt  # DISARMED until the main door is born: the start pose faces it, and an armed
                                           # controller explores furniture meanwhile (try52: wedged on the table, door never seen).
                                           # Each leg arms it with `run` + `cross` below.
-python3 scripts/door.py close; python3 scripts/door.py close DOOR_0; rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json
+rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.0 6.8 0 >/dev/null 2>&1
+# Doors closed AFTER the teleport: the bridge now HOLDS a commanded leaf, and closing it on a robot still standing in
+# the doorway from the last run pressed the held leaf against the body.
+python3 scripts/door.py close; python3 scripts/door.py close DOOR_0
 MAIN=${2:-door_1}
 for i in $(seq 1 150); do grep -a -q "created instance for node '$MAIN'" $L/door_concept.log 2>/dev/null && break; sleep 2; done
 if ! grep -a -q "created instance for node '$MAIN'" $L/door_concept.log; then
   echo "ABORT: '$MAIN' never born in 300 s; doors born: $(grep -a -o "created instance for node 'door_[0-9]*'" $L/door_concept.log | grep -o "door_[0-9]*" | tr '\n' ' ')"
   bash scripts/run_crossing.sh crossing/$1 collect >/dev/null 2>&1; exit 1
 fi; sleep 5
-done_n() { grep -a -c "while crossing — passage DONE" $L/controller.log; }
+done_n() { grep -a -c "passage DONE" $L/controller.log; }   # both "…while crossing — passage DONE" and the close-behind form
 cur=$MAIN
 ok=0
 for leg in 1 2 3 4 5 6; do
