@@ -36,6 +36,7 @@ LIST(APPEND SOURCES
   ../src/canvas_runner.cpp
   ../src/canvas_snapshot.cpp
   ../src/canvas_model.cpp
+  ../src/canvas_lidar.cpp
   ../src/mission_watch.cpp
   ../src/system_reader.cpp
 )

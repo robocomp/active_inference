@@ -1,7 +1,8 @@
 #pragma once
 /*
  * canvas_commands.h — the side canvas' fast path: "show me the zed camera", "show me the room", "show me the plan",
- * "show me the graph [of room_1]", "show me the robot", "draw object chair_1", "close the canvas" are drawn at once with a stock script, without the model (2026-10-18).
+ * "show me the graph [of room_1]", "show me the robot", "draw object chair_1", "show me the lidars",
+ * "close the canvas" are drawn at once with a stock script, without the model (2026-10-18).
  *
  * Only these fixed phrasings (English and the obvious Spanish) — anything looser ("draw the doors in red") is a
  * sentence for the model, which has the draw tool. Pure, header-only; tests/test_canvas.cpp.
@@ -17,8 +18,9 @@ namespace rc::chat
 
 struct ShowRequest
 {
-    enum class Kind { camera, layout, plan, graph, model, hide } kind;
-    std::string arg;   ///< camera: "zed" | "ricoh"; graph: the node to zoom in on ("" = all); model: "robot" | a node | a class
+    enum class Kind { camera, layout, plan, graph, model, lidar, hide } kind;
+    std::string arg;   ///< camera: "zed" | "ricoh"; graph: the node to zoom in on ("" = all); model: "robot" | a node | a class;
+                       ///< lidar: "helios" | "bpearl" | "" (both)
 };
 
 [[nodiscard]] inline std::optional<ShowRequest> parse_show(const std::string& lowered)
@@ -34,6 +36,13 @@ struct ShowRequest
     static const std::regex model_of(R"re(^(?:draw|show(?: me)?|display) (?:the |a )?(?:3d |3-d )?model of (?:the )?([a-z0-9_ ]+)$)re");
     static const std::regex x_model(R"re(^(?:draw|show(?: me)?|display) (?:the |a )?([a-z0-9_ ]+?) (?:3d |3-d )?model$)re");
     static const std::regex robot(R"re(^(?:draw|show(?: me)?|display) (?:the )?(?:robot|yourself)(?: in 3d)?$|^(?:muestrame|muéstrame) el robot$)re");
+    // 3-D LiDARs: "show me the lidars", "draw the 3d lidar", "show me the helios", "the point cloud", "el lidar"
+    static const std::regex lidar(R"re(^(?:draw|show(?: me)?|display|muestrame|muéstrame|dibuja) (?:the |los |el |la )?)re"
+                                  R"re((?:(3d |3-d )?lidars?|(3d |3-d )?lidar (?:points|point cloud|clouds?)|point clouds?|laser|lasers|)re"
+                                  R"re(helios(?: lidar)?|bpearl(?: lidar)?|nube de puntos)$)re");
+    if (std::regex_match(t, lidar))
+        return ShowRequest{ShowRequest::Kind::lidar,
+                           t.find("helios") != std::string::npos ? "helios" : t.find("bpearl") != std::string::npos ? "bpearl" : ""};
     if (std::regex_match(t, robot)) return ShowRequest{ShowRequest::Kind::model, "robot"};
     for (const auto* re : {&draw_object, &model_of, &x_model})
         if (std::smatch mm; std::regex_match(t, mm, *re))

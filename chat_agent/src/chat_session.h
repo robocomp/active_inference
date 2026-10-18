@@ -57,6 +57,7 @@
 
 #include "camera_grabber.h"
 #include "canvas_commands.h"
+#include "canvas_lidar.h"
 #include "canvas_runner.h"
 #include "chat_log.h"
 #include "chat_window.h"
@@ -139,6 +140,8 @@ private:
     QString draw_now(CanvasJob job, bool savable);
     void show_request(const ShowRequest& r, const QString& text);   ///< the canvas fast path
     QString show_model(const std::string& what);   ///< the 3-D page (canvas_model.h); "OK: …" or "ERROR: …"
+    QString show_lidar(const std::string& which);  ///< the point-cloud page (canvas_lidar.h): helios | bpearl | both
+    void canvas_stop();   ///< stop whatever the canvas keeps live: a script worker, the camera, the lidars
     std::optional<CanvasJob> library_job(const QString& name, const QStringList& args) const;
     QStringList canvas_library() const;   ///< stock + saved script names
     void write_canvas_inputs(const CanvasJob& job);
@@ -171,6 +174,9 @@ private:
     CanvasRunner canvas_runner_;
     CanvasJob canvas_job_;          ///< what the canvas shows now (re-run while live)
     std::optional<Camera> canvas_camera_;   ///< the stock camera drawing: frames shown directly, no script
+    LidarGrabber lidars_{G_};               ///< the point-cloud page's subscribers (made only while it shows)
+    bool canvas_lidar_ = false;             ///< the point-cloud page is up: the canvas timer polls lidars_
+    bool lidar_logged_ = false;             ///< its first frame has been logged
     bool canvas_live_ = false;
     bool canvas_savable_ = false;
     int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)

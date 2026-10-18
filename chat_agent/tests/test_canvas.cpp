@@ -42,6 +42,12 @@ int main()
     assert(is("show me the 3d model of the fridge", K::model, "fridge")); ++checks;
     assert(is("show me the table model", K::model, "table")); ++checks;
     assert(is("muéstrame el robot", K::model, "robot")); ++checks;
+    assert(is("show me the lidars", K::lidar)); ++checks;
+    assert(is("draw the 3d lidar", K::lidar)); ++checks;
+    assert(is("show me the lidar point cloud", K::lidar)); ++checks;
+    assert(is("show me the helios", K::lidar, "helios")); ++checks;
+    assert(is("show the bpearl lidar", K::lidar, "bpearl")); ++checks;
+    assert(is("muéstrame el lidar", K::lidar)); ++checks;
     // looser sentences go to the model
     assert(not parse_show("show me the doors in red").has_value()); ++checks;
     assert(not parse_show("show me where the chairs are").has_value()); ++checks;

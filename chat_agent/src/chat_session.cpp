@@ -97,8 +97,7 @@ void ChatSession::start()
         .canvas = CanvasPanel::Callbacks{
             .on_close = [this]()
             {
-                canvas_live_ = false;
-                canvas_runner_.kill();
+                canvas_stop();
                 window_->hide_canvas();
             },
             .on_save = [this](const QString& name) { save_canvas_script(name); },
@@ -406,7 +405,8 @@ QJsonArray ChatSession::tools_json() const
         QJsonObject{}, {}));
     tools.append(tool_def("sensors",
         "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, resolution, age of the "
-        "last frame and bandwidth. Read-only.",
+        "last frame and bandwidth: numbers about the streams, not what they measure. To let the person SEE what the "
+        "LiDARs or cameras measure use show (lidar / camera). Read-only.",
         QJsonObject{{"name", QJsonObject{{"type", "string"},
                                          {"description", "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
                                                          "lidar); empty = all"}}}},
@@ -459,7 +459,8 @@ QJsonArray ChatSession::tools_json() const
             "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
             "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
             "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
-            "'robot', an object name like chair_1, or a class like table); "
+            "'robot', an object name like chair_1, or a class like table); lidar = the live 3-D LiDAR point clouds "
+            "in the robot's frame (args: leave EMPTY for both, the usual answer; 'helios' or 'bpearl' only when the person names one); "
             "other names are drawings "
             "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
             QJsonObject{{"name", QJsonObject{{"type", "string"}, {"enum", names}, {"description", "which drawing"}}},
@@ -649,8 +650,7 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     if (name == "draw" or name == "show") return do_draw(name, args);
     if (name == "hide_canvas")
     {
-        canvas_live_ = false;
-        canvas_runner_.kill();
+        canvas_stop();
         window_->hide_canvas();
         return QStringLiteral("OK: the canvas is closed.");
     }
@@ -779,6 +779,7 @@ QStringList ChatSession::canvas_library() const
             if (not names.contains(f.completeBaseName())) names.append(f.completeBaseName());
     if (not names.contains("plan")) names.append("plan");     // not a script: the plan page of the canvas
     if (not names.contains("model")) names.append("model");   // not a script: the 3-D page (canvas_model.h)
+    if (not names.contains("lidar")) names.append("lidar");   // not a script: the point-cloud page (canvas_lidar.h)
     return names;
 }
 
@@ -842,8 +843,7 @@ QImage to_qimage(const cv::Mat& bgr)
 
 QString ChatSession::draw_now(CanvasJob job, bool savable)
 {
-    canvas_live_ = false;
-    canvas_runner_.kill();    // the previous drawing's live worker
+    canvas_stop();            // the previous drawing's live worker, camera or lidars
     window_->show_canvas();   // first, so the snapshot carries the panel's real size
     if (const auto cam = stock_camera(job); cam.has_value())
     {
@@ -881,7 +881,23 @@ QString ChatSession::draw_now(CanvasJob job, bool savable)
 
 void ChatSession::tick_canvas()
 {
-    if (not canvas_live_ or not window_ or not window_->canvas_visible() or window_->canvas()->showing_plan()) return;
+    if (not window_ or not window_->canvas_visible()) return;
+    if (not canvas_live_ and not canvas_lidar_) return;
+    if (canvas_lidar_)
+    {
+        lidars_.retry();   // a subscriber that is not up yet (self-throttled); keeps the chosen sensors
+        if (lidars_.poll(*inner_))
+        {
+            window_->canvas()->update_lidar(lidars_.cloud(0), lidars_.cloud(1), lidars_.stamp_ms(), q(lidars_.status()));
+            if (not lidar_logged_)
+            {
+                lidar_logged_ = true;
+                log_.write("lidar_first_frame", QJsonObject{{"status", q(lidars_.status())}});
+                std::println("[chat_agent] canvas: first LiDAR frame — {}", lidars_.status());
+            }
+        }
+        return;
+    }
     if (canvas_camera_.has_value())
     {
         if (auto frame = cameras_.grab(*canvas_camera_); frame.has_value())
@@ -902,15 +918,44 @@ void ChatSession::tick_canvas()
     });
 }
 
+void ChatSession::canvas_stop()
+{
+    canvas_live_ = false;
+    canvas_runner_.kill();
+    canvas_camera_.reset();
+    if (canvas_lidar_) lidars_.release();
+    canvas_lidar_ = false;
+}
+
+QString ChatSession::show_lidar(const std::string& which_raw)
+{
+    std::string which = which_raw;
+    std::ranges::transform(which, which.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::vector<std::string> sensors;
+    if (which.find("helios") != std::string::npos or which == "top" or which == "upper") sensors = {"helios"};
+    else if (which.find("bpearl") != std::string::npos or which == "dome" or which == "lower") sensors = {"bpearl"};
+    canvas_stop();
+    lidars_.want(sensors);
+    const bool any = G_->get_node("helios").has_value() or G_->get_node("bpearl").has_value();
+    log_.write("draw_lidar", QJsonObject{{"which", q(which)}, {"sensor_nodes", any}});
+    if (not any) return QStringLiteral("ERROR: the robot has no 3-D LiDAR nodes (helios / bpearl) in the graph");
+    canvas_lidar_ = true;
+    lidar_logged_ = false;
+    window_->show_canvas();
+    window_->canvas()->show_lidar(sensors.empty() ? QStringLiteral("3-D LiDARs: helios + bpearl")
+                                                  : QStringLiteral("3-D LiDAR: %1").arg(q(sensors.front())),
+                                  QStringLiteral("robot frame · helios and bpearl in two colours · waiting for points…"));
+    return QStringLiteral("OK: the %1 point cloud is on the canvas, live, in the robot's frame; the person can turn it "
+                          "with the mouse.").arg(sensors.empty() ? QStringLiteral("3-D LiDARs'") : q(sensors.front()));
+}
+
 QString ChatSession::show_model(const std::string& what)
 {
     const auto m = find_model(*G_, digest_.objects, what);
     log_.write("draw_model", QJsonObject{{"what", q(what)}, {"ok", m.has_value()},
                                          {"result", q(m.has_value() ? m->description : m.error())}});
     if (not m.has_value()) return QStringLiteral("ERROR: ") + q(m.error());
-    canvas_live_ = false;
-    canvas_runner_.kill();
-    canvas_camera_.reset();
+    canvas_stop();
     window_->show_canvas();
     window_->canvas()->show_model(QStringLiteral("3-D model: %1").arg(q(m->node)), m->triangles, q(m->description));
     return QStringLiteral("OK: the 3-D model of %1 is on the canvas (%2 triangles; the person can turn it with the mouse).")
@@ -924,18 +969,24 @@ void ChatSession::show_request(const ShowRequest& r, const QString& text)
     QString reply;
     if (r.kind == ShowRequest::Kind::hide)
     {
-        canvas_live_ = false;
-        canvas_runner_.kill();
+        canvas_stop();
         window_->hide_canvas();
         reply = QStringLiteral("Canvas closed.");
     }
     else if (r.kind == ShowRequest::Kind::plan)
     {
-        canvas_live_ = false;
+        canvas_stop();
         window_->show_canvas();
         window_->canvas()->show_plan();
         reply = window_->canvas()->plan()->has_mission() ? QStringLiteral("The mission plan is on the canvas.")
                                                           : QStringLiteral("No mission yet: the canvas shows an empty plan.");
+    }
+    else if (r.kind == ShowRequest::Kind::lidar)
+    {
+        const QString res = show_lidar(r.arg);
+        reply = res.startsWith("OK") ? QStringLiteral("Showing the %1 on the canvas, live (drag to turn it).")
+                                           .arg(r.arg.empty() ? QStringLiteral("3-D LiDARs") : q(r.arg))
+                                     : QStringLiteral("I cannot show the LiDARs: ") + res.mid(7);
     }
     else if (r.kind == ShowRequest::Kind::model)
     {
@@ -994,6 +1045,17 @@ QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
         draw_failed_ = true;
         return QStringLiteral("ERROR: ") + why;
     };
+    if (stock == "lidar")
+    {
+        // One sensor only when the PERSON named it: qwen3-vl passes 'helios' for "let me see the lidar points" 5/5,
+        // whatever the tool description says, and the person then sees half the robot's LiDAR without asking.
+        QString which = args.value("args").toString().trimmed().toLower();
+        QString asked;
+        for (auto it = history_.rbegin(); it != history_.rend(); ++it)
+            if (it->value("role").toString() == "user") { asked = it->value("content").toString().toLower(); break; }
+        if (not which.isEmpty() and not asked.contains(which)) which.clear();
+        return show_lidar(which.toStdString());
+    }
     if (stock == "model")
     {
         const QString res = show_model(args.value("args").toString().trimmed().toStdString());
@@ -1002,7 +1064,7 @@ QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
     }
     if (stock == "plan")
     {
-        canvas_live_ = false;
+        canvas_stop();
         window_->show_canvas();
         window_->canvas()->show_plan();
         return QStringLiteral("OK: the mission plan is on the canvas.");

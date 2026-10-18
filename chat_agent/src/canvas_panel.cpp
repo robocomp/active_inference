@@ -1,6 +1,7 @@
 #include "canvas_panel.h"
 
 #include "../../common/viewers/gl_mesh_viewer.h"
+#include "../../common/viewers/gl_point_cloud_viewer.h"
 
 #include <QFontDatabase>
 #include <QHBoxLayout>
@@ -45,6 +46,9 @@ CanvasPanel::CanvasPanel(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(s
     model_ = new rc::viewers::GLMeshViewer();   // the same: a page, not a window
     model_->setMinimumSize(160, 120);
     stack_->addWidget(model_);
+    lidar_ = new rc::viewers::GLPointCloudViewer();
+    lidar_->setMinimumSize(160, 120);
+    stack_->addWidget(lidar_);
     lay->addWidget(stack_, 1);
     caption_ = new QLabel(this);
     caption_->setWordWrap(true);
@@ -128,6 +132,27 @@ void CanvasPanel::show_model(const QString& title, std::span<const QVector3D> tr
     model_->set_mesh(triangles);
     caption_->setText(QStringLiteral("<small>%1 &nbsp;·&nbsp; drag to orbit, wheel to zoom</small>").arg(caption.toHtmlEscaped()));
     caption_->setVisible(true);
+}
+
+void CanvasPanel::show_lidar(const QString& title, const QString& caption)
+{
+    set_title(title, true);
+    code_->setPlainText(QString());
+    code_btn_->setChecked(false);
+    code_btn_->setEnabled(false);
+    save_btn_->setEnabled(false);
+    lidar_->set_points({}, {});
+    stack_->setCurrentWidget(lidar_);
+    caption_->setText(QStringLiteral("<small>%1</small>").arg(caption.toHtmlEscaped()));
+    caption_->setVisible(true);
+}
+
+void CanvasPanel::update_lidar(std::span<const QVector3D> a, std::span<const QVector3D> b, std::uint64_t stamp_ms,
+                               const QString& caption)
+{
+    lidar_->set_points(a, b, stamp_ms);
+    caption_->setText(QStringLiteral("<small>%1 &nbsp;·&nbsp; robot frame &nbsp;·&nbsp; drag to orbit, wheel to zoom</small>")
+                          .arg(caption.toHtmlEscaped()));
 }
 
 bool CanvasPanel::showing_plan() const { return stack_->currentWidget() == plan_; }

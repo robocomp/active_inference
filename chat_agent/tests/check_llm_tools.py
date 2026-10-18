@@ -93,7 +93,8 @@ def tools():
         t("agents", "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), "
           "uptime, CPU and memory of each. Read-only.", {}, []),
         t("sensors", "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, "
-          "resolution, age of the last frame and bandwidth. Read-only.",
+          "resolution, age of the last frame and bandwidth: numbers about the streams, not what they measure. To let "
+          "the person SEE what the LiDARs or cameras measure use show (lidar / camera). Read-only.",
           {"name": {"type": "string", "description": "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
                                                      "lidar); empty = all"}}, []),
         t("graph_summary", "What the robot's working memory (its graph) holds: node and edge counts by type and by the "
@@ -133,10 +134,11 @@ def tools():
           "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
           "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
           "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
-          "'robot', an object name like chair_1, or a class like table); "
+          "'robot', an object name like chair_1, or a class like table); lidar = the live 3-D LiDAR point clouds "
+          "in the robot's frame (args: leave EMPTY for both, the usual answer; 'helios' or 'bpearl' only when the person names one); "
           "other names are drawings "
           "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
-          {"name": {"type": "string", "enum": ["camera", "graph", "layout", "model", "plan"], "description": "which drawing"},
+          {"name": {"type": "string", "enum": ["camera", "graph", "layout", "lidar", "model", "plan"], "description": "which drawing"},
            "args": {"type": "string", "description": "camera: 'zed' (front, default) or 'ricoh' (360)"},
            "live": {"type": "boolean", "description": "true = keep redrawing it (default for camera and "
                                                       "layout); false = draw once"}}, ["name"]),
@@ -255,6 +257,8 @@ CASES = [
      lambda n, a, c: n == "show" and a.get("name") == "model" and "chair" in str(a.get("args", ""))),
     ("what do you look like", [], "none", "what do you look like? show me",
      lambda n, a, c: n == "show" and a.get("name") == "model" and str(a.get("args", "robot")) in ("robot", "Shadow", "")),
+    ("lidar points", [], "none", "let me see the lidar points",
+     lambda n, a, c: n == "show" and a.get("name") == "lidar"),
     ("bar chart of distances", [], "none", "plot a bar chart of how far each object is from you",
      lambda n, a, c: n == "draw" and draw_script_runs(a)),
     # (label, history, last_move, user text, grader(name, args, content) -> bool)
