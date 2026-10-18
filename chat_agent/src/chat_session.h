@@ -76,6 +76,8 @@ struct SessionConfig
     std::string system_prompt_path = "etc/system_prompt.md";   ///< robot description; empty/missing ⇒ built-in
     GateLimits limits;                 ///< move_relative ranges
     double default_step_m = 0.3;       ///< "advance a bit"
+    double robot_radius_m = 0.35;      ///< approach_object: half the body width (0.70 m)
+    double approach_clearance_m = 0.30;   ///< approach_object: free space kept between the body and the object
     int objects_nearest = 6;
     int object_change_period_ms = 2000;
     int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
@@ -122,6 +124,8 @@ private:
     QString answer_query(const QString& name, const QJsonObject& args);
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
+    /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
+    QString do_approach(const QJsonObject& args);
     /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.
     QString answer_memory(const QString& name, const QJsonObject& args) const;
     /// Today's records + the all-time stats from the domain-4 graph; nullopt when it is not joined.

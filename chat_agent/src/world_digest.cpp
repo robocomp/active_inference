@@ -9,6 +9,7 @@
 
 #include "../../common/room_resolve/room_resolve.h"
 #include "../../common/world_query/door_query.h"
+#include "approach.h"
 
 namespace rc::chat
 {
@@ -197,7 +198,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
         // bt_state = "<step>|<last_event>|driving=on|off"
         std::vector<std::string> parts;
         for (auto&& p : intention.bt_state | std::views::split('|')) parts.emplace_back(p.begin(), p.end());
-        s += std::format("last command sent from this chat: \"{}\", status: {}", intention.command,
+        s += std::format("last command sent from this chat: \"{}\", status: {}", display_command(intention.command),
                          intention.state.empty() ? std::string("not yet acknowledged") : intention.state);
         if (parts.size() >= 1 and not parts[0].empty() and parts[0] != "-") s += ", step: " + parts[0];
         if (parts.size() >= 2 and not parts[1].empty()) s += ", last event: " + parts[1];

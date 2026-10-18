@@ -13,6 +13,7 @@
 
 #include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
+#include "approach.h"
 #include "image_prep.h"
 #include "look_messages.h"
 
@@ -326,7 +327,8 @@ QJsonArray ChatSession::tools_json() const
                           QJsonObject{}, {}));
     tools.append(tool_def("move_relative",
         "Move the robot a short distance relative to where it is now: first turn in place by turn_deg, then drive "
-        "straight distance_m. Starts at once. The robot refuses if a wall or obstacle is in the way.",
+        "straight distance_m. Starts at once. The robot refuses if a wall or obstacle is in the way. Not for going to "
+        "an object (approach_object) or through a door (cross_door).",
         QJsonObject{{"distance_m", QJsonObject{{"type", "number"},
                                                {"description", "metres to drive after turning: positive = forward, "
                                                                "negative = backward, 0 = do not drive"}}},
@@ -334,6 +336,11 @@ QJsonArray ChatSession::tools_json() const
                                              {"description", "degrees to turn in place first: positive = left, "
                                                              "negative = right, 180 = turn around, 0 = do not turn"}}}},
         QJsonArray{"distance_m", "turn_deg"}));
+    tools.append(tool_def("approach_object",
+        "Drive to an object of the CURRENT room and stop in front of it, facing it: the controller plans the path "
+        "around obstacles. Give its name (chair_1) or its class (table: the nearest one). Starts at once.",
+        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
+        QJsonArray{"object"}));
     tools.append(tool_def("find_objects",
         "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing and size. "
         "Read-only.",
@@ -538,6 +545,7 @@ bool ChatSession::handle_tool_calls(const QJsonArray& calls)
 QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 {
     if (name == "look") return do_look(args);
+    if (name == "approach_object") return do_approach(args);
     QString out;
     if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects")
@@ -591,6 +599,38 @@ QString ChatSession::answer_memory(const QString& name, const QJsonObject& args)
         }
     }
     return q(answer_episodes(st, t[0], t[1], arg("author"), arg("kind"), arg("target")));
+}
+
+QString ChatSession::do_approach(const QJsonObject& args)
+{
+    const std::string what = args.value("object").toString().trimmed().toStdString();
+    const std::string room = digest_.facts.room;
+    const auto refuse = [&](const std::string& why)
+    {
+        log_.write("approach", QJsonObject{{"object", q(what)}, {"ok", false}, {"reason", q(why)}});
+        window_->append_system(QStringLiteral("Not possible: ") + q(why));
+        return QStringLiteral("REJECTED: ") + q(why);
+    };
+    if (not digest_.facts.controller_present) return refuse("the controller is not running, so the robot cannot move");
+    if (room.empty()) return refuse("the current room is not known yet");
+    const auto o = pick_object(digest_.objects, what);
+    if (not o.has_value()) return refuse(o.error());
+    // Both in the room frame: the go_to pose is a room pose. Optionals checked (CLAUDE.md).
+    const auto To = inner_->get_transformation_matrix(room, o->name);
+    const auto Tr = inner_->get_transformation_matrix(room, "body");
+    if (not To.has_value() or not Tr.has_value())
+        return refuse("where '" + o->name + "' or the robot is in " + room + " cannot be resolved right now");
+    const double standoff = cfg_.robot_radius_m + cfg_.approach_clearance_m;
+    const auto p = approach_point({To->translation().x(), To->translation().y()},
+                                  {Tr->translation().x(), Tr->translation().y()}, footprint_radius(*o), standoff);
+    if (not p.has_value())
+        return QStringLiteral("OK: the robot is already next to %1; nothing to drive.").arg(q(o->name));
+    const std::string json = rc::mission::encode_json(approach_mission(o->name, room, *p));
+    log_.write("approach", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"x", p->x}, {"y", p->y}, {"yaw", p->yaw}});
+    if (not send_command(json, "llm")) return QStringLiteral("FAILED: could not write the mission to the graph.");
+    return QStringLiteral("OK: mission 'approach %1' sent: the controller drives to a spot %2 m from its centre, facing "
+                          "it, planning its path around obstacles.")
+        .arg(q(o->name)).arg(footprint_radius(*o) + standoff, 0, 'f', 2);
 }
 
 QString ChatSession::do_look(const QJsonObject& args)
@@ -667,7 +707,7 @@ bool ChatSession::send_command(const std::string& command, const char* origin)
     seen_step_.clear();
     seen_event_.clear();
     warned_unarmed_ = warned_unacked_ = reported_end_ = false;
-    window_->append_system(QStringLiteral("→ sent to the controller: %1").arg(q(command)));
+    window_->append_system(QStringLiteral("→ sent to the controller: %1").arg(q(display_command(command))));
     std::println("[chat_agent] command '{}' sent ({})", command, origin);
     return true;
 }
@@ -697,10 +737,10 @@ void ChatSession::tick_status()
         warned_unacked_ = true;
         window_->append_robot(controller_present_ ? "the controller has not picked the command up yet"
                                                   : "no controller is running to pick the command up");
-        log_.write("intention_unacked", QJsonObject{{"command", q(sent_command_)}});
+        log_.write("intention_unacked", QJsonObject{{"command", q(display_command(sent_command_))}});
     }
     if (state == seen_state_ and step == seen_step_ and event == seen_event_) return;
-    log_.write("intention_state", QJsonObject{{"command", q(sent_command_)}, {"state", q(state)}, {"bt_state", q(s.bt_state)}});
+    log_.write("intention_state", QJsonObject{{"command", q(display_command(sent_command_))}, {"state", q(state)}, {"bt_state", q(s.bt_state)}});
 
     if (state == "in_progress")
     {
@@ -721,12 +761,13 @@ void ChatSession::tick_status()
         reported_end_ = true;
         // stop / uncross END in "aborted" by design — that is their success, not a failure.
         const bool halt = sent_command_ == "stop" or sent_command_ == "uncross";
-        QString line = halt and state == "aborted" ? QStringLiteral("'%1' done").arg(q(sent_command_))
-                                                     : QStringLiteral("'%1' %2").arg(q(sent_command_), q(state));
+        const std::string shown = display_command(sent_command_);
+        QString line = halt and state == "aborted" ? QStringLiteral("'%1' done").arg(q(shown))
+                                                     : QStringLiteral("'%1' %2").arg(q(shown), q(state));
         if (not event.empty()) line += " — " + q(event);
         window_->append_robot(line);
         push_history({{"role", "tool"}, {"tool_name", "robot_status"},
-                      {"content", q(robot_status_text(sent_command_, state, event))}});
+                      {"content", q(robot_status_text(shown, state, event))}});
     }
     seen_state_ = state;
     seen_step_ = step;

@@ -32,4 +32,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -o "$out/tes
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_em" test_em.cpp \
     $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_em"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
+    -o "$out/test_approach" test_approach.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_approach"
 rm -rf "$out"

@@ -136,6 +136,9 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
             "robot description prepended to the system message (read once at start; missing => built-in)");
     c.limits.max_move_m = r.d("Chat.max_move_m", 3.0, "move_relative: longer distances are refused (controller cap 3 m)");
     c.default_step_m = r.d("Chat.default_step_m", 0.3, "\"advance a bit\": the step the model is told to use");
+    c.robot_radius_m = r.d("Chat.robot_radius_m", 0.35, "approach_object: half the body width");
+    c.approach_clearance_m = r.d("Chat.approach_clearance_m", 0.30,
+            "approach_object: free space kept between the body and the object (room to turn)");
     c.objects_nearest = r.i("Chat.objects_nearest", 6, "OBJECTS section of the STATE: how many nearest objects are listed");
     c.object_change_period_ms = r.i("Chat.object_change_period_ms", 2000,
             "object births/removals are shown in the window at most this often (flaps inside the window cancel)");

@@ -81,6 +81,11 @@ system_prompt_path = "etc/system_prompt.md"
 max_move_m = 3.0
 # "advance a bit" — the step the model is told to use when the person gives no number.
 default_step_m = 0.3
+# approach_object (approach.h): stand footprint_radius(object) + robot_radius_m + approach_clearance_m from the object's
+# centre. Geometry, not a knob: robot_radius_m is half the 0.70 m body door_concept checks passages against; the
+# clearance is room to turn on the spot (the controller moves a standpoint it cannot turn in anyway).
+robot_radius_m = 0.35
+approach_clearance_m = 0.30
 # OBJECTS section of the STATE: the N nearest objects of the current room (counts per class always).
 objects_nearest = 6
 # Object births/removals are shown in the window at most this often; a flap inside the window cancels out.

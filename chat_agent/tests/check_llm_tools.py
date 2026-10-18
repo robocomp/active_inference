@@ -67,12 +67,15 @@ def tools():
         t("cancel_passage", "Abandon the door crossing in progress (the robot stays where it is).", {}, []),
         t("move_relative", "Move the robot a short distance relative to where it is now: first turn in place by "
           "turn_deg, then drive straight distance_m. Starts at once. The robot refuses if a wall or obstacle "
-          "is in the way.",
+          "is in the way. Not for going to an object (approach_object) or through a door (cross_door).",
           {"distance_m": {"type": "number", "description": "metres to drive after turning: positive = forward, "
                                                            "negative = backward, 0 = do not drive"},
            "turn_deg": {"type": "number", "description": "degrees to turn in place first: positive = left, "
                                                          "negative = right, 180 = turn around, 0 = do not turn"}},
           ["distance_m", "turn_deg"]),
+        t("approach_object", "Drive to an object of the CURRENT room and stop in front of it, facing it: the "
+          "controller plans the path around obstacles. Give its name (chair_1) or its class (table: the nearest one). "
+          "Starts at once.", {"object": {"type": "string", "description": "an object name or class"}}, ["object"]),
         t("find_objects", "List the objects the robot has perceived in the CURRENT room, nearest first, with "
           "distance, bearing and size. Read-only.",
           {"subtype": {"type": "string", "description": "a class to filter by, in English singular (chair, table, "
@@ -239,6 +242,16 @@ CASES = [
      "robot motion now (odometry, 60 ms old): forward 0.38 m/s, sideways 0.00 m/s, turning left 9 deg/s\n"),
     ("are you moving (still)", [], "none", "are you moving?",
      lambda n, a, c: re.search(r"\bno\b|not moving|standing still|stationary", c.lower()) is not None),
+    # live 2026-10-18: "approach the table" / "approach chair 1" — no tool existed: a straight move at the chair (refused,
+    # the chair blocks it) or a claim of moving with no call at all. approach_object sends a go_to mission.
+    ("approach the table", [], "none", "approach the table",
+     lambda n, a, c: n == "approach_object" and "table" in str(a.get("object", "")).lower()),
+    ("approach chair 1", [], "none", "approach chair 1",
+     lambda n, a, c: n == "approach_object" and str(a.get("object", "")).lower().replace(" ", "_") in ("chair_1",)),
+    ("go to the bottle", [], "none", "go to the bottle",
+     lambda n, a, c: n == "approach_object" and "bottle" in str(a.get("object", "")).lower()),
+    ("acércate a la mesa (es)", [], "none", "acércate a la mesa",
+     lambda n, a, c: n == "approach_object" and re.search("table|mesa", str(a.get("object", "")).lower()) is not None),
     # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
     ("how many agents", [], "none", "how many agents are running?",
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),
