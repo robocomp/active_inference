@@ -104,7 +104,9 @@ look_jpeg_quality = 85
 # systemd user scope (MemoryMax), in a network namespace when the kernel allows it, and is killed after timeout_ms.
 dir = "canvas"
 timeout_ms = 10000
-live_period_ms = 1000
+# Live drawings: the camera is shown directly (no Python); a script redraws in a persistent worker (~45 ms for the
+# room layout), skipping ticks while one is in flight, so a slow script sets its own pace.
+live_period_ms = 100
 memory_max = "1G"
 
 [Ice]

@@ -13,9 +13,14 @@
  *   · a wall-clock timeout, after which the child is killed;
  *   · -I: no PYTHON* env, no user site, the script's directory is not importable.
  *
- * Two ways to run: run_blocking() for a tool call (the result goes back to the model in the same round; the GUI
- * waits at most timeout_ms) and start() for the live re-runs (asynchronous; a tick that finds a run in flight is
- * simply skipped). Starting either kills a run still in flight. No Q_OBJECT; GUI thread only.
+ * Two ways to run:
+ *   run_blocking()  one fresh process, for a tool call or the first picture of a drawing (the result goes back to
+ *                   the model in the same round; the GUI waits at most timeout_ms; ~350 ms for stock/layout.py).
+ *   redraw()        a LIVE drawing's next picture, from a persistent worker (bootstrap.py --serve) that keeps the
+ *                   interpreter and matplotlib loaded: ~45 ms for the same layout. One worker per drawing: asking
+ *                   for a different script/args restarts it, so nothing a script did outlives its drawing.
+ *                   Asynchronous; a tick that finds a redraw in flight is skipped (the drawing sets its own pace).
+ * No Q_OBJECT; GUI thread only.
  */
 
 #include <functional>
@@ -69,12 +74,17 @@ public:
     [[nodiscard]] bool running() const;
 
     CanvasRunResult run_blocking(const CanvasJob& job);
-    void start(const CanvasJob& job, std::function<void(CanvasRunResult)> done);
-    void kill();
+    void redraw(const CanvasJob& job, std::function<void(CanvasRunResult)> done);
+    void kill();          ///< the one-shot run and the live worker
 
 private:
+    [[nodiscard]] QStringList command(const QStringList& bootstrap_args) const;   ///< program first
     void launch(const CanvasJob& job);
     CanvasRunResult collect(int exit_code, bool timed_out);
+    CanvasRunResult picture(qint64 started_ms) const;   ///< out.png, or why there is none
+    void stop_worker();
+    void worker_reply(const QByteArray& line);
+    void worker_fail(const QString& why);
 
     CanvasRunConfig cfg_;
     QString canvas_dir_, run_dir_;
@@ -83,6 +93,14 @@ private:
     QObject ctx_;
     qint64 started_ms_ = 0;
     int generation_ = 0;
+    // the live worker
+    std::unique_ptr<QProcess> worker_;
+    QString worker_key_;                                ///< script + args it serves
+    QByteArray worker_out_, worker_err_;
+    std::function<void(CanvasRunResult)> worker_done_;  ///< set while a redraw is in flight
+    qint64 worker_started_ms_ = 0;
+    int worker_gen_ = 0;
+    int worker_req_ = 0;   ///< which redraw a timeout belongs to
 };
 
 }   // namespace rc::chat

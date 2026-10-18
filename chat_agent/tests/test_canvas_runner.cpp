@@ -1,5 +1,5 @@
 // CanvasRunner + CanvasPanel offscreen checks: a good script draws, a broken one returns its stderr, an endless one is
-// killed at the timeout, a network attempt fails, the async path delivers, and the panel shows a drawing and the plan
+// killed at the timeout, a network attempt fails, the live worker redraws fast, survives a failing script and is killed when stuck, and the panel shows a drawing and the plan
 // page. Build+run: tests/run_tests.sh (needs python3 with matplotlib, numpy, PIL).
 #include "../src/canvas_panel.h"
 #include "../src/canvas_runner.h"
@@ -70,24 +70,43 @@ int main(int argc, char** argv)
     r = runner.run_blocking(script_job(scripts.path(), "net.py",
         "import urllib.request\nurllib.request.urlopen('http://example.com', timeout=2)\n"));
     assert(not r.ok); ++checks;
-    // async, as the live re-runs use it
+    // the live worker: the first redraw pays the start-up, later ones only the drawing
     {
-        QEventLoop loop;
-        CanvasRunResult got;
-        runner.start(CanvasJob{.title = "layout", .script_path = canvas + "/stock/layout.py"},
-                     [&](CanvasRunResult res) { got = std::move(res); loop.quit(); });
-        QTimer::singleShot(8000, &loop, &QEventLoop::quit);
-        loop.exec();
-        assert(got.ok and not runner.running()); ++checks;
-    }
-    // a run killed by a newer one never reports
-    {
+        const CanvasJob layout{.title = "layout", .script_path = canvas + "/stock/layout.py"};
+        const auto redraw = [&](const CanvasJob& job)
+        {
+            QEventLoop loop;
+            CanvasRunResult got;
+            runner.redraw(job, [&](CanvasRunResult res) { got = std::move(res); loop.quit(); });
+            QTimer::singleShot(8000, &loop, &QEventLoop::quit);
+            loop.exec();
+            return got;
+        };
+        const auto first = redraw(layout);
+        assert(first.ok and not runner.running()); ++checks;
+        qint64 warm = 0;
+        for (int i = 0; i < 5; ++i)
+        {
+            const auto again = redraw(layout);
+            assert(again.ok and again.image.width() == 400); ++checks;
+            warm += again.ms;
+        }
+        std::println("live worker: first {} ms, warm mean {} ms", first.ms, warm / 5);
+        assert(warm / 5 < first.ms); ++checks;
+        // a failing redraw reports the traceback and the worker survives it
+        const auto bad = redraw(script_job(scripts.path(), "bad_live.py", "from rcanvas import *\nraise ValueError('boom')\n"));
+        assert(not bad.ok and bad.error.contains("ValueError")); ++checks;
+        assert(redraw(layout).ok); ++checks;   // another drawing: a fresh worker
+        // an endless redraw is killed at the timeout
+        const auto loop = redraw(script_job(scripts.path(), "loop_live.py", "while True:\n    pass\n"));
+        assert(not loop.ok and loop.error.contains("stopped after")); ++checks;
+        // a redraw cancelled by kill() never reports
         int calls = 0;
-        runner.start(script_job(scripts.path(), "slow.py", "import time\ntime.sleep(3)\n"), [&](CanvasRunResult) { ++calls; });
+        runner.redraw(layout, [&](CanvasRunResult) { ++calls; });
         runner.kill();
-        QEventLoop loop;
-        QTimer::singleShot(500, &loop, &QEventLoop::quit);
-        loop.exec();
+        QEventLoop l;
+        QTimer::singleShot(1500, &l, &QEventLoop::quit);
+        l.exec();
         assert(calls == 0 and not runner.running()); ++checks;
     }
 

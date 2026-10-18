@@ -60,8 +60,8 @@ public:
     void set_plan_progress(const rc::mission::Progress& p);
 
     [[nodiscard]] CanvasPanel* canvas() const { return canvas_; }
-    void show_canvas();    ///< unhide the canvas (first time: give it ~45% of the width)
-    void hide_canvas();
+    void show_canvas();    ///< unhide the canvas; the window widens by it (its last width, 560 px at first)
+    void hide_canvas();    ///< hide it and give its width back: the window returns to its size without it
     [[nodiscard]] bool canvas_visible() const { return canvas_->isVisible(); }
 
     void set_busy(bool busy);

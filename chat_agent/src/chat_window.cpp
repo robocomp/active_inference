@@ -82,9 +82,11 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
 
 void ChatWindow::closeEvent(QCloseEvent* e)
 {
+    // The geometry is saved WITHOUT the canvas: the next start opens it again and widens the window by it, so a
+    // window saved with the canvas would grow by one canvas on every run.
+    hide_canvas();
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
     settings.setValue(QStringLiteral("chat_window/geometry"), saveGeometry());
-    if (canvas_->isVisible()) settings.setValue(QStringLiteral("chat_window/splitter"), split_->saveState());
     QWidget::closeEvent(e);
 }
 
@@ -170,28 +172,29 @@ void ChatWindow::set_plan_progress(const rc::mission::Progress& p)
     canvas_->plan()->set_progress(p);
 }
 
+// Opening the canvas WIDENS the window by the canvas and closing it ([×]) gives exactly that width back, so the
+// transcript keeps its size either way and the window returns to what it was. The canvas width is remembered.
 void ChatWindow::show_canvas()
 {
     if (canvas_->isVisible()) return;
-    canvas_->setVisible(true);
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
-    if (const auto st = settings.value(QStringLiteral("chat_window/splitter")).toByteArray(); not st.isEmpty())
-        split_->restoreState(st);
-    const auto sizes = split_->sizes();
-    if (sizes.size() == 2 and sizes[1] < 200)   // never seen, or saved collapsed: give it a usable share
-    {
-        const int total = sizes[0] + sizes[1];
-        if (width() < 1000) resize(std::max(width(), 1100), height());
-        split_->setSizes({total * 55 / 100, total * 45 / 100});
-    }
+    const int canvas_w = std::max(320, settings.value(QStringLiteral("chat_window/canvas_width"), 560).toInt());
+    const int transcript_w = transcript_->width();
+    const int added = canvas_w + split_->handleWidth();
+    canvas_->setVisible(true);
+    resize(width() + added, height());
+    split_->setSizes({transcript_w, canvas_w});
 }
 
 void ChatWindow::hide_canvas()
 {
     if (not canvas_->isVisible()) return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
-    settings.setValue(QStringLiteral("chat_window/splitter"), split_->saveState());
+    settings.setValue(QStringLiteral("chat_window/canvas_width"), canvas_->width());
+    // what the canvas takes NOW (the person may have dragged the splitter or resized the window since it opened)
+    const int added = canvas_->width() + split_->handleWidth();
     canvas_->setVisible(false);
+    resize(std::max(minimumSizeHint().width(), width() - added), height());
 }
 
 void ChatWindow::set_busy(bool busy)

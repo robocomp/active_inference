@@ -90,7 +90,7 @@ struct SessionConfig
     int look_jpeg_quality = 80;
     std::string canvas_dir = "canvas";   ///< bootstrap.py, rcanvas.py, stock/, library/ (canvas_runner.h)
     int canvas_timeout_ms = 10000;       ///< a canvas script is killed after this long
-    int canvas_live_period_ms = 1000;    ///< live drawings re-run at most this often (a run in flight skips a tick)
+    int canvas_live_period_ms = 100;     ///< live drawings redraw at most this often (a redraw in flight skips a tick)
     std::string canvas_memory_max = "1G";
 };
 
@@ -169,6 +169,7 @@ private:
     SystemReader system_{G_, cameras_};   ///< agents / sensors / graph / inspect (after cameras_: it reads their rates)
     CanvasRunner canvas_runner_;
     CanvasJob canvas_job_;          ///< what the canvas shows now (re-run while live)
+    std::optional<Camera> canvas_camera_;   ///< the stock camera drawing: frames shown directly, no script
     bool canvas_live_ = false;
     bool canvas_savable_ = false;
     int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)

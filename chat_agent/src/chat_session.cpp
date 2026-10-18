@@ -459,7 +459,7 @@ QJsonArray ChatSession::tools_json() const
                         {"args", QJsonObject{{"type", "string"},
                                              {"description", "camera: 'zed' (front, default) or 'ricoh' (360)"}}},
                         {"live", QJsonObject{{"type", "boolean"},
-                                             {"description", "true = redraw about once a second (default for camera "
+                                             {"description", "true = keep redrawing it (default for camera "
                                                              "and layout); false = draw once"}}}},
             QJsonArray{"name"}));
         tools.append(tool_def("draw",
@@ -476,7 +476,7 @@ QJsonArray ChatSession::tools_json() const
                         {"title", QJsonObject{{"type", "string"}, {"description", "a short caption, e.g. 'distance to "
                                                                                   "each object'"}}},
                         {"live", QJsonObject{{"type", "boolean"},
-                                             {"description", "true = redraw about once a second with fresh data; "
+                                             {"description", "true = keep redrawing it with fresh data; "
                                                              "false (default) = draw once"}}}},
             QJsonArray{"script", "title"}));
         tools.append(tool_def("hide_canvas", "Close the drawing canvas beside the chat.", QJsonObject{}, {}));
@@ -802,10 +802,46 @@ void ChatSession::write_canvas_inputs(const CanvasJob& job)
     }
 }
 
+namespace
+{
+// The stock camera drawing is the frame itself: shown straight from CameraGrabber's deep copy, no Python, so a live
+// camera runs at the canvas period instead of at a script's start-up cost.
+std::optional<Camera> stock_camera(const CanvasJob& job)
+{
+    if (not job.script_path.endsWith(QStringLiteral("/stock/camera.py"))) return std::nullopt;
+    const QString a = job.args.isEmpty() ? QString() : job.args.front().toLower();
+    return a == "ricoh" or a == "360" or a == "pano" ? Camera::pano : Camera::front;
+}
+
+QImage to_qimage(const cv::Mat& bgr)
+{
+    return QImage(bgr.data, bgr.cols, bgr.rows, static_cast<qsizetype>(bgr.step), QImage::Format_BGR888).copy();
+}
+}   // namespace
+
 QString ChatSession::draw_now(CanvasJob job, bool savable)
 {
     canvas_live_ = false;
+    canvas_runner_.kill();    // the previous drawing's live worker
     window_->show_canvas();   // first, so the snapshot carries the panel's real size
+    if (const auto cam = stock_camera(job); cam.has_value())
+    {
+        auto frame = cameras_.grab(*cam);
+        log_.write("draw", QJsonObject{{"title", job.title}, {"camera", int(*cam)}, {"live", job.live},
+                                       {"ok", frame.has_value()}, {"error", frame.has_value() ? QString() : q(frame.error())}});
+        if (not frame.has_value())
+        {
+            window_->canvas()->show_message(job.title, q(frame.error()));
+            return q(frame.error());
+        }
+        window_->canvas()->show_drawing(job.title, to_qimage(frame->bgr), job.live, job.source, false);
+        canvas_camera_ = cam;
+        canvas_job_ = std::move(job);
+        canvas_savable_ = false;
+        canvas_live_ = canvas_job_.live;
+        return {};
+    }
+    canvas_camera_.reset();
     write_canvas_inputs(job);
     const CanvasRunResult r = canvas_runner_.run_blocking(job);
     log_.write("draw", QJsonObject{{"title", job.title}, {"script", job.script_path}, {"args", job.args.join(' ')},
@@ -825,9 +861,15 @@ QString ChatSession::draw_now(CanvasJob job, bool savable)
 void ChatSession::tick_canvas()
 {
     if (not canvas_live_ or not window_ or not window_->canvas_visible() or window_->canvas()->showing_plan()) return;
-    if (canvas_runner_.running()) return;   // the previous re-run is still drawing: skip this tick
+    if (canvas_camera_.has_value())
+    {
+        if (auto frame = cameras_.grab(*canvas_camera_); frame.has_value())
+            window_->canvas()->update_image(to_qimage(frame->bgr));
+        return;
+    }
+    if (canvas_runner_.running()) return;   // the previous redraw is still drawing: skip this tick
     write_canvas_inputs(canvas_job_);
-    canvas_runner_.start(canvas_job_, [this](CanvasRunResult r)
+    canvas_runner_.redraw(canvas_job_, [this](CanvasRunResult r)
     {
         if (not canvas_live_) return;
         if (r.ok) { window_->canvas()->update_image(r.image); return; }
@@ -936,7 +978,7 @@ QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
     }
     window_->append_system(QStringLiteral("canvas: %1%2").arg(shown, live ? QStringLiteral(" (live)") : QString()));
     return QStringLiteral("OK: '%1' is drawn on the canvas beside the chat%2.")
-        .arg(shown, live ? QStringLiteral(", redrawn every second") : QString());
+        .arg(shown, live ? QStringLiteral(", redrawn continuously") : QString());
 }
 
 void ChatSession::save_canvas_script(const QString& raw)

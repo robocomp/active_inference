@@ -114,7 +114,7 @@ def save_image(img):
 
 def layout_axes(fig):
     ax = fig.add_subplot(1, 1, 1)
-    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_aspect("equal", adjustable="box")
     ax.grid(True, linewidth=0.3, alpha=0.5)
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")

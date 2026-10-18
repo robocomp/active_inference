@@ -133,7 +133,7 @@ def tools():
           "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
           {"name": {"type": "string", "enum": ["camera", "layout", "plan"], "description": "which drawing"},
            "args": {"type": "string", "description": "camera: 'zed' (front, default) or 'ricoh' (360)"},
-           "live": {"type": "boolean", "description": "true = redraw about once a second (default for camera and "
+           "live": {"type": "boolean", "description": "true = keep redrawing it (default for camera and "
                                                       "layout); false = draw once"}}, ["name"]),
         t("draw", "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script: a chart, "
           "a plot, a table, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
@@ -146,7 +146,7 @@ def tools():
           "with save(fig) (or save_image(img)). If it fails you get the error back: fix it and call draw again.",
           {"script": {"type": "string", "description": "the Python source"},
            "title": {"type": "string", "description": "a short caption, e.g. 'distance to each object'"},
-           "live": {"type": "boolean", "description": "true = redraw about once a second with fresh data; false "
+           "live": {"type": "boolean", "description": "true = keep redrawing it with fresh data; false "
                                                       "(default) = draw once"}}, ["script", "title"]),
         t("hide_canvas", "Close the drawing canvas beside the chat.", {}, []),
         t("look", "Look through a camera now: the current picture is shown to YOU (not to the person) in the next message, so you "
