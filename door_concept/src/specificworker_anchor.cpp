@@ -75,6 +75,24 @@ constexpr float kRayReachM = 2.0f;
 // lintel. Defines WHICH surfaces the model describes (walls, jambs, the leaf), as select_doorway_rays does;
 // floor returns of the downward bpearl dome are not wall-plane measurements.
 constexpr float kFloorBandM = 0.05f;
+// ⚑ FLAGGED (Task 7, fix 3) — a PUBLICATION level, not a model term: the RT edge Shadow→anchor is rewritten only on
+// cycles whose update consumed evidence with P(door in view) ≥ this. Between observations the anchor is predicted
+// internally and not published, so the controller's kAnchorStaleMs rule retires it from driving (the room route
+// takes over) instead of servoing on a dead-reckoned target nobody is looking at.
+constexpr float kPublishViewLevel = 0.5f;
+// ⚑ FLAGGED (Task 7, fix 1) — the zed's depth range for the camera's visibility term: the camera node carries the
+// field of view (cam_rgb_width / cam_rgb_focalx, or cam_fov) but no range attribute.
+constexpr float kZedMaxRangeM = 8.0f;
+
+// Bring a robot-frame point captured `age_s` ago into the robot frame of NOW: the robot moved by the body twist
+// over that interval (constant twist), so the point moves by its inverse — the same algebra as the anchor's own
+// prediction (relative_pose.h move_mean). z is untouched.
+Eigen::Vector3f to_now(const Eigen::Vector3f& p, const rc::rt::Twist& tw, float age_s)
+{
+    const Eigen::Vector3f q = rc::interaction::move_mean(Eigen::Vector3f(p.x(), p.y(), 0.f), tw.linear.x() * age_s,
+                                                         tw.linear.y() * age_s, tw.angular.z() * age_s);
+    return {q.x(), q.y(), p.z()};
+}
 }  // namespace
 
 std::string SpecificWorker::robot_node_name() const
@@ -90,7 +108,7 @@ std::string SpecificWorker::robot_node_name() const
 // existing anchor already has (a re-init must not flip yaw by π under the consumer).
 std::optional<rc::interaction::RelPose>
 SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
-                                 const std::optional<rc::interaction::RelPose>& keep_side_of) const
+                                 const std::optional<rc::interaction::RelPose>& keep_side_of, float* axis_sign_out) const
 {
     if (not G or not inner_eigen_) return std::nullopt;
     const std::string room = rc::room::current_room_frame(*G);
@@ -103,7 +121,8 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
     const Eigen::Vector2f c = ap.centre_xy();
     Eigen::Vector2f ux = ap.wall_u.normalized(), uy = ap.across_u().normalized();
     const Eigen::Vector2f p_robot = T_room_robot->translation().head<2>().cast<float>();
-    if (uy.dot(p_robot - c) > 0.0f) { ux = -ux; uy = -uy; }   // rotate by π: the robot on −y, still right-handed
+    float sign = 1.f;
+    if (uy.dot(p_robot - c) > 0.0f) { ux = -ux; uy = -uy; sign = -1.f; }   // rotate by π: the robot on −y, still right-handed
 
     auto make = [&](const Eigen::Vector2f& ax, const Eigen::Vector2f& ay)
     {
@@ -119,7 +138,11 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
     auto r = rc::interaction::from_room(T_room_robot.value(), make(ux, uy), Eigen::Matrix3f::Identity());
     if (keep_side_of.has_value()
         and std::abs(rc::interaction::wrap_pi(r.x.z() - keep_side_of->x.z())) > float(M_PI_2))
+    {
         r = rc::interaction::from_room(T_room_robot.value(), make(-ux, -uy), Eigen::Matrix3f::Identity());
+        sign = -sign;
+    }
+    if (axis_sign_out != nullptr) *axis_sign_out = sign;
 
     // ── P0 = door belief + localisation + σ_model, all in the ANCHOR's axes, then into RelPose coordinates ──────
     // (1) The door belief: variance of the opening's CENTRE along the wall, centre = O + (s + w/2)·u ⇒ J = [1, ½, 0]
@@ -174,7 +197,8 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
 
 bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff)
 {
-    const auto init = anchor_from_room(inst, std::nullopt);
+    float axis_sign = 1.f;
+    const auto init = anchor_from_room(inst, std::nullopt, &axis_sign);
     if (not init.has_value())
         return false;   // no room / robot transform this cycle: try again next cycle
     auto a = rc::interaction::Anchor::create(*G, inst.node_id, aff.node_id(), agent_id, init.value());
@@ -192,6 +216,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.linked_epoch = aff.claim().has_value() ? aff.claim()->epoch : -1;
     pa.consumer_id  = aff.claim().has_value() ? aff.claim()->agent_node_id : 0;
     pa.pose         = init.value();
+    pa.axis_sign    = axis_sign;
     pa.width        = inst.aperture.w;
     pa.thickness    = inst.aperture.thickness;
     pa.height       = inst.aperture.h;
@@ -209,7 +234,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
         anchor_log_.open("etc/anchor_log.csv", std::ios::out | std::ios::trunc);
         anchor_log_.imbue(std::locale::classic());   // a comma decimal separator can never reach the file
         if (anchor_log_.is_open())
-            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis\n";
+            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view\n";
     }
     return true;
 }
@@ -245,6 +270,84 @@ void SpecificWorker::relink_passage_anchor(std::uint64_t new_door_id, std::strin
     pa.linked_aff   = 0;
     pa.linked_epoch = -1;
     pa.reinit_on_next_claim = true;   // a later claim on the new door is a new passage: re-init, never inherit
+}
+
+// ── STEP 0 (Task 7): are the anchor's measurements in the anchor's frame? One-shot, per anchor ────────────────────
+// The anchor is the opening in the robot frame (Shadow: x right, y forward). The robot-frame bpearl sweep is the
+// room-frame sweep's SAME capture restaged (LidarPlaneReader::restage), so room←robot at the capture stamp applied to
+// it must reproduce the room-frame sweep point for point; and room←robot NOW differs from it by exactly the motion
+// since the capture — the epoch gap the update closes with to_now. Returns false when this cycle cannot answer
+// (no paired room sweep, no room, a transform missing): it is retried on the next capture.
+bool SpecificWorker::check_anchor_ray_frames(const std::string& robot_name, float age_s, const rc::rt::Twist& tw)
+{
+    if (not lidar_ingestor_ or not inner_eigen_ or robot_name.empty()) return false;
+    if (not lidar_ingestor_->bpearl_fresh() or not lidar_ingestor_->bpearl_robot_fresh()) return false;   // same pump = same capture
+    const std::string room = rc::room::current_room_frame(*G);
+    if (room.empty()) return false;
+    const auto& pr = lidar_ingestor_->sweep_bpearl_robot();
+    const auto& pw = lidar_ingestor_->sweep_bpearl_room();
+    const auto ts = static_cast<std::uint64_t>(lidar_ingestor_->bpearl_robot_stamp_ms());
+    const auto T_cap = inner_eigen_->get_transformation_matrix(room, robot_name, ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
+    const auto T_now = inner_eigen_->get_transformation_matrix(room, robot_name, 0);
+    if (not T_cap.has_value() or not T_now.has_value() or pr.empty() or pr.size() != pw.size())
+    {
+        if (not pr.empty() and pr.size() != pw.size())
+            std::print("door_concept: [anchor-frames] rays: robot sweep {} pts vs room sweep {} pts — not the same capture, retrying\n",
+                       pr.size(), pw.size());
+        return false;
+    }
+    const Eigen::Matrix4d Mc = T_cap->matrix(), Mn = T_now->matrix();
+    std::vector<double> e_cap, e_now;
+    e_cap.reserve(pr.size()); e_now.reserve(pr.size());
+    for (std::size_t i = 0; i < pr.size(); ++i)
+    {
+        const Eigen::Vector4d q = Mc * Eigen::Vector4d(pr[i].x(), pr[i].y(), pr[i].z(), 1.0);
+        e_cap.push_back((q.head<3>() - pw[i].cast<double>()).norm());
+        const Eigen::Vector3f p_now = to_now(pr[i], tw, age_s);
+        const Eigen::Vector4d qn = Mn * Eigen::Vector4d(p_now.x(), p_now.y(), p_now.z(), 1.0);
+        e_now.push_back((qn.head<2>() - pw[i].head<2>().cast<double>()).norm());
+    }
+    auto stats = [](std::vector<double> v) { std::ranges::sort(v); return std::pair{v[v.size() / 2], v.back()}; };
+    const auto [med_c, max_c] = stats(e_cap);
+    const auto [med_n, max_n] = stats(e_now);
+    const double yaw_gap = std::atan2(Mn(1, 0), Mn(0, 0)) - std::atan2(Mc(1, 0), Mc(0, 0));
+    std::print("door_concept: [anchor-frames] rays ({} pts, room {}): room←robot@capture ∘ robot-frame sweep vs the room-frame "
+               "sweep: median {:.4f} m, max {:.4f} m. Capture age {:.0f} ms; room←robot now vs @capture: yaw {:+.4f} rad, "
+               "xy {:.3f} m (twist predicts yaw {:+.4f} rad). Brought to now by the twist, then room←robot now: median "
+               "{:.4f} m, max {:.4f} m (2-D)\n",
+               pr.size(), room, med_c, max_c, age_s * 1e3f, std::remainder(yaw_gap, 2.0 * M_PI),
+               (Mn.block<2, 1>(0, 3) - Mc.block<2, 1>(0, 3)).norm(), tw.angular.z() * age_s, med_n, max_n);
+    return true;
+}
+
+// The mask: support_points_cam (zed frame: x right, y DEPTH, z up — ROBOT_GEOMETRY.md) through robot←zed and then
+// room←robot at the mask's capture stamp must reproduce MasksPacket::support_points (the ingestor's room frame).
+bool SpecificWorker::check_anchor_mask_frames(const std::string& robot_name, const Eigen::Matrix4d& robot_T_zed)
+{
+    if (not mask_ingestor_ or not inner_eigen_ or robot_name.empty()) return false;
+    const auto& pkt = mask_ingestor_->packet();
+    if (not pkt.valid or pkt.support_points_cam.empty() or pkt.support_points_cam.size() != pkt.support_points.size())
+        return false;
+    const std::string room = rc::room::current_room_frame(*G);
+    if (room.empty()) return false;
+    const auto T_cap = pkt.timestamp_ms > 0
+        ? inner_eigen_->get_transformation_matrix(room, robot_name, pkt.timestamp_ms, "RT", DSR::RT_API::TimeQuery::Interpolated)
+        : inner_eigen_->get_transformation_matrix(room, robot_name, 0);
+    if (not T_cap.has_value()) return false;
+    const Eigen::Matrix4d M = T_cap->matrix() * robot_T_zed;
+    std::vector<double> e;
+    e.reserve(pkt.support_points.size());
+    for (std::size_t i = 0; i < pkt.support_points.size(); ++i)
+    {
+        const auto& q = pkt.support_points_cam[i];
+        const Eigen::Vector4d r = M * Eigen::Vector4d(q.x(), q.y(), q.z(), 1.0);
+        e.push_back((r.head<3>() - pkt.support_points[i].cast<double>()).norm());
+    }
+    std::ranges::sort(e);
+    std::print("door_concept: [anchor-frames] mask ({} pts, room {}, capture stamp {}): room←robot@capture ∘ robot←zed ∘ "
+               "support_points_cam vs support_points: median {:.4f} m, max {:.4f} m\n",
+               e.size(), room, pkt.timestamp_ms, e[e.size() / 2], e.back());
+    return true;
 }
 
 void SpecificWorker::step_passage_anchor()
@@ -318,7 +421,7 @@ void SpecificWorker::step_passage_anchor()
             if (pa.reinit_on_next_claim)
             {
                 // The first claim on the door re-identified after a room switch: a new passage's start.
-                if (const auto r = anchor_from_room(*inst, pa.pose); r.has_value())
+                if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
                 {
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
@@ -329,7 +432,7 @@ void SpecificWorker::step_passage_anchor()
             else if (aff->node_id() == pa.linked_aff)
             {
                 if (epoch >= 0 and pa.linked_epoch >= 0 and epoch != pa.linked_epoch)
-                    if (const auto r = anchor_from_room(*inst, pa.pose); r.has_value())
+                    if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
                     {
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
@@ -350,32 +453,83 @@ void SpecificWorker::step_passage_anchor()
     const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());
     const std::string robot_name = robot_node_name();
     const auto robot = robot_name.empty() ? std::nullopt : G->get_node(robot_name);
-    if (robot.has_value() and pa.pose.stamp_ms > 0 and now > pa.pose.stamp_ms)
-        if (const auto tw = rc::rt::robot_body_twist(*G, robot.value()); tw.has_value())
-        {
-            Eigen::Vector3f var = Eigen::Vector3f::Zero();   // [var_adv, var_side, var_rot]; none stated ⇒ none added
-            if (const auto v = G->get_attrib_by_name<robot_current_speed_variance_att>(robot.value());
-                v.has_value() and v->get().size() >= 3)
-                var = {v->get()[0], v->get()[1], v->get()[2]};
-            const float dt = float(now - pa.pose.stamp_ms) * 1e-3f;
-            pa.pose = rc::interaction::predict(pa.pose, tw.value(), var, dt);
-        }
+    std::optional<rc::rt::Twist> twist;
+    if (robot.has_value())
+        twist = rc::rt::robot_body_twist(*G, robot.value());
+    if (twist.has_value() and pa.pose.stamp_ms > 0 and now > pa.pose.stamp_ms)
+    {
+        Eigen::Vector3f var = Eigen::Vector3f::Zero();   // [var_adv, var_side, var_rot]; none stated ⇒ none added
+        if (const auto v = G->get_attrib_by_name<robot_current_speed_variance_att>(robot.value());
+            v.has_value() and v->get().size() >= 3)
+            var = {v->get()[0], v->get()[1], v->get()[2]};
+        const float dt = float(now - pa.pose.stamp_ms) * 1e-3f;
+        pa.pose = rc::interaction::predict(pa.pose, twist.value(), var, dt);
+    }
     // ★ ONE CLOCK: the anchor is stamped with system-clock epoch ms (provenance::now_ms), the clock
     //   read_affordance_anchor's staleness check uses. predict() copies the TWIST's stamp; overwrite it.
     pa.pose.stamp_ms = now;
 
-    // ── UPDATE: bpearl rays + the door mask, in the ROBOT frame, each capture used once ──────────────────────
+    // ── THIS DOOR'S WALL RUN in anchor coordinates (Task 7, fix 2) ───────────────────────────────────────────
+    // The run is [0, wall_len] from the belief's wall origin along wall_u (door_fitter's associate_wall); the anchor's
+    // origin is the opening's centre and its x-axis is ±wall_u (axis_sign). Unknown run (no wall associated, len 0)
+    // ⇒ ⚑ the FLAGGED default: the aperture ± one width each side. Kept from the last cycle while the instance is gone.
+    if (inst != nullptr)
+    {
+        const float w = inst->aperture.w;
+        float lo = -1.5f * w, hi = 1.5f * w;
+        if (inst->ai2_initialized)
+            if (const auto& bp = inst->ai2_belief.params(); bp.wall_len > 0.f)
+            {
+                const float sc = (inst->aperture.centre_xy() - bp.wall_O).dot(bp.wall_u.normalized());
+                lo = -sc;
+                hi = bp.wall_len - sc;
+            }
+        if (pa.axis_sign < 0.f) { const float t = lo; lo = -hi; hi = -t; }
+        pa.wall_u_min = lo;
+        pa.wall_u_max = hi;
+    }
+    else if (pa.wall_u_max <= pa.wall_u_min)
+    {
+        pa.wall_u_min = -1.5f * pa.width;
+        pa.wall_u_max = 1.5f * pa.width;
+    }
+
+    // ── UPDATE: bpearl rays + the door mask, in the ROBOT frame OF NOW, each capture used once ──────────────
+    // ★ STEP 0 (Task 7) — ONE EPOCH. The anchor is predicted to `now`; a sweep is restaged at its CAPTURE stamp and a
+    //   mask at ITS capture stamp, i.e. in the robot frame of THEN. Both are brought forward to now with the same body
+    //   twist the anchor is predicted by (to_now). A robot turning at 0.5 rad/s with a capture 100 ms old saw the
+    //   wall 0.05 rad away from where the anchor (rightly) expects it.
     std::vector<Eigen::Vector3f> rays, mask_pts;
     Eigen::Vector3f lidar_origin = Eigen::Vector3f::Zero();
     const Eigen::Vector2f c = pa.pose.x.head<2>();
     if (lidar_ingestor_ and lidar_ingestor_->bpearl_robot_stamp_ms() > pa.last_lidar_stamp)
     {
         pa.last_lidar_stamp = lidar_ingestor_->bpearl_robot_stamp_ms();
-        lidar_origin = lidar_ingestor_->origin_bpearl_robot();
+        const float age_s = std::max<std::int64_t>(0, now - pa.last_lidar_stamp) * 1e-3f;
+        const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
+        if (not pa.frames_checked_rays)
+            pa.frames_checked_rays = check_anchor_ray_frames(robot_name, age_s, tw);
+        lidar_origin = to_now(lidar_ingestor_->origin_bpearl_robot(), tw, age_s);
         const Eigen::Vector2f o = lidar_origin.head<2>();
-        for (const auto& p : lidar_ingestor_->sweep_bpearl_robot())
+        // The predicted door line (normal n through the opening's centre), for the floor returns below.
+        const Eigen::Vector2f n_door(-std::sin(pa.pose.x.z()), std::cos(pa.pose.x.z()));
+        for (const auto& p_then : lidar_ingestor_->sweep_bpearl_robot())
         {
-            if (p.z() < kFloorBandM or p.z() > pa.height) continue;   // the wall band
+            const Eigen::Vector3f p = to_now(p_then, tw, age_s);
+            if (p.z() > pa.height) continue;   // above the lintel: not this wall's band
+            if (p.z() < kFloorBandM)
+            {
+                // ★Task 7: a FLOOR return is kept iff its beam crossed the predicted door line while still inside the
+                //  doorway's height band, i.e. it went THROUGH the plane and landed on the floor beyond. The downward
+                //  bpearl dome sees an open doorway almost only this way — its through-beams end on the next room's
+                //  floor — and without them the opening's cells read as unobserved (P(door in view) ≈ the jambs' half,
+                //  0.5: the publication level). Geometry of the beam, not a tuned level. Floor returns in front of the
+                //  line never reached the wall and stay out, as before.
+                const float s_o = n_door.dot(lidar_origin.head<2>() - c), s_p = n_door.dot(p.head<2>() - c);
+                if (not (s_o * s_p < 0.f)) continue;
+                const float z_cross = lidar_origin.z() + s_o / (s_o - s_p) * (p.z() - lidar_origin.z());
+                if (z_cross < kFloorBandM or z_cross > pa.height) continue;
+            }
             const Eigen::Vector2f d = p.head<2>() - o;
             const float len2 = d.squaredNorm();
             if (len2 < 1e-6f) continue;
@@ -383,60 +537,95 @@ void SpecificWorker::step_passage_anchor()
             if ((o + t * d - c).norm() <= kRayReachM) rays.push_back(p);
         }
     }
-    if (mask_ingestor_)
+    // The zed: its pose in the robot frame (static mount) and its frustum, for the mask AND the camera visibility.
+    rc::door::CameraFrustum cam;
+    std::optional<Eigen::Matrix4d> robot_T_zed;
+    if (not robot_name.empty() and inner_eigen_)
+        if (const auto T = inner_eigen_->get_transformation_matrix(robot_name, "zed", 0); T.has_value())   // static: ts==0, main-thread instance
+        {
+            robot_T_zed = T->matrix();
+            if (const auto zed = G->get_node("zed"); zed.has_value())
+            {
+                float half_fov = 0.f;
+                const auto wpx = G->get_attrib_by_name<cam_rgb_width_att>(zed.value());
+                const auto fx  = G->get_attrib_by_name<cam_rgb_focalx_att>(zed.value());
+                if (wpx.has_value() and fx.has_value() and fx.value() > 0)
+                    half_fov = std::atan(0.5f * float(wpx.value()) / float(fx.value()));
+                else if (const auto fov = G->get_attrib_by_name<cam_fov_att>(zed.value()); fov.has_value())
+                    half_fov = 0.5f * fov.value();
+                if (half_fov > 0.f)
+                {
+                    cam.known     = true;
+                    cam.origin    = robot_T_zed->block<2, 1>(0, 3).cast<float>();
+                    cam.forward   = robot_T_zed->block<2, 1>(0, 1).cast<float>().normalized();   // zed y = DEPTH
+                    cam.half_fov  = half_fov;
+                    cam.max_range = kZedMaxRangeM;
+                }
+            }
+        }
+    if (mask_ingestor_ and robot_T_zed.has_value())
         if (const auto& pkt = mask_ingestor_->packet(); pkt.valid and pkt.frame_id != pa.last_mask_frame)
         {
             pa.last_mask_frame = pkt.frame_id;
-            // The STATIC robot←zed mount: ts==0 on the main-thread-owned instance (CLAUDE.md ownership rule).
-            if (const auto T = (robot_name.empty() or not inner_eigen_) ? std::nullopt
-                                                  : inner_eigen_->get_transformation_matrix(robot_name, "zed", 0);
-                T.has_value())
+            const float age_s = pkt.timestamp_ms > 0 ? std::max<std::int64_t>(0, now - std::int64_t(pkt.timestamp_ms)) * 1e-3f : 0.f;
+            const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
+            if (not pa.frames_checked_mask)
+                pa.frames_checked_mask = check_anchor_mask_frames(robot_name, *robot_T_zed);
+            const Eigen::Matrix4d& M = *robot_T_zed;
+            // The door slice nearest the PREDICTED opening (robot frame); a misplaced one loses its pull
+            // through the Student-t tail inside update_door_anchor, not through a gate here.
+            float best = std::numeric_limits<float>::infinity();
+            for (const auto& sl : pkt.slices)
             {
-                const Eigen::Matrix4d M = T->matrix();
-                // The door slice nearest the PREDICTED opening (robot frame); a misplaced one loses its pull
-                // through the Student-t tail inside update_door_anchor, not through a gate here.
-                float best = std::numeric_limits<float>::infinity();
-                for (const auto& sl : pkt.slices)
+                if (sl.label != "door" or not sl.may_fit_geometry() or sl.support_end <= sl.support_begin
+                    or sl.support_end > pkt.support_points_cam.size())
+                    continue;
+                std::vector<Eigen::Vector3f> pts;
+                pts.reserve(sl.support_end - sl.support_begin);
+                Eigen::Vector2f mean = Eigen::Vector2f::Zero();
+                for (std::size_t i = sl.support_begin; i < sl.support_end; ++i)
                 {
-                    if (sl.label != "door" or not sl.may_fit_geometry() or sl.support_end <= sl.support_begin
-                        or sl.support_end > pkt.support_points_cam.size())
-                        continue;
-                    std::vector<Eigen::Vector3f> pts;
-                    pts.reserve(sl.support_end - sl.support_begin);
-                    Eigen::Vector2f mean = Eigen::Vector2f::Zero();
-                    for (std::size_t i = sl.support_begin; i < sl.support_end; ++i)
-                    {
-                        const auto& q = pkt.support_points_cam[i];
-                        const Eigen::Vector4d r = M * Eigen::Vector4d(q.x(), q.y(), q.z(), 1.0);
-                        pts.emplace_back(float(r.x()), float(r.y()), float(r.z()));
-                        mean += pts.back().head<2>();
-                    }
-                    mean /= float(pts.size());
-                    if (const float dist = (mean - c).norm(); dist < best) { best = dist; mask_pts = std::move(pts); }
+                    const auto& q = pkt.support_points_cam[i];
+                    const Eigen::Vector4d r = M * Eigen::Vector4d(q.x(), q.y(), q.z(), 1.0);
+                    pts.push_back(to_now(Eigen::Vector3f(float(r.x()), float(r.y()), float(r.z())), tw, age_s));
+                    mean += pts.back().head<2>();
                 }
+                mean /= float(pts.size());
+                if (const float dist = (mean - c).norm(); dist < best) { best = dist; mask_pts = std::move(pts); }
             }
         }
     rc::door::AnchorEvidence ev;
     const bool measured = not rays.empty() or mask_pts.size() >= 2;
     if (measured)
     {
-        auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, lidar_origin, rays, mask_pts);
+        auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
+                                                      lidar_origin, rays, mask_pts, cam);
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;
     }
 
-    // ── WRITE ────────────────────────────────────────────────────────────────────────────────────────────────
-    if (not pa.anchor->write(*G, pa.pose))
-        if (not G->get_node(pa.anchor->id()).has_value())
-        {
-            std::print("door_concept: [anchor] {}@robot vanished from the graph — forgetting it\n", pa.door_name);
-            passage_anchor_.reset();   // nothing left to remove; a fresh claim re-creates it
-            return;
-        }
+    // ── WRITE (Task 7, fix 3): only on a cycle whose update consumed evidence of a door IN VIEW ─────────────────
+    // Between observations the belief is predicted (above) but not published; the edge then ages past
+    // kAnchorStaleMs and the controller drops back to the room route. The anchor node itself stays.
+    const bool publish = measured and ev.p_view >= kPublishViewLevel;
+    if (publish != pa.publishing)
+    {
+        pa.publishing = publish;
+        std::print("door_concept: [anchor] {}@robot {} publishing — P(door in view) {:.2f} (p_lidar {:.2f}, p_cam {:.2f})\n",
+                   pa.door_name, publish ? "RESUMED" : "PAUSED", ev.p_view, ev.p_lidar, ev.p_cam);
+    }
+    const bool alive = publish ? (pa.anchor->write(*G, pa.pose) or G->get_node(pa.anchor->id()).has_value())
+                               : G->get_node(pa.anchor->id()).has_value();
+    if (not alive)
+    {
+        std::print("door_concept: [anchor] {}@robot vanished from the graph — forgetting it\n", pa.door_name);
+        passage_anchor_.reset();   // nothing left to remove; a fresh claim re-creates it
+        return;
+    }
 
     // ── LOG: one row per cycle while the anchor exists. -1 in the evidence columns = nothing measured this cycle
-    //    (a sentinel OUTSIDE every column's range: counts ≥ 0, p_open ∈ (0,1), camera_nis ≥ 0).
+    //    (a sentinel OUTSIDE every column's range: counts ≥ 0, p_open ∈ (0,1), camera_nis ≥ 0, p_view ∈ [0,1]).
     if (anchor_log_.is_open())
     {
         const auto& P = pa.pose.P;
@@ -445,7 +634,7 @@ void SpecificWorker::step_passage_anchor()
                     << std::sqrt(std::max(0.0f, P(2, 2))) << ','
                     << (measured ? ev.n_through : -1) << ',' << (measured ? ev.n_blocked : -1) << ','
                     << (measured ? ev.n_short : -1) << ',' << (measured ? ev.p_open : -1.0f) << ','
-                    << (measured ? ev.camera_nis : -1.0f) << '\n';
+                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << '\n';
         anchor_log_.flush();
     }
 }

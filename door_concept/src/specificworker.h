@@ -312,15 +312,25 @@ private:
         bool  reinit_on_next_claim = false;               // relinked by a room switch: the next claim re-inits from the room
         int   last_mask_frame = -1;                       // each mask frame is evidence ONCE
         std::int64_t last_lidar_stamp = 0;                // each bpearl capture is evidence ONCE
+        // Task 7. The anchor's x-axis relative to the door's wall_u: +1 same, −1 flipped (anchor_from_room puts the
+        // robot on −y). Needed to carry the wall RUN [0, wall_len] from the wall frame into anchor coordinates.
+        float axis_sign = 1.f;
+        float wall_u_min = 0.f, wall_u_max = 0.f;         // the door's wall run, anchor coordinates (refreshed per cycle)
+        bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
+        bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
     };
     std::optional<PassageAnchor> passage_anchor_;
     std::ofstream anchor_log_;
     void step_passage_anchor();
     bool create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff);
     std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,
-                                                             const std::optional<rc::interaction::RelPose>& keep_side_of) const;
+                                                             const std::optional<rc::interaction::RelPose>& keep_side_of,
+                                                             float* axis_sign_out = nullptr) const;
     void remove_passage_anchor(std::string_view why);
     void relink_passage_anchor(std::uint64_t new_door_id, std::string_view why);
+    // Task 7 Step 0: one-shot frame diagnostics of the anchor's measurements (specificworker_anchor.cpp).
+    bool check_anchor_ray_frames(const std::string& robot_name, float age_s, const rc::rt::Twist& tw);
+    bool check_anchor_mask_frames(const std::string& robot_name, const Eigen::Matrix4d& robot_T_zed);
     std::string robot_node_name() const;
     // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
     // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The

@@ -58,7 +58,7 @@
  * Free energy: F(x) = ½ (x − x̄)ᵀ P̄⁻¹ (x − x̄) − log p(rays | x) − log p(mask | x). NO RAY IS EVER REMOVED FROM F.
  *   - PREDICTIVE SPREAD. Each ray's depth σ and jamb blur τ are widened by the spread the current belief P
  *     predicts for that ray (J P Jᵀ, the Kalman S = HPHᵀ + R); the mask's σ likewise. Two stages: the prior's P,
- *     then the Laplace P stage 1 converged to. This is what gives the update its reach: against the sensor's 5 cm
+ *     then the Laplace P stage 1 converged to; then a third at the sensor's own σ (Task 7, see the loop). This is what gives the update its reach: against the sensor's 5 cm
  *     alone, wall returns from a prior 0.3 m off in depth are outliers the occluder absorbs, and a 0.45 m lateral
  *     error is beyond the jamb's pull.
  *   - OPTIMISER. Per stage, at most 5 accepted Levenberg-Marquardt steps in the prior's metric, accepted on the
@@ -69,9 +69,42 @@
  *     then the frame's common offset (σ_c = 0.02 m on x, y: one LiDAR extrinsic, one wall that is not a perfect
  *     plane) marginalised by Woodbury, I_eff = (I + I_L C)⁻¹ I_L — so ~900 correlated rays cannot claim a 2 mm σ.
  *
- * COST: ~29 ms on a full scan (469 returns), ~15 ms on the 221 within 2 m of the anchor (-O2). The caller
+ * COST: ~60 ms on a full scan (469 returns), ~33 ms on the 224 within 2 m of the anchor (-O2; Task 7: the third
+ * stage and the visibility pass roughly doubled the Task-3 29 / 15 ms; rays off the door's wall run are skipped). The caller
  * should pass the DOORWAY NEIGHBOURHOOD's rays (Task 4 preselects); rays far from the opening add cost, not
  * information.
+ *
+ * ─── THIS DOOR'S WALL ONLY (Task 7, fix 2) ────────────────────────────────────────────────────────────
+ * The wall line is not infinite: the door's wall RUN spans [u_min, u_max] in anchor coordinates (the caller
+ * passes it from the room polygon's wall; unknown ⇒ the aperture ± one width). A ray whose line crosses
+ * OUTSIDE the run is explained by the background alone (1/R, independent of x): it carries no wall evidence.
+ * Membership is soft at the run's ends (e(u) = σ((u − u_min)/τ)·σ((u_max − u)/τ), the same blur τ as the jambs):
+ *   p_branch(ray) = e(u)·[the door/wall/clutter mixture above] + (1 − e(u))·(1/R).
+ * ★try64: with the line infinite, a room corner 1.5 m along a SHUT door's wall made the first update slide the
+ *  opening 0.9 m along the wall toward the corner (test turning_away_does_not_drag_anchor, k = 0: 0.904 m), and a
+ *  gap beyond the run's end captured the opening 1.0 m away (other_wall_outside_extent_ignored).
+ * The run is part of the door's template: it moves WITH the anchor, so a shift that would push the opening into
+ * a gap beyond u_max also pushes the run's end over the gap's through-rays, which then cost what they cost.
+ *
+ * ─── VISIBILITY: P(door in view) TEMPERS the sensor evidence (Task 7, fix 1) ────────────────────────────
+ * The sensors are evidence about THIS opening only on frames where it is actually observed. At the PRIOR mean,
+ * with the prior's predictive spread:
+ *   LiDAR   each passed ray's crossing membership of the doorway NEIGHBOURHOOD n(u) = σ((w − |u|_τ)/τ) (the opening
+ *           and half a width of wall each side, i.e. the jambs and the wall that frames them) times the run
+ *           membership e(u) — the beams the geometry PREDICTS on the doorway, v_lidar = Σ n·e — and the
+ *           responsibility r of the doorway's own structure (wall / through / leaf) against the clutter components,
+ *           which is where a return inconsistent with the predicted depth (an occluder, a wall elsewhere) loses its
+ *           vote: o_lidar = Σ n·e·r. p_lidar = P(at least one beam of the frame struck the doorway)
+ *           = 1 − Π(1 − n·e·r). It falls to 0 when no sampled beam reaches the doorway (out of the sector, or
+ *           every beam occluded) and saturates once a handful do.
+ *   Camera  the soft frustum membership of BOTH jambs (azimuth within the half-FOV, range within the depth range),
+ *           blurred by the jambs' predictive spread: p_cam_geom. The mask's centroid is evidence of the opening's
+ *           centre only if the whole opening is in the image.
+ * The ray log-likelihood is multiplied by p_lidar and the mask's by p_cam_geom (a power likelihood: the
+ * tempered form of "rays | door in view" mixed with "rays | door not in view", the latter independent of x).
+ * p_view = 1 − (1 − p_lidar)(1 − p_cam), p_cam = p_cam_geom when a mask was consumed, else 0. When p_view → 0 the
+ * update reduces to the prior, i.e. the odometry prediction, whose covariance grows with the motion.
+ * (The neighbourhood's half a width of wall each side is a DEFINITION of "the doorway", soft at its edges.)
  *
  * ─── THE ONLY DECISION LEVELS (deliberate, not model terms) ──────────────────────────────────────────
  *   Both are COUNTS at the posterior mean, for the log and for p_open. Neither feeds back into the pose.
@@ -103,8 +136,25 @@ namespace rc::door
 struct AnchorEvidence
 {
     int n_through = 0, n_blocked = 0, n_short = 0;   // ray classes against the predicted opening
-    float p_open = 0.5f;                              // (n_through+1)/(n_through+n_blocked+2), rays inside the span
+    float p_open = 0.5f;                              // (β·n_through+1)/(β·(n_through+n_blocked)+2), rays inside the span
     float camera_nis = -1.f;                          // mask centroid's normalised innovation; -1 = no mask
+    // ─── Task 7: is the door being OBSERVED this frame (see "VISIBILITY" in the header) ─────────────────────
+    float v_lidar = 0.f;                              // predicted beams on the doorway neighbourhood (Σ membership)
+    float o_lidar = 0.f;                              // of those, explained by the doorway's own structure (Σ m·r)
+    float p_lidar = 0.f;                              // P(≥ 1 beam of this frame struck the doorway) = 1 − Π(1 − m·r)
+    float p_cam   = 0.f;                              // P(opening in the zed frustum) when a mask was consumed, else 0
+    float p_view  = 0.f;                              // P(door in view) = 1 − (1 − p_lidar)(1 − p_cam)
+};
+
+// The zed frustum in the ROBOT frame, for the camera's visibility term. `known` false = no frustum (the mask is then
+// not tempered by geometry — the pre-Task-7 behaviour).
+struct CameraFrustum
+{
+    bool known = false;
+    Eigen::Vector2f origin{0.f, 0.f};     // optical centre, robot frame (x, y)
+    Eigen::Vector2f forward{0.f, 1.f};    // viewing direction, robot frame, unit (zed: its y axis = DEPTH)
+    float half_fov  = 0.f;                // horizontal half field of view (rad)
+    float max_range = 0.f;                // depth range (m)
 };
 
 // ─── THE INITIAL BELIEF (from_room) ─────────────────────────────────────────────────────────────────────────
@@ -195,6 +245,12 @@ inline double log_add_exp(double a, double b)
     return m + std::log1p(std::exp(-std::abs(a - b)));
 }
 inline double log_normal(double r, double var) { return -0.5 * r * r / var - 0.5 * std::log(2.0 * M_PI * var); }
+// log(1 − e^a) for a ≤ 0, accurate at both ends.
+inline double log1m_exp(double a)
+{
+    if (a >= 0.0) return -std::numeric_limits<double>::infinity();
+    return a > -M_LN2 ? std::log(-std::expm1(a)) : std::log1p(-std::exp(a));
+}
 
 // A 2-D ray in ROBOT coordinates.
 struct Ray2 { Eigen::Vector2d o, e; };
@@ -239,10 +295,13 @@ inline Spread predictive_spread(const Ray2& r, const V3d& x, const M3d& P)
 struct Model
 {
     double w, t;                       // opening width, wall thickness (m)
+    double u_min, u_max;               // the door's wall run along the wall, anchor coordinates (m)
     std::vector<double> leaf_depths;   // the δ grid
     double short_level, count_level;   // both 3σ + t/2 (see the header: counting only)
-    explicit Model(double w_, double t_)
+    Model(double w_, double t_, double u_min_, double u_max_)
         : w(std::max(0.0, w_)), t(std::max(0.0, t_)),
+          // the run always contains the opening itself (a run that excludes its own door is not this door's wall)
+          u_min(std::min(u_min_, -0.5 * std::max(0.0, w_))), u_max(std::max(u_max_, 0.5 * std::max(0.0, w_))),
           short_level(3.0 * kRangeSigma + 0.5 * t), count_level(3.0 * kRangeSigma + 0.5 * t)
     {
         const int n = 1 + static_cast<int>(std::ceil(t / (0.5 * kRangeSigma)));
@@ -251,8 +310,9 @@ struct Model
     }
 
     // Per-ray quantities shared by every branch (open, shut at each δ).
-    struct Terms { double log_in, log_out, log_wall, log_through, log_clutter, sd2; };
-    Terms terms(const UD& a, const Spread& sp) const
+    struct Terms { double log_in, log_out, log_wall, log_through, log_clutter, sd2, log_run, log_off_run, log_nbhd; };
+    // log_run: the ray's membership of THIS door's wall run, fixed per frame at the prior (run_membership below).
+    Terms terms(const UD& a, const Spread& sp, double log_run) const
     {
         const double sd2 = kRangeSigma * kRangeSigma + sp.sd2;               // depth: range noise + pose spread
         const double sd  = std::sqrt(sd2);
@@ -264,17 +324,42 @@ struct Model
         const double log_occ = log_sigmoid((near - a.d) / sd) + log_sigmoid((a.d - a.d_o) / sd)
                                - std::log(std::hypot(near - a.d_o, sd));
         const double log_bg  = -std::log(kMaxRange);
+        // The doorway NEIGHBOURHOOD (visibility only): the opening and half a width of wall each side, |u| < w.
+        const double log_nbhd = log_sigmoid((w - std::hypot(a.u, tau)) / tau);
         return {log_sigmoid(z), log_sigmoid(-z),
                 log_normal(a.d - near, sd2),                                  // stops on the NEAR face
                 log_sigmoid((a.d - 0.5 * t) / sd) - std::log(kMaxRange),     // beyond the far face
                 log_add_exp(std::log(kClutter) + log_occ, std::log(kClutter) + log_bg),
-                sd2};
+                sd2, log_run, log1m_exp(log_run), log_nbhd};
     }
-    // Every branch: (1 − 2ε)·[m·L_inside + (1 − m)·L_wall] + ε·L_occluder + ε·L_background.
+    // Every branch, on the run: (1 − 2ε)·[m·L_inside + (1 − m)·L_wall] + ε·L_occluder + ε·L_background;
+    // off the run: the background alone (fix 2: no wall evidence).
     static double mix(const Terms& k, double log_inside)
     {
         const double core = log_add_exp(k.log_in + log_inside, k.log_out + k.log_wall);
-        return log_add_exp(std::log(1.0 - 2.0 * kClutter) + core, k.log_clutter);
+        const double on   = log_add_exp(std::log(1.0 - 2.0 * kClutter) + core, k.log_clutter);
+        return log_add_exp(k.log_run + on, k.log_off_run - std::log(kMaxRange));
+    }
+    // The doorway structure's responsibility for this ray against the clutter components (visibility only), the
+    // open/shut latent at its prior and δ averaged — per ray, which is what "is THIS beam explained by the door" asks.
+    double responsibility(const Terms& k, const UD& a) const
+    {
+        double l_leaf = -std::numeric_limits<double>::infinity();
+        for (const double dl : leaf_depths) l_leaf = log_add_exp(l_leaf, log_normal(a.d - dl, k.sd2) - std::log(double(leaf_depths.size())));
+        const double log_inside = log_add_exp(std::log(kPriorOpen) + k.log_through, std::log(1.0 - kPriorOpen) + l_leaf);
+        const double core = std::log(1.0 - 2.0 * kClutter) + log_add_exp(k.log_in + log_inside, k.log_out + k.log_wall);
+        return std::exp(core - log_add_exp(core, k.log_clutter));
+    }
+    // The door's wall RUN (fix 2): soft membership of [u_min, u_max] at the jamb blur, times "the beam travels TOWARD
+    // the wall line" (its crossing lies ahead of the origin, d > d_o): a beam heading away never reaches this wall, so
+    // its line's crossing is not a measurement of it. ★Without that factor, beams fired AWAY from the door crossed
+    // the line (extended backwards) near the run's end and each paid log(1/ε) on the run: shifting the run to drop
+    // them slid the opening along a shut wall (test turning_away_does_not_drag_anchor).
+    double run_membership(const UD& a, const Spread& sp) const
+    {
+        const double sd  = std::sqrt(kRangeSigma * kRangeSigma + sp.sd2);
+        const double tau = std::sqrt(kRangeSigma * kRangeSigma + sp.su2);
+        return log_sigmoid((a.u - u_min) / tau) + log_sigmoid((u_max - a.u) / tau) + log_sigmoid((a.d - a.d_o) / sd);
     }
     double loglik_open(const Terms& k) const { return mix(k, k.log_through); }
     double loglik_shut(const Terms& k, const UD& a, double delta) const { return mix(k, log_normal(a.d - delta, k.sd2)); }
@@ -309,7 +394,14 @@ struct Problem
     std::vector<Ray2> rays;            // ALL rays: none is ever removed from F
     const Mask* mask = nullptr;
     std::vector<Spread> spread;        // per-ray predictive spread, fixed for one iteration (empty = sensor only)
+    // Per-ray log membership of the door's wall run, decided ONCE per frame at the prior mean under the prior's spread.
+    // ★Fixed, not re-evaluated at x: a run that moved with the hypothesis made its two ENDS lateral evidence — the shut
+    //  door "localised" along its wall to the room polygon's wall ends (σ_lat 0.30 → 0.04 on a flat wall) — and a
+    //  template that can shed inconvenient rays by sliding is a template that slides. Which rays belong to this wall
+    //  is a data-association decision taken under the prior; the pose is then inferred from those rays only.
+    std::vector<double> run_log;
     double mask_var = 0;
+    double beta_lidar = 1.0, beta_cam = 1.0;   // visibility tempering (fix 1): P(door in view) per sensor
 
     // Fix the predictive spreads at the linearisation point x under belief P (P = 0: the measurement model alone).
     void linearise(const V3d& x, const M3d& P)
@@ -331,7 +423,7 @@ struct Problem
         for (std::size_t i = 0; i < rays.size(); ++i)
         {
             const UD a = to_anchor(rays[i], x);
-            const auto k = model.terms(a, spread[i]);
+            const auto k = model.terms(a, spread[i], run_log[i]);
             l_open += model.loglik_open(k);
             for (std::size_t j = 0; j < nd; ++j) l_leaf[j] += model.loglik_shut(k, a, model.leaf_depths[j]);
         }
@@ -339,8 +431,8 @@ struct Problem
         for (const double l : l_leaf) l_shut = log_add_exp(l_shut, l - std::log(double(nd)));
         // The door is open or shut for the WHOLE frame: marginalise that latent at the frame level.
         if (not rays.empty())
-            f -= log_add_exp(std::log(kPriorOpen) + l_open, std::log(1.0 - kPriorOpen) + l_shut);
-        if (mask != nullptr and mask->valid) f += Mask::neg_loglik(mask->centroid_u(x), mask_var);
+            f -= beta_lidar * log_add_exp(std::log(kPriorOpen) + l_open, std::log(1.0 - kPriorOpen) + l_shut);
+        if (mask != nullptr and mask->valid) f += beta_cam * Mask::neg_loglik(mask->centroid_u(x), mask_var);
         return f;
     }
     // Central finite differences. Steps: 1 mm / 1 mrad — well below τ = 5 cm, the shortest scale in F.
@@ -373,15 +465,76 @@ inline M3d psd_information(const M3d& H, const M3d& Pinv)
     Eigen::SelfAdjointEigenSolver<M3d> es(0.5 * ((H - Pinv) + (H - Pinv).transpose()));
     return es.eigenvectors() * es.eigenvalues().cwiseMax(0.0).asDiagonal() * es.eigenvectors().transpose();
 }
+
+// ─── VISIBILITY at the prior (fix 1) ──────────────────────────────────────────────────────────────────────────
+// LiDAR: v = Σ n·e (beams on the doorway neighbourhood), o = Σ n·e·r (explained by its structure), and p = the
+// FRACTION OF THE DOORWAY OBSERVED: the neighbourhood |u| < w cut into cells of the model's own lateral resolution
+// (kRangeSigma, the jamb blur), each cell observed with P = 1 − Π(1 − e·r) over the beams crossing it, p = the mean.
+// A doorway half outside the sampled sector, half occluded, or seen at a grazing angle that leaves cells unsampled is
+// half observed — not "observed" because a handful of beams struck it.
+// ★"≥ 1 beam struck the doorway" (1 − Π over all beams) saturated at 1 while the doorway sat on the sector's edge,
+//  and that is where a SHUT door's span slid toward the unsampled side (no beam there to contradict it): test
+//  turning_away_does_not_drag_anchor, 0.10 m at k = 20 with the doorway half out.
+struct LidarView { double v = 0, o = 0, p = 0; };
+// Under the spreads pb.linearise(x, P) staged (the prior's).
+inline LidarView lidar_view(const Problem& pb, const V3d& x)
+{
+    LidarView lv;
+    const double w = pb.model.w;
+    const int n_cells = std::max(1, int(std::ceil(2.0 * w / kRangeSigma)));
+    std::vector<double> log_none(std::size_t(n_cells), 0.0);   // per cell: log Π(1 − e·r)
+    for (std::size_t i = 0; i < pb.rays.size(); ++i)
+    {
+        const UD a = to_anchor(pb.rays[i], x);
+        const auto k = pb.model.terms(a, pb.spread[i], pb.run_log[i]);
+        const double ne = std::exp(k.log_nbhd + k.log_run);
+        const double er = std::exp(k.log_run) * pb.model.responsibility(k, a);
+        lv.v += ne;
+        lv.o += ne * pb.model.responsibility(k, a);
+        if (std::abs(a.u) < w)
+        {
+            const int c = std::clamp(int((a.u + w) / (2.0 * w) * n_cells), 0, n_cells - 1);
+            log_none[std::size_t(c)] += std::log1p(-std::min(er, 1.0 - 1e-12));   // er < 1 by construction
+        }
+    }
+    for (const double l : log_none) lv.p += -std::expm1(l);
+    lv.p /= double(n_cells);
+    return lv;
+}
+// Camera: both jambs inside the frustum (azimuth and range), blurred by their predictive spread under P.
+inline double camera_view(const CameraFrustum& cam, double w, const V3d& x, const M3d& P)
+{
+    if (not cam.known) return 1.0;
+    const Eigen::Vector2d o = cam.origin.cast<double>(), f = cam.forward.cast<double>().normalized();
+    const Eigen::Vector2d right(f.y(), -f.x());
+    const Eigen::Vector2d a(std::cos(x.z()), std::sin(x.z())), da(-std::sin(x.z()), std::cos(x.z()));
+    double log_p = 0.0;
+    for (const double sgn : {-1.0, 1.0})
+    {
+        const Eigen::Vector2d J = x.head<2>() + sgn * 0.5 * w * a;
+        Eigen::Matrix<double, 2, 3> Jac; Jac << 1, 0, sgn * 0.5 * w * da.x(), 0, 1, sgn * 0.5 * w * da.y();
+        const Eigen::Matrix2d S = Jac * P * Jac.transpose();
+        const Eigen::Vector2d q = J - o;
+        const double range = std::max(q.norm(), 1e-6);
+        const Eigen::Vector2d u = q / range, n(-u.y(), u.x());
+        const double az = std::atan2(q.dot(right), q.dot(f));
+        const double s_az = std::sqrt(kRangeSigma * kRangeSigma + n.dot(S * n)) / range;
+        const double s_r  = std::sqrt(kRangeSigma * kRangeSigma + u.dot(S * u));
+        log_p += log_sigmoid((double(cam.half_fov) - std::abs(az)) / s_az) + log_sigmoid((double(cam.max_range) - range) / s_r);
+    }
+    return std::exp(log_p);
+}
 }  // namespace anchor_detail
 
 // One free-energy minimisation: prior = the predicted RelPose; likelihood = rays (+ mask). Levenberg-Marquardt on
 // (x, y, yaw) against the predictive spread (two stages); Laplace covariance at the sensor's σ with the frame's
 // common mode marginalised (Woodbury).
+// wall_u_min/max: the door's wall run along the wall in ANCHOR coordinates (fix 2); `cam`: the zed frustum in the
+// robot frame for the camera's visibility (fix 1; default unknown = the mask is not tempered by geometry).
 inline std::pair<rc::interaction::RelPose, AnchorEvidence>
-update_door_anchor(const rc::interaction::RelPose& prior, float width, float thickness,
+update_door_anchor(const rc::interaction::RelPose& prior, float width, float thickness, float wall_u_min, float wall_u_max,
                    const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot,
-                   const std::vector<Eigen::Vector3f>& mask_pts_robot)
+                   const std::vector<Eigen::Vector3f>& mask_pts_robot, const CameraFrustum& cam = {})
 {
     using namespace anchor_detail;
     AnchorEvidence ev;
@@ -402,7 +555,8 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         mask.valid = mask.sigma2 > 0;   // all points at one abscissa: no spread ⇒ no measured σ
     }
 
-    Problem pb{prior.x.cast<double>(), prior.P.cast<double>().inverse(), Model(width, thickness), {}, &mask, {}, 0};
+    Problem pb{prior.x.cast<double>(), prior.P.cast<double>().inverse(), Model(width, thickness, wall_u_min, wall_u_max),
+               {}, &mask, {}, {}, 0};
     const Eigen::Vector2d o = lidar_origin_robot.head<2>().cast<double>();
     pb.rays.reserve(rays_robot.size());
     for (const auto& p : rays_robot)
@@ -414,9 +568,39 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
 
     V3d x = pb.xbar;
     M3d P = prior.P.cast<double>();
+    // ─── THIS DOOR'S WALL RUN, decided at the prior (fix 2) ────────────────────────────────────────────────────
+    pb.linearise(x, P);   // the prior's predictive spreads: the run, the visibility and stage 0 all use these
+    pb.run_log.resize(pb.rays.size());
+    for (std::size_t i = 0; i < pb.rays.size(); ++i)
+        pb.run_log[i] = pb.model.run_membership(to_anchor(pb.rays[i], x), pb.spread[i]);
+    // A ray whose run membership is below 1e-9 contributes a CONSTANT to F (the background, x-independent) to within
+    // 1e-9 relative: it is left out of the optimisation as a matter of arithmetic, not of modelling (COST only — the
+    // counts below still see every ray).
+    const std::vector<Ray2> all_rays = pb.rays;
+    {
+        std::size_t n = 0;
+        for (std::size_t i = 0; i < pb.rays.size(); ++i)
+            if (pb.run_log[i] > std::log(1e-9))
+            {
+                pb.rays[n] = pb.rays[i]; pb.run_log[n] = pb.run_log[i]; pb.spread[n] = pb.spread[i]; ++n;
+            }
+        pb.rays.resize(n); pb.run_log.resize(n); pb.spread.resize(n);
+    }
+    // ─── VISIBILITY at the prior: how much of this frame's evidence is about THIS doorway (fix 1) ─────────────
+    {
+        const LidarView lv = lidar_view(pb, x);
+        const double pc = camera_view(cam, pb.model.w, x, P);
+        pb.beta_lidar = lv.p;
+        pb.beta_cam   = pc;
+        ev.v_lidar = float(lv.v);
+        ev.o_lidar = float(lv.o);
+        ev.p_lidar = float(lv.p);
+        ev.p_cam   = mask.valid ? float(pc) : 0.f;
+        ev.p_view  = float(1.0 - (1.0 - lv.p) * (1.0 - double(ev.p_cam)));
+    }
     M3d H = pb.Pinv;
     V3d g;
-    // ─── two STAGES of predictive spread, then the sensor alone ─────────────────────────────────────────────
+    // ─── two STAGES of predictive spread, then the sensor alone (a third LM stage, then the Laplace) ─────────────────────────────────────────────
     // Each stage scores the rays against the spread a BELIEF predicts for them (the Kalman S = HPHᵀ + R): stage 1
     // the prior's, stage 2 the Laplace belief stage 1 converged to. From a prior 0.35 m off in depth the wall
     // returns are then a broad pull rather than 7σ outliers the occluder component would absorb, and a 0.45 m
@@ -424,9 +608,14 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     // curvature at a point still 0.5 m off is not a belief, and using it collapsed the reach mid-way (dy = +0.35:
     // σ_lat 0.5 → 0.12 after one step, anchor stranded 0.66 m along the wall). The final Laplace (below) is at the
     // sensor's own σ. Per stage: at most kMaxIter accepted Levenberg-Marquardt steps.
-    for (int stage = 0; stage < 2; ++stage)
+    // ★Task 7: a THIRD stage at the sensor's own σ. The two spread stages optimise a WIDENED objective, and on a shut
+    //  wall (lateral unobservable) its optimum wanders along the wall — the blurred jamb/leaf terms' Occam push toward
+    //  fewer in-span rays — by ~0.1 m; the closing Laplace mean is one Newton step and kept most of that wander wherever
+    //  the true F ripples at the jamb's ray spacing. Converging on the true F first: frame-0 lateral wander 0.092 →
+    //  0.037 m, worst over the turn 0.100 → 0.043 m (test turning_away_does_not_drag_anchor). Cost ~+30 %.
+    for (int stage = 0; stage < 3; ++stage)
     {
-        pb.linearise(x, P);
+        if (stage > 0) pb.linearise(x, stage < 2 ? P : M3d::Zero());   // stage 0: staged above, at the prior
         // Levenberg-Marquardt in the PRIOR's metric (damping μ P̄⁻¹), steps accepted on the gain ratio ρ = actual /
         // predicted decrease (Nielsen's μ update). ★A plain Newton step + Armijo line search failed here: along a
         // shut wall the lateral direction has only the prior's curvature, so the step's lateral part was metres long,
@@ -502,7 +691,7 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     x = post.x.cast<double>();
 
     // ─── Evidence at the posterior mean (COUNTING ONLY — see the header) ─────────────────────────────────────
-    for (const auto& r : pb.rays)
+    for (const auto& r : all_rays)
     {
         const UD a = to_anchor(r, x);
         if (a.d < -pb.model.short_level) { ++ev.n_short; continue; }   // ended in front of the near face
@@ -510,7 +699,8 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         if (a.d > pb.model.count_level) ++ev.n_through;
         else ++ev.n_blocked;                                            // |d| ≤ 3σ + t/2
     }
-    ev.p_open = float(ev.n_through + 1) / float(ev.n_through + ev.n_blocked + 2);
+    // Tempered like the pose evidence: a door out of view says nothing about whether it is open.
+    ev.p_open = float((pb.beta_lidar * ev.n_through + 1.0) / (pb.beta_lidar * (ev.n_through + ev.n_blocked) + 2.0));
     if (mask.valid)
     {
         const double r = mask.centroid_u(x);
