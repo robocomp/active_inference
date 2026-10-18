@@ -40,6 +40,23 @@ int main()
         rel.translate(Eigen::Vector3d(r.x.x(), r.x.y(), 0)); rel.rotate(Eigen::AngleAxisd(r.x.z(), Eigen::Vector3d::UnitZ()));
         const Eigen::Affine3d back = rr * rel;
         check("from_room_round_trip", (back.matrix() - ro.matrix()).norm() < 1e-5); }
+    {   RelPose r; r.x = {0, 2, 0}; r.P.setZero();
+        const Eigen::Vector3f v(0.04f, 0.05f, 0.06f);
+        const float t1 = predict(r, twist(0, 0, 0), v, 1.f).P.trace();
+        const float t5 = predict(r, twist(0, 0, 0), v, 0.5f).P.trace();
+        check("process_noise_scales_with_dt_squared", t1 > 0 and std::fabs(t5 - 0.25f * t1) < 1e-6f); }
+    {   const Eigen::Vector3f x(0.7f, 1.9f, 0.4f);
+        const float adv = 0.3f * 0.4f, side = -0.1f * 0.4f, dth = 0.6f * 0.4f, e = 1e-4f;
+        Eigen::Matrix3f J, G, Jn, Gn;
+        predict_jacobians(x, side, adv, dth, J, G);
+        for (int i = 0; i < 3; ++i) {
+            Eigen::Vector3f d = Eigen::Vector3f::Zero(); d[i] = e;
+            Jn.col(i) = (move_mean(x + d, side, adv, dth) - move_mean(x - d, side, adv, dth)) / (2 * e);
+        }
+        Gn.col(0) = (move_mean(x, side, adv + e, dth) - move_mean(x, side, adv - e, dth)) / (2 * e);
+        Gn.col(1) = (move_mean(x, side + e, adv, dth) - move_mean(x, side - e, adv, dth)) / (2 * e);
+        Gn.col(2) = (move_mean(x, side, adv, dth + e) - move_mean(x, side, adv, dth - e)) / (2 * e);
+        check("jacobians_match_finite_differences", (J - Jn).cwiseAbs().maxCoeff() < 1e-3f and (G - Gn).cwiseAbs().maxCoeff() < 1e-3f); }
     std::puts(fails == 0 ? "ALL PASS" : "FAILED");
     return fails;
 }

@@ -31,32 +31,49 @@ struct RelPose                          // the object frame expressed in the rob
     return a;
 }
 
-// The robot moves d = (side, adv)*dt and turns delta = rot*dt, so the object frame moves by the
-// inverse: p' = R(-delta)(p - d), yaw' = yaw - delta.
-// P <- J P Jt + G S Gt dt, with S = diag(var_adv, var_side, var_rot) from robot_current_speed_variance
-// and G the derivative of x' w.r.t. the displacement (adv, side, rot) of the step. Zero variance adds nothing.
-[[nodiscard]] inline RelPose predict(const RelPose& r, const rc::rt::Twist& tw,
-                                     const Eigen::Vector3f& twist_var, float dt_s)
+// Mean update: the robot moves d = (side, adv) and turns dth, so the object frame moves by the
+// inverse: p' = R(-dth)(p - d), yaw' = yaw - dth.
+[[nodiscard]] inline Eigen::Vector3f move_mean(const Eigen::Vector3f& x, float side, float adv, float dth)
 {
-    const float side = tw.linear.x() * dt_s, adv = tw.linear.y() * dt_s, dth = tw.angular.z() * dt_s;
     const float c = std::cos(dth), s = std::sin(dth);
-    Eigen::Matrix2f Rm; Rm << c, s, -s, c;                         // R(-delta)
-    Eigen::Matrix2f dRm; dRm << -s, c, -c, -s;                     // d R(-delta) / d delta
-    const Eigen::Vector2f q = r.x.head<2>() - Eigen::Vector2f(side, adv);
+    Eigen::Matrix2f Rm; Rm << c, s, -s, c;                         // R(-dth)
+    Eigen::Vector3f o;
+    o.head<2>() = Rm * (x.head<2>() - Eigen::Vector2f(side, adv));
+    o.z() = wrap_pi(x.z() - dth);
+    return o;
+}
 
-    RelPose o;
-    o.x.head<2>() = Rm * q;
-    o.x.z() = wrap_pi(r.x.z() - dth);
-    o.stamp_ms = std::int64_t(tw.stamp_ms);
-
-    Eigen::Matrix3f J = Eigen::Matrix3f::Identity();
+// J = d x'/d x ; G = d x'/d (adv, side, rot displacement of the step), columns in that order.
+inline void predict_jacobians(const Eigen::Vector3f& x, float side, float adv, float dth,
+                              Eigen::Matrix3f& J, Eigen::Matrix3f& G)
+{
+    const float c = std::cos(dth), s = std::sin(dth);
+    Eigen::Matrix2f Rm; Rm << c, s, -s, c;
+    Eigen::Matrix2f dRm; dRm << -s, c, -c, -s;                     // d R(-dth) / d dth
+    const Eigen::Vector2f q = x.head<2>() - Eigen::Vector2f(side, adv);
+    J = Eigen::Matrix3f::Identity();
     J.topLeftCorner<2, 2>() = Rm;
-    Eigen::Matrix3f G = Eigen::Matrix3f::Zero();                   // columns: adv, side, rot
+    G = Eigen::Matrix3f::Zero();
     G.block<2, 1>(0, 0) = -Rm.col(1);
     G.block<2, 1>(0, 1) = -Rm.col(0);
     G.block<2, 1>(0, 2) = dRm * q;
     G(2, 2) = -1.f;
-    o.P = J * r.P * J.transpose() + G * twist_var.asDiagonal() * G.transpose() * dt_s;
+}
+
+// P <- J P Jt + G S Gt dt^2. twist_var = velocity variances [var_adv, var_side, var_rot] in
+// (m/s)^2, (m/s)^2, (rad/s)^2, from robot_current_speed_variance; the displacement covariance over
+// one step is var*dt^2 (the velocity error is slip/scale-like, correlated within the step).
+// Zero variance adds nothing.
+[[nodiscard]] inline RelPose predict(const RelPose& r, const rc::rt::Twist& tw,
+                                     const Eigen::Vector3f& twist_var, float dt_s)
+{
+    const float side = tw.linear.x() * dt_s, adv = tw.linear.y() * dt_s, dth = tw.angular.z() * dt_s;
+    RelPose o;
+    o.x = move_mean(r.x, side, adv, dth);
+    o.stamp_ms = std::int64_t(tw.stamp_ms);
+    Eigen::Matrix3f J, G;
+    predict_jacobians(r.x, side, adv, dth, J, G);
+    o.P = J * r.P * J.transpose() + G * twist_var.asDiagonal() * G.transpose() * (dt_s * dt_s);
     return o;
 }
 
