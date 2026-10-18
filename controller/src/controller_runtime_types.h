@@ -186,6 +186,9 @@ struct ControllerParams
     // level the controller then refused to drive at.
     float max_lateral_accel_mps2 = 1.0f;
     float max_rot_speed_rps = 0.8f;
+    // Door cross on the interaction anchor: the servo is `through` once the opening is this far behind along its
+    // normal (m). door_concept's CrossStandoffM is not visible here; this is the anchor-relative equivalent.
+    float anchor_cross_standoff_m = 2.0f;
     // ── HOW MUCH HARDER TO SLOW FOR A TURN AS ITS RADIUS APPROACHES THE ROBOT'S OWN ──────────────
     // Measured (tools/tracker_sim --brake): from |kappa| = 0.3 1/m upward the ROTATION limit
     // h*w_max/kappa_avg is the only thing setting the speed — the comfort limit sqrt(a_lat/kappa)

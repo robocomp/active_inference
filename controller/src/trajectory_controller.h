@@ -166,6 +166,12 @@ public:
     void set_carrot_hint(int segment_index) { carrot_seg_hint_ = std::max(0, segment_index); }
 
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
+    /// Rebuild the live ESDF from the LiDAR ALONE, with no path to follow — for a caller that commands the base
+    /// itself (the door-cross anchor servo) but must still read clearance_at() on a field that is current.
+    /// ★ NO ROOM-FRAME MODEL (furniture, walls) IS INJECTED, on purpose: that caller exists because the room-frame
+    ///   door and robot poses were 0.4–0.5 m wrong at the doorway, and a wall painted through that error lands in
+    ///   the real opening as a phantom. LiDAR points are egocentric and cannot be displaced by a pose error.
+    void refresh_lidar_field(const Eigen::Affine2f& robot_pose);
     /// Same cycle, with the cloud supplied instead of read from the buffer — the replay path.
     ControlOutput compute(const Eigen::Affine2f& robot_pose,
                           const std::vector<Eigen::Vector3f>& lidar_points);
@@ -281,6 +287,7 @@ private:
     int wp_index_ = 0;
     std::optional<float> goal_facing_yaw_;
     std::optional<float> speed_limit_;   // see set_speed_limit
+    bool inject_model_ = true;           // build_esdf adds the room-frame model; false only inside refresh_lidar_field
     const RouteSpline *route_spline_ = nullptr;   // see set_route
     int carrot_seg_hint_ = 0;            // forward-only anchor for compute_carrot; see the comment there
     std::optional<Eigen::Vector2f> arrival_point_room_;

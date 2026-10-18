@@ -558,6 +558,11 @@ MaxLateralAccel = 1.0
 # ★EXPECTED: lap time down, deviation flat or slightly better (less rotation saturation means more
 # authority left for the feedback). If deviation rises instead, this is the variable to put back.
 MaxRotSpeed = 1.0
+# DOOR CROSS ON THE INTERACTION ANCHOR (2026-10-18). While aff_<door>_cross executes, door_concept hangs the door
+# from the robot (door_N@robot, the opening's pose in the ROBOT frame); the controller servoes on it instead of a
+# room-frame route (src/controller_anchor_servo.h). The servo is done once the opening is this far behind along
+# its normal (m) — the anchor-relative stand-in for door_concept's CrossStandoffM, which the controller cannot see.
+AnchorCrossStandoffM = 2.0
 # ── HOW MUCH HARDER TO SLOW FOR A REALLY SHARP TURN ──────────────────────────────────────────────
 # MEASURED FIRST, and the measurement is why this key exists rather than a re-tune of an existing one
 # (tools/tracker_sim route_world.txt --brake, 30-waypoint tour):

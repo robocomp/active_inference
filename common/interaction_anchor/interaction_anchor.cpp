@@ -198,7 +198,12 @@ std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G
 {
     const auto link = G.get_attrib_by_name<interaction_node_id_att>(affordance);
     if (not link.has_value() or link.value() == 0) return std::nullopt;
-    const auto anchor = G.get_node(link.value());
+    return read_anchor(G, link.value(), now_ms);
+}
+
+std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint64_t anchor_id, std::int64_t now_ms)
+{
+    const auto anchor = G.get_node(anchor_id);
     if (not anchor.has_value() or not is_anchor(G, anchor.value())) return std::nullopt;
     const auto parent = G.get_attrib_by_name<parent_att>(anchor.value());
     if (not parent.has_value()) return std::nullopt;

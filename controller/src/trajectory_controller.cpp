@@ -487,6 +487,14 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     return compute(robot_pose, read_lidar_points_robot(robot_pose));
 }
 
+void TrajectoryController::refresh_lidar_field(const Eigen::Affine2f& robot_pose)
+{
+    refresh_active_params();
+    inject_model_ = false;
+    build_esdf(read_lidar_points_robot(robot_pose), robot_pose);
+    inject_model_ = true;
+}
+
 TrajectoryController::ControlOutput TrajectoryController::compute(
     const Eigen::Affine2f& robot_pose, const std::vector<Eigen::Vector3f>& lidar_points)
 {
@@ -1153,7 +1161,7 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
     esdf_model_points_dropped_ = 0;
 
     // Inject static obstacle points (furniture) — transform from room frame to robot frame
-    if (!static_obstacle_points_room_.empty())
+    if (inject_model_ and !static_obstacle_points_room_.empty())
     {
         const Eigen::Affine2f robot_inv = robot_pose.inverse();
         for (const auto& p_room : static_obstacle_points_room_)
@@ -1185,7 +1193,7 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
     // from a sensor every cycle. Same room->robot transform as the furniture above.
     esdf_boundary_cells_ = 0;
     esdf_boundary_rejected_ = false;
-    if (!room_boundary_points_room_.empty())
+    if (inject_model_ and !room_boundary_points_room_.empty())
     {
         const Eigen::Affine2f robot_inv = robot_pose.inverse();
         // Remember only the cells THIS pass turned on, so a rollback cannot erase a wall the LiDAR or the

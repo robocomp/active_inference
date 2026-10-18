@@ -14,6 +14,8 @@
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
 #include "controller_door_passage.h"
+#include "controller_anchor_servo.h"
+#include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
 #include "controller_motion_commander.h"
@@ -77,6 +79,23 @@ public:
                             ControllerMotionCommander &motion_commander,
                             ControllerDisplay &display,
                             const TimeSource &time_source);
+    // ── DOOR CROSS ON THE INTERACTION ANCHOR (2026-10-18) ────────────────────────────────────────────────────
+    // While `aff_<door>_cross` is executed, door_concept hangs `door_N@robot` from the robot: the opening's pose in
+    // the ROBOT frame. update_cross_anchor reads it (via the affordance's interaction_node_id, else the latched
+    // anchor id once the affordance node is gone) into anchor_cross_; drive_point_target then skips the room route
+    // and execute_plan drives the base from anchor_cross_command through step_anchor_cross — the same guard chain
+    // (live clearance ceiling, uncertainty limiter, stall judge → escape) every other command passes.
+    bool update_cross_anchor(const ControllerPlanningStep &step);
+    void step_anchor_cross(const ControllerRobotPose &robot_pose,
+                           rc::TrajectoryController &path_controller,
+                           ControllerObstacleTracker &obstacle_tracker,
+                           ControllerMotionCommander &motion_commander,
+                           ControllerDisplay &display,
+                           rc::AffordanceManager &affordance_manager,
+                           const TimeSource &time_source);
+    // clearance_speed_limit's braking model along a robot-frame straight line (the servo's own direction of travel).
+    float anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
+                                       const rc::TrajectoryController &path_controller) const;
     bool ensure_current_plan(const ControllerPlanningStep &step,
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
@@ -871,8 +890,18 @@ private:
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
-    float passage_door_width_ = 1.0f;                               // its width_m (caps a door line's clearance)
     std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
+    struct AnchorCrossReading
+    {
+        std::uint64_t anchor_id = 0;
+        std::string name;                       // e.g. door_1@robot
+        rc::interaction::RelPose pose;          // the opening in the robot frame (+ covariance)
+        float width_m = 0.f;
+    };
+    std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's fresh anchor (nullopt = room route)
+    std::uint64_t anchor_latched_id_ = 0;                           // last anchor read, kept while the cross lasts
+    std::string anchor_latched_for_;                                // the cross affordance it was read for
+    int anchor_mode_logged_ = -1;                                   // -1 none, 0 room route, 1 anchor: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
     // The fitted curve for a NON-mission plan (affordance target, click target). Missions keep theirs
@@ -990,8 +1019,7 @@ private:
     // NOT const: it RETAINS the fitted spline so the band can keep deforming it. A plan that is only a
     // list of samples cannot be re-optimised — the control polygon is the decision variable, and
     // throwing it away is what made an affordance route a one-shot fit.
-    ControllerPolygon smooth_plan(const ControllerPolygon &poly,
-                                  const std::function<float(const Eigen::Vector2f &)> &live_clearance = {});
+    ControllerPolygon smooth_plan(const ControllerPolygon &poly);
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

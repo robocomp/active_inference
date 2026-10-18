@@ -3,6 +3,7 @@
 #include "controller_session.h"
 #include "controller_robot_body.h"
 #include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor's clock
 
 #include <algorithm>
 #include <ranges>
@@ -176,10 +177,6 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                                                  door_passage_.view().door); T.has_value())
                     passage_door_centre_ = Eigen::Vector2f(static_cast<float>(T->matrix()(0, 3)),
                                                            static_cast<float>(T->matrix()(1, 3)));
-        passage_door_width_ = 1.0f;
-        if (door_passage_.active())
-            if (const auto dn = graph_->get_node(door_passage_.view().door); dn.has_value())
-                passage_door_width_ = graph_->get_attrib_by_name<width_m_att>(dn.value()).value_or(1.0f);
         door_passages_ = std::move(dp.passages);
         grid_planner_.set_passages(door_passages_);
         obstacle_tracker.set_exempt_names(std::move(dp.exempt));
@@ -1641,8 +1638,7 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     return opt;
 }
 
-ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly,
-                                                 const std::function<float(const Eigen::Vector2f &)> &live_clearance)
+ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
 {
     plan_spline_valid_ = false;
     plan_progress_s_ = 0.f;
@@ -1670,45 +1666,15 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly,
     if (door_passage_.active() and last_target_info_.has_value() and last_target_info_->from_affordance
         and last_target_info_->node_name.ends_with("_cross") and poly.size() >= 2)
     {
-        Eigen::Vector2f goal = last_target_info_->room_pos;
+        const Eigen::Vector2f goal = last_target_info_->room_pos;
         const Eigen::Vector2f d(std::cos(last_target_info_->yaw_rad), std::sin(last_target_info_->yaw_rad));
-        // ★ CENTRE THE AXIS ON THE GAP THE LIDAR SEES (2026-10-18). door_concept's aperture can sit 0.2 m along the
-        //   wall from the real opening — live try56, room_2: carried mirror at x = −0.01, the fit drifted to −0.21
-        //   (masks of the swung leaf pull it toward the hinge), the robot followed that axis to the millimetre and
-        //   jammed against the leaf. The planner grid cannot correct it (it carves a door-wide corridor around the
-        //   same wrong axis); the LIVE field sees jambs and leaf. At the door line (CrossStandoffM ≈ 1.2–1.4 m before
-        //   the standpoint) take the lateral offset of greatest live clearance within ±0.5 m — the middle of the
-        //   gap actually there — and shift the whole axis onto it.
         // The door line's position along the axis: from the door node when the graph gives it, else the old
-        // assumption (standpoint ≈ 1.4 m past the opening).
+        // assumption (standpoint ≈ 1.4 m past the opening). (The live-gap probe that shifted this axis onto the
+        // LiDAR's widest gap is gone, 2026-10-18: with a fresh interaction anchor the cross does not drive this
+        // route at all — anchor_cross_command servoes on the robot-frame opening — and the probe misfired on
+        // misplaced door nodes, try63.)
         const float u_door = passage_door_centre_.has_value()
                            ? std::min(-0.4f, (*passage_door_centre_ - goal).dot(d)) : -1.4f;
-        if (live_clearance)
-        {
-            const Eigen::Vector2f n(-d.y(), d.x());
-            float best_off = 0.f, best_c = -1.f;
-            for (float off = -0.5f; off <= 0.5f + 1e-4f; off += 0.02f)
-            {
-                float c = std::numeric_limits<float>::max();
-                for (const float u : {u_door - 0.2f, u_door, u_door + 0.2f})   // a short stretch across the door line
-                    c = std::min(c, live_clearance(goal + u * d + off * n));
-                if (c < 50.f and c > best_c + 1e-3f) { best_c = c; best_off = off; }   // 100 m = outside the field
-            }
-            // Only a gap the body can pass says where the opening is: below the inscribed radius the door line is
-            // closed everywhere (a shut leaf, a plan made before `open`), and its "best" offset is noise (try57:
-            // −0.44 m at 0.04 m clearance).
-            // …and only a probe that IS on a door line: there the jambs cap the clearance at half the opening. More
-            // than that (plus the beam's range noise) means the probe stood in open floor — the door line was taken
-            // from a misplaced door node — and its "gap" would steer the robot into a jamb (try63: +0.50 m shifts at
-            // 0.97–1.17 m clearance, robot wedged 0.4 m off the opening).
-            const float half_door = 0.5f * passage_door_width_ + 0.10f;
-            if (best_c >= approach_body_.inscribed_radius() and best_c <= half_door and std::abs(best_off) > 0.01f)
-            {
-                goal += best_off * n;
-                std::println("[door-axis] {}: live gap centre is {:+.2f} m across the offered axis (clearance {:.2f} m) "
-                              "— axis shifted onto it", last_target_info_->node_name, best_off, best_c);
-            }
-        }
         const float start_along = (poly.front() - goal).dot(d);
         std::vector<float> cum(poly.size(), 0.f);
         for (std::size_t i = 1; i < poly.size(); ++i) cum[i] = cum[i - 1] + (poly[i] - poly[i - 1]).norm();
@@ -2550,6 +2516,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     // path would have watched the one mode with the least of what it is looking for. Temporary; see the
     // function. Cheap: four grid lookups, plus one whole-map census on the first world.
     monitor_footprint_orientation(step, time_source());
+    anchor_cross_.reset();   // a per-cycle reading: only drive_point_target's update_cross_anchor may set it
 
     if (escape_active_)
     {
@@ -2808,6 +2775,22 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         waypoint_mode_logged_ = true;
         std::println("[route] mission running in WAYPOINT mode — RouteContinuous is false.");
     }
+    // ── THE CROSS STEP ON ITS INTERACTION ANCHOR (2026-10-18) ────────────────────────────────────────────────
+    // A fresh `door_N@robot` says where the opening is IN THE ROBOT FRAME; the room-frame route to the cross
+    // standpoint was 0.4–0.5 m wrong at the doorway and drove the robot into the wall. With an anchor there is no
+    // route: execute_plan servoes on it (step_anchor_cross). Without one — not yet written, stale, or no width —
+    // the existing room route below runs unchanged.
+    if (update_cross_anchor(step))
+    {
+        if (current_plan_.has_value() or path_controller.is_active())
+        {
+            path_controller.stop();
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+        }
+        no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
+        return true;
+    }
     if (step.target_changed || !current_plan_.has_value())
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
@@ -2819,13 +2802,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             // Smooth it the same way a mission route is smoothed. A click target should not get a
             // visibly worse path than a tour does, and the follower's steering command follows curvature
             // either way — a C1 polyline steps it at every turning point regardless of who asked.
-            // The live field (robot frame) as a room-frame probe, for centring a door's axis on the real gap.
-            const Eigen::Affine2f pose = step.robot_pose.as_transform();
-            const Eigen::Matrix2f Rt = pose.linear().transpose();
-            const Eigen::Vector2f t = pose.translation();
-            const auto live = [&path_controller, Rt, t](const Eigen::Vector2f &p)
-            { const Eigen::Vector2f r = Rt * (p - t); return path_controller.clearance_at(r.x(), r.y()); };
-            plan.room_path = smooth_plan(plan.room_path, live);
+            plan.room_path = smooth_plan(plan.room_path);
             current_plan_ = std::move(plan);
         }
         else
@@ -2964,6 +2941,157 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     return true;
 }
 
+
+// ── DOOR CROSS ON THE INTERACTION ANCHOR ──────────────────────────────────────────────────────────────────────
+// Reads this cycle's anchor for a `_cross` affordance target into anchor_cross_. The affordance names its anchor
+// (interaction_node_id); the id is latched so that, if the affordance node is gone or its link was momentarily
+// erased, the SAME anchor is still read by id — under the same kAnchorStaleMs rule, so a dead producer cannot
+// keep the robot moving. door_concept's release_room removes the anchor at the room switch; the door passage's
+// own room-change rule ends the cross there.
+bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
+{
+    anchor_cross_.reset();
+    const bool cross = step.target.from_affordance and step.target.node_name.ends_with("_cross");
+    if (not cross or graph_ == nullptr)
+    {
+        anchor_latched_id_ = 0;
+        anchor_latched_for_.clear();
+        anchor_mode_logged_ = -1;
+        return false;
+    }
+    if (anchor_latched_for_ != step.target.node_name)       // a different cross: nothing latched carries over
+    {
+        anchor_latched_id_ = 0;
+        anchor_latched_for_ = step.target.node_name;
+        anchor_mode_logged_ = -1;
+    }
+    const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
+    std::optional<std::pair<rc::interaction::RelPose, float>> read;
+    std::uint64_t id = 0;
+    if (const auto aff = graph_->get_node(step.target.node_id); aff.has_value())
+        if (read = rc::interaction::read_affordance_anchor(*graph_, aff.value(), now); read.has_value())
+            id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0);
+    if (not read.has_value() and anchor_latched_id_ != 0)
+        if (read = rc::interaction::read_anchor(*graph_, anchor_latched_id_, now); read.has_value())
+            id = anchor_latched_id_;
+    // width_m 0 = the attribute is absent: nothing says whether the body fits, so the servo would only creep. The
+    // room route is the honest fallback, and the log says why.
+    const bool usable = read.has_value() and id != 0 and read->second > 0.f;
+    if (not usable)
+    {
+        if (anchor_mode_logged_ != 0)
+        {
+            anchor_mode_logged_ = 0;
+            std::println("[anchor] cross: no fresh anchor — room route{}",
+                         read.has_value() and read->second <= 0.f ? " (anchor has no width_m)" : "");
+        }
+        return false;
+    }
+    anchor_latched_id_ = id;
+    const auto node = graph_->get_node(id);
+    anchor_cross_ = AnchorCrossReading{.anchor_id = id,
+                                       .name = node.has_value() ? node->name() : std::to_string(id),
+                                       .pose = read->first,
+                                       .width_m = read->second};
+    if (anchor_mode_logged_ != 1)
+    {
+        anchor_mode_logged_ = 1;
+        const auto g = rc::anchor_cross_geometry(anchor_cross_->pose);
+        std::println("[anchor] cross: using anchor {} — opening {:.2f} m wide, e {:+.2f} m, s {:+.2f} m, "
+                     "heading {:+.1f} deg, sigma_lat {:.3f} m",
+                     anchor_cross_->name, anchor_cross_->width_m, g.e, g.s,
+                     g.heading_err * 180.f / std::numbers::pi_v<float>, g.sigma_lat);
+    }
+    return true;
+}
+
+// clearance_speed_limit's braking model, asked along a straight robot-frame line instead of a curve: the body
+// cannot touch anything before ds + (c − support), so v ≤ sqrt(2·a_dec·(ds + c − support)). Same a_dec, same
+// worst-case support, same horizon.
+float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
+                                                      const rc::TrajectoryController &path_controller) const
+{
+    float a_dec = std::max(0.05f, path_controller.params.cbf_max_decel);
+    if (base_capability_.max_linear_decel_mps2.has_value())
+        a_dec = std::min(a_dec, std::max(0.05f, *base_capability_.max_linear_decel_mps2));
+    const float support = path_controller.body_extent_max();
+    const float horizon = v_cap * v_cap / (2.f * a_dec) + support;
+    const float step = std::max(0.02f, path_controller.params.grid_resolution);
+    float v = v_cap;
+    for (float ds = 0.f; ds <= horizon; ds += step)
+    {
+        const Eigen::Vector2f r = ds * dir_robot;
+        const float c = path_controller.clearance_at(r.x(), r.y());
+        v = std::min(v, std::sqrt(2.f * a_dec * std::max(0.f, ds + (c - support))));
+    }
+    return v;
+}
+
+// One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
+//   1. the live field is rebuilt (LiDAR only, see refresh_lidar_field) and the clearance ceiling applied along the
+//      servo's own direction of travel, floored at 0.05 m/s exactly as set_speed_limit floors the tracker's;
+//   2. motion_commander.apply_uncertainty_speed_limit;
+//   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts);
+//   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
+// The LiDAR-stall EMERGENCY hold sits above all of this in SpecificWorker (compute() is not called at all).
+void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
+                                          rc::TrajectoryController &path_controller,
+                                          ControllerObstacleTracker &obstacle_tracker,
+                                          ControllerMotionCommander &motion_commander,
+                                          ControllerDisplay &display,
+                                          rc::AffordanceManager &affordance_manager,
+                                          const TimeSource &time_source)
+{
+    const auto &a = *anchor_cross_;
+    const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
+    const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
+    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    // The body's lateral half-width: the footprint's reach along body ±x (the passage code's own body model, safety
+    // margin included).
+    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+    const auto cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max);
+    if (cmd.through)
+    {
+        const auto g = rc::anchor_cross_geometry(a.pose);
+        std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through",
+                     a.name, g.s, standoff);
+        path_controller.stop();
+        finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos,
+                         time_source(), /*allow_dwell=*/false);
+        return;
+    }
+
+    // 1. Clearance ceiling on the live field, along the commanded translation.
+    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    path_controller.refresh_lidar_field(control_pose.as_transform());
+    float adv_mps = cmd.adv, side_mps = cmd.side, rot_rps = cmd.rot;
+    const float asked_lin_mps = std::hypot(adv_mps, side_mps);
+    if (asked_lin_mps > 0.f)
+    {
+        const Eigen::Vector2f dir(side_mps / asked_lin_mps, adv_mps / asked_lin_mps);   // robot frame: +x side, +y fwd
+        const float v_lim = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
+        if (asked_lin_mps > v_lim) { adv_mps *= v_lim / asked_lin_mps; side_mps *= v_lim / asked_lin_mps; }
+    }
+    // 2. Pose-uncertainty limiter.
+    motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
+    // 3. Stall judge → escape.
+    const auto unc = motion_commander.last_uncertainty_diag();
+    if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
+                     robot_pose.pos, robot_pose.theta, rot_rps, time_source()))
+    {
+        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
+        step_escape(robot_pose, path_controller, motion_commander, time_source());
+        return;
+    }
+    // 4. Out.
+    if (std::abs(adv_mps) < 5e-4f and std::abs(side_mps) < 5e-4f and std::abs(rot_rps) < 1e-3f)
+    {
+        note_no_command(); motion_commander.stop_robot();
+        return;
+    }
+    motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
+}
 
 // ── FINAL-APPROACH BLACK BOX ─────────────────────────────────────────────────────────────────────
 // WHY THIS EXISTS. An affordance standpoint is verified footprint-feasible at exactly ONE heading —
@@ -4540,6 +4668,17 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (escape_active_)
     {
         step_escape(robot_pose, path_controller, motion_commander, time_source());
+        refresh_view_only();
+        return;
+    }
+
+    // The door cross on its interaction anchor owns the base (drive_point_target found a fresh one this cycle and
+    // installed no route). Its command goes through the same guard chain as the tracker's — see step_anchor_cross.
+    if (anchor_cross_.has_value())
+    {
+        step_anchor_cross(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
+                          affordance_manager, time_source);
+        anchor_cross_.reset();
         refresh_view_only();
         return;
     }

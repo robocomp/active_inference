@@ -111,4 +111,9 @@ inline constexpr std::int64_t kAnchorStaleMs = 1000;
 std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G, const DSR::Node& affordance,
                                                                 std::int64_t now_ms);
 
+// The same read, by the anchor's own id — for a consumer that latched it from read_affordance_anchor and must keep
+// executing after the affordance node is gone (door_concept deletes it at a room switch). Same refusals, same
+// kAnchorStaleMs rule; nullopt once the owner removes the anchor.
+std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint64_t anchor_id, std::int64_t now_ms);
+
 }  // namespace rc::interaction

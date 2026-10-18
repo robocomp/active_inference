@@ -988,6 +988,8 @@ void SpecificWorker::load_params()
          "Measured (tools/tracker_sim --brake): from |kappa| = 0.3 1/m upward the ROTATION limit h*w_max/kappa_avg is the only thing setting the speed — the…");
 	cfgr.opt_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps,
          "authority left for the feedback). If deviation rises instead, this is the variable to put back");
+	cfgr.opt_cast<double>("Controller.AnchorCrossStandoffM", params.anchor_cross_standoff_m,
+         "Door cross on the interaction anchor: done once the opening is this far behind along its normal (m)");
 	cfgr.opt_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m,
          "THE standoff. Exactly one number now expresses 'how much room do we want beyond the robot's actual shape', replacing six independent C-space margins…");
 	cfgr.opt_cast<double>("Controller.PoseUncertaintyCoupling", params.pose_uncertainty_coupling,
