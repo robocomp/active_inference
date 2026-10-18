@@ -12,8 +12,8 @@
  *   └────────────────────────────────────────────────────────────────────────────────┘
  *
  * Enter sends; ↑/↓ walk past prompts (the line being typed is kept as the draft); /new, /clear or Ctrl+L
- * start a new conversation; Esc stops the model's answer in flight. The canvas, docked in a splitter, stays hidden
- * until something is drawn (show_canvas); the controller's mission is one of its pages ("show me the plan").
+ * start a new conversation; Esc stops the model's answer in flight. The canvas, docked in a splitter, is open
+ * from the start with a hint (show_canvas); the controller's mission is one of its pages ("show me the plan").
  * No Q_OBJECT (no moc): it talks upward through std::function callbacks, like controller_mission_panel.h.
  * GUI thread only.
  */

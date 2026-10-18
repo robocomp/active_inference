@@ -104,6 +104,11 @@ void ChatSession::start()
         },
     });
     window_->show();
+    // The canvas is open from the start (× closes it; any drawing reopens it), with a hint until the first drawing.
+    window_->show_canvas();
+    window_->canvas()->show_message(QStringLiteral("Canvas"),
+        QStringLiteral("Ask me to show or draw something here:\n\"show me the zed camera\", \"show me the room\", "
+                       "\"show me the plan\", or anything else, e.g. \"plot how far each object is\"."));
     window_->append_system("Robot chat ready. I answer from the robot's live map only. Type \"stop\" to stop it at once.");
 
     QObject::connect(&digest_timer_, &QTimer::timeout, &ctx_, [this]() { tick_digest(); });

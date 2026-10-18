@@ -10,8 +10,8 @@
  *   ├ script (read-only, toggled by </>) ──────────────────────┤
  *   └──────────────────────────────────────────────────────────┘
  *
- * The chat window docks it to the right of the transcript (a QSplitter) and keeps it hidden until something is
- * drawn. It does not run anything itself: it shows what it is given and reports [×], [Save] and its size upward
+ * The chat window docks it to the right of the transcript (a QSplitter); it is open from the start with a hint,
+ * [×] hides it and the next drawing brings it back. It does not run anything itself: it shows what it is given and reports [×], [Save] and its size upward
  * through callbacks (no Q_OBJECT, as chat_window.h). GUI thread only.
  */
 
