@@ -1821,7 +1821,12 @@ void SpecificWorker::remember_ghost(const rc::DoorInstance& inst)
     std::erase_if(ghosts_, [&](const DoorGhost& g)
                   { return (g.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
     ghosts_.push_back({inst.node_name, ap, inst.ai2_belief, inst.processed_cycles});
-    note_identity(inst.node_name, ap);   // the RAM ghost expires with the process; the identity must not
+    // ★ ABSENCE FORGETS THE NAME ACROSS RUNS (2026-10-18, user). This runs on a REMOVE, i.e. the existence belief
+    //   was driven down by looks that should have seen the door and did not. The RAM ghost above still lets a
+    //   real door that merely flickered out come back under its name within this run; but writing the name to
+    //   disk made every phantom permanent — the table kept door_2/3/4/6 in room_1 run after run, each reserving
+    //   a name and a place. A door re-acquired from its ghost writes itself back (note_identity at re-birth).
+    forget_identity(inst.node_name, ap, s.w);
     // Bounded, most-recent-first: this is a short-lived flicker memory, not a permanent map.
     while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max))
         ghosts_.erase(ghosts_.begin());
@@ -1918,16 +1923,39 @@ void SpecificWorker::save_identities() const
 
 // Upsert BY PLACE WITHIN THE CURRENT ROOM: one hole in this room's walls carries one name. The same name may hold a
 // row in another room — that is the doorway's other face, not a conflict.
-void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2f& ap)
+void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m)
 {
     const std::string room = current_room_name();
     if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty() or not name.starts_with("door_") or not ap.allFinite()
         or ap.norm() > 1.0e3f)
         return;
+    // ★ ONE DOORWAY, ONE NAME (2026-10-18, user). A row whose centre lies within this opening's width plus the
+    //   re-acquire radius describes the SAME hole — the openings overlap once their centres are closer than the
+    //   width, and the radius is the place uncertainty this agent already uses for "same door". Matching on the
+    //   radius alone kept room_1's main doorway under two names 1.07 m apart (door_1 @ −1.65 from an aperture fitted
+    //   on the far jamb, door_5 @ −0.58), and the next run picked whichever was closer: door_5. The live door's name
+    //   wins. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
+    const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
     std::erase_if(identities_, [&](const DoorIdentity& i)
-                  { return i.room == room and (i.name == name or (i.xy - ap).norm() < cfg_.exist_reacquire_radius_m); });
+                  { return i.room == room and (i.name == name or (i.xy - ap).norm() < same_hole); });
     identities_.push_back({room, name, ap});
     save_identities();
+}
+
+// The persistent row(s) of a door removed for absence: its name, or any row on the same hole (see note_identity).
+void SpecificWorker::forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m)
+{
+    const std::string room = current_room_name();
+    if (room.empty())
+        return;
+    const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
+    const auto n = std::erase_if(identities_, [&](const DoorIdentity& i)
+                                 { return i.room == room and (i.name == name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
+    if (n > 0)
+    {
+        std::print("door_concept: [identity] {} removed for absence — {} remembered row(s) forgotten in {}\n", name, n, room);
+        save_identities();
+    }
 }
 
 const SpecificWorker::DoorIdentity* SpecificWorker::match_identity(const Eigen::Vector2f& xy) const
@@ -1954,7 +1982,7 @@ void SpecificWorker::remember_live_identities()
         if (not inst.ai2_initialized or inst.is_bearing_hypothesis)
             continue;
         const auto& s = inst.model.state();
-        note_identity(inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy));
+        note_identity(inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy), s.w);
     }
 }
 

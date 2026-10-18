@@ -201,7 +201,8 @@ private:
     std::vector<DoorIdentity> identities_;
     void load_identities();                                            // once, at startup
     void save_identities() const;                                      // whole table, locale-independent
-    void note_identity(const std::string& name, const Eigen::Vector2f& ap);   // upsert by PLACE, then save
+    void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
+    void forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m);       // a removal for absence
     const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;
     void remember_live_identities();                                   // shutdown: persist the doors still alive
     // Place the door on the 2-D graph canvas beside its ACTUAL RT parent (a wall_* once resolved, the
