@@ -218,19 +218,50 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(std::ranges::count(store.stats, st) == 1);
     CHECK(std::ranges::count(store.stats, any) == 1);
 
-    // "View data" text, keyed by node name (episode_text.h): a record → its tree; a stats node → its line; root → both.
+    // "View data" text, keyed by node name (episode_text.h): a record → its mission's story (episode_story.h); a stats
+    // node → its line; root → the day's missions and the statistics.
     const auto has = [](const std::string& text, std::string_view part) { return text.find(part) != std::string::npos; };
     const std::string mission_text = rc::em::node_text(store, m.id);
-    CHECK(has(mission_text, "20261017-1"));
-    CHECK(has(mission_text, "mission \"go\""));
-    CHECK(has(mission_text, "step cross door_3"));      // the child, under its mission
-    CHECK(has(mission_text, "succeeded"));
+    CHECK(has(mission_text, "MISSION \"go\"   [20261017-1]"));
+    CHECK(has(mission_text, "Asked by a person through the chat."));
+    CHECK(has(mission_text, "END     not yet"));       // m is still open
+    CHECK(has(mission_text, "set out to cross door_3"));
+    CHECK(has(mission_text, "finished crossing door_3 — succeeded"));
+    CHECK(not has(mission_text, "»"));                  // nothing marked when the mission itself is clicked
+    const std::string step_text = rc::em::node_text(store, s.id);
+    CHECK(has(step_text, "MISSION \"go\""));           // a step tells its whole mission…
+    CHECK(has(step_text, "» "));                        // …with its own lines marked
+    CHECK(has(step_text, "belong to 20261017-2"));
     CHECK(has(rc::em::node_text(store, "stats_claim_cross_passage_0"), "claim cross (all time): 3 times"));
     const std::string root_text = rc::em::node_text(store, "root");
-    CHECK(has(root_text, "20261017-1"));
+    CHECK(has(root_text, "\"go\", asked by a person — still running   [20261017-1]"));
     CHECK(has(root_text, "all-time statistics:"));
     CHECK(has(rc::em::node_text(store, "nonesuch"), "no episode record"));
     CHECK(rc::em::node_text(rc::em::Store{}, "root") == "episodic memory is empty");
+    {   // the story keeps what concerns the mission: a flickering door is one line, a passing chair goes to MEANWHILE
+        rc::em::Record fm = m, fs = s;
+        fm.t1 = 9000;
+        fm.outcome = "completed";
+        fs.t1 = 9000;
+        fs.outcome = "completed";                   // same end as the mission: told once, by the mission's line
+        for (int i = 0; i < 6; ++i) fm.events.push_back({.dt_ms = 100 + 100 * i, .kind = i % 2 ? "died" : "born", .node = "door_3"});
+        fm.events.push_back({.dt_ms = 50, .kind = "born", .node = "chair_1"});
+        fs.events.push_back({.dt_ms = 10, .kind = "offered", .node = "aff_door_3_open"});
+        const std::string t = *rc::em::story::tell(rc::em::Store{.today = {fm, fs}, .stats = {}}, fm.id);
+        const auto count = [&](std::string_view part)
+        {
+            std::size_t n = 0;
+            for (auto p = t.find(part); p != std::string::npos; p = t.find(part, p + 1)) ++n;
+            return n;
+        };
+        CHECK(count("door_3 kept appearing and dropping out") == 1);
+        CHECK(not has(t, "appeared in its world model: door_3"));
+        CHECK(has(t, "it could now: open door_3"));
+        CHECK(has(t, "MEANWHILE, NOT RELATED TO THE MISSION\n  1 other thing came and went in the world model: chair_1"));
+        CHECK(not has(t, "finished crossing"));
+        CHECK(has(t, "the mission ended — done, the order was carried out"));
+        CHECK(has(t, ", 8 s later — done"));
+    }
 
     // Folding a parent while its child is still open (a mission closed before midnight, its claim not): deleting the
     // parent must re-hang the child under root — cortex delete_node does not cascade or re-parent.
