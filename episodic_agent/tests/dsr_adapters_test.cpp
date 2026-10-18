@@ -117,6 +117,13 @@ static void fact_source(DSR::DSRGraph& live, DSR::DSRGraph& mem, std::shared_ptr
     const auto robot = add_node(live, DSR::Node::create<robot_node_type>("Shadow"), root);
     live.insert_or_assign_edge(DSR::Edge::create<current_edge_type>(robot, room_id));
     CHECK(fs.current_room() == "room_1");
+
+    // The scene: names per kEventNodeTypes, affordances apart, sorted; the robot is not a thing in it.
+    add_node(live, DSR::Node::create<affordance_node_type>("aff_door_3_open"), door_id);
+    const auto sc = fs.scene();
+    CHECK(sc.has_value());
+    CHECK(sc and sc->things == std::vector<std::string>({"door_3", "door_9", "room_1"}));
+    CHECK(sc and sc->offered == std::vector<std::string>({"aff_door_3_open"}));
 }
 
 static void live_diff(DSR::DSRGraph& live)

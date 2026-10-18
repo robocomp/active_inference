@@ -80,6 +80,7 @@ struct FactSource                               // implemented by the agent over
     virtual ~FactSource() = default;
     virtual std::optional<Fact> fact(std::string_view node) const = 0;   // nullopt = node absent
     virtual std::string current_room() const = 0;
+    virtual std::optional<Scene> scene() const { return std::nullopt; }  // nullopt = cannot read one
 };
 
 namespace builder_detail
@@ -255,6 +256,7 @@ private:
         o.rec.id = next_id_(o.rec.t0);
         if (o.rec.room.empty()) o.rec.room = facts_.current_room();
         if (not o.rec.pre.empty()) o.rec.target_ltsm = o.rec.pre.front().ltsm_id;
+        if (o.rec.level != Level::Mission) o.rec.scene_pre = facts_.scene();
         out_.push_back(o.rec);
         open_.push_back(std::move(o));
     }
@@ -288,7 +290,7 @@ private:
         if (outcome != "interrupted_by_em_shutdown") settling_.push_back(Settling{.rec = std::move(r), .due = now_ + kSettleMs});
     }
 
-    // The state after: post (the target's facts), delivered (claims), room_after; stamped t_post.
+    // The state after: post (the target's facts), delivered (claims), scene_post, room_after; stamped t_post.
     void read_after(Record& r, std::uint64_t t) const
     {
         if (r.level != Level::Mission)
@@ -301,6 +303,7 @@ private:
                 if (pre and post)
                     if (const double d = 0.5 * std::log(*pre / *post); std::isfinite(d)) r.delivered = d;
             }
+            r.scene_post = facts_.scene();
         }
         r.room_after = facts_.current_room();
         r.t_post = t;

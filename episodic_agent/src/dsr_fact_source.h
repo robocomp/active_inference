@@ -47,6 +47,8 @@ public:
     std::optional<Fact> fact(std::string_view node) const override;
     /// Name of the room the single `current` edge points at; "" when there is none or more than one.
     std::string current_room() const override;
+    /// Names of the live kEventNodeTypes nodes: affordances under offered, the rest under things; both sorted.
+    std::optional<Scene> scene() const override;
 
     /// The passage_N in ltsm memory matching this live door's memory face; "" when unknown.
     std::string ltsm_id_of(const DSR::Node& door) const;
