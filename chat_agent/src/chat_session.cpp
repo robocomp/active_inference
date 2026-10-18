@@ -6,14 +6,19 @@
 #include <vector>
 
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <cstdlib>
 #include <QJsonDocument>
 #include <QRegularExpression>
 
 #include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
+#include <opencv2/imgcodecs.hpp>
+
 #include "approach.h"
+#include "canvas_snapshot.h"
 #include "controller_facts.h"
 #include "image_prep.h"
 #include "look_messages.h"
@@ -51,7 +56,9 @@ QJsonObject tool_def(const QString& name, const QString& description, QJsonObjec
 
 ChatSession::ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg)
     : G_(std::move(G)), cfg_(std::move(cfg)), inner_(G_->get_inner_eigen_api()), digest_builder_(G_, "body", cfg_.objects_nearest),
-      intention_(G_), mission_watch_(G_), llm_(cfg_.llm), cameras_(G_)
+      intention_(G_), mission_watch_(G_), llm_(cfg_.llm), cameras_(G_),
+      canvas_runner_(CanvasRunConfig{.canvas_dir = q(cfg_.canvas_dir), .timeout_ms = cfg_.canvas_timeout_ms,
+                                     .memory_max = q(cfg_.canvas_memory_max)})
 {
     robot_description_ = load_robot_description(cfg_.system_prompt_path);
     if (not log_.open(cfg_.log_dir)) std::println("[chat_agent] WARNING: cannot open a log under '{}'", cfg_.log_dir);
@@ -86,6 +93,15 @@ void ChatSession::start()
             window_->append_system("New conversation.");
             log_.write("new_conversation");
         },
+        .canvas = CanvasPanel::Callbacks{
+            .on_close = [this]()
+            {
+                canvas_live_ = false;
+                canvas_runner_.kill();
+                window_->hide_canvas();
+            },
+            .on_save = [this](const QString& name) { save_canvas_script(name); },
+        },
     });
     window_->show();
     window_->append_system("Robot chat ready. I answer from the robot's live map only. Type \"stop\" to stop it at once.");
@@ -93,6 +109,8 @@ void ChatSession::start()
     QObject::connect(&digest_timer_, &QTimer::timeout, &ctx_, [this]() { tick_digest(); });
     QObject::connect(&status_timer_, &QTimer::timeout, &ctx_, [this]() { tick_status(); });
     QObject::connect(&ping_timer_, &QTimer::timeout, &ctx_, [this]() { ping_llm(); });
+    QObject::connect(&canvas_timer_, &QTimer::timeout, &ctx_, [this]() { tick_canvas(); });
+    canvas_timer_.start(cfg_.canvas_live_period_ms);
     digest_timer_.start(cfg_.digest_period_ms);
     status_timer_.start(cfg_.status_period_ms);
     ping_timer_.start(30000);
@@ -196,6 +214,7 @@ void ChatSession::on_user_text(const QString& text)
     const std::string t = norm(text);
     log_.write("user", QJsonObject{{"text", text}});
     tick_digest();   // decide on the freshest facts
+    draw_repairs_ = 0;
 
     // 1. stop — at once, without the model, whatever else is going on.
     if (is_stop(t))
@@ -204,6 +223,12 @@ void ChatSession::on_user_text(const QString& text)
         dispatch({.name = "stop"}, "fast_path");
         push_history({{"role", "user"}, {"content", text}});
         push_history({{"role", "assistant"}, {"content", "Stopping the robot now."}});
+        return;
+    }
+    // 1b. "show me the zed camera / the room / the plan", "close the canvas": a stock drawing, without the model.
+    if (const auto show = parse_show(t); show.has_value())
+    {
+        show_request(*show, text);
         return;
     }
     // 2. already in the controller's grammar.
@@ -221,7 +246,7 @@ void ChatSession::on_user_text(const QString& text)
     // 3. the model.
     if (llm_.busy())
     {
-        window_->append_system("Still answering the previous message — wait, or press Cancel.");
+        window_->append_system("Still answering the previous message — wait, or press Esc.");
         return;
     }
     if (not ollama_ok_) ping_llm();
@@ -235,6 +260,8 @@ void ChatSession::on_user_text(const QString& text)
 // If the file is missing, a minimal built-in description takes its place.
 namespace
 {
+constexpr int kMaxDrawRepairs = 2;   ///< re-asks after a failed draw script, per user message
+
 const QString kFallbackDescription = QStringLiteral(
     "You are the voice of Shadow, a mobile robot in a home, talking with a person through a chat window.\n"
     "Rules:\n"
@@ -270,6 +297,11 @@ const QString kInterfaceRules = QStringLiteral(
     "behind or around you. What you say about a picture is a visual impression, not a measurement: for how many, how "
     "far and where, use the STATE and find_objects/where_is. Lines, dots, grids and labels drawn over a picture are "
     "debug overlays, not part of the scene.\n"
+    "- show(...) and draw(...) are for the PERSON: they put a picture on the canvas beside the chat. 'Show me', "
+    "'display', 'put on the screen', 'draw', 'plot', 'map' ⇒ show or draw, never look (look shows a picture only to "
+    "YOU). show = a ready-made picture (the camera, the room map, the mission plan); draw = anything else (a chart, a "
+    "plot, a marked map), as a Python script. After it, say in one short sentence what is on the canvas; do not "
+    "describe a picture you have not seen.\n"
     "- Of the robot's own software the STATE has only the names of the agents alive ('agents alive now'); for "
     "anything more about it CALL a tool, never guess: agents() "
     "(which programs run, their health, CPU, memory, uptime), sensors(name) (cameras, LiDAR, IMU: streams, measured "
@@ -410,8 +442,43 @@ QJsonArray ChatSession::tools_json() const
         "The most recent episode today about one door, room or object (aimed at it or that read its beliefs). "
         "Read-only.",
         QJsonObject{{"target", str("a door, room or object name, e.g. door_27")}}, QJsonArray{"target"}));
+    {
+        QJsonArray names;
+        for (const auto& n : canvas_library()) names.append(n);
+        tools.append(tool_def("show",
+            "Show the PERSON a ready-made picture on the canvas beside the chat (you do not see it: look is for you). "
+            "camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
+            "above with the robot, doors and objects; plan = the mission the robot runs; other names are drawings "
+            "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
+            QJsonObject{{"name", QJsonObject{{"type", "string"}, {"enum", names}, {"description", "which drawing"}}},
+                        {"args", QJsonObject{{"type", "string"},
+                                             {"description", "camera: 'zed' (front, default) or 'ricoh' (360)"}}},
+                        {"live", QJsonObject{{"type", "boolean"},
+                                             {"description", "true = redraw about once a second (default for camera "
+                                                             "and layout); false = draw once"}}}},
+            QJsonArray{"name"}));
+        tools.append(tool_def("draw",
+            "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script: a chart, a "
+            "plot, a table, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
+            "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
+            ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
+            "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
+            "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
+            "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
+            "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w). Metres, room frame. The script MUST end "
+            "with save(fig) (or save_image(img)). If it fails you get the error back: fix it and call draw again.",
+            QJsonObject{{"script", QJsonObject{{"type", "string"}, {"description", "the Python source"}}},
+                        {"title", QJsonObject{{"type", "string"}, {"description", "a short caption, e.g. 'distance to "
+                                                                                  "each object'"}}},
+                        {"live", QJsonObject{{"type", "boolean"},
+                                             {"description", "true = redraw about once a second with fresh data; "
+                                                             "false (default) = draw once"}}}},
+            QJsonArray{"script", "title"}));
+        tools.append(tool_def("hide_canvas", "Close the drawing canvas beside the chat.", QJsonObject{}, {}));
+    }
     tools.append(tool_def("look",
-        "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
+        "Look through a camera now: the current picture is shown to YOU (not to the person) in the next message, so you "
+        "can answer about it. To show a picture to the person use show or draw. Read-only.",
         QJsonObject{{"camera", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"front", "360"}},
                                            {"description", "'front' = the camera facing ahead (default); "
                                                            "'360' = the all-round panorama"}}}},
@@ -497,7 +564,15 @@ void ChatSession::ask_model(bool followup)
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
             const bool followup = turn_.followup;
+            draw_failed_ = false;
             const bool image = handle_tool_calls(turn_.tool_calls);
+            // A drawing script failed: the model gets its error back WITH the tools, to fix it (at most twice).
+            if (draw_failed_ and draw_repairs_ < kMaxDrawRepairs)
+            {
+                ++draw_repairs_;
+                ask_model(false);
+                return;
+            }
             // A tool round with no words: one follow-up (no tools) so the model can tell the person what happened.
             // A picture was asked for: the follow-up is where the model gets to see it, words or not.
             if ((content.isEmpty() or image) and not followup) ask_model(true);
@@ -555,6 +630,14 @@ bool ChatSession::handle_tool_calls(const QJsonArray& calls)
 QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 {
     if (name == "look") return do_look(args);
+    if (name == "draw" or name == "show") return do_draw(name, args);
+    if (name == "hide_canvas")
+    {
+        canvas_live_ = false;
+        canvas_runner_.kill();
+        window_->hide_canvas();
+        return QStringLiteral("OK: the canvas is closed.");
+    }
     if (name == "approach_object") return do_approach(args);
     QString out;
     if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
@@ -668,6 +751,210 @@ QString ChatSession::do_approach(const QJsonObject& args)
     return QStringLiteral("OK: mission 'approach %1' sent: the controller drives to a spot %2 m from its centre, facing "
                           "it, planning its path around obstacles.")
         .arg(q(o->name)).arg(footprint_radius(*o) + standoff, 0, 'f', 2);
+}
+
+// ─── the side canvas (canvas_runner.h / canvas_snapshot.h / canvas_panel.h) ──────────────────────────────────────
+
+QStringList ChatSession::canvas_library() const
+{
+    QStringList names;
+    for (const char* sub : {"/stock", "/library"})
+        for (const QFileInfo& f : QDir(canvas_runner_.canvas_dir() + sub).entryInfoList({"*.py"}, QDir::Files, QDir::Name))
+            if (not names.contains(f.completeBaseName())) names.append(f.completeBaseName());
+    if (not names.contains("plan")) names.append("plan");   // not a script: the plan page of the canvas
+    return names;
+}
+
+std::optional<CanvasJob> ChatSession::library_job(const QString& name, const QStringList& args) const
+{
+    for (const char* sub : {"/stock/", "/library/"})
+    {
+        const QString path = canvas_runner_.canvas_dir() + sub + name + ".py";
+        QFile f(path);
+        if (not f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+        CanvasJob job{.title = name, .script_path = path, .args = args, .source = QString::fromUtf8(f.readAll())};
+        job.wants_images = job.source.contains("image(");
+        return job;
+    }
+    return std::nullopt;
+}
+
+void ChatSession::write_canvas_inputs(const CanvasJob& job)
+{
+    const QSize sz = window_->canvas()->drawing_size();
+    const QJsonObject snap = build_canvas_snapshot(*G_, *inner_, digest_, mission_progress_, cfg_.robot_radius_m,
+                                                   SnapshotSize{std::max(sz.width(), 320), std::max(sz.height(), 240)});
+    if (not write_canvas_snapshot(canvas_runner_.run_dir(), snap))
+        std::println("[chat_agent] canvas: cannot write the snapshot in {}", canvas_runner_.run_dir().toStdString());
+    // Camera frames only for a script that reads them (encoding a 360 frame every second is not free).
+    for (const auto& [cam, file] : {std::pair{Camera::front, "/zed.jpg"}, std::pair{Camera::pano, "/ricoh.jpg"}})
+    {
+        const std::string path = (canvas_runner_.run_dir() + file).toStdString();
+        if (const auto fr = job.wants_images ? cameras_.grab(cam) : std::expected<GrabbedFrame, std::string>(
+                                                                         std::unexpected(std::string())); fr.has_value())
+            cv::imwrite(path, fr->bgr, {cv::IMWRITE_JPEG_QUALITY, 90});
+        else QFile::remove(QString::fromStdString(path));   // no stale frame from an earlier run
+    }
+}
+
+QString ChatSession::draw_now(CanvasJob job, bool savable)
+{
+    canvas_live_ = false;
+    window_->show_canvas();   // first, so the snapshot carries the panel's real size
+    write_canvas_inputs(job);
+    const CanvasRunResult r = canvas_runner_.run_blocking(job);
+    log_.write("draw", QJsonObject{{"title", job.title}, {"script", job.script_path}, {"args", job.args.join(' ')},
+                                   {"live", job.live}, {"ok", r.ok}, {"ms", r.ms}, {"error", r.error}});
+    if (not r.ok)
+    {
+        window_->canvas()->show_message(job.title, QStringLiteral("Could not draw it: ") + r.error);
+        return r.error;
+    }
+    window_->canvas()->show_drawing(job.title, r.image, job.live, job.source, savable);
+    canvas_job_ = std::move(job);
+    canvas_savable_ = savable;
+    canvas_live_ = canvas_job_.live;
+    return {};
+}
+
+void ChatSession::tick_canvas()
+{
+    if (not canvas_live_ or not window_ or not window_->canvas_visible() or window_->canvas()->showing_plan()) return;
+    if (canvas_runner_.running()) return;   // the previous re-run is still drawing: skip this tick
+    write_canvas_inputs(canvas_job_);
+    canvas_runner_.start(canvas_job_, [this](CanvasRunResult r)
+    {
+        if (not canvas_live_) return;
+        if (r.ok) { window_->canvas()->update_image(r.image); return; }
+        // A live drawing that starts failing (a camera gone, a room with no polygon yet…): stop, say why, don't spin.
+        canvas_live_ = false;
+        window_->canvas()->set_live(false);
+        window_->append_system(QStringLiteral("canvas: the live drawing stopped — ") + r.error.section('\n', 0, 0));
+        log_.write("draw_live_failed", QJsonObject{{"title", canvas_job_.title}, {"error", r.error}});
+    });
+}
+
+void ChatSession::show_request(const ShowRequest& r, const QString& text)
+{
+    log_.write("fast_path", QJsonObject{{"kind", "show"}, {"what", int(r.kind)}, {"arg", q(r.arg)}});
+    push_history({{"role", "user"}, {"content", text}});
+    QString reply;
+    if (r.kind == ShowRequest::Kind::hide)
+    {
+        canvas_live_ = false;
+        canvas_runner_.kill();
+        window_->hide_canvas();
+        reply = QStringLiteral("Canvas closed.");
+    }
+    else if (r.kind == ShowRequest::Kind::plan)
+    {
+        canvas_live_ = false;
+        window_->show_canvas();
+        window_->canvas()->show_plan();
+        reply = window_->canvas()->plan()->has_mission() ? QStringLiteral("The mission plan is on the canvas.")
+                                                          : QStringLiteral("No mission yet: the canvas shows an empty plan.");
+    }
+    else
+    {
+        const bool cam = r.kind == ShowRequest::Kind::camera;
+        auto job = library_job(cam ? "camera" : "layout", cam ? QStringList{q(r.arg)} : QStringList{});
+        if (not job.has_value()) reply = QStringLiteral("I cannot draw: the stock canvas scripts are missing.");
+        else
+        {
+            job->title = cam ? (r.arg == "zed" ? QStringLiteral("front camera (ZED)") : QStringLiteral("360 camera (Ricoh)"))
+                             : QStringLiteral("room layout");
+            job->live = true;
+            const QString title = job->title;
+            const QString err = draw_now(std::move(*job), false);
+            reply = err.isEmpty() ? QStringLiteral("Showing the %1 on the canvas.").arg(title)
+                                  : QStringLiteral("I could not draw the %1: %2").arg(title, err.section('\n', 0, 0));
+        }
+    }
+    window_->append_system(reply);
+    push_history({{"role", "assistant"}, {"content", reply}});
+}
+
+QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
+{
+    const QString stock = tool == "show" ? args.value("name").toString().trimmed() : QString();
+    const QString script = tool == "draw" ? args.value("script").toString() : QString();
+    QString title = args.value("title").toString().trimmed();
+    // live: as asked; unasked, a stock camera/layout is live (it is a view of now), a script draws once.
+    const QJsonValue lv = args.value("live");
+    const bool live = lv.isBool() ? lv.toBool()
+                      : lv.isString() ? lv.toString() == QStringLiteral("true")
+                                      : (stock == "camera" or stock == "layout");
+    const QStringList extra = args.value("args").toString().split(' ', Qt::SkipEmptyParts);
+    const auto fail = [this](const QString& why)
+    {
+        draw_failed_ = true;
+        return QStringLiteral("ERROR: ") + why;
+    };
+    if (stock == "plan")
+    {
+        canvas_live_ = false;
+        window_->show_canvas();
+        window_->canvas()->show_plan();
+        return QStringLiteral("OK: the mission plan is on the canvas.");
+    }
+    CanvasJob job;
+    bool savable = false;
+    if (not script.trimmed().isEmpty())
+    {
+        const QString path = canvas_runner_.run_dir() + QStringLiteral("/script.py");
+        QFile f(path);
+        if (not f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+            return fail(QStringLiteral("cannot write the script: ") + f.errorString());
+        f.write(script.toUtf8());
+        f.close();
+        job = CanvasJob{.title = title.isEmpty() ? QStringLiteral("drawing") : title, .script_path = path, .args = extra,
+                        .source = script, .live = live, .wants_images = script.contains("image(")};
+        savable = true;
+    }
+    else if (not stock.isEmpty())
+    {
+        auto j = library_job(stock, extra);
+        if (not j.has_value())
+            return fail(QStringLiteral("no ready-made drawing '%1'; known: %2").arg(stock, canvas_library().join(", ")));
+        job = std::move(*j);
+        job.live = live;
+        if (not title.isEmpty()) job.title = title;
+    }
+    else return fail(tool == "show" ? QStringLiteral("give the name of a ready-made drawing")
+                                    : QStringLiteral("give the Python source in script"));
+    const QString shown = job.title;
+    const QString err = draw_now(std::move(job), savable);
+    if (not err.isEmpty())
+    {
+        window_->append_system(QStringLiteral("canvas: the drawing failed"));
+        return fail(err);
+    }
+    window_->append_system(QStringLiteral("canvas: %1%2").arg(shown, live ? QStringLiteral(" (live)") : QString()));
+    return QStringLiteral("OK: '%1' is drawn on the canvas beside the chat%2.")
+        .arg(shown, live ? QStringLiteral(", redrawn every second") : QString());
+}
+
+void ChatSession::save_canvas_script(const QString& raw)
+{
+    const QString name = q(canvas_script_name(raw.toStdString()));
+    if (name.isEmpty() or canvas_job_.source.isEmpty())
+    {
+        window_->append_system(QStringLiteral("canvas: nothing to save under that name"));
+        return;
+    }
+    const QString dir = canvas_runner_.canvas_dir() + QStringLiteral("/library");
+    QDir().mkpath(dir);
+    QFile f(dir + "/" + name + ".py");
+    if (not f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        window_->append_system(QStringLiteral("canvas: cannot save — ") + f.errorString());
+        return;
+    }
+    f.write(QStringLiteral("# %1 — saved from the chat canvas %2\n")
+                .arg(canvas_job_.title, QDateTime::currentDateTime().toString(Qt::ISODate)).toUtf8());
+    f.write(canvas_job_.source.toUtf8());
+    log_.write("draw_saved", QJsonObject{{"name", name}, {"title", canvas_job_.title}});
+    window_->append_system(QStringLiteral("canvas: saved as '%1' — ask for it by name next time").arg(name));
 }
 
 QString ChatSession::do_look(const QJsonObject& args)

@@ -148,6 +148,11 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.look_max_side_360 = r.i("Chat.look_max_side_360", 1280,
             "look(): the same for the 2:1 Ricoh panorama (1280x640 ~1070 tokens; 1920x960 ~1800 and saw no more)");
     c.look_jpeg_quality = r.i("Chat.look_jpeg_quality", 80, "look(): JPEG quality 1..100 of the attached frame");
+    c.canvas_dir = r.s("Canvas.dir", "canvas", "side canvas: bootstrap.py, rcanvas.py, stock/ and library/ scripts");
+    c.canvas_timeout_ms = r.i("Canvas.timeout_ms", 10000, "side canvas: a drawing script is killed after this long");
+    c.canvas_live_period_ms = r.i("Canvas.live_period_ms", 1000,
+            "side canvas: a live drawing re-runs at most this often (a run still in flight skips the tick)");
+    c.canvas_memory_max = r.s("Canvas.memory_max", "1G", "side canvas: MemoryMax of the script's systemd scope");
     return c;
 }
 

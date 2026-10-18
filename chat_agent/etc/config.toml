@@ -98,6 +98,15 @@ look_max_side = 1280
 look_max_side_360 = 1280
 look_jpeg_quality = 85
 
+[Canvas]
+# The side canvas: the robot draws for the person by running a Python script (canvas/stock/*.py, canvas/library/*.py,
+# or one the model writes) against a snapshot of the world (src/canvas_snapshot.h). The script runs as python3 -I in a
+# systemd user scope (MemoryMax), in a network namespace when the kernel allows it, and is killed after timeout_ms.
+dir = "canvas"
+timeout_ms = 10000
+live_period_ms = 1000
+memory_max = "1G"
+
 [Ice]
 Warn.Connections = "0"
 Trace.Network = "0"

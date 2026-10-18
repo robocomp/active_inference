@@ -30,6 +30,9 @@ LIST(APPEND SOURCES
   ../src/intention_node.cpp
   ../src/camera_grabber.cpp
   ../src/plan_view.cpp
+  ../src/canvas_panel.cpp
+  ../src/canvas_runner.cpp
+  ../src/canvas_snapshot.cpp
   ../src/mission_watch.cpp
   ../src/system_reader.cpp
 )

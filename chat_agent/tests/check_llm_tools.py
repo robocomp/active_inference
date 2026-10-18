@@ -126,7 +126,31 @@ def tools():
         t("last_episode", "The most recent episode today about one door, room or object (aimed at it or that read its "
           "beliefs). Read-only.",
           {"target": {"type": "string", "description": "a door, room or object name, e.g. door_27"}}, ["target"]),
-        t("look", "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
+        # the side canvas (chat_session.cpp tools_json; canvas_runner.h)
+        t("show", "Show the PERSON a ready-made picture on the canvas beside the chat (you do not see it: look is for "
+          "you). camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
+          "above with the robot, doors and objects; plan = the mission the robot runs; other names are drawings "
+          "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
+          {"name": {"type": "string", "enum": ["camera", "layout", "plan"], "description": "which drawing"},
+           "args": {"type": "string", "description": "camera: 'zed' (front, default) or 'ricoh' (360)"},
+           "live": {"type": "boolean", "description": "true = redraw about once a second (default for camera and "
+                                                      "layout); false = draw once"}}, ["name"]),
+        t("draw", "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script: a chart, "
+          "a plot, a table, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
+          "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
+          ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
+          "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
+          "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
+          "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
+          "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w). Metres, room frame. The script MUST end "
+          "with save(fig) (or save_image(img)). If it fails you get the error back: fix it and call draw again.",
+          {"script": {"type": "string", "description": "the Python source"},
+           "title": {"type": "string", "description": "a short caption, e.g. 'distance to each object'"},
+           "live": {"type": "boolean", "description": "true = redraw about once a second with fresh data; false "
+                                                      "(default) = draw once"}}, ["script", "title"]),
+        t("hide_canvas", "Close the drawing canvas beside the chat.", {}, []),
+        t("look", "Look through a camera now: the current picture is shown to YOU (not to the person) in the next message, so you "
+        "can answer about it. To show a picture to the person use show or draw. Read-only.",
           {"camera": {"type": "string", "enum": ["front", "360"],
                       "description": "'front' = the camera facing ahead (default); '360' = the all-round panorama"}}, []),
     ]
@@ -181,6 +205,26 @@ def history_after_move(user_text, dist, turn, cmd):
             {"role": "tool", "tool_name": "robot_status", "content": f"The command '{cmd}' ended: completed. done: {cmd}"}]
 
 
+def draw_script_runs(a):
+    """The model's draw(script=...) actually draws: run it through canvas/bootstrap.py (as chat_agent does) against
+    test_canvas_stock.py's synthetic snapshot."""
+    import subprocess
+    import tempfile
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_canvas_stock import SNAPSHOT
+    script = a.get("script") or ""
+    if "save" not in script:
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "snapshot.json").write_text(json.dumps(SNAPSHOT))
+        Path(d, "script.py").write_text(script)
+        p = subprocess.run([sys.executable, "-I", str(ROOT / "canvas/bootstrap.py"), str(Path(d, "script.py"))],
+                           cwd=d, capture_output=True, text=True, timeout=30)
+        if p.returncode != 0:
+            print("      script failed:", p.stderr.strip().splitlines()[-1:] if p.stderr else p.returncode)
+        return p.returncode == 0 and Path(d, "out.png").exists()
+
+
 def lists_agents(c):
     """A text answer that names the alive agents from the STATE's line (all ten, not a made-up few)."""
     names = ["chair_concept", "controller", "door_concept", "ltsm_agent", "residual_concept", "retina",
@@ -189,6 +233,13 @@ def lists_agents(c):
 
 
 CASES = [
+    # the side canvas (2026-10-18): the person's pictures go through draw(); stock first, a script only when none fits
+    ("show where the doors are", [], "none", "can you draw me a map of the room with the doors?",
+     lambda n, a, c: (n == "show" and a.get("name") == "layout") or (n == "draw" and draw_script_runs(a))),
+    ("show the front camera", [], "none", "put the front camera on the screen for me",
+     lambda n, a, c: n == "show" and a.get("name") == "camera" and str(a.get("args", "zed")) in ("zed", "front", "")),
+    ("bar chart of distances", [], "none", "plot a bar chart of how far each object is from you",
+     lambda n, a, c: n == "draw" and draw_script_runs(a)),
     # (label, history, last_move, user text, grader(name, args, content) -> bool)
     ("advance 1 meter", [], "none", "advance 1 meter",
      lambda n, a, c: n == "move_relative" and abs(num(a, "distance_m") - 1.0) < 1e-6 and num(a, "turn_deg") == 0),

@@ -16,6 +16,9 @@
  * An accepted call is sent at once: no confirmation card since 2026-10-18 (command_gate.h); "stop" halts the robot.
  * Read-only queries, answered here from the digest without the controller:
  * find_objects(subtype?) and where_is(name) (object_facts.h).
+ * show(name) / draw(script) put a picture on the side canvas for the PERSON (canvas_runner.h runs the script against
+ * a snapshot, canvas_snapshot.h); a failed script returns its stderr and the model gets up to two re-asks WITH tools
+ * to fix it. "show me the zed camera / the room / the plan" never reach the model (canvas_commands.h).
  * look(camera?) is read-only too: the newest frame of the front (ZED) or 360 (Ricoh) camera is shrunk, JPEG-encoded
  * and attached to its tool result; the follow-up request, always made then, shows it to the model (look_messages.h
  * has the message layout and the one-turn lifetime of an image; camera_grabber.h the media-plane side).
@@ -53,6 +56,8 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "camera_grabber.h"
+#include "canvas_commands.h"
+#include "canvas_runner.h"
 #include "chat_log.h"
 #include "chat_window.h"
 #include "command_gate.h"
@@ -83,6 +88,10 @@ struct SessionConfig
     int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
     int look_max_side_360 = 1280;      ///< look(): the same for the 2:1 panorama
     int look_jpeg_quality = 80;
+    std::string canvas_dir = "canvas";   ///< bootstrap.py, rcanvas.py, stock/, library/ (canvas_runner.h)
+    int canvas_timeout_ms = 10000;       ///< a canvas script is killed after this long
+    int canvas_live_period_ms = 1000;    ///< live drawings re-run at most this often (a run in flight skips a tick)
+    std::string canvas_memory_max = "1G";
 };
 
 class ChatSession
@@ -124,6 +133,16 @@ private:
     QString answer_query(const QString& name, const QJsonObject& args);
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
+    /// show(name, args?, live?) / draw(script, title, live?) → the tool-result text; the picture goes to the canvas.
+    QString do_draw(const QString& tool, const QJsonObject& args);
+    /// Run `job` now and put its picture on the canvas; "" on success, else why (also shown on the canvas).
+    QString draw_now(CanvasJob job, bool savable);
+    void show_request(const ShowRequest& r, const QString& text);   ///< the canvas fast path
+    std::optional<CanvasJob> library_job(const QString& name, const QStringList& args) const;
+    QStringList canvas_library() const;   ///< stock + saved script names
+    void write_canvas_inputs(const CanvasJob& job);
+    void tick_canvas();                   ///< live re-run
+    void save_canvas_script(const QString& name);
     /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
     QString do_approach(const QJsonObject& args);
     /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.
@@ -148,6 +167,13 @@ private:
     ChatLog log_;
     CameraGrabber cameras_;
     SystemReader system_{G_, cameras_};   ///< agents / sensors / graph / inspect (after cameras_: it reads their rates)
+    CanvasRunner canvas_runner_;
+    CanvasJob canvas_job_;          ///< what the canvas shows now (re-run while live)
+    bool canvas_live_ = false;
+    bool canvas_savable_ = false;
+    int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)
+    bool draw_failed_ = false;      ///< a draw in the current tool round failed
+    QTimer canvas_timer_;
     QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
     QObject ctx_;
     QTimer digest_timer_, status_timer_, ping_timer_;

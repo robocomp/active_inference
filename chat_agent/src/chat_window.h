@@ -2,18 +2,18 @@
 /*
  * chat_window.h — chat_agent's own window: transcript, input line and a status bar.
  *
- *   ┌ transcript (QTextBrowser) ─────────────────────────────┐
- *   │ you: cross the door                                     │
- *   │ robot: I can cross door_19 (2.3 m ahead-left).          │
- *   │ ⟶ robot status: approach — offered                      │
- *   ├─────────────────────────────────────────────────────────┤
- *   │ [ type here … (Enter sends, ↑↓ past prompts)] thinking… [Plan] [Cancel] │
- *   │ model qwen3:8b · ollama ok · controller present          │
- *   └─────────────────────────────────────────────────────────┘
+ *   ┌ transcript (QTextBrowser) ──────────────────────┬ canvas (canvas_panel.h) ──────┐
+ *   │ you: show me the room                            │ room_1 ● live        </> × │
+ *   │ robot: drawn: room layout                        │                             │
+ *   │ ⟶ robot status: approach — offered               │   (what the robot drew)     │
+ *   ├──────────────────────────────────────────────────┴─────────────────────────────┤
+ *   │ [ type here … (Enter sends, ↑↓ past prompts)]                         thinking… │
+ *   │ model qwen3:8b · ollama ok · controller present                                 │
+ *   └────────────────────────────────────────────────────────────────────────────────┘
  *
  * Enter sends; ↑/↓ walk past prompts (the line being typed is kept as the draft); /new, /clear or Ctrl+L
- * start a new conversation. [Plan] opens the plan window (plan_view.h): the mission the controller runs, live; it is
- * enabled once the controller has published one.
+ * start a new conversation; Esc stops the model's answer in flight. The canvas, docked in a splitter, stays hidden
+ * until something is drawn (show_canvas); the controller's mission is one of its pages ("show me the plan").
  * No Q_OBJECT (no moc): it talks upward through std::function callbacks, like controller_mission_panel.h.
  * GUI thread only.
  */
@@ -22,14 +22,14 @@
 #include <vector>
 
 #include <QFrame>
+#include <QSplitter>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPushButton>
 #include <QString>
 #include <QTextBrowser>
 #include <QWidget>
 
-#include "plan_view.h"
+#include "canvas_panel.h"
 
 namespace rc::chat
 {
@@ -42,6 +42,7 @@ public:
         std::function<void(const QString&)> on_send;
         std::function<void()> on_cancel;     ///< abort the model's answer in flight
         std::function<void()> on_new;        ///< new conversation (history cleared)
+        CanvasPanel::Callbacks canvas;       ///< the side canvas' [×] and [Save]
     };
 
     explicit ChatWindow(Callbacks cb, QWidget* parent = nullptr);
@@ -54,9 +55,14 @@ public:
     void append_system(const QString& text);    ///< agent notes: validation, errors, sent commands
     void clear_transcript();
 
-    /// The controller's mission (mission_watch.h): a new one resets the plan window's rows.
+    /// The controller's mission (mission_watch.h): a new one resets the plan page's rows. It does not open the canvas.
     void set_plan(const rc::mission::Mission& m, const QString& ir_json);
     void set_plan_progress(const rc::mission::Progress& p);
+
+    [[nodiscard]] CanvasPanel* canvas() const { return canvas_; }
+    void show_canvas();    ///< unhide the canvas (first time: give it ~45% of the width)
+    void hide_canvas();
+    [[nodiscard]] bool canvas_visible() const { return canvas_->isVisible(); }
 
     void set_busy(bool busy);
     void set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present);
@@ -72,9 +78,8 @@ private:
     Callbacks cb_;
     QTextBrowser* transcript_ = nullptr;
     QLineEdit* input_ = nullptr;
-    QPushButton* cancel_ = nullptr;
-    QPushButton* plan_btn_ = nullptr;
-    PlanView* plan_ = nullptr;        ///< a top-level window this one owns
+    QSplitter* split_ = nullptr;      ///< transcript | canvas
+    CanvasPanel* canvas_ = nullptr;
     QLabel* busy_ = nullptr;          ///< "thinking…" while a request is in flight (replaces a greyed Send button)
     QLabel* status_ = nullptr;
     std::vector<QString> history_;    ///< prompts sent, oldest first
