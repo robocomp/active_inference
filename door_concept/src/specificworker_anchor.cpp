@@ -615,7 +615,8 @@ void SpecificWorker::step_passage_anchor()
             for (int i = -8; i <= 8; ++i)
             {
                 const float z = 0.25f * float(i);
-                curve.emplace_back(std::clamp(inst->phi_est + z * pg.phi_sigma_rad, 0.f, float(M_PI) * 0.5f), std::exp(-0.5f * z * z));
+                curve.emplace_back(std::clamp(inst->phi_est + z * pg.phi_sigma_rad, 0.f, std::clamp(cfg_.phi_max_rad, 0.f, float(M_PI))),
+                                   std::exp(-0.5f * z * z));
             }
             if (const auto p = rc::door::passable_prob(curve, inst->aperture.w, pg.robot_passage_width_m + pg.passage_margin_m);
                 p.has_value())
@@ -623,16 +624,25 @@ void SpecificWorker::step_passage_anchor()
         }
         // The swung leaf, from the door's own belief (hinge, swing side, φ), in ANCHOR coordinates: the hinge jamb is
         // the near edge (−w/2 along wall_u) or the far one, and the anchor's axes are ±(wall_u, across_u) (axis_sign).
+        // Fix round 4: a BELIEF, marginalised per frame by update_door_anchor — hinge × swing × φ over the door's whole
+        // range, plus a "not as believed" branch (LeafPrior::p_not_as_believed). door_concept carries NO posterior over
+        // hinge / swing (they are Openable config pins or a side inherited from the other room; the M2 hypotheses are
+        // not built), so p_hinge = p_swing = 0.5: uniform, the data decide. Without an AI2 belief φ is unknown too.
         rc::door::LeafPrior leaf;
-        if (inst != nullptr and inst->ai2_initialized)
+        if (inst != nullptr)
         {
             const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
+            const float phi_max = std::clamp(cfg_.phi_max_rad, 0.f, float(M_PI));   // the door model's hinge travel
             leaf.known     = true;
             leaf.hinge_u   = pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.width;
             leaf.dir_u     = pa.axis_sign * near;
             leaf.swing_y   = pa.axis_sign * inst->leaf.swing;
-            leaf.phi       = std::clamp(inst->phi_est, 0.f, float(M_PI) * 0.5f);
+            leaf.phi_max   = phi_max;
+            leaf.phi_known = inst->ai2_initialized;
+            leaf.phi       = std::clamp(inst->phi_est, 0.f, phi_max);
             leaf.phi_sigma = std::max(0.f, pg.phi_sigma_rad);
+            leaf.p_hinge   = 0.5f;
+            leaf.p_swing   = 0.5f;
         }
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
                                                       lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf);

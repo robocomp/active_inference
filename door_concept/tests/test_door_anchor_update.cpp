@@ -40,11 +40,24 @@
 //   shut_door_reads_shut_with_floor — 3-D bpearl-like scan (z = 0.67, downward layers) with floor returns, shut door,
 //                                  prior 0.25 m in front of the wall, rays through select_anchor_rays: p_open < 0.1,
 //                                  depth < 0.05 m within 3 updates
+// Task 7 fix round 4 (review):
+//   crossing_with_leaf_at_moderate_pi now runs leaf_crossing(); its 3-D frames also feed
+//   update_cost_on_3d_crossing_frames — per-update ms printed; FAILS above 50 ms in an optimised build (target 30)
+//   wrong_leaf_belief_is_marginalised — π = 0.8, a confident belief (P(hinge), P(swing) 0.95) wrong on φ (believes 0),
+//                                  the hinge side or the swing side: worst lateral < 0.10 m and yaw < 0.10 rad, and no
+//                                  worse than no leaf model; the correct belief keeps lateral ≤ 0.05 m
+//   dragged_posterior_not_published — the round-3 belief taken as certain (φ = 0) drags the anchor; with p_view judged
+//                                  at the POSTERIOR no frame publishes a pose > 0.10 m / 0.10 rad off; the reported
+//                                  p_view equals door_view of the returned posterior
+//   pview_low_* ask door_view at the wrong pose (update_door_anchor's p_view is now its posterior's) and also check
+//                                  that the update from each wrong prior publishes only a pose near the truth
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
-//   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O1 -fPIC -I/usr/include/eigen3 -Isrc -I../common
+//   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O2 -fPIC -I/usr/include/eigen3 -Isrc -I../common
 //     -I$Q -I$Q/QtCore -I$Q/QtGui -I$Q/QtWidgets tests/test_door_anchor_update.cpp -o build/test_door_anchor_update
 //     -lfastdds -lfastcdr -lQt5Core && ./build/test_door_anchor_update
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <format>
@@ -230,6 +243,61 @@ static RelPose creation_prior(const Pose2& r)
     p.P = rc::door::anchor_axes_to_robot(V3(0.30f * 0.30f, 0.20f * 0.20f, 0.10f * 0.10f).asDiagonal(), p.x.z());
     p.stamp_ms = 1;
     return p;
+}
+
+
+// ─── fix round 4: the leaf-crossing run, shared by the crossing / timing / wrong-belief tests ─────────────────────────
+// Open door with its leaf at 90° beside the +u jamb on the robot side, 3-D bpearl-like scans through select_anchor_rays
+// (5,000–8,000 rays per frame within 2 m), the sensor driven from s = -0.5 to +0.8 m along the normal.
+struct CrossStats
+{
+    float pv_min = 1.f, worst_lat = 0.f, worst_yaw = 0.f;
+    double ms_max = 0.0, ms_sum = 0.0;
+    std::size_t rays_max = 0, rays_min = ~std::size_t(0);
+    int frames = 0;
+    int wrong_pub_post = 0, wrong_pub_prior = 0;   // frames PUBLISHED (p_view ≥ 0.5) while > 0.10 m / 0.10 rad off,
+                                                   // with p_view judged at the posterior (now) / at the prior (round 3)
+};
+static CrossStats leaf_crossing(const rc::door::LeafPrior& lp, float pi, bool verbose = false)
+{
+    WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true; wo.leaf90 = true;
+    const auto segs = world(wo);
+    Pose2 robot{V2(0.f, -0.5f - kSensor.y()), 0.f};
+    RelPose belief = creation_prior(robot);
+    CrossStats st;
+    for (int k = 0; k <= 26; ++k)
+    {
+        if (k > 0)
+        {
+            rc::rt::Twist tw; tw.linear = V3(0.f, 0.5f, 0.f);
+            belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+            robot.p.y() += 0.05f;
+        }
+        const auto rays = rc::door::select_anchor_rays(belief, W, T, 0.05f, 2.0f, kSensor, scan3d(segs, robot, 51 + k), 2.0f);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto [post, ev] = rc::door::update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi, lp);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const float pv_prior = rc::door::door_view(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi).p_view;
+        belief = post;
+        const V3 tr = anchor_truth(robot);
+        const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
+        const float yaw = std::abs(rc::interaction::wrap_pi(post.x.z() - tr.z()));
+        const bool off = (post.x.head<2>() - tr.head<2>()).norm() > 0.10f or yaw > 0.10f;
+        st.wrong_pub_post  += (off and ev.p_view >= 0.5f) ? 1 : 0;
+        st.wrong_pub_prior += (off and pv_prior >= 0.5f) ? 1 : 0;
+        st.pv_min = std::min(st.pv_min, ev.p_view);
+        st.worst_lat = std::max(st.worst_lat, lat);
+        st.worst_yaw = std::max(st.worst_yaw, yaw);
+        st.ms_max = std::max(st.ms_max, ms);
+        st.ms_sum += ms;
+        st.rays_max = std::max(st.rays_max, rays.size());
+        st.rays_min = std::min(st.rays_min, rays.size());
+        ++st.frames;
+        if (verbose and (k % 4 == 0 or ev.p_view < 0.6f))
+            std::print("    s={:+.2f} rays={} {:.1f} ms p_view={:.3f} lat err={:.3f} yaw err={:.3f} p_open={:.3f}\n",
+                       robot.p.y() + kSensor.y(), rays.size(), ms, ev.p_view, lat, yaw, ev.p_open);
+    }
+    return st;
 }
 
 int main()
@@ -468,8 +536,10 @@ int main()
         const auto segs = world(wo);
         const Pose2 robot = try64_start();
         const auto rays = scan(segs, robot, 180.f, 41);
-        auto view_of = [&](const RelPose& pr)
-        { return update_door_anchor(pr, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f).second.p_view; };
+        // Fix round 4: update_door_anchor now reports p_view at its POSTERIOR, which from these priors converges onto
+        // the true opening (free space: 0.92). The question these tests ask — is a WRONG pose seen as predicted? — is
+        // put to door_view, the same function, at the pose itself.
+        auto view_of = [&](const RelPose& pr) { return rc::door::door_view(pr, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f).p_view; };
         const RelPose truth = creation_prior(robot);
         const V2 along(std::cos(truth.x.z()), std::sin(truth.x.z())), normal(-along.y(), along.x());
         RelPose free_space = truth; free_space.x.head<2>() -= 1.2f * normal;
@@ -481,41 +551,87 @@ int main()
         std::print("pview_low_when_rotated\n");   check(pv_r < 0.5f, "prior yawed +90°: p_view < 0.5");
         std::print("pview_low_on_solid_wall\n");  check(pv_s < 0.5f, "open door, prior 1.5 m along onto solid wall: p_view < 0.5");
         check(pv_t > 0.5f, "and the true pose reads in view (> 0.5)");
+        // ...and what update_door_anchor PUBLISHES from those priors is never a wrong pose read as in view.
+        for (const auto& [name, pr] : {std::pair{"free space", free_space}, std::pair{"rotated", rotated}, std::pair{"solid wall", solid}})
+        {
+            const auto [post, ev] = update_door_anchor(pr, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f);
+            const float e_pos = (post.x.head<2>() - truth.x.head<2>()).norm();
+            const float e_yaw = std::abs(rc::interaction::wrap_pi(post.x.z() - truth.x.z()));
+            std::print("    from the {} prior: posterior off {:.3f} m / {:.3f} rad, p_view(posterior) {:.3f}\n", name, e_pos, e_yaw, ev.p_view);
+            check(ev.p_view < 0.5f or (e_pos < 0.10f and e_yaw < 0.10f),
+                  std::format("{} prior: published (p_view ≥ 0.5) only if within 0.10 m / 0.10 rad of the truth", name));
+        }
     }
 
     // ─── fix round 3: p_view must not scale with π ─────────────────────────────────────────────────────────────
+    double cross_ms_max = 0.0, cross_ms_sum = 0.0;
+    int cross_frames = 0;
+    std::size_t cross_rays_min = ~std::size_t(0), cross_rays_max = 0;
     for (const float pi : {0.7f, 0.8f})
     {
         std::print("crossing_with_leaf_at_moderate_pi (π = {:.1f})\n", pi);
-        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true; wo.leaf90 = true;
-        const auto segs = world(wo);
-        Pose2 robot{V2(0.f, -0.5f - kSensor.y()), 0.f};
-        RelPose belief = creation_prior(robot);
-        float pv_min = 1.f, worst_lat = 0.f;
-        for (int k = 0; k <= 26; ++k)
+        // The door's own leaf belief: hinged at the +u jamb, swung 90° toward the robot (σ_φ 0.25, the live config).
+        rc::door::LeafPrior lp; lp.known = true; lp.hinge_u = 0.5f * W; lp.dir_u = -1.f; lp.swing_y = -1.f;
+        lp.phi = float(M_PI_2); lp.phi_sigma = 0.25f;
+        const CrossStats st = leaf_crossing(lp, pi, true);
+        std::print("    min p_view {:.3f}, worst lateral {:.3f} m, worst yaw {:.3f} rad\n", st.pv_min, st.worst_lat, st.worst_yaw);
+        check(st.pv_min >= 0.6f, std::format("π = {:.1f}: p_view ≥ 0.6 at every step of the crossing", pi));
+        check(st.worst_lat < 0.05f, std::format("π = {:.1f}: lateral error < 0.05 m throughout", pi));
+        cross_ms_max = std::max(cross_ms_max, st.ms_max); cross_ms_sum += st.ms_sum; cross_frames += st.frames;
+        cross_rays_min = std::min(cross_rays_min, st.rays_min); cross_rays_max = std::max(cross_rays_max, st.rays_max);
+    }
+    // ─── fix round 4, finding 1: COST on the crossing's 3-D frames ─────────────────────────────────────────────────
+    std::print("update_cost_on_3d_crossing_frames\n");
+    std::print("    {} frames of {}–{} rays: {:.1f} ms mean, {:.1f} ms max per update\n", cross_frames, cross_rays_min, cross_rays_max,
+               cross_ms_sum / std::max(1, cross_frames), cross_ms_max);
+#ifdef __OPTIMIZE__
+    check(cross_ms_max <= 50.0, "every update ≤ 50 ms (target 30 ms at -O2)");
+#else
+    std::print("  [SKIP] timing not checked in an unoptimised build: compile at -O2\n");
+#endif
+
+    // ─── fix round 4, finding 2: the leaf configuration is a BELIEF ───────────────────────────────────────────────
+    // A confident belief (P(hinge), P(swing) 0.95 — more than door_concept, which has none, ever passes), WRONG in turn
+    // on φ, the hinge side and the swing side, against the same crossing with no leaf model and with the right belief.
+    std::print("wrong_leaf_belief_is_marginalised (π = 0.8)\n");
+    {
+        rc::door::LeafPrior right; right.known = true; right.hinge_u = 0.5f * W; right.dir_u = -1.f; right.swing_y = -1.f;
+        right.phi = float(M_PI_2); right.phi_sigma = 0.25f; right.p_hinge = 0.95f; right.p_swing = 0.95f;
+        rc::door::LeafPrior phi0 = right;   phi0.phi = 0.f;                                    // believes it shut
+        rc::door::LeafPrior hinge = right;  hinge.hinge_u = -0.5f * W; hinge.dir_u = 1.f;      // the other jamb
+        rc::door::LeafPrior swing = right;  swing.swing_y = 1.f;                               // the far side
+        const CrossStats none = leaf_crossing(rc::door::LeafPrior{}, 0.8f);
+        const CrossStats ok   = leaf_crossing(right, 0.8f);
+        std::print("    {:22s} worst lateral {:.3f} m, worst yaw {:.3f} rad, min p_view {:.3f}\n", "no leaf model", none.worst_lat, none.worst_yaw, none.pv_min);
+        std::print("    {:22s} worst lateral {:.3f} m, worst yaw {:.3f} rad, min p_view {:.3f}\n", "correct belief", ok.worst_lat, ok.worst_yaw, ok.pv_min);
+        check(ok.worst_lat <= 0.05f, "correct belief: lateral error ≤ 0.05 m throughout");
+        for (const auto& [name, lp] : {std::pair{"believes φ = 0", phi0}, std::pair{"hinge flipped", hinge}, std::pair{"swing flipped", swing}})
         {
-            if (k > 0)
-            {
-                rc::rt::Twist tw; tw.linear = V3(0.f, 0.5f, 0.f);
-                belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
-                robot.p.y() += 0.05f;
-            }
-            const auto rays = rc::door::select_anchor_rays(belief, W, T, 0.05f, 2.0f, kSensor, scan3d(segs, robot, 51 + k), 2.0f);
-            // The door's own leaf belief: hinged at the +u jamb, swung 90° toward the robot (σ_φ 0.25, the live config).
-            rc::door::LeafPrior lp; lp.known = true; lp.hinge_u = 0.5f * W; lp.dir_u = -1.f; lp.swing_y = -1.f;
-            lp.phi = float(M_PI_2); lp.phi_sigma = 0.25f;
-            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, pi, lp);
-            belief = post;
-            const V3 tr = anchor_truth(robot);
-            const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
-            pv_min = std::min(pv_min, ev.p_view);
-            worst_lat = std::max(worst_lat, lat);
-            if (k % 4 == 0 or ev.p_view < 0.6f)
-                std::print("    s={:+.2f} p_view={:.3f} lat err={:.3f} p_open={:.3f}\n", robot.p.y() + kSensor.y(), ev.p_view, lat, ev.p_open);
+            const CrossStats st = leaf_crossing(lp, 0.8f);
+            std::print("    {:22s} worst lateral {:.3f} m, worst yaw {:.3f} rad, min p_view {:.3f}\n", name, st.worst_lat, st.worst_yaw, st.pv_min);
+            check(st.worst_lat < 0.10f and st.worst_yaw < 0.10f, std::format("{}: worst lateral < 0.10 m and yaw < 0.10 rad", name));
+            check(st.worst_lat <= none.worst_lat and st.worst_yaw <= none.worst_yaw, std::format("{}: no worse than no leaf model", name));
         }
-        std::print("    min p_view {:.3f}, worst lateral {:.3f} m\n", pv_min, worst_lat);
-        check(pv_min >= 0.6f, std::format("π = {:.1f}: p_view ≥ 0.6 at every step of the crossing", pi));
-        check(worst_lat < 0.05f, std::format("π = {:.1f}: lateral error < 0.05 m throughout", pi));
+    }
+
+    // ─── fix round 4, finding 3: p_view is the POSTERIOR's ────────────────────────────────────────────────────────
+    // The round-3 belief taken as certain (one hinge, one swing, φ = 0 ± 0.01, no "not as believed" mass) drags the
+    // anchor within a frame. Judged at the prior, such frames were published; judged at the posterior, never.
+    std::print("dragged_posterior_not_published\n");
+    {
+        rc::door::LeafPrior certain; certain.known = true; certain.hinge_u = 0.5f * W; certain.dir_u = -1.f; certain.swing_y = -1.f;
+        certain.phi = 0.f; certain.phi_sigma = 0.01f; certain.p_hinge = 1.f; certain.p_swing = 1.f; certain.p_not_as_believed = 0.f;
+        const CrossStats st = leaf_crossing(certain, 0.8f);
+        std::print("    worst lateral {:.3f} m, worst yaw {:.3f} rad; frames published while > 0.10 m / 0.10 rad off: "
+                   "{} with p_view at the posterior, {} had it been judged at the prior\n",
+                   st.worst_lat, st.worst_yaw, st.wrong_pub_post, st.wrong_pub_prior);
+        check(st.wrong_pub_post == 0, "no frame publishes a posterior > 0.10 m / 0.10 rad off");
+        WorldOpts wo; wo.shut = false; wo.back_wall = true;
+        const auto rays = scan(world(wo), try64_start(), 180.f, 41);
+        const RelPose pr = creation_prior(try64_start());
+        const auto [post, ev] = update_door_anchor(pr, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f);
+        check(ev.p_view == rc::door::door_view(post, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f).p_view,
+              "the reported p_view IS door_view of the returned posterior");
     }
     {
         WorldOpts wo; wo.shut = false; wo.back_wall = true;
