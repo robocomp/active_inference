@@ -47,6 +47,8 @@
  * Residual risks (not catchable): ltsm_agent dying within the ~1 s of the join aborts EM; a CRASHED ltsm_agent is only
  * dropped when its DDS lease lapses, and cortex keys the participant set by name, so a crash-restart inside that lease
  * can leave EM holding the old graph.
+ * VIEW DATA: left-click a node in the em window → "View data" → a popup with that episode as text (episode_text.h);
+ * cortex's GraphViewer emits view_data_signal for nodes with no built-in widget, as robot_concept uses it.
  * The logic lives in common/episodic/ (pure, tested); this file is the shell.
  */
 
@@ -63,6 +65,9 @@
 #include "../../common/episodic/em_archive.h"
 #include "../../common/episodic/em_builder.h"
 
+#include <QDialog>
+#include <QPlainTextEdit>
+#include <QPointer>
 #include <QTimer>
 
 #include <atomic>
@@ -139,6 +144,11 @@ private:
     bool bad_wire_logged_ = false, absent_logged_ = false;
 
     void poll();
+    // ── "View data" popup on a domain-4 node (episode_text.h) ──
+    void wire_view_data();                          // once, main thread; no-op without the em graph window
+    void show_node_text(std::uint64_t id);          // one reusable, non-modal popup; size kept in QSettings
+    QPointer<QDialog> text_popup_;
+    QPointer<QPlainTextEdit> text_view_;
     /// Archive + graph + metrics for what the Builder returned.
     void write(const std::vector<rc::em::Record>& out);
     static std::uint64_t now_ms();

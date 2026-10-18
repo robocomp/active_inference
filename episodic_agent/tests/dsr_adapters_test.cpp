@@ -3,6 +3,7 @@
 // no viewer. Plain CHECK macro, non-zero exit on failure, like common/episodic/tests.
 #include "../src/dsr_fact_source.h"
 #include "../src/em_graph.h"
+#include "../src/episode_text.h"
 #include "../../common/episodic/em_query_dsr.h"
 
 #include <dsr/api/dsr_api.h>
@@ -216,6 +217,20 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     }
     CHECK(std::ranges::count(store.stats, st) == 1);
     CHECK(std::ranges::count(store.stats, any) == 1);
+
+    // "View data" text, keyed by node name (episode_text.h): a record → its tree; a stats node → its line; root → both.
+    const auto has = [](const std::string& text, std::string_view part) { return text.find(part) != std::string::npos; };
+    const std::string mission_text = rc::em::node_text(store, m.id);
+    CHECK(has(mission_text, "20261017-1"));
+    CHECK(has(mission_text, "mission \"go\""));
+    CHECK(has(mission_text, "step cross door_3"));      // the child, under its mission
+    CHECK(has(mission_text, "succeeded"));
+    CHECK(has(rc::em::node_text(store, "stats_claim_cross_passage_0"), "claim cross (all time): 3 times"));
+    const std::string root_text = rc::em::node_text(store, "root");
+    CHECK(has(root_text, "20261017-1"));
+    CHECK(has(root_text, "all-time statistics:"));
+    CHECK(has(rc::em::node_text(store, "nonesuch"), "no episode record"));
+    CHECK(rc::em::node_text(rc::em::Store{}, "root") == "episodic memory is empty");
 
     // Folding a parent while its child is still open (a mission closed before midnight, its claim not): deleting the
     // parent must re-hang the child under root — cortex delete_node does not cascade or re-parent.

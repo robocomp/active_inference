@@ -20,6 +20,7 @@
 /** SpecificWorker — episodic_agent. See specificworker.h. */
 
 #include "specificworker.h"
+#include "episode_text.h"
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/episodic/em_journal.h"
@@ -27,6 +28,11 @@
 #include "../../common/window_geometry/window_geometry_saver.h"   // rc::ui::GeometrySaver (SHARED)
 
 #include <QCoreApplication>
+#include <QFontDatabase>
+#include <QSettings>
+#include <QVBoxLayout>
+
+#include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -144,6 +150,8 @@ void SpecificWorker::initialize()
                 std::println("[episodic] window '{}' geometry {}x{}+{}+{}", name, g.width(), g.height(), g.x(), g.y());
             }
     });
+
+    wire_view_data();
 
     // Graphs by NAME, failing legibly (the flat single-instance config files its one graph under "").
     const auto pick = [this](const std::string& key) -> std::shared_ptr<DSR::DSRGraph>
@@ -319,6 +327,54 @@ void SpecificWorker::poll()
         metrics_->on_poll(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count());
         metrics_->maybe_row(now, builder_->open());
     }
+}
+
+// ─── "View data" popup ───────────────────────────────────────────────────────
+
+void SpecificWorker::wire_view_data()
+{
+    // cortex's GraphViewer emits view_data_signal(id, type) for "View data" on a node with no built-in widget — every
+    // domain-4 node (robot_concept wires the same signal for its stream viewers). The em window only (Agent.em
+    // graph = true); the live graph has no viewer here.
+    const auto it = graph_viewers.find("em");
+    if (it == graph_viewers.end() or not it->second) return;
+    auto* gv = qobject_cast<DSR::GraphViewer*>(it->second->get_widget(DSR::DSRViewer::view::graph));
+    if (not gv) return;
+    QObject::connect(gv, &DSR::GraphViewer::view_data_signal, this,
+                     [this](std::uint64_t id, const std::string&) { show_node_text(id); }, Qt::QueuedConnection);
+}
+
+void SpecificWorker::show_node_text(std::uint64_t id)
+{
+    if (shutting_down_ or not G_em_) return;
+    const auto n = G_em_->get_node(id);
+    if (not n) return;
+    const std::string text = rc::em::node_text(rc::em::load_store(*G_em_), n->name());
+    if (not text_popup_)
+    {
+        const auto w = windows.find("em");
+        text_popup_ = new QDialog(w != windows.end() ? w->second.get() : nullptr);
+        text_popup_->setAttribute(Qt::WA_DeleteOnClose);   // QPointer resets; the next click builds a fresh one
+        auto* layout = new QVBoxLayout(text_popup_);
+        text_view_ = new QPlainTextEdit(text_popup_);
+        text_view_->setReadOnly(true);
+        text_view_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        layout->addWidget(text_view_);
+        QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+        if (not text_popup_->restoreGeometry(settings.value("episode_popup/geometry").toByteArray()))
+            text_popup_->resize(760, 420);
+        new rc::ui::GeometrySaver(text_popup_, [this]
+        {
+            if (not text_popup_) return;
+            QSettings s(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+            s.setValue("episode_popup/geometry", text_popup_->saveGeometry());
+        });
+    }
+    text_popup_->setWindowTitle(QString::fromStdString(n->name()));
+    text_view_->setPlainText(QString::fromStdString(text));
+    text_popup_->show();
+    text_popup_->raise();
+    text_popup_->activateWindow();
 }
 
 void SpecificWorker::GraphSink::upsert(const rc::em::Record& r)

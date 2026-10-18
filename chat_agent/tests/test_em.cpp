@@ -1,6 +1,6 @@
-// The episodic-memory tools' answers (src/em_answers.h): pure formatting over a fixed rc::em::Store, the unavailable
+// The episodic-memory tools' answers (common/episodic/em_answers.h): pure formatting over a fixed rc::em::Store, the unavailable
 // case, the HH:MM / epoch-ms time arguments and the STATE's "today:" line. No DSR, no ollama.
-#include "../src/em_answers.h"
+#include "../../common/episodic/em_answers.h"
 
 #include <chrono>
 #include <clocale>

@@ -56,7 +56,7 @@
 #include "chat_log.h"
 #include "chat_window.h"
 #include "command_gate.h"
-#include "em_answers.h"
+#include "../../common/episodic/em_answers.h"
 #include "intention_node.h"
 #include "mission_watch.h"
 #include "system_reader.h"

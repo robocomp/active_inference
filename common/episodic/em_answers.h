@@ -1,9 +1,12 @@
 #pragma once
 /*
- * em_answers.h — the chat's episodic-memory tools as pure text (2026-10-17): what the robot did TODAY (missions, their
+ * em_answers.h — the episodic memory as pure text (2026-10-17): what the robot did TODAY (missions, their
  * steps, the affordance claims under them, with outcomes) and the all-time outcome statistics, formatted for an 8B
- * model from an rc::em::Store (common/episodic/em_query.h). No DSR (tested in tests/test_em.cpp); ChatSession reads the
+ * model from an rc::em::Store (em_query.h). No DSR (tested in chat_agent/tests/test_em.cpp); ChatSession reads the
  * Store from episodic_agent's domain-4 graph with rc::em::load_store and passes it here.
+ * Two consumers (2026-10-18), hence common/: chat_agent's LLM tools, and episodic_agent's "View data" popup on a
+ * domain-4 node (episodic_agent/src/episode_text.h) — so a person reads the same words the model does. The namespace
+ * stays rc::chat: the chat tools were its first consumer and its tests live there.
  *
  * AVAILABILITY: std::nullopt = chat_agent has not joined domain 4 (episodic_agent is not running — the join is lazy,
  * specificworker.cpp). A joined graph holding nothing at all (no record, no statistic) is answered the same way: the
@@ -30,8 +33,8 @@
 #include <string_view>
 #include <vector>
 
-#include "../../common/episodic/em_consolidate.h"
-#include "../../common/episodic/em_query.h"
+#include "em_consolidate.h"
+#include "em_query.h"
 
 namespace rc::chat
 {
