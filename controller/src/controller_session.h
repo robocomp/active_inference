@@ -870,6 +870,8 @@ private:
     rc::DoorPassage door_passage_;                                  // controller_door_passage.h
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
+    std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
+    float passage_door_width_ = 1.0f;                               // its width_m (caps a door line's clearance)
     std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
@@ -988,7 +990,8 @@ private:
     // NOT const: it RETAINS the fitted spline so the band can keep deforming it. A plan that is only a
     // list of samples cannot be re-optimised — the control polygon is the decision variable, and
     // throwing it away is what made an affordance route a one-shot fit.
-    ControllerPolygon smooth_plan(const ControllerPolygon &poly);
+    ControllerPolygon smooth_plan(const ControllerPolygon &poly,
+                                  const std::function<float(const Eigen::Vector2f &)> &live_clearance = {});
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

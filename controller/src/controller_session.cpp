@@ -167,6 +167,19 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             std::println("[door-passage] passage finished — back to AffordancesOnly until the next command or mission");
         }
         door_required_ = std::move(dp.required);
+        // Where the passage's door IS in this room — the door line the cross axis must be centred on. The cross
+        // standpoint sits CrossStandoffM past it, a configured distance the controller must not assume.
+        passage_door_centre_.reset();
+        if (door_passage_.active())
+            if (auto *ie = world_model.inner_eigen(); ie != nullptr)
+                if (const auto T = ie->get_transformation_matrix(world_model.graph_state().room_name,
+                                                                 door_passage_.view().door); T.has_value())
+                    passage_door_centre_ = Eigen::Vector2f(static_cast<float>(T->matrix()(0, 3)),
+                                                           static_cast<float>(T->matrix()(1, 3)));
+        passage_door_width_ = 1.0f;
+        if (door_passage_.active())
+            if (const auto dn = graph_->get_node(door_passage_.view().door); dn.has_value())
+                passage_door_width_ = graph_->get_attrib_by_name<width_m_att>(dn.value()).value_or(1.0f);
         door_passages_ = std::move(dp.passages);
         grid_planner_.set_passages(door_passages_);
         obstacle_tracker.set_exempt_names(std::move(dp.exempt));
@@ -1628,7 +1641,8 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     return opt;
 }
 
-ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
+ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly,
+                                                 const std::function<float(const Eigen::Vector2f &)> &live_clearance)
 {
     plan_spline_valid_ = false;
     plan_progress_s_ = 0.f;
@@ -1656,13 +1670,52 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
     if (door_passage_.active() and last_target_info_.has_value() and last_target_info_->from_affordance
         and last_target_info_->node_name.ends_with("_cross") and poly.size() >= 2)
     {
-        const Eigen::Vector2f goal = last_target_info_->room_pos;
+        Eigen::Vector2f goal = last_target_info_->room_pos;
         const Eigen::Vector2f d(std::cos(last_target_info_->yaw_rad), std::sin(last_target_info_->yaw_rad));
+        // ★ CENTRE THE AXIS ON THE GAP THE LIDAR SEES (2026-10-18). door_concept's aperture can sit 0.2 m along the
+        //   wall from the real opening — live try56, room_2: carried mirror at x = −0.01, the fit drifted to −0.21
+        //   (masks of the swung leaf pull it toward the hinge), the robot followed that axis to the millimetre and
+        //   jammed against the leaf. The planner grid cannot correct it (it carves a door-wide corridor around the
+        //   same wrong axis); the LIVE field sees jambs and leaf. At the door line (CrossStandoffM ≈ 1.2–1.4 m before
+        //   the standpoint) take the lateral offset of greatest live clearance within ±0.5 m — the middle of the
+        //   gap actually there — and shift the whole axis onto it.
+        // The door line's position along the axis: from the door node when the graph gives it, else the old
+        // assumption (standpoint ≈ 1.4 m past the opening).
+        const float u_door = passage_door_centre_.has_value()
+                           ? std::min(-0.4f, (*passage_door_centre_ - goal).dot(d)) : -1.4f;
+        if (live_clearance)
+        {
+            const Eigen::Vector2f n(-d.y(), d.x());
+            float best_off = 0.f, best_c = -1.f;
+            for (float off = -0.5f; off <= 0.5f + 1e-4f; off += 0.02f)
+            {
+                float c = std::numeric_limits<float>::max();
+                for (const float u : {u_door - 0.2f, u_door, u_door + 0.2f})   // a short stretch across the door line
+                    c = std::min(c, live_clearance(goal + u * d + off * n));
+                if (c < 50.f and c > best_c + 1e-3f) { best_c = c; best_off = off; }   // 100 m = outside the field
+            }
+            // Only a gap the body can pass says where the opening is: below the inscribed radius the door line is
+            // closed everywhere (a shut leaf, a plan made before `open`), and its "best" offset is noise (try57:
+            // −0.44 m at 0.04 m clearance).
+            // …and only a probe that IS on a door line: there the jambs cap the clearance at half the opening. More
+            // than that (plus the beam's range noise) means the probe stood in open floor — the door line was taken
+            // from a misplaced door node — and its "gap" would steer the robot into a jamb (try63: +0.50 m shifts at
+            // 0.97–1.17 m clearance, robot wedged 0.4 m off the opening).
+            const float half_door = 0.5f * passage_door_width_ + 0.10f;
+            if (best_c >= approach_body_.inscribed_radius() and best_c <= half_door and std::abs(best_off) > 0.01f)
+            {
+                goal += best_off * n;
+                std::println("[door-axis] {}: live gap centre is {:+.2f} m across the offered axis (clearance {:.2f} m) "
+                              "— axis shifted onto it", last_target_info_->node_name, best_off, best_c);
+            }
+        }
         const float start_along = (poly.front() - goal).dot(d);
         std::vector<float> cum(poly.size(), 0.f);
         for (std::size_t i = 1; i < poly.size(); ++i) cum[i] = cum[i - 1] + (poly[i] - poly[i - 1]).norm();
         float last_s = 0.f;
-        for (const float u : {-2.0f, -1.6f, -1.2f, -0.8f, -0.4f})   // metres before the standpoint, along the axis
+        std::vector<float> us;   // from 0.8 m before the door line to 0.4 m short of the standpoint, every 0.4 m
+        for (float u = u_door - 0.8f; u <= -0.4f + 1e-3f; u += 0.4f) us.push_back(u);
+        for (const float u : us)   // metres before the standpoint, along the axis
         {
             if (u <= start_along + 0.3f) continue;                    // behind the robot: nothing to pull there
             const Eigen::Vector2f a = goal + u * d;
@@ -2766,7 +2819,13 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             // Smooth it the same way a mission route is smoothed. A click target should not get a
             // visibly worse path than a tour does, and the follower's steering command follows curvature
             // either way — a C1 polyline steps it at every turning point regardless of who asked.
-            plan.room_path = smooth_plan(plan.room_path);
+            // The live field (robot frame) as a room-frame probe, for centring a door's axis on the real gap.
+            const Eigen::Affine2f pose = step.robot_pose.as_transform();
+            const Eigen::Matrix2f Rt = pose.linear().transpose();
+            const Eigen::Vector2f t = pose.translation();
+            const auto live = [&path_controller, Rt, t](const Eigen::Vector2f &p)
+            { const Eigen::Vector2f r = Rt * (p - t); return path_controller.clearance_at(r.x(), r.y()); };
+            plan.room_path = smooth_plan(plan.room_path, live);
             current_plan_ = std::move(plan);
         }
         else
