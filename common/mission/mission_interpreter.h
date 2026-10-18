@@ -87,6 +87,20 @@ public:
         std::string outcome;
         std::uint64_t t0 = 0, t1 = 0;   ///< first start · end (ms, the caller's clock)
         int attempt = 0;                ///< 1 = the first try
+        int iteration = 0;              ///< repeat: iterations finished
+    };
+
+    /// One step attempt (or one repeat iteration) starting (state Running) or ending (its final state), for the
+    /// episodic journal (common/episodic/em_journal.h). steps() keeps one entry per step id and so cannot show a
+    /// retry or an iteration; this does. `iteration`: a repeat's own iteration (0-based), and for any other step the
+    /// iteration of its innermost enclosing repeat (0 outside one), so (id, attempt, iteration) names one try.
+    struct StepTransition
+    {
+        std::string id, op;
+        int attempt = 0, iteration = 0;
+        StepState state = StepState::Running;
+        std::string outcome;   ///< the end's outcome word; "" for Running
+        std::uint64_t t = 0;   ///< ms, the caller's clock
     };
 
     explicit Interpreter(Host& host) : host_(host) {}
@@ -98,6 +112,7 @@ public:
     {
         if (auto e = validate(m); e.has_value()) return e;
         if (state_ == State::Running) cancel("superseded", now_ms);
+        ++mission_;
         title_ = std::move(m.title);
         anchors_ = std::move(m.anchors);
         captured_.clear();
@@ -130,7 +145,7 @@ public:
     void cancel(const std::string& outcome, std::uint64_t now_ms)
     {
         if (state_ != State::Running) return;
-        cancel_subtree(root_, now_ms);
+        cancel_subtree(root_, now_ms, outcome);
         state_ = State::Aborted;
         abort_outcome_ = outcome;
         event(std::format("mission '{}': aborted ({})", title_, outcome));
@@ -148,6 +163,10 @@ public:
 
     [[nodiscard]] State state() const { return state_; }
     [[nodiscard]] const std::string& title() const { return title_; }
+    /// Which start() this is: 1, 2, … (0 = none yet). The mission serial everything the controller publishes carries.
+    [[nodiscard]] std::uint64_t serial() const { return mission_; }
+    /// The mission's first tick · its end (0 while it runs).
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> span() const { return {root_.t0, root_.t1}; }
 
     /// The edge's `state`: in_progress · completed · failed|<step>|<outcome> · aborted|<outcome> (chat_inbox.h).
     [[nodiscard]] std::string status() const
@@ -195,7 +214,7 @@ public:
             for (const auto& k : r.kids)
             {
                 out.push_back({.id = k.step->id, .op = k.step->op, .state = k.state, .outcome = k.outcome, .t0 = k.t0,
-                               .t1 = k.t1, .attempt = k.attempt});
+                               .t1 = k.t1, .attempt = k.attempt, .iteration = k.iteration});
                 self(k);
             }
         };
@@ -205,6 +224,9 @@ public:
 
     /// Transitions since the last call, for the log. The newest is also in progress().
     [[nodiscard]] std::vector<std::string> take_events() { return std::exchange(events_, {}); }
+    /// Step transitions since the last call, oldest first. A superseding start() leaves the old mission's closing
+    /// transitions here: drain before start() to keep them apart from the new mission's.
+    [[nodiscard]] std::vector<StepTransition> take_transitions() { return std::exchange(transitions_, {}); }
 
     /// "1:cross door_27", "2:explore room_2": the id, the op and its positional arguments.
     [[nodiscard]] static std::string label(const Step& s)
@@ -225,6 +247,8 @@ private:
         std::string outcome{}, origin{};   ///< origin: the id of the step whose failure this is
         std::uint64_t t0 = 0, t1 = 0, began = 0;
         int attempt = 0, iteration = 0;
+        int outer = 0;          ///< the innermost enclosing repeat's iteration (set by the parent each tick)
+        int open_iteration = -1;   ///< the iteration of the transition opened and not yet closed; -1 = none
         std::size_t cur = 0;
         std::uint64_t iteration_tick = 0;
         bool started = false;   ///< leaf: the host has it
@@ -240,6 +264,8 @@ private:
     Run root_{};
     std::uint64_t tick_ = 0;
     std::vector<std::string> events_;
+    std::vector<StepTransition> transitions_;
+    std::uint64_t mission_ = 0;
 
     static Run build(const Step& s)
     {
@@ -252,6 +278,24 @@ private:
     {
         last_event_ = e;
         events_.push_back(std::move(e));
+    }
+
+    /// An attempt (or, for a repeat, an iteration) begins: Running. The root is the mission, not a step.
+    void open(Run& r, std::uint64_t now)
+    {
+        if (r.step == &root_step_) return;
+        r.open_iteration = r.step->op == "repeat" ? r.iteration : r.outer;
+        transitions_.push_back({.id = r.step->id, .op = r.step->op, .attempt = r.attempt, .iteration = r.open_iteration,
+                                .state = StepState::Running, .outcome = {}, .t = now});
+    }
+    /// What open() began ends, in the step's state now. Once: a step already closed (a repeat's last iteration,
+    /// closed at its boundary) emits nothing more.
+    void close(Run& r, std::uint64_t now)
+    {
+        if (r.step == &root_step_ or r.open_iteration < 0) return;
+        transitions_.push_back({.id = r.step->id, .op = r.step->op, .attempt = r.attempt, .iteration = r.open_iteration,
+                                .state = r.state, .outcome = r.outcome, .t = now});
+        r.open_iteration = -1;
     }
 
     static bool finished(StepState s) { return s != StepState::Pending and s != StepState::Running; }
@@ -281,6 +325,7 @@ private:
         r.state = StepState::Satisfied;
         r.outcome = why.empty() ? "satisfied" : std::move(why);
         r.t1 = now;
+        close(r, now);
         if (r.step != &root_step_) event(std::format("step {}: {}", label(*r.step), r.outcome));
     }
 
@@ -303,6 +348,7 @@ private:
             if (r.attempt == 1) r.t0 = now;
             r.began = now;
             r.state = StepState::Running;
+            open(r, now);
         }
         if (r.kids.empty()) run_leaf(r, now);
         else run_composite(r, now);
@@ -315,6 +361,7 @@ private:
         if (f.kind == OnFail::Kind::Retry and r.attempt <= f.retries)
         {
             event(std::format("step {}: retry {}/{} after {}", label(*r.step), r.attempt + 1, f.retries + 1, r.outcome));
+            close(r, now);   // this attempt ends Failed; the next one opens in advance()
             const int attempt = r.attempt;
             const std::uint64_t t0 = r.t0;
             reset(r);
@@ -328,6 +375,7 @@ private:
             r.state = StepState::Skipped;
             event(std::format("step {}: skipped after {}", label(*r.step), r.outcome));
         }
+        close(r, now);
     }
 
     void run_composite(Run& r, std::uint64_t now)
@@ -337,7 +385,7 @@ private:
         const auto until = s.pred("until");
         if (const auto budget = s.number("budget_s"); budget.has_value() and double(now - r.began) >= *budget * 1000.0)
         {
-            cancel_subtree_kids(r, now);
+            cancel_subtree_kids(r, now, "cancelled");
             return fail(r, now, "budget_exhausted", s.id);
         }
         if (is_repeat and r.cur == 0 and r.kids.front().state == StepState::Pending and until.has_value() and holds(*until))
@@ -352,10 +400,21 @@ private:
                 for (auto& k : r.kids) reset(k);
                 r.cur = 0;
                 if (until.has_value() and holds(*until)) return satisfy(r, now, "until");
+                // The iteration that just finished ends here; the next one opens when its first step starts.
+                r.state = StepState::Satisfied;
+                r.outcome = "satisfied";
+                close(r, now);
+                r.state = StepState::Running;
+                r.outcome.clear();
                 if (r.iteration_tick == tick_) return;   // began this tick: the next one starts next tick
             }
-            if (r.cur == 0 and r.kids.front().state == StepState::Pending) r.iteration_tick = tick_;
+            if (r.cur == 0 and r.kids.front().state == StepState::Pending)
+            {
+                r.iteration_tick = tick_;
+                if (r.open_iteration < 0) open(r, now);   // a repeat's next iteration (the first opened in advance())
+            }
             Run& k = r.kids[r.cur];
+            k.outer = is_repeat ? r.iteration : r.outer;
             advance(k, now);
             if (k.state == StepState::Satisfied or k.state == StepState::Skipped)
             {
@@ -448,18 +507,20 @@ private:
         return out;
     }
 
-    void cancel_subtree(Run& r, std::uint64_t now)
+    void cancel_subtree(Run& r, std::uint64_t now, const std::string& outcome)
     {
         if (r.state != StepState::Running) return;
         if (r.started) host_.cancel(r.resolved);
         r.started = false;
-        cancel_subtree_kids(r, now);
+        cancel_subtree_kids(r, now, outcome);
         r.state = StepState::Cancelled;
+        r.outcome = outcome;
         r.t1 = now;
+        close(r, now);
     }
-    void cancel_subtree_kids(Run& r, std::uint64_t now)
+    void cancel_subtree_kids(Run& r, std::uint64_t now, const std::string& outcome)
     {
-        for (auto& k : r.kids) cancel_subtree(k, now);
+        for (auto& k : r.kids) cancel_subtree(k, now, outcome);
     }
 
     template <class R>

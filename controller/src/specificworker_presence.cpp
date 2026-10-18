@@ -42,6 +42,8 @@ void SpecificWorker::cleanup_owned_nodes()
     stop_control_thread();
 
     obstacle_tracker_.clear_published_obstacles();
+    mission_node_.remove(*G);
+    journal_node_.remove(*G);   // episodic_agent sees it go and closes what is open `lost`
     presence_coordinator_.cleanup_owned_nodes();
 }
 

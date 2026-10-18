@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Live check (needs ollama): does the model map motion / object questions to the right tool calls?
 
-Builds the same system message chat_agent builds — etc/system_prompt.md + the interface rules extracted from
-src/chat_session.cpp (so they cannot drift) + a SYNTHETIC STATE — and the same tool schema, then asks a few
-questions and grades the first tool call. Also reports prompt_eval_count = the real token size of system+tools.
+Builds the same request chat_agent builds — a system message of etc/system_prompt.md + the interface rules extracted
+from src/chat_session.cpp (so they cannot drift), the history, the question, and LAST a system message with a
+SYNTHETIC STATE — and the same tool schema, then asks a few questions and grades the first tool call. Also reports
+prompt_eval_count = the real token size of system+tools+STATE.
 
     python3 tests/check_llm_tools.py [model] [repeats]
 """
@@ -45,6 +46,7 @@ objects perceived in the current room (only this room is perceived): 1 bottle, 2
   - bottle_1 2.9 m, +12 deg ahead, 0.07x0.07x0.25 m
   - chair_2 3.4 m, -100 deg to the right, 0.45x0.50x0.90 m
 last command sent from this chat: none
+today: 2 missions (1 succeeded); last: cross door_0 → room_1
 """
 
 
@@ -76,22 +78,61 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
+        t("agents", "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), "
+          "uptime, CPU and memory. Read-only.", {}, []),
+        t("sensors", "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, "
+          "resolution, age of the last frame and bandwidth. Read-only.",
+          {"name": {"type": "string", "description": "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
+                                                     "lidar); empty = all"}}, []),
+        t("graph_summary", "What the robot's working memory (its graph) holds: node and edge counts by type and by the "
+          "agent that created them. Read-only.", {}, []),
+        t("inspect", "Every attribute and edge of ONE node of the robot's graph, by name (e.g. door_1, Shadow, "
+          "controller 7) or id. Read-only.", {"node": {"type": "string", "description": "the node's name or id"}},
+          ["node"]),
+        # episodic memory (chat_session.cpp tools_json; answers in src/em_answers.h)
+        t("episodes", "What the robot did TODAY, from its episodic memory, with start and end time and outcome, oldest "
+          "first. With no kind and no target it lists only the MISSIONS; pass kind (e.g. cross, open) for the steps and "
+          "claims of that kind, target for everything aimed at one node, or call episode(id) for one mission's steps "
+          "and claims. All filters optional. Read-only.",
+          {"since": {"type": "string", "description": "only episodes that started at or after this time: HH:MM (today, "
+                                                      "local time) or epoch milliseconds"},
+           "until": {"type": "string", "description": "only episodes that started before this time: HH:MM (today, local "
+                                                      "time) or epoch milliseconds"},
+           "author": {"type": "string", "enum": ["human", "self"],
+                      "description": "human = asked by a person, self = on the robot's own"},
+           "kind": {"type": "string", "description": "mission, or a step/claim kind such as cross, open, approach"},
+           "target": {"type": "string", "description": "a door, room or object name, e.g. door_27"}}, []),
+        t("episode", "One episode from today's episodic memory in detail, by id (as listed by episodes): its steps and "
+          "claims, the beliefs read before and after (e.g. P(open) of a door) and what happened meanwhile. Read-only.",
+          {"id": {"type": "string", "description": "the episode id, e.g. 20261017-3"}}, ["id"]),
+        t("outcome_stats", "How often something succeeded, failed or was lost over ALL TIME (today included), its mean "
+          "duration and information gain, from the episodic memory. Steps and claims of the same kind are separate "
+          "rows; missions are split into asked-by-a-person and on-its-own. Read-only.",
+          {"kind": {"type": "string", "description": "mission, or a step/claim kind such as cross, open, approach"},
+           "target": {"type": "string", "description": "optional: a door/room/object name, e.g. door_27; empty = all "
+                                                       "of that kind"}}, ["kind"]),
+        t("last_episode", "The most recent episode today about one door, room or object (aimed at it or that read its "
+          "beliefs). Read-only.",
+          {"target": {"type": "string", "description": "a door, room or object name, e.g. door_27"}}, ["target"]),
         t("look", "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
           {"camera": {"type": "string", "enum": ["front", "360"],
                       "description": "'front' = the camera facing ahead (default); '360' = the all-round panorama"}}, []),
     ]
 
 
-def system(last_move="none"):
+def system():
     desc = (ROOT / "etc/system_prompt.md").read_text().strip()
+    return desc + "\n" + interface_rules()
+
+
+def state(last_move="none"):
     expl = {"move 0.30": "move 0.30 (move forward 0.30 m)", "move -0.30": "move -0.30 (move backward 0.30 m)"}
-    return desc + "\n" + interface_rules() + "\nSTATE:\n" + STATE + \
-        f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
+    return "STATE:\n" + STATE + f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
 
 
 def ask(messages):
     body = {"model": MODEL, "messages": messages, "tools": tools(), "stream": False, "think": False,
-            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 8192}}
+            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 16384}}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=180) as r:
         return json.loads(r.read())
@@ -153,8 +194,47 @@ CASES = [
      lambda n, a, c: n == "look" and str(a.get("camera", "front")) in ("front", "")),
     ("colour of the chair", [], "none", "what colour is the chair?",
      lambda n, a, c: n == "look"),
+    # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
+    ("how many agents", [], "none", "how many agents are running?",
+     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),
+    ("cuántos agentes (es)", [], "none", "¿cuántos agentes están funcionando?",
+     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|catorce)\b", c.lower()) is not None)),
+    ("which agent is degraded", [], "none", "is any agent in trouble?",
+     lambda n, a, c: n == "agents" or (n is None and "door_concept" in c)),
+    ("agent memory use", [], "none", "how much memory is the controller using?",
+     lambda n, a, c: n == "agents" or (n == "inspect" and "controller" in str(a.get("node", "")).lower())),
+    ("ricoh frame rate", [], "none", "what is the frame rate of the Ricoh camera?",
+     lambda n, a, c: (n == "sensors" and re.search("ricoh|360", str(a.get("name", "")).lower()) is not None)
+     or (n is None and "15" in c)),
+    ("ricoh resolution", [], "none", "what resolution does the 360 camera stream at?",
+     lambda n, a, c: n == "sensors" and re.search("ricoh|360|^$", str(a.get("name", "")).lower()) is not None),
+    ("fps de la cámara (es)", [], "none", "¿a cuántos fps va la cámara frontal?",
+     lambda n, a, c: (n == "sensors" and re.search("zed|front|frontal|^$", str(a.get("name", "")).lower()) is not None)
+     or (n is None and re.search(r"29[.,]9|30", c) is not None)),
+    ("working memory", [], "none", "how many nodes are in your working memory?",
+     lambda n, a, c: n == "graph_summary"),
+    ("inspect a node", [], "none", "show me all the attributes of door_1",
+     lambda n, a, c: n == "inspect" and str(a.get("node", "")) == "door_1"),
     ("look behind you", [], "none", "what do you see behind you?",
      lambda n, a, c: n == "look" and str(a.get("camera", "")) == "360"),
+    # episodic memory: what happened earlier goes to the memory tools, never to the live STATE or a guess.
+    ("what did you do this morning", [], "none", "what did you do this morning?",
+     lambda n, a, c: n == "episodes"),
+    ("what did you do today", [], "none", "what have you done today?",
+     lambda n, a, c: n == "episodes" or (n is None and re.search(r"\b(2|two)\b", c.lower()) is not None)),
+    ("since 10:00", [], "none", "what missions did I give you since 10:00?",
+     lambda n, a, c: n == "episodes" and str(a.get("since", "")).startswith("10:00")),
+    ("qué hiciste hoy (es)", [], "none", "¿qué has hecho hoy?",
+     lambda n, a, c: n == "episodes" or (n is None and re.search(r"\b(2|dos)\b", c.lower()) is not None)),
+    ("how often door shut", [], "none", "how often was door_1 shut?",
+     lambda n, a, c: n == "outcome_stats" and str(a.get("target", "")) == "door_1"),
+    ("how often crossing failed", [], "none", "how often have door crossings failed?",
+     lambda n, a, c: n == "outcome_stats" and "cross" in str(a.get("kind", "")).lower()),
+    ("last time at door_0", [], "none", "when did you last go through door_0?",
+     lambda n, a, c: n == "last_episode" and str(a.get("target", "")) == "door_0"
+     or (n == "episodes" and str(a.get("target", "")) == "door_0")),
+    ("details of an episode", [], "none", "tell me more about episode 20261017-3",
+     lambda n, a, c: n == "episode" and str(a.get("id", "")) == "20261017-3"),
 ]
 
 
@@ -164,7 +244,8 @@ def main():
     lat = []
     for label, hist, last_move, text, ok in CASES:
         for k in range(REPEATS):
-            msgs = [{"role": "system", "content": system(last_move)}] + hist + [{"role": "user", "content": text}]
+            msgs = [{"role": "system", "content": system()}] + hist + [{"role": "user", "content": text},
+                                                                       {"role": "system", "content": state(last_move)}]
             t0 = time.monotonic()
             r = ask(msgs)
             lat.append(time.monotonic() - t0)
@@ -178,7 +259,7 @@ def main():
             print(f"{'PASS' if good else 'FAIL'}  {label:<30} -> {shown}")
     sm = system()
     print(f"\nsystem message: {len(sm)} chars; STATE: {len(STATE)} chars; tools JSON: {len(json.dumps(tools()))} chars")
-    print(f"prompt_eval_count (system + tools + one user line): {sys_tokens} tokens")
+    print(f"prompt_eval_count (system + tools + one user line + STATE): {sys_tokens} tokens")
     ls = sorted(lat)
     print(f"latency: median {statistics.median(ls):.2f} s, mean {statistics.mean(ls):.2f} s, "
           f"max {ls[-1]:.2f} s (first call includes any cold load: {lat[0]:.2f} s)")

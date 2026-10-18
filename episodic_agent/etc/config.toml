@@ -1,0 +1,84 @@
+# episodic_agent — ONE process, up to THREE DSR graphs, THREE DDS domains (layout copied from ltsm_agent).
+#
+#   [Agent.dsr ]  the LIVE working graph.   domain 0, configFile "" => joins the fleet. READ ONLY
+#                 (facts, structural events, the controller's em_journal); the presence monitor's own
+#                 agent node is the only thing this agent puts there.
+#   [Agent.em  ]  episodic memory.          domain 4, SEEDED from em_root.json every launch, OWNED:
+#                 today's commitment records + the all-time stats nodes (src/em_graph.h).
+#   ltsm memory   domain [EM].ltsm_domain (2), NOT an [Agent.*] sub-table: joined READ ONLY and LAZILY, only while
+#                 ltsm_agent is present on the live graph (src/specificworker.h), to resolve a door's passage
+#                 identity (src/dsr_fact_source.h). ltsm_agent owns it.
+#
+# genericworker.cpp builds one DSRGraph per [Agent.<name>] sub-table and then G = Graphs.at(front()),
+# where getSurNames() SORTS its result, so "dsr" MUST stay alphabetically first ("dsr" < "em"):
+# G is the live graph and the presence monitor runs on it.
+#
+# NEVER add a table whose FLATTENED key contains the substring "Agent" AND has >= 2 dots: getSurNames
+# filters on k.contains("Agent") and would build a phantom graph from it.
+#
+# Every sub-table MUST define tree/graph/2d (setupViewer reads all three and a missing key THROWS).
+
+[Agent]
+# MUST be unique across the shared graph (CRDT actor id). 26 = episodic_agent, recorded in
+# CONCEPT_AGENT_RECIPE.md §1 (the source of truth).
+id   = 26
+name = "episodic_agent"
+
+[Agent.dsr]
+configFile = ""
+domain     = 0
+# No viewer: robot_concept already shows the live graph. All three false => no window for it.
+tree       = false
+graph      = false
+2d         = false
+
+[Agent.em]
+# Resolved against the process CWD: run this agent from the component root, as the rest of the fleet is.
+configFile = "em_root.json"
+# 0 live, 1 isolated standalone runs, 2 ltsm memory, 7 media plane. 4 = episodic memory.
+domain     = 4
+tree       = false
+graph      = true
+2d         = false
+
+[Presence]
+# Nothing is REQUIRED: EM records whatever exists and tolerates everything missing (it is never a required
+# peer of anyone either). required_agent_names is ABSENT on purpose, not `= []`: the ConfigLoader throws on an
+# empty array; absent reads as the empty default.
+# ltsm_agent is NOT listed: it runs no presence coordinator (no agent node), so it would never resolve. Its memory
+# graph is joined from its DDS participant instead ([EM] ltsm_domain, src/specificworker.h).
+optional_agent_names = ["controller"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+# Only the presence agent node on the live graph. Domain-4 nodes are memory, not live beliefs: they are
+# NOT deleted on exit (the archive reseeds them on the next start anyway).
+nodes = ["episodic_agent 26"]
+
+[Period]
+Compute   = 250
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+[EM]
+# Append-only archive, one JSONL file per local day (common/episodic/em_archive.h). Relative to the CWD.
+archive_dir = "etc/episodes"
+# Poll period of the live graph + the controller's journal (main-thread QTimer; no DSR signals connected).
+poll_ms = 250
+# DDS domain of ltsm_agent's memory graph. Joined read-only while ltsm_agent is present, left when it goes or restarts.
+# Deliberately NOT an [Agent.ltsm] sub-table: the generated code joins those at startup, and a join with no peer
+# aborts the whole process after ~15 s — EM must start and run with ltsm_agent down (doors then carry no ltsm_id).
+ltsm_domain = 2

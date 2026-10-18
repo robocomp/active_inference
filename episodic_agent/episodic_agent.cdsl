@@ -1,0 +1,8 @@
+Component episodic_agent
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+};

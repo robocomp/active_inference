@@ -45,7 +45,8 @@ std::string clock_now()
 WorldDigest::WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame, int objects_nearest)
     : G_(std::move(G)), robot_frame_(std::move(robot_frame)), objects_nearest_(objects_nearest) {}
 
-Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention) const
+Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention,
+                          const std::optional<std::string>& today) const
 {
     Digest d;
     auto& G = *G_;
@@ -183,6 +184,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
         if (parts.size() >= 3 and parts[2] == "driving=off") s += ", NOTE: the base is not armed (Run not pressed)";
         s += "\n";
     }
+    if (today) s += *today + "\n";
     d.text = std::move(s);
     return d;
 }

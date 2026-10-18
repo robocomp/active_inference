@@ -342,6 +342,9 @@ public:
     // set when the user stops it, changes mode, or supersedes it with a click — those already express an
     // intent about driving, whereas a tour finishing on its own does not mean "keep going".
     bool consume_completed();
+    // Why the last run ended (the `reason` stop() was given: "completed", "exhausted", "user", "mode changed", …).
+    // Read by the episodic journal's tour record (tour_journal.h); not consumed.
+    const std::string &stop_reason() const { return stop_reason_; }
 
     State state() const { return state_; }
     bool  running() const { return state_ == State::Running; }

@@ -19,6 +19,8 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/specificworker_mission.cpp
+  ../src/mission_node.cpp
+  ../src/journal_node.cpp
   ../src/controller_display.cpp
   ../src/controller_camera_masks.cpp
   ../src/controller_motion_commander.cpp

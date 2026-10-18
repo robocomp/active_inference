@@ -229,6 +229,8 @@ void SpecificWorker::initialize()
 	// snapshot mutex, and the GUI thread acts on it in present().
 	session_.set_route_changed_callback([this]() { display_.clear_robot_trajectory(); });
 	world_model_.set_affordance_manager(&affordance_manager_);
+	// The episodic journal's claim history: the manager reports each claim as it starts and ends (control thread).
+	affordance_manager_.set_claim_observer([this](const rc::AffordanceManager::ClaimEvent &e) { journal_claim(e); });
 	world_model_.set_dependencies(G, inner_eigen_api_.get());
 	obstacle_tracker_.set_dependencies(G, inner_eigen_api_.get(), &world_model_.graph_state());
 	obstacle_tracker_.set_graph_layout_callback([this]() { trigger_graph_layout_twopi(); });
@@ -576,16 +578,26 @@ void SpecificWorker::initialize()
 			{
 				const QString c = raw.trimmed().toLower();
 				if (c == "run" and remote_run_)        { std::println("[remote] RUN");  remote_run_(1, false); }
-				else if (c == "stop" and remote_stop_) { std::println("[remote] STOP"); remote_stop_(); }
+				// Every command below is ENQUEUED: this timer runs on the GUI thread, and the commands (and the episodic
+				// journal that records them) belong to the control thread.
+				// STOP: the Stop button's abort plus the end of a door passage (run_mission_command's `stop`).
+				else if (c == "stop")
+				{
+					std::println("[remote] STOP");
+					enqueue_command([this]() { run_mission_command("stop", "remote"); });
+				}
 				// DOOR PASSAGE (controller_door_passage.h): `cross door_1` sequences approach -> open -> cross on
 				// door_concept's affordances for that door; `uncross` ends it (selection unrestricted again).
-				else if (c.startsWith("cross ")) run_mission_command(c.toStdString(), "remote");
+				else if (c.startsWith("cross "))
+					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				// RELATIVE MOTION (controller_relative_motion.h): `move <m>`, `turn <deg>`, `turn <deg> move <m>`.
 				// Enqueued: this timer runs on the GUI thread, and the relative motion is stepped on the control thread.
 				else if (c.startsWith("move ") or c.startsWith("turn "))
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
-				else if (c.startsWith("mission ")) run_mission_command(c.mid(8).trimmed().toStdString(), "remote");
-				else if (c == "uncross") { session_.door_passage().stop(); std::println("[remote] door passage stopped"); }
+				else if (c.startsWith("mission "))
+					enqueue_command([this, cmd = c.mid(8).trimmed().toStdString()]() { run_mission_command(cmd, "remote"); });
+				else if (c == "uncross")
+					enqueue_command([this]() { run_mission_command("uncross", "remote"); });
 				else if (c == "cancel" or c == "resume")
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | "
@@ -1487,6 +1499,7 @@ void SpecificWorker::control_loop()
 		// chat_agent's intention node: a new command runs here, between cycles, like every button press above.
 		service_mission();
 		service_chat_inbox();
+		service_journal();   // the episodic journal: step transitions, command ends, drive mode → em_journal
 
 		// Reflect mission/drive state EVERY iteration (~20 ms), independent of compute(). Selecting a mode
 		// or pressing Stop changes what the panel must show, and both leave the pipeline with nothing to
@@ -1787,9 +1800,17 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 //   cancel [mission]    end the running grounded mission (specificworker_mission.cpp); the base is held, armed
 //   resume              end the mission's current `wait` (the person says "I'm here")
 // Any other command REPLACES a running mission, which reports aborted|superseded (doc §7.5).
-// Runs on the control thread (enqueue_command / the chat inbox; the remote timer calls it directly, as before).
+// Runs on the control thread (enqueue_command / the chat inbox; the remote timer enqueues every command).
 // Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
+// The episodic journal records what was accepted (specificworker_mission.cpp, journal_command).
 SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)
+{
+	const MissionResult r = dispatch_mission_command(text, source);
+	journal_command(r, text, source);
+	return r;
+}
+
+SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std::string &text, const char *source)
 {
 	std::string t = QString::fromStdString(text).trimmed().toLower().simplified().toStdString();
 	if (t == "cancel" or t == "cancel mission")
@@ -1987,7 +2008,7 @@ void SpecificWorker::service_chat_inbox()
 				if (not m.has_value()) std::println("[chat] mission refused: {}", refused->message());
 				chat_tracked_ = {.kind = K::Rejected, .reason = refused->status()};
 			}
-			else chat_tracked_ = {.kind = K::Mission, .mission_serial = mission_serial_};
+			else chat_tracked_ = {.kind = K::Mission, .mission_serial = interpreter_.serial()};
 			chat_tracked_.stamp = cmd->stamp_ms;
 		}
 		else
@@ -1997,7 +2018,7 @@ void SpecificWorker::service_chat_inbox()
 			if (r.kind == "cancel" or r.kind == "resume")
 			{
 				// About the mission, not a new one: the report on this stamp is the mission's own.
-				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = mission_serial_};
+				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = interpreter_.serial()};
 				else chat_tracked_ = {.kind = K::Rejected, .reason = r.reason};
 			}
 			else if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
@@ -2013,7 +2034,7 @@ void SpecificWorker::service_chat_inbox()
 	if (chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Mission)
 	{
 		const std::string drv = driving ? "driving=on" : "driving=off";
-		if (chat_tracked_.mission_serial != mission_serial_)
+		if (chat_tracked_.mission_serial != interpreter_.serial())
 			chat_inbox_.publish(*G, chat_tracked_.stamp, "aborted|superseded",
 			                    std::format("superseded|another mission was started|{}", drv));
 		else chat_inbox_.publish(*G, chat_tracked_.stamp, interpreter_.status(), interpreter_.progress() + "|" + drv);

@@ -69,8 +69,13 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     cancel_ = new QPushButton(QStringLiteral("Cancel"), this);
     cancel_->setToolTip(QStringLiteral("Stop the model's answer (does not stop the robot — type \"stop\" for that)"));
     cancel_->setEnabled(false);
+    plan_ = new PlanView(this);
+    plan_btn_ = new QPushButton(QStringLiteral("Plan"), this);
+    plan_btn_->setToolTip(QStringLiteral("The mission the robot runs, step by step (none yet)"));
+    plan_btn_->setEnabled(false);
     row->addWidget(input_, 1);
     row->addWidget(busy_);
+    row->addWidget(plan_btn_);
     row->addWidget(cancel_);
     input_->installEventFilter(new HistoryKeys(this));
     auto* clear = new QShortcut(QKeySequence(QStringLiteral("Ctrl+L")), this);
@@ -82,6 +87,12 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     lay->addWidget(status_);
 
     QObject::connect(input_, &QLineEdit::returnPressed, this, [this]() { send_clicked(); });
+    QObject::connect(plan_btn_, &QPushButton::clicked, this, [this]()
+    {
+        plan_->show();
+        plan_->raise();
+        plan_->activateWindow();
+    });
     QObject::connect(cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_cancel) cb_.on_cancel(); });
     QObject::connect(card_confirm_, &QPushButton::clicked, this, [this]() { if (cb_.on_confirm) cb_.on_confirm(); });
     QObject::connect(card_cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_reject) cb_.on_reject(); });
@@ -182,6 +193,21 @@ void ChatWindow::show_card(const QString& text)
 void ChatWindow::hide_card() { card_->hide(); input_->setFocus(); }
 
 bool ChatWindow::card_visible() const { return card_->isVisible(); }
+
+void ChatWindow::set_plan(const rc::mission::Mission& m, const QString& ir_json)
+{
+    plan_->set_mission(m, ir_json);
+    plan_btn_->setEnabled(true);
+    plan_btn_->setToolTip(QStringLiteral("The mission the robot runs, step by step"));
+}
+
+void ChatWindow::set_plan_progress(const rc::mission::Progress& p)
+{
+    plan_->set_progress(p);
+    // the button says whether something runs, so a glance at the chat tells it without opening the window
+    plan_btn_->setText(p.status == "in_progress" ? QStringLiteral("Plan \u25CF") : QStringLiteral("Plan"));
+    plan_btn_->setStyleSheet(p.status == "in_progress" ? QStringLiteral("color: #1565c0; font-weight: bold;") : QString());
+}
 
 void ChatWindow::set_busy(bool busy)
 {

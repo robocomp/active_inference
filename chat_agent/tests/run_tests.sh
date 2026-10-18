@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline checks for chat_agent's pure pieces (no DSR, no ollama): NDJSON splitter, CommandGate, object facts,
-# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), and the mission interpreter's step machine.
+# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), the mission interpreter's step machine, its progress/history JSON, the plan view's model, the system tools, and the episodic-memory tools' answers.
 set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
@@ -21,4 +21,15 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -o "$out/mission_interpreter_test" \
     ../../common/mission/mission_interpreter_test.cpp
 "$out/mission_interpreter_test"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/mission_progress_test" \
+    ../../common/mission/mission_progress_test.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/mission_progress_test"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_plan_model" \
+    test_plan_model.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_plan_model"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -o "$out/test_system" test_system.cpp
+"$out/test_system"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_em" test_em.cpp \
+    $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_em"
 rm -rf "$out"

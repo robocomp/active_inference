@@ -6,6 +6,7 @@
 #include "affordance_manager.h"
 
 #include <dsr/api/dsr_api.h>
+#include <dsr/core/id_generator.h>   // agent_id_size: the creator agent is the low bits of a node id
 #include "../affordance_protocol/affordance_protocol.h"   // read_viewpoint (object-relative viewpoint debug read)
 
 #include <QDebug>
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <print>
 #include <sstream>
 #include <utility>
@@ -540,6 +542,17 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     const auto from = own_agent_node_id(graph);
     if (!from.has_value()) return false;          // no agent node yet (cold start) — say nothing false
 
+    // The journal's claim history: a new (affordance, epoch) ends the open claim and starts this one.
+    // BEFORE the idempotent return: an edge persisted from a previous run is still a claim this run must report.
+    if (open_claim_.has_value() and (open_claim_id_ != affordance_id or open_claim_->epoch != epoch))
+        end_claim("preempted");
+    if (not open_claim_.has_value())
+    {
+        open_claim_ = describe_claim(graph, affordance_id, epoch);
+        open_claim_id_ = affordance_id;
+        if (claim_observer_) claim_observer_(*open_claim_);
+    }
+
     // ★IDEMPOTENT. This is called every cycle the target decision is made, at 20 Hz. Publishing an
     // unchanged edge would put a delta on the wire per cycle per consumer, which is exactly the kind of
     // per-cycle chatter that has bitten this graph before. Compare first; write only on change.
@@ -581,6 +594,47 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     graph->add_or_modify_attrib_local<executing_target_y_m_att>(edge, y);
     graph->add_or_modify_attrib_local<executing_target_yaw_rad_att>(edge, yaw);
     return graph->insert_or_assign_edge(std::move(edge));
+}
+
+// What the journal says about a claim: read once, at the claim, from the node and its parent. Absent fields stay
+// empty (gain NaN) rather than defaulted — the journal must not report a number nobody advertised.
+AffordanceManager::ClaimEvent AffordanceManager::describe_claim(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                                                std::uint64_t affordance_id, int epoch) const
+{
+    ClaimEvent e{.kind = ClaimEvent::Kind::Start, .epoch = epoch};
+    e.gain = std::numeric_limits<float>::quiet_NaN();
+    const auto node = graph->get_node(affordance_id);
+    if (not node.has_value()) return e;
+    e.affordance = node->name();
+    if (const auto g = graph->get_attrib_by_name<epistemic_gain_att>(node.value()); g.has_value()) e.gain = g.value();
+    e.kind_label = graph->get_attrib_by_name<aff_kind_att>(node.value()).value_or("epistemic");
+    if (const auto parent = graph->get_attrib_by_name<parent_att>(node.value()); parent.has_value())
+        if (const auto p = graph->get_node(parent.value()); p.has_value())
+        {
+            e.target = p->name();
+            e.target_type = p->type();
+        }
+    // The creator: DSR ids carry the generating agent's id in their low agent_id_size bits (id_generator.h), and an
+    // agent node is found by its agent_id attribute, the way own_agent_node_id finds ours.
+    const auto creator = static_cast<std::uint32_t>(affordance_id & ((std::uint64_t{1} << agent_id_size) - 1));
+    for (auto &a : graph->get_nodes_by_type("agent"))
+        if (const auto id = graph->get_attrib_by_name<agent_id_att>(a); id.has_value() and id.value() == creator)
+            e.producer = a.name();
+    const auto c = rc::affordance::read_contract(node.value(), e.target_type);
+    e.contract = std::format(R"({{"policy":"{}","on_fail":"{}","timeout_ms":{}}})", rc::affordance::to_string(c.policy),
+                             rc::affordance::to_string(c.on_fail), c.timeout_ms);
+    return e;
+}
+
+void AffordanceManager::end_claim(std::string outcome)
+{
+    if (not open_claim_.has_value()) return;
+    ClaimEvent e = std::move(*open_claim_);
+    open_claim_.reset();
+    open_claim_id_ = 0;
+    e.kind = ClaimEvent::Kind::End;
+    e.outcome = std::move(outcome);
+    if (claim_observer_) claim_observer_(e);
 }
 
 bool AffordanceManager::clear_executing(const std::shared_ptr<DSR::DSRGraph> &graph,
@@ -637,6 +691,7 @@ bool AffordanceManager::refresh_gain(const std::shared_ptr<DSR::DSRGraph> &graph
 
 bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph)
 {
+    end_claim("preempted");   // the journal: whatever we claimed, we are no longer executing it
     if (!graph)
         return false;
 
@@ -1136,6 +1191,11 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
             j.flush();
         }
     }
+    // The claim is over, whatever happens below. Its outcome is this one only if it is the affordance being completed:
+    // clear_current() (a click target, a mission owning the base) zeroes the current affordance while the claim stays
+    // open, and a later mark_reached on a click target must not be stamped on that abandoned claim.
+    end_claim(open_claim_id_ == current_affordance_id_ and current_affordance_id_ != 0
+                  ? std::string(rc::affordance::to_string(outcome)) : std::string("preempted"));
     if (!graph || current_affordance_id_ == 0)
         return;
 
