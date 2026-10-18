@@ -1552,10 +1552,13 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                                 : rc::AffordanceManager::producer_epoch(graph_, step.target.node_id).value_or(0);
         // epoch 0 = a pre-rollout producer. We still drive; we just cannot name a proposal, and saying
         // nothing is honest where saying "epoch 0" would look like a real claim to a rebuilt peer.
+        // The episodic journal is told either way: it is still a claim the robot is driving (note_claim).
         if (claimed_epoch != 0)
             affordance_manager.publish_executing(graph_, step.target.node_id, claimed_epoch,
                                                  step.target.room_pos.x(), step.target.room_pos.y(),
                                                  step.target.yaw_rad);
+        else
+            affordance_manager.note_claim(graph_, step.target.node_id, 0);
     }
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);

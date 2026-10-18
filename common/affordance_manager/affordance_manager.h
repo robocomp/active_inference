@@ -168,10 +168,13 @@ public:
     // ── CLAIM OBSERVER: the consumer's claim history, for the episodic journal (common/episodic/em_journal.h) ──
     // A poller cannot see claims reliably: a selector switch deletes the `executing` edge with no outcome at all and
     // producers clear `aff_outcome` within a cycle. So the consumer, which KNOWS, reports each claim as it happens:
-    //   Start  publish_executing, only when the claimed (affordance, epoch) changes — never on a pose-only update;
+    //   Start  note_claim (publish_executing calls it), only when the claimed (affordance, epoch) changes — never on
+    //          a pose-only update;
     //   End    "preempted" when the claim moves to another affordance/epoch or release_execution_claim drops it,
     //          or to_string(outcome) from mark_reached. At most one claim is open; an End always matches the Start
-    //          before it. A pre-rollout producer (epoch 0, never published) is never claimed, so never reported.
+    //          before it. A pre-rollout producer (epoch 0: no `executing` edge is published for it) is still a claim
+    //          the robot drives: the consumer calls note_claim with epoch 0, so the journal sees it (2026-10-18 — before
+    //          that, every afford_room drive, a whole day of them, was missing from episodic memory).
     struct ClaimEvent
     {
         enum class Kind { Start, End } kind = Kind::Start;
@@ -186,6 +189,10 @@ public:
         std::string contract;     // compact JSON {"policy","on_fail","timeout_ms"} of the resolved contract
     };
     void set_claim_observer(std::function<void(const ClaimEvent &)> observer) { claim_observer_ = std::move(observer); }
+    // CONSUMER SIDE. Report a claim to the observer without publishing anything: ends the open claim as "preempted" if
+    // (affordance, epoch) changed, then starts this one. publish_executing calls it; call it directly for a claim with
+    // no producer epoch (epoch 0), which gets no `executing` edge. Idempotent, so it can run on every cycle.
+    void note_claim(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id, int epoch);
 
     // CONSUMER SIDE. Withdraw the claim. Called wherever the approach concludes.
     bool clear_executing(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id);

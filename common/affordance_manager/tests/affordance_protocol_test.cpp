@@ -290,6 +290,24 @@ void claim_observer_start_preempt_outcome(TestFailure &failure)
     failure.expect(next_run.publish_executing(graph, a->id(), 6, 1.f, 1.f, 0.f), "next run's re-claim failed");
     failure.expect(next_events.size() == 1 and next_events[0].kind == K::Start and next_events[0].epoch == 6,
                    "an unchanged persisted edge must still fire Start once in a new run");
+
+    // A PRE-ROLLOUT producer (no epoch, e.g. afford_room): the controller drives it without an `executing` edge, and
+    // note_claim still reports it — live 2026-10-18, a whole day of afford_room drives was missing from the journal.
+    rc::AffordanceManager consumer;
+    std::vector<rc::AffordanceManager::ClaimEvent> ev0;
+    consumer.set_claim_observer([&ev0](const rc::AffordanceManager::ClaimEvent &e) { ev0.push_back(e); });
+    consumer.note_claim(graph, b->id(), 0);
+    consumer.note_claim(graph, b->id(), 0);
+    failure.expect(ev0.size() == 1 and ev0[0].kind == K::Start and ev0[0].epoch == 0
+                   and ev0[0].affordance == "aff_door_cross", "an epoch-0 claim must fire one Start, epoch 0");
+    consumer.note_claim(graph, a->id(), 0);
+    failure.expect(ev0.size() == 3 and ev0[1].kind == K::End and ev0[1].outcome == "preempted" and ev0[2].kind == K::Start,
+                   "moving an epoch-0 claim must end the old one preempted and start the new one");
+    consumer.release_execution_claim(graph);
+    failure.expect(ev0.size() == 4 and ev0.back().kind == K::End and ev0.back().outcome == "preempted",
+                   "releasing an epoch-0 claim must end it");
+    consumer.note_claim(graph, 0, 0);
+    failure.expect(ev0.size() == 4, "no affordance (id 0) is no claim");
 }
 // A CONSUMER's release must free the claim it holds (live 2026-10-18: `stop` during a door crossing left
 // aff_door_1_cross Executing with nobody driving it; the next `cross door_1` found nothing eligible and stalled).

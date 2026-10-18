@@ -542,16 +542,9 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     const auto from = own_agent_node_id(graph);
     if (!from.has_value()) return false;          // no agent node yet (cold start) — say nothing false
 
-    // The journal's claim history: a new (affordance, epoch) ends the open claim and starts this one.
-    // BEFORE the idempotent return: an edge persisted from a previous run is still a claim this run must report.
-    if (open_claim_.has_value() and (open_claim_id_ != affordance_id or open_claim_->epoch != epoch))
-        end_claim("preempted");
-    if (not open_claim_.has_value())
-    {
-        open_claim_ = describe_claim(graph, affordance_id, epoch);
-        open_claim_id_ = affordance_id;
-        if (claim_observer_) claim_observer_(*open_claim_);
-    }
+    // The journal's claim history. BEFORE the idempotent return: an edge persisted from a previous run is still a
+    // claim this run must report.
+    note_claim(graph, affordance_id, epoch);
 
     // ★IDEMPOTENT. This is called every cycle the target decision is made, at 20 Hz. Publishing an
     // unchanged edge would put a delta on the wire per cycle per consumer, which is exactly the kind of
@@ -594,6 +587,20 @@ bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &
     graph->add_or_modify_attrib_local<executing_target_y_m_att>(edge, y);
     graph->add_or_modify_attrib_local<executing_target_yaw_rad_att>(edge, yaw);
     return graph->insert_or_assign_edge(std::move(edge));
+}
+
+// The journal's claim history: a new (affordance, epoch) ends the open claim and starts this one.
+void AffordanceManager::note_claim(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id, int epoch)
+{
+    if (!graph or affordance_id == 0) return;
+    if (open_claim_.has_value() and (open_claim_id_ != affordance_id or open_claim_->epoch != epoch))
+        end_claim("preempted");
+    if (not open_claim_.has_value())
+    {
+        open_claim_ = describe_claim(graph, affordance_id, epoch);
+        open_claim_id_ = affordance_id;
+        if (claim_observer_) claim_observer_(*open_claim_);
+    }
 }
 
 // What the journal says about a claim: read once, at the claim, from the node and its parent. Absent fields stay
