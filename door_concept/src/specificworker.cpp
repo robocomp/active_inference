@@ -1119,6 +1119,7 @@ void SpecificWorker::retire_instance(std::uint64_t id)
         it->second.aff_approach.remove();
         it->second.aff_open.remove();
         it->second.aff_cross.remove();
+        it->second.aff_close.remove();
     }
     fitter_->forget_node(id);
     G->delete_node(id);
@@ -2783,6 +2784,7 @@ void SpecificWorker::update_existence_beliefs()
             it->second.aff_approach.remove();   // and the three pragmatic siblings — see retire_instance
             it->second.aff_open.remove();
             it->second.aff_cross.remove();
+            it->second.aff_close.remove();
         }
         fitter_->forget_node(id);
         G->delete_node(id);
@@ -3165,6 +3167,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         inst.aff_approach.init(G, inst.node_id, inst.node_name, "approach", pol);
         inst.aff_open    .init(G, inst.node_id, inst.node_name, "open",     pol);
         inst.aff_cross   .init(G, inst.node_id, inst.node_name, "cross",    pol);
+        inst.aff_close   .init(G, inst.node_id, inst.node_name, "close",    pol);
         inst.pragmatic_inited = true;
     }
 
@@ -3183,7 +3186,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     // A node appearing or disappearing changes the graph's shape, so the viewer's layout has to be
     // recomputed — the same reason the epistemic step has an on_affordance_created hook.
     const bool had_any = inst.aff_approach.is_offered() or inst.aff_open.is_offered()
-                      or inst.aff_cross.is_offered();
+                      or inst.aff_cross.is_offered() or inst.aff_close.is_offered();
 
     // ── approach ─────────────────────────────────────────────────────────────────────────────────
     // ★UNCONDITIONAL (p = 1) for a located door: a door can always be walked up to. What falls away as
@@ -3277,8 +3280,36 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         inst.aff_cross.update(o);
     }
 
+    // ── close ────────────────────────────────────────────────────────────────────────────────────
+    // Possible while the door is believed OPEN and the robot believed CLEAR of the leaf's swing — beyond
+    // safe_standoff (the swept arc + the body, the near edge of the actuation band): closing a door onto the
+    // robot is the one request this must never make. No far bound: the building closes it, not the robot. The
+    // product is the joint probability, no gate. Pragmatic, so never selected by default: the controller's
+    // passage asks for it once the robot is through (controller_door_passage.h).
+    {
+        rc::pragmatic::Offer o;
+        o.known = located and st.p_open_known and not cfg_.door_control_endpoint.empty();
+        const float p_clear = 1.0f - rc::door::prob_within(st.robot_range_m, st.safe_standoff_m, st.range_sigma_m);
+        o.p     = st.p_open * p_clear;
+        if (inst.actuation_refused)
+        {
+            o.p   = 0.0f;   // never-ask-again from the provider: see `open`
+            o.why = "the provider cannot actuate this door: " + inst.actuation_note;
+        }
+        else
+            o.why = std::format("P(open)={:.2f} × P(clear of the swing)={:.2f} (range {:.2f} m vs swept {:.2f} m, σ {:.2f})",
+                                st.p_open, p_clear, st.robot_range_m, st.safe_standoff_m, st.range_sigma_m);
+        // Orient policy, as `open`: the robot does not navigate, it faces the leaf where it stands and waits.
+        const auto pose = rc::door::front_pose(inst.aperture, st.approach_side,
+                                               std::max(st.robot_range_m, st.safe_standoff_m));
+        o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
+        o.value    = pg.value_open;
+        o.contract = rc::door::close_contract(pg);
+        inst.aff_close.update(o);
+    }
+
     if (const bool has_any = inst.aff_approach.is_offered() or inst.aff_open.is_offered()
-                          or inst.aff_cross.is_offered(); has_any != had_any)
+                          or inst.aff_cross.is_offered() or inst.aff_close.is_offered(); has_any != had_any)
         trigger_graph_layout_twopi();
 
     // ── the side effects of a claim ──────────────────────────────────────────────────────────────
@@ -3339,6 +3370,33 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             }
         }
     }
+    // `close`, served like `open` (one request per claim). No stale-epoch question: the claimed pose is where the
+    // robot already stands, beside THIS door.
+    if (inst.aff_close.consume_claim())
+        inst.close_claim_unserved = true;
+    if (inst.close_claim_unserved and not inst.aff_close.claimed())
+        inst.close_claim_unserved = false;
+    if (inst.close_claim_unserved)
+    {
+        inst.close_claim_unserved = false;
+        if (not pg.autonomous_actuation)
+        {
+            inst.actuation_note = "autonomous actuation is disabled (DoorAffordance.AutonomousActuation)";
+            std::print("door_concept: [close] {} was CLAIMED but autonomous actuation is off\n", inst.node_name);
+        }
+        else if (std::string why; request_door_actuation(inst, /*open=*/false, /*provider_id=*/std::string{},
+                                                          "the robot has gone through; closing the door behind it", why))
+            std::print("door_concept: [close] {} claimed → asked the provider to CLOSE it (request {} of this run)\n",
+                       inst.node_name, inst.actuation_requests);
+        else
+        {
+            inst.actuation_note = why;
+            std::print("door_concept: [close] {} claimed but the request was refused LOCALLY: {}\n", inst.node_name, why);
+        }
+    }
+    if (inst.aff_close.consume_completion())
+        std::print("door_concept: [close] {} finished, outcome = {} (P(passable) is now {:.2f})\n", inst.node_name,
+                   rc::affordance::to_string(inst.aff_close.outcome()), st.p_open);
     if (inst.aff_open.consume_completion())
         std::print("door_concept: [open] {} finished, outcome = {} (P(passable) is now {:.2f}{})\n",
                    inst.node_name, rc::affordance::to_string(inst.aff_open.outcome()),
@@ -3869,6 +3927,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                 it->second.aff_approach.remove();
                 it->second.aff_open.remove();
                 it->second.aff_cross.remove();
+                it->second.aff_close.remove();
             }
             fitter_->forget_node(id);
             held_doors_.insert(id);
@@ -4092,6 +4151,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         inst.aff_approach.on_node_deleted(id);
         inst.aff_open.on_node_deleted(id);
         inst.aff_cross.on_node_deleted(id);
+        inst.aff_close.on_node_deleted(id);
     }
 
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
@@ -4103,6 +4163,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         it->second.aff_approach.remove();
         it->second.aff_open.remove();
         it->second.aff_cross.remove();
+        it->second.aff_close.remove();
         std::print("door_concept: node {} removed from DSR, destroying instance and its affordances\n", id);
         fitter_->instances().erase(it);
         if (const auto m = door_memo_.find(id); m != door_memo_.end())

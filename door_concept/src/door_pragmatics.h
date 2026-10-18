@@ -172,6 +172,17 @@ inline rc::affordance::Contract open_contract(const DoorPragmaticCfg& p)
         .stable(2).timeout_s(p.open_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
 
+// close: the mirror of open, after a crossing — Orient (no navigation: the robot stands clear of the swing, which is
+// close's precondition) and WAIT until the leaf is seen shut. Completion is perception, never the provider's Delivered.
+inline rc::affordance::Contract close_contract(const DoorPragmaticCfg& p)
+{
+    using enum rc::affordance::CompareOp;
+    return rc::affordance::Contract::orient()
+        .until ("door_open_prob", LE, 0.30f)
+        .still (0.05f, 0.10f)
+        .stable(2).timeout_s(p.open_timeout_s).on_fail(rc::affordance::OnFail::Consume);
+}
+
 // cross: drive THROUGH. Reach, because there is nothing to servo on — the goal is a change of side, and the
 // predicate says so directly. No .still: holding still in a doorway is the one thing this must not do.
 inline rc::affordance::Contract cross_contract(const DoorPragmaticCfg& p)

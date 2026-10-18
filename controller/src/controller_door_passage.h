@@ -3,7 +3,15 @@
  * controller_door_passage.h — DOOR PASSAGE: take the robot through one door by sequencing door_concept's three
  * pragmatic affordances (2026-10-11, plan room_concept/docs/superpowers/plans/2026-10-11-cross-door-into-adjacent-room.md).
  *
- *   aff_<door>_approach  →  aff_<door>_open  →  aff_<door>_cross
+ *   aff_<door>_approach  →  aff_<door>_open  →  aff_<door>_cross  [→  aff_<door>_close]
+ *
+ * CLOSE BEHIND (2026-10-18, user): a passage asked for by a single command (chat, the panel, remote_cmd.txt) goes on,
+ * once in the new room, to door_concept's `close` — offered while the door is open and the robot clear of its swing —
+ * and then hands the base back to the affordances (take_finished() + then_affordances: the caller sets
+ * AffordancesOnly). A mission's `cross` stops after Cross as before: its next step owns the base. Where no `close` is
+ * ever offered (no door actuator in this world) nothing in the graph tells "not yet" from "never", so the step has a
+ * deadline (set_close_wait_ms), stated in the log, like every contract's own timeout_s; a failed close ends it too —
+ * leaving a door open is not worth holding the robot for.
  *
  * The controller already knows how to execute ONE affordance: claim it, plan to its standpoint, hold it until the
  * producer completes it. What it lacked is a reason to pick these three, in this order, over the explorer's
@@ -27,7 +35,9 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <functional>
 #include <format>
 #include <limits>
 #include <mutex>
@@ -51,16 +61,18 @@ namespace rc
 class DoorPassage
 {
 public:
-    enum class Step { Idle, Approach, Open, Cross, Done };
+    enum class Step { Idle, Approach, Open, Cross, Close, Done };
 
     /// Begin a passage through `door` (the door node's name, e.g. "door_1"). `stop_after` = the last step to run:
     /// Cross (the whole passage) or Open (a mission's `open door`: the passage is Done once the door is open, and
     /// a `cross` on offer — door_concept believing it passable — counts as open already).
-    void start(std::string door, Step stop_after = Step::Cross)
+    void start(std::string door, Step stop_after = Step::Cross, bool then_affordances = false)
     {
         std::scoped_lock lk(m_);
         door_ = std::move(door);
         stop_after_ = stop_after;
+        then_affordances_ = then_affordances;
+        finished_ = false;
         last_outcome_.clear();
         step_ = Step::Approach;
         seen_executing_ = false;
@@ -84,7 +96,25 @@ public:
     [[nodiscard]] bool active() const
     {
         std::scoped_lock lk(m_);
-        return step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross;
+        return step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross or step_ == Step::Close;
+    }
+    /// True once when the passage reaches Done (not on stop()): the caller hands the base back if then_affordances.
+    [[nodiscard]] bool take_finished()
+    {
+        std::scoped_lock lk(m_);
+        return std::exchange(finished_, false);
+    }
+    /// How long the Close step waits for door_concept to OFFER `close` (see the header comment).
+    void set_close_wait_ms(std::uint64_t ms)
+    {
+        std::scoped_lock lk(m_);
+        close_wait_ms_ = ms;
+    }
+    /// Steady-clock milliseconds, injectable for tests.
+    void set_clock(std::function<std::uint64_t()> clock)
+    {
+        std::scoped_lock lk(m_);
+        clock_ = std::move(clock);
     }
     /// True once per start(): the caller releases whatever affordance it was executing, so the claim moves over.
     [[nodiscard]] bool take_just_started()
@@ -196,11 +226,55 @@ public:
         //   standpoint is a pose in the room just left, read in the wrong frame: the passage is over.
         if (step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_)
         {
-            step_ = Step::Done;
-            note_ = "done";
-            out.event = std::format("[door-passage] {}: the room changed {} -> {} while crossing — passage DONE",
-                                    door_, cross_room_, room_frame);
-            last_event_ = *out.event;
+            if (static_cast<int>(stop_after_) >= static_cast<int>(Step::Close))
+            {
+                step_ = Step::Close;
+                close_since_ms_ = now_ms();
+                seen_executing_ = false;
+                attempts_ = 0;
+                out.event = std::format("[door-passage] {}: the room changed {} -> {} while crossing — now closing the "
+                                        "door behind", door_, cross_room_, room_frame);
+            }
+            else
+            {
+                finish();
+                out.event = std::format("[door-passage] {}: the room changed {} -> {} while crossing — passage DONE",
+                                        door_, cross_room_, room_frame);
+                last_event_ = *out.event;
+                return out;
+            }
+        }
+        // ★ CLOSE: offered → claimed → completed by door_concept once the door is perceived shut. Never offered within
+        //   close_wait_ms_ (no actuator), or ended without success: leave it open and finish — see the header.
+        if (step_ == Step::Close)
+        {
+            const State st = state_of(G, name_of(Step::Close));
+            if (st == State::Executing) seen_executing_ = true;
+            std::optional<std::string> why_done;
+            if (seen_executing_ and st == State::Completed)
+            {
+                const auto node = G.get_node(name_of(Step::Close));
+                const auto outcome = node.has_value() ? rc::affordance::read_outcome(node.value())
+                                                      : rc::affordance::Outcome::None;
+                why_done = outcome == rc::affordance::Outcome::Satisfied
+                               ? std::format("{} SATISFIED — door closed behind, passage DONE", name_of(Step::Close))
+                               : std::format("{} ended {} — door left open, passage DONE", name_of(Step::Close),
+                                             rc::affordance::to_string(outcome));
+            }
+            else if (not seen_executing_ and st != State::Offered and now_ms() - close_since_ms_ >= close_wait_ms_)
+                why_done = std::format("{} not offered within {:.1f} s (no door actuator?) — door left open, passage "
+                                       "DONE", name_of(Step::Close), double(close_wait_ms_) / 1000.0);
+            if (why_done.has_value())
+            {
+                finish();
+                out.event = std::format("[door-passage] {}: {}", door_, *why_done);
+                last_event_ = *out.event;
+                return out;
+            }
+            step_state_ = state_name(st);
+            note_ = std::format("{} ({})", name_of(step_), step_state_);
+            if (out.event.has_value()) last_event_ = *out.event;
+            out.required = name_of(Step::Close);
             return out;
         }
         if (step_ == Step::Cross and cross_room_.empty()) cross_room_ = room_frame;
@@ -220,6 +294,7 @@ public:
                 if (done == Step::Approach or done == Step::Open) reached_door_ = true;
                 if (done == Step::Open) opened_ = true;
                 step_ = done == Step::Approach ? Step::Open : done == Step::Open ? Step::Cross : Step::Done;
+                if (step_ == Step::Done) finished_ = true;
                 attempts_ = 0;
                 out.event = std::format("[door-passage] {}: {} SATISFIED -> {}", door_, req,
                                         step_ == Step::Done ? std::string("passage DONE") : name_of(step_));
@@ -234,7 +309,7 @@ public:
         }
         if (step_ != Step::Done and static_cast<int>(step_) > static_cast<int>(stop_after_))
         {
-            step_ = Step::Done;
+            finish();
             out.event = std::format("[door-passage] {}: {} reached — passage DONE (it was asked to stop after {})", door_,
                                     step_name(stop_after_), step_name(stop_after_));
         }
@@ -267,12 +342,13 @@ public:
         int attempts = 0;          ///< failed completions of the current step
         std::string last_event;    ///< the latest [door-passage] transition, verbatim
         std::string last_outcome;  ///< aff_outcome of the latest failed completion ("" = none in this passage)
+        bool then_affordances = false;   ///< started by a single command: hand back to the affordances when Done
     };
     [[nodiscard]] View view() const
     {
         std::scoped_lock lk(m_);
         return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_,
-                .last_outcome = last_outcome_};
+                .last_outcome = last_outcome_, .then_affordances = then_affordances_};
     }
     [[nodiscard]] static const char* step_name(Step s)
     {
@@ -282,6 +358,7 @@ public:
             case Step::Approach: return "approach";
             case Step::Open: return "open";
             case Step::Cross: return "cross";
+            case Step::Close: return "close";
             case Step::Done: return "done";
         }
         return "?";
@@ -299,7 +376,7 @@ private:
 
     [[nodiscard]] std::string name_of(Step s) const
     {
-        const char* kind = s == Step::Approach ? "approach" : s == Step::Open ? "open" : "cross";
+        const char* kind = s == Step::Approach ? "approach" : s == Step::Open ? "open" : s == Step::Close ? "close" : "cross";
         return "aff_" + door_ + "_" + kind;
     }
     static const char* state_name(State s)
@@ -342,8 +419,26 @@ private:
         return door_passage_corridor({tx.value(), ty.value()}, yaw.value(), w, 2.2f, 0.8f);
     }
 
+    void finish()   // under m_
+    {
+        step_ = Step::Done;
+        note_ = "done";
+        finished_ = true;
+    }
+    [[nodiscard]] std::uint64_t now_ms() const   // under m_
+    {
+        if (clock_) return clock_();
+        return std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
     mutable std::mutex m_;
     std::string door_;
+    bool then_affordances_ = false;   ///< a single command's passage: hand the base back to the affordances when Done
+    bool finished_ = false;           ///< reached Done since the last take_finished()
+    std::uint64_t close_wait_ms_ = 5000;
+    std::uint64_t close_since_ms_ = 0;
+    std::function<std::uint64_t()> clock_;
     Step step_ = Step::Idle;
     Step stop_after_ = Step::Cross;
     bool seen_executing_ = false;

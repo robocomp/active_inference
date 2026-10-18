@@ -952,6 +952,13 @@ void SpecificWorker::load_params()
          "");
 	cfgr.opt("Mission.LibraryPath", missions_path_,
          "Where recorded missions live");
+	{
+		double close_wait_s = 5.0;
+		cfgr.opt_cast<double>("Mission.DoorCloseOfferWaitS", close_wait_s,
+		     "A command's door passage, in the new room: how long to wait for door_concept to OFFER `close` before "
+		     "leaving the door open (no actuator offers none) — controller_door_passage.h");
+		session_.door_passage().set_close_wait_ms(static_cast<std::uint64_t>(std::max(0.0, close_wait_s) * 1000.0));
+	}
 	cfgr.opt("Mission.MetricsCsvPath", params.mission_csv_path,
          "One row of continuous trajectory statistics per completed run is appended here");
 	cfgr.opt("Mission.RunDir", params.mission_run_dir,
@@ -1874,7 +1881,8 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 		if (door.has_value())
 		{
 			cancel_mission("superseded", /*hold=*/false);
-			return start_door_passage(*door, rc::DoorPassage::Step::Cross, source);
+			// A single command: close the door behind and hand the base back to the affordances (2026-10-18, user).
+			return start_door_passage(*door, rc::DoorPassage::Step::Close, source, /*then_affordances=*/true);
 		}
 	}
 	std::println("[{}] mission '{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", source, t);
@@ -1883,7 +1891,7 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 
 // `cross door_N` and a mission's cross / open: the door must exist now; the passage restricts the selector to its steps.
 SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after,
-                                                                 const char *source)
+                                                                 const char *source, bool then_affordances)
 {
 	const char *kind = stop_after == rc::DoorPassage::Step::Open ? "open" : "cross";
 	if (not G->get_node(door).has_value())
@@ -1894,7 +1902,7 @@ SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::stri
 	cancel_relative_motion("superseded by a door passage");
 	session_.mission().set_mode(rc::DriveMode::Command);
 	session_.set_command_explore(false);   // the passage's own steps are the order now
-	session_.door_passage().start(door, stop_after);
+	session_.door_passage().start(door, stop_after, then_affordances);
 	std::println("[{}] {} '{}' -> DOOR PASSAGE{}{}", source, kind, door,
 	             stop_after == rc::DoorPassage::Step::Open ? " (stops once open)" : "",
 	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");

@@ -158,6 +158,14 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     {
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
         if (dp.event.has_value()) std::println("{}", *dp.event);
+        // A single command's passage is over (crossed, door closed behind or left open): the base goes back to the
+        // affordances until the next command or mission (2026-10-18, user). A mission's passage hands over to its
+        // next step instead (then_affordances false).
+        if (door_passage_.take_finished() and door_passage_.view().then_affordances)
+        {
+            mission_.set_mode(rc::DriveMode::AffordancesOnly);
+            std::println("[door-passage] passage finished — back to AffordancesOnly until the next command or mission");
+        }
         door_required_ = std::move(dp.required);
         door_passages_ = std::move(dp.passages);
         grid_planner_.set_passages(door_passages_);

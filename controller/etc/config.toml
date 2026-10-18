@@ -73,6 +73,10 @@ MetricsCsvPath = "mission_metrics.csv"
 # laps, the config it ran under, every per-leg metric and the roll-up. One file per run on purpose: an
 # appending log cannot survive a schema change (see the header guard on the CSV). Empty disables.
 RunDir = "etc/runs"
+# A single command's door passage (chat / panel "cross door"), once in the new room, asks door_concept to CLOSE the door
+# behind and then hands the base back to the affordances (AffordancesOnly). Where no `close` is ever offered (no door
+# actuator) nothing tells "not yet" from "never": wait this long for the offer, then leave the door open.
+DoorCloseOfferWaitS = 5.0
 
 [Planner]
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing

@@ -157,7 +157,7 @@ private:
 	/// The Stop button's abort (mission, click target, route/plan/trace; base output disarmed). Control thread only.
 	void abort_all(const char *source);
 	/// The door-passage start shared by `cross door_N` and a mission's cross / open (the door must exist).
-	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source);
+	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source, bool then_affordances = false);
 	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
 	MissionResult start_relative_motion(const std::string &text, const char *source);
 

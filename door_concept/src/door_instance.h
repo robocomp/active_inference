@@ -351,6 +351,9 @@ struct DoorInstance
     rc::pragmatic::PragmaticAffordance aff_approach;
     rc::pragmatic::PragmaticAffordance aff_open;
     rc::pragmatic::PragmaticAffordance aff_cross;
+    // `close` (2026-10-18): the door believed open AND the robot clear of the leaf's swing. Asked for by the
+    // controller's passage once the robot is through, so it closes the door behind it.
+    rc::pragmatic::PragmaticAffordance aff_close;
     bool pragmatic_inited = false;   // init() takes the node id/name, so it waits for the DSR node
 
     // This cycle's preconditions, recomputed once and then (a) published on the door node as the
@@ -379,6 +382,7 @@ struct DoorInstance
     // the leaf moved is answered by door_open_prob, from the image, like everything else here.
     int  actuation_requests = 0;      // how many times we have asked, this door, this run
     bool open_claim_unserved = false; // an `open` claim landed and no request has been sent for it yet
+    bool close_claim_unserved = false; // the same for `close`
     bool actuation_refused  = false;  // the provider said never-ask-again (UnknownDoor / NotActuable)
     std::string actuation_note;       // last provider state or local refusal reason, for the UI/log
 
