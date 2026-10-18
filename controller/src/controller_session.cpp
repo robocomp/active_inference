@@ -1636,7 +1636,50 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
     // and BandEnabled did nothing either (step_route_band returns unless a mission is running). Which
     // is exactly what "I don't see any movement in the path" was. A driven path is a driven path — the
     // clearance preference should not depend on whether a MISSION happens to be the thing driving.
-    const rc::RouteOptimizerConfig opt = make_route_optimizer_config();
+    rc::RouteOptimizerConfig opt = make_route_optimizer_config();
+    // ★ THROUGH A DOOR, ON ITS AXIS (2026-10-18, user: "make the spline get away from the door legs"). The cross
+    //   standpoint carries the travel heading through the aperture, and the line through it along that heading is
+    //   the doorway's centreline by construction (door_concept's through_pose). A* only promises a free path; from
+    //   an approach that ended 0.33 m to one side it ran diagonally through the opening, 0.2 m off centre at the
+    //   door line (live try51 leg 1), and 0.13 m of tracking error put the 0.27 m half-body on the jamb. Anchoring
+    //   the curve to the centreline over the last ~2 m — from before the door to the standpoint — makes the
+    //   optimiser's own likelihood term carry it straight and centred through. σ = 5 cm: how well the door's axis
+    //   is known, not a preference. Only for a door passage's cross step; every other plan has no anchors.
+    if (door_passage_.active() and last_target_info_.has_value() and last_target_info_->from_affordance
+        and last_target_info_->node_name.ends_with("_cross") and poly.size() >= 2)
+    {
+        const Eigen::Vector2f goal = last_target_info_->room_pos;
+        const Eigen::Vector2f d(std::cos(last_target_info_->yaw_rad), std::sin(last_target_info_->yaw_rad));
+        const float start_along = (poly.front() - goal).dot(d);
+        std::vector<float> cum(poly.size(), 0.f);
+        for (std::size_t i = 1; i < poly.size(); ++i) cum[i] = cum[i - 1] + (poly[i] - poly[i - 1]).norm();
+        float last_s = 0.f;
+        for (const float u : {-2.0f, -1.6f, -1.2f, -0.8f, -0.4f})   // metres before the standpoint, along the axis
+        {
+            if (u <= start_along + 0.3f) continue;                    // behind the robot: nothing to pull there
+            const Eigen::Vector2f a = goal + u * d;
+            // Bind by arc length of the nearest polyline point, forward-only so the order is kept.
+            float best_d2 = std::numeric_limits<float>::max(), best_s = last_s;
+            for (std::size_t i = 0; i + 1 < poly.size(); ++i)
+            {
+                const Eigen::Vector2f ab = poly[i + 1] - poly[i];
+                const float L2 = ab.squaredNorm();
+                const float t = L2 > 1e-12f ? std::clamp((a - poly[i]).dot(ab) / L2, 0.f, 1.f) : 0.f;
+                const float s = cum[i] + t * std::sqrt(L2);
+                if (s < last_s) continue;
+                if (const float d2 = (poly[i] + t * ab - a).squaredNorm(); d2 < best_d2) { best_d2 = d2; best_s = s; }
+            }
+            opt.anchors.push_back(a);
+            opt.anchor_s.push_back(best_s);
+            last_s = best_s;
+        }
+        if (not opt.anchors.empty())
+        {
+            opt.sigma_a = 0.05f;
+            std::println("[door-axis] {}: {} anchor(s) on the door centreline pull the route straight through",
+                         last_target_info_->node_name, opt.anchors.size());
+        }
+    }
     if (not spline.build(poly, params_->route_spacing_m,
                          [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
                          params_->route_smoothing_m, &opt))
