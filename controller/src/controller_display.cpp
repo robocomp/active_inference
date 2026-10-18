@@ -2,6 +2,8 @@
 #include "../../common/window_geometry/window_geometry_saver.h"
 
 #include <chrono>
+#include <format>
+#include <fstream>
 #include <print>
 
 #include <QByteArray>
@@ -22,6 +24,19 @@ constexpr auto kWinSettingsApp = "controller";
 constexpr auto kWinSettingsKey = "ControllerPlannerWindow_geometry";
 constexpr auto kAffordanceSettingsKey = "ControllerAffordancePanel_geometry";
 
+// DIAGNOSTIC (temporary): every restore/save of the planner window, to find what changes its size at start-up.
+void log_geometry(const char *what, const QWidget *w)
+{
+    std::ofstream f("window_geometry.log", std::ios::app);
+    f.imbue(std::locale::classic());
+    const auto g = w->geometry();
+    const auto fr = w->frameGeometry();
+    const auto ms = w->minimumSizeHint();
+    f << std::format("{:%T} {:<14} geom {}x{}+{}+{} frame {}x{}+{}+{} visible {} minHint {}x{} min {}x{}\n",
+                     std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now()), what,
+                     g.width(), g.height(), g.x(), g.y(), fr.width(), fr.height(), fr.x(), fr.y(),
+                     w->isVisible(), ms.width(), ms.height(), w->minimumWidth(), w->minimumHeight());
+}
 }  // namespace
 
 void ControllerDisplay::restore_window_geometry()
@@ -34,6 +49,7 @@ void ControllerDisplay::restore_window_geometry()
         custom_widget_->restoreGeometry(geom);
     else
         custom_widget_->resize(820, 600);
+    log_geometry("restored", custom_widget_.get());
 }
 
 void ControllerDisplay::save_window_geometry() const
@@ -43,6 +59,7 @@ void ControllerDisplay::save_window_geometry() const
     QSettings settings(kWinSettingsOrg, kWinSettingsApp);
     settings.setValue(kWinSettingsKey, custom_widget_->saveGeometry());
     settings.sync();
+    log_geometry("saved", custom_widget_.get());
 }
 
 void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks callbacks)
@@ -57,6 +74,10 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     custom_widget_->setWindowTitle(QStringLiteral("controller — planner"));
     restore_window_geometry();
     custom_widget_->show();
+    log_geometry("shown", custom_widget_.get());
+    for (const int ms : {0, 500, 2000, 5000})
+        QTimer::singleShot(ms, custom_widget_.get(), [w = custom_widget_.get(), ms]
+                           { log_geometry(std::format("t+{}ms", ms).c_str(), w); });
     new rc::ui::GeometrySaver(custom_widget_.get(), [this] { save_window_geometry(); });   // owned by the window
 
     // No axis from the base viewer: it is pinned to the centre of this initial view rect, not to the
