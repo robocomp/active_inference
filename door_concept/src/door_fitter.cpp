@@ -1588,8 +1588,8 @@ void DoorFitter::compute_projected_roi(DoorInstance& inst)
     //   swung toward the camera read roi_fill ≈ 3-4 image widths, the detector envelope gave p_detect ≈ 1e-20,
     //   and NO absence was ever charged — misplaced doors after a pose flip (live 10-18: door_2 condemned at
     //   p 0.018 for ever, debounce streak 0). With fewer than 4 the function returned and roi_fill kept a
-    //   stale value. Now each of the 12 box edges is clipped to the near plane, fill is the part of the box
-    //   inside the image (≤ 1); nothing in front ⇒ fill 0.
+    //   stale value. Now each of the 12 box edges is clipped to the near plane (and fill is measured
+    //   in a camera aimed at the door, see below); nothing in front ⇒ fill 0.
     constexpr double kNear = 0.20;
     std::array<Eigen::Vector3d, 8> P{};
     {
@@ -1621,20 +1621,59 @@ void DoorFitter::compute_projected_roi(DoorInstance& inst)
         inst.roi_fill = inst.roi_fill_h = inst.roi_fill_v = 0.f;
         return;
     }
-    // Centring (door_roi_offset, the base's err_vec) keeps the near-clipped box, so a door off to one side
-    // still says which way to turn; |offset| > 1 ⇒ the door's centre is off the image.
+    // Centring (door_roi_offset, the base's err_vec) keeps the near-clipped box in the REAL camera, so a door
+    // off to one side still says which way to turn; |offset| > 1 ⇒ the door's centre is off the image.
     const float roi_cx = 0.5f * (min_col + max_col);
     const float roi_cy = 0.5f * (min_row + max_row);
     const float off_x = (roi_cx - cx_px) / (0.5f * W);   // [-1,1] on the image, 0 = centred
     const float off_y = (roi_cy - cy_px) / (0.5f * H);
-    // FILL is what the detector would actually get: the part of the box inside the image (≤ 1 per axis).
-    const float fh = std::max(0.f, std::min(max_col, W) - std::max(min_col, 0.f)) / W;
-    const float fv = std::max(0.f, std::min(max_row, H) - std::max(min_row, 0.f)) / H;
+
+    // ★ FILL IS THE DOOR'S APPARENT SIZE, NOT ITS FOOTPRINT IN WHATEVER THE ZED HAPPENS TO FACE (2026-10-18).
+    //   The detector envelope asks "is this door big enough, and not too big, to be segmented at this range?"
+    //   — a property of the door and its distance. Read off the live ZED frame it was a property of the GAZE:
+    //   live, door_3 (a phantom beside the robot) projected entirely off the image, roi_fill came out 1
+    //   (fill_h 0, fill_v 1), p_env 0.0013, and in 21000 cycles its removal streak reached 0.6 while the
+    //   panoramic silhouette — the channel that charges the absence, with its own field of view in
+    //   in_fov_frac — had 403 of 420 samples on it. So the leaf box is projected into a VIRTUAL camera with
+    //   the ZED's intrinsics, aimed at the box centre: the size it would have if looked at.
+    Eigen::Vector3d ctr = Eigen::Vector3d::Zero();
+    for (const auto& q : P) ctr += q;
+    ctr /= static_cast<double>(P.size());
+    float fh = 0.f, fv = 0.f;
+    if (ctr.norm() > 1e-6)
+    {
+        const Eigen::Vector3d fwd = ctr.normalized();
+        Eigen::Vector3d right = fwd.cross(Eigen::Vector3d::UnitZ());
+        if (right.norm() < 1e-6) right = Eigen::Vector3d::UnitX();   // door straight above/below: any roll
+        right.normalize();
+        const Eigen::Vector3d up = right.cross(fwd);
+        float lo_c = 1e9f, hi_c = -1e9f, lo_r = 1e9f, hi_r = -1e9f;
+        const auto add_v = [&](const Eigen::Vector3d& q)
+        {
+            const double X = q.dot(right), Y = q.dot(fwd), Z = q.dot(up);
+            const float col = static_cast<float>(X / Y) * fx, row = -static_cast<float>(Z / Y) * fy;
+            lo_c = std::min(lo_c, col); hi_c = std::max(hi_c, col);
+            lo_r = std::min(lo_r, row); hi_r = std::max(hi_r, row);
+        };
+        std::array<Eigen::Vector3d, 8> V{};
+        for (std::size_t i = 0; i < P.size(); ++i) V[i] = P[i];
+        int n_front = 0;
+        for (const auto& q : V) if (q.dot(fwd) >= kNear) { add_v(q); ++n_front; }
+        for (int i = 0; i < 8; ++i)
+            for (const int bit : {1, 2, 4})
+            {
+                if (i & bit) continue;
+                const double ya = V[i].dot(fwd), yb = V[i | bit].dot(fwd);
+                if ((ya >= kNear) == (yb >= kNear)) continue;
+                add_v(V[i] + (kNear - ya) / (yb - ya) * (V[i | bit] - V[i]));
+            }
+        if (n_front > 0) { fh = (hi_c - lo_c) / W; fv = (hi_r - lo_r) / H; }
+    }
     const bool sane = std::isfinite(off_x) and std::isfinite(off_y) and std::isfinite(fh) and std::isfinite(fv);
     inst.roi_offset_x = std::clamp(sane ? off_x : 0.f, -3.0f, 3.0f);
     inst.roi_offset_y = std::clamp(sane ? off_y : 0.f, -3.0f, 3.0f);
-    inst.roi_fill_h   = sane ? fh : 0.f;
-    inst.roi_fill_v   = sane ? fv : 0.f;
+    inst.roi_fill_h   = sane ? std::clamp(fh, 0.f, 4.f) : 0.f;
+    inst.roi_fill_v   = sane ? std::clamp(fv, 0.f, 4.f) : 0.f;
     inst.roi_fill     = std::max(inst.roi_fill_h, inst.roi_fill_v);
     inst.roi_valid    = sane;
 }
