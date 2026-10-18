@@ -225,8 +225,9 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(has(mission_text, "MISSION \"go\"   [20261017-1]"));
     CHECK(has(mission_text, "Asked by a person through the chat."));
     CHECK(has(mission_text, "END     not yet"));       // m is still open
-    CHECK(has(mission_text, "set out to cross door_3"));
-    CHECK(has(mission_text, "finished crossing door_3 — succeeded"));
+    CHECK(has(mission_text, "STEP cross door_3  — succeeded"));
+    CHECK(has(mission_text, "CONSEQUENCES OF ITS ACTIONS"));
+    CHECK(has(mission_text, "cross <door>"));          // the abstract form: instance → type
     CHECK(not has(mission_text, "»"));                  // nothing marked when the mission itself is clicked
     const std::string step_text = rc::em::node_text(store, s.id);
     CHECK(has(step_text, "MISSION \"go\""));           // a step tells its whole mission…
@@ -258,7 +259,25 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
         CHECK(not has(t, "appeared in its world model: door_3"));
         CHECK(has(t, "it could now: open door_3"));
         CHECK(has(t, "MEANWHILE, NOT RELATED TO THE MISSION\n  1 other thing came and went in the world model: chair_1"));
-        CHECK(not has(t, "finished crossing"));
+        // what applying it changed: the door's belief, and the room that appeared (net, within the step's window)
+        rc::em::Record fc = fs;                     // an applied affordance under the step
+        fc.id = "20261017-4";
+        fc.parent = fs.id;
+        fc.level = rc::em::Level::Claim;
+        fc.kind = "open";
+        fc.t0 = 2000;
+        fc.t1 = 3000;
+        fc.outcome = "satisfied";
+        fc.pre = {rc::em::Fact{.node = "door_3", .type = "object", .ltsm_id = "", .values = {{"door_open_prob", 0.0}}}};
+        fc.post = {rc::em::Fact{.node = "door_3", .type = "object", .ltsm_id = "", .values = {{"door_open_prob", 0.9}}}};
+        fc.events = {{.dt_ms = 900, .kind = "offered", .node = "aff_door_3_cross"},
+                     {.dt_ms = 950, .kind = "offered", .node = "aff_door_3_open"}};     // its own affordance: not an effect
+        const std::string c = *rc::em::story::tell(rc::em::Store{.today = {fm, fs, fc}, .stats = {}}, fc.id);
+        CHECK(has(c, "APPLIED open door_3  — succeeded"));
+        CHECK(has(c, "belief: door_3 open 0% → 90%"));
+        CHECK(has(c, "became possible: cross door_3"));
+        CHECK(not has(c, "became possible: open door_3"));
+        CHECK(has(c, "open <door>          succeeded        ⇒ <door> open 0% → 90%; then possible: cross <door>"));
         CHECK(has(t, "the mission ended — done, the order was carried out"));
         CHECK(has(t, ", 8 s later — done"));
     }
