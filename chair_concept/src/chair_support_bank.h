@@ -50,8 +50,8 @@ inline void ingest(ChairInstance& inst, const std::vector<Eigen::Vector3f>& cand
     const auto r = rc::support_bank::ingest(bank, e, prm, candidate_pts, residual_pts);
     inst.support_bank_pts  = std::move(bank.pts);
     inst.support_bank_keys = std::move(bank.keys);
-    const int period = std::max(1, cfg.chair_log_period_frames);
-    log_ingest(inst.node_name, inst.support_bank_pts.size(), prm, r, (inst.processed_cycles % period) == 0);
+    const int period = cfg.chair_log_period_frames;
+    log_ingest(inst.node_name, inst.support_bank_pts.size(), prm, r, period > 0 and (inst.processed_cycles % period) == 0);
 }
 
 }  // namespace rc::support_bank

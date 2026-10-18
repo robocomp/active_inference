@@ -176,7 +176,7 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
         return {};
 
     static int dbg = 0;
-    if (++dbg % 30 == 0)
+    if (log_period_ > 0 and ++dbg % log_period_ == 0)
     {
         constexpr float kRef = 0.10f;   // common scale: 10 cm / 0.1 rad
         static const char* fn[4] = {"+x", "-x", "+y", "-y"};

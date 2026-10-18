@@ -262,7 +262,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
                 {
                     // NOT gated on a verbose flag: this is the one line that says whether the rule is running at
                     // all, which is the first thing anyone asks. Throttled rather than silenced.
-                    if ((n_explained_away_++ % 200) == 0)
+                    if (n_explained_away_++ == 0)   // once per run
                         std::print("[{}] [exclusion] point dropped — already explained by another object "
                                    "({} so far this run)\n", inst.node_name, n_explained_away_);
                     continue;
@@ -322,8 +322,8 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
 
 bool ChairFitter::should_log(const ChairInstance& inst) const
 {
-    const int period = std::max(1, cfg_.chair_log_period_frames);
-    return (inst.processed_cycles % period) == 0;
+    const int period = cfg_.chair_log_period_frames;   // <= 0 silences the periodic logs
+    return period > 0 and (inst.processed_cycles % period) == 0;
 }
 
 // ─── AI2 inference (shared recursive-Laplace belief; mirrors table run_inference) ───────────────

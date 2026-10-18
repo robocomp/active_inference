@@ -56,8 +56,8 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "min stand-off floor for epistemic viewpoints (YOLO misses too-close chairs)");
     out.epistemic_cooldown_cycles= geti("ChairConcept.EpistemicCooldownCycles", 200,
             "min cycles withdrawn after satisfaction");
-    out.chair_log_period_frames  = geti("ChairConcept.ChairLogPeriodFrames", 30,
-            "per-chair log throttle");
+    out.chair_log_period_frames  = geti("ChairConcept.ChairLogPeriodFrames", 0,
+            "per-chair log throttle; 0 = periodic logs off");
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs", 3000,
             "Primary-input (masks) stream gate: no NEW masks frame for this many ms while Operating ⇒ demote out of Operating rather than integrate stale…");
     out.support_bank_max_points    = geti("ChairConcept.SupportBankMaxPoints", 4000,

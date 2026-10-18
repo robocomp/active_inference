@@ -352,6 +352,7 @@ void SpecificWorker::initialize()
     epistemic_planner_.set_detector_envelope(
         rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+    epistemic_planner_.set_log_period(cfg_.chair_log_period_frames);
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: for a
     // chair the backrest makes the VERTICAL extent the binding axis at close range, and the horizontal-only
@@ -698,7 +699,6 @@ void SpecificWorker::compute()
     }
     refresh_evidence_monitor();   // throttled inside; no-ops when the dashboard was not built
 
-    fps_counter_.print("[chair_concept Compute]");
 }
 
 // Collapse instances whose seat footprints overlap (same physical chair fitted twice): keep the one with
@@ -861,7 +861,7 @@ void SpecificWorker::run_instance_tracker()
                     {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_seat_w, cfg_.tracker_birth_seat_d, 0.0f}, foreign_claims_, &who,
                     0.0f, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
                 dv.birth_evidence *= unclaimed;
-                if (unclaimed < 0.99f)
+                if (cfg_.chair_log_period_frames > 0 and unclaimed < 0.99f)
                     std::print("[chair] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed);
             }
@@ -897,7 +897,8 @@ void SpecificWorker::run_instance_tracker()
                     continue;                                   // comparable size ⇒ its own object
                 if ((d.xy - big.xy).norm() > cfg_.birth_fragment_reach_m) continue;   // too far to be a piece
                 d.birthable = false;
-                std::print("chair_concept: [birth] FRAGMENT suppressed: {} pts at {:.2f} m from a {}-pt mask "
+                if (cfg_.chair_log_period_frames > 0)
+                    std::print("chair_concept: [birth] FRAGMENT suppressed: {} pts at {:.2f} m from a {}-pt mask "
                            "({:.0f}% of it) — a piece, not a chair\n",
                            d.support, (d.xy - big.xy).norm(), big.support,
                            100.0f * static_cast<float>(d.support) / static_cast<float>(big.support));
@@ -950,7 +951,7 @@ void SpecificWorker::run_instance_tracker()
     ev_g_.births_cum   += static_cast<long>(res.births.size());
     ev_g_.removals     += static_cast<int>(res.deaths.size());
     ev_g_.removals_cum += static_cast<long>(res.deaths.size());
-    if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
+    if (not res.births.empty() or not res.deaths.empty())
         std::print("[tracker] instances={} chair_dets={} assigned={} unassigned={} births={} deaths={}\n",
                    tracks.size(), dets.size(), n_assigned,
                    static_cast<int>(dets.size()) - n_assigned, res.births.size(), res.deaths.size());
@@ -1054,8 +1055,9 @@ void SpecificWorker::run_instance_tracker()
         if (cfg_.exist_room_prior and fitter_->has_room_polygon()
             and not fitter_->point_in_room(Eigen::Vector2f(c.x(), c.y()), cfg_.exist_room_margin_m))
         {
-            std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — OUTSIDE room\n",
-                       slice, c.x(), c.y());
+            if (cfg_.chair_log_period_frames > 0)
+                std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — OUTSIDE room\n",
+                           slice, c.x(), c.y());
             log_tracker_event("SUPPRESS", 0, c.x(), c.y(), "outside room");
             continue;
         }
@@ -1075,8 +1077,9 @@ void SpecificWorker::run_instance_tracker()
                     const auto& st = it->second.model.state();
                     dist = std::hypot(st.cx - c.x(), st.cy - c.y());
                 }
-                std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — claimed by "
-                           "id={} ({:.2f} m away)\n", slice, c.x(), c.y(), claimer, dist);
+                if (cfg_.chair_log_period_frames > 0)
+                    std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — claimed by "
+                               "id={} ({:.2f} m away)\n", slice, c.x(), c.y(), claimer, dist);
                 log_tracker_event("SUPPRESS", claimer, c.x(), c.y(), std::format("claimer {:.2f}m", dist));
                 continue;
             }
@@ -1171,7 +1174,7 @@ void SpecificWorker::refresh_room_geometry()
     const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
     if (not px.has_value() or not py.has_value())
     {
-        if (++miss % 120 == 1)
+        if (++miss == 1)   // once
             std::print("chair_concept: [room-prior] room node {} has NO delimiting_polygon attribute yet "
                        "(containment prior INACTIVE — out-of-room chairs cannot be removed)\n", room_node_id_);
         return;
@@ -1180,7 +1183,7 @@ void SpecificWorker::refresh_room_geometry()
     const std::size_t n = std::min(xs.size(), ys.size());
     if (n < 3)
     {
-        if (++miss % 120 == 1)
+        if (++miss == 1)   // once
             std::print("chair_concept: [room-prior] delimiting_polygon present but degenerate (n={})\n", n);
         return;
     }
@@ -1513,7 +1516,7 @@ void SpecificWorker::update_existence_beliefs()
                                                        std::max(p_vis, p_vis_ct));
         if (verdict.remove)
             to_remove.push_back(id);
-        if (verdict.stalled)
+        if (verdict.stalled and verdict.starved == policy.stall_warn_cycles)   // once per episode
             std::print("chair_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
                                                                     inst.existence_debounce, verdict));
 
@@ -1522,14 +1525,14 @@ void SpecificWorker::update_existence_beliefs()
         // early return, so a belief pinned at the +4 clamp by evidence no look can contradict said
         // NOTHING — a phantom refrigerator held there by a DOOR's returns sat silent for an hour with
         // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
-        if (verdict.unfalsifiable)
+        if (verdict.unfalsifiable and verdict.starved == policy.stall_warn_cycles)   // once per episode
             std::print("chair_concept: {}\n",
                        rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
     }
 
     // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.
     static int ex_dbg = 0;
-    if (++ex_dbg % 60 == 0)
+    if (cfg_.chair_log_period_frames > 0 and ++ex_dbg % (2 * cfg_.chair_log_period_frames) == 0)
         for (const auto& [id, inst] : fitter_->instances())
             if (not inst.is_bearing_hypothesis)
             {
