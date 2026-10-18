@@ -248,6 +248,8 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
                             }
                         }
                 }
+            if (const auto v = G.get_attrib_by_name<obj_shape_att>(n); v.has_value()) o.shape = v.value();
+            if (const auto v = G.get_attrib_by_name<obj_shape_prob_att>(n); v.has_value()) o.shape_prob = v.value();
             d.objects.push_back(std::move(o));
         }
     if (room_id != 0)
