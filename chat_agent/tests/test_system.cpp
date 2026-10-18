@@ -48,6 +48,13 @@ int main()
         CHECK(all.find("controller") < all.find("bottle_concept"));   // running first
     }
 
+    // ── the STATE's agents line: the names alive, from the same heartbeat rule (live 2026-10-18: with no list in the
+    // STATE the model answered "what agents are alive?" with the four EXAMPLE names of agents()'s description) ──
+    // …and an alive agent not Operating is marked, so "is any agent in trouble?" is not answered "all fine"
+    CHECK(alive_line(agents) == "agents alive now: controller, door_concept (running, but Degraded), retina (3; agents() for "
+                                "health, CPU, memory); not running: bottle_concept, chat_agent");
+    CHECK(alive_line({}) == "agents alive now: none known");
+
     // ── rate meter: frames counted by frame_id between samples, over the last kRateWindowNs ─────────────────────
     {
         RateMeter m;

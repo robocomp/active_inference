@@ -184,6 +184,27 @@ inline constexpr std::uint64_t kStreamStallMs = 1000;
     return out;
 }
 
+/// The STATE's agents line: the names alive (agent_running), a non-Operating one marked, and the silent ones. The
+/// details (CPU, memory, uptime) are agents().
+[[nodiscard]] inline std::string alive_line(const std::vector<AgentFact>& agents)
+{
+    if (agents.empty()) return "agents alive now: none known";
+    std::string running, silent;
+    int n = 0;
+    for (const auto& a : agents)
+    {
+        std::string& list = agent_running(a) ? running : silent;
+        list += (list.empty() ? "" : ", ") + a.name;
+        // An alive agent that is not Operating is marked: the list alone read as "all fine" (is any agent in trouble?)
+        if (agent_running(a) and not a.presence.empty() and a.presence != "Operating") list += " (running, but " + a.presence + ")";
+        n += agent_running(a) ? 1 : 0;
+    }
+    std::string s = std::format("agents alive now: {} ({}; agents() for health, CPU, memory)",
+                                running.empty() ? std::string("none") : running, n);
+    if (not silent.empty()) s += "; not running: " + silent;
+    return s;
+}
+
 struct GraphSummary
 {
     std::map<std::string, int> nodes_by_type, edges_by_type, nodes_by_agent;

@@ -270,7 +270,8 @@ const QString kInterfaceRules = QStringLiteral(
     "behind or around you. What you say about a picture is a visual impression, not a measurement: for how many, how "
     "far and where, use the STATE and find_objects/where_is. Lines, dots, grids and labels drawn over a picture are "
     "debug overlays, not part of the scene.\n"
-    "- The robot's own software is NOT in the STATE: for any question about it CALL a tool, never guess: agents() "
+    "- Of the robot's own software the STATE has only the names of the agents alive ('agents alive now'); for "
+    "anything more about it CALL a tool, never guess: agents() "
     "(which programs run, their health, CPU, memory, uptime), sensors(name) (cameras, LiDAR, IMU: streams, measured "
     "frame rate, resolution, bandwidth), graph_summary() (how many nodes and edges the working memory, i.e. the "
     "graph, holds) or inspect(node) (every attribute of one node). Never tell the user to call a tool or that you "
@@ -355,8 +356,8 @@ QJsonArray ChatSession::tools_json() const
         QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
         QJsonArray{"name"}));
     tools.append(tool_def("agents",
-        "The robot's software agents (programs such as controller, retina, room_concept, door_concept): which are "
-        "running, their state (Operating / Degraded / Waiting), uptime, CPU and memory of each. Read-only.",
+        "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU "
+        "and memory of each. Read-only.",
         QJsonObject{}, {}));
     tools.append(tool_def("sensors",
         "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, resolution, age of the "
@@ -452,6 +453,7 @@ void ChatSession::ask_model(bool followup)
     }
     turn_doors_ = digest_.facts.doors;
     if (const auto m = mission_now_line(mission_progress_); m.has_value()) state_extra_ += q(*m) + "\n";
+    state_extra_ += q(alive_line(system_.agents())) + "\n";   // the names from the graph, so none are made up
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
     const QJsonArray msgs = messages_for_request();

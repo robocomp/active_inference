@@ -38,6 +38,7 @@ other rooms in the live map: none
 robot pose in room_1: x=0.42 m, y=-1.10 m, yaw=88 deg
 robot motion now (odometry, 80 ms old): forward 0.00 m/s, sideways 0.00 m/s, not turning
 controller target now: none (it is executing no affordance)
+agents alive now: chair_concept, chat_agent, controller, door_concept (running, but Degraded), ltsm_agent, residual_concept, retina, robot_concept, room_concept, table_concept (10; agents() for health, CPU, memory)
 doors of the current room (2):
   - door_0: 3.1 m away, bearing +62 deg (ahead-left), P(open)=0.91, affordances: approach=offered open=absent cross=offered [nearest]
   - door_1: 4.4 m away, bearing -120 deg (behind-right), P(open)=0.12, affordances: approach=offered open=offered cross=absent
@@ -84,9 +85,8 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
-        t("agents", "The robot's software agents (programs such as controller, retina, room_concept, door_concept): "
-          "which are running, their state (Operating / Degraded / Waiting), uptime, CPU and memory of each. "
-          "Read-only.", {}, []),
+        t("agents", "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), "
+          "uptime, CPU and memory of each. Read-only.", {}, []),
         t("sensors", "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, "
           "resolution, age of the last frame and bandwidth. Read-only.",
           {"name": {"type": "string", "description": "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
@@ -174,6 +174,13 @@ def history_after_move(user_text, dist, turn, cmd):
             {"role": "tool", "tool_name": "move_relative", "content": f"OK: '{cmd}' sent to the controller."},
             {"role": "assistant", "content": "Done, I moved."},
             {"role": "tool", "tool_name": "robot_status", "content": f"The command '{cmd}' ended: completed. done: {cmd}"}]
+
+
+def lists_agents(c):
+    """A text answer that names the alive agents from the STATE's line (all ten, not a made-up few)."""
+    names = ["chair_concept", "controller", "door_concept", "ltsm_agent", "residual_concept", "retina",
+             "robot_concept", "room_concept", "table_concept"]
+    return all(n in c for n in names)
 
 
 CASES = [
@@ -266,34 +273,39 @@ CASES = [
      lambda n, a, c: n == "approach_object" and re.search("table|mesa", str(a.get("object", "")).lower()) is not None),
     # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
     ("how many agents", [], "none", "how many agents are running?",
-     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),
+     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(10|ten)\b", c.lower()) is not None)),
     ("cuántos agentes (es)", [], "none", "¿cuántos agentes están funcionando?",
-     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|catorce)\b", c.lower()) is not None)),
+     lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(10|diez)\b", c.lower()) is not None)),
     # live 2026-10-18: "agents ... in the WM" was answered as "I have no access to agents" (no tool call). The WM IS
     # the graph, so graph_summary is a fair pick: its result carries the agents census too (system_facts.h).
     ("agents alive in the WM", [], "none", "how many agents are alive in the WM?",
-     lambda n, a, c: n in ("agents", "graph_summary")),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     ("agents alive", [], "none", "how many agents are alive?",
-     lambda n, a, c: n == "agents"),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     ("agents in working memory", [], "none", "which agents are in the working memory?",
-     lambda n, a, c: n in ("agents", "graph_summary")),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     # paraphrases: at temperature 0.2 a phrasing gets the same tool every repeat, so the spread is across phrasings.
     ("agents in the WM", [], "none", "how many agents are in the WM?",
-     lambda n, a, c: n in ("agents", "graph_summary")),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     ("all agents up", [], "none", "are all the agents up?",
-     lambda n, a, c: n == "agents"),
+     lambda n, a, c: n == "agents" or (n is None and "door_concept" in c and re.search(r"degraded", c.lower()) is not None)),
     ("list running agents", [], "none", "list the running agents",
-     lambda n, a, c: n == "agents"),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     ("is retina running", [], "none", "is retina running?",
-     lambda n, a, c: n == "agents" or (n == "inspect" and "retina" in str(a.get("node", "")).lower())),
+     lambda n, a, c: n == "agents" or (n == "inspect" and "retina" in str(a.get("node", "")).lower())
+     or (n is None and re.search(r"\byes\b|is running|is alive", c.lower()) is not None)),
     ("which programs run", [], "none", "which programs are running right now?",
-     lambda n, a, c: n == "agents"),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     ("controller alive", [], "none", "is the controller alive?",
-     lambda n, a, c: n == "agents" or (n == "inspect" and "controller" in str(a.get("node", "")).lower())),
+     lambda n, a, c: n == "agents" or (n == "inspect" and "controller" in str(a.get("node", "")).lower())
+     or (n is None and re.search(r"\byes\b|is running|is alive", c.lower()) is not None)),
     ("agentes vivos WM (es)", [], "none", "¿cuántos agentes hay vivos en la WM?",
-     lambda n, a, c: n in ("agents", "graph_summary")),
+     lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
     ("room_concept cpu", [], "none", "what is the CPU load of room_concept?",
      lambda n, a, c: n == "agents" or (n == "inspect" and "room_concept" in str(a.get("node", "")).lower())),
+    # live 2026-10-18: answered with the four EXAMPLE names of the old agents() description, no call.
+    ("what agents are alive", [], "none", "what agents are alive?",
+     lambda n, a, c: n == "agents" or (n is None and lists_agents(c))),
     ("which agent is degraded", [], "none", "is any agent in trouble?",
      lambda n, a, c: n == "agents" or (n is None and "door_concept" in c)),
     ("agent memory use", [], "none", "how much memory is the controller using?",
