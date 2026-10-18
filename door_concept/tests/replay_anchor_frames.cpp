@@ -10,9 +10,10 @@
 //       -I$Q/QtGui -I$Q/QtWidgets tests/replay_anchor_frames.cpp -o build/replay_anchor_frames -lfastdds -lfastcdr -lQt5Core
 //     ./build/replay_anchor_frames [etc/anchor_frames.bin] [--every N]
 //
-// The recorded p_cam / p_view are AS PUBLISHED (fix 1: the last mask frame's camera term held for kAnchorStaleMs); the
-// replayed ones are this frame's own (p_cam > 0 only on a frame that carried a mask), so they differ on mask-less frames
-// by design — compare p_lidar for the update itself.
+// The recorded p_cam / p_view are AS PUBLISHED (fix 1: the last mask frame held for kAnchorStaleMs, its camera term
+// recomputed at the posterior); the replayed ones are this frame's own (p_cam > 0 only on a frame that carried a mask),
+// so they differ on mask-less frames by design — compare p_lidar for the update itself.
+// Format version 2 (fix round 1). A version-1 file (cc39a46c, e.g. try66) needs the replay built at that commit.
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -49,15 +50,17 @@ int main(int argc, char** argv)
     for (std::size_t k = 0; k < frames.size(); ++k)
     {
         const auto& f = frames[k];
+        rc::door::AnchorStaging st = f.staging;
+        st.replay = true;   // the record's budgeted sets stand for the frame
         const auto [post, ev] = rc::door::update_door_anchor(f.prior, f.width, f.thickness, f.wall_u_min, f.wall_u_max, f.lidar_origin,
-                                                             f.rays, f.mask, f.cam, f.pi_open, f.leaf, f.floor_below);
+                                                             {}, f.mask, f.cam, f.pi_open, f.leaf, f.floor_below, &st);
         const double dxy = (post.x.head<2>() - f.post.x.head<2>()).norm();
         const double dyaw = std::abs(rc::interaction::wrap_pi(post.x.z() - f.post.x.z()));
         worst_xy = std::max(worst_xy, dxy); worst_yaw = std::max(worst_yaw, dyaw);
         worst_pl = std::max(worst_pl, double(std::abs(ev.p_lidar - f.p_lidar)));
         if (k % std::size_t(every) != 0) continue;
         std::print("{:8d} {:5d} {:4d} {:4d} | {:6.3f} {:6.3f} {:6.3f} | {:6.3f} = {:5.3f} x {:5.3f} x {:5.3f} | {:5.3f} {:5.3f} | {:6.4f} {:6.4f}{}\n",
-                   f.t_ms - t0, f.rays.size(), ev.n_budget, f.mask.size(), f.p_view, f.p_lidar, f.p_cam, ev.p_lidar, ev.lidar_open,
+                   f.t_ms - t0, f.staging.prior.n_pre, ev.n_budget, f.mask.size(), f.p_view, f.p_lidar, f.p_cam, ev.p_lidar, ev.lidar_open,
                    ev.lidar_door, ev.lidar_wall, ev.p_cam, ev.p_view, dxy, dyaw, f.p_view < 0.5f ? "  (not published)" : "");
     }
     std::print("replay vs record: worst pose Δ {:.4f} m / {:.4f} rad, worst |Δ p_lidar| {:.4f}\n", worst_xy, worst_yaw, worst_pl);

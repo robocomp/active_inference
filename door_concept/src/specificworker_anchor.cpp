@@ -471,6 +471,8 @@ void SpecificWorker::step_passage_anchor()
             var = {v->get()[0], v->get()[1], v->get()[2]};
         const float dt = float(now - pa.pose.stamp_ms) * 1e-3f;
         pa.pose = rc::interaction::predict(pa.pose, twist.value(), var, dt);
+        // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
+        rc::door::carry_held_mask(pa.cam_hold, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt);
     }
     // ★ ONE CLOCK: the anchor is stamped with system-clock epoch ms (provenance::now_ms), the clock
     //   read_affordance_anchor's staleness check uses. predict() copies the TWIST's stamp; overwrite it.
@@ -605,6 +607,7 @@ void SpecificWorker::step_passage_anchor()
     const bool measured = not rays.empty() or mask_pts.size() >= 2;
     const rc::interaction::RelPose prior_pose = pa.pose;   // for the frame record (fix 3)
     rc::door::LeafPrior leaf;                              // the door's leaf belief (below), also recorded
+    rc::door::AnchorStaging staging;                       // the update's two budgeted ray sets, for the frame record
     if (measured)
     {
         // The door's own P(open) (its leaf-angle posterior): what the visibility check predicts in the opening — a gap
@@ -651,22 +654,25 @@ void SpecificWorker::step_passage_anchor()
         }
         // Floor returns (below the wall band) are told apart by z: in the visibility they PASS, never end (Task 8).
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
-                                                      lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf, kFloorBandM);
+                                                      lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf, kFloorBandM,
+                                                      &staging);
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;
     }
-    // ── Task 8 fix 1: the camera's view evidence persists within the controller's staleness window ────────────────
-    //    A new mask frame sets it (0 when the frame carried no door slice: the camera looked and saw none); a cycle
-    //    without one keeps the last frame's while that frame is younger than kAnchorStaleMs.
+    // ── Task 8 fix 1 (fix round 1): the last mask frame is HELD within the controller's staleness window ───────────
+    //    A new frame replaces it (no door slice ⇒ no points: the camera looked and saw none). Its camera term is
+    //    recomputed at the CURRENT posterior every measured cycle, so the published p_view stays the published pose's.
+    if (new_mask_frame) rc::door::hold_mask_frame(pa.cam_hold, mask_pts, mask_stamp);
+    if (measured)
     {
-        std::optional<float> cam_new;
-        if (new_mask_frame) cam_new = (measured and mask_pts.size() >= 2) ? ev.p_cam : 0.f;
-        const float p_cam = rc::door::held_camera_view(pa.cam_hold, cam_new, mask_stamp, now, rc::interaction::kAnchorStaleMs);
-        if (measured)
+        ev.p_cam  = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, pa.pose);
+        ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
+        if (not pa.az_logged and ev.az_step > 0.f)
         {
-            ev.p_cam  = p_cam;
-            ev.p_view = rc::door::combine_view(ev.p_lidar, p_cam);
+            pa.az_logged = true;
+            std::print("door_concept: [anchor] {}@robot: the bpearl's measured azimuth step is {:.3f} deg ({} rays this frame)\n",
+                       pa.door_name, ev.az_step * 180.f / float(M_PI), rays.size());
         }
     }
     // ── Task 8 fix 3: the frame record (etc/anchor_frames.bin) — every measured cycle, inputs and outputs ──────────
@@ -678,8 +684,7 @@ void SpecificWorker::step_passage_anchor()
         fr.width = pa.width; fr.thickness = pa.thickness; fr.wall_u_min = pa.wall_u_min; fr.wall_u_max = pa.wall_u_max;
         fr.floor_below = kFloorBandM;
         fr.lidar_origin = lidar_origin;
-        fr.rays = rays;
-        fr.n_budget = std::uint32_t(std::max(0, ev.n_budget));
+        fr.staging = std::move(staging);
         fr.mask = mask_pts;
         fr.cam = cam;
         fr.leaf = leaf;

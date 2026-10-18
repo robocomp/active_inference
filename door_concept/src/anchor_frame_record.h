@@ -7,19 +7,18 @@
  * failure gets debugged without a re-run (try65: the anchor was right and its publication flapped; the cause had to be
  * reconstructed by hand from a CSV of outputs).
  *
- * ─── FORMAT (version 1, fixed layout, host byte order = little-endian on every machine this fleet runs) ─────────────
+ * ─── FORMAT (version 2, fixed layout, host byte order = little-endian on every machine this fleet runs) ─────────────
  *   header   8 bytes "DANCHORF", u32 version
  *   record   u32 record_bytes (the rest of the record, for skipping a version this reader does not know)
  *            i64 t_ms
  *            prior RelPose: f32 x[3], f32 P[9] (row-major), i64 stamp_ms
  *            f32 width, thickness, wall_u_min, wall_u_max, floor_below
  *            f32 lidar_origin[3]
- *            u32 n_rays, then n_rays × f32[3]   — the robot-frame rays AFTER select_anchor_rays: the PRE-BUDGET set,
- *                                                  n_rays its count. The ray budget inside the update is deterministic
- *                                                  (budget_rays: no RNG), so this set reproduces the budgeted set AND
- *                                                  its Horvitz-Thompson weights exactly; the budgeted set alone would
- *                                                  lose the weights and the replay would not be the live update.
- *            u32 n_budget                        — how many of them entered F (≤ kRayBudget), for the log
+ *            staged × 2 (at the PRIOR: the fit; at the POSTERIOR: door_view, what was published), each:
+ *              u32 n_pre (rays after select_anchor_rays, before the budget), f64 az_step (the frame's measured azimuth
+ *              step), u32 n, then n × f32[3] (the budgeted robot-frame rays) and n × f64 (their Horvitz-Thompson weights).
+ *              (Fix round 1: v1 stored the whole pre-budget set, ~90 KB a frame; ≤ 2 × 400 rays is ≤ 16 KB. The update
+ *              consumes exactly these, so the replay is still exact.)
  *            u32 n_mask, then n_mask × f32[3]    — the robot-frame door-mask points (0 on a cycle with no new mask)
  *            camera frustum: u8 known, f32 origin[2], f32 forward[2], f32 half_fov, f32 max_range
  *            leaf belief: u8 known, u8 phi_known, f32 hinge_u, dir_u, swing_y, phi, phi_sigma, phi_max, p_hinge,
@@ -50,7 +49,7 @@ namespace rc::door::rec
 {
 
 inline constexpr char          kMagic[8] = {'D', 'A', 'N', 'C', 'H', 'O', 'R', 'F'};
-inline constexpr std::uint32_t kVersion  = 1;
+inline constexpr std::uint32_t kVersion  = 2;
 inline constexpr std::uint64_t kMaxBytes = 200ull * 1024ull * 1024ull;   // ⚑ disk budget
 
 struct Frame
@@ -59,8 +58,7 @@ struct Frame
     rc::interaction::RelPose prior;
     float width = 0.f, thickness = 0.f, wall_u_min = 0.f, wall_u_max = 0.f, floor_below = 0.f;
     Eigen::Vector3f lidar_origin = Eigen::Vector3f::Zero();
-    std::vector<Eigen::Vector3f> rays;     // pre-budget (after select_anchor_rays)
-    std::uint32_t n_budget = 0;
+    AnchorStaging staging;                 // the two budgeted ray sets the update consumed (replay = true to re-run it)
     std::vector<Eigen::Vector3f> mask;
     CameraFrustum cam;
     LeafPrior leaf;
@@ -116,6 +114,20 @@ inline bool get_pts(const char*& p, const char* e, std::vector<Eigen::Vector3f>&
     for (auto& q : v) { float x = 0, y = 0, z = 0; get(p, e, x); get(p, e, y); get(p, e, z); q = {x, y, z}; }
     return true;
 }
+inline void put_staged(std::string& b, const StagedRays& s)
+{
+    put(b, s.n_pre); put(b, s.az_step);
+    put_pts(b, s.rays);
+    for (const double w : s.wt) put(b, w);
+}
+inline bool get_staged(const char*& p, const char* e, StagedRays& s)
+{
+    if (not (get(p, e, s.n_pre) and get(p, e, s.az_step) and get_pts(p, e, s.rays))) return false;
+    if (std::size_t(e - p) < s.rays.size() * sizeof(double)) return false;
+    s.wt.resize(s.rays.size());
+    for (double& w : s.wt) get(p, e, w);
+    return true;
+}
 }  // namespace detail
 
 // One record, serialised (without its leading size word).
@@ -123,13 +135,13 @@ inline std::string encode(const Frame& f)
 {
     using namespace detail;
     std::string b;
-    b.reserve(256 + 12 * (f.rays.size() + f.mask.size()));
+    b.reserve(256 + 20 * (f.staging.prior.rays.size() + f.staging.post.rays.size()) + 12 * f.mask.size());
     put(b, f.t_ms);
     put_pose(b, f.prior);
     for (const float v : {f.width, f.thickness, f.wall_u_min, f.wall_u_max, f.floor_below}) put(b, v);
     put(b, f.lidar_origin.x()); put(b, f.lidar_origin.y()); put(b, f.lidar_origin.z());
-    put_pts(b, f.rays);
-    put(b, f.n_budget);
+    put_staged(b, f.staging.prior);
+    put_staged(b, f.staging.post);
     put_pts(b, f.mask);
     put(b, std::uint8_t(f.cam.known ? 1 : 0));
     for (const float v : {f.cam.origin.x(), f.cam.origin.y(), f.cam.forward.x(), f.cam.forward.y(), f.cam.half_fov, f.cam.max_range}) put(b, v);
@@ -152,7 +164,7 @@ inline bool decode(const char* p, const char* e, Frame& f)
     float ox = 0, oy = 0, oz = 0;
     ok = ok and get(p, e, ox) and get(p, e, oy) and get(p, e, oz);
     f.lidar_origin = {ox, oy, oz};
-    ok = ok and get_pts(p, e, f.rays) and get(p, e, f.n_budget) and get_pts(p, e, f.mask);
+    ok = ok and get_staged(p, e, f.staging.prior) and get_staged(p, e, f.staging.post) and get_pts(p, e, f.mask);
     std::uint8_t k = 0;
     ok = ok and get(p, e, k);
     f.cam.known = k != 0;
@@ -217,11 +229,17 @@ inline bool read_all(std::istream& in, std::vector<Frame>& frames, std::uint32_t
     if (not in.read(magic, sizeof(magic)) or std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) return false;
     if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or ver != kVersion) return false;
     if (version != nullptr) *version = ver;
+    // A record's length word is bounded by what the file still holds: a corrupt word cannot allocate gigabytes.
+    const std::streampos here = in.tellg();
+    in.seekg(0, std::ios::end);
+    const std::streampos end = in.tellg();
+    in.seekg(here);
     std::string buf;
     for (;;)
     {
         std::uint32_t n = 0;
         if (not in.read(reinterpret_cast<char*>(&n), sizeof(n))) break;
+        if (std::streamoff(n) > std::streamoff(end - in.tellg())) break;   // truncated (or corrupt) last record
         buf.resize(n);
         if (not in.read(buf.data(), std::streamsize(n))) break;
         Frame f;

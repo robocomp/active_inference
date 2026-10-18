@@ -320,7 +320,8 @@ private:
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
         float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
-        rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame's P(in view), held kAnchorStaleMs
+        rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame, held kAnchorStaleMs (odometry-carried)
+        bool  az_logged = false;                          // the bpearl's measured azimuth step logged once per anchor
     };
     std::optional<PassageAnchor> passage_anchor_;
     std::ofstream anchor_log_;

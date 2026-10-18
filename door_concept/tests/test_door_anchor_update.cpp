@@ -89,6 +89,7 @@
 #include <print>
 #include <random>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "door_anchor_update.h"
@@ -805,33 +806,83 @@ int main()
     // ─── Task 8, fix 1: the camera's view evidence persists within the staleness window ─────────────────────────────
     std::print("camera_view_persists_within_window\n");
     {
+        // The anchor at the opening 2.5 m ahead, the zed at the robot origin looking forward, a mask filling the opening.
+        RelPose truth; truth.x = V3(0.f, D, 0.f); truth.P = V3(0.03f * 0.03f, 0.03f * 0.03f, 0.02f * 0.02f).asDiagonal();
+        rc::door::CameraFrustum cam; cam.known = true; cam.origin = {0.f, 0.f}; cam.forward = {0.f, 1.f}; cam.half_fov = 0.96f; cam.max_range = 8.f;
+        const auto frame_pts = mask(0.f, 200);
         rc::door::CameraViewHold hold;
-        constexpr float p_lidar = 0.45f, p_cam_frame = 0.95f;   // try65's p_lidar mid-approach; the zed's frustum term
+        constexpr float p_lidar = 0.45f;   // try65's p_lidar mid-approach
         int crossings_new = 0, crossings_old = 0, k_fell = -1;
         bool last_new = true, last_old = true;
-        float pv_min_streaming = 1.f;
+        float pv_min_streaming = 1.f, pc_frame = 0.f;
         for (int k = 0; k < 40; ++k)
         {
             const std::int64_t now = 1'000'000 + 100 * k;              // a 10 Hz anchor cycle
             const bool frame = k < 20 and k % 2 == 0;                  // a mask frame every other cycle, then none
-            const std::optional<float> p_new = frame ? std::optional<float>(p_cam_frame) : std::nullopt;
-            const float pv_new = rc::door::combine_view(p_lidar, rc::door::held_camera_view(hold, p_new, now - 30, now, rc::interaction::kAnchorStaleMs));
-            const float pv_old = rc::door::combine_view(p_lidar, frame ? p_cam_frame : 0.f);   // before: no new frame ⇒ 0
+            if (frame) rc::door::hold_mask_frame(hold, frame_pts, now - 30);
+            const float pc = rc::door::held_camera_view(hold, now, rc::interaction::kAnchorStaleMs, cam, W, truth);
+            if (frame) pc_frame = rc::door::camera_seen(cam, W, truth, frame_pts);
+            const float pv_new = rc::door::combine_view(p_lidar, pc);
+            const float pv_old = rc::door::combine_view(p_lidar, frame ? pc_frame : 0.f);   // before: no new frame ⇒ 0
             const bool pub_new = pv_new >= 0.5f, pub_old = pv_old >= 0.5f;
             if (k > 0) { crossings_new += pub_new != last_new; crossings_old += pub_old != last_old; }
             last_new = pub_new; last_old = pub_old;
             if (k < 20) pv_min_streaming = std::min(pv_min_streaming, pv_new);
             if (k_fell < 0 and not pub_new) k_fell = k;
         }
-        std::print("    while frames stream: min p_view {:.3f}; publication-level crossings: {} (old rule {}); falls at cycle {} "
-                   "(last frame at cycle 18, captured 30 ms before it)\n", pv_min_streaming, crossings_new, crossings_old, k_fell);
+        std::print("    camera term at the truth {:.3f}; while frames stream: min p_view {:.3f}; publication-level crossings: {} (old rule {}); "
+                   "falls at cycle {} (last frame at cycle 18, captured 30 ms before it)\n", pc_frame, pv_min_streaming, crossings_new, crossings_old, k_fell);
         check(pv_min_streaming >= 0.5f, "p_view stays at or above the publication level while mask frames keep coming");
         check(crossings_old > 10, "RED reference: the old rule crosses the level on every frame gap");
         check(crossings_new == 1 and k_fell == 28, "...and falls exactly once, when the last frame is kAnchorStaleMs old");
-        // A new frame WITHOUT a door slice is the camera seeing none: it replaces the held value at once.
-        rc::door::CameraViewHold h2;
-        rc::door::held_camera_view(h2, 0.9f, 0, 0, rc::interaction::kAnchorStaleMs);
-        check(rc::door::held_camera_view(h2, 0.f, 100, 100, rc::interaction::kAnchorStaleMs) == 0.f, "a new frame with no door replaces the held view");
+        // Fix round 1: the HELD frame's term is the CURRENT pose's — a pose since dragged 0.6 m along the wall reads low.
+        RelPose dragged = truth; dragged.x.x() += 0.6f;
+        rc::door::hold_mask_frame(hold, frame_pts, 2'000'000);
+        const float pc_t = rc::door::held_camera_view(hold, 2'000'100, rc::interaction::kAnchorStaleMs, cam, W, truth);
+        const float pc_d = rc::door::held_camera_view(hold, 2'000'100, rc::interaction::kAnchorStaleMs, cam, W, dragged);
+        std::print("    held frame, recomputed: at the truth {:.3f}, at a pose dragged 0.6 m {:.3f} (frustum alone {:.3f})\n", pc_t, pc_d,
+                   rc::door::anchor_detail::camera_view(cam, W, dragged.x.cast<double>(), dragged.P.cast<double>()));
+        check(pc_d < 0.5f and pc_t > 0.8f, "the held camera term is recomputed at the current pose (dragged < 0.5, truth > 0.8)");
+        // A new frame WITHOUT a door slice is the camera seeing none: it replaces the held frame at once.
+        rc::door::hold_mask_frame(hold, {}, 2'000'200);
+        check(rc::door::held_camera_view(hold, 2'000'200, rc::interaction::kAnchorStaleMs, cam, W, truth) == 0.f, "a new frame with no door replaces the held one");
+    }
+
+    // ─── fix round 1: a HELD mask frame from a correct earlier frame cannot publish a wrong pose ─────────────────────────
+    std::print("held_mask_wrong_poses\n");
+    {
+        WorldOpts wo; wo.shut = false; wo.back_wall = true;
+        const Pose2 robot = try64_start();
+        const auto rays = scan(world(wo), robot, 180.f, 41);
+        rc::door::CameraFrustum cam; cam.known = true; cam.origin = {0.f, -0.075f}; cam.forward = {0.f, 1.f}; cam.half_fov = 0.96f; cam.max_range = 8.f;
+        // The correct frame's mask: the opening's pixels, on the door plane and seen through it (the far room).
+        std::vector<V3> pts;
+        const float c = std::cos(robot.psi), sn = std::sin(robot.psi);
+        const V2 cam_w = robot.p + V2(c * cam.origin.x() - sn * cam.origin.y(), sn * cam.origin.x() + c * cam.origin.y());
+        for (int i = 0; i < 60; ++i)
+        {
+            const V2 on_plane(-0.5f * W + W * (float(i) + 0.5f) / 60.f, 0.f);
+            const V2 beyond = on_plane + 2.0f * (on_plane - cam_w).normalized();
+            for (const V2& q : {on_plane, beyond}) { const V2 r = to_robot(robot, q); pts.emplace_back(r.x(), r.y(), 1.0f); }
+        }
+        rc::door::CameraViewHold hold;
+        rc::door::hold_mask_frame(hold, pts, 5'000'000);
+        const std::int64_t now = 5'000'500;   // half a window later, no new frame
+        const RelPose truth = creation_prior(robot);
+        const V2 along(std::cos(truth.x.z()), std::sin(truth.x.z())), normal(-along.y(), along.x());
+        RelPose free_space = truth; free_space.x.head<2>() -= 1.2f * normal;
+        RelPose rotated = truth;    rotated.x.z() = rc::interaction::wrap_pi(truth.x.z() + float(M_PI_2));
+        RelPose solid = truth;      solid.x.head<2>() += 1.5f * along;
+        for (const auto& [name, pr] : {std::pair{"truth", truth}, std::pair{"free space", free_space}, std::pair{"rotated", rotated}, std::pair{"solid wall", solid}})
+        {
+            const float pl = rc::door::door_view(pr, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f).p_lidar;
+            const float pc = rc::door::held_camera_view(hold, now, rc::interaction::kAnchorStaleMs, cam, W, pr);
+            const float frustum = float(rc::door::anchor_detail::camera_view(cam, W, pr.x.cast<double>(), pr.P.cast<double>()));
+            const float pv = rc::door::combine_view(pl, pc);
+            std::print("    {:10s} p_lidar {:.3f}  held p_cam {:.3f} (frustum alone {:.3f})  p_view {:.3f}\n", name, pl, pc, frustum, pv);
+            if (std::string_view(name) == "truth") check(pv > 0.5f, "truth with the held frame: p_view > 0.5");
+            else check(pv < 0.5f, std::format("{} with a held correct frame: p_view < 0.5", name));
+        }
     }
 
     // ─── Task 8, fix 2: try65's door, the live configuration ────────────────────────────────────────────────────────
@@ -912,14 +963,14 @@ int main()
         f.prior = creation_prior(robot);
         f.width = 1.14f; f.thickness = 0.05f; f.wall_u_min = -2.5f; f.wall_u_max = 2.5f; f.floor_below = kFloorZ;
         f.lidar_origin = kSensor;
-        f.rays = rc::door::select_anchor_rays(f.prior, f.width, f.thickness, kFloorZ, 2.1f, kSensor, bpearl_scan(webots_door1(true), robot, 9), 2.0f);
+        const auto rays = rc::door::select_anchor_rays(f.prior, f.width, f.thickness, kFloorZ, 2.1f, kSensor, bpearl_scan(webots_door1(true), robot, 9), 2.0f);
         f.mask = mask(0.f, 50);
         f.cam.known = true; f.cam.origin = {0.f, -0.075f}; f.cam.forward = {0.f, 1.f}; f.cam.half_fov = 0.95f; f.cam.max_range = 8.f;
         f.leaf = lp;
         f.pi_open = 0.7f;
-        const auto [post, ev] = update_door_anchor(f.prior, f.width, f.thickness, f.wall_u_min, f.wall_u_max, f.lidar_origin, f.rays, f.mask,
-                                                   f.cam, f.pi_open, f.leaf, f.floor_below);
-        f.post = post; f.n_budget = std::uint32_t(ev.n_budget);
+        const auto [post, ev] = update_door_anchor(f.prior, f.width, f.thickness, f.wall_u_min, f.wall_u_max, f.lidar_origin, rays, f.mask,
+                                                   f.cam, f.pi_open, f.leaf, f.floor_below, &f.staging);
+        f.post = post;
         f.p_lidar = ev.p_lidar; f.p_cam = ev.p_cam; f.p_view = ev.p_view;
         f.lidar_open = ev.lidar_open; f.lidar_door = ev.lidar_door; f.lidar_wall = ev.lidar_wall;
         const std::string path = "build/test_anchor_frames.bin";
@@ -935,12 +986,17 @@ int main()
         {
             const auto& b = back[1];
             check(rc::door::rec::encode(b) == rc::door::rec::encode(f), "the record round-trips bit for bit");
-            const auto [p2, e2] = update_door_anchor(b.prior, b.width, b.thickness, b.wall_u_min, b.wall_u_max, b.lidar_origin, b.rays, b.mask,
-                                                     b.cam, b.pi_open, b.leaf, b.floor_below);
-            std::print("    {} rays ({} in F), {} mask points; replay vs record: Δxy {:.6f} m, Δyaw {:.6f}, Δp_view {:.6f}\n", b.rays.size(),
-                       b.n_budget, b.mask.size(), (p2.x.head<2>() - b.post.x.head<2>()).norm(), std::abs(p2.x.z() - b.post.x.z()),
+            rc::door::AnchorStaging st = b.staging;
+            st.replay = true;
+            const auto [p2, e2] = update_door_anchor(b.prior, b.width, b.thickness, b.wall_u_min, b.wall_u_max, b.lidar_origin, {}, b.mask,
+                                                     b.cam, b.pi_open, b.leaf, b.floor_below, &st);
+            std::print("    {} rays pre-budget, {} + {} staged, {} mask points, record {} bytes; replay vs record: Δxy {:.6f} m, Δyaw {:.6f}, Δp_view {:.6f}\n",
+                       b.staging.prior.n_pre, b.staging.prior.rays.size(), b.staging.post.rays.size(), b.mask.size(), rc::door::rec::encode(b).size(), (p2.x.head<2>() - b.post.x.head<2>()).norm(), std::abs(p2.x.z() - b.post.x.z()),
                        std::abs(e2.p_view - b.p_view));
-            check(p2.x == b.post.x and p2.P == b.post.P and e2.p_view == b.p_view, "re-running the update on the record reproduces it exactly");
+            check(p2.x == b.post.x and p2.P == b.post.P and e2.p_view == b.p_view and e2.p_lidar == b.p_lidar,
+                  "re-running the update on the record's budgeted sets reproduces it exactly");
+            check(b.staging.prior.n_pre == rays.size() and b.staging.prior.rays.size() <= 400 and b.staging.prior.az_step > 0.0,
+                  "the record holds n_pre, ≤ the budget's rays, and the measured azimuth step");
         }
         // A record cut short (the agent killed mid-write) ends the read; the complete ones before it survive.
         {
