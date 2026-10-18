@@ -140,7 +140,14 @@ struct WallRun
     std::size_t lo = 0, hi = 0;   // first and last polygon edge of the run
 };
 
-inline WallRun wall_run_of_edge(std::span<const Eigen::Vector2f> poly, std::size_t edge)
+// ★ A DOORWAY NOTCH DOES NOT END THE WALL (2026-10-18). A learnt room outline follows the scan into the doorway, so
+//   one physical wall reads  main → step in → the opening's floor line → step out → main. The collinear walk stopped
+//   at the first step, the door was anchored to ONE piece, and apply_constraints (its span must fit [0, wall_len])
+//   pinned it there: live, room_2's door_5 sat at s = 0 for 700 cycles, half a door width off the real gap, while
+//   the ZED segmented it squarely. With recess_m > 0 the walk also crosses a detour of up to two edges when the
+//   next same-direction edge lies within recess_m of the run's line — a recess no deeper than the wall itself is
+//   the doorway in that wall, not another wall. recess_m = 0 is the old behaviour exactly.
+inline WallRun wall_run_of_edge(std::span<const Eigen::Vector2f> poly, std::size_t edge, float recess_m = 0.0f)
 {
     WallRun w;
     const std::size_t n = poly.size();
@@ -154,27 +161,63 @@ inline WallRun wall_run_of_edge(std::span<const Eigen::Vector2f> poly, std::size
         return l > 1e-6f ? Eigen::Vector2f(d / l) : Eigen::Vector2f::Zero();
     };
     const Eigen::Vector2f d0 = edge_dir(edge);
-    std::size_t lo = edge, hi = edge;
-    for (std::size_t step = 0; step + 1 < n; ++step)   // backward while the SAME direction (no |·|: see header)
+    const Eigen::Vector2f P0 = poly[edge];
+    const Eigen::Vector2f n0(-d0.y(), d0.x());
+    const auto on_line = [&](std::size_t i) { return std::abs(n0.dot(poly[i % n] - P0)) <= recess_m; };
+    const auto same_wall_edge = [&](std::size_t j)
+    { return edge_dir(j).dot(d0) >= kColinCos and on_line(j) and on_line(j + 1); };
+    std::size_t lo = edge, hi = edge, used = 1;
+    bool detoured = false;
+    while (used < n)   // backward while the SAME direction (no |·|: see header)
     {
         const std::size_t prev = (lo + n - 1) % n;
-        if (prev == hi or edge_dir(prev).dot(d0) < kColinCos) break;
-        lo = prev;
+        if (prev == hi) break;
+        if (edge_dir(prev).dot(d0) >= kColinCos) { lo = prev; ++used; continue; }
+        bool crossed = false;
+        if (recess_m > 0.0f)
+            for (std::size_t k = 1; k <= 2 and used + k < n; ++k)
+            {
+                const std::size_t j = (lo + n - 1 - k) % n;
+                if (j == hi) break;
+                if (same_wall_edge(j)) { lo = j; used += k + 1; crossed = detoured = true; break; }
+            }
+        if (not crossed) break;
     }
-    for (std::size_t step = 0; step + 1 < n; ++step)   // forward
+    while (used < n)   // forward
     {
         const std::size_t nxt = (hi + 1) % n;
-        if (nxt == lo or edge_dir(nxt).dot(d0) < kColinCos) break;
-        hi = nxt;
+        if (nxt == lo) break;
+        if (edge_dir(nxt).dot(d0) >= kColinCos) { hi = nxt; ++used; continue; }
+        bool crossed = false;
+        if (recess_m > 0.0f)
+            for (std::size_t k = 1; k <= 2 and used + k < n; ++k)
+            {
+                const std::size_t j = (hi + 1 + k) % n;
+                if (j == lo) break;
+                if (same_wall_edge(j)) { hi = j; used += k + 1; crossed = detoured = true; break; }
+            }
+        if (not crossed) break;
     }
     const Eigen::Vector2f a   = poly[lo];
     const Eigen::Vector2f far = poly[(hi + 1) % n];
-    const Eigen::Vector2f ab  = far - a;
-    const float len = ab.norm();
-    if (len < 1e-6f)
-        return w;
-    w.O = a; w.u = ab / len; w.len = len; w.lo = lo; w.hi = hi; w.ok = true;
-    if (polygon_area2(poly) < 0.0) { w.O = far; w.u = -w.u; }   // CW: traverse backwards ⇒ n inward
+    if (detoured)
+    {
+        // The run's ends may sit on the recessed line; the wall is the SEED edge's line, so project onto it.
+        const Eigen::Vector2f O = P0 + (a - P0).dot(d0) * d0;
+        const float len = (far - O).dot(d0);
+        if (len < 1e-6f)
+            return w;
+        w.O = O; w.u = d0; w.len = len; w.lo = lo; w.hi = hi; w.ok = true;
+    }
+    else
+    {
+        const Eigen::Vector2f ab  = far - a;
+        const float len = ab.norm();
+        if (len < 1e-6f)
+            return w;
+        w.O = a; w.u = ab / len; w.len = len; w.lo = lo; w.hi = hi; w.ok = true;
+    }
+    if (polygon_area2(poly) < 0.0) { w.O = w.O + w.len * w.u; w.u = -w.u; }   // CW: traverse backwards ⇒ n inward
     return w;
 }
 
@@ -187,7 +230,7 @@ inline WallRun wall_run_of_edge(std::span<const Eigen::Vector2f> poly, std::size
 // say which edge a sightline leaves through, so then every point votes for its nearest wall. With a single
 // point and no camera this is exactly the old nearest-edge rule.
 inline WallRun associate_wall(std::span<const Eigen::Vector2f> poly, std::span<const Eigen::Vector2f> pts,
-                              const std::optional<Eigen::Vector2f>& cam)
+                              const std::optional<Eigen::Vector2f>& cam, float recess_m = 0.0f)
 {
     const std::size_t n = poly.size();
     if (n < 3 or pts.empty())
@@ -204,13 +247,13 @@ inline WallRun associate_wall(std::span<const Eigen::Vector2f> poly, std::span<c
             if (const std::size_t ne = nearest_edge(p, poly); ne < n) e = ne;
         if (not e.has_value()) continue;
         if (run_of[*e] == n)
-            if (const WallRun r = wall_run_of_edge(poly, *e); r.ok) run_of[*e] = r.lo;
+            if (const WallRun r = wall_run_of_edge(poly, *e, recess_m); r.ok) run_of[*e] = r.lo;
         if (run_of[*e] < n) votes[run_of[*e]] += 1.0;
     }
     const auto it = std::ranges::max_element(votes);
     if (*it <= 0.0)
         return {};
-    return wall_run_of_edge(poly, static_cast<std::size_t>(std::distance(votes.begin(), it)));
+    return wall_run_of_edge(poly, static_cast<std::size_t>(std::distance(votes.begin(), it)), recess_m);
 }
 
 // ─── the poses ───────────────────────────────────────────────────────────────────────────────────

@@ -172,7 +172,8 @@ DoorFitter::WallFrame DoorFitter::associate_wall(std::span<const Eigen::Vector2f
                                                  const std::optional<Eigen::Vector2f>& cam_xy) const
 {
     WallFrame w;
-    if (const auto r = door::associate_wall(room_polygon_, pts_xy, cam_xy); r.ok)
+    // A doorway recess no deeper than the wall belongs to the wall (door_standpoint.h, wall_run_of_edge).
+    if (const auto r = door::associate_wall(room_polygon_, pts_xy, cam_xy, room_band().wall_thickness_m); r.ok)
     { w.O = r.O; w.u = r.u; w.len = r.len; w.ok = true; }
     return w;
 }
@@ -535,7 +536,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         if (const WallFrame wf = associate_wall(pts_xy, cam_xy); wf.ok)
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
-            s0.s = std::clamp((centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w, 0.0f, std::max(0.0f, wf.len - s0.w));
+            s0.s = (centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w;   // not clamped to the run: see apply_constraints
         }
         else
             s0.s = centroid_xy.x() - 0.5f * s0.w;

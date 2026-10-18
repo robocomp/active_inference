@@ -90,7 +90,7 @@ struct DoorBeliefParams
     float tpl_h = 2.00f;
 
     // Associated wall segment length (m), authored by the fitter. The panel must lie WITHIN its wall, so
-    // apply_constraints clamps s ∈ [0, wall_len − w] when this is > 0 (a door can't run past the corner).
+    // Length of the associated wall run (informational). s is NOT clamped to it: see apply_constraints.
     float wall_len = 0.0f;
 
     // Temporal transition (static furniture). s tracks localisation jitter; w,h barely move.

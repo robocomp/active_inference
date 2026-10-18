@@ -129,12 +129,13 @@ void DoorBelief::apply_constraints(DoorBeliefState& s) const
 {
     s.w = std::max(0.05f, s.w);   // a panel cannot have non-positive extent
     s.h = std::max(0.05f, s.h);
-    // A door lies WITHIN its wall: its span [s, s+w] must fit the segment [0, wall_len]. Clamp the near
-    // edge so it can't run past either corner (physical, from the wall geometry — not a tuning threshold).
-    // This constrains the APERTURE, which is rigid in the wall. A swung LEAF legitimately protrudes past
-    // the wall plane — never clamp the leaf footprint here.
-    if (params_.wall_len > 0.0f)
-        s.s = std::clamp(s.s, 0.0f, std::max(0.0f, params_.wall_len - s.w));
+    // ★ NO CLAMP OF s TO THE WALL RUN (2026-10-18). This used to force the span [s, s+w] inside [0, wall_len], on
+    //   the argument that a door lies within its wall. In an outline traced from free space the doorway is exactly
+    //   where the wall is ABSENT: the outline bends into the opening at the jambs, so the door spans the GAP between
+    //   two runs, never the inside of one. Live try50: room_2's carried mirror of door_1 sat at (0.08,0.03), the
+    //   run began at x = −0.11, the clamp put s = 0 and the door centre at x = 0.39 (std_s 0.58 m — the belief did
+    //   not know, the clamp decided); the cross axis ran 0.35 m off the opening and the robot drove into the jamb.
+    //   s is now decided by the evidence and its prior; the wall-band prior still keeps the aperture IN the wall.
 }
 
 // ─── Engine hooks: prior cov, process noise, common-mode ─────────────────────────
@@ -276,13 +277,14 @@ bool DoorBelief::self_test()
         check(b.state().w < 0.90f, "template width anchor overwhelmed by an over-segmented mask (w drifted wide)");
     }
 
-    // (f) segment clamp: with a short wall the panel must not run past a corner — s clamped to [0, len−w].
+    // (f) NO segment clamp (2026-10-18): a door spans the GAP between two wall runs of a free-space outline, so a
+    //     span past the run's end is the normal case at a doorway — apply_constraints must leave s alone.
     {
         DoorBeliefParams Pc = P; Pc.wall_len = 1.0f;
-        DoorBelief b(DoorBeliefState{0.90f, 0.70f, 2.00f}, Pc);   // seed s so s+w=1.6 > len=1.0 (pokes out)
+        DoorBelief b(DoorBeliefState{0.90f, 0.70f, 2.00f}, Pc);   // s+w = 1.6 > len = 1.0: the door straddles the run end
         DoorBeliefState s = b.state(); b.apply_constraints(s); b.set_state(s);
-        std::printf("  clamp: s=%.3f (wall_len=1.0, w=0.70 → s must be ≤ 0.30)\n", b.state().s);
-        check(b.state().s <= 0.30f + 1e-4f and b.state().s >= 0.0f, "along-wall clamp did not keep the panel within its wall");
+        std::printf("  no clamp: s=%.3f (wall_len=1.0, w=0.70 → s must stay 0.90)\n", b.state().s);
+        check(std::abs(b.state().s - 0.90f) < 1e-4f, "apply_constraints moved s: a doorway span must not be clamped into one run");
     }
 
     // (g) APERTURE / LEAF geometry (door_geometry.h). Asserts that phi = 0 reproduces the old wall-plane
