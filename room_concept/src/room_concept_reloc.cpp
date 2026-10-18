@@ -138,8 +138,66 @@ namespace rc
         ep.incumbent_x = incumbent.x(); ep.incumbent_y = incumbent.y(); ep.incumbent_theta = incumbent.z();
         ep.incumbent_loss = inc_med;
 
-        const auto res = rc::reloc::search(reloc_raster_, poly, pts2, {incumbent}, rp,
-                                           static_cast<std::uint32_t>(ep.ts_ms & 0xffffffff));
+        auto res = rc::reloc::search(reloc_raster_, poly, pts2, {incumbent}, rp,
+                                     static_cast<std::uint32_t>(ep.ts_ms & 0xffffffff));
+        // ★ THE MODES ARE A POSTERIOR, NOT A LIKELIHOOD (2026-10-18). The search weighs each mode by how well it
+        //   explains the scan alone. In a symmetric room (live: room_2 promoted as a 4-vertex rectangle) the true
+        //   pose and its 180° twin explain it EQUALLY (w = 0.50 each), so the top was a coin toss and the pose
+        //   flipped 34 times in 200 s, dragging both doors to the mirrored side. A lost search still has a prior:
+        //   P(lost) of being anywhere in the room (uniform over area × 2π) and 1 − P(lost) of being where tracking
+        //   left it, under its covariance + the mode's own + the likelihood's basin. A twin metres away now has
+        //   to WIN on the scan; a tie stays put, and a real kidnap (P(lost) → 1, a decisive misfit) still moves.
+        if (search_trigger_ == "lost" and not res.modes.empty() and std::isfinite(pending_episode_p_lost_))
+        {
+            const double pl = std::clamp(static_cast<double>(pending_episode_p_lost_), 1e-9, 1.0 - 1e-9);
+            double area2 = 0.0;
+            for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+                area2 += static_cast<double>(poly[j].x()) * poly[i].y() - static_cast<double>(poly[i].x()) * poly[j].y();
+            const double log_uniform = -std::log(std::max(0.5 * std::abs(area2), 1e-6) * 2.0 * M_PI);
+            std::vector<float> ranges;   // the basin's rotational width: σ_sdf over the scan's median range
+            ranges.reserve(pts2.size());
+            for (const auto& q : pts2) ranges.push_back(q.norm());
+            float r_scale = 1.f;
+            if (not ranges.empty())
+            {
+                const auto mid = ranges.begin() + static_cast<std::ptrdiff_t>(ranges.size() / 2);
+                std::ranges::nth_element(ranges, mid);
+                r_scale = std::max(*mid, rp.sigma_sdf);
+            }
+            Eigen::Matrix3f basin = Eigen::Matrix3f::Zero();
+            basin(0, 0) = basin(1, 1) = rp.sigma_sdf * rp.sigma_sdf;
+            basin(2, 2) = (rp.sigma_sdf / r_scale) * (rp.sigma_sdf / r_scale);
+            const Eigen::Matrix3f S_inc = current_covariance.allFinite() ? Eigen::Matrix3f(current_covariance + basin) : basin;
+            float lw_max = -std::numeric_limits<float>::infinity();
+            for (auto& m : res.modes)
+            {
+                Eigen::Vector3f d = m.pose - incumbent;
+                d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+                const Eigen::Matrix3f S = S_inc + m.cov;
+                const Eigen::LDLT<Eigen::Matrix3f> ldlt(S);
+                const double maha = d.dot(ldlt.solve(d));
+                const double logdet = ldlt.vectorD().array().abs().max(1e-30f).log().sum();
+                const double log_near = std::isfinite(maha) ? -0.5 * maha - 0.5 * (3.0 * std::log(2.0 * M_PI) + logdet)
+                                                            : -std::numeric_limits<double>::infinity();
+                const double a = std::log(1.0 - pl) + log_near, b = std::log(pl) + log_uniform;
+                const double hi = std::max(a, b);
+                m.log_weight += static_cast<float>(hi + std::log(std::exp(a - hi) + std::exp(b - hi)));
+                lw_max = std::max(lw_max, m.log_weight);
+            }
+            double z = 0.0;
+            for (const auto& m : res.modes) z += std::exp(static_cast<double>(m.log_weight - lw_max));
+            res.entropy = 0.f;
+            float sw2 = 0.f;
+            for (auto& m : res.modes)
+            {
+                m.log_weight = static_cast<float>(m.log_weight - lw_max - std::log(z));
+                m.weight = std::exp(m.log_weight);
+                if (m.weight > 0.f) res.entropy -= m.weight * m.log_weight;
+                sw2 += m.weight * m.weight;
+            }
+            res.ess = sw2 > 0.f ? 1.f / sw2 : 0.f;
+            std::ranges::sort(res.modes, std::ranges::greater{}, &rc::reloc::Mode::weight);
+        }
         ep.n_evals = res.n_evals; ep.duration_ms = res.duration_ms;
         ep.n_modes = static_cast<int>(res.modes.size()); ep.mode_entropy = res.entropy; ep.ess = res.ess;
         ep.n_yaws = res.n_yaws; ep.n_segments = res.n_segments;
