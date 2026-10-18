@@ -31,6 +31,7 @@
 
 #include "viewpoint_score.h"
 #include "../room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
+#include "../interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor — a robot-relative copy is not an obstacle
 
 namespace rc::nbv
 {
@@ -81,6 +82,11 @@ inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::D
         for (const auto& n : G.get_nodes_by_type(type))
         {
             if (n.id() == self_id)
+                continue;
+            // An interaction anchor (`<object>@robot`) is a robot-relative COPY of an object hung from the robot
+            // during an execution: it carries the original's size, so read here it is a second, door-sized
+            // obstacle at the robot's own pose. The original is already in this list.
+            if (rc::interaction::is_anchor(G, n))
                 continue;
             const auto w = G.get_attrib_by_name<width_m_att>(n);
             const auto d = G.get_attrib_by_name<depth_m_att>(n);

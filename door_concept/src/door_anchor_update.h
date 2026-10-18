@@ -107,6 +107,65 @@ struct AnchorEvidence
     float camera_nis = -1.f;                          // mask centroid's normalised innovation; -1 = no mask
 };
 
+// ─── THE INITIAL BELIEF (from_room) ─────────────────────────────────────────────────────────────────────────
+// The anchor is initialised once from the room frames, robot←room ∘ room←opening. Its covariance is the sum of
+// THREE INDEPENDENT sources, all in the ANCHOR's axes (along the wall, across it, yaw) — independent, so they add:
+// no max, no floor.
+//   belief      the door belief's own variance of the opening (door_concept's AI2 belief: the along-wall centre);
+//   robot_pose  the robot←room localisation covariance, projected onto the anchor (robot_pose_cov_on_anchor_*);
+//   σ_model     the room-frame-vs-sensor DISCREPANCY the anchor exists to absorb: a room-frame door fit that is
+//               internally confident and still wrong (try63 leg 2: σ_s 0.04 m with the door 0.45 m off), the room
+//               polygon line vs the wall's mid-plane, a wall direction from a short polygon edge. Neither of the
+//               other two terms can see that error — it is a MODEL error of the room-frame chain, not noise in it.
+// ★Without σ_model the room's confidence becomes the anchor's: a 0.04 m prior on a door 0.45 m off is an 11σ
+//  error, the jamb rays are outliers the clutter components absorb, and the anchor never moves (test
+//  room_frame_error_is_correctable, RED with the belief-only prior).
+inline Eigen::Matrix3f anchor_prior_cov(const Eigen::Matrix3f& belief, const Eigen::Matrix3f& robot_pose,
+                                        const Eigen::Vector3f& sigma_model)
+{
+    return belief + robot_pose + Eigen::Matrix3f(sigma_model.cwiseAbs2().asDiagonal());
+}
+
+// Anchor-axes covariance → RelPose coordinates (x, y of the anchor origin IN THE ROBOT FRAME, yaw).
+inline Eigen::Matrix3f anchor_axes_to_robot(const Eigen::Matrix3f& P_anchor, float anchor_yaw)
+{
+    Eigen::Matrix3f R = Eigen::Matrix3f::Identity();
+    R.topLeftCorner<2, 2>() << std::cos(anchor_yaw), -std::sin(anchor_yaw), std::sin(anchor_yaw), std::cos(anchor_yaw);
+    return R * P_anchor * R.transpose();
+}
+inline Eigen::Matrix3f robot_to_anchor_axes(const Eigen::Matrix3f& P_robot, float anchor_yaw)
+{
+    return anchor_axes_to_robot(P_robot, -anchor_yaw);
+}
+
+// The localisation covariance projected onto the anchor, for the two ways the localisation edge can be anchored.
+// `anchor` = the opening in the ROBOT frame (x, y, yaw); C = the edge's (x, y, yaw) pose covariance, in the
+// edge's PARENT frame (dsr_rt_api.h: "the pose is written in the PARENT frame, so its covariance is too").
+//
+// Edge robot → room (parent = robot; this fleet's room_concept): the edge is the room's pose (t, θ) in the robot
+// frame, and the anchor is p = R(θ)·p_room + t ⇒ ∂p/∂t = I, ∂p/∂θ = S·(p − t) = (−(p_y − t_y), p_x − t_x), ∂yaw/∂θ = 1.
+inline Eigen::Matrix3f robot_pose_cov_on_anchor_from_room_in_robot(const Eigen::Matrix3f& C, const Eigen::Vector2f& room_in_robot,
+                                                                   const Eigen::Vector3f& anchor)
+{
+    Eigen::Matrix3f J = Eigen::Matrix3f::Identity();
+    J(0, 2) = -(anchor.y() - room_in_robot.y());
+    J(1, 2) =  (anchor.x() - room_in_robot.x());
+    return robot_to_anchor_axes(J * C * J.transpose(), anchor.z());
+}
+// Edge room → robot (parent = room): the edge is the robot's pose (t_r, θ_r) in the room, and the anchor is
+// p = R(θ_r)ᵀ(p_room − t_r) ⇒ ∂p/∂t_r = −R(θ_r)ᵀ, ∂p/∂θ_r = (p_y, −p_x), ∂yaw/∂θ_r = −1.
+inline Eigen::Matrix3f robot_pose_cov_on_anchor_from_robot_in_room(const Eigen::Matrix3f& C, float robot_yaw_in_room,
+                                                                   const Eigen::Vector3f& anchor)
+{
+    const float c = std::cos(robot_yaw_in_room), s = std::sin(robot_yaw_in_room);
+    Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
+    J.topLeftCorner<2, 2>() << -c, -s, s, -c;   // −R(θ_r)ᵀ
+    J(0, 2) = anchor.y();
+    J(1, 2) = -anchor.x();
+    J(2, 2) = -1.f;
+    return robot_to_anchor_axes(J * C * J.transpose(), anchor.z());
+}
+
 namespace anchor_detail
 {
 constexpr double kRangeSigma  = 0.05;   // beam range noise (m), as in door_phi_posterior.h

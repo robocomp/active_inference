@@ -1042,7 +1042,18 @@ void SpecificWorker::compute()
     // write are all parented by it.
     step_room_following();
     if (room_node_id_ == 0)
+    {
+        // ★ NO ROOM, BUT A PASSAGE IN FLIGHT (mid room-switch): the anchor's prediction and its robot-frame LiDAR /
+        //   mask update need no room, and an edge left unwritten for 1 s is read as a dead owner — the controller
+        //   would fall back to the room route in the doorway. Keep it alive; only the re-init waits for a room.
+        if (passage_anchor_.has_value())
+        {
+            if (lidar_ingestor_) lidar_ingestor_->pump();   // the room-frame sweep fails here; the robot-frame one does not
+            if (mask_ingestor_) mask_ingestor_->refresh();
+            step_passage_anchor();
+        }
         return;
+    }
 
     // Hang a mirror of the crossed door from every proto-room (and drop mirrors whose room or source is gone).
     step_entry_mirrors();
@@ -3874,6 +3885,12 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     //   the crossed one is the counterpart in ltsm's passage node — so they are HELD: this agent stops fitting them
     //   (drops the instance and its four affordances) but leaves the door node and its RT under the old room's wall.
     //   They go with this agent's owned nodes on exit, or with the room if ltsm ever evicts it.
+    // ★ A ROOM SWITCH DURING THE CROSS IS THE CROSS'S TERMINAL TRANSITION (fix round 1, controller ruling). The robot
+    //   has gone through: ltsm moves `current` before door_concept could complete the cross, and the door released
+    //   below takes its cross affordance with it. Removed HERE, first, so the affordance's link goes before its node.
+    //   During approach/open the anchor is instead relinked at the end of this function.
+    if (passage_anchor_.has_value() and passage_anchor_->cross_was_claimed)
+        remove_passage_anchor("the room switched while the cross was claimed: the robot has crossed");
     const bool old_room_lives = G->get_node(old_room).has_value();
     // ★ AND THE CROSSED DOOR IS ALREADY KNOWN IN THE NEW ROOM: its entry mirror (step_entry_mirrors) sits under the
     //   new room at the exact transform of the source door. It becomes this room's door instance, so a detection of
@@ -4003,8 +4020,9 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                     }
         }
     // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
-    //   one thing the room switch owes it is its ORIGINAL: when the door carried across is the anchored one (same
-    //   source node, or the same doorway name — one name per doorway), the anchor now names that door.
+    //   one thing the room switch owes it (during approach/open — a switch during the cross removed it at the top of
+    //   this function) is its ORIGINAL: when the door carried across is the anchored one (same source node, or the
+    //   same doorway name — one name per doorway), the anchor now names that door.
     if (passage_anchor_.has_value() and adopt_mirror != 0 and adopted_from.has_value()
         and (adopted_from->source_id == passage_anchor_->door_id or adopted_from->name == passage_anchor_->door_name))
         relink_passage_anchor(adopt_mirror, "room switch: the crossed door, re-identified in the new room");

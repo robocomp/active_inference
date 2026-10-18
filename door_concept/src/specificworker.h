@@ -295,9 +295,9 @@ private:
     // `door_N@robot` hangs from the robot node (common/interaction_anchor). Its robot-relative pose is
     // initialised ONCE from the room frames, then predicted by odometry and corrected by the bpearl rays and
     // the door mask in the ROBOT frame (door_anchor_update.h), so a room-frame jump cannot move the target.
-    // ONE anchor per passage: it survives approach → open → cross, the room switch (relink, never removed by
-    // it) and the gaps between claims, and goes when the cross ends, the consumer turns to something else, or
-    // the agent exits. See step_passage_anchor() for the state machine.
+    // ONE anchor per passage: it survives approach → open → cross and the gaps between claims, and goes when the
+    // cross ends (a room switch during the cross IS its end), the consumer turns to something else, or the agent
+    // exits. A room switch during approach/open relinks it. See step_passage_anchor() for the state machine.
     struct PassageAnchor
     {
         std::optional<rc::interaction::Anchor> anchor;    // engaged while the node exists
@@ -308,6 +308,8 @@ private:
         rc::interaction::RelPose pose;                    // the belief, robot frame
         float width = 0.9f, thickness = 0.05f, height = 2.0f;   // refreshed from the door while it is fitted
         bool  approach_was_claimed = false, cross_was_claimed = false;
+        std::uint64_t consumer_id = 0;                    // the agent node whose `executing` edge we serve (0 = legacy)
+        bool  reinit_on_next_claim = false;               // relinked by a room switch: the next claim re-inits from the room
         int   last_mask_frame = -1;                       // each mask frame is evidence ONCE
         std::int64_t last_lidar_stamp = 0;                // each bpearl capture is evidence ONCE
     };

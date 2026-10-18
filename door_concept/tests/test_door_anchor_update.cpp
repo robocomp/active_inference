@@ -221,6 +221,32 @@ int main()
         check((post.x.head<2>() - V2(0.f, D)).norm() < 0.05f, "posterior within 0.05 m of the true opening");
     }
 
+    // ★ The caller's prior (specificworker_anchor.cpp::anchor_from_room) after fix round 1: door belief + projected
+    //   localisation covariance + σ_model. try63 leg 2: σ_s 0.04 m on a door fitted 0.45 m off. The OLD prior (the
+    //   belief's 0.04 alone on the lateral axis) must fail to correct it — that is what made the error uncorrectable.
+    std::print("room_frame_error_is_correctable\n");
+    {
+        const Eigen::Matrix3f belief = V3(0.04f * 0.04f, 0.f, 0.f).asDiagonal();            // σ_s 0.04, anchor axes
+        const Eigen::Matrix3f C_edge = V3(0.03f * 0.03f, 0.03f * 0.03f, 0.01f * 0.01f).asDiagonal();   // room in robot
+        const V3 mean(0.45f, D, 0.f);                                                          // 0.45 m off along the wall
+        const Eigen::Matrix3f robot_pose =
+            rc::door::robot_pose_cov_on_anchor_from_room_in_robot(C_edge, V2(-1.0f, -2.0f), mean);
+        auto run = [&](const Eigen::Matrix3f& P_anchor)
+        {
+            RelPose r; r.x = mean; r.P = rc::door::anchor_axes_to_robot(P_anchor, mean.z()); r.stamp_ms = 1;
+            for (int k = 0; k < 3; ++k) r = update_door_anchor(r, W, T, kOrigin, open_rays, {}).first;
+            return r;
+        };
+        const RelPose fixed = run(rc::door::anchor_prior_cov(belief, robot_pose, V3(0.3f, 0.2f, 0.1f)));
+        const RelPose old   = run(V3(0.04f * 0.04f, 0.2f * 0.2f, 0.1f * 0.1f).asDiagonal());
+        std::print("    new prior: x={:.3f} σ_lat={:.3f}   old prior (σ_s only): x={:.3f} σ_lat={:.3f}\n",
+                   fixed.x.x(), std::sqrt(fixed.P(0, 0)), old.x.x(), std::sqrt(old.P(0, 0)));
+        check(std::abs(fixed.x.x()) < 0.05f, "summed prior: lateral error < 0.05 m after ≤ 3 updates");
+        check(std::abs(old.x.x()) >= 0.05f, "RED with the belief-only prior: lateral error stays ≥ 0.05 m");
+        const Eigen::Matrix3f sum = rc::door::anchor_prior_cov(belief, robot_pose, V3(0.3f, 0.2f, 0.1f));
+        check(std::abs(sum(0, 0) - (0.04f * 0.04f + robot_pose(0, 0) + 0.09f)) < 1e-6f, "the three sources ADD (no max, no floor)");
+    }
+
     std::print("no_data_is_prior\n");
     {
         const RelPose pr = prior_offset();

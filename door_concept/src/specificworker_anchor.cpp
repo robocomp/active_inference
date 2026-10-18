@@ -17,18 +17,25 @@
  *            approach → cross handover the SAME anchor is re-linked (link_affordance drops the approach's link):
  *            same opening, same robot-frame belief, nothing re-initialised. Re-asserted EVERY cycle: a consumer's
  *            whole-node update of the affordance can erase an attribute it never read.
- *   RE-INIT  from_room again ONLY when the claimed affordance is the one already linked and its executing epoch
- *            changed (the consumer accepted a new proposal). The anchor's axes keep the side they had.
- *   PARK     approach ended (any outcome), or the door's instance is gone (merged, released by a room switch): the
- *            anchor is kept, predicted and corrected. The passage may go on (open, then cross), and a room switch
- *            must never remove it — release_room() RELINKS it to the door re-identified in the new room.
+ *   RE-INIT  from_room again ONLY when (i) the claimed affordance is the one already linked and its executing epoch
+ *            changed (the consumer accepted a new proposal), or (ii) the first claim after a room-switch RELINK (a
+ *            new door instance: the old belief is not carried into a new passage). The axes keep their side.
+ *   PARK     approach ended (any outcome), `open` claimed, or the door's instance is gone (merged): the anchor is
+ *            kept, predicted and corrected — the passage may go on (open, then cross).
+ *   ROOM     release_room(): a switch while the anchored door's CROSS is claimed IS the cross's terminal transition
+ *            ⇒ REMOVE (the room switch normally lands before door_concept completes the cross). A switch during
+ *            approach/open RELINKS the anchor to the door re-identified in the new room, and marks it for re-init.
  *   REMOVE   (a) the cross claim of the anchored door ENDED while its instance lives (completed, aborted,
- *                released): the passage is over;
- *            (b) nothing of this door's approach/open/cross is claimed AND the consumer holds an `executing` edge
- *                to some other affordance: it has turned to something else (close, afford_room, another door);
+ *                released): the passage is over; or the room switched during the cross (above);
+ *            (b) nothing of this door's approach/open/cross is claimed AND THE SAME CONSUMER (the agent node of the
+ *                claim we served, ExecutingClaim::agent_node_id) holds an `executing` edge to some other affordance:
+ *                it has turned to something else (close, afford_room, another door). Other consumers' edges are
+ *                not this passage's business. A legacy consumer (no edge, consumer unknown) never triggers it;
  *            (c) the agent exits (cleanup_owned_nodes), or the anchor node vanished under us.
- *   A parked anchor with NO executing edge anywhere is kept (a gap between two passage steps looks exactly like
- *   that); it is removed by (b) as soon as the consumer claims anything, and by (c).
+ *   A parked anchor whose consumer holds NO executing edge is kept (a gap between two passage steps looks exactly
+ *   like that); it is removed by (b) as soon as that consumer claims anything, and by (c).
+ *   Room-less cycles (room_node_id_ == 0, mid-switch) still run the step: prediction and the robot-frame LiDAR need
+ *   no room — only a re-init does, and it waits for one.
  *
  * Every graph access here is on the main thread (compute()), ts==0 on the main-thread-owned inner_eigen_.
  */
@@ -50,15 +57,15 @@
 
 namespace
 {
-// ★ The anchor's initial covariance, where the door belief does not supply it (ruling 8, stated physically):
-//   lateral 0.3 m — a door fit whose position belief has not converged can sit a jamb's width off;
-//   depth   0.2 m — the wall's thickness plus the polygon/face ambiguity of where the opening's mid-plane is;
+// ★ σ_model (fix round 1, controller ruling): the room-frame-vs-sensor DISCREPANCY the anchor exists to absorb —
+//   the error a confident room-frame chain can still carry and that neither the door belief nor the localisation
+//   covariance can see (try63 leg 2: the door belief's σ_s was 0.04 m with the door 0.45 m off):
+//   lateral 0.3 m  — a door fit can sit a jamb's width off along its wall;
+//   depth   0.2 m  — the room polygon line vs the wall's mid-plane, plus the wall's thickness;
 //   yaw     0.1 rad — a wall direction from a few metres of polygon edge.
-// The lateral one is REPLACED by the AI2 belief's own variance of the opening's along-wall centre when the
-// belief exists. Neither includes the robot's localisation covariance (see the report's concerns).
-constexpr float kSigmaLateralDefault = 0.30f;
-constexpr float kSigmaDepth          = 0.20f;
-constexpr float kSigmaYaw            = 0.10f;
+// ADDED to the door belief's variance and to the projected localisation covariance (rc::door::anchor_prior_cov):
+// independent sources add — no max, no floor.
+const Eigen::Vector3f kSigmaModel(0.30f, 0.20f, 0.10f);
 // Ray preselection (door_anchor_update.h asks the caller for the doorway NEIGHBOURHOOD): a beam whose segment
 // passes within this distance of the predicted opening centre. COST, not information — rays farther away cannot
 // cross the opening or its jambs, and add ~linear time to the free-energy evaluation. Not a decision level on
@@ -109,26 +116,58 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
         return T;
     };
 
-    // Lateral variance of the opening's CENTRE along the wall: centre = O + (s + w/2)·u ⇒ J = [1, ½, 0] on [s, w, h].
-    float var_lat = kSigmaLateralDefault * kSigmaLateralDefault;
+    auto r = rc::interaction::from_room(T_room_robot.value(), make(ux, uy), Eigen::Matrix3f::Identity());
+    if (keep_side_of.has_value()
+        and std::abs(rc::interaction::wrap_pi(r.x.z() - keep_side_of->x.z())) > float(M_PI_2))
+        r = rc::interaction::from_room(T_room_robot.value(), make(-ux, -uy), Eigen::Matrix3f::Identity());
+
+    // ── P0 = door belief + localisation + σ_model, all in the ANCHOR's axes, then into RelPose coordinates ──────
+    // (1) The door belief: variance of the opening's CENTRE along the wall, centre = O + (s + w/2)·u ⇒ J = [1, ½, 0]
+    //     on [s, w, h]. The belief says nothing across the wall or about yaw (the wall is the room's). No belief ⇒ 0.
+    Eigen::Matrix3f P_belief = Eigen::Matrix3f::Zero();
     if (inst.ai2_initialized)
     {
         const auto& S = inst.ai2_belief.covariance();
         if (const float v = S(0, 0) + 0.25f * S(1, 1) + S(0, 1); std::isfinite(v) and v > 0.0f)
-            var_lat = v;
+            P_belief(0, 0) = v;
     }
-    const Eigen::Matrix3f P_anchor = Eigen::Vector3f(var_lat, kSigmaDepth * kSigmaDepth, kSigmaYaw * kSigmaYaw).asDiagonal();
-
-    auto r = rc::interaction::from_room(T_room_robot.value(), make(ux, uy), P_anchor);
-    if (keep_side_of.has_value()
-        and std::abs(rc::interaction::wrap_pi(r.x.z() - keep_side_of->x.z())) > float(M_PI_2))
-        r = rc::interaction::from_room(T_room_robot.value(), make(-ux, -uy), P_anchor);
-    // P_anchor is stated in the ANCHOR's axes (along wall, across wall); RelPose's (x, y) are ROBOT-frame
-    // coordinates of the anchor origin, so its position block is R(yaw)·diag·R(yaw)ᵀ.
-    const float cy = std::cos(r.x.z()), sy = std::sin(r.x.z());
-    Eigen::Matrix3f Rz = Eigen::Matrix3f::Identity();
-    Rz.topLeftCorner<2, 2>() << cy, -sy, sy, cy;
-    r.P = Rz * P_anchor * Rz.transpose();
+    // (2) The localisation covariance room_concept writes on the robot↔room RT edge (pose covariance, PARENT frame),
+    //     projected through the composition onto the anchor. This fleet anchors it robot → room; room → robot is
+    //     handled too. No direct edge or no covariance on it ⇒ this term is 0 (stated, not invented).
+    Eigen::Matrix3f P_robot = Eigen::Matrix3f::Zero();
+    if (rt_api_)
+        if (const auto room_n = G->get_node(room), robot_n = G->get_node(robot); room_n.has_value() and robot_n.has_value())
+        {
+            auto se2 = [](const Eigen::Matrix<double, 6, 6>& C6)
+            {
+                constexpr int k[3] = {0, 1, 5};
+                Eigen::Matrix3f C = Eigen::Matrix3f::Zero();
+                for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) C(i, j) = float(C6(k[i], k[j]));
+                return C;
+            };
+            if (const auto e = G->get_edge(robot_n->id(), room_n->id(), "RT"); e.has_value())
+            {
+                if (const auto C6 = rt_api_->get_edge_RT_covariance(e.value()); C6.has_value() and C6->allFinite())
+                {
+                    const Eigen::Vector2f room_in_robot = T_room_robot->inverse().translation().head<2>().cast<float>();
+                    P_robot = rc::door::robot_pose_cov_on_anchor_from_room_in_robot(se2(C6.value()), room_in_robot, r.x);
+                }
+            }
+            else if (const auto e2 = G->get_edge(room_n->id(), robot_n->id(), "RT"); e2.has_value())
+                if (const auto C6 = rt_api_->get_edge_RT_covariance(e2.value()); C6.has_value() and C6->allFinite())
+                {
+                    const auto& L = T_room_robot->linear();
+                    P_robot = rc::door::robot_pose_cov_on_anchor_from_robot_in_room(
+                        se2(C6.value()), float(std::atan2(L(1, 0), L(0, 0))), r.x);
+                }
+        }
+    const Eigen::Matrix3f P_anchor = rc::door::anchor_prior_cov(P_belief, P_robot, kSigmaModel);
+    r.P = rc::door::anchor_axes_to_robot(P_anchor, r.x.z());
+    std::print("door_concept: [anchor] P0 for {} (anchor axes, σ): belief {:.3f} m · localisation ({:.3f}, {:.3f}) m "
+               "{:.3f} rad · model ({:.2f}, {:.2f}) m {:.2f} rad ⇒ lateral {:.3f} m\n", inst.node_name,
+               std::sqrt(P_belief(0, 0)), std::sqrt(std::max(0.f, P_robot(0, 0))), std::sqrt(std::max(0.f, P_robot(1, 1))),
+               std::sqrt(std::max(0.f, P_robot(2, 2))), kSigmaModel.x(), kSigmaModel.y(), kSigmaModel.z(),
+               std::sqrt(P_anchor(0, 0)));
     r.stamp_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
     return r;
 }
@@ -151,6 +190,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.door_name    = inst.node_name;
     pa.linked_aff   = aff.node_id();
     pa.linked_epoch = aff.claim().has_value() ? aff.claim()->epoch : -1;
+    pa.consumer_id  = aff.claim().has_value() ? aff.claim()->agent_node_id : 0;
     pa.pose         = init.value();
     pa.width        = inst.aperture.w;
     pa.thickness    = inst.aperture.thickness;
@@ -204,6 +244,7 @@ void SpecificWorker::relink_passage_anchor(std::uint64_t new_door_id, std::strin
     pa.approach_was_claimed = pa.cross_was_claimed = false;
     pa.linked_aff   = 0;
     pa.linked_epoch = -1;
+    pa.reinit_on_next_claim = true;   // a later claim on the new door is a new passage: re-init, never inherit
 }
 
 void SpecificWorker::step_passage_anchor()
@@ -251,7 +292,8 @@ void SpecificWorker::step_passage_anchor()
         const std::uint64_t mine[3] = {inst ? inst->aff_approach.node_id() : 0, inst ? inst->aff_open.node_id() : 0,
                                        inst ? inst->aff_cross.node_id() : 0};
         for (const auto& e : G->get_edges_by_type("executing"))
-            if (e.to() != mine[0] and e.to() != mine[1] and e.to() != mine[2])
+            if (pa.consumer_id != 0 and e.from() == pa.consumer_id
+                and e.to() != mine[0] and e.to() != mine[1] and e.to() != mine[2])
             {
                 const auto n = G->get_node(e.to());
                 remove_passage_anchor(std::format("the consumer now executes '{}'", n.has_value() ? n->name() : "?"));
@@ -271,7 +313,20 @@ void SpecificWorker::step_passage_anchor()
             aff != nullptr and aff->node_id() != 0)
         {
             const int epoch = aff->claim().has_value() ? aff->claim()->epoch : -1;
-            if (aff->node_id() == pa.linked_aff)
+            if (aff->claim().has_value() and aff->claim()->agent_node_id != 0)
+                pa.consumer_id = aff->claim()->agent_node_id;
+            if (pa.reinit_on_next_claim)
+            {
+                // The first claim on the door re-identified after a room switch: a new passage's start.
+                if (const auto r = anchor_from_room(*inst, pa.pose); r.has_value())
+                {
+                    std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
+                               "the room-switch relink\n", pa.door_name, aff->kind());
+                    pa.pose = r.value();
+                    pa.reinit_on_next_claim = false;
+                }
+            }
+            else if (aff->node_id() == pa.linked_aff)
             {
                 if (epoch >= 0 and pa.linked_epoch >= 0 and epoch != pa.linked_epoch)
                     if (const auto r = anchor_from_room(*inst, pa.pose); r.has_value())
@@ -333,7 +388,7 @@ void SpecificWorker::step_passage_anchor()
         {
             pa.last_mask_frame = pkt.frame_id;
             // The STATIC robot←zed mount: ts==0 on the main-thread-owned instance (CLAUDE.md ownership rule).
-            if (const auto T = robot_name.empty() ? std::nullopt
+            if (const auto T = (robot_name.empty() or not inner_eigen_) ? std::nullopt
                                                   : inner_eigen_->get_transformation_matrix(robot_name, "zed", 0);
                 T.has_value())
             {
