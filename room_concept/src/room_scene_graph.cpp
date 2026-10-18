@@ -1548,11 +1548,13 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     arm_startup_proto(new_room_id, T_pub_int);
     startup_event_ = "crossing_born";
     trigger_layout_();
-    qInfo().noquote() << QString("[room][startup-proto] %1 BORN through %2 as a PROTO-ROOM (id %3): frame = the crossed "
-                                 "aperture, frozen; estimated by the start-up survey like the first room. Room %4 is left "
-                                 "as promoted (RT retired, polygon and walls untouched).")
-                             .arg(QString::fromStdString(new_name)).arg(QString::fromStdString(door))
-                             .arg(new_room_id).arg(left_id);
+    // A re-entry is not surveyed: the recall below adopts the remembered outline in this same call.
+    if (not recall.has_value() or recall_int.size() < 3)
+        qInfo().noquote() << QString("[room][startup-proto] %1 BORN through %2 as a PROTO-ROOM (id %3): frame = the crossed "
+                                     "aperture, frozen; estimated by the start-up survey like the first room. Room %4 is left "
+                                     "as promoted (RT retired, polygon and walls untouched).")
+                                 .arg(QString::fromStdString(new_name)).arg(QString::fromStdString(door))
+                                 .arg(new_room_id).arg(left_id);
 
     // ── RE-ENTRY: THE REMEMBERED OUTLINE IS THE HYPOTHESIS ─────────────────────────────────────────────────────────
     // Adopted as the GIVEN room at once (the same transition a promotion makes): the pose is solved against its SDF
@@ -1563,13 +1565,14 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
         room_concept_->set_map_layout(recall_int);
         room_concept_->adopt_map_layout_as_given();
         std::string reason;
-        promote_startup_proto(reason);
+        promote_startup_proto(reason, true);
         startup_event_ = "recalled";
-        qInfo().noquote() << QString("[room][recall] %1 RE-ENTERED through %2: remembered outline (%3 vertices) adopted in "
-                                     "its own frame (promotion: %4) — %5")
+        qInfo().noquote() << QString("[room][recall] %1 RE-ENTERED through %2 (node id %3): remembered outline (%4 vertices) "
+                                     "adopted in its own frame (promotion: %5) — localising against it, not surveying. "
+                                     "Room %6 is left as promoted.")
                                  .arg(QString::fromStdString(new_name)).arg(QString::fromStdString(door))
-                                 .arg(recall->poly_pub.size()).arg(QString::fromStdString(reason))
-                                 .arg("localising against it, not surveying");
+                                 .arg(new_room_id).arg(recall->poly_pub.size()).arg(QString::fromStdString(reason))
+                                 .arg(left_id);
     }
 }
 
@@ -1844,7 +1847,7 @@ void RoomSceneGraph::adopt_most_probable_layout()
     room_concept_->set_map_layout(std::move(lay_int));
 }
 
-void RoomSceneGraph::promote_startup_proto(std::string& reason)
+void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
 {
     // The re-anchor that came with map_ready was absorbed at the top of this update, so the learnt polygon
     // maps into the frozen frame here without a jump.
@@ -1872,7 +1875,7 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
     readiness_stable_.store(1.f, std::memory_order_relaxed);
     readiness_explore_.store(1.f, std::memory_order_relaxed);
     published_polygon_verts_ = poly_pub.size();
-    save_learnt_layout(poly_pub, "promoted");
+    if (not recalled) save_learnt_layout(poly_pub, "promoted");   // a recalled outline is already on disk
     // free_space_ is NOT reset (2026-10-10): it is the refiner's evidence accumulator from here on, fed at the shadow
     // SLAM pose by step_layout_refiner — the same poses it was built at while plain SLAM drove.
     refine_last_ms_ = steady_ms();
@@ -1897,6 +1900,7 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason)
     startup_event_ = "promoted";
     reason = "promoted";
     trigger_layout_();
+    if (recalled) return;   // the caller logs the re-entry; a recall is not a promotion of a surveyed layout
     const Eigen::Vector2f g = T_pub_int_.translation();
     qInfo().noquote() << QString("[room][startup-proto] %6 PROMOTED IN PLACE (id %1): learnt layout of %2 vertices "
                                  "published in the frozen start-up frame (gauge %3, %4 m, %5 deg); proto edge removed; "

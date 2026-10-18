@@ -222,7 +222,8 @@ private:
     [[nodiscard]] float startup_erode_m() const;
     void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
     void adopt_most_probable_layout();
-    void promote_startup_proto(std::string& reason);
+    /// `recalled`: the outline is a remembered one, already saved when the room was learnt — no new learnt file.
+    void promote_startup_proto(std::string& reason, bool recalled = false);
     void forget_room(const char* why);    ///< the room node vanished: reset EVERY piece of room state together
     bool sweep_foreign_rooms();           ///< leftover room nodes while the start-up proto is the room
     void resolve_lidar_origin();          ///< helios position in the robot frame (the beams' origin)
