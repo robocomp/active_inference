@@ -385,6 +385,9 @@ add_library(ai_common_affordance STATIC
   # a live room_concept run. It was compiled from door_concept/src/CMakeLists.txt until the reinstall
   # landed, and moved here after.
   pragmatic_affordance/pragmatic_affordance.cpp
+  # Every object's ONE `approach` node with its sides as options inside it (aff_option_*, executing_option —
+  # registered by the cortex reinstall of 2026-10-18, so it is safe here now).
+  pragmatic_affordance/object_approach.cpp
 )
 ai_common_defaults(ai_common_affordance)
 target_link_libraries(ai_common_affordance PUBLIC ai_common_core)
