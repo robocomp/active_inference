@@ -9,6 +9,7 @@ prompt_eval_count = the real token size of system+tools+STATE.
     python3 tests/check_llm_tools.py [model] [repeats]
 """
 import json
+import os
 import re
 import statistics
 import sys
@@ -31,7 +32,7 @@ def interface_rules(default_step="0.3"):
 
 
 STATE = """time: 18:42:10
-controller (the agent that drives the robot): running
+can move: yes
 current room: room_1
 other rooms in the live map: none
 robot pose in room_1: x=0.42 m, y=-1.10 m, yaw=88 deg
@@ -78,8 +79,9 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
-        t("agents", "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), "
-          "uptime, CPU and memory. Read-only.", {}, []),
+        t("agents", "The robot's software agents (programs such as controller, retina, room_concept, door_concept): "
+          "which are running, their state (Operating / Degraded / Waiting), uptime, CPU and memory of each. "
+          "Read-only.", {}, []),
         t("sensors", "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, "
           "resolution, age of the last frame and bandwidth. Read-only.",
           {"name": {"type": "string", "description": "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
@@ -199,6 +201,31 @@ CASES = [
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),
     ("cuántos agentes (es)", [], "none", "¿cuántos agentes están funcionando?",
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|catorce)\b", c.lower()) is not None)),
+    # live 2026-10-18: "agents ... in the WM" was answered as "I have no access to agents" (no tool call). The WM IS
+    # the graph, so graph_summary is a fair pick: its result carries the agents census too (system_facts.h).
+    ("agents alive in the WM", [], "none", "how many agents are alive in the WM?",
+     lambda n, a, c: n in ("agents", "graph_summary")),
+    ("agents alive", [], "none", "how many agents are alive?",
+     lambda n, a, c: n == "agents"),
+    ("agents in working memory", [], "none", "which agents are in the working memory?",
+     lambda n, a, c: n in ("agents", "graph_summary")),
+    # paraphrases: at temperature 0.2 a phrasing gets the same tool every repeat, so the spread is across phrasings.
+    ("agents in the WM", [], "none", "how many agents are in the WM?",
+     lambda n, a, c: n in ("agents", "graph_summary")),
+    ("all agents up", [], "none", "are all the agents up?",
+     lambda n, a, c: n == "agents"),
+    ("list running agents", [], "none", "list the running agents",
+     lambda n, a, c: n == "agents"),
+    ("is retina running", [], "none", "is retina running?",
+     lambda n, a, c: n == "agents" or (n == "inspect" and "retina" in str(a.get("node", "")).lower())),
+    ("which programs run", [], "none", "which programs are running right now?",
+     lambda n, a, c: n == "agents"),
+    ("controller alive", [], "none", "is the controller alive?",
+     lambda n, a, c: n == "agents" or (n == "inspect" and "controller" in str(a.get("node", "")).lower())),
+    ("agentes vivos WM (es)", [], "none", "¿cuántos agentes hay vivos en la WM?",
+     lambda n, a, c: n in ("agents", "graph_summary")),
+    ("room_concept cpu", [], "none", "what is the CPU load of room_concept?",
+     lambda n, a, c: n == "agents" or (n == "inspect" and "room_concept" in str(a.get("node", "")).lower())),
     ("which agent is degraded", [], "none", "is any agent in trouble?",
      lambda n, a, c: n == "agents" or (n is None and "door_concept" in c)),
     ("agent memory use", [], "none", "how much memory is the controller using?",
@@ -242,7 +269,8 @@ def main():
     sys_tokens = None
     results = []
     lat = []
-    for label, hist, last_move, text, ok in CASES:
+    only = re.compile(os.environ.get("ONLY", ""))   # ONLY=regex runs just the cases whose label matches
+    for label, hist, last_move, text, ok in (c for c in CASES if only.search(c[0])):
         for k in range(REPEATS):
             msgs = [{"role": "system", "content": system()}] + hist + [{"role": "user", "content": text},
                                                                        {"role": "system", "content": state(last_move)}]

@@ -273,7 +273,8 @@ const QString kInterfaceRules = QStringLiteral(
     "- The robot's own software is NOT in the STATE: for any question about it CALL a tool, never guess: agents() "
     "(which programs run, their health, CPU, memory, uptime), sensors(name) (cameras, LiDAR, IMU: streams, measured "
     "frame rate, resolution, bandwidth), graph_summary() (how many nodes and edges the working memory, i.e. the "
-    "graph, holds) or inspect(node) (every attribute of one node).\n"
+    "graph, holds) or inspect(node) (every attribute of one node). Never tell the user to call a tool or that you "
+    "lack the information: call the tool yourself and answer from its result.\n"
     "- What the robot did EARLIER TODAY is in its episodic memory; the STATE has only the one-line 'today:' summary. "
     "For missions, steps, door crossings, claims and how they ended CALL episodes(...) (filters: since/until as HH:MM, "
     "author, kind, target), episode(id) for one in detail, last_episode(target) for the latest about a door, room or "
@@ -349,8 +350,9 @@ QJsonArray ChatSession::tools_json() const
         QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
         QJsonArray{"name"}));
     tools.append(tool_def("agents",
-        "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU and "
-        "memory. Read-only.", QJsonObject{}, {}));
+        "The robot's software agents (programs such as controller, retina, room_concept, door_concept): which are "
+        "running, their state (Operating / Degraded / Waiting), uptime, CPU and memory of each. Read-only.",
+        QJsonObject{}, {}));
     tools.append(tool_def("sensors",
         "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, resolution, age of the "
         "last frame and bandwidth. Read-only.",
