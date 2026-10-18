@@ -899,6 +899,72 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             std::fflush(stdout);
         }
 
+    // The commitment every planning step ends with: claim the target on the wire, decide whether it changed, and
+    // remember it. Shared by the normal path (after every repair) and the anchored cross (which skips the repairs).
+    const auto commit_step = [&]() -> ControllerPlanningStep
+    {
+        // ── INV-3: SAY WHAT WE ARE DRIVING TO, AFTER EVERY REPAIR, BEFORE WE DRIVE ───────────────────
+        // HERE and not at the commitment, because this is the first line at which step.target.room_pos is
+        // FINAL — the reachability repair, the boxed-in search and recheck_standpoint_on_approach have all
+        // had their say. Those moved the standpoint by up to 0.3 m in ordinary running and 5.5 m in the
+        // no-path cases, and the producer has never once been told. Publishing the producer's pose here
+        // instead of ours would restore the whole defect one level down: a claim that names a pose nobody
+        // is driving to is the same lie as a claim that names none.
+        // ★Idempotent (publish_executing compares first), so the 20 Hz call rate costs no wire traffic.
+        if (step.target.from_affordance and step.target.node_id != 0 and graph_)
+        {
+            const int claimed_epoch = approach_commit_.has_value()
+                                    ? approach_commit_->epoch
+                                    : rc::AffordanceManager::producer_epoch(graph_, step.target.node_id).value_or(0);
+            // epoch 0 = a pre-rollout producer. We still drive; we just cannot name a proposal, and saying
+            // nothing is honest where saying "epoch 0" would look like a real claim to a rebuilt peer.
+            // The episodic journal is told either way: it is still a claim the robot is driving (note_claim).
+            if (claimed_epoch != 0)
+                affordance_manager.publish_executing(graph_, step.target.node_id, claimed_epoch,
+                                                     step.target.room_pos.x(), step.target.room_pos.y(),
+                                                     step.target.yaw_rad);
+            else
+                affordance_manager.note_claim(graph_, step.target.node_id, 0);
+        }
+        step.target_changed = !last_target_info_.has_value()
+                           || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
+        if (step.target.from_affordance and step.target_changed)
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          std::format("planning step built for '{}'", step.target.node_name));
+        last_target_info_ = step.target;
+        active_target_id_ = target->node_id;
+        target_is_new_ = step.target_changed;   // consumed by the goal_reached branch, see target_is_new_
+        return step;
+    };
+
+    // ── A CROSS WITH A FRESH INTERACTION ANCHOR IS NOT A ROOM-FRAME STANDPOINT (2026-10-18) ──────────────────
+    // While door_concept executes `cross` it hangs the door from the robot, and the controller servoes on that
+    // robot-frame pose (step_anchor_cross) — no route, no room-frame standpoint. Every check below judges the
+    // ROOM-FRAME standpoint (the useless-spot memory, OutsideRoom, the repair and its reachability verdicts, the
+    // over-budget rejection) and can report Unreachable or refuse the target before the servo ever runs; with the
+    // room-frame door 0.4–0.5 m wrong they are judging a pose nobody is driving to. So: pass the target through.
+    {
+        const bool is_cross = target->from_affordance and target->node_name.ends_with("_cross");
+        const bool anchored = is_cross and read_cross_anchor(target->node_id, target->node_name).has_value();
+        if (not is_cross) anchor_hoist_logged_ = false;
+        else if (anchored != anchor_hoist_logged_)
+        {
+            anchor_hoist_logged_ = anchored;
+            std::println("[anchor] cross: '{}' {}", target->node_name,
+                         anchored ? "has a fresh anchor — room-frame standpoint repair and reachability checks skipped"
+                                  : "no fresh anchor — room-frame standpoint checks apply");
+        }
+        if (anchored)
+        {
+            step.target = *target;
+            last_raw_target_pos_ = target->room_pos;
+            hold_approach_commitment(step, timestamp_ms);
+            resolve_target_contract(step.target);
+            current_target_room_ = step.target.room_pos;
+            return commit_step();
+        }
+    }
+
     // ── A SPOT WE ALREADY FAILED AT, RECOGNISED BEFORE DRIVING TO IT AGAIN ───────────────────────
     // The producer does not know the approach failed — nothing tells it — so it re-publishes the same
     // standpoint as soon as the suppression lapses, and without this we would re-learn it the expensive
@@ -1557,38 +1623,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
 
     current_target_room_ = step.target.room_pos;
-    // ── INV-3: SAY WHAT WE ARE DRIVING TO, AFTER EVERY REPAIR, BEFORE WE DRIVE ───────────────────
-    // HERE and not at the commitment, because this is the first line at which step.target.room_pos is
-    // FINAL — the reachability repair, the boxed-in search and recheck_standpoint_on_approach have all
-    // had their say. Those moved the standpoint by up to 0.3 m in ordinary running and 5.5 m in the
-    // no-path cases, and the producer has never once been told. Publishing the producer's pose here
-    // instead of ours would restore the whole defect one level down: a claim that names a pose nobody
-    // is driving to is the same lie as a claim that names none.
-    // ★Idempotent (publish_executing compares first), so the 20 Hz call rate costs no wire traffic.
-    if (step.target.from_affordance and step.target.node_id != 0 and graph_)
-    {
-        const int claimed_epoch = approach_commit_.has_value()
-                                ? approach_commit_->epoch
-                                : rc::AffordanceManager::producer_epoch(graph_, step.target.node_id).value_or(0);
-        // epoch 0 = a pre-rollout producer. We still drive; we just cannot name a proposal, and saying
-        // nothing is honest where saying "epoch 0" would look like a real claim to a rebuilt peer.
-        // The episodic journal is told either way: it is still a claim the robot is driving (note_claim).
-        if (claimed_epoch != 0)
-            affordance_manager.publish_executing(graph_, step.target.node_id, claimed_epoch,
-                                                 step.target.room_pos.x(), step.target.room_pos.y(),
-                                                 step.target.yaw_rad);
-        else
-            affordance_manager.note_claim(graph_, step.target.node_id, 0);
-    }
-    step.target_changed = !last_target_info_.has_value()
-                       || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
-    if (step.target.from_affordance and step.target_changed)
-        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
-                      std::format("planning step built for '{}'", step.target.node_name));
-    last_target_info_ = step.target;
-    active_target_id_ = target->node_id;
-    target_is_new_ = step.target_changed;   // consumed by the goal_reached branch, see target_is_new_
-    return step;
+    return commit_step();
 }
 
 // The optimiser's configuration, in ONE place. Every constant here is read off a measured physical
@@ -2789,6 +2824,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             plan_spline_valid_ = false;
         }
         no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
+        short_path_since_ms_ = 0;        // nor a path ending short: there is no path
         return true;
     }
     if (step.target_changed || !current_plan_.has_value())
@@ -2948,6 +2984,29 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
 // erased, the SAME anchor is still read by id — under the same kAnchorStaleMs rule, so a dead producer cannot
 // keep the robot moving. door_concept's release_room removes the anchor at the room switch; the door passage's
 // own room-change rule ends the cross there.
+std::optional<ControllerSession::AnchorCrossReading>
+ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::string &affordance_name) const
+{
+    if (graph_ == nullptr) return std::nullopt;
+    const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
+    std::optional<std::pair<rc::interaction::RelPose, float>> read;
+    std::uint64_t id = 0;
+    if (const auto aff = graph_->get_node(affordance_id); aff.has_value())
+        if (read = rc::interaction::read_affordance_anchor(*graph_, aff.value(), now); read.has_value())
+            id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0);
+    if (not read.has_value() and anchor_latched_id_ != 0 and anchor_latched_for_ == affordance_name)
+        if (read = rc::interaction::read_anchor(*graph_, anchor_latched_id_, now); read.has_value())
+            id = anchor_latched_id_;
+    // width_m 0 = the attribute is absent: nothing says whether the body fits, so the servo would only creep. The
+    // room route is the honest fallback.
+    if (not read.has_value() or id == 0 or read->second <= 0.f) return std::nullopt;
+    const auto node = graph_->get_node(id);
+    return AnchorCrossReading{.anchor_id = id,
+                              .name = node.has_value() ? node->name() : std::to_string(id),
+                              .pose = read->first,
+                              .width_m = read->second};
+}
+
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
 {
     anchor_cross_.reset();
@@ -2965,34 +3024,17 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         anchor_latched_for_ = step.target.node_name;
         anchor_mode_logged_ = -1;
     }
-    const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
-    std::optional<std::pair<rc::interaction::RelPose, float>> read;
-    std::uint64_t id = 0;
-    if (const auto aff = graph_->get_node(step.target.node_id); aff.has_value())
-        if (read = rc::interaction::read_affordance_anchor(*graph_, aff.value(), now); read.has_value())
-            id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0);
-    if (not read.has_value() and anchor_latched_id_ != 0)
-        if (read = rc::interaction::read_anchor(*graph_, anchor_latched_id_, now); read.has_value())
-            id = anchor_latched_id_;
-    // width_m 0 = the attribute is absent: nothing says whether the body fits, so the servo would only creep. The
-    // room route is the honest fallback, and the log says why.
-    const bool usable = read.has_value() and id != 0 and read->second > 0.f;
-    if (not usable)
+    anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name);
+    if (not anchor_cross_.has_value())
     {
         if (anchor_mode_logged_ != 0)
         {
             anchor_mode_logged_ = 0;
-            std::println("[anchor] cross: no fresh anchor — room route{}",
-                         read.has_value() and read->second <= 0.f ? " (anchor has no width_m)" : "");
+            std::println("[anchor] cross: no fresh anchor — room route");
         }
         return false;
     }
-    anchor_latched_id_ = id;
-    const auto node = graph_->get_node(id);
-    anchor_cross_ = AnchorCrossReading{.anchor_id = id,
-                                       .name = node.has_value() ? node->name() : std::to_string(id),
-                                       .pose = read->first,
-                                       .width_m = read->second};
+    anchor_latched_id_ = anchor_cross_->anchor_id;
     if (anchor_mode_logged_ != 1)
     {
         anchor_mode_logged_ = 1;
@@ -3008,12 +3050,18 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
 // clearance_speed_limit's braking model, asked along a straight robot-frame line instead of a curve: the body
 // cannot touch anything before ds + (c − support), so v ≤ sqrt(2·a_dec·(ds + c − support)). Same a_dec, same
 // worst-case support, same horizon.
-float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
-                                                      const rc::TrajectoryController &path_controller) const
+float ControllerSession::anchor_brake_decel(const rc::TrajectoryController &path_controller) const
 {
     float a_dec = std::max(0.05f, path_controller.params.cbf_max_decel);
     if (base_capability_.max_linear_decel_mps2.has_value())
         a_dec = std::min(a_dec, std::max(0.05f, *base_capability_.max_linear_decel_mps2));
+    return a_dec;
+}
+
+float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
+                                                      const rc::TrajectoryController &path_controller) const
+{
+    const float a_dec = anchor_brake_decel(path_controller);
     const float support = path_controller.body_extent_max();
     const float horizon = v_cap * v_cap / (2.f * a_dec) + support;
     const float step = std::max(0.02f, path_controller.params.grid_resolution);
@@ -3029,7 +3077,8 @@ float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir
 
 // One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
 //   1. the live field is rebuilt (LiDAR only, see refresh_lidar_field) and the clearance ceiling applied along the
-//      servo's own direction of travel, floored at 0.05 m/s exactly as set_speed_limit floors the tracker's;
+//      direction the base actually moves, floored at 0.05 m/s exactly as set_speed_limit floors the tracker's; and
+//      the anchor's jambs (anchor_jamb_speed_limit), unfloored, for the last ~0.4 m the LiDAR self-filter cannot see;
 //   2. motion_commander.apply_uncertainty_speed_limit;
 //   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts);
 //   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
@@ -3050,7 +3099,10 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // margin included).
     const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
                                   approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
-    const auto cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max);
+    // Shadow is DIFFERENTIAL (the bridge drops `side`); an unknown capability is treated the same way, since a side
+    // command the base may drop is the one assumption that fails silently.
+    const bool holonomic = base_capability_.holonomic.value_or(false);
+    const auto cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic);
     if (cmd.through)
     {
         const auto g = rc::anchor_cross_geometry(a.pose);
@@ -3062,16 +3114,26 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         return;
     }
 
-    // 1. Clearance ceiling on the live field, along the commanded translation.
+    // 1. Clearance ceilings along the direction the base ACTUALLY moves (on a differential base side is 0, so that is
+    //    (0, adv)): the live LiDAR field, floored at 0.05 m/s like the tracker's; and the anchor's two jambs, which
+    //    the self-filter hides from the field in the last ~0.4 m — that one has NO floor and may stop the robot.
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
     path_controller.refresh_lidar_field(control_pose.as_transform());
-    float adv_mps = cmd.adv, side_mps = cmd.side, rot_rps = cmd.rot;
+    float adv_mps = cmd.adv, side_mps = holonomic ? cmd.side : 0.f, rot_rps = cmd.rot;
     const float asked_lin_mps = std::hypot(adv_mps, side_mps);
     if (asked_lin_mps > 0.f)
     {
         const Eigen::Vector2f dir(side_mps / asked_lin_mps, adv_mps / asked_lin_mps);   // robot frame: +x side, +y fwd
-        const float v_lim = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
-        if (asked_lin_mps > v_lim) { adv_mps *= v_lim / asked_lin_mps; side_mps *= v_lim / asked_lin_mps; }
+        const float v_lidar = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
+        const auto support = [this](const Eigen::Vector2f &d) { return approach_body_.support_radius(0.f, d); };
+        const float v_jamb = rc::anchor_jamb_speed_limit(a.pose, a.width_m, dir, support,
+                                                         anchor_brake_decel(path_controller), v_max);
+        const float v_lim = std::min(v_lidar, v_jamb);
+        if (asked_lin_mps > v_lim)
+        {
+            const float k = v_lim / asked_lin_mps;
+            adv_mps *= k; side_mps *= k;
+        }
     }
     // 2. Pose-uncertainty limiter.
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());

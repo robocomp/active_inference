@@ -86,6 +86,17 @@ public:
     // and execute_plan drives the base from anchor_cross_command through step_anchor_cross — the same guard chain
     // (live clearance ceiling, uncertainty limiter, stall judge → escape) every other command passes.
     bool update_cross_anchor(const ControllerPlanningStep &step);
+    struct AnchorCrossReading
+    {
+        std::uint64_t anchor_id = 0;
+        std::string name;                       // e.g. door_1@robot
+        rc::interaction::RelPose pose;          // the opening in the robot frame (+ covariance)
+        float width_m = 0.f;
+    };
+    // The fresh anchor of a `_cross` affordance (its interaction_node_id, else the anchor latched for that same
+    // affordance name), or nullopt. Pure read; no state changes, no log.
+    std::optional<AnchorCrossReading> read_cross_anchor(std::uint64_t affordance_id,
+                                                         const std::string &affordance_name) const;
     void step_anchor_cross(const ControllerRobotPose &robot_pose,
                            rc::TrajectoryController &path_controller,
                            ControllerObstacleTracker &obstacle_tracker,
@@ -96,6 +107,8 @@ public:
     // clearance_speed_limit's braking model along a robot-frame straight line (the servo's own direction of travel).
     float anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
                                        const rc::TrajectoryController &path_controller) const;
+    // The braking deceleration both ceilings use: the tracker's cbf_max_decel, never more than the base delivers.
+    float anchor_brake_decel(const rc::TrajectoryController &path_controller) const;
     bool ensure_current_plan(const ControllerPlanningStep &step,
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
@@ -891,17 +904,11 @@ private:
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
     std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
-    struct AnchorCrossReading
-    {
-        std::uint64_t anchor_id = 0;
-        std::string name;                       // e.g. door_1@robot
-        rc::interaction::RelPose pose;          // the opening in the robot frame (+ covariance)
-        float width_m = 0.f;
-    };
     std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's fresh anchor (nullopt = room route)
     std::uint64_t anchor_latched_id_ = 0;                           // last anchor read, kept while the cross lasts
     std::string anchor_latched_for_;                                // the cross affordance it was read for
     int anchor_mode_logged_ = -1;                                   // -1 none, 0 room route, 1 anchor: log on change
+    bool anchor_hoist_logged_ = false;                              // build_planning_step's bypass: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
     // The fitted curve for a NON-mission plan (affordance target, click target). Missions keep theirs
