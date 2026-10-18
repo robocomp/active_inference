@@ -43,6 +43,10 @@ int main()
     assert(sec.find("find_objects lists the rest") != std::string::npos); ++checks;
     assert(sec.find("unidentified obstacles") != std::string::npos); ++checks;
     assert(objects_section({}, 6, 0).find(": none") != std::string::npos); ++checks;
+    // an object that offers its approach: its sides, labelled as seen from here (approach.h sides_line)
+    assert(object_line(ObjectFact{.name = "chair_1", .subtype = "chair", .approach_sides = "front (its own front; far side as seen from here)"})
+               .ends_with(", approach sides: front (its own front; far side as seen from here)")); ++checks;
+    assert(object_line(ObjectFact{.name = "chair_2", .subtype = "chair"}).find("approach") == std::string::npos); ++checks;
 
     auto f = answer_find_objects(all, "chairs", "room_1");
     assert(f.starts_with("3 chairs perceived in room_1")); ++checks;

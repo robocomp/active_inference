@@ -45,7 +45,7 @@ doors of the current room (2):
 remembered rooms (not in the live map, known from memory): none
 objects perceived in the current room (only this room is perceived): 1 bottle, 2 chair, 1 table
   nearest 4:
-  - chair_1 2.1 m, +35 deg ahead-left, 0.45x0.50x0.90 m
+  - chair_1 2.1 m, +35 deg ahead-left, 0.45x0.50x0.90 m, approach sides: front (its own front; far side as seen from here), left (its own left; left side as seen from here), right (its own right; right side as seen from here)
   - table_1 2.8 m, +10 deg ahead, 1.20x0.80x0.75 m
   - bottle_1 2.9 m, +12 deg ahead, 0.07x0.07x0.25 m
   - chair_2 3.4 m, -100 deg to the right, 0.45x0.50x0.90 m
@@ -75,9 +75,14 @@ def tools():
            "turn_deg": {"type": "number", "description": "degrees to turn in place first: positive = left, "
                                                          "negative = right, 180 = turn around, 0 = do not turn"}},
           ["distance_m", "turn_deg"]),
-        t("approach_object", "Drive to an object of the CURRENT room and stop in front of it, facing it: the "
-          "controller plans the path around obstacles. Give its name (chair_1) or its class (table: the nearest one). "
-          "Starts at once.", {"object": {"type": "string", "description": "an object name or class"}}, ["object"]),
+        t("approach_object", "Drive to an object of the CURRENT room and stop in front of it, facing it: the object "
+          "itself says where to stand and from which sides it can be approached (the STATE lists them); the controller "
+          "plans the path around obstacles. Give its name (chair_1) or its class (table: the nearest one), and "
+          "optionally the side in the person's own words. Starts at once.",
+          {"object": {"type": "string", "description": "an object name or class"},
+           "side": {"type": "string", "description": "ONLY when the person names a side: the side to approach from, as they said it "
+                                                     "(right, the far side, behind it, por la izquierda) or a side name "
+                                                     "from the STATE; empty = the object's default"}}, ["object"]),
         t("find_objects", "List the objects the robot has perceived in the CURRENT room, nearest first, with "
           "distance, bearing and size. Read-only.",
           {"subtype": {"type": "string", "description": "a class to filter by, in English singular (chair, table, "
@@ -271,6 +276,23 @@ CASES = [
      lambda n, a, c: n == "approach_object" and "bottle" in str(a.get("object", "")).lower()),
     ("acércate a la mesa (es)", [], "none", "acércate a la mesa",
      lambda n, a, c: n == "approach_object" and re.search("table|mesa", str(a.get("object", "")).lower()) is not None),
+    # 2026-10-18: the object proposes its sides (aff_<object>_approach options, STATE "approach sides"); the model passes
+    # the person's words as `side` and the chat resolves them (approach.h resolve_side).
+    ("approach the chair from the right", [], "none", "approach the chair from the right",
+     lambda n, a, c: n == "approach_object" and "chair" in str(a.get("object", "")).lower()
+     and "right" in str(a.get("side", "")).lower()),
+    ("go to chair 1 from the front", [], "none", "go to chair 1 from the front",
+     lambda n, a, c: n == "approach_object" and "chair" in str(a.get("object", "")).lower()
+     and "front" in str(a.get("side", "")).lower()),
+    ("acércate a la silla por la izquierda (es)", [], "none", "acércate a la silla por la izquierda",
+     lambda n, a, c: n == "approach_object" and re.search("chair|silla", str(a.get("object", "")).lower()) is not None
+     and re.search("left|izquierda", str(a.get("side", "")).lower()) is not None),
+    ("approach the chair from behind (not offered: the tool says so)", [], "none", "approach the chair from behind",
+     lambda n, a, c: n == "approach_object" and "chair" in str(a.get("object", "")).lower()),
+    # no side asked: none, or the object's DEFAULT (the first listed: chair_1's front) — the same standpoint. The model
+    # names the first listed side 3/3 even when told to pass one only when the person names it; harmless, so allowed.
+    ("approach chair 1 (no side asked)", [], "none", "approach chair 1",
+     lambda n, a, c: n == "approach_object" and str(a.get("side", "")).strip().lower() in ("", "front")),
     # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
     ("how many agents", [], "none", "how many agents are running?",
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(10|ten)\b", c.lower()) is not None)),

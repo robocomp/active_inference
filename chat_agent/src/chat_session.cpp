@@ -339,9 +339,15 @@ QJsonArray ChatSession::tools_json() const
                                                              "negative = right, 180 = turn around, 0 = do not turn"}}}},
         QJsonArray{"distance_m", "turn_deg"}));
     tools.append(tool_def("approach_object",
-        "Drive to an object of the CURRENT room and stop in front of it, facing it: the controller plans the path "
-        "around obstacles. Give its name (chair_1) or its class (table: the nearest one). Starts at once.",
-        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
+        "Drive to an object of the CURRENT room and stop in front of it, facing it: the object itself says where to "
+        "stand and from which sides it can be approached (the STATE lists them); the controller plans the path around "
+        "obstacles. Give its name (chair_1) or its class (table: the nearest one), and optionally the side in the "
+        "person's own words. Starts at once.",
+        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}},
+                    {"side", QJsonObject{{"type", "string"},
+                                         {"description", "ONLY when the person names a side: the side to approach from, as they said it "
+                                                         "(right, the far side, behind it, por la izquierda) or a side "
+                                                         "name from the STATE; empty = the object's default"}}}},
         QJsonArray{"object"}));
     tools.append(tool_def("find_objects",
         "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing and size. "
@@ -619,11 +625,38 @@ QString ChatSession::do_approach(const QJsonObject& args)
     if (room.empty()) return refuse("the current room is not known yet");
     const auto o = pick_object(digest_.objects, what);
     if (not o.has_value()) return refuse(o.error());
-    // Both in the room frame: the go_to pose is a room pose. Optionals checked (CLAUDE.md).
+    // Both in the room frame: the object's options and the go_to pose are room poses. Optionals checked (CLAUDE.md).
     const auto To = inner_->get_transformation_matrix(room, o->name);
     const auto Tr = inner_->get_transformation_matrix(room, "body");
     if (not To.has_value() or not Tr.has_value())
         return refuse("where '" + o->name + "' or the robot is in " + room + " cannot be resolved right now");
+    const std::string side_words = args.value("side").toString().trimmed().toStdString();
+    // ★ THE OBJECT PROPOSES (2026-10-18): an object that offers its approach affordance says where to stand and from
+    //   which sides; the chat only resolves the person's words to one of those and names it to the controller.
+    if (const auto aff = G_->get_node("aff_" + o->name + "_approach"); aff.has_value())
+    {
+        const auto names = G_->get_attrib_by_name<aff_option_names_att>(*aff);
+        const auto xs = G_->get_attrib_by_name<aff_option_x_m_att>(*aff);
+        const auto ys = G_->get_attrib_by_name<aff_option_y_m_att>(*aff);
+        const auto ws = G_->get_attrib_by_name<aff_option_yaw_rad_att>(*aff);
+        std::vector<ApproachSide> sides;
+        if (names.has_value() and xs.has_value() and ys.has_value() and ws.has_value())
+            if (auto p = parse_sides(*names, xs->get(), ys->get(), ws->get()); p.has_value()) sides = std::move(*p);
+        label_sides(sides, {To->translation().x(), To->translation().y()}, {Tr->translation().x(), Tr->translation().y()});
+        const auto side = resolve_side(sides, side_words);
+        if (not side.has_value()) return refuse(o->name + ": " + side.error());
+        const std::string cmd = "approach " + o->name + (side->empty() ? "" : " from " + *side);
+        std::string where;
+        for (const auto& s : sides)
+            if (s.name == (side->empty() ? sides.front().name : *side)) where = s.view + " side as seen from here";
+        log_.write("approach", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"side", q(*side)}, {"command", q(cmd)}});
+        if (not send_command(cmd, "llm")) return QStringLiteral("FAILED: could not write the command to the graph.");
+        return QStringLiteral("OK: '%1' sent: %2 chose where to stand%3; the controller plans the path around obstacles.")
+            .arg(q(cmd), q(o->name), where.empty() ? QString{} : QStringLiteral(" (%1)").arg(q(where)));
+    }
+    // An object whose agent does not offer `approach` yet (only chair does, so far): the old pose path, without sides.
+    if (not side_words.empty())
+        return refuse(o->name + " does not offer approach sides yet; ask without a side to go to the side the robot is on");
     const double standoff = cfg_.robot_radius_m + cfg_.approach_clearance_m;
     const auto p = approach_point({To->translation().x(), To->translation().y()},
                                   {Tr->translation().x(), Tr->translation().y()}, footprint_radius(*o), standoff);

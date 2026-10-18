@@ -44,6 +44,7 @@ struct ObjectFact
     std::optional<double> dist_m{};      ///< from the robot (body frame), when the transform resolves
     std::optional<double> bearing_deg{}; ///< 0 = ahead, + = left
     std::optional<float> width_m{}, depth_m{}, height_m{};
+    std::string approach_sides{};        ///< its approach affordance's sides with labels as seen now (approach.h sides_line)
 };
 
 /// Body frame: x right, y FORWARD. Bearing 0 = straight ahead, + = to the left. (Doors use the same words.)
@@ -80,6 +81,7 @@ inline std::string object_line(const ObjectFact& o, bool with_subtype = true)
     else s += " position unknown";
     if (o.width_m.has_value() and o.depth_m.has_value() and o.height_m.has_value())
         s += std::format(", {:.2f}x{:.2f}x{:.2f} m", *o.width_m, *o.depth_m, *o.height_m);
+    if (not o.approach_sides.empty()) s += ", approach sides: " + o.approach_sides;
     return s;
 }
 
