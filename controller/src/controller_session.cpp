@@ -3079,6 +3079,7 @@ float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir
 //   1. the live field is rebuilt (LiDAR only, see refresh_lidar_field) and the clearance ceiling applied along the
 //      direction the base actually moves, floored at 0.05 m/s exactly as set_speed_limit floors the tracker's; and
 //      the anchor's jambs (anchor_jamb_speed_limit), unfloored, for the last ~0.4 m the LiDAR self-filter cannot see;
+//      and |rot| by the corners' sweep onto the jambs (anchor_jamb_rot_limit), unfloored;
 //   2. motion_commander.apply_uncertainty_speed_limit;
 //   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts);
 //   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
@@ -3125,8 +3126,8 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     {
         const Eigen::Vector2f dir(side_mps / asked_lin_mps, adv_mps / asked_lin_mps);   // robot frame: +x side, +y fwd
         const float v_lidar = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
-        const auto support = [this](const Eigen::Vector2f &d) { return approach_body_.support_radius(0.f, d); };
-        const float v_jamb = rc::anchor_jamb_speed_limit(a.pose, a.width_m, dir, support,
+        const float v_jamb = rc::anchor_jamb_speed_limit(a.pose, a.width_m, dir, approach_body_.polygon(),
+                                                         approach_body_.safety_margin(),
                                                          anchor_brake_decel(path_controller), v_max);
         const float v_lim = std::min(v_lidar, v_jamb);
         if (asked_lin_mps > v_lim)
@@ -3134,6 +3135,15 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             const float k = v_lim / asked_lin_mps;
             adv_mps *= k; side_mps *= k;
         }
+    }
+    //    And the turn: in the doorway a rotation about the centre swings the body's corners onto the jambs, and no
+    //    translation ceiling sees it (adv may be 0). Capped only for a turn that closes on a jamb, no floor.
+    if (rot_rps != 0.f)
+    {
+        const float w_jamb = rc::anchor_jamb_rot_limit(a.pose, a.width_m, rot_rps, approach_body_.polygon(),
+                                                       approach_body_.safety_margin(),
+                                                       anchor_brake_decel(path_controller), w_max);
+        rot_rps = std::copysign(std::min(std::abs(rot_rps), w_jamb), rot_rps);
     }
     // 2. Pose-uncertainty limiter.
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());

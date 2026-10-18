@@ -44,12 +44,12 @@ RelPose anchor(float x, float y, float yaw, float sigma_xy)
 rc::AnchorCommand cmd(const RelPose& r, bool holonomic = true)
 { return rc::anchor_cross_command(r, kWidth, kBody, kStandoff, kVmax, kWmax, holonomic); }
 
-// A rectangular body: half-width kBody (x), half-length 0.35 (y). Its support along a robot-frame direction.
-float rect_support(const Eigen::Vector2f& d)
-{
-    const Eigen::Vector2f u = d.normalized();
-    return kBody * std::abs(u.x()) + 0.35f * std::abs(u.y());
-}
+// Rectangular bodies, CCW, robot frame (x right, y forward).
+std::vector<Eigen::Vector2f> rect(float hw, float hl) { return {{hw, -hl}, {hw, hl}, {-hw, hl}, {-hw, -hl}}; }
+const auto kLong = rect(kBody, 0.35f);       // the long test body of the original jamb test
+const auto kShadow = rect(kBody, 0.23f);     // Shadow-like: 0.59 m wide, 0.46 m long
+bool touches(const std::vector<Eigen::Vector2f>& body, const Eigen::Vector2f& q)
+{ return rc::anchor_point_in_convex(body, q); }
 
 // Drive the command on a kinematic base for n steps of dt; returns the e trace and the s trace.
 struct Trace { std::vector<float> e, s, psi; };
@@ -196,25 +196,99 @@ void combined_offset_and_heading()
 
 void jamb_stops_the_body()
 {
+    const Eigen::Vector2f fwd(0.f, 1.f);
     // ψ = 0, the jamb J+ = A + (w/2)·a placed 0.30 m straight ahead of the body centre.
     const auto r = anchor(-0.5f * kWidth, 0.30f, 0.f, 0.03f);
-    const float v = rc::anchor_jamb_speed_limit(r, kWidth, Eigen::Vector2f(0.f, 1.f), rect_support, 1.0f, kVmax);
+    const float v = rc::anchor_jamb_speed_limit(r, kWidth, fwd, kLong, 0.f, 1.0f, kVmax);
     const auto c = cmd(r, false);
     CHECK(std::min(c.adv, v) <= 0.01f);
     CHECK(v <= 0.01f);
     // Centred in a 0.9 m opening 1 m ahead: the jambs are beside the corridor, nothing limited.
-    const auto r2 = anchor(0.f, 1.f, 0.f, 0.03f);
-    CHECK(rc::anchor_jamb_speed_limit(r2, kWidth, Eigen::Vector2f(0.f, 1.f), rect_support, 1.0f, kVmax) == kVmax);
-    // The same jamb 1 m ahead in the corridor: a finite, braking-distance ceiling.
-    const auto r3 = anchor(-0.5f * kWidth, 1.0f, 0.f, 0.03f);
-    const float v3 = rc::anchor_jamb_speed_limit(r3, kWidth, Eigen::Vector2f(0.f, 1.f), rect_support, 1.0f, kVmax);
+    CHECK(rc::anchor_jamb_speed_limit(anchor(0.f, 1.f, 0.f, 0.03f), kWidth, fwd, kLong, 0.f, 1.0f, kVmax)
+          > kVmax - 1e-3f);
+    // The same jamb 1 m ahead in the corridor: a braking-distance ceiling, here above the cap.
+    const float v3 = rc::anchor_jamb_speed_limit(anchor(-0.5f * kWidth, 1.0f, 0.f, 0.03f), kWidth, fwd, kLong, 0.f,
+                                                 1.0f, kVmax);
     CHECK(v3 > 0.f and v3 <= kVmax);
-    // A larger along-wall sigma inflates the jamb: a jamb just beside the corridor at small sigma enters it.
-    const auto beside = anchor(-0.5f * kWidth + kBody + 0.05f, 0.5f, 0.f, 0.01f);
-    CHECK(rc::anchor_jamb_speed_limit(beside, kWidth, Eigen::Vector2f(0.f, 1.f), rect_support, 1.0f, kVmax) == kVmax);
-    const auto beside_unsure = anchor(-0.5f * kWidth + kBody + 0.05f, 0.5f, 0.f, 0.10f);
-    CHECK(rc::anchor_jamb_speed_limit(beside_unsure, kWidth, Eigen::Vector2f(0.f, 1.f), rect_support, 1.0f, kVmax)
-          < kVmax);
+    // A jamb 5 cm beside the corridor, 5 cm beyond the face: a sure opening leaves it alone, an unsure one slows.
+    const auto beside = anchor(-0.5f * kWidth + kBody + 0.05f, 0.40f, 0.f, 0.01f);
+    CHECK(rc::anchor_jamb_speed_limit(beside, kWidth, fwd, kLong, 0.f, 1.0f, kVmax) > kVmax - 1e-3f);
+    const auto beside_unsure = anchor(-0.5f * kWidth + kBody + 0.05f, 0.40f, 0.f, 0.10f);
+    CHECK(rc::anchor_jamb_speed_limit(beside_unsure, kWidth, fwd, kLong, 0.f, 1.0f, kVmax) < kVmax);
+    // Moving AWAY (backwards) from the jamb dead ahead: not closing, not limited.
+    CHECK(rc::anchor_jamb_speed_limit(r, kWidth, Eigen::Vector2f(0.f, -1.f), kLong, 0.f, 1.0f, kVmax) > kVmax - 1e-3f);
+}
+
+// The session's guard on one servo command: translation along the base's motion axis and rotation, both capped.
+rc::AnchorCommand guarded(const RelPose& r, const std::vector<Eigen::Vector2f>& body, float a_dec)
+{
+    auto c = cmd(r, false);
+    if (c.adv > 0.f)
+        c.adv = std::min(c.adv, rc::anchor_jamb_speed_limit(r, kWidth, Eigen::Vector2f(0.f, 1.f), body, 0.f, a_dec, kVmax));
+    if (c.rot != 0.f)
+        c.rot = std::copysign(std::min(std::abs(c.rot),
+                                       rc::anchor_jamb_rot_limit(r, kWidth, c.rot, body, 0.f, a_dec, kWmax)), c.rot);
+    return c;
+}
+
+void jamb_does_not_lock_recentering()
+{
+    // Differential robot at the mouth (s = −0.4), e = 0.10, σ_lat = 0.05, a 0.9 m door, a Shadow-like body.
+    RelPose r = anchor(-0.10f, 0.40f, 0.f, 0.05f);
+    const float e0 = rc::anchor_cross_geometry(r).e;
+    int moving = 0, contacts = 0;
+    const int n = 30;
+    for (int i = 0; i < n; ++i)
+    {
+        const auto c = guarded(r, kShadow, 1.0f);
+        if (c.adv > 1e-3f) ++moving;
+        // Sub-step the motion and check the TRUE jamb points against the body box on the way.
+        for (int k = 0; k < 10; ++k)
+        {
+            r.x = rc::interaction::move_mean(r.x, 0.f, c.adv * 0.01f, c.rot * 0.01f);
+            for (const auto& j : rc::anchor_jambs(r, kWidth))
+                if (touches(kShadow, j.mean)) ++contacts;
+        }
+    }
+    const auto g = rc::anchor_cross_geometry(r);
+    std::println("  recentering at the mouth: moving {}/{} steps, e {:+.3f} -> {:+.3f}, s {:+.2f}, contacts {}",
+                 moving, n, e0, g.e, g.s, contacts);
+    CHECK(moving >= 2 * n / 3);
+    CHECK(std::abs(g.e) < std::abs(e0));
+    CHECK(contacts == 0);
+    CHECK(g.s > 0.f);                                    // it went through
+}
+
+void rotation_near_jamb_is_capped()
+{
+    // Body centred in the opening (s = 0), heading off the normal by 0.5 rad, a body whose corners reach PAST the
+    // half-opening (0.32 x 0.33: corner radius 0.46 m against 0.45 m), braking 0.5 m/s².
+    const auto body = rect(0.32f, 0.33f);
+    const float a_dec = 0.5f;
+    const RelPose r0 = anchor(0.f, 0.f, 0.5f, 0.03f);
+    // (a) The servo's own turn (toward the normal, CCW) OPENS clearance: the corner nearest a jamb moves away from it,
+    //     so it is not capped — and no corner meets a true jamb over 0.5 s.
+    const auto c = guarded(r0, body, a_dec);
+    CHECK(c.rot > 0.f);
+    std::println("  doorway turn toward the normal: rot {:+.3f} (w_max {:.2f})", c.rot, kWmax);
+    // (b) The same pose turning the OTHER way closes on a jamb (the front-right corner is 0.28 rad short of J+):
+    //     capped below w_max, and closed-loop the corner never crosses the jamb.
+    const float w_cw = rc::anchor_jamb_rot_limit(r0, kWidth, -1.f, body, 0.f, a_dec, kWmax);
+    CHECK(w_cw < kWmax);
+    std::println("  doorway turn toward the jamb: |rot| cap {:.3f}", w_cw);
+    for (const float dir : {+1.f, -1.f})
+    {
+        RelPose r = r0;
+        int contacts = 0;
+        for (int k = 0; k < 50; ++k)                        // 0.5 s at dt = 0.01, the cap re-evaluated each step
+        {
+            const float w = rc::anchor_jamb_rot_limit(r, kWidth, dir, body, 0.f, a_dec, kWmax);
+            r.x = rc::interaction::move_mean(r.x, 0.f, 0.f, dir * w * 0.01f);
+            for (const auto& j : rc::anchor_jambs(r, kWidth))
+                if (touches(body, j.mean)) ++contacts;
+        }
+        CHECK(contacts == 0);
+    }
 }
 }  // namespace
 
@@ -229,6 +303,8 @@ int main()
     differential_converges_laterally();
     combined_offset_and_heading();
     jamb_stops_the_body();
+    jamb_does_not_lock_recentering();
+    rotation_near_jamb_is_capped();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

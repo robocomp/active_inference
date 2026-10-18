@@ -47,7 +47,12 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
+#include <numbers>
+#include <span>
+#include <vector>
 
 #include <Eigen/Dense>
 
@@ -139,35 +144,152 @@ inline constexpr float kAnchorTauRot = 0.2f;   // heading alignment
 // ── THE JAMBS AS OBSTACLES THE MODEL ALREADY KNOWS ────────────────────────────────────────────────────────────
 // The live field cannot stop the robot at a jamb: the self-filter clears every return within ~0.4 m of the body
 // centre, and the LiDAR ceiling is floored at 0.05 m/s. The anchor knows where the jambs are: J± = A ± (w/2)·a in
-// the robot frame, each uncertain along the wall by σ_lat (the opening's along-wall sigma — the width is carried as
-// known), so each is a disc of radius σ_lat. Moving along the unit robot-frame direction u, the body sweeps a
-// corridor of half-width support(±p) (p ⟂ u): a jamb inside it is met after travelling along − σ_lat − support(u),
-// and the base must be able to stop before that: v ≤ sqrt(2·a_dec·max(0, along − σ_lat − support(u))). A jamb
-// behind the body (along < −support(−u)) or beside the corridor limits nothing. No floor: this ceiling may be 0.
-// support(dir) = the body's reach along a robot-frame direction (RobotFootprint::support_radius at heading 0).
-template <class Support>
-[[nodiscard]] inline float anchor_jamb_speed_limit(const rc::interaction::RelPose& r, float width,
-                                                   const Eigen::Vector2f& u, const Support& support, float a_dec,
-                                                   float v_cap)
+// the robot frame, with covariance Σ_J = P_xy + (w/2)²·σ_ψ²·n nᵀ (dJ/dψ = ±(w/2)·n). That is the SAME Gaussian P_fit
+// reads (aᵀ P_xy a is its along-wall part), projected here on whichever axis a question is asked along, so the
+// ceilings and P_fit agree about one opening. Each jamb limits a motion only as far as that motion CLOSES on it:
+//
+// TRANSLATION along unit u (p ⟂ u). The body sweeps a corridor of half-width support(±p); the jamb counts with
+// P_in = w((support(±p) − |J·p|)/σ_p), σ_p² = pᵀΣ_J p — P_fit's own form, slack over sigma (w: anchor_contact_weight).
+// Moving along u closes on it only while it is AHEAD of the centre, P_closing = Φ((J·u)/σ_u), σ_u² = uᵀΣ_J u; a jamb
+// beside or behind the body is not approached by translating along u, so it limits nothing (re-centring past a jamb
+// is not frozen). The gap to the leading face is g = J·u − support(u); a blocked jamb allows
+// v_block = Φ(g/σ_u)·sqrt(2·a_dec·max(0, g)). The ceiling from that jamb is v_cap − P_in·P_closing·(v_cap − v_block).
+// NO floor: a jamb the mean puts ahead and touching gives 0.
+//
+// ROTATION by sign(ω) about the centre. The jamb (radius r_J, angle φ_J) is reached by the body boundary points at
+// that same radius — the polygon's crossings of the circle |x| = r_J. Δ = the smallest rotation, in the commanded
+// direction, that brings one of them onto φ_J (0 if the jamb is already inside the body; no crossing and the body
+// shorter than r_J ⇒ unreachable). It counts with P_reach = w((r_max − r_J)/σ_r), σ_r² = r̂ᵀΣ_J r̂; a blocked turn
+// allows |ω| ≤ Φ(Δ/σ_θ)·sqrt(2·(a_dec/r_J)·max(0, Δ)), σ_θ = (t̂ᵀΣ_J t̂)^½ / r_J (a_dec as tangential deceleration at
+// r_J). Same blend, no floor. A turn AWAY from a jamb sees it a long way round, so only a closing turn is capped.
+//
+// body = the footprint polygon in the robot frame (x right, y forward), margin = its outward safety margin.
+
+struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; };
+
+[[nodiscard]] inline std::array<AnchorJamb, 2> anchor_jambs(const rc::interaction::RelPose& r, float width)
 {
-    if (not r.x.allFinite() or not (u.squaredNorm() > 0.f) or not (width > 0.f)) return v_cap;
     const auto g = anchor_cross_geometry(r);
+    const Eigen::Vector2f A = r.x.head<2>();
+    const Eigen::Matrix2f cov = r.P.topLeftCorner<2, 2>()
+                              + (0.25f * width * width * std::max(0.f, r.P(2, 2))) * (g.n * g.n.transpose());
+    return {AnchorJamb{A - 0.5f * width * g.a, cov}, AnchorJamb{A + 0.5f * width * g.a, cov}};
+}
+
+// How much a jamb counts on an axis where `z` = mean slack / sigma (slack > 0: the MEAN geometry puts the jamb in
+// the body's way). min(1, 2Φ(z)) = Φ(z)/Φ(0): the Gaussian's probability renormalised so the mean-contact case is
+// CERTAIN. Plain Φ would make the expected allowance at a mean contact (1 − Φ(0))·v_cap = half speed into the jamb;
+// this keeps the soft tail outside (a jamb probably beside the body slows it as much as it is probably in the way)
+// while a jamb the mean says is in the way gets the full braking ceiling.
+[[nodiscard]] inline float anchor_contact_weight(float z) { return std::min(1.f, 2.f * anchor_std_normal_cdf(z)); }
+
+[[nodiscard]] inline float anchor_axis_sigma(const Eigen::Matrix2f& cov, const Eigen::Vector2f& axis)
+{ return std::sqrt(std::max(1e-12f, axis.dot(cov * axis))); }
+
+[[nodiscard]] inline float anchor_body_support(std::span<const Eigen::Vector2f> body, float margin,
+                                               const Eigen::Vector2f& dir)
+{
+    float best = 0.f;
+    for (const auto& v : body) best = std::max(best, v.dot(dir));
+    return best + margin;
+}
+
+[[nodiscard]] inline float anchor_jamb_speed_limit(const rc::interaction::RelPose& r, float width,
+                                                   const Eigen::Vector2f& u, std::span<const Eigen::Vector2f> body,
+                                                   float margin, float a_dec, float v_cap)
+{
+    if (not r.x.allFinite() or not r.P.allFinite() or not (u.squaredNorm() > 0.f) or not (width > 0.f) or body.empty())
+        return v_cap;
     const Eigen::Vector2f un = u.normalized();
     const Eigen::Vector2f p(-un.y(), un.x());
-    const Eigen::Vector2f A = r.x.head<2>();
-    const float rho = g.sigma_lat;
+    const float lead = anchor_body_support(body, margin, un);
     float v = v_cap;
-    for (const float sgn : {-1.f, 1.f})
+    for (const auto& j : anchor_jambs(r, width))
     {
-        const Eigen::Vector2f J = A + sgn * 0.5f * width * g.a;
-        const float along = J.dot(un), lat = J.dot(p);
-        if (along + rho < -support(Eigen::Vector2f(-un))) continue;                     // behind the body
-        const Eigen::Vector2f side_dir = lat >= 0.f ? p : Eigen::Vector2f(-p);
-        if (std::abs(lat) - rho >= support(side_dir)) continue;                           // beside the corridor
-        const float gap = std::max(0.f, along - rho - support(un));
-        v = std::min(v, std::sqrt(2.f * std::max(0.f, a_dec) * gap));
+        const float along = j.mean.dot(un), lat = j.mean.dot(p);
+        const float s_u = anchor_axis_sigma(j.cov, un), s_p = anchor_axis_sigma(j.cov, p);
+        const Eigen::Vector2f side = lat >= 0.f ? p : Eigen::Vector2f(-p);
+        const float p_in = anchor_contact_weight((anchor_body_support(body, margin, side) - std::abs(lat)) / s_p);
+        const float p_closing = anchor_std_normal_cdf(along / s_u);
+        const float gap = along - lead;
+        const float v_block = std::min(v_cap, anchor_std_normal_cdf(gap / s_u)
+                                              * std::sqrt(2.f * std::max(0.f, a_dec) * std::max(0.f, gap)));
+        v = std::min(v, v_cap - p_in * p_closing * (v_cap - v_block));
     }
-    return v;
+    return std::max(0.f, v);
+}
+
+// The body polygon grown by `margin` (radially per vertex — the margin is small against the body).
+[[nodiscard]] inline std::vector<Eigen::Vector2f> anchor_grown_body(std::span<const Eigen::Vector2f> body, float margin)
+{
+    std::vector<Eigen::Vector2f> out;
+    out.reserve(body.size());
+    for (const auto& v : body)
+    {
+        const float n = v.norm();
+        out.push_back(n > 1e-6f ? Eigen::Vector2f(v * ((n + margin) / n)) : v);
+    }
+    return out;
+}
+
+[[nodiscard]] inline bool anchor_point_in_convex(std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& q)
+{
+    if (poly.size() < 3) return false;
+    float sign = 0.f;
+    for (std::size_t i = 0; i < poly.size(); ++i)
+    {
+        const Eigen::Vector2f e = poly[(i + 1) % poly.size()] - poly[i], d = q - poly[i];
+        const float c = e.x() * d.y() - e.y() * d.x();
+        if (c == 0.f) continue;
+        if (sign == 0.f) sign = c;
+        else if ((c > 0.f) != (sign > 0.f)) return false;
+    }
+    return true;
+}
+
+// The cap on |ω| for a turn in the direction of `rot` (rad/s, CCW positive).
+[[nodiscard]] inline float anchor_jamb_rot_limit(const rc::interaction::RelPose& r, float width, float rot,
+                                                 std::span<const Eigen::Vector2f> body, float margin, float a_dec,
+                                                 float w_cap)
+{
+    if (rot == 0.f or not r.x.allFinite() or not r.P.allFinite() or not (width > 0.f) or body.size() < 3) return w_cap;
+    const auto poly = anchor_grown_body(body, margin);
+    float r_max = 0.f;
+    for (const auto& v : poly) r_max = std::max(r_max, v.norm());
+    const float two_pi = 2.f * std::numbers::pi_v<float>;
+    const auto wrap_0_2pi = [two_pi](float x) { x = std::fmod(x, two_pi); return x < 0.f ? x + two_pi : x; };
+    float w = w_cap;
+    for (const auto& j : anchor_jambs(r, width))
+    {
+        const float rj = j.mean.norm();
+        if (rj < 1e-4f) { w = 0.f; continue; }                         // a jamb on the rotation centre: inside
+        const Eigen::Vector2f rh = j.mean / rj, th(-rh.y(), rh.x());
+        const float phi = std::atan2(j.mean.y(), j.mean.x());
+        float delta = std::numeric_limits<float>::infinity();
+        if (anchor_point_in_convex(poly, j.mean)) delta = 0.f;
+        else
+            for (std::size_t i = 0; i < poly.size(); ++i)                 // crossings of |x| = rj with each edge
+            {
+                const Eigen::Vector2f p0 = poly[i], d = poly[(i + 1) % poly.size()] - p0;
+                const float A = d.squaredNorm(), B = 2.f * p0.dot(d), C = p0.squaredNorm() - rj * rj;
+                const float disc = B * B - 4.f * A * C;
+                if (A <= 0.f or disc < 0.f) continue;
+                for (const float t : {(-B - std::sqrt(disc)) / (2.f * A), (-B + std::sqrt(disc)) / (2.f * A)})
+                {
+                    if (t < 0.f or t > 1.f) continue;
+                    const Eigen::Vector2f q = p0 + t * d;
+                    const float th_q = std::atan2(q.y(), q.x());
+                    delta = std::min(delta, rot > 0.f ? wrap_0_2pi(phi - th_q) : wrap_0_2pi(th_q - phi));
+                }
+            }
+        if (not std::isfinite(delta)) continue;                            // the sweep never reaches this radius
+        const float p_reach = anchor_contact_weight((r_max - rj) / anchor_axis_sigma(j.cov, rh));
+        const float s_th = anchor_axis_sigma(j.cov, th) / rj;
+        const float w_block = std::min(w_cap, anchor_std_normal_cdf(delta / s_th)
+                                              * std::sqrt(2.f * std::max(0.f, a_dec) / rj * delta));
+        w = std::min(w, w_cap - p_reach * (w_cap - w_block));
+    }
+    return std::max(0.f, w);
 }
 
 }  // namespace rc
