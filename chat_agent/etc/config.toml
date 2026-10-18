@@ -76,11 +76,8 @@ log_dir = "logs"
 # Who the robot is (body, senses, abilities, limits, honesty rules), prepended to every system message.
 # Read once at start; if missing, a short built-in description is used (and a warning printed).
 system_prompt_path = "etc/system_prompt.md"
-# Relative motion (move_relative tool / "move <m>", "turn <deg>"). User decision 2026-10-12: SMALL moves go straight
-# through, without a confirmation card. A pure turn never needs one (it translates nothing; the controller checks the
-# swept footprint). A move needs a card above small_move_max_m, or when combined with a turn above small_turn_max_deg.
-small_move_max_m = 1.0
-small_turn_max_deg = 90.0
+# Relative motion (move_relative tool / "move <m>", "turn <deg>"). Sent at once, no confirmation card (user decision
+# 2026-10-18: the person can stop the robot at any time); the controller checks the swept footprint and refuses.
 max_move_m = 3.0
 # "advance a bit" — the step the model is told to use when the person gives no number.
 default_step_m = 0.3

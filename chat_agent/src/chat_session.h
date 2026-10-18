@@ -4,10 +4,8 @@
  *
  * THE FLOW OF ONE USER MESSAGE (on_user_text):
  *   1. `stop` fast path (^(stop|para|detente|alto)\b) → the `stop` command is written at once, no model involved.
- *   2. a confirmation card is pending and the text is a yes/no → the card is confirmed/rejected in C++.
- *      The model can never confirm: confirmation exists only as a button click or this typed match.
- *   3. text already in the controller grammar (cross door / cross door_N / uncross) → CommandGate → card or reply.
- *   4. otherwise → the model, with ONE system message rebuilt this turn (robot description
+ *   2. text already in the controller grammar (cross door / cross door_N / uncross / move / turn) → CommandGate → sent.
+ *   3. otherwise → the model, with ONE system message rebuilt this turn (robot description
  *      from etc/system_prompt.md + interface rules + the STATE digest) and the last
  *      ~16 history messages (a tool call and its results are never split by the trim).
  *
@@ -15,8 +13,8 @@
  * find_objects(subtype?), where_is(name), look(camera?), and the episodic-memory queries episodes(since?, until?,
  * author?, kind?, target?), episode(id), outcome_stats(kind, target?), last_episode(target) (em_answers.h).
  * Each call goes through CommandGate; a rejection returns to the model as a role:"tool" message with the reason.
- * cross_door and a LARGE move_relative only raise a card; a small move/turn is sent at once (command_gate.h).
- * Read-only queries, answered here from the digest without the controller and without a card:
+ * An accepted call is sent at once: no confirmation card since 2026-10-18 (command_gate.h); "stop" halts the robot.
+ * Read-only queries, answered here from the digest without the controller:
  * find_objects(subtype?) and where_is(name) (object_facts.h).
  * look(camera?) is read-only too: the newest frame of the front (ZED) or 360 (Ricoh) camera is shrunk, JPEG-encoded
  * and attached to its tool result; the follow-up request, always made then, shows it to the model (look_messages.h
@@ -76,7 +74,7 @@ struct SessionConfig
     int status_period_ms = 250;
     std::string log_dir = "logs";
     std::string system_prompt_path = "etc/system_prompt.md";   ///< robot description; empty/missing ⇒ built-in
-    GateLimits limits;                 ///< move_relative ranges + when it needs a card
+    GateLimits limits;                 ///< move_relative ranges
     double default_step_m = 0.3;       ///< "advance a bit"
     int objects_nearest = 6;
     int object_change_period_ms = 2000;
@@ -101,8 +99,6 @@ public:
 private:
     // ── the three entry points from the window ──
     void on_user_text(const QString& text);
-    void confirm_card(const char* how);
-    void reject_card(const char* how);
 
     void ask_model(bool followup);
     /// Runs every call, pushes the tool results. Returns true if one of them attached an image (look()).
@@ -114,7 +110,7 @@ private:
     void push_history(QJsonObject m);
     QJsonArray messages_for_request() const;
 
-    /// Run a gated call: no confirmation ⇒ send now; confirmation ⇒ raise the card. Returns the tool-result text
+    /// Run a gated call: accepted ⇒ sent now (no confirmation, 2026-10-18). Returns the tool-result text
     /// (for a role:"tool" message); `reply`, if given, gets the same outcome as a plain sentence for the person —
     /// what the history records when no model was involved (a raw tool-result string there is parroted back).
     QString dispatch(const ToolCall& call, const char* origin, QString* reply = nullptr);
@@ -170,13 +166,6 @@ private:
         bool carries_image = false;   ///< this request sent an image ⇒ strip it from the history when it ends
     } turn_;
 
-    struct Pending
-    {
-        ToolCall call;
-        GateResult result;
-        std::string origin;
-    };
-    std::optional<Pending> pending_;
 
     // last command written and what the controller last said about it
     std::string sent_command_;

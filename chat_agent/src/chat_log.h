@@ -3,7 +3,7 @@
  * chat_log.h — one JSON object per line, per run: logs/chat_<YYYYmmdd-HHMMSS>.jsonl.
  *
  * Every event a chat session produces goes here — the user's text, the STATE the model was given, the request,
- * tool calls, gate verdicts, confirmations, intention writes and the controller's state transitions, errors, and
+ * tool calls, gate verdicts, intention writes and the controller's state transitions, errors, and
  * latency/eval counts — so a conversation can be replayed and graded from the file rather than from the terminal.
  * Each record carries `t` (epoch ms) and `ev` (event kind). The stream is imbued with the classic locale (CLAUDE.md:
  * a data file must never acquire a comma decimal separator); QJsonDocument formats numbers itself anyway.

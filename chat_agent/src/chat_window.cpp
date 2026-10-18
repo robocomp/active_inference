@@ -44,22 +44,6 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     transcript_->setMinimumSize(480, 360);
     lay->addWidget(transcript_, 1);
 
-    card_ = new QFrame(this);
-    card_->setFrameShape(QFrame::StyledPanel);
-    card_->setStyleSheet(QStringLiteral("QFrame { background: #fff4d6; border: 1px solid #d9a400; border-radius: 4px; }"
-                                        "QLabel { color: #3a2e00; border: none; }"));
-    auto* card_lay = new QHBoxLayout(card_);
-    card_text_ = new QLabel(card_);
-    card_text_->setWordWrap(true);
-    card_confirm_ = new QPushButton(QStringLiteral("Confirm"), card_);
-    card_cancel_ = new QPushButton(QStringLiteral("Cancel"), card_);
-    card_confirm_->setStyleSheet(QStringLiteral("background: #2e7d32; color: white; font-weight: bold; padding: 4px 12px;"));
-    card_lay->addWidget(card_text_, 1);
-    card_lay->addWidget(card_confirm_);
-    card_lay->addWidget(card_cancel_);
-    card_->hide();
-    lay->addWidget(card_);
-
     auto* row = new QHBoxLayout();
     input_ = new QLineEdit(this);
     input_->setPlaceholderText(QStringLiteral("Ask the robot… (\"stop\" stops it at once)"));
@@ -94,8 +78,6 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
         plan_->activateWindow();
     });
     QObject::connect(cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_cancel) cb_.on_cancel(); });
-    QObject::connect(card_confirm_, &QPushButton::clicked, this, [this]() { if (cb_.on_confirm) cb_.on_confirm(); });
-    QObject::connect(card_cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_reject) cb_.on_reject(); });
 
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
     if (const auto g = settings.value(QStringLiteral("chat_window/geometry")).toByteArray(); not g.isEmpty())
@@ -182,17 +164,6 @@ void ChatWindow::clear_transcript()
     in_assistant_ = false;
     transcript_->clear();
 }
-
-void ChatWindow::show_card(const QString& text)
-{
-    card_text_->setText(text);
-    card_->show();
-    card_confirm_->setFocus();
-}
-
-void ChatWindow::hide_card() { card_->hide(); input_->setFocus(); }
-
-bool ChatWindow::card_visible() const { return card_->isVisible(); }
 
 void ChatWindow::set_plan(const rc::mission::Mission& m, const QString& ir_json)
 {

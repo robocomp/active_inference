@@ -59,14 +59,14 @@ def tools():
         return {"type": "function", "function": {"name": name, "description": desc, "parameters": p}}
     return [
         t("cross_door", "Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go "
-          "through. Shows the person a confirmation card; nothing moves until they confirm.",
+          "through. Starts at once.",
           {"door": {"type": "string", "enum": ["door_0", "door_1", "nearest"],
                     "description": "a door of the current room, or 'nearest'"}}, ["door"]),
         t("stop", "Stop the robot immediately and abandon what it is doing.", {}, []),
         t("cancel_passage", "Abandon the door crossing in progress (the robot stays where it is).", {}, []),
         t("move_relative", "Move the robot a short distance relative to where it is now: first turn in place by "
-          "turn_deg, then drive straight distance_m. Small moves start at once; long ones ask the person to confirm. "
-          "The robot refuses if a wall or obstacle is in the way.",
+          "turn_deg, then drive straight distance_m. Starts at once. The robot refuses if a wall or obstacle "
+          "is in the way.",
           {"distance_m": {"type": "number", "description": "metres to drive after turning: positive = forward, "
                                                            "negative = backward, 0 = do not drive"},
            "turn_deg": {"type": "number", "description": "degrees to turn in place first: positive = left, "
@@ -196,6 +196,21 @@ CASES = [
      lambda n, a, c: n == "look" and str(a.get("camera", "front")) in ("front", "")),
     ("colour of the chair", [], "none", "what colour is the chair?",
      lambda n, a, c: n == "look"),
+    # shut doors, live 2026-10-18: the model invented "confirmation from the door controller" and looped on "yes"
+    # without a call. cross_door opens a shut door itself; a yes to an offered action is that action's call.
+    ("cross the shut door", [], "none", "cross door_1 into the next room",
+     lambda n, a, c: n == "cross_door" and str(a.get("door", "")) == "door_1"),
+    ("cross it (door is shut)", [{"role": "user", "content": "see door_1?"},
+                                 {"role": "assistant", "content": "Yes, I can see door_1. It is 4.4 meters away, behind "
+                                  "my right side, and it appears to be shut (P(open)=0.12)."}], "none",
+     "cross it into the next room",
+     lambda n, a, c: n == "cross_door" and str(a.get("door", "")) == "door_1"),
+    ("yes after an offer", [{"role": "user", "content": "cross door_1"},
+                            {"role": "assistant", "content": "door_1 is shut (P(open)=0.12). To cross it, I must first "
+                             "open it, but I cannot do that without confirmation from the door controller. Would you "
+                             "like me to attempt to open it?"}], "none",
+     "yes",
+     lambda n, a, c: n == "cross_door" and str(a.get("door", "")) == "door_1"),
     # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
     ("how many agents", [], "none", "how many agents are running?",
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),

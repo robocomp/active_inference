@@ -7,26 +7,23 @@
  *
  *   cross_door(door)   door ∈ doors of the current room, or "nearest" resolvable; controller present.
  *                      Resolved to an EXPLICIT door name, so the controller cannot pick a different "nearest" door
- *                      than the one the user confirmed. Moves the robot ⇒ needs_confirmation.
- *   stop()             always accepted, never needs confirmation (stopping is the safe direction).
- *   cancel_passage()   "uncross"; controller present. Ends a passage, does not move the robot ⇒ no confirmation.
+ *                      than the one the person meant.
+ *   stop()             always accepted (stopping is the safe direction).
+ *   cancel_passage()   "uncross"; controller present. Ends a passage, does not move the robot.
  *   move_relative(distance_m, turn_deg)
  *                      robot-relative step: turn first (+ = left), then drive straight (+ = forward, − = back).
  *                      → controller grammar "turn <deg> move <m>" (either part omitted when 0). Controller and room
  *                      known; |distance| ≤ max_move_m, |turn| ≤ 360, not both 0. The controller re-checks the swept
  *                      footprint against its own occupancy grid and refuses with a reason (controller_relative_motion.h).
- *                      CONFIRMATION (user decision 2026-10-12: small moves go straight through):
- *                        · a PURE TURN never needs a card, whatever the angle — it rotates in place and translates
- *                          nothing, and the controller refuses a turn whose swept body would touch anything;
- *                        · with a translation, a card is shown iff |distance| > small_move_max_m (1.0) or
- *                          |turn| > small_turn_max_deg (90): a long drive, or a drive towards where the robot was
- *                          not facing when the person asked, is confirmed; "advance a bit" / "back up 30 cm" is not.
+ *
+ * NO CONFIRMATION (user decision 2026-10-18): an accepted command is sent at once. The person can stop the robot at
+ * any time ("stop" / "para", without the model). The card the model kept promising and the "door controller
+ * confirmation" it invented were what stalled crossings (live 2026-10-18).
  *
  * A rejected call carries a reason, which goes back to the model as a role:"tool" message so it can tell the user.
  *
- * Plus the three deterministic fast paths that bypass the model entirely:
+ * Plus the two deterministic fast paths that bypass the model entirely:
  *   is_stop(text)       ^(stop|para|detente|alto)\b   → `stop` immediately
- *   is_yes / is_no      a typed answer to a pending confirmation card (the model can never confirm)
  *   parse_direct(text)  text already in the controller grammar (cross door / cross door_N / uncross /
  *                       move <m> / turn <deg> / turn <deg> move <m>) → the same validation as the tool
  *
@@ -67,8 +64,6 @@ struct ToolCall
 /// [Chat] limits for move_relative (etc/config.toml).
 struct GateLimits
 {
-    double small_move_max_m = 1.0;     ///< |distance| up to this goes without a card
-    double small_turn_max_deg = 90.0;  ///< a turn COMBINED with a move goes without a card up to this
     double max_move_m = 3.0;           ///< longer is refused (the controller's own cap is 3 m)
 };
 
@@ -86,10 +81,8 @@ inline std::string describe_relative(double distance_m, double turn_deg)
 struct GateResult
 {
     bool ok = false;
-    bool needs_confirmation = false;
     std::string command;   ///< the controller grammar text to send (cross door_19 | stop | uncross)
     std::string reason;    ///< why it was rejected
-    std::string summary;   ///< one line for the confirmation card / transcript
 };
 
 inline std::string ascii_lower_trim(std::string s)
@@ -126,15 +119,12 @@ inline GateResult validate(const ToolCall& call, const GateFacts& f, const GateL
         if (dist != 0.0) cmd += std::format("{}move {:.2f}", cmd.empty() ? "" : " ", dist);
         r.ok = true;
         r.command = cmd;
-        r.summary = describe_relative(dist, turn);
-        r.needs_confirmation = dist != 0.0 and (std::abs(dist) > lim.small_move_max_m or std::abs(turn) > lim.small_turn_max_deg);
         return r;
     }
     if (call.name == "stop")
     {
         r.ok = true;
         r.command = "stop";
-        r.summary = "stop the robot";
         if (not f.controller_present) r.reason = "warning: the controller is not present; the stop is written anyway";
         return r;
     }
@@ -143,7 +133,6 @@ inline GateResult validate(const ToolCall& call, const GateFacts& f, const GateL
         if (not f.controller_present) { r.reason = "the controller is not running"; return r; }
         r.ok = true;
         r.command = "uncross";
-        r.summary = "cancel the door passage";
         return r;
     }
     if (call.name == "cross_door")
@@ -175,9 +164,7 @@ inline GateResult validate(const ToolCall& call, const GateFacts& f, const GateL
             return r;
         }
         r.ok = true;
-        r.needs_confirmation = true;
         r.command = "cross " + door;
-        r.summary = "cross " + door + " (approach, open if shut, go through)";
         return r;
     }
     r.reason = "unknown tool '" + call.name + "'";
@@ -189,18 +176,6 @@ inline bool is_stop(const std::string& text)
 {
     static const std::regex re(R"(^(stop|para|detente|alto)\b)", std::regex::icase);
     return std::regex_search(ascii_lower_trim(text), re);
-}
-
-/// A typed answer to a pending confirmation card. The whole message must be the answer.
-inline bool is_yes(const std::string& text)
-{
-    static const std::regex re(R"(^(yes|y|yep|ok|okay|confirm|confirmed|go|go ahead|do it|sí|si|vale|adelante|confirmo|hazlo|dale)$)");
-    return std::regex_match(ascii_lower_trim(text), re);
-}
-inline bool is_no(const std::string& text)
-{
-    static const std::regex re(R"(^(no|n|nope|cancel|abort|don't|dont|cancela|cancelar|mejor no)$)");
-    return std::regex_match(ascii_lower_trim(text), re);
 }
 
 /// Locale-proof number (CLAUDE.md: never strtod/stod under es_ES).
@@ -256,6 +231,28 @@ inline std::optional<ToolCall> parse_direct(const std::string& text)
     if (std::regex_match(t, cross_re)) return ToolCall{.name = "cross_door", .door = "nearest"};
     if (std::regex_match(t, uncross_re)) return ToolCall{.name = "cancel_passage"};
     return std::nullopt;
+}
+
+/// The model's line when a command ends (the robot_status tool message). state is the intention's "failed|<reason>",
+/// "completed", …; event the BT's last event, often the same reason again (said once here). A FAILED relative move
+/// says what it does not mean: the model otherwise read "a wall blocks the way" as blocking the door it was heading to
+/// and refused every later crossing (live 2026-10-18).
+inline std::string robot_status_text(const std::string& command, const std::string& state, const std::string& event)
+{
+    const auto bar = state.find('|');
+    const std::string outcome = state.substr(0, bar);
+    std::string reason = bar == std::string::npos ? "" : state.substr(bar + 1);
+    if (reason.empty()) reason = event;
+    // explain_relative_command gives "<command> (<plain words>)" for a relative move, the bare command otherwise
+    std::string out = "The command '" + command + "'" + explain_relative_command(command).substr(command.size())
+                    + " ended: " + outcome;
+    if (not reason.empty()) out += " — " + reason;
+    out += ".";
+    const auto c = parse_direct(command);
+    if (outcome == "failed" and c.has_value() and c->name == "move_relative")
+        out += " That blocked only this straight-line move; it says nothing about a door: cross_door approaches a door "
+               "along its own path and opens it if it is shut.";
+    return out;
 }
 
 }   // namespace rc::chat

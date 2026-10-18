@@ -134,10 +134,6 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.log_dir = r.s("Chat.log_dir", "logs", "directory for logs/chat_<date>.jsonl");
     c.system_prompt_path = r.s("Chat.system_prompt_path", "etc/system_prompt.md",
             "robot description prepended to the system message (read once at start; missing => built-in)");
-    c.limits.small_move_max_m = r.d("Chat.small_move_max_m", 1.0,
-            "move_relative: |distance| up to this is sent WITHOUT a confirmation card");
-    c.limits.small_turn_max_deg = r.d("Chat.small_turn_max_deg", 90.0,
-            "move_relative: a turn COMBINED with a move needs a card above this (a pure turn never does)");
     c.limits.max_move_m = r.d("Chat.max_move_m", 3.0, "move_relative: longer distances are refused (controller cap 3 m)");
     c.default_step_m = r.d("Chat.default_step_m", 0.3, "\"advance a bit\": the step the model is told to use");
     c.objects_nearest = r.i("Chat.objects_nearest", 6, "OBJECTS section of the STATE: how many nearest objects are listed");

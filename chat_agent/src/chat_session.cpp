@@ -80,14 +80,10 @@ void ChatSession::start()
             history_.clear();
             look_jpeg_.clear();
             last_relative_.clear();   // "a bit more" has nothing to repeat in a new conversation
-            pending_.reset();
-            window_->hide_card();
             window_->clear_transcript();
             window_->append_system("New conversation.");
             log_.write("new_conversation");
         },
-        .on_confirm = [this]() { confirm_card("button"); },
-        .on_reject = [this]() { reject_card("button"); },
     });
     window_->show();
     window_->append_system("Robot chat ready. I answer from the robot's live map only. Type \"stop\" to stop it at once.");
@@ -201,17 +197,13 @@ void ChatSession::on_user_text(const QString& text)
     // 1. stop — at once, without the model, whatever else is going on.
     if (is_stop(t))
     {
-        if (pending_.has_value()) { pending_.reset(); window_->hide_card(); }
         log_.write("fast_path", QJsonObject{{"kind", "stop"}});
         dispatch({.name = "stop"}, "fast_path");
         push_history({{"role", "user"}, {"content", text}});
         push_history({{"role", "assistant"}, {"content", "Stopping the robot now."}});
         return;
     }
-    // 2. a typed answer to the card.
-    if (pending_.has_value() and is_yes(t)) { push_history({{"role", "user"}, {"content", text}}); confirm_card("typed"); return; }
-    if (pending_.has_value() and is_no(t)) { push_history({{"role", "user"}, {"content", text}}); reject_card("typed"); return; }
-    // 3. already in the controller's grammar.
+    // 2. already in the controller's grammar.
     if (const auto call = parse_direct(t); call.has_value())
     {
         log_.write("fast_path", QJsonObject{{"kind", "grammar"}, {"tool", q(call->name)}, {"door", q(call->door)},
@@ -223,7 +215,7 @@ void ChatSession::on_user_text(const QString& text)
         push_history({{"role", "assistant"}, {"content", reply}});
         return;
     }
-    // 4. the model.
+    // 3. the model.
     if (llm_.busy())
     {
         window_->append_system("Still answering the previous message — wait, or press Cancel.");
@@ -236,7 +228,7 @@ void ChatSession::on_user_text(const QString& text)
 
 // The robot description (etc/system_prompt.md: who Shadow is, its body, senses, abilities and the honesty/language
 // rules) is read once at startup. These interface rules stay in code because they are coupled to it: the tool names
-// and the confirmation card (tools_json, dispatch) and the bearing convention (world_digest.cpp bearing_words).
+// (tools_json, dispatch) and the bearing convention (world_digest.cpp bearing_words).
 // If the file is missing, a minimal built-in description takes its place.
 namespace
 {
@@ -251,9 +243,12 @@ const QString kFallbackDescription = QStringLiteral(
 const QString kInterfaceRules = QStringLiteral(
     "\n## Tools and STATE conventions\n"
     "- Use names exactly as written in the STATE (e.g. door_19).\n"
-    "- cross_door moves the robot and is carried out only after the person confirms on a card in the window: "
-    "never say the robot is moving or has crossed until the STATE or a tool result says so. You cannot confirm "
-    "anything yourself.\n"
+    "- cross_door and move_relative start at once when you call them; the person can stop the robot at any time. "
+    "Never say the robot is moving or has crossed until the STATE or a tool result says so.\n"
+    "- A shut door is no reason not to call cross_door: the crossing itself approaches the door, has it opened and "
+    "plans its own path there, whatever a short move ran into. Nobody has to confirm anything: never ask the person "
+    "to confirm a crossing, a move or the opening of a door. When they ask for an action, or answer yes to one you "
+    "offered, call its tool now.\n"
     "- stop() halts the robot at once. cancel_passage() abandons a door crossing in progress.\n"
     "- Directions: bearing 0 deg = straight ahead of the robot, positive = to its left, negative = to its right.\n"
     "- P(open) is a probability, not a fact: near 0 = probably shut, near 1 = probably open, in between = unsure.\n"
@@ -319,7 +314,7 @@ QJsonArray ChatSession::tools_json() const
     QJsonArray tools;
     tools.append(tool_def("cross_door",
         "Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go through. "
-        "Shows the person a confirmation card; nothing moves until they confirm.",
+        "Starts at once.",
         QJsonObject{{"door", QJsonObject{{"type", "string"}, {"enum", doors},
                                          {"description", "a door of the current room, or 'nearest'"}}}},
         QJsonArray{"door"}));
@@ -328,8 +323,7 @@ QJsonArray ChatSession::tools_json() const
                           QJsonObject{}, {}));
     tools.append(tool_def("move_relative",
         "Move the robot a short distance relative to where it is now: first turn in place by turn_deg, then drive "
-        "straight distance_m. Small moves start at once; long ones ask the person to confirm. The robot refuses if a "
-        "wall or obstacle is in the way.",
+        "straight distance_m. Starts at once. The robot refuses if a wall or obstacle is in the way.",
         QJsonObject{{"distance_m", QJsonObject{{"type", "number"},
                                                {"description", "metres to drive after turning: positive = forward, "
                                                                "negative = backward, 0 = do not drive"}}},
@@ -630,22 +624,12 @@ QString ChatSession::dispatch(const ToolCall& call, const char* origin, QString*
     const GateResult r = validate(call, digest_.facts, cfg_.limits);
     log_.write("gate", QJsonObject{{"origin", origin}, {"tool", q(call.name)}, {"door", q(call.door)},
                                    {"distance_m", call.distance_m}, {"turn_deg", call.turn_deg}, {"ok", r.ok},
-                                   {"confirm", r.needs_confirmation}, {"command", q(r.command)}, {"reason", q(r.reason)}});
+                                   {"command", q(r.command)}, {"reason", q(r.reason)}});
     if (not r.ok)
     {
         window_->append_system(QStringLiteral("Not possible: ") + q(r.reason));
         say = QStringLiteral("I can't do that: %1.").arg(q(r.reason));
         return QStringLiteral("REJECTED: ") + q(r.reason);
-    }
-    if (r.needs_confirmation)
-    {
-        pending_ = Pending{.call = call, .result = r, .origin = origin};
-        window_->show_card(QStringLiteral("<b>Confirm:</b> %1<br><small>Click Confirm, or type yes / sí. "
-                                          "Cancel, no, or stop to drop it.</small>").arg(q(r.summary).toHtmlEscaped()));
-        log_.write("card_shown", QJsonObject{{"command", q(r.command)}});
-        say = QStringLiteral("Please confirm on the card: %1.").arg(q(r.summary));
-        return QStringLiteral("PENDING CONFIRMATION: a card asking the person to confirm '%1' is shown. "
-                              "The robot will not move unless they confirm.").arg(q(r.command));
     }
     if (not r.reason.empty()) window_->append_system(q(r.reason));
     const bool sent = send_command(r.command, origin);
@@ -675,42 +659,6 @@ bool ChatSession::send_command(const std::string& command, const char* origin)
     window_->append_system(QStringLiteral("→ sent to the controller: %1").arg(q(command)));
     std::println("[chat_agent] command '{}' sent ({})", command, origin);
     return true;
-}
-
-void ChatSession::confirm_card(const char* how)
-{
-    if (not pending_.has_value()) return;
-    const Pending p = *pending_;
-    pending_.reset();
-    window_->hide_card();
-    tick_digest();
-    // Re-validate: the door may have gone, or the controller, since the card was raised.
-    const GateResult r = validate(p.call, digest_.facts, cfg_.limits);
-    log_.write("confirm", QJsonObject{{"how", how}, {"command", q(p.result.command)}, {"still_valid", r.ok},
-                                      {"reason", q(r.reason)}});
-    if (not r.ok or r.command != p.result.command)
-    {
-        const QString why = r.ok ? QStringLiteral("the nearest door changed to %1 — ask again").arg(q(r.command))
-                                 : q(r.reason);
-        window_->append_system(QStringLiteral("Confirmed, but no longer possible: ") + why);
-        push_history({{"role", "tool"}, {"tool_name", "confirmation"}, {"content", "Confirmed by the person but NOT sent: " + why}});
-        return;
-    }
-    const bool sent = send_command(r.command, how);
-    push_history({{"role", "tool"}, {"tool_name", "confirmation"},
-                  {"content", sent ? QStringLiteral("The person CONFIRMED; '%1' was sent to the controller.").arg(q(r.command))
-                                   : QStringLiteral("The person confirmed but the command could not be written.")}});
-}
-
-void ChatSession::reject_card(const char* how)
-{
-    if (not pending_.has_value()) return;
-    log_.write("reject", QJsonObject{{"how", how}, {"command", q(pending_->result.command)}});
-    window_->append_system(QStringLiteral("Cancelled: %1").arg(q(pending_->result.command)));
-    push_history({{"role", "tool"}, {"tool_name", "confirmation"},
-                  {"content", QStringLiteral("The person DECLINED '%1'. Nothing was sent.").arg(q(pending_->result.command))}});
-    pending_.reset();
-    window_->hide_card();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -767,7 +715,7 @@ void ChatSession::tick_status()
         if (not event.empty()) line += " — " + q(event);
         window_->append_robot(line);
         push_history({{"role", "tool"}, {"tool_name", "robot_status"},
-                      {"content", QStringLiteral("The command '%1' ended: %2. %3").arg(q(sent_command_), q(state), q(event))}});
+                      {"content", q(robot_status_text(sent_command_, state, event))}});
     }
     seen_state_ = state;
     seen_step_ = step;

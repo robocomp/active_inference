@@ -13,7 +13,7 @@ int main()
     GateFacts f{.room = "room_1", .doors = {"door_19", "door_7"}, .nearest_door = "door_19", .controller_present = true};
 
     auto r = validate({.name = "cross_door", .door = "door_7"}, f);
-    assert(r.ok and r.needs_confirmation and r.command == "cross door_7"); ++checks;
+    assert(r.ok and r.command == "cross door_7"); ++checks;
     r = validate({.name = "cross_door", .door = "nearest"}, f);
     assert(not r.ok and r.reason.find("2 doors") != std::string::npos); ++checks;   // ambiguous: two doors, ask which
     {
@@ -33,12 +33,12 @@ int main()
     r = validate({.name = "cross_door", .door = "door_7"}, g);
     assert(not r.ok); ++checks;
     r = validate({.name = "stop"}, f);
-    assert(r.ok and not r.needs_confirmation and r.command == "stop"); ++checks;
+    assert(r.ok and r.command == "stop"); ++checks;
     g = f; g.controller_present = false;
     r = validate({.name = "stop"}, g);
     assert(r.ok and not r.reason.empty()); ++checks;                         // stop always goes, with a warning
     r = validate({.name = "cancel_passage"}, f);
-    assert(r.ok and not r.needs_confirmation and r.command == "uncross"); ++checks;
+    assert(r.ok and r.command == "uncross"); ++checks;
     r = validate({.name = "cancel_passage"}, g);
     assert(not r.ok); ++checks;
     r = validate({.name = "open_fridge"}, f);
@@ -46,8 +46,6 @@ int main()
 
     assert(is_stop("stop") and is_stop("Stop!") and is_stop("para ya") and is_stop("detente") and is_stop("alto")); ++checks;
     assert(not is_stop("parar") and not is_stop("please stop") and not is_stop("stopwatch")); ++checks;
-    assert(is_yes("yes") and is_yes("sí") and is_yes("Si.") and is_yes("ok") and not is_yes("yes but later")); ++checks;
-    assert(is_no("no") and is_no("cancel") and not is_no("now")); ++checks;
 
     auto d = parse_direct("cross door_19");
     assert(d and d->name == "cross_door" and d->door == "door_19"); ++checks;
@@ -60,30 +58,27 @@ int main()
     assert(not parse_direct("can you cross the door please?")); ++checks;
     // ── move_relative ──
     {
-        const GateLimits lim;   // defaults: small 1.0 m, small turn 90 deg, max 3.0 m
+        const GateLimits lim;   // default max 3.0 m; every accepted move is sent at once (no card, 2026-10-18)
         r = validate({.name = "move_relative", .distance_m = 0.3}, f, lim);
-        assert(r.ok and not r.needs_confirmation and r.command == "move 0.30"); ++checks;      // small: straight through
+        assert(r.ok and r.command == "move 0.30"); ++checks;
         r = validate({.name = "move_relative", .distance_m = -0.5}, f, lim);
-        assert(r.ok and not r.needs_confirmation and r.command == "move -0.50"); ++checks;     // backing up a bit
-        r = validate({.name = "move_relative", .distance_m = 1.0}, f, lim);
-        assert(r.ok and not r.needs_confirmation); ++checks;                                   // the limit itself is small
+        assert(r.ok and r.command == "move -0.50"); ++checks;     // backing up a bit
         r = validate({.name = "move_relative", .distance_m = 1.5}, f, lim);
-        assert(r.ok and r.needs_confirmation and r.command == "move 1.50"); ++checks;          // large: card
+        assert(r.ok and r.command == "move 1.50"); ++checks;
         r = validate({.name = "move_relative", .distance_m = 3.5}, f, lim);
         assert(not r.ok and r.reason.find("at most 3.0 m") != std::string::npos); ++checks;   // beyond max: refused
         r = validate({.name = "move_relative", .turn_deg = 180}, f, lim);
-        assert(r.ok and not r.needs_confirmation and r.command == "turn 180"); ++checks;       // turn around: no card
+        assert(r.ok and r.command == "turn 180"); ++checks;
         r = validate({.name = "move_relative", .turn_deg = -90}, f, lim);
-        assert(r.ok and not r.needs_confirmation and r.command == "turn -90"); ++checks;
+        assert(r.ok and r.command == "turn -90"); ++checks;
         r = validate({.name = "move_relative", .turn_deg = 360}, f, lim);
-        assert(r.ok and not r.needs_confirmation); ++checks;                                   // any pure turn: no card
+        assert(r.ok and r.command == "turn 360"); ++checks;
         r = validate({.name = "move_relative", .turn_deg = 400}, f, lim);
         assert(not r.ok); ++checks;
         r = validate({.name = "move_relative", .distance_m = 0.5, .turn_deg = 90}, f, lim);
-        assert(r.ok and not r.needs_confirmation and r.command == "turn 90 move 0.50"); ++checks;   // turn THEN move
-        assert(r.summary == "turn left 90 deg, then move forward 0.50 m"); ++checks;
+        assert(r.ok and r.command == "turn 90 move 0.50"); ++checks;   // turn THEN move
         r = validate({.name = "move_relative", .distance_m = 0.5, .turn_deg = 180}, f, lim);
-        assert(r.ok and r.needs_confirmation); ++checks;                                       // big turn + a move: card
+        assert(r.ok and r.command == "turn 180 move 0.50"); ++checks;
         r = validate({.name = "move_relative"}, f, lim);
         assert(not r.ok and r.reason.find("nothing to do") != std::string::npos); ++checks;
         r = validate({.name = "move_relative", .distance_m = 0.004}, f, lim);
@@ -96,9 +91,9 @@ int main()
         nc = f; nc.room.clear();
         r = validate({.name = "move_relative", .distance_m = 0.3}, nc, lim);
         assert(not r.ok); ++checks;
-        const GateLimits tight{.small_move_max_m = 0.2};
-        r = validate({.name = "move_relative", .distance_m = 0.3}, f, tight);
-        assert(r.ok and r.needs_confirmation); ++checks;                                       // limits come from config
+        const GateLimits tight{.max_move_m = 1.0};
+        r = validate({.name = "move_relative", .distance_m = 1.5}, f, tight);
+        assert(not r.ok and r.reason.find("at most 1.0 m") != std::string::npos); ++checks;   // limit comes from config
 
         d = parse_direct("move 0.5");
         assert(d and d->name == "move_relative" and d->distance_m == 0.5 and d->turn_deg == 0); ++checks;
@@ -113,6 +108,24 @@ int main()
         assert(parse_number("0.25") == 0.25 and parse_number("+1") == 1.0 and not parse_number("1,5")); ++checks;
         assert(explain_relative_command("move -0.30") == "move -0.30 (move backward 0.30 m)"); ++checks;
         assert(explain_relative_command("turn 90 move 0.50") == "turn 90 move 0.50 (turn left 90 deg, then move forward 0.50 m)"); ++checks;
+    }
+    {
+        // The end-of-command line the model reads (live 2026-10-18: a relative move failed against a wall, and the model
+        // then refused "cross it into next room" for ever, the move's failure read as blocking the door).
+        const std::string fail = robot_status_text("turn -126 move 3.00",
+            "failed|a wall or obstacle blocks the way ahead: only 1.95 m of the 3.00 m are clear",
+            "a wall or obstacle blocks the way ahead: only 1.95 m of the 3.00 m are clear");
+        assert(fail.starts_with("The command 'turn -126 move 3.00' (turn right 126 deg, then move forward 3.00 m) "
+                                "ended: failed — a wall or obstacle blocks the way ahead: only 1.95 m of the 3.00 m "
+                                "are clear.")); ++checks;
+        assert(fail.find("1.95 m of the 3.00 m are clear", fail.find("clear") + 1) == std::string::npos); ++checks;   // said once
+        assert(fail.find("only this straight-line move") != std::string::npos
+               and fail.find("cross_door") != std::string::npos); ++checks;
+        const std::string cross = robot_status_text("cross door_1", "failed|door stayed shut", "door stayed shut");
+        assert(cross == "The command 'cross door_1' ended: failed — door stayed shut."); ++checks;   // not a relative move
+        assert(robot_status_text("cross door_1", "completed", "") == "The command 'cross door_1' ended: completed."); ++checks;
+        assert(robot_status_text("move 0.30", "completed", "arrived") ==
+               "The command 'move 0.30' (move forward 0.30 m) ended: completed — arrived."); ++checks;   // success: no caveat
     }
     std::println("test_gate: {} checks passed", checks);
     return 0;
