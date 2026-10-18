@@ -201,7 +201,14 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     const auto init = anchor_from_room(inst, std::nullopt, &axis_sign);
     if (not init.has_value())
         return false;   // no room / robot transform this cycle: try again next cycle
-    auto a = rc::interaction::Anchor::create(*G, inst.node_id, aff.node_id(), agent_id, init.value());
+    // ★Fix round 1: the anchor is BORN STALE. Anchor::create writes the RT edge at the pose's stamp, and the room-frame
+    //  initialisation is not an observation: stamped `now` it was driven on and drawn for up to kAnchorStaleMs with no
+    //  sensor evidence. Its edge is stamped one tick past the staleness horizon instead, so the node always has a pose
+    //  but the controller refuses it until the first update with P(door in view) ≥ kPublishViewLevel rewrites it. The
+    //  internal belief keeps stamp `now` (the prediction's clock).
+    rc::interaction::RelPose born = init.value();
+    born.stamp_ms = init->stamp_ms - rc::interaction::kAnchorStaleMs - 1;
+    auto a = rc::interaction::Anchor::create(*G, inst.node_id, aff.node_id(), agent_id, born);
     if (not a.has_value())
     {
         std::print("door_concept: [anchor] could NOT hang {} from the robot for {} (create failed)\n",
@@ -475,6 +482,20 @@ void SpecificWorker::step_passage_anchor()
     // ⇒ ⚑ the FLAGGED default: the aperture ± one width each side. Kept from the last cycle while the instance is gone.
     if (inst != nullptr)
     {
+        // The anchor's x-axis vs THIS instance's wall_u, re-derived every cycle (fix round 1): a relink to a mirrored
+        // door instance (the entry mirror in the next room) can carry the opposite wall_u, and a sign latched at
+        // creation would then flip [u_min, u_max]. Only the SIGN is read from the room frame — the anchor's pose is
+        // not. No room transform this cycle ⇒ the last sign stands.
+        {
+            const Eigen::Vector2f wu = (inst->ai2_initialized ? inst->ai2_belief.params().wall_u : inst->aperture.wall_u).normalized();
+            if (const std::string room = rc::room::current_room_frame(*G); not room.empty() and not robot_name.empty() and inner_eigen_)
+                if (const auto T = inner_eigen_->get_transformation_matrix(room, robot_name, 0); T.has_value())
+                {
+                    const Eigen::Vector2d ax(std::cos(pa.pose.x.z()), std::sin(pa.pose.x.z()));
+                    const Eigen::Vector2f ax_room = (T->linear().topLeftCorner<2, 2>() * ax).cast<float>();
+                    if (const float d = ax_room.dot(wu); d != 0.f) pa.axis_sign = d > 0.f ? 1.f : -1.f;
+                }
+        }
         const float w = inst->aperture.w;
         float lo = -1.5f * w, hi = 1.5f * w;
         if (inst->ai2_initialized)
@@ -510,32 +531,14 @@ void SpecificWorker::step_passage_anchor()
         if (not pa.frames_checked_rays)
             pa.frames_checked_rays = check_anchor_ray_frames(robot_name, age_s, tw);
         lidar_origin = to_now(lidar_ingestor_->origin_bpearl_robot(), tw, age_s);
-        const Eigen::Vector2f o = lidar_origin.head<2>();
-        // The predicted door line (normal n through the opening's centre), for the floor returns below.
-        const Eigen::Vector2f n_door(-std::sin(pa.pose.x.z()), std::cos(pa.pose.x.z()));
-        for (const auto& p_then : lidar_ingestor_->sweep_bpearl_robot())
-        {
-            const Eigen::Vector3f p = to_now(p_then, tw, age_s);
-            if (p.z() > pa.height) continue;   // above the lintel: not this wall's band
-            if (p.z() < kFloorBandM)
-            {
-                // ★Task 7: a FLOOR return is kept iff its beam crossed the predicted door line while still inside the
-                //  doorway's height band, i.e. it went THROUGH the plane and landed on the floor beyond. The downward
-                //  bpearl dome sees an open doorway almost only this way — its through-beams end on the next room's
-                //  floor — and without them the opening's cells read as unobserved (P(door in view) ≈ the jambs' half,
-                //  0.5: the publication level). Geometry of the beam, not a tuned level. Floor returns in front of the
-                //  line never reached the wall and stay out, as before.
-                const float s_o = n_door.dot(lidar_origin.head<2>() - c), s_p = n_door.dot(p.head<2>() - c);
-                if (not (s_o * s_p < 0.f)) continue;
-                const float z_cross = lidar_origin.z() + s_o / (s_o - s_p) * (p.z() - lidar_origin.z());
-                if (z_cross < kFloorBandM or z_cross > pa.height) continue;
-            }
-            const Eigen::Vector2f d = p.head<2>() - o;
-            const float len2 = d.squaredNorm();
-            if (len2 < 1e-6f) continue;
-            const float t = std::clamp((c - o).dot(d) / len2, 0.0f, 1.0f);
-            if ((o + t * d - c).norm() <= kRayReachM) rays.push_back(p);
-        }
+        // The wall band, plus the floor returns that went THROUGH the predicted opening (rc::door::keep_floor_return:
+        // through the opening's span, inside the height band, landed beyond the far face by more than the prior's
+        // depth σ — so a mis-predicted shut door cannot read open), within kRayReachM of the opening.
+        std::vector<Eigen::Vector3f> sweep_now;
+        sweep_now.reserve(lidar_ingestor_->sweep_bpearl_robot().size());
+        for (const auto& p_then : lidar_ingestor_->sweep_bpearl_robot()) sweep_now.push_back(to_now(p_then, tw, age_s));
+        rays = rc::door::select_anchor_rays(pa.pose, pa.width, pa.thickness, kFloorBandM, pa.height, lidar_origin,
+                                            sweep_now, kRayReachM);
     }
     // The zed: its pose in the robot frame (static mount) and its frustum, for the mask AND the camera visibility.
     rc::door::CameraFrustum cam;
@@ -609,7 +612,7 @@ void SpecificWorker::step_passage_anchor()
     // Between observations the belief is predicted (above) but not published; the edge then ages past
     // kAnchorStaleMs and the controller drops back to the room route. The anchor node itself stays.
     const bool publish = measured and ev.p_view >= kPublishViewLevel;
-    if (publish != pa.publishing)
+    if (measured and publish != pa.publishing)   // a transition is judged on a MEASURED cycle only
     {
         pa.publishing = publish;
         std::print("door_concept: [anchor] {}@robot {} publishing — P(door in view) {:.2f} (p_lidar {:.2f}, p_cam {:.2f})\n",

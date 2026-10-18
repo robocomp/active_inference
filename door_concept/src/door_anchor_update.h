@@ -83,8 +83,9 @@
  * ★try64: with the line infinite, a room corner 1.5 m along a SHUT door's wall made the first update slide the
  *  opening 0.9 m along the wall toward the corner (test turning_away_does_not_drag_anchor, k = 0: 0.904 m), and a
  *  gap beyond the run's end captured the opening 1.0 m away (other_wall_outside_extent_ignored).
- * The run is part of the door's template: it moves WITH the anchor, so a shift that would push the opening into
- * a gap beyond u_max also pushes the run's end over the gap's through-rays, which then cost what they cost.
+ * Which rays belong to the run is decided ONCE per frame at the PRIOR mean (under the prior's spread), and a beam
+ * travelling AWAY from the line is never on it (see Problem::run_log): a run re-evaluated at each hypothesis made
+ * its ends lateral evidence and let the template slide to shed inconvenient rays.
  *
  * ─── VISIBILITY: P(door in view) TEMPERS the sensor evidence (Task 7, fix 1) ────────────────────────────
  * The sensors are evidence about THIS opening only on frames where it is actually observed. At the PRIOR mean,
@@ -94,9 +95,9 @@
  *           membership e(u) — the beams the geometry PREDICTS on the doorway, v_lidar = Σ n·e — and the
  *           responsibility r of the doorway's own structure (wall / through / leaf) against the clutter components,
  *           which is where a return inconsistent with the predicted depth (an occluder, a wall elsewhere) loses its
- *           vote: o_lidar = Σ n·e·r. p_lidar = P(at least one beam of the frame struck the doorway)
- *           = 1 − Π(1 − n·e·r). It falls to 0 when no sampled beam reaches the doorway (out of the sector, or
- *           every beam occluded) and saturates once a handful do.
+ *           vote: o_lidar = Σ n·e·r (diagnostics). p_lidar = the mean COVERAGE of the doorway's cells — the fraction
+ *           of the doorway region some beam entered (crossed, hit, or travelled along): see lidar_view. It falls to
+ *           0 when no sampled beam reaches the doorway (out of the sector, or every beam occluded).
  *   Camera  the soft frustum membership of BOTH jambs (azimuth within the half-FOV, range within the depth range),
  *           blurred by the jambs' predictive spread: p_cam_geom. The mask's centroid is evidence of the opening's
  *           centre only if the whole opening is in the image.
@@ -141,7 +142,7 @@ struct AnchorEvidence
     // ─── Task 7: is the door being OBSERVED this frame (see "VISIBILITY" in the header) ─────────────────────
     float v_lidar = 0.f;                              // predicted beams on the doorway neighbourhood (Σ membership)
     float o_lidar = 0.f;                              // of those, explained by the doorway's own structure (Σ m·r)
-    float p_lidar = 0.f;                              // P(≥ 1 beam of this frame struck the doorway) = 1 − Π(1 − m·r)
+    float p_lidar = 0.f;                              // mean coverage of the doorway's cells (lidar_view)
     float p_cam   = 0.f;                              // P(opening in the zed frustum) when a mask was consumed, else 0
     float p_view  = 0.f;                              // P(door in view) = 1 − (1 − p_lidar)(1 − p_cam)
 };
@@ -467,14 +468,21 @@ inline M3d psd_information(const M3d& H, const M3d& Pinv)
 }
 
 // ─── VISIBILITY at the prior (fix 1) ──────────────────────────────────────────────────────────────────────────
-// LiDAR: v = Σ n·e (beams on the doorway neighbourhood), o = Σ n·e·r (explained by its structure), and p = the
-// FRACTION OF THE DOORWAY OBSERVED: the neighbourhood |u| < w cut into cells of the model's own lateral resolution
-// (kRangeSigma, the jamb blur), each cell observed with P = 1 − Π(1 − e·r) over the beams crossing it, p = the mean.
-// A doorway half outside the sampled sector, half occluded, or seen at a grazing angle that leaves cells unsampled is
-// half observed — not "observed" because a handful of beams struck it.
-// ★"≥ 1 beam struck the doorway" (1 − Π over all beams) saturated at 1 while the doorway sat on the sector's edge,
-//  and that is where a SHUT door's span slid toward the unsampled side (no beam there to contradict it): test
-//  turning_away_does_not_drag_anchor, 0.10 m at k = 20 with the doorway half out.
+// LiDAR: v = Σ n·e (beams on the doorway neighbourhood), o = Σ n·e·r (explained by its structure) — diagnostics — and
+// p = the FRACTION OF THE DOORWAY OBSERVED. The doorway region is the wall slab |y| ≤ t/2 (+ the beam's depth spread)
+// over |u| < w (the opening and half a width of wall each side), cut into cells of the model's lateral resolution
+// (kRangeSigma). A cell is OBSERVED by a beam whose segment origin → endpoint ENTERS it: a beam that crossed the
+// doorway there, or ended on its structure there (a jamb face, a wall face beside the jamb, a shut leaf), or — from
+// inside the doorway — travelled along it to a jamb. Each such beam observes the cell with probability 1 − 2ε (it may
+// be clutter); a cell's P = 1 − Π(1 − (1 − 2ε)) over its beams; p = the mean over cells. A beam that ended short of
+// the slab (an occluder, a wall elsewhere) never enters it and observes nothing; the doorway out of the sampled sector,
+// occluded, or seen at a grazing angle that leaves cells unsampled is observed only in part.
+// ★History. (1) "≥ 1 beam struck the doorway" (1 − Π over all beams) saturated at 1 with the doorway half out of the
+//  sector, where a SHUT door's span slid toward the unsampled side (turning_away_does_not_drag_anchor, 0.10 m).
+//  (2) Cells credited only where a beam's LINE crossed y = 0 went unobserved MID-CROSSING: from a sensor on the line
+//  every beam crosses at the sensor, so the 360° bpearl read P(view) 0.41 at the line and the anchor was PAUSED in
+//  the doorway (review probe; test mid_crossing_360_keeps_view). Segment-entry credits the jamb faces it hits and
+//  the opening it travels along.
 struct LidarView { double v = 0, o = 0, p = 0; };
 // Under the spreads pb.linearise(x, P) staged (the prior's).
 inline LidarView lidar_view(const Problem& pb, const V3d& x)
@@ -482,20 +490,61 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x)
     LidarView lv;
     const double w = pb.model.w;
     const int n_cells = std::max(1, int(std::ceil(2.0 * w / kRangeSigma)));
-    std::vector<double> log_none(std::size_t(n_cells), 0.0);   // per cell: log Π(1 − e·r)
+    const double cell = 2.0 * w / double(n_cells);
+    std::vector<double> log_none(std::size_t(n_cells), 0.0);   // per cell: log Π(1 − q)
+    const double log_miss = std::log(2.0 * kClutter);           // log(1 − q), q = 1 − 2ε
+    const double c = std::cos(x.z()), s = std::sin(x.z());
+    auto inv = [&](const Eigen::Vector2d& p) { const Eigen::Vector2d q = p - x.head<2>(); return Eigen::Vector2d(c * q.x() + s * q.y(), -s * q.x() + c * q.y()); };
     for (std::size_t i = 0; i < pb.rays.size(); ++i)
     {
         const UD a = to_anchor(pb.rays[i], x);
         const auto k = pb.model.terms(a, pb.spread[i], pb.run_log[i]);
         const double ne = std::exp(k.log_nbhd + k.log_run);
-        const double er = std::exp(k.log_run) * pb.model.responsibility(k, a);
         lv.v += ne;
         lv.o += ne * pb.model.responsibility(k, a);
-        if (std::abs(a.u) < w)
+        // The segment's part inside the slab |y| ≤ hs, as a parameter interval [t0, t1] ⊂ [0, 1].
+        const Eigen::Vector2d oa = inv(pb.rays[i].o), ea = inv(pb.rays[i].e);
+        const double hs = 0.5 * pb.model.t + std::sqrt(k.sd2);
+        const double dy = ea.y() - oa.y();
+        double t0 = 0.0, t1 = 1.0;
+        double log_q_miss = log_miss;   // log(1 − q) for this beam
+        if (std::abs(dy) < 1e-12) { if (std::abs(oa.y()) > hs) continue; }
+        else
         {
-            const int c = std::clamp(int((a.u + w) / (2.0 * w) * n_cells), 0, n_cells - 1);
-            log_none[std::size_t(c)] += std::log1p(-std::min(er, 1.0 - 1e-12));   // er < 1 by construction
+            double ta = (-hs - oa.y()) / dy, tb = (hs - oa.y()) / dy;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(0.0, ta); t1 = std::min(1.0, tb);
+            if (t0 > t1)
+            {
+                // The beam stopped SHORT of the predicted slab. Under the prior's depth spread it may still have
+                // reached the doorway's structure: it observes the cell where its line enters the slab with
+                // q = (1 − 2ε)·exp(−½(gap/sd)²), gap = how far short it stopped. A prior 0.35 m behind the true wall
+                // (σ 0.2) still SEES the wall; an occluder a metre short does not. Beams heading away: nothing.
+                if (ta < 0.0) continue;                                    // the slab is behind the beam's origin
+                const double gap = std::abs(ea.y()) - hs;
+                const double q = (1.0 - 2.0 * kClutter) * std::exp(-0.5 * gap * gap / k.sd2);
+                log_q_miss = std::log1p(-q);
+                t1 = ta; t0 = ta;                                          // the entry point of its line
+            }
         }
+        double u0 = oa.x() + t0 * (ea.x() - oa.x()), u1 = oa.x() + t1 * (ea.x() - oa.x());
+        if (u0 > u1) std::swap(u0, u1);
+        // A return ON A JAMB FACE (the endpoint inside the slab, within the jamb blur of |u| = w/2) observes the wall's
+        // END — which is what the half-width of wall cells beside that jamb stand for. From inside the doorway those
+        // cells are behind the jamb and no beam can enter them; without this the anchor read P(view) 0.55 with the
+        // sensor on the door line (test mid_crossing_360_keeps_view).
+        if (t1 >= 1.0 and t0 <= 1.0)
+        {
+            const double tau = std::sqrt(kRangeSigma * kRangeSigma + pb.spread[i].su2);
+            if (std::abs(std::abs(ea.x()) - 0.5 * w) <= tau)
+            {
+                if (ea.x() > 0) u1 = std::max(u1, w); else u0 = std::min(u0, -w);
+            }
+        }
+        if (u1 <= -w or u0 >= w) continue;
+        const int c0 = std::clamp(int(std::floor((std::max(u0, -w) + w) / cell)), 0, n_cells - 1);
+        const int c1 = std::clamp(int(std::floor((std::min(u1, w) + w) / cell)), 0, n_cells - 1);
+        for (int cc = c0; cc <= c1; ++cc) log_none[std::size_t(cc)] += log_q_miss;
     }
     for (const double l : log_none) lv.p += -std::expm1(l);
     lv.p /= double(n_cells);
@@ -525,6 +574,53 @@ inline double camera_view(const CameraFrustum& cam, double w, const V3d& x, cons
     return std::exp(log_p);
 }
 }  // namespace anchor_detail
+
+// ─── RAY SELECTION for the update (the caller's half, kept here so it is testable) ────────────────────────────────
+// A FLOOR return (z below the wall band) is kept iff its beam went THROUGH THIS OPENING: it crossed the predicted
+// door line between the sensor and the endpoint, at a height inside the doorway's band [z_lo, z_hi], within the
+// opening (|u| < w/2 + τ at the prior, τ the jamb blur), and it landed beyond the predicted FAR face by more than the
+// prior's own depth σ. The downward bpearl dome sees an open doorway almost only this way (its through-beams end on
+// the next room's floor). ★The depth clause is what keeps a mis-predicted SHUT door shut: with the prior 0.25 m in
+// front of the true wall, real floor returns between the predicted line and the wall crossed the line inside the band
+// and read as "through" (review, fix round 1; test shut_door_reads_shut_with_floor). Beyond the far face by more than
+// the prior's depth σ, the floor is behind the wall wherever the wall can be.
+inline bool keep_floor_return(const rc::interaction::RelPose& prior, float w, float t, float z_lo, float z_hi,
+                              const Eigen::Vector3f& origin, const Eigen::Vector3f& p)
+{
+    const Eigen::Vector2f c = prior.x.head<2>();
+    const Eigen::Vector2f a(std::cos(prior.x.z()), std::sin(prior.x.z())), n(-a.y(), a.x());
+    const float s_o = n.dot(origin.head<2>() - c), s_p = n.dot(p.head<2>() - c);
+    if (not (s_o * s_p < 0.f)) return false;                                  // never crossed the line
+    const float k = s_o / (s_o - s_p);
+    const float z_cross = origin.z() + k * (p.z() - origin.z());
+    if (z_cross < z_lo or z_cross > z_hi) return false;                       // under the floor band / over the lintel
+    const float u_cross = a.dot(origin.head<2>() + k * (p.head<2>() - origin.head<2>()) - c);
+    if (std::abs(u_cross) >= 0.5f * w + float(anchor_detail::kRangeSigma)) return false;   // not through the opening
+    const float sigma_depth = std::sqrt(std::max(0.f, n.dot(prior.P.topLeftCorner<2, 2>() * n)));
+    return std::abs(s_p) > 0.5f * t + sigma_depth;                            // beyond the far face by > the prior's σ
+}
+
+// The update's rays from one robot-frame sweep: the wall band [z_lo, z_hi], plus the floor returns that went through
+// the opening (keep_floor_return), restricted to beams whose segment passes within `reach` of the predicted opening
+// (COST only: farther beams cannot cross the opening or its jambs).
+inline std::vector<Eigen::Vector3f> select_anchor_rays(const rc::interaction::RelPose& prior, float w, float t,
+                                                       float z_lo, float z_hi, const Eigen::Vector3f& origin,
+                                                       const std::vector<Eigen::Vector3f>& sweep, float reach)
+{
+    std::vector<Eigen::Vector3f> out;
+    const Eigen::Vector2f c = prior.x.head<2>(), o = origin.head<2>();
+    for (const auto& p : sweep)
+    {
+        if (p.z() > z_hi) continue;
+        if (p.z() < z_lo and not keep_floor_return(prior, w, t, z_lo, z_hi, origin, p)) continue;
+        const Eigen::Vector2f d = p.head<2>() - o;
+        const float len2 = d.squaredNorm();
+        if (len2 < 1e-6f) continue;
+        const float u = std::clamp((c - o).dot(d) / len2, 0.0f, 1.0f);
+        if ((o + u * d - c).norm() <= reach) out.push_back(p);
+    }
+    return out;
+}
 
 // One free-energy minimisation: prior = the predicted RelPose; likelihood = rays (+ mask). Levenberg-Marquardt on
 // (x, y, yaw) against the predictive spread (two stages); Laplace covariance at the sensor's σ with the frame's
@@ -573,6 +669,18 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     pb.run_log.resize(pb.rays.size());
     for (std::size_t i = 0; i < pb.rays.size(); ++i)
         pb.run_log[i] = pb.model.run_membership(to_anchor(pb.rays[i], x), pb.spread[i]);
+    // ─── VISIBILITY at the prior: how much of this frame's evidence is about THIS doorway (fix 1) ─────────────
+    {
+        const LidarView lv = lidar_view(pb, x);
+        const double pc = camera_view(cam, pb.model.w, x, P);
+        pb.beta_lidar = lv.p;
+        pb.beta_cam   = pc;
+        ev.v_lidar = float(lv.v);
+        ev.o_lidar = float(lv.o);
+        ev.p_lidar = float(lv.p);
+        ev.p_cam   = mask.valid ? float(pc) : 0.f;
+        ev.p_view  = float(1.0 - (1.0 - lv.p) * (1.0 - double(ev.p_cam)));
+    }
     // A ray whose run membership is below 1e-9 contributes a CONSTANT to F (the background, x-independent) to within
     // 1e-9 relative: it is left out of the optimisation as a matter of arithmetic, not of modelling (COST only — the
     // counts below still see every ray).
@@ -585,18 +693,6 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
                 pb.rays[n] = pb.rays[i]; pb.run_log[n] = pb.run_log[i]; pb.spread[n] = pb.spread[i]; ++n;
             }
         pb.rays.resize(n); pb.run_log.resize(n); pb.spread.resize(n);
-    }
-    // ─── VISIBILITY at the prior: how much of this frame's evidence is about THIS doorway (fix 1) ─────────────
-    {
-        const LidarView lv = lidar_view(pb, x);
-        const double pc = camera_view(cam, pb.model.w, x, P);
-        pb.beta_lidar = lv.p;
-        pb.beta_cam   = pc;
-        ev.v_lidar = float(lv.v);
-        ev.o_lidar = float(lv.o);
-        ev.p_lidar = float(lv.p);
-        ev.p_cam   = mask.valid ? float(pc) : 0.f;
-        ev.p_view  = float(1.0 - (1.0 - lv.p) * (1.0 - double(ev.p_cam)));
     }
     M3d H = pb.Pinv;
     V3d g;

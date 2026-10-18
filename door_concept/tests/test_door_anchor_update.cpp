@@ -21,6 +21,14 @@
 //   other_wall_outside_extent_ignored — the door's wall ends 0.3 m past its jamb (u_max); a 1 m gap and a collinear
 //                                  wall beyond it; the prior 0.3 m toward them (door shut): the posterior is not pulled past the extent
 //   shut_door_reads_shut           — the try64-like start pose, door shut, corner present: p_open < 0.1
+// Task 7 fix round 1 (review):
+//   turning_away_360               — the same turn with a 360° scan: the pose bounds hold (p_view need not fall — the
+//                                  doorway stays in the sampled dome)
+//   mid_crossing_360_keeps_view    — open door, 360° scan, the robot driving along the normal from s = -0.5 to +0.8 m:
+//                                  p_view ≥ 0.6 at every step, lateral error < 0.05 m
+//   shut_door_reads_shut_with_floor — 3-D bpearl-like scan (z = 0.67, downward layers) with floor returns, shut door,
+//                                  prior 0.25 m in front of the wall, rays through select_anchor_rays: p_open < 0.1,
+//                                  depth < 0.05 m within 3 updates
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
 //   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O1 -fPIC -I/usr/include/eigen3 -Isrc -I../common
@@ -139,7 +147,8 @@ static V3 anchor_truth(const Pose2& r) { const V2 a = to_robot(r, V2::Zero()); r
 static Pose2 try64_start() { return {V2(-0.172f, -2.440f), 0.84f}; }
 // Door wall u in [u0, u1] (the door's own run) with the opening; a corner wall at u = u0 running toward the robot's
 // side; optionally a 1 m gap after u1 and a collinear wall beyond it; a far wall 4 m behind.
-struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false; };
+static const V3 kSensor(0.f, 0.14f, 0.67f);   // the bpearl in the robot frame
+struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false; };
 static std::vector<Seg> world(const WorldOpts& o)
 {
     std::vector<Seg> s;
@@ -149,11 +158,39 @@ static std::vector<Seg> world(const WorldOpts& o)
     if (o.collinear_beyond) box(s, o.u1 + 1.0f, o.u1 + 3.5f, -0.5f * T, 0.5f * T);
     if (o.shut) box(s, -0.5f * W, 0.5f * W, -0.5f * T, -0.5f * T + 0.04f);
     box(s, -6.f, 6.f, 4.f, 4.1f);
+    if (o.back_wall) box(s, -6.f, 6.f, -4.1f, -4.f);   // the robot's own room closes behind it
     return s;
+}
+// A 3-D bpearl-like scan: the sensor at kSensor (z = 0.67), 360° in azimuth at 1°, layers from 0 to -60° at 2°. A beam
+// stops on a wall (walls are taller than the sensor) or on the floor (z = 0), whichever it reaches first. Robot frame.
+static std::vector<V3> scan3d(const std::vector<Seg>& segs, const Pose2& r, unsigned seed = 5)
+{
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> noise(0.f, 0.02f);
+    const float c = std::cos(r.psi), s = std::sin(r.psi);
+    const V2 o_w = r.p + V2(c * kSensor.x() - s * kSensor.y(), s * kSensor.x() + c * kSensor.y());
+    std::vector<V3> pts;
+    for (float a = 0.f; a < 360.f; a += 1.f)
+    {
+        const float b = r.psi + a * float(M_PI) / 180.f;
+        const V2 u(std::cos(b), std::sin(b));
+        float r_wall = 1e9f;
+        for (const auto& sg : segs) if (const float t = ray_seg(o_w, u, sg); t > 0.f and t < r_wall) r_wall = t;
+        for (float el = 0.f; el >= -60.f; el -= 2.f)
+        {
+            const float te = std::tan(el * float(M_PI) / 180.f);
+            const float r_floor = te < 0.f ? kSensor.z() / -te : 1e9f;
+            const float rr = std::min(r_wall, r_floor);
+            if (rr > 8.f) continue;
+            const float rn = rr + noise(rng);
+            const V2 pr = to_robot(r, o_w + u * rn);
+            pts.emplace_back(pr.x(), pr.y(), r_floor <= r_wall ? 0.f + 0.3f * noise(rng) : kSensor.z() + rn * te);
+        }
+    }
+    return pts;
 }
 // A scan from the robot at `r`: beams every 0.25 deg within ±half_sector of the robot's forward, from the sensor at
 // `sensor_robot`; returned in the ROBOT frame (z = 0.5, the wall band).
-static const V3 kSensor(0.f, 0.14f, 0.67f);
 static std::vector<V3> scan(const std::vector<Seg>& segs, const Pose2& r, float half_sector_deg = 90.f, unsigned seed = 7)
 {
     std::mt19937 rng(seed);
@@ -351,6 +388,90 @@ int main()
         check(worst_yaw < 0.05f, "posterior within 0.05 rad of the truth throughout");
         check(n_out > 0 and pv_min_out < 0.1f, "p_view falls (< 0.1) while the doorway is out of the sampled sector");
         check(pv_first > 0.9f and pv_last > 0.9f, "p_view high (> 0.9) before it leaves and after it returns");
+    }
+
+    std::print("turning_away_360\n");
+    {
+        const WorldOpts wo;
+        const auto segs = world(wo);
+        Pose2 robot = try64_start();
+        RelPose belief = creation_prior(robot);
+        float worst_pos = 0.f, worst_yaw = 0.f, pv_min = 1.f;
+        for (int k = 0; k < 120; ++k)
+        {
+            const float omega = k < 60 ? 0.35f : -0.35f;
+            rc::rt::Twist tw; tw.angular = V3(0.f, 0.f, omega);
+            belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+            robot.psi += omega * 0.1f;
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 180.f, 7 + k), {});
+            belief = post;
+            const V3 tr = anchor_truth(robot);
+            worst_pos = std::max(worst_pos, (post.x.head<2>() - tr.head<2>()).norm());
+            worst_yaw = std::max(worst_yaw, std::abs(rc::interaction::wrap_pi(post.x.z() - tr.z())));
+            pv_min = std::min(pv_min, ev.p_view);
+        }
+        std::print("    worst err {:.3f} m {:.3f} rad; min p_view {:.3f}\n", worst_pos, worst_yaw, pv_min);
+        check(worst_pos < 0.10f, "posterior within 0.10 m of the truth throughout (360°)");
+        check(worst_yaw < 0.05f, "posterior within 0.05 rad of the truth throughout (360°)");
+    }
+
+    std::print("mid_crossing_360_keeps_view\n");
+    {
+        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true;
+        const auto segs = world(wo);
+        Pose2 robot{V2(0.12f, -0.5f - kSensor.y()), 0.f};   // the SENSOR at s = -0.5 along the normal, 0.12 m off-centre
+        RelPose belief = creation_prior(robot);
+        float pv_min = 1.f, worst_lat = 0.f;
+        constexpr float ds = 0.05f;
+        for (int k = 0; k <= 26; ++k)
+        {
+            if (k > 0)
+            {
+                rc::rt::Twist tw; tw.linear = V3(0.f, ds / 0.1f, 0.f);
+                belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+                robot.p.y() += ds;
+            }
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, scan(segs, robot, 180.f, 21 + k), {});
+            belief = post;
+            const V3 tr = anchor_truth(robot);
+            const float lat = std::abs(std::cos(tr.z()) * (post.x.x() - tr.x()) + std::sin(tr.z()) * (post.x.y() - tr.y()));
+            pv_min = std::min(pv_min, ev.p_view);
+            worst_lat = std::max(worst_lat, lat);
+            if (k % 2 == 0)
+                std::print("    s={:+.2f} p_view={:.3f} lat err={:.3f} depth err={:.3f} p_open={:.3f}\n", robot.p.y() + kSensor.y(),
+                           ev.p_view, lat, (post.x.head<2>() - tr.head<2>()).norm(), ev.p_open);
+        }
+        std::print("    min p_view {:.3f}, worst lateral {:.3f} m\n", pv_min, worst_lat);
+        check(pv_min >= 0.6f, "p_view ≥ 0.6 at every step of the crossing");
+        check(worst_lat < 0.05f, "lateral error < 0.05 m throughout");
+    }
+
+    std::print("shut_door_reads_shut_with_floor\n");
+    {
+        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = true; wo.back_wall = true;
+        const auto segs = world(wo);
+        const Pose2 robot{V2(0.2f, -2.0f), 0.f};
+        RelPose r = creation_prior(robot);
+        r.x.y() -= 0.25f;                                         // 0.25 m in front of the true wall (toward the robot)
+        const V3 tr = anchor_truth(robot);
+        float p_open_max = 0.f;
+        int n_floor = 0, n_floor_first = -1;
+        for (int k = 0; k < 3; ++k)
+        {
+            const auto sweep = scan3d(segs, robot, 31 + k);
+            const auto rays = rc::door::select_anchor_rays(r, W, T, 0.05f, 2.0f, kSensor, sweep, 2.0f);
+            for (const auto& q : rays) if (q.z() < 0.05f) ++n_floor;
+            if (k == 0) n_floor_first = n_floor;
+            const auto [post, ev] = update_door_anchor(r, W, T, wo.u0, wo.u1, kSensor, rays, {});
+            r = post;
+            p_open_max = std::max(p_open_max, ev.p_open);
+            std::print("    k={} rays={} depth err={:.3f} p_open={:.3f} through={} blocked={} p_view={:.3f}\n", k, rays.size(),
+                       std::abs(r.x.y() - tr.y()), ev.p_open, ev.n_through, ev.n_blocked, ev.p_view);
+        }
+        std::print("    floor returns kept: {} (frame 0, from the mis-predicted prior: {})\n", n_floor, n_floor_first);
+        check(n_floor_first == 0, "no floor return kept as 'through' a shut door from a prior 0.25 m short");
+        check(p_open_max < 0.1f, "p_open < 0.1 on every update");
+        check(std::abs(r.x.y() - tr.y()) < 0.05f, "depth corrected to < 0.05 m within 3 updates");
     }
 
     std::print("other_wall_outside_extent_ignored\n");
