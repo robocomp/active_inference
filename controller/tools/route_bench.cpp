@@ -182,6 +182,10 @@ Metrics evaluate(World &w, const rc::RouteOptimizerConfig *opt, float smoothing,
         rc::RouteOptimizerConfig o = *opt;
         o.distance = [&w](const Vector2f &p) { return w.planner.distance_at(p); };
         o.distance_gradient = [&w](const Vector2f &p) { return w.planner.distance_gradient_at(p); };
+        // The body, as the controller binds it (make_route_optimizer_config): the exact feasibility guard
+        // and, with safety_margin >= 0, the per-sample clearance target.
+        o.support_radius = [body = rc::RobotFootprint::shadow()](float yaw, const Vector2f &dir)
+        { return body.support_radius_yaw(yaw, dir); };
         route.set_optimizer(o);
     }
 
@@ -357,6 +361,7 @@ bool apply_key(rc::RouteOptimizerConfig &o, float &smoothing, float &spacing, co
     else if (k == "kappa_peak")   o.kappa_peak = v;
     else if (k == "sigma_a")      o.sigma_a = v;
     else if (k == "d_target")     o.d_target = v;
+    else if (k == "safety_margin") o.safety_margin = v;   // ≥ 0: target = body extent + margin (see route_optimizer.h)
     else if (k == "rho")          o.rho = v;
     else if (k == "anchor_huber") o.anchor_huber = v;
     else if (k == "iterations")   o.iterations = static_cast<int>(v);

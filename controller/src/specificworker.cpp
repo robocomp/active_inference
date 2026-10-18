@@ -1252,6 +1252,8 @@ void SpecificWorker::load_params()
          "Run the band every N control cycles. 1 = every cycle");
 	cfgr.opt_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias,
          "Route optimiser: speed (0) <-> safety (1)");
+	cfgr.opt_cast<double>("Controller.RouteSafetyMargin", params.route_safety_margin_m,
+         "Route optimiser: clearance target = the body's extent at the route heading + this (m); < 0 = old comfort target");
 	cfgr.opt_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight,
          "The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness of the TURN RATE is the…");
 
