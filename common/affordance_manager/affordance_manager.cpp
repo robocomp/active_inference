@@ -813,7 +813,17 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     //   are eligible only when a mission names them (set_required_name, the door passage).
     else
         std::erase_if(affordances, [&](const DSR::Node &n)
-                      { return graph->get_attrib_by_name<aff_kind_att>(n).has_value(); });
+                      {
+                          if (graph->get_attrib_by_name<aff_kind_att>(n).has_value()) return true;
+                          // ★ A LOOK THAT EXPECTS TO LEARN NOTHING LOSES TO STAYING PUT (2026-10-18). Doing nothing is
+                          //   always a policy and its G is 0; an epistemic offer whose expected gain is ≤ 0 nats cannot
+                          //   beat it, and 0 is the null of information gain, not a tuned cutoff. Without this the contest
+                          //   picked the only entrant whatever its gain: live, door_concept held aff_door_1 at gain 0
+                          //   after each completion (its cooldown hold) and the controller re-claimed it every 5-7 s,
+                          //   driving to the same viewpoint and turning on the spot for minutes.
+                          const auto g = graph->get_attrib_by_name<epistemic_gain_att>(n);
+                          return g.has_value() and not (g.value() > 0.f);
+                      });
 
     // ── IS ANY OBJECT AFFORDANCE IN THE RUNNING? ──────────────────────────────────────────────────
     // Decided over the ELIGIBLE set only (Offered or Executing): an object affordance its own producer
