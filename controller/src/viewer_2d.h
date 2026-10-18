@@ -57,6 +57,10 @@ class Viewer2D : public QObject
     // The door-passage corridors (controller_door_passage.h): space outside the room the planner treats as free while
     // a door is being crossed. Drawn over the room outline so it reads as an opening cut through it; empty clears.
     void draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &passages);
+    // The door-cross INTERACTION ANCHOR (Task 7, fix 3), already in the ROOM frame: the opening's two jamb points
+    // (left, right) and its unit normal (away from the robot). nullopt = draw nothing (clears the previous one).
+    struct AnchorOverlay { Eigen::Vector2f jamb_l, jamb_r, normal; };
+    void draw_anchor(const std::optional<AnchorOverlay> &a);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
     void set_lidar_draw_correction(const Eigen::Affine2f &correction) { lidar_draw_correction_ = correction; }
@@ -152,6 +156,7 @@ private:
     AbstractGraphicViewer *agv_ = nullptr;
     QGraphicsPolygonItem *polygon_item_ = nullptr;
     std::vector<QGraphicsPolygonItem *> passage_items_;   // draw_passages
+    std::vector<QGraphicsLineItem *> anchor_items_;        // draw_anchor
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;

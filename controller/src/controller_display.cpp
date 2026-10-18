@@ -188,6 +188,12 @@ bool ControllerDisplay::mission_recording() const
 bool ControllerDisplay::confirm_mission_supersede()
 { return mission_panel_ && mission_panel_->confirm_supersede(); }
 
+void ControllerDisplay::set_anchor_overlay(const std::optional<AnchorView> &a)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.anchor = a;
+}
+
 void ControllerDisplay::set_door_passage(const rc::DoorPassageStatus &view,
                                          const std::vector<std::vector<Eigen::Vector2f>> &passages)
 {
@@ -712,6 +718,21 @@ void ControllerDisplay::present()
 
     viewer_2d_->draw_room_polygon(snap.room_polygon);
     viewer_2d_->draw_passages(snap.door_passages);
+    // The anchor lives in the ROBOT frame; it is placed through the same pose the robot icon is drawn at.
+    {
+        std::optional<rc::Viewer2D::AnchorOverlay> ov;
+        if (snap.anchor.has_value() and snap.robot_pose.has_value())
+        {
+            const Eigen::Affine2f T = snap.robot_pose->as_transform();
+            const Eigen::Vector2f a(std::cos(snap.anchor->yaw), std::sin(snap.anchor->yaw));
+            const Eigen::Vector2f n(-a.y(), a.x());   // the anchor's +y: the wall normal, away from the robot
+            const float hw = 0.5f * snap.anchor->width;
+            ov = rc::Viewer2D::AnchorOverlay{.jamb_l = T * (snap.anchor->centre - hw * a),
+                                         .jamb_r = T * (snap.anchor->centre + hw * a),
+                                         .normal = T.linear() * n};
+        }
+        viewer_2d_->draw_anchor(ov);
+    }
     viewer_2d_->set_lidar_draw_correction(snap.lidar_correction.value_or(Eigen::Affine2f::Identity()));
     viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
     viewer_2d_->draw_path({

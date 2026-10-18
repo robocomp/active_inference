@@ -907,7 +907,11 @@ private:
     std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's fresh anchor (nullopt = room route)
     std::uint64_t anchor_latched_id_ = 0;                           // last anchor read, kept while the cross lasts
     std::string anchor_latched_for_;                                // the cross affordance it was read for
-    int anchor_mode_logged_ = -1;                                   // -1 none, 0 room route, 1 anchor: log on change
+    int anchor_mode_logged_ = -1;
+    // Task 7, fix 3: the anchor DRAWN on the 2-D view — set only by step_anchor_cross (the cross is engaged AND this
+    // cycle read a fresh anchor), cleared at every cycle's start and whenever update_cross_anchor finds none.
+    // update_display re-checks its age against kAnchorStaleMs, so a cycle that returns early never shows a stale one.
+    std::optional<AnchorCrossReading> anchor_drawn_;                                   // -1 none, 0 room route, 1 anchor: log on change
     bool anchor_hoist_logged_ = false;                              // build_planning_step's bypass: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.

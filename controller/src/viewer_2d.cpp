@@ -308,6 +308,28 @@ void Viewer2D::draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &pa
     }
 }
 
+// The anchor: the opening as a green segment between the jambs, each jamb a short dark-red bar ALONG the normal (the
+// wall's thickness direction), and a short tick from the centre along the normal so the crossing direction reads.
+void Viewer2D::draw_anchor(const std::optional<AnchorOverlay> &a)
+{
+    for (auto *item : anchor_items_)
+        if (item != nullptr) { agv_->scene.removeItem(item); delete item; }
+    anchor_items_.clear();
+    if (not a.has_value()) return;
+    auto line = [&](const Eigen::Vector2f &p, const Eigen::Vector2f &q, const QPen &pen)
+    {
+        auto *item = agv_->scene.addLine(p.x(), p.y(), q.x(), q.y(), pen);
+        item->setZValue(12);   // above the room outline (8) and the passage corridor (9)
+        anchor_items_.push_back(item);
+    };
+    const Eigen::Vector2f half = 0.15f * a->normal;
+    const Eigen::Vector2f c = 0.5f * (a->jamb_l + a->jamb_r);
+    line(a->jamb_l, a->jamb_r, QPen(QColor(20, 170, 60), 0.05));
+    line(a->jamb_l - half, a->jamb_l + half, QPen(QColor(170, 20, 20), 0.08));
+    line(a->jamb_r - half, a->jamb_r + half, QPen(QColor(170, 20, 20), 0.08));
+    line(c, c + 2.f * half, QPen(QColor(20, 170, 60), 0.03, Qt::DashLine));
+}
+
 void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)
 {
     clear_polygon_item(polygon_item_);

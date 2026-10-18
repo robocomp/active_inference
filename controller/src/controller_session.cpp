@@ -2552,6 +2552,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     // function. Cheap: four grid lookups, plus one whole-map census on the first world.
     monitor_footprint_orientation(step, time_source());
     anchor_cross_.reset();   // a per-cycle reading: only drive_point_target's update_cross_anchor may set it
+    anchor_drawn_.reset();   // likewise the drawn anchor: only step_anchor_cross sets it
 
     if (escape_active_)
     {
@@ -3010,6 +3011,7 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
 {
     anchor_cross_.reset();
+    anchor_drawn_.reset();
     const bool cross = step.target.from_affordance and step.target.node_name.ends_with("_cross");
     if (not cross or graph_ == nullptr)
     {
@@ -3029,8 +3031,17 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
     {
         if (anchor_mode_logged_ != 0)
         {
+            // Task 7: door_concept publishes the anchor only while P(door in view) ≥ 0.5, so an anchor that goes stale
+            // MID-cross means the door left the sensors (mid-doorway: the jambs beside the body, out of the dense
+            // bpearl sampling). Accepted fallback: the room route takes over. Said explicitly so it is not read as a
+            // dead producer.
+            if (anchor_mode_logged_ == 1)
+                std::println("[anchor] cross: anchor {} no longer fresh mid-cross (door_concept stops publishing when "
+                             "P(door in view) < 0.5) — falling back to the room route",
+                             anchor_latched_id_ != 0 ? std::to_string(anchor_latched_id_) : std::string("?"));
+            else
+                std::println("[anchor] cross: no fresh anchor — room route");
             anchor_mode_logged_ = 0;
-            std::println("[anchor] cross: no fresh anchor — room route");
         }
         return false;
     }
@@ -3093,6 +3104,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                           const TimeSource &time_source)
 {
     const auto &a = *anchor_cross_;
+    anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
     const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
     const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
     const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
@@ -4365,6 +4377,15 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
     const auto &icon_pose = robot_pose;
     const std::optional<Eigen::Affine2f> lidar_correction;
 
+    // The interaction anchor (Task 7, fix 3): only while the cross is engaged on it AND its reading is fresh.
+    {
+        std::optional<ControllerDisplay::AnchorView> av;
+        if (anchor_drawn_.has_value()
+            and static_cast<std::int64_t>(rc::provenance::now_ms()) - anchor_drawn_->pose.stamp_ms <= rc::interaction::kAnchorStaleMs)
+            av = ControllerDisplay::AnchorView{.centre = anchor_drawn_->pose.x.head<2>(), .yaw = anchor_drawn_->pose.x.z(),
+                                               .width = anchor_drawn_->width_m};
+        display.set_anchor_overlay(av);
+    }
     display.update(icon_pose,
                    room_polygon_,
                    current_plan_,
