@@ -51,6 +51,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -247,6 +248,33 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; };
     return true;
 }
 
+// Signed distance from q to the boundary of a convex polygon: > 0 outside, < 0 inside (the penetration depth).
+[[nodiscard]] inline float anchor_signed_distance(std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& q)
+{
+    if (poly.size() < 3) return std::numeric_limits<float>::infinity();
+    float d = std::numeric_limits<float>::infinity();
+    for (std::size_t i = 0; i < poly.size(); ++i)
+    {
+        const Eigen::Vector2f a = poly[i], e = poly[(i + 1) % poly.size()] - a;
+        const float t = std::clamp(e.squaredNorm() > 0.f ? (q - a).dot(e) / e.squaredNorm() : 0.f, 0.f, 1.f);
+        d = std::min(d, (q - (a + t * e)).norm());
+    }
+    return anchor_point_in_convex(poly, q) ? -d : d;
+}
+
+// The body's motion as seen by a FIXED point q of the robot frame: translating the body by (side, adv) and turning it by
+// dθ moves q to R(−dθ)(q − d) — the same algebra as relative_pose.h move_mean.
+[[nodiscard]] inline Eigen::Vector2f anchor_point_after(const Eigen::Vector2f& q, float side, float adv, float dth)
+{
+    const float c = std::cos(dth), s = std::sin(dth);
+    const Eigen::Vector2f p = q - Eigen::Vector2f(side, adv);
+    return {c * p.x() + s * p.y(), -s * p.x() + c * p.y()};
+}
+
+// ⚑ The finite-difference step of the clearance gains below: 1 mm of body-point travel. ARITHMETIC (a derivative's step,
+// far below every length in the problem), not a model level.
+inline constexpr float kAnchorGainStepM = 1e-3f;
+
 // The cap on |ω| for a turn in the direction of `rot` (rad/s, CCW positive).
 [[nodiscard]] inline float anchor_jamb_rot_limit(const rc::interaction::RelPose& r, float width, float rot,
                                                  std::span<const Eigen::Vector2f> body, float margin, float a_dec,
@@ -266,7 +294,18 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; };
         const Eigen::Vector2f rh = j.mean / rj, th(-rh.y(), rh.x());
         const float phi = std::atan2(j.mean.y(), j.mean.x());
         float delta = std::numeric_limits<float>::infinity();
-        if (anchor_point_in_convex(poly, j.mean)) delta = 0.f;
+        if (anchor_point_in_convex(poly, j.mean))
+        {
+            // Task 9, fix C: a jamb already INSIDE the grown body is reached by every turn (Δ = 0) — but a turn that moves
+            // the body boundary AWAY from it opens clearance and is not closing on it. Only the closing direction is capped
+            // (to 0); the other is this jamb's way out. (Before: both directions capped to 0, and with adv ≥ 0 the base
+            // could neither turn nor move — a deadlock the stall judge then called a wedge.)
+            const float h = kAnchorGainStepM / std::max(rj, 1e-3f);
+            const float gain = anchor_signed_distance(poly, anchor_point_after(j.mean, 0.f, 0.f, std::copysign(h, rot)))
+                             - anchor_signed_distance(poly, j.mean);
+            if (gain > 0.f) continue;
+            delta = 0.f;
+        }
         else
             for (std::size_t i = 0; i < poly.size(); ++i)                 // crossings of |x| = rj with each edge
             {
@@ -290,6 +329,94 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; };
         w = std::min(w, w_cap - p_reach * (w_cap - w_block));
     }
     return std::max(0.f, w);
+}
+
+// ── THE JAMB DEADLOCK AND THE SERVO'S OWN WAY OUT (Task 9, fix C) ─────────────────────────────────────────────────────
+// With a jamb mean INSIDE the grown body (the safety margin already breached, the body itself not yet touching) the
+// ceilings above stop every motion that closes on it: forward when it is ahead (no floor), and the turn toward it. If the
+// servo's own command is one of those, the base stands still in the doorway — and the stall judge, seeing a command with
+// no motion, called that a wedge and escaped (try66 leg 2: "spinning verdict, translation asked", three escapes,
+// Unreachable). That is the servo's problem to solve, with the geometry it already has. While the servo's own capped
+// command opens clearance it stands; when the caps leave it nothing that does (both bind), command the motion that
+// INCREASES the clearance. Candidates: reverse or advance along the heading (and ±side on a holonomic base), or turn either way; each
+// scored by the gain of the MIN signed clearance of the two jambs to the grown body per metre of body-point travel (a turn
+// by its arm, the jamb's radius), the largest positive gain taken. Its speed closes the deficit to "probably outside" —
+// the penetration plus the jamb's own σ along the escape — on the approach loop's time constant (kAnchorTauS):
+// v = v_max·tanh((pen + σ)/(v_max·τ_s)), a turn at the corner speed v/r_J. The result then goes through the same jamb
+// ceilings, so it cannot close on the OTHER jamb. No gain anywhere ⇒ no command (the stall judge stays the backstop).
+struct AnchorGuarded { AnchorCommand cmd; bool backoff = false; float min_clearance = std::numeric_limits<float>::infinity(); };
+
+[[nodiscard]] inline float anchor_min_clearance(const rc::interaction::RelPose& r, float width,
+                                                std::span<const Eigen::Vector2f> grown, float side, float adv, float dth)
+{
+    float c = std::numeric_limits<float>::infinity();
+    for (const auto& j : anchor_jambs(r, width)) c = std::min(c, anchor_signed_distance(grown, anchor_point_after(j.mean, side, adv, dth)));
+    return c;
+}
+
+// The servo command `c` through the jamb ceilings (translation along the base's own motion axis, rotation by the corner
+// sweep), with the deadlock's own way out. Differential: side is forced to 0.
+[[nodiscard]] inline AnchorGuarded anchor_jamb_guard(const rc::interaction::RelPose& r, float width, AnchorCommand c,
+                                                     bool holonomic, std::span<const Eigen::Vector2f> body, float margin,
+                                                     float a_dec, float v_max, float w_max)
+{
+    AnchorGuarded g;
+    if (not holonomic) c.side = 0.f;
+    auto cap = [&](AnchorCommand& k)
+    {
+        if (const float lin = std::hypot(k.adv, k.side); lin > 0.f)
+        {
+            const Eigen::Vector2f u(k.side / lin, k.adv / lin);
+            if (const float v = anchor_jamb_speed_limit(r, width, u, body, margin, a_dec, v_max); lin > v)
+            { k.adv *= v / lin; k.side *= v / lin; }
+        }
+        if (k.rot != 0.f)
+            k.rot = std::copysign(std::min(std::abs(k.rot), anchor_jamb_rot_limit(r, width, k.rot, body, margin, a_dec, w_max)), k.rot);
+    };
+    g.cmd = c;
+    if (not r.x.allFinite() or not r.P.allFinite() or not (width > 0.f) or body.size() < 3) return g;
+    const auto grown = anchor_grown_body(body, margin);
+    g.min_clearance = anchor_min_clearance(r, width, grown, 0.f, 0.f, 0.f);
+    cap(g.cmd);
+    if (not (g.min_clearance < 0.f) or c.through) return g;   // no jamb inside the grown body: the servo, capped
+    // A jamb inside the grown body. The servo's own (capped) command stands if it already OPENS clearance — the caps
+    // leave it a way out. Only when the caps have bound it to a motion that does not (the deadlock) does the guard step in.
+    const auto jambs = anchor_jambs(r, width);
+    const AnchorJamb& breached = anchor_signed_distance(grown, jambs[0].mean) <= anchor_signed_distance(grown, jambs[1].mean)
+                               ? jambs[0] : jambs[1];
+    const float arm = std::max(breached.mean.norm(), 1e-3f);
+    const float h = kAnchorGainStepM;
+    if (const float sp = std::hypot(g.cmd.adv, g.cmd.side) + std::abs(g.cmd.rot) * arm; sp > 0.f)
+    {
+        const float k = h / sp;   // the servo's command scaled to h of body-point travel
+        if (anchor_min_clearance(r, width, grown, k * g.cmd.side, k * g.cmd.adv, k * g.cmd.rot) > g.min_clearance) return g;
+    }
+
+    // The deadlock: the motion with the largest clearance gain per metre of body-point travel.
+    struct Cand { float side, adv, rot; };
+    std::vector<Cand> cand{{0.f, 1.f, 0.f}, {0.f, -1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f, -1.f}};
+    if (holonomic) { cand.push_back({1.f, 0.f, 0.f}); cand.push_back({-1.f, 0.f, 0.f}); }
+    // The arm of a turn: the radius of the jamb the body has breached most.
+    float best_gain = 0.f;
+    std::optional<Cand> best;
+    for (const auto& k : cand)
+    {
+        const float gain = (anchor_min_clearance(r, width, grown, h * k.side, h * k.adv, h * k.rot / arm) - g.min_clearance) / h;
+        if (gain > best_gain) { best_gain = gain; best = k; }
+    }
+    g.backoff = true;
+    g.cmd = AnchorCommand{};
+    if (not best.has_value()) return g;   // nothing opens clearance: stand still, the stall judge decides
+    // The escape direction in the robot frame (translation: its unit vector; a turn: the breached jamb's tangent).
+    const Eigen::Vector2f dir = best->rot != 0.f ? Eigen::Vector2f(Eigen::Vector2f(-breached.mean.y(), breached.mean.x()) / arm)
+                                                 : Eigen::Vector2f(best->side, best->adv);
+    const float sigma = anchor_axis_sigma(breached.cov, dir);
+    const float v = v_max * std::tanh((-g.min_clearance + sigma) / (v_max * kAnchorTauS));
+    g.cmd.side = best->side * v;
+    g.cmd.adv  = best->adv * v;
+    g.cmd.rot  = std::clamp(best->rot * v / arm, -w_max, w_max);
+    cap(g.cmd);
+    return g;
 }
 
 }  // namespace rc

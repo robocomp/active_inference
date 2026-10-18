@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 #include <Eigen/Dense>
 
@@ -126,6 +127,51 @@ struct Twist
     if (const auto ts = G.get_attrib_by_name<robot_current_speed_timestamp_att>(robot); ts.has_value())
         t.stamp_ms = static_cast<std::uint64_t>(ts.value());
     return t;
+}
+
+// ── THE TWIST'S OWN CLOCK (2026-10-19, Task 9) ───────────────────────────────────────────────────
+// ★A SIMULATOR'S VELOCITIES ARE PER SIMULATION SECOND. robot_concept forwards them as the producer states them, with
+// the producer's sim stamp (robot_current_speed_sim_timestamp) and robot_current_speed_simulated beside the wall stamp
+// (robot_current_speed_timestamp). A consumer that integrates the twist over WALL time over-counts every displacement
+// by wall/sim — ★measured try66 (door_concept's interaction anchor, predicted by this twist over the wall clock): the
+// sim ran at ~0.94× real time (commanded 0.35 m/s, the robot's ground truth 0.33 m/s per wall second) and the anchor's
+// predicted translation came out 3–9 % long and its rotation 14–15 % long (the clock is ~6 % of that; the rest is the
+// rotation's own over-report, which the anchor's evidence absorbs once the clock is right), so a 290° spin left it 15°
+// and 1.1 m off, with σ 0.3° / 7 mm.
+// room_concept's SimClockMap has integrated over the sim clock since 2026-08 (room_concept/src/common_types.h); this is
+// the same estimator, shared, so no further consumer has to rediscover it.
+// rate() = Δsim / Δwall over a trailing span, re-anchored after kSimClockSpanMs so a paused or restarted simulator cannot
+// poison it for ever; 1 until a span of kSimClockMinSpanMs exists, and on real hardware (never observed). ⚑ Both spans
+// are room_concept's SimClockMap's (30 s, 0.5 s): an estimation window, not a decision level.
+inline constexpr std::int64_t kSimClockSpanMs = 30000;
+inline constexpr std::int64_t kSimClockMinSpanMs = 500;
+class SimClockRate
+{
+public:
+    void observe(std::int64_t wall_ms, std::int64_t sim_ms)
+    {
+        if (wall_ms <= 0 or sim_ms <= 0 or wall_ms <= last_wall_) return;   // the same sample again, or out of order
+        if (first_wall_ == 0 or sim_ms < last_sim_) { first_wall_ = wall_ms; first_sim_ = sim_ms; }   // first, or a restart
+        last_wall_ = wall_ms; last_sim_ = sim_ms;
+        if (last_wall_ - first_wall_ > kSimClockSpanMs) { first_wall_ = last_wall_; first_sim_ = last_sim_; }
+        else if (const std::int64_t dw = last_wall_ - first_wall_, ds = last_sim_ - first_sim_; dw > kSimClockMinSpanMs and ds > 0)
+            rate_ = double(ds) / double(dw);
+    }
+    // Δsim / Δwall: the factor that turns a wall interval into the interval a sim-second velocity must be integrated over.
+    [[nodiscard]] double rate() const { return rate_; }
+private:
+    std::int64_t first_wall_ = 0, first_sim_ = 0, last_wall_ = 0, last_sim_ = 0;
+    double rate_ = 1.0;
+};
+// The robot node's (wall, sim) stamp pair of its current twist sample — only when the producer says it is SIMULATED.
+[[nodiscard]] inline std::optional<std::pair<std::int64_t, std::int64_t>> robot_twist_sim_stamps(DSR::DSRGraph &G, const DSR::Node &robot)
+{
+    const auto sim = G.get_attrib_by_name<robot_current_speed_simulated_att>(robot);
+    if (not sim.has_value() or not sim.value()) return std::nullopt;
+    const auto wall = G.get_attrib_by_name<robot_current_speed_timestamp_att>(robot);
+    const auto sts  = G.get_attrib_by_name<robot_current_speed_sim_timestamp_att>(robot);
+    if (not wall.has_value() or not sts.has_value()) return std::nullopt;
+    return std::pair{static_cast<std::int64_t>(wall.value()), static_cast<std::int64_t>(sts.value())};
 }
 
 }   // namespace rc::rt

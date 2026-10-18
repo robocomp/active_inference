@@ -116,4 +116,9 @@ std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G
 // kAnchorStaleMs rule; nullopt once the owner removes the anchor.
 std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint64_t anchor_id, std::int64_t now_ms);
 
+// The same read WITHOUT the kAnchorStaleMs refusal (Task 9): the anchor's newest published block, whatever its age
+// (RelPose::stamp_ms says when). For a consumer that must know an anchor EXISTS and where it last was — to WAIT for it
+// and turn toward it — never to drive on it: a stale pose is a pose nobody is looking at. Same other refusals.
+std::optional<std::pair<RelPose, float>> read_anchor_latest(DSR::DSRGraph& G, std::uint64_t anchor_id);
+
 }  // namespace rc::interaction

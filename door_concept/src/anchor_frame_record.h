@@ -28,6 +28,10 @@
  *            f32 p_lidar, p_cam, p_view          — AS PUBLISHED: p_cam / p_view include fix 1's held camera term
  *            f32 lidar_open, lidar_door, lidar_wall   — p_lidar's three factors
  *   Binary, so no text parsing (and no locale) is involved anywhere.
+ *   VERSION 1 (cc39a46c, e.g. try66) is still READ (Task 9): in place of the two staged sets it holds u32 n_rays then
+ *   n_rays × f32[3] (the PRE-budget rays after select_anchor_rays) and u32 n_budget. read_all puts those in
+ *   Frame::rays_v1 / n_budget_v1 and sets Frame::version = 1; a replay then stages them itself (the budget is
+ *   deterministic), so the CURRENT model can be re-run on a v1 file.
  * ⚑ The file is capped at kMaxBytes (200 MB, a disk budget, not a model level): past it, recording stops for the run.
  */
 #pragma once
@@ -66,6 +70,10 @@ struct Frame
     rc::interaction::RelPose post;
     float p_lidar = 0.f, p_cam = 0.f, p_view = 0.f;
     float lidar_open = 0.f, lidar_door = 0.f, lidar_wall = 0.f;
+    // Version-1 records only (read, never written): the pre-budget rays and the budgeted count.
+    std::uint32_t version = kVersion;
+    std::vector<Eigen::Vector3f> rays_v1;
+    std::uint32_t n_budget_v1 = 0;
 };
 
 namespace detail
@@ -156,15 +164,17 @@ inline std::string encode(const Frame& f)
     return b;
 }
 
-inline bool decode(const char* p, const char* e, Frame& f)
+inline bool decode(const char* p, const char* e, Frame& f, std::uint32_t version = kVersion)
 {
     using namespace detail;
+    f.version = version;
     bool ok = get(p, e, f.t_ms) and get_pose(p, e, f.prior);
     for (float* v : {&f.width, &f.thickness, &f.wall_u_min, &f.wall_u_max, &f.floor_below}) ok = ok and get(p, e, *v);
     float ox = 0, oy = 0, oz = 0;
     ok = ok and get(p, e, ox) and get(p, e, oy) and get(p, e, oz);
     f.lidar_origin = {ox, oy, oz};
-    ok = ok and get_staged(p, e, f.staging.prior) and get_staged(p, e, f.staging.post) and get_pts(p, e, f.mask);
+    if (version == 1) ok = ok and get_pts(p, e, f.rays_v1) and get(p, e, f.n_budget_v1) and get_pts(p, e, f.mask);
+    else ok = ok and get_staged(p, e, f.staging.prior) and get_staged(p, e, f.staging.post) and get_pts(p, e, f.mask);
     std::uint8_t k = 0;
     ok = ok and get(p, e, k);
     f.cam.known = k != 0;
@@ -220,14 +230,15 @@ private:
     bool full_ = false;
 };
 
-// The offline side: every record of a file, in order. False if the header is not this format; a truncated last
+// The offline side: every record of a file, in order (version 2, or version 1 — see the header). False if the header is
+// not this format; a truncated last
 // record (the agent killed mid-write) ends the read without failing it.
 inline bool read_all(std::istream& in, std::vector<Frame>& frames, std::uint32_t* version = nullptr)
 {
     char magic[8] = {};
     std::uint32_t ver = 0;
     if (not in.read(magic, sizeof(magic)) or std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) return false;
-    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or ver != kVersion) return false;
+    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 1)) return false;
     if (version != nullptr) *version = ver;
     // A record's length word is bounded by what the file still holds: a corrupt word cannot allocate gigabytes.
     const std::streampos here = in.tellg();
@@ -243,7 +254,7 @@ inline bool read_all(std::istream& in, std::vector<Frame>& frames, std::uint32_t
         buf.resize(n);
         if (not in.read(buf.data(), std::streamsize(n))) break;
         Frame f;
-        if (not decode(buf.data(), buf.data() + buf.size(), f)) break;
+        if (not decode(buf.data(), buf.data() + buf.size(), f, ver)) break;
         frames.push_back(std::move(f));
     }
     return true;

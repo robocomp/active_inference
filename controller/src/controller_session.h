@@ -90,13 +90,17 @@ public:
     {
         std::uint64_t anchor_id = 0;
         std::string name;                       // e.g. door_1@robot
-        rc::interaction::RelPose pose;          // the opening in the robot frame (+ covariance)
+        rc::interaction::RelPose pose;          // the opening in the robot frame (+ covariance), as last PUBLISHED
         float width_m = 0.f;
+        bool fresh = true;                      // Task 9: false = older than kAnchorStaleMs — wait for it, never drive on it
+        std::int64_t age_ms = 0;                // now − its newest stamp
     };
-    // The fresh anchor of a `_cross` affordance (its interaction_node_id, else the anchor latched for that same
-    // affordance name), or nullopt. Pure read; no state changes, no log.
+    // The anchor of a `_cross` affordance (its interaction_node_id, else the anchor latched for that same affordance
+    // name): fresh, or — with accept_stale (Task 9) — the stale one it last published (fresh = false), or nullopt.
+    // Pure read; no state changes, no log.
     std::optional<AnchorCrossReading> read_cross_anchor(std::uint64_t affordance_id,
-                                                         const std::string &affordance_name) const;
+                                                         const std::string &affordance_name,
+                                                         bool accept_stale = false) const;
     void step_anchor_cross(const ControllerRobotPose &robot_pose,
                            rc::TrajectoryController &path_controller,
                            ControllerObstacleTracker &obstacle_tracker,
@@ -299,8 +303,11 @@ private:
     // handled inside — reported and counted, never escaped — because the cure for "our limiter is
     // holding the base at 15%" is not a manoeuvre. See stall_judge.h for why the two must not be
     // conflated, and why judging on the post-throttle command alone made the second one invisible.
+    // spin_is_not_a_wedge (Task 9, fix C): the caller's command is rotation-dominant and its own (the anchor servo's), so
+    // a SPINNING verdict is reported and returned false — no escape, no hand-back. A Wedge still escapes.
     bool detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps, float pose_sigma_m,
-                      const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms);
+                      const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms,
+                      bool spin_is_not_a_wedge = false);
     void reset_stuck_window();
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
@@ -904,10 +911,24 @@ private:
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
     std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
-    std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's fresh anchor (nullopt = room route)
+    std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's anchor, fresh or WAITED for (nullopt = room route)
+    // Task 9, fix A: while a Cross step is anchored it never falls back to the room route. engaged = this Cross step has
+    // driven on a FRESH anchor (a stale one then means STOP and wait); before that, a named anchor is waited for while
+    // turning toward its last pose (anchor_wait_pose_, carried by the robot's own turn since anchor_wait_theta_). The wait
+    // is bounded by the cross contract's own timeout (target_contract_.timeout_ms), then handed back Unreachable — which
+    // the door passage counts as an attempt.
+    bool anchor_cross_engaged_ = false;
+    std::uint64_t anchor_wait_since_ms_ = 0;                        // first stale cycle of the current wait (0 = none)
+    std::int64_t anchor_wait_stamp_ = 0;                            // the stale pose's stamp anchor_wait_pose_ holds
+    rc::interaction::RelPose anchor_wait_pose_;                     // that pose, in the robot frame at anchor_wait_theta_
+    float anchor_wait_theta_ = 0.f;                                 // the robot's room heading when it was latched
+    // Task 9, fix C: a SPINNING verdict on a rotation-dominant servo command is not a wedge; since when it has held.
+    std::uint64_t anchor_spin_since_ms_ = 0;
+    bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change
+    rc::StallVerdict last_judged_verdict_ = rc::StallVerdict::None;  // the stall judge's last closed window
     std::uint64_t anchor_latched_id_ = 0;                           // last anchor read, kept while the cross lasts
     std::string anchor_latched_for_;                                // the cross affordance it was read for
-    int anchor_mode_logged_ = -1;                                   // -1 none, 0 room route, 1 anchor: log on change
+    int anchor_mode_logged_ = -1;                                   // -1 none, 0 room route, 1 anchor, 2 waiting: log on change
     // Task 7, fix 3: the anchor DRAWN on the 2-D view — set only by step_anchor_cross (the cross is engaged AND this
     // cycle read a fresh anchor), cleared at every cycle's start and whenever update_cross_anchor finds none.
     // update_display re-checks its age against kAnchorStaleMs, so a cycle that returns early never shows a stale one.

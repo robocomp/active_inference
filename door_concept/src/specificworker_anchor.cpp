@@ -17,20 +17,27 @@
  *            approach → cross handover the SAME anchor is re-linked (link_affordance drops the approach's link):
  *            same opening, same robot-frame belief, nothing re-initialised. Re-asserted EVERY cycle: a consumer's
  *            whole-node update of the affordance can erase an attribute it never read.
- *   RE-INIT  from_room again ONLY when (i) the claimed affordance is the one already linked and its executing epoch
- *            changed (the consumer accepted a new proposal), or (ii) the first claim after a room-switch RELINK (a
- *            new door instance: the old belief is not carried into a new passage). The axes keep their side.
- *   PARK     approach ended (any outcome), `open` claimed, or the door's instance is gone (merged): the anchor is
- *            kept, predicted and corrected — the passage may go on (open, then cross).
+ *   RE-INIT  from_room again ONLY for a NEW passage: (i) the claimed affordance is the one already linked and its
+ *            executing epoch changed (the consumer accepted a new proposal) — but NOT on a RETRY (Task 9: after a claim of
+ *            this door's approach or cross ENDED without the robot crossing, the next claim is the same passage tried
+ *            again, and the corrected robot-frame belief is the one thing the retry must keep); or (ii) the first claim
+ *            after a room-switch RELINK (a new door instance: the old belief is not carried into a new passage). The
+ *            axes keep their side. The door's GEOMETRY (width, thickness, height, its wall run) is read from the room
+ *            frame at the same two moments and nowhere else (Task 9: try66's belief jumped 0.15 m wider and 0.35 m along
+ *            its wall as the leaf swung open, and the anchor followed it every cycle).
+ *   PARK     approach ended (any outcome), `open` claimed, the CROSS ended without succeeding (Unreachable, Infeasible,
+ *            Timeout, aborted, released, re-offered — Task 9), or the door's instance is gone (merged): the anchor is
+ *            kept, predicted and corrected — the passage may go on (open, then cross, or the cross again).
  *   ROOM     release_room(): a switch while the anchored door's CROSS is claimed IS the cross's terminal transition
  *            ⇒ REMOVE (the room switch normally lands before door_concept completes the cross). A switch during
  *            approach/open RELINKS the anchor to the door re-identified in the new room, and marks it for re-init.
- *   REMOVE   (a) the cross claim of the anchored door ENDED while its instance lives (completed, aborted,
- *                released): the passage is over; or the room switched during the cross (above);
+ *   REMOVE   (a) the cross claim of the anchored door ended SATISFIED while its instance lives: the robot is through,
+ *                the passage's crossing is over; or the room switched during the cross (above);
  *            (b) nothing of this door's approach/open/cross is claimed AND THE SAME CONSUMER (the agent node of the
  *                claim we served, ExecutingClaim::agent_node_id) holds an `executing` edge to some other affordance:
- *                it has turned to something else (close, afford_room, another door). Other consumers' edges are
- *                not this passage's business. A legacy consumer (no edge, consumer unknown) never triggers it;
+ *                it has turned to something else (another object, or this door's `close`: the passage is ending).
+ *                Other consumers' edges are not this passage's business. A legacy consumer (no edge, consumer
+ *                unknown) never triggers it;
  *            (c) the agent exits (cleanup_owned_nodes), or the anchor node vanished under us.
  *   A parked anchor whose consumer holds NO executing edge is kept (a gap between two passage steps looks exactly
  *   like that); it is removed by (b) as soon as that consumer claims anything, and by (c).
@@ -224,9 +231,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.consumer_id  = aff.claim().has_value() ? aff.claim()->agent_node_id : 0;
     pa.pose         = init.value();
     pa.axis_sign    = axis_sign;
-    pa.width        = inst.aperture.w;
-    pa.thickness    = inst.aperture.thickness;
-    pa.height       = inst.aperture.h;
+    anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once
     pa.approach_was_claimed = inst.aff_approach.claimed();
     pa.cross_was_claimed    = inst.aff_cross.claimed();
     passage_anchor_ = std::move(pa);
@@ -254,6 +259,33 @@ void SpecificWorker::remove_passage_anchor(std::string_view why)
         passage_anchor_->anchor->remove(*G);   // the affordance's link first, then the node (its RT edge goes with it)
     std::print("door_concept: [anchor] {}@robot REMOVED — {}\n", passage_anchor_->door_name, why);
     passage_anchor_.reset();
+}
+
+// The door's geometry as the anchor's model needs it — width, thickness, height and its wall RUN in anchor coordinates —
+// read from the door instance (its room-frame belief). Task 9: called when the pose is (re)initialised from the room and
+// at no other time, for the same reason the pose is: try66 leg 1's belief jumped from w 1.06 to 1.22 and 0.35 m along
+// its wall when the leaf swung open, which moved the run's end INSIDE the opening's half-width, and the anchor (reading
+// it every cycle) lost its wall there. The one exception is an UNKNOWN run (no wall associated yet ⇒ ⚑ the flagged
+// default, the aperture ± one width each side): the first known run is taken once — that is first information about the
+// wall, not a refit of it.
+void SpecificWorker::anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const
+{
+    pa.width     = inst.aperture.w;
+    pa.thickness = inst.aperture.thickness;
+    pa.height    = inst.aperture.h;
+    float lo = -1.5f * pa.width, hi = 1.5f * pa.width;
+    pa.run_known = false;
+    if (inst.ai2_initialized)
+        if (const auto& bp = inst.ai2_belief.params(); bp.wall_len > 0.f)
+        {
+            const float sc = (inst.aperture.centre_xy() - bp.wall_O).dot(bp.wall_u.normalized());
+            lo = -sc;
+            hi = bp.wall_len - sc;
+            pa.run_known = true;
+        }
+    if (pa.axis_sign < 0.f) { const float t = lo; lo = -hi; hi = -t; }
+    pa.wall_u_min = lo;
+    pa.wall_u_max = hi;
 }
 
 // The passage door re-identified (room switch: the entry mirror / recreated door is the crossed one). The anchor is
@@ -389,12 +421,31 @@ void SpecificWorker::step_passage_anchor()
     const bool crs = inst != nullptr and inst->aff_cross.claimed();
     const bool opn = inst != nullptr and inst->aff_open.claimed();
 
-    // ── REMOVE (a): the crossing's own claim ended ───────────────────────────────────────────────────────────
-    if (inst != nullptr and pa.cross_was_claimed and not crs)
+    // ── REMOVE (a): the crossing's own claim ended SATISFIED — else PARK it for the retry (Task 9) ────────────────
+    // ★try66 leg 2: every Unreachable of the cross removed the anchor ("the cross claim ended (completed)"), the re-claim
+    //  hung a new one born stale from the room — 0.15 m and 18° from the corrected belief, and, with the robot already
+    //  past the wall plane, with its normal flipped (the room init puts the robot on −y): the controller was told to turn
+    //  155° in the doorway. A cross that ended without the robot crossing is the same passage, to be tried again.
+    if (inst != nullptr and ((pa.cross_was_claimed and not crs) or (pa.approach_was_claimed and not app)))
     {
-        remove_passage_anchor(std::format("the cross claim ended ({})",
-                                          rc::pragmatic::PragmaticAffordance::state_name(inst->aff_cross.state())));
-        return;
+        const bool was_cross = pa.cross_was_claimed and not crs;
+        const auto& ended = was_cross ? inst->aff_cross : inst->aff_approach;
+        const auto outcome = ended.outcome();
+        const std::string why = std::format("the {} claim ended ({}{}{})", ended.kind(),
+                                            rc::pragmatic::PragmaticAffordance::state_name(ended.state()),
+                                            outcome == rc::affordance::Outcome::None ? "" : ", ",
+                                            rc::affordance::to_string(outcome));
+        if (was_cross and outcome == rc::affordance::Outcome::Satisfied)
+        {
+            remove_passage_anchor(why + ": the robot is through");
+            return;
+        }
+        if (outcome != rc::affordance::Outcome::Satisfied)
+        {
+            pa.retry = true;
+            std::print("door_concept: [anchor] {}@robot PARKED — {}: kept, predicted and corrected for this door's next "
+                       "approach or cross claim (a retry: the belief is not re-initialised)\n", pa.door_name, why);
+        }
     }
     // ── REMOVE (b): nothing of this passage is claimed and the consumer is executing something else ──────────
     if (not (app or crs or opn))
@@ -410,15 +461,20 @@ void SpecificWorker::step_passage_anchor()
                 return;
             }
     }
+    const bool claim_rose = (app and not pa.approach_was_claimed) or (crs and not pa.cross_was_claimed);
     pa.approach_was_claimed = app;
     pa.cross_was_claimed    = crs;
 
     // ── LINK + RE-INIT ───────────────────────────────────────────────────────────────────────────────────────
     if (inst != nullptr)
     {
-        pa.width     = inst->aperture.w;
-        pa.thickness = inst->aperture.thickness;
-        pa.height    = inst->aperture.h;
+        if (not pa.run_known)   // the first KNOWN wall run is taken once (anchor_geometry_from_door)
+            if (inst->ai2_initialized and inst->ai2_belief.params().wall_len > 0.f)
+            {
+                const float w = pa.width, t = pa.thickness, h = pa.height;
+                anchor_geometry_from_door(*inst, pa);
+                pa.width = w; pa.thickness = t; pa.height = h;   // the run only: the geometry stays the initialisation's
+            }
         if (const rc::pragmatic::PragmaticAffordance* aff = crs ? &inst->aff_cross : app ? &inst->aff_approach : nullptr;
             aff != nullptr and aff->node_id() != 0)
         {
@@ -433,18 +489,29 @@ void SpecificWorker::step_passage_anchor()
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
                     pa.pose = r.value();
+                    anchor_geometry_from_door(*inst, pa);
                     pa.reinit_on_next_claim = false;
+                    pa.retry = false;
                 }
             }
             else if (aff->node_id() == pa.linked_aff)
             {
                 if (epoch >= 0 and pa.linked_epoch >= 0 and epoch != pa.linked_epoch)
-                    if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
+                {
+                    if (pa.retry)
+                        std::print("door_concept: [anchor] {}@robot re-claimed for {} (epoch {} → {}) — a retry of this "
+                                   "passage: belief kept\n", pa.door_name, aff->kind(), pa.linked_epoch, epoch);
+                    else if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
                     {
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
                         pa.pose = r.value();
+                        anchor_geometry_from_door(*inst, pa);
                     }
+                }
+                else if (pa.retry and claim_rose)
+                    std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry of this passage: same anchor, "
+                               "belief kept\n", pa.door_name, aff->kind());
             }
             else
                 std::print("door_concept: [anchor] {}@robot now serves {} (epoch {}) — same anchor, belief kept\n",
@@ -462,14 +529,24 @@ void SpecificWorker::step_passage_anchor()
     const auto robot = robot_name.empty() ? std::nullopt : G->get_node(robot_name);
     std::optional<rc::rt::Twist> twist;
     if (robot.has_value())
+    {
         twist = rc::rt::robot_body_twist(*G, robot.value());
+        if (const auto st = rc::rt::robot_twist_sim_stamps(*G, robot.value()); st.has_value())
+            sim_clock_.observe(st->first, st->second);
+    }
+    // ★ Task 9 (try66 leg 1): the twist is per SIMULATION second on a simulator, so every interval it is integrated over —
+    //   the prediction's dt and the captures' ages below — is a wall interval times Δsim/Δwall (rc::rt::SimClockRate; 1 on
+    //   real hardware). Integrated over the wall clock, the anchor's prediction ran 6 % long in translation and 14 % in
+    //   rotation in a sim at ~0.94× real time: a 290° spin left it 15° / 1.1 m off with σ 0.3° / 7 mm, and its own
+    //   overconfident prior then rejected the beams that would have corrected it — 0 of 332 leg-1 frames published.
+    const float sim_rate = float(sim_clock_.rate());
     if (twist.has_value() and pa.pose.stamp_ms > 0 and now > pa.pose.stamp_ms)
     {
         Eigen::Vector3f var = Eigen::Vector3f::Zero();   // [var_adv, var_side, var_rot]; none stated ⇒ none added
         if (const auto v = G->get_attrib_by_name<robot_current_speed_variance_att>(robot.value());
             v.has_value() and v->get().size() >= 3)
             var = {v->get()[0], v->get()[1], v->get()[2]};
-        const float dt = float(now - pa.pose.stamp_ms) * 1e-3f;
+        const float dt = float(now - pa.pose.stamp_ms) * 1e-3f * sim_rate;
         pa.pose = rc::interaction::predict(pa.pose, twist.value(), var, dt);
         // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
         rc::door::carry_held_mask(pa.cam_hold, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt);
@@ -481,7 +558,9 @@ void SpecificWorker::step_passage_anchor()
     // ── THIS DOOR'S WALL RUN in anchor coordinates (Task 7, fix 2) ───────────────────────────────────────────
     // The run is [0, wall_len] from the belief's wall origin along wall_u (door_fitter's associate_wall); the anchor's
     // origin is the opening's centre and its x-axis is ±wall_u (axis_sign). Unknown run (no wall associated, len 0)
-    // ⇒ ⚑ the FLAGGED default: the aperture ± one width each side. Kept from the last cycle while the instance is gone.
+    // ⇒ ⚑ the FLAGGED default: the aperture ± one width each side. Task 9: the run is read with the pose
+    // (anchor_geometry_from_door), in ANCHOR coordinates, so it stays the same physical wall whatever instance the anchor
+    // is linked to later; only the axis sign is re-derived here, for the leaf belief below.
     if (inst != nullptr)
     {
         // The anchor's x-axis vs THIS instance's wall_u, re-derived every cycle (fix round 1): a relink to a mirrored
@@ -498,20 +577,8 @@ void SpecificWorker::step_passage_anchor()
                     if (const float d = ax_room.dot(wu); d != 0.f) pa.axis_sign = d > 0.f ? 1.f : -1.f;
                 }
         }
-        const float w = inst->aperture.w;
-        float lo = -1.5f * w, hi = 1.5f * w;
-        if (inst->ai2_initialized)
-            if (const auto& bp = inst->ai2_belief.params(); bp.wall_len > 0.f)
-            {
-                const float sc = (inst->aperture.centre_xy() - bp.wall_O).dot(bp.wall_u.normalized());
-                lo = -sc;
-                hi = bp.wall_len - sc;
-            }
-        if (pa.axis_sign < 0.f) { const float t = lo; lo = -hi; hi = -t; }
-        pa.wall_u_min = lo;
-        pa.wall_u_max = hi;
     }
-    else if (pa.wall_u_max <= pa.wall_u_min)
+    if (pa.wall_u_max <= pa.wall_u_min)
     {
         pa.wall_u_min = -1.5f * pa.width;
         pa.wall_u_max = 1.5f * pa.width;
@@ -528,7 +595,7 @@ void SpecificWorker::step_passage_anchor()
     if (lidar_ingestor_ and lidar_ingestor_->bpearl_robot_stamp_ms() > pa.last_lidar_stamp)
     {
         pa.last_lidar_stamp = lidar_ingestor_->bpearl_robot_stamp_ms();
-        const float age_s = std::max<std::int64_t>(0, now - pa.last_lidar_stamp) * 1e-3f;
+        const float age_s = std::max<std::int64_t>(0, now - pa.last_lidar_stamp) * 1e-3f * sim_rate;
         const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
         if (not pa.frames_checked_rays)
             pa.frames_checked_rays = check_anchor_ray_frames(robot_name, age_s, tw);
@@ -576,7 +643,7 @@ void SpecificWorker::step_passage_anchor()
             pa.last_mask_frame = pkt.frame_id;
             new_mask_frame = true;
             if (pkt.timestamp_ms > 0) mask_stamp = std::int64_t(pkt.timestamp_ms);
-            const float age_s = pkt.timestamp_ms > 0 ? std::max<std::int64_t>(0, now - std::int64_t(pkt.timestamp_ms)) * 1e-3f : 0.f;
+            const float age_s = pkt.timestamp_ms > 0 ? std::max<std::int64_t>(0, now - std::int64_t(pkt.timestamp_ms)) * 1e-3f * sim_rate : 0.f;
             const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
             if (not pa.frames_checked_mask)
                 pa.frames_checked_mask = check_anchor_mask_frames(robot_name, *robot_T_zed);

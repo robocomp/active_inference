@@ -73,6 +73,14 @@
 //                                  walls. With the width at 1.0 / 1.06 m the band's minimum is 0.65 / 0.66 (task-8 report).
 //   anchor_frame_record_roundtrip (fix 3) — a recorded frame reads back bit-identical and re-running the update on it
 //                                  reproduces the recorded posterior exactly (the replay is the live update)
+// Task 9 (try66 leg 1: an anchor 1.1 m / 18° off that never published):
+//   doorway_beside_a_room_corner (fix D) — the door's wall run ends 0.14 m past the +u jamb at a room corner (try66: 0.64 m
+//                                  from the centre), the believed width 16 % wider than the clear one (try66: 1.06 vs
+//                                  0.9), open door, 3-D scan from s = −2 m: the truth reads ≥ 0.6 and the wrong poses
+//                                  < 0.5 — the old cell weighting counted the doorway grid PAST the run's end as wall and
+//                                  read the free-space pose 0.62 (published)
+//   sim_clock_rate (fix D) — rc::rt::SimClockRate: the producer's sim/wall rate from its two stamps; a twist integrated
+//                                  over wall time in a sim running at 0.94× real time over-counts by 1/0.94
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
 //   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O2 -fPIC -I/usr/include/eigen3 -Isrc -I../common
@@ -201,13 +209,15 @@ static Pose2 try64_start() { return {V2(-0.172f, -2.440f), 0.84f}; }
 // side; optionally a 1 m gap after u1 and a collinear wall beyond it; a far wall 4 m behind.
 static const V3 kSensor(0.f, 0.14f, 0.67f);   // the bpearl in the robot frame
 constexpr float kFloorZ = 0.05f;               // the wall band's floor (the caller's kFloorBandM): below it, a floor return
-struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false, leaf90 = false; };
+struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false, leaf90 = false,
+                  corner_u1 = false; };
 static std::vector<Seg> world(const WorldOpts& o)
 {
     std::vector<Seg> s;
     box(s, o.u0, -0.5f * W, -0.5f * T, 0.5f * T);
     box(s, 0.5f * W, o.u1, -0.5f * T, 0.5f * T);
     if (o.corner) box(s, o.u0 - T, o.u0, -4.f, 0.5f * T);
+    if (o.corner_u1) box(s, o.u1, o.u1 + T, -4.f, 0.5f * T);   // Task 9: the room's corner at the +u end of the door's wall
     if (o.collinear_beyond) box(s, o.u1 + 1.0f, o.u1 + 3.5f, -0.5f * T, 0.5f * T);
     if (o.shut) box(s, -0.5f * W, 0.5f * W, -0.5f * T, -0.5f * T + 0.04f);
     box(s, -6.f, 6.f, 4.f, 4.1f);
@@ -660,6 +670,34 @@ int main()
         }
     }
 
+    // ─── Task 9, fix D: a doorway beside a ROOM CORNER (try66 leg 1) ───────────────────────────────────────────────────
+    // The door's wall ends 0.14 m past the +u jamb, where the room turns toward the robot (try66: the run ended 0.64 m from
+    // the opening's centre). The doorway neighbourhood |u| < w reaches past that end, where the model predicts no wall: those
+    // cells counted as "visible wall nobody saw" (try66 frame at 24 s, the TRUE pose, w 1.06: walls 0.44, p_view 0.42), and
+    // beams that passed them credited a WRONG pose: here, with the believed width 16 % too wide, a pose 1.2 m in front of
+    // the wall read 0.62 under the old cell weighting — published. Wall cells are now cells of the door's wall run.
+    std::print("doorway_beside_a_room_corner\n");
+    {
+        WorldOpts wo; wo.u0 = -1.02f; wo.u1 = 0.5f * W + 0.14f; wo.corner = true; wo.corner_u1 = true; wo.shut = false; wo.back_wall = true;
+        const auto segs = world(wo);
+        const Pose2 robot{V2(-0.2f, -2.0f - kSensor.y()), 0.f};
+        const RelPose truth = creation_prior(robot);
+        // The believed width 16 % wider than the clear one, as try66's 1.06 m belief against DOOR_1's 0.9 m between its frames.
+        const float WB = 1.16f * W;
+        const auto rays = rc::door::select_anchor_rays(truth, WB, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 61), 2.0f);
+        auto view_of = [&](const RelPose& pr) { return rc::door::door_view(pr, WB, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.95f, {}, kFloorZ); };
+        const V2 along(std::cos(truth.x.z()), std::sin(truth.x.z())), normal(-along.y(), along.x());
+        RelPose free_space = truth; free_space.x.head<2>() -= 1.2f * normal;
+        RelPose rotated = truth;    rotated.x.z() = rc::interaction::wrap_pi(truth.x.z() + float(M_PI_2));
+        RelPose solid = truth;      solid.x.head<2>() -= 1.5f * along;
+        const auto vt = view_of(truth);
+        const float pv_f = view_of(free_space).p_view, pv_r = view_of(rotated).p_view, pv_s = view_of(solid).p_view;
+        std::print("    WB {:.2f} truth {:.3f} (opening {:.2f} · P(door) {:.2f} · walls {:.2f})  free space {:.3f}  rotated {:.3f}  solid wall {:.3f}\n",
+                   WB, vt.p_view, vt.lidar_open, vt.lidar_door, vt.lidar_wall, pv_f, pv_r, pv_s);
+        check(vt.p_view >= 0.6f, "the true pose of a doorway beside a room corner reads in view (≥ 0.6)");
+        check(pv_f < 0.5f and pv_r < 0.5f and pv_s < 0.5f, "and the wrong poses (free space, rotated, solid wall) stay < 0.5");
+    }
+
     // ─── fix round 3: p_view must not scale with π ─────────────────────────────────────────────────────────────
     double cross_ms_max = 0.0, cross_ms_sum = 0.0;
     int cross_frames = 0;
@@ -1008,6 +1046,34 @@ int main()
             std::vector<rc::door::rec::Frame> some;
             check(rc::door::rec::read_all(cut, some) and some.size() == 1, "a truncated last record is dropped, the first survives");
         }
+    }
+
+    // ─── Task 9, fix D: the twist's own clock ─────────────────────────────────────────────────────────────────────────
+    std::print("sim_clock_rate\n");
+    {
+        rc::rt::SimClockRate clk;
+        check(clk.rate() == 1.0, "unobserved (real hardware): rate 1");
+        // A producer at 20 Hz wall, its sim clock running at 0.94× (try66): 4 s of samples.
+        for (int k = 0; k <= 80; ++k) clk.observe(1'000'000 + 50 * k, 5'000 + std::int64_t(std::llround(0.94 * 50.0 * k)));
+        std::print("    sim at 0.94x real time: rate {:.4f}\n", clk.rate());
+        check(std::abs(clk.rate() - 0.94) < 1e-3, "the rate is Δsim/Δwall (0.94)");
+        // The anchor's prediction over 1 s of wall time at a sim-second yaw rate of 0.57 rad/s (try66's spin): with the
+        // rate the predicted turn is the true one, without it 1/0.94 too long.
+        rc::interaction::RelPose p0; p0.x = {0.f, 2.f, 0.f}; p0.P = Eigen::Matrix3f::Identity() * 1e-4f;
+        rc::rt::Twist tw; tw.angular = {0.f, 0.f, 0.57f};
+        const auto wall = rc::interaction::predict(p0, tw, V3::Zero(), 1.0f);
+        const auto sim  = rc::interaction::predict(p0, tw, V3::Zero(), float(1.0 * clk.rate()));
+        std::print("    1 s wall at 0.57 rad/s: predicted turn {:.4f} rad over the wall clock, {:.4f} over the sim clock (true {:.4f})\n",
+                   -wall.x.z(), -sim.x.z(), 0.57 * 0.94);
+        check(std::abs(-sim.x.z() - 0.57f * 0.94f) < 1e-3f, "integrated over the sim clock the turn is the sim's");
+        // The same sample again, an out-of-order one, and a restarted simulator do not corrupt it.
+        clk.observe(1'000'000 + 50 * 80, 5'000);
+        clk.observe(1'000'000 + 50 * 79, 9'999'999);
+        check(std::abs(clk.rate() - 0.94) < 1e-3, "a repeated or out-of-order sample is ignored");
+        clk.observe(1'000'000 + 50 * 81, 10);   // the sim clock jumped back: restarted
+        for (int k = 82; k <= 120; ++k) clk.observe(1'000'000 + 50 * k, 10 + std::int64_t(std::llround(0.5 * 50.0 * (k - 81))));
+        std::print("    after a restart at 0.5x: rate {:.4f}\n", clk.rate());
+        check(std::abs(clk.rate() - 0.5) < 1e-3, "a restarted simulator re-anchors the estimate");
     }
 
     std::print("no_data_is_prior\n");

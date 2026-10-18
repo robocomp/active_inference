@@ -997,15 +997,24 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x, double pi_open)
     // onto the swung leaf (one side all passes, the other all endings) 0.5–0.55, on the publication level: 24 wrong frames
     // published (dragged_posterior_not_published). The plain PRODUCT ruled those out too but squared every side
     // (0.92 → 0.85) and failed the leaf crossing (0.44); the minimum failed it at 0.55 — both measured.
+    // ★Task 9: a wall cell is a cell of THIS DOOR'S WALL RUN. The doorway neighbourhood (|u| < w) can reach past the run's
+    //  end (a room corner 0.64 m from the opening's centre, try66 leg 1): there the model predicts NO wall, so a beam that
+    //  passes the cell is consistent and a cell nobody saw is not missed. Each cell's wall mass is (1 − m)·e(u), e the run
+    //  membership at the cell (Model::run_membership's ends, soft at the model's lateral resolution). ★Unweighted, the +u
+    //  side of try66's door counted 0.36 m of "visible wall nobody saw" beyond the corner and its factor fell to 0.2 at the
+    //  TRUE pose (p_view 0.42 at s = −2 m, door open).
     double so = 0, wo = 0, miss[2] = {0, 0}, mass[2] = {0, 0};
     for (std::size_t c = 0; c < nc; ++c)
     {
         const double cover = 1.0 - std::pow(2.0 * kClutter, N[c]);
         so += m[c] * cover; wo += m[c];
         const double consistent = N[c] > 0 ? C[c] / N[c] : 1.0;
-        const int side = G.centre(int(c)) < 0.0 ? 0 : 1;
-        miss[side] += (1.0 - m[c]) * (vis[c] * (1.0 - cover) + cover * (1.0 - consistent));
-        mass[side] += (1.0 - m[c]);
+        const double uc = G.centre(int(c));
+        const int side = uc < 0.0 ? 0 : 1;
+        const double wall = (1.0 - m[c]) * std::exp(log_sigmoid((uc - pb.model.u_min) / kRangeSigma)
+                                                    + log_sigmoid((pb.model.u_max - uc) / kRangeSigma));
+        miss[side] += wall * (vis[c] * (1.0 - cover) + cover * (1.0 - consistent));
+        mass[side] += wall;
     }
     // P(H_door | beams) = (π·r + 1 − π) / (π·r + 1 − π + 1), in a form that cannot overflow.
     if (log_r > 0.0)

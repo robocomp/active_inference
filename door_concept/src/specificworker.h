@@ -296,9 +296,10 @@ private:
     // `door_N@robot` hangs from the robot node (common/interaction_anchor). Its robot-relative pose is
     // initialised ONCE from the room frames, then predicted by odometry and corrected by the bpearl rays and
     // the door mask in the ROBOT frame (door_anchor_update.h), so a room-frame jump cannot move the target.
-    // ONE anchor per passage: it survives approach → open → cross and the gaps between claims, and goes when the
-    // cross ends (a room switch during the cross IS its end), the consumer turns to something else, or the agent
-    // exits. A room switch during approach/open relinks it. See step_passage_anchor() for the state machine.
+    // ONE anchor per passage: it survives approach → open → cross, the gaps between claims and the RETRIES of a claim
+    // that ended unsatisfied (Task 9), and goes when the cross succeeds (a room switch during the cross IS that), the
+    // consumer turns to something else (another object, or close), or the agent exits. A room switch during
+    // approach/open relinks it. See step_passage_anchor() for the state machine.
     struct PassageAnchor
     {
         std::optional<rc::interaction::Anchor> anchor;    // engaged while the node exists
@@ -307,7 +308,7 @@ private:
         std::uint64_t linked_aff = 0;                     // the affordance that names the anchor now
         int           linked_epoch = -1;                  // the executing epoch seen on it; -1 = unknown
         rc::interaction::RelPose pose;                    // the belief, robot frame
-        float width = 0.9f, thickness = 0.05f, height = 2.0f;   // refreshed from the door while it is fitted
+        float width = 0.9f, thickness = 0.05f, height = 2.0f;   // read from the door with the pose (Task 9: not per cycle)
         bool  approach_was_claimed = false, cross_was_claimed = false;
         std::uint64_t consumer_id = 0;                    // the agent node whose `executing` edge we serve (0 = legacy)
         bool  reinit_on_next_claim = false;               // relinked by a room switch: the next claim re-inits from the room
@@ -316,7 +317,9 @@ private:
         // Task 7. The anchor's x-axis relative to the door's wall_u: +1 same, −1 flipped (anchor_from_room puts the
         // robot on −y). Needed to carry the wall RUN [0, wall_len] from the wall frame into anchor coordinates.
         float axis_sign = 1.f;
-        float wall_u_min = 0.f, wall_u_max = 0.f;         // the door's wall run, anchor coordinates (refreshed per cycle)
+        float wall_u_min = 0.f, wall_u_max = 0.f;         // the door's wall run, anchor coordinates (read with the pose)
+        bool  run_known = false;                          // the run came from an associated wall (else the flagged default)
+        bool  retry = false;                              // Task 9: a claim of this passage ended unsatisfied — the next is a retry
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
         float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
@@ -332,6 +335,8 @@ private:
                                                              const std::optional<rc::interaction::RelPose>& keep_side_of,
                                                              float* axis_sign_out = nullptr) const;
     void remove_passage_anchor(std::string_view why);
+    void anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const;   // width, thickness, height, run
+    rc::rt::SimClockRate sim_clock_;   // Task 9: the twist's sim/wall rate (common/rt_twist), kept across anchors
     void relink_passage_anchor(std::uint64_t new_door_id, std::string_view why);
     // Task 7 Step 0: one-shot frame diagnostics of the anchor's measurements (specificworker_anchor.cpp).
     bool check_anchor_ray_frames(const std::string& robot_name, float age_s, const rc::rt::Twist& tw);

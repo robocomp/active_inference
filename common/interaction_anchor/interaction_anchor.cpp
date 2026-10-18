@@ -203,6 +203,13 @@ std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G
 
 std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint64_t anchor_id, std::int64_t now_ms)
 {
+    auto r = read_anchor_latest(G, anchor_id);
+    if (r.has_value() and now_ms - r->first.stamp_ms > kAnchorStaleMs) return std::nullopt;   // see kAnchorStaleMs
+    return r;
+}
+
+std::optional<std::pair<RelPose, float>> read_anchor_latest(DSR::DSRGraph& G, std::uint64_t anchor_id)
+{
     const auto anchor = G.get_node(anchor_id);
     if (not anchor.has_value() or not is_anchor(G, anchor.value())) return std::nullopt;
     const auto parent = G.get_attrib_by_name<parent_att>(anchor.value());
@@ -216,7 +223,6 @@ std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint
     std::uint64_t newest = 0;
     for (const auto s : stamps->get()) newest = std::max(newest, s);
     if (newest == 0) return std::nullopt;
-    if (now_ms - static_cast<std::int64_t>(newest) > kAnchorStaleMs) return std::nullopt;   // see kAnchorStaleMs
 
     const auto rt = G.get_rt_api();
     const auto T = rt->get_edge_RT_as_rtmat(edge.value(), newest);

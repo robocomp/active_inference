@@ -290,6 +290,67 @@ void rotation_near_jamb_is_capped()
         CHECK(contacts == 0);
     }
 }
+// Task 9, fix C (try66 leg 2): a jamb inside the GROWN body (the safety margin breached, the body not touching), ahead-left:
+// the RIGHT jamb of an opening that lies to the robot's left. The servo wants to go on — forward, turning LEFT toward the
+// opening — and both close on that jamb: forward has no floor, and the old rotation cap gave Δ = 0 in BOTH directions,
+// so the old chain commanded nothing, a deadlock the stall judge called a wedge. The guard must instead move the body so
+// that the min clearance grows, without ever touching a jamb.
+void jamb_deadlock_backs_off()
+{
+    const float margin = 0.05f, a_dec = 1.0f, dt = 0.01f;
+    const auto grown = rc::anchor_grown_body(kShadow, margin);
+    // J+ at (−0.31, 0.20): 1.6 cm outside the body's left side, inside its margin, 0.20 m ahead of the centre.
+    RelPose r = anchor(-0.31f - 0.5f * kWidth, 0.20f, 0.f, 0.02f);
+    auto clearance = [&](const RelPose& q) { return rc::anchor_min_clearance(q, kWidth, grown, 0.f, 0.f, 0.f); };
+    const float c0 = clearance(r);
+    bool touching = false;
+    for (const auto& j : rc::anchor_jambs(r, kWidth)) touching = touching or touches(kShadow, j.mean);
+    CHECK(c0 < 0.f and not touching);
+    // The OLD chain on the servo's command: forward capped by the jamb ceiling, the turn by Δ = 0 — a deadlock.
+    {
+        auto c = cmd(r, false);
+        const float v = rc::anchor_jamb_speed_limit(r, kWidth, Eigen::Vector2f(0.f, 1.f), kShadow, margin, a_dec, kVmax);
+        std::println("  deadlock pose: servo asks adv {:+.3f} rot {:+.3f}; forward ceiling {:.4f}; min clearance {:+.3f} m",
+                     c.adv, c.rot, v, c0);
+        const float w_ccw = rc::anchor_jamb_rot_limit(r, kWidth, c.rot, kShadow, margin, a_dec, kWmax);
+        std::println("  ...and its turn ({:+.3f}) is capped to {:.4f}", c.rot, w_ccw);
+        CHECK(c.adv >= 0.f and v < 1e-3f);      // adv ≥ 0 and forward closes on the jamb: no translation
+        CHECK(c.rot > 0.f and w_ccw < 1e-3f);   // the servo turns LEFT, into the jamb: capped to 0 — the deadlock
+    }
+    const auto first = rc::anchor_jamb_guard(r, kWidth, cmd(r, false), false, kShadow, margin, a_dec, kVmax, kWmax);
+    std::println("  guard: backoff {} adv {:+.3f} side {:+.3f} rot {:+.3f}", first.backoff, first.cmd.adv, first.cmd.side, first.cmd.rot);
+    CHECK(first.backoff);
+    CHECK(first.cmd.side == 0.f);
+    CHECK(std::abs(first.cmd.adv) > 1e-3f or std::abs(first.cmd.rot) > 1e-3f);
+    // Closed loop for 0.5 s: the guard re-evaluated every step on a kinematic differential base, contacts checked.
+    int contacts = 0;
+    float c_min = c0;
+    for (int k = 0; k < 50; ++k)
+    {
+        const auto g = rc::anchor_jamb_guard(r, kWidth, cmd(r, false), false, kShadow, margin, a_dec, kVmax, kWmax);
+        r.x = rc::interaction::move_mean(r.x, 0.f, g.cmd.adv * dt, g.cmd.rot * dt);
+        for (const auto& j : rc::anchor_jambs(r, kWidth)) if (touches(kShadow, j.mean)) ++contacts;
+        c_min = std::min(c_min, clearance(r));
+    }
+    const float c1 = clearance(r);
+    std::println("  after 0.5 s: min clearance {:+.3f} -> {:+.3f} m (lowest {:+.3f}), contacts {}", c0, c1, c_min, contacts);
+    CHECK(c1 > c0);
+    CHECK(c_min >= c0 - 1e-4f);
+    CHECK(contacts == 0);
+}
+
+// Task 9, fix C: the rotation cap for a jamb already inside the grown body caps only the turn that CLOSES on it.
+void inside_jamb_caps_only_the_closing_turn()
+{
+    const float margin = 0.05f;
+    const RelPose r = anchor(-0.31f + 0.5f * kWidth, 0.20f, 0.f, 0.02f);   // J− ahead-left, inside the margin
+    const float ccw = rc::anchor_jamb_rot_limit(r, kWidth, +1.f, kShadow, margin, 1.0f, kWmax);
+    const float cw  = rc::anchor_jamb_rot_limit(r, kWidth, -1.f, kShadow, margin, 1.0f, kWmax);
+    std::println("  inside jamb ahead-left: |rot| cap CCW {:.3f}, CW {:.3f}", ccw, cw);
+    // Turning CCW swings the front-left corner INTO J− (closing); CW swings it away (opening).
+    CHECK(ccw < 1e-3f);
+    CHECK(cw > 0.5f * kWmax);
+}
 }  // namespace
 
 int main()
@@ -305,6 +366,8 @@ int main()
     jamb_stops_the_body();
     jamb_does_not_lock_recentering();
     rotation_near_jamb_is_capped();
+    jamb_deadlock_backs_off();
+    inside_jamb_caps_only_the_closing_turn();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

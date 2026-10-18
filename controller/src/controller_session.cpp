@@ -937,7 +937,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         return step;
     };
 
-    // ── A CROSS WITH A FRESH INTERACTION ANCHOR IS NOT A ROOM-FRAME STANDPOINT (2026-10-18) ──────────────────
+    // ── A CROSS WITH AN INTERACTION ANCHOR IS NOT A ROOM-FRAME STANDPOINT (2026-10-18; Task 9: fresh or waited for) ─
     // While door_concept executes `cross` it hangs the door from the robot, and the controller servoes on that
     // robot-frame pose (step_anchor_cross) — no route, no room-frame standpoint. Every check below judges the
     // ROOM-FRAME standpoint (the useless-spot memory, OutsideRoom, the repair and its reachability verdicts, the
@@ -945,14 +945,16 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // room-frame door 0.4–0.5 m wrong they are judging a pose nobody is driving to. So: pass the target through.
     {
         const bool is_cross = target->from_affordance and target->node_name.ends_with("_cross");
-        const bool anchored = is_cross and read_cross_anchor(target->node_id, target->node_name).has_value();
+        // Task 9, fix A: a STALE anchor the cross names counts too — the servo waits for it (update_cross_anchor), and the
+        // room-frame checks below would otherwise hand the cross back before it could (try66 leg 2: "standpoint occupied").
+        const bool anchored = is_cross and read_cross_anchor(target->node_id, target->node_name, /*accept_stale=*/true).has_value();
         if (not is_cross) anchor_hoist_logged_ = false;
         else if (anchored != anchor_hoist_logged_)
         {
             anchor_hoist_logged_ = anchored;
             std::println("[anchor] cross: '{}' {}", target->node_name,
-                         anchored ? "has a fresh anchor — room-frame standpoint repair and reachability checks skipped"
-                                  : "no fresh anchor — room-frame standpoint checks apply");
+                         anchored ? "names an anchor — room-frame standpoint repair and reachability checks skipped"
+                                  : "names no anchor — room-frame standpoint checks apply");
         }
         if (anchored)
         {
@@ -2985,29 +2987,48 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
 // erased, the SAME anchor is still read by id — under the same kAnchorStaleMs rule, so a dead producer cannot
 // keep the robot moving. door_concept's release_room removes the anchor at the room switch; the door passage's
 // own room-change rule ends the cross there.
+// accept_stale (Task 9): an anchor that EXISTS but is older than kAnchorStaleMs is returned with fresh = false — for the
+// cross to WAIT for it (and turn toward it), never to drive on it.
 std::optional<ControllerSession::AnchorCrossReading>
-ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::string &affordance_name) const
+ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::string &affordance_name, bool accept_stale) const
 {
     if (graph_ == nullptr) return std::nullopt;
     const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
+    std::uint64_t named = 0;
+    if (const auto aff = graph_->get_node(affordance_id); aff.has_value())
+        named = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0);
+    // The affordance's anchor first, then the one latched for this same cross.
     std::optional<std::pair<rc::interaction::RelPose, float>> read;
     std::uint64_t id = 0;
-    if (const auto aff = graph_->get_node(affordance_id); aff.has_value())
-        if (read = rc::interaction::read_affordance_anchor(*graph_, aff.value(), now); read.has_value())
-            id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0);
-    if (not read.has_value() and anchor_latched_id_ != 0 and anchor_latched_for_ == affordance_name)
-        if (read = rc::interaction::read_anchor(*graph_, anchor_latched_id_, now); read.has_value())
-            id = anchor_latched_id_;
+    for (const std::uint64_t cand : {named, anchor_latched_for_ == affordance_name ? anchor_latched_id_ : std::uint64_t(0)})
+    {
+        if (cand == 0 or read.has_value()) continue;
+        if (read = rc::interaction::read_anchor_latest(*graph_, cand); read.has_value()) id = cand;
+    }
     // width_m 0 = the attribute is absent: nothing says whether the body fits, so the servo would only creep. The
     // room route is the honest fallback.
     if (not read.has_value() or id == 0 or read->second <= 0.f) return std::nullopt;
+    const std::int64_t age = now - read->first.stamp_ms;
+    const bool fresh = age <= rc::interaction::kAnchorStaleMs;   // read_anchor's own rule (interaction_anchor.h)
+    if (not fresh and not accept_stale) return std::nullopt;
     const auto node = graph_->get_node(id);
     return AnchorCrossReading{.anchor_id = id,
                               .name = node.has_value() ? node->name() : std::to_string(id),
                               .pose = read->first,
-                              .width_m = read->second};
+                              .width_m = read->second,
+                              .fresh = fresh,
+                              .age_ms = age};
 }
 
+// Task 9, fix A: ONCE A CROSS IS ANCHORED IT NEVER FALLS BACK TO THE ROOM ROUTE. The room route is known to fail in the
+// doorway (try63–try66: the room-frame door 0.4–0.5 m off; try66 leg 2: "body refused at axis metres …", a standpoint
+// "occupied", three escapes), and the rule is to drive on the door only while SEEING it. So, for a `_cross` target:
+//   fresh anchor                         → the servo drives on it;
+//   stale, after a fresh one this step   → STOP and wait for it to be fresh again;
+//   stale, none fresh yet, but the cross names one (interaction_node_id set, node present) → wait, turning in place
+//                                          toward where it was last published, so the sensors can see it;
+//   no anchor at all                     → the room route, as before.
+// The wait is bounded in step_anchor_cross by the cross contract's own timeout, then handed back Unreachable.
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
 {
     anchor_cross_.reset();
@@ -3018,6 +3039,10 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         anchor_latched_id_ = 0;
         anchor_latched_for_.clear();
         anchor_mode_logged_ = -1;
+        anchor_cross_engaged_ = false;
+        anchor_wait_since_ms_ = 0;
+        anchor_spin_since_ms_ = 0;
+        anchor_backoff_logged_ = false;
         return false;
     }
     if (anchor_latched_for_ != step.target.node_name)       // a different cross: nothing latched carries over
@@ -3025,31 +3050,42 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         anchor_latched_id_ = 0;
         anchor_latched_for_ = step.target.node_name;
         anchor_mode_logged_ = -1;
+        anchor_cross_engaged_ = false;
+        anchor_wait_since_ms_ = 0;
+        anchor_spin_since_ms_ = 0;
+        anchor_backoff_logged_ = false;
+        last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this cross is not this cross's
     }
-    anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name);
+    anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name, /*accept_stale=*/true);
     if (not anchor_cross_.has_value())
     {
         if (anchor_mode_logged_ != 0)
         {
-            // Task 7: door_concept publishes the anchor only while P(door in view) ≥ 0.5, so an anchor that goes stale
-            // MID-cross means the door left the sensors (mid-doorway: the jambs beside the body, out of the dense
-            // bpearl sampling). Accepted fallback: the room route takes over. Said explicitly so it is not read as a
-            // dead producer.
-            if (anchor_mode_logged_ == 1)
-                std::println("[anchor] cross: anchor {} no longer fresh mid-cross (door_concept stops publishing when "
-                             "P(door in view) < 0.5) — falling back to the room route",
-                             anchor_latched_id_ != 0 ? std::to_string(anchor_latched_id_) : std::string("?"));
-            else
-                std::println("[anchor] cross: no fresh anchor — room route");
+            std::println("[anchor] cross: no anchor named by '{}' — room route", step.target.node_name);
             anchor_mode_logged_ = 0;
         }
         return false;
     }
     anchor_latched_id_ = anchor_cross_->anchor_id;
+    if (not anchor_cross_->fresh)
+    {
+        if (anchor_mode_logged_ != 2)
+        {
+            anchor_mode_logged_ = 2;
+            std::println("[anchor] cross: waiting for the anchor {} (stale {} ms) — {}", anchor_cross_->name,
+                         anchor_cross_->age_ms,
+                         anchor_cross_engaged_ ? "stopped: it was driven on in this step and is no longer seen"
+                                               : "not seen yet: turning toward where it was last published");
+        }
+        return true;
+    }
+    anchor_cross_engaged_ = true;
     if (anchor_mode_logged_ != 1)
     {
-        anchor_mode_logged_ = 1;
         const auto g = rc::anchor_cross_geometry(anchor_cross_->pose);
+        if (anchor_mode_logged_ == 2)
+            std::println("[anchor] cross: anchor {} fresh again — resumed", anchor_cross_->name);
+        anchor_mode_logged_ = 1;
         std::println("[anchor] cross: using anchor {} — opening {:.2f} m wide, e {:+.2f} m, s {:+.2f} m, "
                      "heading {:+.1f} deg, sigma_lat {:.3f} m",
                      anchor_cross_->name, anchor_cross_->width_m, g.e, g.s,
@@ -3087,13 +3123,17 @@ float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir
 }
 
 // One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
-//   1. the live field is rebuilt (LiDAR only, see refresh_lidar_field) and the clearance ceiling applied along the
-//      direction the base actually moves, floored at 0.05 m/s exactly as set_speed_limit floors the tracker's; and
-//      the anchor's jambs (anchor_jamb_speed_limit), unfloored, for the last ~0.4 m the LiDAR self-filter cannot see;
-//      and |rot| by the corners' sweep onto the jambs (anchor_jamb_rot_limit), unfloored;
+//   1. the anchor's jambs (rc::anchor_jamb_guard: translation along the direction the base actually moves, unfloored, for
+//      the last ~0.4 m the LiDAR self-filter cannot see; |rot| by the corners' sweep onto the jambs, unfloored; and, Task 9
+//      fix C, the servo's own way out of the deadlock those two caps make with a jamb inside the grown body); then the
+//      live field (LiDAR only, see refresh_lidar_field) along the same direction, floored at 0.05 m/s exactly as
+//      set_speed_limit floors the tracker's;
 //   2. motion_commander.apply_uncertainty_speed_limit;
-//   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts);
+//   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts — Task 9: a Spinning verdict on the
+//      servo's own rotation-dominant command is not a wedge, bounded below by the cross contract's timeout);
 //   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
+// A STALE anchor (Task 9, fix A) is waited for: after a fresh one in this step the base stops; before, it turns in place
+// toward where the anchor was last published. The wait is bounded by the cross contract's timeout, then Unreachable.
 // The LiDAR-stall EMERGENCY hold sits above all of this in SpecificWorker (compute() is not called at all).
 void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                           rc::TrajectoryController &path_controller,
@@ -3104,7 +3144,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                           const TimeSource &time_source)
 {
     const auto &a = *anchor_cross_;
-    anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
+    const std::uint64_t now = time_source();
     const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
     const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
     const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
@@ -3115,59 +3155,117 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // Shadow is DIFFERENTIAL (the bridge drops `side`); an unknown capability is treated the same way, since a side
     // command the base may drop is the one assumption that fails silently.
     const bool holonomic = base_capability_.holonomic.value_or(false);
-    const auto cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic);
-    if (cmd.through)
+    // The bound on a wait and on a non-wedge spin: the cross contract's own timeout (door_concept's CrossTimeoutS) — no
+    // new constant. Handed back as Unreachable, which the door passage counts as an attempt and re-offers.
+    auto hand_back = [&](const std::string &why)
     {
-        const auto g = rc::anchor_cross_geometry(a.pose);
-        std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through",
-                     a.name, g.s, standoff);
-        path_controller.stop();
-        finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos,
-                         time_source(), /*allow_dwell=*/false);
-        return;
-    }
+        std::println("[anchor] cross: {} — beyond the cross contract's timeout ({:.1f} s): handing '{}' back Unreachable",
+                     why, target_contract_.timeout_ms * 1e-3f, anchor_latched_for_);
+        flag_reach_unreachable("anchor cross: " + why);
+        anchor_wait_since_ms_ = 0;
+        anchor_spin_since_ms_ = 0;
+        note_no_command(); motion_commander.stop_robot();
+    };
 
-    // 1. Clearance ceilings along the direction the base ACTUALLY moves (on a differential base side is 0, so that is
-    //    (0, adv)): the live LiDAR field, floored at 0.05 m/s like the tracker's; and the anchor's two jambs, which
-    //    the self-filter hides from the field in the last ~0.4 m — that one has NO floor and may stop the robot.
-    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    path_controller.refresh_lidar_field(control_pose.as_transform());
-    float adv_mps = cmd.adv, side_mps = holonomic ? cmd.side : 0.f, rot_rps = cmd.rot;
-    const float asked_lin_mps = std::hypot(adv_mps, side_mps);
-    if (asked_lin_mps > 0.f)
+    rc::AnchorCommand cmd;
+    rc::interaction::RelPose pose = a.pose;   // the pose the guards are asked about
+    if (a.fresh)
     {
-        const Eigen::Vector2f dir(side_mps / asked_lin_mps, adv_mps / asked_lin_mps);   // robot frame: +x side, +y fwd
-        const float v_lidar = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
-        const float v_jamb = rc::anchor_jamb_speed_limit(a.pose, a.width_m, dir, approach_body_.polygon(),
-                                                         approach_body_.safety_margin(),
-                                                         anchor_brake_decel(path_controller), v_max);
-        const float v_lim = std::min(v_lidar, v_jamb);
-        if (asked_lin_mps > v_lim)
+        anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
+        anchor_wait_since_ms_ = 0;
+        cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic);
+        if (cmd.through)
         {
-            const float k = v_lim / asked_lin_mps;
-            adv_mps *= k; side_mps *= k;
+            const auto g = rc::anchor_cross_geometry(a.pose);
+            std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through",
+                         a.name, g.s, standoff);
+            path_controller.stop();
+            finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos,
+                             time_source(), /*allow_dwell=*/false);
+            return;
         }
     }
-    //    And the turn: in the doorway a rotation about the centre swings the body's corners onto the jambs, and no
-    //    translation ceiling sees it (adv may be 0). Capped only for a turn that closes on a jamb, no floor.
-    if (rot_rps != 0.f)
+    else
     {
-        const float w_jamb = rc::anchor_jamb_rot_limit(a.pose, a.width_m, rot_rps, approach_body_.polygon(),
-                                                       approach_body_.safety_margin(),
-                                                       anchor_brake_decel(path_controller), w_max);
-        rot_rps = std::copysign(std::min(std::abs(rot_rps), w_jamb), rot_rps);
+        if (anchor_wait_since_ms_ == 0) anchor_wait_since_ms_ = now;
+        if (target_contract_known_ and double(now - anchor_wait_since_ms_) > double(target_contract_.timeout_ms))
+        {
+            hand_back(std::format("the anchor {} stayed stale for {:.1f} s", a.name, (now - anchor_wait_since_ms_) * 1e-3));
+            return;
+        }
+        if (anchor_cross_engaged_)
+        {
+            // Driven on in this step and no longer seen: STOP and wait. Nothing is commanded on a pose nobody is looking at.
+            reset_stuck_window();
+            note_no_command(); motion_commander.stop_robot();
+            return;
+        }
+        // Not seen yet: turn in place toward where it was last published, carried by the robot's own turn since then.
+        if (a.pose.stamp_ms != anchor_wait_stamp_)
+        {
+            anchor_wait_stamp_ = a.pose.stamp_ms;
+            anchor_wait_pose_ = a.pose;
+            anchor_wait_theta_ = robot_pose.theta;
+        }
+        pose = anchor_wait_pose_;
+        pose.x = rc::interaction::move_mean(anchor_wait_pose_.x, 0.f, 0.f,
+                                            rc::interaction::wrap_pi(robot_pose.theta - anchor_wait_theta_));
+        const float bearing = std::atan2(-pose.x.x(), pose.x.y());   // forward (+y) to the opening's centre, CCW positive
+        cmd.rot = w_max * std::tanh(bearing / (w_max * rc::kAnchorTauRot));
+    }
+
+    // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
+    //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
+    const auto &body = approach_body_.polygon();
+    const auto guard = rc::anchor_jamb_guard(pose, a.width_m, cmd, holonomic, body, approach_body_.safety_margin(),
+                                             anchor_brake_decel(path_controller), v_max, w_max);
+    if (guard.backoff != anchor_backoff_logged_)   // logged on the transitions only
+    {
+        anchor_backoff_logged_ = guard.backoff;
+        if (guard.backoff)
+            std::println("[anchor] cross: a jamb of {} is {:.3f} m inside the body's safety margin and the servo's own command "
+                         "cannot open it — backing off: adv {:+.3f} side {:+.3f} rot {:+.3f}", a.name, -guard.min_clearance,
+                         guard.cmd.adv, guard.cmd.side, guard.cmd.rot);
+        else
+            std::println("[anchor] cross: clear of the jambs' margin again — the servo resumes");
+    }
+    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    path_controller.refresh_lidar_field(control_pose.as_transform());
+    float adv_mps = guard.cmd.adv, side_mps = holonomic ? guard.cmd.side : 0.f, rot_rps = guard.cmd.rot;
+    // The ask the stall judge weighs the delivery against: the servo's own (the backoff's, when it took over).
+    const float asked_lin_mps = guard.backoff ? std::hypot(guard.cmd.adv, guard.cmd.side) : std::hypot(cmd.adv, holonomic ? cmd.side : 0.f);
+    if (const float lin = std::hypot(adv_mps, side_mps); lin > 0.f)
+    {
+        const Eigen::Vector2f dir(side_mps / lin, adv_mps / lin);   // robot frame: +x side, +y fwd
+        const float v_lidar = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
+        if (lin > v_lidar) { adv_mps *= v_lidar / lin; side_mps *= v_lidar / lin; }
     }
     // 2. Pose-uncertainty limiter.
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
-    // 3. Stall judge → escape.
+    // 3. Stall judge → escape. Rotation-dominant = the body's corners sweep faster than its centre translates (r_max: the
+    //    grown body's reach) — then a Spinning verdict is the servo working, not a wedge (bounded: the contract timeout).
+    float r_max = 0.f;
+    for (const auto &v : rc::anchor_grown_body(body, approach_body_.safety_margin())) r_max = std::max(r_max, v.norm());
+    const bool rotation_dominant = std::abs(rot_rps) * r_max > std::hypot(adv_mps, side_mps);
     const auto unc = motion_commander.last_uncertainty_diag();
     if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
-                     robot_pose.pos, robot_pose.theta, rot_rps, time_source()))
+                     robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, motion_commander, time_source());
         return;
     }
+    if (last_judged_verdict_ == rc::StallVerdict::Spinning and rotation_dominant)
+    {
+        if (anchor_spin_since_ms_ == 0) anchor_spin_since_ms_ = now;
+        else if (target_contract_known_ and double(now - anchor_spin_since_ms_) > double(target_contract_.timeout_ms))
+        {
+            hand_back(std::format("the servo's turn netted nothing for {:.1f} s", (now - anchor_spin_since_ms_) * 1e-3));
+            return;
+        }
+    }
+    else if (last_judged_verdict_ != rc::StallVerdict::Spinning)
+        anchor_spin_since_ms_ = 0;
     // 4. Out.
     if (std::abs(adv_mps) < 5e-4f and std::abs(side_mps) < 5e-4f and std::abs(rot_rps) < 1e-3f)
     {
@@ -6519,7 +6617,7 @@ void ControllerSession::reset_stuck_state()
 bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps,
                                     float pose_sigma_m, const Eigen::Vector2f &pos_room,
                                     float heading_rad, float commanded_rot_rps,
-                                    std::uint64_t now_ms)
+                                    std::uint64_t now_ms, bool spin_is_not_a_wedge)
 {
     if (!params_ || !params_->stuck_recovery_enabled) { reset_stuck_window(); return false; }
 
@@ -6532,6 +6630,7 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
                                     .confirm_ms = params_->stuck_confirm_ms};
     const auto r = stall_judge_.note(pursuing, asked_lin_mps, cmd_lin_mps, pose_sigma_m,
                                      pos_room, heading_rad, commanded_rot_rps, now_ms, jp);
+    if (r.window_s > 0.f) last_judged_verdict_ = r.verdict;   // a window closed: its verdict (None = it moved as told)
     if (r.verdict == rc::StallVerdict::None) return false;
 
     if (r.verdict == rc::StallVerdict::Wedge)
@@ -6562,6 +6661,18 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
     // the pose and force a replan. And on an affordance the escape is already capped
     // (kMaxEscapesPerAffordance = 3, see begin_escape), after which the standpoint is given up and the
     // selector moves on — which is the correct end for a place the body cannot turn in.
+    // ★Task 9, fix C: the anchor servo's own ROTATION-DOMINANT command (its heading loop, or its way out of a jamb
+    //  deadlock) sweeping radians without netting them is the servo working against the doorway, not a body wedged in
+    //  it: reversing and dropping an obstacle there throws the crossing away (try66 leg 2: three such escapes, then
+    //  Unreachable). Reported; the servo keeps the base. Bounded by its caller (the cross contract's timeout).
+    if (r.verdict == rc::StallVerdict::Spinning and spin_is_not_a_wedge)
+    {
+        std::println("[anchor] cross: SPINNING verdict ({:.2f} rad commanded over {:.1f} s, {:.2f} netted, {:.3f} m moved) on "
+                     "the servo's rotation-dominant command — not a wedge: no escape, the servo keeps the base",
+                     r.asked_rot_rad, r.window_s, r.achieved_rot_rad, r.achieved_m);
+        log_stall_event("spin_servo", r, pos_room, pose_sigma_m, now_ms);
+        return false;
+    }
     if (r.verdict == rc::StallVerdict::Spinning)
     {
         std::println("[controller] SPINNING — commanded {:.2f} rad of heading over {:.1f} s and netted "
