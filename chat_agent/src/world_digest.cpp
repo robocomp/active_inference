@@ -45,14 +45,17 @@ std::string clock_now()
 WorldDigest::WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame, int objects_nearest)
     : G_(std::move(G)), robot_frame_(std::move(robot_frame)), objects_nearest_(objects_nearest) {}
 
-Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention) const
+Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention,
+                          const std::optional<std::string>& today) const
 {
     Digest d;
     auto& G = *G_;
     d.facts.controller_present = controller_present;
     std::string s;
     s += std::format("time: {}\n", clock_now());
-    s += std::format("controller (the agent that drives the robot): {}\n", controller_present ? "running" : "NOT running");
+    // Worded as what it means for commands, not as an agent's status: "controller: running" read as the whole agents
+    // answer and stopped agents() being called (check_llm_tools.py "which agent is degraded", 2026-10-18).
+    s += std::format("can move: {}\n", controller_present ? "yes" : "NO (the motion controller is not running)");
 
     // ── rooms ──
     std::uint64_t room_id = 0;
@@ -183,6 +186,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
         if (parts.size() >= 3 and parts[2] == "driving=off") s += ", NOTE: the base is not armed (Run not pressed)";
         s += "\n";
     }
+    if (today) s += *today + "\n";
     d.text = std::move(s);
     return d;
 }

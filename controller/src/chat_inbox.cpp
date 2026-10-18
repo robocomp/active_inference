@@ -59,6 +59,7 @@ std::pair<std::string, std::string> ChatInbox::status_of(const Tracked& t, const
         case K::Stop: return {"aborted", std::format("stopped|robot stopped by chat|{}", drv)};
         case K::Uncross: return {"aborted", std::format("idle|{}|{}", v.last_event, drv)};
         case K::Motion: return {"", ""};   // status_of_motion
+        case K::Mission: return {"", ""};  // the interpreter reports its own (service_mission)
         case K::Cross:
         {
             const std::string bt = std::format("{}|{}|{}", DoorPassage::step_name(v.step), v.last_event, drv);

@@ -33,7 +33,9 @@
 #include <atomic>
 #include <string_view>
 #include <condition_variable>
+#include <expected>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -50,7 +52,12 @@
 #include "controller_session.h"
 #include "controller_world_model.h"
 #include "chat_inbox.h"
+#include "mission_node.h"
 #include "controller_relative_motion.h"
+#include "../../common/mission/mission_interpreter.h"
+#include "../../common/episodic/em_journal.h"
+#include "journal_node.h"
+#include "tour_journal.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
@@ -145,13 +152,90 @@ private:
 		std::uint64_t motion_id = 0;   ///< move: RelativeMotion::View::id of the run started
 	};
 	MissionResult run_mission_command(const std::string &text, const char *source);
+	/// run_mission_command's grammar itself; run_mission_command adds the episodic journal's record of what it did.
+	MissionResult dispatch_mission_command(const std::string &text, const char *source);
 	/// The Stop button's abort (mission, click target, route/plan/trace; base output disarmed). Control thread only.
 	void abort_all(const char *source);
+	/// The door-passage start shared by `cross door_N` and a mission's cross / open (the door must exist).
+	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source);
+	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
+	MissionResult start_relative_motion(const std::string &text, const char *source);
+
+	// ── GROUNDED MISSIONS (common/mission/, chat_agent/docs/mission_language_2026-10-13.md) ──
+	// The interpreter owns the control flow (seq, repeat, on_fail, until, budgets, anchors); this Host maps each leaf
+	// to what the controller already does. Everything runs on the control thread (specificworker_mission.cpp).
+	class MissionHost final : public rc::mission::Host
+	{
+	public:
+		explicit MissionHost(SpecificWorker &w) : w_(w) {}
+		std::optional<std::string> start(const rc::mission::Step &leaf) override;
+		rc::mission::LeafStatus poll(const rc::mission::Step &leaf) override;
+		void cancel(const rc::mission::Step &leaf) override;
+		void say(const std::string &text) override;
+		void halt() override;
+		std::optional<rc::mission::Pose> pose() override;
+		std::optional<double> eval(const rc::mission::Pred &p) override;
+	private:
+		SpecificWorker &w_;
+		std::string door_;                 ///< cross / open: the door the passage runs through
+		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
+		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started
+		std::string room_;                 ///< explore: the room it explores (leaving it ends the step)
+		/// The episodic journal's StepStart text for what start() resolved (R3): {"target","grounding"}.
+		void ground(const rc::mission::Step &leaf, const std::string &target, const QJsonObject &grounding);
+	};
+	MissionHost mission_host_{*this};
+	rc::mission::Interpreter interpreter_{mission_host_};
+	std::string mission_source_;           ///< who started the running mission: "chat" | "remote"
+	std::string mission_ir_json_;          ///< the running (or last) mission's IR, as published on controller_mission
+	rc::MissionNode mission_node_;         ///< controller_mission: the mission, its steps' states, its step history
+	std::uint64_t mission_poll_ms_ = 0;
+	/// Validate and start a mission (it supersedes a running one). The refusal, or nullopt when it runs.
+	std::optional<rc::mission::Error> start_mission(rc::mission::Mission m, const char *source);
+	/// Cancel the running mission (no-op otherwise), reporting `outcome`. hold = the base is then held, still armed;
+	/// false when the caller is about to give the base to something else (a new command, Stop's own disarm).
+	void cancel_mission(const std::string &outcome, bool hold = true);
+	/// One step of the running mission (10 Hz) + its log lines; holds the base when it ends. Control thread.
+	void service_mission();
+	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
+	void hold_base();
+	/// The live door a door reference names now: a node by name, or the face of a passage in the current room.
+	std::expected<std::string, std::string> resolve_door(const rc::mission::Ref &r);
 	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
 	rc::ChatInbox chat_inbox_;
 	rc::ChatInbox::Tracked chat_tracked_;
 	std::uint64_t chat_poll_ms_ = 0;
 	void service_chat_inbox();
+	// ── THE EPISODIC JOURNAL (common/episodic/em_journal.h, docs/superpowers/specs/2026-10-17-episodic-memory-design.md
+	// §6): every operator command as a mission, each step attempt, each affordance claim and the drive mode, published
+	// as `em_journal` on our own `em_journal` node (journal_node.h — NOT the agent node, which the AgentInfo heartbeat
+	// rewrites) so episodic_agent can rebuild what was asked and what happened. Missions are "m<interpreter serial>";
+	// single commands (cross/move/turn/uncross/stop) are one-step missions "c<n>"; panel tours "p<n>" (tour_journal.h).
+	// ★ Control thread only: every writer (run_mission_command — the remote timer enqueues it —, start_mission, the
+	//   interpreter, the claim observer, service_journal) runs there. journal_mx_ is a cheap guard, not a licence.
+	rc::em::Journal journal_{current_time_ms()};   ///< epoch = this process's start, so a restart is visible
+	std::mutex journal_mx_;
+	std::string journal_mission_;                  ///< the interpreter mission open in the journal ("m3"); "" = none
+	struct JournalCommand
+	{
+		std::string id;
+		rc::ChatInbox::Tracked tracked;
+		std::string failure;   ///< cross: the passage's last failed step ("cross_unreachable"), seen while it ran
+	};
+	std::optional<JournalCommand> journal_command_;   ///< the single command open in the journal
+	std::uint64_t journal_commands_ = 0;              ///< "c<n>" counter
+	std::optional<rc::DriveMode> journal_drive_mode_;
+	std::map<std::string, std::string, std::less<>> journal_grounding_;   ///< step id → StepStart text (MissionHost)
+	rc::JournalNode journal_node_;   ///< em_journal: the node the wire is published on (written only on change)
+	rc::TourJournal journal_tours_;  ///< panel tours → MissionStart / MissionEnd, source "panel"
+	void journal_push(rc::em::JournalEntry e);                  ///< journal_mx_ held
+	void journal_steps();                                       ///< journal_mx_ held: interpreter transitions, MissionEnd
+	void journal_check_command(bool superseded);                ///< journal_mx_ held: close the command if it ended
+	void journal_command(const MissionResult &r, const std::string &text, const char *source);
+	void journal_mission_started(const char *source, const std::string &ir);
+	void journal_claim(const rc::AffordanceManager::ClaimEvent &e);
+	/// Once per control-loop pass: step transitions, the command's end, the drive mode, then `em_journal` if dirty.
+	void service_journal();
 	// ── "move <m>" / "turn <deg>": short robot-relative motions (controller_relative_motion.h). Owns the base while
 	// active (compute() steps it BEFORE the planner); cancelled by Stop, a click, Run and a door passage. ──
 	rc::RelativeMotion relative_motion_;

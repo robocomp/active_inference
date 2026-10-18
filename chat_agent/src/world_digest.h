@@ -10,6 +10,8 @@
  *   · remembered rooms behind doors (ltsm_agent's recall_<room> metaconcepts, parent = the door)
  *   · the active chat command and how the controller says it is going (state / bt_state on its has_intention edge)
  *   · whether the controller is present
+ *   · "today: …", what the robot did today, from episodic_agent's memory (em_answers.h today_digest_line) — passed in
+ *     by ChatSession, omitted when no episodic-memory graph is joined
  *   · OBJECTS of the current room (object_facts.h: who publishes what): counts per class + the N nearest, and the
  *     residual obstacle count. The full list (every room) is kept in Digest::objects for the query tools and for
  *     the change tracking (births / removals between turns) that ChatSession does.
@@ -20,6 +22,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <dsr/api/dsr_api.h>
@@ -33,7 +36,7 @@ namespace rc::chat
 
 struct Digest
 {
-    std::string text;    ///< the STATE block for the system prompt
+    std::string text;    ///< the STATE message (the last message of every request)
     GateFacts facts;     ///< what CommandGate validates against
     std::uint64_t room_id = 0;            ///< current room node id (0 = unknown)
     std::vector<ObjectFact> objects;      ///< every object/person in the graph, any room (in_current_room marks ours)
@@ -54,7 +57,9 @@ class WorldDigest
 public:
     WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame = "body", int objects_nearest = 6);
     /// Build the digest now. `inner` must be the main thread's instance (CLAUDE.md: ts==0 cache ownership).
-    Digest build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention) const;
+    /// `today` (already "today: …") is appended as the last line when present.
+    Digest build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention,
+                 const std::optional<std::string>& today = std::nullopt) const;
 
 private:
     std::shared_ptr<DSR::DSRGraph> G_;

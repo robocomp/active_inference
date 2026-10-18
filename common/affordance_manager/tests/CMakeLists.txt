@@ -44,7 +44,7 @@ add_executable(affordance_protocol_test
   affordance_protocol_test.cpp
   ../affordance_manager.cpp
 )
-target_compile_definitions(affordance_protocol_test PRIVATE AFFORDANCE_TEST_SHADOW_JSON="${CMAKE_CURRENT_LIST_DIR}/../../robot_concept/shadow.json")
+target_compile_definitions(affordance_protocol_test PRIVATE AFFORDANCE_TEST_SHADOW_JSON="${CMAKE_CURRENT_LIST_DIR}/../../../robot_concept/shadow.json")
 target_include_directories(affordance_protocol_test PRIVATE
   ..
   /home/pbustos/robocomp/components/cortex/api/include

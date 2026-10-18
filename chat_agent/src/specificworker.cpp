@@ -49,6 +49,8 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     int period = 0;
     rc::cfg::Reader(configLoader, "chat_agent").req("Period.Compute", period,
             "GRAFCET step period (ms) for every state of this agent's state machine");
+    em_domain_ = rc::cfg::Reader(configLoader, "chat_agent").i("EM.domain", 4,
+            "DDS domain of episodic_agent's memory graph; joined read-only while episodic_agent is present");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this), std::bind(&SpecificWorker::waiting_enter, this));
@@ -89,6 +91,7 @@ void SpecificWorker::request_shutdown()
         return;
     save_window_settings();
     session_.reset();          // cancels the request in flight, closes the log, destroys the window
+    em_G_.reset();             // leave domain 4 (nothing of ours lives there)
     cleanup_owned_nodes();     // chat_intention + our agent node, through the shared coordinator ([Owns])
 }
 
@@ -170,7 +173,7 @@ void SpecificWorker::initialize()
         .request_presence_lost  = [this]() { emit presenceLost(); },
     });
     presence_coordinator_.set_peer_hooks({
-        .on_peer_restarted = [](std::uint32_t id) { qInfo() << "[Presence] peer" << id << "restarted"; },
+        .on_peer_restarted = [this](std::uint32_t id) { on_peer_restarted(id); },
         .on_optional_peer_lost  = [this](const std::string& n, std::uint32_t i) { on_optional_peer_lost(n, i); },
         .on_optional_peer_ready = [this](const std::string& n, std::uint32_t i) { on_optional_peer_ready(n, i); },
     });
@@ -221,6 +224,7 @@ void SpecificWorker::initialize()
 
     // NO update_node/update_edge signal connects (CLAUDE.md): the session polls on the main thread.
     session_ = std::make_unique<rc::chat::ChatSession>(G, session_cfg_);
+    session_->set_em_graph(em_G_);   // nullptr until episodic_agent is seen (join_em)
     session_->sweep_stale();   // a crashed run's chat_intention, before ours is born
     session_->start();
 
@@ -232,7 +236,9 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::compute()
 {
-    // Everything runs on the session's QTimers (main thread); the GRAFCET loop only keeps the presence protocol.
+    // Everything runs on the session's QTimers (main thread); the GRAFCET loop only keeps the presence protocol —
+    // and notices episodic_agent's node vanishing or being replaced (no presence hook fires after a stale period).
+    sync_em(false);
 }
 
 void SpecificWorker::emergency() { std::print("chat_agent: emergency()\n"); }

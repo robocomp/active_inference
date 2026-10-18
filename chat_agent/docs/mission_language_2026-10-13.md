@@ -1,6 +1,7 @@
 # Mission language for chat_agent → controller — 2026-10-13
 
-Two parts: **(A)** my review. **(B)** Fable's full design, unchanged, cited by file:line.
+Three parts: **(A)** my review. **(B)** Fable's full design, unchanged, cited by file:line. **(C)** §7, added
+2026-10-17: extensibility, the limits of expressiveness, and concrete syntax (JSON vs a DSL).
 
 ## A. Review and recommendation
 
@@ -389,7 +390,10 @@ it cannot make an impossible offer appear — which is the safety property the p
 
 Outcome words are a closed set shared with `aff_outcome` where they coincide, extended with mission-level ones:
 `satisfied, timeout, unreachable, infeasible, refused, abandoned, outside_room, not_found, no_route, door_wont_open,
-door_lost, budget_exhausted, stopped_by_user, superseded`.
+door_lost, budget_exhausted, stopped_by_user, superseded`. Added by the interpreter (2026-10-17): `wrong_room` (a
+`cross expect` that ended elsewhere, or a step addressed to a room the robot is not in), `no_pose`, `no_anchor`,
+`passage_unresolved`, `cancelled`; a satisfied step records why it ended: `until`, `budget` (an explore with no
+`until`), `resumed`.
 
 ### 3.2 Routes through memory (go_to room)
 
@@ -696,6 +700,15 @@ Order of first commits inside Phase 1: (a) `mission_schema.h` + `mission_ir.h` +
 headers with tests next to `test_gate.cpp`; (b) controller `MissionInterpreter` driven by the text form from
 `remote_cmd.txt` (no LLM in the loop — the bench must run the agent's code); (c) the planner request; (d) the card.
 
+**Status 2026-10-17.** (a) is `common/mission/` (IR + registry, JSON codec, DSL; the resolver is still to come).
+(b) is built: `common/mission/mission_interpreter.h` (the step machine over a `Host` interface, tested on a scripted
+host) and `controller/src/specificworker_mission.cpp` (the controller's Host). A `remote_cmd.txt` whose first line
+is `mission ["title"]` with indented steps below is run as one mission; `cancel` and `resume` are words in both the
+remote file and the chat grammar; a chat payload starting with `{` is decoded as a mission (§7.5). Limits of (b):
+`go_to` takes a pose in the current room only (no final facing yet); a passage ref resolves only through ltsm's live
+`passage_<n>` (while the room beyond is proto); `explored(room)` is unknown until its Phase-0 attribute exists;
+progress travels in `bt_state` (no `mission_progress` attribute yet).
+
 ### 6.3 Risks and mitigations
 
 - **Door crossing reliability is the floor** (3-5 of 6 legs today, memory note `resume-door-passage-two-problems`).
@@ -721,3 +734,231 @@ headers with tests next to `test_gate.cpp`; (b) controller `MissionInterpreter` 
 The stop fast path, the yes/no card, `run_mission_command`'s single-command grammar (missions are *added* as
 `mission <text>` / the mission node, the old commands keep working), the affordance protocol's wire format, and the
 producers. A mission that the interpreter is running is just another thing `abort_all` ends.
+
+---
+
+## C. §7 — Extensibility, expressiveness and syntax (added 2026-10-17)
+
+Not part of Fable's text. Terminology: the **IR** (intermediate representation) is the *grounded* mission — the
+step tree after the resolver has turned every reference into a node name, pose or passage id and every predicate into
+an attribute read with its decision boundary. chat_agent writes it into `current_intention`; the controller's
+`MissionInterpreter` executes it. The LLM never writes the IR directly and the controller never sees anything less
+grounded.
+
+### 7.1 Extensibility
+
+**Where each kind of addition lands**
+
+| Addition | Example | Change |
+|---|---|---|
+| New object type | "go to the sofa" | **none** — the type is a string matched against `object_subtype` |
+| New predicate | `battery_low`, `person_waving` | one evaluator |
+| New reference kind | "the corridor", "the left side of the table" | one resolver function |
+| New primitive | `follow(person)`, `dock`, `pick` | one op entry + the controller mechanism behind it |
+| New combinator | `parallel`, `for_each` | one interpreter node (the expensive case, §7.2) |
+| New optional field | `speed:"slow"` | the field and its default |
+
+**Rule: the IR states goals over outcomes and beliefs; object-specific actions belong to the producers.** Which
+action is possible on which object, with what preconditions and expected information gain, is the producer's
+knowledge (the affordance protocol); which offer to take is the selector's choice. An op is justified only by a
+controller mechanism the selector cannot reach through a goal prior — point target, relative motion, wait. `look_at`
+works on any `aff_<x>` through `set_goal_prior`; there is no `look_at_table`. A new concept agent is then reachable
+from chat the day it publishes its affordance, with no IR change. *(Revised 2026-10-17: the first wording, "ops map to
+controller mechanisms, not to object types", read as a fixed verb applied to a known noun, which breaks for
+interactive perception — §7.6.)*
+
+**Mechanisms that keep the agents in agreement**
+
+1. **One registry, one source of truth.** Each op is one entry in `common/mission/` declaring its fields, the
+   resources it claims (§7.4), validation, text form and JSON-schema fragment. The LLM schema, the resolver's validation, the
+   interpreter's dispatch, and the DSL parser/printer (§7.3) are all generated from that table, so an op cannot exist
+   in one place and not another. Same reasoning as `common/world_query/door_query.h`, applied to the language.
+2. **Compatibility rules.**
+   - An unknown `op`, ref `kind` or predicate rejects the **whole mission**, `failed|unsupported:<name>`, before
+     anything moves.
+   - An unknown *optional* field is ignored.
+   - A field whose meaning matters (one that cannot be safely ignored) is listed in `"requires":[…]`; a controller
+     that does not know it rejects the mission.
+   - `"v"` is bumped only when the meaning of an existing field changes.
+3. **Capability advertisement (deferred).** The controller publishes `mission_caps` (op/predicate/kind names + `v`)
+   on its agent node and chat builds the LLM schema from it, so an older controller makes the LLM unable to *propose*
+   what it cannot run. Needs one cortex attribute (user reinstall); worth it once controller and chat_agent can run
+   at different versions.
+
+### 7.2 Limits of expressiveness
+
+The planned IR (`seq/if/repeat/try/monitor/timeout` + primitives) is **structured control with no variables and a
+single thread**. What that rules out, and the extension that would close each gap:
+
+| # | Limit | Requests it rules out | Extension |
+|---|---|---|---|
+| **L1** | No variables or bindings: a step's result cannot be referred to later | "go back the way you came"; "find a bottle and take me to *it*"; "the room where you saw the chair" | a step may declare `"bind":"b"` for its resolved result (node, pose, door); refs may be `{"var":"b"}`. `find`'s `then` already needs this |
+| **L2** | No iteration over a set | "visit every room"; "check all the doors"; "look at each table" | `for_each {var, in: Query, steps}`, query evaluated when the loop starts; the set is finite, so the loop ends |
+| **L3** | No concurrency; `monitor` can only abort | "go to the kitchen and tell me if you see a person"; "look for bottles on the way" | `parallel` with typed resources — at most one branch owns the base, the others are observers (perception, `say`, binding); `when {pred, do}` lets an event trigger an action without aborting |
+| **L4** | Procedural only: the user must say *how*, not *what* | "make sure the door is open"; "get to room 3 somehow"; "avoid the kitchen"; "go quietly" | (a) mission-level `prefs`: costs in nats over places/affordances that reshape G across all steps (avoid = negative prior; fast vs careful = cost weights); (b) declarative `achieve {pred}`, compiled to a prior on the affordances whose completion clauses make the predicate true — needs producers to declare their effects, which contracts partly do already |
+| L5 | No dialogue mid-mission | "if there are two tables, ask me which" | `ask {question, candidates, bind}` suspends the mission (`state=waiting_user`); the answer arrives as a `reply` request carrying the mission's stamp |
+| L6 | No schedules or standing orders | "every 10 minutes"; "always close doors behind you" | out of scope for the IR: a chat-side scheduler issues ordinary missions; standing orders would be persistent `prefs` |
+| L7 | Unclear *when* a predicate is evaluated | `if door_open` at P = 0.5 from no observation is a coin flip | a semantics rule rather than a feature: a decision step first takes the **epistemic** affordance on that belief until the posterior is clear of the boundary or the step's budget runs out — the active-inference reading of "check whether X" |
+| L8 | Planner depth | the 8B planner reliably emits depth ≤ 2 | a limit of the **planner**, not the IR (which nests without bound); deeper missions are built over several turns |
+
+Things the robot cannot do (manipulation, following a person) are **capability** limits, not expressiveness limits:
+once the controller can do them, each is a new op.
+
+**The ceiling is deliberate.** Even with L1–L5 the IR stays a fixed program run over world predicates, with finite
+sets and a budget on every loop. That keeps the two properties that make it safe: every mission **terminates**, and
+it can be **checked before it runs** (every reference resolved, every op supported). A general programming language
+(recursion, arithmetic, unbounded state) would lose both, and no request we have considered needs it.
+
+**L4 is the Phase-3 headline, not an extra.** It is where the design becomes active inference rather than a script
+runner with priors added on. Its `prefs` slot is reserved in v1 (§7.4).
+
+### 7.3 Concrete syntax: JSON, a DSL, or both
+
+A DSL is not an alternative to the IR; it is another way of **writing** it. The IR is the abstract syntax (the tree
+and its meaning); JSON and a DSL are concrete syntaxes. Switching between them changes neither what can be said nor
+what cannot. The question is which syntax goes where:
+
+| Where | JSON | DSL |
+|---|---|---|
+| **LLM output** | ollama's `format` constrains decoding to a JSON schema, so the 8B model always emits well-formed output | ollama's API takes a JSON schema, not a custom grammar (llama.cpp supports GBNF; ollama does not expose it), so a DSL is generated unconstrained and needs a parse → error → retry loop; roughly half the tokens and latency |
+| **Wire** (`current_intention`) | unknown optional fields can be ignored, so old and new builds tolerate each other; parsers exist | fine with `key=value` arguments, but we own the parser |
+| **People** (card, logs, `remote_cmd.txt`, test scripts) | poor to read and write | clearly better |
+
+**Decision: one IR, two syntaxes, round-trip tested.**
+- **JSON** for LLM output and the wire: schema-constrained decoding is the only well-formedness guarantee on an 8B
+  model.
+- **DSL** for everything people read or write, including `remote_cmd.txt` mission scripts that exercise the
+  interpreter with no LLM in the loop (amendment 3, Part A).
+
+**The DSL is generic, generated from the registry.** One shape for every op, so the grammar never changes when an op
+is added:
+
+```
+mission    := 'mission' STRING? NEWLINE step+
+step       := op positional* (key '=' value)* block?      -- one per line; indentation = nesting
+block      := INDENT step+ DEDENT  ('else' INDENT step+ DEDENT)?
+value      := NUMBER unit? | STRING | NAME | ref | pred
+ref        := NAME                         -- a live node:            door_27, table_1, room_2
+            | 'anchor:' NAME               -- a captured pose:        anchor:start
+            | 'passage:' NAME '@' NAME     -- resolved on arrival:    passage:passage_0@room_2
+            | '$' NAME                     -- a binding (L1):         $found
+pred       := NAME '(' ref (',' ref)* ')' (('>=' | '<') NUMBER)?
+unit       := 's' | 'm' | 'deg'
+```
+
+```
+mission "explore room_2 and return"
+  cross door_27 expect=room_2 retry=2
+  explore room_2 until=explored(room_2)>=0.9 budget=300s
+  cross passage:passage_0@room_2 expect=room_1 retry=2
+  go_to anchor:start
+```
+
+Each op's registry entry already names its positional and keyword fields; the DSL just spells them out. A per-op
+hand-written syntax would make every extension a grammar change, so it is ruled out.
+
+**When to reverse the LLM-side choice.** If measured planner latency is too high (JSON roughly doubles the output
+tokens, and output tokens are most of the cost on the 8B model), let the LLM write the DSL with a retry loop and
+compare the two in the existing harness (`tests/check_llm_tools.py`): validity rate, accuracy on the six §5 examples
+plus 20 paraphrases, and latency. The IR does not change either way, so the experiment is cheap; run it before
+Phase 1(c).
+
+**Rejected: an embedded DSL** — the LLM writes Python or Lua that calls robot functions (the code-as-policies
+approach). It gets variables, loops and concurrency (L1–L3) for free but loses what makes the IR safe to run: no
+check before execution that a mission terminates or that its references resolve; an 8B model's code runs on the
+robot; and conditions stop being probabilities with a stated decision boundary and become arbitrary `if`s. Adding
+L1–L3 to the IR as limited constructs gets the useful part of that power without losing those guarantees.
+
+### 7.4 What v1 must reserve now
+
+Implement only the Phase-1 ops, but put these in the format from day one — adding any later changes the wire format:
+
+1. **A step id on every step** (`"1"`, `"2.3"`), used by `mission_progress`, `bind`, `ask` and replies.
+2. **`bind` / `{"var":…}` / `$name`** accepted by the grammar, rejected by v1's validation.
+3. **The resources each op claims, as a set** (`base` · `arm` · `gripper`, plus an `instant` flag) in the registry,
+   so `parallel` can be added later and the interpreter enforces one owner per resource. A composite claims the union
+   of its body. *(Revised 2026-10-17 from a single class with one owner of the base: manipulation claims the arm and
+   gripper separately — §7.6.)*
+4. **A mission-level `prefs` slot**, empty in v1.
+5. **The compatibility rules** of §7.1: whole-mission reject on unknown op/kind/predicate, unknown optional fields
+   ignored, `requires`, `v`.
+6. **The registry as the single source** of the schema, validation, dispatch and DSL.
+
+Deferred: `mission_caps` (cortex reinstall) and every extension of §7.2 beyond the reserved slots.
+
+### 7.5 Protocol decisions
+
+Agreed 2026-10-17:
+
+1. **Keep the single `chat_intention` node** (each mission is a new stamp) instead of a `mission_<n>` node per
+   mission (§1, §3.7 above). Per-mission nodes add create/delete churn, break the exact-name `[Owns]` entry, and make
+   `ChatInbox` follow a moving node id. The controller tells the payloads apart by the first character: `{` = a
+   mission, anything else = the existing single-command grammar.
+2. **The IR, resolver and registry live in `common/mission/`**, not `chat_agent/src` (§3.7 above). The controller
+   must re-resolve passage and deferred references on arrival; two resolvers could disagree.
+3. **Which requests replace a running mission.** `stop` aborts everything; `cancel_mission` stops the mission and
+   leaves the base armed; `resume` ends only the current `wait`; `reply` answers an `ask` (L5); anything else
+   replaces the mission and reports `aborted|superseded`.
+4. **The 3 s first-sight rule does not apply to a mission whose edge says `in_progress`**: a restarted controller
+   resumes it rather than adopting its stamp. A protocol rule, so it belongs in v1 of the spec even if it is
+   implemented in Phase 4.
+
+### 7.6 Interactive perception: where the action/object line really is (added 2026-10-17)
+
+**The edge.** Read literally, "ops map to mechanisms, not object types" assumes every object-directed act is a fixed
+verb applied to a known noun. Exploring an unknown object by manipulating it, to learn its *affordance signature*,
+breaks that three ways:
+
+1. **The affordance does not exist before the action.** Poking, pushing or lifting is how the robot finds out what
+   the object affords. A grounded ref needs a node, and `look_at` needs that node to offer an `aff_<x>` already; an
+   unknown object has neither a type nor an offer.
+2. **The right action depends on the object, and the mission author cannot choose it.** Where to push, which grasp,
+   how hard — these come from the object's uncertain geometry and the predicted information gain. A fixed `poke` op
+   with planning-time parameters puts that decision in the wrong place.
+3. **Action and object are defined together.** An affordance is a relation between agent and thing, not a property
+   of either. A grammar with verbs in one table and nouns in another has no place for "the action whose outcome tells
+   me what this object is".
+
+The Phase-1 registry already leaks the other way: `cross` and `open` are door-specific verbs.
+
+**The line that survives manipulation.** Not action vs. object, but:
+
+- the **mission** states *what it wants*: an outcome, or a belief made certain enough;
+- the **producers** own the coupling of actions to objects: which actions are possible on which thing, with what
+  preconditions, at what expected information gain;
+- the **selector** chooses which offer to take, and the **controller** executes it.
+
+That is the existing affordance protocol (producers offer, contracts define completion, the selector minimises G);
+the IR only has to address it at the right level.
+
+**Planned path** (all new ops and predicates — no wire change; the §7.1 compatibility rules cover them):
+
+| Addition | Meaning | Compiles to |
+|---|---|---|
+| `learn {target: Ref, belief?, until?, budget_s}` | reduce uncertainty about one node's belief | a goal prior on the epistemic affordances that target that node, whatever the producer offers |
+| `gain(node, belief) < nats` | remaining expected information gain of a belief (amendment 2, generalised) | a read of the producer's published gain |
+| `affords(node, kind) >= p` | the learnt signature: probability the node affords `kind` | a read of the signature on the node |
+| `achieve {pred}` (L4) | a declarative goal | a prior on the affordances whose completion clauses make `pred` true |
+
+Example — explore an unknown object and act on what was learnt:
+
+```
+mission "what is that"
+  learn obj_12 until=gain(obj_12, affordances)<0.1 budget_s=120s
+  if affords(obj_12, grasp)>=0.7
+    achieve near(obj_12, person_1)
+```
+
+A manipulation producer offers `aff_obj12_push(dir)`, `aff_obj12_lift`, … each with its expected gain about the
+signature; the selector picks among them. No manipulation verb appears in the IR.
+
+The same pattern unifies what exists: `explore room_2` is `learn room_2` (layout readiness = `gain(room_2, layout)`),
+and `cross door_19` becomes `achieve in_room(room_2)` with door_concept owning approach → open → cross. So the change
+that removes the door special case also removes the manipulation edge.
+
+**What is already in place.**
+- Refs are type-agnostic: `{"node":"obj_12"}` works for an object of unknown type. Missing, on the resolver side:
+  deictic references ("that thing", from what the robot sees or where the person points).
+- Resources are a set (§7.4 point 3): base, arm and gripper have one owner each.
+- `cross` and `open` are marked LEGACY in the registry.
+

@@ -53,11 +53,15 @@ class DoorPassage
 public:
     enum class Step { Idle, Approach, Open, Cross, Done };
 
-    /// Begin a passage through `door` (the door node's name, e.g. "door_1").
-    void start(std::string door)
+    /// Begin a passage through `door` (the door node's name, e.g. "door_1"). `stop_after` = the last step to run:
+    /// Cross (the whole passage) or Open (a mission's `open door`: the passage is Done once the door is open, and
+    /// a `cross` on offer — door_concept believing it passable — counts as open already).
+    void start(std::string door, Step stop_after = Step::Cross)
     {
         std::scoped_lock lk(m_);
         door_ = std::move(door);
+        stop_after_ = stop_after;
+        last_outcome_.clear();
         step_ = Step::Approach;
         seen_executing_ = false;
         attempts_ = 0;
@@ -223,9 +227,16 @@ public:
             else
             {
                 ++attempts_;
+                last_outcome_ = rc::affordance::to_string(outcome);
                 out.event = std::format("[door-passage] {}: {} ended {} (attempt {}) — waiting for it to be offered again",
                                         door_, req, rc::affordance::to_string(outcome), attempts_);
             }
+        }
+        if (step_ != Step::Done and static_cast<int>(step_) > static_cast<int>(stop_after_))
+        {
+            step_ = Step::Done;
+            out.event = std::format("[door-passage] {}: {} reached — passage DONE (it was asked to stop after {})", door_,
+                                    step_name(stop_after_), step_name(stop_after_));
         }
         step_state_ = state_name(state_of(G, name_of(step_)));
         note_ = std::format("{} ({})", name_of(step_), step_state_);
@@ -255,11 +266,13 @@ public:
         std::string step_state;    ///< the current step's affordance: offered / executing / completed / not offered
         int attempts = 0;          ///< failed completions of the current step
         std::string last_event;    ///< the latest [door-passage] transition, verbatim
+        std::string last_outcome;  ///< aff_outcome of the latest failed completion ("" = none in this passage)
     };
     [[nodiscard]] View view() const
     {
         std::scoped_lock lk(m_);
-        return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_};
+        return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_,
+                .last_outcome = last_outcome_};
     }
     [[nodiscard]] static const char* step_name(Step s)
     {
@@ -332,6 +345,7 @@ private:
     mutable std::mutex m_;
     std::string door_;
     Step step_ = Step::Idle;
+    Step stop_after_ = Step::Cross;
     bool seen_executing_ = false;
     bool just_started_ = false;
     bool preempted_ = false;
@@ -342,6 +356,7 @@ private:
     std::string note_ = "idle";
     std::string step_state_;   // view()
     std::string last_event_;   // view()
+    std::string last_outcome_; // view()
 };
 
 }   // namespace rc

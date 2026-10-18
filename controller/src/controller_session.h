@@ -106,6 +106,16 @@ public:
                            const TimeSource &time_source,
                            const WakeCallback &wake_callback);
 
+    /// How the latest manual target ended — what a mission's `go_to` waits for. One epoch per set_manual_target, so
+    /// a caller that remembers the epoch it started never reads the end of somebody else's target.
+    enum class ManualTargetEnd { Pending, Reached, NoRoute, Cleared };
+    struct ManualTargetStatus
+    {
+        std::uint64_t epoch = 0;
+        ManualTargetEnd end = ManualTargetEnd::Pending;
+    };
+    [[nodiscard]] ManualTargetStatus manual_target_status() const { return manual_target_status_; }
+
     void clear_manual_target(rc::AffordanceManager &affordance_manager,
                              rc::TrajectoryController &path_controller,
                              ControllerMotionCommander &motion_commander,
@@ -461,6 +471,13 @@ private:
     std::optional<ControllerTargetInfo> last_target_info_;
     int last_display_wp_index_ = 0;
     bool manual_target_dirty_ = false;
+    ManualTargetStatus manual_target_status_;
+    /// The manual target ended this way, if one was pending (the first ending is the one reported).
+    void end_manual_target(ManualTargetEnd end)
+    {
+        if (manual_target_room_.has_value() and manual_target_status_.end == ManualTargetEnd::Pending)
+            manual_target_status_.end = end;
+    }
     std::uint64_t active_target_id_ = 0;
     // ★ "ALREADY THERE" IS NOT AN ARRIVAL. Set on the first cycle after adopting a target; if the
     // goal already reads reached on that cycle, no approach happened and nothing was observed —
