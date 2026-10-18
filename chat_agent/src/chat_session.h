@@ -149,6 +149,7 @@ private:
 
     // object change tracking (current room only; node id → fact)
     std::map<std::uint64_t, ObjectFact> objects_now_, window_baseline_, turn_baseline_;
+    std::vector<std::string> turn_doors_;   ///< the current room's doors at the last request (doors_gone)
     std::uint64_t objects_room_ = 0;
     bool objects_init_ = false;
     std::int64_t window_flush_ms_ = 0;

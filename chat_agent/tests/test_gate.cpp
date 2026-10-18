@@ -127,6 +127,16 @@ int main()
         assert(robot_status_text("move 0.30", "completed", "arrived") ==
                "The command 'move 0.30' (move forward 0.30 m) ended: completed — arrived."); ++checks;   // success: no caveat
     }
+    {
+        // A door deleted from the map (live 2026-10-18: the person deleted door_3 while a crossing of it was running;
+        // the model kept describing door_3 from its own earlier reply, and the STATE's command line still named it).
+        const std::vector<std::string> before{"door_1", "door_3"}, after{"door_1"};
+        assert(doors_gone(before, after) == std::vector<std::string>{"door_3"}); ++checks;
+        assert(doors_gone(after, before).empty()); ++checks;                       // a new door is not a gone one
+        assert(command_target_gone("cross door_3", after) == std::optional<std::string>("door_3")); ++checks;
+        assert(not command_target_gone("cross door_1", after)); ++checks;
+        assert(not command_target_gone("move 0.30", after)); ++checks;             // not a door command
+    }
     std::println("test_gate: {} checks passed", checks);
     return 0;
 }

@@ -174,6 +174,7 @@ void ChatSession::track_object_changes()
         objects_init_ = true;
         objects_room_ = digest_.room_id;
         window_baseline_ = turn_baseline_ = objects_now_;
+        turn_doors_ = digest_.facts.doors;
         window_flush_ms_ = now;
         return;
     }
@@ -426,12 +427,20 @@ QJsonArray ChatSession::messages_for_request() const
 void ChatSession::ask_model(bool followup)
 {
     turn_ = Turn{.followup = followup};
-    // STATE additions for this request: what changed among the objects since the last request, and the last
+    // STATE additions for this request: what changed among the objects and the doors since the last request, and the last
     // relative move (so "a bit more" knows its direction even after the history has been trimmed).
     state_extra_.clear();
     if (const ObjectChanges c = diff_objects(turn_baseline_, objects_now_); not c.empty())
         state_extra_ += QStringLiteral("changes in objects since the last message: ") + q(changes_line(c)) + "\n";
     turn_baseline_ = objects_now_;
+    if (const auto gone = doors_gone(turn_doors_, digest_.facts.doors); not gone.empty())
+    {
+        std::string names;
+        for (const auto& g : gone) names += (names.empty() ? "" : ", ") + g;
+        state_extra_ += QStringLiteral("doors gone since the last message: %1 (deleted from the map: it is not there "
+                                       "any more, whatever earlier messages said)\n").arg(q(names));
+    }
+    turn_doors_ = digest_.facts.doors;
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
     const QJsonArray msgs = messages_for_request();

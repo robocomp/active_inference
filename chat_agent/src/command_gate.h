@@ -233,6 +233,26 @@ inline std::optional<ToolCall> parse_direct(const std::string& text)
     return std::nullopt;
 }
 
+/// Doors in `before` that are not in `after` (the current room's doors at the last request vs now). Deleted from the
+/// map — by the person, or by door_concept's existence model — so the STATE says so: otherwise the model goes on
+/// describing a door from its own earlier reply (live 2026-10-18).
+inline std::vector<std::string> doors_gone(const std::vector<std::string>& before, const std::vector<std::string>& after)
+{
+    std::vector<std::string> out;
+    for (const auto& d : before)
+        if (std::ranges::find(after, d) == after.end()) out.push_back(d);
+    return out;
+}
+
+/// "cross door_3" while door_3 is not among `doors` → "door_3": the command aims at a door that is no longer there.
+inline std::optional<std::string> command_target_gone(const std::string& command, const std::vector<std::string>& doors)
+{
+    if (not command.starts_with("cross ")) return std::nullopt;
+    const std::string door = command.substr(6);
+    if (std::ranges::find(doors, door) != doors.end()) return std::nullopt;
+    return door;
+}
+
 /// The model's line when a command ends (the robot_status tool message). state is the intention's "failed|<reason>",
 /// "completed", …; event the BT's last event, often the same reason again (said once here). A FAILED relative move
 /// says what it does not mean: the model otherwise read "a wall blocks the way" as blocking the door it was heading to

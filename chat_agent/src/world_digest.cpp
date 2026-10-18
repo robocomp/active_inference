@@ -184,6 +184,11 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
         if (parts.size() >= 1 and not parts[0].empty() and parts[0] != "-") s += ", step: " + parts[0];
         if (parts.size() >= 2 and not parts[1].empty()) s += ", last event: " + parts[1];
         if (parts.size() >= 3 and parts[2] == "driving=off") s += ", NOTE: the base is not armed (Run not pressed)";
+        // Against EVERY door in the graph, not this room's: a door just crossed belongs to the room left behind.
+        if (const auto gone = command_target_gone(intention.command, rc::world::list_doors(G)); gone.has_value() and
+            (intention.state == "in_progress" or intention.state.empty()))
+            s += std::format(", WARNING: {0} is NO LONGER in the map (deleted), so this crossing cannot finish; "
+                             "call cancel_passage() yourself to end it", *gone);
         s += "\n";
     }
     if (today) s += *today + "\n";

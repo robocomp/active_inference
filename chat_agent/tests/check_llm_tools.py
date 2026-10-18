@@ -127,9 +127,10 @@ def system():
     return desc + "\n" + interface_rules()
 
 
-def state(last_move="none"):
+def state(last_move="none", extra=""):
     expl = {"move 0.30": "move 0.30 (move forward 0.30 m)", "move -0.30": "move -0.30 (move backward 0.30 m)"}
-    return "STATE:\n" + STATE + f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
+    base = STATE.replace("last command sent from this chat: none\n", "") if "last command sent" in extra else STATE
+    return "STATE:\n" + base + extra + f"last move/turn sent from this chat: {expl.get(last_move, last_move)}\n"
 
 
 def ask(messages):
@@ -211,6 +212,19 @@ CASES = [
                              "like me to attempt to open it?"}], "none",
      "yes",
      lambda n, a, c: n == "cross_door" and str(a.get("door", "")) == "door_1"),
+    # live 2026-10-18: the person deleted door_3 during its crossing; the model went on describing it from its own
+    # earlier reply. The STATE now says the door is gone (doors_gone / command_target_gone, command_gate.h).
+    ("deleted door", [{"role": "user", "content": "do you see a door in front of you?"},
+                      {"role": "assistant", "content": "Yes, door_3 is 1.8 m away at -26 deg (ahead-right). It is "
+                       "shut (P(open)=0.00)."},
+                      {"role": "user", "content": "go there and cross it"},
+                      {"role": "assistant", "content": "I am approaching door_3 to cross it."}], "none",
+     "check now the door",
+     lambda n, a, c: n == "cancel_passage" or n is None and (re.search(r"door_3", c) is None
+                                    or re.search(r"no longer|gone|deleted|removed|not there|isn't there", c) is not None),
+     "doors gone since the last message: door_3 (deleted from the map: it is not there any more, whatever earlier "
+     "messages said)\nlast command sent from this chat: \"cross door_3\", status: in_progress, step: open, WARNING: "
+     "door_3 is NO LONGER in the map (deleted), so this crossing cannot finish; call cancel_passage() yourself to end it\n"),
     # system questions: the STATE's agents/cameras lines answer the gist, the tools the details.
     ("how many agents", [], "none", "how many agents are running?",
      lambda n, a, c: n == "agents" or (n is None and re.search(r"\b(14|fourteen)\b", c.lower()) is not None)),
@@ -285,10 +299,10 @@ def main():
     results = []
     lat = []
     only = re.compile(os.environ.get("ONLY", ""))   # ONLY=regex runs just the cases whose label matches
-    for label, hist, last_move, text, ok in (c for c in CASES if only.search(c[0])):
+    for label, hist, last_move, text, ok, *extra in (c for c in CASES if only.search(c[0])):
         for k in range(REPEATS):
             msgs = [{"role": "system", "content": system()}] + hist + [{"role": "user", "content": text},
-                                                                       {"role": "system", "content": state(last_move)}]
+                                                                       {"role": "system", "content": state(last_move, *extra)}]
             t0 = time.monotonic()
             r = ask(msgs)
             lat.append(time.monotonic() - t0)
