@@ -725,7 +725,12 @@ private:
    float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params
    float track_var_ln_s_    = std::numeric_limits<float>::quiet_NaN();
    /// Filter one frame's s; returns P(LOST). `outside` (P past a doorway) mixes the evidence away.
-   float update_lost_belief(float s, float outside);
+   /// `view_change` ∈ [0,1]: how new this frame's view is (pose step in the likelihood's basin). It scales the
+   /// MISMATCH → TRACKING return and the emission learning; 1 = the old per-frame behaviour.
+   float update_lost_belief(float s, float outside, float view_change = 1.f);
+   Eigen::Vector3f belief_prev_pose_ = Eigen::Vector3f::Zero();
+   bool  belief_prev_pose_valid_ = false;
+   float last_search_top_weight_ = 0.f;   ///< posterior weight of the mode the last search committed/confirmed
    void  reset_lost_belief();                       // → TRACKING (after a move, or at start)
    void  set_belief_mismatch();                     // → MISMATCH (a search found nothing better to move to)
    /// `extra_var` ADDS to the learnt spread of ln s (never replaces it): the steady-state filter's fit and a

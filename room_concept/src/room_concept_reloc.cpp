@@ -209,6 +209,7 @@ namespace rc
         }
         const auto& top = res.modes.front();
         ep.top_weight = top.weight;
+        last_search_top_weight_ = top.weight;
         ep.second_weight = res.modes.size() > 1 ? res.modes[1].weight : 0.f;
         ep.best_x = top.pose.x(); ep.best_y = top.pose.y(); ep.best_theta = top.pose.z();
         ep.best_loss = top.median_abs;
@@ -375,7 +376,31 @@ namespace rc
             // reason recorded there: Adam re-solving a chronically wrong prediction every frame makes the post-fit
             // number alone look healthy. Both are MEDIAN |SDF| in metres.
             const float s = std::max(res.sdf_mse, res.pred_sdf_median);
-            const float p_lost = update_lost_belief(s, outside_prob());
+            // How new this frame's view is: the pose step since the last frame, measured against what tracking
+            // resolves — the learnt typical misfit s_track = exp(E[ln s]) in translation, s_track / (mean range) in
+            // rotation. Driving, a frame's step is ~1 of those (ν ≈ 0.4–1); parked, the pose jitters by 0.1 mm
+            // (ν ≈ 0). σ_sdf (0.15 m) would be the wrong scale: a driving robot would then read as parked.
+            float view_change = 1.f;
+            {
+                const Eigen::Vector3f pose(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
+                                           std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0)));
+                if (belief_prev_pose_valid_ and not lidar_points.empty())
+                {
+                    double r_sum = 0.0;
+                    for (const auto& q : lidar_points) r_sum += std::hypot(q.x(), q.y());
+                    const double s_track = std::isfinite(track_mu_ln_s_) ? std::exp(static_cast<double>(track_mu_ln_s_))
+                                                                         : static_cast<double>(params.reloc_track_s_median);
+                    const double sig = std::max(1e-3, s_track);
+                    const double r_mean = std::max(sig, r_sum / static_cast<double>(lidar_points.size()));
+                    const double dp2 = (pose.head<2>() - belief_prev_pose_.head<2>()).squaredNorm() / (sig * sig);
+                    const double dth = std::remainder(pose.z() - belief_prev_pose_.z(), 2.0 * M_PI);
+                    const double dt2 = dth * dth / ((sig / r_mean) * (sig / r_mean));
+                    view_change = static_cast<float>(1.0 - std::exp(-0.5 * (dp2 + dt2)));
+                }
+                belief_prev_pose_ = pose;
+                belief_prev_pose_valid_ = true;
+            }
+            const float p_lost = update_lost_belief(s, outside_prob(), view_change);
             if (p_lost >= 0.5f)   // ⚠ the equal-cost Bayes decision, flagged
                 relocalise_from_belief(lidar_points, s, p_lost);
         }
@@ -439,7 +464,7 @@ namespace rc
         return -std::log(std::log(smax / smin));   // log-uniform density in ln s
     }
 
-    float RoomConcept::update_lost_belief(float s, float outside)
+    float RoomConcept::update_lost_belief(float s, float outside, float view_change)
     {
         if (not belief_init_)
             reset_lost_belief();
@@ -451,7 +476,16 @@ namespace rc
         // on the tracking memory's timescale, and can hide a kidnap at the hazard. P(LOST) never falls below h,
         // so a kidnap after an hour of good tracking needs the same evidence as one after a minute.
         const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
-        const double leave = 1.0 / std::max(1, params.reloc_track_memory_frames);
+        // ★ THE VIEW RETURNS ONLY IF IT CAN CHANGE (2026-10-18). MISMATCH → TRACKING is "the view came back", and a
+        //   parked robot's view cannot come back — it is the same view. At a constant 1/memory per frame that leak
+        //   was refuted by the very next scan (the emission cannot tell LOST from MISMATCH), so the LOST:MISMATCH
+        //   odds grew by (1 + leave) every frame and crossed ½ after memory·ln(1 + 1/(memory·h)) = 358 frames —
+        //   18.6 s, measured, with the robot still to 0.1 mm: a search every 18.6 s, for 20 minutes, each one
+        //   confirming the pose it was handed. view_change ∈ [0,1] is how far this frame's pose moved relative to
+        //   the likelihood's own basin (relocalisation_step); parked it is ~0, driving it is ~1. The kidnap hazard
+        //   h is NOT scaled: a robot can be picked up while parked, and that must stay detectable.
+        const double nu = std::clamp(static_cast<double>(view_change), 0.0, 1.0);
+        const double leave = nu / std::max(1, params.reloc_track_memory_frames);
         const auto& b = belief_;
         std::array<double, 3> pr{
             b[kTrack] * (1.0 - 2.0 * h) + b[kLost] * h + b[kMismatch] * leave,
@@ -476,10 +510,15 @@ namespace rc
 
         // LEARN the tracking emission from the frames it explains, weighted by P(TRACKING), forgetting over
         // reloc_track_memory_frames. A lost robot or a changed view stops teaching it.
+        // ★ AND A REPEATED VIEW TEACHES IT ONCE (2026-10-18): parked, every frame is the same look, and its misfit
+        //   is common-mode, not fresh noise. Counted as independent, minutes of identical (clamped) samples drove
+        //   track_var_ln_s_ onto its 1e-6 floor, after which one real step in s — a door node deleted under a
+        //   parked robot — took P(LOST) from −14.7 log-odds to a search in 1–2 frames (9 searches in 10 s, live).
+        //   So the learning rate is weighted by how new the view is, the same view_change as the transition.
         const double smin = std::max(params.reloc_lost_s_min, 1e-4f);
         const double smax = std::max(static_cast<double>(params.reloc_lost_s_max), smin * 1.001);
         const double ls = std::log(std::clamp(static_cast<double>(s), smin, smax));
-        const double a = belief_[kTrack] / std::max(1, params.reloc_track_memory_frames);
+        const double a = nu * belief_[kTrack] / std::max(1, params.reloc_track_memory_frames);
         const double dev = ls - track_mu_ln_s_;
         track_mu_ln_s_  = static_cast<float>(track_mu_ln_s_ + a * dev);
         track_var_ln_s_ = static_cast<float>(std::max(1e-6, track_var_ln_s_ + a * (dev * dev - track_var_ln_s_)));
@@ -495,8 +534,22 @@ namespace rc
         pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();
         if (ran and last_search_moved_)
             reset_lost_belief();
-        else if (ran and last_search_confirmed_incumbent_ and log_tracking_emission(s) > log_broad_emission(s))
-            reset_lost_belief();          // the pose was fine and so is its fit: a false alarm
+        else if (ran and last_search_confirmed_incumbent_)
+        {
+            // ★ THE SEARCH IS EVIDENCE, NOT A RESET (2026-10-18). It returned the incumbent's basin with posterior
+            //   weight w: P(confirm | not lost) = w, P(confirm | lost) = 1 − w. LOST is updated by that ratio and
+            //   the rest is split between TRACKING and MISMATCH by this frame's own emission — instead of throwing
+            //   the outcome away and restarting from the prior, which is what made the next ramp identical.
+            const double w  = std::clamp(static_cast<double>(last_search_top_weight_), 1e-9, 1.0 - 1e-9);
+            const double pl = std::clamp(static_cast<double>(p_lost), 1e-12, 1.0 - 1e-12);
+            const double h  = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
+            const double l  = std::max(h, pl * (1.0 - w) / (pl * (1.0 - w) + (1.0 - pl) * w));
+            const double lt = log_tracking_emission(s), lb = log_broad_emission(s), m = std::max(lt, lb);
+            const double qt = std::exp(lt - m) / (std::exp(lt - m) + std::exp(lb - m));
+            belief_ = {(1.0 - l) * qt, l, (1.0 - l) * (1.0 - qt)};
+            belief_init_ = true;
+            lost_logodds_ = static_cast<float>(std::log(l / (1.0 - l)));
+        }
         else
             set_belief_mismatch();        // nothing explains this view better: not lost, the view changed
     }
