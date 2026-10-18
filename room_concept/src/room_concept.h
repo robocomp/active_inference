@@ -729,6 +729,7 @@ private:
    enum BeliefState : std::size_t { kTrack = 0, kLost = 1, kMismatch = 2 };
    std::array<double, 3> belief_{1.0, 0.0, 0.0};
    bool  belief_init_       = false;
+   std::atomic<bool>  belief_reset_requested_{false};   ///< a new given room was adopted: reset the lost belief next frame
    std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)
    float lost_logodds_      = std::numeric_limits<float>::quiet_NaN();   // logit P(LOST) — for the logs
    float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params

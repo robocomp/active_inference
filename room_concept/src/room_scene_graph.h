@@ -254,6 +254,7 @@ private:
     std::string learnt_layout_path_;   // this run's learnt-layout file (learnt_layout.h); empty until the first save
     void save_learnt_layout(const std::vector<Eigen::Vector2f>& poly, const char* what);
     std::int64_t  refine_last_ms_ = 0;
+    bool          recalled_visit_ = false;   ///< RE-ENTERED from memory: the outline is not re-refined on this visit
     std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
     std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)

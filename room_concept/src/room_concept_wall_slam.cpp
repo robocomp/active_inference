@@ -434,6 +434,11 @@ namespace rc
         }
         if (L.size() < 3) return;
         map_layout_adopted_ = true;
+        // A new GIVEN room: the lost belief and its rivals described the room left behind. A recalled room adopts its
+        // map in the same call that creates it, so the per-frame reset that runs while a room is surveyed never
+        // happens; the doorway transit's belief carried over and fired a search 1 s after "RE-ENTERED" at s = 0.045 m,
+        // which jumped to the 180° mode (try57). Reset on the localisation thread, next frame.
+        belief_reset_requested_.store(true, std::memory_order_relaxed);
         map_ready_ = true;
         wall_frozen_ = true;                              // layout_state() == Localizing from the next frame
         init_polygon_vertices_ = L;                       // the corner channel's model (a GIVEN layout)

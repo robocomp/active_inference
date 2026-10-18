@@ -367,6 +367,13 @@ namespace rc
         // map_ready also keeps the older contract: entering SEARCHING for a proto-room clears it, which is how the
         // agent LEAVES relocalisation, and after the room is retired nothing here may write the robot→room pose
         // again (mark_room_rt_not_current's ring must stay the edge's last write).
+        if (belief_reset_requested_.exchange(false, std::memory_order_relaxed))
+        {
+            reset_lost_belief();
+            belief_prev_pose_valid_ = false;
+            if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
+            rival_ref_valid_ = false;
+        }
         if (params.reloc_enabled and map_guided_checks_allowed() and not searching())
         {
             // Rivals first: they are scored on THIS scan against the pose update() just committed.

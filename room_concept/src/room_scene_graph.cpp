@@ -931,15 +931,26 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         }
         return 0;
     };
+    float p_in_doorway = 0.f;   // max over this room's apertures — see the outside_prob note below
     for (const auto& ap : apertures)
         if (room_of(ap.id) != dsr_room_id_)
             continue;
-        else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body); c.valid and c.p_cross > best.p_cross)
+        else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body); c.valid)
         {
-            best = c;
-            best_ap = &ap;
+            const float p_open = ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f);
+            p_in_doorway = std::max(p_in_doorway,
+                                    p_open * c.p_span * rc::crossing::phi((c.s + r_body) / std::max(c.sig_s, 1e-4f)));
+            if (c.p_cross > best.p_cross) { best = c; best_ap = &ap; }
         }
-    room_concept_->set_outside_prob(best_ap ? (best_ap->p_open < 0.f ? 0.5f : std::clamp(best_ap->p_open, 0.f, 1.f)) * best.p_past : 0.f);   // conjunction, as p_cross (door_crossing.h)
+    // ★ IN THE DOORWAY, NOT ONLY PAST IT (2026-10-18). This tells the lost belief how far the room still owes the scan
+    //   an explanation. Past-the-line (p_past) is ~0 while the body straddles the mouth, yet there the sensor already
+    //   sees mostly the next room: live try58 leg 3, s jumped 0.02 → 4.18 m in the doorway, P(lost) hit ½ before
+    //   room_2's birth, and the search jumped the pose 4.32 m to the 180° mode. The room stops owing the view once
+    //   the body's FRONT reaches the mouth: Φ((s + r_body)/σ_s), within the span and with the door open — the
+    //   same conjunction as p_cross (door_crossing.h), one body radius earlier.
+    //   ★ Over EVERY valid aperture, not the best-crossing one: in front of the mouth p_cross underflows to exactly 0
+    //   for all of them, best_ap stayed null and this was 0 throughout the approach (try60 leg 1: the same jump).
+    room_concept_->set_outside_prob(p_in_doorway);
     row.n_apert = static_cast<int>(apertures.size());
     if (best_ap == nullptr)
         return;   // row keeps NaN across the aperture columns; n_apert says whether any were offered
@@ -1566,6 +1577,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
         room_concept_->adopt_map_layout_as_given();
         std::string reason;
         promote_startup_proto(reason, true);
+        recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner
         startup_event_ = "recalled";
         qInfo().noquote() << QString("[room][recall] %1 RE-ENTERED through %2 (node id %3): remembered outline (%4 vertices) "
                                      "adopted in its own frame (promotion: %5) — localising against it, not surveying. "
@@ -1593,6 +1605,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     published_polygon_verts_ = 0;
     startup_proto_     = true;
     startup_promoted_  = false;
+    recalled_visit_    = false;
     layout_pool_.clear();
     layout_finished_   = false;
     pub_gauge_frozen_  = true;
@@ -4085,6 +4098,14 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     const std::int64_t now = steady_ms();
     if (now - refine_last_ms_ < kRefinePeriodMs) return;
     refine_last_ms_ = now;
+    // ★ A RE-ENTERED ROOM IS NOT RE-REFINED FROM THE DOORWAY (2026-10-18). Its outline is the one refined during its
+    //   own survey; the free-space record restarts empty at the crossing, so five seconds later it holds only the
+    //   cone visible from the doorway, and every part of the outline outside that cone reads as claimed-but-unswept.
+    //   Live try54: 5 s after "room_1 RE-ENTERED", the refiner slid two edges ~0.3 m and cut a 4.1 m² notch, door_1
+    //   was then seated 2.1 m inside the room, the through-door returns became a 1.4 m misfit, and the localiser
+    //   searched itself 6 m away. Evidence still accumulates (it costs nothing and is the record a later survey
+    //   would start from); the remembered outline is just not edited on this visit.
+    if (recalled_visit_) return;
     std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
     free_space_->evidence_cells(surf, fr, &cs, &cf);
     const auto poly_pub = published_polygon();
