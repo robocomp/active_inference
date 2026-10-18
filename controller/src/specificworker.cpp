@@ -1969,6 +1969,10 @@ void SpecificWorker::abort_all(const char *source)
 	// What survives is the mission SELECTION, so Run starts whichever mission is selected.
 	cancel_mission("stopped_by_user", /*hold=*/false);
 	cancel_relative_motion("stopped");
+	// The affordance being executed is ABANDONED, so say so: a claim left standing kept aff_door_1_cross Executing
+	// with nobody driving it, and the next `cross door_1` found nothing eligible (live 2026-10-18).
+	if (G and affordance_manager_.release_execution_claim(G))
+		std::println("[mission] STOP: released the affordance execution claim");
 	session_.mission().stop(source, current_time_ms());
 	session_.mission().set_click_target(std::nullopt);
 	clear_manual_target();

@@ -291,6 +291,31 @@ void claim_observer_start_preempt_outcome(TestFailure &failure)
     failure.expect(next_events.size() == 1 and next_events[0].kind == K::Start and next_events[0].epoch == 6,
                    "an unchanged persisted edge must still fire Start once in a new run");
 }
+// A CONSUMER's release must free the claim it holds (live 2026-10-18: `stop` during a door crossing left
+// aff_door_1_cross Executing with nobody driving it; the next `cross door_1` found nothing eligible and stalled).
+// release_execution_claim used to look only at the PRODUCER's managed node, which a consumer (the controller,
+// constructed with no managed name) does not have — so it released nothing, ever.
+void consumer_release_frees_its_claim(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    rc::AffordanceManager producer{"door_cross_affordance"};
+    rc::AffordanceManager controller;
+
+    failure.expect(producer.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.5f), "producer failed to publish");
+    failure.expect(controller.select_target(graph).has_value(), "controller did not claim the offered affordance");
+    expect_protocol_state(graph, "door_cross_affordance", true, true, failure);   // Executing
+    failure.expect(controller.release_execution_claim(graph), "release must report that it freed the claim");
+    expect_protocol_state(graph, "door_cross_affordance", false, true, failure);  // Offered again
+
+    // ABANDONED first (clear_current: a click target, a mission or a stop took the base), released after: the
+    // claim is still the consumer's to free, not left Executing for the producer to wait out.
+    failure.expect(controller.select_target(graph).has_value(), "controller did not re-claim");
+    expect_protocol_state(graph, "door_cross_affordance", true, true, failure);
+    controller.clear_current();
+    failure.expect(controller.release_execution_claim(graph), "release after clear_current must free the abandoned claim");
+    expect_protocol_state(graph, "door_cross_affordance", false, true, failure);
+    failure.expect(not controller.release_execution_claim(graph), "a second release has nothing left to free");
+}
 } // namespace
 
 int main()
@@ -304,6 +329,7 @@ int main()
         test_invalid_state_is_not_claimed(failure);
         test_completion_event_is_consumed_once(failure);
         claim_observer_start_preempt_outcome(failure);
+        consumer_release_frees_its_claim(failure);
     }
     catch (const std::exception &e)
     {

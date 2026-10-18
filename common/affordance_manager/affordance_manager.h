@@ -356,6 +356,7 @@ private:
     bool last_managed_pending_ = true;
 
     std::uint64_t current_affordance_id_ = 0;
+    std::uint64_t abandoned_claim_id_ = 0;   ///< a claim clear_current() dropped; release_execution_claim frees it
     std::string current_affordance_name_;
     // Grounded EFE selection (set_selection_params): nav-cost weight (nats/m) + hysteresis (nats).
     float select_lambda_cost_ = 0.2f;

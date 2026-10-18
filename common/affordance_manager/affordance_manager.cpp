@@ -695,7 +695,18 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
     if (!graph)
         return false;
 
-    const auto node_opt = get_managed_node(graph);
+    // ★WHOSE CLAIM. A CONSUMER (the controller: no managed name) claims a producer's node by setting `active`,
+    // and that node is current_affordance_id_ — or abandoned_claim_id_ once clear_current() dropped it. Only a
+    // PRODUCER has a managed node. Looking at the managed node alone released nothing for a consumer, ever: a
+    // `stop` during a door crossing left aff_door_1_cross Executing with nobody driving it, and the next
+    // `cross door_1` found nothing eligible (live 2026-10-18).
+    std::optional<DSR::Node> node_opt;
+    for (const std::uint64_t id : {current_affordance_id_, abandoned_claim_id_})
+        if (id != 0 and not node_opt.has_value())
+            node_opt = graph->get_node(id);
+    abandoned_claim_id_ = 0;
+    if (!node_opt.has_value())
+        node_opt = get_managed_node(graph);
     if (!node_opt.has_value())
         return false;
 
@@ -1126,6 +1137,8 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         graph->update_node(node);
 
         current_affordance_id_ = best_target->node_id;
+        if (abandoned_claim_id_ == best_target->node_id)
+            abandoned_claim_id_ = 0;   // claimed again: it is the current claim, not an abandoned one
         claimed_x_ = best_target->room_pos.x();
         claimed_y_ = best_target->room_pos.y();
         claimed_yaw_ = best_target->yaw_rad;
@@ -1309,6 +1322,9 @@ void AffordanceManager::suppress_target(const std::shared_ptr<DSR::DSRGraph> &gr
 
 void AffordanceManager::clear_current()
 {
+    // The claim is dropped here, not released (no graph): remember it, so release_execution_claim can still free it.
+    if (current_affordance_id_ != 0)
+        abandoned_claim_id_ = current_affordance_id_;
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
     // NOT selected_target_debug_report_: it is a PRINT-dedup key, not affordance state. Clearing it here
