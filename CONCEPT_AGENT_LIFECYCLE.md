@@ -198,6 +198,12 @@ cleanup.
   between. bottle_concept reached this form on 2026-07-31 and chair's config comment recorded the same
   conclusion; neither propagated, which is the argument for keeping it in this file rather than in a
   comment.
+- **A SECOND AFFORDANCE PER OBJECT: `approach`** (2026-10-18, `common/pragmatic_affordance/object_approach.h`).
+  An agent that adds `ObjectApproach` must call `approach.remove()` at **every** site it calls
+  `affordance.remove()` (retire, death, merge), and `approach.on_node_deleted(id)` in `del_node_slot`. When the
+  OBJECT node is deleted from outside, hand the approach to the next compute cycle to remove — never write from
+  the slot. Its name `aff_<object>_approach` keeps the `aff_<prefix>` shape, so `remove_stale_affordances` sweeps
+  it with no config change. Wired: chair.
 - Stop with **SIGTERM/SIGINT only**. `kill -9` cannot be caught, so cleanup never runs and every owned node
   leaks into the persistent graph.
 - A **startup stale-sweep** is the safety net for a previous crash. Because nodes may still be syncing from

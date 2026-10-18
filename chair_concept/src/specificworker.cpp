@@ -372,6 +372,10 @@ void SpecificWorker::compute()
     if (not G or not rt_api_)
         return;
 
+    // Approaches whose chair was deleted from outside (del_node_slot): their nodes go now, on the main thread.
+    for (auto& a : retired_approaches_) a.remove();
+    retired_approaches_.clear();
+
     // Refresh room node id if not yet found
     if (room_node_id_ == 0)
     {
@@ -434,7 +438,10 @@ void SpecificWorker::compute()
 void SpecificWorker::retire_instance(std::uint64_t id)
 {
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-        it->second.affordance.remove();
+        {
+            it->second.affordance.remove();
+            it->second.approach.remove();
+        }
     fitter_->forget_node(id);
     G->delete_node(id);
 }
@@ -989,6 +996,7 @@ void SpecificWorker::update_existence_beliefs()
         log_phantom_event("DEATH", id, inst.node_name, inst.model.state().cx, inst.model.state().cy, &inst,
                           std::format("L {:.2f}", L));
         inst.affordance.remove();
+        inst.approach.remove();
         fitter_->forget_node(id);
         G->delete_node(id);
     });
@@ -1144,6 +1152,37 @@ void SpecificWorker::publish_chair_intentions(rc::ChairInstance& inst,
     // than being gated on the legacy coverage-deficit proxy.
     if (auto node_opt = G->get_node(node_id); node_opt.has_value())
         step_epistemic(inst, node_opt.value());
+    step_approach(inst);
+}
+
+// The chair's approach (common/pragmatic_affordance/object_approach.h): the shared standoff rule and sides, fed from the
+// belief. The FRONT is the seat side, local +y (chair_contour.h), so yaw + 90° in the room; it is named only while the
+// yaw is surely on that side (front_known: 2σ of the mode-folded yaw inside ±45°), else the chair is approached by its
+// box faces. The robot's σ is the pose-chain variance the fitter already computes for this chair.
+void SpecificWorker::step_approach(rc::ChairInstance& inst)
+{
+    rc::pragmatic::ApproachInputs in;
+    std::optional<Eigen::Vector2f> robot;
+    if (inner_eigen_)
+        if (const auto T = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body"); T.has_value())
+            robot = Eigen::Vector2f(static_cast<float>(T.value()(0, 3)), static_cast<float>(T.value()(1, 3)));
+    in.known = inst.ai2_initialized and robot.has_value();
+    if (in.known)
+    {
+        const auto& b = inst.ai2_belief.state();
+        const auto cov = inst.ai2_belief.covariance_reported();
+        const float yaw_sigma = std::sqrt(std::max(0.0f, inst.ai2_belief.yaw_marginal_var()));
+        in.centre = Eigen::Vector2f(b.cx, b.cy);
+        in.yaw = b.yaw;
+        in.yaw_sigma = yaw_sigma;
+        in.half_extent = Eigen::Vector2f(0.5f * inst.model.state().seat_w, 0.5f * inst.model.state().seat_d);
+        if (rc::pragmatic::approach::front_known(yaw_sigma)) in.front_yaw = b.yaw + std::numbers::pi_v<float> / 2;
+        in.pos_cov = cov.block<2, 2>(0, 0);
+        in.robot = *robot;
+        in.robot_pos_sigma_m = std::sqrt(std::max({0.0f, inst.chain_cov_xx, inst.chain_cov_yy}));
+        if (fitter_->has_room_polygon()) in.room_polygon = fitter_->room_polygon();
+    }
+    inst.approach.update(in, rc::pragmatic::ApproachCfg{});
 }
 
 // ─── Initialisation helpers ──────────────────────────────────────────────────
@@ -1277,12 +1316,18 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [chair_id, inst] : fitter_->instances())
+    {
         if (inst.affordance.node_id() == id)
             inst.affordance.on_node_deleted(id);
+        inst.approach.on_node_deleted(id);
+    }
 
     if (fitter_->instances().count(id))
     {
         std::print("chair_concept: node {} removed from DSR, destroying instance\n", id);
+        // Its approach node would stay on offer for a chair that no longer exists: hand it to compute() to delete
+        // (no graph write from this slot).
+        retired_approaches_.push_back(std::move(fitter_->instances().at(id).approach));
         fitter_->instances().erase(id);
     }
 }

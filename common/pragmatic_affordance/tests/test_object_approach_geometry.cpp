@@ -123,6 +123,14 @@ int main()
         CHECK(fits_in_room(V{0.5f, 3}, ell, 0.4f));
     }
 
+    // ── a front is KNOWN when the yaw is surely on the right side: 2σ inside ±45° (sides are 90° apart) ─────────
+    {
+        CHECK(front_known(0.10f));
+        CHECK(front_known(pi / 8 - 0.01f));
+        CHECK(not front_known(pi / 8 + 0.01f));   // 2σ past 45°: "front" could be a side
+        CHECK(not front_known(std::numeric_limits<float>::quiet_NaN()));
+    }
+
     // ── the value falls as the robot arrives (the door's ping-pong lesson) ───────────────────────────────────────
     {
         CHECK(arrival_value(0.3f, 0.0f, 0.25f, 0.05f) < 0.001f);   // standing on it: nothing left to gain

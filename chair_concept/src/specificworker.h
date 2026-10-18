@@ -81,6 +81,7 @@ public:
     // per compute() cycle — one graph walk feeding both the birth filter and the existence
     // occupancy discount, so the two can never disagree about who is where.
     std::vector<rc::exclusion::Claim> foreign_claims_;
+    std::vector<rc::pragmatic::ObjectApproach> retired_approaches_;   // their chair was deleted from outside
     SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
     ~SpecificWorker();
     bool is_shutting_down() const noexcept { return shutting_down_.load(); }
@@ -138,6 +139,7 @@ private:
                                   float free_energy);
     void step_convergence(rc::ChairInstance& inst, DSR::Node& node, float free_energy);
     void step_epistemic(rc::ChairInstance& inst, DSR::Node& node);
+    void step_approach(rc::ChairInstance& inst);   // the chair's pragmatic `approach` (object_approach.h)
     void trigger_graph_layout_twopi();   // injected into ChairSceneGraph as the relayout callback
 
     // ── Presence protocol ────────────────────────────────────────────────────
