@@ -321,7 +321,6 @@ private:
         bool  run_known = false;                          // the run came from an associated wall (else the flagged default)
         bool  retry = false;                              // Task 9: a claim of this passage ended unsatisfied — the next is a retry
         float clear_width = 0.9f;                         // fix round 1: the passage between the casings (leaf + servo)
-        double pose_sim_ms = 0.0;                         // fix round 1: the producer's sim clock at pose.stamp_ms (SimClockRate)
         // fix round 1, the softer rule near the door (kAnchorPredictMs): the last SEEN posterior, carried by odometry.
         bool  seen_once = false;
         std::int64_t last_seen_ms = 0;

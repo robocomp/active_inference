@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -166,6 +167,14 @@ public:
     {
         if (n_ == 0) return double(wall_ms);
         return double(sim_[1]) + double(wall_ms - wall_[1]) * rate();
+    }
+    // The producer-time interval (s) between two WALL instants, both mapped by the CURRENT samples — so it is never
+    // negative and never frozen by when the earlier instant was mapped (fix round 2, try68: an anchor created before the
+    // first sample stored its stamp mapped by the identity, on the WALL epoch, and every later interval against the sim
+    // clock came out 0 — the anchor was never predicted).
+    [[nodiscard]] double interval_s(std::int64_t wall_then, std::int64_t wall_now) const
+    {
+        return std::max(0.0, sim_at(wall_now) - sim_at(wall_then)) * 1e-3;
     }
 private:
     std::int64_t wall_[2] = {0, 0}, sim_[2] = {0, 0};

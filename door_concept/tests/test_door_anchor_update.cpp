@@ -82,6 +82,8 @@
 //   sim_clock_rate (fix D; fix round 1) — rc::rt::SimClockRate maps wall onto sim time by CONSECUTIVE twist samples: a sim
 //                                  at 0.94× integrates 0.94 s per wall second, a PAUSED sim nothing, a restart re-anchors
 //   pi_zero_open_door_is_finite (fix round 1) — π = 0 with the door open at the mouth: finite posterior (try67: NaN, 0/0 in P(H_door))
+//   first_anchor_predicted_before_clock_observed (fix round 2) — an anchor stamped before the first twist sample is still
+//                                  predicted: SimClockRate::interval_s maps both ends by the current samples (try68: dt 0 for ever)
 //   anchor_publish_decision (fix round 1) — Seen / Predicted (cross claimed, seen before, ≤ kAnchorPredictMs) / None
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
@@ -1083,6 +1085,32 @@ int main()
         clk.observe(1'000'000 + 50 * 101, 10);   // the sim clock jumped back: restarted
         clk.observe(1'000'000 + 50 * 102, 35);
         check(std::abs(clk.rate() - 0.5) < 1e-6, "a restarted simulator re-anchors the estimate");
+    }
+
+    // ─── Task 9 fix round 2 (try68): the first anchor of a process is created BEFORE the first twist sample is seen ────
+    std::print("first_anchor_predicted_before_clock_observed\n");
+    {
+        rc::rt::SimClockRate clk;
+        const std::int64_t wall0 = 1'792'364'000'000;          // the anchor's stamp: wall epoch ms, clock not observed yet
+        rc::interaction::RelPose a; a.x = {0.f, 2.f, 0.f}; a.P = Eigen::Matrix3f::Identity() * 1e-4f; a.stamp_ms = wall0;
+        const double old_way = clk.sim_at(wall0);              // what f.r.1 stored at creation: the identity — the WALL epoch
+        rc::rt::Twist tw; tw.angular = {0.f, 0.f, 0.5f};       // the robot turning CCW at 0.5 rad/s (per sim second)
+        double turned = 0.0, old_dt = 0.0;
+        for (int k = 1; k <= 20; ++k)                          // 2 s at 10 Hz; the sim clock (~5 s in) at 0.94x
+        {
+            const std::int64_t now = wall0 + 100 * k;
+            clk.observe(now - 10, 5'000 + std::int64_t(std::llround(0.94 * (100 * k - 10))));
+            const float dt = float(clk.interval_s(a.stamp_ms, now));   // the fix: both ends mapped by the current samples
+            old_dt += std::max(0.0, clk.sim_at(now) - old_way) * 1e-3 > 1e6 ? 0.0 : std::max(0.0, clk.sim_at(now) - old_way) * 1e-3;
+            a = rc::interaction::predict(a, tw, V3(1e-4f, 1e-4f, 1e-4f), dt);
+            a.stamp_ms = now;
+            turned += 0.5 * dt;
+        }
+        std::print("    2 s of a 0.5 rad/s turn: anchor yaw {:+.4f} rad (expected {:+.4f}); f.r.1's interval sim_now − sim_at(stamp@creation) "
+                   "summed {:.4f} s; σ_yaw {:.4f} (from 0.0100)\n", a.x.z(), -turned, old_dt, std::sqrt(a.P(2, 2)));
+        check(std::abs(a.x.z() + 0.5f * 0.94f * 1.99f) < 0.02f, "the anchor turns by −Δyaw of the robot (≈ −0.94 rad over 2 s at 0.94x)");
+        check(old_dt == 0.0, "(the f.r.1 bookkeeping integrated nothing: the sim clock lies far below the wall epoch)");
+        check(a.P(2, 2) > 1.01e-4f, "and its covariance grew");
     }
 
     // ─── Task 9 fix round 1: what to publish (the softer rule near the door, kAnchorPredictMs) ───────────────────────

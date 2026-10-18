@@ -3232,10 +3232,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         // Fix round 1: toward the opening's centre while it is ahead; once the body's centre is within half a body length of
         // the wall plane (or past it, a retry that starts in the doorway) the centre may lie BESIDE or BEHIND the robot, and
         // the way to see it again is to face along the crossing: the normal (heading_err).
-        const float half_len = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
-        const auto g = rc::anchor_cross_geometry(pose);
-        const float aim = g.s > -half_len ? g.heading_err : std::atan2(-pose.x.x(), pose.x.y());   // CCW positive
-        cmd.rot = w_max * std::tanh(aim / (w_max * rc::kAnchorTauRot));
+        cmd.rot = rc::anchor_wait_turn(pose, w_max, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)));
     }
 
     // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
@@ -3275,7 +3272,11 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     for (const auto &v : rc::anchor_grown_body(body, approach_body_.safety_margin())) r_max = std::max(r_max, v.norm());
     const bool rotation_dominant = std::abs(rot_rps) * r_max > std::hypot(adv_mps, side_mps);
     const auto unc = motion_commander.last_uncertainty_diag();
-    if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
+    // The wait-turn (not engaged, a stale anchor) is not pursuit: once it faces the opening its command is ~0 and the judge
+    // read every 3-s window of near-zero asks as SPINNING (try68: nine "0.00 rad commanded" verdicts). It is bounded by the
+    // wait's own timeout above (fix round 2).
+    if (not a.fresh) reset_stuck_window();
+    else if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
                      robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());

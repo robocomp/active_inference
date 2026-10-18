@@ -142,6 +142,19 @@ inline constexpr float kAnchorTauRot = 0.2f;   // heading alignment
     return c;
 }
 
+// ── WAITING FOR AN ANCHOR NOT SEEN YET: TURN SO THE SENSORS CAN SEE IT (Task 9) ────────────────────────────────────────
+// Toward the opening's centre (its bearing from forward, CCW positive) while it lies ahead; once the body's centre is within
+// half a body length of the wall plane (s > −half_len) — or past it — the centre may be beside or behind the robot, and
+// facing along the crossing (the normal: heading_err) is what brings the doorway back into view. The servo's own heading
+// loop (w_max·tanh(·/(w_max·τ_rot))). Pure: tests/test_anchor_servo.cpp.
+[[nodiscard]] inline float anchor_wait_turn(const rc::interaction::RelPose& r, float w_max, float half_len)
+{
+    if (not r.x.allFinite() or not (w_max > 0.f)) return 0.f;
+    const auto g = anchor_cross_geometry(r);
+    const float aim = g.s > -half_len ? g.heading_err : std::atan2(-r.x.x(), r.x.y());
+    return w_max * std::tanh(aim / (w_max * kAnchorTauRot));
+}
+
 // ── THE JAMBS AS OBSTACLES THE MODEL ALREADY KNOWS ────────────────────────────────────────────────────────────
 // The live field cannot stop the robot at a jamb: the self-filter clears every return within ~0.4 m of the body
 // centre, and the LiDAR ceiling is floored at 0.05 m/s. The anchor knows where the jambs are: J± = A ± (w/2)·a in

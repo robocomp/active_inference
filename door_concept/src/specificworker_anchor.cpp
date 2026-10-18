@@ -234,7 +234,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once (width_m set below)
     pa.approach_was_claimed = inst.aff_approach.claimed();
     pa.cross_was_claimed    = inst.aff_cross.claimed();
-    pa.pose_sim_ms  = sim_clock_.sim_at(init->stamp_ms);
+    pa.last_seen_ms = init->stamp_ms;   // never seen yet: unseen since creation (unseen_time)
     passage_anchor_ = std::move(pa);
     passage_anchor_->anchor->set_width(*G, passage_anchor_->clear_width);
     const auto& p = passage_anchor_->pose;
@@ -315,6 +315,11 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.pose.x.z() = rc::interaction::wrap_pi(pa.pose.x.z());
     const Eigen::Matrix3f Pn = (Eigen::Matrix3f::Identity() - K) * Pb;
     pa.pose.P = 0.5f * (Pn + Pn.transpose());
+    // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
+    // claim fails), and nothing seen before it may be published as "predicted" after it.
+    pa.retry = false;
+    pa.seen_once = false;
+    pa.mode = rc::door::AnchorPublish::None;
     std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
                "init (room − belief {:.2f} m / {:+.1f}°): moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n", pa.door_name, kind,
                innov.head<2>().norm(), innov.z() * 57.2958f, dx.head<2>().norm(), dx.z() * 57.2958f,
@@ -435,6 +440,12 @@ void SpecificWorker::step_passage_anchor()
     if (not G or not fitter_ or not cfg_.pragmatic.enabled)
         return;
     auto& instances = fitter_->instances();
+    // The twist's clock is observed FIRST, before any create / re-init (fix round 2): every interval below is mapped by the
+    // current samples (rc::rt::SimClockRate::interval_s).
+    if (const std::string rn = robot_node_name(); not rn.empty())
+        if (const auto rnode = G->get_node(rn); rnode.has_value())
+            if (const auto st = rc::rt::robot_twist_sim_stamps(*G, rnode.value()); st.has_value())
+                sim_clock_.observe(st->first, st->second);
 
     // ── CREATE ───────────────────────────────────────────────────────────────────────────────────────────────
     if (not passage_anchor_.has_value())
@@ -571,34 +582,29 @@ void SpecificWorker::step_passage_anchor()
     const auto robot = robot_name.empty() ? std::nullopt : G->get_node(robot_name);
     std::optional<rc::rt::Twist> twist;
     if (robot.has_value())
-    {
         twist = rc::rt::robot_body_twist(*G, robot.value());
-        if (const auto st = rc::rt::robot_twist_sim_stamps(*G, robot.value()); st.has_value())
-            sim_clock_.observe(st->first, st->second);
-    }
     // ★ Task 9 (try66 leg 1): the twist is per SIMULATION second on a simulator, so every interval it is integrated over —
     //   the prediction's dt and the captures' ages below — is producer SIM time (rc::rt::SimClockRate; the wall clock on
     //   real hardware). Integrated over the wall clock, the anchor's prediction ran 6 % long in translation and 14 % in
     //   rotation in a sim at ~0.94× real time: a 290° spin left it 15° / 1.1 m off with σ 0.3° / 7 mm, and its own
     //   overconfident prior then rejected the beams that would have corrected it — 0 of 332 leg-1 frames published.
-    //   Fix round 1: the interval is the producer's SIM time between this cycle and the last, mapped by consecutive twist
-    //   samples (rc::rt::SimClockRate::sim_at) — a paused simulator integrates nothing.
-    const double sim_now = sim_clock_.sim_at(now);
-    auto sim_age_s = [&](std::int64_t wall_then) { return float(std::max(0.0, sim_now - sim_clock_.sim_at(wall_then)) * 1e-3); };
+    //   Fix round 1/2: the interval is the producer's SIM time between the pose's stamp and now, both mapped by the CURRENT
+    //   consecutive twist samples (rc::rt::SimClockRate::interval_s) — a paused simulator integrates nothing, a restart
+    //   cannot freeze it, and an anchor created before the first sample is predicted like any other.
+    auto sim_age_s = [&](std::int64_t wall_then) { return float(sim_clock_.interval_s(wall_then, now)); };
     if (twist.has_value() and pa.pose.stamp_ms > 0 and now > pa.pose.stamp_ms)
     {
         Eigen::Vector3f var = Eigen::Vector3f::Zero();   // [var_adv, var_side, var_rot]; none stated ⇒ none added
         if (const auto v = G->get_attrib_by_name<robot_current_speed_variance_att>(robot.value());
             v.has_value() and v->get().size() >= 3)
             var = {v->get()[0], v->get()[1], v->get()[2]};
-        const float dt = float(std::max(0.0, sim_now - pa.pose_sim_ms) * 1e-3);
+        const float dt = sim_age_s(pa.pose.stamp_ms);
         pa.pose = rc::interaction::predict(pa.pose, twist.value(), var, dt);
         // The last SEEN posterior is carried by the same odometry (fix round 1: published while predicted, kAnchorPredictMs).
         if (pa.seen_once) pa.seen_pose = rc::interaction::predict(pa.seen_pose, twist.value(), var, dt);
         // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
         rc::door::carry_held_mask(pa.cam_hold, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt);
     }
-    pa.pose_sim_ms = std::max(pa.pose_sim_ms, sim_now);
     // ★ ONE CLOCK: the anchor is stamped with system-clock epoch ms (provenance::now_ms), the clock
     //   read_affordance_anchor's staleness check uses. predict() copies the TWIST's stamp; overwrite it.
     pa.pose.stamp_ms = now;
@@ -855,6 +861,17 @@ void SpecificWorker::step_passage_anchor()
         rc::interaction::RelPose out = pa.seen_pose;
         out.stamp_ms = now;   // fresh by the controller's staleness rule; unseen_time says it is a prediction
         wrote = pa.anchor->write(*G, out) and pa.anchor->set_unseen_ms(*G, int(now - pa.last_seen_ms));
+    }
+    else if (mode == rc::door::AnchorPublish::None and pa.last_seen_ms < now - rc::interaction::kAnchorStaleMs)
+    {
+        // Fix round 2 (try68): NOT seen, nothing to drive on — but the belief, predicted by odometry, still says where to
+        // LOOK. Written BORN STALE (stamped one tick past kAnchorStaleMs, as at creation): the controller never drives on
+        // it, and its wait turns toward the opening where it is NOW, not where it was last published (try68: a pose
+        // published once, 22 s and a full turn earlier — the controller turned toward it, faced a wall, and waited 40 s).
+        rc::interaction::RelPose out = pa.pose;
+        out.stamp_ms = now - rc::interaction::kAnchorStaleMs - 1;
+        wrote = pa.anchor->write(*G, out)
+            and pa.anchor->set_unseen_ms(*G, int(std::min<std::int64_t>(now - pa.last_seen_ms, std::numeric_limits<int>::max())));
     }
     const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)

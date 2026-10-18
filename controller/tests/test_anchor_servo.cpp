@@ -366,6 +366,21 @@ void adv_falls_as_sigma_lat_grows()
     CHECK(falling);
     CHECK(last < 0.75f * cmd(anchor(-0.05f, 1.0f, 0.f, 0.01f), false).adv);   // σ_lat 0.20: P(fit) ≈ 0.70
 }
+// Task 9 fix round 2 (try68): a stale anchor 90° to the robot's LEFT (robot −x side) — the wait turns CCW toward it; one to
+// the right turns CW; one already ahead asks nothing; in the doorway the turn follows the normal.
+void stale_anchor_left_turns_ccw()
+{
+    const float half_len = 0.30f;
+    const float left = rc::anchor_wait_turn(anchor(-2.f, 0.f, float(M_PI_2), 0.02f), kWmax, half_len);
+    const float right = rc::anchor_wait_turn(anchor(2.f, 0.f, -float(M_PI_2), 0.02f), kWmax, half_len);
+    const float ahead = rc::anchor_wait_turn(anchor(0.f, 2.f, 0.f, 0.02f), kWmax, half_len);
+    const float in_door = rc::anchor_wait_turn(anchor(0.f, 0.1f, 0.4f, 0.02f), kWmax, half_len);   // s = −0.1, ψ = 0.4
+    std::println("  wait turn: anchor left {:+.3f}, right {:+.3f}, ahead {:+.3f}, in the doorway (ψ +0.4) {:+.3f}", left, right, ahead, in_door);
+    CHECK(left > 0.5f);
+    CHECK(right < -0.5f);
+    CHECK(std::abs(ahead) < 1e-4f);
+    CHECK(in_door > 0.f);
+}
 }  // namespace
 
 int main()
@@ -384,6 +399,7 @@ int main()
     jamb_deadlock_backs_off();
     inside_jamb_caps_only_the_closing_turn();
     adv_falls_as_sigma_lat_grows();
+    stale_anchor_left_turns_ccw();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

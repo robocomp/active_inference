@@ -27,6 +27,10 @@
 //   --freeze         the door's width and wall run taken from the first record of each chain and kept (the agent now reads
 //                    them with the pose, at creation / re-init); without it each record's own (the live per-cycle values).
 //   --window A B     also summarise p_view over A ≤ t ≤ B s (the chain itself still runs from --from).
+//   --motion-csv F   the step motion from the robot's LOCALISED poses in F (gt_error.csv: ts_ms, est_x, est_y, est_theta;
+//                    room frame, est_theta = the robot frame's yaw) instead of the record — for a record whose live
+//                    prediction was broken (try68: the f.r.1 clock bug, dt = 0 for the whole run). Its covariance growth:
+//   --motion-sd A,S,R  per-second velocity σ of adv, side, rot (default 0.011, 0.011, 0.010: try67's live per-step growth).
 //   --width W        a what-if: the anchor's model width forced to W (e.g. a door's CLEAR width between its frames).
 //   --casing C       the caller's leaf for records written before it (leaf.len = 0, v1/v2): hinged at and spanning the clear
 //                    width rc::door::anchor_clear_width(width, C) — what the agent now passes (DoorConcept.FrameCasingM, 0.06).
@@ -45,6 +49,9 @@
 
 #include "anchor_frame_record.h"
 #include "interaction_anchor/interaction_anchor.h"   // kAnchorStaleMs
+#include <algorithm>
+#include <optional>
+#include <sstream>
 
 namespace
 {
@@ -52,6 +59,37 @@ bool num(const char* a, double& out)
 {
     const auto [p, ec] = std::from_chars(a, a + std::strlen(a), out);
     return ec == std::errc{} and p == a + std::strlen(a);
+}
+
+// The robot's localised poses (ts_ms, x, y, yaw), from gt_error.csv's ts_ms / est_x / est_y / est_theta columns.
+struct PoseRow { std::int64_t t; double x, y, th; };
+std::vector<PoseRow> read_motion_csv(const std::string& path)
+{
+    std::vector<PoseRow> out;
+    std::ifstream f(path);
+    std::string line;
+    if (not std::getline(f, line)) return out;
+    std::vector<std::string> head;
+    { std::stringstream ss(line); std::string c; while (std::getline(ss, c, ',')) head.push_back(c); }
+    auto col = [&](const char* n) { return int(std::find(head.begin(), head.end(), n) - head.begin()); };
+    const int it = col("ts_ms"), ix = col("est_x"), iy = col("est_y"), ith = col("est_theta");
+    while (std::getline(f, line))
+    {
+        std::vector<std::string> c; std::stringstream ss(line); std::string v; while (std::getline(ss, v, ',')) c.push_back(v);
+        const int need = std::max({it, ix, iy, ith});
+        if (int(c.size()) <= need) continue;
+        PoseRow r{}; double t = 0;
+        if (num(c[it].c_str(), t) and num(c[ix].c_str(), r.x) and num(c[iy].c_str(), r.y) and num(c[ith].c_str(), r.th))
+        { r.t = std::int64_t(t); out.push_back(r); }
+    }
+    return out;
+}
+std::optional<PoseRow> pose_at(const std::vector<PoseRow>& rows, std::int64_t t)
+{
+    if (rows.empty()) return std::nullopt;
+    const auto it = std::lower_bound(rows.begin(), rows.end(), t, [](const PoseRow& r, std::int64_t v) { return r.t < v; });
+    if (it == rows.end()) return rows.back();
+    return *it;
 }
 
 struct LegStats { int n = 0, published = 0, ge06 = 0, pub_pred = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0, last_seen = -1; };
@@ -64,12 +102,13 @@ void print_leg(const LegStats& s, int k)
 }
 
 int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool freeze, double from_s, double to_s, int every,
-          double win_a, double win_b, double width_override, double casing)
+          double win_a, double win_b, double width_override, double casing, const std::vector<PoseRow>& motion,
+          const Eigen::Vector3f& motion_var)
 {
     using rc::interaction::RelPose;
     const std::int64_t t0 = frames.empty() ? 0 : frames.front().t_ms;
-    std::print("{:>8} {:>5} | {:>7} {:>7} {:>7} | {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>6} | {:>6}\n", "t_ms", "rays", "x", "y",
-               "yaw", "e", "s", "pl", "open", "door", "walls", "pc", "pv", "pv_rec");
+    std::print("{:>8} {:>5} | {:>7} {:>7} {:>7} | {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>6} | {:>6} {}\n", "t_ms", "rays", "x", "y",
+               "yaw", "e", "s", "pl", "open", "door", "walls", "pc", "pv", "pv_rec", "| sig_lat sig_yaw");
     RelPose x;
     rc::door::CameraViewHold hold;
     float w = 0, u0 = 0, u1 = 0;
@@ -103,7 +142,25 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             Eigen::Matrix3f J, G;
             rc::interaction::predict_jacobians(a.x, side, adv, dth, J, G);
             const Eigen::Matrix3f Q = b.P - J * a.P * J.transpose();
-            const float s_ = float(scale);
+            float s_ = float(scale);
+            Eigen::Matrix3f Qm = Q;
+            if (not motion.empty())
+                if (const auto p0 = pose_at(motion, frames[k - 1].t_ms), p1 = pose_at(motion, f.t_ms); p0.has_value() and p1.has_value())
+                {
+                    // The robot's motion in its own frame at k−1: world = pos + R(θ)·p_robot (x right, y forward).
+                    const double c0 = std::cos(p0->th), s0 = std::sin(p0->th), dxw = p1->x - p0->x, dyw = p1->y - p0->y;
+                    const float m_side = float(c0 * dxw + s0 * dyw), m_adv = float(-s0 * dxw + c0 * dyw);
+                    const float m_dth = rc::interaction::wrap_pi(float(p1->th - p0->th));
+                    const float dts = float(f.t_ms - frames[k - 1].t_ms) * 1e-3f;
+                    Eigen::Matrix3f J2, G2;
+                    rc::interaction::predict_jacobians(x.x, m_side, m_adv, m_dth, J2, G2);
+                    RelPose p; p.x = rc::interaction::move_mean(x.x, m_side, m_adv, m_dth);
+                    p.P = J2 * x.P * J2.transpose() + G2 * motion_var.asDiagonal() * G2.transpose() * (dts * dts);
+                    p.stamp_ms = b.stamp_ms;
+                    x = p;
+                    rc::door::carry_held_mask(hold, m_side, m_adv, m_dth);
+                    goto staged;
+                }
             rc::interaction::predict_jacobians(x.x, s_ * side, s_ * adv, s_ * dth, J, G);
             RelPose p;
             p.x = rc::interaction::move_mean(x.x, s_ * side, s_ * adv, s_ * dth);
@@ -111,7 +168,9 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             p.stamp_ms = b.stamp_ms;
             x = p;
             rc::door::carry_held_mask(hold, s_ * side, s_ * adv, s_ * dth);
+            (void)Qm;
         }
+        staged:
         rc::door::AnchorStaging st = f.staging;   // v2: the record's budgeted sets; v1: empty, its pre-budget rays are staged
         st.replay = f.version != 1;
         const float wk = width_override > 0 ? float(width_override) : freeze ? w : f.width, lo = freeze ? u0 : f.wall_u_min, hi = freeze ? u1 : f.wall_u_max;
@@ -146,10 +205,12 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
         }
         if (k % std::size_t(every) != 0) continue;
         const float cz = std::cos(post.x.z()), sz = std::sin(post.x.z());
-        std::print("{:8d} {:5d} | {:+7.3f} {:+7.3f} {:+7.3f} | {:+6.2f} {:+6.2f} | {:6.3f} = {:5.3f} x {:5.3f} x {:5.3f} | {:5.3f} {:6.3f} | {:6.3f}\n",
+        std::print("{:8d} {:5d} | {:+7.3f} {:+7.3f} {:+7.3f} | {:+6.2f} {:+6.2f} | {:6.3f} = {:5.3f} x {:5.3f} x {:5.3f} | {:5.3f} {:6.3f} | {:6.3f} | {:.4f} {:.4f}\n",
                    f.t_ms - t0, f.version == 1 ? std::uint32_t(f.rays_v1.size()) : f.staging.prior.n_pre, post.x.x(), post.x.y(), post.x.z(),
                    -(cz * post.x.x() + sz * post.x.y()), -(-sz * post.x.x() + cz * post.x.y()), ev.p_lidar, ev.lidar_open, ev.lidar_door,
-                   ev.lidar_wall, ev.p_cam, ev.p_view, f.p_view);
+                   ev.lidar_wall, ev.p_cam, ev.p_view, f.p_view,
+                   std::sqrt(std::max(0.f, Eigen::Vector2f(cz, sz).dot(post.P.topLeftCorner<2, 2>() * Eigen::Vector2f(cz, sz)))),
+                   std::sqrt(std::max(0.f, post.P(2, 2))));
     }
     if (have) print_leg(leg, ++legs);
     if (win.n > 0) { std::print("window "); print_leg(win, 0); }
@@ -163,6 +224,8 @@ int main(int argc, char** argv)
     int every = 1;
     bool chained = false, freeze = false;
     double scale = 1.0, from_s = -1e9, to_s = 1e9, win_a = 1e9, win_b = -1e9, width_override = 0, casing = -1;
+    std::string motion_csv;
+    Eigen::Vector3f motion_var(0.011f * 0.011f, 0.011f * 0.011f, 0.010f * 0.010f);
     for (int i = 1; i < argc; ++i)
     {
         double v = 0;
@@ -172,6 +235,12 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--time-scale") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) scale = v; }
         else if (std::strcmp(argv[i], "--from") == 0 and i + 1 < argc) { if (num(argv[++i], v)) from_s = v; }
         else if (std::strcmp(argv[i], "--to") == 0 and i + 1 < argc) { if (num(argv[++i], v)) to_s = v; }
+        else if (std::strcmp(argv[i], "--motion-csv") == 0 and i + 1 < argc) motion_csv = argv[++i];
+        else if (std::strcmp(argv[i], "--motion-sd") == 0 and i + 1 < argc)
+        {
+            std::stringstream ss(argv[++i]); std::string tok; int j = 0;
+            while (std::getline(ss, tok, ',') and j < 3) { double d = 0; if (num(tok.c_str(), d)) motion_var(j) = float(d * d); ++j; }
+        }
         else if (std::strcmp(argv[i], "--casing") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v >= 0) casing = v; }
         else if (std::strcmp(argv[i], "--width") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) width_override = v; }
         else if (std::strcmp(argv[i], "--window") == 0 and i + 2 < argc) { if (num(argv[++i], v)) win_a = v; if (num(argv[++i], v)) win_b = v; }
@@ -187,7 +256,9 @@ int main(int argc, char** argv)
     {
         std::print("CHAINED: step motion × {:.3f}, width/run {}{}\n", scale, freeze ? "frozen at each chain's first record" : "per record (live)",
                    width_override > 0 ? std::format(", width forced to {:.2f}", width_override) : std::string{});
-        return chain(frames, scale, freeze, from_s, to_s, every, win_a, win_b, width_override, casing);
+        const auto motion = motion_csv.empty() ? std::vector<PoseRow>{} : read_motion_csv(motion_csv);
+        if (not motion_csv.empty()) std::print("motion from {} ({} poses)\n", motion_csv, motion.size());
+        return chain(frames, scale, freeze, from_s, to_s, every, win_a, win_b, width_override, casing, motion, motion_var);
     }
     std::print("{:>8} {:>5} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>5} | {:>6} {:>6}\n", "t_ms", "rays", "F", "mask",
                "pv_rec", "pl_rec", "pc_rec", "pl_rep", "open", "door", "walls", "pc", "pv", "dxy_m", "dyaw");
