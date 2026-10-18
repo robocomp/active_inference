@@ -2,12 +2,15 @@
  * topology_view.cpp — see topology_view.h.
  */
 #include "topology_view.h"
+#include "room_forget.h"
 
 #include <QBrush>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsPathItem>
 #include <QGraphicsPolygonItem>
+#include <QApplication>
 #include <QGraphicsSimpleTextItem>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainterPath>
 #include <QPen>
@@ -21,6 +24,9 @@
 
 namespace
 {
+// QGraphicsItem::data key carrying the memory room name: what a click resolves to.
+constexpr int kRoomKey = 0;
+
 // World +y is up; the scene's +y is down.
 QPointF to_scene(const Eigen::Vector2d &p) { return {p.x(), -p.y()}; }
 
@@ -96,12 +102,14 @@ void TopologyView::rebuild()
                                            QBrush(room_fill(r.name, is_current)));
             item->setZValue(0);
             item->setToolTip(QString::fromStdString(r.name));
+            item->setData(kRoomKey, QString::fromStdString(r.name));
         }
         auto *node = marker(scene_, new QGraphicsEllipseItem(-9, -9, 18, 18), to_scene(r.centre));
         node->setBrush(is_current ? QColor(40, 90, 200) : QColor(60, 60, 60));
         node->setPen(cosmetic(Qt::white, 2.0));
         node->setZValue(4);
         node->setToolTip(QString::fromStdString(r.name));
+        node->setData(kRoomKey, QString::fromStdString(r.name));
         label(scene_, QString::fromStdString(r.name), to_scene(r.centre), {12, -8}, 5);
     }
 
@@ -111,6 +119,13 @@ void TopologyView::rebuild()
         auto *seg = scene_.addLine(QLineF(to_scene(d.a), to_scene(d.b)), cosmetic(QColor(150, 75, 20), 6.0));
         seg->setZValue(2);
         seg->setToolTip(QString::fromStdString(d.name));
+        // Inside ITS OWN room. A passage's two faces are one hole, so they share a centre: labels at a common
+        // offset would stack and hide one face. Stepping each toward its room's centre puts the two names on
+        // either side of the wall.
+        const Eigen::Vector2d inward = map.rooms[d.room].centre - d.centre;
+        const double step = std::min(0.35, 0.5 * inward.norm());
+        const Eigen::Vector2d at = inward.norm() > 0 ? Eigen::Vector2d(d.centre + step * inward.normalized()) : d.centre;
+        label(scene_, QString::fromStdString(d.name), to_scene(at), {-20, -6}, 5);
     }
 
     // ── Passages: room → door → room, weight and opacity = P(passable) ─────────────────────────
@@ -159,7 +174,6 @@ void TopologyView::rebuild()
         const auto at = [&](double x, double y) { return to_scene((w * Eigen::Vector3d(x, y, 0)).head<2>()); };
         scene_.addLine(QLineF(at(0, 0), at(1.0, 0)), cosmetic(QColor(210, 40, 40), 2.5))->setZValue(5);
         scene_.addLine(QLineF(at(0, 0), at(0, 1.0)), cosmetic(QColor(40, 160, 40), 2.5))->setZValue(5);
-        label(scene_, QString::fromStdString("frame: " + map.rooms[*map.anchor].name), at(0, 0), {6, 12}, 5);
     }
 
     // ── Robot: a triangle pointing along its +y, in the current room ───────────────────────────
@@ -206,6 +220,46 @@ void TopologyView::mouseMoveEvent(QMouseEvent *event)
         setSceneRect(sceneRect().united(mapToScene(viewport()->rect()).boundingRect()));
     }
     QGraphicsView::mouseMoveEvent(event);
+}
+
+void TopologyView::mousePressEvent(QMouseEvent *event)
+{
+    press_pos_ = event->pos();
+    QGraphicsView::mousePressEvent(event);
+}
+
+void TopologyView::mouseReleaseEvent(QMouseEvent *event)
+{
+    QGraphicsView::mouseReleaseEvent(event);
+    // A click, not the end of a pan: the pointer stayed within the platform's drag distance.
+    if (event->button() != Qt::LeftButton or not forget_
+        or (event->pos() - press_pos_).manhattanLength() >= QApplication::startDragDistance())
+        return;
+    for (auto *item : items(event->pos()))
+        if (const auto room = item->data(kRoomKey).toString(); not room.isEmpty())
+        {
+            room_menu(room.toStdString(), event->globalPosition().toPoint());
+            return;
+        }
+}
+
+void TopologyView::room_menu(const std::string &room, const QPoint &global)
+{
+    const auto plan = ltsm::plan_forget(*mem_, room);
+    if (not plan.has_value()) return;
+    const auto blocked = blocker_ ? blocker_(room) : std::nullopt;
+
+    QMenu menu(this);
+    menu.addSection(QString::fromStdString(room));
+    auto *forget = menu.addAction(QString::fromStdString(blocked.has_value()
+        ? "Delete room -- not allowed: " + blocked.value()
+        : std::format("Delete room ({} node(s) below it, {} passage(s))", plan->subtree.size(), plan->passages.size())));
+    forget->setEnabled(not blocked.has_value());
+    if (menu.exec(global) == forget)
+    {
+        forget_(room);
+        rebuild();
+    }
 }
 
 void TopologyView::mouseDoubleClickEvent(QMouseEvent *event)

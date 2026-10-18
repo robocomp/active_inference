@@ -34,6 +34,12 @@ public:
 
     TopologyView(std::shared_ptr<DSR::DSRGraph> mem, RobotSource robot, QWidget *parent = nullptr);
 
+    /// Left click (no drag) on a room opens a menu to forget it. `blocker` returns why a room may NOT be forgotten
+    /// (the robot is in it), nullopt when it may; `forget` deletes it. Unset ⇒ no menu.
+    using Blocker = std::function<std::optional<std::string>(const std::string &mem_room)>;
+    using Forget  = std::function<void(const std::string &mem_room)>;
+    void set_forget(Blocker blocker, Forget forget) { blocker_ = std::move(blocker); forget_ = std::move(forget); }
+
     /// The room whose frame is the map's global frame (a live name, e.g. "room_1"; see topo::build).
     void set_anchor(std::string anchor) { anchor_ = std::move(anchor); }
 
@@ -43,6 +49,8 @@ public:
 protected:
     void wheelEvent(QWheelEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;   ///< a CLICK (not a drag) on a room: the forget menu
     void mouseDoubleClickEvent(QMouseEvent *event) override;   ///< hands the framing back to auto-fit
     void resizeEvent(QResizeEvent *event) override;
 
@@ -51,6 +59,10 @@ private:
     RobotSource robot_;
     QGraphicsScene scene_;
     std::string anchor_ = "room_1";
+    Blocker blocker_;
+    Forget forget_;
+    QPoint press_pos_;
+    void room_menu(const std::string &room, const QPoint &global);
     QRectF content_;             ///< scene box of the rooms and doors (what auto-fit frames)
     bool user_framed_ = false;   ///< auto-fit until the user zooms or pans, as the stock graph view does
     void fit();

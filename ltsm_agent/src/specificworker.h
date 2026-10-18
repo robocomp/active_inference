@@ -36,6 +36,7 @@
 #include "passage_harvest.h"
 #include "passage_live.h"
 #include "topology_view.h"
+#include "room_forget.h"
 
 #include <memory>
 #include <unordered_map>
@@ -205,6 +206,12 @@ private:
 	QTimer topology_timer_;
 	void setup_topology_view(const std::string &anchor_room);
 	std::optional<TopologyView::Robot> topology_robot() const;
+	/// Memory's name for a live room (r<room_id>_<name>), when memory holds it. A lookup: never mints an index.
+	std::optional<std::string> memory_room_name(const DSR::Node &live_room) const;
+	/// Why `mem_room` may NOT be forgotten (the robot is in it), or nullopt.
+	std::optional<std::string> forget_blocker(const std::string &mem_room) const;
+	/// Remove `mem_room` from memory (src/room_forget.h) and persist at once. Re-checks the blocker.
+	void forget_memory_room(const std::string &mem_room);
 
 	// ── Live passage (src/passage_live.h) ─────────────────────────────────────────────────────
 	// The proto-room's entry door matched to the current room's door by one live `passage_<n>`.

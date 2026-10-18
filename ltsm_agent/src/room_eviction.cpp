@@ -414,10 +414,11 @@ Outcome RoomEviction::evict(const Candidate &cand)
             //    r0_room --RT[seam]--> r1_room, so inner_eigen answers "where is this door in room
             //    1?" from the same numbers. Storing it too would be a second pose for one physical
             //    hole, i.e. a thing that can disagree with itself.
-            //  - The far FACE is not fabricated either. When room 1 is evicted, door_concept's own
-            //    door node in room 1 comes over with that room's subtree and takes the second
-            //    `match` edge: an INDEPENDENT measurement of the same hole, whose disagreement with
-            //    the first is a measurement of the seam. A face I derived here could never be that.
+            //  - The far FACE, when door_concept has one (the entry mirror), comes over with the new
+            //    room's subtree and takes the second `match` edge: an INDEPENDENT measurement of the
+            //    same hole, whose disagreement with the first is a measurement of the seam.
+            //    When it has none, a face is DERIVED from the seam measured here (see below) -- the
+            //    only way memory can relate the two rooms -- and replaced by the real one later.
             //  - `other_side_door_name` is gone. Two `match` edges into one node say it
             //    structurally, and a string naming a peer node is exactly what goes stale when
             //    door_concept recycles a freed `door_N`.
@@ -514,6 +515,78 @@ Outcome RoomEviction::evict(const Candidate &cand)
                         if (const auto nn = mem_->get_node(nf->second); nn.has_value())
                             out.mem_door_new = nn->name();
                     }
+
+                    // ★ ONE FACE PER ROOM PER PASSAGE (2026-10-18, live try53). A RE-ENTERED room already has its face of
+                    //   this hole in memory (r1_door_1, written when it was evicted through it), so a real face just
+                    //   matched retires any derived stand-in for that room, and with no real face the remembered one is
+                    //   kept rather than deriving a second. try53 derived r1_door_1_entry beside r1_door_1: passage_0 then
+                    //   had two room_1 faces, recall took room_1 as the room behind room_1's own door (no recall_room_2),
+                    //   and the seam composed the turned face without its π (room_2 drawn over room_1).
+                    std::vector<DSR::Node> new_room_faces;
+                    if (const auto nroom = mem_->get_node(out.mem_new_room_id); nroom.has_value())
+                        if (const auto dwn = mem_->get_node(doorway_id); dwn.has_value())
+                            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dwn.value(), "match"))
+                                if (const auto f = mem_->get_node(e.to()); f.has_value() and is_descendant(f->id(), nroom->name()))
+                                    new_room_faces.push_back(f.value());
+                    if (not out.mem_door_new.empty())
+                    {
+                        for (const auto &f : new_room_faces)
+                            if (f.name() != out.mem_door_new and f.name().ends_with(kDerivedFaceSuffix))
+                            {
+                                qInfo().noquote() << QString::fromStdString(std::format(
+                                    "[eviction] {} replaces the derived face {}", out.mem_door_new, f.name()));
+                                mem_->delete_node(f.id());
+                            }
+                    }
+                    else if (const auto real = std::ranges::find_if(new_room_faces, [](const auto &f)
+                                 { return not f.name().ends_with(kDerivedFaceSuffix); });
+                             real != new_room_faces.end())
+                    {
+                        out.mem_door_new = real->name();
+                        qInfo().noquote() << QString::fromStdString(std::format(
+                            "[eviction] {} already holds its face of {} as {} — kept, nothing derived",
+                            cand.new_room_name, chosen->name(), real->name()));
+                    }
+
+                    // ★ NO ENTRY MIRROR ⇒ A DERIVED FACE (2026-10-18, live 12:22: room_2 born through door_5 had none,
+                    //   so passage_0 kept one face and memory could not relate room_2 to room_1 at all). The pose is
+                    //   T(new <- door), read through the ROBOT while both its RT edges exist -- the same measurement
+                    //   the seam is, not a convention -- so seam_through_passage() composes back to exactly that seam.
+                    //   Named <door>_entry: door_concept only mints door_N, so it can never collide with a real face,
+                    //   and when the new room is itself evicted through this hole, the "same hole under a new name"
+                    //   rule above deletes it in favour of door_concept's own face.
+                    if (out.mem_door_new.empty())
+                        if (const auto nroom = mem_->get_node(out.mem_new_room_id); nroom.has_value())
+                        {
+                            const std::string fname = new_prefix + chosen->name() + std::string(kDerivedFaceSuffix);
+                            std::optional<std::uint64_t> fid;
+                            if (const auto existing = mem_->get_node(fname); existing.has_value())
+                                fid = existing->id();
+                            else
+                            {
+                                DSR::Node f;
+                                f.type("object");
+                                f.name(fname);
+                                mem_->add_or_modify_attrib_local<object_subtype_att>(f, std::string("door"));
+                                mem_->add_or_modify_attrib_local<width_m_att>(
+                                    f, live_->get_attrib_by_name<width_m_att>(*chosen).value_or(1.f));
+                                mem_->add_or_modify_attrib_local<parent_att>(f, nroom->id());
+                                mem_->add_or_modify_attrib_local<level_att>(f, mem_->get_node_level(nroom.value()).value_or(0) + 1);
+                                fid = mem_->insert_node(f);   // LVALUE (see twin())
+                            }
+                            if (fid.has_value())
+                            {
+                                auto rt = DSR::Edge::create<RT_edge_type>(nroom->id(), fid.value(), rt_attrs(chosen_in_new));
+                                mem_->insert_or_assign_edge(std::move(rt));
+                                auto m3 = DSR::Edge::create<match_edge_type>(doorway_id, fid.value());
+                                mem_->insert_or_assign_edge(std::move(m3));
+                                out.mem_door_new = fname;
+                                out.mem_door_new_derived = true;
+                                qInfo().noquote() << QString::fromStdString(std::format(
+                                    "[eviction] {} has no face of {}: DERIVED {} from the seam measured through the robot",
+                                    cand.new_room_name, chosen->name(), fname));
+                            }
+                        }
                 }
             }
         }
@@ -592,17 +665,24 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
     if (not dw.has_value()) return std::nullopt;
     auto ie = mem.get_inner_eigen_api();
     std::optional<Mat::RTMat> to_face, face_from;
+    bool to_derived = false, from_derived = false;
     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dw.value(), "match"))
     {
         const auto f = mem.get_node(e.to());
         if (not f.has_value()) continue;
         // Which room a face belongs to: the one that composes to it (its RT ancestor). Siblings under root also
         // "compose" through root's identities, so ask for the room the face is a DESCENDANT of.
-        if (is_descendant(mem, f->id(), room_to))   to_face   = ie->get_transformation_matrix(room_to, f->name());
-        if (is_descendant(mem, f->id(), room_from)) if (auto t = ie->get_transformation_matrix(room_from, f->name()); t.has_value())
-                                                    face_from = t->inverse();
+        // A room holding both a real and a derived face of one hole (memory written before 2026-10-18) uses the real one.
+        const bool d = f->name().ends_with(kDerivedFaceSuffix);
+        if (is_descendant(mem, f->id(), room_to) and (not to_face.has_value() or (to_derived and not d)))
+            if (auto t = ie->get_transformation_matrix(room_to, f->name()); t.has_value())
+            { to_face = t; to_derived = d; }
+        if (is_descendant(mem, f->id(), room_from) and (not face_from.has_value() or (from_derived and not d)))
+            if (auto t = ie->get_transformation_matrix(room_from, f->name()); t.has_value())
+            { face_from = t->inverse(); from_derived = d; }
     }
     if (not to_face.has_value() or not face_from.has_value()) return std::nullopt;
+    const bool derived = to_derived or from_derived;
     Mat::RTMat seam(to_face.value() * face_from.value());
     // ★ THE TWO FACES MAY BE THE SAME HOLE TURNED BY π (2026-10-12). door_concept orients a door's frame from the room
     //   that fits it (+y into that room), so the face seen from the other room is the same doorway rotated half a turn.
@@ -619,6 +699,9 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
         for (std::size_t i = 0; i < px->get().size(); ++i) c += Eigen::Vector2d(px->get()[i], py->get()[i]);
         return c / static_cast<double>(px->get().size());
     };
+    //   NOT for a DERIVED face: it was built from the other face through the measured seam, so the two are exactly
+    //   consistent by construction and there is no independent orientation to correct.
+    if (derived) return seam;
     if (const auto c_to = centroid(room_to), c_from = centroid(room_from); c_to.has_value() and c_from.has_value())
     {
         const Eigen::Vector2d o = to_face->translation().head<2>();

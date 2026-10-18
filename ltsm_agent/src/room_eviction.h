@@ -38,6 +38,9 @@ namespace ltsm
 /// A door in this fleet: an `object` with object_subtype "door" (or, belt and braces, named door_*).
 bool is_door(DSR::DSRGraph &g, const DSR::Node &n);
 
+/// Suffix of a door face DERIVED from the seam measured through the robot (no entry mirror existed at the crossing).
+inline constexpr std::string_view kDerivedFaceSuffix = "_entry";
+
 /// True when memory node `node_id` is `room` or hangs (through parent_att) below it.
 bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string &room);
 
@@ -95,6 +98,7 @@ struct Outcome
     std::uint64_t mem_old_room_id = 0;   ///< the evicted room's twin in memory
     std::uint64_t mem_new_room_id = 0;   ///< the new room's twin in memory (with its subtree)
     std::string   mem_door_new;          ///< the new room's FACE of the crossed door in memory, "" if none
+    bool          mem_door_new_derived = false;   ///< that face was DERIVED from the measured seam (no entry mirror)
     bool          current_flipped = false;
     bool          promoted = false;      ///< the proto self-edge was removed
     int           live_removed = 0;      ///< live nodes deleted with the old room (remove_old)

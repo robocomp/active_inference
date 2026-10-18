@@ -673,7 +673,8 @@ void SpecificWorker::check_eviction(const ltsm::Outcome &out, const ltsm::Candid
             if (not G_ltsm->get_edge(mroot->id(), r.id(), "RT").has_value())
                 fail(std::format("{} does not hang from root", r.name()));
 
-        // The abstract passage: frameless, one `match` edge per face seen. Only the old room's face exists here.
+        // The abstract passage: frameless, one `match` edge per face. The new room has no entry mirror here, so its
+        // face is the DERIVED one, and composing the two faces must give back the seam measured through the robot.
         if (out.mem_doorway.empty()) fail("no passage node was created for the crossed door");
         const auto dw = G_ltsm->get_node(out.mem_doorway);
         if (not dw.has_value()) fail("the passage node is not in memory");
@@ -681,8 +682,15 @@ void SpecificWorker::check_eviction(const ltsm::Outcome &out, const ltsm::Candid
         if (not DSR::DSRGraph::get_node_edges_by_type(dw.value(), "RT").empty())
             fail("the passage node has an RT edge -- it must stay OUT of the metric tree");
         const auto matches = DSR::DSRGraph::get_node_edges_by_type(dw.value(), "match");
-        if (matches.size() != 1) fail(std::format("passage has {} match edges, expected 1 (only one "
-                                                  "side has been seen)", matches.size()));
+        if (matches.size() != 2) fail(std::format("passage has {} match edges, expected 2 (the old room's face + "
+                                                  "the derived one)", matches.size()));
+        if (not out.mem_door_new_derived) fail("the new room's face was not derived");
+        const auto composed = ltsm::seam_through_passage(*G_ltsm, out.mem_doorway, mem_room->name(), mem_old->name());
+        if (not composed.has_value()) fail("the passage does not compose a seam");
+        const double seam_err = (composed->matrix() - out.seam.matrix()).cwiseAbs().maxCoeff();
+        if (seam_err > 1e-6) fail(std::format("composed seam differs from the measured one by {:.2e}", seam_err));
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[eviction][stage] derived face {} composes the measured seam, err={:.2e}", out.mem_door_new, seam_err));
         if (not DSR::DSRGraph::get_node_edges_by_type(dw.value(), "exit").empty())
             fail("the passage still has an `exit` edge");
         qInfo().noquote() << QString::fromStdString(std::format(
@@ -1101,6 +1109,8 @@ void SpecificWorker::setup_topology_view(const std::string &anchor_room)
     if (it == graph_viewers.end() or not G_ltsm) return;
     topology_view_ = new TopologyView(G_ltsm, [this]() { return topology_robot(); });
     topology_view_->set_anchor(anchor_room);
+    topology_view_->set_forget([this](const std::string &room) { return forget_blocker(room); },
+                               [this](const std::string &room) { forget_memory_room(room); });
     it->second->add_custom_widget_to_dock("Topology", topology_view_);
 
     // Births and deaths: the relayout timer already coalesces them. Everything else: a slow poll, so no
@@ -1123,11 +1133,9 @@ std::optional<TopologyView::Robot> SpecificWorker::topology_robot() const
     const auto room = G_dsr->get_node(room_id.value());
     if (not room.has_value()) return std::nullopt;
     TopologyView::Robot out;
-    for (const auto &r : G_ltsm->get_nodes_by_type("room"))
-        if (const auto i = G_ltsm->get_attrib_by_name<room_id_att>(r);
-            i.has_value() and r.name() == std::format("r{}_{}", i.value(), room->name()))
-            out.mem_room = r.name();
-    if (out.mem_room.empty()) return std::nullopt;   // not remembered yet: nothing to highlight
+    const auto mem_room = memory_room_name(room.value());
+    if (not mem_room.has_value()) return std::nullopt;   // not remembered yet: nothing to highlight
+    out.mem_room = mem_room.value();
     const auto px = G_dsr->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
     const auto py = G_dsr->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
     if (px.has_value() and py.has_value() and px->get().size() == py->get().size())
@@ -1140,6 +1148,52 @@ std::optional<TopologyView::Robot> SpecificWorker::topology_robot() const
         break;
     }
     return out;
+}
+
+std::optional<std::string> SpecificWorker::memory_room_name(const DSR::Node &live_room) const
+{
+    for (const auto &r : G_ltsm->get_nodes_by_type("room"))
+        if (const auto i = G_ltsm->get_attrib_by_name<room_id_att>(r);
+            i.has_value() and r.name() == std::format("r{}_{}", i.value(), live_room.name()))
+            return r.name();
+    return std::nullopt;
+}
+
+std::optional<std::string> SpecificWorker::forget_blocker(const std::string &mem_room) const
+{
+    // The robot is IN a room when an RT or `current` edge runs from it to that room -- the current room, and also a
+    // room it is being handed over to mid-crossing (two RT edges). Forgetting either would pull the floor from
+    // under localisation and promotion.
+    if (not G_dsr) return std::nullopt;
+    for (const auto &robot : G_dsr->get_nodes_by_type("robot"))
+        for (const auto *type : {"current", "RT"})
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot, type))
+                if (const auto room = G_dsr->get_node(e.to()); room.has_value() and room->type() == "room")
+                    if (memory_room_name(room.value()) == mem_room)
+                        return std::format("the robot is in it ({} -> {})", robot.name(), room->name());
+    return std::nullopt;
+}
+
+void SpecificWorker::forget_memory_room(const std::string &mem_room)
+{
+    // Checked again here, not only when the menu opened: the robot may have crossed into it since.
+    if (const auto why = forget_blocker(mem_room); why.has_value())
+    {
+        qWarning().noquote() << QString::fromStdString(std::format("[forget] {} NOT removed -- {}", mem_room, why.value()));
+        return;
+    }
+    const auto plan = ltsm::plan_forget(*G_ltsm, mem_room);
+    if (not plan.has_value()) return;
+    const int removed = ltsm::forget(*G_ltsm, plan.value());
+    qInfo().noquote() << QString::fromStdString(std::format(
+        "[forget] {} forgotten: {} node(s) removed, {} passage(s) with it; recall nodes behind its doors retire on "
+        "the next cycle", mem_room, removed, plan->passages.size()));
+    // A deletion is durable state: persist it now, not at the next fence (which may never come this run).
+    if (store)
+    {
+        store->mark_dirty();
+        store->save("forgot " + mem_room);
+    }
 }
 
 void SpecificWorker::restore_graph_zoom()

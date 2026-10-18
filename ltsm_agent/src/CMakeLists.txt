@@ -8,6 +8,7 @@ LIST(APPEND SOURCES
   ../src/room_recall.cpp
   ../src/topology_layout.cpp
   ../src/topology_view.cpp
+  ../src/room_forget.cpp
 )
 
 # Headers set
@@ -20,6 +21,7 @@ LIST(APPEND HEADERS
   ../src/room_recall.h
   ../src/topology_layout.h
   ../src/topology_view.h
+  ../src/room_forget.h
 )
 
 LIST(APPEND LIBS ${LIBS})

@@ -88,15 +88,21 @@ int RoomRecall::step()
                 }
         if (not face.has_value()) continue;
 
-        // The passage holding that face, and its OTHER face.
+        // The passage holding that face, and its OTHER face: one in a DIFFERENT room. A passage written before
+        // 2026-10-18 can carry two faces of the same room (try53: r1_door_1 and r1_door_1_entry), and taking the
+        // sibling made room_1 the room behind room_1's own door, so no recall_room_2 was ever posted.
         std::optional<DSR::Node> other;
+        const auto face_room = room_of(*mem_, face.value());
         for (const auto &pass : mem_->get_nodes_by_type("metaconcept"))
         {
             const auto m = DSR::DSRGraph::get_node_edges_by_type(pass, "match");
             if (std::ranges::none_of(m, [&](const auto &e) { return e.to() == face->id(); })) continue;
             for (const auto &e : m)
                 if (e.to() != face->id())
-                    if (const auto f = mem_->get_node(e.to()); f.has_value()) other = f;
+                    if (const auto f = mem_->get_node(e.to()); f.has_value())
+                        if (const auto fr = room_of(*mem_, f.value());
+                            fr.has_value() and (not face_room.has_value() or fr->id() != face_room->id()))
+                            other = f;
         }
         if (not other.has_value()) continue;
         const auto mroom = room_of(*mem_, other.value());
