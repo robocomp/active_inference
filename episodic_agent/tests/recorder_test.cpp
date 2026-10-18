@@ -148,10 +148,21 @@ int main()
     CHECK(not sink.records.contains("20261017-6"));
     CHECK(rc.stats().at(key).n == 6);
 
+    // Its settled re-emission (em_builder.h SETTLING) lands after that fold: archived, never folded again.
+    {
+        auto settled = rec("20261017-6", d17 + 600, d18 + 50, "mission", "succeeded");
+        settled.settled = true;
+        settled.room_after = "room_2";
+        rc.write({settled});
+        CHECK(rc.stats().at(mkey).n == 2);
+        CHECK(not sink.records.contains("20261017-6"));
+    }
+
     // Everything went to the archive (last line per id wins).
     const auto day17 = archive.load_day("20261017");
     CHECK(day17.size() == 4);
     for (const auto& r : day17) CHECK(r.t1.has_value());
+    CHECK(std::ranges::any_of(day17, [](const rc::em::Record& r) { return r.id == "20261017-6" and r.settled; }));
 
     // A restart on the 18th recomputes the same totals from the archive.
     FakeSink sink2;

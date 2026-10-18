@@ -12,6 +12,9 @@
  *   - write(): a record whose day is AFTER today is the day change: the closed records of the old day are folded
  *     (rollover), their nodes deleted, today advances. A record of an already-rolled day that CLOSES later (opened
  *     before midnight) is folded at that close and its node deleted. Everything else is upserted.
+ * A SETTLED re-emission (em_builder.h) of a record whose day already rolled over is archived only: the record was
+ * folded at its close or by the rollover, and folding it again would count it twice (its settled delivered is lost to
+ * the stats in that midnight case; the archive keeps it).
  * Shutdown-closed records (`interrupted_by_em_shutdown`) go through write() like any other: archive AND graph (R22).
  * Ids: "<day of t0>-<seq>", seq continuing after the archive's largest for that day.
  */
@@ -85,6 +88,8 @@ public:
             const std::string day = day_of(r.t0);
             if (day > today_) change_day(day);
             archive_.append(r);
+            if (day < today_ and r.t1 and r.settled)   // folded at its close, or by the rollover: archive only
+                continue;
             if (day < today_ and r.t1)          // its day already rolled over: fold it now, once
             {
                 Stats& st = stats_[stats_key(r)];

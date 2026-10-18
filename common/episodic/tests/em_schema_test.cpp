@@ -52,6 +52,9 @@ Record full_claim()
     r.step_id = "2.1";
     r.serial_start = 41;
     r.serial_end = 57;
+    r.room_after = "room_2";
+    r.t_post = 1792319746401;
+    r.settled = true;
     return r;
 }
 
@@ -72,12 +75,16 @@ void test_absent_stays_absent()
     r.t1.reset();
     r.serial_start.reset();
     r.serial_end.reset();
+    r.room_after.clear();
+    r.t_post.reset();
+    r.settled = false;
     r.pre = {Fact{.node = "door_27", .type = "door", .ltsm_id = "", .values = {{"x", 1.0}}}};
     const QJsonObject j = to_json(r);
     CHECK(not j.contains("promised"));
     CHECK(not j.contains("delivered"));
     CHECK(not j.contains("t1"));
     CHECK(not j.contains("serial_start") and not j.contains("serial_end"));
+    CHECK(not j.contains("room_after") and not j.contains("t_post") and not j.contains("settled"));
     CHECK(j["mission_key"].toString() == "m12");
     const QJsonObject f = j["pre"].toArray().at(0).toObject();
     CHECK(not f["values"].toObject().contains("door_open_prob"));
@@ -88,6 +95,7 @@ void test_absent_stays_absent()
     CHECK(back.has_value() and not back->t1.has_value());
     CHECK(back.has_value() and not back->serial_start and not back->serial_end and back->mission_key == "m12");
     CHECK(back.has_value() and not back->pre.at(0).values.contains("door_open_prob"));
+    CHECK(back.has_value() and back->room_after.empty() and not back->t_post and not back->settled);
 }
 
 void test_unknown_level_rejected()

@@ -272,7 +272,13 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
         fc.post = {rc::em::Fact{.node = "door_3", .type = "object", .ltsm_id = "", .values = {{"door_open_prob", 0.9}}}};
         fc.events = {{.dt_ms = 900, .kind = "offered", .node = "aff_door_3_cross"},
                      {.dt_ms = 950, .kind = "offered", .node = "aff_door_3_open"}};     // its own affordance: not an effect
-        const std::string c = *rc::em::story::tell(rc::em::Store{.today = {fm, fs, fc}, .stats = {}}, fc.id);
+        rc::em::Record fs2 = fs;                    // the step settled (em_builder.h SETTLING) in the next room
+        fs2.room_after = "room_2";
+        fs2.settled = true;
+        fs2.t_post = 10500;
+        const std::string c = *rc::em::story::tell(rc::em::Store{.today = {fm, fs2, fc}, .stats = {}}, fc.id);
+        CHECK(has(c, "robot moved: room_1 → room_2"));
+        CHECK(has(c, "⇒ the robot is in another room"));
         CHECK(has(c, "APPLIED open door_3  — succeeded"));
         CHECK(has(c, "belief: door_3 open 0% → 90%"));
         CHECK(has(c, "became possible: cross door_3"));

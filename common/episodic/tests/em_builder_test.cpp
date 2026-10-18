@@ -558,6 +558,64 @@ void test_affordance_events_innermost_only()
 }
 }   // namespace
 
+// SETTLING: the state after is read at the close AND kSettleMs of EM time later; the record comes back settled.
+void test_settle_rereads_state_after()
+{
+    FakeFactSource fs;
+    fs.facts["door_3"] = door("door_3", 0.0, 0.04, 0.09);
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100);
+    push_step(s, K::StepStart, 110, "1");
+    push_claim(s, 120);
+    b.on_journal(s.wire(), 130);
+    push_claim_end(s, 200, "success");                      // the controller closes it before the door belief moved
+    const auto c = closed(b.on_journal(s.wire(), 1000));
+    CHECK(c.size() == 1 and not c[0].settled and c[0].t_post == 200u and c[0].room_after == "room_1");
+    CHECK(c.size() == 1 and c[0].post.size() == 1 and c[0].post[0].values.at("door_open_prob") == 0.0);
+    CHECK(b.settling() == 1);
+
+    fs.facts["door_3"] = door("door_3", 0.9, 0.01, 0.01);  // door_concept catches up, the robot is through
+    fs.room = "room_2";
+    CHECK(b.on_events(std::vector<Event>{{.dt_ms = 0, .kind = "offered", .node = "aff_door_3_cross"}}, 2000).empty());
+    const auto later = b.on_events({}, 1000 + kSettleMs);   // due counts from the EM time of the closing call
+    CHECK(later.size() == 1 and b.settling() == 0);
+    if (later.size() != 1) return;
+    const Record& r = later[0];
+    CHECK(r.id == c[0].id and r.settled and r.t1 == 200u and r.outcome == "success");   // the close itself unchanged
+    CHECK(r.t_post == 1000u + kSettleMs and r.room_after == "room_2");
+    CHECK(r.post.size() == 1 and r.post[0].values.at("door_open_prob") == 0.9);
+    CHECK(r.delivered.has_value() and std::abs(*r.delivered - 0.5 * std::log(0.04 * 0.09 / (0.01 * 0.01))) < 1e-12);
+    // the window's events, every kind (the claim is nobody's innermost any more), timed from its t0
+    CHECK(r.events.size() == 1 and r.events[0].node == "aff_door_3_cross" and r.events[0].dt_ms == std::int64_t(2000 - 120));
+    CHECK(b.on_events({}, 9000).empty());                   // settled once
+}
+
+// Missions settle too (room_after only, no post); shutdown settles what is pending at once and never settles what it
+// closes itself.
+void test_settle_missions_and_shutdown()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100);
+    push_step(s, K::StepStart, 110, "1");
+    b.on_journal(s.wire(), 120);
+    push_step(s, K::StepEnd, 200, "1", 1, 0, "done");
+    b.on_journal(s.wire(), 210);
+    CHECK(b.settling() == 1 and b.open().size() == 1);
+    fs.room = "room_2";
+    const auto c = b.shutdown(300);                         // before the step's due time
+    CHECK(c.size() == 2 and b.settling() == 0);
+    if (c.size() != 2) return;
+    CHECK(c[0].level == Level::Step and c[0].settled and c[0].t_post == 300u and c[0].room_after == "room_2");
+    CHECK(c[1].level == Level::Mission and c[1].outcome == "interrupted_by_em_shutdown" and not c[1].settled);
+    CHECK(c[1].room_after == "room_2" and c[1].post.empty());
+    CHECK(b.on_events({}, 99999).empty());                  // nothing left to settle
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "es_ES.UTF-8") or std::setlocale(LC_ALL, "");
@@ -582,6 +640,8 @@ int main()
     test_command_mode_is_self_driving();
     test_mission_key_and_serials();
     test_affordance_events_innermost_only();
+    test_settle_rereads_state_after();
+    test_settle_missions_and_shutdown();
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

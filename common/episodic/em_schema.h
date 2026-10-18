@@ -72,6 +72,15 @@ struct Record
     std::string mission_key;
     std::string step_id;                        // step only: the IR step id ("2.1"; single commands "1")
     std::optional<std::uint64_t> serial_start, serial_end;
+    // THE STATE AFTER (2026-10-18). EM stores the consequences of applying affordances, and they settle AFTER the close:
+    // door_concept raises a door belief a cycle after the open claim closes, the current room switches ~0.2 s after a
+    // crossing step closes. So post, room_after and delivered are read at the close AND again kSettleMs later
+    // (em_builder.h), and the record is re-emitted with settled = true. t_post = when post / room_after were read
+    // (absent on records older than this field); room_after "" = unknown. A record EM closed at its own shutdown is
+    // never settled.
+    std::string room_after;
+    std::optional<std::uint64_t> t_post;
+    bool settled = false;
     bool operator==(const Record&) const = default;
 };
 
@@ -162,6 +171,9 @@ inline QJsonObject to_json(const Record& r)
     o["step_id"] = q(r.step_id);
     if (r.serial_start) o["serial_start"] = double(*r.serial_start);
     if (r.serial_end) o["serial_end"] = double(*r.serial_end);
+    if (not r.room_after.empty()) o["room_after"] = q(r.room_after);
+    if (r.t_post) o["t_post"] = double(*r.t_post);
+    if (r.settled) o["settled"] = true;
     return o;
 }
 
@@ -205,6 +217,9 @@ inline std::optional<Record> record_from_json(const QJsonObject& o)
     r.step_id = s(o["step_id"]);
     if (o["serial_start"].isDouble()) r.serial_start = std::uint64_t(o["serial_start"].toDouble());
     if (o["serial_end"].isDouble()) r.serial_end = std::uint64_t(o["serial_end"].toDouble());
+    r.room_after = s(o["room_after"]);
+    if (o["t_post"].isDouble()) r.t_post = std::uint64_t(o["t_post"].toDouble());
+    r.settled = o["settled"].toBool(false);
     return r;
 }
 

@@ -40,6 +40,13 @@
  *
  * Absent is not zero: a node the FactSource cannot read contributes no Fact; `delivered` exists only when both pre and
  * post carry cov_xx and cov_yy (ruling R2): 0.5*ln((cov_xx_pre*cov_yy_pre)/(cov_xx_post*cov_yy_post)).
+ *
+ * SETTLING (2026-10-18): the consequences of applying an affordance land after its close (em_schema.h, THE STATE
+ * AFTER). A closed record is returned at once (post, room_after, t_post read at the close), then kept kSettleMs of
+ * EM time — measured from the now_ms of the call that closed it, not the journal's t1, so a controller on another clock
+ * cannot stretch it — collecting the events of that window (every kind: it is no longer anyone's child), then re-read
+ * and returned again with settled = true. Settling runs at the end of on_journal / on_events; shutdown settles
+ * whatever is pending at once (read then) before closing the open records, which are never settled.
  */
 
 #include "em_journal.h"
@@ -62,6 +69,11 @@
 
 namespace rc::em
 {
+
+/// How long after its close a record's state after is read again (ms of EM time). The slowest consequence seen live
+/// is a door belief raised one door_concept cycle after the claim closes and the room switch ~0.2 s after a crossing
+/// step closes; 1.5 s covers both with margin and is still short next to an action (2–50 s).
+inline constexpr std::uint64_t kSettleMs = 1500;
 
 struct FactSource                               // implemented by the agent over DSR; faked in tests
 {
@@ -111,6 +123,7 @@ public:
     std::vector<Record> on_journal(const WireView& w, std::uint64_t now_ms)
     {
         out_.clear();
+        now_ = now_ms;
         owner_present_ = true;
         const std::uint64_t max_serial =
             std::ranges::fold_left(w.entries, std::uint64_t{0}, [](std::uint64_t m, const JournalEntry& e)
@@ -139,6 +152,7 @@ public:
             if (e.serial > last_seen_) apply(e);
         last_seen_ = std::max(last_seen_, max_serial);
         check_self(now_ms);
+        settle(now_ms);
         return std::exchange(out_, {});
     }
 
@@ -147,8 +161,11 @@ public:
     std::vector<Record> on_events(std::span<const Event> events, std::uint64_t now_ms)
     {
         out_.clear();
+        now_ = now_ms;
         for (const Event& e : events)
         {
+            for (Settling& s : settling_)
+                s.rec.events.push_back(Event{.dt_ms = std::int64_t(now_ms) - std::int64_t(s.rec.t0), .kind = e.kind, .node = e.node});
             const bool innermost_only = e.kind == "offered" or e.kind == "withdrawn";
             for (std::size_t i = innermost_only and not open_.empty() ? open_.size() - 1 : 0; i < open_.size(); ++i)
             {
@@ -157,12 +174,16 @@ public:
             }
         }
         check_self(now_ms);
+        settle(now_ms);
         return std::exchange(out_, {});
     }
 
-    std::vector<Record> shutdown(std::uint64_t now_ms)      // close all open: "interrupted_by_em_shutdown"
+    // Settles whatever is pending now, then closes all open: "interrupted_by_em_shutdown" (never settled).
+    std::vector<Record> shutdown(std::uint64_t now_ms)
     {
         out_.clear();
+        now_ = now_ms;
+        settle(now_ms, true);
         close_all("interrupted_by_em_shutdown", now_ms);
         return std::exchange(out_, {});
     }
@@ -170,6 +191,7 @@ public:
     std::vector<Record> owner_lost(std::uint64_t now_ms)    // controller node gone: close all open "lost"
     {
         out_.clear();
+        now_ = now_ms;
         close_all("lost", now_ms);
         owner_present_ = false;
         return std::exchange(out_, {});
@@ -180,6 +202,8 @@ public:
         return open_ | std::views::transform(&Open::rec) | std::ranges::to<std::vector>();
     }
 
+    std::size_t settling() const { return settling_.size(); }   // closed records waiting for their state after
+
 private:
     struct Open
     {
@@ -189,10 +213,18 @@ private:
         std::string step_id;        // steps: the IR step id ("2.1")
     };
 
+    struct Settling
+    {
+        Record rec;
+        std::uint64_t due;          // EM time
+    };
+
     const FactSource& facts_;
     std::function<std::string(std::uint64_t)> next_id_;
     std::vector<Open> open_;        // in open order: later = more inner
     std::vector<Record> out_;
+    std::vector<Settling> settling_;
+    std::uint64_t now_ = 0;         // EM time of the current call
     bool primed_ = false, owner_present_ = true;
     std::uint64_t epoch_ = 0, last_seen_ = 0;
     std::string drive_mode_ = "affordances_only";   // R9
@@ -251,9 +283,18 @@ private:
         r.t1 = t;
         r.outcome = outcome;
         r.serial_end = serial;
+        read_after(r, t);
+        out_.push_back(r);
+        if (outcome != "interrupted_by_em_shutdown") settling_.push_back(Settling{.rec = std::move(r), .due = now_ + kSettleMs});
+    }
+
+    // The state after: post (the target's facts), delivered (claims), room_after; stamped t_post.
+    void read_after(Record& r, std::uint64_t t) const
+    {
         if (r.level != Level::Mission)
         {
             r.post = read(r.target);
+            r.delivered.reset();
             if (r.level == Level::Claim)
             {
                 const auto pre = builder_detail::det_xy(r.pre), post = builder_detail::det_xy(r.post);
@@ -261,7 +302,21 @@ private:
                     if (const double d = 0.5 * std::log(*pre / *post); std::isfinite(d)) r.delivered = d;
             }
         }
-        out_.push_back(std::move(r));
+        r.room_after = facts_.current_room();
+        r.t_post = t;
+    }
+
+    // Re-reads and returns every record whose settle time has come (all of them when `all`).
+    void settle(std::uint64_t now_ms, bool all = false)
+    {
+        std::erase_if(settling_, [&](Settling& s)
+        {
+            if (not all and s.due > now_ms) return false;
+            read_after(s.rec, now_ms);
+            s.rec.settled = true;
+            out_.push_back(std::move(s.rec));
+            return true;
+        });
     }
 
     void close_all(const std::string& outcome, std::uint64_t t)

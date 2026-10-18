@@ -69,7 +69,7 @@ public:
         for (const Record& r : rs)
         {
             look(r);
-            if (r.t1) ++closed_total_;
+            if (r.t1 and not r.settled) ++closed_total_;   // a settled re-emission is the same close
         }
     }
     void on_poll(double ms) { poll_ms_ = ms; }

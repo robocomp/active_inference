@@ -15,8 +15,9 @@
  *                 cross <door>"): what an abstract world model learns from the mission. An action whose end was never
  *                 seen (lost, EM shutdown) is left out: nothing can be credited to it.
  *
- * The post-state is what EM read at the close (em_builder.h close()), so a consequence that settles after it (a door
- * belief updated a cycle later, the room switch after a crossing) is not in the record and is not shown.
+ * The state after is what EM read kSettleMs after the close (em_builder.h SETTLING): a door belief raised a cycle
+ * later, or the room switch after a crossing, is in it. Records from before settling existed carry the state read at
+ * the close, and may miss those.
  *
  * Clicking a step or claim tells its whole mission and marks that record's lines with "»". Pure over a Store; the
  * outcome and event words are em_builder.h's and the controller journal's. An unknown word is shown as it is.
@@ -264,11 +265,18 @@ inline constexpr std::uint64_t kGraceMs = 500;
 /// A belief moving less than this (a probability) is not counted as a consequence: estimator jitter.
 inline constexpr double kMinChange = 0.05;
 
-inline bool in_window(const Record& r, std::uint64_t t) { return r.t1 and t >= r.t0 and t <= *r.t1 + kGraceMs; }
+/// An action's window: from its start to when its state after was read — the settle read (em_builder.h SETTLING) when
+/// it has one, else the close plus kGraceMs (records written before settling existed).
+inline bool in_window(const Record& r, std::uint64_t t)
+{
+    if (not r.t1) return false;
+    const std::uint64_t end = r.settled and r.t_post ? std::max(*r.t_post, *r.t1) : *r.t1 + kGraceMs;
+    return t >= r.t0 and t <= end;
+}
 
 inline Effect effect(const Record& r, const Events& ev, const std::vector<Record>& tree)
 {
-    Effect fx{.room_before = r.room, .room_after = r.room, .beliefs = beliefs(r.pre, r.post, true, true, kMinChange),
+    Effect fx{.room_before = r.room, .room_after = r.room_after.empty() ? r.room : r.room_after, .beliefs = beliefs(r.pre, r.post, true, true, kMinChange),
               .became_possible = {}, .no_longer_possible = {}, .appeared = {}, .dropped = {}};
     std::erase_if(fx.beliefs, [](const std::string& b) { return b.find("→") == std::string::npos; });
     std::map<std::string, int, Natural> offer, exist;      // net count per node
@@ -276,7 +284,7 @@ inline Effect effect(const Record& r, const Events& ev, const std::vector<Record
     {
         if (not in_window(r, t) or ev.flickers(node)) continue;
         if (not relevant(Event{.dt_ms = 0, .kind = kind, .node = node}, ev.targets)) continue;
-        if (kind == "current_moved") fx.room_after = node;
+        if (kind == "current_moved" and r.room_after.empty()) fx.room_after = node;
         else if (kind == "offered") ++offer[node];
         else if (kind == "withdrawn") --offer[node];
         else if (kind == "born") ++exist[node];
@@ -496,7 +504,9 @@ inline std::string who(const Record& m)
 
     std::string out = title(m) + "\n" + who(m) + "\n\n";
     out += "START   " + hhmmss(m.t0) + (m.room.empty() ? std::string{} : ", in " + m.room) + "\n";
-    if (m.t1) out += "END     " + hhmmss(*m.t1) + ", " + duration(*m.t1 - m.t0) + " later — " + explain(m) + "\n";
+    if (m.t1)
+        out += "END     " + hhmmss(*m.t1) + ", " + duration(*m.t1 - m.t0) + " later"
+             + (m.room_after.empty() ? std::string{} : ", in " + m.room_after) + " — " + explain(m) + "\n";
     else out += "END     not yet — still running\n";
     const auto n_steps = std::ranges::count(tree, Level::Step, &Record::level);
     const auto n_claims = std::ranges::count(tree, Level::Claim, &Record::level);
