@@ -188,7 +188,37 @@ struct LeafPrior
     // log-likelihood ratio between configurations is tens to hundreds of nats, so any mass in [0.05, 0.5] gives the
     // same posterior (fix round 4 report: the wrong-belief table at 0.05 / 0.2 / 0.5).
     float p_not_as_believed = 0.2f;
+    // Task 9 fix round 1: the leaf's length (m); 0 = the opening's width. A door's leaf spans its CLEAR width between the
+    // casings (hinged on a casing's inner face), narrower than the wall gap the opening model is fitted to.
+    float len = 0.f;
 };
+
+// ─── THE TWO WIDTHS OF A DOORWAY (Task 9 fix round 1) ──────────────────────────────────────────────────────────────
+// door_concept's aperture w is the WALL GAP: the hole in the wall plane its belief is fitted to (DOOR_1: 1.06 m). The
+// passage is narrower: a casing board of width c lines each side (DoorConcept.FrameCasingM — Webots' Door.proto: 0.05 m
+// frames, the walls ending 3 cm short of them; the config's 0.06 m), and the leaf hangs on a casing's inner face and spans
+// the CLEAR width between them (DOOR_1: 0.9 m clear, a 0.95 m leaf overlapping its stops). The anchor's opening model is
+// the thin-wall hole (wall gap); its LEAF and the controller's servo (published width_m) are the clear width.
+// ★try67 (replay, current model): the update's opening at the clear width 0.93 dragged the anchor 45° at the mouth (the
+//  casings and the slots beside them do not fit a thin wall), while the leaf hinged at the wall gap's half-width dragged
+//  it 30° (the leaf's real hinge 6 cm further in). Hinge + length at the clear width, opening at the wall gap: 94 % of the
+//  approach-to-mouth frames ≥ 0.6, within 0.06 m of the truth.
+[[nodiscard]] inline float anchor_clear_width(float wall_gap, float casing) { return std::max(0.f, wall_gap - 2.f * std::max(0.f, casing)); }
+
+// ─── WHAT TO PUBLISH THIS CYCLE (Task 9 fix round 1, user-approved) ────────────────────────────────────────────────
+// Seen      — this measured cycle saw the doorway (P(door in view) ≥ the publication level): the posterior.
+// Predicted — not seen now, but the door's CROSS is claimed, the anchor was seen in this passage, and the last sighting is
+//             at most predict_ms old (interaction_anchor.h kAnchorPredictMs, ⚑ flagged): the last seen posterior carried
+//             forward by odometry, its covariance grown by the motion — the controller's P(body fits) slows on it.
+// None      — otherwise (the strict rule): nothing is written, the edge ages out.
+enum class AnchorPublish : std::uint8_t { None, Seen, Predicted };
+[[nodiscard]] inline AnchorPublish anchor_publish_decision(bool seen_now, bool cross_claimed, bool seen_in_passage,
+                                                           std::int64_t since_seen_ms, std::int64_t predict_ms)
+{
+    if (seen_now) return AnchorPublish::Seen;
+    if (cross_claimed and seen_in_passage and since_seen_ms >= 0 and since_seen_ms <= predict_ms) return AnchorPublish::Predicted;
+    return AnchorPublish::None;
+}
 
 // The zed frustum in the ROBOT frame, for the camera's visibility term. `known` false = no frustum (the mask is then
 // not tempered by geometry — the pre-Task-7 behaviour).
@@ -542,9 +572,9 @@ inline LeafModel make_leaf_model(const LeafPrior& lp, double w)
 {
     LeafModel L;
     if (not lp.known or w <= 0.0) return L;
-    L.len = w;
+    L.len = lp.len > 0.f ? double(lp.len) : w;
     const double phi_max = std::clamp(double(lp.phi_max), 0.0, M_PI);
-    const int n_phi = 1 + std::max(1, int(std::ceil(phi_max / (kRangeSigma / w))));
+    const int n_phi = 1 + std::max(1, int(std::ceil(phi_max / (kRangeSigma / L.len))));
     const double rho = std::clamp(double(lp.p_not_as_believed), 0.0, 1.0);
     const double ph = std::clamp(double(lp.p_hinge), 0.0, 1.0), ps = std::clamp(double(lp.p_swing), 0.0, 1.0);
     // φ weights under the belief, normalised over the grid (a σ below the grid step is the grid's resolution).
@@ -851,7 +881,7 @@ struct ViewGrid
 //  dragged 90° onto the swung leaf collected 35 % consistent endings on a wall that was not there from them.
 template <class Observe>
 bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa, const Eigen::Vector2d& ea, double sd2,
-                double se2, bool floor, Observe&& observe)
+                double se2, bool floor, Observe&& observe, double sd2_path = -1.0)
 {
     const double w = G.w;
     bool any = false;
@@ -877,13 +907,17 @@ bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa
         }
     }
     const bool ends_inside = t1 >= 1.0 and not floor;                       // the endpoint lies in the (outer) slab
-    auto pass_cells = [&](double pa_, double pb_)
+    // near = the segment ran in the depth band beside the structure, not inside it: it observes the OPENING there (a gap is
+    // seen free from just in front of it) but not a wall (passing 3 cm in front of a wall is not passing through it), so
+    // each cell's observation is weighted by its opening membership m — continuous, the same m lidar_view scores with.
+    auto pass_cells = [&](double pa_, double pb_, bool near = false)
     {
         if (pa_ > pb_) return;
         const double ua = oa.x() + pa_ * (ea.x() - oa.x()), ub = oa.x() + pb_ * (ea.x() - oa.x());
         const double lo = std::min(ua, ub), hi = std::max(ua, ub);
         if (hi > -w and lo < w)
-            for (int cc = G.of(std::max(lo, -w)); cc <= G.of(std::min(hi, w)); ++cc) obs(cc, 1.0, false);
+            for (int cc = G.of(std::max(lo, -w)); cc <= G.of(std::min(hi, w)); ++cc)
+                obs(cc, near ? std::exp(log_sigmoid((0.5 * model.w - std::abs(G.centre(cc))) / kRangeSigma)) : 1.0, false);
     };
     if (ends_inside)
     {
@@ -914,7 +948,25 @@ bool view_visit(const Model& model, const ViewGrid& G, const Eigen::Vector2d& oa
             }
     }
     else
-        pass_cells(t0, t1);   // went THROUGH the slab: every cell it traversed was free
+    {
+        // Went THROUGH the slab: every cell it traversed INSIDE THE STRUCTURE was free. ★Task 9 fix round 1 (try67, the
+        // mouth): "inside" is |y| ≤ t/2 + the pose's own depth σ (sd2_path), NOT the endpoint's depth spread hs, whose
+        // range-noise part (kRangeSigma = 5 cm) describes where a RETURN lands, not where a beam's PATH runs. With hs, a
+        // sensor 3.5 cm in front of the near face (the robot at the doorway's mouth) started every beam INSIDE the slab,
+        // and each beam running sideways in front of the wall "passed through" it: the walls factor fell 0.83 → 0.48 at a
+        // pose 2–4 cm off the truth.
+        const double hp = 0.5 * model.t + std::sqrt(std::max(0.0, sd2_path >= 0.0 ? sd2_path : sd2 - kRangeSigma * kRangeSigma));
+        double p0 = t0, p1 = t1;
+        if (std::abs(dy) < 1e-12) { if (std::abs(oa.y()) > hp) p1 = p0 - 1.0; }
+        else
+        {
+            double pa_ = (-hp - oa.y()) / dy, pb_ = (hp - oa.y()) / dy;
+            if (pa_ > pb_) std::swap(pa_, pb_);
+            p0 = std::max(t0, pa_); p1 = std::min(t1, pb_);
+        }
+        if (p0 > p1) pass_cells(t0, t1, true);            // only ever in the band beside the structure
+        else { pass_cells(p0, p1); pass_cells(t0, p0, true); pass_cells(p1, t1, true); }
+    }
     return any;
 }
 
@@ -986,7 +1038,7 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x, double pi_open)
             N[std::size_t(cc)] += wi * g;
             C[std::size_t(cc)] += wi * g * kappa;
             log_r += wi * g * mm * (ends ? -lambda : lambda);
-        });
+        }, pb.spread[i].sd2);
     }
     // THE WALLS, one per side of the opening (Task 8). Per cell: score = coverage 1 − (2ε)^N times consistency C/N (as
     // before); a side's factor is 1 − (its MISSED mass)/(its mass), the missed mass Σ (1 − m)·vis·(1 − score): a cell the
@@ -1016,16 +1068,15 @@ inline LidarView lidar_view(const Problem& pb, const V3d& x, double pi_open)
         miss[side] += wall * (vis[c] * (1.0 - cover) + cover * (1.0 - consistent));
         mass[side] += wall;
     }
-    // P(H_door | beams) = (π·r + 1 − π) / (π·r + 1 − π + 1), in a form that cannot overflow.
-    if (log_r > 0.0)
+    // P(H_door | beams) = A / (A + 1), A = π·r + 1 − π: in LOG form, log A = log(π·e^{log r} + (1 − π)), so it can neither
+    // overflow nor divide 0 by 0. ★Task 9 fix round 1 (try67): the old form divided by (π + (1 − π)·e^{−log r} + e^{−log r}),
+    //  which is 0/0 = NaN at π = 0 (the door's own belief read it SHUT at the mouth) with log r ≈ 10⁴ (thousands of passes):
+    //  the NaN tempered F, the posterior came out NaN, and the anchor stayed NaN — unpublished — for the rest of the run.
     {
-        const double ir = std::exp(-log_r);
-        lv.p_door = (pi_open + (1.0 - pi_open) * ir) / (pi_open + (1.0 - pi_open) * ir + ir);
-    }
-    else
-    {
-        const double r = std::exp(log_r);
-        lv.p_door = (pi_open * r + 1.0 - pi_open) / (pi_open * r + 1.0 - pi_open + 1.0);
+        const double ninf = -std::numeric_limits<double>::infinity();
+        const double pi = std::clamp(pi_open, 0.0, 1.0);
+        const double log_A = log_add_exp(pi > 0.0 ? std::log(pi) + log_r : ninf, pi < 1.0 ? std::log1p(-pi) : ninf);
+        lv.p_door = std::exp(log_sigmoid(log_A));   // A / (A + 1)
     }
     lv.open_cover = wo > 0 ? so / wo : 0.0;
     {
@@ -1547,6 +1598,10 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         post.x = x.cast<float>();
         post.P = P.cast<float>();
     }
+    // A belief is never NaN: a non-finite posterior (any cause) is no update — the prior stands, and this frame's evidence
+    // reports nothing in view. (try67: one NaN posterior silenced the anchor for 120 s; predicting a NaN keeps it NaN.)
+    if (not post.x.allFinite() or not post.P.allFinite())
+        return {prior, AnchorEvidence{}};
     x = post.x.cast<double>();
 
     // ─── P(door in view) at the POSTERIOR — the pose that is written to the edge (fix round 4) ─────────────────────

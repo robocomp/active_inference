@@ -14,7 +14,7 @@
 // The recorded p_cam / p_view are AS PUBLISHED (fix 1: the last mask frame held for kAnchorStaleMs, its camera term
 // recomputed at the posterior); the replayed ones are this frame's own (p_cam > 0 only on a frame that carried a mask),
 // so they differ on mask-less frames by design — compare p_lidar for the update itself.
-// Format version 2 (fix round 1). A version-1 file (cc39a46c, e.g. try66) is read too (Task 9): its records hold the
+// Format version 3 (Task 9 fix round 1; version 2 read too). A version-1 file (cc39a46c, e.g. try66) is read too (Task 9): its records hold the
 // PRE-budget rays, so the replay stages them itself with the CURRENT model — the replayed numbers are then today's
 // model on that run's inputs, not a re-run of the update that ran live (the pose Δ is the model change, not an error).
 //
@@ -28,6 +28,8 @@
 //                    them with the pose, at creation / re-init); without it each record's own (the live per-cycle values).
 //   --window A B     also summarise p_view over A ≤ t ≤ B s (the chain itself still runs from --from).
 //   --width W        a what-if: the anchor's model width forced to W (e.g. a door's CLEAR width between its frames).
+//   --casing C       the caller's leaf for records written before it (leaf.len = 0, v1/v2): hinged at and spanning the clear
+//                    width rc::door::anchor_clear_width(width, C) — what the agent now passes (DoorConcept.FrameCasingM, 0.06).
 // The held camera term is replayed as live (the last mask frame for kAnchorStaleMs, carried by the step motion), so the
 // chained p_view is the one that would be PUBLISHED. ⚠ The rays are the ones select_anchor_rays kept AT THE LIVE PRIOR: a
 // chained prior far from the live one is scored on that selection (floor returns through the opening it predicts are
@@ -52,16 +54,17 @@ bool num(const char* a, double& out)
     return ec == std::errc{} and p == a + std::strlen(a);
 }
 
-struct LegStats { int n = 0, published = 0, ge06 = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0; };
+struct LegStats { int n = 0, published = 0, ge06 = 0, pub_pred = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0, last_seen = -1; };
 void print_leg(const LegStats& s, int k)
 {
     if (s.n == 0) return;
-    std::print("leg {}: t {:.1f}–{:.1f} s, {} frames: p_view mean {:.3f} min {:.3f}, ≥ 0.6 on {} ({:.0f} %), published (≥ 0.5) {}\n", k,
-               s.t0 * 1e-3, s.t1 * 1e-3, s.n, s.sum / s.n, s.min, s.ge06, 100.0 * s.ge06 / s.n, s.published);
+    std::print("leg {}: t {:.1f}–{:.1f} s, {} frames: p_view mean {:.3f} min {:.3f}, ≥ 0.6 on {} ({:.0f} %), published (≥ 0.5) {}, "
+               "published if the cross were claimed (seen, or predicted ≤ kAnchorPredictMs) {}\n", k,
+               s.t0 * 1e-3, s.t1 * 1e-3, s.n, s.sum / s.n, s.min, s.ge06, 100.0 * s.ge06 / s.n, s.published, s.pub_pred);
 }
 
 int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool freeze, double from_s, double to_s, int every,
-          double win_a, double win_b, double width_override)
+          double win_a, double win_b, double width_override, double casing)
 {
     using rc::interaction::RelPose;
     const std::int64_t t0 = frames.empty() ? 0 : frames.front().t_ms;
@@ -109,23 +112,37 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             x = p;
             rc::door::carry_held_mask(hold, s_ * side, s_ * adv, s_ * dth);
         }
-        rc::door::AnchorStaging st;
+        rc::door::AnchorStaging st = f.staging;   // v2: the record's budgeted sets; v1: empty, its pre-budget rays are staged
         st.replay = f.version != 1;
         const float wk = width_override > 0 ? float(width_override) : freeze ? w : f.width, lo = freeze ? u0 : f.wall_u_min, hi = freeze ? u1 : f.wall_u_max;
+        rc::door::LeafPrior leaf = f.leaf;
+        if (casing >= 0.0 and leaf.known and leaf.len <= 0.f)
+        {
+            const float clear = rc::door::anchor_clear_width(wk, float(casing));
+            leaf.hinge_u = (leaf.hinge_u >= 0.f ? 0.5f : -0.5f) * clear;
+            leaf.len = clear;
+        }
         auto [post, ev] = rc::door::update_door_anchor(x, wk, f.thickness, lo, hi, f.lidar_origin,
                                                        f.version == 1 ? f.rays_v1 : std::vector<Eigen::Vector3f>{}, f.mask, f.cam,
-                                                       f.pi_open, f.leaf, f.floor_below, &st);
+                                                       f.pi_open, leaf, f.floor_below, &st);
         if (not f.mask.empty()) rc::door::hold_mask_frame(hold, f.mask, f.t_ms);
         ev.p_cam = rc::door::held_camera_view(hold, f.t_ms, rc::interaction::kAnchorStaleMs, f.cam, wk, post);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
         x = post;
         ++leg.n; leg.sum += ev.p_view; leg.min = std::min(leg.min, double(ev.p_view));
         leg.published += ev.p_view >= 0.5f ? 1 : 0; leg.ge06 += ev.p_view >= 0.6f ? 1 : 0; leg.t1 = f.t_ms - t0;
+        auto note_pred = [&](LegStats& L)
+        {
+            if (ev.p_view >= 0.5f) L.last_seen = f.t_ms;
+            L.pub_pred += (L.last_seen >= 0 and f.t_ms - L.last_seen <= rc::interaction::kAnchorPredictMs) ? 1 : 0;
+        };
+        note_pred(leg);
         if (t >= win_a and t <= win_b)
         {
             if (win.n == 0) win.t0 = f.t_ms - t0;
             ++win.n; win.sum += ev.p_view; win.min = std::min(win.min, double(ev.p_view));
             win.published += ev.p_view >= 0.5f ? 1 : 0; win.ge06 += ev.p_view >= 0.6f ? 1 : 0; win.t1 = f.t_ms - t0;
+            note_pred(win);
         }
         if (k % std::size_t(every) != 0) continue;
         const float cz = std::cos(post.x.z()), sz = std::sin(post.x.z());
@@ -145,7 +162,7 @@ int main(int argc, char** argv)
     std::string path = "etc/anchor_frames.bin";
     int every = 1;
     bool chained = false, freeze = false;
-    double scale = 1.0, from_s = -1e9, to_s = 1e9, win_a = 1e9, win_b = -1e9, width_override = 0;
+    double scale = 1.0, from_s = -1e9, to_s = 1e9, win_a = 1e9, win_b = -1e9, width_override = 0, casing = -1;
     for (int i = 1; i < argc; ++i)
     {
         double v = 0;
@@ -155,6 +172,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--time-scale") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) scale = v; }
         else if (std::strcmp(argv[i], "--from") == 0 and i + 1 < argc) { if (num(argv[++i], v)) from_s = v; }
         else if (std::strcmp(argv[i], "--to") == 0 and i + 1 < argc) { if (num(argv[++i], v)) to_s = v; }
+        else if (std::strcmp(argv[i], "--casing") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v >= 0) casing = v; }
         else if (std::strcmp(argv[i], "--width") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) width_override = v; }
         else if (std::strcmp(argv[i], "--window") == 0 and i + 2 < argc) { if (num(argv[++i], v)) win_a = v; if (num(argv[++i], v)) win_b = v; }
         else path = argv[i];
@@ -169,7 +187,7 @@ int main(int argc, char** argv)
     {
         std::print("CHAINED: step motion × {:.3f}, width/run {}{}\n", scale, freeze ? "frozen at each chain's first record" : "per record (live)",
                    width_override > 0 ? std::format(", width forced to {:.2f}", width_override) : std::string{});
-        return chain(frames, scale, freeze, from_s, to_s, every, win_a, win_b, width_override);
+        return chain(frames, scale, freeze, from_s, to_s, every, win_a, win_b, width_override, casing);
     }
     std::print("{:>8} {:>5} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>5} | {:>6} {:>6}\n", "t_ms", "rays", "F", "mask",
                "pv_rec", "pl_rec", "pc_rec", "pl_rep", "open", "door", "walls", "pc", "pv", "dxy_m", "dyaw");

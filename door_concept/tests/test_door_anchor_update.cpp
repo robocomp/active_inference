@@ -79,8 +79,10 @@
 //                                  0.9), open door, 3-D scan from s = −2 m: the truth reads ≥ 0.6 and the wrong poses
 //                                  < 0.5 — the old cell weighting counted the doorway grid PAST the run's end as wall and
 //                                  read the free-space pose 0.62 (published)
-//   sim_clock_rate (fix D) — rc::rt::SimClockRate: the producer's sim/wall rate from its two stamps; a twist integrated
-//                                  over wall time in a sim running at 0.94× real time over-counts by 1/0.94
+//   sim_clock_rate (fix D; fix round 1) — rc::rt::SimClockRate maps wall onto sim time by CONSECUTIVE twist samples: a sim
+//                                  at 0.94× integrates 0.94 s per wall second, a PAUSED sim nothing, a restart re-anchors
+//   pi_zero_open_door_is_finite (fix round 1) — π = 0 with the door open at the mouth: finite posterior (try67: NaN, 0/0 in P(H_door))
+//   anchor_publish_decision (fix round 1) — Seen / Predicted (cross claimed, seen before, ≤ kAnchorPredictMs) / None
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
 //   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O2 -fPIC -I/usr/include/eigen3 -Isrc -I../common
@@ -344,11 +346,13 @@ static std::vector<V3> bpearl_scan(const std::vector<Seg>& segs, const Pose2& r,
     return pts;
 }
 // door_concept's live leaf belief for DOOR_1 (specificworker_anchor.cpp: hinge/swing 0.5/0.5, φ known, σ_φ 0.25, φ_max
-// 120°), the stated hinge the −u jamb of the believed width.
+// 120°), the stated hinge the −u jamb. Task 9 fix round 1: hinged at the CLEAR half-width and spanning it, the believed
+// wall gap less the config's casing boards (rc::door::anchor_clear_width, FrameCasingM 0.06), as the caller now does.
 static rc::door::LeafPrior live_leaf(float w)
 {
     rc::door::LeafPrior lp;
-    lp.known = true; lp.hinge_u = -0.5f * w; lp.dir_u = 1.f; lp.swing_y = -1.f;
+    const float clear = rc::door::anchor_clear_width(w, 0.06f);
+    lp.known = true; lp.hinge_u = -0.5f * clear; lp.len = clear; lp.dir_u = 1.f; lp.swing_y = -1.f;
     lp.phi = float(M_PI_2); lp.phi_sigma = 0.25f; lp.phi_known = true; lp.phi_max = 2.094f; lp.p_hinge = 0.5f; lp.p_swing = 0.5f;
     return lp;
 }
@@ -1052,28 +1056,62 @@ int main()
     std::print("sim_clock_rate\n");
     {
         rc::rt::SimClockRate clk;
-        check(clk.rate() == 1.0, "unobserved (real hardware): rate 1");
+        check(clk.rate() == 1.0 and clk.sim_at(123) == 123.0, "unobserved (real hardware): the identity");
         // A producer at 20 Hz wall, its sim clock running at 0.94× (try66): 4 s of samples.
         for (int k = 0; k <= 80; ++k) clk.observe(1'000'000 + 50 * k, 5'000 + std::int64_t(std::llround(0.94 * 50.0 * k)));
         std::print("    sim at 0.94x real time: rate {:.4f}\n", clk.rate());
-        check(std::abs(clk.rate() - 0.94) < 1e-3, "the rate is Δsim/Δwall (0.94)");
-        // The anchor's prediction over 1 s of wall time at a sim-second yaw rate of 0.57 rad/s (try66's spin): with the
-        // rate the predicted turn is the true one, without it 1/0.94 too long.
+        check(std::abs(clk.rate() - 0.94) < 0.03, "the rate is Δsim/Δwall between consecutive samples (0.94, ms-quantised)");
+        // The anchor's prediction over 1 s of wall time at a sim-second yaw rate of 0.57 rad/s (try66's spin).
         rc::interaction::RelPose p0; p0.x = {0.f, 2.f, 0.f}; p0.P = Eigen::Matrix3f::Identity() * 1e-4f;
         rc::rt::Twist tw; tw.angular = {0.f, 0.f, 0.57f};
-        const auto wall = rc::interaction::predict(p0, tw, V3::Zero(), 1.0f);
-        const auto sim  = rc::interaction::predict(p0, tw, V3::Zero(), float(1.0 * clk.rate()));
-        std::print("    1 s wall at 0.57 rad/s: predicted turn {:.4f} rad over the wall clock, {:.4f} over the sim clock (true {:.4f})\n",
-                   -wall.x.z(), -sim.x.z(), 0.57 * 0.94);
-        check(std::abs(-sim.x.z() - 0.57f * 0.94f) < 1e-3f, "integrated over the sim clock the turn is the sim's");
-        // The same sample again, an out-of-order one, and a restarted simulator do not corrupt it.
-        clk.observe(1'000'000 + 50 * 80, 5'000);
+        const double s0 = clk.sim_at(1'000'000 + 50 * 60), s1 = clk.sim_at(1'000'000 + 50 * 80);
+        const auto sim = rc::interaction::predict(p0, tw, V3::Zero(), float((s1 - s0) * 1e-3));
+        std::print("    1 s wall at 0.57 rad/s: {:.4f} rad over the sim clock (true {:.4f}; the wall clock gives 0.5700)\n",
+                   -sim.x.z(), 0.57 * 0.94);
+        check(std::abs(-sim.x.z() - 0.57f * 0.94f) < 2e-3f, "integrated over the sim clock the turn is the sim's");
+        // A repeated or out-of-order sample does not move it.
+        const double before = clk.sim_at(1'000'000 + 50 * 80);
+        clk.observe(1'000'000 + 50 * 80, 9'999'999);
         clk.observe(1'000'000 + 50 * 79, 9'999'999);
-        check(std::abs(clk.rate() - 0.94) < 1e-3, "a repeated or out-of-order sample is ignored");
-        clk.observe(1'000'000 + 50 * 81, 10);   // the sim clock jumped back: restarted
-        for (int k = 82; k <= 120; ++k) clk.observe(1'000'000 + 50 * k, 10 + std::int64_t(std::llround(0.5 * 50.0 * (k - 81))));
-        std::print("    after a restart at 0.5x: rate {:.4f}\n", clk.rate());
-        check(std::abs(clk.rate() - 0.5) < 1e-3, "a restarted simulator re-anchors the estimate");
+        check(clk.sim_at(1'000'000 + 50 * 80) == before, "a repeated or out-of-order sample is ignored");
+        // A PAUSED simulator (fix round 1): the sim stamp stops while the wall clock and the last twist go on — nothing
+        // is integrated across the pause.
+        for (int k = 81; k <= 100; ++k) clk.observe(1'000'000 + 50 * k, 5'000 + std::int64_t(std::llround(0.94 * 50.0 * 80)));
+        const double p0s = clk.sim_at(1'000'000 + 50 * 90), p1s = clk.sim_at(1'000'000 + 50 * 100 + 40);
+        std::print("    paused: rate {:.4f}, sim advance over 0.54 s of wall {:.1f} ms\n", clk.rate(), p1s - p0s);
+        check(clk.rate() == 0.0 and p1s - p0s == 0.0, "a paused simulator integrates nothing (the trailing-rate estimator did)");
+        clk.observe(1'000'000 + 50 * 101, 10);   // the sim clock jumped back: restarted
+        clk.observe(1'000'000 + 50 * 102, 35);
+        check(std::abs(clk.rate() - 0.5) < 1e-6, "a restarted simulator re-anchors the estimate");
+    }
+
+    // ─── Task 9 fix round 1: what to publish (the softer rule near the door, kAnchorPredictMs) ───────────────────────
+    // ─── Task 9 fix round 1: π = 0 with thousands of passes (try67 at the mouth) must not make the anchor NaN ────────────
+    std::print("pi_zero_open_door_is_finite\n");
+    {
+        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true;
+        const auto segs = world(wo);
+        const Pose2 robot{V2(0.f, -1.0f - kSensor.y()), 0.f};
+        const RelPose truth = creation_prior(robot);
+        const auto rays = rc::door::select_anchor_rays(truth, W, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 71), 2.0f);
+        const auto [post, ev] = update_door_anchor(truth, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.0f, {}, kFloorZ);
+        std::print("    π = 0, {} rays at s = −1.0: posterior ({:.3f},{:.3f},{:.3f}), P(door) {:.3f}, p_view {:.3f}\n", rays.size(),
+                   post.x.x(), post.x.y(), post.x.z(), ev.lidar_door, ev.p_view);
+        check(post.x.allFinite() and post.P.allFinite() and std::isfinite(ev.p_view), "the posterior and p_view are finite at π = 0");
+        check((post.x.head<2>() - truth.x.head<2>()).norm() < 0.05f, "...and the posterior is the open door's (within 0.05 m)");
+    }
+
+    std::print("anchor_publish_decision\n");
+    {
+        using rc::door::AnchorPublish;
+        const auto K = rc::interaction::kAnchorPredictMs;
+        check(rc::door::anchor_publish_decision(true, false, false, 0, K) == AnchorPublish::Seen, "seen now ⇒ Seen (claimed or not)");
+        check(rc::door::anchor_publish_decision(false, true, true, 0, K) == AnchorPublish::Predicted, "unseen 0 ms, cross claimed, seen before ⇒ Predicted");
+        check(rc::door::anchor_publish_decision(false, true, true, 2999, K) == AnchorPublish::Predicted, "unseen 2999 ms ⇒ Predicted");
+        check(rc::door::anchor_publish_decision(false, true, true, 3001, K) == AnchorPublish::None, "unseen 3001 ms ⇒ None (the strict rule)");
+        check(rc::door::anchor_publish_decision(false, false, true, 100, K) == AnchorPublish::None, "cross NOT claimed ⇒ None (strict rule)");
+        check(rc::door::anchor_publish_decision(false, true, false, 100, K) == AnchorPublish::None, "never seen in this passage ⇒ None");
+        check(K == 3000, "kAnchorPredictMs is 3000 ms");
     }
 
     std::print("no_data_is_prior\n");

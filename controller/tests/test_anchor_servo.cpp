@@ -351,6 +351,21 @@ void inside_jamb_caps_only_the_closing_turn()
     CHECK(ccw < 1e-3f);
     CHECK(cw > 0.5f * kWmax);
 }
+// Task 9 fix round 1: driving on a PREDICTED anchor, whose covariance grows with the motion — the servo slows by itself.
+void adv_falls_as_sigma_lat_grows()
+{
+    float last = 1e9f;
+    bool falling = true;
+    for (const float s : {0.01f, 0.03f, 0.06f, 0.10f, 0.20f})
+    {
+        const auto c = cmd(anchor(-0.05f, 1.0f, 0.f, s), false);
+        std::println("  sigma_lat {:.2f} m: adv {:.3f}", s, c.adv);
+        falling = falling and c.adv < last + 1e-6f;
+        last = c.adv;
+    }
+    CHECK(falling);
+    CHECK(last < 0.75f * cmd(anchor(-0.05f, 1.0f, 0.f, 0.01f), false).adv);   // σ_lat 0.20: P(fit) ≈ 0.70
+}
 }  // namespace
 
 int main()
@@ -368,6 +383,7 @@ int main()
     rotation_near_jamb_is_capped();
     jamb_deadlock_backs_off();
     inside_jamb_caps_only_the_closing_turn();
+    adv_falls_as_sigma_lat_grows();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

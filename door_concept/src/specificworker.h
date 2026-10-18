@@ -320,6 +320,13 @@ private:
         float wall_u_min = 0.f, wall_u_max = 0.f;         // the door's wall run, anchor coordinates (read with the pose)
         bool  run_known = false;                          // the run came from an associated wall (else the flagged default)
         bool  retry = false;                              // Task 9: a claim of this passage ended unsatisfied — the next is a retry
+        float clear_width = 0.9f;                         // fix round 1: the passage between the casings (leaf + servo)
+        double pose_sim_ms = 0.0;                         // fix round 1: the producer's sim clock at pose.stamp_ms (SimClockRate)
+        // fix round 1, the softer rule near the door (kAnchorPredictMs): the last SEEN posterior, carried by odometry.
+        bool  seen_once = false;
+        std::int64_t last_seen_ms = 0;
+        rc::interaction::RelPose seen_pose;
+        rc::door::AnchorPublish mode = rc::door::AnchorPublish::None;
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
         float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
@@ -336,6 +343,8 @@ private:
                                                              float* axis_sign_out = nullptr) const;
     void remove_passage_anchor(std::string_view why);
     void anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const;   // width, thickness, height, run
+    void refresh_anchor_geometry(const rc::DoorInstance& inst, PassageAnchor& pa);            // ...and the published clear width
+    void retry_broad_prior(const rc::DoorInstance& inst, PassageAnchor& pa, std::string_view kind);
     rc::rt::SimClockRate sim_clock_;   // Task 9: the twist's sim/wall rate (common/rt_twist), kept across anchors
     void relink_passage_anchor(std::uint64_t new_door_id, std::string_view why);
     // Task 7 Step 0: one-shot frame diagnostics of the anchor's measurements (specificworker_anchor.cpp).

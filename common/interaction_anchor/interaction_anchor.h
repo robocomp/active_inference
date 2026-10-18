@@ -83,6 +83,11 @@ public:
     // the link every cycle — a consumer's whole-node update of the affordance can erase an attribute it never
     // read. false if the affordance node is missing or the write fails.
     bool link_affordance(DSR::DSRGraph& G, std::uint64_t affordance_id);
+    // The anchor's width_m (Task 9 fix round 1: the owner's CLEAR width, not the object's). Written only on a change.
+    bool set_width(DSR::DSRGraph& G, float width_m);
+    // How long ago the owner last SAW what the edge's pose describes (unseen_time, ms; 0 = seen this cycle). Written only on
+    // a change. See kAnchorPredictMs.
+    bool set_unseen_ms(DSR::DSRGraph& G, int unseen_ms);
     void remove(DSR::DSRGraph& G);                               // node, edge, and the affordance's link
     [[nodiscard]] std::uint64_t id() const { return id_; }
     [[nodiscard]] std::uint64_t object_id() const { return object_id_; }
@@ -103,6 +108,13 @@ void sweep_stale(DSR::DSRGraph& G, int agent_id);
 // reader refuses it instead of widening it. FLAGGED decision level (no model term can stand in for
 // a dead producer).
 inline constexpr std::int64_t kAnchorStaleMs = 1000;
+
+// ⚑ FLAGGED decision level (Task 9 fix round 1, user-approved): while the anchored door's CROSS is claimed and the anchor
+// has been SEEN in this passage, the owner keeps publishing its ODOMETRY-PREDICTED pose (and the predicted covariance,
+// growing with the motion) for up to this long after the last frame it saw the door in — the doorway band, where the jambs
+// leave the dense sampling, is exactly where the strict rule stopped the robot. The anchor node's unseen_time (ms) says
+// how old the last sighting is: 0 = seen, > 0 = predicted. Past this, nothing is published (the strict rule).
+inline constexpr std::int64_t kAnchorPredictMs = 3000;
 
 // Controller side: follows affordance.interaction_node_id to the anchor and reads the newest block of
 // the robot→anchor RT edge. Returns {pose, anchor's width_m (0 if absent)}; nullopt if there is no

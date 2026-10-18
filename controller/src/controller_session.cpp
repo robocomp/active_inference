@@ -162,10 +162,16 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         // A single command's passage is over (crossed, door closed behind or left open): the base goes back to the
         // affordances until the next command or mission (2026-10-18, user). A mission's passage hands over to its
         // next step instead (then_affordances false).
-        if (door_passage_.take_finished() and door_passage_.view().then_affordances)
+        if (door_passage_.take_finished())
         {
-            mission_.set_mode(rc::DriveMode::AffordancesOnly);
-            std::println("[door-passage] passage finished — back to AffordancesOnly until the next command or mission");
+            if (door_passage_.view().failed)
+                std::println("[door-passage] passage FAILED — the door could not be crossed in {} attempts",
+                             rc::DoorPassage::kMaxCrossUnreachable);
+            if (door_passage_.view().then_affordances)
+            {
+                mission_.set_mode(rc::DriveMode::AffordancesOnly);
+                std::println("[door-passage] passage finished — back to AffordancesOnly until the next command or mission");
+            }
         }
         door_required_ = std::move(dp.required);
         // Where the passage's door IS in this room — the door line the cross axis must be centred on. The cross
@@ -3012,12 +3018,14 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
     const bool fresh = age <= rc::interaction::kAnchorStaleMs;   // read_anchor's own rule (interaction_anchor.h)
     if (not fresh and not accept_stale) return std::nullopt;
     const auto node = graph_->get_node(id);
+    const int unseen = node.has_value() ? graph_->get_attrib_by_name<unseen_time_att>(node.value()).value_or(0) : 0;
     return AnchorCrossReading{.anchor_id = id,
                               .name = node.has_value() ? node->name() : std::to_string(id),
                               .pose = read->first,
                               .width_m = read->second,
                               .fresh = fresh,
-                              .age_ms = age};
+                              .age_ms = age,
+                              .unseen_ms = std::max(0, unseen)};
 }
 
 // Task 9, fix A: ONCE A CROSS IS ANCHORED IT NEVER FALLS BACK TO THE ROOM ROUTE. The room route is known to fail in the
@@ -3029,6 +3037,18 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
 //                                          toward where it was last published, so the sensors can see it;
 //   no anchor at all                     → the room route, as before.
 // The wait is bounded in step_anchor_cross by the cross contract's own timeout, then handed back Unreachable.
+void ControllerSession::reset_anchor_cross_state()
+{
+    anchor_mode_logged_ = -1;
+    anchor_cross_engaged_ = false;
+    anchor_wait_since_ms_ = 0;
+    anchor_wait_stamp_ = 0;
+    anchor_spin_since_ms_ = 0;
+    anchor_backoff_logged_ = false;
+    anchor_predicted_logged_ = false;
+    last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
+}
+
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
 {
     anchor_cross_.reset();
@@ -3038,23 +3058,14 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
     {
         anchor_latched_id_ = 0;
         anchor_latched_for_.clear();
-        anchor_mode_logged_ = -1;
-        anchor_cross_engaged_ = false;
-        anchor_wait_since_ms_ = 0;
-        anchor_spin_since_ms_ = 0;
-        anchor_backoff_logged_ = false;
+        reset_anchor_cross_state();
         return false;
     }
     if (anchor_latched_for_ != step.target.node_name)       // a different cross: nothing latched carries over
     {
         anchor_latched_id_ = 0;
         anchor_latched_for_ = step.target.node_name;
-        anchor_mode_logged_ = -1;
-        anchor_cross_engaged_ = false;
-        anchor_wait_since_ms_ = 0;
-        anchor_spin_since_ms_ = 0;
-        anchor_backoff_logged_ = false;
-        last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this cross is not this cross's
+        reset_anchor_cross_state();
     }
     anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name, /*accept_stale=*/true);
     if (not anchor_cross_.has_value())
@@ -3080,6 +3091,14 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         return true;
     }
     anchor_cross_engaged_ = true;
+    if ((anchor_cross_->unseen_ms > 0) != anchor_predicted_logged_)
+    {
+        anchor_predicted_logged_ = anchor_cross_->unseen_ms > 0;
+        if (anchor_predicted_logged_)
+            std::println("[anchor] cross: driving on the PREDICTED anchor (last seen {} ms ago)", anchor_cross_->unseen_ms);
+        else
+            std::println("[anchor] cross: the anchor is SEEN again");
+    }
     if (anchor_mode_logged_ != 1)
     {
         const auto g = rc::anchor_cross_geometry(anchor_cross_->pose);
@@ -3210,8 +3229,13 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         pose = anchor_wait_pose_;
         pose.x = rc::interaction::move_mean(anchor_wait_pose_.x, 0.f, 0.f,
                                             rc::interaction::wrap_pi(robot_pose.theta - anchor_wait_theta_));
-        const float bearing = std::atan2(-pose.x.x(), pose.x.y());   // forward (+y) to the opening's centre, CCW positive
-        cmd.rot = w_max * std::tanh(bearing / (w_max * rc::kAnchorTauRot));
+        // Fix round 1: toward the opening's centre while it is ahead; once the body's centre is within half a body length of
+        // the wall plane (or past it, a retry that starts in the doorway) the centre may lie BESIDE or BEHIND the robot, and
+        // the way to see it again is to face along the crossing: the normal (heading_err).
+        const float half_len = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
+        const auto g = rc::anchor_cross_geometry(pose);
+        const float aim = g.s > -half_len ? g.heading_err : std::atan2(-pose.x.x(), pose.x.y());   // CCW positive
+        cmd.rot = w_max * std::tanh(aim / (w_max * rc::kAnchorTauRot));
     }
 
     // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
@@ -3237,7 +3261,10 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     if (const float lin = std::hypot(adv_mps, side_mps); lin > 0.f)
     {
         const Eigen::Vector2f dir(side_mps / lin, adv_mps / lin);   // robot frame: +x side, +y fwd
-        const float v_lidar = std::max(0.05f, anchor_clearance_speed_limit(dir, v_max, path_controller));
+        // Floored at 0.05 m/s like the tracker's — except a REVERSE (the jamb backoff): nothing the tracker does backs up,
+        // and the rear clearance must be able to stop it (fix round 1).
+        const float v_field = anchor_clearance_speed_limit(dir, v_max, path_controller);
+        const float v_lidar = adv_mps < 0.f ? v_field : std::max(0.05f, v_field);
         if (lin > v_lidar) { adv_mps *= v_lidar / lin; side_mps *= v_lidar / lin; }
     }
     // 2. Pose-uncertainty limiter.
@@ -4056,6 +4083,9 @@ void ControllerSession::resolve_target_contract(const ControllerTargetInfo &targ
     if (target.node_id == contract_for_node_id_ and target.epoch == contract_for_epoch_) return;
     contract_for_node_id_ = target.node_id;
     contract_for_epoch_ = target.epoch;
+    // Fix round 1: a re-offered cross (a new epoch) is a new claim — its anchor state starts over (try67: engaged stayed
+    // true across the re-offer, so the robot stood still for the whole timeout of every attempt).
+    reset_anchor_cross_state();
     target_contract_ = {};
     target_contract_known_ = false;
     // ★A NEW AFFORDANCE HAS NOT LOOKED AT ANYTHING YET. Reset here, at the ONE place a new affordance
@@ -4481,7 +4511,7 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
         if (anchor_drawn_.has_value()
             and static_cast<std::int64_t>(rc::provenance::now_ms()) - anchor_drawn_->pose.stamp_ms <= rc::interaction::kAnchorStaleMs)
             av = ControllerDisplay::AnchorView{.centre = anchor_drawn_->pose.x.head<2>(), .yaw = anchor_drawn_->pose.x.z(),
-                                               .width = anchor_drawn_->width_m};
+                                               .width = anchor_drawn_->width_m, .predicted = anchor_drawn_->unseen_ms > 0};
         display.set_anchor_overlay(av);
     }
     display.update(icon_pose,
@@ -4740,6 +4770,8 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
         approach_commit_.reset();
         approach_fix_.reset();
         reach_unreachable_why_.clear();
+        reset_anchor_cross_state();      // the claim is over: its re-offer starts a fresh one (fix round 1)
+        contract_for_node_id_ = 0;       // ...and is resolved again even if the producer keeps the same epoch
         no_route_since_ms_ = 0;
         short_path_since_ms_ = 0;
     }

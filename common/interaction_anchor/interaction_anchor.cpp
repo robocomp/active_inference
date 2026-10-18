@@ -193,6 +193,24 @@ void sweep_stale(DSR::DSRGraph& G, int agent_id)
     std::print("[interaction_anchor] swept {} stale anchor(s) of agent {}\n", gone.size(), agent_id);
 }
 
+bool Anchor::set_width(DSR::DSRGraph& G, float width_m)
+{
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    if (const auto v = G.get_attrib_by_name<width_m_att>(n.value()); v.has_value() and v.value() == width_m) return true;
+    G.add_or_modify_attrib_local<width_m_att>(n.value(), width_m);
+    return G.update_node(n.value());
+}
+
+bool Anchor::set_unseen_ms(DSR::DSRGraph& G, int unseen_ms)
+{
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    if (const auto v = G.get_attrib_by_name<unseen_time_att>(n.value()); v.has_value() and v.value() == unseen_ms) return true;
+    G.add_or_modify_attrib_local<unseen_time_att>(n.value(), unseen_ms);
+    return G.update_node(n.value());
+}
+
 std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G, const DSR::Node& affordance,
                                                                 std::int64_t now_ms)
 {

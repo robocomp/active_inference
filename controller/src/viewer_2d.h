@@ -59,7 +59,7 @@ class Viewer2D : public QObject
     void draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &passages);
     // The door-cross INTERACTION ANCHOR (Task 7, fix 3), already in the ROOM frame: the opening's two jamb points
     // (left, right) and its unit normal (away from the robot). nullopt = draw nothing (clears the previous one).
-    struct AnchorOverlay { Eigen::Vector2f jamb_l, jamb_r, normal; };
+    struct AnchorOverlay { Eigen::Vector2f jamb_l, jamb_r, normal; bool predicted = false; };   // predicted: drawn dashed, lighter
     void draw_anchor(const std::optional<AnchorOverlay> &a);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);

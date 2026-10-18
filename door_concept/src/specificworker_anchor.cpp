@@ -231,10 +231,12 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.consumer_id  = aff.claim().has_value() ? aff.claim()->agent_node_id : 0;
     pa.pose         = init.value();
     pa.axis_sign    = axis_sign;
-    anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once
+    anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once (width_m set below)
     pa.approach_was_claimed = inst.aff_approach.claimed();
     pa.cross_was_claimed    = inst.aff_cross.claimed();
+    pa.pose_sim_ms  = sim_clock_.sim_at(init->stamp_ms);
     passage_anchor_ = std::move(pa);
+    passage_anchor_->anchor->set_width(*G, passage_anchor_->clear_width);
     const auto& p = passage_anchor_->pose;
     std::print("door_concept: [anchor] {}@robot HUNG from the robot for {} (epoch {}): opening at ({:.2f},{:.2f}) "
                "yaw {:+.2f} in the robot frame, σ_lat {:.2f} m\n", inst.node_name, aff.kind(),
@@ -270,7 +272,8 @@ void SpecificWorker::remove_passage_anchor(std::string_view why)
 // wall, not a refit of it.
 void SpecificWorker::anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const
 {
-    pa.width     = inst.aperture.w;
+    pa.width     = inst.aperture.w;   // the WALL GAP: the anchor update's thin-wall opening
+    pa.clear_width = rc::door::anchor_clear_width(pa.width, cfg_.frame_casing_m);   // the passage: leaf + servo (fix round 1)
     pa.thickness = inst.aperture.thickness;
     pa.height    = inst.aperture.h;
     float lo = -1.5f * pa.width, hi = 1.5f * pa.width;
@@ -286,6 +289,44 @@ void SpecificWorker::anchor_geometry_from_door(const rc::DoorInstance& inst, Pas
     if (pa.axis_sign < 0.f) { const float t = lo; lo = -hi; hi = -t; }
     pa.wall_u_min = lo;
     pa.wall_u_max = hi;
+}
+
+// A RETRY's claim (fix round 1, controller ruling): neither kept blindly (a diverged belief would never be re-initialised)
+// nor replaced (try66: the room init 0.15 m / 18° off, its normal flipped). The belief is BROADENED by σ_model — the same
+// room-vs-sensor discrepancy term P0 carries (kSigmaModel), added in the anchor's axes — and fused with the room
+// initialisation (its P0, which already holds σ_model) as one Gaussian product, the yaw innovation wrapped. A good belief
+// moves by at most a fraction of the room's error and its beams pull it back within frames; a diverged one is pulled
+// toward the room and, broadened, can be re-acquired by its beams.
+void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnchor& pa, std::string_view kind)
+{
+    const auto r = anchor_from_room(inst, pa.pose, &pa.axis_sign);   // keeps the side the belief has
+    if (not r.has_value())
+    {
+        std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry; no room transform: belief kept\n", pa.door_name, kind);
+        return;
+    }
+    const Eigen::Matrix3f Pb = pa.pose.P + rc::door::anchor_axes_to_robot(Eigen::Matrix3f(kSigmaModel.cwiseProduct(kSigmaModel).asDiagonal()), pa.pose.x.z());
+    const Eigen::Matrix3f S = Pb + r->P;
+    const Eigen::Matrix3f K = Pb * S.inverse();
+    Eigen::Vector3f innov = r->x - pa.pose.x;
+    innov.z() = rc::interaction::wrap_pi(innov.z());
+    const Eigen::Vector3f dx = K * innov;
+    pa.pose.x += dx;
+    pa.pose.x.z() = rc::interaction::wrap_pi(pa.pose.x.z());
+    const Eigen::Matrix3f Pn = (Eigen::Matrix3f::Identity() - K) * Pb;
+    pa.pose.P = 0.5f * (Pn + Pn.transpose());
+    std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
+               "init (room − belief {:.2f} m / {:+.1f}°): moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n", pa.door_name, kind,
+               innov.head<2>().norm(), innov.z() * 57.2958f, dx.head<2>().norm(), dx.z() * 57.2958f,
+               std::sqrt(std::max(0.f, pa.pose.P(0, 0) + pa.pose.P(1, 1))));
+}
+
+// The geometry read with the pose, and the anchor's published width_m set to the CLEAR width (fix round 1): the controller's
+// servo sizes the jambs and P(body fits) from it, and DOOR_1's wall gap (1.06) put each jamb ~8 cm outside the real frame.
+void SpecificWorker::refresh_anchor_geometry(const rc::DoorInstance& inst, PassageAnchor& pa)
+{
+    anchor_geometry_from_door(inst, pa);
+    if (pa.anchor.has_value() and G) pa.anchor->set_width(*G, pa.clear_width);
 }
 
 // The passage door re-identified (room switch: the entry mirror / recreated door is the crossed one). The anchor is
@@ -440,7 +481,10 @@ void SpecificWorker::step_passage_anchor()
             remove_passage_anchor(why + ": the robot is through");
             return;
         }
-        if (outcome != rc::affordance::Outcome::Satisfied)
+        // An APPROACH claim released with no outcome because the passage moved on to `open` / `cross` (door_passage's
+        // pre-emption) is the passage advancing, not a failed attempt (fix round 1; try67: "approach claim ended (offered)").
+        const bool superseded = not was_cross and outcome == rc::affordance::Outcome::None and (crs or opn);
+        if (outcome != rc::affordance::Outcome::Satisfied and not superseded)
         {
             pa.retry = true;
             std::print("door_concept: [anchor] {}@robot PARKED — {}: kept, predicted and corrected for this door's next "
@@ -471,9 +515,9 @@ void SpecificWorker::step_passage_anchor()
         if (not pa.run_known)   // the first KNOWN wall run is taken once (anchor_geometry_from_door)
             if (inst->ai2_initialized and inst->ai2_belief.params().wall_len > 0.f)
             {
-                const float w = pa.width, t = pa.thickness, h = pa.height;
+                const float w = pa.width, cw = pa.clear_width, t = pa.thickness, h = pa.height;
                 anchor_geometry_from_door(*inst, pa);
-                pa.width = w; pa.thickness = t; pa.height = h;   // the run only: the geometry stays the initialisation's
+                pa.width = w; pa.clear_width = cw; pa.thickness = t; pa.height = h;   // the run only: the rest stays the initialisation's
             }
         if (const rc::pragmatic::PragmaticAffordance* aff = crs ? &inst->aff_cross : app ? &inst->aff_approach : nullptr;
             aff != nullptr and aff->node_id() != 0)
@@ -489,7 +533,7 @@ void SpecificWorker::step_passage_anchor()
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
                     pa.pose = r.value();
-                    anchor_geometry_from_door(*inst, pa);
+                    refresh_anchor_geometry(*inst, pa);
                     pa.reinit_on_next_claim = false;
                     pa.retry = false;
                 }
@@ -499,19 +543,17 @@ void SpecificWorker::step_passage_anchor()
                 if (epoch >= 0 and pa.linked_epoch >= 0 and epoch != pa.linked_epoch)
                 {
                     if (pa.retry)
-                        std::print("door_concept: [anchor] {}@robot re-claimed for {} (epoch {} → {}) — a retry of this "
-                                   "passage: belief kept\n", pa.door_name, aff->kind(), pa.linked_epoch, epoch);
+                        retry_broad_prior(*inst, pa, aff->kind());
                     else if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
                     {
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
                         pa.pose = r.value();
-                        anchor_geometry_from_door(*inst, pa);
+                        refresh_anchor_geometry(*inst, pa);
                     }
                 }
                 else if (pa.retry and claim_rose)
-                    std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry of this passage: same anchor, "
-                               "belief kept\n", pa.door_name, aff->kind());
+                    retry_broad_prior(*inst, pa, aff->kind());
             }
             else
                 std::print("door_concept: [anchor] {}@robot now serves {} (epoch {}) — same anchor, belief kept\n",
@@ -535,22 +577,28 @@ void SpecificWorker::step_passage_anchor()
             sim_clock_.observe(st->first, st->second);
     }
     // ★ Task 9 (try66 leg 1): the twist is per SIMULATION second on a simulator, so every interval it is integrated over —
-    //   the prediction's dt and the captures' ages below — is a wall interval times Δsim/Δwall (rc::rt::SimClockRate; 1 on
+    //   the prediction's dt and the captures' ages below — is producer SIM time (rc::rt::SimClockRate; the wall clock on
     //   real hardware). Integrated over the wall clock, the anchor's prediction ran 6 % long in translation and 14 % in
     //   rotation in a sim at ~0.94× real time: a 290° spin left it 15° / 1.1 m off with σ 0.3° / 7 mm, and its own
     //   overconfident prior then rejected the beams that would have corrected it — 0 of 332 leg-1 frames published.
-    const float sim_rate = float(sim_clock_.rate());
+    //   Fix round 1: the interval is the producer's SIM time between this cycle and the last, mapped by consecutive twist
+    //   samples (rc::rt::SimClockRate::sim_at) — a paused simulator integrates nothing.
+    const double sim_now = sim_clock_.sim_at(now);
+    auto sim_age_s = [&](std::int64_t wall_then) { return float(std::max(0.0, sim_now - sim_clock_.sim_at(wall_then)) * 1e-3); };
     if (twist.has_value() and pa.pose.stamp_ms > 0 and now > pa.pose.stamp_ms)
     {
         Eigen::Vector3f var = Eigen::Vector3f::Zero();   // [var_adv, var_side, var_rot]; none stated ⇒ none added
         if (const auto v = G->get_attrib_by_name<robot_current_speed_variance_att>(robot.value());
             v.has_value() and v->get().size() >= 3)
             var = {v->get()[0], v->get()[1], v->get()[2]};
-        const float dt = float(now - pa.pose.stamp_ms) * 1e-3f * sim_rate;
+        const float dt = float(std::max(0.0, sim_now - pa.pose_sim_ms) * 1e-3);
         pa.pose = rc::interaction::predict(pa.pose, twist.value(), var, dt);
+        // The last SEEN posterior is carried by the same odometry (fix round 1: published while predicted, kAnchorPredictMs).
+        if (pa.seen_once) pa.seen_pose = rc::interaction::predict(pa.seen_pose, twist.value(), var, dt);
         // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
         rc::door::carry_held_mask(pa.cam_hold, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt);
     }
+    pa.pose_sim_ms = std::max(pa.pose_sim_ms, sim_now);
     // ★ ONE CLOCK: the anchor is stamped with system-clock epoch ms (provenance::now_ms), the clock
     //   read_affordance_anchor's staleness check uses. predict() copies the TWIST's stamp; overwrite it.
     pa.pose.stamp_ms = now;
@@ -595,7 +643,7 @@ void SpecificWorker::step_passage_anchor()
     if (lidar_ingestor_ and lidar_ingestor_->bpearl_robot_stamp_ms() > pa.last_lidar_stamp)
     {
         pa.last_lidar_stamp = lidar_ingestor_->bpearl_robot_stamp_ms();
-        const float age_s = std::max<std::int64_t>(0, now - pa.last_lidar_stamp) * 1e-3f * sim_rate;
+        const float age_s = sim_age_s(pa.last_lidar_stamp);
         const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
         if (not pa.frames_checked_rays)
             pa.frames_checked_rays = check_anchor_ray_frames(robot_name, age_s, tw);
@@ -643,7 +691,7 @@ void SpecificWorker::step_passage_anchor()
             pa.last_mask_frame = pkt.frame_id;
             new_mask_frame = true;
             if (pkt.timestamp_ms > 0) mask_stamp = std::int64_t(pkt.timestamp_ms);
-            const float age_s = pkt.timestamp_ms > 0 ? std::max<std::int64_t>(0, now - std::int64_t(pkt.timestamp_ms)) * 1e-3f * sim_rate : 0.f;
+            const float age_s = pkt.timestamp_ms > 0 ? sim_age_s(std::int64_t(pkt.timestamp_ms)) : 0.f;
             const rc::rt::Twist tw = twist.value_or(rc::rt::Twist{});
             if (not pa.frames_checked_mask)
                 pa.frames_checked_mask = check_anchor_mask_frames(robot_name, *robot_T_zed);
@@ -709,7 +757,8 @@ void SpecificWorker::step_passage_anchor()
             const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
             const float phi_max = std::clamp(cfg_.phi_max_rad, 0.f, float(M_PI));   // the door model's hinge travel
             leaf.known     = true;
-            leaf.hinge_u   = pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.width;
+            leaf.hinge_u   = pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.clear_width;   // fix round 1: a casing's inner face
+            leaf.len       = pa.clear_width;
             leaf.dir_u     = pa.axis_sign * near;
             leaf.swing_y   = pa.axis_sign * inst->leaf.swing;
             leaf.phi_max   = phi_max;
@@ -778,8 +827,36 @@ void SpecificWorker::step_passage_anchor()
                    pa.door_name, publish ? "RESUMED" : "PAUSED", ev.p_view, ev.p_lidar, ev.lidar_open, ev.lidar_door,
                    ev.lidar_wall, ev.p_cam);
     }
-    const bool alive = publish ? (pa.anchor->write(*G, pa.pose) or G->get_node(pa.anchor->id()).has_value())
-                               : G->get_node(pa.anchor->id()).has_value();
+    // ── Fix round 1 (user-approved): the softer rule near the door — while the CROSS is claimed and the doorway has been
+    //    seen in this passage, the last seen posterior, carried by odometry with its covariance grown by the motion, is
+    //    published for up to kAnchorPredictMs after the last sighting (rc::door::anchor_publish_decision). The anchor
+    //    node's unseen_time says how old that sighting is (0 = seen): the controller tells seen from predicted by it.
+    //    An unmeasured cycle changes nothing about what was last seen: a Seen mode is not rewritten (as before), a
+    //    Predicted one goes on until its window ends.
+    if (publish) { pa.seen_once = true; pa.last_seen_ms = now; pa.seen_pose = pa.pose; }
+    const auto mode = (measured or pa.mode == rc::door::AnchorPublish::Predicted)
+        ? rc::door::anchor_publish_decision(publish, crs, pa.seen_once, now - pa.last_seen_ms, rc::interaction::kAnchorPredictMs)
+        : pa.mode;
+    if (mode != pa.mode)
+    {
+        if (mode == rc::door::AnchorPublish::Predicted)
+            std::print("door_concept: [anchor] {}@robot PREDICTED — not seen now, the cross is claimed: publishing the last seen "
+                       "pose carried by odometry (for ≤ {} ms)\n", pa.door_name, rc::interaction::kAnchorPredictMs);
+        else if (pa.mode == rc::door::AnchorPublish::Predicted)
+            std::print("door_concept: [anchor] {}@robot predicted publication ended — {}\n", pa.door_name,
+                       mode == rc::door::AnchorPublish::Seen ? "seen again" : "unseen beyond kAnchorPredictMs, or the cross ended");
+        pa.mode = mode;
+    }
+    bool wrote = false;
+    if (measured and mode == rc::door::AnchorPublish::Seen)
+        wrote = pa.anchor->write(*G, pa.pose) and pa.anchor->set_unseen_ms(*G, 0);
+    else if (mode == rc::door::AnchorPublish::Predicted)
+    {
+        rc::interaction::RelPose out = pa.seen_pose;
+        out.stamp_ms = now;   // fresh by the controller's staleness rule; unseen_time says it is a prediction
+        wrote = pa.anchor->write(*G, out) and pa.anchor->set_unseen_ms(*G, int(now - pa.last_seen_ms));
+    }
+    const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)
     {
         std::print("door_concept: [anchor] {}@robot vanished from the graph — forgetting it\n", pa.door_name);

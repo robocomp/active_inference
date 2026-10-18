@@ -84,6 +84,8 @@ public:
         opened_ = false;
         note_ = "started";
         step_state_.clear();
+        cross_unreachable_ = 0;
+        failed_ = false;
         last_event_ = std::format("[door-passage] {}: started", door_);
     }
     void stop()
@@ -305,6 +307,20 @@ public:
                 last_outcome_ = rc::affordance::to_string(outcome);
                 out.event = std::format("[door-passage] {}: {} ended {} (attempt {}) — waiting for it to be offered again",
                                         door_, req, rc::affordance::to_string(outcome), attempts_);
+                // ⚑ Task 9 fix round 1 — a FLAGGED decision level (controller ruling): kMaxCrossUnreachable Unreachable crosses
+                //   per passage, then the passage reports failure. Every attempt now waits on the anchor up to the cross
+                //   contract's timeout, so without a cap a door the robot cannot get through held it for ever.
+                if (step_ == Step::Cross and outcome == rc::affordance::Outcome::Unreachable
+                    and ++cross_unreachable_ >= kMaxCrossUnreachable)
+                {
+                    finish();
+                    failed_ = true;
+                    last_outcome_ = "failed";
+                    out.event = std::format("[door-passage] {}: {} ended unreachable {} times in this passage — passage FAILED "
+                                            "(the cap kMaxCrossUnreachable)", door_, req, cross_unreachable_);
+                    last_event_ = *out.event;
+                    return out;
+                }
             }
         }
         if (step_ != Step::Done and static_cast<int>(step_) > static_cast<int>(stop_after_))
@@ -343,12 +359,13 @@ public:
         std::string last_event;    ///< the latest [door-passage] transition, verbatim
         std::string last_outcome;  ///< aff_outcome of the latest failed completion ("" = none in this passage)
         bool then_affordances = false;   ///< started by a single command: hand back to the affordances when Done
+        bool failed = false;             ///< Done by the Unreachable-cross cap (kMaxCrossUnreachable), not by crossing
     };
     [[nodiscard]] View view() const
     {
         std::scoped_lock lk(m_);
         return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_,
-                .last_outcome = last_outcome_, .then_affordances = then_affordances_};
+                .last_outcome = last_outcome_, .then_affordances = then_affordances_, .failed = failed_};
     }
     [[nodiscard]] static const char* step_name(Step s)
     {
@@ -452,6 +469,10 @@ private:
     std::string step_state_;   // view()
     std::string last_event_;   // view()
     std::string last_outcome_; // view()
+    int  cross_unreachable_ = 0;   // Unreachable cross completions in this passage (kMaxCrossUnreachable)
+    bool failed_ = false;          // finished by the cap, not by crossing
+public:
+    static constexpr int kMaxCrossUnreachable = 3;   // ⚑ flagged decision level (Task 9 fix round 1)
 };
 
 }   // namespace rc

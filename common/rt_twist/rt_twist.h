@@ -139,29 +139,37 @@ struct Twist
 // rotation's own over-report, which the anchor's evidence absorbs once the clock is right), so a 290° spin left it 15°
 // and 1.1 m off, with σ 0.3° / 7 mm.
 // room_concept's SimClockMap has integrated over the sim clock since 2026-08 (room_concept/src/common_types.h); this is
-// the same estimator, shared, so no further consumer has to rediscover it.
-// rate() = Δsim / Δwall over a trailing span, re-anchored after kSimClockSpanMs so a paused or restarted simulator cannot
-// poison it for ever; 1 until a span of kSimClockMinSpanMs exists, and on real hardware (never observed). ⚑ Both spans
-// are room_concept's SimClockMap's (30 s, 0.5 s): an estimation window, not a decision level.
-inline constexpr std::int64_t kSimClockSpanMs = 30000;
-inline constexpr std::int64_t kSimClockMinSpanMs = 500;
+// the same wall→sim mapping, shared, so no further consumer has to rediscover it — by CONSECUTIVE samples:
+// sim_at(wall) maps a WALL instant onto the producer's sim clock by the last two samples: sim_last + (wall − wall_last)·r,
+// r = Δsim/Δwall between those two CONSECUTIVE samples (Task 9 fix round 1: a trailing 30 s rate kept integrating at
+// 0.94 through a PAUSED simulator, whose last twist sample still says the robot is moving; between consecutive samples a
+// pause is Δsim = 0, so nothing is integrated). A consumer integrates a twist over sim_at(t1) − sim_at(t0). Unobserved
+// (real hardware) ⇒ the identity. A restart (sim stepping back) re-anchors.
 class SimClockRate
 {
 public:
     void observe(std::int64_t wall_ms, std::int64_t sim_ms)
     {
-        if (wall_ms <= 0 or sim_ms <= 0 or wall_ms <= last_wall_) return;   // the same sample again, or out of order
-        if (first_wall_ == 0 or sim_ms < last_sim_) { first_wall_ = wall_ms; first_sim_ = sim_ms; }   // first, or a restart
-        last_wall_ = wall_ms; last_sim_ = sim_ms;
-        if (last_wall_ - first_wall_ > kSimClockSpanMs) { first_wall_ = last_wall_; first_sim_ = last_sim_; }
-        else if (const std::int64_t dw = last_wall_ - first_wall_, ds = last_sim_ - first_sim_; dw > kSimClockMinSpanMs and ds > 0)
-            rate_ = double(ds) / double(dw);
+        if (wall_ms <= 0 or sim_ms <= 0 or (n_ > 0 and wall_ms <= wall_[1])) return;   // the same sample again, or out of order
+        if (n_ > 0 and sim_ms < sim_[1]) n_ = 0;                                         // the simulator restarted
+        wall_[0] = wall_[1]; sim_[0] = sim_[1];
+        wall_[1] = wall_ms; sim_[1] = sim_ms;
+        n_ = std::min(n_ + 1, 2);
     }
-    // Δsim / Δwall: the factor that turns a wall interval into the interval a sim-second velocity must be integrated over.
-    [[nodiscard]] double rate() const { return rate_; }
+    // Δsim/Δwall between the last two samples; 1 until two exist (and on real hardware).
+    [[nodiscard]] double rate() const
+    {
+        return n_ < 2 ? 1.0 : double(sim_[1] - sim_[0]) / double(wall_[1] - wall_[0]);
+    }
+    // The producer's sim clock at a wall instant (ms). Identity when unobserved.
+    [[nodiscard]] double sim_at(std::int64_t wall_ms) const
+    {
+        if (n_ == 0) return double(wall_ms);
+        return double(sim_[1]) + double(wall_ms - wall_[1]) * rate();
+    }
 private:
-    std::int64_t first_wall_ = 0, first_sim_ = 0, last_wall_ = 0, last_sim_ = 0;
-    double rate_ = 1.0;
+    std::int64_t wall_[2] = {0, 0}, sim_[2] = {0, 0};
+    int n_ = 0;
 };
 // The robot node's (wall, sim) stamp pair of its current twist sample — only when the producer says it is SIMULATED.
 [[nodiscard]] inline std::optional<std::pair<std::int64_t, std::int64_t>> robot_twist_sim_stamps(DSR::DSRGraph &G, const DSR::Node &robot)

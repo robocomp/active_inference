@@ -94,6 +94,7 @@ public:
         float width_m = 0.f;
         bool fresh = true;                      // Task 9: false = older than kAnchorStaleMs — wait for it, never drive on it
         std::int64_t age_ms = 0;                // now − its newest stamp
+        int unseen_ms = 0;                      // fix round 1: the owner's last sighting this long ago (> 0 = PREDICTED pose)
     };
     // The anchor of a `_cross` affordance (its interaction_node_id, else the anchor latched for that same affordance
     // name): fresh, or — with accept_stale (Task 9) — the stale one it last published (fresh = false), or nullopt.
@@ -925,6 +926,10 @@ private:
     // Task 9, fix C: a SPINNING verdict on a rotation-dominant servo command is not a wedge; since when it has held.
     std::uint64_t anchor_spin_since_ms_ = 0;
     bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change
+    bool anchor_predicted_logged_ = false;                           // fix round 1: driving on a PREDICTED anchor: log on change
+    // Fix round 1: the cross's engaged / wait / spin state belongs to ONE claim — reset when the target (node, epoch)
+    // changes (resolve_target_contract) and when a claim of it is handed back (report_unreachable_if_no_route).
+    void reset_anchor_cross_state();
     rc::StallVerdict last_judged_verdict_ = rc::StallVerdict::None;  // the stall judge's last closed window
     std::uint64_t anchor_latched_id_ = 0;                           // last anchor read, kept while the cross lasts
     std::string anchor_latched_for_;                                // the cross affordance it was read for

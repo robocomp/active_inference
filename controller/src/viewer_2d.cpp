@@ -324,10 +324,15 @@ void Viewer2D::draw_anchor(const std::optional<AnchorOverlay> &a)
     };
     const Eigen::Vector2f half = 0.15f * a->normal;
     const Eigen::Vector2f c = 0.5f * (a->jamb_l + a->jamb_r);
-    line(a->jamb_l, a->jamb_r, QPen(QColor(20, 170, 60), 0.05));
-    line(a->jamb_l - half, a->jamb_l + half, QPen(QColor(170, 20, 20), 0.08));
-    line(a->jamb_r - half, a->jamb_r + half, QPen(QColor(170, 20, 20), 0.08));
-    line(c, c + 2.f * half, QPen(QColor(20, 170, 60), 0.03, Qt::DashLine));
+    // SEEN: solid green opening, red jambs. PREDICTED (door_concept carrying the last seen pose by odometry, unseen_time > 0):
+    // the same marks dashed and in lighter colours, so the view tells what is seen from what is dead-reckoned.
+    const Qt::PenStyle st = a->predicted ? Qt::DashLine : Qt::SolidLine;
+    const QColor open_c = a->predicted ? QColor(140, 210, 160) : QColor(20, 170, 60);
+    const QColor jamb_c = a->predicted ? QColor(225, 140, 140) : QColor(170, 20, 20);
+    line(a->jamb_l, a->jamb_r, QPen(open_c, 0.05, st));
+    line(a->jamb_l - half, a->jamb_l + half, QPen(jamb_c, 0.08, st));
+    line(a->jamb_r - half, a->jamb_r + half, QPen(jamb_c, 0.08, st));
+    line(c, c + 2.f * half, QPen(open_c, 0.03, Qt::DashLine));
 }
 
 void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)

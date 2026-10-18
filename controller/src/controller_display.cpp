@@ -729,7 +729,8 @@ void ControllerDisplay::present()
             const float hw = 0.5f * snap.anchor->width;
             ov = rc::Viewer2D::AnchorOverlay{.jamb_l = T * (snap.anchor->centre - hw * a),
                                          .jamb_r = T * (snap.anchor->centre + hw * a),
-                                         .normal = T.linear() * n};
+                                         .normal = T.linear() * n,
+                                         .predicted = snap.anchor->predicted};
         }
         viewer_2d_->draw_anchor(ov);
     }
