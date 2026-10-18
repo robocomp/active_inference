@@ -80,10 +80,14 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
     // Σ over the wall-frame [s,w,h]: the D-optimal score ranks which viewpoint most reduces the panel's
     // along-wall offset + size uncertainty. (No orientation entropy — the wall fixes yaw.)
     const Eigen::Matrix<float, 3, 3> S = belief.covariance_reported();   // Σ over [s,w,h]
-    // Faces of the LEAF, from its actual axes — NOT reconstructed from the wall tangent. The old code
-    // took its normals from belief.yaw(), which is the wall's, so once a leaf swings it would send the
-    // robot to stand square to the WALL rather than to the panel it is trying to observe.
-    const door::LeafPose L = belief.leaf_pose();
+    // ★ THE DOORWAY, NOT THE SWUNG LEAF (2026-10-18, user). The quantities this view is meant to resolve —
+    //   [s,w,h], the along-wall offset, width and height — are the APERTURE's, and the aperture is fixed in
+    //   the wall. Aiming at the leaf as currently fitted tied the viewpoint to phi, the one DOF that is often
+    //   unresolved: live, door_1's leaf read 60-106° ("hinge unresolved"), so the viewpoint was planned off a
+    //   panel turned ~60° and landed 4.6 m out to the side, a view from which [s,w,h] never improved and the
+    //   offer was taken again and again. The doorway is the leaf at phi = 0 — the frame, square to the wall.
+    //   (This reverses the 2026-08 choice to plan on the leaf's own axes, which was made while phi was pinned.)
+    const door::LeafPose L = door::leaf_pose(belief.aperture(), door::LeafState{});
     const Eigen::Vector2f ctr = L.centre_xy;
     // Face order, preserved exactly from the local enumeration this replaced:
     //   0 = +x free-edge side · 1 = -x hinge side · 2 = +y front panel · 3 = -y back panel
