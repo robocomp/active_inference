@@ -54,13 +54,14 @@ std::optional<Anchor> Anchor::create(DSR::DSRGraph& G, std::uint64_t object_id, 
     if (not obj.has_value() or not aff.has_value() or not robot.has_value())
         return std::nullopt;
 
-    // One anchor per object. A same-named node is a copy a previous execution left behind (or a
-    // crashed run's, if the sweep has not reached it yet): reclaim it. Anything else is not ours.
-    const std::string name = obj->name() + "@robot";
+    // One anchor per object. A same-named node of OURS is a copy a previous execution left behind (or a
+    // crashed run's, if the sweep has not reached it yet — possibly with no RT edge): reclaim it.
+    // Anything else, including another agent's copy, is not ours to delete.
+    const std::string name = obj->name() + std::string(kAnchorSuffix);
     if (const auto old = G.get_node(name); old.has_value())
     {
-        if (not is_anchor(G, old.value())) return std::nullopt;
-        G.delete_node(old->id());
+        if (not is_own_anchor_node(G, old.value(), agent_id)) return std::nullopt;
+        if (not G.delete_node(old->id())) return std::nullopt;
     }
 
     // Shallow copy: identity and size, nothing the owner's belief keeps (the copy is a pose handle).
@@ -163,9 +164,7 @@ void sweep_stale(DSR::DSRGraph& G, int agent_id)
     std::vector<std::uint64_t> gone;
     for (const auto& n : G.get_nodes_by_type("object"))
     {
-        if (not is_anchor(G, n)) continue;
-        const auto owner = G.get_attrib_by_name<agent_id_att>(n);
-        if (not owner.has_value() or owner.value() != static_cast<std::uint32_t>(agent_id)) continue;
+        if (not is_own_anchor_node(G, n, agent_id)) continue;   // edge-independent: parentless leaks too
         if (G.delete_node(n.id())) gone.push_back(n.id());
     }
     if (gone.empty()) return;

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 #include <dsr/api/dsr_api.h>
@@ -35,17 +36,34 @@
 namespace rc::interaction
 {
 
-// An anchor: a node of type "object" that carries `interaction_node_id` (its original) and whose RT
-// parent is a node of type "robot". Every one of the three is needed: the robot also parents its
-// sensor mounts and `body` (all with `parent`), and affordances carry `interaction_node_id` too.
+inline constexpr std::string_view kAnchorSuffix = "@robot";
+
+// READER predicate. An anchor: a node of type "object" that carries `interaction_node_id` (its
+// original) and EITHER hangs from a node of type "robot" OR is named "<original>@robot". The type and
+// the attribute are both needed: the robot also parents its sensor mounts and `body` (all with
+// `parent`), and affordances carry `interaction_node_id` too (but are not type "object"). The name arm
+// covers the window between insert_node and the first RT write, and a copy whose edge never landed:
+// such a node has no RT parent yet, and a reader must still not take it for an object.
 [[nodiscard]] inline bool is_anchor(DSR::DSRGraph& G, const DSR::Node& n)
 {
     if (n.type() != "object") return false;
     if (not G.get_attrib_by_name<interaction_node_id_att>(n).has_value()) return false;
+    if (n.name().ends_with(kAnchorSuffix)) return true;
     const auto p = G.get_attrib_by_name<parent_att>(n);
     if (not p.has_value()) return false;
     const auto pn = G.get_node(p.value());
     return pn.has_value() and pn->type() == "robot";
+}
+
+// OWNER predicate, edge-independent: this agent's copy, whether or not its RT edge exists. Used to
+// reclaim (create, sweep_stale) — a copy that leaked before its edge was written must still be ours
+// to delete, or the object could never be anchored again.
+[[nodiscard]] inline bool is_own_anchor_node(DSR::DSRGraph& G, const DSR::Node& n, int agent_id)
+{
+    if (n.type() != "object" or not n.name().ends_with(kAnchorSuffix)) return false;
+    if (not G.get_attrib_by_name<interaction_node_id_att>(n).has_value()) return false;
+    const auto owner = G.get_attrib_by_name<agent_id_att>(n);
+    return owner.has_value() and owner.value() == static_cast<std::uint32_t>(agent_id);
 }
 
 class Anchor
