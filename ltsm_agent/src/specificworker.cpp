@@ -40,6 +40,7 @@ DSR::GraphViewer *graph_view_of(const std::shared_ptr<DSR::DSRViewer> &viewer)
 
 #include <cmath>
 #include <format>
+#include <ranges>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
 {
@@ -223,6 +224,10 @@ void SpecificWorker::initialize()
     // The memory view re-lays itself out (twopi) on every node birth/death, from here on -- so the seed
     // below is laid out too.
     setup_memory_layout();
+    if (cfgr.b("Topology.enabled", true,
+            "draw memory as a topological map (rooms placed by their passages' seams) in a dock; display only"))
+        setup_topology_view(cfgr.s("Topology.anchor_room", "room_1",
+                "the room whose frame is the Topology map's global frame (live name; memory's r<idx>_ prefix is matched)"));
 
     if (G_dsr)
         evictor = std::make_unique<ltsm::RoomEviction>(G_dsr, G_ltsm);
@@ -1088,6 +1093,53 @@ void SpecificWorker::setup_memory_layout()
             },
             Qt::QueuedConnection);
     memory_layout_timer_.start(kLayoutCoalesceMs);   // the seeded root / a restored generation
+}
+
+void SpecificWorker::setup_topology_view(const std::string &anchor_room)
+{
+    const auto it = graph_viewers.find("ltsm");
+    if (it == graph_viewers.end() or not G_ltsm) return;
+    topology_view_ = new TopologyView(G_ltsm, [this]() { return topology_robot(); });
+    topology_view_->set_anchor(anchor_room);
+    it->second->add_custom_widget_to_dock("Topology", topology_view_);
+
+    // Births and deaths: the relayout timer already coalesces them. Everything else: a slow poll, so no
+    // further DSR signal is connected for a display.
+    connect(&memory_layout_timer_, &QTimer::timeout, topology_view_, [this]() { topology_view_->rebuild(); });
+    static constexpr int kTopologyRefreshMs = 1000;   // UI refresh period, not a model constant
+    connect(&topology_timer_, &QTimer::timeout, topology_view_, [this]() { topology_view_->rebuild(); });
+    topology_timer_.start(kTopologyRefreshMs);
+    topology_view_->rebuild();
+}
+
+std::optional<TopologyView::Robot> SpecificWorker::topology_robot() const
+{
+    // The room the live `current` edge points at, by its MEMORY name, and the robot's pose in it. Looked up, never
+    // derived through evictor->memory_prefix(): that memoises (and may MINT) a room index, and a display must not
+    // decide the numbering the seed and the eviction share. Memory names a room r<room_id>_<live name>.
+    if (not G_dsr or not G_ltsm) return std::nullopt;
+    const auto room_id = rc::room::current_edge_room(*G_dsr);
+    if (not room_id.has_value()) return std::nullopt;
+    const auto room = G_dsr->get_node(room_id.value());
+    if (not room.has_value()) return std::nullopt;
+    TopologyView::Robot out;
+    for (const auto &r : G_ltsm->get_nodes_by_type("room"))
+        if (const auto i = G_ltsm->get_attrib_by_name<room_id_att>(r);
+            i.has_value() and r.name() == std::format("r{}_{}", i.value(), room->name()))
+            out.mem_room = r.name();
+    if (out.mem_room.empty()) return std::nullopt;   // not remembered yet: nothing to highlight
+    const auto px = G_dsr->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
+    const auto py = G_dsr->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
+    if (px.has_value() and py.has_value() and px->get().size() == py->get().size())
+        for (const auto &[x, y] : std::views::zip(px->get(), py->get())) out.live_outline.emplace_back(x, y);
+    for (const auto &e : G_dsr->get_edges_by_type("current"))
+    {
+        if (e.to() != room_id.value()) continue;
+        if (const auto robot = G_dsr->get_node(e.from()); robot.has_value())
+            out.pose = G_dsr->get_inner_eigen_api()->get_transformation_matrix(room->name(), robot->name());
+        break;
+    }
+    return out;
 }
 
 void SpecificWorker::restore_graph_zoom()

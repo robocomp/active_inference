@@ -38,6 +38,14 @@ namespace ltsm
 /// A door in this fleet: an `object` with object_subtype "door" (or, belt and braces, named door_*).
 bool is_door(DSR::DSRGraph &g, const DSR::Node &n);
 
+/// True when memory node `node_id` is `room` or hangs (through parent_att) below it.
+bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string &room);
+
+/// T(room_to <- room_from) composed through `passage`'s two door faces in `mem` (one face per room); nullopt unless
+/// the passage has a face in each room. Free so a read-only consumer (the topology view) needs no RoomEviction.
+std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage,
+                                               const std::string &room_to, const std::string &room_from);
+
 /// The two rooms the robot is holding at the instant of the hand-over.
 struct Candidate
 {

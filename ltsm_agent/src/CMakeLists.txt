@@ -6,6 +6,8 @@ LIST(APPEND SOURCES
   ../src/passage_harvest.cpp
   ../src/passage_live.cpp
   ../src/room_recall.cpp
+  ../src/topology_layout.cpp
+  ../src/topology_view.cpp
 )
 
 # Headers set
@@ -16,6 +18,8 @@ LIST(APPEND HEADERS
   ../src/passage_harvest.h
   ../src/passage_live.h
   ../src/room_recall.h
+  ../src/topology_layout.h
+  ../src/topology_view.h
 )
 
 LIST(APPEND LIBS ${LIBS})

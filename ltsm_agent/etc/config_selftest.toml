@@ -30,7 +30,7 @@ name = "ltsm_agent"
 configFile = ""
 domain     = 0
 tree       = false
-graph      = true
+graph      = false   # no WM window: ltsm shows only its memory graph + the Topology dock
 2d         = false
 
 [Agent.ltsm]

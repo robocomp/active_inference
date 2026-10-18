@@ -22,7 +22,7 @@ name = "ltsm_agent"
 configFile = "etc/stage_two_rooms.json"
 domain     = 3
 tree       = false
-graph      = true
+graph      = false   # no WM window: ltsm shows only its memory graph + the Topology dock
 2d         = false
 
 [Agent.ltsm]

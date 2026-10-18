@@ -35,6 +35,7 @@
 #include "memory_store.h"
 #include "passage_harvest.h"
 #include "passage_live.h"
+#include "topology_view.h"
 
 #include <memory>
 #include <unordered_map>
@@ -193,6 +194,17 @@ private:
 	QTimer memory_layout_timer_;
 	std::unordered_set<std::uint64_t> memory_known_ids_;
 	void setup_memory_layout();
+
+	// ── Topology dock (src/topology_view.h) ───────────────────────────────────────────────────
+	// Memory drawn as a MAP: room outlines placed through the passages' seams, passages through their
+	// doors, the robot in the current room. Display only. Redrawn on the memory relayout (node birth or
+	// death) and at 1 Hz for attribute churn (outline refinement, passage Betas, the robot's pose).
+	// [Topology] enabled, default ON -- it writes nothing to either graph. [Topology] anchor_room (default
+	// "room_1") is the room whose frame is the map's global frame; every reachable room is drawn in it.
+	TopologyView *topology_view_ = nullptr;   ///< owned by its dock
+	QTimer topology_timer_;
+	void setup_topology_view(const std::string &anchor_room);
+	std::optional<TopologyView::Robot> topology_robot() const;
 
 	// ── Live passage (src/passage_live.h) ─────────────────────────────────────────────────────
 	// The proto-room's entry door matched to the current room's door by one live `passage_<n>`.

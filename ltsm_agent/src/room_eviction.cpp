@@ -569,23 +569,37 @@ Outcome RoomEviction::evict(const Candidate &cand)
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
-std::optional<Mat::RTMat> RoomEviction::seam_through_passage(const std::string &passage, const std::string &room_to,
-                                                             const std::string &room_from) const
+bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string &room)
+{
+    const auto r = mem.get_node(room);
+    if (not r.has_value()) return false;
+    for (auto n = mem.get_node(node_id); n.has_value();)
+    {
+        if (n->id() == r->id()) return true;
+        const auto p = mem.get_attrib_by_name<parent_att>(n.value());
+        if (not p.has_value() or p.value() == n->id()) return false;
+        n = mem.get_node(p.value());
+    }
+    return false;
+}
+
+std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage, const std::string &room_to,
+                                               const std::string &room_from)
 {
     // The two faces are ONE physical hole (door_concept births the entry mirror at the exact pose of its source), so
     // T(face_to <- face_from) = I and   T(to <- from) = T(to <- face_to) · T(face_from <- from).
-    const auto dw = mem_->get_node(passage);
+    const auto dw = mem.get_node(passage);
     if (not dw.has_value()) return std::nullopt;
-    auto ie = mem_->get_inner_eigen_api();
+    auto ie = mem.get_inner_eigen_api();
     std::optional<Mat::RTMat> to_face, face_from;
     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dw.value(), "match"))
     {
-        const auto f = mem_->get_node(e.to());
+        const auto f = mem.get_node(e.to());
         if (not f.has_value()) continue;
         // Which room a face belongs to: the one that composes to it (its RT ancestor). Siblings under root also
         // "compose" through root's identities, so ask for the room the face is a DESCENDANT of.
-        if (is_descendant(f->id(), room_to))   to_face   = ie->get_transformation_matrix(room_to, f->name());
-        if (is_descendant(f->id(), room_from)) if (auto t = ie->get_transformation_matrix(room_from, f->name()); t.has_value())
+        if (is_descendant(mem, f->id(), room_to))   to_face   = ie->get_transformation_matrix(room_to, f->name());
+        if (is_descendant(mem, f->id(), room_from)) if (auto t = ie->get_transformation_matrix(room_from, f->name()); t.has_value())
                                                     face_from = t->inverse();
     }
     if (not to_face.has_value() or not face_from.has_value()) return std::nullopt;
@@ -595,10 +609,10 @@ std::optional<Mat::RTMat> RoomEviction::seam_through_passage(const std::string &
     //   Rooms do not overlap: if room_from's outline lands on room_to's side of the face, the turned face is the one.
     const auto centroid = [&](const std::string &room) -> std::optional<Eigen::Vector2d>
     {
-        const auto r = mem_->get_node(room);
+        const auto r = mem.get_node(room);
         if (not r.has_value()) return std::nullopt;
-        const auto px = mem_->get_attrib_by_name<delimiting_polygon_x_att>(r.value());
-        const auto py = mem_->get_attrib_by_name<delimiting_polygon_y_att>(r.value());
+        const auto px = mem.get_attrib_by_name<delimiting_polygon_x_att>(r.value());
+        const auto py = mem.get_attrib_by_name<delimiting_polygon_y_att>(r.value());
         if (not px.has_value() or not py.has_value() or px->get().empty() or px->get().size() != py->get().size())
             return std::nullopt;
         Eigen::Vector2d c = Eigen::Vector2d::Zero();
@@ -620,18 +634,15 @@ std::optional<Mat::RTMat> RoomEviction::seam_through_passage(const std::string &
     return seam;
 }
 
+std::optional<Mat::RTMat> RoomEviction::seam_through_passage(const std::string &passage, const std::string &room_to,
+                                                             const std::string &room_from) const
+{
+    return ltsm::seam_through_passage(*mem_, passage, room_to, room_from);
+}
+
 bool RoomEviction::is_descendant(std::uint64_t node_id, const std::string &room) const
 {
-    const auto r = mem_->get_node(room);
-    if (not r.has_value()) return false;
-    for (auto n = mem_->get_node(node_id); n.has_value();)
-    {
-        if (n->id() == r->id()) return true;
-        const auto p = mem_->get_attrib_by_name<parent_att>(n.value());
-        if (not p.has_value() or p.value() == n->id()) return false;
-        n = mem_->get_node(p.value());
-    }
-    return false;
+    return ltsm::is_descendant(*mem_, node_id, room);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
