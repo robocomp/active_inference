@@ -8,6 +8,11 @@
 //   shut_door                    — a flush leaf: p_open < 0.1, depth/yaw corrected, lateral σ ≥ 0.8 × prior's
 //   misplaced_mask_downweighted  — mask centroid 0.6 m off the opening: posterior within 0.08 m, camera_nis > 9
 //   no_data_is_prior             — no rays and no mask return the prior exactly
+// Fix round 1 (review):
+//   open/shut_prior_depth_{+0.35,+0.30,-0.30} — a depth prior beyond the old short-ray gate's reach: same bounds as
+//                                  above, and the shut anchor does not run along the wall (|Δx| < 0.1 m)
+//   single_frame_not_overconfident — depth and lateral σ ≥ 0.015 m after one frame (common mode marginalised)
+//   second_opening_does_not_capture — a second 1 m opening 2.0 m along the same wall, prior 0.45 m toward it
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
 //   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O1 -fPIC -I/usr/include/eigen3 -Isrc -I../common
@@ -45,11 +50,17 @@ static void box(std::vector<Seg>& s, float x0, float x1, float y0, float y1)
     s.push_back({{x1, y1}, {x0, y1}}); s.push_back({{x0, y1}, {x0, y0}});
 }
 enum class Leaf { none, side90, flush };
-static std::vector<Seg> scene(Leaf leaf)
+static std::vector<Seg> scene(Leaf leaf, bool second_opening = false)
 {
     std::vector<Seg> s;
     box(s, -4.f, -0.5f * W, D - 0.5f * T, D + 0.5f * T);      // wall, left of the opening
-    box(s, 0.5f * W, 4.f, D - 0.5f * T, D + 0.5f * T);        // wall, right of the opening
+    if (second_opening)                                       // a second 1 m opening centred 2.0 m along the wall
+    {
+        box(s, 0.5f * W, 1.5f, D - 0.5f * T, D + 0.5f * T);
+        box(s, 2.5f, 4.f, D - 0.5f * T, D + 0.5f * T);
+    }
+    else
+        box(s, 0.5f * W, 4.f, D - 0.5f * T, D + 0.5f * T);    // wall, right of the opening
     box(s, -4.f, 4.f, D + 4.f, D + 4.1f);                     // the far room's wall
     if (leaf == Leaf::side90)   // hinged at the right jamb's near face, swung 90 deg toward the robot
         box(s, 0.5f * W - 0.04f, 0.5f * W, D - 0.5f * T - W, D - 0.5f * T);
@@ -67,9 +78,9 @@ static float ray_seg(const V2& o, const V2& u, const Seg& sg)
     const float s = (w.x() * u.y() - w.y() * u.x()) / den;
     return (t > 0.f and s >= 0.f and s <= 1.f) ? t : -1.f;
 }
-static std::vector<V3> cast(Leaf leaf, unsigned seed = 7)
+static std::vector<V3> cast(Leaf leaf, unsigned seed = 7, bool second_opening = false)
 {
-    const auto segs = scene(leaf);
+    const auto segs = scene(leaf, second_opening);
     std::mt19937 rng(seed);
     std::normal_distribution<float> noise(0.f, 0.02f);
     std::vector<V3> pts;
@@ -94,10 +105,10 @@ static std::vector<V3> mask(float centre, int n = 200, unsigned seed = 3)
     for (int i = 0; i < n; ++i) m.emplace_back(centre + ux(rng), D, uz(rng));
     return m;
 }
-static RelPose prior_offset()
+static RelPose prior_offset(float dy = -0.10f)
 {
     RelPose p;
-    p.x = V3(0.45f, D - 0.10f, 0.05f);                          // 0.45 m to the side, 10 cm short, 3 deg off
+    p.x = V3(0.45f, D + dy, 0.05f);                             // 0.45 m to the side, dy in depth (default 10 cm short), 3 deg off
     p.P = V3(0.5f * 0.5f, 0.2f * 0.2f, 0.1f * 0.1f).asDiagonal();
     p.stamp_ms = 1234;
     return p;
@@ -165,6 +176,49 @@ int main()
                    ev.p_open, ev.camera_nis);
         check((post.x.head<2>() - V2(0.f, D)).norm() < 0.08f, "posterior within 0.08 m of the truth");
         check(ev.camera_nis > 9.f, "camera_nis > 9");
+    }
+
+    // ─── fix round 1: a depth prior beyond the gate's old reach (was: every wall return dropped as "short") ─────
+    for (const float dy : {+0.35f, +0.30f, -0.30f})
+    {
+        std::print("open_prior_depth_{:+.2f}\n", dy);
+        {
+            const auto [post, ev] = update_door_anchor(prior_offset(dy), W, T, kOrigin, open_rays, {});
+            std::print("    x=({:.3f},{:.3f},{:.3f}) through={} blocked={} short={} p_open={:.3f}\n", post.x.x(), post.x.y(),
+                       post.x.z(), ev.n_through, ev.n_blocked, ev.n_short, ev.p_open);
+            check(std::abs(post.x.x()) < 0.05f, "lateral error < 0.05 m");
+            check(std::abs(post.x.y() - D) < 0.02f, "depth error < 2 cm");
+            check(std::abs(post.x.z()) < 0.01f, "yaw error < 0.01 rad");
+            check(ev.p_open > 0.9f, "p_open > 0.9");
+        }
+        std::print("shut_prior_depth_{:+.2f}\n", dy);
+        {
+            const RelPose pr = prior_offset(dy);
+            const auto [post, ev] = update_door_anchor(pr, W, T, kOrigin, cast(Leaf::flush), {});
+            std::print("    x=({:.3f},{:.3f},{:.3f}) σ=({:.3f},{:.3f},{:.3f}) blocked={} short={} p_open={:.3f}\n", post.x.x(),
+                       post.x.y(), post.x.z(), std::sqrt(post.P(0, 0)), std::sqrt(post.P(1, 1)), std::sqrt(post.P(2, 2)),
+                       ev.n_blocked, ev.n_short, ev.p_open);
+            check(ev.p_open < 0.1f, "p_open < 0.1");
+            check(std::abs(post.x.y() - D) < 0.02f, "depth corrected (< 2 cm)");
+            check(std::abs(post.x.z()) < 0.01f, "yaw corrected (< 0.01 rad)");
+            check(std::sqrt(post.P(0, 0)) >= 0.8f * std::sqrt(pr.P(0, 0)), "lateral σ ≥ 0.8 × prior's");
+            check(std::abs(post.x.x() - pr.x.x()) < 0.1f, "does not run along the wall (|Δx| < 0.1 m)");
+        }
+    }
+
+    std::print("single_frame_not_overconfident\n");
+    {
+        const auto [post, ev] = update_door_anchor(prior_offset(), W, T, kOrigin, open_rays, {});
+        std::print("    σ=({:.4f},{:.4f},{:.4f})\n", std::sqrt(post.P(0, 0)), std::sqrt(post.P(1, 1)), std::sqrt(post.P(2, 2)));
+        check(std::sqrt(post.P(1, 1)) >= 0.015f, "depth σ ≥ 0.015 m");
+        check(std::sqrt(post.P(0, 0)) >= 0.015f, "lateral σ ≥ 0.015 m");
+    }
+
+    std::print("second_opening_does_not_capture\n");
+    {
+        const auto [post, ev] = update_door_anchor(prior_offset(), W, T, kOrigin, cast(Leaf::none, 7, true), {});
+        std::print("    x=({:.3f},{:.3f},{:.3f}) p_open={:.3f}\n", post.x.x(), post.x.y(), post.x.z(), ev.p_open);
+        check((post.x.head<2>() - V2(0.f, D)).norm() < 0.05f, "posterior within 0.05 m of the true opening");
     }
 
     std::print("no_data_is_prior\n");
