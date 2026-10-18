@@ -220,7 +220,7 @@ SwingClearanceM   = 0.20     # margin on top of the swept arc and the body half-
 # believing the door open while it is still moving. DoorControl.idsl does not advertise the rate, so the
 # duplication is forced — advertising it is the real fix.
 ActuationSwingRate = 0.5
-CrossStandoffM    = 1.20     # how far PAST the aperture the cross target sits
+CrossStandoffM    = 2.00     # how far PAST the aperture the cross target sits. 2026-10-18 (user): 1.2 left the robot in the doorway region seeing half of each room; 2.0 ends inside, where it localises in the room it entered
 CrossClearanceM   = 0.80     # distance past the aperture plane that counts as fully through
 # ★THE ROBOT'S OWN BODY, in the one direction in which a doorway closes. Shadow's lateral half-width
 # measured off the robocomp meshes is 0.2938 m per side (0.588 m across); the hull compiled into

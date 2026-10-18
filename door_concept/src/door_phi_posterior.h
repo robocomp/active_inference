@@ -97,8 +97,18 @@ inline DoorwayRays select_doorway_rays(const Aperture& ap, const Eigen::Vector3f
         if (lateral > 0.5f * ap.w + std::max(0.0f, lat_half) + 0.40f or perp > reach) continue;
         const bool stopped_near = (p.head<2>() - c).norm() <= reach;
         if (stopped_near and (p.z() < z_lo or p.z() > z_hi)) continue;   // floor / above the lintel
-        rays.endpoints.push_back(p);
         if (std::abs(ap.across_u().dot(p.head<2>() - c)) > 0.10f) ++out.off_plane;
+        // ★ A RAY THAT NEVER REACHED THE DOORWAY TESTED NOTHING ABOUT ITS LEAF (2026-10-18, user: "for an open door
+        //   the LiDAR has to go through, and vice versa"). OPEN is shown by returns BEYOND the opening, SHUT by returns
+        //   ON the leaf plane; a return short of the plane hit something in front of the door. Kept in, such returns
+        //   let a leaf swung toward the robot "explain" the doorway recess's side walls: live try59, the robot 3.5 m
+        //   away saw 0 returns on the shut leaf and ~190 short ones on the hinge side, and phi went 0.00 → 1.69 rad
+        //   (σ 0.045) on a CLOSED door — no ray had reached the opening to say it was blocked. Kept: returns that reach
+        //   the plane, within 3σ of range noise plus half the wall's depth.
+        const float s_o = ap.across_u().dot(o2 - c), s_p = ap.across_u().dot(p.head<2>() - c);
+        const float tol = 3.0f * 0.05f + 0.5f * std::max(0.0f, ap.thickness);
+        if (s_o != 0.0f and std::copysign(1.0f, s_o) * s_p > tol) continue;   // ended on the robot's side, short of it
+        rays.endpoints.push_back(p);
     }
     rays.precision   = std::max(1e-3f, precision);
     rays.max_range_m = 8.0f;
