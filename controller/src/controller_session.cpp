@@ -227,8 +227,15 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         {
             std::string why, mesh_path;
             const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+            // ★ The mesh yaw is a property of the ASSET (config.toml RobotMeshYawDeg = 90 is P3Bot's: its proto wraps the
+            //   machine in Rz(+90)). Shadow's shadow.obj is ALREADY in the robot frame — ROBOT_GEOMETRY.md: x exactly
+            //   symmetric ±0.2420, y −0.2306…+0.2471 with the asymmetry at the real front — and load_robot_body never
+            //   applied the knob to it (Shadow keeps the compiled hull). try81 read it with the P3Bot +90 and swapped the
+            //   axes (front 0.2420, |x| 0.2472). So Shadow's outline is read at 0.
+            const bool asset_is_robot_frame = world_model.graph_state().robot_name == "Shadow";
+            const float mesh_yaw = asset_is_robot_frame ? 0.f : (params_ ? params_->robot_mesh_yaw_deg : 0.f);
             const auto mesh = rc::load_robot_mesh_outline(*world_model.graph(), world_model.graph_state().robot_id,
-                                                          params_ ? params_->robot_mesh_yaw_deg : 0.f, why, mesh_path);
+                                                          mesh_yaw, why, mesh_path);
             const auto &hull = approach_body_.polygon();
             const std::vector<Eigen::Vector2f> no_mesh;
             const auto &m = mesh.has_value() ? mesh->polygon() : no_mesh;
@@ -240,9 +247,9 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             const auto side = [](const std::vector<Eigen::Vector2f> &p)
             { float x = 0.f; for (const auto &v : p) x = std::max(x, std::abs(v.x())); return x; };
             if (mesh.has_value())
-                std::println("[returns] body: planning hull front y {:.4f} |x| {:.4f}; mesh '{}' front y {:.4f} |x| {:.4f}; RETURNS body "
+                std::println("[returns] body: planning hull front y {:.4f} |x| {:.4f}; mesh '{}' (yaw {:.0f} deg) front y {:.4f} |x| {:.4f}; RETURNS body "
                              "front {:.4f} |x| {:.4f}; SELF footprint (mesh ⊕ sigma_r {:.3f}) front {:.4f} |x| {:.4f}",
-                             front(hull), side(hull), mesh_path, front(m), side(m), front(returns_body_), side(returns_body_),
+                             front(hull), side(hull), mesh_path, mesh_yaw, front(m), side(m), front(returns_body_), side(returns_body_),
                              sigma, front(self_body_), side(self_body_));
             else
                 std::println("[returns] body: NO MESH OUTLINE ({}) — the returns net uses the planning hull alone (front y {:.4f}); "

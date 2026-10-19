@@ -399,6 +399,15 @@ int main()
                          "self front {:.4f} |x| {:.4f}", front(body), side(body), front(mesh->polygon()), side(mesh->polygon()),
                          front(ret_body), side(ret_body), front(self_fp), side(self_fp));
             CHECK(front(mesh->polygon()) > front(body) + 0.015f);   // the hull is short at the front
+            // try81: the outline was read with P3Bot's +90 deg mesh yaw and came out with its axes swapped. shadow.obj is
+            // in the robot frame (x right, y forward): its front (0.2472) exceeds its half-width (0.2420) at yaw 0, and a
+            // +90 read inverts that — the signature of the swap.
+            CHECK(front(mesh->polygon()) > side(mesh->polygon()));
+            {
+                rc::RobotFootprint::MeshReport rep90;
+                const auto m90 = rc::RobotFootprint::from_obj("../robot_concept/meshes/shadow.obj", 1.5707963f, rep90);
+                CHECK(m90.has_value() and front(m90->polygon()) < side(m90->polygon()));
+            }
             CHECK(side(self_fp) < side(body) + 0.005f);             // the self footprint does not eat the sides
             // The two front-centre returns logged in try78/try80 are SELF now. The try79 one at the front-RIGHT corner
             // (+0.252, +0.236) is NOT: it is 1.1 cm outside even the mesh ⊕ σ_r and ~6 cm outside the STL the simulator
