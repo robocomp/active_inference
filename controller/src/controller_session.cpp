@@ -3174,6 +3174,7 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), approach_body_.polygon(), lr.sigma, lr.reach);
     if (not r.has_value()) return lr;
     lr.r = std::move(*r);
+    lr.capture_self = obstacle_tracker.capture_self_dropped();
     lr.valid = true;
     return lr;
 }
@@ -3192,6 +3193,8 @@ void ControllerSession::log_returns_census(const char *when, const LiveReturns &
     // try76: the first census printed "0 / 0 / 0, nearest -1" both parked and at the cross's first cycle — read as a blind
     // net, while the same run's binding lines showed 3–4 returns near the body. The near field (reach) was simply empty
     // there, and the line did not say so. Every stage is counted now, and the nearest return at ANY range is given.
+    std::println("[returns] {}: {} returns dropped as the robot AT CAPTURE (rigid robot frame, obstacle tracker)", when,
+                 lr.capture_self);
     std::println("[returns] {}: cloud {} pts ({} non-finite), {} beyond reach {:.2f} m, {} inside the hull (the body itself), "
                  "{} kept near the body ({} within sigma_r {:.3f} m OUTSIDE the hull: contact — or a body part the hull misses); "
                  "nearest kept {:.3f} m from the hull at {:+.0f} deg; nearest at any range {:.3f} m from the hull at {:+.0f} deg "
@@ -3481,6 +3484,18 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         if (lin > v_lidar) { adv_mps *= v_lidar / lin; side_mps *= v_lidar / lin; }
     }
     const bool had_motion = adv_mps != 0.f or side_mps != 0.f or rot_rps != 0.f;
+    // Fix round 3, item 4 (try77: a single band return in open space capped the cross to 0 seven times): the FIRST band
+    // return of each cross, with its place on the body and the base's motion — a body part the hull misses sits at a fixed
+    // body position whatever the motion; a lag artefact moves with |ω|.
+    if (not returns.r.band_points.empty() and anchor_band_logged_for_ != anchor_latched_for_)
+    {
+        anchor_band_logged_for_ = anchor_latched_for_;
+        for (const auto &q : returns.r.band_points)
+            std::println("[returns] cross on {}: FIRST return in the contact band — body frame ({:+.3f}, {:+.3f}) m, bearing {:+.0f} deg "
+                         "(0 fwd, + right), {:.3f} m outside the hull; base v {:.3f} m/s, w {:+.3f} rad/s; {} dropped as the robot "
+                         "at capture", a.name, q.x(), q.y(), std::atan2(q.x(), q.y()) * 57.29578f,
+                         rc::anchor_signed_distance(body, q), base_speed_lin_, base_speed_ang_, returns.capture_self);
+    }
     const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
     if (const bool binding = cap.bound_lin and cap.v_lim < v_field; binding != anchor_returns_binding_logged_)
     {

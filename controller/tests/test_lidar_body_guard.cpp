@@ -276,6 +276,68 @@ int main()
         }
     }
 
+    // 10. Fix round 3 (try77) — LAG: the buffer is room-frame and is read on the CURRENT pose. A robot turning CW at 1 rad/s,
+    //     its own front-face returns captured 80 ms ago: re-expressed on the current pose they land OUTSIDE the front face,
+    //     in the contact band, and stop the robot (the old path). Dropped at capture in the rigid robot frame
+    //     (rc::lidar_capture_is_self, the obstacle tracker's converter) they never reach the buffer: no contact. A real jamb
+    //     2 cm outside the hull NOW, on the turn's side, is still contact.
+    {
+        ControllerRobotPose cap_pose, now_pose;
+        cap_pose.pos = now_pose.pos = {-4.566f, 9.53f};
+        cap_pose.theta = 1.2f;
+        now_pose.theta = 1.2f - 1.0f * 0.080f;   // CW at 1 rad/s for 80 ms
+        const Eigen::Affine2f T_cap = cap_pose.as_transform(), T_now = now_pose.as_transform();
+        const std::vector<Eigen::Vector2f> self_cap{{0.10f, 0.225f}, {0.0f, 0.226f}, {-0.10f, 0.225f}};   // front face, inside
+        for (const auto& q : self_cap) CHECK(rc::lidar_capture_is_self(body, fp.circumscribed_radius(), q));
+        // The jamb, 2 cm ahead of the front face in the CURRENT frame (the turn swung the face toward it since capture).
+        const Eigen::Vector2f jamb_now(0.05f, 0.2299f + 0.02f);
+        const Eigen::Vector2f jamb_room = T_now * jamb_now;
+        const Eigen::Vector2f jamb_cap = T_cap.inverse() * jamb_room;
+        CHECK(not rc::lidar_capture_is_self(body, fp.circumscribed_radius(), jamb_cap));   // a real return survives capture
+        const auto converter = [](rc::RawLidarPointVectors&& in, rc::LidarPointVectors& out)
+        { auto& [x, y, z] = out; x = std::move(in.xs); y = std::move(in.ys); z = std::move(in.zs); };
+        const auto sweep = [&](bool capture_filter, bool with_jamb)
+        {
+            rc::RawLidarPointVectors raw;
+            auto add = [&](const Eigen::Vector2f& q_cap)
+            {
+                if (capture_filter and rc::lidar_capture_is_self(body, fp.circumscribed_radius(), q_cap)) return;
+                const Eigen::Vector2f w = T_cap * q_cap;   // placed with the CAPTURE pose, as the tracker does
+                raw.xs.push_back(w.x()); raw.ys.push_back(w.y()); raw.zs.push_back(0.9f);
+            };
+            for (const auto& q : self_cap) add(q);
+            if (with_jamb) add(jamb_cap);
+            rc::LidarPointBuffer buf{5};
+            const int n = int(raw.xs.size());
+            buf.put<0>(std::move(raw), 1000, converter);
+            std::optional<rc::LidarGuardReturns> r;
+            for (int k = 0; k < 200; ++k)
+            {
+                r = rc::lidar_guard_returns_from_buffer(buf, T_now, body, kSigma, 0.436f);   // read on the CURRENT pose
+                if (r.has_value() and r->n_read == n) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return r;
+        };
+        const auto old_path = sweep(false, false);
+        const auto new_path = sweep(true, false);
+        const auto new_jamb = sweep(true, true);
+        CHECK(old_path.has_value() and new_path.has_value() and new_jamb.has_value());
+        if (old_path.has_value() and new_path.has_value() and new_jamb.has_value())
+        {
+            const float v_old = rc::lidar_return_speed_limit(old_path->obstacles, kFwd, body, kMargin, kAdec, kVmax);
+            const float v_new = rc::lidar_return_speed_limit(new_path->obstacles, kFwd, body, kMargin, kAdec, kVmax);
+            const float v_jamb = rc::lidar_return_speed_limit(new_jamb->obstacles, kFwd, body, kMargin, kAdec, kVmax);
+            std::println("  lag, CW 1 rad/s x 80 ms: own front-face returns read on the current pose -> {} in the band, fwd {:.3f} "
+                         "(old path); dropped at capture -> {} kept, fwd {:.3f}; + a real jamb 2 cm out -> band {}, fwd {:.3f}",
+                         old_path->n_band, v_old, new_path->obstacles.size(), v_new, new_jamb->n_band, v_jamb);
+            CHECK(old_path->n_band > 0 and v_old == 0.f);           // the try77 artefact, reproduced
+            CHECK(new_path->obstacles.empty() and v_new == kVmax);  // no contact from the robot's own returns
+            CHECK(new_jamb->n_band == 1 and v_jamb == 0.f);         // the real jamb still stops it
+            CHECK(new_jamb->band_points.size() == 1 and (new_jamb->band_points[0] - jamb_now).norm() < 1e-4f);
+        }
+    }
+
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

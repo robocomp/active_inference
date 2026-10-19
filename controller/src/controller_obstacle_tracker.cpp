@@ -1,6 +1,7 @@
 #include "controller_obstacle_tracker.h"
 
 #include "../../common/robot_footprint/robot_footprint.h"
+#include "lidar_body_guard.h"
 
 #include <array>
 #include <chrono>
@@ -2241,8 +2242,11 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
             .zs = std::move(proc_zs)},
         proc_ts,
         [plane_coeffs = std::move(plane_coeffs), plane_sel = std::move(proc_plane_ids),
-         robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+         robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h,
+         body_poly = body_.polygon(), body_r = body_.circumscribed_radius(),
+         self_dropped = &capture_self_dropped_](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
+            int n_self = 0;
             auto &[room_xs, room_ys, room_zs] = room_points;
             const auto &xs_in = raw_points.xs;
             const auto &ys_in = raw_points.ys;
@@ -2275,6 +2279,18 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                     : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
                 if (robot_z < min_h || robot_z > max_h)
                     continue;
+                // ★ Task 14 fix round 3 (try77): the robot's own returns are dropped HERE, in the rigid robot frame at
+                //   capture (rc::lidar_capture_is_self), not by the reader after the cloud is room-frame — re-expressed on a
+                //   later pose, a self return is displaced by the motion since capture and can land in the contact band.
+                {
+                    const Eigen::Vector2f q_robot = robot_from_lidar_is_identity
+                        ? Eigen::Vector2f(x, y)
+                        : Eigen::Vector2f(static_cast<float>(robot_from_lidar_matrix(0, 0) * x + robot_from_lidar_matrix(0, 1) * y
+                                                             + robot_from_lidar_matrix(0, 2) * z + robot_from_lidar_matrix(0, 3)),
+                                          static_cast<float>(robot_from_lidar_matrix(1, 0) * x + robot_from_lidar_matrix(1, 1) * y
+                                                             + robot_from_lidar_matrix(1, 2) * z + robot_from_lidar_matrix(1, 3)));
+                    if (rc::lidar_capture_is_self(body_poly, body_r, q_robot)) { ++n_self; continue; }
+                }
 
                 // Each point is placed with ITS OWN plane's pose (see PER-PLANE REGISTRATION above).
                 const auto &m = per_plane
@@ -2288,6 +2304,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 room_ys.push_back(room_y);
                 room_zs.push_back(room_z);
             }
+            self_dropped->store(n_self, std::memory_order_relaxed);
         });
 
     // ── ONE BUFFER, BOTH CONSUMERS (the display buffer was removed 2026-09-09) ───────────────────

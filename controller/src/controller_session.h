@@ -124,6 +124,7 @@ public:
     {
         rc::LidarGuardReturns r;
         float margin = 0.f, a_dec = 0.f, v_max = 0.f, w_max = 0.f, sigma = 0.f, reach = 0.f;
+        int capture_self = 0;   // the newest sweep's returns dropped as the robot at capture (obstacle tracker, rigid frame)
         bool valid = false;   // a cloud was read
     };
     [[nodiscard]] LiveReturns live_returns(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
@@ -912,6 +913,7 @@ private:
     bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)
     bool startup_census_done_ = false;      // Task 14 fix 1: the parked start-up census line, once
     std::string anchor_census_for_;         // Task 14 fix 1: the cross whose first-cycle census was logged
+    std::string anchor_band_logged_for_;    // Task 14 fix 3: the cross whose first band return was logged
     bool body_loaded_ = false;                 // one-shot guard: load when the robot node first appears
     // ★WHAT THIS BASE CAN DO, as opposed to what we have chosen to ask of it. Read once beside the body
     // (the robot node states both), and held rather than re-read because it is a property of the hardware,

@@ -68,6 +68,20 @@ namespace rc
     return anchor_signed_distance(body, q) < 0.f;
 }
 
+// ★ Fix round 3 (try77): THE SELF DECISION IS MADE AT CAPTURE, IN THE RIGID ROBOT FRAME. The controller's LiDAR buffer is
+// ROOM-frame (each plane placed with room←lidar at its own stamp) and the reader re-expresses it on the CURRENT pose. For a
+// return off the WORLD that is exact (the point is room-fixed, so the current pose is the right one to see it from). For a
+// return off the ROBOT ITSELF it is wrong by the motion since capture — |ω|·r·lag + |v|·lag, ~2.4 cm on a wheel face at
+// 1 rad/s and 80 ms — enough to carry a self return out of the hull into the contact band. The robot's own returns are
+// fixed in the robot frame, and robot←lidar is a RIGID mount, so at capture the test is exact with no lag term at all:
+// the obstacle tracker's buffer converter calls this on robot←lidar·p and drops the robot's returns before the cloud ever
+// becomes room-frame. `r_circ` = the hull's circumscribed radius: a cheap reject for the ~all points far from the body.
+[[nodiscard]] inline bool lidar_capture_is_self(std::span<const Eigen::Vector2f> body, float r_circ, const Eigen::Vector2f& q_robot)
+{
+    if (body.size() < 3 or q_robot.squaredNorm() > r_circ * r_circ) return false;
+    return anchor_point_in_convex(body, q_robot);
+}
+
 // The OLD controller self-filter (TrajectoryController::read_lidar_points_robot before Task 14), kept as a pure function
 // only so its losses can be counted against the footprint filter (task-14-report.md). Not used to drive.
 [[nodiscard]] inline bool lidar_return_dropped_by_disc(const Eigen::Vector2f& q, float circumscribed)
@@ -89,6 +103,9 @@ struct LidarGuardReturns
     // The nearest finite return NOT inside the hull, at ANY range (robot frame, by distance from the centre), so a census
     // can say where the world is when nothing is within reach.
     std::optional<Eigen::Vector2f> nearest_any;
+    // Fix round 3: the band returns themselves (robot frame), so their place on the body can be logged — a body part the
+    // hull misses sits at a FIXED body position; a lag artefact moves with the motion.
+    std::vector<Eigen::Vector2f> band_points;
 };
 
 // Robot-frame returns → guard obstacles. `reach` = the radius beyond which no return can cap a motion this cycle: the
@@ -115,7 +132,7 @@ template <class Next>
         const float sd = anchor_signed_distance(body, q);
         if (sd < 0.f) { ++out.n_self; continue; }
         note_nearest();
-        if (sd < sigma_r) ++out.n_band;
+        if (sd < sigma_r) { ++out.n_band; out.band_points.push_back(q); }
         const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
         const std::int64_t key = (ci << 32) ^ (cj & 0xffffffff);
         if (const auto it = cell.find(key); it != cell.end())

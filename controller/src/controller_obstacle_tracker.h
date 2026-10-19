@@ -3,6 +3,7 @@
 #include <genericworker.h>
 
 #include <array>
+#include <atomic>
 #include <deque>
 #include <cstdint>
 #include <functional>
@@ -37,6 +38,8 @@ class ControllerObstacleTracker
         // scan; the one-frame hold that made it necessary is gone, so both consumers read this one
         // (which is also the better of the two — it registers room←lidar per plane).
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
+        // Task 14 fix round 3: returns the newest converted sweep dropped as the robot itself (rigid robot frame, at capture).
+        [[nodiscard]] int capture_self_dropped() const { return capture_self_dropped_.load(std::memory_order_relaxed); }
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
         const ControllerObstacleVisuals &display_obstacle_polygons() const { return display_obstacle_polygons_; }
         // residual_concept's occupancy, as CELLS — what the planner marks directly (see the decode
@@ -316,6 +319,9 @@ class ControllerObstacleTracker
         std::unique_ptr<DSR::RT_API> rt_api_;
         const ControllerGraphState *graph_state_ = nullptr;
         std::function<void()> graph_layout_callback_;
+        // Written by the buffer's converter (its worker thread), read by the session: an atomic, nothing else shared.
+        // ★Declared BEFORE the buffer so it outlives the buffer's worker (members die in reverse order).
+        std::atomic<int> capture_self_dropped_{0};
         rc::LidarPointBuffer lidar_room_buffer_{5};
         RawCloudProximity raw_cloud_proximity_;   // measured on the raw sweep, pre z-band (see the struct)
         std::vector<GraphObstacleRecord> known_graph_obstacles_;
