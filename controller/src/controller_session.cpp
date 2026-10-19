@@ -4,6 +4,7 @@
 #include "controller_robot_body.h"
 #include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor's clock
+#include "residual_risk.h"
 
 #include <algorithm>
 #include <ranges>
@@ -52,6 +53,11 @@ constexpr int kUnreachableRounds = 3;
 // How long a "the robot failed here" memory may veto a standpoint. Capped at the producer's recovery
 // time (room_concept IorDecayTime = 120 s); see UselessSpot in the header for the measurement.
 constexpr std::uint64_t kUselessSpotMemoryMs = 120000;
+// The height band the BODY occupies, room-frame z: below it is the floor under the wheels, above it the
+// robot is not (the mesh tops out at 1.42 m). The same band the approach checks use (kBodyZLo/kBodyZHi,
+// written out locally there); here it decides which live returns turn a residual cell back into a wall.
+constexpr float kPlannerBodyZLo = 0.05f;
+constexpr float kPlannerBodyZHi = 1.45f;
 
 // Contract-resolution key for an affordance's parent object node. Post graph-schema migration the
 // node type is the generic "object" and the class lives in the object_subtype attribute; prefer it
@@ -324,10 +330,42 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         grid_planner_.params.safety_margin_m = params_->footprint_safety_margin_m;
         grid_planner_.params.clearance_weight = params_->planner_clearance_weight;
         grid_planner_.params.clearance_pref_m = params_->planner_clearance_pref_m;
+        grid_planner_.params.residual_risk_weight = params_->planner_residual_risk_weight;
     }
+    // ── RESIDUAL AS BELIEF, EXCEPT WHERE THE LIDAR SEES IT NOW (2026-10-19, try96 leg 3) ─────────
+    // Each residual cell arrives priced by residual's own Beta belief (residual_risk.h): a toll in the
+    // A* cost, not a wall, so a weakly-evidenced curtain can no longer disconnect the map. But a cell a
+    // LIVE return lands in, at a height the body occupies, is not a belief about an obstacle — it is
+    // a measurement of one, this cycle — so it goes back to HARD: the planner never routes the body
+    // through something the sensors currently see. Same buffer and body band the approach checks use.
+    std::vector<float> residual_risk = obstacle_tracker.residual_cell_risk_nats();
+    int corroborated = 0;
+    if (auto *lidar = obstacle_tracker.lidar_buffer(); lidar != nullptr and not residual_risk.empty())
+        if (const auto [cloud_opt] = lidar->read_last(); cloud_opt.has_value())
+        {
+            const auto &[xs, ys, zs] = cloud_opt.value();
+            corroborated = rc::residual_risk::harden_corroborated(
+                obstacle_tracker.residual_cells(), obstacle_tracker.residual_cell_size_m(), residual_risk,
+                xs, ys, zs, kPlannerBodyZLo, kPlannerBodyZHi);
+        }
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
                             {.centres = obstacle_tracker.residual_cells(),
-                             .cell_size_m = obstacle_tracker.residual_cell_size_m()});
+                             .cell_size_m = obstacle_tracker.residual_cell_size_m(),
+                             .risk_nats = std::move(residual_risk)});
+    // One line when the split changes materially — the soft/hard census is what says whether a "no route"
+    // was decided by belief or by measurement.
+    {
+        const int soft = grid_planner_.residual_soft_in(), hard = grid_planner_.residual_hard_in();
+        if (std::abs(soft - last_residual_soft_logged_) + std::abs(hard - last_residual_hard_logged_) > 0
+            and timestamp_ms - last_residual_split_log_ms_ >= 10000)
+        {
+            last_residual_split_log_ms_ = timestamp_ms;
+            last_residual_soft_logged_ = soft;
+            last_residual_hard_logged_ = hard;
+            std::println("[grid-world] residual cells: {} soft (priced by belief), {} hard ({} seen by the live "
+                         "LiDAR in the body band, {} with no belief)", soft, hard, corroborated, hard - corroborated);
+        }
+    }
     return true;
 }
 
@@ -1109,13 +1147,16 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // itself the product of this repair, so clearing re-enables nearest_free, which moves the target
     // back into the pocket, which fails again — a good plan and a failed plan on alternate cycles. It
     // costs nothing to hold: once the goal IS reachable, nearest_reachable returns it exactly.
-    const auto same_5cm = [](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
-    { return (a - b).squaredNorm() < 0.05f * 0.05f; };
+    // ★★★2026-10-19 (try96 leg 3): NOT KEYED ON THE MAP, and keyed on the PRODUCER's raw pose. The
+    // record carried world_hash(), which changes on every set_world (residual's cells move every
+    // cycle), so this was false on every cycle that followed a failure and the robot held for the 5 s
+    // liveness instead of driving to a reachable pose 0.6 m short of the door approach. And it compared
+    // the pre-repair pose here against the post-repair pose recorded at the failure — the same mismatch
+    // the node-name note above describes. See route_failure_memory.h.
     const bool routing_failed_here =
-        unroutable_at_.has_value()
-        and same_5cm(unroutable_at_->goal, step.target.room_pos)
-        and same_5cm(unroutable_at_->robot, step.robot_pose.pos.head<2>().cast<float>())
-        and unroutable_at_->map == grid_planner_.world_hash();
+        route_failure_.failed_here(step.target.node_name, last_raw_target_pos_.value_or(step.target.room_pos),
+                                   step.robot_pose.pos.head<2>().cast<float>(),
+                                   /*fallback_engaged=*/unroutable_fix_.has_value());
     // ★COMPUTED ONCE AND HELD. nearest_reachable takes the ROBOT's position as its origin, so
     // re-running it every cycle returns a DIFFERENT point every cycle as the robot moves — and
     // same_target_instance calls a target "changed" once it shifts 5 cm. The repaired target therefore
@@ -2932,9 +2973,13 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             // Tell the REPAIR stage that this exact target could not be routed. It cannot be discovered
             // there — reachability is global, and only the search knows it — so the next cycle's repair
             // asks for the nearest REACHABLE pose instead of merely the nearest free one.
-            unroutable_at_ = UnroutableAt{.goal = step.target.room_pos,
-                                          .robot = step.robot_pose.pos.head<2>().cast<float>(),
-                                          .map = grid_planner_.world_hash()};
+            route_failure_.note_failure(step.target.node_name,
+                                        last_raw_target_pos_.value_or(step.target.room_pos),
+                                        step.robot_pose.pos.head<2>().cast<float>());
+            // A held reachability fallback that no longer routes is stale (the map moved under it, and
+            // fix_still_good only re-checks that the body FITS there). Drop it: the record above now
+            // names THIS robot pose, so next cycle the flood fill re-solves from here.
+            unroutable_fix_.reset();
         }
     }
 
@@ -5332,6 +5377,10 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
     // producer offered fresh epochs the approach commitment refused to follow. The protocol's answer is the
     // consumer's verdict: report Unreachable, and the producer sets the standpoint aside and offers another.
     // 5 s = several replans' worth of no route (a liveness constant, flagged).
+    // ★2026-10-19 (try96 leg 3): the record is no longer keyed on world_hash() (route_failure_memory.h), so the
+    // reachability fallback now engages on the cycle after a failure and drives to the closest reachable pose;
+    // a target with NOTHING closer reachable is reported Unreachable by the repair stage at once. This 5 s clock
+    // is the LAST resort only — for a hold neither of those resolves (e.g. the flood fill cannot leave the cell).
     if (no_route_since_ms_ != 0 and time_source() - no_route_since_ms_ > 5000)
     {
         // A MOUSE target has no producer to report to: mark_reached on it is a no-op, so the click outranked
@@ -6209,7 +6258,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             instant_completed_at_.reset();        // moved away: the cell may legitimately return
         if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance
             and d_to_standpoint <= path_controller.goal_threshold()
-            and not already_instant_done)
+            and not already_instant_done
+            and not target_is_approach_only_)   // an approach pose is ours, never the producer's: not SATISFIED
         {
             instant_completed_at_ = last_target_info_->room_pos;
             qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
@@ -6219,20 +6269,45 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                              robot_pose.pos, time_source(), /*allow_dwell=*/false);
             return;
         }
+        // ── THE END OF AN APPROACH IS A NEW VANTAGE, NOT A VERDICT (2026-10-19, try96 leg 3) ────────
+        // The approach existed because the real standpoint did not route from where the robot WAS. The
+        // robot is now somewhere else, has looked at the space in between, and the residual that sealed
+        // the way may have cleared (a false curtain does, once the robot sees through it). So ask again
+        // instead of reporting: drop the plan and the failure record and let the next cycle route to the
+        // real standpoint. If it still does not route, that cycle records the failure from HERE and the
+        // one after runs nearest_reachable from here — which returns where the robot already stands
+        // when nothing reachable is closer, and THAT is reported Unreachable at once (the approach branch
+        // in build_planning_step). Each approach must end strictly closer to the goal than it began, so
+        // this cannot cycle on an unchanged map.
+        if (target_is_approach_only_)
+        {
+            std::println("[controller] '{}' — approach ended at ({:.2f},{:.2f}); re-asking the planner for the "
+                         "real standpoint from here before giving any verdict",
+                         last_target_info_.has_value() ? last_target_info_->node_name : std::string{"?"},
+                         robot_pose.pos.x(), robot_pose.pos.y());
+            audit_standpoint("approach-end-retry", time_source(),
+                             last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
+                             last_target_info_.has_value() ? last_target_info_->room_pos
+                                                           : robot_pose.pos.head<2>().cast<float>(),
+                             robot_pose.pos.head<2>().cast<float>(), "approach", "", -1, 1, 1);
+            route_failure_.clear();
+            unroutable_fix_.reset();
+            target_is_approach_only_ = false;
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            path_controller.stop();
+            motion_commander.stop_robot();
+            return;
+        }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
-                << (target_is_approach_only_ ? "approach ended -> reporting UNREACHABLE (got as close as the map allows)"
-                                             : "reached -> REACH (consume immediately)");
-        audit_standpoint(target_is_approach_only_ ? "approach-end" : "arrival-end", time_source(),
+                << "reached -> REACH (consume immediately)";
+        audit_standpoint("arrival-end", time_source(),
                          last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
                          last_target_info_.has_value() ? last_target_info_->room_pos
                                                        : robot_pose.pos.head<2>().cast<float>(),
-                         robot_pose.pos.head<2>().cast<float>(),
-                         target_is_approach_only_ ? "approach" : "standpoint", "", -1, 1, 1);
+                         robot_pose.pos.head<2>().cast<float>(), "standpoint", "", -1, 1, 1);
         finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source(), /*allow_dwell=*/not target_is_approach_only_,
-                             target_is_approach_only_
-                                 ? std::optional<rc::affordance::Outcome>(rc::affordance::Outcome::Unreachable)
-                                 : std::nullopt);
+                         robot_pose.pos, time_source(), /*allow_dwell=*/true);
         return;
     }
 

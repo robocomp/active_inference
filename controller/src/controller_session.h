@@ -25,6 +25,7 @@
 #include "controller_runtime_types.h"
 #include "controller_world_model.h"
 #include "grid_planner.h"
+#include "route_failure_memory.h"
 #include "route_follower.h"
 #include "stall_judge.h"
 #include "trajectory_controller.h"
@@ -736,13 +737,17 @@ private:
     // ★A ROUTE FAILURE IS A FACT ABOUT (goal, robot pose, map) — the same triple the map-verdict cache
     // is keyed on, and for the same reason: it cannot outlive any of the three. Quantised to 5 cm,
     // which is finer than the arrival band and coarser than a stationary robot's jitter.
-    struct UnroutableAt
-    {
-        Eigen::Vector2f goal  = Eigen::Vector2f::Zero();
-        Eigen::Vector2f robot = Eigen::Vector2f::Zero();
-        std::size_t     map   = 0;
-    };
-    std::optional<UnroutableAt> unroutable_at_;
+    // ★★★AND NOT THE MAP EITHER (2026-10-19, try96 leg 3). The triple included world_hash(), and the
+    // live obstacle layer changes the hash on every set_world — so the record written by a failed
+    // plan() never matched the next cycle, nearest_reachable never ran, and a door approach with a
+    // reachable pose 0.6 m short was reported Unreachable after the 5 s no-route liveness. Keyed now on
+    // (node name, PRODUCER's raw pose, robot) — see route_failure_memory.h. A map that starts routing
+    // again needs no key: plan() is always tried first, and nearest_reachable returns a reachable goal
+    // exactly.
+    rc::RouteFailureMemory route_failure_;
+    // The soft/hard residual census line (sync_world_state): logged on change, at most every 10 s.
+    int last_residual_soft_logged_ = -1, last_residual_hard_logged_ = -1;
+    std::uint64_t last_residual_split_log_ms_ = 0;
 
     // ── THE RESOLVED STANDPOINT, HELD FOR THE LIFE OF THE TARGET ─────────────────────────────────
     // ★★★A TARGET THAT MOVES WHEN THE MAP MOVES IS NOT A TARGET (2026-08-20). The clearance search
