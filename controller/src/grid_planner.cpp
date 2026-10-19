@@ -6,6 +6,7 @@
 #include "door_passage_corridor.h"   // self_test (12)
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <format>
@@ -119,6 +120,8 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
 {
     cell_ = std::max(0.02f, params.cell_size_m);
     dist_valid_ = false;          // the world changed; any cached distance field describes the old one
+    risk_.clear();
+    residual_soft_in_ = residual_hard_in_ = 0;
     if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); dist_.clear(); return; }
 
     float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
@@ -186,11 +189,30 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     // One cell of residual covers a square of its own resolution; mark every planner cell that square
     // touches. Rounding is OUTWARD (a planner cell is marked if the squares overlap at all), which is
     // the conservative direction for an obstacle and keeps this exact at any pair of resolutions.
+    // ★★★ONLY THE HARD ONES (2026-10-19, try96 leg 3). A residual cell with a finite risk is a belief
+    // the caller has priced (OccupiedCells::risk_nats): it goes into risk_, which plan() charges for,
+    // and does NOT touch occ_ — so it can raise what a route costs but can never disconnect the map.
+    // A thin, weakly-evidenced "curtain" of latched cells sealed the robot off from a door approach
+    // when every latch was a wall. Its risk is added to the ONE planner cell holding its centre: it is
+    // an expectation, not an obstacle extent, so there is nothing to round outward — the footprint and
+    // safety_margin_m already carry the body's reach.
     if (cells.cell_size_m > 0.f and not cells.centres.empty())
     {
         const float h = 0.5f * cells.cell_size_m;
-        for (const auto& c : cells.centres)
+        const bool priced = cells.risk_nats.size() == cells.centres.size();
+        for (std::size_t k = 0; k < cells.centres.size(); ++k)
         {
+            const auto& c = cells.centres[k];
+            if (priced and std::isfinite(cells.risk_nats[k]))
+            {
+                ++residual_soft_in_;
+                int ix, iy;
+                if (cells.risk_nats[k] <= 0.f or not world_to_cell(c, ix, iy)) continue;
+                if (risk_.empty()) risk_.assign(static_cast<std::size_t>(w_) * h_, 0.f);
+                risk_[idx(ix, iy)] += cells.risk_nats[k];
+                continue;
+            }
+            ++residual_hard_in_;
             int ix0, iy0, ix1, iy1;
             world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
             world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
@@ -233,6 +255,32 @@ long GridPlanner::occupied_cells() const
     return n;
 }
 
+long GridPlanner::soft_cells() const
+{
+    long n = 0;
+    for (std::size_t i = 0; i < risk_.size(); ++i) n += (risk_[i] > 0.f and not occ_[i]) ? 1 : 0;
+    return n;
+}
+
+float GridPlanner::risk_at(const Eigen::Vector2f& pos_room) const
+{
+    int ix, iy;
+    if (risk_.empty() or not world_to_cell(pos_room, ix, iy)) return 0.f;
+    return risk_[idx(ix, iy)];
+}
+
+float GridPlanner::state_risk(int ix, int iy, int h) const
+{
+    if (risk_.empty() or offsets_.size() != kHeadings) return 0.f;
+    float r = 0.f;
+    for (const auto& o : offsets_[h])
+    {
+        const int nx = ix + o.x(), ny = iy + o.y();
+        if (in_bounds(nx, ny)) r += risk_[idx(nx, ny)];
+    }
+    return r;
+}
+
 // ── Snapshot ─────────────────────────────────────────────────────────────────────────────────────
 // One row of '0'/'1' per grid row, preceded by everything needed to place it in the room frame. Text
 // rather than binary: a world snapshot is something a person reads and greps while working out why a
@@ -248,11 +296,21 @@ void GridPlanner::write_grid(std::ostream& os) const
         for (int ix = 0; ix < w_; ++ix) row[ix] = occ_[idx(ix, iy)] ? '1' : '0';
         os << row << '\n';
     }
+    // The SOFT layer too, sparse ("ix iy nats" per priced cell): without it an offline replay routes
+    // straight through what the live planner paid to avoid, and the difference reads as a planner bug.
+    if (soft_cells() > 0)
+    {
+        os << "risk " << soft_cells() << '\n';
+        for (int iy = 0; iy < h_; ++iy)
+            for (int ix = 0; ix < w_; ++ix)
+                if (const float r = risk_[idx(ix, iy)]; r > 0.f and not occ_[idx(ix, iy)])
+                    os << ix << ' ' << iy << ' ' << r << '\n';
+    }
 }
 
 bool GridPlanner::read_grid(std::istream& is)
 {
-    w_ = h_ = 0; occ_.clear(); dist_.clear(); dist_valid_ = false;
+    w_ = h_ = 0; occ_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear();
     std::string tok;
     while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     if (tok != "grid") return false;
@@ -269,6 +327,29 @@ bool GridPlanner::read_grid(std::istream& is)
         std::string row;
         if (not (is >> row) or static_cast<int>(row.size()) != w_) { w_ = h_ = 0; occ_.clear(); return false; }
         for (int ix = 0; ix < w_; ++ix) occ_[idx(ix, iy)] = row[ix] == '1' ? 1 : 0;
+    }
+    // Optional soft layer (write_grid). Absent in older snapshots, which therefore replay as before.
+    // Parsed with from_chars: these agents run under a comma-decimal locale (CLAUDE.md).
+    const auto pos = is.tellg();
+    if (is >> tok and tok == "risk")
+    {
+        long n = 0;
+        std::string a, b, c;
+        if (is >> a) std::from_chars(a.data(), a.data() + a.size(), n);
+        risk_.assign(static_cast<std::size_t>(w_) * h_, 0.f);
+        for (long k = 0; k < n and (is >> a >> b >> c); ++k)
+        {
+            int ix = -1, iy = -1; float r = 0.f;
+            std::from_chars(a.data(), a.data() + a.size(), ix);
+            std::from_chars(b.data(), b.data() + b.size(), iy);
+            std::from_chars(c.data(), c.data() + c.size(), r);
+            if (in_bounds(ix, iy) and std::isfinite(r) and r > 0.f) risk_[idx(ix, iy)] = r;
+        }
+    }
+    else
+    {
+        is.clear();
+        is.seekg(pos);
     }
     // The footprint rasterisation depends on cell size and margin, both of which just changed.
     offsets_.clear();
@@ -625,6 +706,8 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
                                                               const Eigen::Vector2f& goal_room)
 {
     last_failure_.clear();
+    last_route_risk_nats_ = 0.f;
+    last_route_cost_m_ = 0.f;
     if (w_ <= 0 or h_ <= 0) { last_failure_ = "grid not built (no room polygon)"; return std::nullopt; }
     rebuild_offsets();
 
@@ -720,6 +803,10 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
     const float clearance_w = std::max(0.f, params.clearance_weight);
     const float clearance_d = std::max(0.01f, params.clearance_pref_m);
     if (clearance_w > 0.f) build_distance_field();
+    // The soft residual layer (set_world): charged per step, never blocking. Skipped entirely when the
+    // world carries none, so the common case pays nothing for the footprint sum.
+    const float risk_w = std::max(0.f, params.residual_risk_weight);
+    const bool  priced = risk_w > 0.f and not risk_.empty();
 
     while (not open.empty())
     {
@@ -749,8 +836,10 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
             const float tight = (clearance_w > 0.f and not dist_.empty())
                               ? clearance_w * std::max(0.f, (clearance_d - dist_[idx(nx, ny)]) / clearance_d)
                               : 0.f;
+            // Belief priced in metres: the surprisal of the body finding every covered soft cell free.
+            const float doubt = priced ? risk_w * state_risk(nx, ny, nh) : 0.f;
             const int ns = sid(nx, ny, nh);
-            if (const float ng = g[s] + step * (1.f + tight) + turn; ng < g[ns])
+            if (const float ng = g[s] + step * (1.f + tight + doubt) + turn; ng < g[ns])
             { g[ns] = ng; parent[ns] = s; open.push({ng + heur(nx, ny), ns}); }
         }
     }
@@ -765,11 +854,17 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
     }
 
     std::vector<Eigen::Vector2f> path;
+    float worst_state_risk = 0.f;
     for (int s = goal_state; s != -1; s = parent[s])
     {
         const int cell = s / kHeadings;
         path.push_back(cell_to_world(cell % w_, cell / w_));
+        if (priced) worst_state_risk = std::max(worst_state_risk, state_risk(cell % w_, cell / w_, s % kHeadings));
     }
+    // The single worst pose the route asks the body to take, in nats: the number to read in a log when a
+    // route went THROUGH residual. (Summing along the chain would count the same cell once per state.)
+    last_route_risk_nats_ = worst_state_risk;
+    last_route_cost_m_ = g[goal_state];
     std::reverse(path.begin(), path.end());
     path.front() = start_room;
     path.back() = goal_room;
@@ -1143,7 +1238,7 @@ bool GridPlanner::self_test()
         const std::vector<Eigen::Vector2f> room1{{-3.f, 0.f}, {2.f, 0.f}, {2.f, 4.61f}, {-3.f, 4.61f}};
         const Eigen::Vector2f robot{-0.5f, 2.0f}, goal{-0.52f, 5.81f}, leaf{-1.05f, 5.12f};
         constexpr float kHeading = 1.56f, kWidth = 1.0f;
-        OccupiedCells cells{.centres = {}, .cell_size_m = 0.05f};
+        OccupiedCells cells{.centres = {}, .cell_size_m = 0.05f, .risk_nats = {}};   // no belief: every cell hard
         for (float y = 3.61f; y <= 4.61f; y += 0.05f) cells.centres.emplace_back(-1.10f, y);   // the open leaf
         for (float y = 4.61f; y <= 4.76f; y += 0.05f) cells.centres.emplace_back(-0.10f, y);   // the far jamb
         const auto world = [&](std::vector<std::vector<Eigen::Vector2f>> passages)

@@ -52,6 +52,13 @@ struct OccupiedCells
 {
     std::vector<Eigen::Vector2f> centres;
     float cell_size_m = 0.f;                    // 0 ⇒ no grid supplied, nothing marked
+    // ── HOW MUCH EACH CELL COSTS, FROM RESIDUAL'S OWN BELIEF (2026-10-19, try96 leg 3) ─────────────
+    // One entry per centre, in NATS: −log Pr(cell mostly free | residual's Beta), see residual_risk.h.
+    // A finite entry makes the cell a TOLL — the A* pays residual_risk_weight per nat the body covers —
+    // instead of a wall; +inf keeps it HARD (no belief behind it, or a live LiDAR return in it).
+    // ★EMPTY (or the wrong length) ⇒ EVERY cell is hard, exactly as before: a caller that has no belief
+    // to offer gets the conservative planner, never a permissive one.
+    std::vector<float> risk_nats;
 };
 
 class GridPlanner
@@ -94,6 +101,18 @@ public:
         // Distance (m, from the robot's CENTRE) beyond which a cell is "roomy" and costs nothing extra.
         // Below it the penalty ramps linearly to `clearance_weight` at d = 0.
         float clearance_pref_m = 0.9f;
+
+        // ── RESIDUAL BELIEF AS A COST, NOT A WALL (2026-10-19) ───────────────────────────────────
+        // A soft residual cell (OccupiedCells::risk_nats finite) does not block; a step whose body
+        // covers soft cells of total risk R nats costs  step * (1 + tight + residual_risk_weight * R).
+        // R = −log Pr(every covered cell is mostly free), so this is the path's surprisal, priced in
+        // metres: at 1.0 a metre driven across one nat of doubt costs like a second metre of floor.
+        // ★A WEIGHT, NOT A THRESHOLD: it decides how far the robot detours around doubt, never whether
+        // a route EXISTS — connectivity is decided by hard occupancy alone. A confirmed residual cell
+        // (~27 nats at residual's concentration cap) makes a crossing cost hundreds of metres, so it
+        // is never taken while any detour exists; a one-hit curtain (~1 nat) is a toll.
+        // 0 ⇒ soft cells are free floor (do not: that discards the belief). Planner.ResidualRiskWeight.
+        float residual_risk_weight = 1.0f;
     };
 
     Params params;
@@ -177,7 +196,22 @@ public:
     // the same occupancy, so an answer derived from the grid can be cached against it instead of
     // against a clock — a timer would either re-ask a question the world has not changed the answer
     // to, or trust an answer after the world moved. This can do neither.
+    // ★HARD OCCUPANCY ONLY. A soft residual cell changes what a route COSTS, never whether one exists
+    // or whether the body fits, so it is deliberately not part of the identity: every verdict cached
+    // against this hash ("no route", "infeasible") is a function of hard occupancy alone. Hashing the
+    // belief too would only add churn — the published field is an EMA that moves every cycle.
     std::size_t world_hash() const { return world_hash_; }
+
+    // ── THE SOFT LAYER, FOR DIAGNOSTICS ─────────────────────────────────────────────────────────
+    // Planner cells carrying residual risk (finite, > 0), and how many residual cells set_world was
+    // handed as soft vs hard. last_route_risk_nats(): the WORST single-pose risk (nats under the
+    // footprint) along the last successful plan() — 0 when the route touches no soft residual.
+    long  soft_cells() const;
+    int   residual_soft_in() const { return residual_soft_in_; }
+    int   residual_hard_in() const { return residual_hard_in_; }
+    float last_route_risk_nats() const { return last_route_risk_nats_; }
+    float last_route_cost_m() const { return last_route_cost_m_; }   // the A* cost of that route (metres-equivalent)
+    float risk_at(const Eigen::Vector2f& pos_room) const;
 
     // ── MIGRATION MONITOR (temporary; delete once the yaw correction is trusted) ───────────────────
     // The same question answered with the body oriented as it WAS before the correction — turned 90 deg
@@ -330,8 +364,17 @@ private:
     bool  cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const;
     void  rebuild_offsets();
     void  build_distance_field() const;   // lazy; fills dist_ with metres, sets dist_valid_
+    // Total soft risk (nats) under the footprint at heading `h` centred on (ix,iy). Same offsets as
+    // cell_free, so "what the body covers" is one definition. 0 when there is no soft layer.
+    float state_risk(int ix, int iy, int h) const;
 
     std::vector<std::uint8_t> occ_;
+    // Soft residual risk per planner cell, nats (0 = none). Empty when nothing soft was supplied, which
+    // is how plan() skips the footprint sum entirely in the common case.
+    std::vector<float> risk_;
+    int   residual_soft_in_ = 0, residual_hard_in_ = 0;
+    float last_route_risk_nats_ = 0.f;
+    float last_route_cost_m_ = 0.f;
     // Cached distance field, in metres, one entry per cell. Mutable because it is a memoised view of occ_:
     // asking for a distance does not change the planner's world, it only realises part of it.
     mutable std::vector<float> dist_;

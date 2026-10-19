@@ -2,6 +2,7 @@
 
 #include "../../common/robot_footprint/robot_footprint.h"
 #include "lidar_body_guard.h"
+#include "residual_risk.h"
 
 #include <array>
 #include <chrono>
@@ -1195,6 +1196,7 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     if (const auto g = graph_->get_node("residual"); g.has_value())
     {
         residual_cells_.clear();
+        residual_cell_risk_nats_.clear();
         residual_cell_size_m_ = 0.f;
         if (const auto cs = graph_->get_attrib_by_name<grid_cell_size_att>(g.value()); cs.has_value())
             residual_cell_size_m_ = cs.value();
@@ -1204,6 +1206,23 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             residual_cells_.reserve(f.size() / 3);
             for (std::size_t i = 0; i + 2 < f.size(); i += 3)      // [x,y,z] triplets; z is the cell's top
                 residual_cells_.emplace_back(f[i], f[i + 1]);
+            // ── ...AND HOW MUCH RESIDUAL BELIEVES EACH ONE (2026-10-19, try96 leg 3) ─────────────
+            // The cell list is a LATCH (one near hit sets it); the Beta field beside it says how much
+            // evidence stands behind the latch. The planner turns that into a cost (residual_risk.h)
+            // instead of a wall, so a weak curtain cannot seal the map. No field ⇒ every cell HARD.
+            rc::residual_risk::BeliefField bf;
+            const auto pa = graph_->get_attrib_by_name<grid_occupancy_prob_att>(g.value());
+            const auto va = graph_->get_attrib_by_name<grid_occupancy_var_att>(g.value());
+            const auto ma = graph_->get_attrib_by_name<grid_field_meta_att>(g.value());
+            if (pa.has_value() and va.has_value() and ma.has_value() and ma.value().get().size() >= 5)
+            {
+                const auto &M = ma.value().get();
+                bf.prob = pa.value().get();
+                bf.var  = va.value().get();
+                bf.xmin = M[0]; bf.ymin = M[1]; bf.cell = M[2];
+                bf.width = static_cast<int>(M[3]); bf.height = static_cast<int>(M[4]);
+            }
+            residual_cell_risk_nats_ = rc::residual_risk::risks_from_field(residual_cells_, bf);
             // Drawn as what they are — one square per occupied cell at residual's own resolution. The
             // display used to show the inflated hulls, which over-stated the obstacle by a body width
             // and hid exactly the discrepancy this change exists to remove.

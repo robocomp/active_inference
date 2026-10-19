@@ -950,6 +950,8 @@ void SpecificWorker::load_params()
          "A* CLEARANCE PREFERENCE — see GridPlanner::Params::clearance_weight");
 	cfgr.opt_cast<double>("Planner.ClearancePref", params.planner_clearance_pref_m,
          "");
+	cfgr.opt_cast<double>("Planner.ResidualRiskWeight", params.planner_residual_risk_weight,
+         "A* price of residual DOUBT: metres per metre per nat a soft residual cell adds (grid_planner.h)");
 	cfgr.opt("Mission.LibraryPath", missions_path_,
          "Where recorded missions live");
 	{

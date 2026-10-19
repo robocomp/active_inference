@@ -49,6 +49,9 @@ class ControllerObstacleTracker
         // site for why the polygon round trip was removed).
         const std::vector<Eigen::Vector2f> &residual_cells() const { return residual_cells_; }
         float residual_cell_size_m() const { return residual_cell_size_m_; }
+        // One entry per residual_cells() entry: the cell's risk in nats from residual's Beta belief
+        // (residual_risk.h). +inf = hard (no belief available for it). Empty = no cells.
+        const std::vector<float> &residual_cell_risk_nats() const { return residual_cell_risk_nats_; }
 
         // Scans per second this process actually ACCEPTED and turned into a cloud, in WALL time over a
         // ~2 s sliding window. ★NOT the sensor's nominal rate and NOT lidar_period_ms_ (an EMA of the
@@ -343,6 +346,7 @@ class ControllerObstacleTracker
         std::optional<std::uint64_t> last_cloud_ts_;     // ...and the scan stamp it belongs to
 
         std::vector<Eigen::Vector2f> residual_cells_;
+        std::vector<float> residual_cell_risk_nats_;
         float residual_cell_size_m_ = 0.f;
         std::unordered_map<std::string, int> object_label_counts_;   // per-type object tag counter (t/c/b)
         int obstacle_label_count_ = 0;                               // shared o_N counter (graph + temp)

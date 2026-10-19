@@ -88,6 +88,10 @@ struct ControllerParams
     // It is a PREFERENCE: it never makes a passable gap unplannable. 0 = the old behaviour.
     float planner_clearance_weight = 1.5f;
     float planner_clearance_pref_m = 0.9f;
+    // RESIDUAL BELIEF AS A COST — see GridPlanner::Params::residual_risk_weight. Metres of path per metre
+    // travelled per nat of doubt about a residual cell the body covers. A weight: it never decides whether
+    // a route exists, only how far the robot detours around unconfirmed residual. Planner.ResidualRiskWeight.
+    float planner_residual_risk_weight = 1.0f;
     // Preferred standoff BEYOND the robot's real extent, handed to the MPPI as d_safe. Pure comfort: the
     // hard constraint is the footprint test, so raising this can slow the robot near obstacles but can never
     // make a reachable goal unreachable. It used to be `clearance_m` and did three unrelated jobs at once —
