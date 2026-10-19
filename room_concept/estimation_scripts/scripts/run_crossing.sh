@@ -40,13 +40,24 @@ if [[ "$2" == "here" ]]; then
   python3 $S/tp.py get >> $OUT/teleport.txt 2>&1; log "start HERE (no teleport): $(tail -1 $OUT/teleport.txt)"
 else
   x=${2:--5.187}; y=${3:-8.441}; th=${4:-2.496}   # apartment start 1: the one nearest DOOR_1
-  python3 $S/tp.py set $x $y $th >> $OUT/teleport.txt 2>&1; sleep 4
-  python3 $S/tp.py get >> $OUT/teleport.txt 2>&1; log "start ($x,$y,$th) landed: $(tail -1 $OUT/teleport.txt)"
+  # Re-teleport while the landed yaw is off the requested one (try72: a robot still wedged from the previous run
+  # landed at yaw -0.64 instead of 0, faced away from the door, and the door was never born).
+  for k in 1 2 3; do
+    python3 $S/tp.py set $x $y $th >> $OUT/teleport.txt 2>&1; sleep 4
+    python3 $S/tp.py get >> $OUT/teleport.txt 2>&1
+    yaw=$(tail -1 $OUT/teleport.txt | awk '{for(i=1;i<=NF;i++) if($i=="yaw") print $(i+1)}')
+    python3 -c "import math,sys; d=abs(math.remainder(float('$yaw')-float('$th'),2*math.pi)); sys.exit(0 if d<0.1 else 1)" 2>/dev/null && break
+  done
+  log "start ($x,$y,$th) landed: $(tail -1 $OUT/teleport.txt)"
 fi
 rm -rf $R/tmp/snapshots; rm -f $R/tmp/refine_input.bin $R/tmp/promotion_select.csv $R/tmp/proto_room.csv $R/tmp/map_layout.csv \
       $R/tmp/layout_refine.csv $R/tmp/door_filter.csv
+# WT=<worktree> WT_AGENTS="controller door_concept ...": run those agents' binaries (and config) from a worktree,
+# still from the main agent directory so data files and controller/remote_cmd.txt stay where the scripts expect them.
 for a in $FLEET; do
-  (cd $B/$a && DISPLAY=:0 setsid nohup bin/$a etc/config.toml > $OUT/logs/$a.log 2>&1 < /dev/null &) ; sleep 4
+  exe=bin/$a; cfg=etc/config.toml
+  if [[ -n "$WT" && " $WT_AGENTS " == *" $a "* ]]; then exe=$WT/$a/bin/$a; cfg=$WT/$a/etc/config.toml; fi
+  (cd $B/$a && DISPLAY=:0 setsid nohup $exe $cfg > $OUT/logs/$a.log 2>&1 < /dev/null &) ; sleep 4
 done
 if [[ "$2" == "here" || -n "$NORUN" ]]; then log "fleet up: $FLEET; controller left STOPPED"
 else sleep 6; echo run > $B/controller/remote_cmd.txt; log "fleet up: $FLEET; controller RUN"; fi

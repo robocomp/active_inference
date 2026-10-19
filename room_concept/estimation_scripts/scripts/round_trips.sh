@@ -41,6 +41,9 @@ for leg in 1 2 3 4 5 6; do
   room=$(grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}')
   echo "leg $leg through $cur: $r  (now in $room)"
   [ "$r" = "FAILED" ] && break
+  # Park between legs: the passage hands back to AffordancesOnly, and free exploration between legs wedged the robot in
+  # the new room's furniture (try84 leg 3) — this test measures the door crossing, not the exploration.
+  echo stop > $B/controller/remote_cmd.txt
   sleep 15; cur=$(grep -a -o "entry mirror door_[0-9]* is now" $L/door_concept.log | tail -1 | awk '{print $3}')
   sleep 25
 done
