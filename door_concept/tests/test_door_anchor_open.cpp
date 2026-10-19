@@ -267,6 +267,15 @@ int main()
         check(in_band.x == belief.x and in_band.P.isApprox(belief.P), "inside the band the belief stands (no broadening, no pull)");
         check((half.x - belief.x).head<2>().norm() < (out.x - belief.x).head<2>().norm() and (half.x - belief.x).head<2>().norm() > 0.f,
               "the pull grows continuously with P(out of band)");
+        // The weight: refused only where BOTH estimates put the robot in the doorway (try73: belief s −0.07, room s −1.7).
+        rc::interaction::RelPose b_in, r_in, r_out;
+        b_in.x = {0.f, 0.07f, 0.f};  b_in.P = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
+        r_in.x = {0.f, 0.30f, 0.f};  r_in.P = Eigen::Vector3f(0.09f, 0.04f, 0.01f).asDiagonal();
+        r_out.x = {0.f, 1.70f, 0.f}; r_out.P = r_in.P;
+        const float w_both = rc::door::retry_weight_out_of_band(b_in, r_in, 0.8f), w_disagree = rc::door::retry_weight_out_of_band(b_in, r_out, 0.8f);
+        std::print("  weight out of band: both in the doorway {:.3f}; belief in, room 1.7 m out {:.3f}\n", w_both, w_disagree);
+        check(w_both < 0.05f, "both in the doorway: the room is refused (try70 leg 5)");
+        check(w_disagree > 0.95f, "the room disagrees about being in the doorway: it is fused (try73 leg 1)");
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));

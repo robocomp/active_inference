@@ -312,7 +312,11 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     //   worst view of the opening there is, and a belief broadened there re-acquires an ALIAS (try70 leg 5: fused at the mouth,
     //   two frames later the update sat 74–86° off with the leaf playing the wall). w = 1 − P(in band) scales both the
     //   broadening and the room's information: K = w·P_b (w·P_b + R)⁻¹, continuous, 0 inside the band (the belief stands).
-    const float w_out = 1.f - rc::door::anchor_doorway_band(pa.pose, cfg_.pragmatic.cross_clearance_m);
+    // ★ Regression fix (try73 leg 1, attempt 3): the band is the doorway where the ROOM's view is worst — so the room is refused
+    //   only when the robot is in the band by BOTH estimates (independent: P_in = P_in(belief)·P_in(room)). try73's belief
+    //   put the robot at s −0.07 with σ 0.02 m while it truly stood 1.87 m out; the room said so (1.63 m away) and the
+    //   belief-only band refused it (weight 0.00), leaving the anchor in its depth alias for the whole attempt.
+    const float w_out = rc::door::retry_weight_out_of_band(pa.pose, r.value(), cfg_.pragmatic.cross_clearance_m);
     Eigen::Vector3f innov;
     const auto fused = rc::door::retry_fusion(pa.pose, r.value(),
                                               rc::door::anchor_axes_to_robot(Eigen::Matrix3f(kSigmaModel.cwiseProduct(kSigmaModel).asDiagonal()),

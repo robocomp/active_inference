@@ -226,6 +226,14 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
     return out;
 }
 
+// The weight retry_fusion takes: P(out of the band) = 1 − P_in(belief)·P_in(room) — refuse the room only where both put the
+// robot in the doorway (regression fix after try73: a wrong belief alone must not veto the room that disagrees with it).
+[[nodiscard]] inline float retry_weight_out_of_band(const rc::interaction::RelPose& belief, const rc::interaction::RelPose& room,
+                                                    float half_depth)
+{
+    return 1.f - anchor_doorway_band(belief, half_depth) * anchor_doorway_band(room, half_depth);
+}
+
 // Task 12 fix round 1 (I-3): a frame is evidence about the LEAF (its φ curve, the hinge and swing log-odds) only when its pose is
 // the one being PUBLISHED as seen — p_view at or above the publication level. An aliased pose scores the beams against a wrong
 // opening; the hinge and swing log-odds accumulate with no forgetting, so one aliased stretch could flip and latch them.
