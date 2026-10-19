@@ -436,7 +436,9 @@ int leaf_contacts(const RelPose& r, const rc::interaction::AnchorLeaf& l, const 
 }
 
 // The session's chain on a differential base: the servo (with or without the leaf), then the jamb+leaf guard.
-rc::AnchorCommand chain(const RelPose& r, const rc::interaction::AnchorLeaf* l, const std::vector<Eigen::Vector2f>& body)
+using Leaves = std::span<const rc::interaction::AnchorLeaf>;
+Leaves one(const rc::interaction::AnchorLeaf* l) { return l != nullptr ? Leaves(l, 1) : Leaves(); }
+rc::AnchorCommand chain(const RelPose& r, Leaves l, const std::vector<Eigen::Vector2f>& body)
 {
     const auto c = rc::anchor_cross_command(r, kWidth, kBody + kMargin, kStandoff, kVmax, kWmax, false, l);
     return rc::anchor_jamb_guard(r, kWidth, c, false, body, kMargin, 0.5f, kVmax, kWmax, l).cmd;
@@ -457,11 +459,13 @@ void clear_gap_beside_the_leaf()
     CHECK(rc::anchor_clear_gap(kWidth, &l120).width > kWidth - 2.f * float(rc::interaction::kLeafHalfThickM) - 1e-3f);
     CHECK(rc::anchor_clear_gap(kWidth, nullptr).width == kWidth and rc::anchor_clear_gap(kWidth, nullptr).centre == 0.f);
     // The encoding round-trips: hinge, free edge, σ.
-    const auto [xs, ys] = rc::interaction::encode_anchor_leaf(l90);
-    const auto d = rc::interaction::decode_anchor_leaf(xs, ys, l90.phi);
-    CHECK(d.has_value() and (d->hinge - l90.hinge).norm() < 1e-6f and (d->tip - l90.tip).norm() < 1e-5f
-          and std::abs(d->sigma_phi - 0.05f) < 1e-4f);
-    CHECK(not rc::interaction::decode_anchor_leaf({0.f, 0.f}, {0.f, 0.f}, 0.f).has_value());
+    auto l2 = leaf_toward(); l2.p = 0.3f; auto l1 = l90; l1.p = 0.7f;
+    const auto [xs, ys] = rc::interaction::encode_anchor_leaves({l1, l2});
+    const auto d = rc::interaction::decode_anchor_leaves(xs, ys, l90.phi);
+    CHECK(d.size() == 2 and (d[0].hinge - l90.hinge).norm() < 1e-6f and (d[0].tip - l90.tip).norm() < 1e-5f
+          and std::abs(d[0].sigma_phi - 0.05f) < 1e-4f and std::abs(d[0].p - 0.7f) < 1e-6f and std::abs(d[1].p - 0.3f) < 1e-6f);
+    CHECK(rc::interaction::decode_anchor_leaves({0.f, 0.f}, {0.f, 0.f}, 0.f).empty());
+    CHECK(rc::interaction::decode_anchor_leaves({xs[0], xs[1], xs[2]}, {ys[0], ys[1], ys[2]}, 0.f).size() == 1);   // the 3-vertex form
     std::println("  clear gap: 90 deg {:.3f} m at {:+.3f}; 60 deg {:.3f} m at {:+.3f}", g90.width, g90.centre, g60.width, g60.centre);
 }
 
@@ -480,7 +484,7 @@ void leaf_on_robot_side_not_contacted()
         float s_min_contact = 9.f;
         for (; steps < 600 and not through; ++steps)
         {
-            const auto c = chain(r, model_leaf ? &l : nullptr, kShadow);
+            const auto c = chain(r, one(model_leaf ? &l : nullptr), kShadow);
             if (c.through) { through = true; break; }
             for (int k = 0; k < 5; ++k)
             {
@@ -513,8 +517,8 @@ void rotation_near_leaf_capped()
     CHECK(leaf_contacts(r0, l, kShadow) == 0);
     for (const float dir : {+1.f, -1.f})
     {
-        const float w_leaf = rc::anchor_jamb_rot_limit(r0, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, &l);
-        const float w_none = rc::anchor_jamb_rot_limit(r0, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, nullptr);
+        const float w_leaf = rc::anchor_jamb_rot_limit(r0, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, one(&l));
+        const float w_none = rc::anchor_jamb_rot_limit(r0, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, Leaves());
         std::println("  beside the leaf, turn {}: |rot| cap {:.3f} with the leaf, {:.3f} without", dir > 0 ? "CCW" : "CW", w_leaf, w_none);
         CHECK(w_none > kWmax - 1e-3f);   // the jambs alone do not see it
         CHECK(w_leaf < 0.5f * kWmax);    // the leaf caps the sweep
@@ -522,14 +526,14 @@ void rotation_near_leaf_capped()
         int contacts = 0;
         for (int k = 0; k < 100; ++k)    // 1 s at dt = 0.01, the cap re-evaluated each step
         {
-            const float w = rc::anchor_jamb_rot_limit(r, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, &l);
+            const float w = rc::anchor_jamb_rot_limit(r, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, one(&l));
             r.x = rc::interaction::move_mean(r.x, 0.f, 0.f, dir * w * 0.01f);
             contacts += leaf_contacts(r, l, kShadow);
         }
         CHECK(contacts == 0);
     }
     // ...and translation toward it is capped too: a sideways (holonomic) push into the leaf.
-    const float v = rc::anchor_jamb_speed_limit(r0, kWidth, Eigen::Vector2f(1.f, 0.f), kShadow, kMargin, 0.5f, kVmax, &l);
+    const float v = rc::anchor_jamb_speed_limit(r0, kWidth, Eigen::Vector2f(1.f, 0.f), kShadow, kMargin, 0.5f, kVmax, one(&l));
     std::println("  beside the leaf, a push toward it: speed cap {:.3f}", v);
     CHECK(v < 0.05f);
 }
@@ -546,19 +550,100 @@ void approach_standpoint_on_the_cross_line()
     {
         const auto l = leaf_toward();
         const auto* lp = with_leaf ? &l : nullptr;
-        const Eigen::Vector2f q = rc::anchor_standpoint(r, kWidth, lp, offered);
+        const Eigen::Vector2f q = rc::anchor_standpoint(r, kWidth, one(lp), kBody + kMargin, offered);
         // The robot standing at q (heading along the normal): the anchor seen from there.
         RelPose seen = r;
         seen.x = rc::interaction::move_mean(r.x, q.x(), q.y(), 0.f);   // translate the robot to q (robot-frame step)
         const auto g = rc::anchor_cross_geometry(seen);
-        const float line = rc::anchor_clear_gap(kWidth, lp).centre;
+        const float line = rc::anchor_cross_line(kWidth, one(lp), kBody + kMargin, rc::anchor_cross_geometry(r).sigma_lat);
         std::println("  approach standpoint{}: offered e {:+.3f} s {:+.3f} -> e {:+.3f} s {:+.3f} (the line at {:+.3f})",
                      with_leaf ? " (leaf at 90 deg)" : "", g0.a.dot(offered - r.x.head<2>()), g0.n.dot(offered - r.x.head<2>()),
                      g.e, g.s, line);
         CHECK(std::abs(g.e - line) < 0.005f);       // on the cross line
         CHECK(std::abs(g.s - (-1.9f)) < 0.005f);    // at the producer's depth
     }
-    CHECK((rc::anchor_standpoint(RelPose{}, 0.f, nullptr, offered) - offered).norm() == 0.f);   // no width: as published
+    CHECK((rc::anchor_standpoint(RelPose{}, 0.f, Leaves(), kBody, offered) - offered).norm() == 0.f);   // no width: as published
+    // I-5: fused by precision with the room frame — a room σ equal to the anchor's lands halfway between line and offer.
+    {
+        const float sa = rc::anchor_cross_geometry(r).sigma_lat;
+        const Eigen::Vector2f q = rc::anchor_standpoint(r, kWidth, Leaves(), kBody, offered, sa);
+        RelPose seen = r; seen.x = rc::interaction::move_mean(r.x, q.x(), q.y(), 0.f);
+        const auto g = rc::anchor_cross_geometry(seen);
+        std::println("  fused with an equally sure room frame: e {:+.3f} (offered -0.310, line 0)", g.e);
+        CHECK(std::abs(g.e - (-0.155f)) < 0.005f);
+    }
+}
+
+// Fix round 1, I-1: a predicted pose carried while parked in the doorway grows its covariance (rc::interaction::grow_unseen),
+// so the servo slows on an old sighting instead of driving it at full speed.
+void predicted_pose_slows_while_parked()
+{
+    const auto l = leaf_toward();
+    const auto lv = one(&l);
+    // Seen at the mouth (s −0.3), 4 cm off the cross line, σ_lat 0.019 m (try70's claimed σ on an 8σ-wrong pose).
+    const float line = rc::anchor_cross_line(kWidth, lv, kBody + kMargin, 0.019f);
+    RelPose seen = anchor(-(line + 0.04f), 0.3f, 0.f, 0.019f);
+    RelPose carried = seen;
+    for (int k = 0; k < 50; ++k) rc::interaction::grow_unseen(carried, 0.1f, 3.0f);   // 5 s parked, unseen, kAnchorPredictMs 3 s
+    const float s0 = rc::anchor_cross_geometry(seen).sigma_lat, s1 = rc::anchor_cross_geometry(carried).sigma_lat;
+    const auto c0 = rc::anchor_cross_command(seen, kWidth, kBody + kMargin, kStandoff, kVmax, kWmax, false, lv);
+    const auto c1 = rc::anchor_cross_command(carried, kWidth, kBody + kMargin, kStandoff, kVmax, kWmax, false, lv);
+    const float p0 = rc::anchor_p_fit_leaves(kWidth, lv, kBody + kMargin, rc::anchor_cross_geometry(seen).e, s0);
+    const float p1 = rc::anchor_p_fit_leaves(kWidth, lv, kBody + kMargin, rc::anchor_cross_geometry(carried).e, s1);
+    std::println("  parked 5 s unseen: sigma_lat {:.3f} -> {:.3f} m, P(fits) {:.3f} -> {:.3f}, adv {:.3f} -> {:.3f}", s0, s1, p0, p1,
+                 c0.adv, c1.adv);
+    CHECK(s1 > 4.f * s0);
+    CHECK(c1.adv < 0.75f * c0.adv);
+    CHECK(c0.adv > 0.f);
+}
+
+// Fix round 1, I-4 / I-6: the leaf hypotheses.
+void leaf_hypotheses_weigh_the_minority()
+{
+    // The hinge believed at P 0.6 (log-odds 0.405), the swing sure (toward the robot): two 90° leaves, one per jamb.
+    const auto hyp = rc::interaction::anchor_leaf_hypotheses(+0.5f * kWidth, -kWallHalfT, -1.f, -1.f, kWidth,
+                                                            std::numbers::pi_v<float> / 2.f, 0.05f, std::log(0.6f / 0.4f), 20.f);
+    CHECK(hyp.size() == 4 and std::abs(hyp[0].p - 0.6f) < 1e-3f and std::abs(hyp[1].p - 0.4f) < 1e-3f);
+    const RelPose r = anchor(0.f, 1.0f, 0.f, 0.02f);
+    int left = 0, right = 0;
+    float p_left = 0.f, p_right = 0.f;
+    for (const auto& o : rc::anchor_obstacles(r, kWidth, hyp))
+        if (o.radius > 0.f and o.p > 0.1f) { if (o.mean.x() > 0.f) { ++right; p_right = o.p; } else { ++left; p_left = o.p; } }
+    const float line = rc::anchor_cross_line(kWidth, hyp, kBody + kMargin, 0.02f);
+    std::println("  hinge P 0.6: leaf obstacles left {} (p {:.2f}), right {} (p {:.2f}); cross line {:+.3f} m (MAP alone -0.020)",
+                 left, p_left, right, p_right, line);
+    CHECK(left > 0 and right > 0);
+    CHECK(std::abs(line) < 0.01f);
+    // I-6: ajar 20° toward the robot, sure: the gap it leaves is a slit — the line stays on the opening's centre.
+    const auto l20 = leaf_toward(20.f * std::numbers::pi_v<float> / 180.f, 0.f);
+    const float line20 = rc::anchor_cross_line(kWidth, one(&l20), kBody + kMargin, 0.02f);
+    const auto g20 = rc::anchor_clear_gap(kWidth, &l20);
+    std::println("  ajar 20 deg: gap {:.3f} m at {:+.3f}; cross line {:+.4f} m", g20.width, g20.centre, line20);
+    CHECK(std::abs(line20) < 0.005f);
+    CHECK(std::abs(g20.centre) > 0.1f);   // the slit's centre is far off — the line does not go there
+    // The guard weighs a leaf by its probability: a push into a 0.4-probable leaf is slowed, not stopped like a sure one.
+    auto sure = leaf_toward(); sure.p = 1.f;
+    auto unsure = leaf_toward(); unsure.p = 0.4f;
+    const RelPose r0 = anchor(-0.08f, 0.55f, 0.f, 0.02f);
+    const float v_sure = rc::anchor_jamb_speed_limit(r0, kWidth, Eigen::Vector2f(1.f, 0.f), kShadow, kMargin, 0.5f, kVmax, one(&sure));
+    const float v_unsure = rc::anchor_jamb_speed_limit(r0, kWidth, Eigen::Vector2f(1.f, 0.f), kShadow, kMargin, 0.5f, kVmax, one(&unsure));
+    std::println("  push into the leaf: cap {:.3f} (sure) vs {:.3f} (P 0.4)", v_sure, v_unsure);
+    CHECK(v_sure < v_unsure and v_unsure < kVmax);
+}
+
+// Task 12 Fix E: the cross ends when the robot is THROUGH on the anchor, not at the room switch.
+void cross_ends_through_not_at_the_room_switch()
+{
+    const RelPose at03 = anchor(0.f, -0.3f, 0.f, 0.02f), at20 = anchor(0.f, -2.0f, 0.f, 0.02f);   // s = +0.3, s = +2.0
+    const bool t03 = rc::anchor_cross_command(at03, kWidth, kBody, kStandoff, kVmax, kWmax, false).through;
+    const bool t20 = rc::anchor_cross_command(at20, kWidth, kBody, kStandoff, kVmax, kWmax, false).through;
+    using E = rc::AnchorCrossEnd;
+    CHECK(rc::anchor_cross_end(true, true, t03) == E::Continue);    // room switch at s +0.3 with an anchor: keep going
+    CHECK(rc::anchor_cross_end(true, true, t20) == E::Through);     // s +2.0: through
+    CHECK(rc::anchor_cross_end(true, false, t20) == E::Through);
+    CHECK(rc::anchor_cross_end(false, true, t03) == E::RoomSwitch); // no anchor: the old room-switch rule
+    CHECK(rc::anchor_cross_end(false, false, t03) == E::Continue);
+    std::println("  cross end: switch at s +0.3 on the anchor -> continue (through {}), s +2.0 -> through ({})", t03, t20);
 }
 
 int main()
@@ -583,6 +668,9 @@ int main()
     leaf_on_robot_side_not_contacted();
     rotation_near_leaf_capped();
     approach_standpoint_on_the_cross_line();
+    predicted_pose_slows_while_parked();
+    leaf_hypotheses_weigh_the_minority();
+    cross_ends_through_not_at_the_room_switch();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

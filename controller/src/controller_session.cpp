@@ -157,6 +157,9 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     // ── DOOR PASSAGE (controller_door_passage.h): which affordance may be selected, and the corridor through the
     //    doorway while crossing. Before set_world below, so the grid built this cycle already includes it.
     {
+        // Task 12 Fix E: whether the cross is driven on an anchor, and whether its servo is through — the passage keeps the
+        // cross going past a room switch on the anchor until then.
+        door_passage_.note_anchor(anchor_cross_engaged_, anchor_through_);
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
         if (dp.event.has_value()) std::println("{}", *dp.event);
         // A single command's passage is over (crossed, door closed behind or left open): the base goes back to the
@@ -818,10 +821,18 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     //   went off on its own: live, after a chat `stop` it claimed aff_door_1 (an inspect look) over and over.
     const bool command_without_order = mission_.mode() == rc::DriveMode::Command
                                    and door_required_.empty() and not command_explore_;
-    const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
+    auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
                             or command_without_order
                             ? std::nullopt
                             : world_model.read_target_in_room(timestamp_ms);
+    // ── Task 12 Fix E: THROUGH THE DOORWAY PAST THE ROOM SWITCH. While the passage is clearing (the room changed during an
+    //    anchored cross), the selector is given a name nothing carries — the new room's door must not be claimed (its own
+    //    cross points back) — and the target stays the cross being executed: its node went with the old room, and the
+    //    anchored path (read_cross_anchor: the latched anchor id) drives the servo on until `through`.
+    if (not door_passage_.clearing() and target.has_value() and target->from_affordance and target->node_name.ends_with("_cross"))
+        clearing_target_ = *target;
+    if (door_passage_.clearing() and clearing_target_.has_value())
+        target = clearing_target_;
     // Read straight after the selection that produced it — it is a per-call report, and any later read
     // would be describing a different cycle's contest.
     // The planner grid's identity, stamped before selection reads it: a verdict this side reached
@@ -3028,7 +3039,7 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
                               .fresh = fresh,
                               .age_ms = age,
                               .unseen_ms = std::max(0, unseen),
-                              .leaf = rc::interaction::read_anchor_leaf(*graph_, id)};
+                              .leaves = rc::interaction::read_anchor_leaves(*graph_, id)};
 }
 
 // Task 9, fix A: ONCE A CROSS IS ANCHORED IT NEVER FALLS BACK TO THE ROOM ROUTE. The room route is known to fail in the
@@ -3050,6 +3061,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_spin_since_ms_ = 0;
     anchor_backoff_logged_ = false;
     anchor_leaf_logged_ = false;
+    anchor_through_ = false;
     anchor_predicted_logged_ = false;
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
 }
@@ -3146,45 +3158,65 @@ float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir
     return v;
 }
 
-// Task 12 fix C: the approach standpoint re-expressed on the interaction anchor (rc::anchor_standpoint): the producer's depth
-// along the opening's normal, laterally on the cross line (the clear gap's centre). Only for an `_approach` affordance that
-// names a FRESH anchor (read_anchor's kAnchorStaleMs rule: a pose somebody is looking at); otherwise the room-frame
-// standpoint stands as published. Logged on the transitions, with the lateral shift it made.
+// Task 12 fix C (fix round 1, I-5): the approach standpoint's ALONG-WALL coordinate, fused from the room frame and the
+// interaction anchor by precision (rc::anchor_standpoint): the room's is the published standpoint's own, with the room-frame
+// door's along-wall σ (its RT edge covariance, projected on the wall); the anchor's is its cross line, with σ_lat. The depth
+// stays the producer's. Computed ONCE per approach proposal — the first cycle of a (node, epoch) with a fresh anchor — and
+// LATCHED: the robot drives to one point, not to one that moves with every anchor frame. Without a fresh anchor (or before
+// one is seen in this epoch) the published standpoint stands.
 void ControllerSession::apply_anchor_standpoint(ControllerPlanningStep &step, const ControllerRobotPose &robot_pose)
 {
     const bool is_approach = step.target.from_affordance and step.target.node_name.ends_with("_approach");
-    std::optional<std::pair<rc::interaction::RelPose, float>> a;
-    std::optional<rc::interaction::AnchorLeaf> leaf;
-    std::uint64_t id = 0;
-    if (is_approach and graph_ != nullptr)
-        if (const auto aff = graph_->get_node(step.target.node_id); aff.has_value())
-            if (id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0); id != 0)
-            {
-                a = rc::interaction::read_anchor(*graph_, id, static_cast<std::int64_t>(rc::provenance::now_ms()));
-                if (a.has_value()) leaf = rc::interaction::read_anchor_leaf(*graph_, id);
-            }
-    const bool on = a.has_value() and a->second > 0.f;
-    if (not on)
+    if (not is_approach or graph_ == nullptr) { anchor_standpoint_latch_.reset(); return; }
+    const int epoch = approach_commit_.has_value() ? approach_commit_->epoch
+                    : rc::AffordanceManager::producer_epoch(graph_, step.target.node_id).value_or(0);
+    if (anchor_standpoint_latch_.has_value() and anchor_standpoint_latch_->node_id == step.target.node_id
+        and anchor_standpoint_latch_->epoch == epoch)
     {
-        if (anchor_standpoint_logged_)
-            std::println("[anchor] approach: '{}' — no fresh anchor: the room-frame standpoint as published", step.target.node_name);
-        anchor_standpoint_logged_ = false;
+        step.target.room_pos = anchor_standpoint_latch_->room_pos;
         return;
     }
+    anchor_standpoint_latch_.reset();
+    std::uint64_t id = 0;
+    std::optional<std::pair<rc::interaction::RelPose, float>> a;
+    if (const auto aff = graph_->get_node(step.target.node_id); aff.has_value())
+        if (id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0); id != 0)
+            a = rc::interaction::read_anchor(*graph_, id, static_cast<std::int64_t>(rc::provenance::now_ms()));
+    if (not a.has_value() or not (a->second > 0.f)) return;   // the published standpoint, until a fresh anchor in this epoch
+    const auto leaves = rc::interaction::read_anchor_leaves(*graph_, id);
+    // The room-frame door's along-wall σ: its RT edge (parent → door) covariance at the newest stamp, on the wall direction.
+    float sigma_room = -1.f;
+    if (const auto anchor_node = graph_->get_node(id); anchor_node.has_value())
+        if (const auto door_id = graph_->get_attrib_by_name<interaction_node_id_att>(anchor_node.value()); door_id.has_value())
+            if (const auto door = graph_->get_node(door_id.value()); door.has_value())
+                if (const auto parent = graph_->get_attrib_by_name<parent_att>(door.value()); parent.has_value())
+                    if (const auto edge = graph_->get_edge(parent.value(), door->id(), "RT"); edge.has_value())
+                        if (const auto stamps = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value()); stamps.has_value())
+                        {
+                            std::uint64_t newest = 0;
+                            for (const auto t : stamps->get()) newest = std::max(newest, t);
+                            const auto rt = graph_->get_rt_api();
+                            const auto T = rt->get_edge_RT_as_rtmat(edge.value(), newest);
+                            const auto C = rt->get_edge_RT_covariance(edge.value(), newest);
+                            if (newest != 0 and T.has_value() and C.has_value())
+                            {
+                                const Eigen::Vector2d u(T->linear()(0, 0), T->linear()(1, 0));   // the door's x: along the wall
+                                const double v = u.x() * u.x() * (*C)(0, 0) + 2.0 * u.x() * u.y() * (*C)(0, 1) + u.y() * u.y() * (*C)(1, 1);
+                                if (std::isfinite(v) and v > 0.0) sigma_room = static_cast<float>(std::sqrt(v));
+                            }
+                        }
+    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
     const Eigen::Affine2f room_T_robot = robot_pose.as_transform();
     const Eigen::Vector2f q = room_T_robot.inverse() * step.target.room_pos;
-    const Eigen::Vector2f q2 = rc::anchor_standpoint(a->first, a->second, leaf.has_value() ? &*leaf : nullptr, q);
+    const Eigen::Vector2f q2 = rc::anchor_standpoint(a->first, a->second, leaves, half_w, q, sigma_room);
     const Eigen::Vector2f room2 = room_T_robot * q2;
-    if (not anchor_standpoint_logged_)
-    {
-        anchor_standpoint_logged_ = true;
-        const auto g = rc::anchor_cross_geometry(a->first);
-        const float psi = a->first.x.z();
-        const Eigen::Vector2f ax(std::cos(psi), std::sin(psi));
-        std::println("[anchor] approach: '{}' stands on the anchor's cross line — standpoint ({:.2f},{:.2f}) -> ({:.2f},{:.2f}) "
-                     "[room], {:+.2f} m along the wall (robot now e {:+.2f} s {:+.2f})", step.target.node_name,
-                     step.target.room_pos.x(), step.target.room_pos.y(), room2.x(), room2.y(), ax.dot(q2 - q), g.e, g.s);
-    }
+    const auto g = rc::anchor_cross_geometry(a->first);
+    std::println("[anchor] approach: '{}' epoch {} — standpoint ({:.2f},{:.2f}) -> ({:.2f},{:.2f}) [room], {:+.2f} m along the "
+                 "wall: room σ {:.3f} m fused with the anchor's line (σ_lat {:.3f} m); latched for this proposal",
+                 step.target.node_name, epoch, step.target.room_pos.x(), step.target.room_pos.y(), room2.x(), room2.y(),
+                 g.a.dot(q2 - q), sigma_room, g.sigma_lat);
+    anchor_standpoint_latch_ = AnchorStandpointLatch{.node_id = step.target.node_id, .epoch = epoch, .room_pos = room2};
     step.target.room_pos = room2;
 }
 
@@ -3225,6 +3257,17 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // new constant. Handed back as Unreachable, which the door passage counts as an attempt and re-offers.
     auto hand_back = [&](const std::string &why)
     {
+        if (door_passage_.clearing())
+        {
+            // Task 12 Fix E: no claim to hand back past the room switch — the anchor is lost; the passage moves on (its
+            // room-switch rule) with the robot where it is.
+            std::println("[anchor] cross: {} while going through past the room switch — the anchor is given up", why);
+            anchor_cross_engaged_ = false;
+            anchor_wait_since_ms_ = 0;
+            anchor_spin_since_ms_ = 0;
+            note_no_command(); motion_commander.stop_robot();
+            return;
+        }
         std::println("[anchor] cross: {} — beyond the cross contract's timeout ({:.1f} s): handing '{}' back Unreachable",
                      why, target_contract_.timeout_ms * 1e-3f, anchor_latched_for_);
         flag_reach_unreachable("anchor cross: " + why);
@@ -3233,19 +3276,21 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         note_no_command(); motion_commander.stop_robot();
     };
 
-    // Task 12 fix A: the swung leaf the owner publishes (anchor frame) — an obstacle for the guards, and the clear gap it leaves
-    // is the cross line. It is rigid in the anchor frame, so it serves the waited-for pose as well as a fresh one.
-    const rc::interaction::AnchorLeaf* leaf = a.leaf.has_value() ? &*a.leaf : nullptr;
-    if (a.leaf.has_value() != anchor_leaf_logged_)
+    // Task 12 fix A (fix round 1: every hinge × swing hypothesis with its probability): the swung leaf the owner publishes
+    // (anchor frame) — obstacles for the guards, weighted by their probability, and the cross line from the gaps they leave.
+    // Rigid in the anchor frame, so it serves the waited-for pose as well as a fresh one.
+    const std::span<const rc::interaction::AnchorLeaf> leaves(a.leaves);
+    if (not a.leaves.empty() != anchor_leaf_logged_)
     {
-        anchor_leaf_logged_ = a.leaf.has_value();
-        if (leaf != nullptr)
+        anchor_leaf_logged_ = not a.leaves.empty();
+        if (not a.leaves.empty())
         {
-            const auto gap = rc::anchor_clear_gap(a.width_m, leaf);
-            std::println("[anchor] cross: {} carries its leaf — hinge ({:+.2f},{:+.2f}) free edge ({:+.2f},{:+.2f}) [anchor frame], "
-                         "phi {:.0f} deg sigma {:.1f} deg: an obstacle to the guards; the clear gap beside it is {:.2f} m wide, "
-                         "the cross line at {:+.2f} m", a.name, leaf->hinge.x(), leaf->hinge.y(), leaf->tip.x(), leaf->tip.y(),
-                         leaf->phi * 57.2958f, leaf->sigma_phi * 57.2958f, gap.width, gap.centre);
+            const auto &l = a.leaves.front();
+            const float line = rc::anchor_cross_line(a.width_m, leaves, half_w, rc::anchor_cross_geometry(a.pose).sigma_lat);
+            std::println("[anchor] cross: {} carries {} leaf hypotheses — MAP (P {:.2f}) hinge ({:+.2f},{:+.2f}) free edge "
+                         "({:+.2f},{:+.2f}) [anchor frame], phi {:.0f} deg sigma {:.1f} deg: obstacles to the guards; the cross "
+                         "line at {:+.2f} m", a.name, a.leaves.size(), l.p, l.hinge.x(), l.hinge.y(), l.tip.x(), l.tip.y(),
+                         l.phi * 57.2958f, l.sigma_phi * 57.2958f, line);
         }
         else
             std::println("[anchor] cross: {} carries no leaf — the jambs alone, the opening's centre line", a.name);
@@ -3257,10 +3302,20 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
-        cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic, leaf);
+        cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic, leaves);
         if (cmd.through)
         {
             const auto g = rc::anchor_cross_geometry(a.pose);
+            // Task 12 Fix E: past a room switch the cross's node is gone — `through` is the door passage's to act on.
+            anchor_through_ = true;
+            if (door_passage_.clearing())
+            {
+                std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — THROUGH the doorway, "
+                             "in the new room", a.name, g.s, standoff);
+                path_controller.stop();
+                note_no_command(); motion_commander.stop_robot();
+                return;
+            }
             std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through",
                          a.name, g.s, standoff);
             path_controller.stop();
@@ -3307,7 +3362,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
     const auto &body = approach_body_.polygon();
     const auto guard = rc::anchor_jamb_guard(pose, a.width_m, cmd, holonomic, body, approach_body_.safety_margin(),
-                                             anchor_brake_decel(path_controller), v_max, w_max, leaf);
+                                             anchor_brake_decel(path_controller), v_max, w_max, leaves);
     if (guard.backoff != anchor_backoff_logged_)   // logged on the transitions only
     {
         anchor_backoff_logged_ = guard.backoff;

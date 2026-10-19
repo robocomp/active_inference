@@ -89,4 +89,27 @@ inline void predict_jacobians(const Eigen::Vector3f& x, float side, float adv, f
     return o;
 }
 
+// ─── Task 12 fix round 1 (I-1): WHAT AN UNSEEN SECOND COSTS THE CARRIED POSE ─────────────────────────────────────────────
+// A pose carried while its object is NOT seen is the last sighting moved by odometry. Odometry adds its own variance with the
+// MOTION (predict); what it cannot add is the error the last sighting already had and its covariance did not state — and
+// that error is MEASURED: the anchor's published posterior under-covers its own error against Webots ground truth (Task 10
+// calibration and the try66–try70 replays: median |lateral error| 0.055–0.125 m against a claimed σ_lat of ~0.02 m; median
+// |yaw error| 0.5–6.9° against ~1°). Each frame that SEES the doorway re-tests the pose (a wrong one is refused by p_view);
+// an unseen second re-tests nothing. So, while unseen, the carried covariance grows toward that measured discrepancy at the
+// rate the predicted window is sized by: the full discrepancy after `horizon_s` (kAnchorPredictMs — the flagged horizon of
+// "how long a prediction is trusted"). It grows inside the doorway band too (parked or spinning, where odometry adds ~0),
+// so a long predicted window slows the servo instead of driving it on an 8σ pose at full speed.
+// ⚑ MEASURED constants (not tuned): the across-leg medians of the |error| on published frames, isotropic in x/y (the depth
+// error was not measured separately; the lateral one is the larger of the two in every replay).
+inline constexpr float kUnseenSigmaXYM   = 0.08f;    // m
+inline constexpr float kUnseenSigmaYawRad = 0.05f;   // rad (~2.9°)
+inline void grow_unseen(RelPose& r, float dt_s, float horizon_s)
+{
+    if (not (dt_s > 0.f) or not (horizon_s > 0.f)) return;
+    const float f = dt_s / horizon_s;
+    r.P(0, 0) += f * kUnseenSigmaXYM * kUnseenSigmaXYM;     // isotropic in the plane: the same in robot and anchor axes
+    r.P(1, 1) += f * kUnseenSigmaXYM * kUnseenSigmaXYM;
+    r.P(2, 2) += f * kUnseenSigmaYawRad * kUnseenSigmaYawRad;
+}
+
 }  // namespace rc::interaction

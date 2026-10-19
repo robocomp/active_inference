@@ -26,6 +26,17 @@
 #include "../../common/rt_query_probe/rt_query_probe.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
+// Fix round 1 (M-1): the hinge / swing log-odds are relative to the belief's leaf; a (re-)created belief may hang it the other
+// way, and then the same evidence reads with the opposite sign.
+static void resign_leaf_llrs(rc::DoorInstance& inst)
+{
+    const auto& L = inst.ai2_belief.params().leaf;
+    if (inst.hinge_llr_ref.has_value() and *inst.hinge_llr_ref != L.hinge) inst.hinge_llr = -inst.hinge_llr;
+    if (inst.swing_llr_ref.has_value() and *inst.swing_llr_ref * L.swing < 0.0f) inst.swing_llr = -inst.swing_llr;
+    inst.hinge_llr_ref = L.hinge;
+    inst.swing_llr_ref = L.swing;
+}
+
 namespace
 {
 // Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs every other label
@@ -501,6 +512,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         {
             inst.ai2_belief = rs->second;
             inst.ai2_initialized = true;
+            resign_leaf_llrs(inst);   // M-1
             restore_seeds_.erase(rs);
             std::print("door_concept: [{}] RE-ACQUIRED — resuming converged belief (s={:.2f} w={:.2f} h={:.2f})\n",
                        inst.node_name, inst.ai2_belief.state().s, inst.ai2_belief.state().w, inst.ai2_belief.state().h);
@@ -558,6 +570,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         }
         inst.ai2_belief = DoorBelief(s0, p);
         inst.ai2_initialized = true;
+        resign_leaf_llrs(inst);   // M-1
     }
 
     if (observation.has_fresh_data)
@@ -1072,10 +1085,12 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         const float cur = inst.ai2_belief.params().leaf.swing;
         inst.swing_llr += (inst.anchor_phi_swing * cur > 0.0f ? 1.0f : -1.0f) * inst.anchor_swing_llr;
         inst.anchor_swing_llr = std::numeric_limits<float>::quiet_NaN();
+        inst.swing_llr_ref = cur;
         if (inst.swing_llr < 0.0f)
         {
             inst.ai2_belief.set_leaf_swing(-cur);
             inst.swing_llr = -inst.swing_llr;
+            inst.swing_llr_ref = -cur;
             std::print("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal: the anchor's beams explain "
                        "it better there (log-odds {:+.1f}; phi {:.0f} deg)\n", inst.node_name, -cur > 0.0f ? "along" : "against",
                        inst.swing_llr, inst.phi_est * 57.2958f);
@@ -1087,7 +1102,9 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         auto hm = rc::door::phi_hinge_marginal(ll_this, ll_other, inst.hinge_llr, phi_prior, sigma_phi);
         loglik = std::move(hm.loglik);
         inst.hinge_llr = hm.hinge_llr;
-        if (rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr))
+        const bool hinge_flipped = rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr);
+        inst.hinge_llr_ref = inst.ai2_belief.params().leaf.hinge;
+        if (hinge_flipped)
             // ★ The live check (fix round 1): this line must come BEFORE the aperture's σ_s collapses (σ_s printed here).
             std::print("door_concept: [{}] HINGE FLIPPED — now the {} jamb, the leaf is better explained hung there "
                        "(log-odds {:+.1f}; phi {:.0f} deg; aperture s {:.2f} m σ_s {:.3f} m)\n",

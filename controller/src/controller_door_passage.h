@@ -54,6 +54,7 @@
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/world_query/door_query.h"
 #include "door_passage_corridor.h"
+#include "controller_anchor_servo.h"   // rc::anchor_cross_end (Task 12 Fix E)
 
 namespace rc
 {
@@ -86,6 +87,9 @@ public:
         step_state_.clear();
         cross_unreachable_ = 0;
         failed_ = false;
+        clearing_ = false;
+        anchored_ = false;
+        through_ = false;
         last_event_ = std::format("[door-passage] {}: started", door_);
     }
     void stop()
@@ -118,6 +122,23 @@ public:
         std::scoped_lock lk(m_);
         clock_ = std::move(clock);
     }
+    /// Task 12 Fix E — the session's word on the cross, each cycle before update(): is it being driven on an interaction
+    /// anchor (engaged, not lost), and has the servo reached `through` (s ≥ AnchorCrossStandoffM)?
+    void note_anchor(bool engaged, bool through)
+    {
+        std::scoped_lock lk(m_);
+        anchored_ = engaged;
+        through_ = through;
+    }
+    /// True while the cross goes on past a room switch on the anchor: the session drives the servo on the latched anchor and
+    /// selects nothing.
+    [[nodiscard]] bool clearing() const
+    {
+        std::scoped_lock lk(m_);
+        return clearing_ and step_ == Step::Cross;
+    }
+    static constexpr const char* kClearingSuffix = "#through";   // appended to the cross's name: required, matched by none
+
     /// True once per start(): the caller releases whatever affordance it was executing, so the claim moves over.
     [[nodiscard]] bool take_just_started()
     {
@@ -222,26 +243,51 @@ public:
             seen_executing_ = false;
         }
 
-        // ★ THE CROSSING IS ROOM_CONCEPT'S TO DECLARE. Its crossing evidence (body wholly past the doorway line)
-        //   births the new room and moves the robot's RT there, and the controller's room follows (room_resolve
-        //   rule 2a) — usually before door_concept completes "cross" (0.8 m past the plane). From then the cross
-        //   standpoint is a pose in the room just left, read in the wrong frame: the passage is over.
-        if (step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_)
+        // ★ THE CROSSING ENDS WHEN THE ROBOT IS THROUGH (Task 12 Fix E, user 10-18: "keep going inside so it can localise in
+        //   the room"). room_concept's crossing evidence moves the robot's RT to the new room with the body only ~0.3 m past
+        //   the plane (try71: close-behind then "ended infeasible", and exploration wedged the robot beside the 97° leaf).
+        //   While the cross is driven on the interaction anchor — robot-relative, so the switch does not move it — the switch
+        //   alone no longer ends it: the session keeps servoing the same anchor (clearing()) until the servo's `through`
+        //   (s ≥ AnchorCrossStandoffM along its normal). Without an anchor (the room route), or if the anchor is lost while
+        //   clearing, the old rule: from the switch on the cross standpoint is a pose in the room just left — the passage
+        //   moves on. rc::anchor_cross_end is the decision, pure (tests/test_anchor_servo.cpp).
+        const bool switched = step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_;
+        if (step_ == Step::Cross and (switched or clearing_)
+            and rc::anchor_cross_end(anchored_, switched or clearing_, through_) == rc::AnchorCrossEnd::Continue)
         {
+            if (not clearing_)
+                out.event = std::format("[door-passage] {}: the room changed {} -> {} while crossing on the anchor — going on "
+                                        "until through", door_, cross_room_, room_frame);
+            clearing_ = true;
+            note_ = "cross (through the doorway, on the anchor)";
+            step_state_ = "clearing";
+            if (out.event.has_value()) last_event_ = *out.event;
+            out.required = name_of(Step::Cross) + kClearingSuffix;   // a NAME no affordance carries: nothing is selectable
+            return out;
+        }
+        if (step_ == Step::Cross and (switched or clearing_))
+        {
+            const bool was_through = clearing_ and through_;
+            clearing_ = false;
             if (static_cast<int>(stop_after_) >= static_cast<int>(Step::Close))
             {
                 step_ = Step::Close;
                 close_since_ms_ = now_ms();
                 seen_executing_ = false;
                 attempts_ = 0;
-                out.event = std::format("[door-passage] {}: the room changed {} -> {} while crossing — now closing the "
-                                        "door behind", door_, cross_room_, room_frame);
+                out.event = was_through
+                    ? std::format("[door-passage] {}: through on the anchor (AnchorCrossStandoffM past the doorway) — now "
+                                  "closing the door behind", door_)
+                    : std::format("[door-passage] {}: the room changed {} -> {} while crossing — now closing the "
+                                  "door behind", door_, cross_room_, room_frame);
             }
             else
             {
                 finish();
-                out.event = std::format("[door-passage] {}: the room changed {} -> {} while crossing — passage DONE",
-                                        door_, cross_room_, room_frame);
+                out.event = was_through
+                    ? std::format("[door-passage] {}: through on the anchor — passage DONE", door_)
+                    : std::format("[door-passage] {}: the room changed {} -> {} while crossing — passage DONE",
+                                  door_, cross_room_, room_frame);
                 last_event_ = *out.event;
                 return out;
             }
@@ -471,6 +517,9 @@ private:
     std::string last_outcome_; // view()
     int  cross_unreachable_ = 0;   // Unreachable cross completions in this passage (kMaxCrossUnreachable)
     bool failed_ = false;          // finished by the cap, not by crossing
+    bool clearing_ = false;        // Task 12 Fix E: crossing on past the room switch, on the anchor
+    bool anchored_ = false;        // the session: the cross is being driven on an anchor
+    bool through_ = false;         // the session: the servo reached `through`
 public:
     static constexpr int kMaxCrossUnreachable = 3;   // ⚑ flagged decision level (Task 9 fix round 1)
 };

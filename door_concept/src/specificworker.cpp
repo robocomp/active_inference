@@ -3914,8 +3914,18 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     //   has gone through: ltsm moves `current` before door_concept could complete the cross, and the door released
     //   below takes its cross affordance with it. Removed HERE, first, so the affordance's link goes before its node.
     //   During approach/open the anchor is instead relinked at the end of this function.
+    // ★ Task 12 Fix E (user, 10-18: "keep going inside so it can localise in the room"): the room switch is NOT the end
+    //   of the cross any more. The robot is ~0.3 m past the plane when room_concept moves `current`; the controller keeps
+    //   servoing the anchor until it is THROUGH (s ≥ AnchorCrossStandoffM along the normal). The anchor hangs from the
+    //   robot, so the switch does not move it: it is KEPT, relinked below to the door re-identified in the new room, and
+    //   published as for a claimed cross (crossing_through). It is removed by REMOVE (b) once the consumer executes
+    //   something else (close-behind, the next affordance), or on exit.
     if (passage_anchor_.has_value() and passage_anchor_->cross_was_claimed)
-        remove_passage_anchor("the room switched while the cross was claimed: the robot has crossed");
+    {
+        passage_anchor_->crossing_through = true;
+        std::print("door_concept: [anchor] {}@robot KEPT through the room switch — the cross goes on until the robot is through\n",
+                   passage_anchor_->door_name);
+    }
     const bool old_room_lives = G->get_node(old_room).has_value();
     // ★ AND THE CROSSED DOOR IS ALREADY KNOWN IN THE NEW ROOM: its entry mirror (step_entry_mirrors) sits under the
     //   new room at the exact transform of the source door. It becomes this room's door instance, so a detection of
@@ -4046,8 +4056,8 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                     }
         }
     // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
-    //   one thing the room switch owes it (during approach/open — a switch during the cross removed it at the top of
-    //   this function) is its ORIGINAL: when the door carried across is the anchored one (same source node, or the
+    //   one thing the room switch owes it (during approach/open, and since Task 12 Fix E during the cross as well) is its
+    //   ORIGINAL: when the door carried across is the anchored one (same source node, or the
     //   same doorway name — one name per doorway), the anchor now names that door.
     if (passage_anchor_.has_value() and adopt_mirror != 0 and adopted_from.has_value()
         and (adopted_from->source_id == passage_anchor_->door_id or adopted_from->name == passage_anchor_->door_name))

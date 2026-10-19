@@ -28,8 +28,8 @@
  *   PARK     approach ended (any outcome), `open` claimed, the CROSS ended without succeeding (Unreachable, Infeasible,
  *            Timeout, aborted, released, re-offered — Task 9), or the door's instance is gone (merged): the anchor is
  *            kept, predicted and corrected — the passage may go on (open, then cross, or the cross again).
- *   ROOM     release_room(): a switch while the anchored door's CROSS is claimed IS the cross's terminal transition
- *            ⇒ REMOVE (the room switch normally lands before door_concept completes the cross). A switch during
+ *   ROOM     release_room(): a switch while the anchored door's CROSS is claimed KEEPS the anchor (Task 12 Fix E: crossing_through)
+ *            and RELINKS it (the robot still crosses on it until through; REMOVE (b) ends it). A switch during
  *            approach/open RELINKS the anchor to the door re-identified in the new room, and marks it for re-init.
  *   REMOVE   (a) the cross claim of the anchored door ended SATISFIED while its instance lives: the robot is through,
  *                the passage's crossing is over; or the room switched during the cross (above);
@@ -308,16 +308,20 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
         std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry; no room transform: belief kept\n", pa.door_name, kind);
         return;
     }
-    const Eigen::Matrix3f Pb = pa.pose.P + rc::door::anchor_axes_to_robot(Eigen::Matrix3f(kSigmaModel.cwiseProduct(kSigmaModel).asDiagonal()), pa.pose.x.z());
-    const Eigen::Matrix3f S = Pb + r->P;
-    const Eigen::Matrix3f K = Pb * S.inverse();
-    Eigen::Vector3f innov = r->x - pa.pose.x;
-    innov.z() = rc::interaction::wrap_pi(innov.z());
-    const Eigen::Vector3f dx = K * innov;
-    pa.pose.x += dx;
-    pa.pose.x.z() = rc::interaction::wrap_pi(pa.pose.x.z());
-    const Eigen::Matrix3f Pn = (Eigen::Matrix3f::Identity() - K) * Pb;
-    pa.pose.P = 0.5f * (Pn + Pn.transpose());
+    // ★ Fix round 1 (I-2): weighted by P(the robot is OUT of the doorway band). Inside the band the room initialisation is the
+    //   worst view of the opening there is, and a belief broadened there re-acquires an ALIAS (try70 leg 5: fused at the mouth,
+    //   two frames later the update sat 74–86° off with the leaf playing the wall). w = 1 − P(in band) scales both the
+    //   broadening and the room's information: K = w·P_b (w·P_b + R)⁻¹, continuous, 0 inside the band (the belief stands).
+    const float w_out = 1.f - rc::door::anchor_doorway_band(pa.pose, cfg_.pragmatic.cross_clearance_m);
+    Eigen::Vector3f innov;
+    const auto fused = rc::door::retry_fusion(pa.pose, r.value(),
+                                              rc::door::anchor_axes_to_robot(Eigen::Matrix3f(kSigmaModel.cwiseProduct(kSigmaModel).asDiagonal()),
+                                                                             pa.pose.x.z()),
+                                              w_out, &innov);
+    Eigen::Vector3f dx = fused.x - pa.pose.x;
+    dx.z() = rc::interaction::wrap_pi(dx.z());
+    pa.pose.x = fused.x;
+    pa.pose.P = fused.P;
     pa.bias = {};   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
     // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
     // claim fails), and nothing seen before it may be published as "predicted" after it.
@@ -327,8 +331,8 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.init_pose.stamp_ms = pa.pose.stamp_ms;
     pa.mode = rc::door::AnchorPublish::None;
     std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
-               "init (room − belief {:.2f} m / {:+.1f}°): moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n", pa.door_name, kind,
-               innov.head<2>().norm(), innov.z() * 57.2958f, dx.head<2>().norm(), dx.z() * 57.2958f,
+               "init (room − belief {:.2f} m / {:+.1f}°, weight P(out of the doorway band) {:.2f}): moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n",
+               pa.door_name, kind, innov.head<2>().norm(), innov.z() * 57.2958f, w_out, dx.head<2>().norm(), dx.z() * 57.2958f,
                std::sqrt(std::max(0.f, pa.pose.P(0, 0) + pa.pose.P(1, 1))));
 }
 
@@ -477,6 +481,9 @@ void SpecificWorker::step_passage_anchor()
 
     const bool app = inst != nullptr and inst->aff_approach.claimed();
     const bool crs = inst != nullptr and inst->aff_cross.claimed();
+    // Fix E: past a room switch during the cross the old door's cross is gone with its room, but the robot is still
+    // crossing on this anchor (the controller servos it until `through`): for PUBLICATION the cross counts as claimed.
+    const bool crs_pub = crs or pa.crossing_through;
     const bool opn = inst != nullptr and inst->aff_open.claimed();
 
     // ── REMOVE (a): the crossing's own claim ended SATISFIED — else PARK it for the retry (Task 9) ────────────────
@@ -814,7 +821,12 @@ void SpecificWorker::step_passage_anchor()
         //   grid, for the believed jamb and the other (rc::door::anchor_phi_loglik), and handed to the door's estimate_phi,
         //   which ADDS it to its φ likelihood once. NOT a shut-vs-not ratio fused into P(passable): an AJAR leaf passes
         //   that test (review: 30° read P 0.989) and fails this one, because passable_logit asks the clear span.
-        if (not rays.empty() and inst != nullptr and inst->ai2_initialized and leaf.known)
+        // ★ Fix round 1 (I-3): only a frame whose pose is being PUBLISHED as seen (p_view ≥ kPublishViewLevel, the same level)
+        //   is evidence about the leaf. An ALIASED pose (try70 leg 5: 60–86° off, p_view 0.33–0.48) scores the beams against a
+        //   wrong opening, and the hinge and swing log-odds accumulate with no forgetting — one such stretch could flip and
+        //   latch them. The publication test is the model's own judgement of whether this frame sees THIS doorway.
+        if (not rays.empty() and inst != nullptr and inst->ai2_initialized and leaf.known
+            and rc::door::anchor_frame_is_leaf_evidence(ev.p_view, kPublishViewLevel))
         {
             const auto g = rc::door::phi_grid(cfg_.phi_max_rad, cfg_.phi_step_rad);
             auto ac = rc::door::anchor_phi_loglik(pa.pose, pa.width, pa.thickness, leaf, lidar_origin, rays, ev.p_view,
@@ -880,11 +892,18 @@ void SpecificWorker::step_passage_anchor()
     //   the geometry predicts, and the carried pose's covariance grows with the motion, not with the wait.
     if (publish) { pa.seen_once = true; pa.last_seen_ms = now; pa.seen_pose = pa.pose; pa.unseen_charge_ms = 0; }
     else if (pa.charge_stamp_ms > 0)
+    {
         pa.unseen_charge_ms = rc::door::anchor_unseen_charge(pa.unseen_charge_ms, now - pa.charge_stamp_ms,
                                                              rc::door::anchor_doorway_band(pa.seen_pose, cfg_.pragmatic.cross_clearance_m));
+        // Fix round 1 (I-1): an unseen second re-tests nothing, inside the band too — the carried pose's covariance grows
+        // toward the anchor's MEASURED under-coverage (rc::interaction::grow_unseen), so the servo slows on an old sighting.
+        if (pa.seen_once)
+            rc::interaction::grow_unseen(pa.seen_pose, 1e-3f * float(now - pa.charge_stamp_ms),
+                                         1e-3f * float(rc::interaction::kAnchorPredictMs));
+    }
     pa.charge_stamp_ms = now;
     const auto mode = (measured or pa.mode == rc::door::AnchorPublish::Predicted)
-        ? rc::door::anchor_publish_decision(publish, crs, pa.seen_once, pa.unseen_charge_ms, rc::interaction::kAnchorPredictMs)
+        ? rc::door::anchor_publish_decision(publish, crs_pub, pa.seen_once, pa.unseen_charge_ms, rc::interaction::kAnchorPredictMs)
         : pa.mode;
     if (mode != pa.mode)
     {
@@ -927,27 +946,31 @@ void SpecificWorker::step_passage_anchor()
     //    φ not measured) ⇒ the attributes are REMOVED, never a sentinel.
     if (wrote)
     {
-        std::optional<rc::interaction::AnchorLeaf> al;
+        // Fix round 1 (I-4): every hinge × swing hypothesis with its probability (σ of the door's hinge / swing log-odds),
+        // so the guards weigh the minority leaf too and the cross line moves only as far as the MAP is believed.
+        std::vector<rc::interaction::AnchorLeaf> al;
         if (inst != nullptr and inst->ai2_initialized and inst->interaction.phi_known)
         {
             const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
             const float phi_max = std::clamp(cfg_.phi_max_rad, 0.f, float(M_PI));
             const float sy = pa.axis_sign * inst->leaf.swing;
-            al = rc::interaction::make_anchor_leaf(pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.clear_width,
-                                                   sy * 0.5f * pa.thickness, pa.axis_sign * near, sy, pa.clear_width,
-                                                   std::clamp(inst->phi_est, 0.f, phi_max), inst->phi_sigma);
+            al = rc::interaction::anchor_leaf_hypotheses(pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.clear_width,
+                                                         sy * 0.5f * pa.thickness, pa.axis_sign * near, sy, pa.clear_width,
+                                                         std::clamp(inst->phi_est, 0.f, phi_max), inst->phi_sigma,
+                                                         inst->hinge_llr, inst->swing_llr);
         }
-        if (al.has_value() != pa.leaf_published)
+        if (not al.empty() != pa.leaf_published)
         {
-            pa.leaf_published = al.has_value();
-            if (al.has_value())
-                std::print("door_concept: [anchor] {}@robot carries its leaf: hinge ({:+.2f},{:+.2f}) free edge ({:+.2f},{:+.2f}) "
-                           "[anchor frame], phi {:.0f} deg σ {:.1f} deg\n", pa.door_name, al->hinge.x(), al->hinge.y(),
-                           al->tip.x(), al->tip.y(), al->phi * 57.2958f, al->sigma_phi * 57.2958f);
+            pa.leaf_published = not al.empty();
+            if (not al.empty())
+                std::print("door_concept: [anchor] {}@robot carries its leaf: MAP hinge ({:+.2f},{:+.2f}) free edge ({:+.2f},{:+.2f}) "
+                           "[anchor frame], phi {:.0f} deg σ {:.1f} deg, P(MAP) {:.2f} (hinge log-odds {:+.1f}, swing {:+.1f})\n",
+                           pa.door_name, al[0].hinge.x(), al[0].hinge.y(), al[0].tip.x(), al[0].tip.y(), al[0].phi * 57.2958f,
+                           al[0].sigma_phi * 57.2958f, al[0].p, inst->hinge_llr, inst->swing_llr);
             else
                 std::print("door_concept: [anchor] {}@robot leaf withdrawn — no leaf angle measured\n", pa.door_name);
         }
-        pa.anchor->set_leaf(*G, al);
+        pa.anchor->set_leaves(*G, al);
     }
     const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)

@@ -221,6 +221,54 @@ int main()
         check(std::abs(sllr) < 1.0, "a shut leaf says (almost) nothing about the swing");
     }
 
+    std::print("(9) fix round 1 (I-3): ALIASED frames (the pose 60–86° off, try70 leg 5) do not flip a swing believed at log-odds 10\n");
+    {
+        // The truth: the leaf hinged at −W/2, swung AWAY 90°. The door believes it, swing log-odds +10.
+        float swing_llr = 10.f, swing_llr_ungated = 10.f;
+        const float swing = 1.f;
+        for (int f = 0; f < 5; ++f)
+        {
+            const auto pts = sweep(1.5708f, swing, rng);
+            rc::interaction::RelPose alias;
+            const float yaw = (60.f + 6.5f * float(f)) * float(M_PI) / 180.f;   // 60 … 86°
+            alias.x = {0.25f, D - 0.3f, yaw};
+            alias.P = Eigen::Vector3f(0.02f * 0.02f, 0.02f * 0.02f, 0.02f * 0.02f).asDiagonal();
+            rc::door::LeafPrior leaf;
+            leaf.known = true; leaf.len = W; leaf.swing_y = swing; leaf.hinge_u = -0.5f * W; leaf.dir_u = 1.f;
+            leaf.phi = 1.5708f; leaf.phi_sigma = 0.1f; leaf.phi_known = true;
+            const auto view = rc::door::door_view(alias, W, T, -3.f, 3.f, V3(0.f, 0.f, 0.5f), pts, {}, {}, 1.f, leaf);
+            const auto g = rc::door::phi_grid(PHI_MAX, PHI_STEP);
+            const auto ac = rc::door::anchor_phi_loglik(alias, W, T, leaf, V3(0.f, 0.f, 0.5f), pts, std::max(view.p_view, 0.74f),
+                                                        g.lo, g.hi, g.n);
+            swing_llr_ungated += float(ac.swing_llr);
+            if (rc::door::anchor_frame_is_leaf_evidence(view.p_view, 0.5f)) swing_llr += float(ac.swing_llr);
+            std::print("  aliased frame yaw {:.0f} deg: p_view {:.2f}, the frame's swing log-odds {:+.1f}\n", yaw * 57.2958f,
+                       view.p_view, ac.swing_llr);
+        }
+        std::print("  swing log-odds after 5 aliased frames: {:+.1f} (counted only as published), {:+.1f} if every frame counted\n",
+                   swing_llr, swing_llr_ungated);
+        check(swing_llr >= 10.f, "the believed swing is not flipped by aliased frames");
+        // …and the gate passes a frame that IS seen.
+        check(rc::door::anchor_frame_is_leaf_evidence(0.74f, 0.5f) and not rc::door::anchor_frame_is_leaf_evidence(0.46f, 0.5f),
+              "a published frame counts, a refused one does not");
+    }
+
+    std::print("(10) fix round 1 (I-2): the retry's room fusion is weighted by P(out of the doorway band)\n");
+    {
+        rc::interaction::RelPose belief, room;
+        belief.x = {0.1f, 0.3f, 0.05f}; belief.P = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
+        room.x = {0.4f, 0.3f, -0.15f};  room.P = Eigen::Vector3f(0.09f, 0.04f, 0.01f).asDiagonal();
+        const Eigen::Matrix3f model = Eigen::Vector3f(0.09f, 0.04f, 0.01f).asDiagonal();
+        const auto in_band = rc::door::retry_fusion(belief, room, model, 0.f);
+        const auto half    = rc::door::retry_fusion(belief, room, model, 0.5f);
+        const auto out     = rc::door::retry_fusion(belief, room, model, 1.f);
+        std::print("  lateral moved: in the band {:.4f} m, half {:.3f} m, out of it {:.3f} m\n", (in_band.x - belief.x).head<2>().norm(),
+                   (half.x - belief.x).head<2>().norm(), (out.x - belief.x).head<2>().norm());
+        check(in_band.x == belief.x and in_band.P.isApprox(belief.P), "inside the band the belief stands (no broadening, no pull)");
+        check((half.x - belief.x).head<2>().norm() < (out.x - belief.x).head<2>().norm() and (half.x - belief.x).head<2>().norm() > 0.f,
+              "the pull grows continuously with P(out of band)");
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

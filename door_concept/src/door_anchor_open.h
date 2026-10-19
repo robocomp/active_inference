@@ -206,6 +206,31 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
     return out;
 }
 
+// Task 12 fix round 1 (I-2): a retry's room fusion, weighted by w = P(the robot is OUT of the doorway band). The belief is
+// broadened by w·σ_model² (in robot axes: model_cov) and fused with the room initialisation as K = w·P_b (w·P_b + R)⁻¹ — the
+// room's information scaled by w, continuous; inside the band (w → 0) the belief stands untouched. Returns the new mean and P.
+[[nodiscard]] inline rc::interaction::RelPose retry_fusion(const rc::interaction::RelPose& belief, const rc::interaction::RelPose& room,
+                                                           const Eigen::Matrix3f& model_cov, float w_out, Eigen::Vector3f* innov_out = nullptr)
+{
+    const float w = std::clamp(w_out, 0.f, 1.f);
+    const Eigen::Matrix3f Pb = belief.P + w * model_cov;
+    const Eigen::Matrix3f K = w * Pb * (w * Pb + room.P).inverse();
+    Eigen::Vector3f innov = room.x - belief.x;
+    innov.z() = rc::interaction::wrap_pi(innov.z());
+    if (innov_out != nullptr) *innov_out = innov;
+    rc::interaction::RelPose out = belief;
+    out.x += K * innov;
+    out.x.z() = rc::interaction::wrap_pi(out.x.z());
+    const Eigen::Matrix3f Pn = (Eigen::Matrix3f::Identity() - K) * Pb;
+    out.P = 0.5f * (Pn + Pn.transpose());
+    return out;
+}
+
+// Task 12 fix round 1 (I-3): a frame is evidence about the LEAF (its φ curve, the hinge and swing log-odds) only when its pose is
+// the one being PUBLISHED as seen — p_view at or above the publication level. An aliased pose scores the beams against a wrong
+// opening; the hinge and swing log-odds accumulate with no forgetting, so one aliased stretch could flip and latch them.
+[[nodiscard]] inline bool anchor_frame_is_leaf_evidence(float p_view, float publish_level) { return p_view >= publish_level; }
+
 // FIX 4: the pose the born-stale (not-seen) write hands the controller's wait-turn. Never the unpublished posterior.
 [[nodiscard]] inline const rc::interaction::RelPose& wait_pose(bool seen_once, const rc::interaction::RelPose& seen_pose,
                                                                const rc::interaction::RelPose& init_pose)

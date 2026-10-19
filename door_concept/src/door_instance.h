@@ -124,6 +124,11 @@ struct DoorInstance
     // process noise — a door does not re-hang itself. `anchor_swing_llr` is the latest anchor frame's increment, for the swing
     // `anchor_phi_swing` it was computed under; estimate_phi consumes it once (NaN = nothing pending).
     float swing_llr        = 0.0f;
+    // Fix round 1 (M-1): the hinge / swing the two log-odds are RELATIVE to (their MAP when last touched). A belief
+    // re-created (re-acquired, or re-seeded) may hang the leaf the other way; the log-odds are re-signed against it then.
+    // Unset = relative to whatever the next belief is (a fresh door, or one handed the other room's hint).
+    std::optional<door::HingeSide> hinge_llr_ref;
+    std::optional<float>           swing_llr_ref;
     float anchor_swing_llr = std::numeric_limits<float>::quiet_NaN();
     float anchor_phi_swing = 1.0f;
     // Task 11 fix round 1 (cost): score the other jamb every cycle only while the hinge MATTERS — the passage anchor

@@ -130,24 +130,55 @@ struct AnchorGap { float centre = 0.f, width = 0.f; };
     return {0.5f * (lo + hi), std::max(0.f, hi - lo)};
 }
 
-// d nulls the lateral offset e to the CROSS LINE (the clear gap's centre, anchor_clear_gap) and advances along the normal
-// at a speed scaled by P(body fits) = Φ((w_gap/2 − body_half_width − |e − c_gap|)/σ_lat); `through` once the opening is
-// `standoff` behind along it. holonomic: side/adv = d, rot aligns the heading with n. Differential: side = 0, rot turns
-// toward d, adv = d's forward projection. Signs: adv = forward (+y) m/s, side = lateral (+x) m/s, rot = rad/s CCW positive
-// (the value handed to the base). leaf = nullptr: the opening's own centre and width (the pre-Task-12 law).
+// ── THE LEAF HYPOTHESES: one passage, judged under all of them (fix round 1, I-4 / I-6) ─────────────────────────────────
+// The anchor carries every hinge × swing hypothesis with its probability p_k (anchor_leaf.h). Each leaves its own gap k
+// (centre c_k, width w_k). Two quantities follow, both continuous:
+//   P(body fits at e) = Σ_k p_k Φ((w_k/2 − body_half − |e − c_k|)/σ_lat)   — the opening's P_fit, under the leaf mixture;
+//   the CROSS LINE    = Σ_k p_k u_k c_k,  u_k = Φ((w_k/2 − body_half)/σ_lat) = P(the body fits gap k, centred on it).
+// The line moves toward a gap only as far as that gap is believed (p_k) AND usable (u_k): with the hinge at P 0.6 the two
+// 90° gaps pull it ±2 cm and it stays near the centre; an ajar leaf leaving a slit (u ≈ 0) keeps the opening's own centre
+// line (I-6: the robot is not aimed at a gap it cannot use — it waits on P_fit there). No leaves ⇒ the opening (line 0).
+[[nodiscard]] inline float anchor_cross_line(float width, std::span<const rc::interaction::AnchorLeaf> leaves,
+                                             float body_half_width, float sigma_lat)
+{
+    float line = 0.f;
+    for (const auto& l : leaves)
+    {
+        const auto gap = anchor_clear_gap(width, &l);
+        line += l.p * anchor_p_fit(gap.width, body_half_width, 0.f, sigma_lat) * gap.centre;
+    }
+    return line;
+}
+[[nodiscard]] inline float anchor_p_fit_leaves(float width, std::span<const rc::interaction::AnchorLeaf> leaves,
+                                               float body_half_width, float e, float sigma_lat)
+{
+    if (leaves.empty()) return anchor_p_fit(width, body_half_width, e, sigma_lat);
+    float p = 0.f;
+    for (const auto& l : leaves)
+    {
+        const auto gap = anchor_clear_gap(width, &l);
+        p += l.p * anchor_p_fit(gap.width, body_half_width, e - gap.centre, sigma_lat);
+    }
+    return std::clamp(p, 0.f, 1.f);
+}
+
+// d nulls the lateral offset e to the CROSS LINE (anchor_cross_line) and advances along the normal at a speed scaled by
+// P(body fits) under the leaf hypotheses (anchor_p_fit_leaves); `through` once the opening is `standoff` behind along it.
+// holonomic: side/adv = d, rot aligns the heading with n. Differential: side = 0, rot turns toward d, adv = d's forward
+// projection. Signs: adv = forward (+y) m/s, side = lateral (+x) m/s, rot = rad/s CCW positive (the value handed to the
+// base). No leaves: the opening's own centre and width (the pre-Task-12 law).
 [[nodiscard]] inline AnchorCommand anchor_cross_command(const rc::interaction::RelPose& r, float width,
                                                         float body_half_width, float standoff, float v_max,
                                                         float w_max, bool holonomic,
-                                                        const rc::interaction::AnchorLeaf* leaf = nullptr)
+                                                        std::span<const rc::interaction::AnchorLeaf> leaves = {})
 {
     AnchorCommand c;
     if (not r.x.allFinite() or not r.P.allFinite() or not (v_max > 0.f) or not (w_max > 0.f)) return c;
     const auto g = anchor_cross_geometry(r);
     if (g.s >= standoff) { c.through = true; return c; }
 
-    const auto gap = anchor_clear_gap(width, leaf);
-    const float e_line = g.e - gap.centre;
-    const float p_fit = anchor_p_fit(gap.width, body_half_width, e_line, g.sigma_lat);
+    const float e_line = g.e - anchor_cross_line(width, leaves, body_half_width, g.sigma_lat);
+    const float p_fit = anchor_p_fit_leaves(width, leaves, body_half_width, g.e, g.sigma_lat);
     const float v_a = -v_max * std::tanh(e_line / (v_max * kAnchorTauLat));
     const float v_n = v_max * p_fit * std::tanh((standoff - g.s) / (v_max * kAnchorTauS));
     Eigen::Vector2f d = v_n * g.n + v_a * g.a;
@@ -175,15 +206,39 @@ struct AnchorGap { float centre = 0.f, width = 0.f; };
 // producer's depth along the normal (its standoff is a design of the producer's) and put it on the CROSS LINE — the clear
 // gap's centre, anchor_clear_gap, so the cross starts on the line it will servo on. Robot frame in, robot frame out:
 // q_a = R(ψ)ᵀ(q − A), q_a.x ← c_gap, q = A + R(ψ) q_a.
+// Fix round 1 (I-5): not an override — the room frame and the anchor both say where the line is, each with its own σ.
+// The along-wall coordinate of the standpoint is their PRECISION-WEIGHTED fusion: the room's (the offered point's own
+// along-wall coordinate, σ_room = the room-frame door's along-wall σ) and the anchor's (the cross line, σ_anchor = the
+// anchor's own σ_lat). σ_room unknown (≤ 0 or not finite) ⇒ the anchor's line alone; the depth stays the producer's.
 [[nodiscard]] inline Eigen::Vector2f anchor_standpoint(const rc::interaction::RelPose& r, float width,
-                                                       const rc::interaction::AnchorLeaf* leaf, const Eigen::Vector2f& offered)
+                                                       std::span<const rc::interaction::AnchorLeaf> leaves, float body_half_width,
+                                                       const Eigen::Vector2f& offered, float sigma_room = -1.f)
 {
     if (not r.x.allFinite() or not offered.allFinite() or not (width > 0.f)) return offered;
+    const auto g = anchor_cross_geometry(r);
     const float psi = rc::interaction::wrap_pi(r.x.z()), c = std::cos(psi), s = std::sin(psi);
     const Eigen::Vector2f d = offered - r.x.head<2>();
     Eigen::Vector2f qa(c * d.x() + s * d.y(), -s * d.x() + c * d.y());
-    qa.x() = anchor_clear_gap(width, leaf).centre;
+    const float line = anchor_cross_line(width, leaves, body_half_width, g.sigma_lat);
+    if (std::isfinite(sigma_room) and sigma_room > 0.f)
+    {
+        const float wa = 1.f / std::max(1e-8f, g.sigma_lat * g.sigma_lat), wr = 1.f / (sigma_room * sigma_room);
+        qa.x() = (wa * line + wr * qa.x()) / (wa + wr);
+    }
+    else
+        qa.x() = line;
     return r.x.head<2>() + Eigen::Vector2f(c * qa.x() - s * qa.y(), s * qa.x() + c * qa.y());
+}
+
+// ── WHEN THE CROSS ENDS (Task 12 Fix E) ────────────────────────────────────────────────────────────────────────────────
+// On the anchor the cross ends when the robot is THROUGH (the servo's `through`, s ≥ standoff along the normal) — a room
+// switch on the way (room_concept moves the robot's RT ~0.3 m past the plane) does not end it. Without an anchor (the room
+// route), the room switch ends it, as before. Pure: the door passage asks it every cycle.
+enum class AnchorCrossEnd { Continue, Through, RoomSwitch };
+[[nodiscard]] inline AnchorCrossEnd anchor_cross_end(bool anchored, bool room_switched, bool through)
+{
+    if (anchored) return through ? AnchorCrossEnd::Through : AnchorCrossEnd::Continue;
+    return room_switched ? AnchorCrossEnd::RoomSwitch : AnchorCrossEnd::Continue;
 }
 
 // ── WAITING FOR AN ANCHOR NOT SEEN YET: TURN SO THE SENSORS CAN SEE IT (Task 9) ────────────────────────────────────────
@@ -238,7 +293,8 @@ struct AnchorGap { float centre = 0.f, width = 0.f; };
 //
 // body = the footprint polygon in the robot frame (x right, y forward), margin = its outward safety margin.
 
-struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; float radius = 0.f; };   // radius: the obstacle's own extent
+// radius: the obstacle's own extent; p: the probability it is there at all (1 for a jamb; a leaf hypothesis's p_k, I-4).
+struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; float radius = 0.f; float p = 1.f; };
 
 [[nodiscard]] inline std::array<AnchorJamb, 2> anchor_jambs(const rc::interaction::RelPose& r, float width)
 {
@@ -278,19 +334,19 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; float radius = 0.
         const Eigen::Vector2f qa = leaf.hinge + rr * dir;
         const Eigen::Vector2f g = R * Eigen::Vector2f(-qa.y(), qa.x());
         const Eigen::Matrix2f cov = r.P.topLeftCorner<2, 2>() + var_psi * (g * g.transpose()) + (rr * rr * var_phi) * (t * t.transpose());
-        out.push_back(AnchorJamb{A + R * qa, cov, leaf.half_thick});
+        out.push_back(AnchorJamb{A + R * qa, cov, leaf.half_thick, std::clamp(leaf.p, 0.f, 1.f)});
     }
     return out;
 }
 
-// The jambs and (if known) the leaf: every obstacle the guards below judge.
+// The jambs and every leaf hypothesis: every obstacle the guards below judge, each with its probability.
 [[nodiscard]] inline std::vector<AnchorJamb> anchor_obstacles(const rc::interaction::RelPose& r, float width,
-                                                              const rc::interaction::AnchorLeaf* leaf)
+                                                              std::span<const rc::interaction::AnchorLeaf> leaves)
 {
     const auto j = anchor_jambs(r, width);
     std::vector<AnchorJamb> out(j.begin(), j.end());
-    if (leaf != nullptr)
-        for (auto& q : anchor_leaf_points(r, *leaf)) out.push_back(std::move(q));
+    for (const auto& l : leaves)
+        for (auto& q : anchor_leaf_points(r, l)) out.push_back(std::move(q));
     return out;
 }
 
@@ -315,14 +371,14 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; float radius = 0.
 [[nodiscard]] inline float anchor_jamb_speed_limit(const rc::interaction::RelPose& r, float width,
                                                    const Eigen::Vector2f& u, std::span<const Eigen::Vector2f> body,
                                                    float margin, float a_dec, float v_cap,
-                                                   const rc::interaction::AnchorLeaf* leaf = nullptr)
+                                                   std::span<const rc::interaction::AnchorLeaf> leaves = {})
 {
     if (not r.x.allFinite() or not r.P.allFinite() or not (u.squaredNorm() > 0.f) or not (width > 0.f) or body.empty())
         return v_cap;
     const Eigen::Vector2f un = u.normalized();
     const Eigen::Vector2f p(-un.y(), un.x());
     float v = v_cap;
-    for (const auto& j : anchor_obstacles(r, width, leaf))
+    for (const auto& j : anchor_obstacles(r, width, leaves))
     {
         const float m = margin + j.radius;   // a disc obstacle = a point against the body grown by its radius
         const float lead = anchor_body_support(body, m, un);
@@ -334,7 +390,7 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; float radius = 0.
         const float gap = along - lead;
         const float v_block = std::min(v_cap, anchor_std_normal_cdf(gap / s_u)
                                               * std::sqrt(2.f * std::max(0.f, a_dec) * std::max(0.f, gap)));
-        v = std::min(v, v_cap - p_in * p_closing * (v_cap - v_block));
+        v = std::min(v, v_cap - j.p * p_in * p_closing * (v_cap - v_block));   // weighted by P(it is there) (I-4)
     }
     return std::max(0.f, v);
 }
@@ -397,7 +453,7 @@ inline constexpr float kAnchorGainStepM = 1e-3f;
 // The cap on |ω| for a turn in the direction of `rot` (rad/s, CCW positive).
 [[nodiscard]] inline float anchor_jamb_rot_limit(const rc::interaction::RelPose& r, float width, float rot,
                                                  std::span<const Eigen::Vector2f> body, float margin, float a_dec,
-                                                 float w_cap, const rc::interaction::AnchorLeaf* leaf = nullptr)
+                                                 float w_cap, std::span<const rc::interaction::AnchorLeaf> leaves = {})
 {
     if (rot == 0.f or not r.x.allFinite() or not r.P.allFinite() or not (width > 0.f) or body.size() < 3) return w_cap;
     const float two_pi = 2.f * std::numbers::pi_v<float>;
@@ -406,7 +462,7 @@ inline constexpr float kAnchorGainStepM = 1e-3f;
     float poly_radius = -1.f, r_max = 0.f;
     std::vector<Eigen::Vector2f> poly;
     float w = w_cap;
-    for (const auto& j : anchor_obstacles(r, width, leaf))
+    for (const auto& j : anchor_obstacles(r, width, leaves))
     {
         if (j.radius != poly_radius)
         {
@@ -452,7 +508,7 @@ inline constexpr float kAnchorGainStepM = 1e-3f;
         const float s_th = anchor_axis_sigma(j.cov, th) / rj;
         const float w_block = std::min(w_cap, anchor_std_normal_cdf(delta / s_th)
                                               * std::sqrt(2.f * std::max(0.f, a_dec) / rj * delta));
-        w = std::min(w, w_cap - p_reach * (w_cap - w_block));
+        w = std::min(w, w_cap - j.p * p_reach * (w_cap - w_block));   // weighted by P(it is there) (I-4)
     }
     return std::max(0.f, w);
 }
@@ -472,20 +528,27 @@ inline constexpr float kAnchorGainStepM = 1e-3f;
 // ceilings, so it cannot close on the OTHER jamb. No gain anywhere ⇒ no command (the stall judge stays the backstop).
 struct AnchorGuarded { AnchorCommand cmd; bool backoff = false; float min_clearance = std::numeric_limits<float>::infinity(); };
 
-// grown: the body grown by its safety margin; an obstacle of radius ρ is clear of it by its signed distance − ρ.
+// grown: the body grown by its safety margin; an obstacle of radius ρ is clear of it by its signed distance − ρ. A breach
+// (negative clearance) counts in proportion to P(the obstacle is there) — I-4: a minority leaf hypothesis inside the margin
+// is a fraction of a breach, continuous in p, not a deadlock of its own.
+[[nodiscard]] inline float anchor_obstacle_clearance(const AnchorJamb& j, std::span<const Eigen::Vector2f> grown,
+                                                     float side, float adv, float dth)
+{
+    const float c = anchor_signed_distance(grown, anchor_point_after(j.mean, side, adv, dth)) - j.radius;
+    return c >= 0.f ? c : j.p * c;
+}
 [[nodiscard]] inline float anchor_min_clearance(std::span<const AnchorJamb> obstacles, std::span<const Eigen::Vector2f> grown,
                                                 float side, float adv, float dth)
 {
     float c = std::numeric_limits<float>::infinity();
-    for (const auto& j : obstacles)
-        c = std::min(c, anchor_signed_distance(grown, anchor_point_after(j.mean, side, adv, dth)) - j.radius);
+    for (const auto& j : obstacles) c = std::min(c, anchor_obstacle_clearance(j, grown, side, adv, dth));
     return c;
 }
 [[nodiscard]] inline float anchor_min_clearance(const rc::interaction::RelPose& r, float width,
                                                 std::span<const Eigen::Vector2f> grown, float side, float adv, float dth,
-                                                const rc::interaction::AnchorLeaf* leaf = nullptr)
+                                                std::span<const rc::interaction::AnchorLeaf> leaves = {})
 {
-    const auto obs = anchor_obstacles(r, width, leaf);
+    const auto obs = anchor_obstacles(r, width, leaves);
     return anchor_min_clearance(obs, grown, side, adv, dth);
 }
 
@@ -494,7 +557,7 @@ struct AnchorGuarded { AnchorCommand cmd; bool backoff = false; float min_cleara
 [[nodiscard]] inline AnchorGuarded anchor_jamb_guard(const rc::interaction::RelPose& r, float width, AnchorCommand c,
                                                      bool holonomic, std::span<const Eigen::Vector2f> body, float margin,
                                                      float a_dec, float v_max, float w_max,
-                                                     const rc::interaction::AnchorLeaf* leaf = nullptr)
+                                                     std::span<const rc::interaction::AnchorLeaf> leaves = {})
 {
     AnchorGuarded g;
     if (not holonomic) c.side = 0.f;
@@ -503,16 +566,16 @@ struct AnchorGuarded { AnchorCommand cmd; bool backoff = false; float min_cleara
         if (const float lin = std::hypot(k.adv, k.side); lin > 0.f)
         {
             const Eigen::Vector2f u(k.side / lin, k.adv / lin);
-            if (const float v = anchor_jamb_speed_limit(r, width, u, body, margin, a_dec, v_max, leaf); lin > v)
+            if (const float v = anchor_jamb_speed_limit(r, width, u, body, margin, a_dec, v_max, leaves); lin > v)
             { k.adv *= v / lin; k.side *= v / lin; }
         }
         if (k.rot != 0.f)
-            k.rot = std::copysign(std::min(std::abs(k.rot), anchor_jamb_rot_limit(r, width, k.rot, body, margin, a_dec, w_max, leaf)), k.rot);
+            k.rot = std::copysign(std::min(std::abs(k.rot), anchor_jamb_rot_limit(r, width, k.rot, body, margin, a_dec, w_max, leaves)), k.rot);
     };
     g.cmd = c;
     if (not r.x.allFinite() or not r.P.allFinite() or not (width > 0.f) or body.size() < 3) return g;
     const auto grown = anchor_grown_body(body, margin);
-    const auto obs = anchor_obstacles(r, width, leaf);
+    const auto obs = anchor_obstacles(r, width, leaves);
     g.min_clearance = anchor_min_clearance(obs, grown, 0.f, 0.f, 0.f);
     cap(g.cmd);
     if (not (g.min_clearance < 0.f) or c.through) return g;   // nothing inside the grown body: the servo, capped
@@ -521,7 +584,7 @@ struct AnchorGuarded { AnchorCommand cmd; bool backoff = false; float min_cleara
     // (the deadlock) does the guard step in.
     const AnchorJamb* bp = &obs.front();
     for (const auto& j : obs)
-        if (anchor_signed_distance(grown, j.mean) - j.radius < anchor_signed_distance(grown, bp->mean) - bp->radius) bp = &j;
+        if (anchor_obstacle_clearance(j, grown, 0.f, 0.f, 0.f) < anchor_obstacle_clearance(*bp, grown, 0.f, 0.f, 0.f)) bp = &j;
     const AnchorJamb& breached = *bp;
     const float arm = std::max(breached.mean.norm(), 1e-3f);
     const float h = kAnchorGainStepM;

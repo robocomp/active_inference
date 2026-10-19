@@ -18,9 +18,10 @@
  *
  * Task 12 — THE DOOR'S SWUNG LEAF ON THE ANCHOR (existing attributes only; full contract in anchor_leaf.h). In ANCHOR
  * coordinates (origin = the opening's centre on the wall's mid-plane, x along the wall, +y the normal, the robot on −y at
- * creation): delimiting_polygon_x/_y = 3 vertices [the hinge on the leaf's centre line (its x = ±w_clear/2 names the
- * hinge jamb), the free edge at the MAP φ (its y sign names the swing side: −y toward the robot, +y away), the free edge one
- * σ_φ further open]; door_phi_rad = φ. Written by the owner (Anchor::set_leaf), read by read_anchor_leaf. No leaf known ⇒
+ * creation): delimiting_polygon_x/_y = per hinge × swing HYPOTHESIS 4 vertices [the hinge on the leaf's centre line (its
+ * x = ±w_clear/2 names the hinge jamb), the free edge at the MAP φ (its y sign names the swing side: −y toward the robot,
+ * +y away), the free edge one σ_φ further open, (p, 0) = the hypothesis's probability]; door_phi_rad = φ. Written by the
+ * owner (Anchor::set_leaves), read by read_anchor_leaves. No leaf known ⇒
  * the attributes are ABSENT (never a sentinel). Leaf half-thickness: kLeafHalfThickM, the model's, shared by both sides.
  *
  * is_anchor() is header-inline so a pure reader (ltsm, episodic, chat, graph3d) needs only this
@@ -99,7 +100,7 @@ public:
     // Task 12 fix A: the door's swung leaf in ANCHOR coordinates (anchor_leaf.h: delimiting_polygon_x/_y = hinge, free edge,
     // free edge one σ further open; door_phi_rad = φ). nullopt REMOVES both (no leaf known — never a sentinel). Written
     // only on a change.
-    bool set_leaf(DSR::DSRGraph& G, const std::optional<AnchorLeaf>& leaf);
+    bool set_leaves(DSR::DSRGraph& G, const std::vector<AnchorLeaf>& leaves);   // empty = remove (fix round 1: hypotheses)
     void remove(DSR::DSRGraph& G);                               // node, edge, and the affordance's link
     [[nodiscard]] std::uint64_t id() const { return id_; }
     [[nodiscard]] std::uint64_t object_id() const { return object_id_; }
@@ -146,6 +147,6 @@ std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint
 std::optional<std::pair<RelPose, float>> read_anchor_latest(DSR::DSRGraph& G, std::uint64_t anchor_id);
 
 // Task 12 fix A: the leaf the owner publishes on the anchor (anchor_leaf.h), or nullopt (none known / malformed).
-std::optional<AnchorLeaf> read_anchor_leaf(DSR::DSRGraph& G, std::uint64_t anchor_id);
+std::vector<AnchorLeaf> read_anchor_leaves(DSR::DSRGraph& G, std::uint64_t anchor_id);
 
 }  // namespace rc::interaction
