@@ -118,8 +118,20 @@ public:
     float anchor_brake_decel(const rc::TrajectoryController &path_controller) const;
     // Task 14: the live returns in the ROBOT frame (the pose the field is built on), self-filtered by the BODY FOOTPRINT
     // grown by the range noise (lidar_body_guard.h) — not the ESDF's 0.405 m disc — as guard obstacles within `reach`.
-    [[nodiscard]] rc::LidarGuardReturns anchor_lidar_returns(const ControllerRobotPose &pose,
-                                                             ControllerObstacleTracker &obstacle_tracker, float reach) const;
+    // The guard's whole input for one cycle: the returns plus the numbers its laws use, so every caller (the cross, the
+    // tracker's command path, the escape, the census) applies the SAME net with the same constants.
+    struct LiveReturns
+    {
+        rc::LidarGuardReturns r;
+        float margin = 0.f, a_dec = 0.f, v_max = 0.f, w_max = 0.f, sigma = 0.f;
+        bool valid = false;   // a cloud was read
+    };
+    [[nodiscard]] LiveReturns live_returns(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
+                                           const rc::TrajectoryController &path_controller) const;
+    // Cap a command (robot-frame convention: side = +x right, rot CCW positive) by the live returns, unfloored.
+    rc::LidarCapResult cap_by_returns(const LiveReturns &lr, float &adv, float &side, float &rot) const;
+    // One census line (review item 4): what the net sees around the body right now.
+    void log_returns_census(const char *when, const LiveReturns &lr) const;
     bool ensure_current_plan(const ControllerPlanningStep &step,
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
@@ -314,7 +326,7 @@ private:
     // a SPINNING verdict is reported and returned false — no escape, no hand-back. A Wedge still escapes.
     bool detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps, float pose_sigma_m,
                       const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms,
-                      bool spin_is_not_a_wedge = false);
+                      bool spin_is_not_a_wedge = false, bool returns_hold = false);
     void reset_stuck_window();
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
@@ -326,6 +338,7 @@ private:
     // place if the rear is blocked) until distance/time bound is met, then stops + clears.
     void step_escape(const ControllerRobotPose &robot_pose,
                      rc::TrajectoryController &path_controller,
+                     ControllerObstacleTracker &obstacle_tracker,
                      ControllerMotionCommander &motion_commander,
                      std::uint64_t now_ms);
     void reset_stuck_state();
@@ -895,6 +908,10 @@ private:
     // not be delivered at all: a static factory has nowhere to put "which robot".
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
     bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
+    bool returns_hold_in_window_ = false;   // Task 14 fix 1: the live returns held the command in the open judge window
+    bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)
+    bool startup_census_done_ = false;      // Task 14 fix 1: the parked start-up census line, once
+    std::string anchor_census_for_;         // Task 14 fix 1: the cross whose first-cycle census was logged
     bool body_loaded_ = false;                 // one-shot guard: load when the robot node first appears
     // ★WHAT THIS BASE CAN DO, as opposed to what we have chosen to ask of it. Read once beside the body
     // (the robot node states both), and held rather than re-read because it is a property of the hardware,

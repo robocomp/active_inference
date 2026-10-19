@@ -78,12 +78,14 @@ int main()
     }
     // 3. Body-own points inside the footprint are filtered: the r ≈ 0 population, a wheel's outer face, a point on the hull.
     {
-        const std::vector<Eigen::Vector2f> self{{0.001f, 0.0005f}, {0.26f, 0.16f}, {-0.249f, -0.10f}, {0.f, 0.229f},
-                                                {0.2716f + 0.02f, 0.0f}};   // the last: 2 cm out, inside σ_r
+        const std::vector<Eigen::Vector2f> self{{0.001f, 0.0005f}, {0.26f, 0.16f}, {-0.249f, -0.10f}, {0.f, 0.229f}};
         const auto r = returns_of(self, body);
         CHECK(r.n_self == int(self.size()) and r.obstacles.empty());
-        for (const auto& q : self) CHECK(rc::lidar_return_is_self(body, kSigma, q));
-        CHECK(not rc::lidar_return_is_self(body, kSigma, Eigen::Vector2f(0.2716f + 0.04f, 0.f)));
+        for (const auto& q : self) CHECK(rc::lidar_return_is_self(body, q));
+        // Monotone (fix round 1): 2 cm OUTSIDE the hull, inside σ_r, is KEPT — it is contact, not the body.
+        CHECK(not rc::lidar_return_is_self(body, Eigen::Vector2f(0.2716f + 0.02f, 0.f)));
+        const auto band = returns_of({Eigen::Vector2f(0.2716f + 0.02f, 0.f)}, body);
+        CHECK(band.obstacles.size() == 1 and band.n_band == 1 and band.n_self == 0);
     }
     // 4. Rotation: a turn cannot grind a corner into a real return; the turn away stays free.
     {
@@ -117,13 +119,13 @@ int main()
         for (int i = 0; i < int(pts.size()); ++i)
         {
             const bool od = rc::lidar_return_dropped_by_disc(pts[i], fp.circumscribed_radius());
-            const bool nd = rc::lidar_return_is_self(body, kSigma, pts[i]);
+            const bool nd = rc::lidar_return_is_self(body, pts[i]);
             old_dropped += od; new_dropped += nd;
             kept_new_dropped_old += (od and not nd);
             if (i < n_world) { world_old_dropped += od; world_new_dropped += nd; } else self_new_kept += not nd;
         }
         std::println("  try74 synthetic frame: {} world + {} self returns; old disc drops {} ({} of them world), footprint "
-                     "drops {} ({} world, within σ_r of the hull); KEPT by the footprint that the disc deleted: {}; self returns kept: {}",
+                     "drops {} ({} world, inside the hull); KEPT by the footprint that the disc deleted: {}; self returns kept: {}",
                      n_world, int(pts.size()) - n_world, old_dropped, world_old_dropped, new_dropped, world_new_dropped,
                      kept_new_dropped_old, self_new_kept);
         CHECK(self_new_kept == 0);
@@ -136,6 +138,75 @@ int main()
                      v, w_ccw, w_cw, r.obstacles.size() + r.n_self, r.obstacles.size());
         CHECK(v < 0.01f);
         CHECK(rc::lidar_return_speed_limit(r.obstacles, kBack, body, kMargin, kAdec, kVmax) > 0.99f * kVmax);
+    }
+
+    // 6. Fix round 1, item 1 — MONOTONE: a return 0.02 m outside the hull (inside σ_r), robot closing on it ⇒ adv 0; moving
+    //    away stays free. Ahead of the front face, and ahead of the front-left corner.
+    for (const Eigen::Vector2f& q : {Eigen::Vector2f(0.f, 0.2300f + 0.02f), Eigen::Vector2f(corner + Eigen::Vector2f(0.005f, 0.02f))})
+    {
+        CHECK(rc::anchor_signed_distance(body, q) > 0.f and rc::anchor_signed_distance(body, q) < kSigma);
+        const auto r = returns_of({q}, body);
+        CHECK(r.obstacles.size() == 1);
+        for (const float m : {0.f, kMargin})
+        {
+            CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, body, m, kAdec, kVmax) < 0.03f);
+            CHECK(rc::lidar_return_speed_limit(r.obstacles, kBack, body, m, kAdec, kVmax) > 0.99f * kVmax);
+        }
+        CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
+        // And closing further (1 cm, 0 cm outside): still 0 — no release in the last centimetres.
+        for (const float k : {0.5f, 0.01f})
+        {
+            const Eigen::Vector2f qq = q + (k - 1.f) * 0.02f * Eigen::Vector2f(0.f, 1.f);
+            if (rc::anchor_signed_distance(body, qq) < 0.f) continue;
+            const auto rr = returns_of({qq}, body);
+            CHECK(rr.obstacles.size() == 1);
+            CHECK(rc::lidar_return_speed_limit(rr.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
+        }
+    }
+    // 7. Fix round 1, item 2 — the deadlock's way out: a return pinning the front-left corner and one beside the left
+    //    side's front: forward, CCW and CW all capped to 0. The backoff opens the min clearance over 0.5 s at 20 Hz.
+    {
+        std::vector<Eigen::Vector2f> pts{corner + Eigen::Vector2f(0.005f, 0.02f), Eigen::Vector2f(-0.2716f - 0.04f, 0.15f),
+                                         Eigen::Vector2f(-0.2716f - 0.04f, 0.05f)};
+        auto r = returns_of(pts, body);
+        CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
+        const float w_ccw = rc::lidar_return_rot_limit(r.obstacles, +1.f, body, kMargin, kAdec, kWmax);
+        const float w_cw = rc::lidar_return_rot_limit(r.obstacles, -1.f, body, kMargin, kAdec, kWmax);
+        std::println("  pinned corner: fwd 0, |w| CCW {:.3f} CW {:.3f}", w_ccw, w_cw);
+        CHECK(w_ccw == 0.f and w_cw == 0.f);
+        const auto min_sd = [&](const std::vector<Eigen::Vector2f>& q)
+        { float m = 1e9f; for (const auto& p : q) m = std::min(m, rc::anchor_signed_distance(body, p)); return m; };
+        const float sd0 = min_sd(pts);
+        const float dt = 0.05f;
+        rc::AnchorCommand first;
+        for (int k = 0; k < 10; ++k)
+        {
+            r = returns_of(pts, body);
+            const auto b = rc::lidar_return_backoff(r.obstacles, body, kMargin, kSigma, kAdec, kVmax, kWmax, false);
+            if (not b.has_value()) break;
+            if (k == 0) first = *b;
+            for (auto& p : pts) p = rc::anchor_point_after(p, b->side * dt, b->adv * dt, b->rot * dt);
+        }
+        const float sd1 = min_sd(pts);
+        std::println("  backoff: first command adv {:+.3f} side {:+.3f} rot {:+.3f}; min clearance {:.3f} -> {:.3f} m over 0.5 s",
+                     first.adv, first.side, first.rot, sd0, sd1);
+        CHECK(first.adv < 0.f or first.rot != 0.f);
+        CHECK(sd1 > sd0 + 0.01f);
+        CHECK(rc::lidar_return_speed_limit(returns_of(pts, body).obstacles, kBack, body, kMargin, kAdec, kVmax) > 0.f);
+        // No penetration of the band ⇒ no backoff.
+        CHECK(not rc::lidar_return_backoff(returns_of({Eigen::Vector2f(0.f, 1.f)}, body).obstacles, body, kMargin, kSigma,
+                                           kAdec, kVmax, kWmax, false).has_value());
+    }
+    // 8. The census and the command cap.
+    {
+        const auto r = returns_of({Eigen::Vector2f(0.f, 0.001f), Eigen::Vector2f(0.f, 0.25f), Eigen::Vector2f(0.6f, 0.f)}, body);
+        const auto c = rc::lidar_guard_census(r, body, kMargin, kAdec, kVmax, kWmax);
+        CHECK(c.n_self == 1 and c.n_band == 1 and c.n_kept == 2);
+        CHECK(std::abs(c.nearest_sd - 0.02f) < 2e-3f and std::abs(c.nearest_bearing_deg) < 1.f);
+        CHECK(c.v_fwd == 0.f and c.v_back > 0.99f * kVmax);
+        float adv = 0.3f, side = 0.f, rot = 0.f;
+        const auto cap = rc::lidar_cap_command(r.obstacles, body, kMargin, kAdec, kVmax, kWmax, adv, side, rot);
+        CHECK(cap.bound_lin and adv == 0.f and not cap.bound_rot);
     }
 
     std::println("{} / {} checks passed", checks - failures, checks);

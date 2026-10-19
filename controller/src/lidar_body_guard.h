@@ -12,13 +12,18 @@
  *
  * This header reads the returns themselves:
  *
- * SELF-FILTER = THE BODY. A return is the robot seeing itself only if it lies inside the robot's footprint polygon grown
- * by the LiDAR's range noise σ_r (signed distance < σ_r). ⚑ DECISION LEVEL, flagged: a return is either kept or deleted;
- * the level is the sensor's own advertised 1-σ range noise (lidar3d_dds [SensorModel] RangeSigmaFloorM: helios 0.02,
- * bpearl 0.03 m), not a tuned slack. What the old disc protected against — the body's own parts (wheels at 0.246–0.27 m,
- * the r ≈ 0 return population, ROBOT_GEOMETRY.md) — is all INSIDE the footprint (the hull already bounds the wheels by
- * their circumscribing sphere), so it stays filtered; the 0.08 m of disc slack beyond the body was a disc-robot
- * approximation (commit 7339252e: robot_radius + 0.08, "beyond the body, a return is the world, not us").
+ * SELF-FILTER = THE BODY. A return is the robot seeing itself only if it lies STRICTLY INSIDE the robot's footprint
+ * polygon (signed distance < 0). ⚑ DECISION LEVEL, flagged: a return is either kept or deleted, and the level is the hull
+ * itself — no slack. What the old disc protected against — the body's own parts (wheels at 0.246–0.27 m, the r ≈ 0 return
+ * population, ROBOT_GEOMETRY.md) — is all INSIDE the footprint (the hull already bounds the wheels by their circumscribing
+ * sphere), so it stays filtered; the 0.08 m of disc slack beyond the body was a disc-robot approximation (commit 7339252e:
+ * robot_radius + 0.08, "beyond the body, a return is the world, not us").
+ * ★ Fix round 1 (review): the first version deleted the σ_r band OUTSIDE the hull as well. That made the guard
+ *   NON-MONOTONE — a jamb closing to within σ_r of the hull (lag, overshoot, the 2–4 cm pose-lag shift of a room-frame
+ *   buffer read on the control pose) vanished, and the cap went back to v_cap in the last centimetres: try74's failure
+ *   again. A return in that band is now kept and is CONTACT for the motion that closes on it (cap 0). The price: any part
+ *   of the robot the hull misses (a cable, a mount) reads as contact — the census (lidar_guard_census) counts that band
+ *   (n_band) at start-up and on every cross so such a part is SEEN; σ_r must not be widened to hide it.
  *
  * Each kept return is an obstacle of the same kind the anchor guards use (rc::AnchorJamb): mean = the return (robot frame),
  * cov = σ_r² I, radius 0, P(there) = 1 — a measurement, egocentric, so no pose error moves it.
@@ -28,7 +33,8 @@
  * corridor edge is a certain graze). Its gap to contact is d = q·u − f(ℓ), f = the body's LEADING profile at lateral
  * offset ℓ (clamped to the corridor, so a return just outside it is measured against the corner). It is CLOSING with
  * P_c = w(d/σ_u): ahead of the leading face ⇒ certain; beside or behind the body (d ≪ 0) ⇒ 0. The stopping law then
- * allows v_block = Φ(g/σ_u)·sqrt(2·a_dec·max(0, g)), g = d − margin (the safety margin as a STANDOFF along the motion),
+ * allows v_block = Φ(g/σ_u)·sqrt(2·a_dec·max(0, g)), g = d − max(margin, σ_r) (the safety margin as a STANDOFF along the
+ * motion, never inside the noise band: a return within σ_r of the hull is contact),
  * and the ceiling is v_cap − P_in·P_c·(v_cap − v_block). NO FLOOR: a closing return at contact gives 0.
  *   Why not anchor_jamb_speed_limit on these points: that law grows the corridor by the margin and counts any point ahead
  *   of the CENTRE as closing — the slack an UNCERTAIN anchor needs. A LiDAR return beside the body inside the margin band
@@ -47,6 +53,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -55,10 +62,10 @@
 namespace rc
 {
 
-// Is this robot-frame return the robot seeing itself? Inside the raw footprint grown by the range noise.
-[[nodiscard]] inline bool lidar_return_is_self(std::span<const Eigen::Vector2f> body, float sigma_r, const Eigen::Vector2f& q)
+// Is this robot-frame return the robot seeing itself? Strictly inside the raw footprint (see the header).
+[[nodiscard]] inline bool lidar_return_is_self(std::span<const Eigen::Vector2f> body, const Eigen::Vector2f& q)
 {
-    return anchor_signed_distance(body, q) < sigma_r;
+    return anchor_signed_distance(body, q) < 0.f;
 }
 
 // The OLD controller self-filter (TrajectoryController::read_lidar_points_robot before Task 14), kept as a pure function
@@ -73,26 +80,33 @@ namespace rc
 struct LidarGuardReturns
 {
     std::vector<AnchorJamb> obstacles;   // kept returns within reach, one per σ-cell
-    int n_self = 0;                      // deleted as the body
+    int n_self = 0;                      // deleted as the body (strictly inside the hull)
+    int n_band = 0;                      // kept, within σ_r OUTSIDE the hull: contact — or a body part the hull misses
     int n_far = 0;                       // beyond reach: cannot limit any motion this cycle
 };
 
 // Robot-frame returns → guard obstacles. `reach` = the radius beyond which no return can cap a motion this cycle: the
 // grown body's reach plus the braking distance from v_cap (ARITHMETIC: there the stopping law gives ≥ v_cap and the sweep
 // cannot reach). Returns are merged one per σ_r cell (the nearest to the centre) — a discretisation below the sensor's
-// own noise, so it changes no answer by more than σ_r, and it bounds the per-cycle cost.
-[[nodiscard]] inline LidarGuardReturns lidar_guard_returns(std::span<const Eigen::Vector2f> points_robot,
-                                                           std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
+// own noise, so it changes no answer by more than σ_r, and it bounds the per-cycle cost. `next(i)` yields the i-th return
+// in the robot frame (or nullopt to skip it), so a caller streams its own cloud without an intermediate copy.
+template <class Next>
+[[nodiscard]] inline LidarGuardReturns lidar_guard_returns_from(std::size_t n, Next&& next,
+                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
 {
     LidarGuardReturns out;
     const float s = std::max(sigma_r, 1e-3f);
     const Eigen::Matrix2f cov = (s * s) * Eigen::Matrix2f::Identity();
     std::unordered_map<std::int64_t, std::size_t> cell;
-    for (const auto& q : points_robot)
+    for (std::size_t i = 0; i < n; ++i)
     {
-        if (not q.allFinite()) continue;
+        const std::optional<Eigen::Vector2f> qo = next(i);
+        if (not qo.has_value() or not qo->allFinite()) continue;
+        const Eigen::Vector2f q = *qo;
         if (q.norm() > reach) { ++out.n_far; continue; }
-        if (lidar_return_is_self(body, sigma_r, q)) { ++out.n_self; continue; }
+        const float sd = anchor_signed_distance(body, q);
+        if (sd < 0.f) { ++out.n_self; continue; }
+        if (sd < sigma_r) ++out.n_band;
         const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
         const std::int64_t key = (ci << 32) ^ (cj & 0xffffffff);
         if (const auto it = cell.find(key); it != cell.end())
@@ -104,6 +118,14 @@ struct LidarGuardReturns
         out.obstacles.push_back(AnchorJamb{q, cov, 0.f, 1.f});
     }
     return out;
+}
+
+[[nodiscard]] inline LidarGuardReturns lidar_guard_returns(std::span<const Eigen::Vector2f> points_robot,
+                                                           std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
+{
+    return lidar_guard_returns_from(points_robot.size(),
+                                    [&](std::size_t i) { return std::optional<Eigen::Vector2f>(points_robot[i]); },
+                                    body, sigma_r, reach);
 }
 
 // The body's leading profile along u at lateral offset l (p = u rotated +90°): max of x·u over the polygon's chord x·p = l.
@@ -129,6 +151,7 @@ struct LidarGuardReturns
                                                     std::span<const Eigen::Vector2f> body, float margin, float a_dec,
                                                     float v_cap)
 {
+    // σ_r is each return's own covariance (isotropic: cov = σ_r² I), so it is read back from there.
     if (not (u.squaredNorm() > 0.f) or body.size() < 3 or returns.empty()) return v_cap;
     const Eigen::Vector2f un = u.normalized();
     const Eigen::Vector2f p(-un.y(), un.x());
@@ -138,13 +161,16 @@ struct LidarGuardReturns
     {
         const float lat = j.mean.dot(p), along = j.mean.dot(un);
         const float s_u = anchor_axis_sigma(j.cov, un), s_p = anchor_axis_sigma(j.cov, p);
+        const float sigma_contact = std::sqrt(std::max(0.f, 0.5f * j.cov.trace()));
         const float edge = lat >= 0.f ? s_plus : s_minus;
         const float p_in = anchor_contact_weight((edge - std::abs(lat)) / s_p);
         const float f = lidar_leading_profile(body, un, p, std::clamp(lat, -s_minus, s_plus));
         if (not std::isfinite(f)) continue;
         const float d = along - f;
         const float p_closing = anchor_contact_weight(d / s_u);
-        const float g = d - margin;
+        // The standoff: the safety margin, and never less than σ_r — a return in the noise band outside the hull is CONTACT
+        // for the motion that closes on it (fix round 1: monotone to the last centimetre, whatever the margin).
+        const float g = d - std::max(margin, sigma_contact);
         const float v_block = std::min(v_cap, anchor_std_normal_cdf(g / s_u) * std::sqrt(2.f * std::max(0.f, a_dec) * std::max(0.f, g)));
         v = std::min(v, v_cap - j.p * p_in * p_closing * (v_cap - v_block));
     }
@@ -156,6 +182,115 @@ struct LidarGuardReturns
                                                   std::span<const Eigen::Vector2f> body, float margin, float a_dec, float w_cap)
 {
     return anchor_obstacles_rot_limit(returns, rot, body, margin, a_dec, w_cap);
+}
+
+// ── THE RETURNS' DEADLOCK AND ITS WAY OUT (fix round 1, review item 2; the LiDAR twin of anchor_jamb_guard's fix C) ─────
+// A return inside the band the caps act on (the hull grown by margin + σ_r) closes forward AND both turns when it pins a
+// corner — the base then stands still against a real obstacle. The way out is the motion that OPENS clearance, judged on
+// the same returns: candidates reverse / advance (/ ±side on a holonomic base) / turn either way, each scored by the drop
+// of the total band penetration B = Σ max(0, (margin + σ_r) − sd_i) per metre of body-point travel (a turn by its arm,
+// the worst return's radius); the largest drop taken. A SUM, not the min: a jamb face lying alongside the body is not
+// opened by reversing, and with the min that face would veto the reverse that frees the pinned corner. Speed: the
+// deficit closed on the approach loop's time constant, v = v_max·tanh(pen/(v_max·τ_s)), pen = the worst penetration.
+// The result then goes through the returns' own caps, so it cannot close on another return. Nothing opens ⇒ nullopt.
+[[nodiscard]] inline float lidar_band_penetration(std::span<const AnchorJamb> returns, std::span<const Eigen::Vector2f> body,
+                                                  float band, float side, float adv, float dth, float* worst = nullptr)
+{
+    float sum = 0.f, w = 0.f;
+    for (const auto& j : returns)
+    {
+        const float pen = band - anchor_signed_distance(body, anchor_point_after(j.mean, side, adv, dth));
+        if (pen > 0.f) { sum += pen; w = std::max(w, pen); }
+    }
+    if (worst != nullptr) *worst = w;
+    return sum;
+}
+
+[[nodiscard]] inline std::optional<AnchorCommand> lidar_return_backoff(std::span<const AnchorJamb> returns,
+                                                                       std::span<const Eigen::Vector2f> body, float margin,
+                                                                       float sigma_r, float a_dec, float v_max, float w_max,
+                                                                       bool holonomic)
+{
+    if (returns.empty() or body.size() < 3) return std::nullopt;
+    const float band = margin + sigma_r;
+    float pen = 0.f;
+    const float b0 = lidar_band_penetration(returns, body, band, 0.f, 0.f, 0.f, &pen);
+    if (not (b0 > 0.f)) return std::nullopt;
+    // The worst return's radius: the arm of a turn.
+    float arm = 1e-3f, worst_pen = -1.f;
+    for (const auto& j : returns)
+        if (const float p = band - anchor_signed_distance(body, j.mean); p > worst_pen) { worst_pen = p; arm = std::max(j.mean.norm(), 1e-3f); }
+    struct Cand { float side, adv, rot; };
+    std::vector<Cand> cand{{0.f, 1.f, 0.f}, {0.f, -1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f, -1.f}};
+    if (holonomic) { cand.push_back({1.f, 0.f, 0.f}); cand.push_back({-1.f, 0.f, 0.f}); }
+    const float h = kAnchorGainStepM;
+    float best_gain = 0.f;
+    std::optional<Cand> best;
+    for (const auto& k : cand)
+    {
+        const float gain = (b0 - lidar_band_penetration(returns, body, band, h * k.side, h * k.adv, h * k.rot / arm)) / h;
+        if (gain > best_gain) { best_gain = gain; best = k; }
+    }
+    if (not best.has_value()) return std::nullopt;
+    const float v = v_max * std::tanh(pen / (v_max * kAnchorTauS));
+    AnchorCommand c;
+    c.side = best->side * v;
+    c.adv = best->adv * v;
+    c.rot = std::clamp(best->rot * v / arm, -w_max, w_max);
+    // Through the returns' own caps.
+    if (const float lin = std::hypot(c.adv, c.side); lin > 0.f)
+    {
+        const float vl = lidar_return_speed_limit(returns, Eigen::Vector2f(c.side / lin, c.adv / lin), body, margin, a_dec, v_max);
+        if (lin > vl) { c.adv *= vl / lin; c.side *= vl / lin; }
+    }
+    if (c.rot != 0.f)
+        c.rot = std::copysign(std::min(std::abs(c.rot), lidar_return_rot_limit(returns, c.rot, body, margin, a_dec, w_max)), c.rot);
+    return c;
+}
+
+// ── THE GUARD APPLIED TO A COMMAND (robot-frame convention: side = +x right, rot CCW positive) ─────────────────────────
+struct LidarCapResult { bool bound_lin = false, bound_rot = false; float v_lim = 0.f, w_lim = 0.f; };
+inline LidarCapResult lidar_cap_command(std::span<const AnchorJamb> returns, std::span<const Eigen::Vector2f> body,
+                                        float margin, float a_dec, float v_max, float w_max,
+                                        float& adv, float& side, float& rot)
+{
+    LidarCapResult r{.v_lim = v_max, .w_lim = w_max};
+    if (const float lin = std::hypot(adv, side); lin > 0.f)
+    {
+        r.v_lim = lidar_return_speed_limit(returns, Eigen::Vector2f(side / lin, adv / lin), body, margin, a_dec, v_max);
+        if (lin > r.v_lim) { r.bound_lin = true; adv *= r.v_lim / lin; side *= r.v_lim / lin; }
+    }
+    if (rot != 0.f)
+    {
+        r.w_lim = lidar_return_rot_limit(returns, rot, body, margin, a_dec, w_max);
+        if (std::abs(rot) > r.w_lim) { r.bound_rot = true; rot = std::copysign(r.w_lim, rot); }
+    }
+    return r;
+}
+
+// ── THE CENSUS (review item 4): is anything the LiDAR sees beyond the hull that the hull should hold? ────────────────
+struct LidarGuardCensus
+{
+    int n_self = 0, n_band = 0, n_kept = 0;
+    float nearest_sd = std::numeric_limits<float>::infinity();   // the nearest kept return's distance to the hull (m)
+    float nearest_bearing_deg = 0.f;                             // its bearing, 0 = forward, + = right
+    float v_fwd = 0.f, v_back = 0.f, w_ccw = 0.f, w_cw = 0.f;    // the caps the returns set right now
+};
+[[nodiscard]] inline LidarGuardCensus lidar_guard_census(const LidarGuardReturns& r, std::span<const Eigen::Vector2f> body,
+                                                         float margin, float a_dec, float v_max, float w_max)
+{
+    LidarGuardCensus c{.n_self = r.n_self, .n_band = r.n_band, .n_kept = int(r.obstacles.size())};
+    for (const auto& j : r.obstacles)
+        if (const float sd = anchor_signed_distance(body, j.mean); sd < c.nearest_sd)
+        {
+            c.nearest_sd = sd;
+            c.nearest_bearing_deg = std::atan2(j.mean.x(), j.mean.y()) * 57.29578f;
+        }
+    c.v_fwd = lidar_return_speed_limit(r.obstacles, Eigen::Vector2f(0.f, 1.f), body, margin, a_dec, v_max);
+    c.v_back = lidar_return_speed_limit(r.obstacles, Eigen::Vector2f(0.f, -1.f), body, margin, a_dec, v_max);
+    c.w_ccw = lidar_return_rot_limit(r.obstacles, +1.f, body, margin, a_dec, w_max);
+    c.w_cw = lidar_return_rot_limit(r.obstacles, -1.f, body, margin, a_dec, w_max);
+    return c;
 }
 
 }  // namespace rc

@@ -2574,11 +2574,22 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     monitor_footprint_orientation(step, time_source());
     anchor_cross_.reset();   // a per-cycle reading: only drive_point_target's update_cross_anchor may set it
     anchor_drawn_.reset();   // likewise the drawn anchor: only step_anchor_cross sets it
+    // Task 14 fix round 1, item 4: once, parked at start-up, what the live-returns net sees around the body — a body part
+    // beyond the hull (a cable, a mount) shows here as returns within sigma_r OUTSIDE it, before it can cause a phantom stop.
+    if (not startup_census_done_ and body_loaded_ and robot_still())
+    {
+        const auto lr = live_returns(step.robot_pose, obstacle_tracker, path_controller);
+        if (lr.valid)
+        {
+            startup_census_done_ = true;
+            log_returns_census("parked at start-up", lr);
+        }
+    }
 
     if (escape_active_)
     {
         display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
-        step_escape(step.robot_pose, path_controller, motion_commander, time_source());
+        step_escape(step.robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
         note_hold("escape manoeuvre owns the base");
         return false;
     }
@@ -3142,22 +3153,53 @@ float ControllerSession::anchor_brake_decel(const rc::TrajectoryController &path
     return a_dec;
 }
 
-rc::LidarGuardReturns ControllerSession::anchor_lidar_returns(const ControllerRobotPose &pose,
-                                                             ControllerObstacleTracker &obstacle_tracker, float reach) const
+ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerRobotPose &pose,
+                                                             ControllerObstacleTracker &obstacle_tracker,
+                                                             const rc::TrajectoryController &path_controller) const
 {
+    LiveReturns lr;
+    lr.margin = approach_body_.safety_margin();
+    lr.a_dec = anchor_brake_decel(path_controller);
+    lr.v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
+    lr.w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
+    lr.sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
     auto *lidar = obstacle_tracker.lidar_buffer();
-    if (lidar == nullptr) return {};
+    if (lidar == nullptr) return lr;
     const auto [cloud_opt] = lidar->read_last();
-    if (not cloud_opt.has_value()) return {};
+    if (not cloud_opt.has_value()) return lr;
     const auto &[xs, ys, zs] = cloud_opt.value();   // room frame, already in the obstacle z band (obstacle tracker)
-    const std::size_t n = std::min({xs.size(), ys.size(), zs.size()});
+    const std::size_t n = std::min(xs.size(), ys.size());
+    // Reach: the grown body plus the braking distance from v_max — beyond it no return can cap anything this cycle.
+    float body_reach = 0.f;
+    for (const auto &v : rc::anchor_grown_body(approach_body_.polygon(), lr.margin)) body_reach = std::max(body_reach, v.norm());
+    const float reach = body_reach + lr.v_max * lr.v_max / (2.f * lr.a_dec);
     const Eigen::Affine2f robot_from_room = pose.as_transform().inverse();
-    std::vector<Eigen::Vector2f> pts;
-    pts.reserve(n);
-    for (std::size_t i = 0; i < n; ++i)
-        if (std::isfinite(xs[i]) and std::isfinite(ys[i])) pts.push_back(robot_from_room * Eigen::Vector2f(xs[i], ys[i]));
-    const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : 0.03f;
-    return rc::lidar_guard_returns(pts, approach_body_.polygon(), sigma_r, reach);
+    // Streamed: each return is transformed as it is read, with no second copy of the cloud.
+    lr.r = rc::lidar_guard_returns_from(n, [&](std::size_t i) -> std::optional<Eigen::Vector2f>
+        {
+            if (not std::isfinite(xs[i]) or not std::isfinite(ys[i])) return std::nullopt;
+            return robot_from_room * Eigen::Vector2f(xs[i], ys[i]);
+        }, approach_body_.polygon(), lr.sigma, reach);
+    lr.valid = true;
+    return lr;
+}
+
+rc::LidarCapResult ControllerSession::cap_by_returns(const LiveReturns &lr, float &adv, float &side, float &rot) const
+{
+    if (not lr.valid) return rc::LidarCapResult{.v_lim = lr.v_max, .w_lim = lr.w_max};
+    return rc::lidar_cap_command(lr.r.obstacles, approach_body_.polygon(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
+                                 adv, side, rot);
+}
+
+void ControllerSession::log_returns_census(const char *when, const LiveReturns &lr) const
+{
+    if (not lr.valid) { std::println("[returns] {}: no LiDAR cloud yet", when); return; }
+    const auto c = rc::lidar_guard_census(lr.r, approach_body_.polygon(), lr.margin, lr.a_dec, lr.v_max, lr.w_max);
+    std::println("[returns] {}: {} returns inside the hull (the body itself), {} kept near the body, {} within sigma_r {:.3f} m "
+                 "OUTSIDE the hull (contact — or a body part the hull misses: a cable, a mount); nearest kept return {:.3f} m "
+                 "from the hull at bearing {:+.0f} deg (0 fwd, + right); caps: fwd {:.3f} back {:.3f} m/s, CCW {:.3f} CW {:.3f} rad/s",
+                 when, c.n_self, c.n_kept, c.n_band, lr.sigma, std::isfinite(c.nearest_sd) ? c.nearest_sd : -1.f,
+                 c.nearest_bearing_deg, c.v_fwd, c.v_back, c.w_ccw, c.w_cw);
 }
 
 float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
@@ -3408,45 +3450,66 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // ★ Task 14 (try74 leg 2: the anchor 0.2 m off at 12σ, the front-left corner driven into the REAL east jamb while the
     //   field above saw nothing): the returns themselves, self-filtered by the BODY (lidar_body_guard.h), not by the
     //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
-    //   trust nothing the anchor says. Reach: the grown body plus the braking distance from v_max (beyond it no return can
-    //   cap anything this cycle).
-    const float a_dec = anchor_brake_decel(path_controller);
-    const float margin = approach_body_.safety_margin();
-    float body_reach = 0.f;
-    for (const auto &v : rc::anchor_grown_body(body, margin)) body_reach = std::max(body_reach, v.norm());
-    const auto returns = anchor_lidar_returns(control_pose, obstacle_tracker, body_reach + v_max * v_max / (2.f * a_dec));
+    //   trust nothing the anchor says.
+    const auto returns = live_returns(control_pose, obstacle_tracker, path_controller);
+    if (anchor_census_for_ != anchor_latched_for_)   // fix round 1, item 4: once on the first cycle of each cross
+    {
+        anchor_census_for_ = anchor_latched_for_;
+        log_returns_census(std::format("first cross cycle on {}", a.name).c_str(), returns);
+    }
     float adv_mps = guard.cmd.adv, side_mps = holonomic ? guard.cmd.side : 0.f, rot_rps = guard.cmd.rot;
     // The ask the stall judge weighs the delivery against: the servo's own (the backoff's, when it took over).
     // ★ Task 13: the ask the stall judge weighs is the command AFTER the jamb / leaf guards — a translation the model's own
     //   obstacles capped to 0 was not asked of the base, and "spinning, translation asked" on it is a verdict on nothing.
     //   (The LiDAR floor and the uncertainty limiter below are throttles, and stay out of the ask: stall_judge.h.)
     const float asked_lin_mps = std::hypot(guard.cmd.adv, holonomic ? guard.cmd.side : 0.f);
+    float v_field = v_max;
     if (const float lin = std::hypot(adv_mps, side_mps); lin > 0.f)
     {
         const Eigen::Vector2f dir(side_mps / lin, adv_mps / lin);   // robot frame: +x side, +y fwd
         // Floored at 0.05 m/s like the tracker's — except a REVERSE (the jamb backoff): nothing the tracker does backs up,
         // and the rear clearance must be able to stop it (fix round 1).
-        const float v_field = anchor_clearance_speed_limit(dir, v_max, path_controller);
         // Task 14: the 0.05 m/s floor stays on the FIELD's ceiling only — its disc-support model reads every return beside
         // the body as no clearance, and the floor is what keeps that from deadlocking in clutter. A return on the swept
-        // body path, closing, is the returns' own ceiling, which has no floor: at contact it gives 0.
-        const float v_returns = rc::lidar_return_speed_limit(returns.obstacles, dir, body, margin, a_dec, v_max);
-        const float v_lidar = std::min(adv_mps < 0.f ? v_field : std::max(0.05f, v_field), v_returns);
-        if (const bool binding = v_returns < lin and v_returns < v_field; binding != anchor_returns_binding_logged_)
-        {
-            anchor_returns_binding_logged_ = binding;
-            if (binding)
-                std::println("[anchor] cross: a LIVE RETURN on the body's path caps translation at {:.3f} m/s (asked {:.3f}; field "
-                             "{:.3f}) — {} returns near the body, {} filtered as the body itself", v_returns, lin, v_field,
-                             returns.obstacles.size(), returns.n_self);
-            else
-                std::println("[anchor] cross: the live returns no longer bind the translation");
-        }
+        // body path, closing, is the returns' own ceiling below, which has no floor: at contact it gives 0.
+        v_field = anchor_clearance_speed_limit(dir, v_max, path_controller);
+        const float v_lidar = adv_mps < 0.f ? v_field : std::max(0.05f, v_field);
         if (lin > v_lidar) { adv_mps *= v_lidar / lin; side_mps *= v_lidar / lin; }
     }
-    if (rot_rps != 0.f)
-        rot_rps = std::copysign(std::min(std::abs(rot_rps),
-                                         rc::lidar_return_rot_limit(returns.obstacles, rot_rps, body, margin, a_dec, w_max)), rot_rps);
+    const bool had_motion = adv_mps != 0.f or side_mps != 0.f or rot_rps != 0.f;
+    const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
+    if (const bool binding = cap.bound_lin and cap.v_lim < v_field; binding != anchor_returns_binding_logged_)
+    {
+        anchor_returns_binding_logged_ = binding;
+        if (binding)
+            std::println("[anchor] cross: a LIVE RETURN on the body's path caps translation at {:.3f} m/s (field {:.3f}) — {} "
+                         "returns near the body ({} within sigma_r outside the hull), {} filtered as the body itself",
+                         cap.v_lim, v_field, returns.r.obstacles.size(), returns.r.n_band, returns.r.n_self);
+        else
+            std::println("[anchor] cross: the live returns no longer bind the translation");
+    }
+    // ★ Fix round 1, item 2 (b): the returns' DEADLOCK — they left the servo nothing (forward and both turns closed by a
+    //   pinned corner). The servo's own way out, judged on the same returns (rc::lidar_return_backoff, the LiDAR twin of
+    //   fix C), already through their caps.
+    bool returns_backoff = false;
+    if (had_motion and adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f)
+        if (const auto b = rc::lidar_return_backoff(returns.r.obstacles, body, returns.margin, returns.sigma, returns.a_dec,
+                                                    v_max, w_max, holonomic);
+            b.has_value())
+        {
+            adv_mps = b->adv; side_mps = holonomic ? b->side : 0.f; rot_rps = b->rot;
+            returns_backoff = true;
+        }
+    if (returns_backoff != returns_backoff_logged_)
+    {
+        returns_backoff_logged_ = returns_backoff;
+        if (returns_backoff)
+            std::println("[anchor] cross: the live returns close every motion the servo has — BACKING OFF on them: adv {:+.3f} "
+                         "side {:+.3f} rot {:+.3f}", adv_mps, side_mps, rot_rps);
+        else
+            std::println("[anchor] cross: the returns' backoff ends");
+    }
+    const bool returns_hold = cap.bound_lin or cap.bound_rot or returns_backoff;
     // 2. Pose-uncertainty limiter.
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
     // 3. Stall judge → escape. Rotation-dominant = the body's corners sweep faster than its centre translates (r_max: the
@@ -3464,10 +3527,11 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     const bool judged = drive or rc::anchor_wait_turn_judged(rot_rps, judge_window_s, unc.valid ? unc.theta_std_rad : -1.f);
     if (not judged) reset_stuck_window();
     else if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
-                     robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant))
+                     robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant,
+                     /*returns_hold=*/returns_hold))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-        step_escape(robot_pose, path_controller, motion_commander, time_source());
+        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
         return;
     }
     if (not drive and judged and last_judged_verdict_ == rc::StallVerdict::Spinning and not anchor_wait_blocked_)
@@ -5084,7 +5148,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // It survives the current_plan_ reset done in begin_escape(), so it's gated FIRST.
     if (escape_active_)
     {
-        step_escape(robot_pose, path_controller, motion_commander, time_source());
+        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
         refresh_view_only();
         return;
     }
@@ -5930,6 +5994,25 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // see stall_judge.h.
     const float asked_lin_mps = std::hypot(adv_mps, side_mps);
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
+    // ★ Task 14 fix round 1, item 3: the SAME live-returns net on the tracker's command path — the approach to a door's
+    //   standpoint, and any drive after a Fix-E room switch that has lost its anchor, run through here (step_anchor_cross
+    //   covers the anchored cross and the anchored clearing). Unfloored, like the cross; the tracker's own field, gate and
+    //   floor are untouched. ⚠ side: the robot-frame convention (+x right) the anchor servo uses; Shadow commands none.
+    bool returns_hold = false;
+    {
+        const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+        const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv_mps, side_mps, rot_rps);
+        returns_hold = cap.bound_lin or cap.bound_rot;
+        if (returns_hold != anchor_returns_binding_logged_)
+        {
+            anchor_returns_binding_logged_ = returns_hold;
+            if (returns_hold)
+                std::println("[controller] a LIVE RETURN caps the tracker's command: v <= {:.3f} m/s{}, |w| <= {:.3f} rad/s{}",
+                             cap.v_lim, cap.bound_lin ? " (binding)" : "", cap.w_lim, cap.bound_rot ? " (binding)" : "");
+            else
+                std::println("[controller] the live returns no longer bind the tracker's command");
+        }
+    }
     // Publish what the limiter did into the actuation stream. It sits between the MPPI's command and the
     // wheels, and until now a lap could show a 17% gap between the two with no way to say whether this
     // was the cause or whether it was inert for want of a covariance on the RT edge.
@@ -5976,10 +6059,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         if (detect_stuck(/*pursuing=*/true, /*asked_lin_mps=*/0.f, /*cmd_lin_mps=*/0.f,
                          motion_commander.last_uncertainty_diag().valid
                              ? motion_commander.last_uncertainty_diag().xy_std_m : 0.f,
-                         robot_pose.pos, robot_pose.theta, rot_rps, time_source()))
+                         robot_pose.pos, robot_pose.theta, rot_rps, time_source(),
+                         /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
         {
             begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-            step_escape(robot_pose, path_controller, motion_commander, time_source());
+            step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
             return;
         }
         motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
@@ -6004,10 +6088,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // arrives nowhere: adv 0, rot at its cap, heading sweeping. Passing zeros here would compile and
     // silently leave the Spinning verdict unreachable — the detector would exist and never fire.
     if (detect_stuck(/*pursuing=*/true, asked_lin_mps, cmd_lin, pose_sigma_m,
-                     robot_pose.pos, robot_pose.theta, rot_rps, time_source()))
+                     robot_pose.pos, robot_pose.theta, rot_rps, time_source(),
+                     /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-        step_escape(robot_pose, path_controller, motion_commander, time_source());
+        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
         return;
     }
 
@@ -6843,7 +6928,7 @@ void ControllerSession::reset_stuck_state()
 bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps,
                                     float pose_sigma_m, const Eigen::Vector2f &pos_room,
                                     float heading_rad, float commanded_rot_rps,
-                                    std::uint64_t now_ms, bool spin_is_not_a_wedge)
+                                    std::uint64_t now_ms, bool spin_is_not_a_wedge, bool returns_hold)
 {
     if (!params_ || !params_->stuck_recovery_enabled) { reset_stuck_window(); return false; }
 
@@ -6856,8 +6941,24 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
                                     .confirm_ms = params_->stuck_confirm_ms};
     const auto r = stall_judge_.note(pursuing, asked_lin_mps, cmd_lin_mps, pose_sigma_m,
                                      pos_room, heading_rad, commanded_rot_rps, now_ms, jp);
+    // Task 14 fix round 1, item 2 (c): did the live returns hold the command at any cycle of this window?
+    returns_hold_in_window_ = returns_hold_in_window_ or returns_hold;
+    const bool held_by_returns = returns_hold_in_window_;
+    if (r.window_s > 0.f or not stall_judge_.armed()) returns_hold_in_window_ = false;   // a window closed, or none open
     if (r.window_s > 0.f) last_judged_verdict_ = r.verdict;   // a window closed: its verdict (None = it moved as told)
     if (r.verdict == rc::StallVerdict::None) return false;
+    // ★ BLOCKED BY A REAL RETURN (fix round 1, item 2 c). The net capped the command because a measured return is on the
+    //   body's path: the robot is standing still in front of a real obstacle, exactly as told. That is neither a wedge (the
+    //   base did what it was commanded) nor our own limiter starving it — it is the world, seen. Reported under its own
+    //   name, no escape (the escape budget is for a body the model cannot explain), and kept out of the throttle totals.
+    if (held_by_returns and r.verdict == rc::StallVerdict::ThrottleStall)
+    {
+        std::println("[controller] BLOCKED BY A REAL RETURN — asked {:.2f} m over {:.1f} s, the live-returns net let through "
+                     "{:.3f} m (a measured obstacle on the body's path), moved {:.3f} m. Not escaping.",
+                     r.asked_m, r.window_s, r.commanded_m, r.achieved_m);
+        log_stall_event("obstacle_hold", r, pos_room, pose_sigma_m, now_ms);
+        return false;
+    }
 
     if (r.verdict == rc::StallVerdict::Wedge)
     {
@@ -6967,6 +7068,7 @@ void ControllerSession::log_stall_event(const char *verdict, const rc::StallJudg
 
 void ControllerSession::reset_stuck_window()
 {
+    returns_hold_in_window_ = false;
     stall_judge_.reset();
     // Task 11 fix 3: the verdict belongs to the window it closed. Kept past a reset, a verdict from before (a wait cycle
     // that was not judged, an escape, a new target) was read as this window's by the anchor spin bound.
@@ -7086,6 +7188,7 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
 
 void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
                                     rc::TrajectoryController &path_controller,
+                                    ControllerObstacleTracker &obstacle_tracker,
                                     ControllerMotionCommander &motion_commander,
                                     std::uint64_t now_ms)
 {
@@ -7114,8 +7217,16 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
     // field is blind inside its 0.405 m self-filter disc, which is where a wedged body's contacts are.
     const float rear = std::min(path_controller.clearance_at(0.f, -rear_probe), escape_rear_raw_m_);
     const float adv = (rear < rear_min) ? 0.f : -(params_ ? params_->escape_adv_speed_mps : 0.15f);
-    const float rot = escape_turn_sign_ * (params_ ? params_->escape_rot_speed_rps : 0.35f);
-    motion_commander.send_speed_command(adv, 0.f, rot);
+    float rot = escape_turn_sign_ * (params_ ? params_->escape_rot_speed_rps : 0.35f);
+    // ★ Task 14 fix round 1, item 2 (a): the escape's reverse-and-turn goes through the SAME live-returns net as every
+    //   other command — it may not back a corner into a real return or turn one into a jamb it is beside.
+    float adv_c = adv, side_c = 0.f;
+    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv_c, side_c, rot);
+    if (cap.bound_lin or cap.bound_rot)
+        std::println("[recovery] escape capped by the live returns: adv {:+.3f} -> {:+.3f}, rot -> {:+.3f}", adv, adv_c, rot);
+    if (adv_c == 0.f and rot == 0.f) { note_no_command(); motion_commander.stop_robot(); return; }
+    motion_commander.send_speed_command(adv_c, 0.f, rot);
 }
 
 void ControllerSession::stop(rc::TrajectoryController &path_controller,
