@@ -458,6 +458,7 @@ int main()
             s_max_dev = std::max(s_max_dev, std::abs(b.state().s - 2.0f));
             if (std::getenv("PHI_TRACE")) std::print("    f{} s {:+.3f} lat_map {:+.2f} phi {:.2f}\n", f, b.state().s, t.lat, t.phi_est);
         }
+        std::print("  w {:.3f} (truth 1.000)\n", b.state().w);
         std::print("  s after 60 frames {:.3f} (truth 2.000), max |s − truth| {:.3f} m, sigma_s {:.3f} m\n", b.state().s, s_max_dev,
                    std::sqrt(b.covariance()(0, 0)));
         check(s_max_dev < 0.1f, "the aperture stays within 0.1 m of the true doorway");

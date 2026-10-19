@@ -317,11 +317,15 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     //   put the robot at s −0.07 with σ 0.02 m while it truly stood 1.87 m out; the room said so (1.63 m away) and the
     //   belief-only band refused it (weight 0.00), leaving the anchor in its depth alias for the whole attempt.
     const float w_out = rc::door::retry_weight_out_of_band(pa.pose, r.value(), cfg_.pragmatic.cross_clearance_m);
-    Eigen::Vector3f innov;
-    const auto fused = rc::door::retry_fusion(pa.pose, r.value(),
+    // ★ Task 17 (try78 leg 2): …and the belief is the SUSPECT when it and the room disagree far beyond their covariance
+    //   (rc::door::belief_lost): with P(lost) the room's initialisation is the answer, a continuous mixture (retry_reinit).
+    Eigen::Vector3f innov = r->x - pa.pose.x;
+    innov.z() = rc::interaction::wrap_pi(innov.z());
+    const auto lost = rc::door::belief_lost(pa.pose, r.value(), pa.clear_width);
+    const auto fused = rc::door::retry_reinit(pa.pose, r.value(),
                                               rc::door::anchor_axes_to_robot(Eigen::Matrix3f(kSigmaModel.cwiseProduct(kSigmaModel).asDiagonal()),
                                                                              pa.pose.x.z()),
-                                              w_out, &innov);
+                                              w_out, lost.p_lost);
     Eigen::Vector3f dx = fused.x - pa.pose.x;
     dx.z() = rc::interaction::wrap_pi(dx.z());
     pa.pose.x = fused.x;
@@ -335,8 +339,9 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.init_pose.stamp_ms = pa.pose.stamp_ms;
     pa.mode = rc::door::AnchorPublish::None;
     std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
-               "init (room − belief {:.2f} m / {:+.1f}°, weight P(out of the doorway band) {:.2f}): moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n",
-               pa.door_name, kind, innov.head<2>().norm(), innov.z() * 57.2958f, w_out, dx.head<2>().norm(), dx.z() * 57.2958f,
+               "init (room − belief {:.2f} m / {:+.1f}°, weight P(out of the doorway band) {:.2f}, Mahalanobis² {:.1f} ⇒ P(belief lost) {:.2f}): "
+               "moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n",
+               pa.door_name, kind, innov.head<2>().norm(), innov.z() * 57.2958f, w_out, lost.d2, lost.p_lost, dx.head<2>().norm(), dx.z() * 57.2958f,
                std::sqrt(std::max(0.f, pa.pose.P(0, 0) + pa.pose.P(1, 1))));
 }
 

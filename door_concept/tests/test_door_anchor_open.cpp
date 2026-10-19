@@ -278,6 +278,30 @@ int main()
         check(w_disagree > 0.95f, "the room disagrees about being in the doorway: it is fused (try73 leg 1)");
     }
 
+    std::print("(11) Task 17: a belief far off the room initialisation, beyond their covariance, is the suspect\n");
+    {
+        const Eigen::Matrix3f model = Eigen::Vector3f(0.09f, 0.04f, 0.01f).asDiagonal();
+        auto run = [&](float off, float yaw_deg) {
+            rc::interaction::RelPose belief, room;
+            belief.x = {0.f, 2.f, 0.f}; belief.P = Eigen::Vector3f(0.03f * 0.03f, 0.03f * 0.03f, 0.01f * 0.01f).asDiagonal();
+            room.x = {off, 2.f, yaw_deg / 57.2958f};
+            room.P = Eigen::Vector3f(0.0905f, 0.0405f, 0.0101f).asDiagonal();   // try78's P0: belief + localisation + σ_model
+            const auto e = rc::door::belief_lost(belief, room, 0.9f);
+            const auto out = rc::door::retry_reinit(belief, room, model, 0.f, e.p_lost);   // inside the band: w_band 0
+            std::print("  room − belief {:.2f} m / {:.0f}°: Mahalanobis² {:.1f}, P(lost) {:.3f} → moved {:.3f} m toward the room ({:.3f} m left), σ_lat {:.3f}\n",
+                       off, yaw_deg, e.d2, e.p_lost, out.x.x(), off - out.x.x(), std::sqrt(out.P(0, 0)));
+            return std::pair{e.p_lost, off - out.x.x()};
+        };
+        const auto [p05, r05] = run(0.05f, 0.f);
+        check(p05 < 0.05f and std::abs(r05 - 0.05f) < 0.01f, "0.05 m off: the belief is KEPT");
+        const auto [p08, r08] = run(0.8f, 10.f);
+        const auto [p097, r097] = run(0.97f, 9.5f);   // try78's second retry
+        const auto [p15, r15] = run(1.5f, 20.f);
+        check(r15 < 0.2f, "1.5 m / 20° off: re-initialised toward the room, within 0.2 m");
+        check(p08 > p05 and p097 > p08 and p15 > p097, "P(lost) grows continuously with the disagreement");
+        (void)r08; (void)r097;
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

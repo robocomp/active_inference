@@ -234,6 +234,61 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
     return 1.f - anchor_doorway_band(belief, half_depth) * anchor_doorway_band(room, half_depth);
 }
 
+// ─── Task 17 (try78 leg 2): WHEN THE BELIEF AND THE ROOM DISAGREE FAR BEYOND THEIR COVARIANCE, THE BELIEF IS THE SUSPECT ─
+// try78: the anchor was created ~0.5 m off and converged to σ_lat 0.02 m there; every retry's room fusion was refused because
+// the wrong belief put the robot inside the doorway band (weight 0.01), and the room (0.77 m and 0.97 m away) never pulled it
+// back. The disagreement ν = room − belief (yaw wrapped) is scored under two hypotheses:
+//   belief RIGHT: ν ~ N(0, S),                    S = P_belief + P_room (the room init's P0: belief + localisation + σ_model);
+//   belief LOST : ν ~ Student-t_ν(0, S + Σ_L),    heavy-tailed AND broad — a lost belief has no scale of its own; Σ_L is the
+//                 scale of the aliases a lost anchor is seen in: one opening width along the wall and across it (try75/78:
+//                 0.4–0.75 m), a quarter turn in yaw (try70: 74–86°). (Without Σ_L a same-scale t is MORE likely than the
+//                 Gaussian at ν = 0 in 3-D, and an agreeing belief would be re-initialised.)
+// P(lost | ν) is their posterior ratio under the prior mass ⚑ kAnchorLostPrior (flagged, LeafPrior::p_not_as_believed's
+// convention) and ⚑ ν = 1 (Cauchy, the heaviest standard tail: "no scale", not a tuned dof).
+inline constexpr double kAnchorLostPrior = 0.2;
+inline constexpr double kAnchorLostDof   = 1.0;
+struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; };
+[[nodiscard]] inline LostEvidence belief_lost(const rc::interaction::RelPose& belief, const rc::interaction::RelPose& room,
+                                              float width)
+{
+    LostEvidence o;
+    Eigen::Vector3d nu = (room.x - belief.x).cast<double>();
+    nu.z() = std::remainder(nu.z(), 2.0 * M_PI);
+    const Eigen::Matrix3d S = (belief.P + room.P).cast<double>();
+    const double wl = std::max(1e-3, double(width));
+    const Eigen::Matrix3d SL = S + Eigen::Vector3d(wl * wl, wl * wl, M_PI * M_PI / 4.0).asDiagonal().toDenseMatrix();
+    const Eigen::LLT<Eigen::Matrix3d> llt(S), lltL(SL);
+    if (llt.info() != Eigen::Success or lltL.info() != Eigen::Success or not nu.allFinite()) return o;
+    o.d2 = nu.dot(llt.solve(nu));
+    const double dL2 = nu.dot(lltL.solve(nu));
+    const auto logdet = [](const Eigen::LLT<Eigen::Matrix3d>& c) { double l = 0; for (int i = 0; i < 3; ++i) l += 2.0 * std::log(c.matrixL()(i, i)); return l; };
+    const double k = 3.0, v = kAnchorLostDof;
+    const double l_right = -0.5 * o.d2 - 0.5 * k * std::log(2.0 * M_PI) - 0.5 * logdet(llt);
+    const double l_lost  = std::lgamma(0.5 * (v + k)) - std::lgamma(0.5 * v) - 0.5 * k * std::log(v * M_PI) - 0.5 * logdet(lltL)
+                         - 0.5 * (v + k) * std::log1p(dL2 / v);
+    const double a = std::log(kAnchorLostPrior) + l_lost, b = std::log(1.0 - kAnchorLostPrior) + l_right;
+    o.p_lost = float(1.0 / (1.0 + std::exp(b - a)));
+    return o;
+}
+// The retry's posterior as the two-hypothesis mixture: with P(lost) the belief carries nothing and the room initialisation
+// IS the answer; otherwise the room fusion at the doorway-band weight (retry_fusion). Moment-matched — continuous in P(lost),
+// no gate: w_reinit = max(band weight, P(lost)) is the mass on the room's side, as ruled.
+[[nodiscard]] inline rc::interaction::RelPose retry_reinit(const rc::interaction::RelPose& belief, const rc::interaction::RelPose& room,
+                                                           const Eigen::Matrix3f& model_cov, float w_band, float p_lost)
+{
+    const auto fused = retry_fusion(belief, room, model_cov, w_band);
+    const float p = std::clamp(p_lost, 0.f, 1.f);
+    rc::interaction::RelPose out = fused;
+    Eigen::Vector3f d = room.x - fused.x;
+    d.z() = rc::interaction::wrap_pi(d.z());
+    out.x = fused.x + p * d;
+    out.x.z() = rc::interaction::wrap_pi(out.x.z());
+    const Eigen::Vector3f df = fused.x - out.x, dr = (fused.x + d) - out.x;
+    out.P = (1.f - p) * (fused.P + df * df.transpose()) + p * (room.P + dr * dr.transpose());
+    out.P = 0.5f * (out.P + out.P.transpose());
+    return out;
+}
+
 // Task 12 fix round 1 (I-3): a frame is evidence about the LEAF (its φ curve, the hinge and swing log-odds) only when its pose is
 // the one being PUBLISHED as seen — p_view at or above the publication level. An aliased pose scores the beams against a wrong
 // opening; the hinge and swing log-odds accumulate with no forgetting, so one aliased stretch could flip and latch them.
