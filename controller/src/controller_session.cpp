@@ -3322,6 +3322,8 @@ void ControllerSession::reset_anchor_cross_state()
     gap_seen_now_ = false;
     gap_steering_logged_ = false;
     gap_lost_logged_ = false;
+    gap_room_yaw_fix_ = 0.f;
+    gap_room_yaw_sigma_ = -1.f;
     cross_gate_ = {};
     anchor_last_reading_.reset();
     anchor_gone_logged_ = false;
@@ -3632,7 +3634,7 @@ void ControllerSession::apply_anchor_standpoint(ControllerPlanningStep &step, co
 //    dropped). 2. MEASURE on the prior: the held line (wall line + its covariance) once there is one, else the anchor (its
 //    opening centre, wall normal, covariance); the door's full width is the anchor's. 3. A seen gap replaces the held line.
 bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose,
-                                           ControllerObstacleTracker &obstacle_tracker)
+                                           ControllerObstacleTracker &obstacle_tracker, float heading_var)
 {
     const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
     if (gap_line_.has_value() and gap_carry_pose_.has_value())
@@ -3651,6 +3653,23 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
     prior.P = pr.P;
     prior.width = a.width_m;
     prior.measured = gap_line_.has_value();   // try86 fix: a held gap is a measurement — no gross jump to another opening/wall
+    // try105 leg 5: the ANCHOR's yaw (13–20° off in room_1's corridor stub, where no stretch of the door's wall is visible to
+    // refit it) is fused with the yaw of the room polygon's wall the opening lies on (doorway_gap.h). Acquisition only: a held
+    // gap already carries it.
+    if (not prior.measured and room_polygon_.size() >= 3 and heading_var >= 0.f)
+    {
+        const Eigen::Affine2f robot_from_room = pose.as_transform().inverse();
+        std::vector<Eigen::Vector2f> poly;
+        poly.reserve(room_polygon_.size());
+        for (const auto &v : room_polygon_) poly.push_back(robot_from_room * v);
+        if (const auto wall = rc::doorway_room_wall_yaw(prior, poly, heading_var); wall.has_value())
+        {
+            const float psi_before = rc::doorway_gap_yaw(prior.normal);
+            prior = rc::doorway_gap_fuse_wall_yaw(prior, *wall);
+            gap_room_yaw_fix_ = rc::interaction::wrap_pi(rc::doorway_gap_yaw(prior.normal) - psi_before);
+            gap_room_yaw_sigma_ = std::sqrt(wall->var);
+        }
+    }
 
     // The body: its half-width (the corridor it needs) and its length (the slab it occupies crossing the wall line).
     const auto &rb = returns_body();
@@ -3677,9 +3696,13 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
         {
             const auto geo = rc::anchor_cross_geometry(*gap_line_);
             std::println("[gap] seen{}: width {:.3f} m, centre ({:+.3f},{:+.3f}) e {:+.3f} m, normal heading {:+.1f} deg, score {:.3f}{}{} "
-                         "(door {:.2f} m)", first ? "" : " (changed)", g.width, g.centre.x(), g.centre.y(), geo.e,
+                         "(door {:.2f} m){}", first ? "" : " (changed)", g.width, g.centre.x(), g.centre.y(), geo.e,
                          heading * 57.29578f, g.score, g.in_doorway ? ", from inside the doorway" : "",
-                         g.wall_fitted ? ", wall refitted" : "", a.width_m);
+                         g.wall_fitted ? ", wall refitted" : "", a.width_m,
+                         first and gap_room_yaw_sigma_ > 0.f
+                             ? std::format(" — the anchor's yaw moved {:+.1f} deg onto the room wall's (sigma {:.1f} deg)",
+                                           gap_room_yaw_fix_ * 57.29578f, gap_room_yaw_sigma_ * 57.29578f)
+                             : std::string());
             gap_logged_ = {e_now, 0.f, g.width};
             gap_logged_heading_ = heading;
         }
@@ -3779,7 +3802,11 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //   the servo, the jamb guard and `through` all run on the GAP (re-measured every cycle, carried by odometry while not
     //   seen), with no leaf model: the measured span already ends at the leaf. The anchor stays the prior that says where to
     //   look. Before that, the anchor law below is unchanged.
-    const bool on_gap = update_doorway_gap(a, tracker_pose_.has_value() ? *tracker_pose_ : robot_pose, obstacle_tracker);
+    float heading_var = -1.f;   // the localiser's heading variance (the room wall's yaw is seen through it); unknown ⇒ none
+    if (const auto ud = motion_commander.last_uncertainty_diag(); ud.valid and ud.theta_std_rad >= 0.f)
+        heading_var = ud.theta_std_rad * ud.theta_std_rad;
+    const bool on_gap = update_doorway_gap(a, tracker_pose_.has_value() ? *tracker_pose_ : robot_pose, obstacle_tracker,
+                                           heading_var);
     if (on_gap and not gap_steering_logged_)
     {
         gap_steering_logged_ = true;

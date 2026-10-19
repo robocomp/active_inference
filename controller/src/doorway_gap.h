@@ -432,6 +432,105 @@ inline std::optional<GapLine> gap_fit_wall(std::span<const Eigen::Vector2f> pts,
     return best;
 }
 
+// ── THE WALL'S DIRECTION FROM THE ROOM FRAME (try105 leg 5) ─────────────────────────────────────────────────────────────
+// WHY. In room_1's corridor stub below door_1 (the open leaf runs 0.95 m along the corridor's west side; the corridor's east
+// wall meets the door wall 7.5 cm past the east jamb) no stretch of the door's WALL is visible on the approach: the leaf hides
+// the west side, and the corridor wall is perpendicular to it. gap_fit_wall then has nothing to refit on and the line keeps the
+// PRIOR's yaw — the anchor's, which door_concept registered 13–20° off there (try105 leg 5: normal at +47.7° from the robot's
+// forward against +61° true; −27.8° against −8°) — and once held, that yaw is a measurement (no gross branch) that nothing
+// corrects. The servo drove the skewed normal: 0.15 m east of the opening at the mouth, its front-right corner on the east
+// casing, the gap "0.6 m behind" (the line also sat 0.8 m short, at the leaf's free edge), three cross attempts lost.
+// The ROOM frame knows the wall's DIRECTION well — a polygon edge, seen through the robot's heading (the localiser's σθ,
+// ~1°) — though it may be decimetres off in POSITION, which is why the anchor exists. So the room gives the yaw, only the yaw.
+// MODEL. The opening lies on one edge k of the room polygon (robot frame). Which one: the edge likeliest under the prior —
+// its distance from the prior's centre under the prior's position σ widened by the gap's gross scale, times its direction
+// under the prior's yaw σ widened by the gross yaw scale (a corridor's side wall, perpendicular to the door's, scores ~0).
+// Its yaw ψ_k (n_k oriented like the prior's normal) measures the wall's yaw with variance σθ² + (√2·σ_c/L_k)² (the robot's
+// heading, and the edge's own: two corners σ_c apart over its length L_k). It is fused with the prior through the gap's own
+// robust mixture — the anchor right (1 − kGapPriorGross, its claimed P) or grossly wrong (kGapPriorGross, P + G²): a 15°
+// disagreement with a claimed 1° is the gross branch, and the posterior follows the room. A MEASURED prior (a held gap) is
+// not fused again: its yaw already carries the room's, and the room's error is one error, not fresh noise every cycle.
+//   ⚑ kRoomCornerSigmaM = 0.02 m: the room polygon's corner σ (room_concept's published corner floor) — a model constant.
+inline constexpr float kRoomCornerSigmaM = 0.02f;
+struct DoorwayWallYaw
+{
+    float psi = 0.f;   // the wall normal's yaw in the anchor convention (doorway_gap_yaw), oriented like the prior's normal
+    float var = 0.f;   // its variance (rad²)
+    int edge = -1;     // the polygon edge it came from
+};
+// `polygon_robot`: the room polygon in the ROBOT frame (x right, y forward); `var_heading`: the localiser's heading variance.
+[[nodiscard]] inline std::optional<DoorwayWallYaw> doorway_room_wall_yaw(const DoorwayGapPrior& prior,
+                                                                         std::span<const Eigen::Vector2f> polygon_robot,
+                                                                         float var_heading)
+{
+    if (polygon_robot.size() < 3 or not prior.centre.allFinite() or not prior.normal.allFinite()
+        or not (prior.normal.squaredNorm() > 0.f) or not std::isfinite(var_heading) or var_heading < 0.f)
+        return std::nullopt;
+    const Eigen::Vector2f n0 = prior.normal.normalized();
+    const float psi0 = doorway_gap_yaw(n0);
+    const Eigen::Matrix2f Pxy = prior.P.topLeftCorner<2, 2>();
+    const float var_yaw = std::max(0.f, prior.P(2, 2)) + kGapGrossYawRad * kGapGrossYawRad;
+    std::optional<DoorwayWallYaw> best;
+    float best_w = 0.f;
+    for (std::size_t k = 0; k < polygon_robot.size(); ++k)
+    {
+        const Eigen::Vector2f a = polygon_robot[k], b = polygon_robot[(k + 1) % polygon_robot.size()];
+        const Eigen::Vector2f ab = b - a;
+        const float len = ab.norm();
+        if (not (len > 1e-3f) or not ab.allFinite()) continue;
+        const Eigen::Vector2f u = ab / len;
+        Eigen::Vector2f nk(-u.y(), u.x());
+        if (nk.dot(n0) < 0.f) nk = -nk;
+        const float t = std::clamp((prior.centre - a).dot(u), 0.f, len);
+        const float dist = (prior.centre - (a + t * u)).norm();
+        const float var_loc = std::max(0.f, nk.dot(Pxy * nk)) + kGapGrossXYM * kGapGrossXYM;
+        const float psi_k = doorway_gap_yaw(nk);
+        const float dpsi = rc::interaction::wrap_pi(psi_k - psi0);
+        const float w = std::exp(-0.5f * dist * dist / var_loc) * std::exp(-0.5f * dpsi * dpsi / var_yaw);
+        if (w > best_w)
+        {
+            best_w = w;
+            const float se = std::sqrt(2.f) * kRoomCornerSigmaM / len;
+            best = DoorwayWallYaw{psi_k, var_heading + se * se, int(k)};
+        }
+    }
+    return best;
+}
+// The prior's yaw fused with the room's (the robust mixture above); its centre stays where it was.
+[[nodiscard]] inline DoorwayGapPrior doorway_gap_fuse_wall_yaw(DoorwayGapPrior prior, const DoorwayWallYaw& w)
+{
+    if (prior.measured or not std::isfinite(w.psi) or not (w.var > 0.f)) return prior;
+    const float psi0 = doorway_gap_yaw(prior.normal.normalized());
+    const float d = rc::interaction::wrap_pi(w.psi - psi0);
+    const float v_right = std::max(0.f, prior.P(2, 2));
+    const std::array<std::pair<float, float>, 2> comps{std::pair{1.f - kGapPriorGross, v_right},
+                                                       std::pair{kGapPriorGross, v_right + kGapGrossYawRad * kGapGrossYawRad}};
+    std::array<float, 2> lw{}, mu{}, var{};
+    float lmax = -std::numeric_limits<float>::infinity();
+    for (std::size_t i = 0; i < 2; ++i)
+    {
+        const float S = comps[i].second + w.var;
+        lw[i] = std::log(comps[i].first) - 0.5f * d * d / S - 0.5f * std::log(S);
+        const float K = comps[i].second / S;
+        mu[i] = K * d;
+        var[i] = comps[i].second * (1.f - K);
+        lmax = std::max(lmax, lw[i]);
+    }
+    float z = 0.f, mean = 0.f, m2 = 0.f;
+    for (std::size_t i = 0; i < 2; ++i) z += std::exp(lw[i] - lmax);
+    for (std::size_t i = 0; i < 2; ++i)
+    {
+        const float p = std::exp(lw[i] - lmax) / z;
+        mean += p * mu[i];
+        m2 += p * (var[i] + mu[i] * mu[i]);
+    }
+    const float psi = psi0 + mean;
+    prior.normal = Eigen::Vector2f(-std::sin(psi), std::cos(psi));
+    prior.P(2, 2) = std::max(0.f, m2 - mean * mean);
+    prior.P(0, 2) = prior.P(2, 0) = prior.P(1, 2) = prior.P(2, 1) = 0.f;
+    return prior;
+}
+
 // Carry a gap line (robot-frame pose) by the robot's own motion: the robot moved (side, adv) in its previous frame and
 // turned dth. The covariance grows with the motion: the turn by Shadow's measured rotation-scale error
 // (relative_pose.h kRotScaleSigma), the translation by ⚑ kGapCarryTransSigma of the distance (an assumption — the wheel

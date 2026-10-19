@@ -1049,8 +1049,13 @@ private:
     Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // e, (unused), width at the last "[gap] seen" line
     float gap_logged_heading_ = 0.f;
     std::string current_room_name_;                             // the room frame robot poses are read in (this cycle)
-    // One gap cycle: carry, measure on the prior (the carried gap, else the anchor), log. True = steer on gap_line_.
-    bool update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker);
+    // try105 leg 5: the yaw the room polygon's wall gave the anchor's prior at acquisition (doorway_gap.h
+    // doorway_gap_fuse_wall_yaw): the correction applied (rad) and the wall's yaw σ, for the "[gap] seen" line.
+    float gap_room_yaw_fix_ = 0.f, gap_room_yaw_sigma_ = -1.f;
+    // One gap cycle: carry, measure on the prior (the carried gap, else the anchor — its yaw fused with the room wall's), log.
+    // `heading_var`: the localiser's heading variance (rad²; < 0 = unknown ⇒ no room yaw). True = steer on gap_line_.
+    bool update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
+                            float heading_var);
     bool anchor_hoist_logged_ = false;                              // build_planning_step's bypass: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
