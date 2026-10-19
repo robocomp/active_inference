@@ -183,6 +183,8 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
             "...and scaled by the precision that failed to confirm"); // ...at the precision we had
     out.grid_forget_can_unlatch   = getb("Grid.ForgetCanUnlatch", false,
             "...and the decay may never un-latch on its own: removal needs evidence of FREENESS, not absence of observation"); // ...and never un-latches by itself
+    out.grid_absence_removes      = getb("Grid.AbsenceRemoves", true,
+            "column EXISTENCE: a beam through a height a column was struck at, returning nothing, is evidence against the whole column (the try96 curtain)");
     out.grid_bin_span_m           = getf("Grid.BinSpanM", 2.0f,
             "height covered by the 64 voxel bins ⇒ 3.125 cm voxels. Matched to the ~3 cm registration");  // ⇒ 64 voxels of 3.125 cm
     out.grid_clear_stop_max_m     = getf("Grid.ClearStopMaxM", 0.10f,

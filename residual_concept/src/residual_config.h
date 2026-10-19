@@ -101,6 +101,10 @@ struct ResidualConfig
     // ...and the decay may never un-latch on its own: removal needs evidence of FREENESS, not absence of
     // observation. See OccGridParams::forget_can_unlatch. true ⇒ the pre-2026-08-22 behaviour.
     bool  grid_forget_can_unlatch   = false;
+    // ...but absence of RETURNS where beams went is evidence, and it reaches the whole column: see
+    // OccGridParams::absence_removes. false ⇒ the pre-2026-10-19 voxel-ledger-only removal, for A/B.
+    bool  grid_absence_removes      = true;
+
     // ── clearing: P(this beam would have been blocked) instead of a binary z-gate ──
     float grid_bin_span_m           = 2.0f;
     float grid_clear_stop_max_m     = 0.10f;

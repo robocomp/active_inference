@@ -267,6 +267,20 @@ ForgetRangeWeighted = true
 # occupied. Watch `zheld` (new column in grid_diag.csv) = occupied cells whose only beams this cycle flew over or
 # under them; and `forgotten`, which must now stay 0 — nonzero means someone re-enabled the coupling.
 ForgetCanUnlatch = false   # true = the pre-2026-08-22 coupling (decay erodes lo_ and may release), for A/B
+# ── ...BUT ABSENCE OF RETURNS WHERE BEAMS WENT IS EVIDENCE, AND IT REACHES THE WHOLE COLUMN (2026-10-19) ──────
+# try96 leg 3: room_concept's pose was 0.47 m / 13.5 deg wrong for ~20 s (reporting sigma 2.4 cm) while the robot
+# dwelt 0.7 m from a wall. Both lidars struck that wall every cycle and the grid latched it half a metre into the
+# room: a 3 m "curtain" of full-height columns. After the localiser recovered the robot looked straight through it
+# for half a minute — and with pencil refutation (BeamSpacingRad = 0 below) only the 2.5 cm voxels a ring line
+# happened to cross could ever be refuted; the voxels between ring lines kept every column's max positive. The
+# curtain cut the planner off from the door and the mission failed. Each cell now also carries a COLUMN EXISTENCE
+# log-odds: a beam through a height the column was struck at, strictly inside its struck span, with nothing
+# coming back, lowers it at the ledger's own l_miss x precision; a return anywhere in the column raises it; below
+# occ_clear the column's material is withdrawn. Occlusion holds (no ray, no evidence), a struck surface is
+# protected, gaps and the span's edge voxels testify nothing. See OccGridParams::absence_removes.
+# Replay (tests/test_curtain.cpp, real mounts, live grid settings): curtain 193 cells -> 4 after 30 s parked,
+# 0 after the drive on (control: 187 / 91); an orbited real box and an occluded box unchanged.
+AbsenceRemoves = true      # false = voxel-ledger-only removal (pre-2026-10-19), for A/B
 # ── A GRAZING BEAM IS NOT A REFUTATION ────────────────────────────────────────────────────────────────────────
 # The table in the middle of the room cannot be removed unless it flies (it does not) or a table_concept claims
 # it (none is running). Measured on a simulated table driven through this exact grid with the real mounts

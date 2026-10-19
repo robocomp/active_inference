@@ -760,6 +760,7 @@ void SpecificWorker::compute()
             gp.forget_visible_only  = cfg_.grid_forget_visible_only;
             gp.forget_range_weighted = cfg_.grid_forget_range_weighted;
             gp.forget_can_unlatch   = cfg_.grid_forget_can_unlatch;
+            gp.absence_removes      = cfg_.grid_absence_removes;
             gp.bin_span_m           = cfg_.grid_bin_span_m;
             gp.clear_stop_max_m     = cfg_.grid_clear_stop_max_m;
             gp.collision_band_top_m = cfg_.grid_collision_band_top_m;
@@ -1594,7 +1595,7 @@ void SpecificWorker::log_grid_diag()
         //   the row and not to the header) and every column after decay_w was then read as its neighbour —
         //   including by me, while diagnosing. Count them if you touch either.
              "clear_damped,clear_surf,clear_blind,clear_stopped,blind_shell,bad_pts,repaired,"
-             "bins_conf,bins_refut\n";
+             "bins_conf,bins_refut,absent\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
@@ -1609,16 +1610,17 @@ void SpecificWorker::log_grid_diag()
       << d.clear_damped << ',' << d.clear_surface_damped << ',' << d.clear_blind << ','
       << d.clear_stopped << ',' << d.clear_blind_shell << ','
       << d.bad_points << ',' << d.cells_repaired << ','
-      << d.bins_confirmed << ',' << d.bins_refuted << '\n';
+      << d.bins_confirmed << ',' << d.bins_refuted << ',' << d.cells_absent << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();
         const double blocked_frac = (d.misses + d.miss_blocked_zaware) > 0
             ? 100.0 * static_cast<double>(d.miss_blocked_zaware) / (d.misses + d.miss_blocked_zaware) : 0.0;
         std::println("[grid-diag] occ={} hits={} miss={} zaware_block={} ({:.0f}% of clearing) latch={} "
-                     "release={} forgotten={} self_damped={} floor_damped={} floor_clears={} hit_then_cleared={}",
+                     "release={} (absence {}) forgotten={} self_damped={} floor_damped={} floor_clears={} "
+                     "hit_then_cleared={}",
                      grid_.occupied_count(), d.hits, d.misses, d.miss_blocked_zaware, blocked_frac,
-                     d.cells_latched, d.cells_released, d.cells_forgotten, d.self_hits_damped,
+                     d.cells_latched, d.cells_released, d.cells_absent, d.cells_forgotten, d.self_hits_damped,
                      d.floor_damped_hits, d.floor_endpoint_clears, d.hit_then_cleared);
     }
     ++cyc;
@@ -1701,7 +1703,7 @@ void SpecificWorker::log_releases()
         f << grid_diag_cycle_ << ',' << e.x << ',' << e.y << ',' << e.lo_before << ',' << e.lo_after << ','
           << e.zmn << ',' << e.zmx << ',' << e.last_z << ',' << e.clear_z << ',' << e.clear_w << ','
           << e.range_m << ',' << e.age_cycles << ','
-          << (e.cause == 0 ? "see-through" : e.cause == 1 ? "decay" : "no-support") << ','
+          << (e.cause == 0 ? "see-through" : e.cause == 1 ? "decay" : e.cause == 2 ? "absence" : "no-support") << ','
           // WHICH SENSOR finished the cell. helios, bpearl and the ZED fail in completely different ways, and
           // "the table is being eroded" cannot be acted on until this column says which one is doing it.
           << (e.src == 1 ? "bpearl" : e.src == 2 ? "helios" : e.src == 3 ? "zed" : "?") << '\n';

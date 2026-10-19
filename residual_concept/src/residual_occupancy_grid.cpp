@@ -5,6 +5,7 @@
 #include "residual_occupancy_grid.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -47,6 +48,9 @@ void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const 
     h_ = std::max(1, static_cast<int>(std::ceil((ymax - ymin) / cs)));
     lo_.assign(static_cast<std::size_t>(w_) * h_, 0.0f);
     kobs_.assign(lo_.size(), 0.0f);                // accumulated observation weight (0 ⇒ unobserved prior)
+    ex_.assign(lo_.size(), 0.0f);                  // column existence (0 ⇒ no evidence either way)
+    emat_.assign(lo_.size(), 0ull);                // ...the heights it has been struck at (0 ⇒ no hypothesis)
+    scbits_.assign(lo_.size(), 0ull);
     zmn_.assign(lo_.size(), 0.0f);
     zsup_.assign(lo_.size() * OccGridParams::Z_BINS, 0.0f);
     zstab_.assign(lo_.size() * OccGridParams::Z_BINS, 0.0f);
@@ -161,6 +165,7 @@ void OccupancyGrid::mark_free_voxel(int ix, int iy, int iz, float z, float w, fl
     const std::uint64_t band = nbits >= 64                 // ~300 000 times a cycle)
                              ? ~0ull : (((1ull << nbits) - 1ull) << b0);
     smbits_[i] |= band;
+    scbits_[i] |= 1ull << iz;                              // ...and the voxel the beam itself passed through
     smiss_half_[i] = std::max(smiss_half_[i], half_h);
     if (not smiss_[i] or w > smiss_w_[i])
     { smiss_[i] = 1; smiss_w_[i] = w; smiss_z_[i] = z; smiss_src_[i] = sensor_id_; }
@@ -279,10 +284,61 @@ void OccupancyGrid::commit_cycle(float dt_s)
     {
         // Self-heal: a cell whose ledger has gone non-finite is invisible to every threshold below.
         if (not std::isfinite(lo_[i]))
-        { lo_[i] = 0.0f; kobs_[i] = 0.0f; occ_[i] = 0;
+        { lo_[i] = 0.0f; kobs_[i] = 0.0f; occ_[i] = 0; ex_[i] = 0.0f; emat_[i] = 0ull;
           zmn_[i] = zmx_[i] = dispz_[i] = 0.0f; clear_bins(i); ++sd_.cells_repaired; }
 
+        // The navigable band of this column, in bins: voxels below the floor band are ground and are never
+        // obstacles; voxels above ceil_z are overhead.
+        const auto band_bins = [&](int& b_lo, int& b_hi)
+        {
+            float cx_w, cy_w; cell_to_world(static_cast<int>(i % w_), static_cast<int>(i / w_), cx_w, cy_w);
+            const float fz = fp_a_ * cx_w + fp_b_ * cy_w + fp_c_ + p_.floor_z0;
+            b_lo = std::clamp(static_cast<int>(std::floor(fz / std::max(1e-6f, bw))), 0, OccGridParams::Z_BINS - 1);
+            b_hi = std::clamp(static_cast<int>(std::floor(p_.ceil_z / std::max(1e-6f, bw))), 0, OccGridParams::Z_BINS - 1);
+        };
+
         const bool touched = (shbits_[i] != 0ull) or (smbits_[i] != 0ull);
+        // ── COLUMN EXISTENCE (see OccGridParams::absence_removes) — scored against the PRIOR ledger, i.e.
+        //    before this cycle's per-voxel update: the prediction is made from what we believed.
+        if (touched and p_.absence_removes)
+        {
+            int e_lo, e_hi; band_bins(e_lo, e_hi);
+            const auto span_mask = [](int lo, int hi) -> std::uint64_t
+            {
+                if (lo < 0 or hi < lo) return 0ull;
+                const int n = hi - lo + 1;
+                return n >= 64 ? ~0ull : (((1ull << n) - 1ull) << lo);
+            };
+            const std::uint64_t band = span_mask(e_lo, e_hi);
+            const float* sup0 = &zsup_[i * OccGridParams::Z_BINS];
+            std::uint64_t now = 0ull;
+            for (int b = e_lo; b <= e_hi; ++b) if (sup0[b] > 0.0f) now |= 1ull << b;
+            // Every height this column has been struck at while the hypothesis lives — the union, not the
+            // latest snapshot. Its own voxels are refuted one by one by the very beams that testify here, and a
+            // sporadic phantom is struck at a different height every few cycles; scored against the current
+            // ledger the evidence extinguishes itself (tried, measured: the curtain stalled at E ~ -1.0 with 48
+            // of 193 cells left) and a latched cell whose voxels are all just below zero sits in the hysteresis
+            // band for ever.
+            emat_[i] |= now;
+            const std::uint64_t struck = emat_[i] & band;
+            const float cap = p_.l_clamp;
+            if ((shbits_[i] & band) != 0ull)                             // struck anywhere in the band: it IS there
+                ex_[i] = std::min(cap, ex_[i] + shit_w_[i] * p_.l_hit);
+            else if (struck != 0ull)
+            {
+                // A beam through a height the column WAS struck at, and nothing came back. Only strictly inside
+                // the struck span: a crossing in its top or bottom voxel is ambiguous at the grid's own vertical
+                // resolution — a box top at 0.600 m is struck in both the 0.575 and the 0.600 voxel, and a beam
+                // skimming it at 0.61 m passes through the upper one meeting nothing (counted, those skims ate a
+                // real box being orbited: tests/test_curtain.cpp STANDING 64 -> 43 cells). And only through a
+                // STRUCK height, never through a gap between two: material at 0.73 and one stray return at 1.41
+                // is not evidence of material at 0.92 (self_test property 20 — the live table the robot drove
+                // into on 2026-08-22). The crossing bits are the beam's own voxel, not its sampling footprint.
+                const int lo = std::countr_zero(struck), hi = 63 - std::countl_zero(struck);
+                if ((scbits_[i] & struck & span_mask(lo + 1, hi - 1)) != 0ull)
+                    ex_[i] = std::max(-cap, ex_[i] - smiss_w_[i] * p_.l_miss);
+            }
+        }
         if (touched)
         {
             update_bins(i, shit_w_[i], smiss_w_[i]);        // the per-voxel log-odds update
@@ -361,6 +417,28 @@ void OccupancyGrid::commit_cycle(float dt_s)
             trace_release(i, lo_before, smiss_z_[i], smiss_w_[i], 0, prev_lo, prev_hi, prev_top);
             occ_[i] = 0; ++sd_.cells_released;
         }
+        // ABSENCE: beams have gone through the material's span and nothing came back, often enough that the
+        // column's existence is below the same occ_clear the voxel ledger releases at. Withdraw the material
+        // (its positive voxels return to UNKNOWN — not to free: the per-voxel ledger keeps whatever it measured
+        // directly) and release the cell. One fresh return re-latches it, exactly like any unknown cell.
+        if (p_.absence_removes and ex_[i] < p_.occ_clear and (b_top >= 0 or occ_[i]))
+        {
+            float* supm = &zsup_[i * OccGridParams::Z_BINS];
+            float* stbm = &zstab_[i * OccGridParams::Z_BINS];
+            for (int b = 0; b < OccGridParams::Z_BINS; ++b) if (supm[b] > 0.0f) { supm[b] = 0.0f; stbm[b] = 0.0f; }
+            float col2 = 0.0f; bool any2 = false;
+            for (int b = b_lo; b <= b_hi; ++b)
+                if (supm[b] != 0.0f and (not any2 or supm[b] > col2)) { col2 = supm[b]; any2 = true; }
+            lo_[i] = col2;
+            hit_[i] = 0; zmn_[i] = zmx_[i] = dispz_[i] = 0.0f;
+            if (occ_[i])
+            {
+                trace_release(i, lo_before, smiss_z_[i], smiss_w_[i], 2, prev_lo, prev_hi, prev_top);
+                occ_[i] = 0; ++sd_.cells_released; ++sd_.cells_absent;
+            }
+            ex_[i] = 0.0f; emat_[i] = 0ull;                  // the hypothesis is gone; a new one starts from scratch
+        }
+        else if (b_top < 0 and not occ_[i]) { ex_[i] = 0.0f; emat_[i] = 0ull; }   // nothing left to refer to
 
         // ── the BELIEF FIELD — risk + epistemic, for the five agents that consume it ──
         // It now RIDES the projection instead of a second, parallel accumulator. The two had come apart: the old
@@ -499,6 +577,7 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         std::fill(slook_.begin(), slook_.end(), 0);
         std::fill(shbits_.begin(), shbits_.end(), 0ull);
         std::fill(smbits_.begin(), smbits_.end(), 0ull);
+        std::fill(scbits_.begin(), scbits_.end(), 0ull);
         std::fill(shit_w_.begin(), shit_w_.end(), 0.0f);
         std::fill(smiss_w_.begin(), smiss_w_.end(), 0.0f);
         std::fill(smiss_half_.begin(), smiss_half_.end(), 0.0f);

@@ -426,6 +426,54 @@ struct OccGridParams
     // needed the whole l_clamp → occ_clear span. "How sure am I" ages; "what have I measured" does not.
     bool forget_can_unlatch = false;    // true ⇒ the decay also erodes lo_ and may release a latched cell
                                         //        (the coupled pre-2026-08-22 behaviour, kept for A/B)
+    // ── ABSENCE REMOVES: a column's material is ONE hypothesis, and a beam through it is evidence against it ──
+    // The per-voxel ledger above refutes only the bin a crossing actually passes through (beam_spacing_rad is 0
+    // live — the ±6 cm footprint made thin surfaces churn and was A/B'd off on 2026-10-10). The 2-D cell is then
+    // the MAX over its bins, so it is released only once EVERY material bin has been refuted individually. From
+    // a parked pose most bins of a tall column sit between two ring lines and are never crossed at all: the
+    // column is geometry-locked, not evidence-locked. Measured live 2026-10-19 (try96 leg 3): a wall registered
+    // through a 0.47 m / 13.5 deg pose error latched a 3 m "curtain" of full-height columns in open floor;
+    // the robot then looked straight through it from 1.5-4 m for half a minute and none of it was removed. The
+    // curtain cut the planner off from the door and the mission failed. tests/test_curtain.cpp replays it with the
+    // real mounts and the live grid settings: 193 curtain cells; this channel OFF keeps 187 after 30 s parked and
+    // 91 after a further 26 s drive, ON keeps 4 and 0 — with an orbited real box and an occluded box unchanged.
+    // The generative model was missing a level. What the hits support is not 40 independent 2.5 cm slabs, it
+    // is "there is SOMETHING standing in this column, struck at these heights". A beam through one of those
+    // heights predicts a return; when none comes, that is evidence against the something — not only against
+    // the one slab the ray happened to cross. So each cell carries a column EXISTENCE log-odds E (the rc::exist
+    // channel of the concept agents, per cell), updated once per cycle like every ledger here:
+    //     a return anywhere in the nav band this cycle                     E += w_hit · l_hit   (it IS there)
+    //     else, a beam through a height the column was STRUCK at, strictly
+    //     inside the span of struck heights, and nothing came back         E −= w_miss · l_miss
+    // with the same l_hit / l_miss and the same precision weights (range, pose σ, ego-motion, device noise) the
+    // voxel ledger uses — the same inverse sensor model, aimed at the column hypothesis instead of one voxel.
+    // "Struck" is the UNION of the heights struck while the hypothesis lives (a per-cell bitmask): the voxel
+    // ledger refutes each of those voxels one by one with the very beams that testify here, so scoring against
+    // its current state made the evidence extinguish itself (tried, measured: the curtain stalled at E ≈ −1.0
+    // with 48 of 193 cells left), and a sporadic phantom is struck at a different height every few cycles.
+    // E is clamped at ±l_clamp; it never decays with time (no constant process noise), so absence of observation
+    // changes nothing. When E falls below occ_clear the column's material is withdrawn (its positive voxels return
+    // to UNKNOWN, not to free) and a latched cell is released with cause "absence". The decision level is the
+    // SAME occ_clear the voxel ledger releases at — no new threshold. A latched cell whose voxels the ledger has
+    // already driven just below zero (the hysteresis band, where it would otherwise sit latched for ever) keeps
+    // its struck set and stays testable.
+    // What protects the rest — each of these was MEASURED failing before it was added:
+    //   · OCCLUSION HOLDS by construction: a cell no ray reaches gets no crossing, so E does not move.
+    //   · A SURFACE STILL BEING STRUCK is protected at the COLUMN level: a return anywhere in the column this
+    //     cycle explains every crossing of it as passing BESIDE the surface (cell quantisation, grazing), so it
+    //     raises E instead of lowering it. Only a column nothing returns from any more can be eroded.
+    //   · A beam through a GAP between two struck heights testifies nothing: material at 0.73 m and one stray
+    //     return at 1.41 m is not evidence of material at 0.92 m (self_test property 20, the table the robot
+    //     drove into on 2026-08-22). A density-weighted "contiguity prior" for gaps was tried and failed exactly
+    //     that property. Over or under the struck span testifies nothing either (z-aware, as before).
+    //   · Neither does a beam through the span's TOP or BOTTOM voxel: at the grid's 2.5 cm vertical resolution a
+    //     box top at 0.600 m is struck in two voxels, and a beam skimming it at 0.61 m passes through the upper
+    //     one meeting nothing (counted, those skims ate an orbited real box, 64 -> 43 cells). So a one- or
+    //     two-voxel plate is left to the per-voxel ledger alone. This is the grid's resolution, not a tuned margin.
+    //   · The crossing is the beam's own voxel (scbits_), never its sampling footprint (smbits_).
+    //   · Crossings inside the dead shell / clearance radius are never emitted, so they carry nothing here either.
+    // false ⇒ the pre-2026-10-19 behaviour (voxel ledger only), for A/B.
+    bool absence_removes = true;
     // (There was a z_band_relax knob here that made the remembered z-band CONTRACT. It was removed: the theory
     // behind it had the sign backwards and it caused a measured 3.0× clearing regression. See the long note at
     // the zmn_/zmx_ update in commit_cycle before considering anything like it again.)
@@ -462,7 +510,8 @@ struct ReleaseEvent
     float range_m = 0.0f;          // horizontal range from the observer to this cell
     long  age_cycles = 0;          // how many cycles it had been continuously latched. A LARGE age is the alarm:
                                    // a structure that stood for minutes was deleted by seconds of see-through.
-    std::uint8_t cause = 0;        // 0 = see-through evidence (miss), 1 = time decay (forget_can_unlatch)
+    std::uint8_t cause = 0;        // 0 = see-through evidence (miss), 1 = time decay (forget_can_unlatch),
+                                   // 2 = absence: the column's existence E fell below occ_clear (absence_removes)
     std::uint8_t src = 0;          // which SWEEP delivered the see-through that finished it (set_sensor_id).
                                    // Without this "the table is being eroded" cannot be attributed to a sensor,
                                    // and this grid is fed by helios, bpearl and a ZED with very different
@@ -528,6 +577,10 @@ struct SweepDiag
                                   // means the sweep itself is corrupt.
     long cells_repaired = 0;      // cells whose log-odds had gone non-finite and were reset to unknown. Must be
                                   // 0 on a healthy run: anything else means a NaN is still reaching the model.
+    long cells_absent = 0;        // cells released by the COLUMN EXISTENCE channel (absence_removes): beams passed
+                                  // through the material's height span and nothing returned. Their releases carry
+                                  // cause 2. Zero for a whole run in a scene with moving things means the channel
+                                  // is not engaging; a large count on a STANDING obstacle means it is eroding one.
     long cells_unsupported = 0;   // cells released because EVERY height bin they claimed has been refuted —
                                   // "no lidar hits there". The removal channel once the support model is on.
     long clear_imprecise = 0;     // voxel clearings whose weight was cut because the sweep's own depth noise at
@@ -740,6 +793,8 @@ public:
     // ── read-out ──
     bool  occupied(int ix, int iy) const;
     float logodds (int ix, int iy) const { return in_bounds(ix, iy) ? lo_[idx(ix, iy)] : 0.0f; }
+    // Column EXISTENCE log-odds (see OccGridParams::absence_removes): 0 = no evidence, < occ_clear = withdrawn.
+    float existence(int ix, int iy) const { return in_bounds(ix, iy) ? ex_[idx(ix, iy)] : 0.0f; }
     // Remembered hit z-band of a cell (0 if never hit). Exposed for the self_test's bounded-memory property —
     // this band gates z-aware clearing, so its width IS the cell's clearability.
     float zband_lo(int ix, int iy) const { return in_bounds(ix, iy) and hit_[idx(ix, iy)] ? zmn_[idx(ix, iy)] : 0.0f; }
@@ -851,6 +906,10 @@ private:
                                                   // the origin would masquerade as the robot and skew the range)
     int   w_ = 0, h_ = 0;
     std::vector<float>        lo_;                 // log-odds (drives the hard occupied() latch — unchanged)
+    std::vector<float>        ex_;                // per-cell COLUMN EXISTENCE log-odds (see absence_removes)
+    std::vector<std::uint64_t> emat_;             // ...every height bin it has been struck at while it lives
+    std::vector<std::uint64_t> scbits_;           // this cycle: the bins beams actually passed through (the pencil,
+                                                  // NOT widened by the sampling footprint like smbits_)
     std::vector<float>        kobs_;              // accumulated OBSERVATION weight per cell (the confidence behind
                                                    // the projection's answer). Risk comes from the column; this
                                                    // carries only how much evidence stands behind it.              // Beta(α,β) posterior over occupancy probability (the belief field)

@@ -134,6 +134,7 @@ int main(int argc, char** argv)
         else if (k == "forget_can_unlatch")P.forget_can_unlatch = v != 0.0f;
         else if (k == "forget_half_life_s")P.forget_half_life_s = v;
         else if (k == "beam_spacing_rad") P.beam_spacing_rad = v;
+        else if (k == "absence_removes")  P.absence_removes = v != 0.0f;
         else if (k == "speckle_min_neighbours") P.speckle_min_neighbours = static_cast<int>(v);
         else if (k == "speckle_grace_cycles")   P.speckle_grace_cycles   = static_cast<int>(v);
         else if (k == "stray")                  g_stray = static_cast<int>(v);
