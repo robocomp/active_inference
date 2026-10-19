@@ -990,6 +990,8 @@ void SpecificWorker::load_params()
          "authority left for the feedback). If deviation rises instead, this is the variable to put back");
 	cfgr.opt_cast<double>("Controller.AnchorCrossStandoffM", params.anchor_cross_standoff_m,
          "Door cross on the interaction anchor: done once the opening is this far behind along its normal (m)");
+	cfgr.opt_cast<double>("Controller.LidarRangeSigmaM", params.lidar_range_sigma_m,
+         "LiDAR 1-sigma range noise (m): the anchor cross's body-footprint self-filter level and the returns' covariance");
 	cfgr.opt_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m,
          "THE standoff. Exactly one number now expresses 'how much room do we want beyond the robot's actual shape', replacing six independent C-space margins…");
 	cfgr.opt_cast<double>("Controller.PoseUncertaintyCoupling", params.pose_uncertainty_coupling,

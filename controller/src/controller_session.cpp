@@ -3142,6 +3142,24 @@ float ControllerSession::anchor_brake_decel(const rc::TrajectoryController &path
     return a_dec;
 }
 
+rc::LidarGuardReturns ControllerSession::anchor_lidar_returns(const ControllerRobotPose &pose,
+                                                             ControllerObstacleTracker &obstacle_tracker, float reach) const
+{
+    auto *lidar = obstacle_tracker.lidar_buffer();
+    if (lidar == nullptr) return {};
+    const auto [cloud_opt] = lidar->read_last();
+    if (not cloud_opt.has_value()) return {};
+    const auto &[xs, ys, zs] = cloud_opt.value();   // room frame, already in the obstacle z band (obstacle tracker)
+    const std::size_t n = std::min({xs.size(), ys.size(), zs.size()});
+    const Eigen::Affine2f robot_from_room = pose.as_transform().inverse();
+    std::vector<Eigen::Vector2f> pts;
+    pts.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+        if (std::isfinite(xs[i]) and std::isfinite(ys[i])) pts.push_back(robot_from_room * Eigen::Vector2f(xs[i], ys[i]));
+    const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : 0.03f;
+    return rc::lidar_guard_returns(pts, approach_body_.polygon(), sigma_r, reach);
+}
+
 float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
                                                       const rc::TrajectoryController &path_controller) const
 {
@@ -3226,7 +3244,8 @@ void ControllerSession::apply_anchor_standpoint(ControllerPlanningStep &step, co
 //      the last ~0.4 m the LiDAR self-filter cannot see; |rot| by the corners' sweep onto the jambs, unfloored; and, Task 9
 //      fix C, the servo's own way out of the deadlock those two caps make with a jamb inside the grown body); then the
 //      live field (LiDAR only, see refresh_lidar_field) along the same direction, floored at 0.05 m/s exactly as
-//      set_speed_limit floors the tracker's;
+//      set_speed_limit floors the tracker's; and (Task 14) the raw returns, body-filtered, on the swept path and the
+//      corner sweep, UNFLOORED (lidar_body_guard.h) — the net that does not trust the anchor;
 //   2. motion_commander.apply_uncertainty_speed_limit;
 //   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts — Task 9: a Spinning verdict on the
 //      servo's own rotation-dominant command is not a wedge, bounded below by the cross contract's timeout);
@@ -3386,6 +3405,16 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     }
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
     path_controller.refresh_lidar_field(control_pose.as_transform());
+    // ★ Task 14 (try74 leg 2: the anchor 0.2 m off at 12σ, the front-left corner driven into the REAL east jamb while the
+    //   field above saw nothing): the returns themselves, self-filtered by the BODY (lidar_body_guard.h), not by the
+    //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
+    //   trust nothing the anchor says. Reach: the grown body plus the braking distance from v_max (beyond it no return can
+    //   cap anything this cycle).
+    const float a_dec = anchor_brake_decel(path_controller);
+    const float margin = approach_body_.safety_margin();
+    float body_reach = 0.f;
+    for (const auto &v : rc::anchor_grown_body(body, margin)) body_reach = std::max(body_reach, v.norm());
+    const auto returns = anchor_lidar_returns(control_pose, obstacle_tracker, body_reach + v_max * v_max / (2.f * a_dec));
     float adv_mps = guard.cmd.adv, side_mps = holonomic ? guard.cmd.side : 0.f, rot_rps = guard.cmd.rot;
     // The ask the stall judge weighs the delivery against: the servo's own (the backoff's, when it took over).
     // ★ Task 13: the ask the stall judge weighs is the command AFTER the jamb / leaf guards — a translation the model's own
@@ -3398,9 +3427,26 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         // Floored at 0.05 m/s like the tracker's — except a REVERSE (the jamb backoff): nothing the tracker does backs up,
         // and the rear clearance must be able to stop it (fix round 1).
         const float v_field = anchor_clearance_speed_limit(dir, v_max, path_controller);
-        const float v_lidar = adv_mps < 0.f ? v_field : std::max(0.05f, v_field);
+        // Task 14: the 0.05 m/s floor stays on the FIELD's ceiling only — its disc-support model reads every return beside
+        // the body as no clearance, and the floor is what keeps that from deadlocking in clutter. A return on the swept
+        // body path, closing, is the returns' own ceiling, which has no floor: at contact it gives 0.
+        const float v_returns = rc::lidar_return_speed_limit(returns.obstacles, dir, body, margin, a_dec, v_max);
+        const float v_lidar = std::min(adv_mps < 0.f ? v_field : std::max(0.05f, v_field), v_returns);
+        if (const bool binding = v_returns < lin and v_returns < v_field; binding != anchor_returns_binding_logged_)
+        {
+            anchor_returns_binding_logged_ = binding;
+            if (binding)
+                std::println("[anchor] cross: a LIVE RETURN on the body's path caps translation at {:.3f} m/s (asked {:.3f}; field "
+                             "{:.3f}) — {} returns near the body, {} filtered as the body itself", v_returns, lin, v_field,
+                             returns.obstacles.size(), returns.n_self);
+            else
+                std::println("[anchor] cross: the live returns no longer bind the translation");
+        }
         if (lin > v_lidar) { adv_mps *= v_lidar / lin; side_mps *= v_lidar / lin; }
     }
+    if (rot_rps != 0.f)
+        rot_rps = std::copysign(std::min(std::abs(rot_rps),
+                                         rc::lidar_return_rot_limit(returns.obstacles, rot_rps, body, margin, a_dec, w_max)), rot_rps);
     // 2. Pose-uncertainty limiter.
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
     // 3. Stall judge → escape. Rotation-dominant = the body's corners sweep faster than its centre translates (r_max: the

@@ -15,6 +15,7 @@
 #include "controller_mission.h"
 #include "controller_door_passage.h"
 #include "controller_anchor_servo.h"
+#include "lidar_body_guard.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -115,6 +116,10 @@ public:
                                        const rc::TrajectoryController &path_controller) const;
     // The braking deceleration both ceilings use: the tracker's cbf_max_decel, never more than the base delivers.
     float anchor_brake_decel(const rc::TrajectoryController &path_controller) const;
+    // Task 14: the live returns in the ROBOT frame (the pose the field is built on), self-filtered by the BODY FOOTPRINT
+    // grown by the range noise (lidar_body_guard.h) — not the ESDF's 0.405 m disc — as guard obstacles within `reach`.
+    [[nodiscard]] rc::LidarGuardReturns anchor_lidar_returns(const ControllerRobotPose &pose,
+                                                             ControllerObstacleTracker &obstacle_tracker, float reach) const;
     bool ensure_current_plan(const ControllerPlanningStep &step,
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
@@ -889,6 +894,7 @@ private:
     // a fresh RobotFootprint::shadow() temporary at eleven call sites, which is why a per-robot shape could
     // not be delivered at all: a static factory has nowhere to put "which robot".
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
+    bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
     bool body_loaded_ = false;                 // one-shot guard: load when the robot node first appears
     // ★WHAT THIS BASE CAN DO, as opposed to what we have chosen to ask of it. Read once beside the body
     // (the robot node states both), and held rather than re-read because it is a property of the hardware,

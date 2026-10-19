@@ -563,6 +563,10 @@ MaxRotSpeed = 1.0
 # room-frame route (src/controller_anchor_servo.h). The servo is done once the opening is this far behind along
 # its normal (m) — the anchor-relative stand-in for door_concept's CrossStandoffM, which the controller cannot see.
 AnchorCrossStandoffM = 2.0
+# Task 14: the LiDAR's 1-sigma range noise (m). The anchor cross reads the raw returns as a safety net that does not
+# trust the anchor: a return is the robot itself only inside the body footprint grown by this; each kept return is an
+# obstacle with this sigma (src/lidar_body_guard.h). 0.03 = the bpearl's advertised RangeSigmaFloorM (helios 0.02).
+LidarRangeSigmaM = 0.03
 # ── HOW MUCH HARDER TO SLOW FOR A REALLY SHARP TURN ──────────────────────────────────────────────
 # MEASURED FIRST, and the measurement is why this key exists rather than a re-tune of an existing one
 # (tools/tracker_sim route_world.txt --brake, 30-waypoint tour):

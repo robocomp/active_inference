@@ -454,19 +454,20 @@ struct AnchorJamb { Eigen::Vector2f mean; Eigen::Matrix2f cov; float radius = 0.
 // far below every length in the problem), not a model level.
 inline constexpr float kAnchorGainStepM = 1e-3f;
 
-// The cap on |ω| for a turn in the direction of `rot` (rad/s, CCW positive).
-[[nodiscard]] inline float anchor_jamb_rot_limit(const rc::interaction::RelPose& r, float width, float rot,
-                                                 std::span<const Eigen::Vector2f> body, float margin, float a_dec,
-                                                 float w_cap, std::span<const rc::interaction::AnchorLeaf> leaves = {})
+// The cap on |ω| for a turn in the direction of `rot` (rad/s, CCW positive), against any set of robot-frame obstacles
+// (Task 14: the anchor's jambs and leaf points, or the LiDAR's own returns — lidar_body_guard.h — on one rule).
+[[nodiscard]] inline float anchor_obstacles_rot_limit(std::span<const AnchorJamb> obstacles, float rot,
+                                                      std::span<const Eigen::Vector2f> body, float margin, float a_dec,
+                                                      float w_cap)
 {
-    if (rot == 0.f or not r.x.allFinite() or not r.P.allFinite() or not (width > 0.f) or body.size() < 3) return w_cap;
+    if (rot == 0.f or body.size() < 3) return w_cap;
     const float two_pi = 2.f * std::numbers::pi_v<float>;
     const auto wrap_0_2pi = [two_pi](float x) { x = std::fmod(x, two_pi); return x < 0.f ? x + two_pi : x; };
     // The body grown by the margin plus each obstacle's own radius (jambs 0, the leaf its half-thickness): two polygons.
     float poly_radius = -1.f, r_max = 0.f;
     std::vector<Eigen::Vector2f> poly;
     float w = w_cap;
-    for (const auto& j : anchor_obstacles(r, width, leaves))
+    for (const auto& j : obstacles)
     {
         if (j.radius != poly_radius)
         {
@@ -515,6 +516,15 @@ inline constexpr float kAnchorGainStepM = 1e-3f;
         w = std::min(w, w_cap - j.p * p_reach * (w_cap - w_block));   // weighted by P(it is there) (I-4)
     }
     return std::max(0.f, w);
+}
+
+[[nodiscard]] inline float anchor_jamb_rot_limit(const rc::interaction::RelPose& r, float width, float rot,
+                                                 std::span<const Eigen::Vector2f> body, float margin, float a_dec,
+                                                 float w_cap, std::span<const rc::interaction::AnchorLeaf> leaves = {})
+{
+    if (rot == 0.f or not r.x.allFinite() or not r.P.allFinite() or not (width > 0.f) or body.size() < 3) return w_cap;
+    const auto obs = anchor_obstacles(r, width, leaves);
+    return anchor_obstacles_rot_limit(obs, rot, body, margin, a_dec, w_cap);
 }
 
 // ── THE JAMB DEADLOCK AND THE SERVO'S OWN WAY OUT (Task 9, fix C) ─────────────────────────────────────────────────────

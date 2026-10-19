@@ -189,6 +189,10 @@ struct ControllerParams
     // Door cross on the interaction anchor: the servo is `through` once the opening is this far behind along its
     // normal (m). door_concept's CrossStandoffM is not visible here; this is the anchor-relative equivalent.
     float anchor_cross_standoff_m = 2.0f;
+    // Task 14: the LiDAR's 1-σ range noise (m) — the level of the body-footprint self-filter and the returns' own
+    // covariance in the anchor cross's physical safety net (lidar_body_guard.h). Default = the larger of the two advertised
+    // [SensorModel] RangeSigmaFloorM (lidar3d_dds: helios 0.02, bpearl 0.03 — the bpearl is the near-field sensor).
+    float lidar_range_sigma_m = 0.03f;
     // ── HOW MUCH HARDER TO SLOW FOR A TURN AS ITS RADIUS APPROACHES THE ROBOT'S OWN ──────────────
     // Measured (tools/tracker_sim --brake): from |kappa| = 0.3 1/m upward the ROTATION limit
     // h*w_max/kappa_avg is the only thing setting the speed — the comfort limit sqrt(a_lat/kappa)
