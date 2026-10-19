@@ -1092,7 +1092,8 @@ void SpecificWorker::compute()
     const auto door_nodes = G->get_nodes_by_type("object");
     for (const auto& node : door_nodes)
         if (node.name().starts_with("door") and not rc::room::is_proto_mirror(*G, node)   // a mirror is not a belief
-            and not rc::interaction::is_anchor(*G, node))   // nor is the passage door's robot-relative copy
+            and not rc::interaction::is_anchor(*G, node)    // nor is the passage door's robot-relative copy
+            and not held_doors_.contains(node.id()))        // nor a door HELD in the room left behind (release_room)
             process_door_node(node);
 
     // ── The three PRAGMATIC affordances: approach / open / cross ──────────────────────────────────
@@ -3741,7 +3742,23 @@ void SpecificWorker::step_room_following()
     }
 
     if (room_node_id_ == *current)
+    {
+        // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
+        if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
+        {
+            carry_pending_room_ = 0;
+            std::optional<EntryMirror> adopted_from;
+            std::uint64_t adopt = 0;
+            if (auto rec = recreate_lost_door(room_node_id_); rec.has_value())
+            {
+                adopt = rec->first;
+                adopted_from = std::move(rec->second);
+            }
+            lost_doors_.clear();
+            install_carried_door(room_node_id_, adopt, adopted_from);
+        }
         return;                                        // already following it; the common case
+    }
 
     if (room_node_id_ == 0)
     {
@@ -3960,6 +3977,20 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
             adopted_from = std::move(rec->second);
         }
     lost_doors_.clear();
+    // ★ …OR THE CROSSED DOOR IS STILL LIVE IN THE ROOM LEFT BEHIND (try106 leg 3). ltsm moves `current` and evicts the
+    //   old room in two steps, and which one reaches us first is a race: when the move wins, the crossed door is not
+    //   lost yet, so there is nothing to recreate here. It is HELD below, and when ltsm deletes it the carry happens
+    //   then (step_room_following). Without this, room_1 was re-entered with no door_1 and "cross door_1" failed.
+    carry_pending_room_ = (adopt_mirror == 0 and old_room_lives) ? new_room : 0;
+    // ★ OUR OWN MIRROR OF IT, NOW. Both rooms are live at this instant, so each held door's pose in the new room is a
+    //   direct chain; after the switch the door is no longer fitted and its memo is never refreshed again.
+    if (carry_pending_room_ != 0 and inner_eigen_ and fitter_)
+        if (const auto room_n = G->get_node(new_room); room_n.has_value())
+            for (const auto& [id, inst] : fitter_->instances())
+                if (const auto m = door_memo_.find(id); m != door_memo_.end())
+                    if (const auto Tx = inner_eigen_->get_transformation_matrix(room_n->name(), m->second.name, 0);
+                        Tx.has_value() and Tx->matrix().allFinite())
+                        m->second.T_in_room[new_room] = Eigen::Affine3d(Tx->matrix());
     // ★ ONE NAME PER DOORWAY (2026-10-13). The mirror was born under a fresh number because its source still held the
     //   doorway's name (DSR names are unique). Once the source is gone — ltsm evicts it with the room left behind —
     //   the mirror is re-made under that name, so the same hole is door_8 from both rooms, across every crossing, and
@@ -4022,6 +4053,15 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     // on the wrong walls — the fail-safe direction.
     fitter_->set_room_geometry(Eigen::Vector2f::Zero(), {});
     refresh_room_geometry();         // and pick the new one up in the same cycle
+    install_carried_door(new_room, adopt_mirror, adopted_from);
+}
+
+// The door carried across a room switch becomes the new room's door: its instance rebuilt against the room we are in,
+// the leaf it remembers from the crossing, and the passage anchor relinked to it. Called by release_room, and LATE by
+// step_room_following when the crossed door was still live in the room left behind at the switch (carry_pending_room_).
+void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t adopt_mirror,
+                                          const std::optional<EntryMirror>& adopted_from)
+{
     // A door recreated just above was inserted while room_node_id_ still named the room LEFT: our own node-added slot
     // already built an instance for it against that (deleted) room, which reads its RT as (0,0) and makes the
     // adoption below see "already exists" and skip (live try25: no leaf memory, the door lost, a phantom picked
@@ -4198,6 +4238,8 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
         return;   // an entry mirror under a proto-room — never a fitted instance (see step_entry_mirrors)
     if (rc::interaction::is_anchor(*G, node_opt.value()))
         return;   // `door_N@robot`: the passage door's robot-relative copy, never a fitted instance
+    if (held_doors_.contains(id))
+        return;   // a door of the room left behind: HELD there, not this room's (try106: re-adopted against the wrong room)
 
     fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }
@@ -4251,6 +4293,14 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
             door_memo_.erase(m);
         }
     }
+    // A door HELD in the room left behind, deleted now with that room: lost, and carried across by step_room_following
+    // if it is the one the robot just went through.
+    if (held_doors_.erase(id) > 0)
+        if (const auto m = door_memo_.find(id); m != door_memo_.end())
+        {
+            lost_doors_.push_back(std::move(m->second));
+            door_memo_.erase(m);
+        }
 }
 
 // ─── Lifecycle stubs ─────────────────────────────────────────────────────────

@@ -290,6 +290,8 @@ private:
     std::uint64_t adopt_doorway_name(std::uint64_t id, std::uint64_t room_id, const std::string& name);
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
+    std::uint64_t carry_pending_room_ = 0;   ///< room entered while the crossed door was still HELD: carry it when it is lost
+    void install_carried_door(std::uint64_t new_room, std::uint64_t adopt_mirror, const std::optional<EntryMirror>& adopted_from);
     void step_entry_mirrors();
 
     // ── THE INTERACTION ANCHOR: the passage door hung from the robot (specificworker_anchor.cpp) ──────────
