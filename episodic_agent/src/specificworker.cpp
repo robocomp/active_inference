@@ -28,7 +28,9 @@
 #include "../../common/window_geometry/window_geometry_saver.h"   // rc::ui::GeometrySaver (SHARED)
 
 #include <QCoreApplication>
+#include <QEvent>
 #include <QFontDatabase>
+#include <QScrollBar>
 #include <QSettings>
 #include <QVBoxLayout>
 
@@ -331,6 +333,33 @@ void SpecificWorker::poll()
 
 // ─── "View data" popup ───────────────────────────────────────────────────────
 
+namespace
+{
+// cortex's AbstractGraphicViewer::showEvent shrinks the scene rect to the items + 100 and fits it, which leaves the
+// scrollbars no range — and the viewer pans BY the scrollbars. GraphViewer re-pads the rect on its next refit, which
+// on the churning live graph comes within ms; the em graph is quiet, so the window stayed unpannable after every
+// show. Re-pad once after each show, only while there is nothing to scroll (a user's own zoom is left alone).
+class PanAfterShow : public QObject
+{
+public:
+    explicit PanAfterShow(DSR::GraphViewer* gv) : QObject(gv), gv_(gv) { gv->installEventFilter(this); }
+
+    bool eventFilter(QObject* obj, QEvent* ev) override
+    {
+        if (obj == gv_ and ev->type() == QEvent::Show)
+            QTimer::singleShot(100, gv_, [gv = gv_]
+            {
+                const auto stuck = [](const QScrollBar* b) { return b->maximum() == b->minimum(); };
+                if (stuck(gv->horizontalScrollBar()) and stuck(gv->verticalScrollBar())) gv->fit_graph_to_view();
+            });
+        return false;
+    }
+
+private:
+    DSR::GraphViewer* gv_;
+};
+}   // namespace
+
 void SpecificWorker::wire_view_data()
 {
     // cortex's GraphViewer emits view_data_signal(id, type) for "View data" on a node with no built-in widget — every
@@ -342,6 +371,8 @@ void SpecificWorker::wire_view_data()
     if (not gv) return;
     QObject::connect(gv, &DSR::GraphViewer::view_data_signal, this,
                      [this](std::uint64_t id, const std::string&) { show_node_text(id); }, Qt::QueuedConnection);
+    new PanAfterShow(gv);
+    if (gv->isVisible()) gv->fit_graph_to_view();   // already shown before this ran
 }
 
 void SpecificWorker::show_node_text(std::uint64_t id)
