@@ -737,8 +737,14 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     // In the leaf's own axes (ex, ey, ez) the nuisance moves the box by a scalar per axis:
     //   e_a = a·(c_k − o) + depth (a·n) + lat (a·u_w),   f_a = a·u_i (independent of the nuisance).
     struct LeafK { float half[3]; float exn, exu, eyn, eyu; float cz; Eigen::Vector2f ex, ey, c; };
-    // Hypothesis index kk = hyp * nstep + k: hyp 0 = the believed hinge, hyp 1 = the other jamb (when asked for).
-    const int H  = nz.other_hinge ? 2 : 1;
+    // Hypothesis index kk = hyp * nstep + k over the (hinge, swing) hypotheses asked for: hyp 0 = the believed leaf, then
+    // the other jamb (other_hinge), the other swing (other_swing, Task 20), and both flipped (when both are asked for).
+    struct Hyp { bool flip_hinge, flip_swing; };
+    std::vector<Hyp> hyps{{false, false}};
+    if (nz.other_hinge) hyps.push_back({true, false});
+    if (nz.other_swing) hyps.push_back({false, true});
+    if (nz.other_hinge and nz.other_swing) hyps.push_back({true, true});
+    const int H  = static_cast<int>(hyps.size());
     const int KK = H * nstep;
     std::vector<LeafK> leaves(static_cast<std::size_t>(KK));
     for (int kk = 0; kk < KK; ++kk)
@@ -747,8 +753,11 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
         const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / (nstep - 1);
         door::LeafState lf = params_.leaf;
         lf.phi = phi;
-        if (kk >= nstep)
+        const Hyp& hy = hyps[static_cast<std::size_t>(kk / nstep)];
+        if (hy.flip_hinge)
             lf.hinge = lf.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
+        if (hy.flip_swing)
+            lf.swing = -lf.swing;
         const door::LeafPose L = door::leaf_pose(ap0, lf);
         LeafK& q = leaves[static_cast<std::size_t>(kk)];
         q.half[0] = L.half_w; q.half[1] = L.half_t; q.half[2] = L.half_h;
@@ -930,7 +939,10 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     {
         const int k = kk % nstep;
         const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / (nstep - 1);
-        (kk < nstep ? out.loglik : out.loglik_other).emplace_back(phi, static_cast<float>(m[static_cast<std::size_t>(kk)] - mmax));
+        const Hyp& hy = hyps[static_cast<std::size_t>(kk / nstep)];
+        auto& dst = hy.flip_swing ? (hy.flip_hinge ? out.loglik_both : out.loglik_swing)
+                                  : (hy.flip_hinge ? out.loglik_other : out.loglik);
+        dst.emplace_back(phi, static_cast<float>(m[static_cast<std::size_t>(kk)] - mmax));
     }
     return out;
 }

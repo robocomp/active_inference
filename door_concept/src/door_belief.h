@@ -302,6 +302,12 @@ public:
         // explained only by sliding the aperture one width along the wall (try69: 0.88 m) or by over-swinging it
         // (118 deg for a leaf at 90). The two hypotheses share the frame's nuisances and its tempering.
         bool other_hinge = false;
+        // phi_field_loglik only (Task 20): ALSO score the leaf swung to the OTHER side of the wall (FieldResult::loglik_swing,
+        // and loglik_both with other_hinge). The swing is a discrete hidden variable exactly as the hinge is: DOOR_1 opens
+        // into room_1 while the config pin (Openable.SwingDir) put it into room_2, and with one swing in the model an open
+        // leaf on the far side can only be "explained" by over-swinging it behind the wall (room_1: 117 deg for 90) or by a
+        // half-shut leaf (try87 room_2: 60 deg, P(passable) 0 for an open door ⇒ `open` re-offered and timed out 22 times).
+        bool other_swing = false;
     };
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
@@ -350,6 +356,9 @@ public:
         // `loglik` (their joint max is 0, so log Σ exp of each is that hinge's marginal evidence up to one constant).
         // Empty when not asked for; then `loglik` alone has max 0, as before.
         std::vector<std::pair<float, float>> loglik_other;
+        // FieldNuisance::other_swing only (Task 20), same scale: the believed hinge with the leaf on the OTHER side of the
+        // wall, and (with other_hinge too) both flipped. Empty when not asked for.
+        std::vector<std::pair<float, float>> loglik_swing, loglik_both;
         // Task 15: the SLIDE's own evidence — per slide cell (offset from the belief's s, m), the tempered log-likelihood
         // marginalised over the leaf (every angle, both hinges when scored) and the depth, with the slide's prior NOT
         // included. Where the WALL'S HOLE is, from the wall's ends and the beams through it, whatever the leaf is doing.

@@ -136,6 +136,8 @@ constexpr int   NSTEP = 25;
 struct Tracker   // the carried belief, exactly as DoorInstance carries it
 {
     float hinge_llr = 0.0f;   // log P(believed hinge) / P(other) — DoorInstance::hinge_llr
+    float swing_llr = 0.0f;   // log P(believed swing) / P(other) — DoorInstance::swing_llr (Task 20)
+    bool  marg_swing = true;  // Task 20: as DoorFitter::estimate_phi — the swing is marginalised (false: the pre-Task-20 model)
     float phi_est = 0.0f, phi_sigma = PHI_MAX;
     bool  first = true;
     float p = 0.0f;
@@ -155,6 +157,7 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
     const float prior = std::isnan(prior_mean_override) ? t.phi_est : prior_mean_override;
     std::vector<std::pair<float, float>> ll;
     nz.other_hinge = true;   // as DoorFitter::estimate_phi: the hinge is marginalised
+    nz.other_swing = t.marg_swing and not std::getenv("OLD_SWING");   // Task 20: and the swing
     if (not sel.rays.endpoints.empty())
     {
         auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
@@ -166,10 +169,13 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
                 if (std::getenv("SLIDE_TRACE")) std::print("      slide obs mean {:+.3f} sd {:.3f} (belief s {:.3f} sd {:.3f})\n", so.mean, std::sqrt(so.var), b.state().s, std::sqrt(b.covariance()(0, 0)));
                 b.fuse_slide(so.mean, so.var);
             }
-        auto hm = rc::door::phi_hinge_marginal(fr.loglik, fr.loglik_other, t.hinge_llr, prior, sp);
+        auto hm = rc::door::phi_leaf_marginal(fr.loglik, fr.loglik_other, fr.loglik_swing, fr.loglik_both,
+                                              t.hinge_llr, t.swing_llr, prior, sp);
         ll = std::move(hm.loglik);
         t.hinge_llr = hm.hinge_llr;
+        t.swing_llr = hm.swing_llr;
         rc::door::adopt_map_hinge(b, t.hinge_llr);
+        rc::door::adopt_map_swing(b, t.swing_llr);
     }
     const auto post = rc::door::phi_posterior_step(ll, PHI_MIN, PHI_MAX, NSTEP, prior, sp);
     t.phi_sigma = post.sigma;
@@ -462,6 +468,41 @@ int main()
         std::print("  s after 60 frames {:.3f} (truth 2.000), max |s − truth| {:.3f} m, sigma_s {:.3f} m\n", b.state().s, s_max_dev,
                    std::sqrt(b.covariance()(0, 0)));
         check(s_max_dev < 0.1f, "the aperture stays within 0.1 m of the true doorway");
+    }
+
+    // ── (h) Task 20 (live try87 leg 2): the open door read SHUT from the far side under a WRONG SWING ─────────────────────────
+    // DOOR_1 from room_2: the leaf open 90 deg into room_1 (AWAY from the robot), hinge on the x = W jamb (Task 11). The model's
+    // swing is the config pin inherited through the mirror: INTO room_2 (+1) — wrong. The robot stands at the open standpoint
+    // (~1.95 m out), as live, its belief remembered from the crossing (phi 2.0 rad, sigma 0.05). Live, phi went 2.00 → 1.04 rad
+    // and P(passable) to 0, so door_concept offered `open` for an open door and the claim timed out 22 times.
+    // The decision that unblocks the reopen: P(passable) of the swing-marginalised posterior is HIGH, so `cross` is offered
+    // and `open` is not (its precondition is P(shut) = 1 − P(passable)). The pre-Task-20 model is run beside it.
+    std::print("\n(h) try87_open_door_read_shut_under_a_wrong_swing: leaf 90 deg AWAY (room_1), model swing INTO room_2\n");
+    for (const bool marg : {false, true})
+    {
+        Scene sc; sc.phi = 1.5708f; sc.swing = -1.0f; sc.hinge_far = true;
+        auto b = make_belief(0.0f, +1.0f, rc::door::HingeSide::Far);   // the WRONG swing, the right hinge
+        Tracker t; t.phi_est = 2.0f; t.phi_sigma = 0.05f; t.first = false; t.marg_swing = marg;
+        b.set_leaf_phi(t.phi_est);
+        std::vector<float> p;
+        for (int f = 0; f < 60; ++f)
+        {
+            // the robot servoes onto the standpoint and turns to face the door: from 2.2 m to 1.95 m, a slow yaw wobble
+            const V3 o(0.45f + 0.10f * std::sin(0.15f * f), 2.2f - 0.25f * std::min(1.0f, f / 20.0f), 0.67f);
+            step_new(t, b, o, scan(sc, o, rng, 0.5f));
+            p.push_back(t.p);
+            if (std::getenv("PHI_TRACE")) std::print("    f{} P {:.3f} phi {:.2f} sigma {:.2f} swing {:+.0f} llr {:+.1f}\n", f, t.p, t.phi_est, t.phi_sigma, b.params().leaf.swing, t.swing_llr);
+        }
+        float p_tail = 1.0f;
+        for (std::size_t i = 20; i < p.size(); ++i) p_tail = std::min(p_tail, p[i]);
+        std::print("  {}: final P(passable) {:.3f}, min over the last 40 frames {:.3f}, phi {:.2f} rad, swing now {:+.0f} (truth -1), swing log-odds {:+.1f}\n",
+                   marg ? "swing MARGINALISED (Task 20)" : "swing PINNED (before)", t.p, p_tail, t.phi_est, b.params().leaf.swing, t.swing_llr);
+        if (marg)
+        {
+            check(b.params().leaf.swing < 0.0f, "the swing ends on the true side (into room_1)");
+            check(p_tail > 0.8f, std::format("the open door reads passable at the standpoint (min P {:.3f} > 0.8): cross offered, open not", p_tail));
+            check(std::abs(t.phi_est - 1.5708f) < 0.1745f, std::format("phi {:.0f} deg within 90 +- 10", t.phi_est * 57.3f));
+        }
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));

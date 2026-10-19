@@ -302,6 +302,115 @@ inline PhiHingeMarginal phi_hinge_marginal(const std::vector<std::pair<float, fl
     return out;
 }
 
+// ─── Task 20 (try87): THE SWING IS A HIDDEN VARIABLE TOO — the (hinge × swing) marginal ─────────────────────────────────
+// The swing side was a config pin (Openable.SwingDir), learned only from the passage anchor's beams (Task 12 fix D) — and
+// the anchor now lives only during the cross (Task 19), where try87 leg 1 still left it at log-odds +0.0. DOOR_1 opens into
+// room_1; the pin put it into room_2, and the room_2 mirror inherited that. From room_2 the open leaf stands on the FAR side
+// of the wall, which a one-swing model can only explain as a leaf over-swung behind the wall (2.0 rad) or — once the robot
+// faced the doorway and more beams reached the leaf — a half-shut leaf on the near side: φ 2.00 → 1.04 rad in two frames,
+// σ 0.04, clear span 0.50 m < 0.70 m of body, P(passable) 0 for a door standing open. door_concept then offered `open` for
+// a door that was open; the provider accepted every OPEN (a no-op), perception never read it open, and the open claim timed
+// out 22 times (60 s each).
+// So the leaf is marginalised over the four (hinge, swing) hypotheses the frame scored, under a mean-field prior
+// P(h)·P(s) = σ(±hinge_llr)·σ(±swing_llr). Both are STATIC, so each log-odds accumulates with no process noise:
+//     w_hs  = log P(h) + log P(s) + log Σ_k L_hs(φ_k) N(φ_k; μ, σ)
+//     hinge_llr ← log Σ_s exp w_(believed,s) − log Σ_s exp w_(other,s)      (over the swings scored for BOTH hinges)
+//     swing_llr ← log Σ_h exp w_(h,believed) − log Σ_h exp w_(h,other)      (over the hinges scored for BOTH swings)
+// and the φ curve is the mixture log Σ_hs P(h)P(s) L_hs(φ). A shut leaf is the same under every hypothesis (φ = 0 lies in
+// the wall plane whatever the hinge or swing), so a closed door teaches nothing about either — as the hinge alone.
+// With only the two hinge curves scored this is exactly phi_hinge_marginal (the swing prior cancels).
+struct PhiLeafMarginal
+{
+    std::vector<std::pair<float, float>> loglik;   // the (hinge × swing)-marginal φ log-likelihood (for phi_posterior_step)
+    float hinge_llr = 0.0f;                        // posterior log P(believed hinge) / P(other)
+    float swing_llr = 0.0f;                        // posterior log P(believed swing) / P(other)
+};
+// `bb` believed hinge+swing (FieldResult::loglik), `ob` other hinge (loglik_other), `bs` other swing (loglik_swing), `os`
+// both flipped (loglik_both). An empty curve = that hypothesis was not scored this frame: it takes no part.
+inline PhiLeafMarginal phi_leaf_marginal(const std::vector<std::pair<float, float>>& bb,
+                                         const std::vector<std::pair<float, float>>& ob,
+                                         const std::vector<std::pair<float, float>>& bs,
+                                         const std::vector<std::pair<float, float>>& os,
+                                         float hinge_llr, float swing_llr, float prior_mean, float prior_sigma)
+{
+    PhiLeafMarginal out;
+    out.hinge_llr = hinge_llr;
+    out.swing_llr = swing_llr;
+    if (bb.empty())
+        return out;
+    constexpr double ninf = -std::numeric_limits<double>::infinity();
+    const auto lae = [](double a, double b)
+    {
+        if (a == -std::numeric_limits<double>::infinity()) return b;
+        if (b == -std::numeric_limits<double>::infinity()) return a;
+        const double m = std::max(a, b);
+        return m + std::log1p(std::exp(-std::abs(a - b)));
+    };
+    const auto fin = [](float v) { return std::isfinite(v) ? static_cast<double>(v) : -std::numeric_limits<double>::infinity(); };
+    const auto log_sig = [](double l) { return l >= 0 ? -std::log1p(std::exp(-l)) : l - std::log1p(std::exp(l)); };   // log σ(l)
+    const double hl = hinge_llr, sl = swing_llr;
+    const double lp_h[2] = {log_sig(hl), log_sig(-hl)};   // believed, other
+    const double lp_s[2] = {log_sig(sl), log_sig(-sl)};
+    // [hinge][swing]
+    const std::vector<std::pair<float, float>>* c[2][2] = {{&bb, &bs}, {&ob, &os}};
+    bool have[2][2];
+    for (int h = 0; h < 2; ++h)
+        for (int s = 0; s < 2; ++s)
+            have[h][s] = c[h][s]->size() == bb.size();
+    // The prior over the hypotheses that were scored, renormalised (an unscored one is not "impossible", it is absent).
+    double lz = ninf;
+    for (int h = 0; h < 2; ++h)
+        for (int s = 0; s < 2; ++s)
+            if (have[h][s]) lz = lae(lz, lp_h[h] + lp_s[s]);
+    const double sp = std::max(1e-4, static_cast<double>(prior_sigma));
+    double e[2][2] = {{ninf, ninf}, {ninf, ninf}};
+    out.loglik.reserve(bb.size());
+    for (std::size_t k = 0; k < bb.size(); ++k)
+    {
+        const double d = (static_cast<double>(bb[k].first) - prior_mean) / sp;
+        double mix = ninf;
+        for (int h = 0; h < 2; ++h)
+            for (int s = 0; s < 2; ++s)
+                if (have[h][s])
+                {
+                    const double a = fin((*c[h][s])[k].second);
+                    e[h][s] = lae(e[h][s], a - 0.5 * d * d);
+                    mix = lae(mix, a + lp_h[h] + lp_s[s] - lz);
+                }
+        out.loglik.emplace_back(bb[k].first, std::isfinite(mix) ? static_cast<float>(mix) : -std::numeric_limits<float>::infinity());
+    }
+    // Posterior log weight of each scored hypothesis (the common normaliser cancels in every ratio below).
+    double w[2][2];
+    for (int h = 0; h < 2; ++h)
+        for (int s = 0; s < 2; ++s)
+            w[h][s] = have[h][s] ? lp_h[h] + lp_s[s] + e[h][s] : ninf;
+    // Hinge: over the swings scored under BOTH hinges, so the ratio compares like with like.
+    {
+        double num = ninf, den = ninf;
+        for (int s = 0; s < 2; ++s)
+            if (have[0][s] and have[1][s]) { num = lae(num, w[0][s]); den = lae(den, w[1][s]); }
+        if (std::isfinite(num) and std::isfinite(den)) out.hinge_llr = static_cast<float>(num - den);
+    }
+    {
+        double num = ninf, den = ninf;
+        for (int h = 0; h < 2; ++h)
+            if (have[h][0] and have[h][1]) { num = lae(num, w[h][0]); den = lae(den, w[h][1]); }
+        if (std::isfinite(num) and std::isfinite(den)) out.swing_llr = static_cast<float>(num - den);
+    }
+    return out;
+}
+
+// The swing the geometry swings to is the MAP one; ⚑ P = 1/2, the MAP of a binary posterior (a decision level, as the
+// hinge's). The log-odds is negated with the flip, so the belief itself is unchanged. Returns true when it flipped.
+inline bool adopt_map_swing(rc::DoorBelief& b, float& swing_llr)
+{
+    if (not (swing_llr < 0.0f))
+        return false;
+    b.set_leaf_swing(-b.params().leaf.swing);
+    swing_llr = -swing_llr;
+    return true;
+}
+
 // The geometry everyone else reads (the aperture fit's leaf SDF, the published leaf pose, the anchor's leaf prior) is
 // ONE leaf, so it hangs from the more probable hinge. ⚑ P = 1/2 is the MAP of a binary posterior, a decision level and
 // not a tuned one; the log-odds is negated with the flip, so the belief itself is unchanged — only which hypothesis is

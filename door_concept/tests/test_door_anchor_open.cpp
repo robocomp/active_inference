@@ -333,6 +333,57 @@ int main()
         check(not rc::door::anchor_creation_claim(false, false), "nothing claimed: no anchor");
     }
 
+    std::print("(14) Task 20: the (hinge x swing) marginal — the decision that unblocks try87's reopen\n");
+    {
+        // A 25-point grid over [0, 120 deg]; Gaussian log-likelihood bumps (nats).
+        constexpr int N = 25;
+        constexpr float PMAX = 2.0944f;
+        const auto bump = [&](float mu, float sd, float depth)
+        {
+            std::vector<std::pair<float, float>> c;
+            for (int k = 0; k < N; ++k)
+            {
+                const float phi = PMAX * k / (N - 1);
+                c.emplace_back(phi, -depth * (1.f - std::exp(-0.5f * (phi - mu) * (phi - mu) / (sd * sd))));
+            }
+            return c;
+        };
+        const std::vector<std::pair<float, float>> none;
+        // (a) only the two hinges scored: identical to phi_hinge_marginal (the swing prior cancels)
+        {
+            const auto a = bump(1.0f, 0.2f, 8.f), o = bump(1.6f, 0.2f, 12.f);
+            const auto hm = rc::door::phi_hinge_marginal(a, o, 0.7f, 1.2f, 0.4f);
+            const auto lm = rc::door::phi_leaf_marginal(a, o, none, none, 0.7f, 3.0f, 1.2f, 0.4f);
+            float worst = 0.f;
+            for (std::size_t k = 0; k < a.size(); ++k) worst = std::max(worst, std::abs(hm.loglik[k].second - lm.loglik[k].second));
+            check(worst < 1e-4f and std::abs(hm.hinge_llr - lm.hinge_llr) < 1e-4f and lm.swing_llr == 3.0f,
+                  std::format("hinges only: == phi_hinge_marginal (max |dL| {:.1e}), swing log-odds untouched", worst));
+        }
+        // (b) try87: the believed swing explains the far-side leaf only as a half-shut 60 deg leaf (deep miss elsewhere);
+        //     the OTHER swing explains it at 90 deg, by more nats. The marginal must move to the other swing and read passable.
+        {
+            const auto bb = bump(1.04f, 0.08f, 30.f), bs = bump(1.5708f, 0.08f, 60.f);   // bs: 30 nats better at its peak
+            // put the other swing's peak above the believed one's: its curve is 0 at 90 deg, the believed one's is -18 there
+            auto bb_low = bb; for (auto& [phi, l] : bb_low) l -= 18.f;
+            const auto lm = rc::door::phi_leaf_marginal(bb_low, none, bs, none, 0.0f, 0.0f, 1.3f, 0.6f);
+            const auto pin = rc::door::passable_logit(std::vector<std::pair<float, double>>(bb_low.begin(), bb_low.end()), 1.0f, 0.70f);
+            std::vector<std::pair<float, double>> mixd(lm.loglik.begin(), lm.loglik.end());
+            const auto mix = rc::door::passable_logit(mixd, 1.0f, 0.70f);
+            std::print("    believed swing alone: P(passable) log-odds {:+.1f}; swing-marginal {:+.1f}; swing log-odds {:+.1f}\n",
+                       pin.value_or(0.0), mix.value_or(0.0), lm.swing_llr);
+            check(pin.has_value() and *pin < 0.0, "the believed (wrong) swing alone reads the open door SHUT (the try87 offer of `open`)");
+            check(lm.swing_llr < 0.0f, "the swing log-odds moves to the other side");
+            check(mix.has_value() and *mix > 0.0, "the swing-marginal P(passable) > 1/2: cross offered, open (P(shut)) not");
+        }
+        // (c) a SHUT leaf is the same under every hypothesis: the swing and hinge log-odds do not move
+        {
+            const auto c = bump(0.0f, 0.1f, 20.f);
+            const auto lm = rc::door::phi_leaf_marginal(c, c, c, c, 1.5f, -0.5f, 0.0f, 0.2f);
+            check(std::abs(lm.hinge_llr - 1.5f) < 1e-4f and std::abs(lm.swing_llr + 0.5f) < 1e-4f,
+                  "identical curves (a shut leaf) teach nothing about hinge or swing");
+        }
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

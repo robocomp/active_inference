@@ -1037,7 +1037,10 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // stride only slows learning the hinge for a door nobody is about to use.
     constexpr int kHingeStride = 5;
     nz.other_hinge = inst.hinge_question_live or (inst.phi_calls++ % kHingeStride == 0);
-    std::vector<std::pair<float, float>> ll_this, ll_other;
+    // Task 20: the SWING is marginalised the same way and on the same budget (rc::door::phi_leaf_marginal) — 4 hypotheses
+    // when both are scored. ⚑ Compute budget, as above: same stride, not a model level.
+    nz.other_swing = nz.other_hinge;
+    std::vector<std::pair<float, float>> ll_this, ll_other, ll_swing, ll_both;
     if (not rays.endpoints.empty())
     {
         auto fr = inst.ai2_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
@@ -1050,6 +1053,8 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
             inst.ai2_belief.fuse_slide(so.mean, so.var);
         ll_this  = std::move(fr.loglik);
         ll_other = std::move(fr.loglik_other);
+        ll_swing = std::move(fr.loglik_swing);
+        ll_both  = std::move(fr.loglik_both);
     }
     else
     {
@@ -1067,6 +1072,10 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         const auto& a_other = same ? inst.anchor_phi_ll_other : inst.anchor_phi_ll;
         const bool have_leaf = ll_this.size() == static_cast<std::size_t>(NSTEP);
         const bool have_other = ll_other.size() == static_cast<std::size_t>(NSTEP);
+        // Task 20: the anchor frame scores the swing through its own log-odds (below), not through these curves; the
+        // field's other-swing curves lack its evidence, so this frame's swing mixture is left to the anchor's log-odds.
+        ll_swing.clear();
+        ll_both.clear();
         for (int k = 0; k < NSTEP; ++k)
         {
             const float phi = PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1);
@@ -1107,11 +1116,19 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     std::vector<std::pair<float, float>> loglik;
     if (not ll_this.empty())
     {
-        auto hm = rc::door::phi_hinge_marginal(ll_this, ll_other, inst.hinge_llr, phi_prior, sigma_phi);
+        auto hm = rc::door::phi_leaf_marginal(ll_this, ll_other, ll_swing, ll_both, inst.hinge_llr, inst.swing_llr,
+                                              phi_prior, sigma_phi);
         loglik = std::move(hm.loglik);
         inst.hinge_llr = hm.hinge_llr;
+        inst.swing_llr = hm.swing_llr;
         const bool hinge_flipped = rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr);
         inst.hinge_llr_ref = inst.ai2_belief.params().leaf.hinge;
+        if (rc::door::adopt_map_swing(inst.ai2_belief, inst.swing_llr))
+            std::print("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal: the LiDAR field explains "
+                       "it better there (log-odds {:+.1f}; phi {:.0f} deg)\n", inst.node_name,
+                       inst.ai2_belief.params().leaf.swing > 0.0f ? "along" : "against", inst.swing_llr, inst.phi_est * 57.2958f);
+        if (not ll_swing.empty())
+            inst.swing_llr_ref = inst.ai2_belief.params().leaf.swing;
         if (hinge_flipped)
             // ★ The live check (fix round 1): this line must come BEFORE the aperture's σ_s collapses (σ_s printed here).
             std::print("door_concept: [{}] HINGE FLIPPED — now the {} jamb, the leaf is better explained hung there "
