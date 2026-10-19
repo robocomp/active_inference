@@ -247,9 +247,26 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
 // convention) and ⚑ ν = 1 (Cauchy, the heaviest standard tail: "no scale", not a tuned dof).
 inline constexpr double kAnchorLostPrior = 0.2;
 inline constexpr double kAnchorLostDof   = 1.0;
-struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; };
+struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; double view_llr = 0.0; };
+
+// ─── Task 17 add-on: THE BELIEF'S OWN VISIBILITY AS EVIDENCE THAT IT IS LOST ──────────────────────────────────────────────
+// try78: the wrong anchor stood at the doorway for 60 s with p_view 0.13–0.18 — what its own model says a WRONG pose looks
+// like. Every measured frame (the belief predicts the doorway's neighbourhood in the sweep) is scored under the two hypotheses:
+//   right: p_view ~ ½·U(0,1) + ½·Beta(2,1)   (density 1 + 2p … ½ uniform: a right pose can be refused by clutter, a leaf)
+//   lost : p_view ~ ½·U(0,1) + ½·Beta(1,2)   (density 1 + 2(1 − p))
+// so the frame's log-ratio log[(1 + 2(1 − p)) / (1 + 2p)] is bounded (±log 3): no frame is decisive alone. Consecutive frames
+// share the view, so the evidence is TIME-weighted: Δllr = log-ratio · dt / τ, τ = ⚑ kAnchorPredictMs — the flagged horizon a
+// view is trusted over, here the time over which views decorrelate. Accumulated for the passage (a seen frame subtracts),
+// reset with the belief (creation, re-init, retry fusion). Continuous; no counter, no limit.
+[[nodiscard]] inline double view_lost_llr_step(float p_view, double dt_s, double tau_s)
+{
+    if (not std::isfinite(p_view) or not (dt_s > 0.0) or not (tau_s > 0.0)) return 0.0;
+    const double p = std::clamp(double(p_view), 0.0, 1.0);
+    return std::log((1.0 + 2.0 * (1.0 - p)) / (1.0 + 2.0 * p)) * dt_s / tau_s;
+}
+
 [[nodiscard]] inline LostEvidence belief_lost(const rc::interaction::RelPose& belief, const rc::interaction::RelPose& room,
-                                              float width)
+                                              float width, double view_llr = 0.0)
 {
     LostEvidence o;
     Eigen::Vector3d nu = (room.x - belief.x).cast<double>();
@@ -266,7 +283,9 @@ struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; };
     const double l_right = -0.5 * o.d2 - 0.5 * k * std::log(2.0 * M_PI) - 0.5 * logdet(llt);
     const double l_lost  = std::lgamma(0.5 * (v + k)) - std::lgamma(0.5 * v) - 0.5 * k * std::log(v * M_PI) - 0.5 * logdet(lltL)
                          - 0.5 * (v + k) * std::log1p(dL2 / v);
-    const double a = std::log(kAnchorLostPrior) + l_lost, b = std::log(1.0 - kAnchorLostPrior) + l_right;
+    // The room disagreement and the belief's own visibility are independent evidence: their log-ratios add.
+    o.view_llr = std::isfinite(view_llr) ? view_llr : 0.0;
+    const double a = std::log(kAnchorLostPrior) + l_lost + o.view_llr, b = std::log(1.0 - kAnchorLostPrior) + l_right;
     o.p_lost = float(1.0 / (1.0 + std::exp(b - a)));
     return o;
 }

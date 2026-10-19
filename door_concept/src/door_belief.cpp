@@ -173,9 +173,12 @@ Eigen::Matrix<float, 3, 1> DoorBelief::common_mode_inv_diag(const DoorFrame& fra
     const float leaf_s = 0.5f * state_.w * std::abs(std::sin(params_.leaf.phi)) * leaf_phi_sigma_;
     const float s2  = params_.common_mode_s_std  * params_.common_mode_s_std + leaf_s * leaf_s;
     const float wh2 = params_.common_mode_wh_std * params_.common_mode_wh_std;
+    // Task 17 add-on: the mask reads the WIDTH through the leaf panel as well — its along-wall extent w·cos φ moves by
+    // w·|sin φ|·δφ under an angle error — so the same leaf-angle uncertainty enters the width's common mode (try78: σ_w 5 mm).
+    const float leaf_w = state_.w * std::abs(std::sin(params_.leaf.phi)) * leaf_phi_sigma_;
     return (Eigen::Matrix<float, 3, 1>() <<
             1.0f / std::max(1e-9f, s2 + frame.chain_cov_s),
-            1.0f / std::max(1e-9f, wh2),
+            1.0f / std::max(1e-9f, wh2 + leaf_w * leaf_w),
             1.0f / std::max(1e-9f, wh2)).finished();
 }
 

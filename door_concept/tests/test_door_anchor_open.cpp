@@ -302,6 +302,29 @@ int main()
         (void)r08; (void)r097;
     }
 
+    std::print("(12) Task 17 add-on: the belief's own visibility joins the evidence that it is lost\n");
+    {
+        const Eigen::Matrix3f model = Eigen::Vector3f(0.09f, 0.04f, 0.01f).asDiagonal();
+        const double tau = 3.0;   // kAnchorPredictMs (interaction_anchor.h), in s
+        auto run = [&](float off, float yaw_deg, float p_view, double seconds) {
+            double llr = 0.0;
+            for (double t = 0.0; t < seconds; t += 0.1) llr += rc::door::view_lost_llr_step(p_view, 0.1, tau);   // 10 Hz frames
+            rc::interaction::RelPose belief, room;
+            belief.x = {0.f, 2.f, 0.f}; belief.P = Eigen::Vector3f(0.03f * 0.03f, 0.03f * 0.03f, 0.01f * 0.01f).asDiagonal();
+            room.x = {off, 2.f, yaw_deg / 57.2958f};
+            room.P = Eigen::Vector3f(0.0905f, 0.0405f, 0.0101f).asDiagonal();
+            const auto e = rc::door::belief_lost(belief, room, 0.9f, llr);
+            const auto out = rc::door::retry_reinit(belief, room, model, 0.f, e.p_lost);
+            std::print("  {:.2f} m / {:.0f}° off, {:.0f} s at p_view {:.2f}: view log-odds {:+.1f}, P(lost) {:.3f} → {:.3f} m from the room\n",
+                       off, yaw_deg, seconds, p_view, llr, e.p_lost, off - out.x.x());
+            return off - out.x.x();
+        };
+        check(run(0.8f, 10.f, 0.15f, 60.0) < 0.2f, "0.8 m / 10° off AND 60 s unpublished at p_view 0.15: re-initialised within 0.2 m");
+        check(std::abs(run(0.05f, 0.f, 0.30f, 2.5) - 0.05f) < 0.01f, "a correct belief briefly unpublished (2.5 s at 0.30): kept");
+        check(std::abs(run(0.05f, 0.f, 0.85f, 60.0) - 0.05f) < 0.01f, "a correct belief seen for 60 s: kept");
+        check(rc::door::view_lost_llr_step(0.0f, 0.1, tau) <= std::log(3.0) * 0.1 / tau + 1e-12, "one frame is never decisive (bounded)");
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

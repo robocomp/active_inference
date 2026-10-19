@@ -337,7 +337,9 @@ private:
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
         std::int64_t unseen_charge_ms = 0, charge_stamp_ms = 0;   // Task 12 fix B: the charged unseen time (anchor_unseen_charge)
         bool  leaf_published = false;
-        bool  crossing_through = false;                   // Task 12 Fix E: a room switch came during the cross — still crossing                     // Task 12 fix A: the anchor carries the leaf (logs the transitions)
+        bool  crossing_through = false;
+        double view_lost_llr = 0.0;                       // Task 17 add-on: the belief's own visibility evidence (view_lost_llr_step)
+        std::int64_t view_llr_stamp_ms = 0;                   // Task 12 Fix E: a room switch came during the cross — still crossing                     // Task 12 fix A: the anchor carries the leaf (logs the transitions)
         rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame, held kAnchorStaleMs (odometry-carried)
         bool  az_logged = false;                          // the bpearl's measured azimuth step logged once per anchor
     };

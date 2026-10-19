@@ -321,7 +321,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     //   (rc::door::belief_lost): with P(lost) the room's initialisation is the answer, a continuous mixture (retry_reinit).
     Eigen::Vector3f innov = r->x - pa.pose.x;
     innov.z() = rc::interaction::wrap_pi(innov.z());
-    const auto lost = rc::door::belief_lost(pa.pose, r.value(), pa.clear_width);
+    const auto lost = rc::door::belief_lost(pa.pose, r.value(), pa.clear_width, pa.view_lost_llr);
     const auto fused = rc::door::retry_reinit(pa.pose, r.value(),
                                               rc::door::anchor_axes_to_robot(Eigen::Matrix3f(kSigmaModel.cwiseProduct(kSigmaModel).asDiagonal()),
                                                                              pa.pose.x.z()),
@@ -330,6 +330,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     dx.z() = rc::interaction::wrap_pi(dx.z());
     pa.pose.x = fused.x;
     pa.pose.P = fused.P;
+    pa.view_lost_llr = 0.0;   // Task 17 add-on: a new belief, a new visibility record
     pa.bias = {};   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
     // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
     // claim fails), and nothing seen before it may be published as "predicted" after it.
@@ -339,9 +340,9 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.init_pose.stamp_ms = pa.pose.stamp_ms;
     pa.mode = rc::door::AnchorPublish::None;
     std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
-               "init (room − belief {:.2f} m / {:+.1f}°, weight P(out of the doorway band) {:.2f}, Mahalanobis² {:.1f} ⇒ P(belief lost) {:.2f}): "
+               "init (room − belief {:.2f} m / {:+.1f}°, weight P(out of the doorway band) {:.2f}, Mahalanobis² {:.1f}, view log-odds {:+.1f} ⇒ P(belief lost) {:.2f}): "
                "moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n",
-               pa.door_name, kind, innov.head<2>().norm(), innov.z() * 57.2958f, w_out, lost.d2, lost.p_lost, dx.head<2>().norm(), dx.z() * 57.2958f,
+               pa.door_name, kind, innov.head<2>().norm(), innov.z() * 57.2958f, w_out, lost.d2, lost.view_llr, lost.p_lost, dx.head<2>().norm(), dx.z() * 57.2958f,
                std::sqrt(std::max(0.f, pa.pose.P(0, 0) + pa.pose.P(1, 1))));
 }
 
@@ -568,6 +569,7 @@ void SpecificWorker::step_passage_anchor()
                     pa.pose = r.value();
                     pa.init_pose = r.value();   // Task 11 fix 4
                     pa.bias = {};
+                    pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
                     refresh_anchor_geometry(*inst, pa);
                     pa.reinit_on_next_claim = false;
                     pa.retry = false;
@@ -586,6 +588,7 @@ void SpecificWorker::step_passage_anchor()
                         pa.pose = r.value();
                         pa.init_pose = r.value();   // Task 11 fix 4
                         pa.bias = {};
+                        pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
                         refresh_anchor_geometry(*inst, pa);
                     }
                 }
@@ -825,6 +828,10 @@ void SpecificWorker::step_passage_anchor()
     {
         ev.p_cam  = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, pa.pose);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
+        // Task 17 add-on: a measured frame is a frame the belief predicted the doorway in — its p_view is evidence about it.
+        if (pa.view_llr_stamp_ms > 0)
+            pa.view_lost_llr += rc::door::view_lost_llr_step(ev.p_view, 1e-3 * double(now - pa.view_llr_stamp_ms),
+                                                             1e-3 * double(rc::interaction::kAnchorPredictMs));
         // ★ Task 11 fix 2 (fix round 1): the anchor's own beams as evidence about the LEAF ANGLE, at the POSTERIOR it is
         //   about to publish, tempered by that posterior's p_view — scored under the swung leaf over door_concept's own φ
         //   grid, for the believed jamb and the other (rc::door::anchor_phi_loglik), and handed to the door's estimate_phi,
@@ -853,6 +860,7 @@ void SpecificWorker::step_passage_anchor()
                        pa.door_name, ev.az_step * 180.f / float(M_PI), rays.size());
         }
     }
+    pa.view_llr_stamp_ms = now;   // every cycle: unmeasured time passes and carries no evidence (Task 17 add-on)
     // ── Task 8 fix 3: the frame record (etc/anchor_frames.bin) — every measured cycle, inputs and outputs ──────────
     if (measured)
     {
