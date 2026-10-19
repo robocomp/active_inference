@@ -59,8 +59,6 @@
 #include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
-#include "door_anchor_open.h"   // Task 11: rc::door::fuse_open — the anchor's beams in P(open)
-#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor stamps Λ with it
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
 
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
@@ -744,8 +742,10 @@ std::optional<SpecificWorker::ActuationTarget> SpecificWorker::nearest_door_for_
         const auto& st = inst.model.state();
         ActuationTarget t;
         t.name    = inst.node_name;
-        t.xy      = Eigen::Vector2f(st.cx, st.cy);
-        t.yaw     = st.yaw;
+        // Task 11 fix round 1: the APERTURE, not the leaf — the leaf's centre jumps by up to a width when the hinge
+        // flips (and moves w/2 with every swing); "which door is nearest" must not.
+        t.xy      = Eigen::Vector2f(st.ap_cx, st.ap_cy);
+        t.yaw     = st.ap_yaw;
         t.width_m = st.w;
         t.range_m = (t.xy - robot).norm();
         // ★THE LEAF ANGLE, and whether it is a MEASUREMENT. In M0 phi is PINNED at 0 — it is not fitted
@@ -1213,7 +1213,9 @@ void SpecificWorker::run_instance_tracker()
         rc::TrackView t;
         t.id = id;
         const auto& s = inst.model.state();
-        t.xy = {s.cx, s.cy};
+        // Task 11 fix round 1: associate on the APERTURE (what the "door" mask labels — the doorway frame, door_fitter.cpp),
+        // not the leaf centre, which a hinge flip moves by up to a width.
+        t.xy = {s.ap_cx, s.ap_cy};
         // Is this instance EXPECTED to be seen this cycle — its model projects into the camera FoV.
         // Read by the tracker's association bookkeeping; out-of-view is a HOLD, never negative evidence.
         // (It used to feed the miss-counter death path too; that path is gone — removal is the
@@ -3067,9 +3069,20 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // phi support curve is nearly flat (peak 0.007–0.245), so its argmax is noise, and a parameter the
     // data does not identify must not be allowed to decide whether an affordance exists.
     const float needed = pg.robot_passage_width_m + pg.passage_margin_m;
-    if (const auto p = rc::door::passable_prob(inst.phi_curve, ap.w, needed); p.has_value())
+    // ★ Task 11 fix round 1: IN LOG SPACE (rc::door::passable_logit over the posterior's log weights). The linear float
+    //   sum underflowed every passable angle of a collapsed curve to exactly 0 — an absorbing "certainly shut" that no
+    //   later evidence could move. The log-odds is kept beside p_open; p_open = σ(it).
+    if (const auto l = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed); l.has_value())
     {
-        st.p_open = *p;
+        st.p_open_logit = *l;
+        st.p_open = static_cast<float>(rc::door::sigmoid(*l));
+        st.p_open_known = true;
+        st.p_open_from_curve = true;
+    }
+    else if (const auto p = rc::door::passable_prob(inst.phi_curve, ap.w, needed); p.has_value())
+    {
+        st.p_open = *p;   // a curve carried without its log weights (a mirror's memory): the linear form
+        st.p_open_logit = std::log(std::max(1e-300, double(*p))) - std::log(std::max(1e-300, 1.0 - double(*p)));
         st.p_open_known = true;
         st.p_open_from_curve = true;
     }
@@ -3105,25 +3118,10 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
         if (const auto p = rc::door::passable_prob(prior_curve, ap.w, needed); p.has_value())
         {
             st.p_open = *p;
+            st.p_open_logit = std::log(std::max(1e-300, double(*p))) - std::log(std::max(1e-300, 1.0 - double(*p)));
             st.p_open_known = true;
             st.p_open_from_curve = false;
         }
-    }
-
-    // ── Task 11 fix 2: the passage anchor's OWN beams, fused as a likelihood ──────────────────────
-    // While an anchor serves THIS door and its latest measured frame is fresh, that frame's open-vs-shut
-    // log-likelihood ratio (rc::door::anchor_open_llr: beams predicted to pass the opening, checked, tempered by
-    // the frame's p_view and its common mode) is added to the leaf channel's log-odds. Added, never substituted:
-    // a shut door's beams give Λ ≪ 0, and π at 0 or 1 is left where it is (rc::door::fuse_open). Every reader of
-    // P(open) — transitable, cross, close, the anchor's own visibility π — reads this one fused value.
-    st.p_open_leaf = st.p_open;
-    if (st.p_open_known and passage_anchor_.has_value()
-        and (passage_anchor_->door_id == inst.node_id or passage_anchor_->door_name == inst.node_name)
-        and passage_anchor_->open_llr_ms > 0
-        and static_cast<std::int64_t>(rc::provenance::now_ms()) - passage_anchor_->open_llr_ms <= rc::interaction::kAnchorStaleMs)
-    {
-        st.p_open = rc::door::fuse_open(st.p_open, passage_anchor_->open_llr);
-        st.anchor_open_llr = static_cast<float>(passage_anchor_->open_llr);
     }
 
     // ── P(the robot is in the actuation zone), and which SIDE it is on ───────────────────────────
@@ -3218,6 +3216,11 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     // three offers therefore cannot disagree about which cycle they are describing.
     inst.interaction = compute_interaction_state(inst);
     const auto& st = inst.interaction;
+    // Task 11 fix round 1 (cost): the leaf channel scores the second jamb every cycle only while the hinge matters.
+    inst.hinge_question_live = inst.aff_approach.claimed() or inst.aff_open.claimed() or inst.aff_cross.claimed()
+                               or inst.aff_close.claimed()
+                               or (passage_anchor_.has_value()
+                                   and (passage_anchor_->door_id == inst.node_id or passage_anchor_->door_name == inst.node_name));
     scene_graph_->write_interaction_state(node_opt.value(), st);
     G->update_node(node_opt.value());
 
@@ -3317,12 +3320,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
-        o.why      = std::format("P(passable)={:.2f} — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body{}",
-                                 st.p_open, st.clear_width_m, st.phi_rad,
-                                 pg.robot_passage_width_m + pg.passage_margin_m,
-                                 st.anchor_open_llr != 0.0f
-                                     ? std::format(" (leaf {:.2f} ⊕ anchor beams Λ {:+.1f})", st.p_open_leaf, st.anchor_open_llr)
-                                     : std::string{});
+        o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body",
+                                 st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
+                                 pg.robot_passage_width_m + pg.passage_margin_m);
         inst.aff_cross.update(o);
     }
 

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -48,6 +49,43 @@ inline std::optional<float> passable_prob(const std::vector<std::pair<float, flo
     if (den <= 0.0)
         return std::nullopt;
     return static_cast<float>(num / den);
+}
+
+// ★ THE SAME QUESTION IN LOG SPACE (Task 11 fix round 1). passable_prob sums FLOAT weights: a posterior a few
+// hundredths of a radian wide about phi = 0 underflows every passable angle to exactly 0, the ratio is exactly 0, and
+// no later evidence fused with it can move it — "certainly shut" was a rounding artefact, not a belief (try69: P(open)
+// 0.000 while the anchor's beams said open at +50..157 nats a frame). `log_curve` is (phi, log weight) — the posterior
+// step's own lp, never exponentiated — and the result is the LOG-ODDS log P(passable) − log P(not), by log-sum-exp on
+// each side. Finite whenever both sides have a grid point (the grid spans phi = 0 and phi_max). nullopt = no curve.
+inline std::optional<double> passable_logit(const std::vector<std::pair<float, double>>& log_curve,
+                                            float aperture_w, float needed_m)
+{
+    constexpr double ninf = -std::numeric_limits<double>::infinity();
+    double a = ninf, b = ninf;
+    const auto lae = [](double x, double y)
+    {
+        if (x == -std::numeric_limits<double>::infinity()) return y;
+        if (y == -std::numeric_limits<double>::infinity()) return x;
+        const double m = std::max(x, y);
+        return m + std::log1p(std::exp(-std::abs(x - y)));
+    };
+    bool any = false;
+    for (const auto& [phi, lw] : log_curve)
+    {
+        if (not std::isfinite(phi) or std::isnan(lw)) continue;
+        any = true;
+        if (clear_width(aperture_w, phi) >= needed_m) a = lae(a, lw);
+        else                                          b = lae(b, lw);
+    }
+    if (not any or (a == ninf and b == ninf)) return std::nullopt;
+    if (a == ninf) return -std::numeric_limits<double>::infinity();
+    if (b == ninf) return std::numeric_limits<double>::infinity();
+    return a - b;
+}
+// σ(logit), without overflow at either end.
+[[nodiscard]] inline double sigmoid(double l)
+{
+    return l >= 0 ? 1.0 / (1.0 + std::exp(-l)) : std::exp(l) / (1.0 + std::exp(l));
 }
 
 }  // namespace rc::door

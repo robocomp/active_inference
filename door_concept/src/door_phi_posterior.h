@@ -116,6 +116,18 @@ inline DoorwayRays select_doorway_rays(const Aperture& ap, const Eigen::Vector3f
     return out;
 }
 
+// ─── THE φ GRID, ONE DEFINITION (Task 11 fix round 1) ─────────────────────────────────────────────────────────────────
+// DoorFitter::estimate_phi and the passage anchor's φ curve (door_anchor_open.h) must score the same hypotheses: the
+// range [0, max(0.1, phi_max)] and the step count derived from the declared resolution, as estimate_phi always did.
+struct PhiGrid { float lo = 0.0f, hi = 0.1f; int n = 5; };
+inline PhiGrid phi_grid(float phi_max_rad, float phi_step_rad)
+{
+    PhiGrid g;
+    g.hi = std::max(0.1f, phi_max_rad);
+    g.n  = std::clamp(static_cast<int>(std::lround(g.hi / std::max(0.01f, phi_step_rad))) + 1, 5, 64);
+    return g;
+}
+
 // ─── the predict step: how wide the carried belief is by now ─────────────────────────────────────────
 // Same model as before (compounded with the swing the leaf could have made in dt), factored out so the
 // harness runs it. dt = +inf ⇒ first look ⇒ no prior.
@@ -131,6 +143,7 @@ inline float phi_prior_sigma(float prev_sigma, float swing_rate, float dt, float
 struct PhiPosteriorStep
 {
     std::vector<std::pair<float, float>> curve;   // (phi, posterior weight), max weight == 1
+    std::vector<std::pair<float, double>> log_curve;   // (phi, log posterior weight), max 0 — never underflows (passable_logit)
     float mean  = 0.0f;
     float sigma = 0.0f;
     bool  measured = false;
@@ -212,6 +225,7 @@ inline PhiPosteriorStep phi_posterior_step(const std::vector<std::pair<float, fl
         const float  phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / static_cast<float>(nstep - 1);
         const double w   = std::exp(lp[k] - lpmax);
         out.curve.emplace_back(phi, static_cast<float>(w));
+        out.log_curve.emplace_back(phi, lp[k] - lpmax);
         num += w * phi; den += w;
         if (w > best)
         {

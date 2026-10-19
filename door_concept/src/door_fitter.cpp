@@ -890,6 +890,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // this frame's absence over a stale posterior — evidence carried forward under the name of a
     // measurement that was never taken. An empty curve is the honest state and the consumer handles it.
     inst.phi_curve.clear();
+    inst.phi_curve_log.clear();
     if (not inst.ai2_initialized)
         return;
     // ★NO CAMERA PRECONDITION. This used to return when the camera, its pose or the mask stream was
@@ -963,10 +964,11 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // precisely the evidence that an aperture is open. A ray belongs to this doorway if its SEGMENT
     // passes through the cylinder the leaf can sweep — whether it stopped there or flew on.
     // The search grid. ★RANGE AND RESOLUTION BOTH DECLARED; the step COUNT is derived from them.
-    const float PHI_MIN = 0.0f;
-    const float PHI_MAX = std::max(0.1f, cfg_.phi_max_rad);
-    const int   NSTEP   = std::clamp(
-        static_cast<int>(std::lround(PHI_MAX / std::max(0.01f, cfg_.phi_step_rad))) + 1, 5, 64);
+    // (Task 11 fix round 1: one definition, rc::door::phi_grid, shared with the passage anchor's φ curve.)
+    const auto grid_phi = rc::door::phi_grid(cfg_.phi_max_rad, cfg_.phi_step_rad);
+    const float PHI_MIN = grid_phi.lo;
+    const float PHI_MAX = grid_phi.hi;
+    const int   NSTEP   = grid_phi.n;
 
     // ★THE ALONG-WALL SLIDE IS A NUISANCE OVER ITS HONEST SUPPORT (+-w/2), and the ray selection follows it
     // (door_phi_posterior.h has the why: a carried mirror sat 0.23-0.40 m from the real doorway).
@@ -1012,26 +1014,69 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // ★THE HINGE IS MARGINALISED (Task 11, try69): the leaf is also scored hung from the OTHER jamb, the curve below is
     // the hinge mixture, and the hinge's own log-odds accumulates — see rc::door::phi_hinge_marginal for why one config-
     // pinned hinge made an open door read shut from room_2. The geometry then hangs from the MAP hinge.
-    nz.other_hinge = true;
-    std::vector<std::pair<float, float>> loglik;
+    // ⚑ Fix round 1 (cost): the second jamb doubles phi_field_loglik, so it is scored every cycle only while the hinge
+    // MATTERS (hinge_question_live: the passage anchor serves this door, or one of its affordances is claimed) and on a
+    // stride of kHingeStride cycles otherwise — a compute budget, not a model level. The log-odds accumulates, so a
+    // stride only slows learning the hinge for a door nobody is about to use.
+    constexpr int kHingeStride = 5;
+    nz.other_hinge = inst.hinge_question_live or (inst.phi_calls++ % kHingeStride == 0);
+    std::vector<std::pair<float, float>> ll_this, ll_other;
     if (not rays.endpoints.empty())
     {
         auto fr = inst.ai2_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
         inst.dbg_phi_ninf  = fr.n_inf;
         inst.dbg_phi_beta  = fr.beta;
         inst.dbg_phi_lat   = fr.lat_map;
-        auto hm = rc::door::phi_hinge_marginal(fr.loglik, fr.loglik_other, inst.hinge_llr, phi_prior, sigma_phi);
-        loglik = std::move(hm.loglik);
-        inst.hinge_llr = hm.hinge_llr;
-        if (rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr))
-            std::print("door_concept: [{}] HINGE now the {} jamb — the leaf is better explained hung there (log-odds {:+.1f})\n",
-                       inst.node_name, inst.ai2_belief.params().leaf.hinge == door::HingeSide::Near ? "near" : "far",
-                       inst.hinge_llr);
+        ll_this  = std::move(fr.loglik);
+        ll_other = std::move(fr.loglik_other);
     }
     else
     {
         inst.dbg_phi_ninf = 0.0f;
         inst.dbg_phi_beta = 1.0f;
+    }
+    // ★ Fix round 1: THE PASSAGE ANCHOR'S BEAMS, as a φ likelihood on this same grid (door_anchor_open.h), ADDED — never
+    //   fused into P(passable): the passability marginalisation stays passable_logit's, over the joint posterior. Each
+    //   anchor frame is consumed once. Its hinge axis is the one it was computed under; swapped if the MAP jamb flipped.
+    if (inst.anchor_phi_ll.size() == static_cast<std::size_t>(NSTEP)
+        and inst.anchor_phi_ll_other.size() == static_cast<std::size_t>(NSTEP))
+    {
+        const bool same = inst.anchor_phi_hinge == inst.ai2_belief.params().leaf.hinge;
+        const auto& a_this  = same ? inst.anchor_phi_ll : inst.anchor_phi_ll_other;
+        const auto& a_other = same ? inst.anchor_phi_ll_other : inst.anchor_phi_ll;
+        const bool have_leaf = ll_this.size() == static_cast<std::size_t>(NSTEP);
+        const bool have_other = ll_other.size() == static_cast<std::size_t>(NSTEP);
+        for (int k = 0; k < NSTEP; ++k)
+        {
+            const float phi = PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1);
+            if (not have_leaf) ll_this.emplace_back(phi, 0.0f);
+            ll_this[static_cast<std::size_t>(k)].second += a_this[static_cast<std::size_t>(k)];
+        }
+        // The other jamb is joined only when the leaf channel scored it too (or there is no leaf frame at all): a
+        // mixture of a two-source curve with a one-source one would weigh the hinges on different evidence.
+        if (have_other or not have_leaf)
+        {
+            if (not have_other)
+                for (int k = 0; k < NSTEP; ++k)
+                    ll_other.emplace_back(PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1), 0.0f);
+            for (int k = 0; k < NSTEP; ++k) ll_other[static_cast<std::size_t>(k)].second += a_other[static_cast<std::size_t>(k)];
+        }
+    }
+    inst.anchor_phi_ll.clear();
+    inst.anchor_phi_ll_other.clear();
+    std::vector<std::pair<float, float>> loglik;
+    if (not ll_this.empty())
+    {
+        auto hm = rc::door::phi_hinge_marginal(ll_this, ll_other, inst.hinge_llr, phi_prior, sigma_phi);
+        loglik = std::move(hm.loglik);
+        inst.hinge_llr = hm.hinge_llr;
+        if (rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr))
+            // ★ The live check (fix round 1): this line must come BEFORE the aperture's σ_s collapses (σ_s printed here).
+            std::print("door_concept: [{}] HINGE FLIPPED — now the {} jamb, the leaf is better explained hung there "
+                       "(log-odds {:+.1f}; phi {:.0f} deg; aperture s {:.2f} m σ_s {:.3f} m)\n",
+                       inst.node_name, inst.ai2_belief.params().leaf.hinge == door::HingeSide::Near ? "near" : "far",
+                       inst.hinge_llr, inst.phi_est * 57.2958f, inst.ai2_belief.state().s,
+                       std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))));
     }
 
     // ★THE PRIOR MULTIPLIES THE LIKELIHOOD, IN LOGS. A flat likelihood leaves the prior standing; a peaked
@@ -1040,6 +1085,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // rc::door::phi_posterior_step).
     const auto post = rc::door::phi_posterior_step(loglik, PHI_MIN, PHI_MAX, NSTEP, phi_prior, sigma_phi);
     inst.phi_curve  = post.curve;
+    inst.phi_curve_log = post.log_curve;
     inst.dbg_phi_cv = post.cv;
     inst.dbg_w_sdf  = post.w_lik_best;
     inst.dbg_w_mask = 0.0f;   // kept in the log schema; the camera no longer votes on phi

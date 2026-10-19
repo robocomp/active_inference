@@ -114,6 +114,18 @@ struct DoorInstance
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
     float hinge_llr    = 0.0f;
+    // Task 11 fix round 1: the passage anchor's beams as a φ log-likelihood on THIS door's φ grid (door_anchor_open.h
+    // anchor_phi_loglik), for the hinge it was computed under (`anchor_phi_hinge`) and the other jamb. Written by
+    // step_passage_anchor, ADDED to estimate_phi's likelihood once and cleared there: each anchor frame counts once.
+    std::vector<float> anchor_phi_ll, anchor_phi_ll_other;
+    door::HingeSide    anchor_phi_hinge = door::HingeSide::Near;
+    // Task 11 fix round 1 (cost): score the other jamb every cycle only while the hinge MATTERS — the passage anchor
+    // serves this door or one of its affordances is claimed (set by the pragmatic step) — else on a stride.
+    bool hinge_question_live = false;
+    int  phi_calls = 0;
+    // The posterior's φ curve in LOG weights (phi_posterior_step::log_curve): P(passable) is taken from it in log
+    // space (passable_logit), so a collapsed curve is a very negative log-odds, never an absorbing 0.
+    std::vector<std::pair<float, double>> phi_curve_log;
     float phi_support  = -1.0f;   // was the camera mask overlap at phi_est; -1 since the camera stopped scoring phi (2026-09-14)
     // ★IS phi_est A MEASUREMENT, OR OUR OWN REQUEST ECHOED BACK? True when the last thing to move it was
     // the PRIOR — the commanded swing — because the image offered no resolvable hypothesis at all.

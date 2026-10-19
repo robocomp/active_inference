@@ -58,7 +58,8 @@
 #include <print>
 
 #include "door_anchor_update.h"
-#include "door_anchor_open.h"   // Task 11: the anchor's beams as open/shut evidence; the wait pose
+#include "door_anchor_open.h"   // Task 11: the anchor's beams as φ evidence; the wait pose
+#include "door_phi_posterior.h"   // rc::door::phi_grid — the door's own φ grid
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the clock read_affordance_anchor checks
 #include "../../common/room_resolve/room_resolve.h"
 #include "../../common/rt_twist/rt_twist.h"
@@ -250,7 +251,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
         anchor_log_.open("etc/anchor_log.csv", std::ios::out | std::ios::trunc);
         anchor_log_.imbue(std::locale::classic());   // a comma decimal separator can never reach the file
         if (anchor_log_.is_open())
-            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view,open_llr\n";
+            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view\n";
     }
     return true;
 }
@@ -613,8 +614,8 @@ void SpecificWorker::step_passage_anchor()
         // Task 10: the persistent bias moves with the same step (its misfit part decorrelating as the view changes).
         rc::door::transport_bias(pa.bias, x_before, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt, pa.width);
         // The last SEEN posterior is carried by the same odometry (fix round 1: published while predicted, kAnchorPredictMs).
-        if (pa.seen_once) pa.seen_pose = rc::interaction::predict(pa.seen_pose, twist.value(), var, dt);
-        else              pa.init_pose = rc::interaction::predict(pa.init_pose, twist.value(), var, dt);   // Task 11 fix 4
+        // Task 11 fix 4: the not-seen wait pose's carry, exclusive (rc::door::carry_wait_poses).
+        rc::door::carry_wait_poses(pa.seen_once, pa.seen_pose, pa.init_pose, twist.value(), var, dt);
         // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
         rc::door::carry_held_mask(pa.cam_hold, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt);
     }
@@ -751,8 +752,7 @@ void SpecificWorker::step_passage_anchor()
         // request is not EVIDENCE that the door opened). For the visibility check — what the opening is EXPECTED to
         // look like — the commanded state is exactly the right prediction: π = passability under N(phi_est, σ_φ).
         const auto& pg = cfg_.pragmatic;
-        // ★ Task 11 fix 2: inst->interaction.p_open is ALREADY the fused P(open) (compute_interaction_state adds this
-        //   anchor's latest Λ to the leaf channel's π), so the visibility check below uses the fused π too.
+        // (Task 11 fix round 1: inst->interaction.p_open already carries this anchor's beams, through the φ posterior.)
         if (inst != nullptr and inst->interaction.p_open_known)
             pa.p_open_belief = std::clamp(inst->interaction.p_open, 0.f, 1.f);
         else if (inst != nullptr and inst->phi_from_command and pg.phi_sigma_rad > 0.f)
@@ -809,14 +809,19 @@ void SpecificWorker::step_passage_anchor()
     {
         ev.p_cam  = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, pa.pose);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
-        // ★ Task 11 fix 2: the anchor's own beams as evidence about the leaf, at the POSTERIOR it is about to publish,
-        //   tempered by that posterior's p_view (rc::door::anchor_open_llr). Fused into P(open) by
-        //   compute_interaction_state while fresh. A cycle with no rays says nothing new (the last Λ ages out).
-        if (not rays.empty())
+        // ★ Task 11 fix 2 (fix round 1): the anchor's own beams as evidence about the LEAF ANGLE, at the POSTERIOR it is
+        //   about to publish, tempered by that posterior's p_view — scored under the swung leaf over door_concept's own φ
+        //   grid, for the believed jamb and the other (rc::door::anchor_phi_loglik), and handed to the door's estimate_phi,
+        //   which ADDS it to its φ likelihood once. NOT a shut-vs-not ratio fused into P(passable): an AJAR leaf passes
+        //   that test (review: 30° read P 0.989) and fails this one, because passable_logit asks the clear span.
+        if (not rays.empty() and inst != nullptr and inst->ai2_initialized and leaf.known)
         {
-            const auto oe = rc::door::anchor_open_llr(pa.pose, pa.width, pa.thickness, lidar_origin, rays, ev.p_view);
-            pa.open_llr = oe.llr;
-            pa.open_llr_ms = now;
+            const auto g = rc::door::phi_grid(cfg_.phi_max_rad, cfg_.phi_step_rad);
+            auto ac = rc::door::anchor_phi_loglik(pa.pose, pa.width, pa.thickness, leaf, lidar_origin, rays, ev.p_view,
+                                                  g.lo, g.hi, g.n);
+            inst->anchor_phi_ll       = std::move(ac.ll_this);
+            inst->anchor_phi_ll_other = std::move(ac.ll_other);
+            inst->anchor_phi_hinge    = inst->leaf.hinge;   // the jamb `leaf` was built from
         }
         if (not pa.az_logged and ev.az_step > 0.f)
         {
@@ -923,9 +928,7 @@ void SpecificWorker::step_passage_anchor()
                     << std::sqrt(std::max(0.0f, P(2, 2))) << ','
                     << (measured ? ev.n_through : -1) << ',' << (measured ? ev.n_blocked : -1) << ','
                     << (measured ? ev.n_short : -1) << ',' << (measured ? ev.p_open : -1.0f) << ','
-                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << ','
-                    << (measured and pa.open_llr_ms == now ? pa.open_llr : std::numeric_limits<double>::quiet_NaN())
-                    << '\n';   // nan = no beams this cycle (every real number is a possible Λ)
+                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << '\n';
         anchor_log_.flush();
     }
 }
