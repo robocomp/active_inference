@@ -463,6 +463,19 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         last_wall_view_ = loc_res->wall_view;
         have_wall_view_ = true;
     }
+    // ★ A ROOM SWITCH MUST REACH THE CANVAS. The cache above is refilled only by full-solve frames, and once a room is
+    //   recalled through a door the early exit takes nearly every frame (try93: 2 full solves in 1847 frames of a room_2
+    //   leg), so the canvas kept the PREVIOUS room's outline for ~100 s with the robot drawn outside it. While localising,
+    //   the outline is the current room's layout, which adopt/recall writes synchronously — take it from there.
+    //   Rotation 0: a localising layout is axis-aligned in its own frame (see the LOCALIZING branch below).
+    if (room_concept_ != nullptr and room_concept_->localizing())
+        if (auto L = room_concept_->nominal_room_polygon(); L.size() >= 3 and L != last_wall_view_.polygon.verts)
+        {
+            last_wall_view_.polygon = {};
+            last_wall_view_.polygon.verts = std::move(L);
+            last_wall_view_.theta0_born = false;
+            have_wall_view_ = true;
+        }
     const bool wall_poly_ready = have_wall_view_ and last_wall_view_.polygon.verts.size() >= 3;
 
     // ── PIN THE ROOM AT (0, 0, 0) AND DRAW EVERYTHING ELSE RELATIVE TO IT ────────────────────────
