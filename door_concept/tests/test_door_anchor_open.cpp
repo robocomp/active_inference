@@ -384,6 +384,33 @@ int main()
         }
     }
 
+    std::print("(15) Task 21: no anchor outlives its passage; a new cross puts the robot on the NEAR side\n");
+    {
+        // try89 leg 2 -> leg 3: through the room switch (crossing_through), then the door is asked again (leg 3's approach).
+        check(rc::door::passage_over_after_through(true, true, false), "after the switch, this door claimed again: the passage is over");
+        check(rc::door::passage_over_after_through(true, false, true), "after the switch, the predicted window spent: the passage is over");
+        check(not rc::door::passage_over_after_through(true, false, false), "still crossing on it (claimed nothing, seen/predicted): kept");
+        check(not rc::door::passage_over_after_through(false, true, true), "before the switch the cross's own lifecycle rules (retry etc.)");
+        // …and the next cross claim creates a fresh one (Task 19): nothing anchored ⇒ the cross creates it.
+        check(rc::door::anchor_creation_claim(true, false), "a new cross claim creates a fresh anchor");
+
+        // The near side. Door at the origin, wall_u = +x, across_u = +y. s = the robot's coordinate along the anchor's +y.
+        const Eigen::Vector2f c(0.f, 0.f), wu(1.f, 0.f), n(0.f, 1.f);
+        const auto s_of = [&](const Eigen::Vector2f& p_robot, float latched)
+        {
+            const auto ax = rc::door::anchor_opening_axes(wu, n, rc::door::anchor_near_side(latched, n.dot(p_robot - c)));
+            const float det = ax.ux.x() * ax.uy.y() - ax.ux.y() * ax.uy.x();
+            check(std::abs(det - 1.f) < 1e-5f, "the opening frame stays right-handed");
+            return ax.uy.dot(p_robot - c);
+        };
+        const Eigen::Vector2f leg2_robot(0.1f, -1.9f), leg3_robot(0.2f, 1.8f);   // the two legs start on opposite sides
+        check(s_of(leg2_robot, -1.f) < 0.f, "leg 2 (robot on -n, leaving the -n room): s < 0");
+        check(s_of(leg3_robot, +1.f) < 0.f, std::format("leg 3 (robot on the OTHER side, +n): s {:+.2f} < 0 — not leg 2's +1.78", s_of(leg3_robot, +1.f)));
+        check(s_of(leg3_robot, 0.f) < 0.f and s_of(leg2_robot, 0.f) < 0.f, "unlatched: the robot's own side, s < 0 either way");
+        // A retry mid-doorway, 0.1 m past the plane: the latched side (the room it is leaving) keeps the normal pointing on.
+        check(s_of(Eigen::Vector2f(0.f, 0.1f), -1.f) > 0.f, "mid-doorway retry: the side the cross LEAVES holds (s > 0, past the plane, not flipped)");
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

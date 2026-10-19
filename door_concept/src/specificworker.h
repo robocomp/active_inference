@@ -349,7 +349,6 @@ private:
     void step_passage_anchor();
     bool create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff);
     std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,
-                                                             const std::optional<rc::interaction::RelPose>& keep_side_of,
                                                              float* axis_sign_out = nullptr) const;
     void remove_passage_anchor(std::string_view why);
     void anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const;   // width, thickness, height, run

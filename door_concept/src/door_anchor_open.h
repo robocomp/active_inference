@@ -313,6 +313,40 @@ struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; double view_llr = 0.0
 // opening; the hinge and swing log-odds accumulate with no forgetting, so one aliased stretch could flip and latch them.
 [[nodiscard]] inline bool anchor_frame_is_leaf_evidence(float p_view, float publish_level) { return p_view >= publish_level; }
 
+// ─── Task 21 (try89 leg 3): NO ANCHOR SURVIVES ITS PASSAGE, AND EVERY ANCHOR IS BORN ON THE ROBOT'S NEAR SIDE ──────────────
+// try89: after leg 2's cross went through, the anchor was KEPT past the room switch (crossing_through, Fix E) and nothing ever
+// ended it — REMOVE (b) needs the consumer's `executing` edge to something else, and the controller wrote none for the
+// close-less "passage DONE" and its later claims. Leg 3's approach saw the door again, the leftover anchor RESUMED publishing
+// (crossing_through counts as a claimed cross), the controller drove on it before the cross was claimed, and the cross claim
+// then re-initialised it KEEPING leg 2's side (s +1.78, 176°: the normal flipped), so "through" fired 2 m short of the door.
+//
+// (1) After the room switch (crossing_through) the passage is over as soon as EITHER this door is asked anything again (any
+//     of its approach/open/cross/close claimed: the consumer moved on — a legacy consumer writes no edge, but its claim is
+//     visible on our own affordance) OR the predicted publication has run out (the same kAnchorPredictMs bound that stops
+//     publishing it: the anchor is no longer driven on). No new level: both are existing events.
+[[nodiscard]] inline bool passage_over_after_through(bool crossing_through, bool door_step_claimed, bool predict_window_spent)
+{
+    return crossing_through and (door_step_claimed or predict_window_spent);
+}
+// (2) Which side of the opening the robot is on, along the aperture's across_u (+1 / −1): the side the CROSS LEAVES (the
+//     latched interior side, door_concept's cross_side_latched — it holds mid-doorway, where the robot's own position is
+//     ambiguous), else the robot's position (unlatched: 0). The anchor's +y then points from that side through the opening,
+//     so the robot is at s < 0 — at creation, at every re-init and at every retry; never inherited from an older belief.
+[[nodiscard]] inline float anchor_near_side(float cross_side_latched, float robot_along_n)
+{
+    if (cross_side_latched != 0.0f and std::isfinite(cross_side_latched)) return cross_side_latched < 0.0f ? -1.0f : +1.0f;
+    return robot_along_n > 0.0f ? +1.0f : -1.0f;
+}
+// The opening frame's axes in the room: x along the wall, y the normal pointing AWAY from the near side (right-handed), and
+// the sign of x against wall_u (the anchor's axis_sign).
+struct OpeningAxes { Eigen::Vector2f ux, uy; float sign = 1.0f; };
+[[nodiscard]] inline OpeningAxes anchor_opening_axes(const Eigen::Vector2f& wall_u, const Eigen::Vector2f& across_u, float near_side)
+{
+    OpeningAxes a{wall_u.normalized(), across_u.normalized(), 1.0f};
+    if (near_side > 0.0f) { a.ux = -a.ux; a.uy = -a.uy; a.sign = -1.0f; }   // rotate by π: the near side on −y
+    return a;
+}
+
 // ─── Task 19 (user decision): WHEN THE PASSAGE ANCHOR IS CREATED ─────────────────────────────────────────────────────────
 // On the CROSS claim only. The cross is offered only while door_concept believes the door passable (open), so the anchor is
 // born on an open door and is never updated against a shut one or a swinging leaf; approach and open run on the room-frame

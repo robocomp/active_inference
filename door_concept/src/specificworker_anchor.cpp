@@ -12,6 +12,8 @@
  * The authoritative mark is the consumer-owned EDGE controller --[executing]--> affordance, read through
  * PragmaticAffordance::claimed()/claim() — which is AffordanceManager::read_executing, with the legacy
  * `active and epistemic_pending` fallback for a consumer that writes no edge. This agent NEVER writes that edge.
+ *   SIDE     Task 21: every from_room (create, re-init, retry) puts the robot on the anchor's NEAR side (s < 0, +y through
+ *            the opening): the side the cross leaves, else where the robot is — never the side an older belief had.
  *   CREATE   no anchor and some door's `cross` is claimed ⇒ from_room + Anchor::create (same P0: belief + localisation +
  *            σ_model). Task 19 (user decision): NOT on `approach` — approach and open run anchor-less on the room-frame
  *            standpoint; the anchor is born on an open door (rc::door::anchor_creation_claim).
@@ -29,7 +31,9 @@
  *            Timeout, aborted, released, re-offered — Task 9), or the door's instance is gone (merged): the anchor is
  *            kept, predicted and corrected — the passage may go on (open, then cross, or the cross again).
  *   ROOM     release_room(): a switch while the anchored door's CROSS is claimed KEEPS the anchor (Task 12 Fix E: crossing_through)
- *            and RELINKS it (the robot still crosses on it until through; REMOVE (b) ends it). A switch during
+ *            and RELINKS it (the robot still crosses on it until through). Task 21: that passage is then OVER — the anchor is
+ *            removed — as soon as this door is claimed again (any step: a new passage gets a FRESH anchor) or the predicted
+ *            window is spent (it is no longer driven on), or by REMOVE (b). No anchor outlives its passage. A switch during
  *            approach/open of a PARKED cross retry RELINKS the anchor to the door re-identified in the new room, and marks it for re-init.
  *   REMOVE   (a) the cross claim of the anchored door ended SATISFIED while its instance lives: the robot is through,
  *                the passage's crossing is over; or the room switched during the cross (above);
@@ -117,7 +121,7 @@ std::string SpecificWorker::robot_node_name() const
 // existing anchor already has (a re-init must not flip yaw by π under the consumer).
 std::optional<rc::interaction::RelPose>
 SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
-                                 const std::optional<rc::interaction::RelPose>& keep_side_of, float* axis_sign_out) const
+                                 float* axis_sign_out) const
 {
     if (not G or not inner_eigen_) return std::nullopt;
     const std::string room = rc::room::current_room_frame(*G);
@@ -128,10 +132,13 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
 
     const auto& ap = inst.aperture;
     const Eigen::Vector2f c = ap.centre_xy();
-    Eigen::Vector2f ux = ap.wall_u.normalized(), uy = ap.across_u().normalized();
     const Eigen::Vector2f p_robot = T_room_robot->translation().head<2>().cast<float>();
-    float sign = 1.f;
-    if (uy.dot(p_robot - c) > 0.0f) { ux = -ux; uy = -uy; sign = -1.f; }   // rotate by π: the robot on −y, still right-handed
+    // ★ Task 21: the robot's NEAR side, always — the side the cross leaves (latched), else where the robot is. Never the side
+    //   an older belief had (try89 leg 3: a re-init kept leg 2's side ⇒ s +1.78, the normal flipped). rc::door::anchor_near_side.
+    const auto axes = rc::door::anchor_opening_axes(
+        ap.wall_u, ap.across_u(), rc::door::anchor_near_side(inst.cross_side_latched, ap.across_u().normalized().dot(p_robot - c)));
+    const Eigen::Vector2f ux = axes.ux, uy = axes.uy;
+    float sign = axes.sign;
 
     auto make = [&](const Eigen::Vector2f& ax, const Eigen::Vector2f& ay)
     {
@@ -145,12 +152,6 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
     };
 
     auto r = rc::interaction::from_room(T_room_robot.value(), make(ux, uy), Eigen::Matrix3f::Identity());
-    if (keep_side_of.has_value()
-        and std::abs(rc::interaction::wrap_pi(r.x.z() - keep_side_of->x.z())) > float(M_PI_2))
-    {
-        r = rc::interaction::from_room(T_room_robot.value(), make(-ux, -uy), Eigen::Matrix3f::Identity());
-        sign = -sign;
-    }
     if (axis_sign_out != nullptr) *axis_sign_out = sign;
 
     // ── P0 = door belief + localisation + σ_model, all in the ANCHOR's axes, then into RelPose coordinates ──────
@@ -207,7 +208,7 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
 bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff)
 {
     float axis_sign = 1.f;
-    const auto init = anchor_from_room(inst, std::nullopt, &axis_sign);
+    const auto init = anchor_from_room(inst, &axis_sign);
     if (not init.has_value())
         return false;   // no room / robot transform this cycle: try again next cycle
     // ★Fix round 1: the anchor is BORN STALE. Anchor::create writes the RT edge at the pose's stamp, and the room-frame
@@ -301,10 +302,27 @@ void SpecificWorker::anchor_geometry_from_door(const rc::DoorInstance& inst, Pas
 // toward the room and, broadened, can be re-acquired by its beams.
 void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnchor& pa, std::string_view kind)
 {
-    const auto r = anchor_from_room(inst, pa.pose, &pa.axis_sign);   // keeps the side the belief has
+    float near_sign = pa.axis_sign;
+    const auto r = anchor_from_room(inst, &near_sign);   // Task 21: the robot's near side, not the belief's
     if (not r.has_value())
     {
         std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry; no room transform: belief kept\n", pa.door_name, kind);
+        return;
+    }
+    // Task 21: a belief on the OTHER side (its axes π from the near-side frame) is not the same quantity — fusing them would
+    // average two yaws π apart. It is replaced by the near-side initialisation (it cannot happen within one passage: the
+    // anchor is born near-side and the latched side holds for the attempt).
+    if (std::abs(rc::interaction::wrap_pi(r->x.z() - pa.pose.x.z())) > float(M_PI_2))
+    {
+        std::print("door_concept: [anchor] {}@robot re-claimed for {} — the belief was on the far side: RE-INITIALISED on the "
+                   "robot's near side\n", pa.door_name, kind);
+        pa.pose = r.value();
+        pa.init_pose = r.value();
+        pa.axis_sign = near_sign;
+        pa.bias = {};
+        pa.view_lost_llr = 0.0;
+        refresh_anchor_geometry(inst, pa);
+        pa.retry = false;
         return;
     }
     // ★ Fix round 1 (I-2): weighted by P(the robot is OUT of the doorway band). Inside the band the room initialisation is the
@@ -523,6 +541,16 @@ void SpecificWorker::step_passage_anchor()
                        "cross claim (a retry: the belief is not re-initialised)\n", pa.door_name, why);
         }
     }
+    // ── REMOVE (c'): Task 21 — after the room switch the passage is over once this door is asked anything again ─────────
+    //    (rc::door::passage_over_after_through; the predicted-window half is tested where the window is charged, below).
+    if (inst != nullptr
+        and rc::door::passage_over_after_through(pa.crossing_through,
+                                                  app or crs or opn or inst->aff_close.claimed(), false))
+    {
+        remove_passage_anchor("the passage is over (through the room switch): this door is claimed again — a new passage gets a "
+                              "fresh anchor");
+        return;
+    }
     // ── REMOVE (b): nothing of this passage is claimed and the consumer is executing something else ──────────
     if (not (app or crs or opn))
     {
@@ -559,7 +587,7 @@ void SpecificWorker::step_passage_anchor()
             if (pa.reinit_on_next_claim)
             {
                 // The first claim on the door re-identified after a room switch: a new passage's start.
-                if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
+                if (const auto r = anchor_from_room(*inst, &pa.axis_sign); r.has_value())
                 {
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
@@ -578,7 +606,7 @@ void SpecificWorker::step_passage_anchor()
                 {
                     if (pa.retry)
                         retry_broad_prior(*inst, pa, aff->kind());
-                    else if (const auto r = anchor_from_room(*inst, pa.pose, &pa.axis_sign); r.has_value())
+                    else if (const auto r = anchor_from_room(*inst, &pa.axis_sign); r.has_value())
                     {
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
@@ -930,6 +958,14 @@ void SpecificWorker::step_passage_anchor()
             std::print("door_concept: [anchor] {}@robot predicted publication ended — {}\n", pa.door_name,
                        mode == rc::door::AnchorPublish::Seen ? "seen again" : "unseen beyond kAnchorPredictMs, or the cross ended");
         pa.mode = mode;
+    }
+    // Task 21: after the room switch, once the predicted window is spent the anchor is no longer driven on — the passage is
+    // over (the same kAnchorPredictMs bound that ended its publication; rc::door::passage_over_after_through).
+    if (rc::door::passage_over_after_through(pa.crossing_through, false,
+                                             pa.seen_once and pa.unseen_charge_ms > rc::interaction::kAnchorPredictMs))
+    {
+        remove_passage_anchor("the passage is over (through the room switch): the predicted window is spent");
+        return;
     }
     bool wrote = false;
     if (measured and mode == rc::door::AnchorPublish::Seen)
