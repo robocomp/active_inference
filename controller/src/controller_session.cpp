@@ -3043,6 +3043,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_cross_engaged_ = false;
     anchor_wait_since_ms_ = 0;
     anchor_wait_stamp_ = 0;
+    anchor_wait_blocked_ = false;
     anchor_spin_since_ms_ = 0;
     anchor_backoff_logged_ = false;
     anchor_predicted_logged_ = false;
@@ -3192,6 +3193,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     {
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
         anchor_wait_since_ms_ = 0;
+        anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
         cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic);
         if (cmd.through)
         {
@@ -3233,6 +3235,9 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         // the wall plane (or past it, a retry that starts in the doorway) the centre may lie BESIDE or BEHIND the robot, and
         // the way to see it again is to face along the crossing: the normal (heading_err).
         cmd.rot = rc::anchor_wait_turn(pose, w_max, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)));
+        // Task 11 fix 3: this wait's turn was judged SPINNING — commanded, not delivered (a jamb, a leg): it is not ground
+        // on. The base holds until the anchor is seen again or the wait's own timeout hands the cross back.
+        if (anchor_wait_blocked_) cmd.rot = 0.f;
     }
 
     // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
@@ -3272,16 +3277,26 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     for (const auto &v : rc::anchor_grown_body(body, approach_body_.safety_margin())) r_max = std::max(r_max, v.norm());
     const bool rotation_dominant = std::abs(rot_rps) * r_max > std::hypot(adv_mps, side_mps);
     const auto unc = motion_commander.last_uncertainty_diag();
-    // The wait-turn (not engaged, a stale anchor) is not pursuit: once it faces the opening its command is ~0 and the judge
-    // read every 3-s window of near-zero asks as SPINNING (try68: nine "0.00 rad commanded" verdicts). It is bounded by the
-    // wait's own timeout above (fix round 2).
-    if (not a.fresh) reset_stuck_window();
+    // The wait-turn (not engaged, a stale anchor): once it faces the opening its command is ~0, and the judge read every 3-s
+    // window of those near-zero asks as SPINNING (try68: nine "0.00 rad commanded" verdicts). ★Task 11 fix 3: skipped ONLY
+    // then — when the turn asked over one window is below the heading σ the localiser resolves (rc::anchor_wait_turn_judged).
+    // A real wait-turn is judged on delivered vs commanded yaw like any other turn, so a turn ground against a jamb is
+    // caught (spin_servo, no escape: the wait then holds, above) instead of running for the whole 40-s wait.
+    const float judge_window_s = params_ != nullptr ? params_->stuck_confirm_ms * 1e-3f : 0.f;
+    const bool judged = a.fresh or rc::anchor_wait_turn_judged(rot_rps, judge_window_s, unc.valid ? unc.theta_std_rad : -1.f);
+    if (not judged) reset_stuck_window();
     else if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
                      robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, motion_commander, time_source());
         return;
+    }
+    if (not a.fresh and judged and last_judged_verdict_ == rc::StallVerdict::Spinning and not anchor_wait_blocked_)
+    {
+        anchor_wait_blocked_ = true;
+        std::println("[anchor] cross: the wait-turn toward {} was commanded but not delivered (SPINNING) — holding still, "
+                     "not grinding, until it is seen again", a.name);
     }
     if (last_judged_verdict_ == rc::StallVerdict::Spinning and rotation_dominant)
     {
@@ -6775,6 +6790,9 @@ void ControllerSession::log_stall_event(const char *verdict, const rc::StallJudg
 void ControllerSession::reset_stuck_window()
 {
     stall_judge_.reset();
+    // Task 11 fix 3: the verdict belongs to the window it closed. Kept past a reset, a verdict from before (a wait cycle
+    // that was not judged, an escape, a new target) was read as this window's by the anchor spin bound.
+    last_judged_verdict_ = rc::StallVerdict::None;
 }
 
 void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,

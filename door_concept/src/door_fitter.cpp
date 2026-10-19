@@ -1009,14 +1009,24 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // DoorBelief::phi_field_loglik: same per-ray density as phi_field_likelihood, the slide marginalised over
     // +-w/2, and the joint log-likelihood raised to n_eff/n_inf — a frame that sees a sliver of the leaf
     // carries a sliver of evidence instead of a delta.
+    // ★THE HINGE IS MARGINALISED (Task 11, try69): the leaf is also scored hung from the OTHER jamb, the curve below is
+    // the hinge mixture, and the hinge's own log-odds accumulates — see rc::door::phi_hinge_marginal for why one config-
+    // pinned hinge made an open door read shut from room_2. The geometry then hangs from the MAP hinge.
+    nz.other_hinge = true;
     std::vector<std::pair<float, float>> loglik;
     if (not rays.endpoints.empty())
     {
         auto fr = inst.ai2_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
-        loglik = std::move(fr.loglik);
         inst.dbg_phi_ninf  = fr.n_inf;
         inst.dbg_phi_beta  = fr.beta;
         inst.dbg_phi_lat   = fr.lat_map;
+        auto hm = rc::door::phi_hinge_marginal(fr.loglik, fr.loglik_other, inst.hinge_llr, phi_prior, sigma_phi);
+        loglik = std::move(hm.loglik);
+        inst.hinge_llr = hm.hinge_llr;
+        if (rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr))
+            std::print("door_concept: [{}] HINGE now the {} jamb — the leaf is better explained hung there (log-odds {:+.1f})\n",
+                       inst.node_name, inst.ai2_belief.params().leaf.hinge == door::HingeSide::Near ? "near" : "far",
+                       inst.hinge_llr);
     }
     else
     {

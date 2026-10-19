@@ -264,6 +264,7 @@ private:
         Eigen::Vector2f hinge_local{0.f, 0.f};
         Eigen::Vector2f open_local{0.f, 0.f};
         float           phi_est = 0.f, phi_sigma = 0.f;
+        float           hinge_llr = 0.f;   // Task 11: the source's confidence in the hinge it hands over (≥ 0)
         std::vector<std::pair<float, float>> phi_curve;
         int             matched_frames = 0;
         // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
@@ -326,6 +327,13 @@ private:
         bool  seen_once = false;
         std::int64_t last_seen_ms = 0;
         rc::interaction::RelPose seen_pose;
+        // Task 11 fix 4: the pose this passage was initialised with FROM THE ROOM (creation, re-init, retry), carried by
+        // the same odometry: the not-seen wait pose before anything is seen (rc::door::wait_pose). Never the posterior.
+        rc::interaction::RelPose init_pose;
+        // Task 11 fix 2: the latest measured frame's open-vs-shut log-likelihood ratio from the anchor's own beams
+        // (rc::door::anchor_open_llr), fused into P(open) while fresh (≤ kAnchorStaleMs): 0 / 0 = none yet.
+        double open_llr = 0.0;
+        std::int64_t open_llr_ms = 0;
         rc::door::AnchorPublish mode = rc::door::AnchorPublish::None;
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
         float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check

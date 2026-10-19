@@ -227,4 +227,79 @@ inline PhiPosteriorStep phi_posterior_step(const std::vector<std::pair<float, fl
     return out;
 }
 
+// ─── THE HINGE IS A HIDDEN VARIABLE OF THE MODEL, NOT A CONFIG FACT (Task 11, live try69) ───────────────────────
+// Which jamb carries the leaf was a config pin (Openable.HingeSide = Near) that a mirror then inherited as geometry.
+// DOOR_1's real hinge is on the OTHER jamb. With one hinge in the model an open leaf has only two ways to be
+// explained: over-swing it (room_1, try69: phi 2.05 rad for a leaf at 1.57) or slide the aperture one width along the
+// wall so its believed hinge lands on the real one (room_2: the aperture slid 0.78 m, σ_s 0.60 → 0.03, while phi read
+// 90°). Once the robot stood in front of the REAL opening, the slid aperture covered solid wall, a shut leaf explained
+// it perfectly, phi fell to 0.01 rad and P(passable) to 0 for a door standing open — the cross was withdrawn.
+// So the hinge h ∈ {believed, other} is marginalised. It is STATIC (a door does not re-hang itself), so its belief
+// accumulates frame by frame with no process noise, as a log-odds:
+//     llr ← llr + log Σ_k L_b(φ_k) N(φ_k; μ, σ) − log Σ_k L_o(φ_k) N(φ_k; μ, σ)
+// (each hinge's marginal evidence under the SAME carried φ prior), and the φ curve the posterior step sees is the
+// hinge MIXTURE  log[ P(b) L_b(φ) + P(o) L_o(φ) ]. A shut leaf is identical under both hinges (door_geometry.h,
+// test (e)), so a closed door moves the log-odds by exactly 0 — the hinge is learned only while the leaf is open,
+// which is the only time it matters.
+// `loglik_this` / `loglik_other` are FieldResult::loglik / loglik_other: one grid, one common scale.
+struct PhiHingeMarginal
+{
+    std::vector<std::pair<float, float>> loglik;   // the hinge-marginal φ log-likelihood (for phi_posterior_step)
+    float hinge_llr = 0.0f;                        // posterior log P(believed hinge) / P(other)
+};
+inline PhiHingeMarginal phi_hinge_marginal(const std::vector<std::pair<float, float>>& loglik_this,
+                                           const std::vector<std::pair<float, float>>& loglik_other,
+                                           float hinge_llr, float prior_mean, float prior_sigma)
+{
+    PhiHingeMarginal out;
+    out.hinge_llr = hinge_llr;
+    if (loglik_other.size() != loglik_this.size() or loglik_this.empty())
+    {
+        out.loglik = loglik_this;   // one hypothesis scored: nothing to marginalise, nothing learned about the hinge
+        return out;
+    }
+    constexpr double ninf = -std::numeric_limits<double>::infinity();
+    const auto lae = [](double a, double b)
+    {
+        if (a == -std::numeric_limits<double>::infinity()) return b;
+        if (b == -std::numeric_limits<double>::infinity()) return a;
+        const double m = std::max(a, b);
+        return m + std::log1p(std::exp(-std::abs(a - b)));
+    };
+    const auto fin = [](float v) { return std::isfinite(v) ? static_cast<double>(v) : -std::numeric_limits<double>::infinity(); };
+    const double l = hinge_llr;
+    const double lp_b = l >= 0 ? -std::log1p(std::exp(-l)) : l - std::log1p(std::exp(l));    // log σ(llr)
+    const double lp_o = l >= 0 ? -l - std::log1p(std::exp(-l)) : -std::log1p(std::exp(l));   // log σ(−llr)
+    const double sp = std::max(1e-4, static_cast<double>(prior_sigma));
+    double e_b = ninf, e_o = ninf;
+    out.loglik.reserve(loglik_this.size());
+    for (std::size_t k = 0; k < loglik_this.size(); ++k)
+    {
+        const double a = fin(loglik_this[k].second), b = fin(loglik_other[k].second);
+        const double d = (static_cast<double>(loglik_this[k].first) - prior_mean) / sp;
+        e_b = lae(e_b, a - 0.5 * d * d);
+        e_o = lae(e_o, b - 0.5 * d * d);
+        const double mix = lae(a + lp_b, b + lp_o);
+        out.loglik.emplace_back(loglik_this[k].first, std::isfinite(mix) ? static_cast<float>(mix)
+                                                                         : -std::numeric_limits<float>::infinity());
+    }
+    if (std::isfinite(e_b) and std::isfinite(e_o))
+        out.hinge_llr = static_cast<float>(l + e_b - e_o);
+    return out;
+}
+
+// The geometry everyone else reads (the aperture fit's leaf SDF, the published leaf pose, the anchor's leaf prior) is
+// ONE leaf, so it hangs from the more probable hinge. ⚑ P = 1/2 is the MAP of a binary posterior, a decision level and
+// not a tuned one; the log-odds is negated with the flip, so the belief itself is unchanged — only which hypothesis is
+// called "believed". Returns true when it flipped.
+inline bool adopt_map_hinge(rc::DoorBelief& b, float& hinge_llr)
+{
+    if (not (hinge_llr < 0.0f))
+        return false;
+    const auto h = b.params().leaf.hinge;
+    b.set_leaf_hinge(h == HingeSide::Near ? HingeSide::Far : HingeSide::Near);
+    hinge_llr = -hinge_llr;
+    return true;
+}
+
 }  // namespace rc::door

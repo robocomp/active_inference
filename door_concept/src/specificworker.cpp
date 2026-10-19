@@ -59,6 +59,8 @@
 #include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
+#include "door_anchor_open.h"   // Task 11: rc::door::fuse_open — the anchor's beams in P(open)
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor stamps Λ with it
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
 
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
@@ -3108,6 +3110,22 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
         }
     }
 
+    // ── Task 11 fix 2: the passage anchor's OWN beams, fused as a likelihood ──────────────────────
+    // While an anchor serves THIS door and its latest measured frame is fresh, that frame's open-vs-shut
+    // log-likelihood ratio (rc::door::anchor_open_llr: beams predicted to pass the opening, checked, tempered by
+    // the frame's p_view and its common mode) is added to the leaf channel's log-odds. Added, never substituted:
+    // a shut door's beams give Λ ≪ 0, and π at 0 or 1 is left where it is (rc::door::fuse_open). Every reader of
+    // P(open) — transitable, cross, close, the anchor's own visibility π — reads this one fused value.
+    st.p_open_leaf = st.p_open;
+    if (st.p_open_known and passage_anchor_.has_value()
+        and (passage_anchor_->door_id == inst.node_id or passage_anchor_->door_name == inst.node_name)
+        and passage_anchor_->open_llr_ms > 0
+        and static_cast<std::int64_t>(rc::provenance::now_ms()) - passage_anchor_->open_llr_ms <= rc::interaction::kAnchorStaleMs)
+    {
+        st.p_open = rc::door::fuse_open(st.p_open, passage_anchor_->open_llr);
+        st.anchor_open_llr = static_cast<float>(passage_anchor_->open_llr);
+    }
+
     // ── P(the robot is in the actuation zone), and which SIDE it is on ───────────────────────────
     if (not inner_eigen_)
         return st;
@@ -3299,9 +3317,12 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
-        o.why      = std::format("P(passable)={:.2f} — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body",
+        o.why      = std::format("P(passable)={:.2f} — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body{}",
                                  st.p_open, st.clear_width_m, st.phi_rad,
-                                 pg.robot_passage_width_m + pg.passage_margin_m);
+                                 pg.robot_passage_width_m + pg.passage_margin_m,
+                                 st.anchor_open_llr != 0.0f
+                                     ? std::format(" (leaf {:.2f} ⊕ anchor beams Λ {:+.1f})", st.p_open_leaf, st.anchor_open_llr)
+                                     : std::string{});
         inst.aff_cross.update(o);
     }
 
@@ -3840,6 +3861,7 @@ void SpecificWorker::step_entry_mirrors()
                     em.open_local  = R.transpose() * (si.leaf.swing * si.aperture.across_u());
                     em.phi_est     = si.phi_est;
                     em.phi_sigma   = si.phi_sigma;
+                    em.hinge_llr   = si.hinge_llr;
                     em.phi_curve   = si.phi_curve;
                     em.matched_frames = si.matched_frames;
                 }
@@ -4009,6 +4031,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                                                             Eigen::Vector2f(R * em.open_local));
                         dst.phi_est   = em.phi_est;
                         dst.phi_sigma = em.phi_sigma;
+                        dst.hinge_llr = em.hinge_llr;   // the hinge hint is the source's MAP jamb; this is how sure it was
                         dst.phi_curve = em.phi_curve;
                         dst.phi_last_t = std::chrono::steady_clock::now();
                         // The robot's body just went through the aperture: an observation that it was passable, not
@@ -4255,6 +4278,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.open_local     = R.transpose() * (inst.leaf.swing * inst.aperture.across_u());
     em.phi_est        = inst.phi_est;
     em.phi_sigma      = inst.phi_sigma;
+    em.hinge_llr      = inst.hinge_llr;
     em.phi_curve      = inst.phi_curve;
     em.matched_frames = inst.matched_frames;
     em.T_root_door    = Eigen::Affine3d(Tw->matrix());

@@ -923,6 +923,7 @@ private:
     std::int64_t anchor_wait_stamp_ = 0;                            // the stale pose's stamp anchor_wait_pose_ holds
     rc::interaction::RelPose anchor_wait_pose_;                     // that pose, in the robot frame at anchor_wait_theta_
     float anchor_wait_theta_ = 0.f;                                 // the robot's room heading when it was latched
+    bool anchor_wait_blocked_ = false;                              // Task 11 fix 3: this wait's turn was judged SPINNING
     // Task 9, fix C: a SPINNING verdict on a rotation-dominant servo command is not a wedge; since when it has held.
     std::uint64_t anchor_spin_since_ms_ = 0;
     bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change

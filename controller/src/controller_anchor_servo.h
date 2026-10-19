@@ -155,6 +155,21 @@ inline constexpr float kAnchorTauRot = 0.2f;   // heading alignment
     return w_max * std::tanh(aim / (w_max * kAnchorTauRot));
 }
 
+// ── IS THE WAIT-TURN'S ASK JUDGEABLE? (Task 11, fix 3) ──────────────────────────────────────────────────────────────────
+// The stall judge weighs the heading a window was TOLD to sweep against the heading it NETTED. A wait-turn that already
+// faces the opening asks ~0 (tanh of a tiny bearing), and try68 read every such 3-s window as SPINNING ("0.00 rad
+// commanded"): an ask smaller than what the heading estimate can resolve cannot be failed, only mis-measured. Task 9's
+// round-2 cure skipped the judge for EVERY wait cycle, so a turn ground against a jamb for up to the 40-s wait, with no
+// LiDAR check on rotation. The line between the two is not a constant: the turn this rate asks over ONE judge window
+// must exceed the localiser's own heading σ — below it "did it turn" has no answer. An unknown σ (≤ 0 or not finite)
+// leaves the ask unweighable, and the wait is not judged (the old behaviour, bounded by the wait's own timeout).
+[[nodiscard]] inline bool anchor_wait_turn_judged(float rot_rps, float window_s, float theta_std_rad)
+{
+    if (not std::isfinite(rot_rps) or not std::isfinite(theta_std_rad) or not (theta_std_rad > 0.f) or not (window_s > 0.f))
+        return false;
+    return std::abs(rot_rps) * window_s > theta_std_rad;
+}
+
 // ── THE JAMBS AS OBSTACLES THE MODEL ALREADY KNOWS ────────────────────────────────────────────────────────────
 // The live field cannot stop the robot at a jamb: the self-filter clears every return within ~0.4 m of the body
 // centre, and the LiDAR ceiling is floored at 0.05 m/s. The anchor knows where the jambs are: J± = A ± (w/2)·a in

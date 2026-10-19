@@ -5,6 +5,7 @@
 //     -lfastdds -lfastcdr -lQt5Core && /tmp/tas          (one line)
 // (run from controller/)
 #include "../src/controller_anchor_servo.h"
+#include "../src/stall_judge.h"
 
 #include <cmath>
 #include <numbers>
@@ -381,6 +382,35 @@ void stale_anchor_left_turns_ccw()
     CHECK(std::abs(ahead) < 1e-4f);
     CHECK(in_door > 0.f);
 }
+// Task 11 fix 3: the wait-turn is judged when its ask is resolvable, skipped only when it is ~0. Runs the session's gate
+// (anchor_wait_turn_judged) in front of the real StallJudge, cycle by cycle at 10 Hz, heading frozen (a blocked turn).
+void wait_turn_grinding_is_judged()
+{
+    const float window_s = 1.5f, theta_std = 0.01f;   // stuck_confirm_ms; a localiser heading σ of ~0.6°
+    auto run = [&](float rot_rps) -> rc::StallVerdict
+    {
+        rc::StallJudge judge;
+        rc::StallVerdict last = rc::StallVerdict::None;
+        for (int k = 0; k <= 40; ++k)   // 4 s
+        {
+            const std::uint64_t t = 1000 + 100 * std::uint64_t(k);
+            if (not rc::anchor_wait_turn_judged(rot_rps, window_s, theta_std)) { judge.reset(); last = rc::StallVerdict::None; continue; }
+            const auto r = judge.note(true, 0.f, 0.f, 0.f, Eigen::Vector2f::Zero(), /*heading frozen*/0.f, rot_rps, t,
+                                      {.slip_ratio = 0.25f, .confirm_ms = window_s * 1e3f});
+            if (r.window_s > 0.f) last = r.verdict;
+        }
+        return last;
+    };
+    const auto grinding = run(0.5f);      // the wait-turn at half its cap, delivering nothing
+    const auto settled  = run(0.003f);    // try68: facing the opening, tanh of a tiny bearing (0.0045 rad per window)
+    std::println("  wait turn judged: 0.5 rad/s blocked → {}, 0.003 rad/s → {}; gate(0.5)={} gate(0.003)={} gate(σ unknown)={}",
+                 int(grinding), int(settled), rc::anchor_wait_turn_judged(0.5f, window_s, theta_std),
+                 rc::anchor_wait_turn_judged(0.003f, window_s, theta_std), rc::anchor_wait_turn_judged(0.5f, window_s, -1.f));
+    CHECK(grinding == rc::StallVerdict::Spinning);   // a turn ground against a jamb is caught
+    CHECK(settled == rc::StallVerdict::None);        // try68's false positive stays away
+    CHECK(rc::anchor_wait_turn_judged(-0.5f, window_s, theta_std));   // either direction
+    CHECK(not rc::anchor_wait_turn_judged(0.5f, window_s, -1.f));      // no heading σ ⇒ the ask cannot be weighed
+}
 }  // namespace
 
 int main()
@@ -400,6 +430,7 @@ int main()
     inside_jamb_caps_only_the_closing_turn();
     adv_falls_as_sigma_lat_grows();
     stale_anchor_left_turns_ccw();
+    wait_turn_grinding_is_judged();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

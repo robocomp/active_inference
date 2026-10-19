@@ -77,6 +77,7 @@ struct Scene
     float T = 0.11f, W = 1.0f, H = 2.1f;
     float phi = 1.66f;        // TRUE leaf angle
     float swing = -1.0f;      // -1: into room_1 (OUT of the robot's room), hinged on the far face; +1: into room_2
+    bool  hinge_far = false;  // false: hinged on the x = 0 jamb; true: on the x = W jamb (Task 11: DOOR_1 from room_2)
     std::vector<Box> boxes() const
     {
         std::vector<Box> b;
@@ -89,9 +90,9 @@ struct Scene
         // The leaf: hinged on the x = 0 jamb at the face of the wall it opens toward (the Webots Door sits
         // at room_1's face), 4 cm thick, centred on its swing line.
         const float y_h = swing < 0 ? -T : 0.0f;
-        const V2 dir(std::cos(phi), swing * std::sin(phi));
+        const V2 dir(hinge_far ? -std::cos(phi) : std::cos(phi), swing * std::sin(phi));
         const float lw = W - 0.01f;
-        b.push_back({V2(0, y_h) + 0.5f * lw * dir, dir, 0.5f * lw, 0.02f, 0.01f, H - 0.01f});
+        b.push_back({V2(hinge_far ? W : 0.0f, y_h) + 0.5f * lw * dir, dir, 0.5f * lw, 0.02f, 0.01f, H - 0.01f});
         return b;
     }
 };
@@ -120,11 +121,12 @@ static std::vector<V3> scan(const Scene& s, const V3& o, std::mt19937& rng, floa
 }
 
 // ─── the model door ──────────────────────────────────────────────────────────────────────────────
-static rc::DoorBelief make_belief(float model_slide, float swing)
+static rc::DoorBelief make_belief(float model_slide, float swing,
+                                  rc::door::HingeSide hinge = rc::door::HingeSide::Near)
 {
     rc::DoorBeliefParams p;
     p.wall_O = {-2, 0}; p.wall_u = {1, 0}; p.thickness = 0.05f; p.floor_z = 0;
-    p.leaf = {0, rc::door::HingeSide::Near, swing};
+    p.leaf = {0, hinge, swing};
     return rc::DoorBelief({2.0f + model_slide, 1.0f, 2.1f}, p);
 }
 
@@ -133,6 +135,7 @@ constexpr int   NSTEP = 25;
 
 struct Tracker   // the carried belief, exactly as DoorInstance carries it
 {
+    float hinge_llr = 0.0f;   // log P(believed hinge) / P(other) — DoorInstance::hinge_llr
     float phi_est = 0.0f, phi_sigma = PHI_MAX;
     bool  first = true;
     float p = 0.0f;
@@ -149,13 +152,18 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
     const float dt = t.first ? std::numeric_limits<float>::infinity() : DT;
     t.first = false;
     const float sp = rc::door::phi_prior_sigma(t.phi_sigma, swing_rate, dt, PHI_STEP, PHI_MAX);
+    const float prior = std::isnan(prior_mean_override) ? t.phi_est : prior_mean_override;
     std::vector<std::pair<float, float>> ll;
+    nz.other_hinge = true;   // as DoorFitter::estimate_phi: the hinge is marginalised
     if (not sel.rays.endpoints.empty())
     {
         auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
-        ll = std::move(fr.loglik); t.ninf = fr.n_inf; t.beta = fr.beta; t.lat = fr.lat_map;
+        t.ninf = fr.n_inf; t.beta = fr.beta; t.lat = fr.lat_map;
+        auto hm = rc::door::phi_hinge_marginal(fr.loglik, fr.loglik_other, t.hinge_llr, prior, sp);
+        ll = std::move(hm.loglik);
+        t.hinge_llr = hm.hinge_llr;
+        rc::door::adopt_map_hinge(b, t.hinge_llr);
     }
-    const float prior = std::isnan(prior_mean_override) ? t.phi_est : prior_mean_override;
     const auto post = rc::door::phi_posterior_step(ll, PHI_MIN, PHI_MAX, NSTEP, prior, sp);
     t.phi_sigma = post.sigma;
     t.phi_est   = std::clamp(post.mean, PHI_MIN, PHI_MAX);
@@ -312,7 +320,7 @@ int main()
             const V3 o(1.4f + 0.3f * std::sin(0.3f * f), 1.9f, 0.67f);
             step_new(t, b, o, scan(sc, o, rng, 0.5f));
             p.push_back(t.p);
-            if (std::getenv("PHI_TRACE")) std::print("    f{} P {:.3f} phi {:.0f} sigma {:.0f} n_inf {:.1f} beta {:.3f} lat {:+.2f}\n", f, t.p, t.phi_est * 57.3f, t.phi_sigma * 57.3f, t.ninf, t.beta, t.lat);
+            if (std::getenv("PHI_TRACE")) std::print("    f{} P {:.3f} phi {:.0f} sigma {:.0f} n_inf {:.1f} beta {:.3f} lat {:+.2f} llr {:+.2f} hinge {}\n", f, t.p, t.phi_est * 57.3f, t.phi_sigma * 57.3f, t.ninf, t.beta, t.lat, t.hinge_llr, b.params().leaf.hinge == rc::door::HingeSide::Far ? "far" : "near");
             if (first_high < 0 and t.p > 0.9f) first_high = f;
         }
         std::print("  P(passable) {:.3f}, first > 0.9 at frame {}, phi {:.0f} deg, flips after it {}\n",
@@ -365,6 +373,39 @@ int main()
         std::print("  truth passable from frame {}, P>0.5 from frame {}, final P {:.3f} phi {:.0f} deg\n",
                    truth_at, pass_at, t.p, t.phi_est * 57.3f);
         check(pass_at >= 0 and std::abs(pass_at - truth_at) <= 6 and t.p > 0.9f, "commanded swing followed");
+    }
+
+    // ── (f) phi_reads_open_from_far_side (Task 11, live try69 leg 2) ─────────────────────────────────
+    // DOOR_1 seen from room_2: the leaf stands open 90 deg AWAY from the robot (into room_1), hinged on the jamb the
+    // model does NOT believe in (room_1's config pin, Near, was the wrong jamb, and the mirror inherited it as the
+    // geometry it was). The robot walks from in front of the believed hinge across the doorway to the far side, as
+    // the controller's wait-turn did. Truth: phi = 90 deg, passable throughout.
+    std::print("\n(f) phi_reads_open_from_far_side: leaf 90 deg AWAY, hinged on the jamb the model does not believe\n");
+    // swing +1 is the same door seen from room_1 (leg 1): the leaf swung TOWARD the robot, its own returns dropped by
+    // select_doorway_rays (short of the plane), so the hinge must be read from the rays it does or does not block.
+    for (const float swing : {-1.0f, +1.0f})
+    for (const bool believed_right : {true, false})
+    {
+        Scene sc; sc.phi = 1.5708f; sc.swing = swing; sc.hinge_far = true;
+        std::print("  -- leaf {} the robot\n", swing < 0 ? "AWAY from" : "TOWARD");
+        auto b = make_belief(0.0f, swing, believed_right ? rc::door::HingeSide::Far : rc::door::HingeSide::Near);
+        Tracker t; t.phi_est = 1.66f; t.phi_sigma = 0.035f; t.first = false;   // remembered from the crossing
+        std::vector<float> p;
+        for (int f = 0; f < 40; ++f)
+        {
+            const V3 o(-0.4f + 1.8f * f / 39.0f, 1.6f, 0.67f);   // from beside the believed hinge to past the far jamb
+            step_new(t, b, o, scan(sc, o, rng, 0.5f));
+            p.push_back(t.p);
+            if (std::getenv("PHI_TRACE")) std::print("    f{} x {:+.2f} P {:.3f} phi {:.0f} sigma {:.0f} lat {:+.2f} hinge {}\n", f, o.x(), t.p, t.phi_est * 57.3f, t.phi_sigma * 57.3f, t.lat, b.params().leaf.hinge == rc::door::HingeSide::Far ? "far" : "near");
+        }
+        const float pmin = *std::ranges::min_element(p);
+        std::print("  believed hinge {}: min P {:.3f}, final P {:.3f}, phi {:.0f} deg, hinge now {}\n",
+                   believed_right ? "right" : "WRONG", pmin, t.p, t.phi_est * 57.3f,
+                   b.params().leaf.hinge == rc::door::HingeSide::Far ? "far (true)" : "near");
+        check(b.params().leaf.hinge == rc::door::HingeSide::Far, "the hinge ends on the true jamb");
+        check(std::abs(t.phi_est - 1.5708f) < 0.1745f and pmin > 0.8f,
+              std::format("believed hinge {}: phi {:.0f} deg within 90 +- 10, P(passable) min {:.3f} > 0.8",
+                          believed_right ? "right" : "wrong", t.phi_est * 57.3f, pmin));
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));

@@ -720,14 +720,20 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     // In the leaf's own axes (ex, ey, ez) the nuisance moves the box by a scalar per axis:
     //   e_a = a·(c_k − o) + depth (a·n) + lat (a·u_w),   f_a = a·u_i (independent of the nuisance).
     struct LeafK { float half[3]; float exn, exu, eyn, eyu; float cz; Eigen::Vector2f ex, ey, c; };
-    std::vector<LeafK> leaves(static_cast<std::size_t>(nstep));
-    for (int k = 0; k < nstep; ++k)
+    // Hypothesis index kk = hyp * nstep + k: hyp 0 = the believed hinge, hyp 1 = the other jamb (when asked for).
+    const int H  = nz.other_hinge ? 2 : 1;
+    const int KK = H * nstep;
+    std::vector<LeafK> leaves(static_cast<std::size_t>(KK));
+    for (int kk = 0; kk < KK; ++kk)
     {
+        const int k = kk % nstep;
         const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / (nstep - 1);
         door::LeafState lf = params_.leaf;
         lf.phi = phi;
+        if (kk >= nstep)
+            lf.hinge = lf.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
         const door::LeafPose L = door::leaf_pose(ap0, lf);
-        LeafK& q = leaves[static_cast<std::size_t>(k)];
+        LeafK& q = leaves[static_cast<std::size_t>(kk)];
         q.half[0] = L.half_w; q.half[1] = L.half_t; q.half[2] = L.half_h;
         q.ex = L.ex; q.ey = L.ey; q.c = L.centre_xy; q.cz = L.centre_z;
         q.exn = L.ex.dot(n2); q.exu = L.ex.dot(uw);
@@ -803,10 +809,10 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
         for (double& v : lprior) v -= lz;
     }
 
-    std::vector<double> ll(static_cast<std::size_t>(nstep) * NN, 0.0);
+    std::vector<double> ll(static_cast<std::size_t>(KK) * NN, 0.0);
     double best = -std::numeric_limits<double>::infinity();
     int bd = 0, bl = 0;
-    for (int k = 0; k < nstep; ++k)
+    for (int k = 0; k < KK; ++k)
     {
         prepare(k);
         for (int di = 0; di < dn; ++di)
@@ -819,7 +825,11 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
                 for (int i = 0; i < M; ++i)
                     acc += ray_term(k, di, li, i, depth, lat);
                 ll[static_cast<std::size_t>(k) * NN + di * ln + li] = acc;
-                if (acc + lprior[static_cast<std::size_t>(li)] > best)
+                // The MAP nuisance and n_inf below are the BELIEVED leaf's (k < nstep), exactly as before the hinge
+                // was marginalised: they measure how much this frame says about the ANGLE, and the other hinge's
+                // hypotheses are scored under the same tempering. Counting the rays that only separate the two
+                // hinges as well would temper the angle by evidence it never received (test (c): P 0.95 -> 0.78).
+                if (k < nstep and acc + lprior[static_cast<std::size_t>(li)] > best)
                 { best = acc + lprior[static_cast<std::size_t>(li)]; bd = di; bl = li; }
             }
         }
@@ -863,9 +873,9 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     const double beta = out.beta;
 
     // ── power likelihood, then marginalise the nuisances (log-mean-exp, uniform prior over the grid) ──
-    std::vector<double> m(static_cast<std::size_t>(nstep), -std::numeric_limits<double>::infinity());
+    std::vector<double> m(static_cast<std::size_t>(KK), -std::numeric_limits<double>::infinity());
     double mmax = -std::numeric_limits<double>::infinity();
-    for (int k = 0; k < nstep; ++k)
+    for (int k = 0; k < KK; ++k)
     {
         const double* v = &ll[static_cast<std::size_t>(k) * NN];
         double b = -std::numeric_limits<double>::infinity();
@@ -878,10 +888,11 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
         mmax = std::max(mmax, m[static_cast<std::size_t>(k)]);
     }
     out.loglik.reserve(static_cast<std::size_t>(nstep));
-    for (int k = 0; k < nstep; ++k)
+    for (int kk = 0; kk < KK; ++kk)
     {
+        const int k = kk % nstep;
         const float phi = phi_min + (phi_max - phi_min) * static_cast<float>(k) / (nstep - 1);
-        out.loglik.emplace_back(phi, static_cast<float>(m[static_cast<std::size_t>(k)] - mmax));
+        (kk < nstep ? out.loglik : out.loglik_other).emplace_back(phi, static_cast<float>(m[static_cast<std::size_t>(kk)] - mmax));
     }
     return out;
 }

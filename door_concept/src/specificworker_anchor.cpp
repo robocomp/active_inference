@@ -58,6 +58,7 @@
 #include <print>
 
 #include "door_anchor_update.h"
+#include "door_anchor_open.h"   // Task 11: the anchor's beams as open/shut evidence; the wait pose
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the clock read_affordance_anchor checks
 #include "../../common/room_resolve/room_resolve.h"
 #include "../../common/rt_twist/rt_twist.h"
@@ -230,6 +231,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.linked_epoch = aff.claim().has_value() ? aff.claim()->epoch : -1;
     pa.consumer_id  = aff.claim().has_value() ? aff.claim()->agent_node_id : 0;
     pa.pose         = init.value();
+    pa.init_pose    = init.value();   // Task 11 fix 4
     pa.axis_sign    = axis_sign;
     anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once (width_m set below)
     pa.approach_was_claimed = inst.aff_approach.claimed();
@@ -248,7 +250,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
         anchor_log_.open("etc/anchor_log.csv", std::ios::out | std::ios::trunc);
         anchor_log_.imbue(std::locale::classic());   // a comma decimal separator can never reach the file
         if (anchor_log_.is_open())
-            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view\n";
+            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view,open_llr\n";
     }
     return true;
 }
@@ -320,6 +322,8 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     // claim fails), and nothing seen before it may be published as "predicted" after it.
     pa.retry = false;
     pa.seen_once = false;
+    pa.init_pose = r.value();   // Task 11 fix 4: nothing seen since this retry ⇒ the room's initialisation is the wait pose
+    pa.init_pose.stamp_ms = pa.pose.stamp_ms;
     pa.mode = rc::door::AnchorPublish::None;
     std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
                "init (room − belief {:.2f} m / {:+.1f}°): moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n", pa.door_name, kind,
@@ -545,6 +549,7 @@ void SpecificWorker::step_passage_anchor()
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
                     pa.pose = r.value();
+                    pa.init_pose = r.value();   // Task 11 fix 4
                     pa.bias = {};
                     refresh_anchor_geometry(*inst, pa);
                     pa.reinit_on_next_claim = false;
@@ -562,6 +567,7 @@ void SpecificWorker::step_passage_anchor()
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
                         pa.pose = r.value();
+                        pa.init_pose = r.value();   // Task 11 fix 4
                         pa.bias = {};
                         refresh_anchor_geometry(*inst, pa);
                     }
@@ -608,6 +614,7 @@ void SpecificWorker::step_passage_anchor()
         rc::door::transport_bias(pa.bias, x_before, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt, pa.width);
         // The last SEEN posterior is carried by the same odometry (fix round 1: published while predicted, kAnchorPredictMs).
         if (pa.seen_once) pa.seen_pose = rc::interaction::predict(pa.seen_pose, twist.value(), var, dt);
+        else              pa.init_pose = rc::interaction::predict(pa.init_pose, twist.value(), var, dt);   // Task 11 fix 4
         // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
         rc::door::carry_held_mask(pa.cam_hold, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt);
     }
@@ -744,6 +751,8 @@ void SpecificWorker::step_passage_anchor()
         // request is not EVIDENCE that the door opened). For the visibility check — what the opening is EXPECTED to
         // look like — the commanded state is exactly the right prediction: π = passability under N(phi_est, σ_φ).
         const auto& pg = cfg_.pragmatic;
+        // ★ Task 11 fix 2: inst->interaction.p_open is ALREADY the fused P(open) (compute_interaction_state adds this
+        //   anchor's latest Λ to the leaf channel's π), so the visibility check below uses the fused π too.
         if (inst != nullptr and inst->interaction.p_open_known)
             pa.p_open_belief = std::clamp(inst->interaction.p_open, 0.f, 1.f);
         else if (inst != nullptr and inst->phi_from_command and pg.phi_sigma_rad > 0.f)
@@ -765,6 +774,9 @@ void SpecificWorker::step_passage_anchor()
         // range, plus a "not as believed" branch (LeafPrior::p_not_as_believed). door_concept carries NO posterior over
         // hinge / swing (they are Openable config pins or a side inherited from the other room; the M2 hypotheses are
         // not built), so p_hinge = p_swing = 0.5: uniform, the data decide. Without an AI2 belief φ is unknown too.
+        // (Task 11: the hinge now HAS a posterior — DoorInstance::hinge_llr, and inst->leaf.hinge is its MAP jamb. It is
+        //  deliberately not passed as p_hinge yet: the anchor update is Task 10's, and its uniform hinge already lets the
+        //  beams decide per frame. σ(hinge_llr) is the value to pass when that is revisited.)
         if (inst != nullptr)
         {
             const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
@@ -797,6 +809,15 @@ void SpecificWorker::step_passage_anchor()
     {
         ev.p_cam  = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, pa.pose);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
+        // ★ Task 11 fix 2: the anchor's own beams as evidence about the leaf, at the POSTERIOR it is about to publish,
+        //   tempered by that posterior's p_view (rc::door::anchor_open_llr). Fused into P(open) by
+        //   compute_interaction_state while fresh. A cycle with no rays says nothing new (the last Λ ages out).
+        if (not rays.empty())
+        {
+            const auto oe = rc::door::anchor_open_llr(pa.pose, pa.width, pa.thickness, lidar_origin, rays, ev.p_view);
+            pa.open_llr = oe.llr;
+            pa.open_llr_ms = now;
+        }
         if (not pa.az_logged and ev.az_step > 0.f)
         {
             pa.az_logged = true;
@@ -876,7 +897,10 @@ void SpecificWorker::step_passage_anchor()
         // LOOK. Written BORN STALE (stamped one tick past kAnchorStaleMs, as at creation): the controller never drives on
         // it, and its wait turns toward the opening where it is NOW, not where it was last published (try68: a pose
         // published once, 22 s and a full turn earlier — the controller turned toward it, faced a wall, and waited 40 s).
-        rc::interaction::RelPose out = pa.pose;
+        // ★ Task 11 fix 4: the last SEEN pose carried by odometry, else the room initialisation carried the same way —
+        //   NEVER pa.pose, the posterior p_view just refused to publish (try66 L2: it follows a wedge's odometry 81–89° off,
+        //   and the wait-turn swung hard at the jamb toward it). rc::door::wait_pose.
+        rc::interaction::RelPose out = rc::door::wait_pose(pa.seen_once, pa.seen_pose, pa.init_pose);
         out.stamp_ms = now - rc::interaction::kAnchorStaleMs - 1;
         wrote = pa.anchor->write(*G, out)
             and pa.anchor->set_unseen_ms(*G, int(std::min<std::int64_t>(now - pa.last_seen_ms, std::numeric_limits<int>::max())));
@@ -899,7 +923,9 @@ void SpecificWorker::step_passage_anchor()
                     << std::sqrt(std::max(0.0f, P(2, 2))) << ','
                     << (measured ? ev.n_through : -1) << ',' << (measured ? ev.n_blocked : -1) << ','
                     << (measured ? ev.n_short : -1) << ',' << (measured ? ev.p_open : -1.0f) << ','
-                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << '\n';
+                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << ','
+                    << (measured and pa.open_llr_ms == now ? pa.open_llr : std::numeric_limits<double>::quiet_NaN())
+                    << '\n';   // nan = no beams this cycle (every real number is a possible Λ)
         anchor_log_.flush();
     }
 }

@@ -197,6 +197,7 @@ public:
     // disappearing. It stays outside theta: the belief remains 3-DOF [s, w, h] and the shared inference
     // engine is untouched, exactly as door_geometry.h's header anticipated.
     void  set_leaf_phi(float phi) { params_.leaf.phi = phi; }
+    void  set_leaf_hinge(door::HingeSide h) { params_.leaf.hinge = h; }
 
     // ── THE HINGE BRANCH: free energy as a function of the leaf angle alone ──────────────────────
     // ★THIS IS THE SAME MINIMISATION THE AGENT ALREADY DOES, RESTRICTED TO ONE COORDINATE. Nothing new
@@ -281,6 +282,12 @@ public:
         // width. <= 0 ⇒ uniform over the grid (the old behaviour). Uniform let a SHUT leaf slide half a door-width onto
         // the solid wall beside the doorway and explain it perfectly (try44: every phi collapse had lat = -0.55 m).
         float lat_sigma = -1.0f;
+        // phi_field_loglik only (Task 11): ALSO score the leaf hung from the OTHER jamb (FieldResult::loglik_other).
+        // The hinge is a discrete hidden variable of the generative model, not a config fact: DOOR_1's real hinge is
+        // on the jamb the config pin (Near) does not name, and with only one hinge in the model the open leaf could be
+        // explained only by sliding the aperture one width along the wall (try69: 0.88 m) or by over-swinging it
+        // (118 deg for a leaf at 90). The two hypotheses share the frame's nuisances and its tempering.
+        bool other_hinge = false;
     };
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
@@ -325,6 +332,10 @@ public:
         float lat_map  = 0.0f;   // MAP aperture slide along the wall (m) — a placement error, if large
         float depth_map = 0.0f;  // MAP wall/leaf offset across the wall (m)
         int   n_rays   = 0;      // rays scored (after stride subsampling)
+        // FieldNuisance::other_hinge only: the same curve with the leaf on the OTHER jamb, on the SAME scale as
+        // `loglik` (their joint max is 0, so log Σ exp of each is that hinge's marginal evidence up to one constant).
+        // Empty when not asked for; then `loglik` alone has max 0, as before.
+        std::vector<std::pair<float, float>> loglik_other;
     };
     [[nodiscard]] FieldResult
     phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,

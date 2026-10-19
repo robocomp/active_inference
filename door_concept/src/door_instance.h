@@ -111,6 +111,9 @@ struct DoorInstance
     float dbg_phi_beta = 1.0f;
     float dbg_phi_lat  = 0.0f;
     bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
+    // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
+    // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
+    float hinge_llr    = 0.0f;
     float phi_support  = -1.0f;   // was the camera mask overlap at phi_est; -1 since the camera stopped scoring phi (2026-09-14)
     // ★IS phi_est A MEASUREMENT, OR OUR OWN REQUEST ECHOED BACK? True when the last thing to move it was
     // the PRIOR — the commanded swing — because the image offered no resolvable hypothesis at all.

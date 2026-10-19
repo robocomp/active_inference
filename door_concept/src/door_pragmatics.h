@@ -79,6 +79,10 @@ struct InteractionState
     // curve was produced this cycle. ★Published beside the probability on purpose — the two are the same
     // marginalisation over different weights, and a log that cannot tell them apart cannot be audited.
     bool  p_open_from_curve = false;
+    // Task 11 fix 2: p_open above is the leaf channel's π FUSED with the passage anchor's latest beams (fuse_open).
+    // These two say what went in: the leaf channel's own value, and the anchor's Λ (0 = none fused this cycle).
+    float p_open_leaf = 0.0f;
+    float anchor_open_llr = 0.0f;
 
     // P(the robot is AT the door for whatever comes next), marginalised over the door's state:
     //   P(open)·P(d ≤ reach) + P(shut)·P(in band).
