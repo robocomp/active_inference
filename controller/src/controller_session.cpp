@@ -1000,7 +1000,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         const bool is_cross = target->from_affordance and target->node_name.ends_with("_cross");
         // Task 9, fix A: a STALE anchor the cross names counts too — the servo waits for it (update_cross_anchor), and the
         // room-frame checks below would otherwise hand the cross back before it could (try66 leg 2: "standpoint occupied").
-        const bool anchored = is_cross and read_cross_anchor(target->node_id, target->node_name, /*accept_stale=*/true).has_value();
+        // try90 fix: …and so does a cross whose anchor is gone but which holds its measured gap (the anchor was its prior).
+        const bool anchored = is_cross and (read_cross_anchor(target->node_id, target->node_name, /*accept_stale=*/true).has_value()
+                                            or gap_carries_cross(target->node_name));
         if (not is_cross) anchor_hoist_logged_ = false;
         else if (anchored != anchor_hoist_logged_)
         {
@@ -3141,6 +3143,8 @@ void ControllerSession::reset_anchor_cross_state()
     gap_steering_logged_ = false;
     gap_lost_logged_ = false;
     cross_gate_ = {};
+    anchor_last_reading_.reset();
+    anchor_gone_logged_ = false;
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
 }
 
@@ -3163,6 +3167,26 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         reset_anchor_cross_state();
     }
     anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name, /*accept_stale=*/true);
+    if (anchor_cross_.has_value())
+    {
+        anchor_last_reading_ = anchor_cross_;
+        anchor_gone_logged_ = false;
+    }
+    else if (gap_carries_cross(step.target.node_name))
+    {
+        // try90 fix: the anchor was REMOVED (door_concept's own end-of-passage rule) while the cross holds its measured gap and
+        // has seen its near side — go on on the gap: the last reading stands in for the name and the door width only.
+        anchor_cross_ = anchor_last_reading_;
+        anchor_cross_->fresh = false;
+        if (not anchor_gone_logged_)
+        {
+            anchor_gone_logged_ = true;
+            const auto g = rc::anchor_cross_geometry(*gap_line_);
+            std::println("[gap] the anchor {} is gone — going on on the held gap until through (s {:+.2f} m, e {:+.3f} m)",
+                         anchor_cross_->name, g.s, g.e);
+        }
+        return true;
+    }
     if (not anchor_cross_.has_value())
     {
         if (anchor_mode_logged_ != 0)
@@ -3175,6 +3199,7 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
     anchor_latched_id_ = anchor_cross_->anchor_id;
     if (not anchor_cross_->fresh)
     {
+        if (gap_carries_cross(step.target.node_name)) return true;   // driven on the held gap: nothing is waited for
         if (anchor_mode_logged_ != 2)
         {
             anchor_mode_logged_ = 2;
@@ -3408,13 +3433,9 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
                                            ControllerObstacleTracker &obstacle_tracker)
 {
     const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-    if (gap_line_.has_value() and gap_carry_pose_.has_value() and gap_carry_room_ == current_room_name_)
-    {
-        const Eigen::Vector2f d = Eigen::Rotation2Df(gap_carry_pose_->theta).toRotationMatrix().transpose()
-                                * (pose.pos - gap_carry_pose_->pos);
-        const float dth = rc::interaction::wrap_pi(pose.theta - gap_carry_pose_->theta);
-        if (d.allFinite() and std::isfinite(dth)) gap_line_ = rc::doorway_gap_carry(*gap_line_, d.x(), d.y(), dth);
-    }
+    if (gap_line_.has_value() and gap_carry_pose_.has_value())
+        gap_line_ = rc::doorway_gap_carry_poses(*gap_line_, gap_carry_pose_->pos, gap_carry_pose_->theta, pose.pos, pose.theta,
+                                                gap_carry_room_ == current_room_name_);
     gap_carry_pose_ = pose;
     gap_carry_room_ = current_room_name_;
     gap_seen_now_ = false;
@@ -3446,7 +3467,8 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
         gap_width_ = g.width;
         gap_seen_now_ = true;
         const float heading = rc::doorway_gap_yaw(g.normal);
-        const bool changed = (Eigen::Vector2f(g.centre.x(), g.centre.y()) - gap_logged_.head<2>()).norm() > 0.05f
+        const float e_now = rc::anchor_cross_geometry(*gap_line_).e;   // the robot-frame centre moves with the robot: compare e
+        const bool changed = std::abs(e_now - gap_logged_.x()) > 0.05f
                           or std::abs(g.width - gap_logged_.z()) > 0.03f
                           or std::abs(rc::interaction::wrap_pi(heading - gap_logged_heading_)) > 0.05f;   // logging only
         if (first or changed)
@@ -3456,7 +3478,7 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
                          "(door {:.2f} m)", first ? "" : " (changed)", g.width, g.centre.x(), g.centre.y(), geo.e,
                          heading * 57.29578f, g.score, g.in_doorway ? ", from inside the doorway" : "",
                          g.wall_fitted ? ", wall refitted" : "", a.width_m);
-            gap_logged_ = {g.centre.x(), g.centre.y(), g.width};
+            gap_logged_ = {e_now, 0.f, g.width};
             gap_logged_heading_ = heading;
         }
         gap_lost_logged_ = false;

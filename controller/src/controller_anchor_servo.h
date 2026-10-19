@@ -264,6 +264,16 @@ struct CrossThroughGate
     [[nodiscard]] bool through(bool servo_through) const { return servo_through and near_seen; }
 };
 
+// ── THE ANCHOR GONE MID-CROSS (try90) ───────────────────────────────────────────────────────────────────────────────────
+// door_concept removes the anchor once the passage is over by ITS rule (Task 21: through the room switch, the predicted window
+// spent — try90: ~0.8 m past the plane). The anchor was only the prior for WHICH gap; once the cross holds a measured (or
+// carried) gap line and the robot was observed on its near side, the cross goes on on that line to `through` (s ≥ standoff),
+// the returns net in the chain — no wait, and no fallback to a room route on old-room coordinates (review NB2).
+[[nodiscard]] inline bool cross_continues_without_anchor(bool gap_held, const CrossThroughGate& gate)
+{
+    return gap_held and gate.near_seen;
+}
+
 // ── DRIVE ON A STALE ANCHOR? (Task 13 Fix E far side; Task 16: from the plane on) ───────────────────────────────────────
 // A fresh anchor is driven on. A stale one is driven on — on the pose odometry carries, the guards in the chain — once the
 // body's centre is PAST THE PLANE on that pose (s > 0: try76 leg 2 stood at s +0.36 for 40 s waiting for an anchor that

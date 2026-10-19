@@ -449,4 +449,20 @@ inline constexpr float kGapCarryTransSigma = 0.05f;
     return o;
 }
 
+
+// The carry the session runs, from two consecutive ROOM-frame robot poses (pos, θ; robot frame x right, y forward, room =
+// R(θ)·q + pos): the motion in the previous robot frame is d = R(θ_prev)ᵀ(pos − pos_prev), dθ = θ − θ_prev. Only within ONE
+// room frame: a room switch re-expresses the pose (try90: room_1 → room_2 at s +0.3 m), and that cycle's "motion" is a frame
+// change, not a displacement — dropped (same_room = false). The pure form of ControllerSession::update_doorway_gap's carry.
+[[nodiscard]] inline rc::interaction::RelPose doorway_gap_carry_poses(const rc::interaction::RelPose& r,
+                                                                     const Eigen::Vector2f& pos_prev, float th_prev,
+                                                                     const Eigen::Vector2f& pos, float th, bool same_room)
+{
+    if (not same_room) return r;
+    const Eigen::Vector2f d = Eigen::Rotation2Df(th_prev).toRotationMatrix().transpose() * (pos - pos_prev);
+    const float dth = rc::interaction::wrap_pi(th - th_prev);
+    if (not d.allFinite() or not std::isfinite(dth)) return r;
+    return doorway_gap_carry(r, d.x(), d.y(), dth);
+}
+
 }  // namespace rc

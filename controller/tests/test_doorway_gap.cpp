@@ -375,6 +375,22 @@ int main()
         CHECK(not g3.observe(false, -1.8f, 0.2471f) and not g3.through(true));
     }
 
+    // (i) try90: the carry across a room switch — the frame jump is not motion; without the anchor the gate decides.
+    {
+        RelPose l;
+        l.x = {0.f, -0.8f, 0.f};
+        l.P = Eigen::Matrix3f::Identity() * 1e-4f;
+        const auto same = rc::doorway_gap_carry_poses(l, Eigen::Vector2f(1.f, 2.f), 0.3f, Eigen::Vector2f(1.3f, 1.8f), 0.35f, false);
+        CHECK((same.x - l.x).norm() < 1e-6f);
+        const auto moved = rc::doorway_gap_carry_poses(l, Eigen::Vector2f(0.f, 0.f), 0.f, Eigen::Vector2f(0.f, 0.1f), 0.f, true);
+        CHECK(std::abs(moved.x.y() - (-0.9f)) < 1e-5f);   // 0.1 m forward: the line 0.1 m further behind
+        rc::CrossThroughGate gate;
+        CHECK(not rc::cross_continues_without_anchor(true, gate));    // near side never seen: the anchor is still needed
+        (void)gate.observe(true, -1.5f, 0.2471f);
+        CHECK(rc::cross_continues_without_anchor(true, gate));
+        CHECK(not rc::cross_continues_without_anchor(false, gate));   // no held gap: nothing to go on with
+    }
+
     // Cost: one measurement on a full 1440-beam scan.
     {
         const auto w = wall_with_openings({{-0.45f, 0.45f}, {1.2f, 3.2f}}, 0.10f);
@@ -392,7 +408,7 @@ int main()
     // GAP → the jamb guard on the gap → the returns net. Lost gap ⇒ carried by the (true) motion. Ends `through` with no
     // contact of the body against any box.
     const auto integrate = [&](float noise, bool leaf_west, float x0, float th0_deg, float anchor_err, bool blind = false, bool sparse = false,
-                               bool flip = false)
+                               bool flip = false, bool anchor_removed = false)
     {
         auto w = wall_with_openings({{-0.45f, 0.45f}}, 0.10f, true, sparse ? -2.17f : -4.f);
         if (leaf_west) w.boxes.push_back({-0.45f, -0.95f, -0.41f, -0.05f});
@@ -410,6 +426,17 @@ int main()
         float line_width = 0.f;
         bool through = false, contact = false;
         rc::CrossThroughGate gate;
+        // try90: the ROOM frame the session reads poses in. It jumps at the room switch (s +0.3 m: a new frame, 0.3 m and
+        // 0.05 rad away), and the carry must not read that as motion. `anchor_removed`: from s +0.8 the anchor is gone.
+        Eigen::Affine2f room_from_world = Eigen::Affine2f::Identity();
+        bool switched = false, removed = false;
+        int removed_at = -1;
+        const auto room_pose = [&](const Pose& q)
+        {
+            const Eigen::Vector2f pos = room_from_world * Eigen::Vector2f(q.x, q.y);
+            const float th = q.th + std::atan2(room_from_world.linear()(1, 0), room_from_world.linear()(0, 0));
+            return std::pair<Eigen::Vector2f, float>{pos, th};
+        };
         int seen_cycles = 0, lost_cycles = 0, k = 0;
         float min_clear = 1e9f;
         for (; k < int(90.f / dt) and not through; ++k)
@@ -428,6 +455,7 @@ int main()
             }
             else
             {
+                CHECK(not removed);   // once the anchor is gone nothing may ask for it
                 pr = prior_of(p, door, 0.9f, 0.02f, anchor_err);
                 if (flip) pr->normal = -pr->normal;   // try89: a leftover anchor with its normal flipped
             }
@@ -451,11 +479,26 @@ int main()
             (void)rc::lidar_cap_command(ret.obstacles, kBody, margin, a_dec, v_max, w_max, adv, side, rot);
             // Integrate the unicycle (forward = R(th)·(0,1)), and carry the gap line by the same motion.
             const float dth = rot * dt, ds = adv * dt;
+            const auto [rp0, rth0] = room_pose(p);
             p.x += -std::sin(p.th + 0.5f * dth) * ds;
             p.y += std::cos(p.th + 0.5f * dth) * ds;
             p.th += dth;
-            // The motion in the PREVIOUS robot frame: forward ds along a chord turned by dth/2.
-            line = rc::doorway_gap_carry(*line, -std::sin(0.5f * dth) * ds, std::cos(0.5f * dth) * ds, dth);
+            bool same_room = true;
+            if (anchor_removed and not switched and p.y > 0.3f)
+            {
+                switched = true;
+                same_room = false;
+                room_from_world = Eigen::Translation2f(0.3f, -0.2f) * Eigen::Rotation2Df(0.05f);
+            }
+            // The session's carry: room-pose deltas within one room frame (the switch cycle dropped).
+            const auto [rp1, rth1] = room_pose(p);
+            line = rc::doorway_gap_carry_poses(*line, rp0, rth0, rp1, rth1, same_room);
+            if (anchor_removed and not removed and rc::anchor_cross_geometry(*line).s > 0.8f)
+            {
+                removed = true;
+                removed_at = k;
+                CHECK(rc::cross_continues_without_anchor(line.has_value(), gate));   // the cross goes on on the held gap
+            }
             for (const auto& q : solid)
             {
                 const Eigen::Vector2f qr = to_robot(p, q);
@@ -470,6 +513,12 @@ int main()
                      min_clear, contact);
         CHECK(through);
         CHECK(not contact);
+        if (anchor_removed)
+        {
+            std::println("    anchor removed at cycle {} (s > +0.8, after the room switch), through {:.1f} s later", removed_at,
+                         (k - removed_at) * dt);
+            CHECK(switched and removed and (k - removed_at) * dt < 10.f);   // no wait: straight on to the standoff
+        }
         CHECK(p.y > 1.5f);
     };
     integrate(0.01f, true, 0.3f, 10.f, 0.2f);     // the brief's case, with a try74-like wrong anchor
@@ -479,6 +528,8 @@ int main()
     integrate(0.02f, true, 0.45f, 2.f, 0.15f, false, /*sparse=*/true);   // try86's start: e -0.45, s -1.37, heading +2 deg
     integrate(0.02f, false, -0.45f, -8.f, -0.3f, true, /*sparse=*/true);
     integrate(0.02f, true, 0.3f, 10.f, 0.2f, false, false, /*flip=*/true);   // try89: the anchor's normal FLIPPED
+    integrate(0.02f, true, 0.3f, 10.f, 0.0f, false, false, false, /*anchor_removed=*/true);   // try90: anchor gone at s +0.8
+    integrate(0.02f, false, -0.2f, -5.f, 0.1f, /*blind=*/true, false, false, /*anchor_removed=*/true);
     // A random sweep: start offset ±0.35 m, heading ±15°, anchor error ±0.5 m, either leaf side, blind or not.
     {
         std::mt19937 r2(11);

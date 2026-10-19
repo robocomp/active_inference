@@ -1001,7 +1001,16 @@ private:
     // try89 fix: `through` needs the robot OBSERVED on the near side (s < −body half-length, on a seen gap or a seen anchor)
     // earlier in this claim; a claim that never was cannot complete as through.
     rc::CrossThroughGate cross_gate_;
-    Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // centre x, y, width at the last "[gap] seen" line
+    // try90 fix: the last anchor reading of this cross — once the anchor is REMOVED, a cross that holds a gap and has seen its
+    // near side goes on with it (rc::cross_continues_without_anchor): the reading is kept only for its name and door width.
+    std::optional<AnchorCrossReading> anchor_last_reading_;
+    bool anchor_gone_logged_ = false;
+    [[nodiscard]] bool gap_carries_cross(const std::string &cross_name) const
+    {
+        return anchor_latched_for_ == cross_name and anchor_last_reading_.has_value()
+           and rc::cross_continues_without_anchor(gap_line_.has_value(), cross_gate_);
+    }
+    Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // e, (unused), width at the last "[gap] seen" line
     float gap_logged_heading_ = 0.f;
     std::string current_room_name_;                             // the room frame robot poses are read in (this cycle)
     // One gap cycle: carry, measure on the prior (the carried gap, else the anchor), log. True = steer on gap_line_.
