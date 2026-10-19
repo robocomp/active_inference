@@ -10,6 +10,7 @@
 #include "../src/controller_runtime_types.h"
 
 #include <cstdlib>
+#include <numbers>
 #include <random>
 #include "../../common/robot_footprint/robot_footprint.h"
 
@@ -440,6 +441,205 @@ int main()
             CHECK(rn.obstacles.size() == 1 and rc::lidar_return_speed_limit(rn.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax) == 0.f);
             // The contact standoff (margin from the RETURNS body) brakes before the self footprint's front.
             CHECK(front(ret_body) + kMargin > front(self_fp));
+        }
+    }
+
+    // 13. try104 — "the robot repeatedly hits the wall when the target is to its left". The REAL Shadow bodies: the planning
+    //     hull (what the simulator renders and collides, front 0.2300), the mesh outline (robot_concept/meshes/shadow.obj),
+    //     the returns body and the round-5 self footprint built from them as the session builds them. TRUE geometry for
+    //     contact = the hull ∪ the two differential drive wheels of webots-shadow/protos/Shadow.proto (axle |x| 0.259,
+    //     R 0.10, width 0.05 ⇒ |x| ≤ 0.284, |y| ≤ 0.10; the compiled hull stops at 0.2716 — see the report). A wall
+    //     (segment), sampled every 1 cm, returns drawn along the ray from the centre with N(0, σ) range noise (fixed seed),
+    //     the cloud put in the ROOM frame and read back through lidar_guard_returns_room on the moving pose, as live. The
+    //     robot asks for an in-place turn at the tracker's 0.58 rad/s; the command goes through the session's chain
+    //     (rc::lidar_guard_command: the turn's room, then the caps; a command held whole goes to the returns' backoff);
+    //     the base executes it ONE CYCLE LATE (65 ms, the measured control period). Contact = a noise-free wall point
+    //     inside the TRUE body, checked at 5 sub-steps per cycle.
+    {
+        rc::RobotFootprint::MeshReport rep;
+        const auto mesh = rc::RobotFootprint::from_obj("../robot_concept/meshes/shadow.obj", 0.f, rep);
+        CHECK(mesh.has_value());
+        if (mesh.has_value())
+        {
+            const auto ret_body = rc::lidar_returns_body(body, mesh->polygon());
+            const auto self_fp = rc::lidar_self_footprint(body, mesh->polygon(), kSigma);
+            std::vector<Eigen::Vector2f> true_pts(body.begin(), body.end());
+            for (const float sx : {-1.f, 1.f})
+                for (const float y : {-0.10f, 0.10f}) { true_pts.emplace_back(sx * 0.234f, y); true_pts.emplace_back(sx * 0.284f, y); }
+            const auto true_body = rc::mesh::convex_hull_2d(std::move(true_pts));
+            constexpr float kDt = 0.065f, kAsk = 0.58f;
+            // A wall segment from a to b (room frame; the start pose is the room origin, heading +y).
+            struct Wall { Eigen::Vector2f a, b; };
+            struct Outcome { bool contact = false; float min_true_sd = 1e9f; float turned = 0.f; int held = 0, backoff = 0, room = 0;
+                             int deleted_near = 0; };
+            enum class Rule { Old, New };
+            const auto run = [&](const Wall& wall, float sign, Rule rule, float sigma_gen, int cycles, float prime_back)
+            {
+                std::mt19937 rng(104);
+                std::normal_distribution<float> noise(0.f, sigma_gen);
+                rc::LidarWorldMemory memory;
+                Eigen::Vector2f pos(0.f, 0.f);
+                float th = 0.f;
+                float pending_adv = 0.f, pending_rot = 0.f;   // last cycle's command: what the base executes now
+                Outcome o;
+                const auto T = [&] { return Eigen::Affine2f(Eigen::Translation2f(pos) * Eigen::Rotation2Df(th)); };
+                std::vector<Eigen::Vector2f> wall_fine;
+                const float len = (wall.b - wall.a).norm();
+                for (float s = 0.f; s <= len; s += 0.005f) wall_fine.push_back(wall.a + (s / len) * (wall.b - wall.a));
+                const auto true_contact = [&]
+                {
+                    const Eigen::Affine2f inv = T().inverse();
+                    bool c = false;
+                    for (const auto& w : wall_fine)
+                    {
+                        const float sd = rc::anchor_signed_distance(true_body, inv * w);
+                        o.min_true_sd = std::min(o.min_true_sd, sd);
+                        c = c or sd < 0.f;
+                    }
+                    return c;
+                };
+                const auto sweep = [&]
+                {
+                    rc::RawLidarPointVectors raw;
+                    const Eigen::Affine2f Tn = T();
+                    for (float s = 0.f; s <= len; s += 0.01f)
+                    {
+                        const Eigen::Vector2f w = wall.a + (s / len) * (wall.b - wall.a);
+                        const Eigen::Vector2f q = Tn.inverse() * w;
+                        const Eigen::Vector2f wn = Tn * Eigen::Vector2f(q * ((q.norm() + noise(rng)) / q.norm()));
+                        raw.xs.push_back(wn.x()); raw.ys.push_back(wn.y()); raw.zs.push_back(0.9f);
+                    }
+                    return raw;
+                };
+                const auto read = [&](const rc::RawLidarPointVectors& raw)
+                {
+                    return rule == Rule::New
+                        ? rc::lidar_guard_returns_room(raw.xs, raw.ys, T(), ret_body, kSigma, 0.6f, self_fp, body, &memory)
+                        : rc::lidar_guard_returns_room(raw.xs, raw.ys, T(), ret_body, kSigma, 0.6f, self_fp);
+                };
+                // The approach: the robot saw this wall from `prime_back` further back (one sweep) before it got here.
+                if (prime_back > 0.f)
+                {
+                    pos = Eigen::Vector2f(0.f, -prime_back);
+                    (void)read(sweep());
+                    pos = Eigen::Vector2f(0.f, 0.f);
+                }
+                o.contact = true_contact();
+                for (int k = 0; k < cycles and not o.contact; ++k)
+                {
+                    for (int sub = 0; sub < 5 and not o.contact; ++sub)   // the base executes the PREVIOUS cycle's command
+                    {
+                        th += pending_rot * kDt / 5.f;
+                        pos += Eigen::Rotation2Df(th) * Eigen::Vector2f(0.f, pending_adv * kDt / 5.f);
+                        o.turned += pending_rot * kDt / 5.f;
+                        o.contact = true_contact();
+                    }
+                    const auto r = read(sweep());
+                    if (k == 0) o.deleted_near = r.n_self;
+                    const auto g = rc::lidar_guard_command(r.obstacles, ret_body, kMargin, kAdec, kVmax, kWmax, false,
+                                                           rc::AnchorCommand{0.f, 0.f, sign * kAsk, false});
+                    float adv = g.cmd.adv, rot = g.cmd.rot;
+                    o.room += g.turn_room;
+                    if (adv == 0.f and rot == 0.f)
+                    {
+                        ++o.held;
+                        if (const auto b = rc::lidar_return_backoff(r.obstacles, ret_body, kMargin, kSigma, kAdec, kVmax, kWmax, false);
+                            b.has_value())
+                        { ++o.backoff; adv = b->adv; rot = b->rot; }
+                    }
+                    pending_adv = adv; pending_rot = rot;
+                    if (std::abs(o.turned) >= std::numbers::pi_v<float> / 2.f) break;   // turned to the target
+                }
+                return o;
+            };
+            const auto report = [](const char* what, float gap, float sg, float sign, const char* rule, const Outcome& o)
+            {
+                std::println("  try104 {} {:.3f} m [noise {:.2f}], turn {} — {}: contact {} (true clearance min {:+.3f} m), turned {:+.2f} rad, "
+                             "deleted as self at first {}, held {}, turn-room {}, backoff {}", what, gap, sg, sign > 0 ? "LEFT " : "RIGHT",
+                             rule, o.contact, o.min_true_sd, o.turned, o.deleted_near, o.held, o.room, o.backoff);
+            };
+            const float quarter = std::numbers::pi_v<float> / 2.f - 1e-3f;
+            // (a) THE LIVE CASE: a surface ahead that the body's front has come to within 0.5–2 cm of — the try104 returns
+            //     spanned body x −0.16..+0.16 at y 0.236–0.258. A 0.36 m panel, inside the round-5 self footprint (front
+            //     0.2777) end to end, seen one sweep earlier from 6 cm back (the approach). The target 90° to the left, and
+            //     to the right.
+            for (const float sg : {0.01f, kSigma})
+                for (const float gap : {0.005f, 0.01f, 0.02f})
+                    for (const float sign : {+1.f, -1.f})
+                    {
+                        const float y = 0.2300f + gap;
+                        const Wall w{Eigen::Vector2f(-0.18f, y), Eigen::Vector2f(0.18f, y)};
+                        const auto o_old = run(w, sign, Rule::Old, sg, 400, 0.06f);
+                        const auto o_new = run(w, sign, Rule::New, sg, 400, 0.06f);
+                        report("panel AHEAD", gap, sg, sign, "OLD rule", o_old);
+                        report("panel AHEAD", gap, sg, sign, "NEW rule", o_new);
+                        if (sg < kSigma) CHECK(o_old.contact);   // the try104 failure, reproduced: the panel deleted as the robot
+                        CHECK(not o_new.contact);                // never a turn into it
+                        CHECK(std::abs(o_new.turned) >= quarter and o_new.turned * sign > 0.f);   // and the way out: it turns
+                    }
+            // (b) A LONG wall ahead (it runs past the body's sides: the world continues into the footprint), no approach seen.
+            for (const float gap : {0.005f, 0.02f})
+                for (const float sign : {+1.f, -1.f})
+                {
+                    const float y = 0.2300f + gap;
+                    const auto o = run(Wall{Eigen::Vector2f(-1.5f, y), Eigen::Vector2f(1.5f, y)}, sign, Rule::New, 0.01f, 600, 0.f);
+                    report("wall AHEAD", gap, 0.01f, sign, "NEW rule", o);
+                    CHECK(not o.contact);
+                    CHECK(std::abs(o.turned) >= quarter and o.turned * sign > 0.f);
+                }
+            // (c) A wall on the RIGHT, parallel to the side, at 1 cm, 3 cm and 0.2 m from the TRUE side (the wheel face), the
+            //     target to the left (and right): the tail / nose swing into it is never commanded.
+            for (const float gap : {0.01f, 0.03f, 0.20f})
+                for (const float sign : {+1.f, -1.f})
+                {
+                    const float x = 0.284f + gap;
+                    const auto o = run(Wall{Eigen::Vector2f(x, -1.5f), Eigen::Vector2f(x, 1.5f)}, sign, Rule::New, kSigma, 600, 0.f);
+                    report("wall RIGHT", gap, kSigma, sign, "NEW rule", o);
+                    CHECK(not o.contact);
+                    if (gap >= 0.2f) CHECK(o.held == 0 and std::abs(o.turned) >= quarter);   // far enough: the turn is simply free
+                }
+            // (d) Round 5 is kept for what it was for: ISOLATED returns on the front cover (y +0.26, no world beside them, no
+            //     memory) are still the robot under the new rule — forward stays free; and a wall at the same y that runs
+            //     past the body's sides is the WORLD (it continues into returns outside the footprint) — forward stops.
+            {
+                std::vector<Eigen::Vector2f> cover, wall;
+                for (float x = -0.20f; x <= 0.2001f; x += 0.02f) cover.emplace_back(x, 0.26f);
+                for (float x = -0.60f; x <= 0.6001f; x += 0.02f) wall.emplace_back(x, 0.26f);
+                const auto rc_ = rc::lidar_guard_returns(cover, ret_body, kSigma, 0.6f, self_fp, body);
+                const auto rw = rc::lidar_guard_returns(wall, ret_body, kSigma, 0.6f, self_fp, body);
+                const float vc = rc::lidar_return_speed_limit(rc_.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax);
+                const float vw = rc::lidar_return_speed_limit(rw.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax);
+                std::println("  new rule: isolated front-cover returns at y +0.26 -> {} self, fwd {:.3f}; a WALL at y +0.26 -> {} self, "
+                             "{} kept, fwd {:.3f}", rc_.n_self, vc, rw.n_self, rw.obstacles.size(), vw);
+                CHECK(rc_.n_self == int(cover.size()) and vc == kVmax);
+                CHECK(rw.n_self == 0 and vw == 0.f);
+                // Inside the TRUE body is the robot whatever is around it.
+                const auto ri = rc::lidar_guard_returns(std::vector<Eigen::Vector2f>{{0.f, 0.20f}, {0.3f, 0.20f}}, ret_body, kSigma,
+                                                        0.6f, self_fp, body);
+                CHECK(ri.n_self == 1);
+            }
+            // (e) A world return the body already touches (inside the returns body, kept because the wall it belongs to runs
+            //     past the sides) holds only the motion that deepens it: forward held, reverse free, and the backoff's
+            //     rollout is not vetoed by the contact itself.
+            {
+                std::vector<Eigen::Vector2f> touch;
+                for (float x = -0.60f; x <= 0.6001f; x += 0.02f) touch.emplace_back(x, 0.240f);
+                const auto r = rc::lidar_guard_returns(touch, ret_body, kSigma, 0.6f, self_fp, body);
+                CHECK(r.n_self == 0);
+                CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax) == 0.f);
+                CHECK(rc::lidar_return_speed_limit(r.obstacles, kBack, ret_body, kMargin, kAdec, kVmax) > 0.99f * kVmax);
+                const auto b = rc::lidar_return_backoff(r.obstacles, ret_body, kMargin, kSigma, kAdec, kVmax, kWmax, false);
+                CHECK(b.has_value() and b->adv < 0.f);
+                // The asked turn, either way, is refused in place and given its room: reverse while turning.
+                for (const float sign : {+1.f, -1.f})
+                {
+                    const auto g = rc::lidar_guard_command(r.obstacles, ret_body, kMargin, kAdec, kVmax, kWmax, false,
+                                                           rc::AnchorCommand{0.f, 0.f, sign * kAsk, false});
+                    std::println("  touching a wall ahead, turn {} asked: turn-room {} ({} blockers) -> adv {:+.3f} rot {:+.3f}",
+                                 sign > 0 ? "LEFT" : "RIGHT", g.turn_room, g.turn_blockers, g.cmd.adv, g.cmd.rot);
+                    CHECK(g.turn_room and g.cmd.adv < 0.f);
+                }
+            }
         }
     }
 

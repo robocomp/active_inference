@@ -58,6 +58,8 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -151,47 +153,139 @@ struct LidarGuardReturns
     std::vector<Eigen::Vector2f> band_points;
 };
 
+// ── WHICH RETURNS ARE THE ROBOT: A HYPOTHESIS DECIDED ON EVIDENCE, NOT ON A BAND (try104) ─────────────────────────────
+// try104 leg 1 (room_1's corridor stub, the target 90° to the LEFT): the robot stood with its front against a wall and the
+// net alternated, cycle by cycle, "DRIVING rot +0.58 (left)" ↔ "HELD BY RETURNS |w| <= 0". Reconstructed from
+// proximity_obstacles.csv on the estimated pose, the wall's nearest returns sat at body-frame y 0.236–0.258 — AT the
+// robot's front (the simulated body, shadow.stl, ends at y 0.2300; the mesh outline at 0.2472) and 2–4 cm INSIDE the
+// round-5 self footprint (mesh ⊕ σ_r, front 0.2777). Every one of them was deleted as "the robot". The net saw the wall
+// only on the cycles when range noise threw a return past 0.2777, and on every other cycle it let the tracker's full turn
+// through: the turn swept the front corner into the wall it was touching (ground truth, gt_error.csv: the robot pivoted
+// 0.146 rad CCW in place against it). The band that hid the robot's own front cover hid the WORLD at exactly the range at
+// which the net exists to act — round 1's failure (a guard that releases in the last centimetres), reintroduced.
+// A return in the self footprint is not the robot by being there; it is the robot when nothing in the WORLD explains it.
+// The world is spatially continuous and fixed in the room; the robot's own returns are neither, relative to it. So a
+// return inside the self footprint but outside the TRUE body (`true_body`, the planning hull — what the simulator renders
+// and collides, and the only region no world return can physically occupy) is the world when
+//   · it lies in the σ_r cell of, or a cell adjacent to, a world return of THIS sweep (a surface continues: a wall whose
+//     ends reach past the footprint carries its middle with it — propagated until nothing changes), or
+//   · its ROOM-frame cell, or an adjacent one, held a world return LAST sweep (`memory`: the world does not move when the
+//     robot does — an obstacle approached from outside the band is still the obstacle once inside it).
+// Otherwise it stays the robot (round 5's protection against the front cover is kept for isolated returns). The cell is
+// σ_r, the same discretisation the guard already merges on, and "adjacent" is the 8-neighbourhood of a discretised
+// surface — no new level. A return inside `true_body` is always the robot (the r ≈ 0 population, the wheels).
 // Robot-frame returns → guard obstacles. `reach` = the radius beyond which no return can cap a motion this cycle: the
 // grown body's reach plus the braking distance from v_cap (ARITHMETIC: there the stopping law gives ≥ v_cap and the sweep
 // cannot reach). Returns are merged one per σ_r cell (the nearest to the centre) — a discretisation below the sensor's
 // own noise, so it changes no answer by more than σ_r, and it bounds the per-cycle cost. `next(i)` yields the i-th return
 // in the robot frame (or nullopt to skip it), so a caller streams its own cloud without an intermediate copy.
-// `self_body` (fix round 5): the SELF footprint a return is the robot inside; empty ⇒ `body`. `body` is the returns body
-// the band is measured against.
-template <class Next>
-[[nodiscard]] inline LidarGuardReturns lidar_guard_returns_from(std::size_t n, Next&& next,
+// `self_body` (fix round 5): the SELF footprint the robot's own returns can lie in; empty ⇒ `body`. `body` is the returns
+// body the band is measured against. `true_body`: the region only the robot occupies; empty ⇒ `self_body` (the old rule:
+// everything in the self footprint is the robot). `room(i)` / `memory`: the room-frame cell memory (may be absent).
+struct LidarWorldMemory
+{
+    std::unordered_set<std::int64_t> cells;   // room-frame σ_r cells that held a world return in the last sweep
+};
+
+[[nodiscard]] inline std::int64_t lidar_cell_key(const Eigen::Vector2f& q, float s)
+{
+    const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
+    return (ci << 32) ^ (cj & 0xffffffff);
+}
+[[nodiscard]] inline bool lidar_cell_near(const std::unordered_set<std::int64_t>& cells, const Eigen::Vector2f& q, float s)
+{
+    if (cells.empty()) return false;
+    const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
+    for (std::int64_t a = -1; a <= 1; ++a)
+        for (std::int64_t b = -1; b <= 1; ++b)
+            if (cells.contains(((ci + a) << 32) ^ ((cj + b) & 0xffffffff))) return true;
+    return false;
+}
+
+template <class Next, class Room>
+[[nodiscard]] inline LidarGuardReturns lidar_guard_returns_from(std::size_t n, Next&& next, Room&& room,
                                                                 std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
-                                                                std::span<const Eigen::Vector2f> self_body = {})
+                                                                std::span<const Eigen::Vector2f> self_body,
+                                                                std::span<const Eigen::Vector2f> true_body,
+                                                                LidarWorldMemory* memory)
 {
     const std::span<const Eigen::Vector2f> self = self_body.empty() ? body : self_body;
+    const std::span<const Eigen::Vector2f> solid = true_body.empty() ? self : true_body;
+    const bool weigh = not true_body.empty();   // the old rule (no true body given) deletes the whole self footprint
     LidarGuardReturns out;
     const float s = std::max(sigma_r, 1e-3f);
     const Eigen::Matrix2f cov = (s * s) * Eigen::Matrix2f::Identity();
     std::unordered_map<std::int64_t, std::size_t> cell;
+    std::unordered_set<std::int64_t> world_robot, world_room;   // this sweep's world cells, robot and room frame
+    struct Pending { Eigen::Vector2f q; std::optional<Eigen::Vector2f> w; };
+    std::vector<Pending> pending;                                // in the self footprint, outside the true body
+    const auto keep = [&](const Eigen::Vector2f& q, const std::optional<Eigen::Vector2f>& w)
+    {
+        if (not out.nearest_any.has_value() or q.squaredNorm() < out.nearest_any->squaredNorm()) out.nearest_any = q;
+        if (anchor_signed_distance(body, q) < sigma_r) { ++out.n_band; out.band_points.push_back(q); }
+        world_robot.insert(lidar_cell_key(q, s));
+        if (w.has_value()) world_room.insert(lidar_cell_key(*w, s));
+        const std::int64_t key = lidar_cell_key(q, s);
+        if (const auto it = cell.find(key); it != cell.end())
+        {
+            if (q.norm() < out.obstacles[it->second].mean.norm()) out.obstacles[it->second].mean = q;
+            return;
+        }
+        cell.emplace(key, out.obstacles.size());
+        out.obstacles.push_back(AnchorJamb{q, cov, 0.f, 1.f});
+    };
     for (std::size_t i = 0; i < n; ++i)
     {
         ++out.n_read;
         const std::optional<Eigen::Vector2f> qo = next(i);
         if (not qo.has_value() or not qo->allFinite()) { ++out.n_nonfinite; continue; }
         const Eigen::Vector2f q = *qo;
-        const auto note_nearest = [&] { if (not out.nearest_any.has_value() or q.squaredNorm() < out.nearest_any->squaredNorm()) out.nearest_any = q; };
-        if (q.norm() > reach) { ++out.n_far; note_nearest(); continue; }
-        if (anchor_point_in_convex(self, q)) { ++out.n_self; continue; }
-        const float sd = anchor_signed_distance(body, q);
-        if (sd < 0.f) { ++out.n_self; continue; }   // inside the returns body (⊂ self when the self footprint is given)
-        note_nearest();
-        if (sd < sigma_r) { ++out.n_band; out.band_points.push_back(q); }
-        const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
-        const std::int64_t key = (ci << 32) ^ (cj & 0xffffffff);
-        if (const auto it = cell.find(key); it != cell.end())
+        if (q.norm() > reach)
         {
-            if (q.norm() < out.obstacles[it->second].mean.norm()) out.obstacles[it->second].mean = q;
+            ++out.n_far;
+            if (not out.nearest_any.has_value() or q.squaredNorm() < out.nearest_any->squaredNorm()) out.nearest_any = q;
             continue;
         }
-        cell.emplace(key, out.obstacles.size());
-        out.obstacles.push_back(AnchorJamb{q, cov, 0.f, 1.f});
+        if (anchor_point_in_convex(solid, q)) { ++out.n_self; continue; }
+        const std::optional<Eigen::Vector2f> w = room(i);
+        if (anchor_point_in_convex(self, q) or (not weigh and anchor_signed_distance(body, q) < 0.f))
+        {
+            if (weigh) pending.push_back({q, w});
+            else ++out.n_self;
+            continue;
+        }
+        keep(q, w);
     }
+    // The ambiguous returns: the world wherever the world explains them, propagated to a fixed point.
+    for (bool changed = true; changed and not pending.empty();)
+    {
+        changed = false;
+        for (std::size_t k = 0; k < pending.size();)
+        {
+            const auto& p = pending[k];
+            const bool world = lidar_cell_near(world_robot, p.q, s)
+                               or (memory != nullptr and p.w.has_value() and lidar_cell_near(memory->cells, *p.w, s));
+            if (not world) { ++k; continue; }
+            keep(p.q, p.w);
+            pending[k] = pending.back();
+            pending.pop_back();
+            changed = true;
+        }
+    }
+    out.n_self += int(pending.size());
+    if (memory != nullptr) memory->cells = std::move(world_room);
     return out;
+}
+
+template <class Next>
+[[nodiscard]] inline LidarGuardReturns lidar_guard_returns_from(std::size_t n, Next&& next,
+                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
+                                                                std::span<const Eigen::Vector2f> self_body = {},
+                                                                std::span<const Eigen::Vector2f> true_body = {})
+{
+    return lidar_guard_returns_from(n, std::forward<Next>(next),
+                                    [](std::size_t) -> std::optional<Eigen::Vector2f> { return std::nullopt; },
+                                    body, sigma_r, reach, self_body, true_body, nullptr);
 }
 
 // The session's entry point: a ROOM-frame cloud (the obstacle tracker's lidar buffer: z-banded, room frame) and the robot's
@@ -200,7 +294,9 @@ template <class Next>
 [[nodiscard]] inline LidarGuardReturns lidar_guard_returns_room(std::span<const float> xs_room, std::span<const float> ys_room,
                                                                 const Eigen::Affine2f& room_T_robot,
                                                                 std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
-                                                                std::span<const Eigen::Vector2f> self_body = {})
+                                                                std::span<const Eigen::Vector2f> self_body = {},
+                                                                std::span<const Eigen::Vector2f> true_body = {},
+                                                                LidarWorldMemory* memory = nullptr)
 {
     const Eigen::Affine2f robot_from_room = room_T_robot.inverse();
     return lidar_guard_returns_from(std::min(xs_room.size(), ys_room.size()),
@@ -209,16 +305,18 @@ template <class Next>
                                         if (not std::isfinite(xs_room[i]) or not std::isfinite(ys_room[i])) return std::nullopt;
                                         return robot_from_room * Eigen::Vector2f(xs_room[i], ys_room[i]);
                                     },
-                                    body, sigma_r, reach, self_body);
+                                    [&](std::size_t i) -> std::optional<Eigen::Vector2f> { return Eigen::Vector2f(xs_room[i], ys_room[i]); },
+                                    body, sigma_r, reach, self_body, true_body, memory);
 }
 
 [[nodiscard]] inline LidarGuardReturns lidar_guard_returns(std::span<const Eigen::Vector2f> points_robot,
                                                            std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
-                                                           std::span<const Eigen::Vector2f> self_body = {})
+                                                           std::span<const Eigen::Vector2f> self_body = {},
+                                                           std::span<const Eigen::Vector2f> true_body = {})
 {
     return lidar_guard_returns_from(points_robot.size(),
                                     [&](std::size_t i) { return std::optional<Eigen::Vector2f>(points_robot[i]); },
-                                    body, sigma_r, reach, self_body);
+                                    body, sigma_r, reach, self_body, true_body);
 }
 
 // The body's leading profile along u at lateral offset l (p = u rotated +90°): max of x·u over the polygon's chord x·p = l.
@@ -252,6 +350,15 @@ template <class Next>
     float v = v_cap;
     for (const auto& j : returns)
     {
+        // try104: a WORLD return measured inside the returns body (contact plus range noise — the evidence rule above keeps
+        // it) cannot be behind the leading face, which is what the closing weight w(d/σ) below would read into d < 0. It is
+        // contact, and the motion closes on it iff the motion deepens it (the rot ceiling's own test, kAnchorGainStepM);
+        // a motion that opens or slides along it is free.
+        if (const float sd = anchor_signed_distance(body, j.mean); sd < 0.f)
+        {
+            if (anchor_signed_distance(body, j.mean - kAnchorGainStepM * un) < sd) v = std::min(v, v_cap * (1.f - j.p));
+            continue;
+        }
         const float lat = j.mean.dot(p), along = j.mean.dot(un);
         const float s_u = anchor_axis_sigma(j.cov, un), s_p = anchor_axis_sigma(j.cov, p);
         const float sigma_contact = std::sqrt(std::max(0.f, 0.5f * j.cov.trace()));
@@ -356,11 +463,14 @@ struct BackoffSeg { float side = 0.f, adv = 0.f, rot = 0.f; };
         {
             // Rejected when the returns it would touch are more likely than not the world (fix round 6: Σ P(world) of the
             // touched returns ≥ ½ — ⚑ a decision level: a learned self return does not veto the way out).
+            // try104: a return the body already touches (a world return kept inside it) vetoes only the step that
+            // DEEPENS the contact — otherwise every way out of a contact would be refused by the contact itself.
             float touch = 0.f;
             for (std::size_t i = 0; i < pts.size(); ++i)
             {
+                const float before = anchor_signed_distance(body, pts[i]);
                 pts[i] = anchor_point_after(pts[i], sg.side / float(n), sg.adv / float(n), sg.rot / float(n));
-                if (anchor_signed_distance(body, pts[i]) <= 0.f) touch += returns[i].p;
+                if (const float after = anchor_signed_distance(body, pts[i]); after <= 0.f and after < before) touch += returns[i].p;
             }
             if (touch >= 0.5f) return std::nullopt;
         }
@@ -442,6 +552,45 @@ inline LidarCapResult lidar_cap_command(std::span<const AnchorJamb> returns, std
         if (std::abs(rot) > r.w_lim) { r.bound_rot = true; rot = std::copysign(r.w_lim, rot); }
     }
     return r;
+}
+
+// ── THE TRACKER'S COMMAND THROUGH THE NET, WITH THE TURN'S WAY OUT (try104) ───────────────────────────────────────────
+// A differential base aligns by turning in place, and with a wall at its front (or a corner beside it) the in-place turn's
+// sweep reaches the wall whichever way it turns: the caps hold it, the returns' backoff opens the margin band — the
+// minimum of a different objective, which on try101 and try104 alike turned the robot back the other way — and the tracker
+// asks for the same turn again: hold, back off, turn, hold, the limit cycle try104 sat in for minutes. The anchor servo
+// already had the model-level answer (rc::anchor_make_turn_room, try101): while the asked turn is refused by obstacles its
+// sweep reaches, the translation is the one that moves those blockers out of the sweep — the arc that backs away from the
+// wall while turning toward the target. The tracker's command gets the same, on the live returns, BEFORE the caps (so the
+// translation cannot close on anything behind: it goes through the same caps). Nothing blocks the turn ⇒ the command
+// is untouched.
+struct LidarGuardedCommand { AnchorCommand cmd; LidarCapResult cap; bool turn_room = false; int turn_blockers = 0; };
+[[nodiscard]] inline LidarGuardedCommand lidar_guard_command(std::span<const AnchorJamb> returns, std::span<const Eigen::Vector2f> body,
+                                                             float margin, float a_dec, float v_max, float w_max, bool holonomic,
+                                                             AnchorCommand ask)
+{
+    LidarGuardedCommand out;
+    const std::array<AnchorTurnBlockers, 1> sets{AnchorTurnBlockers{returns, body}};
+    auto room = anchor_make_turn_room(ask, sets, margin, a_dec, v_max, w_max, holonomic);
+    // The translation is judged on the WHOLE cloud, not only on today's blockers: carried the deficit's own length along
+    // it, does the asked turn get more room? A wall parallel to the motion (the body beside it) answers no — sliding along
+    // it brings a new stretch of the same wall into the sweep for every stretch it leaves — and then the room is not
+    // made by translating (the caps hold, the backoff decides); the anchor servo's version looked only at the current
+    // blockers, and on such a wall would creep along it for ever.
+    if (room.applied)
+    {
+        const Eigen::Vector2f t(room.cmd.side, room.cmd.adv);
+        std::vector<AnchorJamb> moved(returns.begin(), returns.end());
+        for (auto& j : moved) j.mean -= room.deficit * t.normalized();
+        const float w_now = lidar_return_rot_limit(returns, ask.rot, body, margin, a_dec, w_max);
+        const float w_after = lidar_return_rot_limit(moved, ask.rot, body, margin, a_dec, w_max);
+        if (not (w_after > w_now)) room = AnchorTurnRoom{.cmd = ask, .applied = false, .blockers = room.blockers};
+    }
+    out.cmd = room.cmd;
+    out.turn_room = room.applied;
+    out.turn_blockers = room.blockers;
+    out.cap = lidar_cap_command(returns, body, margin, a_dec, v_max, w_max, out.cmd.adv, out.cmd.side, out.cmd.rot);
+    return out;
 }
 
 // ── THE CENSUS (review item 4): is anything the LiDAR sees beyond the hull that the hull should hold? ────────────────

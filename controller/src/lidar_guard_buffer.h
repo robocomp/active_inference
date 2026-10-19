@@ -18,12 +18,14 @@ namespace rc
                                                                                       const Eigen::Affine2f& room_T_robot,
                                                                                       std::span<const Eigen::Vector2f> body,
                                                                                       float sigma_r, float reach,
-                                                                                      std::span<const Eigen::Vector2f> self_body = {})
+                                                                                      std::span<const Eigen::Vector2f> self_body = {},
+                                                                                      std::span<const Eigen::Vector2f> true_body = {},
+                                                                                      LidarWorldMemory* memory = nullptr)
 {
     const auto [cloud_opt] = buffer.read_last();
     if (not cloud_opt.has_value()) return std::nullopt;
     const auto& [xs, ys, zs] = cloud_opt.value();
-    return lidar_guard_returns_room(xs, ys, room_T_robot, body, sigma_r, reach, self_body);
+    return lidar_guard_returns_room(xs, ys, room_T_robot, body, sigma_r, reach, self_body, true_body, memory);
 }
 
 // Task 18: the newest cloud as plain robot-frame points at ANY range (the doorway gap needs the far room behind the opening:

@@ -258,7 +258,15 @@ private:
 
     // Contract-driven servo ("lock-on") on reaching an affordance pose. Returns true once finished
     // (LOCKED or GIVE_UP); drives the base directly via the motion commander.
-    bool step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source);
+    bool step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
+                     ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                     const TimeSource &time_source);
+    // try104: the in-place turns and nudges that own the base (Orient, lock-on) go through the SAME live-returns net as
+    // the tracker, the escape and the anchor servo — they used to reach the base uncapped. Sends what the net allows,
+    // or stops when it holds the whole command.
+    void send_through_returns(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
+                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                              float adv, float side, float rot, const char *who);
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     // Perception producer's monotonic frame counter (mask_frame_id), or -1. See the definition.
     [[nodiscard]] int masks_frame_seq() const;
@@ -266,7 +274,8 @@ private:
     // Contract-driven Orient (Policy::Orient): rotate IN PLACE toward `target_yaw` (no navigation) until the
     // contract's completion predicate fires (a depth detection arrives) or the contract times out. Returns
     // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
-    bool step_orient(const ControllerRobotPose &robot_pose, ControllerMotionCommander &motion_commander,
+    bool step_orient(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
+                     ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                      const TimeSource &time_source, float target_yaw);
     // What the 2D view draws for a running Orient: the bearing asked for, and whether to draw it at
     // all. Latched where the program is built (which is the only place that knows the policy) and
@@ -941,6 +950,11 @@ private:
     // mesh outline — what a return can hit) and the SELF footprint (hull ∪ mesh ⊕ σ_r — what the LiDAR sees of the robot).
     // Empty until the body loads ⇒ the planning hull.
     std::vector<Eigen::Vector2f> returns_body_, self_body_;
+    // try104: the room-frame cells that held a WORLD return in the last sweep the net read — the evidence that keeps a wall
+    // the robot is touching from being deleted as "the robot" (rc::lidar_guard_returns_from). Written by live_returns
+    // (const: it is the net's memory of the sweep, not session state anyone else reads).
+    mutable rc::LidarWorldMemory returns_world_memory_;
+    bool tracker_turn_room_logged_ = false;   // try104: the tracker's turn is being given its room (logged on transitions)
     [[nodiscard]] const std::vector<Eigen::Vector2f> &returns_body() const
     {
         return returns_body_.empty() ? approach_body_.polygon() : returns_body_;

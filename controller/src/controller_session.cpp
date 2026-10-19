@@ -253,7 +253,10 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             const auto &m = mesh.has_value() ? mesh->polygon() : no_mesh;
             returns_body_ = rc::lidar_returns_body(hull, m);
             self_body_ = rc::lidar_self_footprint(hull, m, sigma);
-            obstacle_tracker.set_self_body(self_body_);
+            // try104: AT CAPTURE only the TRUE body is dropped (exact in the rigid robot frame, round 3). The rest of the
+            // self footprint is weighed by the net on evidence (rc::lidar_guard_returns_from) — dropped here, a wall the
+            // robot touches never reached the net at all.
+            obstacle_tracker.set_self_body(hull);
             // Task 18: the learned self map (fix rounds 6–7) is REMOVED — the static footprint above is the whole self model.
             const auto front = [](const std::vector<Eigen::Vector2f> &p)
             { float y = -1.f; for (const auto &v : p) y = std::max(y, v.y()); return y; };
@@ -3453,7 +3456,10 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     lr.reach = body_reach + lr.v_max * lr.v_max / (2.f * lr.a_dec);
     // The room-frame cloud streamed onto the robot frame of `pose` (rc::lidar_guard_returns_from_buffer — the accessor the
     // test drives too).
-    auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body(), lr.sigma, lr.reach, self_body_);
+    // try104: the self footprint is a hypothesis weighed on evidence; only the planning hull (the body the simulator renders
+    // and collides) is the robot unconditionally.
+    auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body(), lr.sigma, lr.reach, self_body_,
+                                                 approach_body_.polygon(), &returns_world_memory_);
     if (not r.has_value()) return lr;
     lr.r = std::move(*r);
     lr.capture_self = obstacle_tracker.capture_self_dropped();
@@ -5725,7 +5731,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (lockon_.active())
     {
         note_why(rc::why::Cause::LockOn, std::format("lock-on micro-search on '{}'", why_target_name()));
-        if (step_lockon(motion_commander, time_source))
+        if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source))
             finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
         refresh_view_only();
@@ -5757,7 +5763,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 refresh_view_only();
                 note_why(rc::why::Cause::Orienting, std::format("orient '{}': turning in place toward its bearing",
                                                                 last_target_info_->node_name));
-                if (step_orient(robot_pose, motion_commander, time_source, last_target_info_->yaw_rad))
+                if (step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
+                                last_target_info_->yaw_rad))
                     finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
                 return;
@@ -6422,7 +6429,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             lockon_.begin(time_source(), active_contract_.scalar_target,
                           active_contract_.stable_n, active_contract_.timeout_ms);
             path_controller.stop();
-            if (step_lockon(motion_commander, time_source))
+            if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source))
                 finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
             return;
@@ -6587,7 +6594,32 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     std::string returns_cap_text;   // motion_verdict.h — observability only
     {
         const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-        const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv_mps, side_mps, rot_rps);
+        // try104: the tracker's in-place turn refused by a wall its sweep reaches gets its ROOM first (the arc that backs
+        // away from the blockers while turning — rc::lidar_guard_command, the anchor servo's try101 answer on the live
+        // returns), then the caps. Before, the caps held it, the backoff turned it back, the tracker asked again: a limit
+        // cycle against the wall.
+        const auto lr = live_returns(pose, obstacle_tracker, path_controller);
+        rc::LidarCapResult cap{.v_lim = lr.v_max, .w_lim = lr.w_max};
+        if (lr.valid)
+        {
+            const auto g = rc::lidar_guard_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
+                                                   base_capability_.holonomic.value_or(false),
+                                                   rc::AnchorCommand{adv_mps, side_mps, rot_rps, false});
+            if (g.turn_room != tracker_turn_room_logged_)
+            {
+                tracker_turn_room_logged_ = g.turn_room;
+                if (g.turn_room)
+                    std::println("[controller] the tracker's turn ({:+.2f} rad/s asked) is refused by {} live return(s) its sweep "
+                                 "reaches — MAKING ROOM for it: adv {:+.3f} (asked {:+.3f})", rot_rps, g.turn_blockers, g.cmd.adv,
+                                 adv_mps);
+                else
+                    std::println("[controller] the tracker's turn has its room — its own translation resumes");
+            }
+            adv_mps = g.cmd.adv;
+            side_mps = g.cmd.side;
+            rot_rps = g.cmd.rot;
+            cap = g.cap;
+        }
         returns_hold = cap.bound_lin or cap.bound_rot;
         if (returns_hold)
             returns_cap_text = std::format("v <= {:.3f} m/s{}, |w| <= {:.3f} rad/s{}", cap.v_lim, cap.bound_lin ? " (binding)" : "",
@@ -7143,14 +7175,37 @@ bool ControllerSession::robot_still() const
     return rc::affordance::stillness_ok(base_speed_lin_, base_speed_ang_, active_contract_);
 }
 
-bool ControllerSession::step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source)
+void ControllerSession::send_through_returns(const ControllerRobotPose &robot_pose,
+                                             const rc::TrajectoryController &path_controller,
+                                             ControllerObstacleTracker &obstacle_tracker,
+                                             ControllerMotionCommander &motion_commander,
+                                             float adv, float side, float rot, const char *who)
+{
+    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv, side, rot);
+    if (adv == 0.f and side == 0.f and rot == 0.f)
+    {
+        note_why(rc::why::Cause::ReturnsHold, std::format("{}: a live return holds the whole command — v <= {:.3f} m/s{}, "
+                                                          "|w| <= {:.3f} rad/s{}", who, cap.v_lim,
+                                                          cap.bound_lin ? " (binding)" : "", cap.w_lim,
+                                                          cap.bound_rot ? " (binding)" : ""));
+        note_no_command(); motion_commander.stop_robot();
+        return;
+    }
+    motion_commander.send_speed_command(adv, side, rot);
+}
+
+bool ControllerSession::step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
+                                    ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                                    const TimeSource &time_source)
 {
     const auto reading = read_servo_reading(feedback_node_id_);
     const bool met = goal_met(feedback_node_id_);
     const auto cmd = lockon_.update(reading, met, time_source(), masks_frame_seq());
     // Quasi-static: drive the (tiny, capped) nudge only during STEP; hold still while SETTLING/done.
     if (lockon_.active() && (cmd.adv != 0.0f || cmd.side != 0.0f || cmd.rot != 0.0f))
-        motion_commander.send_speed_command(cmd.adv, cmd.side, cmd.rot);
+        send_through_returns(robot_pose, path_controller, obstacle_tracker, motion_commander, cmd.adv, cmd.side, cmd.rot,
+                             "lock-on");
     else
         motion_commander.stop_robot();
     if (lockon_.done())
@@ -7183,6 +7238,8 @@ bool ControllerSession::step_lockon(ControllerMotionCommander &motion_commander,
 }
 
 bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
+                                    const rc::TrajectoryController &path_controller,
+                                    ControllerObstacleTracker &obstacle_tracker,
                                     ControllerMotionCommander &motion_commander,
                                     const TimeSource &time_source, float target_yaw)
 {
@@ -7249,7 +7306,7 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
     float rot = std::clamp(k * yaw_err, -cap, cap);
     if (aligned)
         rot = 0.0f;
-    if (rot != 0.0f) motion_commander.send_speed_command(0.0f, 0.0f, rot);
+    if (rot != 0.0f) send_through_returns(robot_pose, path_controller, obstacle_tracker, motion_commander, 0.f, 0.f, rot, "orient");
     else             motion_commander.stop_robot();
     return false;
 }
