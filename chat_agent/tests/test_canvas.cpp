@@ -54,6 +54,11 @@ int main()
     assert(is("draw the room", K::layout)); ++checks;   // a ready-made drawing, whatever the verb
     assert(is("draw graph", K::graph)); ++checks;
     assert(is("draw your working memory graph", K::graph)); ++checks;
+    // "of the working memory" names the whole graph, not a node to focus on (2026-10-19, it failed live)
+    assert(is("draw the graph of the working memory", K::graph, "")); ++checks;
+    assert(is("draw the graph of your working memory", K::graph, "")); ++checks;
+    assert(is("dibuja el grafo de la memoria de trabajo", K::graph, "")); ++checks;
+    assert(is("show  me the   room", K::layout)); ++checks;   // runs of spaces count as one (typed live)
     assert(not parse_show("draw the doors in red").has_value()); ++checks;
     assert(not parse_show("draw a bar chart of the distances").has_value()); ++checks;
     assert(not parse_show("cross the door").has_value()); ++checks;

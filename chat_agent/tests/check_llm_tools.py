@@ -18,7 +18,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3:8b"
+# the cap chat_agent sends (etc/config.toml [LLM] num_predict): a call longer than it is cut and lost, live and here
+NUM_PREDICT = int(re.search(r"^num_predict\s*=\s*(-?\d+)", (ROOT / "etc/config.toml")
+                            .read_text(), re.M).group(1))
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3-vl:8b-instruct"   # the model in etc/config.toml
 REPEATS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 URL = "http://localhost:11434/api/chat"
 
@@ -51,6 +54,23 @@ objects perceived in the current room (only this room is perceived): 1 bottle, 2
   - chair_2 3.4 m, -100 deg to the right, 0.45x0.50x0.90 m
 last command sent from this chat: none
 today: 2 missions (1 succeeded); last: cross door_0 → room_1
+"""
+
+
+# the fleet down (live 2026-10-19): no room, no controller, nothing perceived
+EMPTY_STATE = """time: 12:17:35
+can move: NO (the motion controller is not running)
+current room: unknown
+other rooms in the live map: none
+robot pose: unknown (no current room)
+robot motion now (odometry, 29 ms old): forward 0.00 m/s, sideways 0.00 m/s, turning right 0 deg/s
+controller target now: none (it is executing no affordance)
+doors of the current room (0):
+  none known
+remembered rooms (not in the live map, known from memory): none
+objects perceived in the current room (only this room is perceived): none
+last command sent from this chat: none
+today: 1 mission (0 succeeded); last: leg 3 → room_1
 """
 
 
@@ -90,6 +110,15 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
+        t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
+          "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
+          "human_concept, refrigerator_concept, controller, ltsm_agent, episodic_agent). When the person asks to start, "
+          "stop or restart an agent, call it with the name they give, also one not listed: the tool says why not. "
+          "Never to answer a question about them (that is agents). Stopping or restarting the controller or "
+          "retina needs the person's yes: the tool says so, you ask, and you call it again with the same arguments "
+          "only after they answer yes.",
+          {"action": {"type": "string", "enum": ["start", "stop", "restart"]},
+           "agent": {"type": "string", "description": "the agent's name, e.g. chair_concept"}}, ["action", "agent"]),
         t("agents", "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), "
           "uptime, CPU and memory of each. Read-only.", {}, []),
         t("sensors", "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, "
@@ -144,8 +173,7 @@ def tools():
                                                       "layout); false = draw once"}}, ["name"]),
         t("draw", "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script (NOT for "
           "the camera, the room map, the plan, the working-memory graph or a 3-D model: show has those, even when the "
-          "person says 'draw'): a chart, "
-          "a plot, a table, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
+          "person says 'draw'; NOT for a table: table): a chart, a plot, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
           "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
           ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
           "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
@@ -159,6 +187,13 @@ def tools():
            "title": {"type": "string", "description": "a short caption, e.g. 'distance to each object'"},
            "live": {"type": "boolean", "description": "true = keep redrawing it with fresh data; false "
                                                       "(default) = draw once"}}, ["script", "title"]),
+        t("table", "Show the PERSON a table on the canvas beside the chat, from rows you already have: your previous "
+          "answer, the STATE or a tool result (a list of agents, of objects and distances, of what you can do). No "
+          "script; a table is never a draw. Short rows, as many as the content has.",
+          {"title": {"type": "string", "description": "a short caption"},
+           "header": {"type": "array", "items": {"type": "string"}, "description": "the column names"},
+           "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}},
+                    "description": "one list of cells per row, as many cells as the header"}}, ["title", "rows"]),
         t("hide_canvas", "Close the drawing canvas beside the chat.", {}, []),
         t("look", "Look through a camera now: the current picture is shown to YOU (not to the person) in the next message, so you "
         "can answer about it. To show a picture to the person use show or draw. Read-only.",
@@ -173,6 +208,8 @@ def system():
 
 
 def state(last_move="none", extra=""):
+    if extra.startswith("time:"):   # a whole STATE of its own (EMPTY_STATE)
+        return "STATE:\n" + extra + f"last move/turn sent from this chat: {last_move}\n"
     expl = {"move 0.30": "move 0.30 (move forward 0.30 m)", "move -0.30": "move -0.30 (move backward 0.30 m)"}
     base = STATE.replace("last command sent from this chat: none\n", "") if "last command sent" in extra else STATE
     for key in ("robot motion now", "controller target now"):   # the case's own line replaces the default one
@@ -183,7 +220,7 @@ def state(last_move="none", extra=""):
 
 def ask(messages):
     body = {"model": MODEL, "messages": messages, "tools": tools(), "stream": False, "think": False,
-            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 16384}}
+            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 16384, "num_predict": NUM_PREDICT}}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=180) as r:
         return json.loads(r.read())
@@ -212,7 +249,6 @@ def history_after_move(user_text, dist, turn, cmd):
             {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "move_relative",
                                                                               "arguments": {"distance_m": dist, "turn_deg": turn}}}]},
             {"role": "tool", "tool_name": "move_relative", "content": f"OK: '{cmd}' sent to the controller."},
-            {"role": "assistant", "content": "Done, I moved."},
             {"role": "tool", "tool_name": "robot_status", "content": f"The command '{cmd}' ended: completed. done: {cmd}"}]
 
 
@@ -236,12 +272,40 @@ def draw_script_runs(a):
         return p.returncode == 0 and Path(d, "out.png").exists()
 
 
+def draws_table(n, a, must=()):
+    """The table tool with rows holding every word in `must`. A draw() script that makes its own table does not count:
+    its font is whatever the model wrote, too big for the canvas (live 2026-10-19); the table tool fits it."""
+    rows = a.get("rows") if n == "table" else None
+    return isinstance(rows, list) and len(rows) > 0 and all(w in json.dumps(rows) for w in must)
+
+
 def lists_agents(c):
     """A text answer that names the alive agents from the STATE's line (all ten, not a made-up few)."""
     names = ["chair_concept", "controller", "door_concept", "ltsm_agent", "residual_concept", "retina",
              "robot_concept", "room_concept", "table_concept"]
     return all(n in c for n in names)
 
+
+WHAT_I_CAN_DO = [{"role": "user", "content": "tell me what you can do"},
+                 {"role": "assistant", "content": "I can explore the current room, recognize doors and objects, cross "
+                  "doors, move short distances, and approach objects. I cannot fetch things, open doors manually, or "
+                  "follow people. I can also show camera views, 3-D models, or room layouts if requested."}]
+
+# live 2026-10-19, as chat_session keeps it: the call and its result, not the follow-up said after it. With the
+# follow-up ("I am approaching table_7 … I will stop in front of it") in the history, the next approach got that
+# sentence, for table_4, and no call (0/5 replayed); without it 5/5 called approach_object.
+APPROACHED = [{"role": "user", "content": "approach the table in front"},
+              {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "approach_object",
+                                                                              "arguments": {"object": "table_1"}}}]},
+              {"role": "tool", "tool_name": "approach_object", "content": "OK: mission 'approach table_1' sent: the "
+               "controller drives to a spot 0.75 m from its centre, facing it."},
+              {"role": "tool", "tool_name": "robot_status", "content": "The command 'approach table_1' ended: completed."},
+              {"role": "user", "content": "advance 0.5 meters"},
+              {"role": "assistant", "content": "Moving forward 0.50 m."}]
+
+AGENTS_LISTED = [{"role": "user", "content": "make a list with all the active agents"},
+                 {"role": "assistant", "content": "The active agents are: chair_concept, chat_agent, controller, "
+                  "door_concept, episodic_agent, residual_concept, retina, robot_concept, room_concept, and table_concept."}]
 
 CASES = [
     # the side canvas (2026-10-18): the person's pictures go through draw(); stock first, a script only when none fits
@@ -261,6 +325,26 @@ CASES = [
      lambda n, a, c: n == "show" and a.get("name") == "lidar"),
     ("bar chart of distances", [], "none", "plot a bar chart of how far each object is from you",
      lambda n, a, c: n == "draw" and draw_script_runs(a)),
+    # live 2026-10-19, fleet down: "show what you can do in a table" got "I cannot show anything on the canvas because I
+    # am not in a known room" three times. A table of words needs no room: draw it.
+    ("abilities table, fleet down", WHAT_I_CAN_DO, "none", "show all you can do in a table",
+     lambda n, a, c: draws_table(n, a), EMPTY_STATE),
+    ("abilities table on canvas", WHAT_I_CAN_DO, "none", "show it on a table on the canvas",
+     lambda n, a, c: draws_table(n, a), EMPTY_STATE),
+    # live 2026-10-19: "show the list in the canvas" after the agents list showed a stock table of abilities instead
+    ("agents list on canvas", AGENTS_LISTED, "none", "show the list in the canvas",
+     lambda n, a, c: draws_table(n, a, ("retina", "controller", "room_concept"))),
+    ("table of objects", [], "none", "make a table of the objects you see and how far they are",
+     lambda n, a, c: draws_table(n, a, ("chair_1", "table_1", "bottle_1"))),
+    ("abilities table, room known", WHAT_I_CAN_DO, "none", "show what you can do in a table",
+     lambda n, a, c: draws_table(n, a)),
+    # live 2026-10-19: "draw a table with your abilities" went to draw, a script with font size 10 that overflowed
+    ("draw a table of abilities", WHAT_I_CAN_DO, "none", "draw a table with your abilities",
+     lambda n, a, c: draws_table(n, a)),
+    ("approach again, by a side", APPROACHED, "none", "approach the chair by the side the robot is on",
+     lambda n, a, c: n == "approach_object" and "chair" in str(a.get("object", ""))),
+    ("approach again", APPROACHED, "none", "now approach the chair",
+     lambda n, a, c: n == "approach_object" and "chair" in str(a.get("object", ""))),
     # (label, history, last_move, user text, grader(name, args, content) -> bool)
     ("advance 1 meter", [], "none", "advance 1 meter",
      lambda n, a, c: n == "move_relative" and abs(num(a, "distance_m") - 1.0) < 1e-6 and num(a, "turn_deg") == 0),
@@ -381,6 +465,35 @@ CASES = [
     # paraphrases: at temperature 0.2 a phrasing gets the same tool every repeat, so the spread is across phrasings.
     ("agents in the WM", [], "none", "how many agents are in the WM?",
      lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
+    # agent_control (2026-10-19): the person starts / stops / restarts agents from the chat; questions stay on agents
+    ("restart the chair agent", [], "none", "restart the chair agent",
+     lambda n, a, c: n == "agent_control" and a.get("action") == "restart" and "chair" in str(a.get("agent", ""))),
+    ("stop retina", [], "none", "stop retina",
+     lambda n, a, c: n == "agent_control" and a.get("action") == "stop" and "retina" in str(a.get("agent", ""))),
+    ("arranca el agente de las mesas (es)", [], "none", "arranca el agente de las mesas",
+     lambda n, a, c: n == "agent_control" and a.get("action") == "start" and "table" in str(a.get("agent", ""))),
+    ("is the chair agent running (no control)", [], "none", "is the chair agent running?",
+     lambda n, a, c: n != "agent_control"),
+    # live 2026-10-19: "can you start agents?" got "I cannot start agents directly", and "start refrigerator_concept"
+    # (then missing from the list) got the same excuse without a call
+    ("can you start agents (yes)", [], "none", "can you start agents?",
+     lambda n, a, c: n is None and re.search(r"\b(cannot|can't|can not|unable)\b", c.lower()) is None
+     and "start" in c.lower()),
+    ("start refrigerator_concept", [], "none", "start refrigerator_concept",
+     lambda n, a, c: n == "agent_control" and a.get("action") == "start" and "refrigerator" in str(a.get("agent", ""))),
+    ("start an agent not in the list", [], "none", "start kitchen_metaconcept",
+     lambda n, a, c: n == "agent_control" and "kitchen" in str(a.get("agent", ""))),
+    # a plain "yes" to agent_control's question never reaches the model: the session carries it out (fast path,
+    # chat_session.cpp 1a) — the model answered it by claiming "stopped" without calling the tool (eval 2026-10-19)
+    ("no to stopping the controller",
+     [{"role": "user", "content": "stop the controller agent"},
+      {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "agent_control",
+                                                                         "arguments": {"action": "stop", "agent": "controller"}}}]},
+      {"role": "tool", "tool_name": "agent_control", "content": "NOT DONE: ask the person \"Stop controller? The robot "
+       "stops moving until it is back.\" and call agent_control again with the same arguments only if they answer yes."},
+      {"role": "assistant", "content": "Stop controller? The robot stops moving until it is back."}], "none",
+     "no, leave it",
+     lambda n, a, c: n != "agent_control"),
     ("all agents up", [], "none", "are all the agents up?",
      lambda n, a, c: n == "agents" or (n is None and "door_concept" in c and re.search(r"degraded", c.lower()) is not None)),
     ("list running agents", [], "none", "list the running agents",

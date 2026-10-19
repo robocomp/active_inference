@@ -85,6 +85,84 @@ def main():
         ok = rc != 0 and "no node named 'door_99'" in err
         print(f"{'PASS' if ok else 'FAIL'}  graph unknown focus")
         fails += not ok
+        # edges to nodes no longer in the graph (seen live 2026-10-19: 907 of 918) are dropped, not drawn as hundreds
+        # of nameless nodes that squash the picture to a few pixels high
+        dangling = dict(GRAPH, edges=GRAPH["edges"] + [{"from": "3", "to": str(1000 + i), "type": "has"}
+                                                        for i in range(300)])
+        with open(os.path.join(rundir, "graph.json"), "w") as f:
+            json.dump(dangling, f)
+        rc, err, png = run(rundir, os.path.join(CANVAS, "stock", "graph.py"))
+        h = Image.open(os.path.join(rundir, "out.png")).size[1] if png else 0
+        ok = rc == 0 and h > 100
+        print(f"{'PASS' if ok else 'FAIL'}  graph with dangling edges (height {h} px)" + ("" if rc == 0 else f"\n{err}"))
+        fails += not ok
+        # a table of words needs no world (live 2026-10-19, fleet down: "show what you can do in a table"): draw_table
+        # on an empty snapshot draws every cell, long ones included
+        with open(os.path.join(rundir, "snapshot.json"), "w") as f:
+            json.dump(dict(SNAPSHOT, room=None, robot=None, doors=[], objects=[], target=None), f)
+        with open(os.path.join(rundir, "table.py"), "w") as f:
+            f.write("from rcanvas import *\n"
+                    "save(draw_table([['cross a door of the current room', 'yes'], ['fetch things', 'no']] * 6,\n"
+                    "                header=['what', 'can I'], title='What I can do'))\n")
+        rc, err, png = run(rundir, os.path.join(rundir, "table.py"))
+        dark = 0
+        if png:
+            im = Image.open(os.path.join(rundir, "out.png")).convert("L")
+            dark = sum(1 for v in im.getdata() if v < 100)
+        ok = rc == 0 and dark > 500
+        print(f"{'PASS' if ok else 'FAIL'}  table of words, empty world ({dark} dark px)" + ("" if rc == 0 else f"\n{err}"))
+        fails += not ok
+        if ok and keep:
+            shutil.copy(os.path.join(rundir, "out.png"), os.path.join(keep, "table.png"))
+        # a narrow canvas (310x420, live 2026-10-19) and long cells: every wrapped line stays inside its own cell
+        with open(os.path.join(rundir, "snapshot.json"), "w") as f:
+            json.dump(dict(SNAPSHOT, canvas={"w": 310, "h": 420}), f)
+        with open(os.path.join(rundir, "table.py"), "w") as f:
+            f.write("from rcanvas import *\n"
+                    "rows = [['Explore the current room to learn its shape, and know where I am in it', 'Slide sideways']] * 10\n"
+                    "fig = draw_table(rows, header=['I can', 'I cannot'], title='What I can do')\n"
+                    "fig.canvas.draw()\n"
+                    "r = fig.canvas.get_renderer()\n"
+                    "t = fig.axes[0].tables[0]\n"
+                    "bad = [k for k, c in t.get_celld().items()\n"
+                    "       if not c.get_window_extent(r).padded(1).contains(*c.get_text().get_window_extent(r).p0)\n"
+                    "       or not c.get_window_extent(r).padded(1).contains(*c.get_text().get_window_extent(r).p1)]\n"
+                    "ax = fig.axes[0].get_window_extent(r)\n"
+                    "fw, fh = fig.canvas.get_width_height()\n"
+                    "out = [k for k, c in t.get_celld().items() if c.get_window_extent(r).y0 < -1\n"
+                    "       or c.get_window_extent(r).x1 > fw + 1]\n"
+                    "broken = [k for k, c in t.get_celld().items() if 'Slide' in c.get_text().get_text()\n"
+                    "          and 'sideways' not in c.get_text().get_text()]\n"
+                    "assert not broken, f'a word split across lines: {broken}'\n"
+                    "assert not bad and not out, f'text outside its cell: {bad}, cells off the canvas: {out}'\n"
+                    "save(fig)\n")
+        rc, err, png = run(rundir, os.path.join(rundir, "table.py"))
+        ok = rc == 0 and png
+        print(f"{'PASS' if ok else 'FAIL'}  table on a narrow canvas fits" + ("" if ok else f"\n{err.strip().splitlines()[-1]}"))
+        fails += not ok
+        if keep and png:
+            shutil.copy(os.path.join(rundir, "out.png"), os.path.join(keep, "table_narrow.png"))
+        # the table tool: chat_agent passes the model's {title, header, rows} as one JSON argument to stock/table.py
+        spec = {"title": "Active agents", "header": ["agent", "state"],
+                "rows": [["retina", "running"], ["controller", 7], ["room_concept", None]]}
+        rc, err, png = run(rundir, os.path.join(CANVAS, "stock", "table.py"), json.dumps(spec))
+        ok = rc == 0 and png
+        print(f"{'PASS' if ok else 'FAIL'}  stock table from JSON" + ("" if ok else f"\n{err}"))
+        fails += not ok
+        rc, err, png = run(rundir, os.path.join(CANVAS, "stock", "table.py"), json.dumps({"rows": []}))
+        ok = rc != 0 and "no rows" in err
+        print(f"{'PASS' if ok else 'FAIL'}  stock table without rows says so" + ("" if ok else f"\n{err}"))
+        fails += not ok
+        # header=True (the model wrote it, eval 2026-10-19): the first row is the header
+        with open(os.path.join(rundir, "table.py"), "w") as f:
+            f.write("from rcanvas import *\n"
+                    "save(draw_table([['what', 'can I'], ['cross a door', 'yes']], header=True))\n")
+        rc, err, png = run(rundir, os.path.join(rundir, "table.py"))
+        ok = rc == 0 and png
+        print(f"{'PASS' if ok else 'FAIL'}  table, header=True" + ("" if ok else f"\n{err}"))
+        fails += not ok
+        with open(os.path.join(rundir, "snapshot.json"), "w") as f:
+            json.dump(SNAPSHOT, f)
         with open(os.path.join(rundir, "net.py"), "w") as f:
             f.write(BAD_NET)
         rc, err, _ = run(rundir, os.path.join(rundir, "net.py"))

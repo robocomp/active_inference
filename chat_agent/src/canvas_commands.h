@@ -25,7 +25,9 @@ struct ShowRequest
 
 [[nodiscard]] inline std::optional<ShowRequest> parse_show(const std::string& lowered)
 {
-    std::string t = lowered;
+    std::string t;
+    for (char c : lowered)   // "show  me the room": runs of spaces count as one
+        if (c != ' ' or (not t.empty() and t.back() != ' ')) t += c;
     while (not t.empty() and (t.back() == '.' or t.back() == '!' or t.back() == '?' or t.back() == ' ')) t.pop_back();
     static const std::regex show(R"re(^(?:please )?(?:show(?: me)?|display|open|draw|dibuja|muestrame|muéstrame|ensename|enséñame))re"
                                  R"re( (?:the |your |my |la |el |las |los |tu )?(.+?)(?: please)?$)re");
@@ -72,6 +74,9 @@ struct ShowRequest
     {
         std::string focus = gm[1].str();
         std::ranges::replace(focus, ' ', '_');   // "room 1" → room_1
+        // "graph of the working memory" names the whole graph, not a node
+        static const std::regex whole(R"re(^(?:(?:your|my|tu|mi)_)?(?:working_memory|memory|dsr|memoria(?:_de_trabajo)?)$)re");
+        if (std::regex_match(focus, whole)) focus.clear();
         return ShowRequest{ShowRequest::Kind::graph, focus};
     }
     return std::nullopt;

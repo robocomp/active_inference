@@ -153,6 +153,12 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.canvas_live_period_ms = r.i("Canvas.live_period_ms", 100,
             "side canvas: a live drawing redraws at most this often (a redraw still in flight skips the tick)");
     c.canvas_memory_max = r.s("Canvas.memory_max", "1G", "side canvas: MemoryMax of the script's systemd scope");
+    c.fleet_dir = r.s("Fleet.dir", c.fleet_dir, "agent_control: the directory holding <agent>/bin/<agent>");
+    c.fleet_agents = r.s("Fleet.agents", c.fleet_agents, "agent_control: agents the chat may start / stop (comma list)");
+    c.fleet_confirm = r.s("Fleet.confirm", c.fleet_confirm, "agent_control: stopping these needs the person's yes");
+    c.fleet_lock = r.s("Fleet.lock", c.fleet_lock,
+            "agent_control: tour lock file (\"\" = $XDG_RUNTIME_DIR/ai_fleet_tour.lock); refused while its PID lives");
+    c.fleet_log_dir = r.s("Fleet.log_dir", c.fleet_log_dir, "agent_control: agents started by the chat log here");
     return c;
 }
 

@@ -52,6 +52,8 @@ url = "http://localhost:11434"
 # 31/36 on tests/check_llm_tools.py, ~0.4 s median, 7.7 GiB VRAM (qwen3:8b: 6.2). ★NOT plain "qwen3-vl:8b": that tag is
 # the THINKING variant, ignores think:false and spent 3000-6000 tokens (40-80 s) thinking before every tool call.
 # Back to text-only: model = "qwen3:8b" (look() then fails at the model, not here — it cannot see the image).
+# qwen3-vl:30b-a3b-instruct tried 2026-10-19: eval 168/204 (8b: 189/204), ~1 s answers, 61% on a 16 GB GPU, no
+# visible gain live — kept for more complex scenarios; it cannot share this GPU with retina.
 model = "qwen3-vl:8b-instruct"
 # 16k (2026-10-17, was 8k): room for the planned LTSM / EM / system tools and a longer history. The KV cache is
 # ~144 KB/token (~2.3 GB at 16k, beside ~6 GB of weights) on a 16 GB GPU shared with retina's YOLO and the ZED SDK —
@@ -66,7 +68,9 @@ transfer_timeout_ms = 120000
 keep_alive = "30m"
 # Cap on generated tokens per request; <= 0 = none. The instruct model answers in 10-50 tokens; this only stops a
 # runaway (cuts it mid-sentence, so it is a backstop, not a style control — brevity comes from the prompt).
-num_predict = 400
+# A draw() script is a few hundred tokens (a table of what the robot can do: up to ~850, eval 2026-10-19); at 400 it
+# was cut mid-call and ollama returned nothing. 1500 ≈ 15 s of a runaway.
+num_predict = 1500
 
 [Chat]
 max_history = 32

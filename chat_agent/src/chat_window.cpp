@@ -1,5 +1,6 @@
 #include "chat_window.h"
 #include <algorithm>
+#include <utility>
 #include <QKeySequence>
 #include <QKeyEvent>
 #include <QShortcut>
@@ -75,17 +76,22 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
 
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
     if (const auto g = settings.value(QStringLiteral("chat_window/geometry")).toByteArray(); not g.isEmpty())
+    {
         restoreGeometry(g);
+        restored_with_canvas_ = settings.value(QStringLiteral("chat_window/canvas_open"), false).toBool();
+    }
     else
         resize(640, 560);
 }
 
 void ChatWindow::closeEvent(QCloseEvent* e)
 {
-    // The geometry is saved WITHOUT the canvas: the next start opens it again and widens the window by it, so a
-    // window saved with the canvas would grow by one canvas on every run.
-    hide_canvas();
+    // The geometry is saved AS SEEN, with whether the canvas was in it: the first show_canvas() of the next run then
+    // fits the canvas inside instead of widening. Hiding the canvas here first did not work: the shrink reaches the
+    // window manager after saveGeometry(), so the window grew by one canvas on every run.
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
+    if (canvas_->isVisible()) settings.setValue(QStringLiteral("chat_window/canvas_width"), canvas_->width());
+    settings.setValue(QStringLiteral("chat_window/canvas_open"), canvas_->isVisible());
     settings.setValue(QStringLiteral("chat_window/geometry"), saveGeometry());
     QWidget::closeEvent(e);
 }
@@ -182,6 +188,11 @@ void ChatWindow::show_canvas()
     const int transcript_w = transcript_->width();
     const int added = canvas_w + split_->handleWidth();
     canvas_->setVisible(true);
+    if (std::exchange(restored_with_canvas_, false))   // the restored size already holds it
+    {
+        split_->setSizes({std::max(0, width() - added), canvas_w});
+        return;
+    }
     resize(width() + added, height());
     split_->setSizes({transcript_w, canvas_w});
 }
@@ -202,13 +213,15 @@ void ChatWindow::set_busy(bool busy)
     busy_->setVisible(busy);   // typing while busy is still allowed: "stop" must always get through
 }
 
-void ChatWindow::set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present)
+void ChatWindow::set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present,
+                            const QString& gpu)
 {
     const auto dot = [](bool ok) { return ok ? QStringLiteral("<span style='color:#2e7d32'>&#9679;</span>")
                                              : QStringLiteral("<span style='color:#c62828'>&#9679;</span>"); };
-    status_->setText(QStringLiteral("<small>model <b>%1</b> &nbsp;·&nbsp; %2 %3 &nbsp;·&nbsp; %4 controller %5</small>")
+    status_->setText(QStringLiteral("<small>model <b>%1</b> &nbsp;·&nbsp; %2 %3 &nbsp;·&nbsp; %4 controller %5 &nbsp;·&nbsp; %6</small>")
                          .arg(model.toHtmlEscaped(), dot(ollama_ok), ollama.toHtmlEscaped(), dot(controller_present),
-                              controller_present ? QStringLiteral("present") : QStringLiteral("absent")));
+                              controller_present ? QStringLiteral("present") : QStringLiteral("absent"),
+                              gpu.toHtmlEscaped()));
 }
 
 }   // namespace rc::chat

@@ -23,6 +23,9 @@ The API:
     save(fig)                       REQUIRED last call: writes out.png, which the canvas shows
     plt, np, math                   also exported by `from rcanvas import *` (matplotlib on Agg)
     save_image(img)                 the same for a numpy/PIL image (no matplotlib, faster)
+    fig = draw_table(rows, header=None, title=None)
+                                    a table of words filling the canvas (needs no world): rows = lists of cells;
+                                    header = a list of column names, or True when it is the first row
     g = graph()                     the robot's working memory (its DSR graph), when the script mentions graph():
                                     g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] (node ids)
     img = draw_graph(focus=None)    that graph laid out by Graphviz as a PIL image (RT edges = the tree, others
@@ -35,7 +38,7 @@ from types import SimpleNamespace
 
 OUT = "out.png"
 
-__all__ = ["world", "image", "figure", "save", "save_image", "layout_axes", "draw_room", "draw_doors", "draw_objects",
+__all__ = ["world", "image", "figure", "save", "save_image", "layout_axes", "draw_table", "draw_room", "draw_doors", "draw_objects",
            "draw_robot", "draw_target", "draw_layout", "fit_view", "graph", "draw_graph", "plt", "np", "math"]
 
 
@@ -123,6 +126,54 @@ def layout_axes(fig):
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     return ax
+
+
+def draw_table(rows, header=None, title=None):
+    """A figure holding a table of words (a list as rows). Each cell wraps to its column's width and each row is as
+    tall as its longest cell; the font is the largest (9 pt down to 5) at which the whole table fits the canvas."""
+    import textwrap
+    fig = figure()
+    W, H = fig.get_figwidth() * 72, fig.get_figheight() * 72   # points
+    top = 0.9 if title else 0.98
+    ax = fig.add_axes([0.02, 0.02, 0.96, top - 0.02])
+    ax.axis("off")
+    if title:
+        fig.suptitle(str(title), fontsize=13, fontweight="bold")
+    rows = [[str(c) for c in r] for r in rows] or [[""]]
+    if header is True:   # "the first row is the header"
+        header, rows = rows[0], rows[1:] or [[""]]
+    head = [str(h) for h in header] if header else None
+    ncol = max(len(r) for r in rows + ([head] if head else []))
+    rows = [r + [""] * (ncol - len(r)) for r in rows]
+    if head:
+        head += [""] * (ncol - len(head))
+    body = ([head] if head else []) + rows
+    # each column gets its longest word, then the rest of the width goes by how much text the column holds
+    word = [max(1, max((len(x) for r in body for x in r[j].split()), default=1)) for j in range(ncol)]
+    text = [max(1, sum(len(r[j]) for r in body)) for j in range(ncol)]
+    aw, ah = 0.96 * W, (top - 0.02) * H
+    for size in range(9, 4, -1):
+        em = 0.6 * size                                     # points per character, generously
+        total = aw / em - 2 * ncol                          # characters across, less each cell's padding
+        spare = max(0.0, total - sum(word))
+        chars = [int(word[j] + spare * text[j] / sum(text)) for j in range(ncol)]
+        widths = [(c + 2) * em / aw for c in chars]
+        cells = [["\n".join(textwrap.wrap(c, chars[j], break_long_words=False)) for j, c in enumerate(r)] for r in body]
+        lines = [max(c.count("\n") + 1 for c in r) for r in cells]
+        if sum(n * size * 1.25 + size * 0.6 for n in lines) <= ah:
+            break
+    t = ax.table(cellText=cells, loc="upper left", cellLoc="left", colWidths=widths)
+    t.auto_set_font_size(False)
+    t.set_fontsize(size)
+    for i, n in enumerate(lines):
+        for j in range(ncol):
+            c = t[i, j]
+            c.set_height((n * size * 1.25 + size * 0.6) / ah)
+            c.PAD = 0.8 * em / (widths[j] * aw)   # the same inset in every column (PAD is a fraction of the width)
+            if head and i == 0:
+                c.set_text_props(fontweight="bold")
+                c.set_facecolor("#e3eaf3")
+    return fig
 
 
 def draw_room(ax, w):
@@ -218,7 +269,9 @@ def graph():
     except FileNotFoundError:
         d = {"nodes": [], "edges": []}
     nodes = [SimpleNamespace(id=n["id"], name=n["name"], type=n["type"], agent=n.get("agent")) for n in d["nodes"]]
-    edges = [SimpleNamespace(src=e["from"], dst=e["to"], type=e["type"]) for e in d["edges"]]
+    ids = {n.id for n in nodes}   # an edge to a node gone from the graph is left out, not drawn as a nameless node
+    edges = [SimpleNamespace(src=e["from"], dst=e["to"], type=e["type"]) for e in d["edges"]
+             if e["from"] in ids and e["to"] in ids]
     return SimpleNamespace(nodes=nodes, edges=edges)
 
 

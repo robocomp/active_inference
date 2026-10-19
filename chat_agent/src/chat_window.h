@@ -65,11 +65,13 @@ public:
     [[nodiscard]] bool canvas_visible() const { return canvas_->isVisible(); }
 
     void set_busy(bool busy);
-    void set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present);
+    void set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present,
+                    const QString& gpu);   ///< gpu: "GPU 8.1/15.9 GB" | "GPU n/a" (gpu_memory.h)
 
     void closeEvent(QCloseEvent* e) override;
 
 private:
+    bool restored_with_canvas_ = false;   ///< the saved geometry was taken with the canvas open
     void append_html(const QString& html);
     void send_clicked();
     void history_step(int dir);   ///< −1 = older (↑), +1 = newer (↓)
