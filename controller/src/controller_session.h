@@ -16,6 +16,7 @@
 #include "controller_door_passage.h"
 #include "controller_anchor_servo.h"
 #include "lidar_guard_buffer.h"
+#include "self_return_map.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -919,8 +920,23 @@ private:
     // mesh outline — what a return can hit) and the SELF footprint (hull ∪ mesh ⊕ σ_r — what the LiDAR sees of the robot).
     // Empty until the body loads ⇒ the planning hull.
     std::vector<Eigen::Vector2f> returns_body_, self_body_;
+    // Task 14 fix round 6: the self footprint LEARNED from motion (self_return_map.h), and the contact body it grows
+    // (returns body ∪ learned self places), refreshed once per cycle by update_self_map.
+    rc::SelfReturnMap self_map_;
+    std::vector<Eigen::Vector2f> returns_body_eff_;
+    bool self_map_ready_ = false;
     [[nodiscard]] const std::vector<Eigen::Vector2f> &returns_body() const
-    { return returns_body_.empty() ? approach_body_.polygon() : returns_body_; }
+    {
+        if (not returns_body_eff_.empty()) return returns_body_eff_;
+        return returns_body_.empty() ? approach_body_.polygon() : returns_body_;
+    }
+    void update_self_map(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
+                         const rc::TrajectoryController &path_controller, ControllerMotionCommander &motion_commander,
+                         std::uint64_t now_ms);
+public:
+    // Persist the learned self map (etc/self_returns.csv) and print its census — called at shutdown.
+    void save_self_returns() const;
+private:
     bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
     bool returns_hold_in_window_ = false;   // Task 14 fix 1: the live returns held the command in the open judge window
     bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)

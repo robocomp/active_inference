@@ -112,6 +112,7 @@ void SpecificWorker::request_shutdown()
 		return;
 
 	display_.save_window_geometry();   // persist the standalone planner window (GUI thread)
+	session_.save_self_returns();      // Task 14 fix round 6: the learned self map, for the next run
 	cleanup_owned_nodes();
 	stop_robot();
 }

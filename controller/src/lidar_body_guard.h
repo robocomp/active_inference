@@ -292,7 +292,8 @@ template <class Next>
     float sum = 0.f, w = 0.f;
     for (const auto& j : returns)
     {
-        const float pen = band - anchor_signed_distance(body, anchor_point_after(j.mean, side, adv, dth));
+        // Weighted by P(it is the world) (fix round 6: a learned self return, p → 0, opens nothing and holds nothing).
+        const float pen = j.p * (band - anchor_signed_distance(body, anchor_point_after(j.mean, side, adv, dth)));
         if (pen > 0.f) { sum += pen; w = std::max(w, pen); }
     }
     if (worst != nullptr) *worst = w;
@@ -327,11 +328,15 @@ struct BackoffSeg { float side = 0.f, adv = 0.f, rot = 0.f; };
         const int n = std::max(1, int(std::ceil(travel / std::max(step, 1e-4f))));
         for (int k = 0; k < n; ++k)
         {
-            for (auto& q : pts)
+            // Rejected when the returns it would touch are more likely than not the world (fix round 6: Σ P(world) of the
+            // touched returns ≥ ½ — ⚑ a decision level: a learned self return does not veto the way out).
+            float touch = 0.f;
+            for (std::size_t i = 0; i < pts.size(); ++i)
             {
-                q = anchor_point_after(q, sg.side / float(n), sg.adv / float(n), sg.rot / float(n));
-                if (anchor_signed_distance(body, q) <= 0.f) return std::nullopt;   // touches the body: rejected
+                pts[i] = anchor_point_after(pts[i], sg.side / float(n), sg.adv / float(n), sg.rot / float(n));
+                if (anchor_signed_distance(body, pts[i]) <= 0.f) touch += returns[i].p;
             }
+            if (touch >= 0.5f) return std::nullopt;
         }
     }
     return pts;
@@ -362,7 +367,7 @@ struct BackoffSeg { float side = 0.f, adv = 0.f, rot = 0.f; };
     const auto band_sum = [&](const std::vector<Eigen::Vector2f>& pts)
     {
         float s = 0.f;
-        for (const auto& q : pts) s += std::max(0.f, band - anchor_signed_distance(body, q));
+        for (std::size_t i = 0; i < pts.size(); ++i) s += returns[i].p * std::max(0.f, band - anchor_signed_distance(body, pts[i]));
         return s;
     };
     float best_gain = 0.f;

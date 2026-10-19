@@ -242,6 +242,18 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             returns_body_ = rc::lidar_returns_body(hull, m);
             self_body_ = rc::lidar_self_footprint(hull, m, sigma);
             obstacle_tracker.set_self_body(self_body_);
+            // Task 14 fix round 6: the learned self map, seeded by the self footprint above and by what earlier runs learned.
+            self_map_.configure(sigma, returns_body_, self_body_, approach_body_.safety_margin());
+            self_map_.set_capability(base_capability_.max_linear_speed_mps.value_or(1.f),
+                                     base_capability_.max_rot_speed_rps.value_or(2.f));
+            const int loaded = self_map_.load("etc/self_returns.csv");
+            self_map_ready_ = true;
+            std::println("[returns] learned self map: {} ({} cells of {:.3f} m)",
+                         loaded > 0 ? std::format("{} cells loaded from etc/self_returns.csv", loaded)
+                         : loaded < 0 ? std::string("etc/self_returns.csv has a different cell size — ignored, learning afresh")
+                                      : std::string("none saved yet — learning from this run"),
+                         std::max(loaded, 0), self_map_.cell());
+            returns_body_eff_ = self_map_.body_with_learned(returns_body_);
             const auto front = [](const std::vector<Eigen::Vector2f> &p)
             { float y = -1.f; for (const auto &v : p) y = std::max(y, v.y()); return y; };
             const auto side = [](const std::vector<Eigen::Vector2f> &p)
@@ -2608,6 +2620,9 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     monitor_footprint_orientation(step, time_source());
     anchor_cross_.reset();   // a per-cycle reading: only drive_point_target's update_cross_anchor may set it
     anchor_drawn_.reset();   // likewise the drawn anchor: only step_anchor_cross sets it
+    // Task 14 fix round 6: learn which body places return the robot itself — once per cycle, before anything reads the net.
+    update_self_map(tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose, obstacle_tracker, path_controller,
+                    motion_commander, time_source());
     // Task 14 fix round 1, item 4: once, parked at start-up, what the live-returns net sees around the body — a body part
     // beyond the hull (a cable, a mount) shows here as returns within sigma_r OUTSIDE it, before it can cause a phantom stop.
     if (not startup_census_done_ and body_loaded_ and robot_still())
@@ -3232,6 +3247,9 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body(), lr.sigma, lr.reach, self_body_);
     if (not r.has_value()) return lr;
     lr.r = std::move(*r);
+    // Fix round 6: each kept return weighs as P(world) of its body place (renormalised at even odds — self_return_map.h).
+    if (self_map_ready_)
+        for (auto &o : lr.r.obstacles) o.p = self_map_.p_world(o.mean);
     lr.capture_self = obstacle_tracker.capture_self_dropped();
     lr.valid = true;
     return lr;
@@ -3242,6 +3260,43 @@ rc::LidarCapResult ControllerSession::cap_by_returns(const LiveReturns &lr, floa
     if (not lr.valid) return rc::LidarCapResult{.v_lim = lr.v_max, .w_lim = lr.w_max};
     return rc::lidar_cap_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
                                  adv, side, rot);
+}
+
+void ControllerSession::update_self_map(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
+                                        const rc::TrajectoryController &path_controller,
+                                        ControllerMotionCommander &motion_commander, std::uint64_t now_ms)
+{
+    if (not self_map_ready_) return;
+    auto *lidar = obstacle_tracker.lidar_buffer();
+    if (lidar == nullptr) return;
+    // Learning reads every return outside the HAND-WRITTEN self footprint — measured against the hand-written returns body,
+    // not the learned one: a learned place's own returns must keep arriving here, or their absence would unlearn it.
+    const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+    float reach = 0.f;
+    for (const auto &v : returns_body_) reach = std::max(reach, v.norm());
+    reach += approach_body_.safety_margin() + 2.f * sigma;
+    const auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body_, sigma, reach, self_body_);
+    if (not r.has_value() or r->n_read == 0) return;
+    std::vector<Eigen::Vector2f> pts;
+    pts.reserve(r->obstacles.size());
+    for (const auto &o : r->obstacles) pts.push_back(o.mean);
+    const auto unc = motion_commander.last_uncertainty_diag();
+    self_map_.update(pts, pose.as_transform(), unc.valid ? unc.xy_std_m : 0.f, double(now_ms) * 1e-3,
+                     unc.valid ? unc.theta_std_rad : 0.f);
+    returns_body_eff_ = self_map_.body_with_learned(returns_body_);
+    (void)path_controller;
+}
+
+void ControllerSession::save_self_returns() const
+{
+    if (not self_map_ready_) return;
+    const bool ok = self_map_.save("etc/self_returns.csv");
+    const auto c = self_map_.census(self_body_);
+    std::println("[returns] learned self map at shutdown: {} cells, {} self, {} of them BEYOND the hand-written self footprint, "
+                 "{} history restarts on pose jumps; saved to etc/self_returns.csv: {}", c.cells, c.self_cells, c.learned_self,
+                 self_map_.restarts(), ok ? "yes" : "FAILED");
+    for (const auto &t : c.top)
+        std::println("[returns]   learned self place body ({:+.3f}, {:+.3f}) m, log-odds {:+.2f}", t.x(), t.y(), t.z());
 }
 
 bool ControllerSession::hemmed_in_by_returns(const LiveReturns &lr) const

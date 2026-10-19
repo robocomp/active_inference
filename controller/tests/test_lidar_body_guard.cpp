@@ -8,6 +8,10 @@
 #include "../src/lidar_body_guard.h"
 #include "../src/lidar_guard_buffer.h"
 #include "../src/controller_runtime_types.h"
+#include "../src/self_return_map.h"
+
+#include <cstdlib>
+#include <random>
 #include "../../common/robot_footprint/robot_footprint.h"
 
 #include <chrono>
@@ -437,6 +441,170 @@ int main()
             CHECK(rn.obstacles.size() == 1 and rc::lidar_return_speed_limit(rn.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax) == 0.f);
             // The contact standoff (margin from the RETURNS body) brakes before the self footprint's front.
             CHECK(front(ret_body) + kMargin > front(self_fp));
+        }
+    }
+
+    // 13. Fix round 6 (try79/try82): the self footprint LEARNED from motion (rc::SelfReturnMap). A body-frame-fixed point at
+    //     the front-right corner (+0.246, +0.242) — outside the hull and the mesh ⊕ σ_r — becomes self while the robot
+    //     drives and turns for 3 s; a WORLD-fixed jamb end approached at 0.1 m/s never does, and forward goes to 0 at contact.
+    {
+        rc::RobotFootprint::MeshReport rep;
+        const auto mesh = rc::RobotFootprint::from_obj("../robot_concept/meshes/shadow.obj", 0.f, rep);
+        CHECK(mesh.has_value());
+        if (mesh.has_value())
+        {
+            const auto ret_body = rc::lidar_returns_body(body, mesh->polygon());
+            const auto self_fp = rc::lidar_self_footprint(body, mesh->polygon(), kSigma);
+            std::mt19937 rng(7);
+            std::normal_distribution<float> noise(0.f, kSigma);
+            // RANGE noise: along the beam from the bpearl (body (0, +0.14)), σ_r — a LiDAR return is uncertain in range, not
+            // in bearing (0.4° azimuth step = 2 mm at these distances), so its scatter is a line, not a disc.
+            const Eigen::Vector2f bpearl(0.f, 0.14f);
+            const auto jitter = [&](Eigen::Vector2f q) { const Eigen::Vector2f u = (q - bpearl).normalized(); return Eigen::Vector2f(q + noise(rng) * u); };
+            const auto weigh = [&](rc::LidarGuardReturns r, const rc::SelfReturnMap& m)
+            { for (auto& o : r.obstacles) o.p = m.p_world(o.mean); return r; };
+            const Eigen::Vector2f corner_pt(0.246f, 0.242f);
+            CHECK(not rc::anchor_point_in_convex(self_fp, corner_pt));
+
+            // (a) drive + turn for 3 s with the corner part on the body and a wall in the world.
+            rc::SelfReturnMap map;
+            map.configure(kSigma, ret_body, self_fp, kMargin);
+            const float p0 = map.p_self(corner_pt);
+            ControllerRobotPose pose;
+            pose.pos = {1.f, 1.f};
+            pose.theta = 0.3f;
+            std::vector<Eigen::Vector2f> wall_world;   // a wall 1.5 m away: outside the domain, as in open space
+            for (float x = -2.f; x <= 4.f; x += 0.05f) wall_world.emplace_back(x, 3.0f);
+            for (int k = 0; k < 60; ++k)   // 3 s at 20 Hz: v 0.15 m/s, w 0.3 rad/s
+            {
+                const Eigen::Affine2f T = pose.as_transform();
+                std::vector<Eigen::Vector2f> sweep{jitter(corner_pt)};
+                for (const auto& w : wall_world) sweep.push_back(jitter(T.inverse() * w));
+                const auto r = rc::lidar_guard_returns(sweep, ret_body, kSigma, 0.6f, self_fp);
+                std::vector<Eigen::Vector2f> kept;
+                for (const auto& o : r.obstacles) kept.push_back(o.mean);
+                map.update(kept, T, 0.005f, k * 0.05);
+                pose.theta += 0.3f * 0.05f;   // forward = robot +y = room direction theta + 90 deg
+                pose.pos += 0.15f * 0.05f * Eigen::Vector2f(-std::sin(pose.theta), std::cos(pose.theta));
+            }
+            const float p1 = map.p_self(corner_pt);
+            const auto body_eff = map.body_with_learned(ret_body);
+            const auto rc_ = weigh(rc::lidar_guard_returns(std::vector<Eigen::Vector2f>{corner_pt}, body_eff, kSigma, 0.6f, self_fp), map);
+            const float v_corner = rc::lidar_return_speed_limit(rc_.obstacles, kFwd, body_eff, kMargin, kAdec, kVmax);
+            std::println("  learned self: corner part P(self) {:.3f} -> {:.3f} after 3 s driving+turning; forward {:.3f}", p0, p1, v_corner);
+            CHECK(p0 < 0.05f and p1 > 0.5f and v_corner > 0.95f * kVmax);
+            // What matters live: the part's NOISY returns, sweep after sweep — how many sweeps still leave forward free?
+            {
+                int free_sweeps = 0;
+                for (int k = 0; k < 200; ++k)
+                {
+                    const auto rj = weigh(rc::lidar_guard_returns(std::vector<Eigen::Vector2f>{jitter(corner_pt)}, body_eff, kSigma, 0.6f, self_fp), map);
+                    free_sweeps += rc::lidar_return_speed_limit(rj.obstacles, kFwd, body_eff, kMargin, kAdec, kVmax) > 0.95f * kVmax;
+                }
+                std::println("  the part's noisy returns after learning: forward free on {}/200 sweeps", free_sweeps);
+                CHECK(free_sweeps >= 190);
+            }
+            // Parked, the same point teaches nothing (no motion separates the hypotheses).
+            {
+                rc::SelfReturnMap still;
+                still.configure(kSigma, ret_body, self_fp, kMargin);
+                for (int k = 0; k < 60; ++k)
+                {
+                    const std::vector<Eigen::Vector2f> sweep{jitter(corner_pt)};
+                    still.update(sweep, Eigen::Affine2f::Identity(), 0.005f, k * 0.05);
+                }
+                CHECK(std::abs(still.logodds(corner_pt) - std::log(rc::SelfReturnMap::kP0 / (1.f - rc::SelfReturnMap::kP0))) < 1e-4f);
+            }
+
+            // (b) a world-fixed jamb end, approached at 0.1 m/s from 0.5 m ahead until the front touches it.
+            rc::SelfReturnMap mj;
+            mj.configure(kSigma, ret_body, self_fp, kMargin);
+            ControllerRobotPose rp;   // theta 0: forward = room +y
+            const Eigen::Vector2f jamb_room(0.1f, 0.25f + 0.5f);
+            float p_max = 0.f, v_end = 1.f;
+            int stopped = 0;
+            for (int k = 0; k < 400 and stopped < 20; ++k)   // the robot OBEYS the cap (the net is in the loop)
+            {
+                const Eigen::Affine2f T = rp.as_transform();
+                const Eigen::Vector2f q = T.inverse() * jamb_room;
+                std::vector<Eigen::Vector2f> sweep{jitter(q)};
+                const auto r = rc::lidar_guard_returns(sweep, ret_body, kSigma, 0.6f, self_fp);
+                std::vector<Eigen::Vector2f> kept;
+                for (const auto& o : r.obstacles) kept.push_back(o.mean);
+                mj.update(kept, T, 0.005f, k * 0.05);
+                p_max = std::max(p_max, mj.p_self(q));
+                const auto rq = weigh(rc::lidar_guard_returns(std::vector<Eigen::Vector2f>{q}, ret_body, kSigma, 0.6f, self_fp), mj);
+                v_end = rc::lidar_return_speed_limit(rq.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax);
+                const float v = std::min(0.1f, v_end);
+                if (std::getenv("TLBG_DEBUG") and k % 10 == 0) std::println("    k {} q.y {:.3f} p_self {:.3f} L {:.2f} v {:.3f}", k, q.y(), mj.p_self(q), mj.logodds(q), v_end);
+                stopped = v == 0.f ? stopped + 1 : 0;
+                rp.pos.y() += v * 0.05f;
+            }
+            const float gap = (rp.as_transform().inverse() * jamb_room).y() - 0.2472f;
+            std::println("  world jamb approached at 0.1 m/s: max P(self) {:.3f}; stopped {:.3f} m short of the front cover, "
+                         "forward {:.3f}", p_max, gap, v_end);
+            CHECK(p_max < 0.05f and v_end == 0.f and gap > 0.f);
+
+            // (b2) The hard case: a world jamb end approached straight at the LEARNED corner (the map from (a), P(self) ≈ 1
+            //      there). It slides through the body frame, the evidence turns, and the robot must still stop short of it.
+            {
+                rc::SelfReturnMap m2 = map;
+                ControllerRobotPose rp2;
+                const Eigen::Vector2f target = corner_pt + Eigen::Vector2f(0.f, 0.25f);   // 25 cm ahead of the part
+                float p_first = -1.f, v_last = 1.f, min_gap = 1.f, min_gap_part = 1.f;
+                int stopped2 = 0;
+                for (int k = 0; k < 600 and stopped2 < 20; ++k)
+                {
+                    const Eigen::Affine2f T = rp2.as_transform();
+                    const Eigen::Vector2f q = T.inverse() * target;
+                    std::vector<Eigen::Vector2f> sweep{jitter(q), jitter(corner_pt)};   // the robot's own part still returns
+                    const auto be = m2.body_with_learned(ret_body);
+                    const auto r = rc::lidar_guard_returns(sweep, be, kSigma, 0.6f, self_fp);
+                    std::vector<Eigen::Vector2f> kept;
+                    for (const auto& o : r.obstacles) kept.push_back(o.mean);
+                    m2.update(kept, T, 0.005f, 100.0 + k * 0.05);
+                    if (p_first < 0.f and m2.in_domain(q)) p_first = m2.p_self(q);
+                    const auto be2 = m2.body_with_learned(ret_body);
+                    const auto rq = weigh(rc::lidar_guard_returns(std::vector<Eigen::Vector2f>{q}, be2, kSigma, 0.6f, self_fp), m2);
+                    v_last = rq.obstacles.empty() ? kVmax : rc::lidar_return_speed_limit(rq.obstacles, kFwd, be2, kMargin, kAdec, kVmax);
+                    const float v = std::min(0.1f, v_last);
+                    stopped2 = v == 0.f ? stopped2 + 1 : 0;
+                    rp2.pos.y() += v * 0.05f;
+                    min_gap = std::min(min_gap, rc::anchor_signed_distance(ret_body, q));
+                    min_gap_part = std::min(min_gap_part, (q - corner_pt).norm());
+                }
+                std::println("  world jamb driven at the LEARNED corner: P(self) on entering the domain {:.3f}; closest {:.3f} m from the "
+                             "returns body, {:.3f} m from the part; forward at the end {:.3f}", p_first, min_gap, min_gap_part, v_last);
+                CHECK(min_gap > 0.f and min_gap_part > kSigma and v_last == 0.f);
+            }
+            // (d) A localisation JUMP while parked (7.5 cm in one sweep): the world point beside the corner keeps its body
+            //     position, which a jump would read as self — the ring restarts at the jump and nothing is learned.
+            {
+                rc::SelfReturnMap mjump;
+                mjump.configure(kSigma, ret_body, self_fp, kMargin);
+                mjump.set_capability(1.f, 2.f);
+                const Eigen::Vector2f q(-0.30f, 0.10f);
+                Eigen::Affine2f T = Eigen::Affine2f::Identity();
+                for (int k = 0; k < 60; ++k)
+                {
+                    if (k == 20) T.translation() += Eigen::Vector2f(0.075f, 0.f);
+                    const std::vector<Eigen::Vector2f> sweep{jitter(q)};
+                    mjump.update(sweep, T, 0.005f, k * 0.05);
+                }
+                std::println("  localisation jump while parked: restarts {}, P(self) {:.3f}", mjump.restarts(), mjump.p_self(q));
+                CHECK(mjump.restarts() == 1 and mjump.p_self(q) < 0.05f);
+            }
+
+            // (c) persistence round-trip, classic locale, from_chars.
+            const std::string path = "/tmp/self_returns_test.csv";
+            CHECK(map.save(path));
+            rc::SelfReturnMap back;
+            back.configure(kSigma, ret_body, self_fp, kMargin);
+            CHECK(back.load(path) > 0 and std::abs(back.p_self(corner_pt) - p1) < 1e-3f);
+            const auto cen = map.census(self_fp);
+            std::println("  census: {} cells, {} self, {} learned beyond the outline (top at ({:+.3f},{:+.3f}))", cen.cells, cen.self_cells,
+                         cen.learned_self, cen.top.empty() ? 0.f : cen.top[0].x(), cen.top.empty() ? 0.f : cen.top[0].y());
+            CHECK(cen.learned_self >= 1);
         }
     }
 
