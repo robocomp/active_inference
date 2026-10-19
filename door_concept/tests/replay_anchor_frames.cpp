@@ -38,6 +38,8 @@
 //   --diag           with --gt: per frame, the prior's, the data-only optimum's (x̄ + I_L⁺ I_L ν) and the posterior's error,
 //                    the frame's robust data σ, the gain, and the persistent bias's σ (Task 10's diagnosis).
 //   --dump F         with --chain: every posterior to F as CSV (t_ms, x, y, yaw, P row-major, p_view).
+//   --rot-scale K    Task 12: add the per-step rotation-scale variance (K·|Δθ|)² through the step's Jacobian (relative_pose.h
+//                    kRotScaleSigma = 0.09) — for records written before the live predict added it.
 //   --no-bias        Task 10 ablation: the persistent bias factor is NOT carried between frames (the agent carries it).
 //   --casing C       the caller's leaf for records written before it (leaf.len = 0, v1/v2): hinged at and spanning the clear
 //                    width rc::door::anchor_clear_width(width, C) — what the agent now passes (DoorConcept.FrameCasingM, 0.06).
@@ -64,7 +66,8 @@
 namespace
 {
 bool no_bias = false;   // --no-bias: the ablation — no bias state carried (each frame's own bias only, L = 0 before it)
-bool diag = false;      // --diag: per frame, the prior's / the data-only optimum's / the posterior's error against the truth
+bool diag = false;
+double rot_scale = 0.0;   // --rot-scale K (Task 12): the per-step rotation-scale variance the live caller now adds      // --diag: per frame, the prior's / the data-only optimum's / the posterior's error against the truth
 std::ofstream dump;     // --dump F: every chained posterior as CSV (t_ms, x, y, yaw, P row-major, p_view) — for the servo check
 bool num(const char* a, double& out)
 {
@@ -271,6 +274,12 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             RelPose p;
             p.x = rc::interaction::move_mean(x.x, s_ * side, s_ * adv, s_ * dth);
             p.P = J * x.P * J.transpose() + s_ * s_ * Q;
+            // --rot-scale K: the rotation-scale variance (relative_pose.h kRotScaleSigma) on records written without it.
+            if (rot_scale > 0.0)
+            {
+                const float sr = float(rot_scale) * std::abs(s_ * dth);
+                p.P += (sr * sr) * (G.col(2) * G.col(2).transpose());
+            }
             p.stamp_ms = b.stamp_ms;
             rc::door::transport_bias(bias, x.x, s_ * side, s_ * adv, s_ * dth, wk_model);
             x = p;
@@ -381,6 +390,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--chain") == 0) chained = true;
         else if (std::strcmp(argv[i], "--no-bias") == 0) no_bias = true;
         else if (std::strcmp(argv[i], "--diag") == 0) diag = true;
+        else if (std::strcmp(argv[i], "--rot-scale") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v >= 0) rot_scale = v; }
         else if (std::strcmp(argv[i], "--dump") == 0 and i + 1 < argc)
         {
             dump.open(argv[++i]);

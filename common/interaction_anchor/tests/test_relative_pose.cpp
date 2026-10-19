@@ -1,5 +1,6 @@
 // Standalone harness (no framework) for interaction_anchor/relative_pose.h.
 #include "interaction_anchor/relative_pose.h"
+#include <cmath>
 #include <cstdio>
 
 using namespace rc::interaction;
@@ -29,9 +30,28 @@ int main()
         const float c = std::cos(0.3f), s = std::sin(0.3f);
         Eigen::Matrix3f J = Eigen::Matrix3f::Identity();
         J.topLeftCorner<2,2>() << c, s, -s, c;
-        const Eigen::Matrix3f JPJt = J * r.P * J.transpose();
+        Eigen::Matrix3f Jc, Gc;
+        predict_jacobians(r.x, 0.1f, 0.5f, 0.3f, Jc, Gc);
+        const float sr = kRotScaleSigma * 0.3f;   // Task 12: the turn's scale variance, through the rot column of G
+        const Eigen::Matrix3f JPJt = J * r.P * J.transpose() + (sr * sr) * (Gc.col(2) * Gc.col(2).transpose());
         check("covariance_grows_only_with_motion_variance",
               (still.P - r.P).norm() < 1e-6f and (a.P - JPJt).norm() < 1e-6f and b.P.trace() > JPJt.trace()); }
+    // Task 12 (try73): the rotation-scale term. One 5-rad turn in one step: σ_yaw ≥ k·5·0.8 (0.36 rad) from 0.02; the
+    // anchor 2 m ahead gains lateral/depth σ through the lever arm; a pure translation is unchanged.
+    {   RelPose r; r.x = {0, 2, 0}; r.P = Eigen::Vector3f(4e-4f, 4e-4f, 4e-4f).asDiagonal();
+        const auto spin = predict(r, twist(0, 0, 5.f), zero, 1.f);
+        const float sy = std::sqrt(spin.P(2, 2)), sxy = std::sqrt(spin.P(0, 0) + spin.P(1, 1));
+        std::printf("  one 5-rad step: sigma_yaw %.3f rad, sigma_xy %.3f m\n", sy, sxy);
+        check("rot_scale_one_step_spin", sy >= kRotScaleSigma * 5.f * 0.8f and sxy > 0.5f);
+        // The same spin in 100 steps of 0.05 rad (door_concept's ~10 Hz): a per-step (white) term accumulates as sqrt(N).
+        RelPose s = r;
+        for (int k = 0; k < 100; ++k) s = predict(s, twist(0, 0, 0.5f), zero, 0.1f);
+        const float sy100 = std::sqrt(s.P(2, 2));
+        std::printf("  the same spin in 100 steps: sigma_yaw %.3f rad (k*sqrt(sum dth^2) = %.3f)\n", sy100,
+                    std::sqrt(4e-4f + kRotScaleSigma * kRotScaleSigma * 100.f * 0.05f * 0.05f));
+        check("rot_scale_per_step_accumulates", sy100 > 2.f * 0.02f);
+        const auto tr = predict(r, twist(0.1f, 0.5f, 0.f), zero, 1.f);
+        check("rot_scale_pure_translation_unchanged", (tr.P - r.P).norm() < 1e-7f); }
     {   Eigen::Affine3d rr = Eigen::Affine3d::Identity(), ro = Eigen::Affine3d::Identity();
         rr.translate(Eigen::Vector3d(1, 1, 0)); rr.rotate(Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitZ()));
         ro.translate(Eigen::Vector3d(2, 4, 0)); ro.rotate(Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()));

@@ -60,7 +60,20 @@ inline void predict_jacobians(const Eigen::Vector3f& x, float side, float adv, f
     G(2, 2) = -1.f;
 }
 
-// P <- J P Jt + G S Gt dt^2. twist_var = velocity variances [var_adv, var_side, var_rot] in
+// ─── Task 12 (try73): THE ODOMETRY'S ROTATION SCALE IS UNCERTAIN, AND SHADOW'S IS MEASURED ────────────────────────────────
+// A turn of Δθ is integrated from the wheels' rate; its SCALE error (wheel scrub on a differential base turning in place) is
+// an error proportional to the turn, not white noise per second, and robot_current_speed_variance does not state it. The
+// anchor's own frame records against Webots ground truth measure it over the initial ~5-rad spin of three runs: predicted /
+// true rotation = 1.091 (try70), 1.079 (try71), 1.089 (try73) — the sim clock already corrected (SimClockRate). Without it the
+// prediction claimed σ_yaw ≈ 1° after a 5-rad spin that left it 21° and 1.0 m off (try73 leg 1), and its overconfidence
+// sealed it off from the beams that would have corrected it.
+// So each step adds a rotation-displacement variance (k_rot·|Δθ|)², propagated through the SAME Jacobian G as the twist's
+// own (its rot column: the anchor's lever arm about the robot), so lateral and depth grow with range. ⚑ k_rot is a PHYSICAL
+// CALIBRATION of Shadow's odometry (the measured 7.9–9.1 %, rounded up), not a gate; the MEAN is not corrected by it (the
+// sign and size of the bias are a property of the base and the floor, the variance is what the prediction owes).
+inline constexpr float kRotScaleSigma = 0.09f;
+
+// P <- J P Jt + G S Gt dt^2 + g_rot g_rotᵀ (k_rot·|Δθ|)². twist_var = velocity variances [var_adv, var_side, var_rot] in
 // (m/s)^2, (m/s)^2, (rad/s)^2, from robot_current_speed_variance; the displacement covariance over
 // one step is var*dt^2 (the velocity error is slip/scale-like, correlated within the step).
 // Zero variance adds nothing.
@@ -74,6 +87,8 @@ inline void predict_jacobians(const Eigen::Vector3f& x, float side, float adv, f
     Eigen::Matrix3f J, G;
     predict_jacobians(r.x, side, adv, dth, J, G);
     o.P = J * r.P * J.transpose() + G * twist_var.asDiagonal() * G.transpose() * (dt_s * dt_s);
+    const float s_rot = kRotScaleSigma * std::abs(dth);            // the turn's scale error (see kRotScaleSigma)
+    o.P += (s_rot * s_rot) * (G.col(2) * G.col(2).transpose());
     return o;
 }
 
