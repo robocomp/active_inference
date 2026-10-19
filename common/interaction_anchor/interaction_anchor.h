@@ -97,6 +97,11 @@ public:
     // How long ago the owner last SAW what the edge's pose describes (unseen_time, ms; 0 = seen this cycle). Written only on
     // a change. See kAnchorPredictMs.
     bool set_unseen_ms(DSR::DSRGraph& G, int unseen_ms);
+    // Final review I-2: is the edge's newest block a pose to DRIVE on (`valid` on the node)? false = a wait pose (where to
+    // LOOK), never to drive on. Written only on a change. ORDER MATTERS (two separate graph writes): mark false BEFORE
+    // writing a wait pose, and true only AFTER writing the drivable block — so a reader between the two writes sees a
+    // not-drivable mark, never a drivable mark on a wait pose. See anchor_drivable.
+    bool set_drivable(DSR::DSRGraph& G, bool drivable);
     // Task 12 fix A: the door's swung leaf in ANCHOR coordinates (anchor_leaf.h: delimiting_polygon_x/_y = hinge, free edge,
     // free edge one σ further open; door_phi_rad = φ). nullopt REMOVES both (no leaf known — never a sentinel). Written
     // only on a change.
@@ -129,10 +134,28 @@ inline constexpr std::int64_t kAnchorStaleMs = 1000;
 // how old the last sighting is: 0 = seen, > 0 = predicted. Past this, nothing is published (the strict rule).
 inline constexpr std::int64_t kAnchorPredictMs = 3000;
 
+// ★ WHY "NOT DRIVABLE" IS A NODE ATTRIBUTE AND NOT AN OLD STAMP (final review I-2). The robot→anchor RT edge is a
+// CHRONOLOGICAL history ring: cortex's insert_or_assign_edge_RT treats a block stamped older than the newest as a LATE
+// measurement — it re-sorts it into its place, or DROPS it if it is older than every slot. So a wait pose written "born
+// stale" (stamped now − kAnchorStaleMs − 1) after a predicted block stamped `now` never became the newest block: the reader
+// kept returning the last predicted block as FRESH for ~kAnchorStaleMs after the owner stopped publishing. The owner now
+// stamps every block `now` (monotonic) and says "not drivable" with the node's `valid` = false (Anchor::set_drivable);
+// the stamp keeps its one meaning — the kAnchorStaleMs rule for a DEAD producer. Absent `valid` reads as NOT drivable:
+// Anchor::create writes false, so only an owner that has said "drive on this" is driven on.
+[[nodiscard]] inline bool anchor_drivable(DSR::DSRGraph& G, const DSR::Node& anchor)
+{
+    return G.get_attrib_by_name<valid_att>(anchor).value_or(false);
+}
+// The drivability rule every reader applies: newest block within kAnchorStaleMs of now AND marked drivable.
+[[nodiscard]] inline bool anchor_fresh(DSR::DSRGraph& G, const DSR::Node& anchor, std::int64_t stamp_ms, std::int64_t now_ms)
+{
+    return now_ms - stamp_ms <= kAnchorStaleMs and anchor_drivable(G, anchor);
+}
+
 // Controller side: follows affordance.interaction_node_id to the anchor and reads the newest block of
 // the robot→anchor RT edge. Returns {pose, anchor's width_m (0 if absent)}; nullopt if there is no
-// link, the node or edge is missing, the edge carries no covariance, or its newest stamp is older than
-// kAnchorStaleMs relative to now_ms.
+// link, the node or edge is missing, the edge carries no covariance, or the block is not fresh by anchor_fresh (its stamp
+// older than kAnchorStaleMs relative to now_ms, or the owner marked it not drivable).
 std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G, const DSR::Node& affordance,
                                                                 std::int64_t now_ms);
 
@@ -141,8 +164,8 @@ std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G
 // kAnchorStaleMs rule; nullopt once the owner removes the anchor.
 std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint64_t anchor_id, std::int64_t now_ms);
 
-// The same read WITHOUT the kAnchorStaleMs refusal (Task 9): the anchor's newest published block, whatever its age
-// (RelPose::stamp_ms says when). For a consumer that must know an anchor EXISTS and where it last was — to WAIT for it
+// The same read WITHOUT the freshness refusal (Task 9): the anchor's newest published block, whatever its age
+// (RelPose::stamp_ms says when) or its drivable mark (anchor_fresh decides that). For a consumer that must know an anchor EXISTS and where it last was — to WAIT for it
 // and turn toward it — never to drive on it: a stale pose is a pose nobody is looking at. Same other refusals.
 std::optional<std::pair<RelPose, float>> read_anchor_latest(DSR::DSRGraph& G, std::uint64_t anchor_id);
 

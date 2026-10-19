@@ -76,6 +76,7 @@ std::optional<Anchor> Anchor::create(DSR::DSRGraph& G, std::uint64_t object_id, 
         G.add_or_modify_attrib_local<depth_m_att>(n, v.value());
     G.add_or_modify_attrib_local<interaction_node_id_att>(n, object_id);
     G.add_or_modify_attrib_local<agent_id_att>(n, static_cast<std::uint32_t>(agent_id));
+    G.add_or_modify_attrib_local<valid_att>(n, false);   // I-2: born NOT drivable; the owner marks it once it has a sighting
     rc::provenance::stamp_creation(G, n);
     const auto id = G.insert_node(n);
     if (not id.has_value())
@@ -211,6 +212,15 @@ bool Anchor::set_unseen_ms(DSR::DSRGraph& G, int unseen_ms)
     return G.update_node(n.value());
 }
 
+bool Anchor::set_drivable(DSR::DSRGraph& G, bool drivable)
+{
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    if (const auto v = G.get_attrib_by_name<valid_att>(n.value()); v.has_value() and v.value() == drivable) return true;
+    G.add_or_modify_attrib_local<valid_att>(n.value(), drivable);
+    return G.update_node(n.value());
+}
+
 bool Anchor::set_leaves(DSR::DSRGraph& G, const std::vector<AnchorLeaf>& leaves)
 {
     auto n = G.get_node(id_);
@@ -258,7 +268,9 @@ std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G
 std::optional<std::pair<RelPose, float>> read_anchor(DSR::DSRGraph& G, std::uint64_t anchor_id, std::int64_t now_ms)
 {
     auto r = read_anchor_latest(G, anchor_id);
-    if (r.has_value() and now_ms - r->first.stamp_ms > kAnchorStaleMs) return std::nullopt;   // see kAnchorStaleMs
+    if (not r.has_value()) return std::nullopt;
+    const auto anchor = G.get_node(anchor_id);
+    if (not anchor.has_value() or not anchor_fresh(G, anchor.value(), r->first.stamp_ms, now_ms)) return std::nullopt;
     return r;
 }
 
@@ -271,7 +283,8 @@ std::optional<std::pair<RelPose, float>> read_anchor_latest(DSR::DSRGraph& G, st
     const auto edge = G.get_edge(parent.value(), anchor->id(), "RT");
     if (not edge.has_value()) return std::nullopt;
 
-    // The newest block, by scanning the stamps: the ring is overwritten in place (see rc::rt::newest_twist).
+    // The newest block, by scanning the stamps: the ring is overwritten in place (see rc::rt::newest_twist). The owner stamps
+    // monotonically (I-2: "not drivable" is the node's `valid`, never an older stamp), so the newest stamp is the last write.
     const auto stamps = G.get_attrib_by_name<rt_timestamps_att>(edge.value());
     if (not stamps.has_value()) return std::nullopt;
     std::uint64_t newest = 0;

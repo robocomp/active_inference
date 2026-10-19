@@ -3101,9 +3101,11 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
     // room route is the honest fallback.
     if (not read.has_value() or id == 0 or read->second <= 0.f) return std::nullopt;
     const std::int64_t age = now - read->first.stamp_ms;
-    const bool fresh = age <= rc::interaction::kAnchorStaleMs;   // read_anchor's own rule (interaction_anchor.h)
-    if (not fresh and not accept_stale) return std::nullopt;
     const auto node = graph_->get_node(id);
+    // read_anchor's own rule (interaction_anchor.h): within kAnchorStaleMs AND marked drivable by its owner (final review
+    // I-2: a wait pose is "not drivable" on the node, not an older stamp).
+    const bool fresh = node.has_value() and rc::interaction::anchor_fresh(*graph_, node.value(), read->first.stamp_ms, now);
+    if (not fresh and not accept_stale) return std::nullopt;
     const int unseen = node.has_value() ? graph_->get_attrib_by_name<unseen_time_att>(node.value()).value_or(0) : 0;
     return AnchorCrossReading{.anchor_id = id,
                               .name = node.has_value() ? node->name() : std::to_string(id),

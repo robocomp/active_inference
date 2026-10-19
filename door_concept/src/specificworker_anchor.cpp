@@ -968,26 +968,31 @@ void SpecificWorker::step_passage_anchor()
         return;
     }
     bool wrote = false;
+    // Final review I-2: every block is stamped monotonically; "drive on it" / "only look at it" is the node's drivable mark
+    // (Anchor::set_drivable — written AFTER a drivable block, BEFORE a wait pose; interaction_anchor.h says why).
     if (measured and mode == rc::door::AnchorPublish::Seen)
-        wrote = pa.anchor->write(*G, pa.pose) and pa.anchor->set_unseen_ms(*G, 0);
+        wrote = pa.anchor->write(*G, pa.pose) and pa.anchor->set_unseen_ms(*G, 0) and pa.anchor->set_drivable(*G, true);
     else if (mode == rc::door::AnchorPublish::Predicted)
     {
         rc::interaction::RelPose out = pa.seen_pose;
         out.stamp_ms = now;   // fresh by the controller's staleness rule; unseen_time says it is a prediction
-        wrote = pa.anchor->write(*G, out) and pa.anchor->set_unseen_ms(*G, int(now - pa.last_seen_ms));
+        wrote = pa.anchor->write(*G, out) and pa.anchor->set_unseen_ms(*G, int(now - pa.last_seen_ms))
+            and pa.anchor->set_drivable(*G, true);
     }
     else if (mode == rc::door::AnchorPublish::None and pa.last_seen_ms < now - rc::interaction::kAnchorStaleMs)
     {
         // Fix round 2 (try68): NOT seen, nothing to drive on — but the belief, predicted by odometry, still says where to
-        // LOOK. Written BORN STALE (stamped one tick past kAnchorStaleMs, as at creation): the controller never drives on
-        // it, and its wait turns toward the opening where it is NOW, not where it was last published (try68: a pose
+        // LOOK. Written NOT DRIVABLE (final review I-2: the drivable mark cleared FIRST, then the pose stamped `now` — an
+        // older "born stale" stamp was re-sorted or DROPPED by the RT history ring, so the last predicted block stayed
+        // fresh for ~kAnchorStaleMs): the controller never drives on it, and its wait turns toward the opening where it
+        // is NOW, not where it was last published (try68: a pose
         // published once, 22 s and a full turn earlier — the controller turned toward it, faced a wall, and waited 40 s).
         // ★ Task 11 fix 4: the last SEEN pose carried by odometry, else the room initialisation carried the same way —
         //   NEVER pa.pose, the posterior p_view just refused to publish (try66 L2: it follows a wedge's odometry 81–89° off,
         //   and the wait-turn swung hard at the jamb toward it). rc::door::wait_pose.
         rc::interaction::RelPose out = rc::door::wait_pose(pa.seen_once, pa.seen_pose, pa.init_pose);
-        out.stamp_ms = now - rc::interaction::kAnchorStaleMs - 1;
-        wrote = pa.anchor->write(*G, out)
+        out.stamp_ms = now;
+        wrote = pa.anchor->set_drivable(*G, false) and pa.anchor->write(*G, out)
             and pa.anchor->set_unseen_ms(*G, int(std::min<std::int64_t>(now - pa.last_seen_ms, std::numeric_limits<int>::max())));
     }
     // ── Task 12 fix A: the SWUNG LEAF on the anchor, in anchor coordinates (interaction_anchor/anchor_leaf.h) — the door's
