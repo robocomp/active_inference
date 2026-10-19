@@ -3179,7 +3179,8 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // Marginalise the near edge over the door's state (see InteractionState::p_reach). Without a leaf-angle
     // posterior this cycle the door is treated as one that may need swinging: the band alone, as before.
     const float p_open_now = st.p_open_known ? std::clamp(st.p_open, 0.0f, 1.0f) : 0.0f;
-    st.p_reach       = p_open_now * rc::door::prob_within(st.robot_range_m, d_max, sigma)
+    st.p_within      = rc::door::prob_within(st.robot_range_m, d_max, sigma);
+    st.p_reach       = p_open_now * st.p_within
                      + (1.0f - p_open_now) * st.p_band;
     st.p_reach_known = true;
     st.range_sigma_m = sigma;
@@ -3304,7 +3305,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     {
         rc::pragmatic::Offer o;
         o.known = located and st.p_open_known;
-        o.p     = st.p_open;
+        // try102: passable AND at the door (rc::door::cross_offer_prob) — never from across the room.
+        o.p     = rc::door::cross_offer_prob(st.p_open, st.p_within);
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
             inst.cross_side_latched = rc::door::interior_side(inst.aperture, st.approach_standoff_m,
                                                               fitter_->room_polygon(), st.approach_side);   // leave THIS room
@@ -3326,9 +3328,11 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
-        o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body",
+        o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
+                                 " × P(at the door)={:.2f} (range {:.2f} m ≤ {:.2f}, σ {:.2f})",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
-                                 pg.robot_passage_width_m + pg.passage_margin_m);
+                                 pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.robot_range_m,
+                                 std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m);
         inst.aff_cross.update(o);
     }
 

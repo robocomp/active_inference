@@ -94,6 +94,7 @@ struct InteractionState
     float p_reach = 0.0f;
     bool  p_reach_known = false;      // false ⇒ no robot pose this cycle
     float p_band  = 0.0f;             // P(d_min ≤ d ≤ d_max): `open`'s half — it is the step that swings the leaf
+    float p_within = 0.0f;            // P(d ≤ d_max): AT an open door — `cross`'s half (cross_offer_prob)
 
     float crossing_progress = 0.0f;   // -1 .. +1, signed against the latched side
     bool  crossing_known = false;
@@ -115,13 +116,7 @@ struct InteractionState
 // clear_width() and passable_prob() live in door_passability.h (dependency-free, so the offline phi harness
 // tests/test_door_phi_stability.cpp marginalises with the SAME function the agent publishes).
 
-// P(d <= R) for a distance d known to +/- sigma. Normal CDF; sigma is floored by the caller so this can
-// never degenerate into a step function.
-inline float prob_within(float d, float R, float sigma)
-{
-    const float s = std::max(sigma, 1e-3f);
-    return 0.5f * std::erfc(-(R - d) / (s * std::numbers::sqrt2_v<float>));
-}
+// prob_within (P(d ≤ R)) lives in door_passability.h, beside cross_offer_prob (dependency-free, tested offline).
 
 // P(d_min <= d <= d_max): the actuation zone is a BAND, not a disc.
 // ★A DISC IS THE WRONG SHAPE AND IT FAILS TOWARD THE DANGER. "Within reach" stays true as the robot gets
