@@ -315,6 +315,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.pose.x.z() = rc::interaction::wrap_pi(pa.pose.x.z());
     const Eigen::Matrix3f Pn = (Eigen::Matrix3f::Identity() - K) * Pb;
     pa.pose.P = 0.5f * (Pn + Pn.transpose());
+    pa.bias = {};   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
     // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
     // claim fails), and nothing seen before it may be published as "predicted" after it.
     pa.retry = false;
@@ -544,6 +545,7 @@ void SpecificWorker::step_passage_anchor()
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
                     pa.pose = r.value();
+                    pa.bias = {};
                     refresh_anchor_geometry(*inst, pa);
                     pa.reinit_on_next_claim = false;
                     pa.retry = false;
@@ -560,6 +562,7 @@ void SpecificWorker::step_passage_anchor()
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
                         pa.pose = r.value();
+                        pa.bias = {};
                         refresh_anchor_geometry(*inst, pa);
                     }
                 }
@@ -599,7 +602,10 @@ void SpecificWorker::step_passage_anchor()
             v.has_value() and v->get().size() >= 3)
             var = {v->get()[0], v->get()[1], v->get()[2]};
         const float dt = sim_age_s(pa.pose.stamp_ms);
+        const Eigen::Vector3f x_before = pa.pose.x;
         pa.pose = rc::interaction::predict(pa.pose, twist.value(), var, dt);
+        // Task 10: the persistent bias moves with the same step (its misfit part decorrelating as the view changes).
+        rc::door::transport_bias(pa.bias, x_before, twist->linear.x() * dt, twist->linear.y() * dt, twist->angular.z() * dt, pa.width);
         // The last SEEN posterior is carried by the same odometry (fix round 1: published while predicted, kAnchorPredictMs).
         if (pa.seen_once) pa.seen_pose = rc::interaction::predict(pa.seen_pose, twist.value(), var, dt);
         // The held mask frame (fix 1) moves with the ROBOT (odometry), not with the anchor's posterior.
@@ -727,6 +733,7 @@ void SpecificWorker::step_passage_anchor()
     rc::door::AnchorEvidence ev;
     const bool measured = not rays.empty() or mask_pts.size() >= 2;
     const rc::interaction::RelPose prior_pose = pa.pose;   // for the frame record (fix 3)
+    const rc::door::AnchorBias prior_bias = pa.bias;       // ...and the bias factor handed with it (record v4)
     rc::door::LeafPrior leaf;                              // the door's leaf belief (below), also recorded
     rc::door::AnchorStaging staging;                       // the update's two budgeted ray sets, for the frame record
     if (measured)
@@ -777,7 +784,7 @@ void SpecificWorker::step_passage_anchor()
         // Floor returns (below the wall band) are told apart by z: in the visibility they PASS, never end (Task 8).
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
                                                       lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf, kFloorBandM,
-                                                      &staging);
+                                                      &staging, &pa.bias);
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;
@@ -803,6 +810,7 @@ void SpecificWorker::step_passage_anchor()
         rc::door::rec::Frame fr;
         fr.t_ms = now;
         fr.prior = prior_pose;
+        fr.bias  = prior_bias;
         fr.width = pa.width; fr.thickness = pa.thickness; fr.wall_u_min = pa.wall_u_min; fr.wall_u_max = pa.wall_u_max;
         fr.floor_below = kFloorBandM;
         fr.lidar_origin = lidar_origin;

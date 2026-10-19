@@ -7,7 +7,7 @@
  * failure gets debugged without a re-run (try65: the anchor was right and its publication flapped; the cause had to be
  * reconstructed by hand from a CSV of outputs).
  *
- * ─── FORMAT (version 3, fixed layout, host byte order = little-endian on every machine this fleet runs) ─────────────
+ * ─── FORMAT (version 4, fixed layout, host byte order = little-endian on every machine this fleet runs) ─────────────
  *   header   8 bytes "DANCHORF", u32 version
  *   record   u32 record_bytes (the rest of the record, for skipping a version this reader does not know)
  *            i64 t_ms
@@ -28,6 +28,9 @@
  *            f32 p_lidar, p_cam, p_view          — AS PUBLISHED: p_cam / p_view include fix 1's held camera term
  *            f32 lidar_open, lidar_door, lidar_wall   — p_lidar's three factors
  *   Binary, so no text parsing (and no locale) is involved anywhere.
+ *   VERSION 4 (Task 10) adds, after p_view's trio of factors, f32 bias_L[3 × kBiasCols] (row-major): the persistent-bias
+ *   factor the update was handed with its prior (door_anchor_update.h AnchorBias), so a plain replay re-runs the same
+ *   update; versions 1–3 read L = 0 (they predate it: their prior P is all data-space).
  *   VERSION 3 (Task 9 fix round 1) adds f32 leaf.len after p_not_as_believed (the leaf's own length: the clear width).
  *   VERSION 2 (dd1d525f–f8dc1356, e.g. try67) is still read: leaf.len = 0 (= the opening's width, as it then was).
  *   VERSION 1 (cc39a46c, e.g. try66) is still READ (Task 9): in place of the two staged sets it holds u32 n_rays then
@@ -55,7 +58,7 @@ namespace rc::door::rec
 {
 
 inline constexpr char          kMagic[8] = {'D', 'A', 'N', 'C', 'H', 'O', 'R', 'F'};
-inline constexpr std::uint32_t kVersion  = 3;
+inline constexpr std::uint32_t kVersion  = 4;
 inline constexpr std::uint64_t kMaxBytes = 200ull * 1024ull * 1024ull;   // ⚑ disk budget
 
 struct Frame
@@ -72,6 +75,7 @@ struct Frame
     rc::interaction::RelPose post;
     float p_lidar = 0.f, p_cam = 0.f, p_view = 0.f;
     float lidar_open = 0.f, lidar_door = 0.f, lidar_wall = 0.f;
+    AnchorBias bias;                       // v4: the persistent-bias factor handed to the update with `prior`
     // Version-1 records only (read, never written): the pre-budget rays and the budgeted count.
     std::uint32_t version = kVersion;
     std::vector<Eigen::Vector3f> rays_v1;
@@ -163,6 +167,7 @@ inline std::string encode(const Frame& f)
     put(b, f.pi_open);
     put_pose(b, f.post);
     for (const float v : {f.p_lidar, f.p_cam, f.p_view, f.lidar_open, f.lidar_door, f.lidar_wall}) put(b, v);
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < kBiasCols; ++j) put(b, f.bias.L(i, j));
     return b;
 }
 
@@ -192,6 +197,9 @@ inline bool decode(const char* p, const char* e, Frame& f, std::uint32_t version
     if (version >= 3) ok = ok and get(p, e, f.leaf.len);
     ok = ok and get(p, e, f.pi_open) and get_pose(p, e, f.post);
     for (float* v : {&f.p_lidar, &f.p_cam, &f.p_view, &f.lidar_open, &f.lidar_door, &f.lidar_wall}) ok = ok and get(p, e, *v);
+    f.bias = {};
+    if (version >= 4)
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < kBiasCols; ++j) ok = ok and get(p, e, f.bias.L(i, j));
     return ok;
 }
 
@@ -241,7 +249,7 @@ inline bool read_all(std::istream& in, std::vector<Frame>& frames, std::uint32_t
     char magic[8] = {};
     std::uint32_t ver = 0;
     if (not in.read(magic, sizeof(magic)) or std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) return false;
-    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 2 and ver != 1)) return false;
+    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 3 and ver != 2 and ver != 1)) return false;
     if (version != nullptr) *version = ver;
     // A record's length word is bounded by what the file still holds: a corrupt word cannot allocate gigabytes.
     const std::streampos here = in.tellg();

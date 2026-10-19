@@ -14,7 +14,7 @@
 // The recorded p_cam / p_view are AS PUBLISHED (fix 1: the last mask frame held for kAnchorStaleMs, its camera term
 // recomputed at the posterior); the replayed ones are this frame's own (p_cam > 0 only on a frame that carried a mask),
 // so they differ on mask-less frames by design — compare p_lidar for the update itself.
-// Format version 3 (Task 9 fix round 1; version 2 read too). A version-1 file (cc39a46c, e.g. try66) is read too (Task 9): its records hold the
+// Format version 4 (Task 10: the persistent-bias factor; versions 3 and 2 read too). A version-1 file (cc39a46c, e.g. try66) is read too (Task 9): its records hold the
 // PRE-budget rays, so the replay stages them itself with the CURRENT model — the replayed numbers are then today's
 // model on that run's inputs, not a re-run of the update that ran live (the pose Δ is the model change, not an error).
 //
@@ -32,6 +32,13 @@
 //                    prediction was broken (try68: the f.r.1 clock bug, dt = 0 for the whole run). Its covariance growth:
 //   --motion-sd A,S,R  per-second velocity σ of adv, side, rot (default 0.011, 0.011, 0.010: try67's live per-step growth).
 //   --width W        a what-if: the anchor's model width forced to W (e.g. a door's CLEAR width between its frames).
+//   --gt F           Task 10: score every posterior against the Webots truth in F (gt_error.csv: gt_x_world, gt_y_world,
+//                    gt_theta_raw; DOOR_1 of tworooms-piso.wbt) and print, per leg and window, the CALIBRATION of the
+//                    claimed σ on the published frames (p_view ≥ 0.5): |err|, σ, |err|/σ medians and 2σ coverage.
+//   --diag           with --gt: per frame, the prior's, the data-only optimum's (x̄ + I_L⁺ I_L ν) and the posterior's error,
+//                    the frame's robust data σ, the gain, and the persistent bias's σ (Task 10's diagnosis).
+//   --dump F         with --chain: every posterior to F as CSV (t_ms, x, y, yaw, P row-major, p_view).
+//   --no-bias        Task 10 ablation: the persistent bias factor is NOT carried between frames (the agent carries it).
 //   --casing C       the caller's leaf for records written before it (leaf.len = 0, v1/v2): hinged at and spanning the clear
 //                    width rc::door::anchor_clear_width(width, C) — what the agent now passes (DoorConcept.FrameCasingM, 0.06).
 // The held camera term is replayed as live (the last mask frame for kAnchorStaleMs, carried by the step motion), so the
@@ -50,11 +57,15 @@
 #include "anchor_frame_record.h"
 #include "interaction_anchor/interaction_anchor.h"   // kAnchorStaleMs
 #include <algorithm>
+#include <locale>
 #include <optional>
 #include <sstream>
 
 namespace
 {
+bool no_bias = false;   // --no-bias: the ablation — no bias state carried (each frame's own bias only, L = 0 before it)
+bool diag = false;      // --diag: per frame, the prior's / the data-only optimum's / the posterior's error against the truth
+std::ofstream dump;     // --dump F: every chained posterior as CSV (t_ms, x, y, yaw, P row-major, p_view) — for the servo check
 bool num(const char* a, double& out)
 {
     const auto [p, ec] = std::from_chars(a, a + std::strlen(a), out);
@@ -92,24 +103,104 @@ std::optional<PoseRow> pose_at(const std::vector<PoseRow>& rows, std::int64_t t)
     return *it;
 }
 
-struct LegStats { int n = 0, published = 0, ge06 = 0, pub_pred = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0, last_seen = -1; };
+// ─── Ground truth (Task 10): the robot's Webots pose (gt_error.csv: ts_ms, gt_x_world, gt_y_world, gt_theta_raw) and the
+// door's opening, so each frame's posterior can be scored against the truth and its claimed σ CALIBRATED.
+//   The robot's world yaw is −gt_theta_raw − π/2 (Task 8/9's convention, checked against the robot's motion).
+//   DOOR_1 (tworooms-piso.wbt): the gap between ROOM2_WALL_SOUTH_WEST and _EAST is x ∈ [−5.30, −4.24] at the walls'
+//   mid-plane y = 9.425 (the frame's own translation, (−4.769, 9.380), is the door node, 4.5 cm off the mid-plane:
+//   that offset is in DEPTH only), the wall runs along world x, so the anchor's true yaw is −(robot world yaw).
+struct GtRow { std::int64_t t; double x, y, th; };
+std::vector<GtRow> read_gt_csv(const std::string& path)
+{
+    std::vector<GtRow> out;
+    std::ifstream f(path);
+    std::string line;
+    if (not std::getline(f, line)) return out;
+    std::vector<std::string> head;
+    { std::stringstream ss(line); std::string c; while (std::getline(ss, c, ',')) head.push_back(c); }
+    auto col = [&](const char* n) { return int(std::find(head.begin(), head.end(), n) - head.begin()); };
+    const int it = col("ts_ms"), ix = col("gt_x_world"), iy = col("gt_y_world"), ith = col("gt_theta_raw");
+    while (std::getline(f, line))
+    {
+        std::vector<std::string> c; std::stringstream ss(line); std::string v; while (std::getline(ss, v, ',')) c.push_back(v);
+        if (int(c.size()) <= std::max({it, ix, iy, ith})) continue;
+        GtRow r{}; double t = 0, raw = 0;
+        if (num(c[it].c_str(), t) and num(c[ix].c_str(), r.x) and num(c[iy].c_str(), r.y) and num(c[ith].c_str(), raw))
+        { r.t = std::int64_t(t); r.th = -raw - M_PI / 2; out.push_back(r); }
+    }
+    return out;
+}
+constexpr double kDoorX = -4.77, kDoorY = 9.425;
+// The posterior's error against the truth, in the TRUE anchor's axes: lateral (along the wall), yaw, and the robot's
+// true normal coordinate s; plus the claimed σ along the same axis. The anchor's axes may be flipped (the robot on the
+// other side): then the yaw differs by π and the along-wall axis is reversed.
+struct GtErr { bool ok = false; double lat = 0, yaw = 0, s = 0, sig_lat = 0, sig_yaw = 0; };
+GtErr gt_error(const std::vector<GtRow>& gt, std::int64_t t, const rc::interaction::RelPose& post)
+{
+    GtErr e;
+    if (gt.empty()) return e;
+    // The truth at t, interpolated between the two bracketing rows (≈ 20 Hz; the next row alone is up to 110 ms late,
+    // 3° of a 0.5 rad/s turn).
+    auto it = std::lower_bound(gt.begin(), gt.end(), t, [](const GtRow& r, std::int64_t v) { return r.t < v; });
+    if (it == gt.end() or it == gt.begin()) return e;
+    const GtRow& g1 = *it; const GtRow& g0 = *std::prev(it);
+    if (g1.t - g0.t > 200 or g1.t == g0.t) return e;
+    const double a_ = double(t - g0.t) / double(g1.t - g0.t);
+    const GtRow gi{t, g0.x + a_ * (g1.x - g0.x), g0.y + a_ * (g1.y - g0.y), g0.th + a_ * std::remainder(g1.th - g0.th, 2 * M_PI)};
+    const GtRow* it2 = &gi;
+    const double c = std::cos(it2->th), s = std::sin(it2->th), dx = kDoorX - it2->x, dy = kDoorY - it2->y;
+    const double tx = c * dx + s * dy, ty = -s * dx + c * dy, tz = std::remainder(-it2->th, 2 * M_PI);
+    const Eigen::Vector2d a(std::cos(tz), std::sin(tz));
+    double lat = (post.x.x() - tx) * a.x() + (post.x.y() - ty) * a.y();
+    double ye = std::remainder(post.x.z() - tz, 2 * M_PI);
+    if (std::abs(ye) > M_PI / 2) { ye = std::remainder(ye + M_PI, 2 * M_PI); lat = -lat; }
+    e.ok = true; e.lat = lat; e.yaw = ye; e.s = -(-std::sin(tz) * tx + std::cos(tz) * ty);
+    const Eigen::Matrix2d P2 = post.P.topLeftCorner<2, 2>().cast<double>();
+    e.sig_lat = std::sqrt(std::max(0.0, a.dot(P2 * a)));
+    e.sig_yaw = std::sqrt(std::max(0.0, double(post.P(2, 2))));
+    return e;
+}
+struct Calib
+{
+    std::vector<double> zl, zy, el, ey, sl, sy;
+    void add(const GtErr& e)
+    {
+        zl.push_back(std::abs(e.lat) / std::max(e.sig_lat, 1e-9)); zy.push_back(std::abs(e.yaw) / std::max(e.sig_yaw, 1e-9));
+        el.push_back(std::abs(e.lat)); ey.push_back(std::abs(e.yaw)); sl.push_back(e.sig_lat); sy.push_back(e.sig_yaw);
+    }
+    static double med(std::vector<double> v) { if (v.empty()) return 0; std::ranges::nth_element(v, v.begin() + std::ptrdiff_t(v.size() / 2)); return v[v.size() / 2]; }
+    static double mx(const std::vector<double>& v) { return v.empty() ? 0 : std::ranges::max(v); }
+    static double cov2(const std::vector<double>& z) { if (z.empty()) return 0; return 100.0 * double(std::ranges::count_if(z, [](double q) { return q <= 2.0; })) / double(z.size()); }
+    void print(const char* what) const
+    {
+        if (zl.empty()) return;
+        std::print("  calib {} ({} published frames): lat |err| med {:.3f} max {:.3f} m, σ_lat med {:.3f} m, |err|/σ med {:.2f}, 2σ cover {:.0f} % | "
+                   "yaw |err| med {:.1f} max {:.1f}°, σ_yaw med {:.2f}°, |err|/σ med {:.2f}, 2σ cover {:.0f} %\n",
+                   what, zl.size(), med(el), mx(el), med(sl), med(zl), cov2(zl), med(ey) * 180 / M_PI, mx(ey) * 180 / M_PI,
+                   med(sy) * 180 / M_PI, med(zy), cov2(zy));
+    }
+};
+
+struct LegStats { int n = 0, published = 0, ge06 = 0, pub_pred = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0, last_seen = -1; Calib cal; };
 void print_leg(const LegStats& s, int k)
 {
     if (s.n == 0) return;
     std::print("leg {}: t {:.1f}–{:.1f} s, {} frames: p_view mean {:.3f} min {:.3f}, ≥ 0.6 on {} ({:.0f} %), published (≥ 0.5) {}, "
                "published if the cross were claimed (seen, or predicted ≤ kAnchorPredictMs) {}\n", k,
                s.t0 * 1e-3, s.t1 * 1e-3, s.n, s.sum / s.n, s.min, s.ge06, 100.0 * s.ge06 / s.n, s.published, s.pub_pred);
+    s.cal.print("seen");
 }
 
 int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool freeze, double from_s, double to_s, int every,
           double win_a, double win_b, double width_override, double casing, const std::vector<PoseRow>& motion,
-          const Eigen::Vector3f& motion_var)
+          const Eigen::Vector3f& motion_var, const std::vector<GtRow>& gt)
 {
     using rc::interaction::RelPose;
     const std::int64_t t0 = frames.empty() ? 0 : frames.front().t_ms;
     std::print("{:>8} {:>5} | {:>7} {:>7} {:>7} | {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>6} | {:>6} {}\n", "t_ms", "rays", "x", "y",
                "yaw", "e", "s", "pl", "open", "door", "walls", "pc", "pv", "pv_rec", "| sig_lat sig_yaw");
     RelPose x;
+    rc::door::AnchorBias bias;   // Task 10: the persistent bias factor, carried as the agent carries it
     rc::door::CameraViewHold hold;
     float w = 0, u0 = 0, u1 = 0;
     bool have = false;
@@ -127,6 +218,7 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             leg = {};
             leg.t0 = f.t_ms - t0;
             x = f.prior;
+            bias = f.bias;
             hold = {};
             w = f.width; u0 = f.wall_u_min; u1 = f.wall_u_max;
             have = true;
@@ -144,6 +236,7 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             const Eigen::Matrix3f Q = b.P - J * a.P * J.transpose();
             float s_ = float(scale);
             Eigen::Matrix3f Qm = Q;
+            const float wk_model = width_override > 0 ? float(width_override) : freeze ? w : f.width;
             if (not motion.empty())
                 if (const auto p0 = pose_at(motion, frames[k - 1].t_ms), p1 = pose_at(motion, f.t_ms); p0.has_value() and p1.has_value())
                 {
@@ -157,6 +250,7 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
                     RelPose p; p.x = rc::interaction::move_mean(x.x, m_side, m_adv, m_dth);
                     p.P = J2 * x.P * J2.transpose() + G2 * motion_var.asDiagonal() * G2.transpose() * (dts * dts);
                     p.stamp_ms = b.stamp_ms;
+                    rc::door::transport_bias(bias, x.x, m_side, m_adv, m_dth, wk_model);
                     x = p;
                     rc::door::carry_held_mask(hold, m_side, m_adv, m_dth);
                     goto staged;
@@ -166,6 +260,7 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             p.x = rc::interaction::move_mean(x.x, s_ * side, s_ * adv, s_ * dth);
             p.P = J * x.P * J.transpose() + s_ * s_ * Q;
             p.stamp_ms = b.stamp_ms;
+            rc::door::transport_bias(bias, x.x, s_ * side, s_ * adv, s_ * dth, wk_model);
             x = p;
             rc::door::carry_held_mask(hold, s_ * side, s_ * adv, s_ * dth);
             (void)Qm;
@@ -181,9 +276,10 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             leaf.hinge_u = (leaf.hinge_u >= 0.f ? 0.5f : -0.5f) * clear;
             leaf.len = clear;
         }
+        const RelPose xprior_ = x;
         auto [post, ev] = rc::door::update_door_anchor(x, wk, f.thickness, lo, hi, f.lidar_origin,
                                                        f.version == 1 ? f.rays_v1 : std::vector<Eigen::Vector3f>{}, f.mask, f.cam,
-                                                       f.pi_open, leaf, f.floor_below, &st);
+                                                       f.pi_open, leaf, f.floor_below, &st, no_bias ? nullptr : &bias);
         if (not f.mask.empty()) rc::door::hold_mask_frame(hold, f.mask, f.t_ms);
         ev.p_cam = rc::door::held_camera_view(hold, f.t_ms, rc::interaction::kAnchorStaleMs, f.cam, wk, post);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
@@ -196,12 +292,21 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             L.pub_pred += (L.last_seen >= 0 and f.t_ms - L.last_seen <= rc::interaction::kAnchorPredictMs) ? 1 : 0;
         };
         note_pred(leg);
+        const GtErr ge = gt_error(gt, f.t_ms, post);
+        if (dump.is_open())
+        {
+            dump << (f.t_ms - t0) << ',' << post.x.x() << ',' << post.x.y() << ',' << post.x.z();
+            for (int a = 0; a < 3; ++a) for (int c = 0; c < 3; ++c) dump << ',' << post.P(a, c);
+            dump << ',' << ev.p_view << '\n';
+        }
+        if (ge.ok and ev.p_view >= 0.5f) leg.cal.add(ge);
         if (t >= win_a and t <= win_b)
         {
             if (win.n == 0) win.t0 = f.t_ms - t0;
             ++win.n; win.sum += ev.p_view; win.min = std::min(win.min, double(ev.p_view));
             win.published += ev.p_view >= 0.5f ? 1 : 0; win.ge06 += ev.p_view >= 0.6f ? 1 : 0; win.t1 = f.t_ms - t0;
             note_pred(win);
+            if (ge.ok and ev.p_view >= 0.5f) win.cal.add(ge);
         }
         if (k % std::size_t(every) != 0) continue;
         const float cz = std::cos(post.x.z()), sz = std::sin(post.x.z());
@@ -211,6 +316,25 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
                    ev.lidar_wall, ev.p_cam, ev.p_view, f.p_view,
                    std::sqrt(std::max(0.f, Eigen::Vector2f(cz, sz).dot(post.P.topLeftCorner<2, 2>() * Eigen::Vector2f(cz, sz)))),
                    std::sqrt(std::max(0.f, post.P(2, 2))));
+        if (ge.ok and diag)
+        {
+            const float tz = post.x.z();
+            const Eigen::Vector3f al(std::cos(tz), std::sin(tz), 0), ay(0, 0, 1);
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(ev.info);
+            Eigen::Matrix3f Ip = Eigen::Matrix3f::Zero();
+            for (int q = 0; q < 3; ++q) if (es.eigenvalues()(q) > 1e-9f * es.eigenvalues().maxCoeff()) Ip += es.eigenvectors().col(q) * es.eigenvectors().col(q).transpose() / es.eigenvalues()(q);
+            const Eigen::Matrix3f LL = bias.L * bias.L.transpose();
+            auto sd = [&](const Eigen::Matrix3f& V, const Eigen::Vector3f& a) { return std::sqrt(std::max(0.f, a.dot(V * a))); };
+            RelPose xl = post; xl.x = xprior_.x + Ip * ev.info_innov;
+            const GtErr gl = gt_error(gt, f.t_ms, xl), gp = gt_error(gt, f.t_ms, xprior_);
+            const Eigen::Matrix3f Vr = Ip * (ev.misfit + ev.info) * Ip;
+            std::print("{:8d} DIAG prior err lat {:+.3f} yaw {:+.2f}° (σ {:.3f} {:.2f}°) | data-only err lat {:+.3f} yaw {:+.2f}° (robust σ {:.3f} {:.2f}°) | "
+                       "gain lat {:.2f} yaw {:.2f} | L σ lat {:.3f} yaw {:.2f}° | P_z σ lat {:.3f}\n", f.t_ms - t0,
+                       gp.lat, gp.yaw * 180 / M_PI, gp.sig_lat, gp.sig_yaw * 180 / M_PI, gl.lat, gl.yaw * 180 / M_PI, sd(Vr, al), sd(Vr, ay) * 180 / M_PI,
+                       al.dot(ev.gain * al), ev.gain(2, 2), sd(LL, al), sd(LL, ay) * 180 / M_PI, sd(Eigen::Matrix3f(post.P - LL), al));
+        }
+        if (ge.ok) std::print("{:8d} GT lat {:+.3f} yaw {:+.2f}° s {:+.2f} | z_lat {:.2f} z_yaw {:.2f}\n", f.t_ms - t0, ge.lat, ge.yaw * 180 / M_PI, ge.s,
+                              std::abs(ge.lat) / std::max(ge.sig_lat, 1e-9), std::abs(ge.yaw) / std::max(ge.sig_yaw, 1e-9));
     }
     if (have) print_leg(leg, ++legs);
     if (win.n > 0) { std::print("window "); print_leg(win, 0); }
@@ -224,18 +348,27 @@ int main(int argc, char** argv)
     int every = 1;
     bool chained = false, freeze = false;
     double scale = 1.0, from_s = -1e9, to_s = 1e9, win_a = 1e9, win_b = -1e9, width_override = 0, casing = -1;
-    std::string motion_csv;
+    std::string motion_csv, gt_csv;
     Eigen::Vector3f motion_var(0.011f * 0.011f, 0.011f * 0.011f, 0.010f * 0.010f);
     for (int i = 1; i < argc; ++i)
     {
         double v = 0;
         if (std::strcmp(argv[i], "--every") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v >= 1) every = int(v); }
         else if (std::strcmp(argv[i], "--chain") == 0) chained = true;
+        else if (std::strcmp(argv[i], "--no-bias") == 0) no_bias = true;
+        else if (std::strcmp(argv[i], "--diag") == 0) diag = true;
+        else if (std::strcmp(argv[i], "--dump") == 0 and i + 1 < argc)
+        {
+            dump.open(argv[++i]);
+            dump.imbue(std::locale::classic());
+            dump << "t_ms,x,y,yaw,P00,P01,P02,P10,P11,P12,P20,P21,P22,p_view\n";
+        }
         else if (std::strcmp(argv[i], "--freeze") == 0) freeze = true;
         else if (std::strcmp(argv[i], "--time-scale") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) scale = v; }
         else if (std::strcmp(argv[i], "--from") == 0 and i + 1 < argc) { if (num(argv[++i], v)) from_s = v; }
         else if (std::strcmp(argv[i], "--to") == 0 and i + 1 < argc) { if (num(argv[++i], v)) to_s = v; }
         else if (std::strcmp(argv[i], "--motion-csv") == 0 and i + 1 < argc) motion_csv = argv[++i];
+        else if (std::strcmp(argv[i], "--gt") == 0 and i + 1 < argc) gt_csv = argv[++i];
         else if (std::strcmp(argv[i], "--motion-sd") == 0 and i + 1 < argc)
         {
             std::stringstream ss(argv[++i]); std::string tok; int j = 0;
@@ -258,7 +391,9 @@ int main(int argc, char** argv)
                    width_override > 0 ? std::format(", width forced to {:.2f}", width_override) : std::string{});
         const auto motion = motion_csv.empty() ? std::vector<PoseRow>{} : read_motion_csv(motion_csv);
         if (not motion_csv.empty()) std::print("motion from {} ({} poses)\n", motion_csv, motion.size());
-        return chain(frames, scale, freeze, from_s, to_s, every, win_a, win_b, width_override, casing, motion, motion_var);
+        const auto gt = gt_csv.empty() ? std::vector<GtRow>{} : read_gt_csv(gt_csv);
+        if (not gt_csv.empty()) std::print("ground truth from {} ({} poses)\n", gt_csv, gt.size());
+        return chain(frames, scale, freeze, from_s, to_s, every, win_a, win_b, width_override, casing, motion, motion_var, gt);
     }
     std::print("{:>8} {:>5} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>5} | {:>6} {:>6}\n", "t_ms", "rays", "F", "mask",
                "pv_rec", "pl_rec", "pc_rec", "pl_rep", "open", "door", "walls", "pc", "pv", "dxy_m", "dyaw");
@@ -268,11 +403,12 @@ int main(int argc, char** argv)
     {
         const auto& f = frames[k];
         if ((f.t_ms - t0) * 1e-3 < from_s or (f.t_ms - t0) * 1e-3 > to_s) continue;
+        rc::door::AnchorBias fb = f.bias;   // v4: the factor the live update was handed (v1–v3: none)
         rc::door::AnchorStaging st = f.staging;
         st.replay = f.version != 1;   // v2: the record's budgeted sets stand for the frame; v1: stage its pre-budget rays
         const auto [post, ev] = rc::door::update_door_anchor(f.prior, f.width, f.thickness, f.wall_u_min, f.wall_u_max, f.lidar_origin,
                                                              f.version == 1 ? f.rays_v1 : std::vector<Eigen::Vector3f>{}, f.mask,
-                                                             f.cam, f.pi_open, f.leaf, f.floor_below, &st);
+                                                             f.cam, f.pi_open, f.leaf, f.floor_below, &st, &fb);
         const double dxy = (post.x.head<2>() - f.post.x.head<2>()).norm();
         const double dyaw = std::abs(rc::interaction::wrap_pi(post.x.z() - f.post.x.z()));
         worst_xy = std::max(worst_xy, dxy); worst_yaw = std::max(worst_yaw, dyaw);

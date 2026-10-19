@@ -67,10 +67,14 @@
  *     gain ratio, stopping when the undamped step promises < 1e-3 nats. Derivatives are finite differences of F in
  *     double precision (F is smooth by construction); the curvature used is P̄⁻¹ + [I_L]₊, the data's information
  *     projected onto its PSD part.
- *   - LAPLACE + COMMON MODE. At the sensor's own σ: I_L from the exact finite-difference Hessian (a Gauss-
- *     Newton/Fisher one would count each jamb-adjacent wall ray as lateral information on a featureless shut wall),
- *     then the frame's common offset (σ_c = 0.02 m on x, y: one LiDAR extrinsic, one wall that is not a perfect
- *     plane) marginalised by Woodbury, I_eff = (I + I_L C)⁻¹ I_L — so ~900 correlated rays cannot claim a 2 mm σ.
+ *   - LAPLACE + PERSISTENT BIAS (Task 10). At the sensor's own σ: I_L from the exact finite-difference Hessian (a Gauss-
+ *     Newton/Fisher one would count each jamb-adjacent wall ray as lateral information on a featureless shut wall).
+ *     What the rays share — the mount (σ_c on x, y; its yaw ε about the LiDAR, a lateral term growing with range), the
+ *     wall's straightness, and the misfit of the structure this model does not describe (a cluster-robust sandwich of
+ *     the rays' scores) — is ONE error from frame to frame, not fresh noise: it is carried as a latent factor L beside
+ *     the pose (AnchorBias), the update uses the Schmidt (consider) gain, and the published P = P_z + L Lᵀ never falls
+ *     below one view's systematic error. (Task 7–9's per-frame Woodbury common mode, I_eff = (I + I_L C)⁻¹ I_L, was
+ *     divided by √N over a chain: try66–69 published σ_yaw 0.1–0.2° against 2–28° errors.)
  *
  * COST (fix round 4, -O2): ≤ ~30 ms per update on a 7,800-ray 3-D bpearl frame with the leaf configurations
  * marginalised (was 1.4–1.9 s: every ray within 2 m entered F, ~400 evaluations of F per update). Bounded by THE RAY
@@ -159,6 +163,10 @@ struct AnchorEvidence
     float az_step = 0.f;                              // the frame's measured azimuth step (rad), for the log
     float p_cam   = 0.f;                              // P(opening in the zed frustum) when a mask was consumed, else 0
     float p_view  = 0.f;                              // P(door in view) = 1 − (1 − p_lidar)(1 − p_cam)
+    float sig_bias_yaw = 0.f;                         // Task 10: the persistent bias's yaw σ in the published P (rad)
+    // Task 10 diagnostics (the replay prints them): the frame's model information I_L, its score-space misfit J_s, the gain.
+    Eigen::Matrix3f info = Eigen::Matrix3f::Zero(), misfit = Eigen::Matrix3f::Zero(), gain = Eigen::Matrix3f::Zero();
+    Eigen::Vector3f info_innov = Eigen::Vector3f::Zero();   // I_L ν: the data-only optimum's pull on the prior mean
 };
 
 // The door's own belief about its SWUNG leaf, in ANCHOR coordinates (fix round 3). The leaf is a segment of length w
@@ -723,6 +731,61 @@ struct Problem
         l_shut += c_shut;
         // The door is open or shut for the WHOLE frame: marginalise that latent at the frame level.
         return log_add_exp(std::log(kPriorOpen) + l_open, std::log(1.0 - kPriorOpen) + l_shut);
+    }
+
+    // ─── PER-RAY SCORES (Task 10) ────────────────────────────────────────────────────────────────────────────────
+    // frame_loglik is a FRAME-level mixture over its hypotheses h (open × the active leaf configurations, shut × δ):
+    //   log p(rays | x) = log Σ_h π_h exp(Σ_i w_i ℓ_i(h, x)).
+    // Its gradient splits EXACTLY into per-ray terms (Fisher's identity): ∇ log p = Σ_i w_i Σ_h r_h ∇ℓ_i(h), r_h the frame's
+    // posterior responsibility of h at x. ray_scores returns, per kept ray, the score of ONE of the beams it stands for,
+    // tempered as F tempers it: s_i = β_lidar Σ_h r_h ∇ℓ_i(h). (The shut branch is scored exactly, without
+    // inside_negligible's shortcut — the two agree to 1e-6 per ray.) Central differences at F's own 1e-3 step.
+    std::vector<V3d> ray_scores(const V3d& x) const
+    {
+        const std::size_t n = rays.size(), nd = model.leaf_depths.size();
+        const bool leafy = not leaf.cfgs.empty();
+        const std::size_t no = leafy ? leaf.active.size() : 1, nh = no + nd;
+        std::vector<double> lp(nh);
+        for (std::size_t c = 0; c < no; ++c)
+            lp[c] = std::log(kPriorOpen) + (leafy ? (leaf.active[c] < 0 ? leaf.log_prior_none : leaf.cfgs[std::size_t(leaf.active[c])].log_prior) : 0.0);
+        for (std::size_t j = 0; j < nd; ++j) lp[no + j] = std::log(1.0 - kPriorOpen) - std::log(double(nd));
+        auto per_ray = [&](const V3d& xx, std::size_t i, double* out)
+        {
+            const RayAt r = at(rays[i], xx, std::cos(xx.z()), std::sin(xx.z()));
+            const auto k = model.terms(r.a, spread[i], run_log[i]);
+            const double l_open = model.loglik_open(k);
+            for (std::size_t c = 0; c < no; ++c)
+                out[c] = l_open + ((leafy and leaf.active[c] >= 0) ? leaf_delta(r, k, i, leaf.cfgs[std::size_t(leaf.active[c])], l_open) : 0.0);
+            for (std::size_t j = 0; j < nd; ++j) out[no + j] = model.loglik_shut(k, r.a, model.leaf_depths[j]);
+            // −∞ − (−∞) inside a branch (a leaf the ray cannot meet) is that branch's impossibility, not a number.
+            for (std::size_t h = 0; h < nh; ++h) if (std::isnan(out[h])) out[h] = -std::numeric_limits<double>::infinity();
+        };
+        std::vector<double> l0(n * nh);
+        std::vector<double> Lh(lp);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            per_ray(x, i, &l0[i * nh]);
+            for (std::size_t h = 0; h < nh; ++h) Lh[h] += wt[i] * l0[i * nh + h];
+        }
+        double z = -std::numeric_limits<double>::infinity();
+        for (const double v : Lh) z = log_add_exp(z, v);
+        std::vector<double> resp(nh);
+        for (std::size_t h = 0; h < nh; ++h) resp[h] = std::exp(Lh[h] - z);
+        std::vector<V3d> s(n, V3d::Zero());
+        std::vector<double> lpb(nh), lmb(nh);
+        constexpr double h_ = 1e-3;
+        for (std::size_t i = 0; i < n; ++i)
+            for (int a = 0; a < 3; ++a)
+            {
+                V3d e = V3d::Zero(); e(a) = h_;
+                per_ray(x + e, i, lpb.data());
+                per_ray(x - e, i, lmb.data());
+                double g = 0.0;
+                for (std::size_t h = 0; h < nh; ++h)
+                    if (const double d = lpb[h] - lmb[h]; resp[h] > 0.0 and std::isfinite(d)) g += resp[h] * d / (2.0 * h_);
+                s[i](a) = beta_lidar * g;
+            }
+        return s;
     }
 
     // Which leaf configurations carry the posterior at x (under the spreads staged): all of them scored once, the most
@@ -1446,9 +1509,142 @@ inline AnchorEvidence door_view(const rc::interaction::RelPose& at, float width,
     return ev;
 }
 
+// ─── THE PERSISTENT BIAS (Task 10) ──────────────────────────────────────────────────────────────────────────────
+// Every frame's rays share errors no number of rays can average out, and — the point of Task 10 — so does the NEXT
+// frame's: 0.1 s later the same mount sees the same wall, and the same structure the model does not describe (the casing
+// boards, a swung leaf off its believed hinge, the slot between wall and frame) pulls the fit the same way. Treated as
+// fresh noise on every frame, the old per-frame Woodbury common mode was divided by √N over a chain: try66–69 published
+// σ_yaw 0.1–0.2° against errors of 2–28° (median |err|/σ 10–43).
+// The model: the rays measure x + b_k (+ the beams' independent noise, I_L⁻¹), with b_k = Γ_k ξ this view's systematic
+// error and ξ ~ N(0, I) ONE latent for the whole passage (fully correlated from frame to frame; its magnitude Γ_k
+// re-evaluated for the current view, bias_terms). The posterior's error is n + L ξ, n independent of ξ (covariance P_z,
+// the part the beams' noise legitimately averages), and for ANY gain K
+//   L_k = (I − K) J L_{k−1} + K Γ_k,   P_z ← (I − K) P_z (I − K)ᵀ + K I_L⁻¹ Kᵀ,   published P = P_z + L Lᵀ,
+// J the odometry's motion Jacobian. K is the Schmidt (consider) gain, the one that minimises P with b in the innovation:
+//   K = (P_z − L (Γ − L)ᵀ) (P_z + (Γ − L)(Γ − L)ᵀ + I_L⁻¹)⁻¹,
+// evaluated in I_L's range with every I_L⁻¹ cancelled (I_L Γ is bounded even where Γ's misfit block is not). A frame that
+// can only repeat the bias already in L adds no confidence; repeated identical frames drive L → Γ: the posterior never
+// claims less than one view's systematic error. The caller keeps L (AnchorBias) beside the RelPose, carries it by the same motion Jacobian
+// (transport_bias), and passes it back: the update recovers P_z = P − L Lᵀ.
+// L has two blocks of three latent columns, both oriented on the robot's axes (symmetric square roots), so the same
+// latent means the same direction from frame to frame:
+//   0–2  the PHYSICAL errors the rays share (mount, wall) — the same for the whole passage;
+//   3–5  the model's MISFIT — a property of the VIEW, so it decorrelates as the view changes (below).
+inline constexpr int kBiasCols = 6;
+using BiasFactor = Eigen::Matrix<float, 3, kBiasCols>;
+struct AnchorBias { BiasFactor L = BiasFactor::Zero(); };
+// The odometry step that moves the anchor's mean (relative_pose.h move_mean, at the PRE-move mean x) moves its error the
+// same way: L ← J L (linear, so P − L Lᵀ predicts exactly as P_z would).
+// The PHYSICAL latent is the same for the whole passage. The MISFIT is a property of the VIEW — which beams land on which
+// casing, leaf edge or stretch of wall — so it decorrelates as the view changes: ξ_m ← ρ ξ_m + √(1 − ρ²) η,
+// ρ = exp(−Δ / ℓ), with Δ how far the doorway moved in the robot's frame this step (translation, and the lever of a
+// turn) and ℓ the misfit's own scale, half the opening — the size of the clusters it is measured on (bias_terms). The
+// part that decorrelates is no longer shared with the next frame: it leaves L and stays in P (P − L Lᵀ grows by
+// (1 − ρ²) L_m L_mᵀ), where the next frames' evidence can average it.
+// ★Fully persistent (ρ = 1), a lateral misfit picked up on the far approach could never be corrected once the open
+//  door's jambs were in view (try67 replay: the lateral error held at −0.1…−0.27 m for 25 s). Fully fresh (ρ = 0: the
+//  misfit as one more per-frame noise) the doorway band's yaw drag came back: 5–18° median error at |s| < 1 m on try66,
+//  67 and 69, against 1–4° with the view's persistence (task-10-report.md, the band table).
+inline void transport_bias(AnchorBias& b, const Eigen::Vector3f& x_before, float side, float adv, float dth, float width)
+{
+    Eigen::Matrix3f J, G;
+    rc::interaction::predict_jacobians(x_before, side, adv, dth, J, G);
+    const Eigen::Vector3f moved = rc::interaction::move_mean(x_before, side, adv, dth);
+    const float ell = 0.5f * std::max(width, 1e-3f);
+    const float rho = std::exp(-(moved.head<2>() - x_before.head<2>()).norm() / ell);
+    b.L = J * b.L;
+    b.L.rightCols<3>() *= rho;
+}
+// ⚑ FLAGGED CONSTANT — the LiDAR mount's yaw uncertainty (rad). Nobody has measured the LiDAR's extrinsic yaw; this is the
+//   codebase's stated mount-yaw prior for the zed/ricoh (ImageEdge.mountYawSigma = 0.0035 rad), whose cluster-honest
+//   solve came out at ±0.216° = 0.0038 rad (room_concept/VALIDATION_THREE_DEVICE_CORNERS.md). Same bracket class.
+constexpr double kMountYawSigma = 0.0035;
+
+// This view's systematic error b, in the robot frame on the anchor's (x, y, yaw): b = C^{1/2} ξ_p + I_L⁺ J_s^{1/2} ξ_m.
+//   PHYSICS, C. (i) The mount's translation and the wall's departure from a plane: σ_c on x, y (kCommonSigma, as before).
+//   (ii) The mount's yaw ε rotates the whole scan about the LiDAR origin o: the anchor turns by ε AND its position
+//   moves by ε × (p − o) — a lateral common mode that GROWS WITH RANGE: g = (−(p_y − o_y), p_x − o_x, 1), σ_ε² g gᵀ.
+//   (iii) The wall's own straightness: σ_c of departure at each end of the run [u_min, u_max] tilts the line by
+//   √2 σ_c / (u_max − u_min).
+//   MISFIT, J_s (cluster-robust sandwich, in SCORE space). The model's information I_L is what the rays WOULD carry were
+//   the model right; the dispersion of their scores says what they do carry. Scores are summed per STRUCTURAL CLUSTER —
+//   beams ending on one element share its misfit (one casing board, one leaf, one stretch of wall): the endpoint's
+//   along-wall position in bins of half the opening (edges at the jambs and the centre) × its depth class (in front of
+//   the wall / on it / beyond it, at the model's own count level 3σ + t/2); the mask is one more cluster. With S_c the
+//   clusters' score sums, centred and × G/(G − 1) (CR1), J = Σ (S_c − S̄)(S_c − S̄)ᵀ / β_c (the power likelihood's own
+//   scale: a well-specified frame gives J ≈ I_L). The data-only sandwich I_L⁻¹ J I_L⁻¹ exceeds the model's I_L⁻¹ by
+//   I_L⁻¹ (J − I_L) I_L⁻¹; J_s = the PSD part of (J − I_L) in I_L's range (eigenvalues above 1e-9 of the largest:
+//   arithmetic, the numerical rank) is that excess in score space — bounded, where its pose-space image is not (a
+//   direction the frame barely constrains has an unbounded data-only misfit, and the update never forms it: see the
+//   gain below). A model that OVER-states the scatter in some direction earns no extra precision there.
+//   ⚑ The cluster size (half the opening) is a modelling definition: the structures the thin-wall model misdescribes are
+//   the jambs' casings, the leaf (one clear width) and the wall either side. Replays: try66–69 (task-10-report.md).
+struct BiasTerms { Eigen::Matrix3d C = Eigen::Matrix3d::Zero(), Js = Eigen::Matrix3d::Zero(); };
+inline BiasTerms bias_terms(const anchor_detail::Problem& pb, const Eigen::Vector3d& x, const Eigen::Matrix3d& I_L,
+                            const Eigen::Vector2d& lidar_o)
+{
+    using namespace anchor_detail;
+    BiasTerms bt;
+    M3d& B = bt.C;
+    B(0, 0) = B(1, 1) = kCommonSigma * kCommonSigma;
+    const V3d gy(-(x.y() - lidar_o.y()), x.x() - lidar_o.x(), 1.0);
+    B += kMountYawSigma * kMountYawSigma * gy * gy.transpose();
+    const double run = std::max(pb.model.u_max - pb.model.u_min, 1e-9);
+    B(2, 2) += 2.0 * kCommonSigma * kCommonSigma / (run * run);
+
+    std::map<std::int64_t, V3d> cl;
+    if (not pb.rays.empty() and pb.beta_lidar > 1e-12)
+    {
+        const auto sc = pb.ray_scores(x);
+        const double cz = std::cos(x.z()), sz = std::sin(x.z()), half = 0.5 * std::max(pb.model.w, 1e-9);
+        for (std::size_t i = 0; i < sc.size(); ++i)
+        {
+            const auto q = Problem::at(pb.rays[i], x, cz, sz);
+            const auto ub = std::int64_t(std::floor(std::clamp(q.ea.x() / half, -1e6, 1e6)));   // (clamp: integer range only)
+            const int dc = q.a.d < -pb.model.count_level ? 0 : (q.a.d > pb.model.count_level ? 2 : 1);
+            cl.try_emplace(ub * 3 + dc, V3d::Zero()).first->second += pb.wt[i] * sc[i] / std::sqrt(pb.beta_lidar);   // ÷√β per factor: J carries 1/β
+        }
+    }
+    if (pb.mask != nullptr and pb.mask->valid and pb.beta_cam > 1e-12)
+    {
+        V3d sm;
+        for (int a = 0; a < 3; ++a)
+        {
+            V3d e = V3d::Zero(); e(a) = 1e-3;
+            sm(a) = -pb.beta_cam * (Mask::neg_loglik(pb.mask->centroid_u(x + e), pb.mask_var) - Mask::neg_loglik(pb.mask->centroid_u(x - e), pb.mask_var)) / 2e-3;
+        }
+        cl[std::numeric_limits<std::int64_t>::max()] = sm / std::sqrt(pb.beta_cam);
+    }
+    const std::size_t G = cl.size();
+    if (G < 2) return bt;   // one cluster: its scatter is not measurable
+    V3d mean = V3d::Zero();
+    for (const auto& [k, v] : cl) mean += v;
+    mean /= double(G);
+    M3d J = M3d::Zero();
+    for (const auto& [k, v] : cl) J += (v - mean) * (v - mean).transpose();
+    J *= double(G) / double(G - 1);
+    Eigen::SelfAdjointEigenSolver<M3d> es(0.5 * (I_L + I_L.transpose()));
+    const double lmax = es.eigenvalues().maxCoeff();
+    if (not (lmax > 0.0)) return bt;
+    std::vector<int> r;
+    for (int q = 0; q < 3; ++q) if (es.eigenvalues()(q) > 1e-9 * lmax) r.push_back(q);
+    const int nr = int(r.size());
+    Eigen::MatrixXd U(3, nr);
+    for (int a = 0; a < nr; ++a) U.col(a) = es.eigenvectors().col(r[std::size_t(a)]);
+    const Eigen::MatrixXd M = U.transpose() * (J - I_L) * U;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> em(0.5 * (M + M.transpose()));
+    bt.Js = U * em.eigenvectors() * em.eigenvalues().cwiseMax(0.0).asDiagonal() * em.eigenvectors().transpose() * U.transpose();
+    return bt;
+}
+inline Eigen::Matrix3d sym_sqrt(const Eigen::Matrix3d& A)
+{
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> e(0.5 * (A + A.transpose()));
+    return e.eigenvectors() * e.eigenvalues().cwiseMax(0.0).cwiseSqrt().asDiagonal() * e.eigenvectors().transpose();
+}
+
 // One free-energy minimisation: prior = the predicted RelPose; likelihood = rays (+ mask). Levenberg-Marquardt on
-// (x, y, yaw) against the predictive spread (two stages); Laplace covariance at the sensor's σ with the frame's
-// common mode marginalised (Woodbury).
+// (x, y, yaw) against the predictive spread (two stages); Laplace at the sensor's σ; the frame's systematic error
+// carried as a PERSISTENT bias (Task 10, AnchorBias above): `bias` in/out, nullptr = a single frame (L = 0 before it).
 // wall_u_min/max: the door's wall run along the wall in ANCHOR coordinates (fix 2); `cam`: the zed frustum in the
 // robot frame for the camera's visibility (fix 1; default unknown = the mask is not tempered by geometry);
 // p_open_prior: the door's own P(open) (door_concept's leaf-angle belief), the structure the visibility check
@@ -1458,13 +1654,28 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
                    const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot,
                    const std::vector<Eigen::Vector3f>& mask_pts_robot, const CameraFrustum& cam = {},
                    float p_open_prior = 0.5f, const LeafPrior& leaf = {},
-                   float floor_below = -std::numeric_limits<float>::infinity(), AnchorStaging* staging = nullptr)
+                   float floor_below = -std::numeric_limits<float>::infinity(), AnchorStaging* staging = nullptr,
+                   AnchorBias* bias = nullptr)
 {
     using namespace anchor_detail;
     AnchorEvidence ev;
+    // Task 10: the data-space prior P_z = P − L Lᵀ. When the carried factor no longer fits under P (the caller re-set
+    // or fused the belief without it), the bookkeeping restarts: L = 0, P is the data-space belief.
+    Eigen::Matrix<double, 3, kBiasCols> L0 = Eigen::Matrix<double, 3, kBiasCols>::Zero();
+    M3d Pz0 = prior.P.cast<double>();
+    if (bias != nullptr)
+    {
+        L0 = bias->L.cast<double>();
+        const M3d t = Pz0 - L0 * L0.transpose();
+        if (Eigen::LLT<M3d>(0.5 * (t + t.transpose())).info() == Eigen::Success) Pz0 = 0.5 * (t + t.transpose());
+        else L0.setZero();
+    }
 
     const Mask mask = make_mask(mask_pts_robot, prior.x.cast<double>());
 
+    // The FIT — its prior, predictive spreads, ray budget, tempering — runs under the whole prior P: where the beams can
+    // land is set by everything the anchor does not know, the bias included (a fit under P_z alone could not reach jambs
+    // a persistent error had put 0.3 m off: try67 replay, 0.68 m lateral error). P_z enters only the gain.
     Problem pb{prior.x.cast<double>(), prior.P.cast<double>().inverse(), Model(width, thickness, wall_u_min, wall_u_max)};
     pb.mask = &mask;
     pb.leaf = make_leaf_model(leaf, pb.model.w);
@@ -1577,31 +1788,70 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     H = pb.Pinv + I_L;
     if (pb.F(x + H.llt().solve(-g)) > pb.F(x))
         g.setZero();   // the true-F Newton step would not descend: x already is its optimum to our resolution
-    const M3d C   = V3d(kCommonSigma * kCommonSigma, kCommonSigma * kCommonSigma, 0.0).asDiagonal();
-    const M3d A   = M3d::Identity() + I_L * C;
-    const Eigen::PartialPivLU<M3d> Alu(A);
-    M3d I_eff = Alu.solve(I_L);
-    I_eff = 0.5 * (I_eff + I_eff.transpose());
-
+    // ─── Task 10: the PERSISTENT bias, and the covariance that is published ───────────────────────────────────────
+    // The beams' own noise is what I_L describes, and it is independent from frame to frame: it accumulates in the
+    // data-space belief (P_z). What does NOT average out is the frame's SYSTEMATIC error b — the LiDAR's extrinsic, the
+    // wall's departure from a plane, and the structure this model does not describe (casings, a swung leaf off its
+    // believed hinge) — because the next frame, 0.1 s later, sees the same wall through the same mount (see
+    // AnchorBias). Its factor Γ is this view's (bias_terms); the posterior's sensitivity to the latent is L, updated with
+    // the Schmidt gain K (see AnchorBias):  L ← (I − K) L + K Γ,  P_z ← (I − K) P_z (I − K)ᵀ + K I_L⁻¹ Kᵀ,  P = P_z + L Lᵀ.
+    // Everything is formed in I_L's range, so no I_L⁻¹ appears. The mean: x̄ + K ν (b has zero mean).
     rc::interaction::RelPose post = prior;
-    if (Eigen::LLT<M3d> llt(pb.Pinv + I_eff); llt.info() == Eigen::Success)
+    rc::interaction::RelPose post_z = prior;   // the data-space belief: what the beams predict the rays from
+    using M3L = Eigen::Matrix<double, 3, kBiasCols>;
+    M3L L_new = L0;
     {
-        const M3d S = llt.solve(M3d::Identity());
-        V3d xp = pb.xbar + S * Alu.solve(H * dx - g);
+        const M3d& Pz = Pz0;
+        const BiasTerms bt = bias_terms(pb, x, I_L, lidar_origin_robot.head<2>().cast<double>());
+        const M3d Ch = sym_sqrt(bt.C), Jh = sym_sqrt(bt.Js);
+        Eigen::SelfAdjointEigenSolver<M3d> es(0.5 * (I_L + I_L.transpose()));
+        const double lmax = es.eigenvalues().maxCoeff();
+        std::vector<int> rr;
+        for (int q = 0; q < 3; ++q) if (lmax > 0.0 and es.eigenvalues()(q) > 1e-9 * lmax) rr.push_back(q);
+        const int nr = int(rr.size());
+        M3d K = M3d::Zero(), KIp = M3d::Zero();   // the gain and K I_L⁺
+        V3d Kv = V3d::Zero();
+        M3L KG = M3L::Zero();
+        if (nr > 0)
+        {
+            Eigen::MatrixXd U(3, nr);
+            Eigen::VectorXd lam(nr);
+            for (int a2 = 0; a2 < nr; ++a2) { U.col(a2) = es.eigenvectors().col(rr[std::size_t(a2)]); lam(a2) = es.eigenvalues()(rr[std::size_t(a2)]); }
+            M3L GI;                                         // I_L Γ = [I_L C^{1/2}, J_s^{1/2}]
+            GI.setZero();
+            GI.leftCols<3>() = I_L * Ch;
+            GI.rightCols<3>() = Jh;
+            const M3L DI = GI - I_L * L0;                   // I_L (Γ − L)
+            const Eigen::MatrixXd Nt = U.transpose() * (I_L * Pz * I_L + DI * DI.transpose()) * U;
+            const Eigen::MatrixXd Q = (Nt + Eigen::MatrixXd(lam.asDiagonal())).llt().solve(Eigen::MatrixXd::Identity(nr, nr));
+            const M3d T = Pz * I_L - L0 * DI.transpose();   // (P_z − L (Γ − L)ᵀ) I_L
+            KIp = T * U * Q * U.transpose();
+            K = KIp * I_L;
+            Kv = KIp * (H * dx - g);                        // K ν, from I_L ν = H (x − x̄) − g (one Newton step on the true F)
+            KG.leftCols<3>() = K * Ch;
+            KG.rightCols<3>() = KIp * Jh;                   // K I_L⁺ J_s^{1/2}: Jh lies in I_L's range
+        }
+        const M3d IK = M3d::Identity() - K;
+        const M3d Pz_new = IK * Pz * IK.transpose() + KIp * I_L * KIp.transpose();
+        L_new = IK * L0 + KG;
+        ev.info = I_L.cast<float>(); ev.misfit = bt.Js.cast<float>(); ev.gain = K.cast<float>(); ev.info_innov = (H * dx - g).cast<float>();
+        V3d xp = pb.xbar + Kv;
         xp.z() = std::remainder(xp.z(), 2.0 * M_PI);
         post.x = xp.cast<float>();
-        post.P = (0.5 * (S + S.transpose())).cast<float>();
+        post_z.x = post.x;
+        post_z.P = (0.5 * (Pz_new + Pz_new.transpose())).cast<float>();
+        const M3d Pp = Pz_new + L_new * L_new.transpose();
+        post.P = (0.5 * (Pp + Pp.transpose())).cast<float>();
+        ev.sig_bias_yaw = float(std::sqrt(std::max(0.0, (L_new * L_new.transpose())(2, 2))));
     }
-    else
-    {
-        // Not positive definite: the data did not localise the anchor here — keep the last iteration's belief.
-        post.x = x.cast<float>();
-        post.P = P.cast<float>();
-    }
+    if (bias != nullptr) bias->L = L_new.cast<float>();
     // A belief is never NaN: a non-finite posterior (any cause) is no update — the prior stands, and this frame's evidence
     // reports nothing in view. (try67: one NaN posterior silenced the anchor for 120 s; predicting a NaN keeps it NaN.)
-    if (not post.x.allFinite() or not post.P.allFinite())
+    if (not post.x.allFinite() or not post.P.allFinite() or not L_new.allFinite())
+    {
+        if (bias != nullptr) bias->L = L0.cast<float>();
         return {prior, AnchorEvidence{}};
+    }
     x = post.x.cast<double>();
 
     // ─── P(door in view) at the POSTERIOR — the pose that is written to the edge (fix round 4) ─────────────────────

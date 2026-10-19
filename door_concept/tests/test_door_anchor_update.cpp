@@ -85,12 +85,19 @@
 //   first_anchor_predicted_before_clock_observed (fix round 2) — an anchor stamped before the first twist sample is still
 //                                  predicted: SimClockRate::interval_s maps both ends by the current samples (try68: dt 0 for ever)
 //   anchor_publish_decision (fix round 1) — Seen / Predicted (cross claimed, seen before, ≤ kAnchorPredictMs) / None
+// Task 10 (an honest covariance: try66–69 published σ_yaw 0.1–0.2° against 2–28° errors):
+//   persistent_bias_does_not_average_out — 40 frames of one open doorway, fresh beam noise each: carrying AnchorBias the
+//                                  posterior keeps σ ≥ the physical common mode (mount yaw about the LiDAR, the wall's
+//                                  straightness, σ_c); without it the chain collapses ~1/√N
+//   misfit_widens_sigma_on_unmodelled_casings — 0.2 m-deep jamb casings the model lacks: the cluster-robust misfit grows
+//                                  and so does the published σ_lat (0.031 → 0.054 m), the error staying within ~2σ
 //
 // Build + run (from door_concept/; relative_pose.h pulls rt_twist.h ⇒ DSR/Qt/fastdds headers):
 //   mkdir -p build; Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O2 -fPIC -I/usr/include/eigen3 -Isrc -I../common
 //     -I$Q -I$Q/QtCore -I$Q/QtGui -I$Q/QtWidgets tests/test_door_anchor_update.cpp -o build/test_door_anchor_update
 //     -lfastdds -lfastcdr -lQt5Core && ./build/test_door_anchor_update
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1140,6 +1147,88 @@ int main()
         check(rc::door::anchor_publish_decision(false, false, true, 100, K) == AnchorPublish::None, "cross NOT claimed ⇒ None (strict rule)");
         check(rc::door::anchor_publish_decision(false, true, false, 100, K) == AnchorPublish::None, "never seen in this passage ⇒ None");
         check(K == 3000, "kAnchorPredictMs is 3000 ms");
+    }
+
+
+    // ─── Task 10: the published covariance is honest about what does not average out ───────────────────────────────
+    // 40 frames of the same open doorway from the same pose, each with fresh beam noise: the physical common mode (mount
+    // translation σ_c, mount yaw ε about the LiDAR, the wall's straightness over its run) is the same error on every frame,
+    // so the chained posterior must not claim less — while a chain that does NOT carry the bias factor collapses ~1/√N.
+    std::print("persistent_bias_does_not_average_out\n");
+    {
+        const double run = double(kUmax - kUmin), r = double(D);   // the LiDAR origin is the robot's (kOrigin x, y = 0)
+        const double floor_yaw = std::sqrt(rc::door::kMountYawSigma * rc::door::kMountYawSigma
+                                           + 2.0 * rc::door::anchor_detail::kCommonSigma * rc::door::anchor_detail::kCommonSigma / (run * run));
+        const double floor_lat = std::sqrt(rc::door::anchor_detail::kCommonSigma * rc::door::anchor_detail::kCommonSigma
+                                           + rc::door::kMountYawSigma * rc::door::kMountYawSigma * r * r);
+        RelPose carried = prior_offset(), fresh = prior_offset();
+        rc::door::AnchorBias bias;
+        float yaw1 = 0.f;
+        for (int k = 0; k < 40; ++k)
+        {
+            const auto rays = cast(Leaf::none, 100 + unsigned(k));
+            carried = update_door_anchor(carried, W, T, kUmin, kUmax, kOrigin, rays, {}, {}, 0.5f, {},
+                                         -std::numeric_limits<float>::infinity(), nullptr, &bias).first;
+            fresh = update_door_anchor(fresh, W, T, kUmin, kUmax, kOrigin, rays, {}).first;
+            if (k == 0) yaw1 = std::sqrt(carried.P(2, 2));
+        }
+        const float sy_c = std::sqrt(carried.P(2, 2)), sl_c = std::sqrt(carried.P(0, 0));
+        const float sy_f = std::sqrt(fresh.P(2, 2)), sl_f = std::sqrt(fresh.P(0, 0));
+        std::print("    after 40 frames: carried σ_lat {:.4f} m σ_yaw {:.4f} rad (frame 1: {:.4f}); not carried σ_lat {:.4f} σ_yaw {:.4f}; "
+                   "physics floor σ_lat {:.4f} σ_yaw {:.4f}; mean error ({:+.3f}, {:+.3f}, {:+.4f})\n", sl_c, sy_c, yaw1, sl_f, sy_f,
+                   floor_lat, floor_yaw, carried.x.x(), carried.x.y() - D, carried.x.z());
+        check(sy_c >= 0.9f * float(floor_yaw), "carried: σ_yaw ≥ 0.9 × the physical yaw common mode after 40 frames");
+        check(sl_c >= 0.9f * float(floor_lat), "carried: σ_lat ≥ 0.9 × σ_c ⊕ σ_ε·range after 40 frames");
+        check(sy_c >= 0.8f * yaw1, "carried: 40 frames claim no less than ~1 frame in yaw (does not average out)");
+        check(sy_f < 0.5f * sy_c, "not carried: the same chain collapses (σ_yaw < ½ the carried one) — the defect Task 10 removes");
+        check(std::abs(carried.x.x()) < 0.05f and std::abs(carried.x.z()) < 0.01f, "the carried chain's mean is still on the truth");
+    }
+
+    // An open doorway whose jambs carry 0.2 m-deep CASINGS the thin-wall model does not describe (DOOR_1's frames): the
+    // rays that end on them pull the fit coherently, the clusters' scores disperse, and the misfit term must widen σ —
+    // relative to the same doorway without casings, from the same mouth pose, both chained with their bias factor.
+    std::print("misfit_widens_sigma_on_unmodelled_casings\n");
+    {
+        auto run_case = [&](bool casings)
+        {
+            WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true;
+            auto segs = world(wo);
+            if (casings)
+            {
+                box(segs, -0.5f * W, -0.5f * W + 0.05f, -0.5f * T - 0.09f, 0.5f * T + 0.09f);
+                box(segs, 0.5f * W - 0.05f, 0.5f * W, -0.5f * T - 0.09f, 0.5f * T + 0.09f);
+            }
+            RelPose x;
+            rc::door::AnchorBias b;
+            float js = 0.f, err_yaw = 0.f, err_lat = 0.f;
+            for (int k = 0; k < 6; ++k)
+            {
+                const Pose2 robot{V2(0.08f, -1.2f + 0.1f * float(k) - kSensor.y()), 0.03f};
+                const RelPose truth = creation_prior(robot);
+                if (k == 0) x = truth;
+                const auto rays = rc::door::select_anchor_rays(x, W, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 200 + unsigned(k)), 2.0f);
+                const auto [post, ev] = update_door_anchor(x, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.9f, {}, kFloorZ, nullptr, &b);
+                x = post;
+                js = ev.misfit.trace();
+                err_yaw = std::abs(rc::interaction::wrap_pi(post.x.z() - truth.x.z()));
+                err_lat = std::abs(post.x.x() - truth.x.x());
+                if (k + 1 < 6)   // the next pose is 0.1 m ahead: carry the anchor and its bias by that step
+                {
+                    const Eigen::Vector3f xb = x.x;
+                    x.x = rc::interaction::move_mean(x.x, 0.f, 0.1f, 0.f);
+                    rc::door::transport_bias(b, xb, 0.f, 0.1f, 0.f, W);
+                }
+            }
+            return std::array<float, 5>{std::sqrt(x.P(0, 0)), std::sqrt(x.P(2, 2)), js, err_lat, err_yaw};
+        };
+        const auto plain = run_case(false), cased = run_case(true);
+        std::print("    plain: σ_lat {:.4f} σ_yaw {:.4f}, misfit tr {:.3g}, |err| {:.3f} m {:.4f} rad | casings: σ_lat {:.4f} σ_yaw {:.4f}, "
+                   "misfit tr {:.3g}, |err| {:.3f} m {:.4f} rad\n", plain[0], plain[1], plain[2], plain[3], plain[4], cased[0], cased[1],
+                   cased[2], cased[3], cased[4]);
+        check(cased[2] > plain[2], "the casings' rays disperse the cluster scores (misfit trace larger)");
+        check(cased[0] > 1.3f * plain[0], "...and the published σ_lat is wider with them (> 1.3×: the casings pull along the wall)");
+        check(cased[1] >= 0.99f * plain[1], "...while σ_yaw does not shrink");
+        check(cased[4] <= 2.f * cased[1] + 0.005f and cased[3] <= 2.f * cased[0] + 0.01f, "the casing doorway's error is within ~2σ");
     }
 
     std::print("no_data_is_prior\n");

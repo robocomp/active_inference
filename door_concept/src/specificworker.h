@@ -307,7 +307,8 @@ private:
         std::string   door_name;                          // its name at creation (one name per doorway)
         std::uint64_t linked_aff = 0;                     // the affordance that names the anchor now
         int           linked_epoch = -1;                  // the executing epoch seen on it; -1 = unknown
-        rc::interaction::RelPose pose;                    // the belief, robot frame
+        rc::interaction::RelPose pose;                    // the belief, robot frame (P = the published covariance)
+        rc::door::AnchorBias bias;                        // Task 10: its persistent-bias factor (P − L Lᵀ = the data-space part)
         float width = 0.9f, thickness = 0.05f, height = 2.0f;   // read from the door with the pose (Task 9: not per cycle)
         bool  approach_was_claimed = false, cross_was_claimed = false;
         std::uint64_t consumer_id = 0;                    // the agent node whose `executing` edge we serve (0 = legacy)
