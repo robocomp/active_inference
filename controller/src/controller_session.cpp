@@ -134,6 +134,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         return false;
     }
     room_wait_logged_ = false;
+    current_room_name_ = world_model.graph_state().room_name;   // Task 18: the frame the gap line is carried in
 
     const auto room_polygon = world_model.read_room_polygon();
     if (!room_polygon.has_value() || room_polygon->size() < 3)
@@ -242,18 +243,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             returns_body_ = rc::lidar_returns_body(hull, m);
             self_body_ = rc::lidar_self_footprint(hull, m, sigma);
             obstacle_tracker.set_self_body(self_body_);
-            // Task 14 fix round 6: the learned self map, seeded by the self footprint above and by what earlier runs learned.
-            self_map_.configure(sigma, returns_body_, self_body_, approach_body_.safety_margin());
-            self_map_.set_capability(base_capability_.max_linear_speed_mps.value_or(1.f),
-                                     base_capability_.max_rot_speed_rps.value_or(2.f));
-            const int loaded = self_map_.load("etc/self_returns.csv");
-            self_map_ready_ = true;
-            std::println("[returns] learned self map: {} ({} cells of {:.3f} m)",
-                         loaded > 0 ? std::format("{} cells loaded from etc/self_returns.csv", loaded)
-                         : loaded < 0 ? std::string("etc/self_returns.csv has a different cell size — ignored, learning afresh")
-                                      : std::string("none saved yet — learning from this run"),
-                         std::max(loaded, 0), self_map_.cell());
-            returns_body_eff_ = self_map_.body_with_learned(returns_body_);
+            // Task 18: the learned self map (fix rounds 6–7) is REMOVED — the static footprint above is the whole self model.
             const auto front = [](const std::vector<Eigen::Vector2f> &p)
             { float y = -1.f; for (const auto &v : p) y = std::max(y, v.y()); return y; };
             const auto side = [](const std::vector<Eigen::Vector2f> &p)
@@ -2620,9 +2610,6 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     monitor_footprint_orientation(step, time_source());
     anchor_cross_.reset();   // a per-cycle reading: only drive_point_target's update_cross_anchor may set it
     anchor_drawn_.reset();   // likewise the drawn anchor: only step_anchor_cross sets it
-    // Task 14 fix round 6: learn which body places return the robot itself — once per cycle, before anything reads the net.
-    update_self_map(tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose, obstacle_tracker, path_controller,
-                    motion_commander, time_source());
     // Task 14 fix round 1, item 4: once, parked at start-up, what the live-returns net sees around the body — a body part
     // beyond the hull (a cable, a mount) shows here as returns within sigma_r OUTSIDE it, before it can cause a phantom stop.
     if (not startup_census_done_ and body_loaded_ and robot_still())
@@ -3148,6 +3135,11 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_through_ = false;
     anchor_carried_logged_ = false;
     anchor_predicted_logged_ = false;
+    gap_line_.reset();             // Task 18: a measured gap belongs to one claim
+    gap_carry_pose_.reset();
+    gap_seen_now_ = false;
+    gap_steering_logged_ = false;
+    gap_lost_logged_ = false;
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
 }
 
@@ -3247,9 +3239,6 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body(), lr.sigma, lr.reach, self_body_);
     if (not r.has_value()) return lr;
     lr.r = std::move(*r);
-    // Fix round 6: each kept return weighs as P(world) of its body place (renormalised at even odds — self_return_map.h).
-    if (self_map_ready_)
-        for (auto &o : lr.r.obstacles) o.p = self_map_.p_world(o.mean);
     lr.capture_self = obstacle_tracker.capture_self_dropped();
     lr.valid = true;
     return lr;
@@ -3260,49 +3249,6 @@ rc::LidarCapResult ControllerSession::cap_by_returns(const LiveReturns &lr, floa
     if (not lr.valid) return rc::LidarCapResult{.v_lim = lr.v_max, .w_lim = lr.w_max};
     return rc::lidar_cap_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
                                  adv, side, rot);
-}
-
-void ControllerSession::update_self_map(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
-                                        const rc::TrajectoryController &path_controller,
-                                        ControllerMotionCommander &motion_commander, std::uint64_t now_ms)
-{
-    if (not self_map_ready_) return;
-    auto *lidar = obstacle_tracker.lidar_buffer();
-    if (lidar == nullptr) return;
-    // Learning reads every return outside the HAND-WRITTEN self footprint — measured against the hand-written returns body,
-    // not the learned one: a learned place's own returns must keep arriving here, or their absence would unlearn it.
-    const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-    // The sweep handed over must hold every return the motion over the history ring can carry INTO the domain (fix round 7:
-    // a sweep cut to the domain made the world explanation predict "empty" where a wall slid in — self_return_map.h).
-    float body_r = 0.f;
-    for (const auto &v : returns_body_) body_r = std::max(body_r, v.norm());
-    const float dom_r = body_r + approach_body_.safety_margin() + 2.f * sigma;
-    const float v_pol = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
-    const float w_pol = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
-    const float ring_s = float(rc::SelfReturnMap::kRing) * 0.05f;   // the ring's span at the 20 Hz sweep rate
-    const float reach = dom_r + (v_pol + w_pol * dom_r) * ring_s;
-    const auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body_, sigma, reach, self_body_);
-    if (not r.has_value() or r->n_read == 0) return;
-    std::vector<Eigen::Vector2f> pts;
-    pts.reserve(r->obstacles.size());
-    for (const auto &o : r->obstacles) pts.push_back(o.mean);
-    const auto unc = motion_commander.last_uncertainty_diag();
-    self_map_.update(pts, pose.as_transform(), unc.valid ? unc.xy_std_m : 0.f, double(now_ms) * 1e-3,
-                     unc.valid ? unc.theta_std_rad : 0.f);
-    returns_body_eff_ = self_map_.body_with_learned(returns_body_);
-    (void)path_controller;
-}
-
-void ControllerSession::save_self_returns() const
-{
-    if (not self_map_ready_) return;
-    const bool ok = self_map_.save("etc/self_returns.csv");
-    const auto c = self_map_.census(self_body_);
-    std::println("[returns] learned self map at shutdown: {} cells, {} self, {} of them BEYOND the hand-written self footprint, "
-                 "{} history restarts on pose jumps; saved to etc/self_returns.csv: {}", c.cells, c.self_cells, c.learned_self,
-                 self_map_.restarts(), ok ? "yes" : "FAILED");
-    for (const auto &t : c.top)
-        std::println("[returns]   learned self place body ({:+.3f}, {:+.3f}) m, log-odds {:+.2f}", t.x(), t.y(), t.z());
 }
 
 bool ControllerSession::hemmed_in_by_returns(const LiveReturns &lr) const
@@ -3452,6 +3398,76 @@ void ControllerSession::apply_anchor_standpoint(ControllerPlanningStep &step, co
     step.target.room_pos = room2;
 }
 
+// ── Task 18: the doorway gap, one cycle (doorway_gap.h) ─────────────────────────────────────────────────────────────────
+// 1. CARRY the held line by the robot's motion since the last cycle: the room-pose delta expressed in the previous robot
+//    frame (side, adv, dθ) — only within one room frame (a room switch re-expresses the pose; that one cycle's delta is
+//    dropped). 2. MEASURE on the prior: the held line (wall line + its covariance) once there is one, else the anchor (its
+//    opening centre, wall normal, covariance); the door's full width is the anchor's. 3. A seen gap replaces the held line.
+bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose,
+                                           ControllerObstacleTracker &obstacle_tracker)
+{
+    const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+    if (gap_line_.has_value() and gap_carry_pose_.has_value() and gap_carry_room_ == current_room_name_)
+    {
+        const Eigen::Vector2f d = Eigen::Rotation2Df(gap_carry_pose_->theta).toRotationMatrix().transpose()
+                                * (pose.pos - gap_carry_pose_->pos);
+        const float dth = rc::interaction::wrap_pi(pose.theta - gap_carry_pose_->theta);
+        if (d.allFinite() and std::isfinite(dth)) gap_line_ = rc::doorway_gap_carry(*gap_line_, d.x(), d.y(), dth);
+    }
+    gap_carry_pose_ = pose;
+    gap_carry_room_ = current_room_name_;
+    gap_seen_now_ = false;
+
+    rc::DoorwayGapPrior prior;
+    const rc::interaction::RelPose &pr = gap_line_.has_value() ? *gap_line_ : a.pose;
+    if (not pr.x.allFinite() or not pr.P.allFinite() or not (a.width_m > 0.f)) return gap_line_.has_value();
+    const float psi = pr.x.z();
+    prior.centre = pr.x.head<2>();
+    prior.normal = Eigen::Vector2f(-std::sin(psi), std::cos(psi));
+    prior.P = pr.P;
+    prior.width = a.width_m;
+
+    // The body: its half-width (the corridor it needs) and its length (the slab it occupies crossing the wall line).
+    const auto &rb = returns_body();
+    float half_w = 0.f, front = -1e9f, back = 1e9f;
+    for (const auto &v : rb) { half_w = std::max(half_w, std::abs(v.x())); front = std::max(front, v.y()); back = std::min(back, v.y()); }
+    const float depth = front - back;
+    auto *lidar = obstacle_tracker.lidar_buffer();
+    if (lidar == nullptr or not (depth > 0.f)) return gap_line_.has_value();
+    const auto pts = rc::lidar_robot_points_from_buffer(*lidar, pose.as_transform(), rb, self_body_);
+    if (not pts.has_value()) return gap_line_.has_value();
+    const auto g = rc::measure_doorway_gap(*pts, prior, half_w, sigma, depth);
+    if (g.seen)
+    {
+        const bool first = not gap_line_.has_value() or gap_lost_logged_;
+        gap_line_ = rc::doorway_gap_pose(g, sigma);
+        gap_width_ = g.width;
+        gap_seen_now_ = true;
+        const float heading = rc::doorway_gap_yaw(g.normal);
+        const bool changed = (Eigen::Vector2f(g.centre.x(), g.centre.y()) - gap_logged_.head<2>()).norm() > 0.05f
+                          or std::abs(g.width - gap_logged_.z()) > 0.03f
+                          or std::abs(rc::interaction::wrap_pi(heading - gap_logged_heading_)) > 0.05f;   // logging only
+        if (first or changed)
+        {
+            const auto geo = rc::anchor_cross_geometry(*gap_line_);
+            std::println("[gap] seen{}: width {:.3f} m, centre ({:+.3f},{:+.3f}) e {:+.3f} m, normal heading {:+.1f} deg, score {:.3f}{}{} "
+                         "(door {:.2f} m)", first ? "" : " (changed)", g.width, g.centre.x(), g.centre.y(), geo.e,
+                         heading * 57.29578f, g.score, g.in_doorway ? ", from inside the doorway" : "",
+                         g.wall_fitted ? ", wall refitted" : "", a.width_m);
+            gap_logged_ = {g.centre.x(), g.centre.y(), g.width};
+            gap_logged_heading_ = heading;
+        }
+        gap_lost_logged_ = false;
+    }
+    else if (gap_line_.has_value() and not gap_lost_logged_)
+    {
+        gap_lost_logged_ = true;
+        const auto geo = rc::anchor_cross_geometry(*gap_line_);
+        std::println("[gap] lost — carrying the last line (s {:+.2f} m, e {:+.3f} m, σ_lat {:.3f} m)", geo.s, geo.e, geo.sigma_lat);
+    }
+    return gap_line_.has_value();
+}
+
 // One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
 //   1. the anchor's jambs (rc::anchor_jamb_guard: translation along the direction the base actually moves, unfloored, for
 //      the last ~0.4 m the LiDAR self-filter cannot see; |rot| by the corners' sweep onto the jambs, unfloored; and, Task 9
@@ -3528,8 +3544,26 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         else
             std::println("[anchor] cross: {} carries no leaf — the jambs alone, the opening's centre line", a.name);
     }
+    // ★ Task 18: THE DOORWAY AS THE LIDAR MEASURES IT. From the first cycle the through-span of the anchor's wall is seen,
+    //   the servo, the jamb guard and `through` all run on the GAP (re-measured every cycle, carried by odometry while not
+    //   seen), with no leaf model: the measured span already ends at the leaf. The anchor stays the prior that says where to
+    //   look. Before that, the anchor law below is unchanged.
+    const bool on_gap = update_doorway_gap(a, tracker_pose_.has_value() ? *tracker_pose_ : robot_pose, obstacle_tracker);
+    if (on_gap and not gap_steering_logged_)
+    {
+        gap_steering_logged_ = true;
+        const auto g = rc::anchor_cross_geometry(*gap_line_);
+        std::println("[gap] steering on the measured gap ({:.3f} m wide, e {:+.3f} m, s {:+.2f} m) — the anchor {} is now only its prior",
+                     gap_width_, g.e, g.s, a.name);
+    }
+    if (on_gap) anchor_cross_engaged_ = true;   // driven on a measurement in this attempt (Fix E / Task 16 bookkeeping)
+    const std::span<const rc::interaction::AnchorLeaf> no_leaves;
+    const rc::interaction::RelPose drive_pose = on_gap ? *gap_line_ : a.pose;
+    const float drive_width = on_gap ? gap_width_ : a.width_m;
+    const std::span<const rc::interaction::AnchorLeaf> drive_leaves = on_gap ? no_leaves : leaves;
+    const std::string drive_name = on_gap ? std::format("the measured gap of {}", a.name) : a.name;
     rc::AnchorCommand cmd;
-    rc::interaction::RelPose pose = a.pose;   // the pose the guards are asked about
+    rc::interaction::RelPose pose = drive_pose;   // the pose the guards are asked about
     // ★ Task 13 (try74 leg 1: 40 s at s +1.56 waiting for a far-side anchor that never published): past the room switch
     //   the cross is completed on the ODOMETRY-CARRIED pose door_concept keeps writing (its wait pose: the last sighting,
     //   carried, its covariance grown by the motion and the unseen time) — `through` is s ≥ standoff on it, and nothing
@@ -3538,33 +3572,39 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // Task 16 (try76 leg 2): also from the moment the body's centre is past the plane on the carried pose (rc::anchor_drive_on).
     // Task 16 fix (try81): …only on a pose that derives from a sighting in this attempt (anchor_cross_engaged_: the servo drove on a
     // fresh anchor since the claim began; reset with every new claim, so a retry's never-seen room initialisation waits).
-    const bool drive = rc::anchor_drive_on(a.fresh, door_passage_.clearing(), anchor_cross_engaged_, a.pose);
-    if (drive and not a.fresh and not anchor_carried_logged_)
+    const bool drive = on_gap or rc::anchor_drive_on(a.fresh, door_passage_.clearing(), anchor_cross_engaged_, a.pose);
+    if (drive and not on_gap and not a.fresh and not anchor_carried_logged_)
         std::println("[anchor] cross: {}, {} not seen for {} ms — going on, on the pose odometry carries (s {:+.2f}, σ_lat {:.3f} m)",
                      door_passage_.clearing() ? "past the room switch" : "past the door plane", a.name, a.age_ms,
                      rc::anchor_cross_geometry(a.pose).s, rc::anchor_cross_geometry(a.pose).sigma_lat);
-    anchor_carried_logged_ = drive and not a.fresh;
+    anchor_carried_logged_ = drive and not on_gap and not a.fresh;
     if (drive)
     {
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
+        if (on_gap)          // Task 18: the view shows what is steered on — the measured gap
+        {
+            anchor_drawn_->pose = drive_pose;
+            anchor_drawn_->width_m = drive_width;
+            anchor_drawn_->leaves.clear();
+        }
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
-        cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic, leaves);
+        cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves);
         if (cmd.through)
         {
-            const auto g = rc::anchor_cross_geometry(a.pose);
+            const auto g = rc::anchor_cross_geometry(drive_pose);
             // Task 12 Fix E: past a room switch the cross's node is gone — `through` is the door passage's to act on.
             anchor_through_ = true;
             if (door_passage_.clearing())
             {
                 std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — THROUGH the doorway, "
-                             "in the new room", a.name, g.s, standoff);
+                             "in the new room{}", drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
                 path_controller.stop();
                 note_no_command(); motion_commander.stop_robot();
                 return;
             }
-            std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through",
-                         a.name, g.s, standoff);
+            std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through{}",
+                         drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
             path_controller.stop();
             finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos,
                              time_source(), /*allow_dwell=*/false);
@@ -3608,8 +3648,8 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
     //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
     const auto &body = approach_body_.polygon();
-    const auto guard = rc::anchor_jamb_guard(pose, a.width_m, cmd, holonomic, body, approach_body_.safety_margin(),
-                                             anchor_brake_decel(path_controller), v_max, w_max, leaves);
+    const auto guard = rc::anchor_jamb_guard(pose, drive_width, cmd, holonomic, body, approach_body_.safety_margin(),
+                                             anchor_brake_decel(path_controller), v_max, w_max, drive_leaves);
     if (guard.backoff != anchor_backoff_logged_)   // logged on the transitions only
     {
         anchor_backoff_logged_ = guard.backoff;

@@ -16,7 +16,7 @@
 #include "controller_door_passage.h"
 #include "controller_anchor_servo.h"
 #include "lidar_guard_buffer.h"
-#include "self_return_map.h"
+#include "doorway_gap.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -920,23 +920,10 @@ private:
     // mesh outline — what a return can hit) and the SELF footprint (hull ∪ mesh ⊕ σ_r — what the LiDAR sees of the robot).
     // Empty until the body loads ⇒ the planning hull.
     std::vector<Eigen::Vector2f> returns_body_, self_body_;
-    // Task 14 fix round 6: the self footprint LEARNED from motion (self_return_map.h), and the contact body it grows
-    // (returns body ∪ learned self places), refreshed once per cycle by update_self_map.
-    rc::SelfReturnMap self_map_;
-    std::vector<Eigen::Vector2f> returns_body_eff_;
-    bool self_map_ready_ = false;
     [[nodiscard]] const std::vector<Eigen::Vector2f> &returns_body() const
     {
-        if (not returns_body_eff_.empty()) return returns_body_eff_;
         return returns_body_.empty() ? approach_body_.polygon() : returns_body_;
     }
-    void update_self_map(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
-                         const rc::TrajectoryController &path_controller, ControllerMotionCommander &motion_commander,
-                         std::uint64_t now_ms);
-public:
-    // Persist the learned self map (etc/self_returns.csv) and print its census — called at shutdown.
-    void save_self_returns() const;
-private:
     bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
     bool returns_hold_in_window_ = false;   // Task 14 fix 1: the live returns held the command in the open judge window
     bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)
@@ -1001,6 +988,21 @@ private:
     // cycle read a fresh anchor), cleared at every cycle's start and whenever update_cross_anchor finds none.
     // update_display re-checks its age against kAnchorStaleMs, so a cycle that returns early never shows a stale one.
     std::optional<AnchorCrossReading> anchor_drawn_;
+    // ── Task 18: THE DOORWAY AS THE LIDAR MEASURES IT (doorway_gap.h) ──────────────────────────────────────────────────
+    // From the first cycle the through-span of the anchor's wall is SEEN, the cross steers on it (re-measured every cycle;
+    // carried by the robot's own motion — room-frame pose deltas within one room — while it is not seen). The anchor stays
+    // the prior until then and says where along which wall to look. Reset with every claim (reset_anchor_cross_state).
+    std::optional<rc::interaction::RelPose> gap_line_;          // the gap's line, robot frame (anchor convention), seen or carried
+    float gap_width_ = 0.f;                                     // its clear width as last MEASURED
+    bool gap_seen_now_ = false;                                 // this cycle measured it (else carried)
+    std::optional<ControllerRobotPose> gap_carry_pose_;         // the pose gap_line_ is expressed at
+    std::string gap_carry_room_;                                // ...and its room frame
+    bool gap_steering_logged_ = false, gap_lost_logged_ = false;
+    Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // centre x, y, width at the last "[gap] seen" line
+    float gap_logged_heading_ = 0.f;
+    std::string current_room_name_;                             // the room frame robot poses are read in (this cycle)
+    // One gap cycle: carry, measure on the prior (the carried gap, else the anchor), log. True = steer on gap_line_.
+    bool update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker);
     bool anchor_hoist_logged_ = false;                              // build_planning_step's bypass: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
