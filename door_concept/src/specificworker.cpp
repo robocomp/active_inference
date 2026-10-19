@@ -3385,19 +3385,13 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         // Ask the question itself: is the pose the consumer is actually driving to within actuation reach of
         // THIS aperture? Then the request is about this door whatever the epoch, and the provider door is
         // chosen by this door's own place (request_door_actuation), not by the robot's pose.
-        const auto& c = inst.aff_open.claim();
-        const bool same_doorway = not c.has_value()
-            or (Eigen::Vector2f(c->x, c->y) - inst.aperture.centre_xy()).norm()
-               <= std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f);
-        if (inst.aff_open.claim_is_stale() and not same_doorway)
-        {
-            if (inst.actuation_note.find("older proposal") == std::string::npos)
-                std::print("door_concept: [open] {} claimed on epoch {} while we publish {}, driving to "
-                           "({:.2f},{:.2f}) — out of this door's reach, NOT sending a door request\n",
-                           inst.node_name, c->epoch, inst.aff_open.epoch(), c->x, c->y);
-            inst.actuation_note = "consumer accepted an older proposal out of reach; waiting";
-        }
-        else if (not pg.autonomous_actuation)
+        // ★THE CLAIM NAMES THIS DOOR ALREADY: it is a claim on THIS instance's `open` node. The distance test that
+        //   stood here (claimed pose within ActuationReachM of the aperture, else "NOT sending a door request") was a
+        //   second proxy for the same question, and it answered it wrong whenever the controller's standpoint repair
+        //   moved the claimed pose back: try100 leg 1 claimed (-0.69,2.42), 2.2 m from the aperture, the request was
+        //   withheld for the whole 12 s claim, the open timed out and the mission failed door_wont_open — the door
+        //   was opened only on the next claim. Whether the robot is close enough to pass is `cross`'s business.
+        if (not pg.autonomous_actuation)
         {
             inst.open_claim_unserved = false;
             inst.actuation_note = "autonomous actuation is disabled (DoorAffordance.AutonomousActuation)";
