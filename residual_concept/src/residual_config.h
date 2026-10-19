@@ -104,7 +104,11 @@ struct ResidualConfig
     // ...but absence of RETURNS where beams went is evidence, and it reaches the whole column: see
     // OccGridParams::absence_removes. false ⇒ the pre-2026-10-19 voxel-ledger-only removal, for A/B.
     bool  grid_absence_removes      = true;
-
+    // Ray origin per lidar. The merged sweep carries ONE origin — the last plane merged, i.e. the bpearl — and
+    // both devices were traced from it, so every helios clearing ray started 0.405 m too low and 0.295 m off and
+    // crossed each column at the wrong heights. true ⇒ each device from its own sensor centre. false ⇒ the old
+    // single origin, for A/B.
+    bool  grid_per_device_ray_origin = true;
     // ── clearing: P(this beam would have been blocked) instead of a binary z-gate ──
     float grid_bin_span_m           = 2.0f;
     float grid_clear_stop_max_m     = 0.10f;

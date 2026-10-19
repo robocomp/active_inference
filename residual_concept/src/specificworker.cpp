@@ -1360,7 +1360,10 @@ bool SpecificWorker::integrate_lidar_per_device()
     grid_.set_sensor_noise(0.0f, 0.0f);                    // lidar-grade: full clearing authority
     grid_.set_sensor_beam_spacing(cfg_.bpearl_beam_spacing_rad);   // ...and how much of a column one
     grid_.set_sensor_id(1);                                        // crossing may refute (see beam_spacing_rad)
-    grid_.integrate_sweep(lidar_ingestor_->origin_room(), bpearl_pts, /*begin_cycle=*/true, ego_reliability_);
+    // Each device's rays from ITS OWN centre (Grid.PerDeviceRayOrigin): origin_room() is the last plane merged.
+    const bool own = cfg_.grid_per_device_ray_origin;
+    grid_.integrate_sweep(own ? lidar_ingestor_->origin_room(1) : lidar_ingestor_->origin_room(), bpearl_pts,
+                          /*begin_cycle=*/true, ego_reliability_);
 
     const auto& he = device_sweep(0, keep);          // re-derive: unfiltered when the flag is on
     grid_.set_floor_plane(a, b, c, sig_he);
@@ -1369,7 +1372,8 @@ bool SpecificWorker::integrate_lidar_per_device()
     grid_.set_sensor_noise(0.0f, 0.0f);
     grid_.set_sensor_beam_spacing(cfg_.helios_beam_spacing_rad);
     grid_.set_sensor_id(2);
-    grid_.integrate_sweep(lidar_ingestor_->origin_room(), he, /*begin_cycle=*/false, ego_reliability_);
+    grid_.integrate_sweep(own ? lidar_ingestor_->origin_room(0) : lidar_ingestor_->origin_room(), he,
+                          /*begin_cycle=*/false, ego_reliability_);
     log_sweep(he, "helios");   // the returns themselves, in the frame the grid works in
     grid_.set_floor_plane(a, b, c, sig_bp);   // leave the datum's sigma in place for the ZED pass that follows
     grid_.set_device_floor_z0(-1.0f);         // ...and the DEFAULT band: ZED is not one of these two devices

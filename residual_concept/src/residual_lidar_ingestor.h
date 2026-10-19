@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -47,6 +48,13 @@ public:
     const std::vector<Eigen::Vector3f>& sweep_room()  const { return sweep_room_; }
     const std::vector<std::uint8_t>&    plane_id()    const { return plane_id_; }   // per-point device: helios=0, bpearl=1
     const Eigen::Vector3f&              origin_room() const { return origin_room_; }
+    // The sensor centre of ONE plane (helios=0, bpearl=1) in the room frame, at that plane's own capture stamp.
+    // origin_room() above is whatever plane the reader merged LAST (bpearl when it is on), which is right for the
+    // robot's axis but wrong as a RAY origin for the other device: helios sits 0.405 m higher and 0.295 m away,
+    // so its clearing rays were being traced from the bpearl and crossed every column at the wrong heights.
+    // Falls back to origin_room() when that plane's transform did not resolve this cycle.
+    const Eigen::Vector3f&              origin_room(std::uint8_t plane) const
+    { return (plane < plane_origin_ok_.size() and plane_origin_ok_[plane]) ? plane_origin_room_[plane] : origin_room_; }
     std::uint64_t                       last_stamp_ms() const { return static_cast<std::uint64_t>(last_ts_); }
 
 private:
@@ -61,6 +69,9 @@ private:
     std::vector<Eigen::Vector3f> sweep_room_;                    // latest sweep, ROOM frame
     std::vector<std::uint8_t>    plane_id_;                      // per-point source device (helios=0, bpearl=1)
     Eigen::Vector3f              origin_room_ = Eigen::Vector3f::Zero();  // sensor centre, ROOM frame
+    std::vector<std::string>     plane_nodes_;                   // DSR node per plane id, in the reader's order
+    std::vector<Eigen::Vector3f> plane_origin_room_;             // per-plane sensor centre, ROOM frame
+    std::vector<bool>            plane_origin_ok_;               // ...resolved this cycle?
     std::int64_t                 last_ts_ = 0;                   // newest ingested source stamp (exposed)
 };
 
