@@ -325,6 +325,14 @@ int main()
         check(rc::door::view_lost_llr_step(0.0f, 0.1, tau) <= std::log(3.0) * 0.1 / tau + 1e-12, "one frame is never decisive (bounded)");
     }
 
+    std::print("(13) Task 19: an approach claim creates no anchor; a cross claim does\n");
+    {
+        check(not rc::door::anchor_creation_claim(false, true), "approach claimed (door not yet open): no anchor");
+        check(rc::door::anchor_creation_claim(true, false), "cross claimed (offered only on a passable door): the anchor is created");
+        check(rc::door::anchor_creation_claim(true, true), "cross claimed while an approach is still claimed: the cross creates it");
+        check(not rc::door::anchor_creation_claim(false, false), "nothing claimed: no anchor");
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

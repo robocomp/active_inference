@@ -313,6 +313,12 @@ struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; double view_llr = 0.0
 // opening; the hinge and swing log-odds accumulate with no forgetting, so one aliased stretch could flip and latch them.
 [[nodiscard]] inline bool anchor_frame_is_leaf_evidence(float p_view, float publish_level) { return p_view >= publish_level; }
 
+// ─── Task 19 (user decision): WHEN THE PASSAGE ANCHOR IS CREATED ─────────────────────────────────────────────────────────
+// On the CROSS claim only. The cross is offered only while door_concept believes the door passable (open), so the anchor is
+// born on an open door and is never updated against a shut one or a swinging leaf; approach and open run on the room-frame
+// standpoint. An approach claim creates nothing. (`approach_claimed` is taken only to say so explicitly.)
+[[nodiscard]] inline bool anchor_creation_claim(bool cross_claimed, bool /*approach_claimed*/) { return cross_claimed; }
+
 // FIX 4: the pose the born-stale (not-seen) write hands the controller's wait-turn. Never the unpublished posterior.
 [[nodiscard]] inline const rc::interaction::RelPose& wait_pose(bool seen_once, const rc::interaction::RelPose& seen_pose,
                                                                const rc::interaction::RelPose& init_pose)

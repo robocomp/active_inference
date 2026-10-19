@@ -312,7 +312,7 @@ private:
         rc::interaction::RelPose pose;                    // the belief, robot frame (P = the published covariance)
         rc::door::AnchorBias bias;                        // Task 10: its persistent-bias factor (P − L Lᵀ = the data-space part)
         float width = 0.9f, thickness = 0.05f, height = 2.0f;   // read from the door with the pose (Task 9: not per cycle)
-        bool  approach_was_claimed = false, cross_was_claimed = false;
+        bool  cross_was_claimed = false;   // Task 19: the cross is the only claim an anchor serves
         std::uint64_t consumer_id = 0;                    // the agent node whose `executing` edge we serve (0 = legacy)
         bool  reinit_on_next_claim = false;               // relinked by a room switch: the next claim re-inits from the room
         int   last_mask_frame = -1;                       // each mask frame is evidence ONCE

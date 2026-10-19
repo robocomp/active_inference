@@ -1,7 +1,7 @@
 /*
  * specificworker_anchor.cpp — door_concept OWNS the interaction anchor during a door passage.
  *
- * While the controller executes this door's `approach` or `cross`, a shallow copy of the door (`door_N@robot`)
+ * While the controller executes this door's `cross` (Task 19: offered only on a door believed OPEN), a shallow copy of the door (`door_N@robot`)
  * hangs from the robot node (common/interaction_anchor). Its pose is the OPENING in the robot frame, initialised
  * ONCE from the room frames (robot←room ∘ room←opening), then predicted by the body twist and corrected by the
  * bpearl rays and the door mask, both in the robot frame (door_anchor_update.h). The room frame is not read again
@@ -12,25 +12,25 @@
  * The authoritative mark is the consumer-owned EDGE controller --[executing]--> affordance, read through
  * PragmaticAffordance::claimed()/claim() — which is AffordanceManager::read_executing, with the legacy
  * `active and epistemic_pending` fallback for a consumer that writes no edge. This agent NEVER writes that edge.
- *   CREATE   no anchor and some door's `cross` (preferred) or `approach` is claimed ⇒ from_room + Anchor::create.
- *   LINK     the affordance currently claimed (cross over approach) names the anchor (interaction_node_id). On the
- *            approach → cross handover the SAME anchor is re-linked (link_affordance drops the approach's link):
- *            same opening, same robot-frame belief, nothing re-initialised. Re-asserted EVERY cycle: a consumer's
- *            whole-node update of the affordance can erase an attribute it never read.
+ *   CREATE   no anchor and some door's `cross` is claimed ⇒ from_room + Anchor::create (same P0: belief + localisation +
+ *            σ_model). Task 19 (user decision): NOT on `approach` — approach and open run anchor-less on the room-frame
+ *            standpoint; the anchor is born on an open door (rc::door::anchor_creation_claim).
+ *   LINK     the claimed cross names the anchor (interaction_node_id). Re-asserted EVERY cycle: a consumer's
+ *            whole-node update of the affordance can erase an attribute it never read. (No approach → cross relink.)
  *   RE-INIT  from_room again ONLY for a NEW passage: (i) the claimed affordance is the one already linked and its
  *            executing epoch changed (the consumer accepted a new proposal) — but NOT on a RETRY (Task 9: after a claim of
- *            this door's approach or cross ENDED without the robot crossing, the next claim is the same passage tried
+ *            this door's cross ENDED without the robot crossing, the next claim is the same passage tried
  *            again, and the corrected robot-frame belief is the one thing the retry must keep); or (ii) the first claim
  *            after a room-switch RELINK (a new door instance: the old belief is not carried into a new passage). The
  *            axes keep their side. The door's GEOMETRY (width, thickness, height, its wall run) is read from the room
  *            frame at the same two moments and nowhere else (Task 9: try66's belief jumped 0.15 m wider and 0.35 m along
  *            its wall as the leaf swung open, and the anchor followed it every cycle).
- *   PARK     approach ended (any outcome), `open` claimed, the CROSS ended without succeeding (Unreachable, Infeasible,
+ *   PARK     the CROSS ended without succeeding (Unreachable, Infeasible,
  *            Timeout, aborted, released, re-offered — Task 9), or the door's instance is gone (merged): the anchor is
  *            kept, predicted and corrected — the passage may go on (open, then cross, or the cross again).
  *   ROOM     release_room(): a switch while the anchored door's CROSS is claimed KEEPS the anchor (Task 12 Fix E: crossing_through)
  *            and RELINKS it (the robot still crosses on it until through; REMOVE (b) ends it). A switch during
- *            approach/open RELINKS the anchor to the door re-identified in the new room, and marks it for re-init.
+ *            approach/open of a PARKED cross retry RELINKS the anchor to the door re-identified in the new room, and marks it for re-init.
  *   REMOVE   (a) the cross claim of the anchored door ended SATISFIED while its instance lives: the robot is through,
  *                the passage's crossing is over; or the room switched during the cross (above);
  *            (b) nothing of this door's approach/open/cross is claimed AND THE SAME CONSUMER (the agent node of the
@@ -235,8 +235,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.init_pose    = init.value();   // Task 11 fix 4
     pa.axis_sign    = axis_sign;
     anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once (width_m set below)
-    pa.approach_was_claimed = inst.aff_approach.claimed();
-    pa.cross_was_claimed    = inst.aff_cross.claimed();
+    pa.cross_was_claimed = inst.aff_cross.claimed();
     pa.last_seen_ms = init->stamp_ms;   // never seen yet: unseen since creation (unseen_time)
     passage_anchor_ = std::move(pa);
     passage_anchor_->anchor->set_width(*G, passage_anchor_->clear_width);
@@ -371,7 +370,7 @@ void SpecificWorker::relink_passage_anchor(std::uint64_t new_door_id, std::strin
     pa.door_id = new_door_id;
     // A different door instance: its affordances are new nodes. The old door's claims are not this one's history,
     // and the affordance linked so far went with the room left behind.
-    pa.approach_was_claimed = pa.cross_was_claimed = false;
+    pa.cross_was_claimed = false;
     pa.linked_aff   = 0;
     pa.linked_epoch = -1;
     pa.reinit_on_next_claim = true;   // a later claim on the new door is a new passage: re-init, never inherit
@@ -472,9 +471,12 @@ void SpecificWorker::step_passage_anchor()
     {
         for (auto& [id, inst] : instances)
         {
-            const rc::pragmatic::PragmaticAffordance* aff = inst.aff_cross.claimed()    ? &inst.aff_cross
-                                                          : inst.aff_approach.claimed() ? &inst.aff_approach
-                                                                                        : nullptr;
+            // ★ Task 19 (user decision): the anchor is created on the CROSS claim only — offered only while the door is
+            //   believed passable, i.e. OPEN. Approach and open run without one (the controller uses the room-frame
+            //   standpoint, as before the anchor); most anchor failures built up while it was updated against a shut door
+            //   and a swinging leaf. rc::door::anchor_creation_claim.
+            const rc::pragmatic::PragmaticAffordance* aff =
+                rc::door::anchor_creation_claim(inst.aff_cross.claimed(), inst.aff_approach.claimed()) ? &inst.aff_cross : nullptr;
             if (aff != nullptr and aff->node_id() != 0)
             {
                 create_passage_anchor(inst, *aff);
@@ -501,28 +503,24 @@ void SpecificWorker::step_passage_anchor()
     //  hung a new one born stale from the room — 0.15 m and 18° from the corrected belief, and, with the robot already
     //  past the wall plane, with its normal flipped (the room init puts the robot on −y): the controller was told to turn
     //  155° in the doorway. A cross that ended without the robot crossing is the same passage, to be tried again.
-    if (inst != nullptr and ((pa.cross_was_claimed and not crs) or (pa.approach_was_claimed and not app)))
+    if (inst != nullptr and pa.cross_was_claimed and not crs)   // Task 19: the cross is the only claim an anchor serves
     {
-        const bool was_cross = pa.cross_was_claimed and not crs;
-        const auto& ended = was_cross ? inst->aff_cross : inst->aff_approach;
+        const auto& ended = inst->aff_cross;
         const auto outcome = ended.outcome();
         const std::string why = std::format("the {} claim ended ({}{}{})", ended.kind(),
                                             rc::pragmatic::PragmaticAffordance::state_name(ended.state()),
                                             outcome == rc::affordance::Outcome::None ? "" : ", ",
                                             rc::affordance::to_string(outcome));
-        if (was_cross and outcome == rc::affordance::Outcome::Satisfied)
+        if (outcome == rc::affordance::Outcome::Satisfied)
         {
             remove_passage_anchor(why + ": the robot is through");
             return;
         }
-        // An APPROACH claim released with no outcome because the passage moved on to `open` / `cross` (door_passage's
-        // pre-emption) is the passage advancing, not a failed attempt (fix round 1; try67: "approach claim ended (offered)").
-        const bool superseded = not was_cross and outcome == rc::affordance::Outcome::None and (crs or opn);
-        if (outcome != rc::affordance::Outcome::Satisfied and not superseded)
+        if (outcome != rc::affordance::Outcome::Satisfied)
         {
             pa.retry = true;
             std::print("door_concept: [anchor] {}@robot PARKED — {}: kept, predicted and corrected for this door's next "
-                       "approach or cross claim (a retry: the belief is not re-initialised)\n", pa.door_name, why);
+                       "cross claim (a retry: the belief is not re-initialised)\n", pa.door_name, why);
         }
     }
     // ── REMOVE (b): nothing of this passage is claimed and the consumer is executing something else ──────────
@@ -539,8 +537,7 @@ void SpecificWorker::step_passage_anchor()
                 return;
             }
     }
-    const bool claim_rose = (app and not pa.approach_was_claimed) or (crs and not pa.cross_was_claimed);
-    pa.approach_was_claimed = app;
+    const bool claim_rose = crs and not pa.cross_was_claimed;   // Task 19: no approach→cross relink — the cross alone
     pa.cross_was_claimed    = crs;
 
     // ── LINK + RE-INIT ───────────────────────────────────────────────────────────────────────────────────────
@@ -553,7 +550,7 @@ void SpecificWorker::step_passage_anchor()
                 anchor_geometry_from_door(*inst, pa);
                 pa.width = w; pa.clear_width = cw; pa.thickness = t; pa.height = h;   // the run only: the rest stays the initialisation's
             }
-        if (const rc::pragmatic::PragmaticAffordance* aff = crs ? &inst->aff_cross : app ? &inst->aff_approach : nullptr;
+        if (const rc::pragmatic::PragmaticAffordance* aff = crs ? &inst->aff_cross : nullptr;
             aff != nullptr and aff->node_id() != 0)
         {
             const int epoch = aff->claim().has_value() ? aff->claim()->epoch : -1;
