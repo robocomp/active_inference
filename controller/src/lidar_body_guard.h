@@ -249,6 +249,44 @@ template <class Next>
     return sum;
 }
 
+// ★ Fix round 4 (try79: parked 300 s alongside room_2's east wall, 5 cm off its side). The first version scored single
+//   motions over 1 mm and capped the winner with the SAFETY MARGIN — and a differential base parallel to a wall has no
+//   single motion that opens it: advance/reverse leave the side gap unchanged, and either turn swings one end of the side
+//   (or a corner) toward the wall, which the margin-capped turn ceiling refuses. Two changes, both of them the model's:
+//   1. TWO-SEGMENT PRIMITIVES at the deficit's own scale — a turn, a translation, or a turn THEN a translation — so
+//      "turn away a little, then drive out" is a candidate. Scale: the deficit D = the worst band penetration (≥ σ_r); a
+//      translation moves the body D, a turn moves its farthest point D (θ = D / r_max). Scored by the drop of the total
+//      band penetration at the END, and REJECTED if any return touches the hull (sd ≤ 0) along the way (sampled every
+//      σ_r/2 of body-point travel — ARITHMETIC, a discretisation below the noise).
+//   2. The backoff is capped by the returns with the CONTACT standoff only (margin 0 ⇒ max(0, σ_r)): its job is to give
+//      the margin back, so it may move inside the margin band as long as it does not close on contact.
+//   Receding horizon: only the first segment is commanded, and the next cycle chooses again.
+struct BackoffSeg { float side = 0.f, adv = 0.f, rot = 0.f; };
+
+[[nodiscard]] inline std::optional<std::vector<Eigen::Vector2f>> lidar_backoff_rollout(std::span<const AnchorJamb> returns,
+                                                                                        std::span<const Eigen::Vector2f> body,
+                                                                                        std::span<const BackoffSeg> segs,
+                                                                                        float r_max, float step)
+{
+    std::vector<Eigen::Vector2f> pts;
+    pts.reserve(returns.size());
+    for (const auto& j : returns) pts.push_back(j.mean);
+    for (const auto& sg : segs)
+    {
+        const float travel = std::hypot(sg.side, sg.adv) + std::abs(sg.rot) * r_max;
+        const int n = std::max(1, int(std::ceil(travel / std::max(step, 1e-4f))));
+        for (int k = 0; k < n; ++k)
+        {
+            for (auto& q : pts)
+            {
+                q = anchor_point_after(q, sg.side / float(n), sg.adv / float(n), sg.rot / float(n));
+                if (anchor_signed_distance(body, q) <= 0.f) return std::nullopt;   // touches the body: rejected
+            }
+        }
+    }
+    return pts;
+}
+
 [[nodiscard]] inline std::optional<AnchorCommand> lidar_return_backoff(std::span<const AnchorJamb> returns,
                                                                        std::span<const Eigen::Vector2f> body, float margin,
                                                                        float sigma_r, float a_dec, float v_max, float w_max,
@@ -259,35 +297,49 @@ template <class Next>
     float pen = 0.f;
     const float b0 = lidar_band_penetration(returns, body, band, 0.f, 0.f, 0.f, &pen);
     if (not (b0 > 0.f)) return std::nullopt;
-    // The worst return's radius: the arm of a turn.
-    float arm = 1e-3f, worst_pen = -1.f;
-    for (const auto& j : returns)
-        if (const float p = band - anchor_signed_distance(body, j.mean); p > worst_pen) { worst_pen = p; arm = std::max(j.mean.norm(), 1e-3f); }
-    struct Cand { float side, adv, rot; };
-    std::vector<Cand> cand{{0.f, 1.f, 0.f}, {0.f, -1.f, 0.f}, {0.f, 0.f, 1.f}, {0.f, 0.f, -1.f}};
-    if (holonomic) { cand.push_back({1.f, 0.f, 0.f}); cand.push_back({-1.f, 0.f, 0.f}); }
-    const float h = kAnchorGainStepM;
-    float best_gain = 0.f;
-    std::optional<Cand> best;
-    for (const auto& k : cand)
+    float r_max = 1e-3f;
+    for (const auto& v : body) r_max = std::max(r_max, v.norm());
+    const float D = std::max(pen, sigma_r);
+    const float th = D / r_max;
+    std::vector<std::vector<BackoffSeg>> cand;
+    for (const float sgn : {1.f, -1.f})
     {
-        const float gain = (b0 - lidar_band_penetration(returns, body, band, h * k.side, h * k.adv, h * k.rot / arm)) / h;
-        if (gain > best_gain) { best_gain = gain; best = k; }
+        cand.push_back({BackoffSeg{0.f, sgn * D, 0.f}});
+        cand.push_back({BackoffSeg{0.f, 0.f, sgn * th}});
+        for (const float sa : {1.f, -1.f}) cand.push_back({BackoffSeg{0.f, 0.f, sgn * th}, BackoffSeg{0.f, sa * D, 0.f}});
+        if (holonomic) cand.push_back({BackoffSeg{sgn * D, 0.f, 0.f}});
     }
-    if (not best.has_value()) return std::nullopt;
-    const float v = v_max * std::tanh(pen / (v_max * kAnchorTauS));
+    const auto band_sum = [&](const std::vector<Eigen::Vector2f>& pts)
+    {
+        float s = 0.f;
+        for (const auto& q : pts) s += std::max(0.f, band - anchor_signed_distance(body, q));
+        return s;
+    };
+    float best_gain = 0.f;
+    const std::vector<BackoffSeg>* best = nullptr;
+    for (const auto& c : cand)
+        if (const auto end = lidar_backoff_rollout(returns, body, c, r_max, 0.5f * sigma_r); end.has_value())
+            if (const float gain = b0 - band_sum(*end); gain > best_gain) { best_gain = gain; best = &c; }
+    if (best == nullptr) return std::nullopt;
+    const BackoffSeg& first = best->front();
+    const float v = v_max * std::tanh(D / (v_max * kAnchorTauS));
     AnchorCommand c;
-    c.side = best->side * v;
-    c.adv = best->adv * v;
-    c.rot = std::clamp(best->rot * v / arm, -w_max, w_max);
-    // Through the returns' own caps.
+    if (first.rot != 0.f) c.rot = std::clamp(std::copysign(v / r_max, first.rot), -w_max, w_max);
+    else
+    {
+        const float len = std::hypot(first.side, first.adv);
+        c.side = v * first.side / len;
+        c.adv = v * first.adv / len;
+    }
+    // Through the returns' own caps, at the CONTACT standoff (margin 0: the backoff may use the margin band, not contact).
     if (const float lin = std::hypot(c.adv, c.side); lin > 0.f)
     {
-        const float vl = lidar_return_speed_limit(returns, Eigen::Vector2f(c.side / lin, c.adv / lin), body, margin, a_dec, v_max);
+        const float vl = lidar_return_speed_limit(returns, Eigen::Vector2f(c.side / lin, c.adv / lin), body, 0.f, a_dec, v_max);
         if (lin > vl) { c.adv *= vl / lin; c.side *= vl / lin; }
     }
     if (c.rot != 0.f)
-        c.rot = std::copysign(std::min(std::abs(c.rot), lidar_return_rot_limit(returns, c.rot, body, margin, a_dec, w_max)), c.rot);
+        c.rot = std::copysign(std::min(std::abs(c.rot), lidar_return_rot_limit(returns, c.rot, body, 0.f, a_dec, w_max)), c.rot);
+    if (c.adv == 0.f and c.side == 0.f and c.rot == 0.f) return std::nullopt;
     return c;
 }
 

@@ -337,6 +337,13 @@ private:
                       std::uint64_t now_ms);
     // Step the active escape (owns the base). Reverses with a slight turn (or rotates in
     // place if the rear is blocked) until distance/time bound is met, then stops + clears.
+    // Task 14 fix round 4: one cycle of the returns' backoff on the tracker path. true = it commanded the base this cycle;
+    // false = clearance is open (or nothing opens it): the backoff ended, the plan was dropped so the planner re-plans.
+    bool step_returns_backoff(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                              const char *why);
+    // Are real returns inside the band the net acts on (the robot hemmed in)?
+    [[nodiscard]] bool hemmed_in_by_returns(const LiveReturns &lr) const;
     void step_escape(const ControllerRobotPose &robot_pose,
                      rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker,
@@ -1091,6 +1098,15 @@ private:
     // list of samples cannot be re-optimised — the control polygon is the decision variable, and
     // throwing it away is what made an affordance route a one-shot fit.
     ControllerPolygon smooth_plan(const ControllerPolygon &poly);
+    // Task 14 fix round 4 (try79): the RETURNS' BACKOFF on the tracker path — owns the base while it opens clearance from the
+    // live returns, then hands back to the planner (re-plan). `returns_held_since_ms_`: the net has held the tracker's whole
+    // command since then (0 = not held). `returns_block_pending_`: the stall judge called a window BLOCKED BY A REAL RETURN.
+    // `returns_backoff_failed_`: the last backoff found nothing that opens clearance — not re-triggered from the same hold
+    // until the target changes or a plan drives again.
+    bool          returns_backoff_active_ = false;
+    std::uint64_t returns_held_since_ms_ = 0;
+    bool          returns_block_pending_ = false;
+    bool          returns_backoff_failed_ = false;
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

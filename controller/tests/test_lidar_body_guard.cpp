@@ -338,6 +338,51 @@ int main()
         }
     }
 
+    // 11. Fix round 4 (try79) — HEMMED IN: a wall 0.05 m off the left side (an infinite wall, 1 cm sampling) and a planner
+    //     target BEHIND the robot. The net refuses both turns (the side's ends and the corners swing into the margin), so
+    //     the tracker can only sit. The returns' backoff (turn / drive / turn-then-drive, contact standoff) opens clearance
+    //     at 20 Hz until the band is clear; the body grown by the safety margin (the planner's own footprint test) is then
+    //     free at the start pose, and the turn toward the target is no longer refused.
+    {
+        constexpr float kGap = 0.04f;   // inside the 0.05 m margin: the planner's footprint test refuses the start pose
+        auto fpm = rc::RobotFootprint::shadow();
+        fpm.set_safety_margin(kMargin);
+        std::vector<Eigen::Vector2f> pts;
+        for (float y = -1.5f; y <= 1.5f; y += 0.01f) pts.emplace_back(-0.2716f - kGap, y);
+        const auto r0 = returns_of(pts, body);
+        const float w0_ccw = rc::lidar_return_rot_limit(r0.obstacles, +1.f, body, kMargin, kAdec, kWmax);
+        const float w0_cw = rc::lidar_return_rot_limit(r0.obstacles, -1.f, body, kMargin, kAdec, kWmax);
+        bool start_blocked = false;
+        for (const auto& q : pts) start_blocked = start_blocked or fpm.contains(q);
+        CHECK(w0_ccw < 0.5f * kWmax and w0_cw < 0.5f * kWmax and start_blocked);
+        const auto min_sd = [&](const std::vector<Eigen::Vector2f>& q)
+        { float m = 1e9f; for (const auto& p : q) m = std::min(m, rc::anchor_signed_distance(body, p)); return m; };
+        const float sd0 = min_sd(pts);
+        float sd_lo = sd0;
+        int steps = 0;
+        for (; steps < 400; ++steps)   // 20 s at 20 Hz, receding horizon
+        {
+            const auto b = rc::lidar_return_backoff(returns_of(pts, body).obstacles, body, kMargin, kSigma, kAdec, kVmax, kWmax, false);
+            if (not b.has_value()) break;
+            for (auto& p : pts) p = rc::anchor_point_after(p, b->side * 0.05f, b->adv * 0.05f, b->rot * 0.05f);
+            sd_lo = std::min(sd_lo, min_sd(pts));
+        }
+        const float sd1 = min_sd(pts);
+        bool start_free = true;
+        for (const auto& q : pts) start_free = start_free and not fpm.contains(q);
+        const auto r1 = returns_of(pts, body);
+        const float w1_ccw = rc::lidar_return_rot_limit(r1.obstacles, +1.f, body, kMargin, kAdec, kWmax);
+        const float w1_cw = rc::lidar_return_rot_limit(r1.obstacles, -1.f, body, kMargin, kAdec, kWmax);
+        std::println("  hemmed in (wall 4 cm off the side): turns CCW {:.3f} CW {:.3f}, start in collision {}; backoff {} steps "
+                     "({:.1f} s): min clearance {:.3f} -> {:.3f} m (never below {:.3f}); start free {}, turns CCW {:.3f} CW {:.3f}",
+                     w0_ccw, w0_cw, start_blocked, steps, steps * 0.05f, sd0, sd1, sd_lo, start_free, w1_ccw, w1_cw);
+        CHECK(steps < 400);                       // it terminates: the band is clear
+        CHECK(sd1 >= kMargin + kSigma - 1e-3f);   // the margin and the noise band given back
+        CHECK(sd_lo > 0.f);                       // never touched the wall on the way
+        CHECK(start_free);                        // the planner's footprint test accepts the start pose
+        CHECK(w1_ccw > 0.f or w1_cw > 0.f);       // and the turn toward the target behind is allowed one way
+    }
+
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }
