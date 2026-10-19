@@ -58,6 +58,14 @@ bool RouteSpline::build(const std::vector<Eigen::Vector2f> &polyline, float spac
                         const RouteOptimizerConfig *opt)
 {
     samples_.clear();
+    // ★THE RETAINED STATE IS RESET WITH THE REST. ctrl_/polyline_/is_free_ are what deform() re-evaluates from,
+    // and they used to be assigned only on the long-path branch below: every early return (a short path, a failed
+    // fit) left the PREVIOUS route's control polygon in place. The elastic band then rebuilt that old route over
+    // the new short one and the robot parked at its end, 0.74 m short of the door's approach standpoint, until
+    // three escapes abandoned it (try92/try95, leg 2: a <0.8 m approach after the look standpoint).
+    ctrl_.clear();
+    polyline_.clear();
+    is_free_ = {};
     length_ = 0.f;
     corrections_ = 0;
     last_opt_ = RouteOptimizerReport{};
@@ -86,6 +94,11 @@ bool RouteSpline::build(const std::vector<Eigen::Vector2f> &polyline, float spac
     {
         samples_ = ctrl;
         for (std::size_t i = 0; i + 1 < samples_.size(); ++i) length_ += (samples_[i + 1] - samples_[i]).norm();
+        // The polygon IS the state here too: < 4 points, so the band's own M < 4 guard leaves this curve alone.
+        ctrl_      = std::move(ctrl);
+        ctrl_step_ = ctrl_step;
+        polyline_  = polyline;
+        is_free_   = is_free;
         return true;
     }
 
