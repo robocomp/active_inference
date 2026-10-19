@@ -184,11 +184,13 @@ public:
             // door_concept also offers to `open` is two contradictory beliefs, and the shut door wins (live try20:
             // a transient P(passable) on a SHUT door sent the robot to cross it, `open` was offered a moment later).
             const bool open_wanted = later == Step::Cross and not opened_ and state_of(G, name_of(Step::Open)) == State::Offered;
-            // ★ NEVER FROM APPROACH STRAIGHT TO CROSS (2026-10-12). From across the room door_concept can rate a SHUT
-            //   door passable (try20/21/26: P(passable)=1.00 at phi=0.44 rad, clear span 0.10 m); `cross` then fails
-            //   unreachable, stays offered, and the robot never goes to the door. Approach is cheap and ends within
-            //   reach, facing the door — where `open` vs `cross` is decided on the beliefs that matter.
-            if (later == Step::Cross and step_ == Step::Approach) continue;
+            // FROM APPROACH STRAIGHT TO CROSS when door_concept offers it. This used to be forbidden (2026-10-12) because
+            // door_concept then rated a SHUT door passable from across the room (try20/21/26: P(passable)=1.00 at phi=0.44
+            // rad, clear span 0.10 m). That belief was the defect, and it is fixed at its source (10-19: the leaf model
+            // scores every return and explains the room's walls, so a shut door reads shut from either side). Keeping
+            // the rule made an OPEN, passable door wait for the approach servo's own completion — try99 leg 2: cross on
+            // offer at P(passable)=1.00, phi 1.57 rad, while the approach servo micro-searched until approach_timeout.
+            // `open_wanted` still makes a shut door win over a contradictory `cross`.
             if (state_of(G, name_of(later)) == State::Offered and not open_wanted)
             {
                 const bool was_executing = st_cur == State::Executing;
