@@ -469,13 +469,17 @@ int main()
             else { ++lost_cycles; if (std::getenv("GAPDBG")) std::println("  lost at ({:+.2f},{:+.2f},{:+.0f}) cands {} best score {:.4f} w {:.3f} c ({:+.2f},{:+.2f})", p.x, p.y, p.th*57.3f, g.candidates, g.score, g.width, g.centre.x(), g.centre.y()); }
             CHECK(line.has_value() or k > 0);
             if (not line.has_value()) break;
-            auto cmd = rc::anchor_cross_command(*line, line_width, half_w_servo, standoff, v_max, w_max, /*holonomic=*/false);
+            // try101: the session's chain — P(fit) read where the body enters (its front, and the free advance the cloud
+            // leaves the body aligned with the normal).
+            const auto ret = rc::lidar_guard_returns(pts, kBody, kSigmaR, 1.0f);
+            const float free = rc::lidar_free_advance(pts, rc::anchor_cross_geometry(*line).n, kBody);
+            auto cmd = rc::anchor_cross_command(*line, line_width, half_w_servo, standoff, v_max, w_max, /*holonomic=*/false, {},
+                                                0.2471f + margin, free);
             (void)gate.observe(g.seen, rc::anchor_cross_geometry(*line).s, 0.2471f);
             if (gate.through(cmd.through)) { through = true; break; }
             CHECK(not cmd.through);   // the session hands back a through without the near side; here it never happens
             const auto guard = rc::anchor_jamb_guard(*line, line_width, cmd, false, kBody, margin, a_dec, v_max, w_max);
             float adv = guard.cmd.adv, side = 0.f, rot = guard.cmd.rot;
-            const auto ret = rc::lidar_guard_returns(pts, kBody, kSigmaR, 1.0f);
             (void)rc::lidar_cap_command(ret.obstacles, kBody, margin, a_dec, v_max, w_max, adv, side, rot);
             // Integrate the unicycle (forward = R(th)·(0,1)), and carry the gap line by the same motion.
             const float dth = rot * dt, ds = adv * dt;

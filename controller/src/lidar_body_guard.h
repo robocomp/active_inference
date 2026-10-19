@@ -270,6 +270,32 @@ template <class Next>
     return std::max(0.f, v);
 }
 
+// ── HOW FAR THE BODY CAN ADVANCE ONCE ALIGNED (try101) ───────────────────────────────────────────────────────────────────
+// The body turned to face along unit u (robot frame) where it stands: its corridor is the returns at lateral ℓ = q·p
+// (p = u rotated +90°) within its own lateral extent, and each one ahead of it is reached after d = q·u − f(ℓ), f = the body's
+// LEADING profile at ℓ (its own frame: x right, y forward — the same profile lidar_return_speed_limit uses). The free advance
+// is the smallest such d; a return already inside the aligned body ahead of its centre (d < 0, q·u > 0) leaves none (0).
+// Raw body, no margin, no σ: this is a distance the servo plans its re-centring over (anchor_entry_advance), not a stop.
+// `points`: the robot-frame cloud at ANY range, the robot itself removed (lidar_robot_points_from_buffer) — the guard's
+// returns stop at the braking reach, and the advance that matters is metres long. No return in the corridor ⇒ +∞.
+[[nodiscard]] inline float lidar_free_advance(std::span<const Eigen::Vector2f> points, const Eigen::Vector2f& u,
+                                              std::span<const Eigen::Vector2f> body)
+{
+    float free = std::numeric_limits<float>::infinity();
+    if (not (u.squaredNorm() > 0.f) or body.size() < 3) return free;
+    const Eigen::Vector2f un = u.normalized(), p(-un.y(), un.x());
+    const Eigen::Vector2f ub(0.f, 1.f), pb(-1.f, 0.f);   // the same two axes in the body's own frame
+    for (const auto& q : points)
+    {
+        const float along = q.dot(un);
+        if (not (along > 0.f)) continue;   // behind or beside the centre: not on the way ahead
+        const float f = lidar_leading_profile(body, ub, pb, q.dot(p));
+        if (not std::isfinite(f)) continue;   // outside the corridor
+        free = std::min(free, std::max(0.f, along - f));
+    }
+    return free;
+}
+
 // The rotation ceiling for a turn in the direction of `rot` from the returns: the corner sweep, unfloored.
 [[nodiscard]] inline float lidar_return_rot_limit(std::span<const AnchorJamb> returns, float rot,
                                                   std::span<const Eigen::Vector2f> body, float margin, float a_dec, float w_cap)

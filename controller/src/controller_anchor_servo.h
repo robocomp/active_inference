@@ -162,23 +162,81 @@ struct AnchorGap { float centre = 0.f, width = 0.f; };
     return std::clamp(p, 0.f, 1.f);
 }
 
+// ── WHERE THE BODY WILL BE WHEN IT ENTERS THE OPENING (try101) ────────────────────────────────────────────────────────────
+// On a DIFFERENTIAL base the lateral offset can only be reduced by ADVANCING: e changes at v·sin(heading off the normal).
+// With P_fit read at the CURRENT offset, an off-line robot far from the door got v_n = 0, so d was pure v_a·a — along the
+// wall — and the base turned ±90° to face the wall direction and drove SIDEWAYS (try101 leg 1: from 0.29 m off the measured
+// line, 1.9 m before the wall, a 138° turn and a 0.37 m drive across room_1's 1 m corridor stub, toward its far wall). The
+// fit that matters is the one when the body ENTERS the opening. Under this same law, small-signal, the offset to the line
+// decays along the normal as de/ds = v_a/v_n = −(e/τ_lat)/v_n, i.e. as exp(−Δs/(v_max·τ_lat)) at the advance speed v_max (a
+// slower advance converges FASTER per metre, so v_max is the conservative rate), where Δs is the advance the body HAS
+// before the offset must already be right: up to where its front meets the opening's MOUTH — the wall plane (s = 0), or for
+// a leaf hypothesis swung toward the robot its most robot-ward point — and no further than the body, ALIGNED with the
+// normal at its current offset, can advance before its swept path meets anything (`free_advance`, measured on the live
+// returns by the caller: a leaf, a jamb, a corridor's end). A robot beside a leaf cannot re-centre by advancing, and there
+// Δs ≈ 0 keeps the old slide-first behaviour, which is exactly right. So under each hypothesis k P_fit is read at the offset
+// PREDICTED there, line + (e − line)·exp(−Δs_k/(v_max·τ_lat)): far from the door, with room ahead, it is the line's own P_fit
+// and the robot advances while it re-centres (intercept atan(v_a/v_n), ~21° from 0.29 m); at the mouth Δs = 0 and it is the
+// current offset, exactly as before. Holonomic: the base re-centres without advancing, so the current offset stays the right
+// one (unchanged).
+[[nodiscard]] inline float anchor_entry_advance(float s, float mouth, float body_front, float free_advance)
+{
+    return std::max(0.f, std::min(mouth - s - std::max(0.f, body_front), free_advance));
+}
+[[nodiscard]] inline float anchor_offset_at_entry(float e, float line, float advance, float v_max)
+{
+    return line + (e - line) * std::exp(-std::max(0.f, advance) / (v_max * kAnchorTauLat));
+}
+// The mouth of one leaf hypothesis (anchor frame y; ≤ 0): its most robot-ward point, or the wall plane.
+[[nodiscard]] inline float anchor_leaf_mouth(const rc::interaction::AnchorLeaf& l)
+{
+    return std::min(0.f, std::min(l.hinge.y(), l.tip.y()) - l.half_thick);
+}
+[[nodiscard]] inline float anchor_p_fit_at_entry(float width, std::span<const rc::interaction::AnchorLeaf> leaves,
+                                                 float body_half_width, float e, float line, float s, float body_front,
+                                                 float v_max, float sigma_lat,
+                                                 float free_advance = std::numeric_limits<float>::infinity())
+{
+    if (leaves.empty())
+        return anchor_p_fit(width, body_half_width,
+                            anchor_offset_at_entry(e, line, anchor_entry_advance(s, 0.f, body_front, free_advance), v_max),
+                            sigma_lat);
+    float p = 0.f;
+    for (const auto& l : leaves)
+    {
+        const auto gap = anchor_clear_gap(width, &l);
+        const float ek = anchor_offset_at_entry(e, line, anchor_entry_advance(s, anchor_leaf_mouth(l), body_front, free_advance),
+                                                v_max);
+        p += l.p * anchor_p_fit(gap.width, body_half_width, ek - gap.centre, sigma_lat);
+    }
+    return std::clamp(p, 0.f, 1.f);
+}
+
 // d nulls the lateral offset e to the CROSS LINE (anchor_cross_line) and advances along the normal at a speed scaled by
 // P(body fits) under the leaf hypotheses (anchor_p_fit_leaves); `through` once the opening is `standoff` behind along it.
 // holonomic: side/adv = d, rot aligns the heading with n. Differential: side = 0, rot turns toward d, adv = d's forward
-// projection. Signs: adv = forward (+y) m/s, side = lateral (+x) m/s, rot = rad/s CCW positive (the value handed to the
-// base). No leaves: the opening's own centre and width (the pre-Task-12 law).
+// projection, and P(body fits) is read at the offset the body will have when it ENTERS the opening
+// (anchor_p_fit_at_entry; body_front = the body's reach ahead of its centre, free_advance = how far the body aligned with
+// the normal can advance before its swept path meets an obstacle, ∞ = not measured). Signs: adv = forward (+y) m/s, side = lateral
+// (+x) m/s, rot = rad/s CCW positive (the value handed to the base). No leaves: the opening's own centre and width (the
+// pre-Task-12 law).
 [[nodiscard]] inline AnchorCommand anchor_cross_command(const rc::interaction::RelPose& r, float width,
                                                         float body_half_width, float standoff, float v_max,
                                                         float w_max, bool holonomic,
-                                                        std::span<const rc::interaction::AnchorLeaf> leaves = {})
+                                                        std::span<const rc::interaction::AnchorLeaf> leaves = {},
+                                                        float body_front = 0.f,
+                                                        float free_advance = std::numeric_limits<float>::infinity())
 {
     AnchorCommand c;
     if (not r.x.allFinite() or not r.P.allFinite() or not (v_max > 0.f) or not (w_max > 0.f)) return c;
     const auto g = anchor_cross_geometry(r);
     if (g.s >= standoff) { c.through = true; return c; }
 
-    const float e_line = g.e - anchor_cross_line(width, leaves, body_half_width, g.sigma_lat);
-    const float p_fit = anchor_p_fit_leaves(width, leaves, body_half_width, g.e, g.sigma_lat);
+    const float line = anchor_cross_line(width, leaves, body_half_width, g.sigma_lat);
+    const float e_line = g.e - line;
+    const float p_fit = holonomic ? anchor_p_fit_leaves(width, leaves, body_half_width, g.e, g.sigma_lat)
+                                  : anchor_p_fit_at_entry(width, leaves, body_half_width, g.e, line, g.s, body_front, v_max,
+                                                          g.sigma_lat, free_advance);
     const float v_a = -v_max * std::tanh(e_line / (v_max * kAnchorTauLat));
     // Task 13: the loop aims one σ PAST the standoff (σ_s = the opening's σ along its normal), so `through` (s ≥ standoff) is
     // reached in finite time — aimed exactly at the level, the first-order loop only approaches it (a kinematic replay of

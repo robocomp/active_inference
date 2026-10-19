@@ -3823,7 +3823,21 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         }
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
-        cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves);
+        // try101: P(body fits) read where the body will ENTER the opening — a differential base re-centres by advancing, not
+        // by turning to face along the wall. The advance it has for that: up to the mouth (its front = the footprint's reach
+        // ahead, margin included, like half_w), and no further than the body, aligned with the normal where it stands, can go
+        // before the live cloud is in its way (rc::lidar_free_advance: a leaf, a jamb — the gap's span ends at the leaf, its
+        // depth toward the robot is only in the cloud).
+        float free_advance = std::numeric_limits<float>::infinity();
+        if (auto *lidar = obstacle_tracker.lidar_buffer(); lidar != nullptr and drive_pose.x.allFinite())
+        {
+            const auto &cp = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+            if (const auto pts = rc::lidar_robot_points_from_buffer(*lidar, cp.as_transform(), returns_body(), self_body_);
+                pts.has_value())
+                free_advance = rc::lidar_free_advance(*pts, rc::anchor_cross_geometry(drive_pose).n, returns_body());
+        }
+        cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
+                                       approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)), free_advance);
         if (cmd.through and not cross_gate_.through(cmd.through))
         {
             // try89 fix: s ≥ standoff on a claim that never saw the robot on the near side is not a crossing — the frame is
@@ -3895,9 +3909,16 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         if (anchor_wait_blocked_) cmd.rot = 0.f;
     }
 
+    const auto &body = approach_body_.polygon();
+    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    path_controller.refresh_lidar_field(control_pose.as_transform());
+    // ★ Task 14 (try74 leg 2: the anchor 0.2 m off at 12σ, the front-left corner driven into the REAL east jamb while the
+    //   field above saw nothing): the returns themselves, self-filtered by the BODY (lidar_body_guard.h), not by the
+    //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
+    //   trust nothing the anchor says.
+    const auto returns = live_returns(control_pose, obstacle_tracker, path_controller);
     // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
     //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
-    const auto &body = approach_body_.polygon();
     const auto guard = rc::anchor_jamb_guard(pose, drive_width, cmd, holonomic, body, approach_body_.safety_margin(),
                                              anchor_brake_decel(path_controller), v_max, w_max, drive_leaves);
     if (guard.backoff != anchor_backoff_logged_)   // logged on the transitions only
@@ -3910,13 +3931,6 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         else
             std::println("[anchor] cross: clear of the jambs' margin again — the servo resumes");
     }
-    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    path_controller.refresh_lidar_field(control_pose.as_transform());
-    // ★ Task 14 (try74 leg 2: the anchor 0.2 m off at 12σ, the front-left corner driven into the REAL east jamb while the
-    //   field above saw nothing): the returns themselves, self-filtered by the BODY (lidar_body_guard.h), not by the
-    //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
-    //   trust nothing the anchor says.
-    const auto returns = live_returns(control_pose, obstacle_tracker, path_controller);
     // Fix round 1, item 4: once per cross, on its first cycle WITH A NON-EMPTY CLOUD (try76: the line logged before the first
     // LiDAR frame read all zeros and looked like a blind net).
     if (anchor_census_for_ != anchor_latched_for_ and returns.valid and returns.r.n_read > 0)

@@ -365,7 +365,12 @@ void adv_falls_as_sigma_lat_grows()
         last = c.adv;
     }
     CHECK(falling);
-    CHECK(last < 0.75f * cmd(anchor(-0.05f, 1.0f, 0.f, 0.01f), false).adv);   // σ_lat 0.20: P(fit) ≈ 0.70
+    // σ_lat 0.20: the advance is P(fit) of the sure one — read, on this differential base, at the offset PREDICTED where the
+    // body enters the opening (try101: anchor_p_fit_at_entry; 0.76 here, 0.70 at the current offset).
+    const float p20 = rc::anchor_p_fit_at_entry(kWidth, {}, kBody, 0.05f, 0.f, -1.0f, 0.f, kVmax, 0.20f);
+    std::println("  sigma_lat 0.20 m: P(fit) at entry {:.3f}, adv ratio {:.3f}", p20, last / cmd(anchor(-0.05f, 1.0f, 0.f, 0.01f), false).adv);
+    CHECK(p20 < 0.8f);
+    CHECK(std::abs(last / cmd(anchor(-0.05f, 1.0f, 0.f, 0.01f), false).adv - p20) < 0.02f);
 }
 // Task 9 fix round 2 (try68): a stale anchor 90° to the robot's LEFT (robot −x side) — the wait turns CCW toward it; one to
 // the right turns CW; one already ahead asks nothing; in the doorway the turn follows the normal.
