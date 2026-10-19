@@ -31,6 +31,7 @@
 
 #include "../src/door_belief.h"
 #include "../src/door_phi_posterior.h"
+#include "../src/door_opening_edges.h"   // try96: registration + the opening's span, as DoorFitter::estimate_phi
 #include "../src/door_passability.h"   // passable_prob — the SAME marginalisation the agent publishes
 
 using V2 = Eigen::Vector2f;
@@ -142,6 +143,7 @@ struct Tracker   // the carried belief, exactly as DoorInstance carries it
     bool  first = true;
     float p = 0.0f;
     float ninf = 0.0f, beta = 1.0f, lat = 0.0f;
+    rc::door::AlongWallState along;   // try96: the scan's registration offset, as DoorInstance::along_wall
 };
 
 // One cycle of the NEW channel: select → phi_field_loglik → posterior → rate limit → P(passable).
@@ -150,7 +152,9 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
 {
     auto nz  = rc::door::phi_field_nuisance(b.aperture());
     nz.lat_sigma = std::sqrt(std::max(1e-8f, b.covariance()(0, 0)));   // as DoorFitter::estimate_phi does
-    const auto sel = rc::door::select_doorway_rays(b.aperture(), o, pts, std::max(-nz.lat_lo, nz.lat_hi), 1.0f);
+    // try96: the sweep registered to the wall it sees, as DoorFitter::estimate_phi does.
+    const auto rs = rc::door::register_sweep(b.aperture(), o, pts);
+    const auto sel = rc::door::select_doorway_rays(b.aperture(), rs.origin, rs.pts, std::max(-nz.lat_lo, nz.lat_hi), 1.0f);
     const float dt = t.first ? std::numeric_limits<float>::infinity() : DT;
     t.first = false;
     const float sp = rc::door::phi_prior_sigma(t.phi_sigma, swing_rate, dt, PHI_STEP, PHI_MAX);
@@ -162,8 +166,8 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
     {
         auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
         t.ninf = fr.n_inf; t.beta = fr.beta; t.lat = fr.lat_map;
-        // Task 15: as DoorFitter::estimate_phi — the wall's slide evidence enters s (env NO_SLIDE_FUSE=1: the old model).
-        if (not std::getenv("NO_SLIDE_FUSE"))
+        // try96: the field's slide marginal is no longer fused into s (env OLD_SLIDE_FUSE=1: Task 15's model, as before).
+        if (std::getenv("OLD_SLIDE_FUSE"))
             if (const auto so = rc::door::slide_observation(fr.lat_loglik); so.var > 0.f)
             {
                 if (std::getenv("SLIDE_TRACE")) std::print("      slide obs mean {:+.3f} sd {:.3f} (belief s {:.3f} sd {:.3f})\n", so.mean, std::sqrt(so.var), b.state().s, std::sqrt(b.covariance()(0, 0)));
@@ -178,6 +182,22 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
         rc::door::adopt_map_swing(b, t.swing_llr);
     }
     const auto post = rc::door::phi_posterior_step(ll, PHI_MIN, PHI_MAX, NSTEP, prior, sp);
+    // try96: where along the wall — the opening's through-span with the persistent registration offset (σ0 = 0.02/m · range,
+    // the agent's DoorModel.AI2RangeNoiseLatPerM; no pose chain in the harness), as DoorFitter::estimate_phi does.
+    if (not std::getenv("OLD_SLIDE_FUSE"))
+    {
+        const auto ap = b.aperture();
+        const float range = (ap.centre_xy() - rs.origin.head<2>()).norm();
+        const auto runs = rc::door::measure_openings(ap, rs.origin, rs.pts);
+        const auto aw = rc::door::along_wall_update(b, t.along, runs, rs.reg,
+                                    rc::door::clear_fraction(post.curve), (0.02f * range) * (0.02f * range), range, DT);
+        if (std::getenv("AW_TRACE"))
+        {
+            std::print("      aw: reg {} eps {:+.3f} depth {:+.3f} n {} | runs {}", rs.reg.ok, rs.reg.eps, rs.reg.depth, rs.reg.n_inliers, runs.size());
+            for (const auto& r : runs) std::print(" [{:.2f},{:.2f}]", r.a_left, r.a_right);
+            std::print(" | z {:.3f} R {:.4f} nu {:+.3f} beta {:.2f} pd {:.2f} b {:+.3f} sd_b {:.3f} s {:.3f} sd_s {:.3f}\n", aw.z, aw.R, aw.nu, aw.beta, aw.p_detect, t.along.b, std::sqrt(t.along.Pb), b.state().s, std::sqrt(b.covariance()(0,0)));
+        }
+    }
     t.phi_sigma = post.sigma;
     t.phi_est   = std::clamp(post.mean, PHI_MIN, PHI_MAX);
     b.set_leaf_phi(t.phi_est);
@@ -458,7 +478,11 @@ int main()
             }
             fr.R.assign(fr.points.size(), 0.0029f);
             if (not std::getenv("OLD_MASK")) b.set_leaf_phi_sigma(t.phi_sigma);
-            b.update(fr);
+            // try96: as DoorFitter::run_inference — the mask observes s + b, the LiDAR's registration offset.
+            if (t.along.init and not std::getenv("OLD_SLIDE_FUSE"))
+                b.update_sharing_offset(fr, t.along.b, t.along.Pb, t.along.c);
+            else
+                b.update(fr);
             const V3 o(0.5f + 0.4f * std::sin(0.1f * f), 1.9f, 0.67f);
             step_new(t, b, o, scan(sc, o, rng, 0.5f), 0.3f);   // the decayed leaf angle, held (as live: a flat tempered likelihood)
             s_max_dev = std::max(s_max_dev, std::abs(b.state().s - 2.0f));

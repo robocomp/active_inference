@@ -212,6 +212,82 @@ public:
         const Eigen::Matrix<float, 3, 3> Sn = Sigma_ - K * Sigma_.row(0);
         Sigma_ = 0.5f * (Sn + Sn.transpose());
     }
+    // try96 (door_opening_edges.h): the LiDAR's along-wall measurement observes s PLUS the scan's registration offset b,
+    // a state the caller carries (mean `bias`, variance `Pb`, cross-covariance `c` with [s, w, h]). A probabilistic-data-
+    // association update of the augmented [s, w, h, b] with H = [1 0 0 1], innovation `nu`, measurement variance `R` and
+    // association weight `beta` ∈ [0, 1] (the PDA covariance: shrunk by β·KSKᵀ, re-grown by β(1−β)·Kν²Kᵀ). Writes Σ,
+    // the state, and the caller's bias / Pb / c back.
+    void  fuse_along_wall(float nu, float R, float beta, float& bias, float& Pb, Eigen::Vector3f& c)
+    {
+        if (not std::isfinite(nu) or not std::isfinite(R) or not (beta > 0.f)) return;
+        Eigen::Matrix4f A = Eigen::Matrix4f::Zero();
+        A.topLeftCorner<3, 3>() = Sigma_;
+        A.block<3, 1>(0, 3) = c;
+        A.block<1, 3>(3, 0) = c.transpose();
+        A(3, 3) = Pb;
+        const Eigen::Vector4f H(1.f, 0.f, 0.f, 1.f);
+        const float S = H.dot(A * H) + std::max(0.f, R);
+        if (not (S > 0.f)) return;
+        const Eigen::Vector4f K = A * H / S;
+        const float bw = std::min(1.f, beta);
+        state_.s += bw * K(0) * nu; state_.w += bw * K(1) * nu; state_.h += bw * K(2) * nu;
+        bias += bw * K(3) * nu;
+        Eigen::Matrix4f An = A - bw * S * (K * K.transpose()) + bw * (1.f - bw) * nu * nu * (K * K.transpose());
+        An = 0.5f * (An + An.transpose());
+        Sigma_ = An.topLeftCorner<3, 3>();
+        c = An.block<3, 1>(0, 3);
+        Pb = std::max(0.f, An(3, 3));
+    }
+
+    // ★try96: THE MASK SEES THE SAME REGISTRATION OFFSET. Camera and LiDAR are registered to the room by ONE pose, so a mask
+    // frame observes s + b exactly as the LiDAR's opening does (door_opening_edges.h). This runs the engine's update (the
+    // GN-Laplace mask fit, unchanged) and then re-expresses what it learned — its information J = Σ₁⁻¹ − Σ₀⁻¹ and the
+    // matching information vector — as a measurement of [s + b, w, h] on the augmented [s, w, h, b], so b, its variance Pb
+    // and its cross-covariance c with [s, w, h] are updated with it. Without this a persistent mask-vs-LiDAR conflict (a
+    // wrong leaf model, which is not a pose error) would be absorbed into b and the LiDAR would lose every argument to the
+    // mask (test_door_phi_stability (g)). The caller removes the pose chain from the frame's common mode: b carries it.
+    float update_sharing_offset(const DoorFrame& frame, float& bias, float& Pb, Eigen::Vector3f& c)
+    {
+        const Eigen::Matrix<float, 3, 1> x0 = state_.vec();
+        Eigen::Matrix<float, 3, 3> Sp = Sigma_;
+        if (Sp.isZero()) Sp.diagonal() = prior_cov_diag();
+        Sp.diagonal() += process_noise_diag();                 // the engine's own predict step (F = I)
+        const float e = update(frame);
+        if (not (Pb > 1e-10f)) return e;                       // no offset to share: the engine's result stands
+        const Eigen::Matrix<float, 3, 3> L1 = Sigma_.inverse(), L0 = Sp.inverse();
+        Eigen::Matrix<float, 3, 3> J = L1 - L0;
+        J = 0.5f * (J + J.transpose());
+        const Eigen::Matrix<float, 3, 1> g = L1 * state_.vec() - L0 * x0;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float lim = 0.99f * std::sqrt(std::max(0.f, Sp(i, i) * Pb));
+            c(i) = std::clamp(c(i), -lim, lim);
+        }
+        Eigen::Matrix4f A = Eigen::Matrix4f::Zero();
+        A.topLeftCorner<3, 3>() = Sp;
+        A.block<3, 1>(0, 3) = c;
+        A.block<1, 3>(3, 0) = c.transpose();
+        A(3, 3) = Pb;
+        Eigen::Matrix<float, 3, 4> H = Eigen::Matrix<float, 3, 4>::Zero();
+        H(0, 0) = 1.f; H(0, 3) = 1.f; H(1, 1) = 1.f; H(2, 2) = 1.f;
+        const Eigen::Matrix4f Lam = A.inverse();
+        Eigen::Vector4f xa; xa << x0, bias;
+        const Eigen::Matrix4f Lam1 = Lam + H.transpose() * J * H;
+        const Eigen::Vector4f eta1 = Lam * xa + H.transpose() * g;
+        Eigen::Matrix4f A1 = Lam1.inverse();
+        if (not A1.allFinite()) return e;
+        A1 = 0.5f * (A1 + A1.transpose());
+        const Eigen::Vector4f x1 = A1 * eta1;
+        if (not x1.allFinite()) return e;
+        DoorBeliefState st = DoorBeliefState::from_vec(x1.head<3>());
+        apply_constraints(st);
+        state_ = st;
+        Sigma_ = A1.topLeftCorner<3, 3>();
+        c = A1.block<3, 1>(0, 3);
+        Pb = std::max(0.f, A1(3, 3));
+        bias = x1(3);
+        return e;
+    }
 
     // ── THE HINGE BRANCH: free energy as a function of the leaf angle alone ──────────────────────
     // ★THIS IS THE SAME MINIMISATION THE AGENT ALREADY DOES, RESTRICTED TO ONE COORDINATE. Nothing new

@@ -5,6 +5,7 @@
 #include "door_fitter.h"
 #include "door_standpoint.h"
 #include "door_phi_posterior.h"   // the phi channel as pure functions (tested offline)
+#include "door_opening_edges.h"   // try96: wall registration, the opening's through-span, the registration offset
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -653,6 +654,12 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         const Eigen::Vector2f u = inst.ai2_belief.params().wall_u;
         const float chain_s = u.x() * u.x() * inst.chain_cov_xx + u.y() * u.y() * inst.chain_cov_yy;   // proj onto u
         frame.chain_cov_s = chain_s + range_lat_var + mot_pos_var;
+        // try96: the mask is displaced by the same registration offset b as the LiDAR (one pose registers both): the pose
+        // chain + range term is b's (door_opening_edges.h), so the frame keeps only its own motion smear, and the fit is
+        // re-expressed as a measurement of s + b (DoorBelief::update_sharing_offset).
+        const bool share_offset = inst.along_wall.init;
+        if (share_offset)
+            frame.chain_cov_s = mot_pos_var;
         // ★NO FREEZE SWITCH HERE. What used to gate this update is now stated in the generative model
         // instead: the aperture's along-wall process noise is ZERO (door_belief.h process_std_s), so its
         // precision grows with evidence and its mean stops being dragged by a swinging leaf without any
@@ -663,7 +670,10 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         // from the other — so a wrong hinge cannot slide the aperture a width to make its leaf fit (try75 leg 1).
         inst.ai2_belief.set_hinge_prob(1.0f / (1.0f + std::exp(-inst.hinge_llr)));
         inst.ai2_belief.set_leaf_phi_sigma(inst.phi_sigma);   // …and under the leaf ANGLE's own uncertainty
-        inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
+        if (share_offset)
+            inst.ai2_belief.update_sharing_offset(frame, inst.along_wall.b, inst.along_wall.Pb, inst.along_wall.c);
+        else
+            inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
         // NOTE: refine_extent (coverage/extent likelihood) DISABLED — coverage without a free-space
         // counter-force is positive feedback: it inflated the footprint to cover contamination/neighbours
         // (seat → 2–5.8 m) and spawned phantom instances. Kept in the belief for reference; see Fable review.
@@ -774,8 +784,12 @@ void DoorFitter::log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& 
         p = (dot == std::string::npos) ? p + "_phi" : p.substr(0, dot) + "_phi" + p.substr(dot);
         rc::diag::open_rotating(phi_trace_csv_, p);
         if (not phi_trace_csv_.is_open()) return;
+        // ★try96: s per cycle (it was logged only on the rare mask frames, so the slide had no trace) and the along-wall
+        //   channel. loglik stays the LAST column (a ;-separated list), so the new ones go in front of it, by name.
         phi_trace_csv_ << "t_ms,node,ox,oy,nrays,off_plane,ninf,beta,lat,prior_mean,prior_sigma,post_mean,post_sigma,measured,"
-                       << "hit0,expl0,signed0,loglik\n";
+                       << "hit0,expl0,signed0,"
+                       << "s,sd_s,reg_ok,reg_eps,reg_depth,reg_n,aw_runs,aw_z,aw_R,aw_nu,aw_beta,aw_pd,aw_b,aw_sd_b,"
+                       << "loglik\n";
     }
     const auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch()).count();
@@ -783,7 +797,13 @@ void DoorFitter::log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& 
                    << rays.endpoints.size() << ',' << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_ninf << ','
                    << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << ',' << prior_mean << ',' << prior_sigma << ','
                    << post_mean << ',' << post_sigma << ',' << (measured ? 1 : 0) << ','
-                   << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ',' << inst.dbg_ray_signed0 << ',';
+                   << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ',' << inst.dbg_ray_signed0 << ','
+                   << inst.ai2_belief.state().s << ',' << std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))) << ','
+                   << (inst.dbg_reg.ok ? 1 : 0) << ',' << inst.dbg_reg.eps << ',' << inst.dbg_reg.depth << ','
+                   << inst.dbg_reg.n_inliers << ',' << inst.dbg_along.n_runs << ',' << inst.dbg_along.z << ','
+                   << inst.dbg_along.R << ',' << inst.dbg_along.nu << ',' << inst.dbg_along.beta << ','
+                   << inst.dbg_along.p_detect << ',' << inst.along_wall.b << ','
+                   << std::sqrt(std::max(0.0f, inst.along_wall.Pb)) << ',';
     for (std::size_t k = 0; k < loglik.size(); ++k)
         phi_trace_csv_ << (k ? ";" : "") << loglik[k].second;
     phi_trace_csv_ << '\n';
@@ -997,11 +1017,22 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     if (inst.ai2_initialized)
         nz.lat_sigma = std::sqrt(std::max(1e-8f, inst.ai2_belief.covariance()(0, 0)));   // 0 = known, never "uniform"
     rc::ai::LidarRays rays;
+    // ★try96: THE SWEEP IS REGISTERED TO THE WALL IT SEES before any doorway likelihood (door_opening_edges.h). A heading /
+    //   across-wall error of the room's pose misregisters the cloud in the room frame (try96: 14-20°, 0.3-0.45 m for ~30 s ⇒
+    //   the hole appeared 1.4 m along the wall); the rotation and the across offset are measured from the wall's own
+    //   returns beside the opening and undone about the sensor. Unregistrable (few wall returns) ⇒ the sweep as given.
+    rc::door::RegisteredSweep reg_sweep;
+    inst.dbg_reg = {};
+    if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
+    {
+        reg_sweep = rc::door::register_sweep(inst.ai2_belief.aperture(), leaf_origin_, *leaf_pts_);
+        inst.dbg_reg = reg_sweep.reg;
+    }
     if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
     {
         // ★SELECT BY THE PATH, NOT BY THE ENDPOINT — a slab through the aperture plus the jamb band; see
         // rc::door::select_doorway_rays (the selection used to live here, unchanged but for the slide).
-        auto sel = rc::door::select_doorway_rays(inst.aperture, leaf_origin_, *leaf_pts_,
+        auto sel = rc::door::select_doorway_rays(inst.aperture, reg_sweep.origin, reg_sweep.pts,
                                                  std::max(std::abs(nz.lat_lo), std::abs(nz.lat_hi)),
                                                  cfg_.lidar_bpearl_precision);
         rays = std::move(sel.rays);
@@ -1047,10 +1078,13 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         inst.dbg_phi_ninf  = fr.n_inf;
         inst.dbg_phi_beta  = fr.beta;
         inst.dbg_phi_lat   = fr.lat_map;
-        // Task 15: where the WALL puts the hole — the field's slide marginal, the leaf marginalised — fused into s
-        // (rc::door::slide_observation): a wrong leaf can no longer slide the aperture a width onto solid wall.
-        if (const auto so = rc::door::slide_observation(fr.lat_loglik); so.var > 0.f)
-            inst.ai2_belief.fuse_slide(so.mean, so.var);
+        // ★try96: the field's slide marginal is NO LONGER fused into s. Task 15 fused it every cycle as an independent
+        //   measurement in the room frame; under a 30-s localisation error the frames of that stretch, sharing ONE pose
+        //   error, were counted as hundreds of observations and dragged the aperture 1.1 m along its wall (and, past
+        //   ±w/2, out of reach of the true hole for ever). It also integrates every leaf hypothesis uniformly — the
+        //   other-hinge / other-swing mirrors that "fit at many offsets". s now takes its LiDAR evidence from the opening's
+        //   through-span with a persistent registration offset (below, after the leaf posterior). fr.lat_loglik stays a
+        //   nuisance of the φ curve only.
         ll_this  = std::move(fr.loglik);
         ll_other = std::move(fr.loglik_other);
         ll_swing = std::move(fr.loglik_swing);
@@ -1168,6 +1202,27 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     else
         inst.phi_sigma = PHI_MAX - PHI_MIN;   // not even a prior: HOLD the estimate, width = the whole range
     inst.phi_measured = post.measured;
+
+    // ─── WHERE ALONG THE WALL: the opening's edges, with the registration offset the frames share (try96) ────────────
+    // rc::door::along_wall_update (door_opening_edges.h): the through-span of the REGISTERED sweep is a measurement of
+    // s (the aperture contains it), associated against clutter with P(the door shows a span) = E[1 − cos φ] under the
+    // posterior just formed, and fused with the scan's along-wall registration offset b as a persistent state.
+    // σ0² = the pose chain's along-wall variance + the static range term — the common mode the mask frames carry.
+    inst.dbg_along = {};
+    if (inst.ai2_initialized and leaf_pts_ and not leaf_pts_->empty())
+    {
+        const auto ap = inst.ai2_belief.aperture();
+        const auto runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts);
+        const Eigen::Vector2f u = ap.wall_u;
+        const float chain_s = u.x() * u.x() * inst.chain_cov_xx + u.y() * u.y() * inst.chain_cov_yy;
+        const float range = (ap.centre_xy() - reg_sweep.origin.head<2>()).norm();
+        const float rl = cfg_.ai2_range_noise_lat_per_m * range;
+        const float dt_aw = inst.along_wall_t.time_since_epoch().count() == 0
+                          ? 0.0f : std::chrono::duration<float>(now - inst.along_wall_t).count();
+        inst.along_wall_t = now;
+        inst.dbg_along = rc::door::along_wall_update(inst.ai2_belief, inst.along_wall, runs, reg_sweep.reg,
+                                                     rc::door::clear_fraction(post.curve), chain_s + rl * rl, range, dt_aw);
+    }
     log_phi_csv(inst, rays, loglik, phi_prior, sigma_phi, post.mean, post.sigma, post.measured);
     // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".
     inst.phi_support = -1.0f;

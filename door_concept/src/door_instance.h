@@ -22,6 +22,7 @@
 
 #include "door_model.h"        // DoorModel / DoorState
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
+#include "door_opening_edges.h" // rc::door::AlongWallState — the scan's registration offset (try96)
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/pragmatic_affordance/pragmatic_affordance.h" // rc::pragmatic (SHARED) — approach/open/cross
 #include "door_pragmatics.h"   // rc::door::InteractionState — the three preconditions
@@ -111,6 +112,13 @@ struct DoorInstance
     float dbg_phi_beta = 1.0f;
     float dbg_phi_lat  = 0.0f;
     bool  phi_measured = false;     // did any channel contribute a likelihood this cycle?
+    // try96 (door_opening_edges.h): the LiDAR's along-wall evidence for s — the scan registered to the wall, the opening's
+    // through-span, and the registration offset b that frames of one stretch SHARE (carried here, with its clock). The
+    // dbg_* are this cycle's, for the phi trace.
+    door::AlongWallState along_wall;
+    std::chrono::steady_clock::time_point along_wall_t{};
+    door::WallRegistration dbg_reg;
+    door::AlongWallResult  dbg_along;
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
     float hinge_llr    = 0.0f;
