@@ -93,6 +93,22 @@ RobotFootprint load_robot_body(DSR::DSRGraph &graph,
     return *body;
 }
 
+std::optional<RobotFootprint> load_robot_mesh_outline(DSR::DSRGraph &graph, std::uint64_t robot_id, float mesh_yaw_deg,
+                                                      std::string &why, std::string &path_out)
+{
+    const auto node = graph.get_node(robot_id);
+    if (not node.has_value()) { why = "robot node not in the graph"; return std::nullopt; }
+    const auto attr = graph.get_attrib_by_name<path_att>(node.value());
+    if (not attr.has_value()) { why = "robot node has no 'path' attribute"; return std::nullopt; }
+    const auto resolved = resolve_robot_mesh_path(attr.value().get());
+    if (not resolved.has_value()) { why = "cannot find '" + attr.value().get() + "'"; return std::nullopt; }
+    path_out = resolved->string();
+    RobotFootprint::MeshReport rep;
+    auto fp = RobotFootprint::from_obj(path_out, mesh_yaw_deg * static_cast<float>(M_PI) / 180.f, rep);
+    if (not fp.has_value()) why = rep.reason;
+    return fp;
+}
+
 void log_robot_body_report(const RobotBodyReport &report, const RobotFootprint &active)
 {
     const RobotFootprint reference = RobotFootprint::shadow();

@@ -383,6 +383,54 @@ int main()
         CHECK(w1_ccw > 0.f or w1_cw > 0.f);       // and the turn toward the target behind is allowed one way
     }
 
+    // 12. Fix round 5 (try78/79/80): the hull misses the robot's own FRONT. The self footprint from the REAL mesh
+    //     (robot_concept/meshes/shadow.obj, read as the controller reads it) ∪ the planning hull, ⊕ σ_r on the mesh.
+    {
+        rc::RobotFootprint::MeshReport rep;
+        const auto mesh = rc::RobotFootprint::from_obj("../robot_concept/meshes/shadow.obj", 0.f, rep);
+        CHECK(mesh.has_value());
+        if (mesh.has_value())
+        {
+            const auto ret_body = rc::lidar_returns_body(body, mesh->polygon());
+            const auto self_fp = rc::lidar_self_footprint(body, mesh->polygon(), kSigma);
+            const auto front = [](const std::vector<Eigen::Vector2f>& p) { float y = -1.f; for (const auto& v : p) y = std::max(y, v.y()); return y; };
+            const auto side = [](const std::vector<Eigen::Vector2f>& p) { float x = 0.f; for (const auto& v : p) x = std::max(x, std::abs(v.x())); return x; };
+            std::println("  footprints: hull front {:.4f} |x| {:.4f}; mesh front {:.4f} |x| {:.4f}; returns body front {:.4f} |x| {:.4f}; "
+                         "self front {:.4f} |x| {:.4f}", front(body), side(body), front(mesh->polygon()), side(mesh->polygon()),
+                         front(ret_body), side(ret_body), front(self_fp), side(self_fp));
+            CHECK(front(mesh->polygon()) > front(body) + 0.015f);   // the hull is short at the front
+            CHECK(side(self_fp) < side(body) + 0.005f);             // the self footprint does not eat the sides
+            // The two front-centre returns logged in try78/try80 are SELF now. The try79 one at the front-RIGHT corner
+            // (+0.252, +0.236) is NOT: it is 1.1 cm outside even the mesh ⊕ σ_r and ~6 cm outside the STL the simulator
+            // renders — unexplained, and deliberately not absorbed by widening anything (see the fix report).
+            for (const Eigen::Vector2f& q : {Eigen::Vector2f(0.007f, 0.260f), Eigen::Vector2f(0.123f, 0.258f)})
+                CHECK(rc::anchor_point_in_convex(self_fp, q));
+            CHECK(not rc::anchor_point_in_convex(self_fp, Eigen::Vector2f(0.252f, 0.236f)));
+            // Returns at y +0.26 across the front width, in open space: self ⇒ forward free.
+            std::vector<Eigen::Vector2f> front_pts;
+            for (float x = -0.20f; x <= 0.2001f; x += 0.02f) front_pts.emplace_back(x, 0.26f);
+            const auto r = rc::lidar_guard_returns(front_pts, ret_body, kSigma, 0.6f, self_fp);
+            const float v = rc::lidar_return_speed_limit(r.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax);
+            std::println("  front returns at y +0.26: {} self, {} kept; forward {:.3f}", r.n_self, r.obstacles.size(), v);
+            CHECK(r.n_self == int(front_pts.size()) and r.obstacles.empty() and v == kVmax);
+            // The old footprint (hull only) would have kept them and stopped the robot.
+            const auto r_old = rc::lidar_guard_returns(front_pts, body, kSigma, 0.6f);
+            CHECK(rc::lidar_return_speed_limit(r_old.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
+            // A real obstacle at y +0.32 still blocks.
+            const std::vector<Eigen::Vector2f> real_pts{Eigen::Vector2f(0.0f, 0.32f), Eigen::Vector2f(0.1f, 0.32f)};
+            const auto rb = rc::lidar_guard_returns(real_pts, ret_body, kSigma, 0.6f, self_fp);
+            const float vb = rc::lidar_return_speed_limit(rb.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax);
+            std::println("  real obstacle at y +0.32: kept {}, forward {:.3f} (stopping law on a 7.3 cm gap)", rb.obstacles.size(), vb);
+            CHECK(rb.obstacles.size() == 2 and vb < 0.5f * kVmax);   // capped by the stopping law on its 7 cm gap
+            // Closer, inside the standoff but still outside the self footprint (y +0.29): stops.
+            const std::vector<Eigen::Vector2f> near_pts{Eigen::Vector2f(0.0f, 0.29f)};
+            const auto rn = rc::lidar_guard_returns(near_pts, ret_body, kSigma, 0.6f, self_fp);
+            CHECK(rn.obstacles.size() == 1 and rc::lidar_return_speed_limit(rn.obstacles, kFwd, ret_body, kMargin, kAdec, kVmax) == 0.f);
+            // The contact standoff (margin from the RETURNS body) brakes before the self footprint's front.
+            CHECK(front(ret_body) + kMargin > front(self_fp));
+        }
+    }
+
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

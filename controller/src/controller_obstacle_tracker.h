@@ -25,6 +25,9 @@ class ControllerObstacleTracker
         // The robot's real silhouette, from the session (controller_robot_body.h). Governs the per-bearing
         // self-filter, the "genuinely ahead of the body" test, and the obstacle-overlaps-the-body reject.
         void set_body(rc::RobotFootprint body) { body_ = std::move(body); }
+        // Task 14 fix round 5: the SELF footprint the capture-time self filter drops returns inside (lidar_body_guard.h:
+        // hull ∪ mesh ⊕ σ_r). Empty ⇒ the body's polygon.
+        void set_self_body(std::vector<Eigen::Vector2f> poly) { self_body_ = std::move(poly); }
         void set_dependencies(std::shared_ptr<DSR::DSRGraph> graph,
                             DSR::InnerEigenAPI *inner_eigen_api,
                             const ControllerGraphState *graph_state);
@@ -331,6 +334,7 @@ class ControllerObstacleTracker
         // function-local `static const … = shadow()` at the self-filter, i.e. one robot's shape frozen for
         // the life of the process — see the note at that call site.
         rc::RobotFootprint body_ = rc::RobotFootprint::shadow();
+        std::vector<Eigen::Vector2f> self_body_;
 
         // Arrival instants of ACCEPTED scans (wall clock, ms) — see lidar_processed_hz().
         std::deque<std::uint64_t> lidar_accept_wall_ms_;

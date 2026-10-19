@@ -14,11 +14,12 @@ namespace rc
 [[nodiscard]] inline std::optional<LidarGuardReturns> lidar_guard_returns_from_buffer(LidarPointBuffer& buffer,
                                                                                       const Eigen::Affine2f& room_T_robot,
                                                                                       std::span<const Eigen::Vector2f> body,
-                                                                                      float sigma_r, float reach)
+                                                                                      float sigma_r, float reach,
+                                                                                      std::span<const Eigen::Vector2f> self_body = {})
 {
     const auto [cloud_opt] = buffer.read_last();
     if (not cloud_opt.has_value()) return std::nullopt;
     const auto& [xs, ys, zs] = cloud_opt.value();
-    return lidar_guard_returns_room(xs, ys, room_T_robot, body, sigma_r, reach);
+    return lidar_guard_returns_room(xs, ys, room_T_robot, body, sigma_r, reach, self_body);
 }
 }  // namespace rc

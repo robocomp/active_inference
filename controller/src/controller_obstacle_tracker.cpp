@@ -2243,7 +2243,8 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
         proc_ts,
         [plane_coeffs = std::move(plane_coeffs), plane_sel = std::move(proc_plane_ids),
          robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h,
-         body_poly = body_.polygon(), body_r = body_.circumscribed_radius(),
+         body_poly = self_body_.empty() ? body_.polygon() : self_body_,
+         body_r = [&] { float r = 0.f; for (const auto &v : (self_body_.empty() ? body_.polygon() : self_body_)) r = std::max(r, v.norm()); return r; }(),
          self_dropped = &capture_self_dropped_](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
             int n_self = 0;

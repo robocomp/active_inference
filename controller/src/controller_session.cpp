@@ -221,6 +221,33 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         grid_planner_.set_footprint(approach_body_);
         path_controller.set_footprint(approach_body_);
         obstacle_tracker.set_body(approach_body_);
+        // ── Task 14 fix round 5: THE RETURNS NET'S OWN BODY. The planner keeps the compiled hull (above); the LiDAR sees
+        //    the robot's real front cover, which the mesh reaches and the hull does not (try78/79/80: self returns at
+        //    y ≈ +0.26 across the front, 3 cm outside the hull, closed every forward motion). See lidar_body_guard.h.
+        {
+            std::string why, mesh_path;
+            const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+            const auto mesh = rc::load_robot_mesh_outline(*world_model.graph(), world_model.graph_state().robot_id,
+                                                          params_ ? params_->robot_mesh_yaw_deg : 0.f, why, mesh_path);
+            const auto &hull = approach_body_.polygon();
+            const std::vector<Eigen::Vector2f> no_mesh;
+            const auto &m = mesh.has_value() ? mesh->polygon() : no_mesh;
+            returns_body_ = rc::lidar_returns_body(hull, m);
+            self_body_ = rc::lidar_self_footprint(hull, m, sigma);
+            obstacle_tracker.set_self_body(self_body_);
+            const auto front = [](const std::vector<Eigen::Vector2f> &p)
+            { float y = -1.f; for (const auto &v : p) y = std::max(y, v.y()); return y; };
+            const auto side = [](const std::vector<Eigen::Vector2f> &p)
+            { float x = 0.f; for (const auto &v : p) x = std::max(x, std::abs(v.x())); return x; };
+            if (mesh.has_value())
+                std::println("[returns] body: planning hull front y {:.4f} |x| {:.4f}; mesh '{}' front y {:.4f} |x| {:.4f}; RETURNS body "
+                             "front {:.4f} |x| {:.4f}; SELF footprint (mesh ⊕ sigma_r {:.3f}) front {:.4f} |x| {:.4f}",
+                             front(hull), side(hull), mesh_path, front(m), side(m), front(returns_body_), side(returns_body_),
+                             sigma, front(self_body_), side(self_body_));
+            else
+                std::println("[returns] body: NO MESH OUTLINE ({}) — the returns net uses the planning hull alone (front y {:.4f}); "
+                             "a body part beyond it will read as contact", why, front(hull));
+        }
 
         // ── ...AND WHAT THAT BODY CAN DO ────────────────────────────────────────────────────────
         // Same one-shot, same node, same reason to wait for it: the shape and the capability are two
@@ -3191,11 +3218,11 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     if (lidar == nullptr) return lr;
     // Reach: the grown body plus the braking distance from v_max — beyond it no return can cap anything this cycle.
     float body_reach = 0.f;
-    for (const auto &v : rc::anchor_grown_body(approach_body_.polygon(), lr.margin)) body_reach = std::max(body_reach, v.norm());
+    for (const auto &v : rc::anchor_grown_body(returns_body(), lr.margin)) body_reach = std::max(body_reach, v.norm());
     lr.reach = body_reach + lr.v_max * lr.v_max / (2.f * lr.a_dec);
     // The room-frame cloud streamed onto the robot frame of `pose` (rc::lidar_guard_returns_from_buffer — the accessor the
     // test drives too).
-    auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), approach_body_.polygon(), lr.sigma, lr.reach);
+    auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body(), lr.sigma, lr.reach, self_body_);
     if (not r.has_value()) return lr;
     lr.r = std::move(*r);
     lr.capture_self = obstacle_tracker.capture_self_dropped();
@@ -3206,13 +3233,13 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
 rc::LidarCapResult ControllerSession::cap_by_returns(const LiveReturns &lr, float &adv, float &side, float &rot) const
 {
     if (not lr.valid) return rc::LidarCapResult{.v_lim = lr.v_max, .w_lim = lr.w_max};
-    return rc::lidar_cap_command(lr.r.obstacles, approach_body_.polygon(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
+    return rc::lidar_cap_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
                                  adv, side, rot);
 }
 
 bool ControllerSession::hemmed_in_by_returns(const LiveReturns &lr) const
 {
-    return lr.valid and rc::lidar_band_penetration(lr.r.obstacles, approach_body_.polygon(), lr.margin + lr.sigma,
+    return lr.valid and rc::lidar_band_penetration(lr.r.obstacles, returns_body(), lr.margin + lr.sigma,
                                                    0.f, 0.f, 0.f) > 0.f;
 }
 
@@ -3223,7 +3250,7 @@ bool ControllerSession::step_returns_backoff(const ControllerRobotPose &robot_po
     const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
     const auto lr = live_returns(pose, obstacle_tracker, path_controller);
     const bool holonomic = base_capability_.holonomic.value_or(false);
-    const auto b = lr.valid ? rc::lidar_return_backoff(lr.r.obstacles, approach_body_.polygon(), lr.margin, lr.sigma, lr.a_dec,
+    const auto b = lr.valid ? rc::lidar_return_backoff(lr.r.obstacles, returns_body(), lr.margin, lr.sigma, lr.a_dec,
                                                        lr.v_max, lr.w_max, holonomic)
                             : std::nullopt;
     if (not returns_backoff_active_)
@@ -3262,7 +3289,7 @@ bool ControllerSession::step_returns_backoff(const ControllerRobotPose &robot_po
 void ControllerSession::log_returns_census(const char *when, const LiveReturns &lr) const
 {
     if (not lr.valid) { std::println("[returns] {}: no LiDAR cloud yet", when); return; }
-    const auto c = rc::lidar_guard_census(lr.r, approach_body_.polygon(), lr.margin, lr.a_dec, lr.v_max, lr.w_max);
+    const auto c = rc::lidar_guard_census(lr.r, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max);
     // try76: the first census printed "0 / 0 / 0, nearest -1" both parked and at the cross's first cycle — read as a blind
     // net, while the same run's binding lines showed 3–4 returns near the body. The near field (reach) was simply empty
     // there, and the line did not say so. Every stage is counted now, and the nearest return at ANY range is given.
@@ -3567,7 +3594,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             std::println("[returns] cross on {}: FIRST return in the contact band — body frame ({:+.3f}, {:+.3f}) m, bearing {:+.0f} deg "
                          "(0 fwd, + right), {:.3f} m outside the hull; base v {:.3f} m/s, w {:+.3f} rad/s; {} dropped as the robot "
                          "at capture", a.name, q.x(), q.y(), std::atan2(q.x(), q.y()) * 57.29578f,
-                         rc::anchor_signed_distance(body, q), base_speed_lin_, base_speed_ang_, returns.capture_self);
+                         rc::anchor_signed_distance(returns_body(), q), base_speed_lin_, base_speed_ang_, returns.capture_self);
     }
     const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
     if (const bool binding = cap.bound_lin and cap.v_lim < v_field; binding != anchor_returns_binding_logged_)
@@ -3585,7 +3612,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //   fix C), already through their caps.
     bool returns_backoff = false;
     if (had_motion and adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f)
-        if (const auto b = rc::lidar_return_backoff(returns.r.obstacles, body, returns.margin, returns.sigma, returns.a_dec,
+        if (const auto b = rc::lidar_return_backoff(returns.r.obstacles, returns_body(), returns.margin, returns.sigma, returns.a_dec,
                                                     v_max, w_max, holonomic);
             b.has_value())
         {

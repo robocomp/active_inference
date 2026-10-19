@@ -915,6 +915,12 @@ private:
     // a fresh RobotFootprint::shadow() temporary at eleven call sites, which is why a per-robot shape could
     // not be delivered at all: a static factory has nowhere to put "which robot".
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
+    // Task 14 fix round 5: the returns net's two footprints (lidar_body_guard.h): the RETURNS body (planning hull ∪ the
+    // mesh outline — what a return can hit) and the SELF footprint (hull ∪ mesh ⊕ σ_r — what the LiDAR sees of the robot).
+    // Empty until the body loads ⇒ the planning hull.
+    std::vector<Eigen::Vector2f> returns_body_, self_body_;
+    [[nodiscard]] const std::vector<Eigen::Vector2f> &returns_body() const
+    { return returns_body_.empty() ? approach_body_.polygon() : returns_body_; }
     bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
     bool returns_hold_in_window_ = false;   // Task 14 fix 1: the live returns held the command in the open judge window
     bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)

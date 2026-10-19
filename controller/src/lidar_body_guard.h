@@ -49,10 +49,12 @@
  */
 
 #include "controller_anchor_servo.h"
+#include "../../common/robot_footprint/mesh_hull.h"
 
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -80,6 +82,47 @@ namespace rc
 {
     if (body.size() < 3 or q_robot.squaredNorm() > r_circ * r_circ) return false;
     return anchor_point_in_convex(body, q_robot);
+}
+
+// ★ Fix round 5 (try78/79/80: the first contact-band return of every cross sat on the robot's own FRONT — body frame
+//   (+0.007, +0.260), (+0.252, +0.236), (+0.123, +0.258), ~3 cm outside the hull, in open space — and in try80 they
+//   closed every forward motion from s −1.92 m). The compiled hull is the BODY STL ∪ the wheels, front y = 0.2300; the
+//   display mesh robot_concept/meshes/shadow.obj reaches y = 0.2472 across the front (1.7 cm further), and the bpearl
+//   (downward dome at y +0.14) sees that front cover. Two footprints, each for its own question:
+//   • THE RETURNS BODY (what a return can hit): conv(planning hull ∪ mesh outline) — the true extent of the body.
+//   • THE SELF FOOTPRINT (what the LiDAR can see of the robot): conv(planning hull ∪ (mesh outline ⊕ σ_r)) — the body's
+//     visible surface, measured with the sensor's own range noise. A return inside it is the robot, at capture.
+//   ⚑ The ⊕σ_r is a decision level, flagged: it is the noise of a measurement OF the body surface, not of a contact. It
+//   reaches beyond the returns body only where the mesh surface is (front +3 cm → y 0.277; at the sides the mesh ⊕ σ_r
+//   is 0.272 ≈ the hull's 0.2716), and the contact law's standoff (margin 0.05 from the RETURNS body → y 0.297) brakes
+//   2 cm before a real obstacle could enter it.
+[[nodiscard]] inline std::vector<Eigen::Vector2f> lidar_minkowski_disc(std::span<const Eigen::Vector2f> poly, float r)
+{
+    // poly ⊕ disc(r), by 16 samples per vertex (circumradius r/cos(π/16) so the sampled disc CONTAINS the true one).
+    std::vector<Eigen::Vector2f> pts;
+    const float rr = r / std::cos(std::numbers::pi_v<float> / 16.f);
+    for (const auto& v : poly)
+        for (int k = 0; k < 16; ++k)
+        {
+            const float a = float(k) * std::numbers::pi_v<float> / 8.f;
+            pts.push_back(v + rr * Eigen::Vector2f(std::cos(a), std::sin(a)));
+        }
+    return rc::mesh::convex_hull_2d(std::move(pts));
+}
+[[nodiscard]] inline std::vector<Eigen::Vector2f> lidar_returns_body(std::span<const Eigen::Vector2f> hull,
+                                                                     std::span<const Eigen::Vector2f> mesh)
+{
+    std::vector<Eigen::Vector2f> pts(hull.begin(), hull.end());
+    pts.insert(pts.end(), mesh.begin(), mesh.end());
+    return rc::mesh::convex_hull_2d(std::move(pts));
+}
+[[nodiscard]] inline std::vector<Eigen::Vector2f> lidar_self_footprint(std::span<const Eigen::Vector2f> hull,
+                                                                       std::span<const Eigen::Vector2f> mesh, float sigma_r)
+{
+    std::vector<Eigen::Vector2f> pts(hull.begin(), hull.end());
+    if (not mesh.empty())
+        for (const auto& v : lidar_minkowski_disc(mesh, sigma_r)) pts.push_back(v);
+    return rc::mesh::convex_hull_2d(std::move(pts));
 }
 
 // The OLD controller self-filter (TrajectoryController::read_lidar_points_robot before Task 14), kept as a pure function
@@ -113,10 +156,14 @@ struct LidarGuardReturns
 // cannot reach). Returns are merged one per σ_r cell (the nearest to the centre) — a discretisation below the sensor's
 // own noise, so it changes no answer by more than σ_r, and it bounds the per-cycle cost. `next(i)` yields the i-th return
 // in the robot frame (or nullopt to skip it), so a caller streams its own cloud without an intermediate copy.
+// `self_body` (fix round 5): the SELF footprint a return is the robot inside; empty ⇒ `body`. `body` is the returns body
+// the band is measured against.
 template <class Next>
 [[nodiscard]] inline LidarGuardReturns lidar_guard_returns_from(std::size_t n, Next&& next,
-                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
+                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
+                                                                std::span<const Eigen::Vector2f> self_body = {})
 {
+    const std::span<const Eigen::Vector2f> self = self_body.empty() ? body : self_body;
     LidarGuardReturns out;
     const float s = std::max(sigma_r, 1e-3f);
     const Eigen::Matrix2f cov = (s * s) * Eigen::Matrix2f::Identity();
@@ -129,8 +176,9 @@ template <class Next>
         const Eigen::Vector2f q = *qo;
         const auto note_nearest = [&] { if (not out.nearest_any.has_value() or q.squaredNorm() < out.nearest_any->squaredNorm()) out.nearest_any = q; };
         if (q.norm() > reach) { ++out.n_far; note_nearest(); continue; }
+        if (anchor_point_in_convex(self, q)) { ++out.n_self; continue; }
         const float sd = anchor_signed_distance(body, q);
-        if (sd < 0.f) { ++out.n_self; continue; }
+        if (sd < 0.f) { ++out.n_self; continue; }   // inside the returns body (⊂ self when the self footprint is given)
         note_nearest();
         if (sd < sigma_r) { ++out.n_band; out.band_points.push_back(q); }
         const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
@@ -151,7 +199,8 @@ template <class Next>
 // frame with no intermediate copy. tests/test_lidar_body_guard.cpp drives it through the real buffer (lidar_guard_buffer.h).
 [[nodiscard]] inline LidarGuardReturns lidar_guard_returns_room(std::span<const float> xs_room, std::span<const float> ys_room,
                                                                 const Eigen::Affine2f& room_T_robot,
-                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
+                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
+                                                                std::span<const Eigen::Vector2f> self_body = {})
 {
     const Eigen::Affine2f robot_from_room = room_T_robot.inverse();
     return lidar_guard_returns_from(std::min(xs_room.size(), ys_room.size()),
@@ -160,15 +209,16 @@ template <class Next>
                                         if (not std::isfinite(xs_room[i]) or not std::isfinite(ys_room[i])) return std::nullopt;
                                         return robot_from_room * Eigen::Vector2f(xs_room[i], ys_room[i]);
                                     },
-                                    body, sigma_r, reach);
+                                    body, sigma_r, reach, self_body);
 }
 
 [[nodiscard]] inline LidarGuardReturns lidar_guard_returns(std::span<const Eigen::Vector2f> points_robot,
-                                                           std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
+                                                           std::span<const Eigen::Vector2f> body, float sigma_r, float reach,
+                                                           std::span<const Eigen::Vector2f> self_body = {})
 {
     return lidar_guard_returns_from(points_robot.size(),
                                     [&](std::size_t i) { return std::optional<Eigen::Vector2f>(points_robot[i]); },
-                                    body, sigma_r, reach);
+                                    body, sigma_r, reach, self_body);
 }
 
 // The body's leading profile along u at lateral offset l (p = u rotated +90°): max of x·u over the polygon's chord x·p = l.

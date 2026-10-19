@@ -79,6 +79,12 @@ RobotFootprint load_robot_body(DSR::DSRGraph &graph,
                               float mesh_yaw_deg,
                               RobotBodyReport &report);
 
+// Task 14 fix round 5: the robot mesh's XY outline (robot frame), read from the robot node's `path` WHATEVER body the
+// planner keeps — for Shadow the planner keeps the compiled hull (the mesh omits the wheels), but the mesh is still the
+// best statement of the front cover the LiDAR sees. nullopt (with `why`) when there is no path / file / usable hull.
+std::optional<RobotFootprint> load_robot_mesh_outline(DSR::DSRGraph &graph, std::uint64_t robot_id, float mesh_yaw_deg,
+                                                      std::string &why, std::string &path_out);
+
 // One block, unconditional, at qInfo — or qCritical when it fell back. The numbers beside the numbers they
 // replace, because "a body loaded" is not the question; "which body, and how does it differ from the one the
 // robot was driving" is.
