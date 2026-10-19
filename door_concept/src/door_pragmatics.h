@@ -45,6 +45,7 @@
 
 #pragma once
 
+#include <limits>
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -161,6 +162,14 @@ inline rc::affordance::Contract approach_contract(const DoorPragmaticCfg& p)
         .stable(2).timeout_s(p.approach_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
 
+// ★THE TURN OF AN open/close IS NOT A LOOK, so this producer declares its rate (Contract::max_yaw_rate) instead of
+//   inheriting the consumer's default. That default is the LockOn creep (0.06 rad/s), tuned to keep masks sharp while
+//   a servo collects them; open/close observe nothing while they turn (the .still hold applies once aligned) and are
+//   bounded by open_timeout_s, so the creep made any arrival more than ~41 deg off the leaf a guaranteed timeout
+//   (try98 leg 1: 12 s at 0.06 rad/s, "orient GIVE_UP", door_wont_open). No rate of our own: the largest float asks
+//   for "no cap from this producer" and the consumer clamps it to the base's own limit (max_rot_speed_rps).
+inline constexpr float kTurnAtBaseLimit = std::numeric_limits<float>::max();
+
 // open: the robot is ALREADY there — approach put it there, and that is the precondition. So this must not
 // navigate: Orient turns in place to face the leaf and then WAITS for the world to change. A Servo would
 // run its distance sweep and creep around while the leaf swings, which is both pointless and unsafe next
@@ -172,6 +181,7 @@ inline rc::affordance::Contract open_contract(const DoorPragmaticCfg& p)
     return rc::affordance::Contract::orient()
         .until ("door_open_prob", GE, 0.70f)
         .still (0.05f, 0.10f)
+        .yaw_rate(kTurnAtBaseLimit)
         .stable(2).timeout_s(p.open_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
 
@@ -183,6 +193,7 @@ inline rc::affordance::Contract close_contract(const DoorPragmaticCfg& p)
     return rc::affordance::Contract::orient()
         .until ("door_open_prob", LE, 0.30f)
         .still (0.05f, 0.10f)
+        .yaw_rate(kTurnAtBaseLimit)
         .stable(2).timeout_s(p.open_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
 
