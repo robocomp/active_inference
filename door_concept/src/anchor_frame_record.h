@@ -237,10 +237,13 @@ public:
     }
     bool capped() const { return full_; }
     bool is_open() const { return out_.is_open(); }
+    // Flush the tail and close. Called from request_shutdown: the agent exits through std::_Exit and the worker is
+    // never deleted, so no destructor ever runs to do it.
+    void close() { if (out_.is_open()) out_.close(); }
     std::uint64_t bytes() const { return bytes_; }
 
 private:
-    std::ofstream out_;              // closed (and so flushed) by its destructor at shutdown
+    std::ofstream out_;              // closed (and so flushed) by close(), from request_shutdown
     std::uint32_t since_flush_ = 0;
     std::uint64_t bytes_ = 0;
     bool full_ = false;

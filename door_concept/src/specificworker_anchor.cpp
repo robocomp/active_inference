@@ -1047,7 +1047,7 @@ void SpecificWorker::step_passage_anchor()
                     << (measured ? ev.n_through : -1) << ',' << (measured ? ev.n_blocked : -1) << ','
                     << (measured ? ev.n_short : -1) << ',' << (measured ? ev.p_open : -1.0f) << ','
                     << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << '\n';
-        // Final review I-4: batched, not per row (the stream's destructor flushes the tail at shutdown).
+        // Final review I-4: batched, not per row (request_shutdown closes the stream, flushing the tail).
         if (++anchor_log_rows_ % rc::door::rec::kAnchorRecordFlushEvery == 0) anchor_log_.flush();
     }
 }

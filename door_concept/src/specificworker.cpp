@@ -248,6 +248,11 @@ void SpecificWorker::request_shutdown()
 
     cleanup_owned_nodes();
 
+    // Flush the diagnostics' tails (up to 63 buffered rows each): exit is std::_Exit and this worker is never
+    // deleted, so no ofstream destructor runs. Same thread as compute() (Qt timer), so no write can race this.
+    anchor_frames_.close();
+    if (anchor_log_.is_open()) anchor_log_.close();
+
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
     // destruct later with the rest of the object can fault inside DSR. Mirrors bottle_concept.
     inner_eigen_.reset();
