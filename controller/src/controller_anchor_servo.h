@@ -638,6 +638,75 @@ inline constexpr float kAnchorGainStepM = 1e-3f;
     return std::max(0.f, w);
 }
 
+// ── MAKING ROOM FOR THE TURN (try101) ────────────────────────────────────────────────────────────────────────────────────
+// A differential base aligns by turning in place, and a turn is refused by every obstacle its sweep reaches: the grown
+// body's corners reach R = max |vertex| (+ margin + the obstacle's radius) from the centre, so an obstacle at |q| < R that the
+// turn closes on caps it (anchor_obstacles_rot_limit). The servo had no motion for that: its translation is d's forward
+// projection, which is (near) zero or INTO the obstacle while the heading is far off. try101 leg 1 (and its two retries)
+// stood 0.37 m from room_1's corridor wall facing it at 15-25°, the turn toward the door refused by that wall (R 0.396 m),
+// forward refused by the same wall — and the returns' backoff (which minimises margin penetration, not the turn's need)
+// turned it back the other way each cycle: a CW/CCW chatter until the contract timed out, three times.
+// The motion that gives the turn its room is the translation that moves the obstacles it is blocked by OUT of the sweep:
+// a blocker j (its own cap below the asked |rot|) has the reach deficit δ_j = R_j − |q_j| > 0, and translating the body by
+// h along u changes it by h·(q_j·u)/|q_j|. Candidates: forward/reverse (and ±side on a holonomic base); the one that lowers
+// the total P-weighted deficit Σ p_j δ_j fastest is taken (a SUM, as the returns' backoff: a face beside the body must not
+// veto the reverse that frees the corner ahead). Speed: the worst deficit closed on the approach loop's time constant,
+// v_max·tanh(max p_j δ_j / (v_max·τ_s)) — the deficit is a length the body still has to put between itself and the blocker.
+// The servo's turn stays as asked (the guards cap it to what the room allows); its translation is REPLACED by this one
+// unless the servo already moves at least as fast the same way. Nothing blocks the turn, or no candidate lowers the deficit
+// ⇒ the servo's command, untouched. The result then goes through the SAME guard chain, so the translation that makes room
+// cannot close on anything behind. Receding horizon: every cycle the blockers are found again, and once the turn has its
+// room the servo's own translation is back.
+struct AnchorTurnBlockers { std::span<const AnchorJamb> obstacles; std::span<const Eigen::Vector2f> body; };
+struct AnchorTurnRoom { AnchorCommand cmd; bool applied = false; int blockers = 0; float deficit = 0.f; };
+[[nodiscard]] inline AnchorTurnRoom anchor_make_turn_room(const AnchorCommand& c, std::span<const AnchorTurnBlockers> sets,
+                                                          float margin, float a_dec, float v_max, float w_max, bool holonomic)
+{
+    AnchorTurnRoom out{.cmd = c};
+    if (c.through or not (std::abs(c.rot) > 0.f) or not (v_max > 0.f)) return out;
+    const float ask = std::abs(c.rot);
+    struct Blocker { Eigen::Vector2f q; float deficit, p; };
+    std::vector<Blocker> blk;
+    for (const auto& set : sets)
+    {
+        if (set.body.size() < 3) continue;
+        float r_body = 0.f;
+        for (const auto& v : set.body) r_body = std::max(r_body, v.norm());
+        for (const auto& j : set.obstacles)
+        {
+            const float rq = j.mean.norm();
+            const float reach = r_body + margin + j.radius;   // anchor_grown_body grows radially: its max |vertex|
+            if (not (rq > 1e-4f) or rq >= reach) continue;
+            if (anchor_obstacles_rot_limit(std::span<const AnchorJamb>(&j, 1), c.rot, set.body, margin, a_dec, w_max) >= ask)
+                continue;
+            blk.push_back({j.mean, reach - rq, std::clamp(j.p, 0.f, 1.f)});
+        }
+    }
+    out.blockers = int(blk.size());
+    if (blk.empty()) return out;
+    std::vector<Eigen::Vector2f> cand{{0.f, 1.f}, {0.f, -1.f}};
+    if (holonomic) { cand.push_back({1.f, 0.f}); cand.push_back({-1.f, 0.f}); }
+    float best_gain = 0.f;
+    std::optional<Eigen::Vector2f> best;
+    for (const auto& u : cand)
+    {
+        float gain = 0.f;   // −d(Σ p δ)/dh: moving the body along u moves each blocker by −u
+        for (const auto& b : blk) gain -= b.p * b.q.dot(u) / b.q.norm();
+        if (gain > best_gain) { best_gain = gain; best = u; }
+    }
+    if (not best.has_value()) return out;
+    float worst = 0.f;
+    for (const auto& b : blk) worst = std::max(worst, b.p * b.deficit);
+    out.deficit = worst;
+    const float v = v_max * std::tanh(worst / (v_max * kAnchorTauS));
+    const float own = Eigen::Vector2f(c.side, c.adv).dot(*best);   // the servo's own translation along u
+    if (own >= v) return out;                                       // it already makes the room, at least as fast
+    out.cmd.side = holonomic ? v * best->x() : 0.f;
+    out.cmd.adv = v * best->y();
+    out.applied = true;
+    return out;
+}
+
 [[nodiscard]] inline float anchor_jamb_rot_limit(const rc::interaction::RelPose& r, float width, float rot,
                                                  std::span<const Eigen::Vector2f> body, float margin, float a_dec,
                                                  float w_cap, std::span<const rc::interaction::AnchorLeaf> leaves = {})

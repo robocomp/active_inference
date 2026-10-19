@@ -8,6 +8,7 @@
 #include "../src/controller_anchor_servo.h"
 #include "../src/lidar_body_guard.h"
 
+#include <array>
 #include <chrono>
 #include <format>
 #include <string>
@@ -470,7 +471,7 @@ int main()
             CHECK(line.has_value() or k > 0);
             if (not line.has_value()) break;
             // try101: the session's chain — P(fit) read where the body enters (its front, and the free advance the cloud
-            // leaves the body aligned with the normal).
+            // leaves the body aligned with the normal), then the turn given its room against the jambs and the returns.
             const auto ret = rc::lidar_guard_returns(pts, kBody, kSigmaR, 1.0f);
             const float free = rc::lidar_free_advance(pts, rc::anchor_cross_geometry(*line).n, kBody);
             auto cmd = rc::anchor_cross_command(*line, line_width, half_w_servo, standoff, v_max, w_max, /*holonomic=*/false, {},
@@ -478,6 +479,12 @@ int main()
             (void)gate.observe(g.seen, rc::anchor_cross_geometry(*line).s, 0.2471f);
             if (gate.through(cmd.through)) { through = true; break; }
             CHECK(not cmd.through);   // the session hands back a through without the near side; here it never happens
+            {
+                const auto model = rc::anchor_obstacles(*line, line_width, {});
+                const std::array<rc::AnchorTurnBlockers, 2> sets{rc::AnchorTurnBlockers{model, kBody},
+                                                                 rc::AnchorTurnBlockers{ret.obstacles, kBody}};
+                cmd = rc::anchor_make_turn_room(cmd, sets, margin, a_dec, v_max, w_max, false).cmd;
+            }
             const auto guard = rc::anchor_jamb_guard(*line, line_width, cmd, false, kBody, margin, a_dec, v_max, w_max);
             float adv = guard.cmd.adv, side = 0.f, rot = guard.cmd.rot;
             (void)rc::lidar_cap_command(ret.obstacles, kBody, margin, a_dec, v_max, w_max, adv, side, rot);

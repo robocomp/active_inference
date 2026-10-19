@@ -993,6 +993,7 @@ private:
     // Task 9, fix C: a SPINNING verdict on a rotation-dominant servo command is not a wedge; since when it has held.
     std::uint64_t anchor_spin_since_ms_ = 0;
     bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change
+    bool anchor_turn_room_logged_ = false;                           // try101: the servo's turn is making its room (log on change)
     bool anchor_leaf_logged_ = false;
     bool anchor_carried_logged_ = false;                             // Task 13: driving on the carried pose past the switch (log on change)
     bool anchor_through_ = false;                                    // Task 12 Fix E: the servo reached `through` in this claim

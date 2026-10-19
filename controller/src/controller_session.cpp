@@ -7,6 +7,7 @@
 #include "residual_risk.h"
 
 #include <algorithm>
+#include <array>
 #include <ranges>
 #include <bit>
 #include <chrono>
@@ -3308,6 +3309,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_wait_blocked_ = false;
     anchor_spin_since_ms_ = 0;
     anchor_backoff_logged_ = false;
+    anchor_turn_room_logged_ = false;
     anchor_leaf_logged_ = false;
     anchor_through_ = false;
     anchor_carried_logged_ = false;
@@ -3917,6 +3919,32 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
     //   trust nothing the anchor says.
     const auto returns = live_returns(control_pose, obstacle_tracker, path_controller);
+    // 0. ★ try101 leg 1 (and its two retries): stood 0.37 m from room_1's corridor wall, facing it, the turn toward the door
+    //    refused by that wall and forward refused by it too — and the returns' backoff turned it back the other way each
+    //    cycle until the contract timed out. The servo's turn is given its ROOM: while the guards would cap the turn, the
+    //    translation is the one that moves its blockers (the anchor's jambs/leaf AND the live returns) out of the sweep
+    //    (rc::anchor_make_turn_room). It then goes through the same guards below, so it cannot close on anything else.
+    {
+        const auto model = rc::anchor_obstacles(pose, drive_width, drive_leaves);
+        const std::span<const rc::AnchorJamb> live = returns.valid ? std::span<const rc::AnchorJamb>(returns.r.obstacles)
+                                                                   : std::span<const rc::AnchorJamb>();
+        const std::array<rc::AnchorTurnBlockers, 2> sets{rc::AnchorTurnBlockers{model, body},
+                                                         rc::AnchorTurnBlockers{live, returns_body()}};
+        const auto room = rc::anchor_make_turn_room(cmd, sets, approach_body_.safety_margin(),
+                                                    anchor_brake_decel(path_controller), v_max, w_max, holonomic);
+        if (room.applied != anchor_turn_room_logged_)
+        {
+            anchor_turn_room_logged_ = room.applied;
+            if (room.applied)
+                std::println("[anchor] cross: the turn toward {} ({:+.2f} rad/s asked) is refused by {} obstacle(s) its sweep "
+                             "reaches ({:.3f} m short of a free turn) — MAKING ROOM for it: adv {:+.3f} side {:+.3f} (servo's "
+                             "own adv {:+.3f})", drive_name, cmd.rot, room.blockers, room.deficit, room.cmd.adv, room.cmd.side,
+                             cmd.adv);
+            else
+                std::println("[anchor] cross: the turn has its room — the servo's own translation resumes");
+        }
+        cmd = room.cmd;
+    }
     // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
     //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
     const auto guard = rc::anchor_jamb_guard(pose, drive_width, cmd, holonomic, body, approach_body_.safety_margin(),
