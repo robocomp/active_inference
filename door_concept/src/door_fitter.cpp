@@ -789,6 +789,7 @@ void DoorFitter::log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& 
         phi_trace_csv_ << "t_ms,node,ox,oy,nrays,off_plane,ninf,beta,lat,prior_mean,prior_sigma,post_mean,post_sigma,measured,"
                        << "hit0,expl0,signed0,"
                        << "s,sd_s,reg_ok,reg_eps,reg_depth,reg_n,aw_runs,aw_z,aw_R,aw_nu,aw_beta,aw_pd,aw_b,aw_sd_b,"
+                       << "hinge_llr,swing_llr,vp_n,vp_epoch,p_ok,pi_move,hazard,"   // try102: the leaf channel
                        << "loglik\n";
     }
     const auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -803,7 +804,10 @@ void DoorFitter::log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& 
                    << inst.dbg_reg.n_inliers << ',' << inst.dbg_along.n_runs << ',' << inst.dbg_along.z << ','
                    << inst.dbg_along.R << ',' << inst.dbg_along.nu << ',' << inst.dbg_along.beta << ','
                    << inst.dbg_along.p_detect << ',' << inst.along_wall.b << ','
-                   << std::sqrt(std::max(0.0f, inst.along_wall.Pb)) << ',';
+                   << std::sqrt(std::max(0.0f, inst.along_wall.Pb)) << ','
+                   << inst.hinge_llr << ',' << inst.swing_llr << ',' << inst.leaf_channel.views.views.size() << ','
+                   << inst.leaf_channel.views.epoch << ',' << inst.dbg_leaf_p_ok << ',' << inst.dbg_leaf_pi_move << ','
+                   << inst.leaf_channel.hazard() << ',';
     for (std::size_t k = 0; k < loglik.size(); ++k)
         phi_trace_csv_ << (k ? ";" : "") << loglik[k].second;
     phi_trace_csv_ << '\n';
@@ -944,19 +948,17 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // rate the provider advertised — or the same generic 2 rad/s the step limiter below already uses —
     // times a MEASURED interval, not a per-cycle constant. Long gap, wide prior; fast loop, tight one;
     // first ever look, no prior at all.
-    const float swing_rate = inst.phi_cmd_rate > 1e-3f ? inst.phi_cmd_rate : 2.0f;
+    // ★ try102 (2026-10-19): THAT WIDTH IS NOW ONLY THE COMMANDED SWING'S. Without a command the leaf is HELD and moved at
+    //   an inferred hazard (rc::door::leaf_channel_step): the generic 2 rad/s diffusion that stood here widened σ by
+    //   0.2 rad per unmeasured cycle, so a parked robot 5.5 m out forgot an open door in ~1.5 s — phi read the uniform's
+    //   mean 60° and P(passable) its mass above 72.5° (0.33-0.37) for 40 s, twice (ai2_log_phi.csv rows 4264-4301).
+    const float swing_rate = inst.phi_cmd_rate > 1e-3f ? inst.phi_cmd_rate : 2.0f;   // the COMMANDED motion's rate
     const float dt_phi = inst.phi_last_t.time_since_epoch().count() == 0
                        ? std::numeric_limits<float>::infinity()
                        : std::chrono::duration<float>(now - inst.phi_last_t).count();
     inst.phi_last_t = now;
-    // Never tighter than the search grid can resolve (that would be a claim about phi finer than the
-    // measurement) and never wider than the full range (which is the same as having no prior at all).
-    // ★★★THE PRIOR WIDTH COMPOUNDS — IT IS A PREDICT STEP, NOT A FRESH GAUSSIAN EACH CYCLE (2026-09-13).
-    // A flat likelihood leaves the posterior equal to the prior; a prior re-centred on the current estimate
-    // with a per-cycle width would freeze the value and reassert it with a confidence it never earned
-    // (measured: sigma 5.00, 5.00, 5.01 while the estimate froze at 47 deg on a shut door). Compounding the
-    // previous posterior's width with this interval's swing makes ignorance ACCUMULATE. Never tighter than
-    // the grid resolves, never wider than the range. See rc::door::phi_prior_sigma.
+    // While our own command runs: the commanded trajectory, its width compounding with the swing it could have made in dt
+    // (never tighter than the grid resolves, never wider than the range — rc::door::phi_prior_sigma, 2026-09-13).
     const float sigma_phi = rc::door::phi_prior_sigma(inst.phi_sigma, swing_rate, dt_phi,
                                                       cfg_.phi_step_rad, cfg_.phi_max_rad);
     if (inst.phi_cmd_active)
@@ -1134,55 +1136,51 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     }
     inst.anchor_phi_ll.clear();
     inst.anchor_phi_ll_other.clear();
-    // ★ Task 12 fix D: the swing's log-odds, from the anchor's beams (the only channel that scores both swings), consumed once;
-    //   its sign is relative to the swing it was computed under. The geometry swings to the MAP side: ⚑ the flip at P = ½ is
-    //   the MAP of a binary posterior (a decision level, as the hinge's), and the log-odds is negated with it.
+    // ★ Task 12 fix D: the swing's evidence from the anchor's beams (the only channel that scores both swings), consumed once;
+    //   its sign is relative to the swing it was computed under. ★ try102: it is THIS FRAME's swing evidence, added to the
+    //   field's own for the same frame and contaminated ONCE with it (the anchor and the field read the same sweep), never
+    //   accumulated on its own.
+    double anchor_swing_delta = 0.0;
     if (std::isfinite(inst.anchor_swing_llr))
     {
         const float cur = inst.ai2_belief.params().leaf.swing;
-        inst.swing_llr += (inst.anchor_phi_swing * cur > 0.0f ? 1.0f : -1.0f) * inst.anchor_swing_llr;
+        anchor_swing_delta = (inst.anchor_phi_swing * cur > 0.0f ? 1.0 : -1.0) * double(inst.anchor_swing_llr);
         inst.anchor_swing_llr = std::numeric_limits<float>::quiet_NaN();
-        inst.swing_llr_ref = cur;
-        if (inst.swing_llr < 0.0f)
-        {
-            inst.ai2_belief.set_leaf_swing(-cur);
-            inst.swing_llr = -inst.swing_llr;
-            inst.swing_llr_ref = -cur;
-            std::print("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal: the anchor's beams explain "
-                       "it better there (log-odds {:+.1f}; phi {:.0f} deg)\n", inst.node_name, -cur > 0.0f ? "along" : "against",
-                       inst.swing_llr, inst.phi_est * 57.2958f);
-        }
     }
-    std::vector<std::pair<float, float>> loglik;
-    if (not ll_this.empty())
-    {
-        auto hm = rc::door::phi_leaf_marginal(ll_this, ll_other, ll_swing, ll_both, inst.hinge_llr, inst.swing_llr,
-                                              phi_prior, sigma_phi);
-        loglik = std::move(hm.loglik);
-        inst.hinge_llr = hm.hinge_llr;
-        inst.swing_llr = hm.swing_llr;
-        const bool hinge_flipped = rc::door::adopt_map_hinge(inst.ai2_belief, inst.hinge_llr);
-        inst.hinge_llr_ref = inst.ai2_belief.params().leaf.hinge;
-        if (rc::door::adopt_map_swing(inst.ai2_belief, inst.swing_llr))
-            std::print("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal: the LiDAR field explains "
-                       "it better there (log-odds {:+.1f}; phi {:.0f} deg)\n", inst.node_name,
-                       inst.ai2_belief.params().leaf.swing > 0.0f ? "along" : "against", inst.swing_llr, inst.phi_est * 57.2958f);
-        if (not ll_swing.empty())
-            inst.swing_llr_ref = inst.ai2_belief.params().leaf.swing;
-        if (hinge_flipped)
-            // ★ The live check (fix round 1): this line must come BEFORE the aperture's σ_s collapses (σ_s printed here).
-            std::print("door_concept: [{}] HINGE FLIPPED — now the {} jamb, the leaf is better explained hung there "
-                       "(log-odds {:+.1f}; phi {:.0f} deg; aperture s {:.2f} m σ_s {:.3f} m)\n",
-                       inst.node_name, inst.ai2_belief.params().leaf.hinge == door::HingeSide::Near ? "near" : "far",
-                       inst.hinge_llr, inst.phi_est * 57.2958f, inst.ai2_belief.state().s,
-                       std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))));
-    }
-
-    // ★THE PRIOR MULTIPLIES THE LIKELIHOOD, IN LOGS. A flat likelihood leaves the prior standing; a peaked
-    // one moves it; and no likelihood, however far from the prior, can underflow the posterior to nothing
-    // (the old linear product did, and the "no curve" branch then threw the prior away — see
-    // rc::door::phi_posterior_step).
-    const auto post = rc::door::phi_posterior_step(loglik, PHI_MIN, PHI_MAX, NSTEP, phi_prior, sigma_phi);
+    // ─── THE LEAF CHANNEL (try102, rc::door::leaf_channel_step): hinge × swing × φ for this frame ─────────────────────
+    //   ε-contaminated frames, evidence pooled per VIEWPOINT (a parked robot adds to one bounded term), and φ HELD unless
+    //   moved (inferred hazard) or commanded. The geometry hangs from the MAP hinge and swings to the MAP side (⚑ P = ½, the
+    //   MAP of a binary posterior — a decision level, as before).
+    rc::door::LeafChannelInput lin;
+    lin.bb = std::move(ll_this); lin.ob = std::move(ll_other); lin.bs = std::move(ll_swing); lin.os = std::move(ll_both);
+    lin.anchor_swing_delta = anchor_swing_delta;
+    lin.have_sensor = leaf_pts_ != nullptr;   // leaf_origin_ is the sweep's sensor, in the room frame the aperture is in
+    lin.sensor = leaf_origin_.head<2>();
+    lin.dt = dt_phi;
+    lin.cmd_active = have_prior;
+    lin.cmd_mean = phi_prior;
+    lin.cmd_sigma = sigma_phi;
+    lin.phi_min = PHI_MIN; lin.phi_max = PHI_MAX; lin.nstep = NSTEP;
+    lin.view_rad = cfg_.phi_step_rad;
+    const auto lr = rc::door::leaf_channel_step(inst.leaf_channel, inst.ai2_belief, inst.hinge_llr, inst.swing_llr,
+                                                inst.phi_est, inst.phi_sigma, lin);
+    inst.hinge_llr_ref = inst.ai2_belief.params().leaf.hinge;
+    inst.swing_llr_ref = inst.ai2_belief.params().leaf.swing;
+    inst.dbg_leaf_pi_move = static_cast<float>(lr.pi_move);
+    inst.dbg_leaf_p_ok    = static_cast<float>(lr.p_ok);
+    if (lr.swing_flipped)
+        std::print("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal (log-odds {:+.1f} over {} "
+                   "viewpoints; phi {:.0f} deg)\n", inst.node_name,
+                   inst.ai2_belief.params().leaf.swing > 0.0f ? "along" : "against", inst.swing_llr,
+                   inst.leaf_channel.views.views.size(), inst.phi_est * 57.2958f);
+    if (lr.hinge_flipped)
+        // ★ The live check (fix round 1): this line must come BEFORE the aperture's σ_s collapses (σ_s printed here).
+        std::print("door_concept: [{}] HINGE FLIPPED — now the {} jamb, the leaf is better explained hung there "
+                   "(log-odds {:+.1f} over {} viewpoints; phi {:.0f} deg; aperture s {:.2f} m σ_s {:.3f} m)\n",
+                   inst.node_name, inst.ai2_belief.params().leaf.hinge == door::HingeSide::Near ? "near" : "far",
+                   inst.hinge_llr, inst.leaf_channel.views.views.size(), inst.phi_est * 57.2958f,
+                   inst.ai2_belief.state().s, std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))));
+    const auto& post = lr.post;
     inst.phi_curve  = post.curve;
     inst.phi_curve_log = post.log_curve;
     inst.dbg_phi_cv = post.cv;
@@ -1190,23 +1188,9 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     inst.dbg_w_mask = 0.0f;   // kept in the log schema; the camera no longer votes on phi
     inst.dbg_w_edge = 0.0f;
 
-    // ─── COLLAPSE THE POSTERIOR: a MEAN and a WIDTH, always ────────────────────────────────────────
-    // ★THE WIDTH IS THE POINT, and ★NO ARGMAX ANYWHERE (the argmax of a nearly-flat curve is noise; chasing
-    // it slid the aperture along the wall, r = -1.000, 34 cm against 41 deg).
-    // ★THE CARRIED BELIEF IS THE POSTERIOR'S (mean, sigma) — NO CLAMP ON THE MEAN (2026-10-13). The mean used
-    // to move at most swing_rate*dt per cycle while sigma took the posterior's width, so the NEXT prior was
-    // centred many sigma from the evidence and fought it (harness (c): first look at an open door,
-    // P(passable) 1.00 -> 0.10 -> 1.00). "A hinge cannot jump" is already the predict step: the prior's width
-    // grows by exactly what the leaf could have swung in dt (phi_prior_sigma), so a single frame moves the
-    // mean far only if its evidence outweighs that prior — and, tempered by what it actually observed
-    // (phi_field_loglik), a near-empty frame cannot.
-    if (not post.curve.empty())
-    {
-        inst.phi_sigma = post.sigma;
-        inst.phi_est   = post.mean;
-    }
-    else
-        inst.phi_sigma = PHI_MAX - PHI_MIN;   // not even a prior: HOLD the estimate, width = the whole range
+    // ─── THE CARRIED BELIEF: the channel wrote phi_est / phi_sigma — the posterior's MEAN and WIDTH, never an argmax (the
+    // argmax of a nearly-flat curve is noise; chasing it slid the aperture along the wall, r = -1.000, 34 cm against 41 deg),
+    // never a clamped mean (2026-10-13: a rate-limited mean fought its own posterior, P(passable) 1.00 -> 0.10 -> 1.00).
     inst.phi_measured = post.measured;
 
     // ─── WHERE ALONG THE WALL: the opening's edges, with the registration offset the frames share (try96) ────────────
@@ -1229,7 +1213,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         inst.dbg_along = rc::door::along_wall_update(inst.ai2_belief, inst.along_wall, runs, reg_sweep.reg,
                                                      rc::door::clear_fraction(post.curve), chain_s + rl * rl, range, dt_aw);
     }
-    log_phi_csv(inst, rays, loglik, phi_prior, sigma_phi, post.mean, post.sigma, post.measured);
+    log_phi_csv(inst, rays, lr.frame_loglik, lr.prior_mean, lr.prior_sigma, post.mean, post.sigma, post.measured);
     // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".
     inst.phi_support = -1.0f;
 

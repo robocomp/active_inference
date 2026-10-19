@@ -19,6 +19,8 @@
 //       stays below 0.05 — the reason the room's walls are modelled rather than every short return dropped.
 //   (i) INFO, not a check: the live try97 carried belief (swing into room_2 at +2309 nats) — what an over-confident carried
 //       log-odds still does from room_2, where the swing is weakly observable (see the report's concerns).
+//   (j) try102: the swing carried WRONG at what the leaf channel itself accrues over (a)'s approach (≈ 3.5 nats per viewpoint,
+//       ~+30 — not +2309): room_2 overturns it, and the open door then reads passable.
 //
 // Compiles against the code before the fix too (the room-wall API is reached through `requires`), so "before" can be
 // measured: there (a) ends with the swing into room_2 at ~107° and (b) reads ~45-75°.
@@ -43,6 +45,7 @@
 #include "../src/door_phi_posterior.h"
 #include "../src/door_opening_edges.h"
 #include "../src/door_passability.h"
+#include "../src/door_leaf_channel.h"   // try102: the leaf channel DoorFitter::estimate_phi runs
 
 using V2 = Eigen::Vector2f;
 using V3 = Eigen::Vector3f;
@@ -204,6 +207,7 @@ struct Tracker
     bool  first = true;
     float p = -1.f;
     rc::door::WallRegistration reg;
+    rc::door::LeafChannel leaf;   // try102: as DoorInstance::leaf_channel
 };
 
 // One cycle of DoorFitter::estimate_phi's LiDAR path (both jambs and both swings scored, as for a claimed door).
@@ -216,23 +220,17 @@ static void step(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vector<V
     const auto rs = do_register(nz, b.aperture(), o, pts);
     t.reg = rs.reg;
     const auto sel = rc::door::select_doorway_rays(b.aperture(), rs.origin, rs.pts, std::max(-nz.lat_lo, nz.lat_hi), 1.0f);
-    const float sp = rc::door::phi_prior_sigma(t.sigma, 2.0f, t.first ? std::numeric_limits<float>::infinity() : DT,
-                                               PHI_STEP, PHI_MAX);
+    rc::door::LeafChannelInput in;
+    in.dt = t.first ? std::numeric_limits<float>::infinity() : DT;
     t.first = false;
-    std::vector<std::pair<float, float>> ll;
     if (not sel.rays.endpoints.empty())
     {
-        const auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
-        auto hm = rc::door::phi_leaf_marginal(fr.loglik, fr.loglik_other, fr.loglik_swing, fr.loglik_both,
-                                              t.hinge_llr, t.swing_llr, t.phi, sp);
-        ll = std::move(hm.loglik);
-        t.hinge_llr = hm.hinge_llr; t.swing_llr = hm.swing_llr;
-        rc::door::adopt_map_hinge(b, t.hinge_llr);
-        rc::door::adopt_map_swing(b, t.swing_llr);
+        auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
+        in.bb = std::move(fr.loglik); in.ob = std::move(fr.loglik_other); in.bs = std::move(fr.loglik_swing); in.os = std::move(fr.loglik_both);
     }
-    const auto post = rc::door::phi_posterior_step(ll, PHI_MIN, PHI_MAX, NSTEP, t.phi, sp);
-    t.phi = std::clamp(post.mean, PHI_MIN, PHI_MAX);
-    t.sigma = post.sigma;
+    in.have_sensor = true; in.sensor = o.head<2>();
+    in.phi_min = PHI_MIN; in.phi_max = PHI_MAX; in.nstep = NSTEP; in.view_rad = PHI_STEP;
+    const auto post = rc::door::leaf_channel_step(t.leaf, b, t.hinge_llr, t.swing_llr, t.phi, t.sigma, in).post;
     b.set_leaf_phi(t.phi);
     t.p = rc::door::passable_prob(post.curve, b.aperture().w, NEEDED).value_or(-1.f);
 }
@@ -334,6 +332,34 @@ int main()
                            f == 14 ? "2.6 m centred" : "parked pose  ", ti.phi * 57.2958f, ti.p,
                            leaf_into_room1(bi, false) ? "room_1" : "room_2", ti.swing_llr);
         }
+    }
+
+    // ── (j) try102: a WRONG side carried at what the channel itself accrues — overturned from room_2 ──────────────────────
+    // Under the leaf channel (door_leaf_channel.h) a side is worth log((1−ε_v)/ε_v) ≈ 3.5 nats per VIEWPOINT, so leg 1's
+    // whole approach (a) carries ~+30, not +2309. Carried wrong at that value into room_2, the try97 window must overturn it.
+    const float carried = std::abs(ta.swing_llr);
+    std::print("\n(j) room_2 with the swing carried WRONG at the channel's own leg-1 value (+{:.0f} nats into room_2)\n", carried);
+    {
+        Tracker tj; tj.hinge_llr = std::abs(ta.hinge_llr); tj.swing_llr = carried; tj.phi = 1.92f; tj.sigma = 0.09f; tj.first = false;
+        auto bj = make_belief(false, true, false, 1.92f);
+        int f_flip = -1;
+        float p_tail = 2.f;
+        const int NJ = 180;
+        for (int f = 0; f < NJ; ++f)
+        {
+            // the try97 window, then a slow sideways wander across the doorway's front, 1.6 m (≈ 10 viewpoints at 1.5 m)
+            const float s = std::clamp((static_cast<float>(f) - 15.f) / 10.f, 0.f, 1.f);
+            const V3 o(0.035f + 0.75f * s - 1.6f * std::clamp((static_cast<float>(f) - 40.f) / 120.f, 0.f, 1.f),
+                       2.575f - 1.02f * s, 0.67f);
+            step(tj, bj, o, scan(open, o, rng), room2_polygon());
+            trace("j", f, o, tj, bj, false);
+            if (f_flip < 0 and leaf_into_room1(bj, false)) f_flip = f;
+            if (f >= NJ - 20) p_tail = std::min(p_tail, tj.p);
+        }
+        std::print("  swing into {} after {} frames (flipped at frame {}), {} viewpoints; phi {:.1f} deg, P(passable) over the last 20 frames ≥ {:.2f}\n",
+                   leaf_into_room1(bj, false) ? "room_1 (true)" : "room_2 (WRONG)", NJ, f_flip, tj.leaf.views.views.size(), tj.phi * 57.2958f, p_tail);
+        check(leaf_into_room1(bj, false), std::format("a wrong side carried at +{:.0f} is overturned from room_2 (frame {})", carried, f_flip));
+        check(p_tail > 0.8f, std::format("…and the open door reads passable once it is (min P {:.2f} over the last 20 frames)", p_tail));
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", g_fail));

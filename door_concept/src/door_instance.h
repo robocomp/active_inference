@@ -23,6 +23,7 @@
 #include "door_model.h"        // DoorModel / DoorState
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "door_opening_edges.h" // rc::door::AlongWallState — the scan's registration offset (try96)
+#include "door_leaf_channel.h"  // rc::door::LeafChannel — hinge / swing / φ per viewpoint (try102)
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/pragmatic_affordance/pragmatic_affordance.h" // rc::pragmatic (SHARED) — approach/open/cross
 #include "door_pragmatics.h"   // rc::door::InteractionState — the three preconditions
@@ -122,6 +123,11 @@ struct DoorInstance
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
     float hinge_llr    = 0.0f;
+    // try102: the leaf channel's state (rc::door::leaf_channel_step) — the viewpoints this door was seen from with each one's
+    // pooled hinge / swing evidence, and the φ filter (held, moved at an inferred hazard). hinge_llr / swing_llr / phi_est /
+    // phi_sigma stay the published values; the channel reads them back each frame for what others wrote.
+    door::LeafChannel leaf_channel;
+    float dbg_leaf_pi_move = 0.0f, dbg_leaf_p_ok = 1.0f;
     // Task 11 fix round 1: the passage anchor's beams as a φ log-likelihood on THIS door's φ grid (door_anchor_open.h
     // anchor_phi_loglik), for the hinge it was computed under (`anchor_phi_hinge`) and the other jamb. Written by
     // step_passage_anchor, ADDED to estimate_phi's likelihood once and cleared there: each anchor frame counts once.

@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "../src/door_belief.h"
+#include "../src/door_leaf_channel.h"   // try102: the leaf channel DoorFitter::estimate_phi runs
 #include "../src/door_phi_posterior.h"
 #include "../src/door_opening_edges.h"
 #include "../src/door_passability.h"
@@ -160,6 +161,7 @@ struct Tracker
     rc::door::AlongWallState along;
     rc::door::WallRegistration reg;
     rc::door::AlongWallResult aw;
+    rc::door::LeafChannel leaf;   // try102: as DoorInstance::leaf_channel
 };
 
 // One cycle of DoorFitter::estimate_phi's LiDAR path. `old_channel`: Task 15 (no registration, the field's slide marginal
@@ -175,22 +177,18 @@ static void step(Tracker& t, rc::DoorBelief& b, const Cloud& c, bool old_channel
     else rs = rc::door::register_sweep(b.aperture(), c.origin, c.pts);
     t.reg = rs.reg;
     const auto sel = rc::door::select_doorway_rays(b.aperture(), rs.origin, rs.pts, std::max(-nz.lat_lo, nz.lat_hi), 1.0f);
-    const float sp = rc::door::phi_prior_sigma(t.phi_sigma, 2.0f, DT, PHI_STEP, PHI_MAX);
-    std::vector<std::pair<float, float>> ll;
+    rc::door::LeafChannelInput in;
     if (not sel.rays.endpoints.empty())
     {
         auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
         if (old_channel)
             if (const auto so = rc::door::slide_observation(fr.lat_loglik); so.var > 0.f)
                 b.fuse_slide(so.mean, so.var);
-        auto hm = rc::door::phi_leaf_marginal(fr.loglik, fr.loglik_other, fr.loglik_swing, fr.loglik_both,
-                                              t.hinge_llr, t.swing_llr, t.phi_est, sp);
-        ll = std::move(hm.loglik);
-        t.hinge_llr = hm.hinge_llr; t.swing_llr = hm.swing_llr;
-        rc::door::adopt_map_hinge(b, t.hinge_llr);
-        rc::door::adopt_map_swing(b, t.swing_llr);
+        in.bb = std::move(fr.loglik); in.ob = std::move(fr.loglik_other); in.bs = std::move(fr.loglik_swing); in.os = std::move(fr.loglik_both);
     }
-    const auto post = rc::door::phi_posterior_step(ll, PHI_MIN, PHI_MAX, NSTEP, t.phi_est, sp);
+    in.have_sensor = true; in.sensor = c.origin.head<2>(); in.dt = DT;
+    in.phi_min = PHI_MIN; in.phi_max = PHI_MAX; in.nstep = NSTEP; in.view_rad = PHI_STEP;
+    const auto post = rc::door::leaf_channel_step(t.leaf, b, t.hinge_llr, t.swing_llr, t.phi_est, t.phi_sigma, in).post;
     if (not old_channel)
     {
         const auto ap = b.aperture();
@@ -198,7 +196,6 @@ static void step(Tracker& t, rc::DoorBelief& b, const Cloud& c, bool old_channel
         t.aw = rc::door::along_wall_update(b, t.along, rc::door::measure_openings(ap, rs.origin, rs.pts), rs.reg,
                                            rc::door::clear_fraction(post.curve), (0.02f * range) * (0.02f * range), range, DT);
     }
-    if (not post.curve.empty()) { t.phi_sigma = post.sigma; t.phi_est = std::clamp(post.mean, PHI_MIN, PHI_MAX); }
     b.set_leaf_phi(t.phi_est);
     t.p = rc::door::passable_prob(post.curve, b.aperture().w, 0.70f).value_or(-1.0f);
 }

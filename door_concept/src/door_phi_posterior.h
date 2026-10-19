@@ -355,11 +355,33 @@ struct PhiLeafMarginal
 };
 // `bb` believed hinge+swing (FieldResult::loglik), `ob` other hinge (loglik_other), `bs` other swing (loglik_swing), `os`
 // both flipped (loglik_both). An empty curve = that hypothesis was not scored this frame: it takes no part.
+// The φ prior the hypotheses' evidence is integrated under is a LOG CURVE on the same grid (door_leaf_channel.h passes the
+// predicted belief); the (mean, σ) overload below builds the Gaussian one, as before.
+inline PhiLeafMarginal phi_leaf_marginal(const std::vector<std::pair<float, float>>& bb,
+                                         const std::vector<std::pair<float, float>>& ob,
+                                         const std::vector<std::pair<float, float>>& bs,
+                                         const std::vector<std::pair<float, float>>& os,
+                                         float hinge_llr, float swing_llr, const std::vector<double>& log_prior);
 inline PhiLeafMarginal phi_leaf_marginal(const std::vector<std::pair<float, float>>& bb,
                                          const std::vector<std::pair<float, float>>& ob,
                                          const std::vector<std::pair<float, float>>& bs,
                                          const std::vector<std::pair<float, float>>& os,
                                          float hinge_llr, float swing_llr, float prior_mean, float prior_sigma)
+{
+    std::vector<double> lp(bb.size());
+    const double sp = std::max(1e-4, static_cast<double>(prior_sigma));
+    for (std::size_t k = 0; k < bb.size(); ++k)
+    {
+        const double d = (static_cast<double>(bb[k].first) - prior_mean) / sp;
+        lp[k] = -0.5 * d * d;
+    }
+    return phi_leaf_marginal(bb, ob, bs, os, hinge_llr, swing_llr, lp);
+}
+inline PhiLeafMarginal phi_leaf_marginal(const std::vector<std::pair<float, float>>& bb,
+                                         const std::vector<std::pair<float, float>>& ob,
+                                         const std::vector<std::pair<float, float>>& bs,
+                                         const std::vector<std::pair<float, float>>& os,
+                                         float hinge_llr, float swing_llr, const std::vector<double>& log_prior)
 {
     PhiLeafMarginal out;
     out.hinge_llr = hinge_llr;
@@ -390,19 +412,18 @@ inline PhiLeafMarginal phi_leaf_marginal(const std::vector<std::pair<float, floa
     for (int h = 0; h < 2; ++h)
         for (int s = 0; s < 2; ++s)
             if (have[h][s]) lz = lae(lz, lp_h[h] + lp_s[s]);
-    const double sp = std::max(1e-4, static_cast<double>(prior_sigma));
     double e[2][2] = {{ninf, ninf}, {ninf, ninf}};
     out.loglik.reserve(bb.size());
     for (std::size_t k = 0; k < bb.size(); ++k)
     {
-        const double d = (static_cast<double>(bb[k].first) - prior_mean) / sp;
+        const double lpk = k < log_prior.size() ? log_prior[k] : 0.0;
         double mix = ninf;
         for (int h = 0; h < 2; ++h)
             for (int s = 0; s < 2; ++s)
                 if (have[h][s])
                 {
                     const double a = fin((*c[h][s])[k].second);
-                    e[h][s] = lae(e[h][s], a - 0.5 * d * d);
+                    e[h][s] = lae(e[h][s], a + lpk);
                     mix = lae(mix, a + lp_h[h] + lp_s[s] - lz);
                 }
         out.loglik.emplace_back(bb[k].first, std::isfinite(mix) ? static_cast<float>(mix) : -std::numeric_limits<float>::infinity());

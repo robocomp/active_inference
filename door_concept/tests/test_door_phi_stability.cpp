@@ -33,6 +33,7 @@
 #include "../src/door_phi_posterior.h"
 #include "../src/door_opening_edges.h"   // try96: registration + the opening's span, as DoorFitter::estimate_phi
 #include "../src/door_passability.h"   // passable_prob — the SAME marginalisation the agent publishes
+#include "../src/door_leaf_channel.h"   // try102: the leaf channel DoorFitter::estimate_phi runs
 
 using V2 = Eigen::Vector2f;
 using V3 = Eigen::Vector3f;
@@ -144,6 +145,7 @@ struct Tracker   // the carried belief, exactly as DoorInstance carries it
     float p = 0.0f;
     float ninf = 0.0f, beta = 1.0f, lat = 0.0f;
     rc::door::AlongWallState along;   // try96: the scan's registration offset, as DoorInstance::along_wall
+    rc::door::LeafChannel leaf;       // try102: the leaf channel's state, as DoorInstance::leaf_channel
 };
 
 // One cycle of the NEW channel: select → phi_field_loglik → posterior → rate limit → P(passable).
@@ -157,9 +159,10 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
     const auto sel = rc::door::select_doorway_rays(b.aperture(), rs.origin, rs.pts, std::max(-nz.lat_lo, nz.lat_hi), 1.0f);
     const float dt = t.first ? std::numeric_limits<float>::infinity() : DT;
     t.first = false;
+    // try102: the channel's commanded prior (our own swing) is the command's trajectory, its width compounding at the
+    // command's rate, as DoorFitter::estimate_phi; without a command the leaf is held (rc::door::leaf_channel_step).
     const float sp = rc::door::phi_prior_sigma(t.phi_sigma, swing_rate, dt, PHI_STEP, PHI_MAX);
-    const float prior = std::isnan(prior_mean_override) ? t.phi_est : prior_mean_override;
-    std::vector<std::pair<float, float>> ll;
+    rc::door::LeafChannelInput in;
     nz.other_hinge = true;   // as DoorFitter::estimate_phi: the hinge is marginalised
     nz.other_swing = t.marg_swing and not std::getenv("OLD_SWING");   // Task 20: and the swing
     if (not sel.rays.endpoints.empty())
@@ -173,15 +176,12 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
                 if (std::getenv("SLIDE_TRACE")) std::print("      slide obs mean {:+.3f} sd {:.3f} (belief s {:.3f} sd {:.3f})\n", so.mean, std::sqrt(so.var), b.state().s, std::sqrt(b.covariance()(0, 0)));
                 b.fuse_slide(so.mean, so.var);
             }
-        auto hm = rc::door::phi_leaf_marginal(fr.loglik, fr.loglik_other, fr.loglik_swing, fr.loglik_both,
-                                              t.hinge_llr, t.swing_llr, prior, sp);
-        ll = std::move(hm.loglik);
-        t.hinge_llr = hm.hinge_llr;
-        t.swing_llr = hm.swing_llr;
-        rc::door::adopt_map_hinge(b, t.hinge_llr);
-        rc::door::adopt_map_swing(b, t.swing_llr);
+        in.bb = std::move(fr.loglik); in.ob = std::move(fr.loglik_other); in.bs = std::move(fr.loglik_swing); in.os = std::move(fr.loglik_both);
     }
-    const auto post = rc::door::phi_posterior_step(ll, PHI_MIN, PHI_MAX, NSTEP, prior, sp);
+    in.have_sensor = true; in.sensor = o.head<2>(); in.dt = dt;
+    in.cmd_active = not std::isnan(prior_mean_override); in.cmd_mean = prior_mean_override; in.cmd_sigma = sp;
+    in.phi_min = PHI_MIN; in.phi_max = PHI_MAX; in.nstep = NSTEP; in.view_rad = PHI_STEP;
+    const auto post = rc::door::leaf_channel_step(t.leaf, b, t.hinge_llr, t.swing_llr, t.phi_est, t.phi_sigma, in).post;
     // try96: where along the wall — the opening's through-span with the persistent registration offset (σ0 = 0.02/m · range,
     // the agent's DoorModel.AI2RangeNoiseLatPerM; no pose chain in the harness), as DoorFitter::estimate_phi does.
     if (not std::getenv("OLD_SLIDE_FUSE"))
@@ -198,8 +198,6 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
             std::print(" | z {:.3f} R {:.4f} nu {:+.3f} beta {:.2f} pd {:.2f} b {:+.3f} sd_b {:.3f} s {:.3f} sd_s {:.3f}\n", aw.z, aw.R, aw.nu, aw.beta, aw.p_detect, t.along.b, std::sqrt(t.along.Pb), b.state().s, std::sqrt(b.covariance()(0,0)));
         }
     }
-    t.phi_sigma = post.sigma;
-    t.phi_est   = std::clamp(post.mean, PHI_MIN, PHI_MAX);
     b.set_leaf_phi(t.phi_est);
     t.p = rc::door::passable_prob(post.curve, b.aperture().w, NEEDED).value_or(-1.0f);
 }
