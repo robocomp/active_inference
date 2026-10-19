@@ -95,6 +95,7 @@ public:
         bool fresh = true;                      // Task 9: false = older than kAnchorStaleMs — wait for it, never drive on it
         std::int64_t age_ms = 0;                // now − its newest stamp
         int unseen_ms = 0;                      // fix round 1: the owner's last sighting this long ago (> 0 = PREDICTED pose)
+        std::optional<rc::interaction::AnchorLeaf> leaf;   // Task 12 fix A: the swung leaf, anchor frame (nullopt = none known)
     };
     // The anchor of a `_cross` affordance (its interaction_node_id, else the anchor latched for that same affordance
     // name): fresh, or — with accept_stale (Task 9) — the stale one it last published (fresh = false), or nullopt.
@@ -877,6 +878,8 @@ private:
     // Applied where the producer's pose lands, before every repair. Returns nothing: it edits
     // `step.target` in place, which is the only way a caller can be sure it cannot be forgotten.
     void hold_approach_commitment(ControllerPlanningStep &step, std::uint64_t timestamp_ms);
+    void apply_anchor_standpoint(ControllerPlanningStep &step, const ControllerRobotPose &robot_pose);   // Task 12 fix C
+    bool anchor_standpoint_logged_ = false;
 
     std::uint64_t approach_blocked_log_ms_ = 0;   // rate limit for "found nowhere better"
     // The body used by the approach re-check, held rather than rebuilt per call (shadow() allocates).
@@ -927,6 +930,7 @@ private:
     // Task 9, fix C: a SPINNING verdict on a rotation-dominant servo command is not a wedge; since when it has held.
     std::uint64_t anchor_spin_since_ms_ = 0;
     bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change
+    bool anchor_leaf_logged_ = false;                                // Task 12 fix A: the anchor carries a leaf — log on change
     bool anchor_predicted_logged_ = false;                           // fix round 1: driving on a PREDICTED anchor: log on change
     // Fix round 1: the cross's engaged / wait / spin state belongs to ONE claim — reset when the target (node, epoch)
     // changes (resolve_target_contract) and when a claim of it is handed back (report_unreachable_if_no_route).

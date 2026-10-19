@@ -1149,6 +1149,34 @@ int main()
         check(K == 3000, "kAnchorPredictMs is 3000 ms");
     }
 
+    // ─── Task 12 fix B: the predicted window charges unseen time only OUTSIDE the doorway band ──────────────────────
+    std::print("predicted_window_stretches_in_the_doorway_band\n");
+    {
+        using rc::door::AnchorPublish;
+        const auto K = rc::interaction::kAnchorPredictMs;
+        constexpr float c = 0.80f;   // DoorAffordance.CrossClearanceM
+        auto at = [](float s, float sd) { rc::interaction::RelPose p; p.x = {0.f, -s, 0.f};   // the robot at progress s
+                                          p.P = Eigen::Vector3f(sd * sd, sd * sd, 1e-4f).asDiagonal(); return p; };
+        const float m_in = rc::door::anchor_doorway_band(at(-0.32f, 0.02f), c);   // try70 leg 5: parked at the mouth
+        const float m_out = rc::door::anchor_doorway_band(at(-2.0f, 0.02f), c);    // the approach
+        const float m_edge = rc::door::anchor_doorway_band(at(-0.80f, 0.02f), c);
+        std::print("  P(in band): s -0.32 → {:.3f}, s -0.80 → {:.3f}, s -2.0 → {:.3f}\n", m_in, m_edge, m_out);
+        check(m_in > 0.999f and m_out < 1e-6f, "the mouth is in the band, the approach is not");
+        check(std::abs(m_edge - 0.5f) < 0.01f, "the band's edge is soft: ½ at s = −c");
+        check(rc::door::anchor_doorway_band(at(+0.32f, 0.02f), c) > 0.999f, "past the plane is in the band too");
+        // 40 s parked at the mouth, unseen, 10 Hz: the charged time stays far inside the window; the wall-clock rule was out at 3 s.
+        std::int64_t ch_in = 0, ch_out = 0;
+        for (int k = 0; k < 400; ++k) { ch_in = rc::door::anchor_unseen_charge(ch_in, 100, m_in); ch_out = rc::door::anchor_unseen_charge(ch_out, 100, m_out); }
+        std::print("  40 s unseen: charged {} ms at the mouth, {} ms on the approach\n", ch_in, ch_out);
+        check(rc::door::anchor_publish_decision(false, true, true, ch_in, K) == AnchorPublish::Predicted, "parked at the mouth: still Predicted");
+        check(rc::door::anchor_publish_decision(false, true, true, ch_out, K) == AnchorPublish::None, "off the band: the strict rule as before");
+        check(ch_out == 40000, "outside the band the charge IS the wall time");
+        check(rc::door::anchor_unseen_charge(1234, 0, 0.f) == 1234 and rc::door::anchor_unseen_charge(1234, -5, 0.f) == 1234,
+              "no time, no charge");
+        rc::interaction::RelPose bad; bad.x = {NAN, 0.f, 0.f};
+        check(rc::door::anchor_doorway_band(bad, c) == 0.f, "a non-finite pose is out of the band (the strict rule)");
+    }
+
 
     // ─── Task 10: the published covariance is honest about what does not average out ───────────────────────────────
     // 40 frames of the same open doorway from the same pose, each with fresh beam noise: the physical common mode (mount

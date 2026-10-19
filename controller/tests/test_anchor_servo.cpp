@@ -413,6 +413,154 @@ void wait_turn_grinding_is_judged()
 }
 }  // namespace
 
+// ── Task 12 fix A: the swung leaf ──────────────────────────────────────────────────────────────────────────────────
+// try70's door: the leaf hinged on one jamb, swung 90° TOWARD the robot (its side, anchor −y). Anchor frame: the hinge on
+// the +x jamb's robot-side face, the leaf running back along −y for its length.
+constexpr float kWallHalfT = 0.05f, kMargin = 0.05f;
+rc::interaction::AnchorLeaf leaf_toward(float phi = std::numbers::pi_v<float> / 2.f, float sigma_phi = 0.05f)
+{ return rc::interaction::make_anchor_leaf(+0.5f * kWidth, -kWallHalfT, -1.f, -1.f, kWidth, phi, sigma_phi); }
+
+// The TRUE leaf slab against the TRUE body (no margin): its centre line sampled at 5 mm, each sample a disc of the leaf's
+// half-thickness — a contact is any disc reaching inside the body box.
+int leaf_contacts(const RelPose& r, const rc::interaction::AnchorLeaf& l, const std::vector<Eigen::Vector2f>& body)
+{
+    const float psi = r.x.z(), c = std::cos(psi), s = std::sin(psi);
+    int n = 0;
+    for (int i = 0; i <= 200; ++i)
+    {
+        const Eigen::Vector2f qa = l.hinge + (l.tip - l.hinge) * (float(i) / 200.f);
+        const Eigen::Vector2f q = r.x.head<2>() + Eigen::Vector2f(c * qa.x() - s * qa.y(), s * qa.x() + c * qa.y());
+        if (rc::anchor_signed_distance(body, q) < l.half_thick) ++n;
+    }
+    return n;
+}
+
+// The session's chain on a differential base: the servo (with or without the leaf), then the jamb+leaf guard.
+rc::AnchorCommand chain(const RelPose& r, const rc::interaction::AnchorLeaf* l, const std::vector<Eigen::Vector2f>& body)
+{
+    const auto c = rc::anchor_cross_command(r, kWidth, kBody + kMargin, kStandoff, kVmax, kWmax, false, l);
+    return rc::anchor_jamb_guard(r, kWidth, c, false, body, kMargin, 0.5f, kVmax, kWmax, l).cmd;
+}
+
+void clear_gap_beside_the_leaf()
+{
+    const auto l90 = leaf_toward();
+    const auto g90 = rc::anchor_clear_gap(kWidth, &l90);
+    // Hinged at +w/2: the gap runs from −w/2 to the leaf's −x face (thickness 2·0.02 off the hinge side).
+    CHECK(std::abs(g90.width - (kWidth - 2.f * float(rc::interaction::kLeafHalfThickM))) < 1e-4f);   // the slab is inside the opening
+    CHECK(g90.centre < 0.f and g90.centre > -0.03f);
+    const auto l60 = leaf_toward(std::numbers::pi_v<float> / 3.f, 0.f);   // ajar: projects L·cos 60° = 0.45 m into the opening
+    const auto g60 = rc::anchor_clear_gap(kWidth, &l60);
+    CHECK(g60.width < 0.5f * kWidth and g60.width > 0.5f * kWidth - 4.f * float(rc::interaction::kLeafHalfThickM));
+    CHECK(g60.centre < -0.2f);
+    const auto l120 = leaf_toward(2.f * std::numbers::pi_v<float> / 3.f, 0.f);   // past 90°: folded back over the wall
+    CHECK(rc::anchor_clear_gap(kWidth, &l120).width > kWidth - 2.f * float(rc::interaction::kLeafHalfThickM) - 1e-3f);
+    CHECK(rc::anchor_clear_gap(kWidth, nullptr).width == kWidth and rc::anchor_clear_gap(kWidth, nullptr).centre == 0.f);
+    // The encoding round-trips: hinge, free edge, σ.
+    const auto [xs, ys] = rc::interaction::encode_anchor_leaf(l90);
+    const auto d = rc::interaction::decode_anchor_leaf(xs, ys, l90.phi);
+    CHECK(d.has_value() and (d->hinge - l90.hinge).norm() < 1e-6f and (d->tip - l90.tip).norm() < 1e-5f
+          and std::abs(d->sigma_phi - 0.05f) < 1e-4f);
+    CHECK(not rc::interaction::decode_anchor_leaf({0.f, 0.f}, {0.f, 0.f}, 0.f).has_value());
+    std::println("  clear gap: 90 deg {:.3f} m at {:+.3f}; 60 deg {:.3f} m at {:+.3f}", g90.width, g90.centre, g60.width, g60.centre);
+}
+
+void leaf_on_robot_side_not_contacted()
+{
+    // A differential robot 2 m before the opening, 0.30 m off-centre TOWARD THE HINGE side, the leaf at 90° on its side.
+    const auto l = leaf_toward();
+    // From 2 m, and from 1.2 m — the body's nose 2 cm short of the leaf's free edge, where the jamb-only law (the old one,
+    // run alongside as the control) drives the body's right side into the leaf.
+    for (const float s0 : {2.0f, 1.2f})
+    for (const bool model_leaf : {true, false})
+    {
+        RelPose r = anchor(-0.30f, s0, 0.f, 0.02f);
+        int leaf_hits = 0, jamb_hits = 0, steps = 0;
+        bool through = false;
+        float s_min_contact = 9.f;
+        for (; steps < 600 and not through; ++steps)
+        {
+            const auto c = chain(r, model_leaf ? &l : nullptr, kShadow);
+            if (c.through) { through = true; break; }
+            for (int k = 0; k < 5; ++k)
+            {
+                r.x = rc::interaction::move_mean(r.x, 0.f, c.adv * 0.01f, c.rot * 0.01f);
+                if (const int h = leaf_contacts(r, l, kShadow); h > 0) { ++leaf_hits; s_min_contact = std::min(s_min_contact, rc::anchor_cross_geometry(r).s); }
+                for (const auto& j : rc::anchor_jambs(r, kWidth))
+                    if (touches(kShadow, j.mean)) ++jamb_hits;
+            }
+        }
+        const auto g = rc::anchor_cross_geometry(r);
+        std::println("  from s {:+.1f}, leaf {}: {} steps, e {:+.3f} s {:+.2f}, leaf contacts {} (first at s {:+.2f}), jamb contacts {}",
+                     -s0, model_leaf ? "MODELLED  " : "unmodelled", steps, g.e, g.s, leaf_hits, s_min_contact, jamb_hits);
+        if (model_leaf)
+        {
+            CHECK(leaf_hits == 0);
+            CHECK(jamb_hits == 0);
+            CHECK(g.s > 1.0f);   // through: well past the plane (v_n tapers to 0 AT the standoff, so `through` itself is asymptotic)
+        }
+        else if (s0 < 1.5f)
+            CHECK(leaf_hits > 0);   // the control: without the leaf this approach DOES hit it
+    }
+}
+
+void rotation_near_leaf_capped()
+{
+    // Beside the leaf, 0.55 m before the plane: the 90° leaf runs past the body's right side 0.37 m from its centre, outside
+    // the body (0.294) but inside its grown reach — any turn swings a right-hand corner (radius 0.373 m) out toward it.
+    const auto l = leaf_toward();
+    const RelPose r0 = anchor(-0.08f, 0.55f, 0.f, 0.02f);
+    CHECK(leaf_contacts(r0, l, kShadow) == 0);
+    for (const float dir : {+1.f, -1.f})
+    {
+        const float w_leaf = rc::anchor_jamb_rot_limit(r0, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, &l);
+        const float w_none = rc::anchor_jamb_rot_limit(r0, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, nullptr);
+        std::println("  beside the leaf, turn {}: |rot| cap {:.3f} with the leaf, {:.3f} without", dir > 0 ? "CCW" : "CW", w_leaf, w_none);
+        CHECK(w_none > kWmax - 1e-3f);   // the jambs alone do not see it
+        CHECK(w_leaf < 0.5f * kWmax);    // the leaf caps the sweep
+        RelPose r = r0;
+        int contacts = 0;
+        for (int k = 0; k < 100; ++k)    // 1 s at dt = 0.01, the cap re-evaluated each step
+        {
+            const float w = rc::anchor_jamb_rot_limit(r, kWidth, dir, kShadow, kMargin, 0.5f, kWmax, &l);
+            r.x = rc::interaction::move_mean(r.x, 0.f, 0.f, dir * w * 0.01f);
+            contacts += leaf_contacts(r, l, kShadow);
+        }
+        CHECK(contacts == 0);
+    }
+    // ...and translation toward it is capped too: a sideways (holonomic) push into the leaf.
+    const float v = rc::anchor_jamb_speed_limit(r0, kWidth, Eigen::Vector2f(1.f, 0.f), kShadow, kMargin, 0.5f, kVmax, &l);
+    std::println("  beside the leaf, a push toward it: speed cap {:.3f}", v);
+    CHECK(v < 0.05f);
+}
+
+// Task 12 fix C: the approach standpoint, asked in the anchor's frame, ends ON the cross line at the producer's depth.
+void approach_standpoint_on_the_cross_line()
+{
+    // The opening 2.2 m ahead, its normal rotated 0.2 rad; the room-frame standpoint the producer published lands 0.31 m off
+    // the normal (try70 legs 3 and 5) at 1.9 m before the plane.
+    const RelPose r = anchor(0.4f, 2.2f, 0.2f, 0.02f);
+    const auto g0 = rc::anchor_cross_geometry(r);
+    const Eigen::Vector2f offered = r.x.head<2>() + g0.a * (-0.31f) + g0.n * (-1.9f);
+    for (const bool with_leaf : {false, true})
+    {
+        const auto l = leaf_toward();
+        const auto* lp = with_leaf ? &l : nullptr;
+        const Eigen::Vector2f q = rc::anchor_standpoint(r, kWidth, lp, offered);
+        // The robot standing at q (heading along the normal): the anchor seen from there.
+        RelPose seen = r;
+        seen.x = rc::interaction::move_mean(r.x, q.x(), q.y(), 0.f);   // translate the robot to q (robot-frame step)
+        const auto g = rc::anchor_cross_geometry(seen);
+        const float line = rc::anchor_clear_gap(kWidth, lp).centre;
+        std::println("  approach standpoint{}: offered e {:+.3f} s {:+.3f} -> e {:+.3f} s {:+.3f} (the line at {:+.3f})",
+                     with_leaf ? " (leaf at 90 deg)" : "", g0.a.dot(offered - r.x.head<2>()), g0.n.dot(offered - r.x.head<2>()),
+                     g.e, g.s, line);
+        CHECK(std::abs(g.e - line) < 0.005f);       // on the cross line
+        CHECK(std::abs(g.s - (-1.9f)) < 0.005f);    // at the producer's depth
+    }
+    CHECK((rc::anchor_standpoint(RelPose{}, 0.f, nullptr, offered) - offered).norm() == 0.f);   // no width: as published
+}
+
 int main()
 {
     centred_goes_straight();
@@ -431,6 +579,10 @@ int main()
     adv_falls_as_sigma_lat_grows();
     stale_anchor_left_turns_ccw();
     wait_turn_grinding_is_judged();
+    clear_gap_beside_the_leaf();
+    leaf_on_robot_side_not_contacted();
+    rotation_near_leaf_capped();
+    approach_standpoint_on_the_cross_line();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

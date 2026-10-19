@@ -68,7 +68,8 @@ static std::vector<V3> sweep(float phi, float swing, std::mt19937& rng, float oc
 struct Chain { float mean = 0.f, sigma = PHI_MAX; bool first = true; float hinge_llr = 0.f; double logit = 0.0; float p = 0.f; };
 // One cycle, estimate_phi's way, with the anchor's curve as the likelihood. `believed_right` false = the anchor's
 // LeafPrior names the other jamb (the try69 inheritance).
-static void step(Chain& c, const std::vector<V3>& pts, float swing, bool believed_right, float p_view = 0.74f)
+static void step(Chain& c, const std::vector<V3>& pts, float swing, bool believed_right, float p_view = 0.74f,
+                 double* swing_llr = nullptr)
 {
     rc::interaction::RelPose post;
     post.x = {0.f, D, 0.f};
@@ -78,7 +79,9 @@ static void step(Chain& c, const std::vector<V3>& pts, float swing, bool believe
     leaf.hinge_u = (believed_right ? -0.5f : 0.5f) * W;
     leaf.dir_u   = believed_right ? 1.f : -1.f;
     const auto g = rc::door::phi_grid(PHI_MAX, PHI_STEP);
+    leaf.phi = c.mean; leaf.phi_sigma = c.sigma; leaf.phi_known = not c.first;
     const auto ac = rc::door::anchor_phi_loglik(post, W, T, leaf, V3(0.f, 0.f, 0.5f), pts, p_view, g.lo, g.hi, g.n);
+    if (swing_llr != nullptr) *swing_llr += ac.swing_llr;
     std::vector<std::pair<float, float>> ll_this, ll_other;
     for (int k = 0; k < int(ac.ll_this.size()); ++k)
     {
@@ -190,6 +193,32 @@ int main()
         const auto i1 = init.x, s1 = seen.x;
         rc::door::carry_wait_poses(true, seen, init, tw, var, 0.5f);
         check(init.x == i1 and not (seen.x == s1), "seen: seen_pose moves, the init pose is frozen");
+    }
+
+    std::print("(8) Task 12 fix D: the BELIEVED SWING is wrong (a config pin / an inherited side) — both swings are scored\n");
+    for (const float swing_true : {+1.f, -1.f})
+        for (const float deg : {20.f, 30.f, 45.f, 60.f, 90.f})
+        {
+            const float phi = deg * float(M_PI) / 180.f;
+            Chain c;
+            double sllr = 0.0;
+            for (int f = 0; f < 5; ++f) step(c, sweep(phi, swing_true, rng), -swing_true, true, 0.74f, &sllr);
+            const float clear = rc::door::clear_width(W, phi);
+            std::print("  leaf truly {} {:3.0f} deg, believed the other way: P(passable) {:.3f} (logit {:+.1f}), phi est {:.0f} deg, "
+                       "swing log-odds (believed vs flipped) {:+.1f}\n", swing_true > 0 ? "AWAY  " : "TOWARD", deg, c.p, c.logit,
+                       c.mean * 57.2958f, sllr);
+            if (clear >= NEEDED)
+                check(c.p > 0.8f, std::format("wrong swing, {:.0f} deg (span {:.2f} ≥ body): P {:.3f} > 0.8", deg, clear, c.p));
+            else
+                check(c.p < 0.2f, std::format("wrong swing, {:.0f} deg (span {:.2f} < body): P {:.3f} < 0.2", deg, clear, c.p));
+            if (deg >= 30.f) check(sllr < 0.0, std::format("wrong swing, {:.0f} deg: the evidence favours the TRUE swing ({:+.1f})", deg, sllr));
+        }
+    {
+        Chain c;
+        double sllr = 0.0;
+        for (int f = 0; f < 5; ++f) step(c, sweep(0.f, 1.f, rng), -1.f, true, 0.74f, &sllr);
+        std::print("  a SHUT door: swing log-odds {:+.3f}\n", sllr);
+        check(std::abs(sllr) < 1.0, "a shut leaf says (almost) nothing about the swing");
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));

@@ -181,13 +181,25 @@ struct Calib
     }
 };
 
-struct LegStats { int n = 0, published = 0, ge06 = 0, pub_pred = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0, last_seen = -1; Calib cal; };
+struct LegStats
+{
+    int n = 0, published = 0, ge06 = 0, pub_pred = 0; double sum = 0, min = 1; std::int64_t t0 = 0, t1 = 0, last_seen = -1; Calib cal;
+    // Task 12 fix B: the doorway band (TRUE |s| ≤ 0.5 m, needs --gt): frames seen, seen-or-predicted under the 3-s wall-clock
+    // window, and under the band-CHARGED window (rc::door::anchor_unseen_charge at the last seen posterior, CrossClearanceM 0.80).
+    int band_n = 0, band_seen = 0, band_old = 0, band_new = 0;
+    std::int64_t charge = 0, charge_t = -1;
+    rc::interaction::RelPose seen_pose;
+};
+constexpr float kReplayCrossClearanceM = 0.80f;   // door_concept's DoorAffordance.CrossClearanceM default (the doorway band)
 void print_leg(const LegStats& s, int k)
 {
     if (s.n == 0) return;
     std::print("leg {}: t {:.1f}–{:.1f} s, {} frames: p_view mean {:.3f} min {:.3f}, ≥ 0.6 on {} ({:.0f} %), published (≥ 0.5) {}, "
                "published if the cross were claimed (seen, or predicted ≤ kAnchorPredictMs) {}\n", k,
                s.t0 * 1e-3, s.t1 * 1e-3, s.n, s.sum / s.n, s.min, s.ge06, 100.0 * s.ge06 / s.n, s.published, s.pub_pred);
+    if (s.band_n > 0)
+        std::print("  doorway band (true |s| ≤ 0.5 m): {} frames — seen {}, seen-or-predicted {} with the 3-s wall window, {} with the "
+                   "band-charged window (Task 12 fix B)\n", s.band_n, s.band_seen, s.band_old, s.band_new);
     s.cal.print("seen");
 }
 
@@ -286,13 +298,25 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
         x = post;
         ++leg.n; leg.sum += ev.p_view; leg.min = std::min(leg.min, double(ev.p_view));
         leg.published += ev.p_view >= 0.5f ? 1 : 0; leg.ge06 += ev.p_view >= 0.6f ? 1 : 0; leg.t1 = f.t_ms - t0;
+        const GtErr ge = gt_error(gt, f.t_ms, post);
         auto note_pred = [&](LegStats& L)
         {
-            if (ev.p_view >= 0.5f) L.last_seen = f.t_ms;
-            L.pub_pred += (L.last_seen >= 0 and f.t_ms - L.last_seen <= rc::interaction::kAnchorPredictMs) ? 1 : 0;
+            if (ev.p_view >= 0.5f) { L.last_seen = f.t_ms; L.charge = 0; L.seen_pose = post; }
+            else if (L.charge_t >= 0 and L.last_seen >= 0)
+                L.charge = rc::door::anchor_unseen_charge(L.charge, f.t_ms - L.charge_t,
+                                                          rc::door::anchor_doorway_band(L.seen_pose, kReplayCrossClearanceM));
+            L.charge_t = f.t_ms;
+            const bool old_rule = L.last_seen >= 0 and f.t_ms - L.last_seen <= rc::interaction::kAnchorPredictMs;
+            L.pub_pred += old_rule ? 1 : 0;
+            if (ge.ok and std::abs(ge.s) <= 0.5)
+            {
+                ++L.band_n;
+                L.band_seen += ev.p_view >= 0.5f ? 1 : 0;
+                L.band_old  += old_rule ? 1 : 0;
+                L.band_new  += (L.last_seen >= 0 and L.charge <= rc::interaction::kAnchorPredictMs) ? 1 : 0;
+            }
         };
         note_pred(leg);
-        const GtErr ge = gt_error(gt, f.t_ms, post);
         if (dump.is_open())
         {
             dump << (f.t_ms - t0) << ',' << post.x.x() << ',' << post.x.y() << ',' << post.x.z();

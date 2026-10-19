@@ -1025,6 +1025,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // reachability repair, the boxed-in search and the close-in re-check — so those still act on
     // whatever we are actually driving to. See ApproachCommitment in the header for the measurement.
     hold_approach_commitment(step, timestamp_ms);
+    // Task 12 fix C: an approach whose affordance names a fresh interaction anchor stands on the anchor's cross line.
+    apply_anchor_standpoint(step, *robot_pose);
     // The contract has to be known HERE, before the repair below, because the policy now decides both
     // whether there will be a terminal rotation and therefore whether the standpoint needs room for
     // one. active_contract_ is resolved at ARRIVAL and stays that way — it is what the servo executor
@@ -3025,7 +3027,8 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
                               .width_m = read->second,
                               .fresh = fresh,
                               .age_ms = age,
-                              .unseen_ms = std::max(0, unseen)};
+                              .unseen_ms = std::max(0, unseen),
+                              .leaf = rc::interaction::read_anchor_leaf(*graph_, id)};
 }
 
 // Task 9, fix A: ONCE A CROSS IS ANCHORED IT NEVER FALLS BACK TO THE ROOM ROUTE. The room route is known to fail in the
@@ -3046,6 +3049,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_wait_blocked_ = false;
     anchor_spin_since_ms_ = 0;
     anchor_backoff_logged_ = false;
+    anchor_leaf_logged_ = false;
     anchor_predicted_logged_ = false;
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
 }
@@ -3142,6 +3146,48 @@ float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir
     return v;
 }
 
+// Task 12 fix C: the approach standpoint re-expressed on the interaction anchor (rc::anchor_standpoint): the producer's depth
+// along the opening's normal, laterally on the cross line (the clear gap's centre). Only for an `_approach` affordance that
+// names a FRESH anchor (read_anchor's kAnchorStaleMs rule: a pose somebody is looking at); otherwise the room-frame
+// standpoint stands as published. Logged on the transitions, with the lateral shift it made.
+void ControllerSession::apply_anchor_standpoint(ControllerPlanningStep &step, const ControllerRobotPose &robot_pose)
+{
+    const bool is_approach = step.target.from_affordance and step.target.node_name.ends_with("_approach");
+    std::optional<std::pair<rc::interaction::RelPose, float>> a;
+    std::optional<rc::interaction::AnchorLeaf> leaf;
+    std::uint64_t id = 0;
+    if (is_approach and graph_ != nullptr)
+        if (const auto aff = graph_->get_node(step.target.node_id); aff.has_value())
+            if (id = graph_->get_attrib_by_name<interaction_node_id_att>(aff.value()).value_or(0); id != 0)
+            {
+                a = rc::interaction::read_anchor(*graph_, id, static_cast<std::int64_t>(rc::provenance::now_ms()));
+                if (a.has_value()) leaf = rc::interaction::read_anchor_leaf(*graph_, id);
+            }
+    const bool on = a.has_value() and a->second > 0.f;
+    if (not on)
+    {
+        if (anchor_standpoint_logged_)
+            std::println("[anchor] approach: '{}' — no fresh anchor: the room-frame standpoint as published", step.target.node_name);
+        anchor_standpoint_logged_ = false;
+        return;
+    }
+    const Eigen::Affine2f room_T_robot = robot_pose.as_transform();
+    const Eigen::Vector2f q = room_T_robot.inverse() * step.target.room_pos;
+    const Eigen::Vector2f q2 = rc::anchor_standpoint(a->first, a->second, leaf.has_value() ? &*leaf : nullptr, q);
+    const Eigen::Vector2f room2 = room_T_robot * q2;
+    if (not anchor_standpoint_logged_)
+    {
+        anchor_standpoint_logged_ = true;
+        const auto g = rc::anchor_cross_geometry(a->first);
+        const float psi = a->first.x.z();
+        const Eigen::Vector2f ax(std::cos(psi), std::sin(psi));
+        std::println("[anchor] approach: '{}' stands on the anchor's cross line — standpoint ({:.2f},{:.2f}) -> ({:.2f},{:.2f}) "
+                     "[room], {:+.2f} m along the wall (robot now e {:+.2f} s {:+.2f})", step.target.node_name,
+                     step.target.room_pos.x(), step.target.room_pos.y(), room2.x(), room2.y(), ax.dot(q2 - q), g.e, g.s);
+    }
+    step.target.room_pos = room2;
+}
+
 // One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
 //   1. the anchor's jambs (rc::anchor_jamb_guard: translation along the direction the base actually moves, unfloored, for
 //      the last ~0.4 m the LiDAR self-filter cannot see; |rot| by the corners' sweep onto the jambs, unfloored; and, Task 9
@@ -3187,6 +3233,23 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         note_no_command(); motion_commander.stop_robot();
     };
 
+    // Task 12 fix A: the swung leaf the owner publishes (anchor frame) — an obstacle for the guards, and the clear gap it leaves
+    // is the cross line. It is rigid in the anchor frame, so it serves the waited-for pose as well as a fresh one.
+    const rc::interaction::AnchorLeaf* leaf = a.leaf.has_value() ? &*a.leaf : nullptr;
+    if (a.leaf.has_value() != anchor_leaf_logged_)
+    {
+        anchor_leaf_logged_ = a.leaf.has_value();
+        if (leaf != nullptr)
+        {
+            const auto gap = rc::anchor_clear_gap(a.width_m, leaf);
+            std::println("[anchor] cross: {} carries its leaf — hinge ({:+.2f},{:+.2f}) free edge ({:+.2f},{:+.2f}) [anchor frame], "
+                         "phi {:.0f} deg sigma {:.1f} deg: an obstacle to the guards; the clear gap beside it is {:.2f} m wide, "
+                         "the cross line at {:+.2f} m", a.name, leaf->hinge.x(), leaf->hinge.y(), leaf->tip.x(), leaf->tip.y(),
+                         leaf->phi * 57.2958f, leaf->sigma_phi * 57.2958f, gap.width, gap.centre);
+        }
+        else
+            std::println("[anchor] cross: {} carries no leaf — the jambs alone, the opening's centre line", a.name);
+    }
     rc::AnchorCommand cmd;
     rc::interaction::RelPose pose = a.pose;   // the pose the guards are asked about
     if (a.fresh)
@@ -3194,7 +3257,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
-        cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic);
+        cmd = rc::anchor_cross_command(a.pose, a.width_m, half_w, standoff, v_max, w_max, holonomic, leaf);
         if (cmd.through)
         {
             const auto g = rc::anchor_cross_geometry(a.pose);
@@ -3244,7 +3307,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
     const auto &body = approach_body_.polygon();
     const auto guard = rc::anchor_jamb_guard(pose, a.width_m, cmd, holonomic, body, approach_body_.safety_margin(),
-                                             anchor_brake_decel(path_controller), v_max, w_max);
+                                             anchor_brake_decel(path_controller), v_max, w_max, leaf);
     if (guard.backoff != anchor_backoff_logged_)   // logged on the transitions only
     {
         anchor_backoff_logged_ = guard.backoff;

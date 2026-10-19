@@ -822,6 +822,8 @@ void SpecificWorker::step_passage_anchor()
             inst->anchor_phi_ll       = std::move(ac.ll_this);
             inst->anchor_phi_ll_other = std::move(ac.ll_other);
             inst->anchor_phi_hinge    = inst->leaf.hinge;   // the jamb `leaf` was built from
+            inst->anchor_swing_llr    = float(ac.swing_llr); // Task 12 fix D: this frame's swing evidence…
+            inst->anchor_phi_swing    = inst->leaf.swing;    // …relative to the swing `leaf` was built from
         }
         if (not pa.az_logged and ev.az_step > 0.f)
         {
@@ -873,15 +875,24 @@ void SpecificWorker::step_passage_anchor()
     //    node's unseen_time says how old that sighting is (0 = seen): the controller tells seen from predicted by it.
     //    An unmeasured cycle changes nothing about what was last seen: a Seen mode is not rewritten (as before), a
     //    Predicted one goes on until its window ends.
-    if (publish) { pa.seen_once = true; pa.last_seen_ms = now; pa.seen_pose = pa.pose; }
+    // ★ Task 12 fix B: the predicted window bounds the CHARGED unseen time — wall time weighted by P(out of the doorway band)
+    //   at the predicted pose (rc::door::anchor_doorway_band / anchor_unseen_charge): inside the band "not seen" is what
+    //   the geometry predicts, and the carried pose's covariance grows with the motion, not with the wait.
+    if (publish) { pa.seen_once = true; pa.last_seen_ms = now; pa.seen_pose = pa.pose; pa.unseen_charge_ms = 0; }
+    else if (pa.charge_stamp_ms > 0)
+        pa.unseen_charge_ms = rc::door::anchor_unseen_charge(pa.unseen_charge_ms, now - pa.charge_stamp_ms,
+                                                             rc::door::anchor_doorway_band(pa.seen_pose, cfg_.pragmatic.cross_clearance_m));
+    pa.charge_stamp_ms = now;
     const auto mode = (measured or pa.mode == rc::door::AnchorPublish::Predicted)
-        ? rc::door::anchor_publish_decision(publish, crs, pa.seen_once, now - pa.last_seen_ms, rc::interaction::kAnchorPredictMs)
+        ? rc::door::anchor_publish_decision(publish, crs, pa.seen_once, pa.unseen_charge_ms, rc::interaction::kAnchorPredictMs)
         : pa.mode;
     if (mode != pa.mode)
     {
         if (mode == rc::door::AnchorPublish::Predicted)
             std::print("door_concept: [anchor] {}@robot PREDICTED — not seen now, the cross is claimed: publishing the last seen "
-                       "pose carried by odometry (for ≤ {} ms)\n", pa.door_name, rc::interaction::kAnchorPredictMs);
+                       "pose carried by odometry (for ≤ {} ms of unseen time OUTSIDE the doorway band; P(in band) now {:.2f})\n",
+                       pa.door_name, rc::interaction::kAnchorPredictMs,
+                       rc::door::anchor_doorway_band(pa.seen_pose, cfg_.pragmatic.cross_clearance_m));
         else if (pa.mode == rc::door::AnchorPublish::Predicted)
             std::print("door_concept: [anchor] {}@robot predicted publication ended — {}\n", pa.door_name,
                        mode == rc::door::AnchorPublish::Seen ? "seen again" : "unseen beyond kAnchorPredictMs, or the cross ended");
@@ -909,6 +920,34 @@ void SpecificWorker::step_passage_anchor()
         out.stamp_ms = now - rc::interaction::kAnchorStaleMs - 1;
         wrote = pa.anchor->write(*G, out)
             and pa.anchor->set_unseen_ms(*G, int(std::min<std::int64_t>(now - pa.last_seen_ms, std::numeric_limits<int>::max())));
+    }
+    // ── Task 12 fix A: the SWUNG LEAF on the anchor, in anchor coordinates (interaction_anchor/anchor_leaf.h) — the door's
+    //    own belief (MAP hinge, swing, φ and its posterior σ), as the anchor update's LeafPrior builds it, so the controller's
+    //    guards know the obstacle the LiDAR self-filter hides and aim at the clear gap beside it. Not known (no leaf belief,
+    //    φ not measured) ⇒ the attributes are REMOVED, never a sentinel.
+    if (wrote)
+    {
+        std::optional<rc::interaction::AnchorLeaf> al;
+        if (inst != nullptr and inst->ai2_initialized and inst->interaction.phi_known)
+        {
+            const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
+            const float phi_max = std::clamp(cfg_.phi_max_rad, 0.f, float(M_PI));
+            const float sy = pa.axis_sign * inst->leaf.swing;
+            al = rc::interaction::make_anchor_leaf(pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.clear_width,
+                                                   sy * 0.5f * pa.thickness, pa.axis_sign * near, sy, pa.clear_width,
+                                                   std::clamp(inst->phi_est, 0.f, phi_max), inst->phi_sigma);
+        }
+        if (al.has_value() != pa.leaf_published)
+        {
+            pa.leaf_published = al.has_value();
+            if (al.has_value())
+                std::print("door_concept: [anchor] {}@robot carries its leaf: hinge ({:+.2f},{:+.2f}) free edge ({:+.2f},{:+.2f}) "
+                           "[anchor frame], phi {:.0f} deg σ {:.1f} deg\n", pa.door_name, al->hinge.x(), al->hinge.y(),
+                           al->tip.x(), al->tip.y(), al->phi * 57.2958f, al->sigma_phi * 57.2958f);
+            else
+                std::print("door_concept: [anchor] {}@robot leaf withdrawn — no leaf angle measured\n", pa.door_name);
+        }
+        pa.anchor->set_leaf(*G, al);
     }
     const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)

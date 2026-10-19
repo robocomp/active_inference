@@ -50,9 +50,14 @@ namespace rc::door
 
 struct AnchorPhiCurve
 {
-    std::vector<float> ll_this, ll_other;   // tempered log-likelihood on the φ grid; joint max 0 (empty = nothing)
+    std::vector<float> ll_this, ll_other;   // tempered log-likelihood on the φ grid, the SWING marginalised; joint max 0 (empty = nothing)
     double n_inf = 0.0, beta = 1.0;         // discriminating beams; the common-mode power (before p_view)
     int    n_rays = 0;
+    // Task 12 fix D: this frame's evidence about the SWING SIDE, log p(rays | believed swing) − log p(rays | flipped), each
+    // marginalised over both hinges (½ each) and over φ under the caller's prior on it (LeafPrior phi / phi_sigma; uniform
+    // when unknown) — on the same tempered scale as the curves. 0 when nothing discriminates (a shut leaf is the same leaf
+    // whichever way it would swing). The door accumulates it as it does the hinge's (DoorInstance::swing_llr).
+    double swing_llr = 0.0;
 };
 
 // `leaf` gives the believed hinge/swing in ANCHOR coordinates (the anchor caller's LeafPrior); `other` is the same
@@ -77,17 +82,22 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
     const double len = leaf.len > 0.f ? double(leaf.len) : double(width);
     const Eigen::Vector2d oa = inv(lidar_origin.head<2>().cast<double>());
 
-    // The leaf direction per (hypothesis, angle).
-    const int H = 2, K = nstep;
+    // The leaf direction per (hypothesis, angle). ★Task 12 fix D: FOUR hypotheses, hinge × swing, exactly as the pose update
+    // marginalises them (update_door_anchor's hinge × swing blocks at p_swing ½). With the swing a config pin (Openable.SwingDir,
+    // or a side inherited from the other room) and only the believed swing scored, a door AJAR 20–60° and swung AWAY from a
+    // believed TOWARD leaf was explained by the believed side's leaf near its own far end (φ locked at 73.7°) and read
+    // P(passable) ≈ 0.76 (the Task 11 re-review probe): an impassable door looked passable. Index hs = 2·hinge + swing.
+    const int H = 4, K = nstep;
     std::vector<Eigen::Vector2d> hinge(H), dir(H * K);
-    for (int h = 0; h < H; ++h)
+    for (int hs = 0; hs < H; ++hs)
     {
-        const double hu = (h == 0 ? 1.0 : -1.0) * double(leaf.hinge_u), du = (h == 0 ? 1.0 : -1.0) * double(leaf.dir_u);
-        hinge[h] = Eigen::Vector2d(hu, 0.0);
+        const double hsg = hs / 2 == 0 ? 1.0 : -1.0, ssg = hs % 2 == 0 ? 1.0 : -1.0;
+        const double hu = hsg * double(leaf.hinge_u), du = hsg * double(leaf.dir_u), sy = ssg * double(leaf.swing_y);
+        hinge[hs] = Eigen::Vector2d(hu, 0.0);
         for (int k = 0; k < K; ++k)
         {
             const double phi = double(phi_min) + (double(phi_max) - double(phi_min)) * k / (K - 1);
-            dir[h * K + k] = Eigen::Vector2d(du * std::cos(phi), double(leaf.swing_y) * std::sin(phi));
+            dir[hs * K + k] = Eigen::Vector2d(du * std::cos(phi), sy * std::sin(phi));
         }
     }
     const auto density = [&](double t_surf, double t_ref, double r, double s_d)
@@ -160,13 +170,39 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
     const double g = pv * out.beta;
     double mx = -std::numeric_limits<double>::infinity();
     for (double& x : ll) { x *= g; mx = std::max(mx, x); }
+    // Per hinge, the swing marginalised at ½ each: log ½(e^a + e^b), shifted so the joint max stays 0.
+    const auto lae = [](double a, double b) { const double m = std::max(a, b); return m + std::log(std::exp(a - m) + std::exp(b - m)); };
+    std::vector<double> lh(std::size_t(2 * K));
+    double mh = -std::numeric_limits<double>::infinity();
+    for (int h = 0; h < 2; ++h)
+        for (int k = 0; k < K; ++k)
+        {
+            const double v = lae(ll[std::size_t((2 * h) * K + k)], ll[std::size_t((2 * h + 1) * K + k)]) - std::log(2.0);
+            lh[std::size_t(h * K + k)] = v;
+            mh = std::max(mh, v);
+        }
     out.ll_this.resize(std::size_t(K));
     out.ll_other.resize(std::size_t(K));
     for (int k = 0; k < K; ++k)
     {
-        out.ll_this[std::size_t(k)]  = float(ll[std::size_t(k)] - mx);
-        out.ll_other[std::size_t(k)] = float(ll[std::size_t(K + k)] - mx);
+        out.ll_this[std::size_t(k)]  = float(lh[std::size_t(k)] - mh);
+        out.ll_other[std::size_t(k)] = float(lh[std::size_t(K + k)] - mh);
     }
+    // The swing's evidence: each swing marginalised over both hinges (½) and φ under the caller's prior.
+    double e_b = -std::numeric_limits<double>::infinity(), e_o = e_b;
+    const double sp = std::max(1e-4, double(leaf.phi_sigma));
+    for (int k = 0; k < K; ++k)
+    {
+        const double phi = double(phi_min) + (double(phi_max) - double(phi_min)) * k / (K - 1);
+        const double d = (phi - double(leaf.phi)) / sp;
+        const double lw = leaf.phi_known ? -0.5 * d * d : 0.0;
+        for (int h = 0; h < 2; ++h)
+        {
+            e_b = lae(e_b, ll[std::size_t((2 * h) * K + k)] + lw);
+            e_o = lae(e_o, ll[std::size_t((2 * h + 1) * K + k)] + lw);
+        }
+    }
+    out.swing_llr = std::isfinite(e_b - e_o) ? e_b - e_o : 0.0;
     return out;
 }
 

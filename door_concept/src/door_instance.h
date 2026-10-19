@@ -119,6 +119,13 @@ struct DoorInstance
     // step_passage_anchor, ADDED to estimate_phi's likelihood once and cleared there: each anchor frame counts once.
     std::vector<float> anchor_phi_ll, anchor_phi_ll_other;
     door::HingeSide    anchor_phi_hinge = door::HingeSide::Near;
+    // Task 12 fix D: the SWING SIDE as a static hidden variable, as the hinge: log P(the belief's swing) / P(the other side),
+    // accumulated from the passage anchor's beams (anchor_phi_loglik scores both swings; a shut leaf adds exactly 0) with no
+    // process noise — a door does not re-hang itself. `anchor_swing_llr` is the latest anchor frame's increment, for the swing
+    // `anchor_phi_swing` it was computed under; estimate_phi consumes it once (NaN = nothing pending).
+    float swing_llr        = 0.0f;
+    float anchor_swing_llr = std::numeric_limits<float>::quiet_NaN();
+    float anchor_phi_swing = 1.0f;
     // Task 11 fix round 1 (cost): score the other jamb every cycle only while the hinge MATTERS — the passage anchor
     // serves this door or one of its affordances is claimed (set by the pragmatic step) — else on a stride.
     bool hinge_question_live = false;

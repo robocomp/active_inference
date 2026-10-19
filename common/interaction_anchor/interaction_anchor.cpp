@@ -211,6 +211,41 @@ bool Anchor::set_unseen_ms(DSR::DSRGraph& G, int unseen_ms)
     return G.update_node(n.value());
 }
 
+bool Anchor::set_leaf(DSR::DSRGraph& G, const std::optional<AnchorLeaf>& leaf)
+{
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    const auto px = G.get_attrib_by_name<delimiting_polygon_x_att>(n.value());
+    const auto py = G.get_attrib_by_name<delimiting_polygon_y_att>(n.value());
+    const auto ph = G.get_attrib_by_name<door_phi_rad_att>(n.value());
+    if (not leaf.has_value())
+    {
+        if (not px.has_value() and not py.has_value() and not ph.has_value()) return true;
+        if (px.has_value()) G.remove_attrib_local<delimiting_polygon_x_att>(n.value());
+        if (py.has_value()) G.remove_attrib_local<delimiting_polygon_y_att>(n.value());
+        if (ph.has_value()) G.remove_attrib_local<door_phi_rad_att>(n.value());
+        return G.update_node(n.value());
+    }
+    auto [xs, ys] = encode_anchor_leaf(leaf.value());
+    if (px.has_value() and py.has_value() and ph.has_value() and px->get() == xs and py->get() == ys and ph.value() == leaf->phi)
+        return true;
+    G.add_or_modify_attrib_local<delimiting_polygon_x_att>(n.value(), std::move(xs));
+    G.add_or_modify_attrib_local<delimiting_polygon_y_att>(n.value(), std::move(ys));
+    G.add_or_modify_attrib_local<door_phi_rad_att>(n.value(), leaf->phi);
+    return G.update_node(n.value());
+}
+
+std::optional<AnchorLeaf> read_anchor_leaf(DSR::DSRGraph& G, std::uint64_t anchor_id)
+{
+    const auto n = G.get_node(anchor_id);
+    if (not n.has_value()) return std::nullopt;
+    const auto px = G.get_attrib_by_name<delimiting_polygon_x_att>(n.value());
+    const auto py = G.get_attrib_by_name<delimiting_polygon_y_att>(n.value());
+    if (not px.has_value() or not py.has_value()) return std::nullopt;
+    const auto ph = G.get_attrib_by_name<door_phi_rad_att>(n.value());
+    return decode_anchor_leaf(px->get(), py->get(), ph.value_or(0.f));
+}
+
 std::optional<std::pair<RelPose, float>> read_affordance_anchor(DSR::DSRGraph& G, const DSR::Node& affordance,
                                                                 std::int64_t now_ms)
 {

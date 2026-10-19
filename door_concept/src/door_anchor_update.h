@@ -144,6 +144,7 @@
 
 #include <Eigen/Dense>
 
+#include "interaction_anchor/anchor_leaf.h"   // kLeafHalfThickM: the leaf model shared with the controller (Task 12)
 #include "interaction_anchor/relative_pose.h"
 
 namespace rc::door
@@ -226,6 +227,33 @@ enum class AnchorPublish : std::uint8_t { None, Seen, Predicted };
     if (seen_now) return AnchorPublish::Seen;
     if (cross_claimed and seen_in_passage and since_seen_ms >= 0 and since_seen_ms <= predict_ms) return AnchorPublish::Predicted;
     return AnchorPublish::None;
+}
+
+// ─── Task 12 fix B: THE PREDICTED WINDOW COUNTS ONLY THE TIME AN UNSEEN DOORWAY IS NEWS ────────────────────────────────
+// try70 leg 5: the robot stood at the mouth (true s −0.32) and the anchor was never published again: p_view held at 0.46,
+// the 3-s predicted window ran out, the controller waited 40 s and handed the cross back. What the 3 s bound is FOR is a
+// doorway that SHOULD be in view and is not (a wrong pose, a dead sensor) — but inside the doorway band the body is in
+// the opening: the jambs pass inside the LiDAR self-filter and the walls are grazed edge-on, so "not seen" there is what
+// the geometry predicts, not news, and the odometry-carried pose loses nothing by waiting (its covariance grows with the
+// MOTION, rc::interaction::predict, not with the clock). So the unseen time is CHARGED at the rate of the probability that
+// the robot is OUT of the band: charge += dt · (1 − P(|s| < c)), s the robot's progress along the opening's normal under
+// the predicted pose's own σ along it, c = DoorAffordance.CrossClearanceM (the half-depth door_concept already calls "in
+// the doorway": crossing progress ±1). A seen frame resets it; kAnchorPredictMs then bounds the CHARGED time. Outside the
+// band nothing changes (charge = wall time); inside it the window stretches smoothly — no new level.
+[[nodiscard]] inline float anchor_doorway_band(const rc::interaction::RelPose& pose, float half_depth)
+{
+    if (not pose.x.allFinite() or not pose.P.allFinite() or not (half_depth > 0.f)) return 0.f;
+    const float psi = pose.x.z();
+    const Eigen::Vector2f n(-std::sin(psi), std::cos(psi));
+    const float s = -n.dot(pose.x.head<2>());
+    const float sd = std::sqrt(std::max(1e-12f, n.dot(pose.P.topLeftCorner<2, 2>() * n)));
+    const auto Phi = [](float z) { return 0.5f * std::erfc(-z * 0.70710678f); };
+    return std::clamp(Phi((half_depth - s) / sd) - Phi((-half_depth - s) / sd), 0.f, 1.f);
+}
+[[nodiscard]] inline std::int64_t anchor_unseen_charge(std::int64_t charge_ms, std::int64_t dt_ms, float band)
+{
+    if (dt_ms <= 0) return charge_ms;
+    return charge_ms + std::int64_t(std::llround(double(dt_ms) * double(1.f - std::clamp(band, 0.f, 1.f))));
 }
 
 // The zed frustum in the ROBOT frame, for the camera's visibility term. `known` false = no frustum (the mask is then
@@ -322,7 +350,7 @@ constexpr double kLogNegligible = -13.815510557964274;   // log(1e-6)
 // the leaf's FACE, and the leaf turns about a hinge on the jamb's swing-side face. With a thin leaf hinged on the
 // mid-plane (round 3), the 90-degree-open leaf's face sat 4 cm off the model line; once phi was marginalised (fix round 4)
 // the fit traded that misfit for phi = 1.47 and 0.08 rad of anchor yaw mid-doorway (pinning phi = pi/2 gave 0.027).
-constexpr double kLeafHalfThick = 0.02;
+constexpr double kLeafHalfThick = rc::interaction::kLeafHalfThickM;   // 0.02 m; Task 12: ONE value, published on the anchor too
 
 using V3d = Eigen::Vector3d;
 using M3d = Eigen::Matrix3d;

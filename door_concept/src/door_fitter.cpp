@@ -1064,6 +1064,23 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     }
     inst.anchor_phi_ll.clear();
     inst.anchor_phi_ll_other.clear();
+    // ★ Task 12 fix D: the swing's log-odds, from the anchor's beams (the only channel that scores both swings), consumed once;
+    //   its sign is relative to the swing it was computed under. The geometry swings to the MAP side: ⚑ the flip at P = ½ is
+    //   the MAP of a binary posterior (a decision level, as the hinge's), and the log-odds is negated with it.
+    if (std::isfinite(inst.anchor_swing_llr))
+    {
+        const float cur = inst.ai2_belief.params().leaf.swing;
+        inst.swing_llr += (inst.anchor_phi_swing * cur > 0.0f ? 1.0f : -1.0f) * inst.anchor_swing_llr;
+        inst.anchor_swing_llr = std::numeric_limits<float>::quiet_NaN();
+        if (inst.swing_llr < 0.0f)
+        {
+            inst.ai2_belief.set_leaf_swing(-cur);
+            inst.swing_llr = -inst.swing_llr;
+            std::print("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal: the anchor's beams explain "
+                       "it better there (log-odds {:+.1f}; phi {:.0f} deg)\n", inst.node_name, -cur > 0.0f ? "along" : "against",
+                       inst.swing_llr, inst.phi_est * 57.2958f);
+        }
+    }
     std::vector<std::pair<float, float>> loglik;
     if (not ll_this.empty())
     {

@@ -334,6 +334,8 @@ private:
         bool  frames_checked_rays = false, frames_checked_mask = false;   // Step 0: one-shot frame diagnostics
         float p_open_belief = 0.5f;                       // fix round 2: the door's P(open), for the visibility check
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
+        std::int64_t unseen_charge_ms = 0, charge_stamp_ms = 0;   // Task 12 fix B: the charged unseen time (anchor_unseen_charge)
+        bool  leaf_published = false;                     // Task 12 fix A: the anchor carries the leaf (logs the transitions)
         rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame, held kAnchorStaleMs (odometry-carried)
         bool  az_logged = false;                          // the bpearl's measured azimuth step logged once per anchor
     };

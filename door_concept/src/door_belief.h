@@ -198,6 +198,7 @@ public:
     // engine is untouched, exactly as door_geometry.h's header anticipated.
     void  set_leaf_phi(float phi) { params_.leaf.phi = phi; }
     void  set_leaf_hinge(door::HingeSide h) { params_.leaf.hinge = h; }
+    void  set_leaf_swing(float swing) { params_.leaf.swing = swing; }   // Task 12 fix D: the MAP swing side (±1)
 
     // ── THE HINGE BRANCH: free energy as a function of the leaf angle alone ──────────────────────
     // ★THIS IS THE SAME MINIMISATION THE AGENT ALREADY DOES, RESTRICTED TO ONE COORDINATE. Nothing new
