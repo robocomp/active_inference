@@ -191,6 +191,10 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
             "var = RtCovScale · Σ_ii; calibrate toward NEES≈1");
     out.rt_cov_add_chain              = getb("DoorConcept.RtCovAddChain", true,
             "Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov");
+    out.anchor_frame_record           = getb("DoorConcept.AnchorFrameRecord", false,
+            "Record every measured interaction-anchor cycle to etc/anchor_frames.bin (replay_anchor_frames; ≤ 200 MB/run). Development instrument, default off");
+    out.anchor_log                    = getb("DoorConcept.AnchorLog", false,
+            "Write etc/anchor_log.csv, one row per cycle while an interaction anchor exists. Development instrument, default off");
 
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis", 9.0f,
             "χ²₂ gate (~3σ) for a mask↔instance match once it has a cov");

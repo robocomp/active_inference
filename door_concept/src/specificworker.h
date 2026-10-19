@@ -345,6 +345,7 @@ private:
     };
     std::optional<PassageAnchor> passage_anchor_;
     std::ofstream anchor_log_;
+    std::uint64_t anchor_log_rows_ = 0;   // final review I-4: flush every kAnchorRecordFlushEvery rows
     rc::door::rec::Recorder anchor_frames_;   // Task 8 fix 3: etc/anchor_frames.bin, every measured anchor cycle (replay_anchor_frames)
     void step_passage_anchor();
     bool create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff);

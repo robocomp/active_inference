@@ -60,6 +60,9 @@ namespace rc::door::rec
 inline constexpr char          kMagic[8] = {'D', 'A', 'N', 'C', 'H', 'O', 'R', 'F'};
 inline constexpr std::uint32_t kVersion  = 4;
 inline constexpr std::uint64_t kMaxBytes = 200ull * 1024ull * 1024ull;   // ⚑ disk budget
+// I/O batching, not a model level: the recorder (and door_concept's anchor_log.csv) flush every this many records and at
+// close — never per record on the compute thread (final review I-4).
+inline constexpr std::uint32_t kAnchorRecordFlushEvery = 64;
 
 struct Frame
 {
@@ -228,15 +231,17 @@ public:
         if (bytes_ + sizeof(n) + b.size() > kMaxBytes) { full_ = true; out_.flush(); return false; }
         out_.write(reinterpret_cast<const char*>(&n), sizeof(n));
         out_.write(b.data(), std::streamsize(b.size()));
-        out_.flush();
+        if (++since_flush_ >= kAnchorRecordFlushEvery) { out_.flush(); since_flush_ = 0; }
         bytes_ += sizeof(n) + b.size();
         return bool(out_);
     }
     bool capped() const { return full_; }
+    bool is_open() const { return out_.is_open(); }
     std::uint64_t bytes() const { return bytes_; }
 
 private:
-    std::ofstream out_;
+    std::ofstream out_;              // closed (and so flushed) by its destructor at shutdown
+    std::uint32_t since_flush_ = 0;
     std::uint64_t bytes_ = 0;
     bool full_ = false;
 };

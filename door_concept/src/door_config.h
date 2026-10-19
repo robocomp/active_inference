@@ -369,6 +369,12 @@ struct DoorConfig
     bool  rt_cov_upload = true;
     float rt_cov_scale  = 1.0f;
     bool  rt_cov_add_chain = true;   // Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
+    // Final review I-4: the interaction anchor's DEVELOPMENT instruments, both DEFAULT OFF (cf. retina's [ZedDump]).
+    // anchor_frame_record: etc/anchor_frames.bin, every measured anchor cycle (~17 KB/frame, ≤ 200 MB/run) for
+    // tests/replay_anchor_frames. anchor_log: etc/anchor_log.csv, one row per cycle while an anchor exists. Neither is
+    // flushed per row: both flush every kAnchorRecordFlushEvery records and at close.
+    bool  anchor_frame_record = false;
+    bool  anchor_log = false;
 
     // ── Multi-instance birth/associate/death tracker (shared rc::InstanceTracker) ──────────────────
     // "door" masks are associated to instances by a covariance-gated 1-to-1 (cov from the belief Σ),

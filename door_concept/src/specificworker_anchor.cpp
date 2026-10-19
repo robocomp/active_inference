@@ -246,7 +246,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
                passage_anchor_->linked_epoch, p.x.x(), p.x.y(), p.x.z(),
                std::sqrt(std::max(0.0f, p.P(0, 0) + p.P(1, 1))));
 
-    if (not anchor_log_.is_open())
+    if (cfg_.anchor_log and not anchor_log_.is_open())   // final review I-4: DoorConcept.AnchorLog (default off)
     {
         anchor_log_.open("etc/anchor_log.csv", std::ios::out | std::ios::trunc);
         anchor_log_.imbue(std::locale::classic());   // a comma decimal separator can never reach the file
@@ -887,7 +887,8 @@ void SpecificWorker::step_passage_anchor()
     }
     pa.view_llr_stamp_ms = now;   // every cycle: unmeasured time passes and carries no evidence (Task 17 add-on)
     // ── Task 8 fix 3: the frame record (etc/anchor_frames.bin) — every measured cycle, inputs and outputs ──────────
-    if (measured)
+    //    Only when DoorConcept.AnchorFrameRecord opened it (final review I-4): building a Frame is not free either.
+    if (measured and anchor_frames_.is_open())
     {
         rc::door::rec::Frame fr;
         fr.t_ms = now;
@@ -1046,6 +1047,7 @@ void SpecificWorker::step_passage_anchor()
                     << (measured ? ev.n_through : -1) << ',' << (measured ? ev.n_blocked : -1) << ','
                     << (measured ? ev.n_short : -1) << ',' << (measured ? ev.p_open : -1.0f) << ','
                     << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << '\n';
-        anchor_log_.flush();
+        // Final review I-4: batched, not per row (the stream's destructor flushes the tail at shutdown).
+        if (++anchor_log_rows_ % rc::door::rec::kAnchorRecordFlushEvery == 0) anchor_log_.flush();
     }
 }

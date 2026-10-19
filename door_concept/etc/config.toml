@@ -185,6 +185,9 @@ SupportSelectHeightMarginM = 0.25 # extra Z margin above door height when select
 RtCovUpload = true          # upload the door pose covariance (rt_covariance_att, 6×6 SE3) onto the room→door RT edge from the belief Σ
 RtCovScale = 1.0            # var = RtCovScale · Σ_ii; calibrate toward NEES≈1
 RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
+# Interaction-anchor development instruments (final review I-4), both OFF by default. Neither flushes per row.
+AnchorFrameRecord = false   # etc/anchor_frames.bin: every measured anchor cycle for tests/replay_anchor_frames (~17 KB/frame, ≤ 200 MB/run)
+AnchorLog = false           # etc/anchor_log.csv: one row per cycle while an anchor exists
 
 [DoorAffordance]
 # ── THE THREE PRAGMATIC AFFORDANCES: approach / open / cross ────────────────────────────────────────
