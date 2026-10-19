@@ -34,6 +34,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -98,21 +99,48 @@ inline DoorwayRays select_doorway_rays(const Aperture& ap, const Eigen::Vector3f
         const bool stopped_near = (p.head<2>() - c).norm() <= reach;
         if (stopped_near and (p.z() < z_lo or p.z() > z_hi)) continue;   // floor / above the lintel
         if (std::abs(ap.across_u().dot(p.head<2>() - c)) > 0.10f) ++out.off_plane;
-        // ★ A RAY THAT NEVER REACHED THE DOORWAY TESTED NOTHING ABOUT ITS LEAF (2026-10-18, user: "for an open door
-        //   the LiDAR has to go through, and vice versa"). OPEN is shown by returns BEYOND the opening, SHUT by returns
-        //   ON the leaf plane; a return short of the plane hit something in front of the door. Kept in, such returns
-        //   let a leaf swung toward the robot "explain" the doorway recess's side walls: live try59, the robot 3.5 m
-        //   away saw 0 returns on the shut leaf and ~190 short ones on the hinge side, and phi went 0.00 → 1.69 rad
-        //   (σ 0.045) on a CLOSED door — no ray had reached the opening to say it was blocked. Kept: returns that reach
-        //   the plane, within 3σ of range noise plus half the wall's depth.
-        const float s_o = ap.across_u().dot(o2 - c), s_p = ap.across_u().dot(p.head<2>() - c);
-        const float tol = 3.0f * 0.05f + 0.5f * std::max(0.0f, ap.thickness);
-        if (s_o != 0.0f and std::copysign(1.0f, s_o) * s_p > tol) continue;   // ended on the robot's side, short of it
+        // ★ A RETURN SHORT OF THE DOORWAY PLANE IS KEPT (try97, 2026-10-19). From 2026-10-18 (01dda32d) such returns were
+        //   dropped: on a shut DOOR_1 the corridor wall beside the jamb (try59, ~190 returns) was "explained" by a leaf
+        //   swung toward the robot (phi 1.69 rad), because the field had no other structure to put them on. But a leaf
+        //   swung toward the sensor returns EXACTLY such rays, and so does nothing else: dropping them made every leaf on
+        //   the sensor's side unobservable — never supported, only refuted by rays that happened to fly past it — so the
+        //   swing was inferred AWAY from whoever looked. try97: from room_1 (the side DOOR_1 opens into) the swing went to
+        //   room_2 with +2309 nats and phi 110°; carried across, room_2 then held a leaf on ITS side that its own
+        //   selection could not see, parked on the line of sight from the hinge (73°, 49° from the parked pose) for a
+        //   leaf at 90°. A selection that depends on the hypothesis is not a likelihood. The corridor wall is now
+        //   modelled for what it is (FieldNuisance::room_walls, room_walls_beside below), under every hypothesis.
         rays.endpoints.push_back(p);
     }
     rays.precision   = std::max(1e-3f, precision);
     rays.max_range_m = 8.0f;
     rays.robust_c_m  = 0.05f;   // the beam model's RANGE NOISE sigma (see estimate_phi)
+    return out;
+}
+
+// ─── THE ROOM'S OTHER WALLS, as the field's background structure (try97) ─────────────────────────────────────────────
+// The room polygon's edges as vertical wall segments for DoorBelief::FieldNuisance::room_walls, LESS the door's own wall:
+// that one is already the field's plane-with-a-hole, and solid it would stop every ray through the opening. An edge is
+// the door's wall when both its ends lie within the field's own depth support [depth_lo, depth_hi] of the doorway plane
+// — the band in which the model already says the door's wall can be. No new level: a wall perpendicular to the door
+// (a corridor side) starts in that band and leaves it, so it stays.
+inline std::vector<std::array<Eigen::Vector2f, 2>> room_walls_beside(const Aperture& ap,
+                                                                     const std::vector<Eigen::Vector2f>& polygon,
+                                                                     float depth_lo, float depth_hi)
+{
+    std::vector<std::array<Eigen::Vector2f, 2>> out;
+    const std::size_t n = polygon.size();
+    if (n < 3) return out;
+    const Eigen::Vector2f nrm = ap.across_u();
+    const auto in_band = [&](const Eigen::Vector2f& p)
+    { const float d = nrm.dot(p - ap.wall_O); return d >= depth_lo and d <= depth_hi; };
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& a = polygon[i];
+        const Eigen::Vector2f& b = polygon[(i + 1) % n];
+        if (in_band(a) and in_band(b)) continue;   // the door's own wall
+        out.push_back({a, b});
+    }
     return out;
 }
 

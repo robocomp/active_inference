@@ -448,6 +448,28 @@ namespace
         }
         return tmin > 0.0f ? tmin : -1.0f;
     }
+
+    // ── Ray vs the ROOM's walls (FieldNuisance::room_walls): vertical segments standing on the floor. Returns the first
+    //    hit distance along the unit 3-D ray u, or <0 for none. A crossing below the floor is not a wall hit (the floor
+    //    stopped the ray first). Static: the same under every leaf hypothesis and every door nuisance.
+    float ray_room_walls(const Eigen::Vector3f& o, const Eigen::Vector3f& u,
+                         const std::vector<std::array<Eigen::Vector2f, 2>>& walls, float floor_z)
+    {
+        float best = -1.0f;
+        const Eigen::Vector2f o2 = o.head<2>(), u2 = u.head<2>();
+        for (const auto& [a, b] : walls)
+        {
+            const Eigen::Vector2f e = b - a, d = a - o2;
+            const float den = u2.x() * e.y() - u2.y() * e.x();
+            if (std::abs(den) < 1e-9f) continue;                      // parallel to the wall
+            const float t = (d.x() * e.y() - d.y() * e.x()) / den;    // along the ray (3-D distance: u is unit)
+            const float s = (d.x() * u2.y() - d.y() * u2.x()) / den;  // along the wall segment, [0, 1]
+            if (t <= 0.0f or s < 0.0f or s > 1.0f) continue;
+            if (o.z() + t * u.z() < floor_z) continue;
+            if (best < 0.0f or t < best) best = t;
+        }
+        return best;
+    }
 }   // namespace
 
 std::vector<std::pair<float, float>>
@@ -529,6 +551,10 @@ DoorBelief::phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, f
                             else if (P.z() >= ap.floor_z) t_wall = t;   // solid wall (floor is not ours)
                         }
                     }
+                    // ── the ROOM's walls (try97): a wall met before the door's wall/hole stops the ray there ─────
+                    if (const float t_room = ray_room_walls(rays.origin, u, nz.room_walls, ap.floor_z);
+                        t_room > 0.0f and (t_wall <= 0.0f or t_room < t_wall) and (t_ap <= 0.0f or t_room < t_ap))
+                    { t_wall = t_room; t_ap = -1.0f; }
                     // ── the LEAF ────────────────────────────────────────────────────────────────
                     const float t_leaf = ray_obb_entry(rays.origin, u, L);
 
@@ -691,6 +717,11 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     std::vector<float>  t_wall_eff(static_cast<std::size_t>(NN) * M, -1.0f);
     std::vector<float>  t_ap_v(static_cast<std::size_t>(NN) * M, -1.0f);
     std::vector<double> base(static_cast<std::size_t>(NN) * M, 0.0);
+    // The room's walls (FieldNuisance::room_walls, try97): static, so once per ray.
+    std::vector<float> t_room(static_cast<std::size_t>(M), -1.0f);
+    if (not nz.room_walls.empty())
+        for (int i = 0; i < M; ++i)
+            t_room[static_cast<std::size_t>(i)] = ray_room_walls(o, U[static_cast<std::size_t>(i)], nz.room_walls, ap0.floor_z);
     for (int di = 0; di < dn; ++di)
     {
         const float depth = grid(nz.depth_lo, nz.depth_hi, dn, di);
@@ -724,6 +755,10 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
                     if (in_open) t_ap = t_plane;
                     else if (pz >= ap0.floor_z) t_wall = t_plane;
                 }
+                // A room wall met before the door's wall / hole stops the ray there (the same rule as phi_field_likelihood).
+                if (const float tr = t_room[static_cast<std::size_t>(i)];
+                    tr > 0.0f and (t_wall <= 0.0f or tr < t_wall) and (t_ap <= 0.0f or tr < t_ap))
+                { t_wall = tr; t_ap = -1.0f; }
                 const std::size_t idx = static_cast<std::size_t>(di * ln + li) * M + i;
                 t_wall_eff[idx] = t_wall;
                 t_ap_v[idx]     = t_ap;

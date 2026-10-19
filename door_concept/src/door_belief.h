@@ -384,6 +384,16 @@ public:
         // leaf on the far side can only be "explained" by over-swinging it behind the wall (room_1: 117 deg for 90) or by a
         // half-shut leaf (try87 room_2: 60 deg, P(passable) 0 for an open door ⇒ `open` re-offered and timed out 22 times).
         bool other_swing = false;
+        // ★ THE ROOM THE SENSOR IS IN IS PART OF THE SCENE (try97, 2026-10-19). Vertical wall segments (room frame, from
+        //   the floor up) — the room polygon's edges other than the door's own wall (rc::door::room_walls_beside) — are a
+        //   modelled surface under EVERY leaf hypothesis: a return on them is the wall's, so a leaf swung toward the sensor
+        //   is credited only with returns the room cannot explain, and is refuted by any ray that flew past where it would
+        //   stand. Before this the field had no background structure, so returns short of the doorway plane were DROPPED by
+        //   the selection (select_doorway_rays, 2026-10-18: the corridor wall beside DOOR_1 read as a leaf at 97° on a shut
+        //   door) — which blinded the model to every leaf on the sensor's side and biased the swing AWAY from the observer
+        //   (try97: +2309 nats for the wrong swing from room_1, carried to room_2, phi 73°/49° for a leaf at 90°).
+        //   Empty ⇒ no background (the field as before, used by the synthetic harnesses).
+        std::vector<std::array<Eigen::Vector2f, 2>> room_walls;
     };
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,

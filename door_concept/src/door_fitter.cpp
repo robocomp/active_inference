@@ -1016,6 +1016,12 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     // the wide support that ±w/2 was introduced for.
     if (inst.ai2_initialized)
         nz.lat_sigma = std::sqrt(std::max(1e-8f, inst.ai2_belief.covariance()(0, 0)));   // 0 = known, never "uniform"
+    // try97: the room the sensor stands in is part of the scene — its walls, less the door's own (rc::door::room_walls_beside).
+    // The field explains returns on them under every leaf hypothesis (so the selection keeps returns short of the doorway
+    // plane: a leaf swung toward the sensor is seen, and a corridor wall is not taken for one), and the registration
+    // attributes them to their own wall instead of the door's.
+    if (has_room_polygon())
+        nz.room_walls = rc::door::room_walls_beside(inst.aperture, room_polygon_, nz.depth_lo, nz.depth_hi);
     rc::ai::LidarRays rays;
     // ★try96: THE SWEEP IS REGISTERED TO THE WALL IT SEES before any doorway likelihood (door_opening_edges.h). A heading /
     //   across-wall error of the room's pose misregisters the cloud in the room frame (try96: 14-20°, 0.3-0.45 m for ~30 s ⇒
@@ -1025,7 +1031,7 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     inst.dbg_reg = {};
     if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
     {
-        reg_sweep = rc::door::register_sweep(inst.ai2_belief.aperture(), leaf_origin_, *leaf_pts_);
+        reg_sweep = rc::door::register_sweep(inst.ai2_belief.aperture(), leaf_origin_, *leaf_pts_, nz.room_walls);
         inst.dbg_reg = reg_sweep.reg;
     }
     if (leaf_pts_ and not leaf_pts_->empty() and inst.ai2_initialized)
