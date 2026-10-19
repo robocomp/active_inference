@@ -1,6 +1,7 @@
 // DoorPassage (controller_door_passage.h): the close-behind step after a crossing, and the hand-back to affordances.
 // Build+run (a real DSR graph on a private DDS domain, like common/affordance_manager/tests):
-//   g++ -std=c++23 -O0 -g -fPIC -I/usr/include/eigen3 $(pkg-config --cflags Qt6Core) -o /tmp/tdp test_door_passage.cpp \
+//   g++ -std=c++23 -O0 -g -fPIC -I/usr/include/eigen3 -I../../common -DSHADOW_JSON="\"$PWD/../../robot_concept/shadow.json\"" \
+//       $(pkg-config --cflags Qt6Core) -o /tmp/tdp test_door_passage.cpp \
 //       -ldsr_api -ldsr_core -lfastcdr -lfastdds $(pkg-config --libs Qt6Core) && /tmp/tdp
 #include "../src/controller_door_passage.h"
 
@@ -145,6 +146,40 @@ int main()
         const auto out = p.update(*G, nullptr, "room_2");
         CHECK(p.view().step == Step::Done);
         CHECK(out.event.has_value() and out.event->find("left open") != std::string::npos);
+    }
+
+    // ── final review I-1: an ANCHORED cross clears past the room switch; its anchor is then lost with no gap to carry it.
+    //    The session drops `engaged` (rc::anchor_gone_action == EndClearing); the passage must END (room-switch rule), not
+    //    stay `clearing` for ever. ──────────────────────────────────────────────────────────────────────────────────────
+    {
+        auto G = make_graph(4);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_3", Step::Cross);
+        const std::string a = "aff_door_3_";
+        offered(*G, a + "approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, a + "approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, a + "approach");
+        p.update(*G, nullptr, "room_1");
+        offered(*G, a + "cross");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, a + "cross");
+        p.note_anchor(/*engaged=*/true, /*through=*/false);
+        p.update(*G, nullptr, "room_1");
+        p.update(*G, nullptr, "room_2");            // room switch on the anchor: keep going until through
+        CHECK(p.clearing());
+        CHECK(p.view().step == Step::Cross);
+        p.update(*G, nullptr, "room_2");
+        CHECK(p.clearing());                        // still engaged: still clearing
+        CHECK(not p.take_finished());
+        p.note_anchor(/*engaged=*/false, /*through=*/false);   // the anchor is gone, no gap: the session gives it up
+        const auto out = p.update(*G, nullptr, "room_2");
+        CHECK(not p.clearing());
+        CHECK(p.view().step == Step::Done);
+        CHECK(out.event.has_value() and out.event->find("room changed") != std::string::npos);
+        CHECK(p.take_finished());
     }
 
     std::println("test_door_passage: {} checks, {} failures", checks, failures);

@@ -274,6 +274,20 @@ struct CrossThroughGate
     return gap_held and gate.near_seen;
 }
 
+// ── …AND WHEN NOTHING CAN CARRY IT (final review I-1) ─────────────────────────────────────────────────────────────────
+// With the anchor gone and no held gap (no gap line, or the near side never observed in this claim), what the cross does
+// depends on where it is. Before the room switch the room route stands (its coordinates are still this room's). Past it —
+// the passage clearing — the cross target is a pose in the room JUST LEFT, read in the new room's frame: it must never be
+// driven (review NB2). The cross ENDS instead: the session stops the base and drops `engaged`, so the passage takes its
+// room-switch end (rc::anchor_cross_end(false, true, ·) == RoomSwitch) on the next cycle and reports the step's outcome.
+// Without this the passage stayed `clearing` for ever (anchored_ still true, through_ never reached) — an unbounded hang.
+enum class AnchorGoneAction { RoomRoute, CarryOnGap, EndClearing };
+[[nodiscard]] inline AnchorGoneAction anchor_gone_action(bool gap_carries, bool clearing)
+{
+    if (gap_carries) return AnchorGoneAction::CarryOnGap;
+    return clearing ? AnchorGoneAction::EndClearing : AnchorGoneAction::RoomRoute;
+}
+
 // ── DRIVE ON A STALE ANCHOR? (Task 13 Fix E far side; Task 16: from the plane on) ───────────────────────────────────────
 // A fresh anchor is driven on. A stale one is driven on — on the pose odometry carries, the guards in the chain — once the
 // body's centre is PAST THE PLANE on that pose (s > 0: try76 leg 2 stood at s +0.36 for 40 s waiting for an anchor that

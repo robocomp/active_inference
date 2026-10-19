@@ -3189,6 +3189,20 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
     }
     if (not anchor_cross_.has_value())
     {
+        // Final review I-1: past the room switch with nothing to carry the cross, the cross ENDS (rc::anchor_gone_action) —
+        // never the room route, whose target is a pose in the room just left. Dropping `engaged` lets the passage take its
+        // room-switch end on the next cycle (note_anchor → rc::anchor_cross_end == RoomSwitch); this cycle drives nothing.
+        if (rc::anchor_gone_action(/*gap_carries=*/false, door_passage_.clearing()) == rc::AnchorGoneAction::EndClearing)
+        {
+            if (anchor_cross_engaged_)
+                std::println("[anchor] cross: the anchor of '{}' is gone past the room switch and no held gap carries the "
+                             "cross — it ends here (the passage moves on by its room-switch rule)", step.target.node_name);
+            anchor_cross_engaged_ = false;
+            anchor_through_ = false;
+            anchor_wait_since_ms_ = 0;
+            anchor_spin_since_ms_ = 0;
+            return true;   // no route: execute_plan finds neither an anchor nor a plan, and stops the base
+        }
         if (anchor_mode_logged_ != 0)
         {
             std::println("[anchor] cross: no anchor named by '{}' — room route", step.target.node_name);

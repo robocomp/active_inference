@@ -705,6 +705,25 @@ void stale_past_the_plane_continues()
     CHECK(through and waited == 0 and t < 20.f);
 }
 
+// Final review I-1: the anchor gone past the room switch with no held gap ends the cross (never a room route on old-room
+// coordinates), and the passage then takes its room-switch end — no unbounded `clearing`.
+void anchor_gone_while_clearing_ends()
+{
+    using A = rc::AnchorGoneAction;
+    CHECK(rc::anchor_gone_action(true, true) == A::CarryOnGap);     // held gap + near side seen: carry to through
+    CHECK(rc::anchor_gone_action(true, false) == A::CarryOnGap);
+    CHECK(rc::anchor_gone_action(false, false) == A::RoomRoute);    // before the switch: the room route is this room's
+    CHECK(rc::anchor_gone_action(false, true) == A::EndClearing);   // past it, nothing to carry: end
+    // The session drops `engaged` on EndClearing; the passage's decision then ends the cross by the room-switch rule.
+    CHECK(rc::anchor_cross_end(/*anchored=*/false, /*clearing=*/true, /*through=*/false) == rc::AnchorCrossEnd::RoomSwitch);
+    // Before the fix `engaged` stayed true: Continue for ever.
+    CHECK(rc::anchor_cross_end(true, true, false) == rc::AnchorCrossEnd::Continue);
+    // A gap that is held but whose near side was never observed does not carry (the retry-near-the-plane case).
+    rc::CrossThroughGate gate;
+    CHECK(not rc::cross_continues_without_anchor(true, gate));
+    CHECK(rc::anchor_gone_action(rc::cross_continues_without_anchor(true, gate), true) == A::EndClearing);
+}
+
 int main()
 {
     centred_goes_straight();
@@ -732,6 +751,7 @@ int main()
     cross_ends_through_not_at_the_room_switch();
     clearing_completes_on_odometry();
     stale_past_the_plane_continues();
+    anchor_gone_while_clearing_ends();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }
