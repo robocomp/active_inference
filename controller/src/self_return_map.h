@@ -35,8 +35,8 @@
  * SEED: the mesh ⊕ σ_r self footprint is certain self (the front face is self from the start) and is never learned over —
  * its returns are deleted upstream, so their absence is not evidence; everywhere else starts at the world prior.
  * Each return's evidence goes to its own cell (its scatter spreads one body point over the part ⊕ ~σ_r).
- * ⚑ DECISION CONSTANTS, flagged: the prior P0 (a new place is the world: 0.01), the cap |L| ≤ kLmax (keeps every cell
- *   re-learnable), the outlier floor ε, the ring length (one second at
+ * ⚑ DECISION CONSTANTS, flagged: the prior P0 (a new place is the world: 0.01) and its decay with distance from the
+ *   hand-written footprint (scale σ_r), the cap |evidence| ≤ kEmax (keeps every cell re-learnable), the outlier floor ε, the ring length (one second at
  *   20 Hz). None is a gate on the data; each bounds or shapes a likelihood.
  * ⚠ A localisation JUMP looks like motion the world did not make (world returns stay put in the body frame) and would read
  *   as self evidence for every comparison spanning it. A pose step the BASE could not have made in that time
@@ -69,7 +69,7 @@ class SelfReturnMap
 public:
     static constexpr int kRing = 20;          // ⚑ one second of sweeps at 20 Hz
     static constexpr float kP0 = 0.01f;       // ⚑ prior: a new place is the world
-    static constexpr float kLmax = 6.f;       // ⚑ |log-odds| cap (P 0.9975): every cell stays re-learnable
+    static constexpr float kEmax = 12.f;      // ⚑ |evidence| cap (nats): every cell stays re-learnable
     static constexpr float kEps = 0.01f;      // ⚑ outlier floor of the kernel likelihood (bounds one comparison's evidence)
     // P_d is MEASURED per cell: the rate at which sweeps put a return in it (an EMA over kRing sweeps). A part's returns
     // scatter over several cells, so a cell is hit on a fraction of sweeps — a constant P_d (0.5 was tried) charged every
@@ -95,10 +95,12 @@ public:
     [[nodiscard]] bool in_domain(const Eigen::Vector2f& q) const
     { return body_.size() >= 3 and anchor_signed_distance(body_, q) < domain_; }
 
-    [[nodiscard]] float logodds(const Eigen::Vector2f& q) const
+    // L(c) = the cell's PRIOR (decaying with distance from the hand-written self footprint) + its accumulated evidence.
+    [[nodiscard]] float logodds(const Eigen::Vector2f& q) const { return cell_logodds(ix(q.x()), ix(q.y())); }
+    [[nodiscard]] float cell_logodds(int i, int j) const
     {
-        const auto it = L_.find(key(ix(q.x()), ix(q.y())));
-        return it != L_.end() ? it->second : prior();
+        const auto it = E_.find(key(i, j));
+        return prior_at(centre(i, j)) + (it != E_.end() ? it->second : 0.f);
     }
     // A return at q measures a body point within ~σ_r of it (its own range noise), so it is self if ANY place within σ_r of
     // it is: the learned self region is the learned cells ⊕ σ_r — exactly as the hand-written one is the mesh ⊕ σ_r. The
@@ -112,7 +114,7 @@ public:
         for (int di = -1; di <= 1; ++di)
             for (int dj = -1; dj <= 1; ++dj)
                 if ((centre(ci + di, cj + dj) - q).norm() <= sigma_)
-                    if (const auto it = L_.find(key(ci + di, cj + dj)); it != L_.end()) l = std::max(l, it->second);
+                    l = std::max(l, cell_logodds(ci + di, cj + dj));
         return 1.f / (1.f + std::exp(-l));
     }
 
@@ -133,8 +135,14 @@ public:
         Frame f;
         f.T = room_T_robot;
         f.t = t_s;
+        // ★ fix round 7 (try83): the sweep is kept WHOLE (everything the caller passes — the domain plus as far as the
+        //   motion over the ring can carry a world point), not cut to the domain. Cut to the domain, a world return that
+        //   slid INTO the domain had no predecessor in the old sweep (it had been just outside the cut), so the world
+        //   explanation predicted the cell empty while the self explanation (a neighbour along a wall the robot drives
+        //   beside) predicted it occupied — 22 cells of a wall 0.375 m to the left were "learned" as the robot. Both
+        //   predictions must be read off the SAME, complete old sweep.
         for (const auto& q : returns_robot)
-            if (q.allFinite() and in_domain(q)) f.pts.push_back(q);
+            if (q.allFinite()) f.pts.push_back(q);
         if (not ring_.empty())
         {
             const Frame& ref = ring_.front();
@@ -149,31 +157,37 @@ public:
                 for (const auto& r : ref.pts) best = std::min(best, (r - p).squaredNorm());
                 return best;
             };
+            // OCCUPANCY PREDICTIONS (the ruling, fix round 7): the self explanation predicts the old sweep's occupancy UNMOVED
+            // in the body frame, the world explanation predicts it carried by the motion; the evidence in the cell of a
+            // current return q is the log ratio of the two predicted occupancies there, each a kernel density of the old
+            // sweep around the point it says q came from (q itself / T⁻¹q). Where both predict the cell occupied — a wall
+            // along the motion, any long surface — the ratio is 1 and nothing is learned; only a return the world
+            // explanation says should have MOVED AWAY, and is still there, counts for self.
             // Each return's evidence goes to ITS OWN cell. (Spreading it over the cells within 2σ_r was tried: the learned
             // place became the part ⊕ 2σ_r, a 6-cm blob that grew the contact body until an approaching jamb was inside it
             // and deleted — test 13 b2. The returns' own scatter already spreads the evidence over the part ⊕ σ_r.)
             std::unordered_map<std::int64_t, bool> seen;
             for (const auto& q : f.pts)
             {
-                if (self_fp_.size() >= 3 and anchor_point_in_convex(self_fp_, q)) continue;
+                if (not in_domain(q) or (self_fp_.size() >= 3 and anchor_point_in_convex(self_fp_, q))) continue;
                 const float dL = 0.5f * (ell(nearest2(q)) - ell(nearest2(Tinv * q)));
                 const std::int64_t k = key(ix(q.x()), ix(q.y()));
                 seen[k] = true;
-                auto [it, fresh] = L_.try_emplace(k, prior());
-                it->second = std::clamp(it->second + dL, -kLmax, kLmax);
+                auto [it, fresh] = E_.try_emplace(k, 0.f);
+                it->second = std::clamp(it->second + dL, -kEmax, kEmax);
             }
             // Emptiness: a believed-self cell with no return now, weighted by how far the motion moves a world point there,
             // against the cell's own measured hit rate h (a cell hit on 15% of sweeps misses on 85% of them as a matter of
             // course: log(1 − h) per miss).
-            for (auto& [k, l] : L_)
+            for (auto& [k, e] : E_)
             {
                 const bool hit = seen.contains(k);
                 float& h = hit_[k];
                 h += ((hit ? 1.f : 0.f) - h) / float(kRing);
-                if (l <= 0.f or hit) continue;
-                const Eigen::Vector2f c = centre(int(k >> 32), int(std::int32_t(k & 0xffffffff)));
+                const Eigen::Vector2f c = centre(ki(k), kj(k));
+                if (hit or prior_at(c) + e <= 0.f) continue;
                 const float m = 1.f - std::exp(-(Tinv * c - c).squaredNorm() / (2.f * s2));
-                l = std::clamp(l + 0.5f * m * std::log(std::max(1e-3f, 1.f - h)), -kLmax, kLmax);
+                e = std::clamp(e + 0.5f * m * std::log(std::max(1e-3f, 1.f - h)), -kEmax, kEmax);
             }
         }
         ring_.push_back(std::move(f));
@@ -189,8 +203,8 @@ public:
     {
         std::vector<Eigen::Vector2f> pts(returns_body.begin(), returns_body.end());
         bool any = false;
-        for (const auto& [k, l] : L_)
-            if (l > 0.f) { pts.push_back(centre(int(k >> 32), int(std::int32_t(k & 0xffffffff)))); any = true; }
+        for (const auto& [k, e] : E_)
+            if (cell_logodds(ki(k), kj(k)) > 0.f) { pts.push_back(centre(ki(k), kj(k))); any = true; }
         if (not any) return {returns_body.begin(), returns_body.end()};
         return rc::mesh::convex_hull_2d(std::move(pts));
     }
@@ -200,12 +214,13 @@ public:
     [[nodiscard]] Census census(std::span<const Eigen::Vector2f> seed_fp, int n_top = 8) const
     {
         Census c;
-        c.cells = int(L_.size());
-        for (const auto& [k, l] : L_)
+        c.cells = int(E_.size());
+        for (const auto& [k, e] : E_)
         {
+            const float l = cell_logodds(ki(k), kj(k));
             if (l <= 0.f) continue;
             ++c.self_cells;
-            const Eigen::Vector2f p = centre(int(k >> 32), int(std::int32_t(k & 0xffffffff)));
+            const Eigen::Vector2f p = centre(ki(k), kj(k));
             if (not anchor_point_in_convex(seed_fp, p)) { ++c.learned_self; c.top.emplace_back(p.x(), p.y(), l); }
         }
         std::ranges::sort(c.top, [](const auto& a, const auto& b) { return a.z() > b.z(); });
@@ -218,9 +233,10 @@ public:
         std::ofstream f(path, std::ios::out | std::ios::trunc);
         if (not f) return false;
         f.imbue(std::locale::classic());
-        f << "# self_return_map cell_m " << cell_ << "\n";
-        for (const auto& [k, l] : L_)
-            if (std::abs(l - prior()) > 1e-3f) f << int(k >> 32) << ',' << int(std::int32_t(k & 0xffffffff)) << ',' << l << '\n';
+        // v2: the EVIDENCE per cell (the prior is recomputed from the geometry on load). A v1 file (log-odds) is refused.
+        f << "# self_return_map v2 cell_m " << cell_ << "\n";
+        for (const auto& [k, e] : E_)
+            if (std::abs(e) > 1e-3f) f << ki(k) << ',' << kj(k) << ',' << e << '\n';
         return bool(f);
     }
     // Loads cells written with the SAME cell size (a different size is a different map: ignored, returns -1).
@@ -234,6 +250,7 @@ public:
         {
             if (line.starts_with("#"))
             {
+                if (line.find(" v2 ") == std::string::npos) return -1;   // another format: a different map
                 const auto p = line.find("cell_m ");
                 float c = 0.f;
                 if (p != std::string::npos)
@@ -253,7 +270,7 @@ public:
             auto r2 = std::from_chars(r1.ptr + 1, e, j);
             if (r2.ec != std::errc{} or r2.ptr == e or *r2.ptr != ',') continue;
             if (std::from_chars(r2.ptr + 1, e, l).ec != std::errc{}) continue;
-            L_[key(i, j)] = std::clamp(l, -kLmax, kLmax);
+            E_[key(i, j)] = std::clamp(l, -kEmax, kEmax);
             ++n;
         }
         return n;
@@ -265,6 +282,17 @@ public:
 private:
     struct Frame { Eigen::Affine2f T = Eigen::Affine2f::Identity(); double t = 0.0; std::vector<Eigen::Vector2f> pts; };
     [[nodiscard]] static float prior() { return std::log(kP0 / (1.f - kP0)); }
+    // ★ fix round 7: a body part the outline misses is a few CENTIMETRES past it, not 10 cm. The prior that a place is the
+    //   robot decays with its distance d from the hand-written self footprint on the noise's own scale:
+    //   P0(d) = P0·exp(−d²/2σ_r²) — a smooth prior, not a cutoff. At the try82 corner part (d ≈ 1 cm) it is ~P0; at the
+    //   try83 wall (d ≈ 10 cm) it is P0·e^−5.6, 5.6 nats more evidence needed.
+    [[nodiscard]] float prior_at(const Eigen::Vector2f& c) const
+    {
+        const float d = self_fp_.size() >= 3 ? std::max(0.f, anchor_signed_distance(self_fp_, c)) : 0.f;
+        return prior() - d * d / (2.f * sigma_ * sigma_);   // log(P0·e^−x/(1 − P0·e^−x)) ≈ prior − x for P0 ≪ 1
+    }
+    [[nodiscard]] static int ki(std::int64_t k) { return int(k >> 32); }
+    [[nodiscard]] static int kj(std::int64_t k) { return int(std::int32_t(k & 0xffffffff)); }
     [[nodiscard]] int ix(float v) const { return int(std::floor(v / cell_)); }
     [[nodiscard]] Eigen::Vector2f centre(int i, int j) const { return {(float(i) + 0.5f) * cell_, (float(j) + 0.5f) * cell_}; }
     [[nodiscard]] static std::int64_t key(int i, int j) { return (std::int64_t(i) << 32) | std::uint32_t(j); }
@@ -272,7 +300,7 @@ private:
     float sigma_ = 0.03f, cell_ = 0.015f, domain_ = 0.11f, v_cap_ = 1.f, w_cap_ = 2.f;
     int restarts_ = 0;
     std::vector<Eigen::Vector2f> body_, self_fp_;
-    std::unordered_map<std::int64_t, float> L_, hit_;
+    std::unordered_map<std::int64_t, float> E_, hit_;   // evidence (nats) and measured hit rate, per cell
     std::deque<Frame> ring_;
 };
 

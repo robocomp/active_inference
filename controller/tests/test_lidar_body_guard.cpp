@@ -513,7 +513,9 @@ int main()
                     const std::vector<Eigen::Vector2f> sweep{jitter(corner_pt)};
                     still.update(sweep, Eigen::Affine2f::Identity(), 0.005f, k * 0.05);
                 }
-                CHECK(std::abs(still.logodds(corner_pt) - std::log(rc::SelfReturnMap::kP0 / (1.f - rc::SelfReturnMap::kP0))) < 1e-4f);
+                rc::SelfReturnMap fresh;
+                fresh.configure(kSigma, ret_body, self_fp, kMargin);
+                CHECK(std::abs(still.logodds(corner_pt) - fresh.logodds(corner_pt)) < 1e-4f);
             }
 
             // (b) a world-fixed jamb end, approached at 0.1 m/s from 0.5 m ahead until the front touches it.
@@ -576,6 +578,39 @@ int main()
                 std::println("  world jamb driven at the LEARNED corner: P(self) on entering the domain {:.3f}; closest {:.3f} m from the "
                              "returns body, {:.3f} m from the part; forward at the end {:.3f}", p_first, min_gap, min_gap_part, v_last);
                 CHECK(min_gap > 0.f and min_gap_part > kSigma and v_last == 0.f);
+            }
+            // (e) Fix round 7 (try83): driving 3 s PARALLEL to a wall 0.375 m to the left (1 cm sampling, range noise) must
+            //     learn nothing — try83 learned 22 cells of exactly this wall as the robot. Read through the same handover
+            //     the session uses: every return within the domain plus the ring's motion bound (1.2 m here).
+            {
+                rc::SelfReturnMap mw;
+                mw.configure(kSigma, ret_body, self_fp, kMargin);
+                ControllerRobotPose wp;   // theta 0: forward = room +y, left = room −x
+                std::vector<Eigen::Vector2f> wall;
+                for (float y = -3.f; y <= 6.f; y += 0.01f) wall.emplace_back(-0.375f, y);
+                const float prior = mw.logodds(Eigen::Vector2f(-0.375f, 0.15f));
+                for (int k = 0; k < 60; ++k)
+                {
+                    const Eigen::Affine2f T = wp.as_transform();
+                    std::vector<Eigen::Vector2f> sweep;
+                    for (const auto& w : wall)
+                        if (const Eigen::Vector2f q = T.inverse() * w; q.norm() < 1.2f) sweep.push_back(jitter(q));
+                    const auto r = rc::lidar_guard_returns(sweep, ret_body, kSigma, 1.2f, self_fp);
+                    std::vector<Eigen::Vector2f> kept;
+                    for (const auto& o : r.obstacles) kept.push_back(o.mean);
+                    mw.update(kept, T, 0.005f, k * 0.05);
+                    wp.pos.y() += 0.15f * 0.05f;
+                }
+                float pmax = 0.f, lmax = -1e9f;
+                for (float y = -0.10f; y <= 0.30f; y += 0.01f)
+                {
+                    pmax = std::max(pmax, mw.p_self(Eigen::Vector2f(-0.375f, y)));
+                    lmax = std::max(lmax, mw.logodds(Eigen::Vector2f(-0.375f, y)));
+                }
+                const auto cw = mw.census(self_fp);
+                std::println("  driving 3 s beside a wall 0.375 m to the left: max P(self) on the wall {:.4f} (log-odds {:+.2f}, prior "
+                             "there {:+.2f}); {} cells learned self", pmax, lmax, prior, cw.self_cells);
+                CHECK(pmax < 0.02f and cw.self_cells == 0);
             }
             // (d) A localisation JUMP while parked (7.5 cm in one sweep): the world point beside the corner keeps its body
             //     position, which a jump would read as self — the ring restarts at the jump and nothing is learned.

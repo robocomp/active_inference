@@ -3272,9 +3272,15 @@ void ControllerSession::update_self_map(const ControllerRobotPose &pose, Control
     // Learning reads every return outside the HAND-WRITTEN self footprint — measured against the hand-written returns body,
     // not the learned one: a learned place's own returns must keep arriving here, or their absence would unlearn it.
     const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-    float reach = 0.f;
-    for (const auto &v : returns_body_) reach = std::max(reach, v.norm());
-    reach += approach_body_.safety_margin() + 2.f * sigma;
+    // The sweep handed over must hold every return the motion over the history ring can carry INTO the domain (fix round 7:
+    // a sweep cut to the domain made the world explanation predict "empty" where a wall slid in — self_return_map.h).
+    float body_r = 0.f;
+    for (const auto &v : returns_body_) body_r = std::max(body_r, v.norm());
+    const float dom_r = body_r + approach_body_.safety_margin() + 2.f * sigma;
+    const float v_pol = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
+    const float w_pol = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
+    const float ring_s = float(rc::SelfReturnMap::kRing) * 0.05f;   // the ring's span at the 20 Hz sweep rate
+    const float reach = dom_r + (v_pol + w_pol * dom_r) * ring_s;
     const auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), returns_body_, sigma, reach, self_body_);
     if (not r.has_value() or r->n_read == 0) return;
     std::vector<Eigen::Vector2f> pts;
