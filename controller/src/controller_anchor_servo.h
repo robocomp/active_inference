@@ -245,6 +245,25 @@ enum class AnchorCrossEnd { Continue, Through, RoomSwitch };
     return room_switched ? AnchorCrossEnd::RoomSwitch : AnchorCrossEnd::Continue;
 }
 
+// ── WAS THE ROBOT EVER ON THE NEAR SIDE? (try89 fix) ──────────────────────────────────────────────────────────────────────
+// try89 leg 3: a leftover anchor with a FLIPPED normal (s +1.78, heading 176°) put a robot standing BEFORE the door "past" it,
+// and the cross completed `through` at 2.00 m without crossing. `through` (s ≥ standoff) counts only if the robot was OBSERVED
+// on the near side earlier in the same claim: s < −half_len (the body wholly before the plane) on a pose seen that cycle (a
+// measured gap, or an anchor seen — not predicted, not carried). A claim that starts at s > 0 cannot complete as through.
+// ⚑ −half_len is geometry (the body's own half-length), not a tuned level.
+struct CrossThroughGate
+{
+    bool near_seen = false;
+    // True on the cycle the near side is first observed.
+    bool observe(bool observed, float s, float half_len)
+    {
+        if (near_seen or not observed or not std::isfinite(s) or not (s < -half_len)) return false;
+        near_seen = true;
+        return true;
+    }
+    [[nodiscard]] bool through(bool servo_through) const { return servo_through and near_seen; }
+};
+
 // ── DRIVE ON A STALE ANCHOR? (Task 13 Fix E far side; Task 16: from the plane on) ───────────────────────────────────────
 // A fresh anchor is driven on. A stale one is driven on — on the pose odometry carries, the guards in the chain — once the
 // body's centre is PAST THE PLANE on that pose (s > 0: try76 leg 2 stood at s +0.36 for 40 s waiting for an anchor that

@@ -20,6 +20,7 @@
 
 namespace
 {
+using rc::interaction::RelPose;
 int failures = 0, checks = 0;
 void check(bool ok, int line, std::string_view what)
 {
@@ -199,7 +200,10 @@ int main()
             std::println("(d) pose ({:+.2f},{:+.2f},{:+.2f}): seen {} left world ({:+.3f},{:+.3f}) right ({:+.3f},{:+.3f}) width {:.3f}",
                          p.x, p.y, p.th, g.seen, wl.x(), wl.y(), wr.x(), wr.y(), g.width);
             CHECK(g.seen);
-            CHECK(std::abs(wl.x() + 0.45f) < 0.03f and std::abs(wr.x() - 0.45f) < 0.03f);
+            // In the doorway the crossing direction is undecided by geometry (the robot is ON the plane); the edges are the
+            // jambs either way round.
+            const float lo = std::min(wl.x(), wr.x()), hi = std::max(wl.x(), wr.x());
+            CHECK(std::abs(lo + 0.45f) < 0.03f and std::abs(hi - 0.45f) < 0.03f);
             CHECK(std::abs(0.5f * (wl.x() + wr.x()) - p.x * 0.f) < 0.02f);
         }
     }
@@ -329,6 +333,48 @@ int main()
         CHECK(not g.seen);
     }
 
+    // (h) try89: the prior's normal FLIPPED (a leftover anchor: s +1.5 for a robot standing BEFORE the door). At acquisition the
+    //     gap's normal points AWAY from the robot regardless — the robot is on the near side.
+    {
+        const auto w = wall_with_openings({{-0.45f, 0.45f}}, 0.10f);
+        const Pose p{0.3f, -1.5f, 0.f};
+        auto pr = prior_of(p, door, 0.9f, 0.05f);
+        pr.normal = -pr.normal;
+        const auto g = rc::measure_doorway_gap(scan(w, p, rng), pr, kHalfW, kSigmaR, kDepth);
+        const auto geo = rc::anchor_cross_geometry(rc::doorway_gap_pose(g, kSigmaR));
+        std::println("(h) flipped prior: seen {} normal ({:+.3f},{:+.3f}) s {:+.2f}", g.seen, g.normal.x(), g.normal.y(), geo.s);
+        CHECK(g.seen and g.normal.y() > 0.95f and geo.s < -1.3f);
+        // A MEASURED prior keeps its sign (past the plane the robot is legitimately on the far side).
+        auto pm = prior_of(Pose{0.f, 1.5f, 0.f}, door, 0.9f, 0.03f);
+        pm.measured = true;
+        const auto gm = rc::measure_doorway_gap(scan(w, Pose{0.f, 1.5f, 0.f}, rng), pm, kHalfW, kSigmaR, kDepth);
+        CHECK(gm.seen and gm.normal.y() > 0.95f and rc::anchor_cross_geometry(rc::doorway_gap_pose(gm, kSigmaR)).s > 1.3f);
+    }
+    // (h2) A claim that STARTS at s +1.8 (the flipped anchor, observed every cycle, nothing else) never reports through, though
+    //      the servo itself says through at once; one that is observed at s −1.8 first and then reaches the standoff does.
+    {
+        rc::CrossThroughGate gate;
+        RelPose flipped;
+        flipped.x = {0.0f, -1.8f, 0.0f};   // the opening 1.8 m BEHIND, normal forward: s = +1.8 (try89's leftover anchor)
+        flipped.P = Eigen::Matrix3f::Identity() * 1e-4f;
+        int reported = 0, servo_through = 0;
+        for (int k = 0; k < 400; ++k)
+        {
+            const auto c = rc::anchor_cross_command(flipped, 0.9f, kHalfW + 0.05f, 2.0f, 0.35f, 1.0f, false);
+            (void)gate.observe(true, rc::anchor_cross_geometry(flipped).s, 0.2471f);
+            servo_through += c.through ? 1 : 0;
+            reported += gate.through(c.through) ? 1 : 0;
+            flipped.x = rc::interaction::move_mean(flipped.x, 0.f, c.adv * 0.05f, c.rot * 0.05f);
+        }
+        std::println("(h2) claim from s +1.8: servo said through on {} cycles, the gate reported {}", servo_through, reported);
+        CHECK(servo_through > 0);   // the servo alone WOULD have completed it (try89)
+        CHECK(reported == 0);
+        rc::CrossThroughGate g2;
+        CHECK(g2.observe(true, -1.8f, 0.2471f) and not g2.through(false) and g2.through(true));
+        rc::CrossThroughGate g3;   // a PREDICTED (not observed) near-side pose does not count
+        CHECK(not g3.observe(false, -1.8f, 0.2471f) and not g3.through(true));
+    }
+
     // Cost: one measurement on a full 1440-beam scan.
     {
         const auto w = wall_with_openings({{-0.45f, 0.45f}, {1.2f, 3.2f}}, 0.10f);
@@ -345,7 +391,8 @@ int main()
     // Each cycle: scan → gap (prior = the anchor until the gap is held, then the carried gap) → anchor_cross_command on the
     // GAP → the jamb guard on the gap → the returns net. Lost gap ⇒ carried by the (true) motion. Ends `through` with no
     // contact of the body against any box.
-    const auto integrate = [&](float noise, bool leaf_west, float x0, float th0_deg, float anchor_err, bool blind = false, bool sparse = false)
+    const auto integrate = [&](float noise, bool leaf_west, float x0, float th0_deg, float anchor_err, bool blind = false, bool sparse = false,
+                               bool flip = false)
     {
         auto w = wall_with_openings({{-0.45f, 0.45f}}, 0.10f, true, sparse ? -2.17f : -4.f);
         if (leaf_west) w.boxes.push_back({-0.45f, -0.95f, -0.41f, -0.05f});
@@ -362,6 +409,7 @@ int main()
         std::optional<rc::interaction::RelPose> line;
         float line_width = 0.f;
         bool through = false, contact = false;
+        rc::CrossThroughGate gate;
         int seen_cycles = 0, lost_cycles = 0, k = 0;
         float min_clear = 1e9f;
         for (; k < int(90.f / dt) and not through; ++k)
@@ -375,10 +423,14 @@ int main()
                 pr->centre = line->x.head<2>();
                 pr->normal = Eigen::Vector2f(-std::sin(psi), std::cos(psi));
                 pr->P = line->P;
+                pr->measured = true;   // the held gap: its sign stands (the session sets this too)
                 pr->width = 0.9f;   // the door's full width: the plausibility bound, not the last measurement
             }
             else
+            {
                 pr = prior_of(p, door, 0.9f, 0.02f, anchor_err);
+                if (flip) pr->normal = -pr->normal;   // try89: a leftover anchor with its normal flipped
+            }
             // `blind`: the gap measurement sees NOTHING while the body's centre is within 0.5 m of the wall plane (the jambs beside
             // the body, out of the scan pattern) — the line must be carried by odometry; the returns net keeps its returns.
             const std::vector<Eigen::Vector2f> none;
@@ -390,7 +442,9 @@ int main()
             CHECK(line.has_value() or k > 0);
             if (not line.has_value()) break;
             auto cmd = rc::anchor_cross_command(*line, line_width, half_w_servo, standoff, v_max, w_max, /*holonomic=*/false);
-            if (cmd.through) { through = true; break; }
+            (void)gate.observe(g.seen, rc::anchor_cross_geometry(*line).s, 0.2471f);
+            if (gate.through(cmd.through)) { through = true; break; }
+            CHECK(not cmd.through);   // the session hands back a through without the near side; here it never happens
             const auto guard = rc::anchor_jamb_guard(*line, line_width, cmd, false, kBody, margin, a_dec, v_max, w_max);
             float adv = guard.cmd.adv, side = 0.f, rot = guard.cmd.rot;
             const auto ret = rc::lidar_guard_returns(pts, kBody, kSigmaR, 1.0f);
@@ -424,6 +478,7 @@ int main()
     integrate(0.02f, true, 0.3f, 10.f, 0.2f, /*blind=*/true);   // the gap lost for the 1 m around the plane: carried
     integrate(0.02f, true, 0.45f, 2.f, 0.15f, false, /*sparse=*/true);   // try86's start: e -0.45, s -1.37, heading +2 deg
     integrate(0.02f, false, -0.45f, -8.f, -0.3f, true, /*sparse=*/true);
+    integrate(0.02f, true, 0.3f, 10.f, 0.2f, false, false, /*flip=*/true);   // try89: the anchor's normal FLIPPED
     // A random sweep: start offset ±0.35 m, heading ±15°, anchor error ±0.5 m, either leaf side, blind or not.
     {
         std::mt19937 r2(11);

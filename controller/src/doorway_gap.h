@@ -14,6 +14,10 @@
  * the through-span IS the clear passable opening, from the leaf's free edge to the far jamb. Its edges are the last returns
  * ON the wall, the jamb or the leaf on each side.
  *
+ * SIGN. At acquisition (an anchor prior), with the robot clear of the slab, the normal is oriented away from the robot, so the
+ * robot is on the near side — the prior's own sign is not trusted (try89). A measured prior keeps its sign; so does an
+ * acquisition from inside the doorway, where geometry cannot say which way is away.
+ *
  * INPUT. Robot-frame returns (x right, y forward), already self-filtered by the body footprint at capture (the round-5 path);
  * the body's half-width; and the PRIOR (required): a point on the door's wall line and its normal (the direction of travel),
  * the covariance of that point (the anchor's own, or the carried gap's), and the door's full opening width.
@@ -387,6 +391,15 @@ inline std::optional<GapLine> gap_fit_wall(std::span<const Eigen::Vector2f> pts,
     };
 
     detail::GapLine L = detail::gap_line(prior->centre, prior->normal);
+    // try89 fix: at ACQUISITION the crossing direction is AWAY from the robot — the robot is on the near side (s < 0),
+    // whatever sign the prior's normal carries (a leftover anchor from the previous leg had it flipped: s +1.78, 176°, and
+    // the cross completed "through" without crossing). The prior says where to look and which gap, never the sign. A held
+    // (measured) gap keeps its sign: the robot legitimately ends on its far side.
+    // Only with the robot CLEAR of the slab (|s| ≥ depth): standing in the doorway, geometry does not say which way is
+    // "away", and flipping on a few cm of s would send a retry back the way it came — the prior's sign stands there (and a
+    // claim that starts there cannot complete as through: CrossThroughGate).
+    if (const float s0 = (Eigen::Vector2f::Zero() - L.m).dot(L.n); not prior->measured and s0 >= depth)
+        L = detail::gap_line(L.m, -L.n);
     for (int pass = 0; pass < 2; ++pass)
     {
         const float s = (Eigen::Vector2f::Zero() - L.m).dot(L.n);

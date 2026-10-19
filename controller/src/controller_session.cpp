@@ -3140,6 +3140,7 @@ void ControllerSession::reset_anchor_cross_state()
     gap_seen_now_ = false;
     gap_steering_logged_ = false;
     gap_lost_logged_ = false;
+    cross_gate_ = {};
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
 }
 
@@ -3505,7 +3506,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     const bool holonomic = base_capability_.holonomic.value_or(false);
     // The bound on a wait and on a non-wedge spin: the cross contract's own timeout (door_concept's CrossTimeoutS) — no
     // new constant. Handed back as Unreachable, which the door passage counts as an attempt and re-offers.
-    auto hand_back = [&](const std::string &why)
+    auto hand_back = [&](const std::string &why, bool timed_out = true)
     {
         if (door_passage_.clearing())
         {
@@ -3518,8 +3519,11 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             note_no_command(); motion_commander.stop_robot();
             return;
         }
-        std::println("[anchor] cross: {} — beyond the cross contract's timeout ({:.1f} s): handing '{}' back Unreachable",
-                     why, target_contract_.timeout_ms * 1e-3f, anchor_latched_for_);
+        if (timed_out)
+            std::println("[anchor] cross: {} — beyond the cross contract's timeout ({:.1f} s): handing '{}' back Unreachable",
+                         why, target_contract_.timeout_ms * 1e-3f, anchor_latched_for_);
+        else
+            std::println("[anchor] cross: {}: handing '{}' back Unreachable", why, anchor_latched_for_);
         flag_reach_unreachable("anchor cross: " + why);
         anchor_wait_since_ms_ = 0;
         anchor_spin_since_ms_ = 0;
@@ -3579,6 +3583,17 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                      door_passage_.clearing() ? "past the room switch" : "past the door plane", a.name, a.age_ms,
                      rc::anchor_cross_geometry(a.pose).s, rc::anchor_cross_geometry(a.pose).sigma_lat);
     anchor_carried_logged_ = drive and not on_gap and not a.fresh;
+    // try89 fix: was the robot OBSERVED on the near side of the doorway in this claim? Only a seen gap, or an anchor seen
+    // this cycle (not predicted, not carried), counts — a carried pose is exactly what was wrong in try89.
+    {
+        const bool observed = on_gap ? gap_seen_now_ : (a.fresh and a.unseen_ms == 0);
+        const float half_len = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
+        if (drive_pose.x.allFinite() and cross_gate_.observe(observed, rc::anchor_cross_geometry(drive_pose).s, half_len))
+        {
+            std::println("[anchor] cross: robot observed on the near side of {} (s {:+.2f} m) — `through` may now complete",
+                         drive_name, rc::anchor_cross_geometry(drive_pose).s);
+        }
+    }
     if (drive)
     {
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
@@ -3591,6 +3606,15 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
         cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves);
+        if (cmd.through and not cross_gate_.through(cmd.through))
+        {
+            // try89 fix: s ≥ standoff on a claim that never saw the robot on the near side is not a crossing — the frame is
+            // wrong (a flipped leftover anchor), not the robot through. Handed back; the passage counts it and re-offers.
+            const auto g = rc::anchor_cross_geometry(drive_pose);
+            hand_back(std::format("{} reads s {:+.2f} m (≥ standoff) but the robot was never observed on its near side in this "
+                                  "claim — not a crossing", drive_name, g.s), /*timed_out=*/false);
+            return;
+        }
         if (cmd.through)
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);

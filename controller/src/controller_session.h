@@ -998,6 +998,9 @@ private:
     std::optional<ControllerRobotPose> gap_carry_pose_;         // the pose gap_line_ is expressed at
     std::string gap_carry_room_;                                // ...and its room frame
     bool gap_steering_logged_ = false, gap_lost_logged_ = false;
+    // try89 fix: `through` needs the robot OBSERVED on the near side (s < −body half-length, on a seen gap or a seen anchor)
+    // earlier in this claim; a claim that never was cannot complete as through.
+    rc::CrossThroughGate cross_gate_;
     Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // centre x, y, width at the last "[gap] seen" line
     float gap_logged_heading_ = 0.f;
     std::string current_room_name_;                             // the room frame robot poses are read in (this cycle)
