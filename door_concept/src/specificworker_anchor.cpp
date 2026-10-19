@@ -817,7 +817,7 @@ void SpecificWorker::step_passage_anchor()
         // Fix round 4: a BELIEF, marginalised per frame by update_door_anchor — hinge × swing × φ over the door's whole
         // range, plus a "not as believed" branch (LeafPrior::p_not_as_believed). door_concept carries NO posterior over
         // hinge / swing (they are Openable config pins or a side inherited from the other room; the M2 hypotheses are
-        // not built), so p_hinge = p_swing = 0.5: uniform, the data decide. Without an AI2 belief φ is unknown too.
+        // not built), so p_hinge = p_swing = 0.5 then (superseded: see the try103 note below). Without an AI2 belief φ is unknown too.
         // (Task 11: the hinge now HAS a posterior — DoorInstance::hinge_llr, and inst->leaf.hinge is its MAP jamb. It is
         //  deliberately not passed as p_hinge yet: the anchor update is Task 10's, and its uniform hinge already lets the
         //  beams decide per frame. σ(hinge_llr) is the value to pass when that is revisited.)
@@ -834,8 +834,17 @@ void SpecificWorker::step_passage_anchor()
             leaf.phi_known = inst->ai2_initialized;
             leaf.phi       = std::clamp(inst->phi_est, 0.f, phi_max);
             leaf.phi_sigma = std::max(0.f, pg.phi_sigma_rad);
-            leaf.p_hinge   = 0.5f;
-            leaf.p_swing   = 0.5f;
+            // ★THE DOOR'S OWN POSTERIOR, NOT A UNIFORM (try103 leg 3). With p_hinge = p_swing = 0.5 all four hinge × swing
+            //   placements weigh the same, so a 79°-rotated anchor frame always had a placement whose swung leaf explained
+            //   the REAL wall: on its first update the anchor locked onto the leaf as its wall (e −1.75 m, heading +105°)
+            //   and never recovered (Mahalanobis² 234 at the retry). The log-odds are relative to the jamb/side they were
+            //   last signed against (hinge_llr_ref / swing_llr_ref); read them against the belief stated here. They are the
+            //   ε-capped, per-viewpoint-pooled leaf channel's (6f267858), so bounded and honest about their evidence.
+            const auto sigm = [](float x) { return 1.f / (1.f + std::exp(-x)); };
+            const bool hinge_same = not inst->hinge_llr_ref.has_value() or *inst->hinge_llr_ref == inst->leaf.hinge;
+            const bool swing_same = not inst->swing_llr_ref.has_value() or (*inst->swing_llr_ref > 0.f) == (inst->leaf.swing > 0.f);
+            leaf.p_hinge   = sigm(hinge_same ? inst->hinge_llr : -inst->hinge_llr);
+            leaf.p_swing   = sigm(swing_same ? inst->swing_llr : -inst->swing_llr);
         }
         // Floor returns (below the wall band) are told apart by z: in the visibility they PASS, never end (Task 8).
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
