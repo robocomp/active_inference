@@ -3862,6 +3862,7 @@ void SpecificWorker::step_entry_mirrors()
                     em.phi_est     = si.phi_est;
                     em.phi_sigma   = si.phi_sigma;
                     em.hinge_llr   = si.hinge_llr;
+                    em.swing_llr   = si.swing_llr;
                     em.phi_curve   = si.phi_curve;
                     em.matched_frames = si.matched_frames;
                 }
@@ -4042,6 +4043,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                         dst.phi_est   = em.phi_est;
                         dst.phi_sigma = em.phi_sigma;
                         dst.hinge_llr = em.hinge_llr;   // the hinge hint is the source's MAP jamb; this is how sure it was
+                        dst.swing_llr = em.swing_llr;   // Task 13: the swing hint is the source's MAP side; likewise
                         dst.phi_curve = em.phi_curve;
                         dst.phi_last_t = std::chrono::steady_clock::now();
                         // The robot's body just went through the aperture: an observation that it was passable, not
@@ -4289,6 +4291,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.phi_est        = inst.phi_est;
     em.phi_sigma      = inst.phi_sigma;
     em.hinge_llr      = inst.hinge_llr;
+    em.swing_llr      = inst.swing_llr;
     em.phi_curve      = inst.phi_curve;
     em.matched_frames = inst.matched_frames;
     em.T_root_door    = Eigen::Affine3d(Tw->matrix());

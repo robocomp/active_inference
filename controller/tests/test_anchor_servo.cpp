@@ -646,6 +646,38 @@ void cross_ends_through_not_at_the_room_switch()
     std::println("  cross end: switch at s +0.3 on the anchor -> continue (through {}), s +2.0 -> through ({})", t03, t20);
 }
 
+// Task 13 (try74 leg 1: 40 s at s +1.56 waiting for a far-side anchor): past the room switch the cross completes on the pose
+// odometry carries — no anchor seen after the switch, the carried pose's covariance growing (motion + unseen time), the
+// guards still in the chain — and ends `through` without waiting.
+void clearing_completes_on_odometry()
+{
+    const auto l = leaf_toward();
+    RelPose r = anchor(0.02f, -0.3f, 0.05f, 0.02f);   // the switch: 0.3 m past the plane, roughly centred
+    float t = 0.f;
+    bool through = false;
+    int leaf_hits = 0, jamb_hits = 0;
+    for (int k = 0; k < 600 and not through; ++k)   // 0.1-s cycles, 60 s cap
+    {
+        const auto c = chain(r, one(&l), kShadow);
+        if (c.through) { through = true; break; }
+        rc::rt::Twist tw;
+        tw.linear = {c.side, c.adv, 0.f};
+        tw.angular = {0.f, 0.f, c.rot};
+        r = rc::interaction::predict(r, tw, Eigen::Vector3f(1e-4f, 1e-4f, 1e-4f), 0.1f);   // odometry carries it (+ k_rot term)
+        rc::interaction::grow_unseen(r, 0.1f, 3.0f);                                     // unseen all along
+        t += 0.1f;
+        leaf_hits += leaf_contacts(r, l, kShadow);
+        for (const auto& j : rc::anchor_jambs(r, kWidth)) if (touches(kShadow, j.mean)) ++jamb_hits;
+    }
+    const auto g = rc::anchor_cross_geometry(r);
+    std::println("  clearing on odometry: through {} after {:.1f} s at s {:+.2f} (sigma_lat {:.3f} m), contacts leaf {} jamb {}",
+                 through, t, g.s, g.sigma_lat, leaf_hits, jamb_hits);
+    CHECK(through);
+    CHECK(t < 20.f);   // no 40-s wait
+    CHECK(leaf_hits == 0 and jamb_hits == 0);
+    CHECK(rc::anchor_cross_end(true, true, through) == rc::AnchorCrossEnd::Through);
+}
+
 int main()
 {
     centred_goes_straight();
@@ -671,6 +703,7 @@ int main()
     predicted_pose_slows_while_parked();
     leaf_hypotheses_weigh_the_minority();
     cross_ends_through_not_at_the_room_switch();
+    clearing_completes_on_odometry();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

@@ -932,6 +932,7 @@ private:
     std::uint64_t anchor_spin_since_ms_ = 0;
     bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change
     bool anchor_leaf_logged_ = false;
+    bool anchor_carried_logged_ = false;                             // Task 13: driving on the carried pose past the switch (log on change)
     bool anchor_through_ = false;                                    // Task 12 Fix E: the servo reached `through` in this claim
     std::optional<ControllerTargetInfo> clearing_target_;                // Task 12 Fix E: the cross being executed, kept past the room switch                                // Task 12 fix A: the anchor carries a leaf — log on change
     bool anchor_predicted_logged_ = false;                           // fix round 1: driving on a PREDICTED anchor: log on change

@@ -3062,6 +3062,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_backoff_logged_ = false;
     anchor_leaf_logged_ = false;
     anchor_through_ = false;
+    anchor_carried_logged_ = false;
     anchor_predicted_logged_ = false;
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
 }
@@ -3297,7 +3298,17 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     }
     rc::AnchorCommand cmd;
     rc::interaction::RelPose pose = a.pose;   // the pose the guards are asked about
-    if (a.fresh)
+    // ★ Task 13 (try74 leg 1: 40 s at s +1.56 waiting for a far-side anchor that never published): past the room switch
+    //   the cross is completed on the ODOMETRY-CARRIED pose door_concept keeps writing (its wait pose: the last sighting,
+    //   carried, its covariance grown by the motion and the unseen time) — `through` is s ≥ standoff on it, and nothing
+    //   waits for a SEEN anchor. The guards stay in the chain on that same pose: while any body point is within reach of a
+    //   jamb or the leaf they cap the motion that closes on it; once the body has cleared them they bind on nothing.
+    const bool drive = a.fresh or door_passage_.clearing();
+    if (drive and not a.fresh and not anchor_carried_logged_)
+        std::println("[anchor] cross: past the room switch, {} not seen for {} ms — going on, on the pose odometry carries "
+                     "(σ_lat {:.3f} m)", a.name, a.age_ms, rc::anchor_cross_geometry(a.pose).sigma_lat);
+    anchor_carried_logged_ = drive and not a.fresh;
+    if (drive)
     {
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
         anchor_wait_since_ms_ = 0;
@@ -3377,7 +3388,10 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     path_controller.refresh_lidar_field(control_pose.as_transform());
     float adv_mps = guard.cmd.adv, side_mps = holonomic ? guard.cmd.side : 0.f, rot_rps = guard.cmd.rot;
     // The ask the stall judge weighs the delivery against: the servo's own (the backoff's, when it took over).
-    const float asked_lin_mps = guard.backoff ? std::hypot(guard.cmd.adv, guard.cmd.side) : std::hypot(cmd.adv, holonomic ? cmd.side : 0.f);
+    // ★ Task 13: the ask the stall judge weighs is the command AFTER the jamb / leaf guards — a translation the model's own
+    //   obstacles capped to 0 was not asked of the base, and "spinning, translation asked" on it is a verdict on nothing.
+    //   (The LiDAR floor and the uncertainty limiter below are throttles, and stay out of the ask: stall_judge.h.)
+    const float asked_lin_mps = std::hypot(guard.cmd.adv, holonomic ? guard.cmd.side : 0.f);
     if (const float lin = std::hypot(adv_mps, side_mps); lin > 0.f)
     {
         const Eigen::Vector2f dir(side_mps / lin, adv_mps / lin);   // robot frame: +x side, +y fwd
@@ -3401,7 +3415,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // A real wait-turn is judged on delivered vs commanded yaw like any other turn, so a turn ground against a jamb is
     // caught (spin_servo, no escape: the wait then holds, above) instead of running for the whole 40-s wait.
     const float judge_window_s = params_ != nullptr ? params_->stuck_confirm_ms * 1e-3f : 0.f;
-    const bool judged = a.fresh or rc::anchor_wait_turn_judged(rot_rps, judge_window_s, unc.valid ? unc.theta_std_rad : -1.f);
+    const bool judged = drive or rc::anchor_wait_turn_judged(rot_rps, judge_window_s, unc.valid ? unc.theta_std_rad : -1.f);
     if (not judged) reset_stuck_window();
     else if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
                      robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant))
@@ -3410,7 +3424,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         step_escape(robot_pose, path_controller, motion_commander, time_source());
         return;
     }
-    if (not a.fresh and judged and last_judged_verdict_ == rc::StallVerdict::Spinning and not anchor_wait_blocked_)
+    if (not drive and judged and last_judged_verdict_ == rc::StallVerdict::Spinning and not anchor_wait_blocked_)
     {
         anchor_wait_blocked_ = true;
         std::println("[anchor] cross: the wait-turn toward {} was commanded but not delivered (SPINNING) — holding still, "

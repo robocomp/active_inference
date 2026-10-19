@@ -265,6 +265,7 @@ private:
         Eigen::Vector2f open_local{0.f, 0.f};
         float           phi_est = 0.f, phi_sigma = 0.f;
         float           hinge_llr = 0.f;   // Task 11: the source's confidence in the hinge it hands over (≥ 0)
+        float           swing_llr = 0.f;   // Task 13: …and in the swing side (≥ 0), carried the same way
         std::vector<std::pair<float, float>> phi_curve;
         int             matched_frames = 0;
         // For a door recreated in a room entered through it (remember_door / release_room): its pose under root

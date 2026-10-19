@@ -180,7 +180,11 @@ struct AnchorGap { float centre = 0.f, width = 0.f; };
     const float e_line = g.e - anchor_cross_line(width, leaves, body_half_width, g.sigma_lat);
     const float p_fit = anchor_p_fit_leaves(width, leaves, body_half_width, g.e, g.sigma_lat);
     const float v_a = -v_max * std::tanh(e_line / (v_max * kAnchorTauLat));
-    const float v_n = v_max * p_fit * std::tanh((standoff - g.s) / (v_max * kAnchorTauS));
+    // Task 13: the loop aims one σ PAST the standoff (σ_s = the opening's σ along its normal), so `through` (s ≥ standoff) is
+    // reached in finite time — aimed exactly at the level, the first-order loop only approaches it (a kinematic replay of
+    // the far side sat at s 2.00 for 60 s). The overshoot is the pose's own uncertainty about where the standoff is.
+    const float sigma_s = std::sqrt(std::max(0.f, g.n.dot(r.P.topLeftCorner<2, 2>() * g.n)));
+    const float v_n = v_max * p_fit * std::tanh((standoff + sigma_s - g.s) / (v_max * kAnchorTauS));
     Eigen::Vector2f d = v_n * g.n + v_a * g.a;
     float speed = d.norm();
     if (speed > v_max) { d *= v_max / speed; speed = v_max; }
