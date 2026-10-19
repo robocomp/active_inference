@@ -38,6 +38,7 @@
 #include <limits>
 
 #include "../../common/dashboard/timeseries_plot.h"
+#include "motion_verdict.h"
 #include "controller_mission_panel.h"
 
 
@@ -186,15 +187,17 @@ public:
         toolbar_layout_ = toolbar_layout;
 
 
-        toolbar_layout->addStretch();
-
-        // Stuck-recovery indicator, pinned to the right of the toolbar. Hidden while the robot
-        // drives normally; lights up orange while an escape maneuver is reversing/turning the
-        // base out of a wedge (see ControllerSession stuck recovery).
-        stuck_status_label_ = new QLabel(QString(), toolbar);
-        stuck_status_label_->setAlignment(Qt::AlignCenter);
-        stuck_status_label_->setVisible(false);
-        toolbar_layout->addWidget(stuck_status_label_);
+        // ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) — permanent, replaces the old STUCK chip ──────────────
+        // One chip, always visible, taking the toolbar's slack: the binding cause, its detail and since-when, coloured
+        // by who has to act (driving / deliberate / operator / waiting on another agent / blocked by the world / fault).
+        // The escape manoeuvre the STUCK chip used to show is one of its causes (ESCAPING). Full text in the tooltip;
+        // the label is elided to its width so a long detail never sets the window's minimum width.
+        why_label_ = new QLabel(QStringLiteral(" no verdict yet "), toolbar);
+        why_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        why_label_->setMinimumWidth(120);
+        why_label_->setTextFormat(Qt::PlainText);
+        why_label_->setStyleSheet(why_style("#7f8c8d", "white"));
+        toolbar_layout->addWidget(why_label_, /*stretch=*/1);
 
         // Which affordance the epistemic planner picked. It belongs beside the drive controls — it is
         // the answer to "why is it going there", not a pose readout.
@@ -398,23 +401,43 @@ public:
         selected_affordance_value_->setToolTip(current + QStringLiteral("   (prev: ") + previous + ")");
     }
 
-    // Toggle the stuck-recovery indicator. Orange + visible while the robot is escaping a wedge;
-    // hidden otherwise. Dedups so repeated same-state calls (one per cycle) don't churn Qt.
-    void set_stuck_active(bool active)
+    // The escape manoeuvre is shown by the WHY chip now (cause ESCAPING); kept so callers need not change.
+    void set_stuck_active(bool active) { stuck_active_shown_ = active; }
+
+    // The WHY chip (motion_verdict.h). Called every frame from present(); dedups text, tooltip and colour.
+    void set_motion_verdict(const rc::why::View &v)
     {
-        if (stuck_status_label_ == nullptr or active == stuck_active_shown_)
-            return;
-        stuck_active_shown_ = active;
-        if (active)
+        if (why_label_ == nullptr) return;
+        if (not v.valid)
+            return;   // keeps "no verdict yet" until the first control pass selects one
+        const char *bg = "#7f8c8d", *fg = "white";
+        switch (v.klass)
         {
-            stuck_status_label_->setText(QStringLiteral(" ⚠ STUCK — escaping "));
-            stuck_status_label_->setStyleSheet(
-                "QLabel { background-color: #e67e22; color: white; font-weight: bold;"
-                " border-radius: 4px; padding: 2px 8px; }");
-            stuck_status_label_->setVisible(true);
+            case rc::why::Klass::Driving:        bg = "#27ae60"; break;
+            case rc::why::Klass::Deliberate:     bg = "#2980b9"; break;
+            case rc::why::Klass::Operator:       bg = "#7f8c8d"; break;
+            case rc::why::Klass::WaitingOnAgent: bg = "#f1c40f"; fg = "black"; break;
+            case rc::why::Klass::BlockedByWorld: bg = "#e67e22"; break;
+            case rc::why::Klass::Fault:          bg = "#c0392b"; break;
         }
-        else
-            stuck_status_label_->setVisible(false);
+        const QString head = QString::fromStdString(std::format("{} {} · {}", v.driving ? "▶ MOVING" : "■ STOPPED",
+                                                                rc::why::cause_name(v.cause),
+                                                                rc::why::format_duration(v.duration_ms)));
+        const QString full = head + QStringLiteral(" — ") + QString::fromStdString(v.detail);
+        const QString text = why_label_->fontMetrics().elidedText(full, Qt::ElideRight,
+                                                                 std::max(80, why_label_->width() - 20));
+        if (text != why_text_shown_) { why_text_shown_ = text; why_label_->setText(text); }
+        const QString tip = full + QStringLiteral("\n\nclass: ") + QString::fromUtf8(rc::why::klass_name(v.klass).data(),
+                                                                                   int(rc::why::klass_name(v.klass).size()))
+                          + QStringLiteral("\nLogged as [why] on change; every change in why_log.jsonl.");
+        if (tip != why_tip_shown_) { why_tip_shown_ = tip; why_label_->setToolTip(tip); }
+        const QString style = why_style(bg, fg);
+        if (style != why_style_shown_) { why_style_shown_ = style; why_label_->setStyleSheet(style); }
+    }
+    static QString why_style(const char *bg, const char *fg)
+    {
+        return QString("QLabel { background-color: %1; color: %2; font-weight: bold; border-radius: 4px; padding: 2px 8px; }")
+            .arg(bg, fg);
     }
 
     // What the ARRIVAL test is waiting on, at the right end of the pose row. `yaw_err_rad` is nullopt
@@ -513,7 +536,8 @@ private:
     QString goal_dist_shown_, goal_theta_shown_;
     QLabel *selected_affordance_value_ = nullptr;
     QString affordance_shown_;
-    QLabel *stuck_status_label_ = nullptr;
+    QLabel *why_label_ = nullptr;   // the WHY chip (set_motion_verdict)
+    QString why_text_shown_, why_tip_shown_, why_style_shown_;
 
     std::function<void()> affordance_clicked_;   // opens the affordance program window
     QLCDNumber *session_dist_lcd_ = nullptr;   // session totals, top row

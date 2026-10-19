@@ -214,6 +214,11 @@ void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps
             cmd_json.flush();
         }
     }
+    {
+        const std::scoped_lock lock(mutex_);
+        last_command_ = LastCommand{.adv_mps = adv_mps, .side_mps = side_mps, .rot_rps = rot_rps, .stop = false,
+                                    .line = loc.line(), .fn = loc.function_name()};
+    }
     const float adv_mm_s = adv_mps * 1000.f;
     const float side_mm_s = side_mps * 1000.f;
 
@@ -484,8 +489,18 @@ ControllerMotionCommander::OutputRateStats ControllerMotionCommander::last_outpu
     return last_rate_stats_;
 }
 
-void ControllerMotionCommander::stop_robot()
+ControllerMotionCommander::LastCommand ControllerMotionCommander::last_command() const
 {
+    const std::scoped_lock lock(mutex_);
+    return last_command_;
+}
+
+void ControllerMotionCommander::stop_robot(std::source_location loc)
+{
+    {
+        const std::scoped_lock lock(mutex_);
+        last_command_ = LastCommand{.stop = true, .line = loc.line(), .fn = loc.function_name()};
+    }
     if (command_text_sink_)
         command_text_sink_(0.f, 0.f, 0.f);
 

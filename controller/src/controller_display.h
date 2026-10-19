@@ -101,6 +101,8 @@ public:
     void set_stuck_active(bool active);
     // Why compute() is not planning this cycle (ControllerSession::hold_reason()); "" = not holding. Status line only.
     void set_hold_reason(const std::string &why);
+    // WHY IS THE ROBOT NOT MOVING (motion_verdict.h): the toolbar's permanent chip. Thread-safe (a copy into the snapshot).
+    void set_motion_verdict(const rc::why::View &v);
     // Push the live arrival state to the toolbar readout. Called every cycle; the widget dedups.
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
     void set_session_totals(float metres, float seconds);   // top row: metres and time since startup
@@ -254,6 +256,7 @@ private:
         // Door passage for the status line + corridor overlay (set_door_passage).
         rc::DoorPassageStatus door_passage_view;
         std::string hold_reason;   // set_hold_reason; "" = planning normally
+        rc::why::View motion_verdict;   // set_motion_verdict
         std::vector<std::vector<Eigen::Vector2f>> door_passages;
         std::optional<AnchorView> anchor;   // set_anchor_overlay: robot frame; drawn through robot_pose
     };

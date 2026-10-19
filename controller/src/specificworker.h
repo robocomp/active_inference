@@ -378,6 +378,16 @@ private:
 		void log_hold(const char *event, const std::string &why, const RobotPose *pose);
 		bool lidar_stalled_ = false;
 		std::chrono::steady_clock::time_point lidar_stall_since_{};
+		// ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only: nothing that drives reads it.
+		// One verdict per control pass, selected after compute() from the session's evidence plus what only the worker
+		// knows (presence, the LiDAR watchdog, Run/Pause, the output arm). Shown in the toolbar, logged `[why]` on
+		// change (+ every 10 s while stopped), appended to why_log.jsonl beside base_commands.jsonl (same steady clock).
+		rc::why::Tracker why_tracker_;
+		std::ofstream    why_log_;
+		bool             why_log_open_ = false;
+		std::mutex       presence_why_mx_;
+		std::string      presence_why_ = "presence: not Operating yet";   // under presence_why_mx_ (set on the GUI thread)
+		void finish_why_cycle(std::uint64_t steady_ms);
 		// ── BOUNDED RECOVERY OF THE MEDIA READER ─────────────────────────────────────────────
 		// ★A LIVE-BUT-SILENT SUBSCRIBER IS NEVER REPLACED. LidarPlaneReader::ensure_subscribers
 		// only builds a plane when `not p.sub`, so once a subscriber exists it stays for the life

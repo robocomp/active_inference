@@ -406,12 +406,20 @@ public:
         std::string last_outcome;  ///< aff_outcome of the latest failed completion ("" = none in this passage)
         bool then_affordances = false;   ///< started by a single command: hand back to the affordances when Done
         bool failed = false;             ///< Done by the Unreachable-cross cap (kMaxCrossUnreachable), not by crossing
+        // For the motion verdict (motion_verdict.h): which node it waits on, and the two rules that keep it waiting.
+        std::string required;            ///< the current step's affordance name ("" = idle / done)
+        bool reached_door = false;       ///< no fallback to earlier steps (update(): "…but NOT once the robot has reached")
+        bool opened = false;             ///< `open` succeeded: a re-offered `open` is the flicker, ignored
+        bool clearing = false;           ///< crossing on past the room switch, on the anchor
     };
     [[nodiscard]] View view() const
     {
         std::scoped_lock lk(m_);
+        const bool live = step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross or step_ == Step::Close;
         return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_,
-                .last_outcome = last_outcome_, .then_affordances = then_affordances_, .failed = failed_};
+                .last_outcome = last_outcome_, .then_affordances = then_affordances_, .failed = failed_,
+                .required = live ? name_of(step_) : std::string{}, .reached_door = reached_door_, .opened = opened_,
+                .clearing = clearing_ and step_ == Step::Cross};
     }
     [[nodiscard]] static const char* step_name(Step s)
     {

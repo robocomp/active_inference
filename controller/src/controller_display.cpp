@@ -299,6 +299,12 @@ void ControllerDisplay::set_hold_reason(const std::string &why)
     snapshot_.hold_reason = why;
 }
 
+void ControllerDisplay::set_motion_verdict(const rc::why::View &v)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.motion_verdict = v;
+}
+
 void ControllerDisplay::set_session_totals(float metres, float seconds)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -541,6 +547,7 @@ void ControllerDisplay::present()
     }
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
+    custom_widget_->set_motion_verdict(snap.motion_verdict);   // the WHY chip (motion_verdict.h); widget dedups
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
     if (status_line_) status_line_->apply(compose_status(snap));

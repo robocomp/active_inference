@@ -14,6 +14,7 @@
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
 #include "controller_door_passage.h"
+#include "motion_verdict.h"
 #include "controller_anchor_servo.h"
 #include "lidar_guard_buffer.h"
 #include "doorway_gap.h"
@@ -180,7 +181,17 @@ public:
                              const WakeCallback &wake_callback);
 
     void stop(rc::TrajectoryController &path_controller,
-              ControllerMotionCommander &motion_commander);
+              ControllerMotionCommander &motion_commander,
+              std::source_location loc = std::source_location::current());
+
+    // ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only: nothing that drives reads these.
+    // The worker begin()s the evidence at the top of each control pass and selects the verdict at its end; every branch
+    // of this class that ends a cycle without motion notes its cause here, with the numbers it decided on.
+    [[nodiscard]] rc::why::Evidence &why() { return why_; }
+    void note_why(rc::why::Cause c, std::string detail, std::source_location loc = std::source_location::current())
+    {
+        why_.note(c, std::move(detail), loc);
+    }
 
     /// ABANDON the affordance being executed and let the planner choose the next one.
     /// The operator's override on the epistemic policy: the selector optimises expected information
@@ -649,6 +660,11 @@ private:
     std::string suppressed_affordance_;
     // Names the branch that ended a cycle without sending a speed command (see the .cpp).
     void note_no_command(std::source_location loc = std::source_location::current());
+    rc::why::Evidence why_;                 // this cycle's evidence (motion_verdict.h)
+    rc::why::AffordanceMemory why_aff_memory_;   // the last sighting of each door-passage affordance, kept past deletion
+    void observe_door_passage_why(std::uint64_t now_ms);   // passage note + memory, once per cycle (sync_world_state)
+    // The name of what the robot is being driven to, for the "MOVING — to …" detail.
+    [[nodiscard]] std::string why_target_name() const;
 
     // Rate limit for the "target is boxed in" warning — the condition persists as long as the target does.
     std::uint64_t last_unreachable_log_ms_ = 0;

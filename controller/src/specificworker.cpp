@@ -38,6 +38,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <locale>
 #include <sstream>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -158,6 +159,13 @@ void SpecificWorker::initialize()
 	    .on_waiting_enter = [this]()
 	    {
 	        const auto missing = presence_coordinator_.missing_required_names();
+	        {
+	            std::string m;
+	            for (const auto &label : missing) m += " " + label;
+	            std::lock_guard lk(presence_why_mx_);
+	            presence_why_ = missing.empty() ? std::string("presence Waiting (not Operating yet)")
+	                                            : "presence Waiting — required peer(s) missing:" + m;
+	        }
 	        if (missing.empty())
 	            qInfo("[SM] -> Waiting");
 	        else
@@ -167,8 +175,12 @@ void SpecificWorker::initialize()
 	            qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
 	        }
 	    },
-	    .on_operating_enter = []()
+	    .on_operating_enter = [this]()
 	    {
+	        {
+	            std::lock_guard lk(presence_why_mx_);
+	            presence_why_.clear();
+	        }
 	        qInfo("[SM] -> Operating: all required peers present");
 	    },
 	    .on_operating_loop = [this]()
@@ -188,6 +200,11 @@ void SpecificWorker::initialize()
 	        QString m;
 	        for (const auto &label : presence_coordinator_.missing_required_names())
 	            m += " " + QString::fromStdString(label);
+	        {
+	            std::lock_guard lk(presence_why_mx_);
+	            presence_why_ = std::format("presence DEGRADED — required peer(s) lost:{} ({} ms grace before shutdown)",
+	                                        m.toStdString(), kRequiredLossGraceMs);
+	        }
 	        // DEBOUNCE — do NOT cleanup/exit on entry. A transient required-peer flap
 	        // (startup handshake, brief DSR node churn, a peer restarting) fires
 	        // presenceLost momentarily and then recovers; tearing down here deletes our
@@ -744,6 +761,7 @@ void SpecificWorker::compute()
 
 	if (!G)
 	{
+		session_.note_why(rc::why::Cause::NoWorld, "no DSR graph");
 		update_custom_widget(std::nullopt);
 		return;
 	}
@@ -758,7 +776,13 @@ void SpecificWorker::compute()
 	// A "move" / "turn" owns the base until it ends (controller_relative_motion.h) — before the planner, so neither
 	// an affordance nor a stale plan can take turns with it.
 	if (step_relative_motion(now_ms))
+	{
+		const auto rv = relative_motion_.view();
+		session_.note_why(rc::why::Cause::RelativeMotion,
+		                  std::format("move order #{} '{}': {}{}", rv.id, rv.text, rv.current.empty() ? std::string("ending") : rv.current,
+		                              rv.last_event.empty() ? std::string{} : " — " + rv.last_event));
 		return;
+	}
 
 	const auto step = build_planning_step(now_ms);
 	update_selected_affordance_label();
@@ -771,6 +795,10 @@ void SpecificWorker::compute()
 	// point may run while halted; the display still updates so the view stays live.
 	if (!driving_enabled_ or paused_)
 	{
+		session_.note_why(rc::why::Cause::Halted,
+		                  paused_ ? std::string("PAUSED — press Pause again to resume (the route is kept)")
+		                          : std::string("driving is off — Run not pressed, or Stop / abort / a finished mission "
+		                                        "disabled it; press Run or click a target"));
 		if (!stop_sent_when_halted_)
 		{
 			// ★PAUSE MUST NOT CLEAR THE PATH. path_controller_.stop() wipes path_room_, which is
@@ -1490,6 +1518,7 @@ void SpecificWorker::control_loop()
 		}
 		if (!control_running_.load(std::memory_order_acquire))
 			break;
+		session_.why().begin();   // this pass's evidence (motion_verdict.h); selected in finish_why_cycle below
 
 		// 1) Drain user commands (target clicks, follow toggle) on the owning thread.
 		if (command_pending_.load(std::memory_order_acquire))
@@ -1633,6 +1662,7 @@ void SpecificWorker::control_loop()
 		// did; once ready the sensor takes over the cadence. Costs one branch and removes a hang that
 		// only appears on a cold start, which is the worst kind to leave in.
 		const bool world_ready = world_model_.graph_state().ready();
+		bool pipeline_ran = false;   // compute() ran this pass (the WHY verdict below)
 		const bool trigger = operating_latched_.load(std::memory_order_acquire)
 		                     and (fresh_lidar or not world_ready);
 		// Clear the wake edge every pass: it is the CV predicate, so leaving it set would spin this loop.
@@ -1679,9 +1709,104 @@ void SpecificWorker::control_loop()
 			}
 
 			if (!lidar_stalled_)
+			{
 				compute();
+				pipeline_ran = true;
+			}
+		}
+
+		// ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only.
+		// A verdict is selected when this pass DECIDED something: compute() ran, or the pipeline is held for a reason
+		// only this loop knows. A pass that merely found no fresh scan (about half of all healthy passes) decides
+		// nothing and keeps the previous verdict — only its duration is refreshed.
+		{
+			const auto steady_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			    std::chrono::steady_clock::now().time_since_epoch()).count());
+			const bool latched = operating_latched_.load(std::memory_order_acquire);
+			bool held = false;
+			if (not latched)
+			{
+				std::string p;
+				{
+					std::lock_guard lk(presence_why_mx_);
+					p = presence_why_;
+				}
+				session_.note_why(rc::why::Cause::PresenceDegraded, p.empty() ? std::string("presence: not Operating") : p);
+				held = true;
+			}
+			if (lidar_stalled_)
+			{
+				const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+				    std::chrono::steady_clock::now() - last_lidar_rx_).count();
+				session_.note_why(rc::why::Cause::LidarStalled,
+				                  std::format("no fresh LiDAR sweep for {:.1f} s (limit {} ms; last poll {}) — robot halted, "
+				                              "recovering the media reader", age_ms * 1e-3, params.lidar_stall_timeout_ms,
+				                              to_string(last_lidar_poll_)));
+				held = true;
+			}
+			else if (world_ready and not lidar_ever_received_)
+			{
+				session_.note_why(rc::why::Cause::LidarStalled,
+				                  std::format("no LiDAR sweep received yet (last poll {}) — the pipeline runs on fresh scans",
+				                              to_string(last_lidar_poll_)));
+				held = true;
+			}
+			if (pipeline_ran or held)
+				finish_why_cycle(steady_ms);
+			else
+				display_.set_motion_verdict(why_tracker_.view(steady_ms));
 		}
 	}
+}
+
+// ── WHY IS THE ROBOT NOT MOVING: select, log on change, publish (motion_verdict.h) ─────────────────────────────────
+// ★ Observability only: reads the evidence the pass noted and the command in force; changes nothing that drives.
+void SpecificWorker::finish_why_cycle(std::uint64_t steady_ms)
+{
+	auto &ev = session_.why();
+	const bool armed = motion_commander_.output_enabled();
+	if (not armed)
+		ev.note(rc::why::Cause::Disarmed, "the base output is DISARMED — commands are computed and discarded (Stop disarms; "
+		                                  "press Run or click a target to re-arm)");
+	// The running mission step rides on every verdict, and a `wait` step is itself the cause.
+	{
+		std::string ctx = std::format("mode {}", rc::to_string(session_.mission().mode()));
+		if (interpreter_.state() == rc::mission::Interpreter::State::Running)
+		{
+			const std::string prog = interpreter_.progress();
+			const std::string leaf = prog.substr(0, prog.find('|'));
+			ctx += " · mission step " + leaf;
+			if (leaf.find(":wait") != std::string::npos)
+				ev.note(rc::why::Cause::MissionWaiting, std::format("mission step {} holds the base by order", leaf));
+		}
+		ev.set_context(std::move(ctx));
+	}
+	// The command in force: the output thread keeps sending the last one until it is replaced, so "driving" is a
+	// non-zero last command on an armed output — not "something was sent this pass".
+	const auto lc = motion_commander_.last_command();
+	const bool driving = armed and lc.nonzero();
+	const std::string last_site = lc.fn.empty() ? std::string{} : rc::why::site_of(lc.fn, lc.line);
+	const auto verdict = rc::why::select(ev, driving, last_site,
+	                                     std::format("adv {:+.2f} m/s rot {:+.2f} rad/s from {}", lc.adv_mps, lc.rot_rps,
+	                                                 last_site));
+	const auto why_out = why_tracker_.update(verdict, steady_ms);
+	if (not why_out.log_line.empty())
+		std::println("{}", why_out.log_line);
+	if (why_out.changed)
+	{
+		if (not why_log_open_)
+		{
+			why_log_.open("why_log.jsonl", std::ios::out | std::ios::trunc);
+			why_log_.imbue(std::locale::classic());   // decimal POINT under LANG=es_ES (CLAUDE.md)
+			why_log_open_ = true;
+		}
+		if (why_log_.is_open())
+		{
+			why_log_ << rc::why::json_row(verdict, steady_ms) << '\n';
+			why_log_.flush();
+		}
+	}
+	display_.set_motion_verdict(why_tracker_.view(steady_ms));
 }
 
 void SpecificWorker::init_lidar_media()
@@ -2072,6 +2197,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 	const auto pose = world_model_.read_robot_pose_latest(now_ms);
 	if (not pose.has_value())
 	{
+		session_.note_why(rc::why::Cause::NoPose, "move order holding: no robot pose to close the loop on");
 		motion_commander_.stop_robot();   // no pose ⇒ no closed loop ⇒ hold
 		return true;
 	}
@@ -2079,6 +2205,8 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 	                        obstacle_tracker_.temporary_obstacle_rfe_points(), params.max_lidar_draw_points);
 	if (not driving_enabled_ or paused_)
 	{
+		session_.note_why(rc::why::Cause::Halted, paused_ ? std::string("PAUSED during a move order")
+		                                                  : std::string("driving is off during a move order — press Run"));
 		motion_commander_.stop_robot();
 		update_custom_widget(*pose);
 		return true;

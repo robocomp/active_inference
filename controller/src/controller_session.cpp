@@ -131,6 +131,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             qInfo() << "Controller waiting for room and robot nodes in DSR";
             room_wait_logged_ = true;
         }
+        note_why(rc::why::Cause::NoWorld, "the room or robot node is not in DSR yet (room_concept / robot_concept)");
         update_display(std::nullopt,
                        display,
                        obstacle_tracker.display_obstacle_polygons(),
@@ -149,6 +150,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         current_plan_.reset();
         plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
         qInfo() << "Controller waiting for delimiting polygon attributes on room node";
+        note_why(rc::why::Cause::NoWorld, std::format("room '{}' carries no polygon yet (room_concept)",
+                                                      world_model.graph_state().room_name));
         update_display(std::nullopt,
                        display,
                        obstacle_tracker.display_obstacle_polygons(),
@@ -201,6 +204,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         display.set_door_passage({.door = v.door, .step = rc::DoorPassage::step_name(v.step), .step_state = v.step_state,
                                   .attempts = v.attempts, .last_event = v.last_event},
                                  door_passages_);
+        observe_door_passage_why(timestamp_ms);   // motion_verdict.h — observability only
     }
 
     // ── THE ROBOT'S OWN BODY, ONCE, AS SOON AS ITS NODE EXISTS ───────────────────────────────────
@@ -418,6 +422,7 @@ void audit_standpoint(std::string_view event, std::uint64_t t_ms,
 // audit file the standpoint rows go to — so a freeze can be read off one file instead of inferred.
 void ControllerSession::note_no_command(std::source_location loc)
 {
+    why_.note_zero_site(rc::why::site_of(loc));   // every call, before the audit's throttle (motion_verdict.h)
     static std::uint64_t last_ms = 0;
     const auto now = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -427,6 +432,70 @@ void ControllerSession::note_no_command(std::source_location loc)
     const Eigen::Vector2f here = current_target_room_.value_or(Eigen::Vector2f::Zero());
     audit_standpoint("no-command", now, here, here, here, "stopped",
                      std::format("line {}", loc.line()), -1, -1, -1);
+}
+
+// ── WHY IS THE ROBOT NOT MOVING: the door passage's side (motion_verdict.h) ─────────────────────────────────────────
+// ★ OBSERVABILITY ONLY — reads the graph, writes nothing but the evidence. Runs every cycle the passage has a door, so
+//   the last sighting of each of its affordances is kept: door_concept DELETES a withdrawn affordance, and with the node
+//   goes everything that would explain the wait (try97 leg 2: 'aff_door_1_cross' withdrawn at P(passable)=0.12, the
+//   passage at Cross waiting for it for ~7 minutes, nothing on screen saying so).
+// ★ The producer's own precondition sentence ("clear span 0.65 m … vs 0.70 m of body") is NOT on the wire — it is only
+//   logged by door_concept. What the controller can read is what the DOOR node publishes; that is composed here.
+void ControllerSession::observe_door_passage_why(std::uint64_t now_ms)
+{
+    const auto v = door_passage_.view();
+    if (v.door.empty() or not graph_) return;
+    std::string door_now;
+    if (const auto dn = graph_->get_node(v.door); dn.has_value())
+    {
+        std::vector<std::string> parts;
+        const auto p_pass  = graph_->get_attrib_by_name<door_open_prob_att>(dn.value());
+        const auto p_reach = graph_->get_attrib_by_name<door_reach_prob_att>(dn.value());
+        const auto phi     = graph_->get_attrib_by_name<door_phi_rad_att>(dn.value());
+        const auto w       = graph_->get_attrib_by_name<width_m_att>(dn.value());
+        if (p_pass.has_value()) parts.push_back(std::format("P(passable)={:.2f}", p_pass.value()));
+        if (phi.has_value() and phi.value() >= 0.f and w.has_value())
+        {
+            // The along-wall clear span door_concept rates passability on — rc::door::clear_width
+            // (door_concept/src/door_passability.h): w·(1 − max(0, cos φ)). Display only.
+            const float span = std::max(0.f, w.value() * (1.f - std::max(0.f, std::cos(phi.value()))));
+            parts.push_back(std::format("clear span {:.2f} m at phi={:.2f} rad (aperture {:.2f} m)", span, phi.value(), w.value()));
+        }
+        else if (w.has_value())
+            parts.push_back(std::format("aperture {:.2f} m, leaf angle not measured", w.value()));
+        if (p_reach.has_value()) parts.push_back(std::format("P(reach)={:.2f}", p_reach.value()));
+        for (const auto &p : parts) door_now += (door_now.empty() ? "" : ", ") + p;
+    }
+    else
+        door_now = std::format("door node '{}' is not in the graph", v.door);
+    for (const char *kind : {"approach", "open", "cross", "close"})
+    {
+        const std::string name = "aff_" + v.door + "_" + kind;
+        const auto n = graph_->get_node(name);
+        if (not n.has_value()) { why_aff_memory_.absent(name, now_ms); continue; }
+        // The protocol's two flags (affordance_manager.h decode_protocol_state), as DoorPassage::state_of reads them.
+        const bool a = graph_->get_attrib_by_name<active_att>(n.value()).value_or(false);
+        const bool p = graph_->get_attrib_by_name<epistemic_pending_att>(n.value()).value_or(false);
+        const char *st = p and not a ? "offered" : p and a ? "executing" : not p and not a ? "completed" : "active-not-pending";
+        why_aff_memory_.seen(name, {.state = st,
+                                    .outcome = graph_->get_attrib_by_name<aff_outcome_att>(n.value()).value_or(std::string{}),
+                                    .precondition = door_now, .t_ms = now_ms});
+    }
+    if (not door_passage_.active()) return;
+    const rc::why::PassageFacts f{.door = v.door, .step = rc::DoorPassage::step_name(v.step), .required = v.required,
+                                  .state = v.step_state, .reached_door = v.reached_door, .opened = v.opened,
+                                  .clearing = v.clearing, .attempts = v.attempts, .last_outcome = v.last_outcome,
+                                  .door_now = door_now};
+    if (auto note = rc::why::passage_note(f, why_aff_memory_, now_ms); note.has_value())
+        why_.add(std::move(*note));
+}
+
+std::string ControllerSession::why_target_name() const
+{
+    if (last_target_info_.has_value() and not last_target_info_->node_name.empty()) return last_target_info_->node_name;
+    if (manual_target_room_.has_value())
+        return std::format("clicked point ({:.2f},{:.2f})", manual_target_room_->x(), manual_target_room_->y());
+    return "—";
 }
 
 // ── THE PROTOCOL CONVERSATION, ON ITS OWN CLOCK ──────────────────────────────────────────────────
@@ -532,6 +601,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     if (!robot_pose.has_value())
     {
         qInfo() << "Controller waiting for robot pose in room frame";
+        note_why(rc::why::Cause::NoPose, std::format("no robot pose in room '{}' (the room<-robot RT is missing or stale)",
+                                                     world_model.graph_state().room_name));
         update_display(std::nullopt,
                        display,
                        obstacle_tracker.display_obstacle_polygons(),
@@ -818,6 +889,10 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         affordance_view_.dwell_mask_needed = wants_mask ? hits_wanted : 0;
         affordance_view_.suppressed = suppressed_affordance_;
         display.set_affordance_execution(affordance_view_);
+        note_why(rc::why::Cause::Dwell,
+                 std::format("after '{}': {:.1f} s of dwell left{}", dwell_object_.empty() ? std::string("—") : dwell_object_,
+                             double(dwell_left_s(timestamp_ms)),
+                             wants_mask ? std::format(", mask seen {}/{}", dwell_mask_hits_, hits_wanted) : std::string{}));
         stop(path_controller, motion_commander);
         note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
                       std::format("no planning step (line {})", 505));
@@ -958,6 +1033,33 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
+        {
+            // ── WHY: nothing to drive to — and WHICH of the three reasons, with the contest's candidates.
+            std::string d;
+            if (mission_.mode() == rc::DriveMode::Target)
+                d = "Target mode: no point has been clicked";
+            else if (command_without_order)
+                d = "Command mode with no order standing (it takes orders; it does not forage)";
+            else if (rc::uses_mission(mission_.mode()))
+                d = std::format("{} mode: no mission running", rc::to_string(mission_.mode()));
+            else
+            {
+                d = not door_required_.empty() ? std::format("selector restricted to '{}': nothing eligible", door_required_)
+                                               : std::string("selector: nothing eligible");
+                const auto &cs = affordance_manager.last_candidates();
+                if (cs.empty()) d += " — no affordance on offer";
+                else
+                {
+                    d += " — candidates:";
+                    constexpr std::size_t kShown = 6;   // display only: the rest are counted, not listed
+                    for (std::size_t i = 0; i < cs.size() and i < kShown; ++i)
+                        d += std::format(" '{}'({}{})", cs[i].node_name, cs[i].state, cs[i].eligible ? "" : ", ineligible");
+                    if (cs.size() > kShown) d += std::format(" +{} more", cs.size() - kShown);
+                }
+                if (not suppressed_affordance_.empty()) d += std::format("; suppressed '{}'", suppressed_affordance_);
+            }
+            note_why(rc::why::Cause::NoTarget, std::move(d));
+        }
         stop(path_controller, motion_commander);
         note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
                       std::format("no planning step (line {})", 592));
@@ -1098,6 +1200,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              std::format("failed here {}x before", spot->hits), -1, -1, 0);
             current_plan_.reset();
             plan_spline_valid_ = false;
+            note_why(rc::why::Cause::TargetRejected,
+                     std::format("'{}' at ({:.2f},{:.2f}): failed from here {}x before — reported Unreachable", target->node_name,
+                                 target->room_pos.x(), target->room_pos.y(), spot->hits));
             stop(path_controller, motion_commander);
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
@@ -1281,6 +1386,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             current_plan_.reset();
             plan_spline_valid_ = false;
             last_repair_applied_m_ = 0.f;
+            note_why(rc::why::Cause::TargetRejected,
+                     std::format("orient '{}': the body cannot turn here ({}/8 headings blocked, nearest {:.2f} m) — reported "
+                                 "Infeasible", step.target.node_name, blk.headings_blocked, blk.nearest_m));
             stop(path_controller, motion_commander);
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
@@ -1337,6 +1445,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             current_plan_.reset();
             plan_spline_valid_ = false;
             last_repair_applied_m_ = 0.f;
+            note_why(rc::why::Cause::TargetRejected,
+                     std::format("'{}' at ({:.2f},{:.2f}) is outside room '{}' — reported OutsideRoom", step.target.node_name,
+                                 cell.x(), cell.y(), current_room_name_));
             stop(path_controller, motion_commander);
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
@@ -1538,6 +1649,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             current_plan_.reset();
             plan_spline_valid_ = false;
             last_repair_applied_m_ = 0.f;
+            note_why(rc::why::Cause::TargetRejected,
+                     std::format("'{}' at ({:.2f},{:.2f}): {} — reported {}", step.target.node_name, cell.x(), cell.y(), why,
+                                 rc::affordance::to_string(*fact)));
             stop(path_controller, motion_commander);
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
@@ -1658,6 +1772,10 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
         current_plan_.reset();
         plan_spline_valid_ = false;
+        note_why(rc::why::Cause::TargetRejected,
+                 std::format("'{}' at ({:.2f},{:.2f}) is not reachable: the closest reachable pose is {:.2f} m away, past the "
+                             "{:.2f} m repair budget — suppressed", step.target.node_name, published.x(), published.y(),
+                             (*safe - published).norm(), repair_budget));
         stop(path_controller, motion_commander);
         update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
@@ -2669,7 +2787,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
         step_escape(step.robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
-        note_hold("escape manoeuvre owns the base");
+        note_hold("escape manoeuvre owns the base");   // step_escape notes the why
         return false;
     }
     // Task 14 fix round 4: the returns' backoff owns the base the same way, until clearance is open; then the planner.
@@ -2771,6 +2889,8 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         }
         note_hold(std::format("route not built ({})",
                               last_plan_failure_.empty() ? "no reason recorded" : last_plan_failure_));
+        note_why(rc::why::Cause::NoRoute, std::format("mission '{}': the route could not be built ({})", mission_.selected_name(),
+                                                      last_plan_failure_.empty() ? "no reason recorded" : last_plan_failure_));
         return false;
     }
     // ── SECOND CHANCE FOR THE WAYPOINTS THE BUILD COULD NOT REACH ────────────────────────────────
@@ -2844,6 +2964,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
             note_hold(std::format("repair FAILED at s={:.2f} m — the route under the robot is not "
                                   "footprint-feasible and could not be re-authored around it",
                                   route_.progress()));
+            note_why(rc::why::Cause::NoRoute, hold_reason_);
             return false;
         }
     }
@@ -3021,6 +3142,13 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         path_controller.stop();
         motion_commander.stop_robot();
         if (no_route_since_ms_ == 0) no_route_since_ms_ = time_source();   // reported Unreachable by execute_plan
+        note_why(rc::why::Cause::NoRoute,
+                 std::format("no route to '{}' at ({:.2f},{:.2f}) for {:.1f} s: {}{}", step.target.node_name,
+                             step.target.room_pos.x(), step.target.room_pos.y(),
+                             double(time_source() - no_route_since_ms_) * 1e-3, grid_planner_.last_failure(),
+                             unroutable_fix_.has_value() ? " (a reachability fallback is held)"
+                                                         : returns_backoff_failed_ ? " (the returns' backoff found no way out)"
+                                                                                   : ""));
         if (time_source() - last_no_route_log_ms_ >= 3000)
         {
             last_no_route_log_ms_ = time_source();
@@ -3377,12 +3505,17 @@ bool ControllerSession::step_returns_backoff(const ControllerRobotPose &robot_po
         returns_backoff_failed_ = not open;
         std::println("[controller] returns' backoff ends — {}: re-planning", open ? "clearance open beyond the margin"
                                                                                   : "nothing opens it further");
+        note_why(rc::why::Cause::ReturnsBackoff, std::format("the returns' backoff ends ({}) — re-planning next cycle",
+                                                             open ? "clearance open" : "nothing opens it further"));
         reset_stuck_state();
         current_plan_.reset();
         path_controller.stop();
         note_no_command(); motion_commander.stop_robot();
         return false;
     }
+    note_why(rc::why::Cause::ReturnsBackoff,
+             std::format("{} — backing off the real returns: adv {:+.2f} rot {:+.2f} ({} returns around the body)", why,
+                         b->adv, b->rot, lr.r.obstacles.size()));
     motion_commander.send_speed_command(b->adv, holonomic ? b->side : 0.f, b->rot);
     return true;
 }
@@ -3596,6 +3729,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             // Task 12 Fix E: no claim to hand back past the room switch — the anchor is lost; the passage moves on (its
             // room-switch rule) with the robot where it is.
             std::println("[anchor] cross: {} while going through past the room switch — the anchor is given up", why);
+            note_why(rc::why::Cause::AnchorHandBack, std::format("past the room switch: {} — the anchor is given up", why));
             anchor_cross_engaged_ = false;
             anchor_wait_since_ms_ = 0;
             anchor_spin_since_ms_ = 0;
@@ -3608,6 +3742,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         else
             std::println("[anchor] cross: {}: handing '{}' back Unreachable", why, anchor_latched_for_);
         flag_reach_unreachable("anchor cross: " + why);
+        note_why(rc::why::Cause::AnchorHandBack, std::format("'{}' handed back Unreachable: {}", anchor_latched_for_, why));
         anchor_wait_since_ms_ = 0;
         anchor_spin_since_ms_ = 0;
         note_no_command(); motion_commander.stop_robot();
@@ -3707,6 +3842,9 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             {
                 std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — THROUGH the doorway, "
                              "in the new room{}", drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
+                note_why(rc::why::Cause::PassageClearing,
+                         std::format("THROUGH the doorway on {} ({:.2f} m past, standoff {:.2f} m) — the passage moves on",
+                                     drive_name, g.s, standoff));
                 path_controller.stop();
                 note_no_command(); motion_commander.stop_robot();
                 return;
@@ -3730,6 +3868,10 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         if (anchor_cross_engaged_)
         {
             // Driven on in this step and no longer seen: STOP and wait. Nothing is commanded on a pose nobody is looking at.
+            note_why(rc::why::Cause::AnchorWaiting,
+                     std::format("the anchor {} is stale ({} ms old) — stopped until it is seen again (handed back after "
+                                 "{:.1f} s; waiting {:.1f} s)", a.name, a.age_ms, target_contract_.timeout_ms * 1e-3,
+                                 (now - anchor_wait_since_ms_) * 1e-3));
             reset_stuck_window();
             note_no_command(); motion_commander.stop_robot();
             return;
@@ -3891,9 +4033,24 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     // 4. Out.
     if (std::abs(adv_mps) < 5e-4f and std::abs(side_mps) < 5e-4f and std::abs(rot_rps) < 1e-3f)
     {
+        // WHY (observability only): which of the guards above took the whole command.
+        if (returns_hold)
+            note_why(rc::why::Cause::ReturnsHold,
+                     std::format("cross on {}: a live return closes every motion (v <= {:.3f} m/s, |w| <= {:.3f} rad/s; {} returns "
+                                 "near the body, {} in the contact band)", a.name, cap.v_lim, cap.w_lim,
+                                 returns.r.obstacles.size(), returns.r.n_band));
+        else if (not drive)
+            note_why(rc::why::Cause::AnchorWaiting,
+                     std::format("cross on {}: the anchor is {} — {}", a.name, a.fresh ? "not yet engaged" : "stale",
+                                 anchor_wait_blocked_ ? "the wait-turn was judged SPINNING, holding still"
+                                                      : "facing the opening, waiting for a fresh anchor"));
+        else
+            note_why(rc::why::Cause::TrackerZero, std::format("the anchor servo on {} commanded zero", a.name));
         note_no_command(); motion_commander.stop_robot();
         return;
     }
+    why_.set_driving_detail(std::format("cross on the anchor {}: adv {:+.2f} m/s rot {:+.2f} rad/s{}", a.name, adv_mps, rot_rps,
+                                        returns_hold ? " — capped by live returns" : ""));
     motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
 }
 
@@ -5525,6 +5682,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // follower so it isn't disturbed by goal_reached re-evaluation while we quasi-statically servo.
     if (lockon_.active())
     {
+        note_why(rc::why::Cause::LockOn, std::format("lock-on micro-search on '{}'", why_target_name()));
         if (step_lockon(motion_commander, time_source))
             finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
@@ -5555,6 +5713,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 // the full cycle uses — and the final cycle of a turn is shown as a turn rather than
                 // as the idle that finalize_reached leaves behind.
                 refresh_view_only();
+                note_why(rc::why::Cause::Orienting, std::format("orient '{}': turning in place toward its bearing",
+                                                                last_target_info_->node_name));
                 if (step_orient(robot_pose, motion_commander, time_source, last_target_info_->yaw_rad))
                     finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
@@ -5802,6 +5962,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             mission_.stop("completed", time_source());
             route_active_ = false;
             path_controller.stop();
+            note_why(rc::why::Cause::MissionDone, std::format("mission '{}' completed", mission_.selected_name()));
             note_no_command(); motion_commander.stop_robot();
             return;
         }
@@ -6120,6 +6281,10 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // curve and the robot drives at the blocker again.
         route_repair_pending_ = true;
         path_controller.stop();
+        note_why(rc::why::Cause::Blockage,
+                 std::format("the path to '{}' is blocked at ({:.2f},{:.2f}), r {:.2f} m — plan dropped, re-routing",
+                             why_target_name(), control_output.blockage_center_room.x(),
+                             control_output.blockage_center_room.y(), control_output.blockage_radius));
         note_no_command(); motion_commander.stop_robot();
         return;
     }
@@ -6336,6 +6501,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             }
         }
         clear_tracking_state();
+        note_why(rc::why::Cause::PathShort,
+                 std::format("the path ended {:.2f} m short of '{}'{}", d_here, why_target_name(),
+                             short_path_since_ms_ != 0
+                                 ? std::format(" for {:.1f} s (Unreachable after 5 s)", (time_source() - short_path_since_ms_) * 1e-3)
+                                 : std::string{}));
         note_no_command(); motion_commander.stop_robot();
         return;
     }
@@ -6372,10 +6542,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     //   covers the anchored cross and the anchored clearing). Unfloored, like the cross; the tracker's own field, gate and
     //   floor are untouched. ⚠ side: the robot-frame convention (+x right) the anchor servo uses; Shadow commands none.
     bool returns_hold = false;
+    std::string returns_cap_text;   // motion_verdict.h — observability only
     {
         const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
         const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv_mps, side_mps, rot_rps);
         returns_hold = cap.bound_lin or cap.bound_rot;
+        if (returns_hold)
+            returns_cap_text = std::format("v <= {:.3f} m/s{}, |w| <= {:.3f} rad/s{}", cap.v_lim, cap.bound_lin ? " (binding)" : "",
+                                           cap.w_lim, cap.bound_rot ? " (binding)" : "");
         if (not returns_hold) returns_backoff_failed_ = false;   // a command the net lets through: a later hold may back off
         if (returns_hold != anchor_returns_binding_logged_)
         {
@@ -6463,6 +6637,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
             return;
         }
+        if (adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f and returns_hold)
+            note_why(rc::why::Cause::ReturnsHold, std::format("arrival rotation at '{}' held by a live return: {}",
+                                                              why_target_name(), returns_cap_text));
+        why_.set_driving_detail(std::format("arrival rotation at '{}': rot {:+.2f} rad/s{}", why_target_name(), rot_rps,
+                                            returns_hold ? " — capped by live returns" : ""));
         motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
         return;
     }
@@ -6514,10 +6693,28 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (std::abs(adv_mps) < 5e-4f && std::abs(side_mps) < 5e-4f && std::abs(rot_rps) < 1e-3f)
     {
         path_controller.stop();
+        // WHY (observability only): the returns took the whole command, or the tracker itself asked for nothing.
+        if (returns_hold)
+            note_why(rc::why::Cause::ReturnsHold,
+                     std::format("to '{}' ({:.2f} m left): a live return holds the whole command — {}{}", why_target_name(),
+                                 control_output.dist_to_goal, returns_cap_text,
+                                 returns_held_since_ms_ != 0
+                                     ? std::format(", held {:.1f} s (backoff after one judge window)",
+                                                   (time_source() - returns_held_since_ms_) * 1e-3)
+                                     : std::string{}));
+        else
+            note_why(rc::why::Cause::TrackerZero,
+                     std::format("the tracker asked for zero toward '{}' ({:.2f} m left, asked {:.3f} m/s){}{}", why_target_name(),
+                                 control_output.dist_to_goal, asked_lin_mps,
+                                 control_output.gate_hard_stop ? "; the safety gate hard-stopped it" : "",
+                                 control_output.safety_guard_triggered ? "; safety guard triggered" : ""));
         note_no_command(); motion_commander.stop_robot();
         return;
     }
 
+    why_.set_driving_detail(std::format("to '{}' ({:.2f} m left): adv {:+.2f} m/s rot {:+.2f} rad/s{}", why_target_name(),
+                                        control_output.dist_to_goal, adv_mps, rot_rps,
+                                        returns_hold ? " — capped by live returns" : ""));
     motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
 }
 
@@ -7026,6 +7223,12 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
                                          std::source_location floc)
 {
     last_finalize_line_ = floc.line();
+    note_why(rc::why::Cause::Arrived,
+             std::format("'{}' completed{} at ({:.2f},{:.2f}){}", why_target_name(),
+                         outcome_override.has_value() ? std::format(" ({})", rc::affordance::to_string(*outcome_override))
+                                                      : std::string{},
+                         arrived_at.x(), arrived_at.y(), allow_dwell ? " — a dwell may follow" : ""),
+             floc);
     // ★★★WHO COMPLETED IT, AND FROM HOW FAR. Six callers reach here; three are outside the arrival
     // branch. The starvation returns because something completes an affordance the robot never drove
     // to, which then makes the (correct) just-completed suppression block the very cell it should
@@ -7596,6 +7799,9 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
                                     std::uint64_t now_ms)
 {
     const float backed = (robot_pose.pos - escape_start_pos_).norm();
+    note_why(rc::why::Cause::Escape,
+             std::format("wedged: reverse + turn {} out of it, {:.2f} m backed so far (escape {} on this target)",
+                         escape_turn_sign_ > 0.f ? "LEFT" : "RIGHT", backed, escapes_on_target_));
     const float max_ms = params_ ? params_->escape_max_ms : 1500.f;
     const float max_dist = params_ ? params_->escape_distance_m : 0.30f;
     if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(max_ms) || backed > max_dist)
@@ -7633,12 +7839,14 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
 }
 
 void ControllerSession::stop(rc::TrajectoryController &path_controller,
-                             ControllerMotionCommander &motion_commander)
+                             ControllerMotionCommander &motion_commander,
+                             std::source_location loc)
 {
     path_controller.stop();
     reset_stuck_state();
     clear_tracking_state();
-    motion_commander.stop_robot();
+    why_.note_zero_site(rc::why::site_of(loc));   // the caller of stop(), not stop() itself
+    motion_commander.stop_robot(loc);
 }
 
 void ControllerSession::abort(rc::TrajectoryController &path_controller,

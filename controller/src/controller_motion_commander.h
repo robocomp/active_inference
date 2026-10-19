@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include "controller_runtime_types.h"
@@ -60,7 +61,19 @@ public:
     // authorities are identified in one run instead of by reading the tracker.
     void send_speed_command(float adv_mps, float side_mps, float rot_rps,
                             std::source_location loc = std::source_location::current());
-    void stop_robot();
+    void stop_robot(std::source_location loc = std::source_location::current());
+
+    /// The command in force and who issued it (motion_verdict.h: "is it driving, and if not, which line stopped it").
+    /// Observability only — nothing that drives reads it. Copied under the mutex.
+    struct LastCommand
+    {
+        float adv_mps = 0.f, side_mps = 0.f, rot_rps = 0.f;
+        bool stop = true;           ///< the last call was stop_robot()
+        std::uint32_t line = 0;
+        std::string fn;             ///< the caller's function signature (source_location)
+        [[nodiscard]] bool nonzero() const { return not stop and (adv_mps != 0.f or side_mps != 0.f or rot_rps != 0.f); }
+    };
+    [[nodiscard]] LastCommand last_command() const;
 
     /// ARM / DISARM the base output entirely.
     ///
@@ -145,6 +158,7 @@ private:
     CommandTextSink command_text_sink_;
     ProfileSink profile_sink_;
     bool stop_command_latched_ = false;
+    LastCommand last_command_;   // under mutex_ (last_command())
     bool has_last_speed_command_ = false;
     Eigen::Vector3f last_speed_command_ = Eigen::Vector3f::Zero();
 
