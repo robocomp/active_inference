@@ -3426,6 +3426,7 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
     prior.normal = Eigen::Vector2f(-std::sin(psi), std::cos(psi));
     prior.P = pr.P;
     prior.width = a.width_m;
+    prior.measured = gap_line_.has_value();   // try86 fix: a held gap is a measurement — no gross jump to another opening/wall
 
     // The body: its half-width (the corridor it needs) and its length (the slab it occupies crossing the wall line).
     const auto &rb = returns_body();

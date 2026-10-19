@@ -26,22 +26,25 @@
  *   every bin whose ray crosses the line beyond the robot is THROUGH if its return lies more than `depth` beyond the line
  *   (the slab the body occupies while passing — a jamb face, a leaf swung to the far side, anything inside it blocks), and
  *   BLOCKED otherwise (in front of the line: a leaf on the robot's side; on it: the wall). Runs of THROUGH bins (unknown bins
- *   bridged) bounded by a BLOCKED bin on both sides are the candidate openings; their edges are those two blocked returns,
- *   measured ALONG the wall (a = the line's direction). The span is then narrowed by any return inside the slab (|depth| <
- *   `depth`) between the edges — a leaf face on the robot's side (test c).
+ *   bridged) bounded by a BLOCKED bin on both sides are the candidate openings; each edge lies between that blocked return
+ *   and where the first ray that passed crosses the return's depth, and is taken at their midpoint (try86 fix: with sparse
+ *   beams the blocked return alone can sit several cm outside the jamb), measured ALONG the wall (a = the line's direction). The span is then narrowed by any return between the edges on the
+ *   body's way through — from the robot's own depth to the slab beyond the line (or a leaf's reach, the door's width): a leaf
+ *   face on the robot's side (test c), an ajar leaf's free edge (tests f, f2).
  *   The WALL LINE is then refitted from the blocked returns 0.1–1.0 m outside each edge: the prior's line and a total-least-
- *   squares line per side compete on residual (range-noise units) + direction under the prior's yaw (gross-widened) — an
- *   ajar leaf makes its side two lines, a leaf at 90° is a line perpendicular to the wall; both lose — and the measurement is
- *   repeated once on the winner, so an anchor's yaw error does not tilt the opening.
+ *   squares line per side compete on SUPPORT (returns within 2σ_r) × the likelihood of their direction under the prior's yaw
+ *   (an anchor's widened by the gross scale; a measured gap's not) — a leaf at 90° is a line perpendicular to the wall, an
+ *   ajar leaf makes its side two lines; both lose — and the measurement is repeated once on the winner.
  * IN THE DOORWAY (|s| < depth: the jambs beside the body, no ray crosses the line usefully): the line is the prior's (the last
  *   fit, carried); the edges are the nearest returns inside the slab on each side of the robot's own projection on it.
  *
  * WHICH OPENING (a second opening further along the wall): the one whose centre is likeliest under the prior —
  *   s_loc = (1−ε)·exp(−½ dᵀS⁻¹d) + ε·exp(−½ dᵀ(S+G)⁻¹d),  d = c − μ,  S = P_xy + R_meas
  *   (a robust mixture: the anchor is right, or GROSSLY wrong — without the second term a confidently wrong anchor, try74's
- *   12σ, would make the true door "unseen"), times a one-sided door-width plausibility: an opening up to the door's width is
- *   plausible (a half-open door is narrower — the servo's P(body fits) slows or refuses on it), a wider one is not a door:
- *   s_w = exp(−½((w − w_door)₊/σ_w)²). The width is fed to the servo AS MEASURED.
+ *   12σ, would make the true door "unseen"; a MEASURED prior — a gap this claim already holds — has no gross branch), times
+ *   the width: wider than the door is not the door, s_w = exp(−½((w − w_door)₊/σ_w)²), and an opening is a doorway to steer
+ *   on only as far as the body fits it, P_fit = Φ((w − 2·half_w)/σ_w) (try86: 1–5 cm slivers scored 0.98 under the one-sided
+ *   term). A half-open door wider than the body is seen and the servo slows on its measured width; a slit is not seen.
  *
  * ⚑ DECISION LEVELS AND MODEL CONSTANTS, flagged (CLAUDE.md):
  *   kGapScoreFloor   = exp(−4.5): "no gap seen" below a 3σ match on one factor. A decision level — the controller either
@@ -101,6 +104,10 @@ struct DoorwayGapPrior
     Eigen::Vector2f normal{0.f, 1.f};                   // the wall normal, oriented along the crossing (unit)
     Eigen::Matrix3f P = Eigen::Matrix3f::Identity();    // covariance of (x, y, yaw) — the anchor's, or the carried gap's
     float width = 0.9f;                                 // the door's full opening width
+    // true = the prior is a gap this claim already MEASURED (carried): no gross-error branch — neither its place nor its
+    // line may jump to another opening or another wall (try86: chained re-associations walked the line 70° round the room).
+    // false = the anchor: its place may be grossly wrong (the gross branch), its wall's yaw too (refit widened).
+    bool measured = false;
 };
 
 // The gap's yaw in the anchor convention (controller_anchor_servo.h): n = (−sin ψ, cos ψ), a = (cos ψ, sin ψ) = (n.y, −n.x).
@@ -164,7 +171,8 @@ struct GapSpan { float tl, tr; };   // along-wall coordinates (t = (q − m)·a)
 
 // Openings by through-rays, the robot clear of the slab. `s` = the robot's offset along n (< 0 before the line).
 inline std::vector<GapSpan> gap_through_spans(const std::vector<std::optional<Eigen::Vector2f>>& scan,
-                                              std::span<const Eigen::Vector2f> slab_pts, const GapLine& L, float s, float depth)
+                                              std::span<const Eigen::Vector2f> slab_pts, const GapLine& L, float s, float depth,
+                                              float door_width)
 {
     std::vector<GapSpan> out;
     const Eigen::Vector2f beyond = s < 0.f ? L.n : Eigen::Vector2f(-L.n);
@@ -184,6 +192,17 @@ inline std::vector<GapSpan> gap_through_spans(const std::vector<std::optional<Ei
     std::optional<std::size_t> last_b;
     bool in_run = false, run_open = false;   // run_open: the run started with no blocked bin before it (unbounded)
     std::optional<std::size_t> run_lo;
+    std::size_t first_t = 0, last_t = 0;
+    // Where a through ray passes the depth (along `beyond`) of a blocked return, along the wall: the obstacle's edge is
+    // between that return and this point, at the same depth (on a thick wall seen obliquely, the line's own crossing would
+    // sit inward of the jamb's far corner).
+    const auto t_pass = [&](std::size_t k_through, std::size_t k_blocked)
+    {
+        const Eigen::Vector2f u = doorway_bin_dir(k_through);
+        const float dd = (*scan[k_blocked] - L.m).dot(beyond);
+        const float lambda = (dd + L.m.dot(beyond)) / u.dot(beyond);
+        return (lambda * u - L.m).dot(L.a);
+    };
     for (std::size_t i = 1; i <= N; ++i)
     {
         const std::size_t k = (start + i) % N;
@@ -194,28 +213,35 @@ inline std::vector<GapSpan> gap_through_spans(const std::vector<std::optional<Ei
         case St::U:
             break;
         case St::T:
-            if (not in_run) { in_run = true; run_open = not last_b.has_value(); run_lo = last_b; }
+            if (not in_run) { in_run = true; run_open = not last_b.has_value(); run_lo = last_b; first_t = k; }
+            last_t = k;
             break;
         case St::B:
             if (in_run and not run_open and run_lo.has_value())
             {
-                float tl = (*scan[*run_lo] - L.m).dot(L.a), tr = (*scan[k] - L.m).dot(L.a);
-                if (tl > tr) std::swap(tl, tr);
-                out.push_back({tl, tr});
+                // Each edge lies between the last blocked return and the first ray that passed (try86 fix: with sparse beams
+                // and dropped returns the blocked return can sit several cm OUTSIDE the jamb) — its midpoint, along the wall.
+                float t0 = 0.5f * ((*scan[*run_lo] - L.m).dot(L.a) + t_pass(first_t, *run_lo));
+                float t1 = 0.5f * ((*scan[k] - L.m).dot(L.a) + t_pass(last_t, k));
+                if (t0 > t1) std::swap(t0, t1);
+                out.push_back({t0, t1});
             }
             in_run = false;
             last_b = k;
             break;
         }
     }
-    // Narrow each span by any return inside the slab between its edges (a leaf face on the robot's side).
+    // Narrow each span by any return between its edges on the body's way through: from the robot's own depth (it drives
+    // the whole approach along the normal — an ajar leaf reaching 0.9 m toward it narrows the passage over all of that) to
+    // the slab beyond the line, or a leaf's reach (the door's width) if longer.
     for (auto& sp : out)
     {
         const float tc = 0.5f * (sp.tl + sp.tr);
         for (const auto& q : slab_pts)
         {
             const Eigen::Vector2f d = q - L.m;
-            if (std::abs(d.dot(L.n)) >= depth) continue;
+            const float dd = d.dot(beyond);
+            if (dd <= -std::abs(s) or dd >= std::max(depth, door_width)) continue;
             const float t = d.dot(L.a);
             if (t <= sp.tl or t >= sp.tr) continue;
             if (t < tc) sp.tl = t; else sp.tr = t;
@@ -240,12 +266,12 @@ inline std::optional<GapSpan> gap_in_doorway_span(std::span<const Eigen::Vector2
     return GapSpan{tl, tr};
 }
 
-// The wall line refitted from the returns ON it, outside the opening's edges. Three explanations of those returns compete:
-// the prior's own line, and a total-least-squares line through each side's stretch fitted on its own (an ajar leaf sweeps
-// across its hinge side: two lines there, a large residual; a leaf at 90° is a straight line of its own, PERPENDICULAR to the
-// wall). Each is charged its residual in range-noise units plus how unlikely its direction is under the prior (the prior's
-// yaw σ, widened by the anchor's gross-error scale kGapGrossYawRad); the cheapest is kept. nullopt = the prior's line wins
-// or too few returns on either side.
+// The wall line refitted from the returns ON it, outside the opening's edges (0.1–1.0 m beyond each). Candidate lines: the
+// prior's own, and a total-least-squares line through each side's stretch (refitted once on its own inliers). Each is scored
+// by its SUPPORT — how many of those returns lie within 2σ_r of it — times how likely its direction is under the prior's yaw
+// (variance `var_yaw`): support × exp(−½Δψ²/var_yaw). A leaf at 90° is a straight line of its own but perpendicular to the
+// wall (try86: the refit took the 81° leaf, and every later cycle drifted further); an ajar leaf makes its side two lines and
+// little support. The best is kept; nullopt = the prior's line wins or too few returns.
 inline std::optional<GapLine> gap_fit_wall(std::span<const Eigen::Vector2f> pts, const GapLine& L, const GapSpan& sp, float depth,
                                            float sigma_r, float var_yaw)
 {
@@ -258,32 +284,42 @@ inline std::optional<GapLine> gap_fit_wall(std::span<const Eigen::Vector2f> pts,
         if (t < sp.tl - kGapWallFitNearM and t > sp.tl - kGapWallFitFarM) side[0].push_back(q);
         else if (t > sp.tr + kGapWallFitNearM and t < sp.tr + kGapWallFitFarM) side[1].push_back(q);
     }
-    const float s2 = std::max(sigma_r * sigma_r, 1e-6f);
-    const float v_ang = std::max(0.f, var_yaw) + kGapGrossYawRad * kGapGrossYawRad;
-    // The prior's line: its mean squared residual over every wall return.
-    float best_cost = std::numeric_limits<float>::infinity();
+    const float band = 2.f * std::max(sigma_r, 1e-3f);
+    const float v_ang = std::max(var_yaw, 1e-6f);
+    const auto support = [&](const Eigen::Vector2f& m, const Eigen::Vector2f& n)
     {
-        float ss = 0.f; int cnt = 0;
-        for (const auto& w : side) for (const auto& q : w) { const float r = (q - L.m).dot(L.n); ss += r * r; ++cnt; }
-        if (cnt >= kGapWallFitMinPts) best_cost = ss / float(cnt) / s2;
-    }
-    std::optional<GapLine> best;
-    for (const auto& w : side)
+        int c = 0;
+        for (const auto& w : side) for (const auto& q : w) if (std::abs((q - m).dot(n)) < band) ++c;
+        return c;
+    };
+    const auto tls = [](const std::vector<Eigen::Vector2f>& w, Eigen::Vector2f& mean, Eigen::Vector2f& n)
     {
-        if (int(w.size()) < kGapWallFitMinPts) continue;
-        Eigen::Vector2f mean = Eigen::Vector2f::Zero();
+        if (w.size() < 2) return false;
+        mean.setZero();
         for (const auto& q : w) mean += q;
         mean /= float(w.size());
         Eigen::Matrix2f C = Eigen::Matrix2f::Zero();
         for (const auto& q : w) C += (q - mean) * (q - mean).transpose();
         const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(C);
-        if (es.info() != Eigen::Success) continue;
-        Eigen::Vector2f n = es.eigenvectors().col(0);   // the smallest eigenvalue's vector: the normal
+        if (es.info() != Eigen::Success) return false;
+        n = es.eigenvectors().col(0);   // the smallest eigenvalue's vector: the normal
+        return true;
+    };
+    float best_score = float(support(L.m, L.n));   // the prior's line: Δψ = 0
+    std::optional<GapLine> best;
+    for (const auto& w : side)
+    {
+        if (int(w.size()) < kGapWallFitMinPts) continue;
+        Eigen::Vector2f mean, n;
+        if (not tls(w, mean, n)) continue;
+        std::vector<Eigen::Vector2f> in;   // one refit on its own inliers
+        for (const auto& q : w) if (std::abs((q - mean).dot(n)) < band) in.push_back(q);
+        if (int(in.size()) < kGapWallFitMinPts or not tls(in, mean, n)) continue;
         if (n.dot(L.n) < 0.f) n = -n;
         const float dpsi = std::atan2(L.n.x() * n.y() - L.n.y() * n.x(), L.n.dot(n));
-        const float cost = std::max(0.f, es.eigenvalues()(0)) / float(w.size()) / s2 + dpsi * dpsi / v_ang;
-        if (cost >= best_cost) continue;
-        best_cost = cost;
+        const float score = float(support(mean, n)) * std::exp(-0.5f * dpsi * dpsi / v_ang);
+        if (score <= best_score or support(mean, n) < kGapWallFitMinPts) continue;
+        best_score = score;
         // Keep the opening's along-wall origin: the new line's point nearest the old one.
         best = gap_line(L.m - n * (L.m - mean).dot(n), n);
     }
@@ -316,10 +352,15 @@ inline std::optional<GapLine> gap_fit_wall(std::span<const Eigen::Vector2f> pts,
             const Eigen::LDLT<Eigen::Matrix2f> ldlt(C);
             return ldlt.info() == Eigen::Success ? d.dot(ldlt.solve(d)) : std::numeric_limits<float>::infinity();
         };
-        const float s_loc = (1.f - kGapPriorGross) * std::exp(-0.5f * m2(S))
-                          + kGapPriorGross * std::exp(-0.5f * m2(S + kGapGrossXYM * kGapGrossXYM * Eigen::Matrix2f::Identity()));
+        const float gross = prior->measured ? 0.f : kGapPriorGross;
+        const float s_loc = (1.f - gross) * std::exp(-0.5f * m2(S))
+                          + gross * std::exp(-0.5f * m2(S + kGapGrossXYM * kGapGrossXYM * Eigen::Matrix2f::Identity()));
+        // Width, two-sided (try86 fix): wider than the door is not the door; and an opening is a DOORWAY to steer on only as
+        // far as the body fits through it — P(fit) = Φ((w − body width)/σ_w), the servo's own P_fit form. A 4-cm sliver
+        // between two beams scores Φ(−4.4) ≈ 5e-6; a half-open door wider than the body is seen, and the servo slows on it.
         const float over = std::max(0.f, w - prior->width) / sw;
-        return s_loc * std::exp(-0.5f * over * over);
+        const float p_fit = 0.5f * std::erfc(-((w - 2.f * body_half_width) / sw) * 0.70710678f);
+        return s_loc * std::exp(-0.5f * over * over) * p_fit;
     };
     const auto pick = [&](const detail::GapLine& L, std::span<const detail::GapSpan> spans, bool in_doorway) -> DoorwayGap
     {
@@ -359,14 +400,17 @@ inline std::optional<GapLine> gap_fit_wall(std::span<const Eigen::Vector2f> pts,
             g.wall_fitted = best.wall_fitted;
             return g;
         }
-        const auto spans = detail::gap_through_spans(scan, pts, L, s, depth);
+        const auto spans = detail::gap_through_spans(scan, pts, L, s, depth, prior->width);
         auto g = pick(L, spans, false);
         g.wall_fitted = best.wall_fitted;
         best = g;
         if (pass == 1 or not g.seen) break;
         // Refit the wall from its own returns outside the chosen opening, and measure once more on that line.
         const detail::GapSpan chosen{(g.left - L.m).dot(L.a), (g.right - L.m).dot(L.a)};
-        const auto fitted = detail::gap_fit_wall(pts, L, chosen, depth, sigma_r, prior->P(2, 2));
+        // The yaw variance the refit may move within: the prior's own; an anchor's widened by its gross-error scale.
+        const float var_yaw = std::max(0.f, prior->P(2, 2)) + doorway_gap_meas_cov(g.width, sigma_r)(2, 2)
+                            + (prior->measured ? 0.f : kGapGrossYawRad * kGapGrossYawRad);
+        const auto fitted = detail::gap_fit_wall(pts, L, chosen, depth, sigma_r, var_yaw);
         if (not fitted.has_value()) break;
         L = *fitted;
         best.wall_fitted = true;

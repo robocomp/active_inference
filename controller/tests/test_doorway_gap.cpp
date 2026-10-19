@@ -9,6 +9,8 @@
 #include "../src/lidar_body_guard.h"
 
 #include <chrono>
+#include <format>
+#include <string>
 #include <cstdlib>
 #include <cmath>
 #include <print>
@@ -31,7 +33,7 @@ struct Box { float x0, y0, x1, y1; };
 struct World { std::vector<Box> boxes; };
 
 // A wall of thickness t along y = 0 from x = −L to +L with openings [o0, o1] (world x), and a closed room box around it.
-World wall_with_openings(std::vector<std::pair<float, float>> openings, float t, bool room_box = true)
+World wall_with_openings(std::vector<std::pair<float, float>> openings, float t, bool room_box = true, float back_y = -4.f)
 {
     World w;
     const float L = 4.f;
@@ -41,7 +43,7 @@ World wall_with_openings(std::vector<std::pair<float, float>> openings, float t,
     if (x < L) w.boxes.push_back({x, -0.5f * t, L, 0.5f * t});
     if (room_box)
     {
-        w.boxes.push_back({-L, -4.05f, L, -3.95f});   // room_1 back wall
+        w.boxes.push_back({-L, back_y - 0.05f, L, back_y + 0.05f});   // room_1 back wall
         w.boxes.push_back({-L, 3.95f, L, 4.05f});     // room_2 far wall
         w.boxes.push_back({-L - 0.1f, -4.05f, -L, 4.05f});
         w.boxes.push_back({L, -4.05f, L + 0.1f, 4.05f});
@@ -65,9 +67,10 @@ Eigen::Vector2f to_robot(const Pose& p, const Eigen::Vector2f& w)
 
 // A 2-D LiDAR at the robot centre: `beams` rays, range noise sigma, max range. Returns robot-frame points.
 std::vector<Eigen::Vector2f> scan(const World& w, const Pose& p, std::mt19937& rng, float noise = 0.01f, int beams = 1440,
-                                  float max_range = 8.f)
+                                  float max_range = 8.f, float dropout = 0.f, int echoes = 1)
 {
     std::normal_distribution<float> nd(0.f, noise);
+    std::uniform_real_distribution<float> u01(0.f, 1.f);
     std::vector<Eigen::Vector2f> out;
     const Eigen::Vector2f o(p.x, p.y);
     for (int k = 0; k < beams; ++k)
@@ -93,7 +96,8 @@ std::vector<Eigen::Vector2f> scan(const World& w, const Pose& p, std::mt19937& r
             }
             if (hit and t0 > 1e-4f and t0 < best) best = t0;
         }
-        if (best < max_range) out.push_back(dr * (best + nd(rng)));
+        if (best < max_range and not (u01(rng) < dropout))
+            for (int e = 0; e < echoes; ++e) out.push_back(dr * (best + nd(rng)));   // several rings hitting one surface
     }
     return out;
 }
@@ -239,12 +243,90 @@ int main()
             const Eigen::Vector2f wl = to_world(p, g.left), wr = to_world(p, g.right);
             std::println("(f) pose ({:+.2f},{:+.2f}): seen {} left world x {:+.3f} right x {:+.3f} width {:.3f} (leaf edge to jamb {:.3f})",
                          p.x, p.y, g.seen, wl.x(), wr.x(), g.width, expect);
-            CHECK(g.seen);
+            // try86 fix: a span narrower than the body is MEASURED (its width is the leaf-edge-to-jamb distance) but is not a
+            // doorway to steer on — not seen; the cross stays on the anchor, whose own P_fit refuses it.
+            CHECK(not g.seen);
             CHECK(std::abs(g.width - expect) < 0.03f);
             CHECK(std::abs(wr.x() - 0.45f) < 0.03f);
-            const auto c = rc::anchor_cross_command(rc::doorway_gap_pose(g, kSigmaR), g.width, kHalfW + 0.05f, 2.0f, 0.35f, 1.0f, false);
-            CHECK(c.adv < 0.01f);   // P(body fits) ≈ 0: no advance into a slit
         }
+    }
+    // (f2) Ajar at 75°: the span from the free edge to the far jamb is wider than the body — seen, at its measured width.
+    {
+        auto w = wall_with_openings({{-0.45f, 0.45f}}, 0.10f);
+        const float ang = 75.f * std::numbers::pi_v<float> / 180.f, L = 0.9f;
+        const Eigen::Vector2f hinge(-0.43f, -0.07f), dir(std::cos(ang), -std::sin(ang));
+        float edge_x = -1.f;
+        for (int i = 0; i <= 90; ++i)
+        {
+            const Eigen::Vector2f q = hinge + (L * float(i) / 90.f) * dir;
+            w.boxes.push_back({q.x() - 0.02f, q.y() - 0.02f, q.x() + 0.02f, q.y() + 0.02f});
+            edge_x = std::max(edge_x, q.x() + 0.02f);
+        }
+        const float expect = 0.45f - edge_x;
+        const Pose p{0.2f, -1.5f, 0.f};
+        const auto g = rc::measure_doorway_gap(scan(w, p, rng), prior_of(p, door, 0.9f, 0.05f), kHalfW, kSigmaR, kDepth);
+        std::println("(f2) ajar 75 deg: seen {} width {:.3f} (leaf edge to jamb {:.3f}) score {:.3f}", g.seen, g.width, expect, g.score);
+        CHECK(g.seen and std::abs(g.width - expect) < 0.03f);
+        const auto c = rc::anchor_cross_command(rc::doorway_gap_pose(g, kSigmaR), g.width, kHalfW + 0.05f, 2.0f, 0.35f, 1.0f, false);
+        const auto c_full = rc::anchor_cross_command(rc::doorway_gap_pose(g, kSigmaR), 0.9f, kHalfW + 0.05f, 2.0f, 0.35f, 1.0f, false);
+        CHECK(c.adv <= c_full.adv);   // the measured (narrower) width can only slow the servo
+    }
+
+    // (g) try86 worst case: sparse beams (1°, 30 % dropped), three echoes per beam (rings), a second wall 0.8 m BEHIND the
+    //     robot, the robot as try86 started (e −0.45, s −1.37, heading +2°), a 90° leaf on its side, an anchor 0.1 m off in
+    //     depth and 0.15 m along the wall at sigma 4 cm. Seen: width 0.86 (leaf face to far jamb) within the 1° beam spacing
+    //     (±2.4 cm per edge at 1.4 m), centre AHEAD and on the clear gap (x +0.02, inside the wall's thickness); no opening ⇒
+    //     not seen; a measured prior never jumps to the back wall.
+    {
+        const Pose p{0.45f, -1.37f, 2.f * std::numbers::pi_v<float> / 180.f};
+        // kind 0: the door open, nothing else in it; 1: plus a 90° leaf on the robot's side (truth 0.86, to the leaf face);
+        // 2: no opening. Two sensors: DENSE (1440 beams, 10 % dropped — try86's cloud held 21k points) must read 0.85–0.91;
+        // SPARSE (1°, 30 % dropped) reads narrower — each edge is the midpoint between the last blocked return and the first
+        // ray through, so it can sit up to half a beam gap (+ a dropped beam) inward, ~1.5–4 cm per edge at 1.7 m: 0.76–0.91.
+        // The LEAF edge reads ~5 cm inward even dense: it is the innermost of hundreds of 2-cm-noise echoes along 0.9 m of
+        // leaf face (≈3σ) — conservative, and the same returns the net brakes on: 0.78–0.90.
+        for (const bool dense : {true, false})
+        for (const int kind : {0, 1, 2})
+        {
+            const bool open = kind != 2;
+            auto w = wall_with_openings(open ? std::vector<std::pair<float, float>>{{-0.45f, 0.45f}} : std::vector<std::pair<float, float>>{},
+                                        0.10f, true, -2.17f);
+            if (kind == 1) w.boxes.push_back({-0.45f, -0.95f, -0.41f, -0.05f});
+            const float cx = kind == 1 ? 0.02f : 0.f;
+            const float wlo = dense ? (kind == 1 ? 0.78f : 0.85f) : 0.76f, whi = 0.91f;
+            const std::string name = std::format("{} {}", dense ? "dense" : "sparse",
+                                                 kind == 0 ? "open" : kind == 1 ? "open + 90 deg leaf" : "solid");
+            int seen = 0, good = 0;
+            float wmin = 9.f, wmax = 0.f;
+            for (int rep = 0; rep < 20; ++rep)
+            {
+                const auto pts = dense ? scan(w, p, rng, 0.02f, 1440, 8.f, 0.1f, 3) : scan(w, p, rng, 0.02f, 360, 8.f, 0.3f, 3);
+                auto pr = prior_of(p, Eigen::Vector2f(0.15f, 0.1f), 0.87f, 0.04f);
+                const auto g = rc::measure_doorway_gap(pts, pr, kHalfW, kSigmaR, kDepth);
+                seen += g.seen ? 1 : 0;
+                const Eigen::Vector2f cw = to_world(p, g.centre);
+                const bool ok = g.seen and g.width > wlo and g.width < whi and std::abs(cw.x() - cx) < 0.06f and std::abs(cw.y()) < 0.12f
+                                and g.centre.y() > 0.f;
+                good += ok ? 1 : 0;
+                if (g.seen) { wmin = std::min(wmin, g.width); wmax = std::max(wmax, g.width); }
+                if (open and not ok)
+                    std::println("(g) {}: seen {} width {:.3f} centre world ({:+.3f},{:+.3f}) robot ({:+.3f},{:+.3f}) score {:.3f} fitted {}",
+                                 name, g.seen, g.width, cw.x(), cw.y(), g.centre.x(), g.centre.y(), g.score, g.wall_fitted);
+            }
+            std::println("(g) {}: seen {}/20, correct {}/20, width {:.3f}..{:.3f}", name, seen, good, open ? wmin : 0.f, open ? wmax : 0.f);
+            if (open) CHECK(good == 20);
+            else      CHECK(seen == 0);
+        }
+    }
+    {
+        // (g2) A MEASURED prior on the door (the held gap) with the scan of a solid wall in the robot's back: never re-associated
+        //      to the back wall — not seen (and so carried).
+        const Pose p{0.0f, -1.0f, 0.f};
+        auto w = wall_with_openings({}, 0.10f, true, -1.8f);
+        auto pr = prior_of(p, door, 0.87f, 0.03f);
+        pr.measured = true;
+        const auto g = rc::measure_doorway_gap(scan(w, p, rng, 0.02f, 360, 8.f, 0.3f, 3), pr, kHalfW, kSigmaR, kDepth);
+        CHECK(not g.seen);
     }
 
     // Cost: one measurement on a full 1440-beam scan.
@@ -263,9 +345,9 @@ int main()
     // Each cycle: scan → gap (prior = the anchor until the gap is held, then the carried gap) → anchor_cross_command on the
     // GAP → the jamb guard on the gap → the returns net. Lost gap ⇒ carried by the (true) motion. Ends `through` with no
     // contact of the body against any box.
-    const auto integrate = [&](float noise, bool leaf_west, float x0, float th0_deg, float anchor_err, bool blind = false)
+    const auto integrate = [&](float noise, bool leaf_west, float x0, float th0_deg, float anchor_err, bool blind = false, bool sparse = false)
     {
-        auto w = wall_with_openings({{-0.45f, 0.45f}}, 0.10f);
+        auto w = wall_with_openings({{-0.45f, 0.45f}}, 0.10f, true, sparse ? -2.17f : -4.f);
         if (leaf_west) w.boxes.push_back({-0.45f, -0.95f, -0.41f, -0.05f});
         else           w.boxes.push_back({0.41f, -0.95f, 0.45f, -0.05f});
         // Box samples every 5 mm for the contact test.
@@ -274,7 +356,7 @@ int main()
             for (float x = b.x0; x <= b.x1 + 1e-6f; x += 0.005f)
                 for (float y = b.y0; y <= b.y1 + 1e-6f; y += 0.005f)
                     if (std::abs(x) < 1.5f and std::abs(y) < 1.5f) solid.emplace_back(x, y);
-        Pose p{x0, -1.5f, th0_deg * std::numbers::pi_v<float> / 180.f};
+        Pose p{x0, sparse ? -1.37f : -1.5f, th0_deg * std::numbers::pi_v<float> / 180.f};
         const float dt = 0.05f, v_max = 0.35f, w_max = 1.0f, standoff = 2.0f, margin = 0.05f, a_dec = 1.0f;
         const float half_w_servo = kHalfW + margin;
         std::optional<rc::interaction::RelPose> line;
@@ -284,7 +366,7 @@ int main()
         float min_clear = 1e9f;
         for (; k < int(90.f / dt) and not through; ++k)
         {
-            const auto pts = scan(w, p, rng, noise);
+            const auto pts = sparse ? scan(w, p, rng, noise, 360, 8.f, 0.3f, 3) : scan(w, p, rng, noise);
             std::optional<rc::DoorwayGapPrior> pr;
             if (line.has_value())
             {
@@ -329,8 +411,8 @@ int main()
                 if (sd < 0.f) contact = true;
             }
         }
-        std::println("integration (noise {:.2f}, leaf {}, x0 {:+.2f}, heading {:+.0f} deg, anchor err {:+.2f}): through {} after {:.1f} s at world ({:+.3f},{:+.3f}) heading {:+.1f} deg; gap seen {} / lost {} cycles; "
-                     "min body clearance {:.3f} m; contact {}", noise, leaf_west ? "west" : "east", x0, th0_deg, anchor_err, through, k * dt, p.x, p.y, p.th * 57.2958f, seen_cycles, lost_cycles,
+        std::println("integration ({}noise {:.2f}, leaf {}, x0 {:+.2f}, heading {:+.0f} deg, anchor err {:+.2f}): through {} after {:.1f} s at world ({:+.3f},{:+.3f}) heading {:+.1f} deg; gap seen {} / lost {} cycles; "
+                     "min body clearance {:.3f} m; contact {}", sparse ? "try86-like: sparse 1 deg, 30% dropped, back wall 0.8 m behind; " : "", noise, leaf_west ? "west" : "east", x0, th0_deg, anchor_err, through, k * dt, p.x, p.y, p.th * 57.2958f, seen_cycles, lost_cycles,
                      min_clear, contact);
         CHECK(through);
         CHECK(not contact);
@@ -340,6 +422,8 @@ int main()
     integrate(0.02f, true, 0.3f, 10.f, 0.0f);     // noisier returns, a right anchor
     integrate(0.02f, false, -0.3f, -10.f, -0.5f); // leaf on the east jamb, mirrored start, a 0.5 m wrong anchor
     integrate(0.02f, true, 0.3f, 10.f, 0.2f, /*blind=*/true);   // the gap lost for the 1 m around the plane: carried
+    integrate(0.02f, true, 0.45f, 2.f, 0.15f, false, /*sparse=*/true);   // try86's start: e -0.45, s -1.37, heading +2 deg
+    integrate(0.02f, false, -0.45f, -8.f, -0.3f, true, /*sparse=*/true);
     // A random sweep: start offset ±0.35 m, heading ±15°, anchor error ±0.5 m, either leaf side, blind or not.
     {
         std::mt19937 r2(11);
