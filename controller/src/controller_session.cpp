@@ -3468,7 +3468,9 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //   waits for a SEEN anchor. The guards stay in the chain on that same pose: while any body point is within reach of a
     //   jamb or the leaf they cap the motion that closes on it; once the body has cleared them they bind on nothing.
     // Task 16 (try76 leg 2): also from the moment the body's centre is past the plane on the carried pose (rc::anchor_drive_on).
-    const bool drive = rc::anchor_drive_on(a.fresh, door_passage_.clearing(), a.pose);
+    // Task 16 fix (try81): …only on a pose that derives from a sighting in this attempt (anchor_cross_engaged_: the servo drove on a
+    // fresh anchor since the claim began; reset with every new claim, so a retry's never-seen room initialisation waits).
+    const bool drive = rc::anchor_drive_on(a.fresh, door_passage_.clearing(), anchor_cross_engaged_, a.pose);
     if (drive and not a.fresh and not anchor_carried_logged_)
         std::println("[anchor] cross: {}, {} not seen for {} ms — going on, on the pose odometry carries (s {:+.2f}, σ_lat {:.3f} m)",
                      door_passage_.clearing() ? "past the room switch" : "past the door plane", a.name, a.age_ms,

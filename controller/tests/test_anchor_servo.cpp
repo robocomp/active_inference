@@ -681,17 +681,19 @@ void clearing_completes_on_odometry()
 // Task 16 (try76 leg 2): a stale anchor past the plane, before any room switch, is driven on to `through`; before it, waited for.
 void stale_past_the_plane_continues()
 {
-    CHECK(rc::anchor_drive_on(false, false, anchor(0.f, -0.36f, 0.f, 0.02f)));        // s +0.36, no switch: drive
-    CHECK(not rc::anchor_drive_on(false, false, anchor(0.f, 0.30f, 0.f, 0.02f)));      // s −0.30: wait for a fresh one
-    CHECK(rc::anchor_drive_on(true, false, anchor(0.f, 0.30f, 0.f, 0.02f)));           // fresh: drive
-    CHECK(rc::anchor_drive_on(false, true, anchor(0.f, 0.30f, 0.f, 0.02f)));           // clearing: drive
+    CHECK(rc::anchor_drive_on(false, false, true, anchor(0.f, -0.36f, 0.f, 0.03f)));   // seen, then stale at s +0.36: drive
+    CHECK(not rc::anchor_drive_on(false, false, true, anchor(0.f, 0.30f, 0.f, 0.02f))); // s −0.30: wait for a fresh one
+    CHECK(rc::anchor_drive_on(true, false, false, anchor(0.f, 0.30f, 0.f, 0.02f)));    // fresh: drive
+    CHECK(rc::anchor_drive_on(false, true, false, anchor(0.f, 0.30f, 0.f, 0.02f)));    // clearing: drive
+    // Task 16 fix (try81 leg 3): a NEVER-SEEN anchor (the retry's room initialisation, carried) at "s +0.20", σ_lat 0.38: waits.
+    CHECK(not rc::anchor_drive_on(false, false, false, anchor(0.f, -0.20f, 0.f, 0.38f)));
     // From s +0.36, never seen again, carried by odometry with the guards: through, no wait.
     const auto l = leaf_toward();
     RelPose r = anchor(0.02f, -0.36f, 0.f, 0.02f);
     float t = 0.f; bool through = false; int waited = 0;
     for (int k = 0; k < 600 and not through; ++k)
     {
-        if (not rc::anchor_drive_on(false, false, r)) { ++waited; t += 0.1f; continue; }
+        if (not rc::anchor_drive_on(false, false, true, r)) { ++waited; t += 0.1f; continue; }
         const auto c = chain(r, one(&l), kShadow);
         if (c.through) { through = true; break; }
         rc::rt::Twist tw; tw.linear = {c.side, c.adv, 0.f}; tw.angular = {0.f, 0.f, c.rot};

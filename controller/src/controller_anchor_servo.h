@@ -251,10 +251,16 @@ enum class AnchorCrossEnd { Continue, Through, RoomSwitch };
 // could not be seen from inside the doorway), or past the room switch (clearing); before the plane the wait-for-fresh rule
 // stands (the approach is where a sighting is both possible and needed). ⚑ s = 0 is the wall plane: geometry, the ruling's
 // level, not a tuned one.
-[[nodiscard]] inline bool anchor_drive_on(bool fresh, bool clearing, const rc::interaction::RelPose& pose)
+// ★ Task 16 fix (try81 leg 3): the past-the-plane branch needs the carried pose to DERIVE FROM A SIGHTING in this attempt
+//   (`seen_in_attempt`: the servo drove on a fresh anchor since this claim began). After a retry, door_concept's not-seen pose
+//   is the room initialisation carried by odometry: its "s +0.20" (σ_lat 0.38 m) put a robot that was really AT the jamb past
+//   the plane, and the returns net then blocked every motion. A pose nobody has seen in this attempt says nothing about which
+//   side of the plane the body is on — it waits, exactly as before the plane. (A fact, not a level: the covariance route —
+//   P_fit at the carried σ — already throttles the servo, and does not by itself stop a never-seen pose.)
+[[nodiscard]] inline bool anchor_drive_on(bool fresh, bool clearing, bool seen_in_attempt, const rc::interaction::RelPose& pose)
 {
     if (fresh or clearing) return true;
-    if (not pose.x.allFinite()) return false;
+    if (not seen_in_attempt or not pose.x.allFinite()) return false;
     return anchor_cross_geometry(pose).s > 0.f;
 }
 
