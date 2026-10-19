@@ -306,6 +306,40 @@ inline PhiHingeMarginal phi_hinge_marginal(const std::vector<std::pair<float, fl
 // ONE leaf, so it hangs from the more probable hinge. ⚑ P = 1/2 is the MAP of a binary posterior, a decision level and
 // not a tuned one; the log-odds is negated with the flip, so the belief itself is unchanged — only which hypothesis is
 // called "believed". Returns true when it flipped.
+// ─── Task 15: THE APERTURE'S PLACE ALONG THE WALL, FROM THE WALL'S OWN HOLE ─────────────────────────────────────────────
+// try75 leg 1: with the leaf open 90° (hinge west, toward the robot) the leaf channel's φ decayed toward shut (1.7 → 0.3 rad
+// over 20 s on a flat tempered likelihood) and the mask fit — which places the aperture ONLY through the leaf panel's
+// SDF at the believed φ and hinge — slid s by one door width (−0.12 → −0.87 m) onto solid wall; the LiDAR's own MAP slide
+// (FieldResult::lat_map) said +0.15…+0.30 m the whole time, and nothing listened. A wrong leaf (φ or hinge) and an aperture
+// slid by a width explain the door mask equally well; the WALL does not: beams that pass through the true opening cross a
+// slid aperture's solid wall. So the slide's marginal likelihood from the field (FieldResult::lat_loglik: over every leaf
+// angle and, when scored, both hinges, and the depth — the leaf marginalised, not conditioned on its MAP) enters the
+// aperture's s as an observation: moment-matched to N(mean, var) on its grid, the grid's own quantisation (step²/12) added,
+// and fused into the belief (DoorBelief::fuse_slide). A flat curve (a shut leaf hides the hole) gives var ≈ support²/12:
+// weak, by construction. No level: the curve's own spread is the observation's σ.
+struct SlideObservation { float mean = 0.f, var = -1.f; };
+[[nodiscard]] inline SlideObservation slide_observation(const std::vector<std::pair<float, double>>& lat_loglik)
+{
+    SlideObservation o;
+    if (lat_loglik.size() < 2) return o;
+    double mx = -std::numeric_limits<double>::infinity();
+    for (const auto& [x, l] : lat_loglik) if (std::isfinite(l)) mx = std::max(mx, l);
+    if (not std::isfinite(mx)) return o;
+    double sw = 0.0, sx = 0.0, sxx = 0.0;
+    for (const auto& [x, l] : lat_loglik)
+    {
+        if (not std::isfinite(l)) continue;
+        const double w = std::exp(l - mx);
+        sw += w; sx += w * x; sxx += w * double(x) * double(x);
+    }
+    if (not (sw > 0.0)) return o;
+    const double m = sx / sw, v = std::max(0.0, sxx / sw - m * m);
+    const double step = double(lat_loglik[1].first - lat_loglik[0].first);
+    o.mean = float(m);
+    o.var  = float(v + step * step / 12.0);
+    return o;
+}
+
 inline bool adopt_map_hinge(rc::DoorBelief& b, float& hinge_llr)
 {
     if (not (hinge_llr < 0.0f))

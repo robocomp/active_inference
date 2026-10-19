@@ -159,6 +159,13 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
     {
         auto fr = b.phi_field_loglik(sel.rays, PHI_MIN, PHI_MAX, NSTEP, nz);
         t.ninf = fr.n_inf; t.beta = fr.beta; t.lat = fr.lat_map;
+        // Task 15: as DoorFitter::estimate_phi — the wall's slide evidence enters s (env NO_SLIDE_FUSE=1: the old model).
+        if (not std::getenv("NO_SLIDE_FUSE"))
+            if (const auto so = rc::door::slide_observation(fr.lat_loglik); so.var > 0.f)
+            {
+                if (std::getenv("SLIDE_TRACE")) std::print("      slide obs mean {:+.3f} sd {:.3f} (belief s {:.3f} sd {:.3f})\n", so.mean, std::sqrt(so.var), b.state().s, std::sqrt(b.covariance()(0, 0)));
+                b.fuse_slide(so.mean, so.var);
+            }
         auto hm = rc::door::phi_hinge_marginal(fr.loglik, fr.loglik_other, t.hinge_llr, prior, sp);
         ll = std::move(hm.loglik);
         t.hinge_llr = hm.hinge_llr;
@@ -406,6 +413,54 @@ int main()
         check(std::abs(t.phi_est - 1.5708f) < 0.1745f and pmin > 0.8f,
               std::format("believed hinge {}: phi {:.0f} deg within 90 +- 10, P(passable) min {:.3f} > 0.8",
                           believed_right ? "right" : "wrong", t.phi_est * 57.3f, pmin));
+    }
+
+    // ── (g) Task 15 (live try75 leg 1): the APERTURE does not slide a width under a wrong leaf ───────────────────────────
+    // DOOR_1 from room_1: the leaf open 90° TOWARD the robot, hinged on the x = 0 jamb (west). The model believes the OTHER
+    // jamb and a leaf that has decayed toward shut (φ 0.3 rad), as live. The door MASK (the camera's points on the open
+    // leaf) is fitted by the panel SDF at that wrong leaf every cycle — which alone slid live s by ~0.75 m onto solid wall —
+    // and the LiDAR field runs beside it. Truth: s = 2.0 (the model's wall frame). s must stay within 0.1 m.
+    std::print("\n(g) aperture_holds_under_a_wrong_leaf: leaf 90 deg TOWARD, hinge believed on the wrong jamb, phi decayed\n");
+    {
+        Scene sc; sc.phi = 1.5708f; sc.swing = +1.0f; sc.hinge_far = false;
+        auto b = make_belief(0.0f, +1.0f, rc::door::HingeSide::Far);
+        b.set_leaf_phi(0.3f);
+        // try75's hinge log-odds hovered +0.0…+0.6 for the WRONG jamb: P(believed) = σ(0.6) = 0.65 (env OLD_MASK=1: the single-
+        // hinge mask fit of HEAD, P = 1).
+        b.set_hinge_prob(std::getenv("OLD_MASK") ? 1.0f : 1.0f / (1.0f + std::exp(-0.6f)));
+        // The aperture as live at the slide: on the true doorway, σ_s 0.067 m (try75 cycle 561), the door's mask on the open leaf.
+        {
+            auto p = b.params(); p.prior_s_std = 0.067f;
+            const auto st = b.state();
+            b = rc::DoorBelief(st, p);
+            b.set_hinge_prob(std::getenv("OLD_MASK") ? 1.0f : 1.0f / (1.0f + std::exp(-0.6f)));
+        }
+        std::normal_distribution<float> nn(0.f, 0.01f);
+        // Phase 2: the leaf OPEN 90° toward the robot; the model's φ has decayed to 0.3 (live: a flat tempered likelihood).
+        b.set_leaf_phi(0.3f);
+        Tracker t; t.phi_est = 0.3f; t.phi_sigma = 0.25f; t.first = false;
+        // The mask: points on the true leaf's robot-side face (y from 0 into room_2 up to its length), 0.2–1.9 m high.
+        float s_max_dev = 0.f;
+        for (int f = 0; f < 60; ++f)
+        {
+            rc::DoorFrame fr;
+            for (int i = 0; i < 300; ++i)
+            {
+                const float a = (i % 30) / 29.f, z = 0.2f + 1.7f * (i / 30) / 9.f;
+                // the model's wall frame: wall_O (-2, 0), so the true doorway x in [0, W] is s in [2, 3]
+                fr.points.emplace_back(-0.02f + nn(rng), 0.0f + a * (sc.W - 0.02f) + nn(rng), z);
+            }
+            fr.R.assign(fr.points.size(), 0.0029f);
+            if (not std::getenv("OLD_MASK")) b.set_leaf_phi_sigma(t.phi_sigma);
+            b.update(fr);
+            const V3 o(0.5f + 0.4f * std::sin(0.1f * f), 1.9f, 0.67f);
+            step_new(t, b, o, scan(sc, o, rng, 0.5f), 0.3f);   // the decayed leaf angle, held (as live: a flat tempered likelihood)
+            s_max_dev = std::max(s_max_dev, std::abs(b.state().s - 2.0f));
+            if (std::getenv("PHI_TRACE")) std::print("    f{} s {:+.3f} lat_map {:+.2f} phi {:.2f}\n", f, b.state().s, t.lat, t.phi_est);
+        }
+        std::print("  s after 60 frames {:.3f} (truth 2.000), max |s − truth| {:.3f} m, sigma_s {:.3f} m\n", b.state().s, s_max_dev,
+                   std::sqrt(b.covariance()(0, 0)));
+        check(s_max_dev < 0.1f, "the aperture stays within 0.1 m of the true doorway");
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));

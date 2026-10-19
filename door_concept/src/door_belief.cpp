@@ -26,32 +26,43 @@ float DoorBelief::sdf_panel(const Eigen::Vector3f& p, const DoorBeliefState& s) 
     return door::leaf_sdf(leaf_pose_at(s), p);
 }
 
-float DoorBelief::sdf_prim(const Eigen::Vector3f& p, const DoorBeliefState& s, int /*prim*/) const
+float DoorBelief::sdf_prim(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const
 {
-    return sdf_panel(p, s);   // one primitive
+    if (prim == 0) return sdf_panel(p, s);
+    // Task 15: the same leaf hung from the OTHER jamb. A hypothesis with no probability has no surface at all (so the
+    // engine's nearest-primitive information picks it never): the single-hinge model is recovered exactly at P = 1.
+    if (not (p_hinge_ < 1.f)) return 1e6f;
+    door::LeafState other = params_.leaf;
+    other.hinge = other.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
+    return door::leaf_sdf(door::leaf_pose(aperture_at(s), other), p);
 }
 
-// ─── Mixture responsibilities [panel, clutter] ──────────────────────────────────
-std::array<float, 2> DoorBelief::mixture_unnorm(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const
+// ─── Mixture responsibilities [believed leaf, other jamb's leaf, clutter] ─────────────────────
+std::array<float, 3> DoorBelief::mixture_unnorm(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const
 {
     const float eps     = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
     const float pi_surf = 1.0f - eps;
     const float inv2R   = 0.5f / std::max(1e-9f, R);
 
-    const float d = sdf_panel(p, s);
-    std::array<float, 2> u{};
-    u[0] = pi_surf * std::exp(-d * d * inv2R);                                   // panel
+    std::array<float, 3> u{};
+    const float d0 = sdf_panel(p, s);
+    u[0] = pi_surf * p_hinge_ * std::exp(-d0 * d0 * inv2R);                       // the believed leaf
+    if (p_hinge_ < 1.f)
+    {
+        const float d1 = sdf_prim(p, s, 1);
+        u[1] = pi_surf * (1.f - p_hinge_) * std::exp(-d1 * d1 * inv2R);          // the other jamb's leaf
+    }
     const float cs = params_.clutter_scale_m;
-    u[1] = eps * std::exp(-cs * cs * inv2R);                                     // clutter
+    u[2] = eps * std::exp(-cs * cs * inv2R);                                     // clutter
     return u;   // UNNORMALIZED
 }
 
-std::array<float, 2> DoorBelief::responsibilities(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const
+std::array<float, 3> DoorBelief::responsibilities(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const
 {
-    std::array<float, 2> u = mixture_unnorm(p, s, R);
-    const float sum = u[0] + u[1];
-    if (sum <= 0.0f) return {0.0f, 1.0f};
-    u[0] /= sum; u[1] /= sum;
+    std::array<float, 3> u = mixture_unnorm(p, s, R);
+    const float sum = u[0] + u[1] + u[2];
+    if (sum <= 0.0f) return {0.0f, 0.0f, 1.0f};
+    for (float& x : u) x /= sum;
     return u;
 }
 
@@ -64,6 +75,7 @@ float DoorBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts, const Doo
         const auto  r = responsibilities(p, s, R);
         const float d = sdf_panel(p, s);
         e += 0.5 * r[0] * d * d / R;
+        if (r[1] > 0.f) { const float d1 = sdf_prim(p, s, 1); e += 0.5 * r[1] * d1 * d1 / R; }
     }
     return static_cast<float>(e / static_cast<double>(pts.size()));
 }
@@ -78,7 +90,7 @@ float DoorBelief::mixture_nll(const std::vector<Eigen::Vector3f>& pts, const Doo
     for (const auto& p : pts)
     {
         const auto u = mixture_unnorm(p, s, R);
-        nll += -std::log(std::max(1e-30, static_cast<double>(u[0] + u[1])));
+        nll += -std::log(std::max(1e-30, static_cast<double>(u[0] + u[1] + u[2])));
     }
     return static_cast<float>(nll / static_cast<double>(pts.size()));
 }
@@ -92,7 +104,7 @@ float DoorBelief::clutter_fraction(const std::vector<Eigen::Vector3f>& pts, floa
 {
     if (pts.empty()) return 0.0f;
     double c = 0.0;
-    for (const auto& p : pts) c += responsibilities(p, state_, R)[1];   // index 1 = clutter
+    for (const auto& p : pts) c += responsibilities(p, state_, R)[2];   // index 2 = clutter
     return static_cast<float>(c / static_cast<double>(pts.size()));
 }
 
@@ -157,7 +169,9 @@ Eigen::Matrix<float, 3, 1> DoorBelief::process_noise_diag() const
 
 Eigen::Matrix<float, 3, 1> DoorBelief::common_mode_inv_diag(const DoorFrame& frame) const
 {
-    const float s2  = params_.common_mode_s_std  * params_.common_mode_s_std;
+    // Task 15: + the leaf's angle uncertainty, carried into where the mask says the aperture is (see set_leaf_phi_sigma).
+    const float leaf_s = 0.5f * state_.w * std::abs(std::sin(params_.leaf.phi)) * leaf_phi_sigma_;
+    const float s2  = params_.common_mode_s_std  * params_.common_mode_s_std + leaf_s * leaf_s;
     const float wh2 = params_.common_mode_wh_std * params_.common_mode_wh_std;
     return (Eigen::Matrix<float, 3, 1>() <<
             1.0f / std::max(1e-9f, s2 + frame.chain_cov_s),
@@ -886,6 +900,27 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
         for (int j = 0; j < NN; ++j) acc += std::exp(beta * v[j] + lp(j) - b);
         m[static_cast<std::size_t>(k)] = b + std::log(std::max(1e-300, acc / static_cast<double>(NN)));
         mmax = std::max(mmax, m[static_cast<std::size_t>(k)]);
+    }
+    // Task 15: the slide's marginal (over the leaf — every angle and hinge scored — and the depth), prior excluded.
+    {
+        out.lat_loglik.reserve(static_cast<std::size_t>(ln));
+        double lmax = -std::numeric_limits<double>::infinity();
+        std::vector<double> lv(static_cast<std::size_t>(ln));
+        for (int li = 0; li < ln; ++li)
+        {
+            double b = -std::numeric_limits<double>::infinity();
+            for (int k = 0; k < KK; ++k)
+                for (int di = 0; di < dn; ++di)
+                    b = std::max(b, beta * ll[static_cast<std::size_t>(k) * NN + di * ln + li]);
+            double acc = 0.0;
+            for (int k = 0; k < KK; ++k)
+                for (int di = 0; di < dn; ++di)
+                    acc += std::exp(beta * ll[static_cast<std::size_t>(k) * NN + di * ln + li] - b);
+            lv[static_cast<std::size_t>(li)] = b + std::log(std::max(1e-300, acc / static_cast<double>(KK * dn)));
+            lmax = std::max(lmax, lv[static_cast<std::size_t>(li)]);
+        }
+        for (int li = 0; li < ln; ++li)
+            out.lat_loglik.emplace_back(grid(nz.lat_lo, nz.lat_hi, ln, li), lv[static_cast<std::size_t>(li)] - lmax);
     }
     out.loglik.reserve(static_cast<std::size_t>(nstep));
     for (int kk = 0; kk < KK; ++kk)

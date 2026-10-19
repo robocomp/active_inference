@@ -199,6 +199,19 @@ public:
     void  set_leaf_phi(float phi) { params_.leaf.phi = phi; }
     void  set_leaf_hinge(door::HingeSide h) { params_.leaf.hinge = h; }
     void  set_leaf_swing(float swing) { params_.leaf.swing = swing; }   // Task 12 fix D: the MAP swing side (±1)
+    // Task 15: fuse a Gaussian observation of the aperture's slide along the wall, innovation `ds` (m, relative to the
+    // current s) with variance `var` — a 1-D Kalman update on [s, w, h] through Σ's first column (w and h follow their
+    // correlation with s). var ≤ 0 or non-finite ⇒ nothing.
+    void  fuse_slide(float ds, float var)
+    {
+        if (not std::isfinite(ds) or not std::isfinite(var) or not (var > 0.f)) return;
+        const float S = Sigma_(0, 0) + var;
+        if (not (S > 0.f)) return;
+        const Eigen::Matrix<float, 3, 1> K = Sigma_.col(0) / S;
+        state_.s += K(0) * ds; state_.w += K(1) * ds; state_.h += K(2) * ds;
+        const Eigen::Matrix<float, 3, 3> Sn = Sigma_ - K * Sigma_.row(0);
+        Sigma_ = 0.5f * (Sn + Sn.transpose());
+    }
 
     // ── THE HINGE BRANCH: free energy as a function of the leaf angle alone ──────────────────────
     // ★THIS IS THE SAME MINIMISATION THE AGENT ALREADY DOES, RESTRICTED TO ONE COORDINATE. Nothing new
@@ -337,6 +350,10 @@ public:
         // `loglik` (their joint max is 0, so log Σ exp of each is that hinge's marginal evidence up to one constant).
         // Empty when not asked for; then `loglik` alone has max 0, as before.
         std::vector<std::pair<float, float>> loglik_other;
+        // Task 15: the SLIDE's own evidence — per slide cell (offset from the belief's s, m), the tempered log-likelihood
+        // marginalised over the leaf (every angle, both hinges when scored) and the depth, with the slide's prior NOT
+        // included. Where the WALL'S HOLE is, from the wall's ends and the beams through it, whatever the leaf is doing.
+        std::vector<std::pair<float, double>> lat_loglik;
     };
     [[nodiscard]] FieldResult
     phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,
@@ -366,7 +383,7 @@ public:
     float sdf_panel(const Eigen::Vector3f& p, const DoorBeliefState& s) const;
     float sdf_prim (const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const;  // prim==0 → panel
     Eigen::Matrix<float, 3, 1> sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const;
-    std::array<float, 2> responsibilities(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const;
+    std::array<float, 3> responsibilities(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const;   // [believed leaf, other jamb's leaf, clutter]
     // Fixed template prior on w,h folded into the SAME GN normal equations as the data (engine detects this
     // hook via a C++23 requires). Pulls w→tpl_w, h→tpl_h with precision 1/prior_{w,h}_std² each frame; s is
     // untouched (it carries only the broad temporal prior). This is what makes the strong size prior stick.
@@ -392,7 +409,17 @@ public:
     void  canonicalize(DoorBeliefState&) const {}   // wall fixes yaw ⇒ no symmetry fold
 
     int   gn_iters() const { return params_.gn_iters; }
-    int   n_prims()  const { return 1; }             // one thin panel (clutter is the +1)
+    // Task 15: TWO panel primitives — the leaf hung from the believed jamb, and from the other (weight P(believed hinge),
+    // set_hinge_prob) — so the mask's points are explained under the HINGE MARGINAL, never by sliding the aperture a width
+    // to make the believed hinge fit (try75). P = 1 ⇒ the other leaf has no weight and no surface: the old model, exactly.
+    int   n_prims()  const { return 2; }             // two hinge hypotheses (clutter is the +1)
+    void  set_hinge_prob(float p) { p_hinge_ = std::isfinite(p) ? std::clamp(p, 0.f, 1.f) : 1.f; }
+    // Task 15: the leaf ANGLE's posterior σ (rad). The mask places the aperture only THROUGH the leaf panel at the believed φ,
+    // so an error δφ moves the s that explains it by ≈ (w/2)·|sin φ|·δφ: that is added to the frame's along-wall common mode
+    // (common_mode_inv_diag), and a mask frame can no longer move s further than the leaf's own uncertainty lets it say
+    // where the hole is. 0 (default) ⇒ the old frame weight.
+    void  set_leaf_phi_sigma(float sd) { leaf_phi_sigma_ = std::isfinite(sd) ? std::max(0.f, sd) : 0.f; }
+    float hinge_prob() const { return p_hinge_; }
     float sigma2()   const { return params_.sigma_base_m * params_.sigma_base_m; }
     Eigen::Matrix<float, 3, 3> transition() const { return Eigen::Matrix<float, 3, 3>::Identity(); }  // static
     Eigen::Matrix<float, 3, 1> process_noise_diag() const;
@@ -404,7 +431,9 @@ public:
 private:
     // Unnormalized mixture terms [panel, clutter] at p (likelihood×prior). Shared by responsibilities()
     // (normalizes) and association_nll() (sums).
-    std::array<float, 2> mixture_unnorm(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const;
+    std::array<float, 3> mixture_unnorm(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const;
+    float p_hinge_ = 1.f;   // Task 15: P(the believed hinge); 1 = the single-hinge model
+    float leaf_phi_sigma_ = 0.f;   // Task 15: the leaf angle's σ (rad), for the mask frame's along-wall common mode
 
     DoorBeliefState            state_;
     DoorBeliefParams           params_;

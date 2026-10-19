@@ -659,6 +659,10 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         // moment at which the code changes behaviour. A boolean freeze also had a defect this does not:
         // it keyed on model_stable, whose convergence test INCLUDES phi, so the aperture unfroze exactly
         // when the leaf started moving — the one time it most needed to hold still.
+        // Task 15: the mask is explained under the HINGE MARGINAL — the leaf from the believed jamb with P = σ(hinge_llr), and
+        // from the other — so a wrong hinge cannot slide the aperture a width to make its leaf fit (try75 leg 1).
+        inst.ai2_belief.set_hinge_prob(1.0f / (1.0f + std::exp(-inst.hinge_llr)));
+        inst.ai2_belief.set_leaf_phi_sigma(inst.phi_sigma);   // …and under the leaf ANGLE's own uncertainty
         inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
         // NOTE: refine_extent (coverage/extent likelihood) DISABLED — coverage without a free-space
         // counter-force is positive feedback: it inflated the footprint to cover contamination/neighbours
@@ -1040,6 +1044,10 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         inst.dbg_phi_ninf  = fr.n_inf;
         inst.dbg_phi_beta  = fr.beta;
         inst.dbg_phi_lat   = fr.lat_map;
+        // Task 15: where the WALL puts the hole — the field's slide marginal, the leaf marginalised — fused into s
+        // (rc::door::slide_observation): a wrong leaf can no longer slide the aperture a width onto solid wall.
+        if (const auto so = rc::door::slide_observation(fr.lat_loglik); so.var > 0.f)
+            inst.ai2_belief.fuse_slide(so.mean, so.var);
         ll_this  = std::move(fr.loglik);
         ll_other = std::move(fr.loglik_other);
     }
