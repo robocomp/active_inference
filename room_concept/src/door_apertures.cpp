@@ -3,6 +3,7 @@
 // Only pose_publisher.cpp needs that include, for DSR's signal emitter.
 #include "door_apertures.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto_mirror
+#include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -61,6 +62,10 @@ namespace rc
             ++tally_.named_door;
             const auto sub = G.get_attrib_by_name<object_subtype_att>(n);
             if (not sub.has_value() or sub.value() != "door") continue;
+            // An INTERACTION ANCHOR (door_N@robot: door_concept's robot-relative copy of a door it is crossing) is the same
+            // physical doorway as the door itself — a second aperture would weigh the same beams twice, and it may still be
+            // the born-not-drivable room initialisation, up to σ_model off along the wall (final review I-3).
+            if (rc::interaction::is_anchor(G, n)) continue;
             // An ENTRY MIRROR under a proto-room is the same physical doorway as a door already here;
             // discounting it too would weigh the same beams twice (w = (1 - p_open)^2).
             if (rc::room::is_proto_mirror(G, n)) continue;

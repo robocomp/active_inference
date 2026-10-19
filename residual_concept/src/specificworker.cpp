@@ -11,6 +11,7 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
 
 #include <cstdlib>
 #include <thread>
@@ -256,6 +257,9 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
     const std::string room_frame_objs = rc::room::current_room_frame(*G);
     for (const auto& n : G->get_nodes_by_type("object"))
         {
+            // An interaction anchor (door_N@robot) is a robot-relative COPY of an object already here: explaining with it too
+            // would build a second, possibly displaced box for the same thing (final review I-3).
+            if (rc::interaction::is_anchor(*G, n)) continue;
             const float w = G->get_attrib_by_name<width_m_att> (n).value_or(0.0f);
             const float d = G->get_attrib_by_name<depth_m_att> (n).value_or(0.0f);
             const float h = G->get_attrib_by_name<height_m_att>(n).value_or(0.0f);
