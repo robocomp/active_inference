@@ -83,6 +83,12 @@ struct LidarGuardReturns
     int n_self = 0;                      // deleted as the body (strictly inside the hull)
     int n_band = 0;                      // kept, within σ_r OUTSIDE the hull: contact — or a body part the hull misses
     int n_far = 0;                       // beyond reach: cannot limit any motion this cycle
+    // Stage counts (try76 fix): offered → finite → within reach → outside the hull. A census of an EMPTY near field is
+    // otherwise indistinguishable from an empty cloud.
+    int n_read = 0, n_nonfinite = 0;
+    // The nearest finite return NOT inside the hull, at ANY range (robot frame, by distance from the centre), so a census
+    // can say where the world is when nothing is within reach.
+    std::optional<Eigen::Vector2f> nearest_any;
 };
 
 // Robot-frame returns → guard obstacles. `reach` = the radius beyond which no return can cap a motion this cycle: the
@@ -100,12 +106,15 @@ template <class Next>
     std::unordered_map<std::int64_t, std::size_t> cell;
     for (std::size_t i = 0; i < n; ++i)
     {
+        ++out.n_read;
         const std::optional<Eigen::Vector2f> qo = next(i);
-        if (not qo.has_value() or not qo->allFinite()) continue;
+        if (not qo.has_value() or not qo->allFinite()) { ++out.n_nonfinite; continue; }
         const Eigen::Vector2f q = *qo;
-        if (q.norm() > reach) { ++out.n_far; continue; }
+        const auto note_nearest = [&] { if (not out.nearest_any.has_value() or q.squaredNorm() < out.nearest_any->squaredNorm()) out.nearest_any = q; };
+        if (q.norm() > reach) { ++out.n_far; note_nearest(); continue; }
         const float sd = anchor_signed_distance(body, q);
         if (sd < 0.f) { ++out.n_self; continue; }
+        note_nearest();
         if (sd < sigma_r) ++out.n_band;
         const auto ci = static_cast<std::int64_t>(std::floor(q.x() / s)), cj = static_cast<std::int64_t>(std::floor(q.y() / s));
         const std::int64_t key = (ci << 32) ^ (cj & 0xffffffff);
@@ -118,6 +127,23 @@ template <class Next>
         out.obstacles.push_back(AnchorJamb{q, cov, 0.f, 1.f});
     }
     return out;
+}
+
+// The session's entry point: a ROOM-frame cloud (the obstacle tracker's lidar buffer: z-banded, room frame) and the robot's
+// room pose as `room_T_robot` (ControllerRobotPose::as_transform — robot frame x right, y forward), streamed into the robot
+// frame with no intermediate copy. tests/test_lidar_body_guard.cpp drives it through the real buffer (lidar_guard_buffer.h).
+[[nodiscard]] inline LidarGuardReturns lidar_guard_returns_room(std::span<const float> xs_room, std::span<const float> ys_room,
+                                                                const Eigen::Affine2f& room_T_robot,
+                                                                std::span<const Eigen::Vector2f> body, float sigma_r, float reach)
+{
+    const Eigen::Affine2f robot_from_room = room_T_robot.inverse();
+    return lidar_guard_returns_from(std::min(xs_room.size(), ys_room.size()),
+                                    [&](std::size_t i) -> std::optional<Eigen::Vector2f>
+                                    {
+                                        if (not std::isfinite(xs_room[i]) or not std::isfinite(ys_room[i])) return std::nullopt;
+                                        return robot_from_room * Eigen::Vector2f(xs_room[i], ys_room[i]);
+                                    },
+                                    body, sigma_r, reach);
 }
 
 [[nodiscard]] inline LidarGuardReturns lidar_guard_returns(std::span<const Eigen::Vector2f> points_robot,
@@ -271,7 +297,9 @@ inline LidarCapResult lidar_cap_command(std::span<const AnchorJamb> returns, std
 // ── THE CENSUS (review item 4): is anything the LiDAR sees beyond the hull that the hull should hold? ────────────────
 struct LidarGuardCensus
 {
-    int n_self = 0, n_band = 0, n_kept = 0;
+    int n_read = 0, n_nonfinite = 0, n_far = 0, n_self = 0, n_band = 0, n_kept = 0;
+    float nearest_any_sd = std::numeric_limits<float>::infinity();   // the nearest return at any range, to the hull (m)
+    float nearest_any_bearing_deg = 0.f;
     float nearest_sd = std::numeric_limits<float>::infinity();   // the nearest kept return's distance to the hull (m)
     float nearest_bearing_deg = 0.f;                             // its bearing, 0 = forward, + = right
     float v_fwd = 0.f, v_back = 0.f, w_ccw = 0.f, w_cw = 0.f;    // the caps the returns set right now
@@ -279,7 +307,13 @@ struct LidarGuardCensus
 [[nodiscard]] inline LidarGuardCensus lidar_guard_census(const LidarGuardReturns& r, std::span<const Eigen::Vector2f> body,
                                                          float margin, float a_dec, float v_max, float w_max)
 {
-    LidarGuardCensus c{.n_self = r.n_self, .n_band = r.n_band, .n_kept = int(r.obstacles.size())};
+    LidarGuardCensus c{.n_read = r.n_read, .n_nonfinite = r.n_nonfinite, .n_far = r.n_far, .n_self = r.n_self,
+                       .n_band = r.n_band, .n_kept = int(r.obstacles.size())};
+    if (r.nearest_any.has_value())
+    {
+        c.nearest_any_sd = anchor_signed_distance(body, *r.nearest_any);
+        c.nearest_any_bearing_deg = std::atan2(r.nearest_any->x(), r.nearest_any->y()) * 57.29578f;
+    }
     for (const auto& j : r.obstacles)
         if (const float sd = anchor_signed_distance(body, j.mean); sd < c.nearest_sd)
         {

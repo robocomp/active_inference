@@ -2579,10 +2579,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     if (not startup_census_done_ and body_loaded_ and robot_still())
     {
         const auto lr = live_returns(step.robot_pose, obstacle_tracker, path_controller);
-        if (lr.valid)
+        if (lr.valid and lr.r.n_read > 0)   // the first NON-EMPTY cloud (try76: before it, every count is 0)
         {
             startup_census_done_ = true;
-            log_returns_census("parked at start-up", lr);
+            log_returns_census("parked at start-up, first non-empty cloud", lr);
         }
     }
 
@@ -3165,21 +3165,15 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     lr.sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
     auto *lidar = obstacle_tracker.lidar_buffer();
     if (lidar == nullptr) return lr;
-    const auto [cloud_opt] = lidar->read_last();
-    if (not cloud_opt.has_value()) return lr;
-    const auto &[xs, ys, zs] = cloud_opt.value();   // room frame, already in the obstacle z band (obstacle tracker)
-    const std::size_t n = std::min(xs.size(), ys.size());
     // Reach: the grown body plus the braking distance from v_max — beyond it no return can cap anything this cycle.
     float body_reach = 0.f;
     for (const auto &v : rc::anchor_grown_body(approach_body_.polygon(), lr.margin)) body_reach = std::max(body_reach, v.norm());
-    const float reach = body_reach + lr.v_max * lr.v_max / (2.f * lr.a_dec);
-    const Eigen::Affine2f robot_from_room = pose.as_transform().inverse();
-    // Streamed: each return is transformed as it is read, with no second copy of the cloud.
-    lr.r = rc::lidar_guard_returns_from(n, [&](std::size_t i) -> std::optional<Eigen::Vector2f>
-        {
-            if (not std::isfinite(xs[i]) or not std::isfinite(ys[i])) return std::nullopt;
-            return robot_from_room * Eigen::Vector2f(xs[i], ys[i]);
-        }, approach_body_.polygon(), lr.sigma, reach);
+    lr.reach = body_reach + lr.v_max * lr.v_max / (2.f * lr.a_dec);
+    // The room-frame cloud streamed onto the robot frame of `pose` (rc::lidar_guard_returns_from_buffer — the accessor the
+    // test drives too).
+    auto r = rc::lidar_guard_returns_from_buffer(*lidar, pose.as_transform(), approach_body_.polygon(), lr.sigma, lr.reach);
+    if (not r.has_value()) return lr;
+    lr.r = std::move(*r);
     lr.valid = true;
     return lr;
 }
@@ -3195,11 +3189,17 @@ void ControllerSession::log_returns_census(const char *when, const LiveReturns &
 {
     if (not lr.valid) { std::println("[returns] {}: no LiDAR cloud yet", when); return; }
     const auto c = rc::lidar_guard_census(lr.r, approach_body_.polygon(), lr.margin, lr.a_dec, lr.v_max, lr.w_max);
-    std::println("[returns] {}: {} returns inside the hull (the body itself), {} kept near the body, {} within sigma_r {:.3f} m "
-                 "OUTSIDE the hull (contact — or a body part the hull misses: a cable, a mount); nearest kept return {:.3f} m "
-                 "from the hull at bearing {:+.0f} deg (0 fwd, + right); caps: fwd {:.3f} back {:.3f} m/s, CCW {:.3f} CW {:.3f} rad/s",
-                 when, c.n_self, c.n_kept, c.n_band, lr.sigma, std::isfinite(c.nearest_sd) ? c.nearest_sd : -1.f,
-                 c.nearest_bearing_deg, c.v_fwd, c.v_back, c.w_ccw, c.w_cw);
+    // try76: the first census printed "0 / 0 / 0, nearest -1" both parked and at the cross's first cycle — read as a blind
+    // net, while the same run's binding lines showed 3–4 returns near the body. The near field (reach) was simply empty
+    // there, and the line did not say so. Every stage is counted now, and the nearest return at ANY range is given.
+    std::println("[returns] {}: cloud {} pts ({} non-finite), {} beyond reach {:.2f} m, {} inside the hull (the body itself), "
+                 "{} kept near the body ({} within sigma_r {:.3f} m OUTSIDE the hull: contact — or a body part the hull misses); "
+                 "nearest kept {:.3f} m from the hull at {:+.0f} deg; nearest at any range {:.3f} m from the hull at {:+.0f} deg "
+                 "(0 fwd, + right); caps: fwd {:.3f} back {:.3f} m/s, CCW {:.3f} CW {:.3f} rad/s",
+                 when, c.n_read, c.n_nonfinite, c.n_far, lr.reach, c.n_self, c.n_kept, c.n_band, lr.sigma,
+                 std::isfinite(c.nearest_sd) ? c.nearest_sd : -1.f, c.nearest_bearing_deg,
+                 std::isfinite(c.nearest_any_sd) ? c.nearest_any_sd : -1.f, c.nearest_any_bearing_deg,
+                 c.v_fwd, c.v_back, c.w_ccw, c.w_cw);
 }
 
 float ControllerSession::anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
@@ -3452,10 +3452,12 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
     //   trust nothing the anchor says.
     const auto returns = live_returns(control_pose, obstacle_tracker, path_controller);
-    if (anchor_census_for_ != anchor_latched_for_)   // fix round 1, item 4: once on the first cycle of each cross
+    // Fix round 1, item 4: once per cross, on its first cycle WITH A NON-EMPTY CLOUD (try76: the line logged before the first
+    // LiDAR frame read all zeros and looked like a blind net).
+    if (anchor_census_for_ != anchor_latched_for_ and returns.valid and returns.r.n_read > 0)
     {
         anchor_census_for_ = anchor_latched_for_;
-        log_returns_census(std::format("first cross cycle on {}", a.name).c_str(), returns);
+        log_returns_census(std::format("cross on {}, first non-empty cloud", a.name).c_str(), returns);
     }
     float adv_mps = guard.cmd.adv, side_mps = holonomic ? guard.cmd.side : 0.f, rot_rps = guard.cmd.rot;
     // The ask the stall judge weighs the delivery against: the servo's own (the backoff's, when it took over).

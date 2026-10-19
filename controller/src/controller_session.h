@@ -15,7 +15,7 @@
 #include "controller_mission.h"
 #include "controller_door_passage.h"
 #include "controller_anchor_servo.h"
-#include "lidar_body_guard.h"
+#include "lidar_guard_buffer.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -123,7 +123,7 @@ public:
     struct LiveReturns
     {
         rc::LidarGuardReturns r;
-        float margin = 0.f, a_dec = 0.f, v_max = 0.f, w_max = 0.f, sigma = 0.f;
+        float margin = 0.f, a_dec = 0.f, v_max = 0.f, w_max = 0.f, sigma = 0.f, reach = 0.f;
         bool valid = false;   // a cloud was read
     };
     [[nodiscard]] LiveReturns live_returns(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,

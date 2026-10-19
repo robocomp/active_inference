@@ -3,11 +3,16 @@
 // Build+run (from controller/; relative_pose.h pulls rt_twist.h → dsr_api.h, hence Qt/fastdds on the line):
 //   Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O1 -Wall -Wextra -I/usr/include/eigen3 -I../common -Isrc
 //     -I$Q -I$Q/QtCore -I$Q/QtGui -I$Q/QtWidgets -fPIC tests/test_lidar_body_guard.cpp
-//     ../common/robot_footprint/*.cpp -o /tmp/tlbg -lfastdds -lfastcdr -lQt5Core && /tmp/tlbg        (one line)
+//     -I/home/pbustos/robocomp/robocomp_core/classes ../common/robot_footprint/*.cpp -o /tmp/tlbg
+//     -lfastdds -lfastcdr -lQt5Core && /tmp/tlbg        (one line; the robocomp_core -I is the buffer's threadpool)
 #include "../src/lidar_body_guard.h"
+#include "../src/lidar_guard_buffer.h"
+#include "../src/controller_runtime_types.h"
 #include "../../common/robot_footprint/robot_footprint.h"
 
+#include <chrono>
 #include <cmath>
+#include <thread>
 #include <print>
 #include <string_view>
 #include <vector>
@@ -207,6 +212,68 @@ int main()
         float adv = 0.3f, side = 0.f, rot = 0.f;
         const auto cap = rc::lidar_cap_command(r.obstacles, body, kMargin, kAdec, kVmax, kWmax, adv, side, rot);
         CHECK(cap.bound_lin and adv == 0.f and not cap.bound_rot);
+    }
+
+    // 9. try76 fix: THE SESSION'S OWN PATH — a room-frame cloud put into a real rc::LidarPointBuffer (the obstacle tracker's
+    //    converter shape), read back with rc::lidar_guard_returns_from_buffer on ControllerRobotPose::as_transform(), the
+    //    accessor and transform ControllerSession::live_returns runs. Robot at the try74 contact pose, heading not 0.
+    {
+        ControllerRobotPose pose;
+        pose.pos = {-4.566f, 9.53f};
+        pose.theta = 1.2f;
+        const Eigen::Affine2f room_T_robot = pose.as_transform();
+        const std::vector<Eigen::Vector2f> robot_pts{
+            corner + Eigen::Vector2f(0.005f, 0.02f),   // the jamb end in the band: contact
+            Eigen::Vector2f(-0.30f, 0.30f),             // near, kept
+            Eigen::Vector2f(0.001f, 0.0005f),           // r ≈ 0: the body
+            Eigen::Vector2f(0.0f, 3.0f)};               // a far wall: beyond reach
+        rc::RawLidarPointVectors raw;
+        for (const auto& q : robot_pts) { const Eigen::Vector2f w = room_T_robot * q; raw.xs.push_back(w.x()); raw.ys.push_back(w.y()); raw.zs.push_back(0.9f); }
+        raw.xs.push_back(std::numeric_limits<float>::quiet_NaN()); raw.ys.push_back(0.f); raw.zs.push_back(0.9f);
+        rc::LidarPointBuffer buffer{5};
+        CHECK(not rc::lidar_guard_returns_from_buffer(buffer, room_T_robot, body, kSigma, 0.436f).has_value());   // empty
+        buffer.put<0>(std::move(raw), 1000, [](rc::RawLidarPointVectors&& in, rc::LidarPointVectors& out)
+                      { auto& [x, y, z] = out; x = std::move(in.xs); y = std::move(in.ys); z = std::move(in.zs); });
+        // put() converts on the buffer's own worker thread, as live: poll the read the session makes until it lands.
+        const auto read_n = [&](int n_expected)
+        {
+            for (int k = 0; k < 200; ++k)
+            {
+                if (auto rr = rc::lidar_guard_returns_from_buffer(buffer, room_T_robot, body, kSigma, 0.436f);
+                    rr.has_value() and rr->n_read == n_expected) return rr;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return rc::lidar_guard_returns_from_buffer(buffer, room_T_robot, body, kSigma, 0.436f);
+        };
+        const auto r = read_n(5);
+        CHECK(r.has_value());
+        if (r.has_value())
+        {
+            const auto c = rc::lidar_guard_census(*r, body, kMargin, kAdec, kVmax, kWmax);
+            std::println("  session path: read {} non-finite {} far {} self {} kept {} band {}; nearest kept {:.3f} m at {:+.0f} deg, "
+                         "any {:.3f} m; fwd cap {:.3f}", c.n_read, c.n_nonfinite, c.n_far, c.n_self, c.n_kept, c.n_band,
+                         c.nearest_sd, c.nearest_bearing_deg, c.nearest_any_sd, c.v_fwd);
+            CHECK(c.n_read == 5 and c.n_nonfinite == 1 and c.n_far == 1 and c.n_self == 1 and c.n_kept == 2 and c.n_band == 1);
+            // The transform round-trips: the kept returns ARE the robot-frame points.
+            bool found = false;
+            for (const auto& o : r->obstacles) found = found or (o.mean - robot_pts[0]).norm() < 1e-4f;
+            CHECK(found);
+            CHECK(c.v_fwd == 0.f);
+        }
+        // Parked in the open: nothing within reach — the census must still say where the world is, not "-1".
+        rc::RawLidarPointVectors open;
+        for (const auto& q : {Eigen::Vector2f(0.f, 1.5f), Eigen::Vector2f(-1.2f, 0.f)})
+        { const Eigen::Vector2f w = room_T_robot * q; open.xs.push_back(w.x()); open.ys.push_back(w.y()); open.zs.push_back(0.9f); }
+        buffer.put<0>(std::move(open), 2000, [](rc::RawLidarPointVectors&& in, rc::LidarPointVectors& out)
+                      { auto& [x, y, z] = out; x = std::move(in.xs); y = std::move(in.ys); z = std::move(in.zs); });
+        const auto ro = read_n(2);
+        CHECK(ro.has_value());
+        if (ro.has_value())
+        {
+            const auto c = rc::lidar_guard_census(*ro, body, kMargin, kAdec, kVmax, kWmax);
+            CHECK(c.n_read == 2 and c.n_far == 2 and c.n_kept == 0);
+            CHECK(std::abs(c.nearest_any_sd - (1.2f - 0.2716f)) < 0.01f and std::abs(c.nearest_any_bearing_deg + 90.f) < 1.f);
+        }
     }
 
     std::println("{} / {} checks passed", checks - failures, checks);
