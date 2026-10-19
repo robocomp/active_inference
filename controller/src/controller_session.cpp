@@ -3364,10 +3364,12 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     //   carried, its covariance grown by the motion and the unseen time) — `through` is s ≥ standoff on it, and nothing
     //   waits for a SEEN anchor. The guards stay in the chain on that same pose: while any body point is within reach of a
     //   jamb or the leaf they cap the motion that closes on it; once the body has cleared them they bind on nothing.
-    const bool drive = a.fresh or door_passage_.clearing();
+    // Task 16 (try76 leg 2): also from the moment the body's centre is past the plane on the carried pose (rc::anchor_drive_on).
+    const bool drive = rc::anchor_drive_on(a.fresh, door_passage_.clearing(), a.pose);
     if (drive and not a.fresh and not anchor_carried_logged_)
-        std::println("[anchor] cross: past the room switch, {} not seen for {} ms — going on, on the pose odometry carries "
-                     "(σ_lat {:.3f} m)", a.name, a.age_ms, rc::anchor_cross_geometry(a.pose).sigma_lat);
+        std::println("[anchor] cross: {}, {} not seen for {} ms — going on, on the pose odometry carries (s {:+.2f}, σ_lat {:.3f} m)",
+                     door_passage_.clearing() ? "past the room switch" : "past the door plane", a.name, a.age_ms,
+                     rc::anchor_cross_geometry(a.pose).s, rc::anchor_cross_geometry(a.pose).sigma_lat);
     anchor_carried_logged_ = drive and not a.fresh;
     if (drive)
     {

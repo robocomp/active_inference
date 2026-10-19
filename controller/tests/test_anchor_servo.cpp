@@ -678,6 +678,31 @@ void clearing_completes_on_odometry()
     CHECK(rc::anchor_cross_end(true, true, through) == rc::AnchorCrossEnd::Through);
 }
 
+// Task 16 (try76 leg 2): a stale anchor past the plane, before any room switch, is driven on to `through`; before it, waited for.
+void stale_past_the_plane_continues()
+{
+    CHECK(rc::anchor_drive_on(false, false, anchor(0.f, -0.36f, 0.f, 0.02f)));        // s +0.36, no switch: drive
+    CHECK(not rc::anchor_drive_on(false, false, anchor(0.f, 0.30f, 0.f, 0.02f)));      // s −0.30: wait for a fresh one
+    CHECK(rc::anchor_drive_on(true, false, anchor(0.f, 0.30f, 0.f, 0.02f)));           // fresh: drive
+    CHECK(rc::anchor_drive_on(false, true, anchor(0.f, 0.30f, 0.f, 0.02f)));           // clearing: drive
+    // From s +0.36, never seen again, carried by odometry with the guards: through, no wait.
+    const auto l = leaf_toward();
+    RelPose r = anchor(0.02f, -0.36f, 0.f, 0.02f);
+    float t = 0.f; bool through = false; int waited = 0;
+    for (int k = 0; k < 600 and not through; ++k)
+    {
+        if (not rc::anchor_drive_on(false, false, r)) { ++waited; t += 0.1f; continue; }
+        const auto c = chain(r, one(&l), kShadow);
+        if (c.through) { through = true; break; }
+        rc::rt::Twist tw; tw.linear = {c.side, c.adv, 0.f}; tw.angular = {0.f, 0.f, c.rot};
+        r = rc::interaction::predict(r, tw, Eigen::Vector3f(1e-4f, 1e-4f, 1e-4f), 0.1f);
+        rc::interaction::grow_unseen(r, 0.1f, 3.0f);
+        t += 0.1f;
+    }
+    std::println("  stale past the plane: through {} after {:.1f} s, {} cycles waited", through, t, waited);
+    CHECK(through and waited == 0 and t < 20.f);
+}
+
 int main()
 {
     centred_goes_straight();
@@ -704,6 +729,7 @@ int main()
     leaf_hypotheses_weigh_the_minority();
     cross_ends_through_not_at_the_room_switch();
     clearing_completes_on_odometry();
+    stale_past_the_plane_continues();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

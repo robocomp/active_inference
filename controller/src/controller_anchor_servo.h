@@ -245,6 +245,19 @@ enum class AnchorCrossEnd { Continue, Through, RoomSwitch };
     return room_switched ? AnchorCrossEnd::RoomSwitch : AnchorCrossEnd::Continue;
 }
 
+// ── DRIVE ON A STALE ANCHOR? (Task 13 Fix E far side; Task 16: from the plane on) ───────────────────────────────────────
+// A fresh anchor is driven on. A stale one is driven on — on the pose odometry carries, the guards in the chain — once the
+// body's centre is PAST THE PLANE on that pose (s > 0: try76 leg 2 stood at s +0.36 for 40 s waiting for an anchor that
+// could not be seen from inside the doorway), or past the room switch (clearing); before the plane the wait-for-fresh rule
+// stands (the approach is where a sighting is both possible and needed). ⚑ s = 0 is the wall plane: geometry, the ruling's
+// level, not a tuned one.
+[[nodiscard]] inline bool anchor_drive_on(bool fresh, bool clearing, const rc::interaction::RelPose& pose)
+{
+    if (fresh or clearing) return true;
+    if (not pose.x.allFinite()) return false;
+    return anchor_cross_geometry(pose).s > 0.f;
+}
+
 // ── WAITING FOR AN ANCHOR NOT SEEN YET: TURN SO THE SENSORS CAN SEE IT (Task 9) ────────────────────────────────────────
 // Toward the opening's centre (its bearing from forward, CCW positive) while it lies ahead; once the body's centre is within
 // half a body length of the wall plane (s > −half_len) — or past it — the centre may be beside or behind the robot, and
