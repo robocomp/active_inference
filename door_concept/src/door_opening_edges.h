@@ -61,7 +61,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <numbers>
 #include <vector>
@@ -101,12 +103,31 @@ inline Eigen::Vector2f rot2(const Eigen::Vector2f& v, float a)
     const float c = std::cos(a), s = std::sin(a);
     return {c * v.x() - s * v.y(), s * v.x() + c * v.y()};
 }
+// True iff q lies nearer some segment of `walls` than `d_door` (its distance to the door's wall line).
+inline bool nearer_other_wall(const Eigen::Vector2f& q, float d_door, const std::vector<std::array<Eigen::Vector2f, 2>>& walls)
+{
+    for (const auto& [a, b] : walls)
+    {
+        const Eigen::Vector2f e = b - a;
+        const float l2 = e.squaredNorm();
+        const float t = l2 > 0.f ? std::clamp((q - a).dot(e) / l2, 0.f, 1.f) : 0.f;
+        if ((q - a - t * e).norm() < d_door) return true;
+    }
+    return false;
+}
 }   // namespace detail
 
 // The wall returns are those at the door's height band within kRegWindowM either side of the aperture (the hole has
 // none, a leaf at 90° and a perpendicular corner wall make lines the rotation search cannot align with the wall).
+// ★ try97: AND THAT ARE THE DOOR'S WALL'S, not another wall of the room. `other_walls` (the room's walls less the door's
+//   own, rc::door::room_walls_beside) attributes each return to the nearest modelled surface: one nearer another wall
+//   than the door's wall line is that wall's. Without it, a robot in room_1's corridor 1.3-1.6 m from DOOR_1 saw the
+//   corridor's side walls out-vote the 0.6 m of door wall beside the opening — live try97 leg 1 registered at
+//   eps +0.38..+0.41 rad / depth +0.38..+0.59 m (the search's own bounds), every frame of the approach rotated 23°.
+//   Empty ⇒ every return in the window is a candidate (the harnesses without a room).
 [[nodiscard]] inline WallRegistration register_to_wall(const Aperture& ap, const Eigen::Vector3f& origin,
-                                                       const std::vector<Eigen::Vector3f>& pts)
+                                                       const std::vector<Eigen::Vector3f>& pts,
+                                                       const std::vector<std::array<Eigen::Vector2f, 2>>& other_walls = {})
 {
     WallRegistration out;
     const Eigen::Vector2f u = ap.wall_u, n = ap.across_u(), c = ap.centre_xy(), o = origin.head<2>();
@@ -123,6 +144,7 @@ inline Eigen::Vector2f rot2(const Eigen::Vector2f& v, float a)
         const Eigen::Vector2f q = p.head<2>();
         const float a = u.dot(q - c), r = n.dot(q - c);
         if (std::abs(a) > half_len + reach * std::sin(kRegYawMaxRad) or std::abs(r) > across_max) continue;
+        if (detail::nearer_other_wall(q, std::abs(r), other_walls)) continue;   // another wall's return
         cand.push_back(q - o);
     }
     if (static_cast<int>(cand.size()) < kRegMinInliers)
@@ -130,7 +152,13 @@ inline Eigen::Vector2f rot2(const Eigen::Vector2f& v, float a)
     // Across-wall coordinate of a sensor-relative point q after undoing a rotation eps: n·(o + R(−eps) q − c).
     const float r_o = n.dot(o - c);
     const int   nb  = static_cast<int>(std::ceil(2.f * kRegDepthMaxM / kRegSigmaRM));
-    std::vector<int> hist(static_cast<std::size_t>(nb));
+    // ★ SUPPORT IS THE LENGTH OF LINE OBSERVED, NOT THE NUMBER OF RETURNS (try97). The registration fits a 2-D line, and the
+    //   returns stacked up one azimuth of a vertical surface (one per ring) are the same 2-D observation repeated; their
+    //   count also grows as 1/range². Counting points let 10 cm of DOOR_1's open leaf 0.7 m from the sensor (≈ 14 rings ×
+    //   16 azimuths) out-vote 0.6 m of wall 1.1 m away: room_1 leg 1 registered at +0.41 rad on the leaf. Each along-wall
+    //   cell of the registration's own resolution (kRegSigmaRM) counts once per depth band.
+    const int na = static_cast<int>(std::ceil(2.f * half_len / kRegSigmaRM));
+    std::vector<std::uint8_t> occ(static_cast<std::size_t>(nb) * static_cast<std::size_t>(na));
     int best_support = -1; float best_eps = 0.f, best_depth = 0.f;
     const int ne = static_cast<int>(std::lround(kRegYawMaxRad / kRegYawStepRad));
     // From 0 outward, strictly greater support wins: on a tie the smaller rotation stands.
@@ -138,7 +166,7 @@ inline Eigen::Vector2f rot2(const Eigen::Vector2f& v, float a)
     {
         const int   j   = (k % 2 == 0) ? k / 2 : -(k + 1) / 2;
         const float eps = static_cast<float>(j) * kRegYawStepRad;
-        std::ranges::fill(hist, 0);
+        std::ranges::fill(occ, std::uint8_t{0});
         const float ce = std::cos(-eps), se = std::sin(-eps);
         for (const auto& q : cand)
         {
@@ -147,12 +175,19 @@ inline Eigen::Vector2f rot2(const Eigen::Vector2f& v, float a)
             if (std::abs(a) > half_len) continue;
             const float r = n.dot(qr) + r_o;
             const int b = static_cast<int>(std::floor((r + kRegDepthMaxM) / kRegSigmaRM));
-            if (b >= 0 and b < nb) ++hist[static_cast<std::size_t>(b)];
+            const int ia = std::clamp(static_cast<int>(std::floor((a + half_len) / kRegSigmaRM)), 0, na - 1);
+            if (b >= 0 and b < nb) occ[static_cast<std::size_t>(b) * na + ia] = 1;
         }
         for (int b = 0; b < nb; ++b)
         {
-            const int s = hist[static_cast<std::size_t>(b)] + (b > 0 ? hist[static_cast<std::size_t>(b - 1)] : 0)
-                        + (b + 1 < nb ? hist[static_cast<std::size_t>(b + 1)] : 0);
+            int s = 0;   // along-wall cells observed in the band b-1..b+1 (a cell in two bands counts once)
+            for (int ia = 0; ia < na; ++ia)
+            {
+                bool hit = occ[static_cast<std::size_t>(b) * na + ia] != 0;
+                if (b > 0)      hit = hit or occ[static_cast<std::size_t>(b - 1) * na + ia] != 0;
+                if (b + 1 < nb) hit = hit or occ[static_cast<std::size_t>(b + 1) * na + ia] != 0;
+                s += hit ? 1 : 0;
+            }
             if (s > best_support)
             { best_support = s; best_eps = eps; best_depth = -kRegDepthMaxM + (static_cast<float>(b) + 0.5f) * kRegSigmaRM; }
         }
@@ -413,10 +448,11 @@ struct RegisteredSweep
     Eigen::Vector3f origin = Eigen::Vector3f::Zero();
 };
 [[nodiscard]] inline RegisteredSweep register_sweep(const Aperture& ap, const Eigen::Vector3f& origin,
-                                                    const std::vector<Eigen::Vector3f>& pts)
+                                                    const std::vector<Eigen::Vector3f>& pts,
+                                                    const std::vector<std::array<Eigen::Vector2f, 2>>& other_walls = {})
 {
     RegisteredSweep out;
-    out.reg = register_to_wall(ap, origin, pts);
+    out.reg = register_to_wall(ap, origin, pts, other_walls);
     out.pts = pts;
     out.origin = apply_registration(out.reg, ap, origin, out.pts);
     return out;
