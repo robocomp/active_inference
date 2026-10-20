@@ -89,13 +89,13 @@ bool arrived(const PolicyInput& in, const Pose2& at)
     return xy and (not g.yaw or std::abs(wrap(*g.yaw - at.yaw)) <= g.tol_yaw);
 }
 
-struct Cand { float v, w; float lps = 0.f, prog = 0.f, lpc = 0.f; Pose2 end{}; bool lpc_done = false; };
+struct Cand { float v, w; float lps = 0.f, prog = 0.f, lpc = 0.f; Pose2 end{}; bool elig = false, lpc_done = false; };
 
 float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, float v, float w, Pose2* end)
 {
     const auto sw = rollout(from, v, w, p.horizon_s, in.base, p.dt);
     if (end) *end = sw.back();
-    return log_p_no_contact(*in.body, sw, in.returns, in.sigma_xy, in.sigma_yaw);
+    return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m);
 }
 
 bool eligible(float lps, const PolicyParams& p) { return 1.f - std::exp(lps) <= p.risk_eps; }
@@ -147,7 +147,10 @@ std::vector<std::pair<float, float>> coarse_set(const PolicyInput& in, const Pol
 }
 }  // namespace
 
-float log_p_continuable(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
+namespace
+{
+// `in.returns` are surface cells already (decide() merges once per cycle).
+float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
 {
     const auto set = coarse_set(in, p);
     const int n = int(set.size());
@@ -164,11 +167,22 @@ float log_p_continuable(const PolicyInput& in, const PolicyParams& p, const Pose
         }
     return std::log((float(k) + 1.f) / (float(n) + 2.f));
 }
+}  // namespace
 
-Decision decide(const PolicyInput& in, const PolicyParams& p)
+float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pose2& from)
+{
+    const auto cells = surface_cells(in0.returns);
+    PolicyInput in = in0; in.returns = cells;
+    return log_p_continuable_cells(in, p, from);
+}
+
+Decision decide(const PolicyInput& in0, const PolicyParams& p)
 {
     Decision d{.mode = Decision::Mode::Stuck, .why = {}};
-    if (in.body == nullptr or in.goal == nullptr) { d.why = "no body or no goal"; return d; }
+    if (in0.body == nullptr or in0.goal == nullptr) { d.why = "no body or no goal"; return d; }
+    // ★ returns -> surface cells ONCE per cycle (contact.h): every candidate and continuation sweeps the same cells
+    const auto cells = surface_cells(in0.returns);
+    PolicyInput in = in0; in.returns = cells;
     const Goal& g = *in.goal;
     if (g.kind != Goal::Kind::Heading and in.field == nullptr) { d.why = "place/doorway goal without a field"; return d; }
 
@@ -202,28 +216,22 @@ Decision decide(const PolicyInput& in, const PolicyParams& p)
             if (v == 0.f and w == 0.f) continue;     // standing still is the absence of a decision, not a candidate
             Cand c{.v = v, .w = w};
             c.lps = lp_safe(in, p, in.pose, v, w, &c.end);
-            if (not eligible(c.lps, p)) continue;
-            c.prog = progress(in, in.pose, c.end);
+            c.elig = eligible(c.lps, p);
+            if (c.elig) { c.prog = progress(in, in.pose, c.end); ++d.eligible; }
             cands.push_back(c);
         }
-    d.eligible = int(cands.size());
-    if (cands.empty())
-    {
-        d.why = "no candidate motion is contact-free at risk " + std::to_string(p.risk_eps) + ": hold";
-        return d;
-    }
-    auto ensure_lpc = [&](Cand& c) { if (not c.lpc_done) { c.lpc = log_p_continuable(in, p, c.end); c.lpc_done = true; } };
+    auto ensure_lpc = [&](Cand& c) { if (not c.lpc_done) { c.lpc = log_p_continuable_cells(in, p, c.end); c.lpc_done = true; } };
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
     {
         d.mode = m; d.v = c.v; d.w = c.w; d.log_p_safe = c.lps; d.log_p_cont = c.lpc; d.progress_m = c.prog; d.why = std::move(why);
         return d;
     };
 
-    // ---- Drive: best score among eligible candidates with progress > 0.
+    // ---- Drive: best score among ELIGIBLE candidates with progress > 0 (risk_eps gates normal motion).
     // ★ Exact branch-and-bound on the continuation cost: lpc <= log((N+1)/(N+2)) < 0, so once the best score found
     //   beats every remaining candidate's lps + progress/scale, their continuations need not be rolled out.
     std::vector<Cand*> drive;
-    for (auto& c : cands) if (c.prog > 0.f) drive.push_back(&c);
+    for (auto& c : cands) if (c.elig and c.prog > 0.f) drive.push_back(&c);
     if (not drive.empty())
     {
         auto base_score = [&](const Cand* c) { return c->lps + c->prog / p.progress_scale_m; };
@@ -239,27 +247,56 @@ Decision decide(const PolicyInput& in, const PolicyParams& p)
         return finish(Decision::Mode::Drive, *best, "drive: " + words(best->v, best->w));
     }
 
-    // ---- Release: no eligible motion makes progress. Among eligible candidates with v <= 0 (reverse arcs and
-    //      in-place turns), take the one that buys the most freedom: max log_p_cont(end) - log_p_cont(now).
-    //      Ties (k is a count) go to the safer sweep, then to the larger reverse travel (more room bought).
-    const float lpc_now = log_p_continuable(in, p, in.pose);
+    // ---- No eligible motion makes progress: the robot is in a wedge, and the only option is to move back and turn
+    //      a bit (user's rule). First the impossible case: a return inside the BARE hull contradicts "not touching
+    //      now" (the robot cannot overlap a wall) — a sensing/pose error, not a place a motion can be chosen from.
+    const auto inside = std::ranges::count_if(in0.returns, [&](const Return& r) { return hull_distance(*in.body, in.pose, r.p) < 0.f; });
+    if (inside > 0) { d.why = std::to_string(inside) + " returns inside the body (sensing/pose error): hold"; return d; }
+
+    // ---- Release (controller ruling, fix round 5): NOT held to risk_eps. Among ALL candidates with v <= 0 (reverse
+    //      arcs and in-place turns), lexicographically: (a) those that INCREASE continuability
+    //      (log_p_cont(end) > log_p_cont(now)) if any exist, else all of them; (b) the smallest P(contact); ties go
+    //      to the larger continuability gain, then to the larger reverse travel.
+    // ★ Exact scan: visiting in decreasing log_p_safe, the first candidate with a gain is the (a)-member with the
+    //   smallest P; only its equal-lps ties can beat it (larger gain), and a tie reaching lpc_max ends the scan.
+    //   Pass (b) reuses every continuation already rolled out.
+    const float lpc_now = log_p_continuable_cells(in, p, in.pose);
     const float n_cont = float(coarse_set(in, p).size());
     const float lpc_max = std::log((n_cont + 1.f) / (n_cont + 2.f));
-    // ★ Visit in tie-break order (safer sweep, then longer reverse); the first candidate that reaches lpc_max can
-    //   be beaten by nobody after it, so the scan stops there — exact, and it caps the open-space worst case.
     std::vector<Cand*> rel;
     for (auto& c : cands) if (c.v <= 0.f) rel.push_back(&c);
     std::ranges::sort(rel, std::greater{}, [](const Cand* x) { return std::pair{x->lps, -x->v}; });
+    if (rel.empty()) { d.why = "no progress, and no reverse or in-place motion to release with: hold"; return d; }
+    constexpr float kTie = 1e-6f;
     Cand* best = nullptr;
-    for (Cand* c : rel)
+    if (lpc_now < lpc_max)                        // (a): a gain is possible at all
+        for (Cand* c : rel)
+        {
+            if (best != nullptr and c->lps < best->lps - kTie) break;
+            ensure_lpc(*c);
+            if (c->lpc > lpc_now and (best == nullptr or c->lpc > best->lpc)) best = c;
+            if (best != nullptr and best->lpc >= lpc_max) break;
+        }
+    if (best == nullptr)                          // (b): nobody gains — the least likely contact, ties to continuability
+        for (Cand* c : rel)
+        {
+            if (best != nullptr and c->lps < best->lps - kTie) break;
+            ensure_lpc(*c);
+            if (best == nullptr or c->lpc > best->lpc) best = c;
+            if (best->lpc >= lpc_max) break;
+        }
+    const float P = 1.f - std::exp(best->lps);
+    // ★ STUCK is the mirror of risk_eps, no new constant: Drive moves only when contact is improbable (P <= eps);
+    //   Release is refused only when contact is as certain as Drive demands it be improbable (P >= 1 - eps) —
+    //   whatever the robot does it touches, so moving buys nothing and the task layer is told.
+    if (best->lps <= std::log(p.risk_eps))
     {
-        ensure_lpc(*c);
-        if (best == nullptr or c->lpc > best->lpc) best = c;
-        if (best->lpc >= lpc_max) break;
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= 1-%.3g: hold", words(best->v, best->w).c_str(), P, p.risk_eps);
+        d.why = buf; return d;
     }
-    if (best == nullptr) { d.why = "no progress, and no reverse or in-place motion is contact-free: hold"; return d; }
-    char buf[160];
-    std::snprintf(buf, sizeof buf, "release: %s; continuability %.2f -> %.2f nats", words(best->v, best->w).c_str(), lpc_now, best->lpc);
+    char buf[200];
+    std::snprintf(buf, sizeof buf, "release: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", words(best->v, best->w).c_str(), P, lpc_now, best->lpc);
     return finish(Decision::Mode::Release, *best, buf);
 }
 }  // namespace rc::policy

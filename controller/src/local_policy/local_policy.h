@@ -26,10 +26,13 @@ struct PolicyParams { float horizon_s = 1.0f, dt = 0.05f; int n_v = 7, n_w = 11,
 
 struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma_yaw = 0, returns_age_s = 0;
                      std::span<const Return> returns; const rc::RobotFootprint* body = nullptr; BaseLimits base;
-                     const Goal* goal = nullptr; const CostToGo* field = nullptr; };
+                     const Goal* goal = nullptr; const CostToGo* field = nullptr;
+                     // residual error of the proto-derived body (tessellation, hull simplification, beam footprint)
+                     float body_geometry_sigma_m = 0.01f; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen).
-// eligible = number of candidates whose P(contact) <= risk_eps.
+// eligible = number of candidates whose P(contact) <= risk_eps (Drive draws from them; Release from ALL v <= 0 ones).
+// Stuck only when returns lie inside the bare hull, or the best release has P(contact) >= 1 - risk_eps.
 struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode; float v = 0, w = 0;
                   float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why; };
 

@@ -1,4 +1,6 @@
 // Task 2 (local-motion policy): rollout + swept-body contact probability.
+// Fix round 4: returns are merged into surface cells (kSurfaceCellM) and the shared-offset integral is adaptive;
+//   `surface_cells` and `epsilon_integral_accuracy` (vs a 4001-node reference, sigma_j/sigma_s in [0.05, 5]) cover them.
 // Build+run (from controller/):
 //   g++ -std=c++23 -O2 -Wall -Wextra -I/usr/include/eigen3 -I../common tests/test_policy_contact.cpp src/local_policy/contact.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tpc && /tmp/tpc
@@ -15,6 +17,7 @@ static int fails = 0;
 #define CHECK(name, cond) do { const bool ok_ = (cond); std::printf("%s %s\n", ok_ ? "PASS" : "FAIL", name); if (not ok_) ++fails; } while (0)
 
 static constexpr float kHalfPi = 1.57079633f;
+static constexpr float kGeom = 0.01f;   // body_geometry_sigma_m (default at the call sites)
 static BaseLimits limits() { BaseLimits b; b.v_max = 0.5f; b.w_max = 1.5f; b.a_lin = 1.f; b.d_lin = 1.f; b.a_rot = 2.f; b.d_rot = 2.f; return b; }
 static rc::RobotFootprint body(float margin = 0.05f) { auto f = rc::RobotFootprint::shadow(); f.set_safety_margin(margin); return f; }
 // Wall of returns on the line x = x0 (room frame), y in [y0, y1]; robot yaw = pi/2 puts room +x on its right.
@@ -69,21 +72,24 @@ int main()
     { // wall_beside_parallel_free
         const auto sw = rollout(origin, 0.3f, 0.f, 1.f, b, 0.05f);
         const auto r = wall_x(0.40f, -1.f, 2.f);
-        const float lp = log_p_no_contact(body(), sw, r, sxy, syaw);
+        const float lp = log_p_no_contact(body(), sw, r, sxy, syaw, kGeom);
         std::printf("  parallel lp=%.5f\n", lp);
         CHECK("wall_beside_parallel_free", lp > std::log(0.99f));
     }
     { // wall_beside_turn_hits
         const auto sw = rollout(origin, 0.f, 1.f, 1.f, b, 0.05f);
         const auto r = wall_x(0.34f, -1.f, 1.f);
-        const float lp = log_p_no_contact(body(), sw, r, sxy, syaw);
+        const float lp = log_p_no_contact(body(), sw, r, sxy, syaw, kGeom);
         std::printf("  turn lp=%.5f\n", lp);
-        CHECK("wall_beside_turn_hits", lp < std::log(0.5f));
+        // ★ fix round 3: contact is against the BARE hull, whose corner reach (0.318 m) misses a 0.34 m wall by 2.2 cm
+        //   (~1.5 sigma total). The turn is still CHARGED — ineligible at risk_eps 0.01 — but no longer near-certain,
+        //   so the bar moves from P > 0.5 to P > 0.01 (the policy's chance constraint), same intent.
+        CHECK("wall_beside_turn_hits", lp < std::log(1.f - 0.01f));
     }
     { // wall_ahead_fast_vs_slow
         const auto r = wall_y(0.8f, -1.f, 1.f);
-        const float fast = log_p_no_contact(body(), rollout(origin, 0.35f, 0.f, 2.f, b, 0.05f), r, sxy, syaw);
-        const float slow = log_p_no_contact(body(), rollout(origin, 0.10f, 0.f, 2.f, b, 0.05f), r, sxy, syaw);
+        const float fast = log_p_no_contact(body(), rollout(origin, 0.35f, 0.f, 2.f, b, 0.05f), r, sxy, syaw, kGeom);
+        const float slow = log_p_no_contact(body(), rollout(origin, 0.10f, 0.f, 2.f, b, 0.05f), r, sxy, syaw, kGeom);
         std::printf("  fast=%.4f slow=%.4f\n", fast, slow);
         CHECK("wall_ahead_fast_vs_slow", fast < slow and fast < std::log(0.5f) and slow > std::log(0.99f));
     }
@@ -91,33 +97,92 @@ int main()
         const std::vector<Return> r{{{0.264f, 0.f}, 0.01f, 1.f}};
         const std::vector<Pose2> away{origin, {{-0.2f, 0.f}, kHalfPi}};   // body moves room -x = its left: flank leaves the point
         const std::vector<Pose2> into{origin, {{0.2f, 0.f}, kHalfPi}};    // body moves right: point sinks deeper
-        CHECK("start_inside separating is free", log_p_no_contact(body(), away, r, sxy, syaw) > std::log(0.99f));
-        CHECK("start_inside deeper hits", log_p_no_contact(body(), into, r, sxy, syaw) < std::log(0.5f));
+        CHECK("start_inside separating is free", log_p_no_contact(body(), away, r, sxy, syaw, kGeom) > std::log(0.99f));
+        CHECK("start_inside deeper hits", log_p_no_contact(body(), into, r, sxy, syaw, kGeom) < std::log(0.5f));
     }
-    { // conditional_continuous_at_surface: a return on the grown nose line at sd0 = -1 mm, 0, +1 mm; the body
-      // advances 5 mm into it (a small deepening keeps P mid-range, where a step would show)
+    { // conditional_continuous_at_surface: a return on the BARE nose line (y = 0.23) at sd0 = -1 mm, 0, +1 mm; the
+      // body advances 5 mm into it (small enough to keep P mid-range, where a step would show).
+      // ★ fix round 3: distances are to the BARE hull (was the margin-grown nose, y = 0.28).
         const std::vector<Pose2> sw{origin, {{0.f, 0.005f}, kHalfPi}};
         float P[3]; int i = 0;
         for (float d : {-0.001f, 0.f, 0.001f})
         {
-            const std::vector<Return> r{{{0.f, 0.28f + d}, 0.01f, 1.f}};
-            P[i++] = 1.f - std::exp(log_p_no_contact(body(), sw, r, sxy, syaw));
+            const std::vector<Return> r{{{0.f, 0.23f + d}, 0.01f, 1.f}};
+            P[i++] = 1.f - std::exp(log_p_no_contact(body(), sw, r, sxy, syaw, kGeom));
         }
         std::printf("  P(-1mm)=%.4f P(0)=%.4f P(+1mm)=%.4f\n", P[0], P[1], P[2]);
         CHECK("conditional_continuous_at_surface", std::abs(P[0] - P[1]) < 0.05f and std::abs(P[1] - P[2]) < 0.05f and P[1] > 0.1f and P[1] < 0.9f);
     }
     { // backing_away_free: a wall exactly at the grown nose (y = 0.23 + 0.05), straight back
         const auto r = wall_y(0.28f, -0.4f, 0.4f);
-        const float P = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, -0.3f, 0.f, 1.f, b, 0.05f), r, sxy, syaw));
+        const float P = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, -0.3f, 0.f, 1.f, b, 0.05f), r, sxy, syaw, kGeom));
         std::printf("  backing away from a wall at the margin edge: P=%.2e\n", P);
         CHECK("backing_away_free", P < 1e-3f);
     }
     { // p_exist scales the hit; a far return is ignored
         const std::vector<Return> hit{{{0.f, 0.3f}, 0.01f, 1.f}}, ghost{{{0.f, 0.3f}, 0.01f, 0.1f}}, far{{{50.f, 0.f}, 0.01f, 1.f}};
         const auto sw = rollout(origin, 0.3f, 0.f, 1.f, b, 0.05f);
-        const float a = log_p_no_contact(body(), sw, hit, sxy, syaw), g = log_p_no_contact(body(), sw, ghost, sxy, syaw);
+        const float a = log_p_no_contact(body(), sw, hit, sxy, syaw, kGeom), g = log_p_no_contact(body(), sw, ghost, sxy, syaw, kGeom);
         CHECK("p_exist=0.1 hits ~10x less", g > a and std::abs(g - std::log(0.9f)) < 0.02f);
-        CHECK("far return ignored", log_p_no_contact(body(), sw, far, sxy, syaw) == 0.f);
+        CHECK("far return ignored", log_p_no_contact(body(), sw, far, sxy, syaw, kGeom) == 0.f);
+    }
+    { // surface_cells: n hits of one surface element are ONE obstacle at their mean with sigma_r / sqrt(n)
+        std::vector<Return> r;
+        for (int i = 0; i < 4; ++i) r.push_back({{0.301f + 0.002f * i, 0.011f + 0.005f * i}, 0.01f, 1.f});   // one 0.04 cell
+        r.push_back({{0.30f, 0.11f}, 0.01f, 1.f});                                                            // alone in its cell
+        r.push_back({{0.30f, 0.21f}, 0.01f, 0.5f}); r.push_back({{0.31f, 0.22f}, 0.01f, 0.5f});              // two half-sure hits
+        const auto c = surface_cells(r);
+        std::printf("  cells: %zu ; cell0 p=(%.4f,%.4f) sigma=%.4f ; cell1 sigma=%.4f ; cell2 p_exist=%.3f\n", c.size(),
+                    c[0].p.x(), c[0].p.y(), c[0].sigma, c[1].sigma, c[2].p_exist);
+        CHECK("surface_cells count", c.size() == 3);
+        CHECK("surface_cells mean + sigma/sqrt(n)", std::abs(c[0].p.x() - 0.304f) < 1e-4f and std::abs(c[0].p.y() - 0.0185f) < 1e-4f and std::abs(c[0].sigma - 0.005f) < 1e-5f);
+        CHECK("surface_cells isolated hit keeps sigma_r", std::abs(c[1].sigma - 0.01f) < 1e-6f and c[1].p_exist == 1.f);
+        CHECK("surface_cells existence combines", std::abs(c[2].p_exist - 0.75f) < 1e-5f);
+        CHECK("surface_cells idempotent", surface_cells(c).size() == 3 and std::abs(surface_cells(c)[0].sigma - 0.005f) < 1e-5f);
+    }
+    { // epsilon_integral_accuracy: the adaptive shared-offset integral vs a brute-force 4001-node trapezoid, over
+      // sigma_j / sigma_s in [0.05, 5] (random clearance sets, with and without p_exist < 1), and on real sweeps:
+      // the pressed wall (x = 0.30) slid along at several sigma_r. Bar: |P - P_ref| <= 0.005 (controller ruling).
+        const double ss = std::sqrt(double(sxy) * sxy + double(kGeom) * kGeom);
+        std::mt19937 g(11); double worst = 0; int cases = 0;
+        for (double ratio : {0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0})
+        {
+            double wr = 0;
+            for (int trial = 0; trial < 150; ++trial)
+            {
+                std::uniform_int_distribution<int> nt(1, 30);
+                std::uniform_real_distribution<double> sd0d(-0.01, 0.08), dd(0.0, 0.06), pe(0.3, 1.0);
+                std::vector<ContactTerm> t;
+                for (int i = 0, m = nt(g); i < m; ++i) { const double s0 = sd0d(g); t.push_back({s0, s0 - dd(g), ratio * ss, trial % 3 == 0 ? pe(g) : 1.0}); }
+                wr = std::max(wr, std::abs(std::exp(log_ratio_shared_offset(t, ss)) - std::exp(log_ratio_shared_offset(t, ss, 4001))));
+                ++cases;
+            }
+            std::printf("  eps integral, sigma_j/sigma_s=%.2f: max |P - P_ref| = %.5f\n", ratio, wr);
+            worst = std::max(worst, wr);
+        }
+        // real sweeps: terms exactly as log_p_no_contact builds them (cells, bare hull, per-cell yaw lever arm)
+        const auto f = body();
+        for (float sr : {0.0006f, 0.003f, 0.01f, 0.05f})
+            for (auto [v, w] : {std::pair{-0.25f, 0.f}, std::pair{-0.5f, -0.3f}, std::pair{0.f, 1.0f}})
+            {
+                const auto sw = rollout(origin, v, w, 1.f, b, 0.05f);
+                std::vector<ContactTerm> t;
+                for (const auto& q : surface_cells(wall_x(0.30f, -2.f, 2.f, sr)))
+                {
+                    const float rho = (q.p - origin.p).norm();
+                    const double sj = std::sqrt(double(q.sigma) * q.sigma + double(rho) * rho * syaw * syaw);
+                    float sd0 = hull_distance(f, origin, q.p), sd = sd0;
+                    for (std::size_t i = 1; i < sw.size(); ++i) sd = std::min(sd, hull_distance(f, sw[i], q.p));
+                    if (sd - 6.0 * ss > 7.0 * sj) continue;
+                    t.push_back({sd0, sd, sj, q.p_exist});
+                }
+                const double P = 1.0 - std::exp(log_ratio_shared_offset(t, ss)), Pref = 1.0 - std::exp(log_ratio_shared_offset(t, ss, 4001));
+                const double Plib = 1.0 - std::exp(log_p_no_contact(f, sw, wall_x(0.30f, -2.f, 2.f, sr), sxy, syaw, kGeom));
+                std::printf("  wall 0.30 sigma_r=%.4f v=%+.2f w=%+.2f : P=%.4f P_ref=%.4f (log_p_no_contact %.4f)\n", sr, v, w, P, Pref, Plib);
+                worst = std::max({worst, std::abs(P - Pref), std::abs(Plib - Pref)}); ++cases;
+            }
+        std::printf("  epsilon_integral_accuracy: worst |P - P_ref| = %.5f over %d cases\n", worst, cases);
+        CHECK("epsilon_integral_accuracy", worst <= 0.005);
     }
     { // timing: 21-pose sweep vs 300 returns
         std::vector<Pose2> sw; for (int i = 0; i < 21; ++i) sw.push_back({{0.f, 0.02f * i}, kHalfPi});
@@ -127,7 +192,7 @@ int main()
         for (int k = 0; k < 201; ++k)
         {
             const auto t0 = std::chrono::steady_clock::now();
-            sink = sink + log_p_no_contact(f, sw, r, sxy, syaw);
+            sink = sink + log_p_no_contact(f, sw, r, sxy, syaw, kGeom);
             ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         }
         std::sort(ms.begin(), ms.end());

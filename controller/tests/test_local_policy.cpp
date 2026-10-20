@@ -12,13 +12,12 @@
 // Fields: 8 x 8 m grid, 0.05 m cells, centred on the robot. Where a test says "map lag" the field's free predicate
 //   does NOT contain the wall (a newly seen obstacle the map has not absorbed — the case release exists for).
 //
-// ★ KNOWN FAIL (2 lines, fix round 1, reported in task-4-report.md, NOT worked around): pressed_into_wall_releases.
-//   With contact conditioned on not touching now (contact.cpp), dead_end now releases; pressed does not, because a
-//   differential base pressed 1 cm into a wall has no motion that leaves every return no closer than now: straight
-//   motion drags outside wall points (sd0 +0.007 .. +0.18) onto the flank (sd_min -0.06), any turn deepens the
-//   inside ones (sd0 -0.015 -> -0.035 .. -0.13). Every one of the 76 candidates has P(contact) >= 0.956.
-// Timing (-O2, 300 returns, median of 100): drive 4.5 ms; release worst case (field +inf, 76 eligible) 9.8 ms
-//   (19.3 ms before the exact early stop in the release scan). n_cont_* left at the brief's 3 x 5.
+// ★ Fix round 5 (controller ruling): Release is NOT held to risk_eps — when no eligible candidate makes progress it
+//   takes, among ALL v <= 0 motions, those that gain continuability (else all) and of them the least likely contact;
+//   Stuck only for returns inside the bare hull or a release with P(contact) >= 1 - risk_eps. pressed_into_wall
+//   (parallel wall at x = 0.30, 1.6 cm gap) therefore RELEASES at P = 0.078 (best of the 0.04 m surface cells with one
+//   return each at this file's 0.05 m sampling; 0.045 at 1 cm sampling). Drive decisions are untouched.
+// Timing (-O2, 300 returns, median of 100): see the timing test's printout; n_cont_* left at the brief's 3 x 5.
 #include "../src/local_policy/local_policy.h"
 
 #include <algorithm>
@@ -37,8 +36,8 @@ static BaseLimits limits()
 { BaseLimits b; b.v_max = 0.5f; b.w_max = 1.5f; b.a_lin = 1.f; b.d_lin = 1.f; b.a_rot = 2.f; b.d_rot = 2.f;
   b.v_min_eff = 0.03f; b.w_min_eff = 0.08f; return b; }
 static rc::RobotFootprint body() { auto f = rc::RobotFootprint::shadow(); f.set_safety_margin(0.05f); return f; }
-static std::vector<Return> wall_x(float x0, float y0, float y1)
-{ std::vector<Return> r; for (float y = y0; y <= y1 + 1e-4f; y += 0.05f) r.push_back({{x0, y}, 0.01f, 1.f}); return r; }
+static std::vector<Return> wall_x(float x0, float y0, float y1, float spacing = 0.05f)
+{ std::vector<Return> r; for (float y = y0; y <= y1 + 1e-4f; y += spacing) r.push_back({{x0, y}, 0.01f, 1.f}); return r; }
 static std::vector<Return> wall_y(float y0, float x0, float x1)
 { std::vector<Return> r; for (float x = x0; x <= x1 + 1e-4f; x += 0.05f) r.push_back({{x, y0}, 0.01f, 1.f}); return r; }
 static const CostToGo::Grid kGrid{{-4.f, -4.f}, 0.05f, 160, 160};
@@ -69,7 +68,7 @@ static void print(const char* name, const Decision& d)
 static float p_contact_of(const Scene& s, float v, float w)
 {
     const auto sw = rollout(s.in.pose, v, w, s.pp.horizon_s, s.in.base, s.pp.dt);
-    return 1.f - std::exp(log_p_no_contact(s.b, sw, s.ret, s.in.sigma_xy, s.in.sigma_yaw));
+    return 1.f - std::exp(log_p_no_contact(s.b, sw, s.ret, s.in.sigma_xy, s.in.sigma_yaw, s.in.body_geometry_sigma_m));
 }
 static Pose2 end_of(const Scene& s, float v, float w) { return rollout(s.in.pose, v, w, s.pp.horizon_s, s.in.base, s.pp.dt).back(); }
 static float min_sd(const Scene& s, const Pose2& at)
@@ -103,21 +102,50 @@ int main()
         // the pure in-place turn toward the goal IS evaluated and refused
         std::printf("  in-place turn left 1.5 rad/s: P(contact)=%.3f\n", p_contact_of(s, 0.f, 1.5f));
     }
-    { // pressed_into_wall_releases: wall 0.01 m inside the right flank (|x| 0.284 -> x = 0.274), goal through it.
-        Scene s; s.ret = wall_x(0.274f, -2.f, 2.f); s.goal.p = {1.5f, 0.f};
-        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));   // map lag
+    { // pressed_into_wall_releases (fix round 2 geometry): the wall lies inside the old margin shell but OUTSIDE the
+      // bare hull — flank x = +0.30 (bare half-width 0.284). Goal straight through it (map lag).
+        Scene s; s.ret = wall_x(0.30f, -2.f, 2.f); s.goal.p = {1.5f, 0.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
         s.finish();
         const auto d = decide(s.in, s.pp); print("pressed_into_wall_releases", d);
-        const float sd0 = min_sd(s, s.in.pose), sd1 = min_sd(s, end_of(s, d.v, d.w));
-        std::printf("  clearance start %.3f -> end %.3f\n", sd0, sd1);
-        CHECK("pressed_into_wall release", d.mode == Decision::Mode::Release);
-        CHECK("pressed_into_wall moves away", sd1 > sd0 + 1e-3f);
-        // diagnostic for the report: the same with the wall 0.01 m inside the MARGIN-grown flank (x = 0.324)
-        Scene t; t.ret = wall_x(0.324f, -2.f, 2.f); t.goal.p = {1.5f, 0.f};
-        V g2 = t.goal.p; t.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g2, 1));
-        t.finish(); print("pressed_into_margin(diag)", decide(t.in, t.pp));
+        float h0 = 1e9f, h1 = 1e9f; const Pose2 e = end_of(s, d.v, d.w);
+        for (const auto& r : s.ret) { h0 = std::min(h0, hull_distance(s.b, s.in.pose, r.p)); h1 = std::min(h1, hull_distance(s.b, e, r.p)); }
+        std::printf("  bare-hull clearance start %.3f -> end %.3f ; P(contact)=%.5f\n", h0, h1, p_contact_of(s, d.v, d.w));
+        // ★ fix round 5: Release with v <= 0 (not gated by risk_eps); its P(contact) is printed above
+        CHECK("pressed_into_wall release", d.mode == Decision::Mode::Release and d.v <= 0.f);
+        CHECK("pressed_into_wall does not close on the wall", h1 >= h0 - 1e-4f);
         for (float v : {-0.5f, -0.25f, 0.25f}) for (float w : {-0.6f, 0.f, 0.6f})
-            std::printf("  diag x=0.274 P(contact) v=%+.2f w=%+.2f : %.3f | x=0.324 : %.3f\n", v, w, p_contact_of(s, v, w), p_contact_of(t, v, w));
+            std::printf("  diag x=0.30 P(contact) v=%+.2f w=%+.2f : %.3f\n", v, w, p_contact_of(s, v, w));
+    }
+    { // dense_wall_not_riskier (fix round 4): the pressed wall (x = 0.30, parallel to the flank) sampled every 1 cm vs
+      // every 4 cm. Returns are measurements of ONE surface: more of them must not raise P(contact) (round 3 read
+      // 0.18 -> 0.28 going 5 cm -> 2 cm). ★ MONOTONE, not equal (fix round 5 ruling): with sigma_cell = sigma_r/sqrt(n)
+      // four hits per 0.04 m cell pin the wall down twice as well as one, so the denser wall reads LOWER
+      // (0.075 vs 0.22 for the slide) — equality would mean the extra hits taught nothing.
+        Scene d1, d4; d1.ret = wall_x(0.30f, -2.f, 2.f, 0.01f); d4.ret = wall_x(0.30f, -2.f, 2.f, 0.04f);
+        d1.goal.p = d4.goal.p = {1.5f, 0.f};
+        V g = d1.goal.p; d1.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        d4.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        d1.finish(); d4.finish();
+        float worst_gap = 0.f, worst_rise = 0.f;
+        for (auto [v, w] : {std::pair{-0.25f, 0.f}, std::pair{0.25f, 0.f}, std::pair{-0.5f, -0.3f}})
+        {
+            const float p1 = p_contact_of(d1, v, w), p4 = p_contact_of(d4, v, w);
+            std::printf("  dense wall v=%+.2f w=%+.2f : P(1 cm)=%.4f P(4 cm)=%.4f  (cells %zu vs %zu)\n", v, w, p1, p4,
+                        surface_cells(d1.ret).size(), surface_cells(d4.ret).size());
+            worst_gap = std::max(worst_gap, std::fabs(p1 - p4)); worst_rise = std::max(worst_rise, p1 - p4);
+        }
+        const auto e1 = decide(d1.in, d1.pp), e4 = decide(d4.in, d4.pp); print("dense 1 cm", e1); print("dense 4 cm", e4);
+        std::printf("  dense wall: worst rise %.4f, largest |difference| %.4f\n", worst_rise, worst_gap);
+        CHECK("dense_wall_not_riskier (denser never raises P)", worst_rise <= 1e-3f);
+    }
+    { // wall_inside_bare_hull_is_stuck: wall at x = +0.274 penetrates the bare hull — physically impossible
+        Scene s; s.ret = wall_x(0.274f, -2.f, 2.f); s.goal.p = {1.5f, 0.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish();
+        const auto d = decide(s.in, s.pp); print("wall_inside_bare_hull_is_stuck", d);
+        CHECK("wall_inside_bare_hull_is_stuck", d.mode == Decision::Mode::Stuck and d.v == 0.f and d.w == 0.f
+                                                  and d.why.find("returns inside the body") != std::string::npos);
     }
     { // dead_end_releases: 0.8 m wide cul-de-sac (walls x = +-0.4), nose 0.05 m from the end wall (y = 0.23 + 0.05).
       // The end wall spans the whole grid in the field, so the goal beyond it is walled off (field = +inf here).
