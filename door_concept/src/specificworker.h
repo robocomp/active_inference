@@ -255,8 +255,14 @@ private:
     //   crosses. ltsm retires the recall as soon as the room is live again — possibly before `current` reaches us — so
     //   the names are LATCHED every cycle and the latch is cleared at each switch. A room is a recall iff its name was
     //   announced by a recall since the previous switch. A fresh room never qualifies, whatever its name.
+    // A FRESH room (not a recall, incl. the first room resolved) strips its rows' restore data (strip_restorable): only
+    //   knowledge acquired since that room's fresh entry can come back. A recalled room's restore is DEFERRED until its
+    //   polygon is loaded (has_room_polygon), so the belief init associates the door with a wall, not the identity frame.
     std::unordered_set<std::string> recall_names_seen_;
+    std::uint64_t pending_restore_room_ = 0;
     void latch_recall_names();
+    void enter_room_memory(std::uint64_t room_id, bool first_resolution);   // decide recall/fresh; strip or arm the restore
+    void step_pending_restore();
     void restore_remembered_doors(std::uint64_t new_room);
 
     // ── ENTRY MIRRORS: the door a PROTO-ROOM was entered through ───────────────────────────────────

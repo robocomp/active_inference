@@ -157,6 +157,25 @@ int main()
         CHECK(near(restore_existence_prior(r, 1.0f), 1.0f));
     }
 
+    // ── 4. Stale rows: a FRESH entry of room_1 strips its restore data; a later recall restores only doors seen since ──
+    {
+        std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.54f, 4.61f),    // an OLDER run's door_1
+                                   full_row("room_1", "door_6", 2.00f, -3.00f),    // an older run's phantom
+                                   full_row("room_2", "door_3", 3.60f, 2.18f)};
+        CHECK(strip_restorable(t, "room_1") == 2);
+        CHECK(not t[0].pose and not t[0].leaf and not t[0].exist_logodds and t[0].name == "door_1");   // name kept
+        CHECK(not t[1].pose and t[2].pose.has_value());                                                // other rooms untouched
+        // During this visit door_1 is seen and fitted: its row is rewritten with a pose (upsert by name).
+        std::erase_if(t, [](const IdentityRow& r) { return r.room == "room_1" and r.name == "door_1"; });
+        t.push_back(full_row("room_1", "door_1", -0.55f, 4.60f));
+        const auto d = plan_restore(t, "room_1", true, {}, radius);
+        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_1");
+        bool phantom_skipped = false;
+        for (const auto& s : d.skipped) phantom_skipped = phantom_skipped or (s.name == "door_6" and s.reason == SkipReason::NoPose);
+        CHECK(phantom_skipped);
+        CHECK(strip_restorable(t, "room_9") == 0);
+    }
+
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");
     return fails == 0 ? 0 : 1;
 }

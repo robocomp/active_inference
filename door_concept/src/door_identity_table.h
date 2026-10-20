@@ -219,8 +219,30 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
     return d;
 }
 
+/// A room entered FRESH (not a recall) starts its restorable memory over: the pose, leaf and existence of its rows are
+/// dropped, the NAME and PLACE kept (still an identity: a re-detected door gets its name back, and the number stays
+/// reserved). etc/door_identities.csv outlives ltsm's memory, so without this a later recall of the same room name
+/// could restore an OLDER run's doors as confident phantoms. Returns how many rows lost their restore data.
+inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view room)
+{
+    int n = 0;
+    for (auto& r : rows)
+        if (r.room == room and (r.pose.has_value() or r.leaf.has_value() or r.exist_logodds.has_value()))
+        {
+            r.pose.reset();
+            r.leaf.reset();
+            r.exist_logodds.reset();
+            ++n;
+        }
+    return n;
+}
+
 /// The existence prior a restored door starts from: the remembered belief when one was written, else `default_L`
 /// (the agent passes Existence.BirthLogodds = 1.0 nats, P = 0.73 — the same moderate prior a fresh birth gets).
+/// ★A DIFFERENT CONVENTION FROM GHOST RE-ACQUISITION, on purpose (controller ruling 2026-10-20). A ghost is a door
+/// REMOVED for absence that a new detection brings back: its shape is remembered but its existence restarts from
+/// BirthLogodds, because the last thing known about it was evidence AGAINST it. A restored door was alive when its room
+/// was left — the last thing known is the belief it then held — so that belief is the prior, not a fresh birth's.
 inline float restore_existence_prior(const IdentityRow& r, float default_L)
 {
     return r.exist_logodds.has_value() and std::isfinite(*r.exist_logodds) ? *r.exist_logodds : default_L;

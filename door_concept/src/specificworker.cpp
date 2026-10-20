@@ -488,6 +488,8 @@ void SpecificWorker::initialize()
     // Which door is which — remembered from earlier runs. Without this the numbering falls out of the order
     // the robot happens to sweep the room, so the same door was door_1 one run and door_2 the next.
     load_identities();
+    if (room_node_id_ != 0)
+        enter_room_memory(room_node_id_, true);   // the first room is a fresh entry: older runs' poses can't come back
 
     // ── Time-series dashboard — its OWN top-level window ──────────────────────
     // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
@@ -3745,13 +3747,17 @@ void SpecificWorker::step_room_following()
         {
             // ★Not rooms.front(): with a proto-room in the graph that is a coin toss (unordered_set).
             if (const auto room = rc::room::current_room(*G); room.has_value())
+            {
                 room_node_id_ = *room;
+                enter_room_memory(room_node_id_, true);
+            }
         }
         return;
     }
 
     if (room_node_id_ == *current)
     {
+        step_pending_restore();   // a recalled room's doors, once its polygon is loaded
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
         if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
         {
@@ -3773,6 +3779,7 @@ void SpecificWorker::step_room_following()
     {
         room_node_id_ = *current;
         std::print("door_concept: [room] following `current` → room node {}\n", room_node_id_);
+        enter_room_memory(room_node_id_, true);
         return;
     }
 
@@ -4065,8 +4072,8 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     install_carried_door(new_room, adopt_mirror, adopted_from);
     // AFTER the carry: the crossed door is live by now (or still HELD under its name for the late carry), so the
     // restore below cannot duplicate it.
-    restore_remembered_doors(new_room);
-    recall_names_seen_.clear();      // a recall is evidence about THIS crossing only
+    enter_room_memory(new_room, false);
+    step_pending_restore();          // now, if the recalled outline is already loaded; else on a later cycle
 }
 
 // ─── RESTORE ON RE-ENTRY ──────────────────────────────────────────────────────────────────────────────────────────
@@ -4082,6 +4089,47 @@ void SpecificWorker::latch_recall_names()
                            "restored if the robot enters it\n", room);
 }
 
+void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolution)
+{
+    pending_restore_room_ = 0;
+    const auto room = G->get_node(room_id);
+    const bool recalled = room.has_value() and not first_resolution and recall_names_seen_.contains(room->name());
+    recall_names_seen_.clear();      // a recall is evidence about ONE crossing only
+    if (not room.has_value())
+        return;
+    if (recalled)
+    {
+        pending_restore_room_ = room_id;
+        return;
+    }
+    // ★FRESH ENTRY (controller ruling 2026-10-20): the table outlives ltsm's memory, so rows of a room of this name from
+    //  an older run must not be restorable later as confident phantoms. Names and places stay (identity only).
+    if (const int n = rc::door::strip_restorable(identities_, room->name()); n > 0)
+    {
+        save_identities();
+        std::print("door_concept: [restore] '{}' entered FRESH ({}) — {} remembered row(s) reduced to identity only; "
+                   "only doors fitted from now on can be restored on a later recall\n",
+                   room->name(), first_resolution ? "first room resolved" : "no ltsm recall announced it", n);
+    }
+    else
+        std::print("door_concept: [restore] '{}' entered FRESH ({}) — nothing restored; its doors are earned from evidence\n",
+                   room->name(), first_resolution ? "first room resolved" : "no ltsm recall announced it");
+}
+
+void SpecificWorker::step_pending_restore()
+{
+    if (pending_restore_room_ == 0 or pending_restore_room_ != room_node_id_ or not fitter_)
+        return;
+    if (not fitter_->has_room_polygon())
+    {
+        refresh_room_geometry();
+        if (not fitter_->has_room_polygon())
+            return;   // the recalled outline has not reached us yet: wait (the door's belief must find its wall)
+    }
+    const auto room = std::exchange(pending_restore_room_, 0);
+    restore_remembered_doors(room);
+}
+
 void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
 {
     if (not G or not fitter_ or not scene_graph_)
@@ -4089,7 +4137,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
     const auto room = G->get_node(new_room);
     if (not room.has_value())
         return;
-    const bool recalled = recall_names_seen_.contains(room->name());
+    const bool recalled = true;   // only reached through enter_room_memory's recall branch
 
     // Every door node live in the graph, with its aperture in the ENTERED room's frame when that resolves (ts==0 on the
     // main-thread instance; always check the optional). A door held in the room left behind still blocks by name.
@@ -4105,12 +4153,6 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         live.push_back(std::move(l));
     }
     const auto d = rc::door::plan_restore(identities_, room->name(), recalled, live, cfg_.exist_reacquire_radius_m);
-    if (d.not_recalled)
-    {
-        std::print("door_concept: [restore] '{}' is not a recall (no ltsm recall announced it since the last switch) — "
-                   "no door restored; its doors are earned from evidence\n", room->name());
-        return;
-    }
     for (const auto& k : d.skipped)
         std::print("door_concept: [restore] '{}' in '{}' NOT restored: {}\n", k.name, room->name(), rc::door::to_string(k.reason));
 
@@ -4136,6 +4178,8 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         // ★THE EXISTENCE PRIOR IS THE MEMORY. Not a fresh birth's prior and not certainty either: the belief the door had
         //  when the room was left (or, for a row written without one, Existence.BirthLogodds). The channel takes it from
         //  here — seen ⇒ confirmed, absent where it should be visible (P(detect), wall line of sight) ⇒ removed.
+        //  ⚠ Deliberately NOT the ghost convention (re-acquisition restarts at BirthLogodds): a ghost was REMOVED for
+        //  absence, a restored door was ALIVE when left — see rc::door::restore_existence_prior.
         inst.existence.set_max(cfg_.exist_max_logodds);
         inst.existence.set(prior_L);
         inst.existence_seeded = true;
