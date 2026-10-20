@@ -26,10 +26,11 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 4 (task-6-report.md, "Round 4"): two-step progress in decide(). Contacts 0 everywhere;
-// try105 20/20 and try101 20/20 now, but 7 checks FAIL: a turn in place is credited the full progress of the continuation
-// it enables (prog2 ~0.48 m) and wins on continuability, so the robot turns +-0.3 rad/s in place for ever with the field
-// flat (dead_end 0/20, 80 s without progress; narrow_doorway never releases, 0/20 Unreachable).
+// STATUS 2026-10-20 round 5 (task-6-report.md, "Round 5"): progress as a RATE + field resolution. All Task-4 unit tests
+// green. Scenarios: contacts 0; 9 checks FAIL. dead_end / narrow_doorway never Release: at the edge of the eligible
+// region "back up, then come forward a little" always shows positive two-step progress, so the robot shuttles +-1 cm
+// in front of the 0.55 m gap for ever (no trap, no Unreachable). With unseen ON, reversal ticks also leave weak frozen
+// hypotheses (W > 0, p ~ 1e-5) that the robot later covers -> "0.0 returns inside the body" Stuck.
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"

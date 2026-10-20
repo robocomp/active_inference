@@ -67,6 +67,9 @@ float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
         const float fb = in.field->at(b.p);
         if (not std::isfinite(fb)) return -kInf;
         pr = fa - fb;
+        // ★ ROUND 5 (field resolution): a decrease the field cannot resolve (CostToGo::resolution_m — octile metric +
+        //   interpolation) is not progress; it counts as zero (release_side_on's 9 mm "two-step progress" was this).
+        if (pr > 0.f and pr < in.field->resolution_m((b.p - a.p).norm())) pr = 0.f;
         if (not g.yaw) return pr;
         wt = g.tol_xy / std::max(g.tol_xy, (a.p - g.p).norm());
     }
@@ -93,15 +96,24 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 
 // prog = ONE-step progress (start -> end); prog2 = TWO-step progress (round-4 ruling): the best of the end itself and every
 // ELIGIBLE coarse continuation from it, measured from the decision's start.
-struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, lpc = 0.f; Pose2 end{}; bool elig = false, lpc_done = false; int conts = -1; };
+// rate = best progress RATE (m/s, round 5): max(prog / dur, max over eligible continuations of
+// progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
+struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{};
+              bool elig = false, lpc_done = false; int conts = -1; };
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
 // lps_floor: below it only a bound is needed (contact.h) — candidates need exact values only while releasable
 // (P < release_risk_max), continuations only while eligible (lps >= log(1 - eps)).
-float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, float v0, float w0, float v, float w, Pose2* end, float lps_floor)
+// Duration (s) of a rollout: its poses are dt apart except the last step, which may be shorter — (n-1) dt is an upper
+// bound by less than dt, the same for every candidate (it only rescales rates by at most dt / horizon).
+float duration(const std::vector<Pose2>& sw, const PolicyParams& p) { return std::max(p.dt, float(sw.size() - 1) * p.dt); }
+
+float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, float v0, float w0, float v, float w, Pose2* end, float lps_floor,
+              float* dur = nullptr)
 {
     const auto sw = rollout(from, v0, w0, v, w, p.horizon_s, in.base, p.dt);
     if (end) *end = sw.back();
+    if (dur) *dur = duration(sw, p);
     return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m, lps_floor);
 }
 
@@ -179,34 +191,38 @@ Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     return c;
 }
 // `in.returns` are surface cells already (decide() merges once per cycle).
-// ref / best_prog (optional): also return the largest progress(ref, continuation end) over the ELIGIBLE continuations
-// (-inf if none) — the second step of the two-step progress.
-// ★ EXACT pruning: a continuation's contact sweep (the expensive part; its rollout is already cached) is evaluated only
-//   if its answer can change something — it could count for continuability (progress from `from` >= 0) or raise
-//   best_prog (progress from `ref` above the best eligible one so far; visited in decreasing order of it).
+// ref (optional): also return, over the ELIGIBLE continuations, the largest progress(ref, continuation end) (best_prog)
+// and the largest RATE progress(ref, end) / (base_dur + continuation duration) (best_rate); -inf if none.
+// ★ EXACT pruning: a continuation's contact sweep (its rollout is cached) is evaluated only if its answer can change
+//   something — count it for continuability (progress from `from` >= 0), or raise best_prog / best_rate.
 float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from, const Conts& c,
-                 const Pose2* ref = nullptr, float* best_prog = nullptr)
+                 const Pose2* ref = nullptr, float base_dur = 0.f, float* best_prog = nullptr, float* best_rate = nullptr)
 {
     if (best_prog) *best_prog = -kInf;
+    if (best_rate) *best_rate = -kInf;
     if (c.arrived) return std::log((float(c.n) + 1.f) / (float(c.n) + 2.f));   // nothing left to continue: k = N
     if (c.sw.empty()) return std::log(1.f / (float(c.n) + 2.f));
-    struct Item { std::size_t i; float pf, pr; };
+    struct Item { std::size_t i; float pf, pr, rt; };
     std::vector<Item> items;
     for (std::size_t i = 0; i < c.sw.size(); ++i)
-        items.push_back({i, progress(in, from, c.sw[i].back()), ref ? progress(in, *ref, c.sw[i].back()) : -kInf});
-    std::ranges::sort(items, std::greater{}, &Item::pr);
-    int k = 0; float best = -kInf;
+    {
+        const float pr = ref ? progress(in, *ref, c.sw[i].back()) : -kInf;
+        items.push_back({i, progress(in, from, c.sw[i].back()), pr, ref ? pr / (base_dur + duration(c.sw[i], p)) : -kInf});
+    }
+    std::ranges::sort(items, std::greater{}, &Item::rt);
+    int k = 0; float bp = -kInf, br = -kInf;
     for (const Item& it : items)
     {
-        const bool need_k = it.pf >= 0.f, need_b = best_prog != nullptr and it.pr > best;
+        const bool need_k = it.pf >= 0.f, need_b = ref != nullptr and (it.pr > bp or it.rt > br);
         if (not (need_k or need_b)) continue;
         const float lps = log_p_no_contact_cells(*in.body, c.sw[it.i], in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m,
                                                  std::log1p(-p.risk_eps));
         if (not eligible(lps, p)) continue;
         if (need_k) ++k;
-        if (need_b) best = it.pr;
+        if (ref) { bp = std::max(bp, it.pr); br = std::max(br, it.rt); }
     }
-    if (best_prog) *best_prog = best;
+    if (best_prog) *best_prog = bp;
+    if (best_rate) *best_rate = br;
     return std::log((float(k) + 1.f) / (float(c.n) + 2.f));
 }
 float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
@@ -271,7 +287,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         {
             if (v == 0.f and w == 0.f) continue;     // standing still is the absence of a decision, not a candidate
             Cand c{.v = v, .w = w};
-            c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log1p(-p.release_risk_max));
+            c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log1p(-p.release_risk_max), &c.dur);
             c.elig = eligible(c.lps, p);
             if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
             cands.push_back(c);
@@ -284,9 +300,10 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     auto ensure_lpc = [&](Cand& c)
     {
         if (c.lpc_done) return;
-        float second = -kInf;
-        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, &second);
+        float second = -kInf, second_rate = -kInf;
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate);
         c.prog2 = std::max(c.prog, second);
+        c.rate = std::max(c.prog / c.dur, second_rate);
         c.lpc_done = true;
     };
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
@@ -301,22 +318,33 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     //   i.e. field(start) - min(field(end), min field(continuation ends)) for Place/Doorway, the same heading-agreement
     //   term for Heading goals. "Turn to line up, then go" is a Drive: the turn makes no field progress by itself, the
     //   continuation it enables does. Release (and the trap the driver lays on it) is left for the genuine wedge: NO
-    //   eligible candidate gets anywhere even one step later. Score = lps + prog2 / scale + lpc.
-    // ★ EXACT branch-and-bound (budget): prog2 <= ub2 = max(prog, max over ALL continuation ends of progress(start, end))
-    //   — the cached rollouts' end poses, no contact sweep needed — and lpc <= lpc_max < 0, so a candidate whose
-    //   lps + ub2/scale + lpc_max cannot beat the best exact score found is never swept. Only candidates with ub2 > 0
-    //   can make two-step progress at all.
+    //   eligible candidate gets anywhere even one step later. (Round 5: scored by RATE, below.)
+    // ★ ROUND 5: PROGRESS IS A RATE. A candidate is scored by its best descent RATE (m/s): its own progress over its own
+    //   duration (hold + brake), or its progress together with an eligible continuation's over both durations. Turning
+    //   in place first and driving later takes the time of both, so it halves the rate of driving now: the borrowed
+    //   progress of round 4 no longer wins the turn-forever dither, and no rule was added for it.
+    //   Rate scale = progress_scale_m / horizon_s (0.10 m/s per nat with the defaults): the descent rate worth one nat,
+    //   the same meaning as the old 0.10 m over one horizon. Drive iff some eligible candidate has prog2 > 0
+    //   (two-step, at the field's resolution); among those, score = lps + rate / rate_scale + lpc.
+    // ★ EXACT branch-and-bound (budget): rate <= ub_rate over ALL cached continuation ends (no contact sweep) and
+    //   lpc <= lpc_top < 0; candidates are swept in decreasing bound until the bound cannot beat the best exact score.
+    const float rate_scale = p.progress_scale_m / std::max(p.horizon_s, 1e-3f);
     const float lpc_top = [&] { const float n = float(coarse_set(in, p).size()); return std::log((n + 1.f) / (n + 2.f)); }();
     std::vector<Cand*> drive;
     for (auto& c : cands)
     {
         if (not c.elig) continue;
         const Conts& cc = ensure_conts(c);
-        c.ub2 = c.prog;
-        for (const auto& sw : cc.sw) c.ub2 = std::max(c.ub2, progress(in, start, sw.back()));
+        c.ub2 = c.prog; c.ub_rate = c.prog / c.dur;
+        for (const auto& sw : cc.sw)
+        {
+            const float pr = progress(in, start, sw.back());
+            c.ub2 = std::max(c.ub2, pr);
+            c.ub_rate = std::max(c.ub_rate, pr / (c.dur + duration(sw, p)));
+        }
         if (c.ub2 > 0.f) drive.push_back(&c);
     }
-    auto bound = [&](const Cand* c) { return c->lps + c->ub2 / p.progress_scale_m + lpc_top; };
+    auto bound = [&](const Cand* c) { return c->lps + c->ub_rate / rate_scale + lpc_top; };
     std::ranges::sort(drive, std::greater{}, bound);
     Cand* best_drive = nullptr; float best_s = -kInf;
     for (Cand* c : drive)
@@ -324,7 +352,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         if (bound(c) <= best_s) break;
         ensure_lpc(*c);
         if (not (c->prog2 > 0.f)) continue;
-        const float s = c->lps + c->prog2 / p.progress_scale_m + c->lpc;
+        const float s = c->lps + c->rate / rate_scale + c->lpc;
         if (s > best_s) { best_s = s; best_drive = c; }
     }
     if (best_drive != nullptr)

@@ -25,7 +25,8 @@ struct Goal { enum class Kind { Place, Doorway, Heading } kind; Eigen::Vector2f 
 //   contact-free than not (P(contact) < 0.5): the robot never commits to a motion that will probably bump; when no
 //   release clears that bar the base is Stuck and the task layer is told (review ruling: the former bar 1 - risk_eps
 //   let a release run at P = 0.978 — a near-certain bump).
-//   progress_scale_m is not a gate: it is the distance of progress worth one nat of safety/continuability.
+//   progress_scale_m is not a gate: it is the distance of progress worth one nat of safety/continuability over one
+//   horizon; decide() scores progress as a RATE (round 5) with the scale progress_scale_m / horizon_s (m/s per nat).
 struct PolicyParams { float horizon_s = 1.0f, dt = 0.05f; int n_v = 7, n_w = 11, n_cont_v = 3, n_cont_w = 5;
                       float risk_eps = 0.01f, release_risk_max = 0.5f, progress_scale_m = 0.10f, returns_max_age_s = 0.5f; };
 
