@@ -217,6 +217,9 @@ public:
     // The walls, for anything that needs them as GEOMETRY rather than as a containment prior — notably the
     // NBV sight test, which must know the wall a door is set into is opaque. See rc::nbv::wall_obstacles.
     const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
+    // camera→room at the current pose (ts=0, main thread); nullopt while the chain does not resolve. Public read of
+    // the transform the silhouette uses, for the remembered-door look's absence channel.
+    std::optional<Eigen::Matrix4d> camera_in_room() const { return room_T_zed_matrix(); }
 
     // Robot/camera ego-motion (room frame), from the transform chain — producer-independent. Call once per
     // compute cycle; run_inference then gates the pose/shape update to STILLNESS ("be-still-to-update").

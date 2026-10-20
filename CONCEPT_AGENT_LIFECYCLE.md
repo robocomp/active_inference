@@ -215,7 +215,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ `zed_detectability` | — no silhouette channel | ✅ | ✅ *(fixed)* |
 | bottle | ✅ | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
 | cabinet | ✅ | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed)* |
+| door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
 | refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -245,6 +245,18 @@ already birthed, as a prior the existence channel then judges like any other doo
    restores anything, whatever its name. Justification: the doors were birthed by evidence on an earlier visit and
    memory holds them; re-requiring a sighting made `cross door_1` fail in tourP2 because the 60 s exploration did not
    look at that wall. Rows of the older 4-column table carry no pose and are skipped with a log line.
+
+**door_concept OWNERSHIP addition (2026-10-21): the look-at-a-remembered-door affordance.** For each identity row of
+the current room whose door is NOT instantiated (identity-only or full), door_concept owns one epistemic affordance
+`aff_door_look_<name>` (type `affordance`, `has_intention` from the ROOM node, `parent` = the room; contract = the
+`door` servo contract, whose completion clauses the room cannot satisfy, so it ends by the producer's withdrawal or by
+the contract timeout). It is placed by the shared NBV model (`common/nbv/viewpoint_score.h`, `door_look.h`) at the
+standpoint that sees the remembered aperture and valued by the expected information gain about the door's existence
+(p_detect · MI of a Bernoulli existence with the detector's hit/clutter rates). It is not a birth: no door node is
+created. It is withdrawn when the door is re-born (identity match by name or hole), or when absence evidence from the
+views the robot actually had — `rc::exist` accumulation weighted by P(detect) incl. wall line of sight, shared
+`decide_removal` — rules it out (then not offered again this visit). Dropped on every room switch; swept by the
+`aff_door` prefix (`rc::owned::remove_stale_affordances`) at startup and shutdown.
 
 ⚠️ **unattributable** = the agent records births and deaths, but retires on *divergence* (clutter), not on
 sensor absence, so it has no `p_detect` to report. Those deaths carry an explicit

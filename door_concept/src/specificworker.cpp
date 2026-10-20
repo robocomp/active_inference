@@ -1110,6 +1110,7 @@ void SpecificWorker::compute()
             step_pragmatic_affordances(inst);
     for (const auto& [door_id, inst] : fitter_->instances())
         remember_door(inst);
+    step_remembered_looks();
     // The passage door hung from the robot while its approach/cross executes — AFTER the pragmatic step, so the
     // claims it reads were polled this cycle (specificworker_anchor.cpp).
     step_passage_anchor();
@@ -1382,6 +1383,10 @@ void SpecificWorker::run_instance_tracker()
             }
             dets.push_back(dv);
         }
+    // The remembered-door look reads this frame's detections as "seen there" (door_look.h, step_remembered_looks).
+    look_new_frame_ = birth_new_obs;
+    look_dets_xy_.clear();
+    for (const auto& d : dets) look_dets_xy_.push_back(d.xy);
 
     // DIAGNOSTIC (merged-vs-single mask): one CSV row per "door" slice per cycle — count, size, centroid,
     // range. If a cluttered scene collapses to ONE big slice (npts ≫ a clean single door) the extra doors
@@ -4201,6 +4206,140 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
     }
 }
 
+// ─── LOOK AT A REMEMBERED DOOR (door_look.h) ─────────────────────────────────────────────────────────────────────
+
+void SpecificWorker::drop_looks(const char* why)
+{
+    for (auto& [nm, e] : looks_)
+        if (e.aff.node_id() != 0)
+        {
+            e.aff.remove();
+            std::print("door_concept: [look] aff_door_look_{} withdrawn — {}\n", nm, why);
+        }
+    looks_.clear();
+}
+
+void SpecificWorker::step_remembered_looks()
+{
+    if (not G or not fitter_ or room_node_id_ == 0)
+        return;
+    const std::string room = current_room_name();
+    if (room_node_id_ != looks_room_)
+    {
+        drop_looks("the robot is in another room now");
+        looks_room_ = room_node_id_;
+    }
+    if (room.empty() or not fitter_->has_room_polygon())
+    {
+        for (auto& [nm, e] : looks_) e.aff.hold_offered();   // no polygon this cycle is not a withdrawal
+        return;
+    }
+    const auto& poly = fitter_->room_polygon();
+
+    // The doors that ARE instantiated (this room's instances), and the doorways their walls have open.
+    std::vector<rc::door::LiveDoor> live;
+    std::vector<rc::nbv::WallGap> gaps;
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        const auto& s = inst.model.state();
+        live.push_back({inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy)});
+        if (inst.ai2_initialized and not inst.is_bearing_hypothesis)
+            gaps.push_back({Eigen::Vector2f(s.ap_cx, s.ap_cy), 0.5f * s.w});
+    }
+    std::vector<std::string> ruled;
+    for (const auto& [nm, e] : looks_) if (e.ruled_out) ruled.push_back(nm);
+    const auto offer = rc::door::look::offer_rows(identities_, room, live, ruled, cfg_.exist_reacquire_radius_m);
+
+    // Withdraw what is no longer offered: re-born (the common, good ending). Ruled-out entries stay, inert, as the mark.
+    for (auto it = looks_.begin(); it != looks_.end();)
+    {
+        if (it->second.ruled_out or std::ranges::any_of(offer, [&](const auto& r) { return r.name == it->first; }))
+        { ++it; continue; }
+        if (it->second.aff.node_id() != 0)
+        {
+            it->second.aff.remove();
+            std::print("door_concept: [look] aff_door_look_{} withdrawn — the door is live again (re-born at its hole)\n",
+                       it->first);
+        }
+        it = looks_.erase(it);
+    }
+    if (offer.empty())
+        return;
+
+    rc::exist::RemovalPolicy pol;
+    pol.logodds_max   = cfg_.exist_max_logodds;
+    pol.removal_prob  = cfg_.exist_removal_prob;
+    pol.remove_frames = static_cast<float>(cfg_.exist_remove_frames);
+    const rc::door::look::Params prm{.robot_radius_m = 0.5f * cfg_.pragmatic.robot_passage_width_m,
+                                     .clutter_prob   = cfg_.exist_clutter_prob,
+                                     .detection_prob = cfg_.exist_detection_prob,
+                                     .prior_w_m      = cfg_.door_prior_w_m,
+                                     .prior_h_m      = cfg_.door_prior_h_m,
+                                     .thickness_m    = cfg_.door_thickness_m};
+    const auto sensor    = rc::nbv::sensor_from_graph(*G, inner_eigen_.get());
+    const auto furniture = rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), 0);
+    const auto cam       = fitter_->camera_in_room();
+    const auto room_node = G->get_node(room_node_id_);
+    if (not room_node.has_value())
+        return;
+
+    for (const auto& r : offer)
+    {
+        auto it = looks_.find(r.name);
+        if (it == looks_.end())
+        {
+            // The prior: what memory says (the row's existence when written; BirthLogodds for an identity-only row).
+            const float L0 = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds);
+            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(1.0f / (1.0f + std::exp(-L0)), pol), {}, false}).first;
+            it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");
+            std::print("door_concept: [look] '{}' remembered in '{}' at ({:.2f},{:.2f}) is not in the graph — offering a "
+                       "look (prior P(exists)={:.2f})\n", r.name, room, r.xy.x(), r.xy.y(), it->second.ev.p_exists());
+        }
+        auto& e = it->second;
+        if (const auto aid = e.aff.node_id(); aid != 0)
+            e.aff.on_node_modified(aid);   // the controller's protocol flags, polled (see rc::poll_protocol)
+
+        // ── Absence / presence evidence from THIS mask frame's view of the place ──
+        if (look_new_frame_ and cam.has_value())
+        {
+            const Eigen::Vector2f cxy(static_cast<float>(cam->coeff(0, 3)), static_cast<float>(cam->coeff(1, 3)));
+            const float cyaw = static_cast<float>(std::atan2(cam->coeff(1, 1), cam->coeff(0, 1)));   // zed +y = forward
+            const float pd = rc::door::look::p_detect_from(r, cxy, cyaw, poly, sensor, furniture, gaps, prm);
+            const float same_hole = cfg_.exist_reacquire_radius_m + (r.pose.has_value() ? r.pose->width : 0.0f);
+            const bool seen = std::ranges::any_of(look_dets_xy_, [&](const Eigen::Vector2f& d) { return (d - r.xy).norm() < same_hole; });
+            if (e.ev.observe(pd, seen, prm.detection_prob, prm.clutter_prob, pol))
+            {
+                e.ruled_out = true;
+                e.aff.remove();
+                std::print("door_concept: [look] '{}' RULED OUT this visit — absent where it should have been visible "
+                           "(P(exists)={:.3f}); not offered again until the room is re-entered\n", r.name, e.ev.p_exists());
+                continue;
+            }
+        }
+
+        // ── The offer: the standpoint of highest expected information gain about this door's existence ──
+        const auto plan = rc::door::look::plan(r, e.ev.p_exists(), poly, sensor, furniture, gaps, prm);
+        if (not plan.valid)
+        {
+            e.aff.hold_offered();   // could not compute a look this cycle (camera model, polygon): not a withdrawal
+            continue;
+        }
+        rc::AffordanceTarget tgt;
+        tgt.x_m = plan.pos.x(); tgt.y_m = plan.pos.y(); tgt.yaw_rad = plan.yaw;
+        tgt.gain = plan.eig;
+        tgt.valid = true;
+        tgt.standoff_min_m = plan.band_near_m;
+        tgt.standoff_max_m = plan.band_far_m;
+        tgt.framing_fill   = rc::nbv::framing_fill(sensor);
+        const bool fresh = e.aff.node_id() == 0;
+        e.aff.update(tgt);
+        if (fresh and e.aff.node_id() != 0)
+            std::print("door_concept: [look] aff_door_look_{} OFFERED at ({:.2f},{:.2f}) yaw={:.2f} — EIG {:.3f} nats "
+                       "(p_detect {:.2f}, visible {:.2f})\n", r.name, plan.pos.x(), plan.pos.y(), plan.yaw, plan.eig,
+                       plan.p_detect, plan.visible_frac);
+    }
+}
+
 // The door carried across a room switch becomes the new room's door: its instance rebuilt against the room we are in,
 // the leaf it remembers from the crossing, and the passage anchor relinked to it. Called by release_room, and LATE by
 // step_room_following when the crossed door was still live in the room left behind at the switch (carry_pending_room_).
@@ -4406,6 +4545,9 @@ void SpecificWorker::poll_affordance_protocol()
 }
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
+    for (auto& [nm, e] : looks_)
+        if (e.aff.node_id() == id)
+            e.aff.on_node_deleted(id);
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [door_id, inst] : fitter_->instances())
     {

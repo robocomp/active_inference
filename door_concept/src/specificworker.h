@@ -60,6 +60,8 @@
 #include "../../common/object_affordance/object_affordance.h"
 #include "door_model.h"
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
+#include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
+#include <map>
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/evidence_monitor.h"
@@ -259,6 +261,25 @@ private:
     //   knowledge acquired since that room's fresh entry can come back. A recalled room's restore is DEFERRED until its
     //   polygon is loaded (has_room_polygon), so the belief init associates the door with a wall, not the identity frame.
     std::unordered_set<std::string> recall_names_seen_;
+
+    // ── LOOK AT A REMEMBERED DOOR (2026-10-21, tourP5; door_look.h) ─────────────────────────────────────────────
+    // Each identity row of the CURRENT room whose door is not instantiated gets an epistemic "look here" affordance
+    // (`aff_door_look_<name>`, has_intention from the room; owned under the aff_door prefix), placed by the shared NBV
+    // model at a standpoint that sees the remembered aperture and valued by the expected information gain about the
+    // door's existence. Withdrawn when the door is re-born (name or hole), or when absence evidence from the views the
+    // robot actually had rules it out — then not offered again this visit. All of it is dropped on a room switch.
+    struct LookEntry
+    {
+        rc::door::look::Evidence ev;
+        rc::ObjectAffordance     aff;
+        bool                     ruled_out = false;
+    };
+    std::map<std::string, LookEntry> looks_;
+    std::uint64_t looks_room_ = 0;
+    std::vector<Eigen::Vector2f> look_dets_xy_;   ///< this mask frame's door detections (room frame), for "seen there"
+    bool look_new_frame_ = false;                 ///< a NEW mask frame arrived this cycle (evidence per observation)
+    void step_remembered_looks();
+    void drop_looks(const char* why);
     std::uint64_t pending_restore_room_ = 0;
     void latch_recall_names();
     void enter_room_memory(std::uint64_t room_id, bool first_resolution);   // decide recall/fresh; strip or arm the restore
