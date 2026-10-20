@@ -114,4 +114,49 @@ inline float prob_within(float d, float R, float sigma)
     return std::clamp(p_passable, 0.0f, 1.0f) * std::clamp(p_within_reach, 0.0f, 1.0f);
 }
 
+// ─── AT THE DOOR INCLUDES THE VIEWING ANGLE (tourP8, 2026-10-21) ─────────────────────────────────────────────────────────
+// tourP8 leg 1 opened and crossed door_2 from door_4's standpoint: 1.95 m from the aperture centre — inside the actuation
+// band, so P(in band) and P(d ≤ reach) were high — but 58° off the door's normal and 0.69 m from its wall plane. From there
+// the anchor never saw the doorway (P(door in view) never reached 0.5), the φ estimate collapsed at grazing incidence, and
+// the cross timed out. Range alone does not say the robot is AT a door: the doorway must also be IN FRONT of it.
+// The view of an opening of width w from a point at angle θ off its normal is its apparent (projected) span w·|cos θ| —
+// the span the scanner's beams can pass through and the camera's two jambs subtend, which is what the anchor's P(door in
+// view) is built from (lidar_view's opening cover, camera_view's jambs). The robot is "at the door" for open / cross when
+// that apparent opening admits its body: P(w·|cos θ| ≥ needed) under the range σ — the same body width the passability
+// uses and the same σ the band uses. Continuous; no angle threshold: 0° ⇒ the full aperture, 90° ⇒ a sliver.
+// `cos_theta` = (robot − centre)/|robot − centre| · normal (its sign — which face — does not change how much is seen).
+[[nodiscard]] inline float facing_cos(float rx, float ry, float nx, float ny)
+{
+    const float r = std::hypot(rx, ry), n = std::hypot(nx, ny);
+    return (r > 1e-4f and n > 1e-6f) ? (rx * nx + ry * ny) / (r * n) : 1.0f;   // on the centre: nothing is oblique
+}
+[[nodiscard]] inline float prob_facing_opening(float cos_theta, float aperture_w, float needed_w, float sigma)
+{
+    const float apparent = std::max(0.0f, aperture_w) * std::min(1.0f, std::abs(cos_theta));
+    return prob_within(needed_w, apparent, sigma);   // P(needed ≤ apparent)
+}
+
+// ─── NO PASSABLE ON PREDICTION ALONE (tourP8 D5) ────────────────────────────────────────────────────────────────────────
+// The actuator-command anticipation moves φ toward the commanded angle so the agent is not surprised by its own action —
+// a PRIOR. tourP8 asserted `transitable` at φ = 89.5° with measured = 0 on every row, i.e. on the request echoed back.
+// The streak toward ASSERTING advances only on a cycle a leaf / aperture likelihood contributed to (DoorInstance::
+// phi_measured); an unmeasured cycle HOLDS it (neither advances nor resets). Retraction — the safe direction — still
+// follows any known cycle, as before.
+struct TransitableStreaks { int yes = 0, no = 0; };
+struct TransitableDecision { bool assert_now = false, retract_now = false; };
+[[nodiscard]] inline TransitableDecision transitable_step(TransitableStreaks& s, bool asserted, float p_passable, bool measured,
+                                                          float yes_prob, float no_prob, int stable_cycles)
+{
+    const bool yes = p_passable >= yes_prob;
+    const bool no  = p_passable <  no_prob;
+    if (measured) s.yes = yes ? s.yes + 1 : 0;   // evidence only
+    s.no = no ? s.no + 1 : 0;
+    TransitableDecision d;
+    d.assert_now  = not asserted and measured and s.yes >= stable_cycles;
+    d.retract_now = asserted and s.no >= stable_cycles;
+    return d;
+}
+
+[[nodiscard]] inline bool near_equal(float a, float b, float tol = 1e-6f) { return std::abs(a - b) <= tol; }
+
 }  // namespace rc::door

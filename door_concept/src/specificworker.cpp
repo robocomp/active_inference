@@ -3186,11 +3186,16 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // whose stand-off is in the same region of the room polygon as the robot; see rc::door::approach_side.
     st.approach_side = rc::door::approach_side(ap, robot, st.robot_side, st.approach_standoff_m,
                                                fitter_->room_polygon());
-    st.p_band        = rc::door::prob_in_band(st.robot_range_m, d_min, d_max, sigma);
+    // ★AT THE DOOR INCLUDES THE VIEWING ANGLE (tourP8): range alone put the robot "in band" 58° off the normal, 0.69 m from
+    //  the wall, from where the doorway could not be seen. The opening must be in front: P(w·|cos θ| ≥ body) under the same σ.
+    const float cos_t = rc::door::facing_cos(delta.x(), delta.y(), normal.x(), normal.y());
+    st.p_facing   = rc::door::prob_facing_opening(cos_t, ap.w, needed, sigma);
+    st.facing_deg = std::acos(std::clamp(std::abs(cos_t), 0.0f, 1.0f)) * 57.2958f;
+    st.p_band        = rc::door::prob_in_band(st.robot_range_m, d_min, d_max, sigma) * st.p_facing;
     // Marginalise the near edge over the door's state (see InteractionState::p_reach). Without a leaf-angle
     // posterior this cycle the door is treated as one that may need swinging: the band alone, as before.
     const float p_open_now = st.p_open_known ? std::clamp(st.p_open, 0.0f, 1.0f) : 0.0f;
-    st.p_within      = rc::door::prob_within(st.robot_range_m, d_max, sigma);
+    st.p_within      = rc::door::prob_within(st.robot_range_m, d_max, sigma) * st.p_facing;
     st.p_reach       = p_open_now * st.p_within
                      + (1.0f - p_open_now) * st.p_band;
     st.p_reach_known = true;
@@ -3299,7 +3304,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             o.why = "the provider cannot actuate this door: " + inst.actuation_note;
         }
         else
-            o.why = std::format("P(in band)={:.2f} × P(shut)={:.2f}{}", st.p_band,
+            o.why = std::format("P(in band)={:.2f} (incl. P(facing)={:.2f} at {:.0f} deg off the normal) × P(shut)={:.2f}{}",
+                                 st.p_band, st.p_facing, st.facing_deg,
                                  1.0f - st.p_open, st.p_open_from_curve ? "" : " (phi from the belief, no curve)");
         const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, st.approach_standoff_m);
         // Orient policy: the (x,y) is informational — the consumer does not navigate, it turns to face
@@ -3340,9 +3346,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
         o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
-                                 " × P(at the door)={:.2f} (range {:.2f} m ≤ {:.2f}, σ {:.2f})",
+                                 " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
-                                 pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.robot_range_m,
+                                 pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.p_facing, st.facing_deg,
+                                 st.robot_range_m,
                                  std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m);
         inst.aff_cross.update(o);
     }
@@ -4458,14 +4465,18 @@ void SpecificWorker::step_transitable_edge(rc::DoorInstance& inst, const rc::doo
     if (not st.p_open_known)
         return;
 
-    const bool yes = st.p_open >= pg.transitable_prob;
-    const bool no  = st.p_open <  pg.not_transitable_prob;
     // Inside the Schmitt band NEITHER streak grows, so a probability hovering at the boundary holds
     // whatever was last decided rather than flapping a public edge at the compute rate.
-    inst.transitable_streak     = yes ? inst.transitable_streak + 1 : 0;
-    inst.not_transitable_streak = no  ? inst.not_transitable_streak + 1 : 0;
+    // ★NO ASSERTION ON PREDICTION ALONE (tourP8 D5): the streak toward asserting advances only on a cycle a leaf /
+    //  aperture likelihood contributed to (phi_measured); the command anticipation is a prior, not evidence.
+    rc::door::TransitableStreaks sk{inst.transitable_streak, inst.not_transitable_streak};
+    const auto dec = rc::door::transitable_step(sk, inst.transitable_asserted, st.p_open, inst.phi_measured,
+                                                pg.transitable_prob, pg.not_transitable_prob,
+                                                pg.transitable_stable_cycles);
+    inst.transitable_streak     = sk.yes;
+    inst.not_transitable_streak = sk.no;
 
-    if (not inst.transitable_asserted and inst.transitable_streak >= pg.transitable_stable_cycles)
+    if (dec.assert_now)
     {
         auto edge = DSR::Edge::create<transitable_edge_type>(inst.node_id, inst.node_id);
         if (G->insert_or_assign_edge(edge))
@@ -4481,7 +4492,7 @@ void SpecificWorker::step_transitable_edge(rc::DoorInstance& inst, const rc::doo
             std::print("door_concept: [transitable] {} could NOT assert the edge (node {} missing?)\n",
                        inst.node_name, inst.node_id);
     }
-    else if (inst.transitable_asserted and inst.not_transitable_streak >= pg.transitable_stable_cycles)
+    else if (dec.retract_now)
     {
         G->delete_edge(inst.node_id, inst.node_id, "transitable");
         inst.transitable_asserted = false;
