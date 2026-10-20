@@ -98,7 +98,7 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 // ELIGIBLE coarse continuation from it, measured from the decision's start.
 // rate = best progress RATE (m/s, round 5): max(prog / dur, max over eligible continuations of
 // progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
-struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{};
+struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{};
               bool elig = false, lpc_done = false; int conts = -1; };
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
@@ -196,18 +196,21 @@ Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
 // ★ EXACT pruning: a continuation's contact sweep (its rollout is cached) is evaluated only if its answer can change
 //   something — count it for continuability (progress from `from` >= 0), or raise best_prog / best_rate.
 float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from, const Conts& c,
-                 const Pose2* ref = nullptr, float base_dur = 0.f, float* best_prog = nullptr, float* best_rate = nullptr)
+                 const Pose2* ref = nullptr, float base_dur = 0.f, float* best_prog = nullptr, float* best_rate = nullptr,
+                 float* best_rate_dur = nullptr)
 {
+    if (best_rate_dur) *best_rate_dur = 0.f;
     if (best_prog) *best_prog = -kInf;
     if (best_rate) *best_rate = -kInf;
     if (c.arrived) return std::log((float(c.n) + 1.f) / (float(c.n) + 2.f));   // nothing left to continue: k = N
     if (c.sw.empty()) return std::log(1.f / (float(c.n) + 2.f));
-    struct Item { std::size_t i; float pf, pr, rt; };
+    struct Item { std::size_t i; float pf, pr, rt, dur; };
     std::vector<Item> items;
     for (std::size_t i = 0; i < c.sw.size(); ++i)
     {
         const float pr = ref ? progress(in, *ref, c.sw[i].back()) : -kInf;
-        items.push_back({i, progress(in, from, c.sw[i].back()), pr, ref ? pr / (base_dur + duration(c.sw[i], p)) : -kInf});
+        const float dj = duration(c.sw[i], p);
+        items.push_back({i, progress(in, from, c.sw[i].back()), pr, ref ? pr / (base_dur + dj) : -kInf, dj});
     }
     std::ranges::sort(items, std::greater{}, &Item::rt);
     int k = 0; float bp = -kInf, br = -kInf;
@@ -219,7 +222,7 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
                                                  std::log1p(-p.risk_eps));
         if (not eligible(lps, p)) continue;
         if (need_k) ++k;
-        if (ref) { bp = std::max(bp, it.pr); br = std::max(br, it.rt); }
+        if (ref) { bp = std::max(bp, it.pr); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; } }
     }
     if (best_prog) *best_prog = bp;
     if (best_rate) *best_rate = br;
@@ -237,7 +240,7 @@ float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pos
     return log_p_continuable_cells(in, p, from);
 }
 
-Decision decide(const PolicyInput& in0, const PolicyParams& p)
+Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* mon)
 {
     Decision d{.mode = Decision::Mode::Stuck, .why = {}};
     if (in0.body == nullptr or in0.goal == nullptr) { d.why = "no body or no goal"; return d; }
@@ -264,6 +267,26 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     //   until then the base keeps (v_now, w_now). Every candidate is rolled out from THAT pose, starting at the
     //   current velocity — the coast of a moving base is part of every motion, including "stop and turn".
     const Pose2 start = policy_start(in);
+
+    // ---- ROUND 6: judge the pending prediction (local_policy.h, ProgressMonitor) on what actually happened
+    const bool monitored = mon != nullptr and g.kind != Goal::Kind::Heading;
+    bool prediction_failed = false;
+    char failed_why[160] = "";
+    if (monitored and mon->pending and in.now_s - mon->t0 >= double(mon->tau))
+    {
+        const float f_now = in.field->at(in.pose.p);
+        const float realized = mon->f0 - f_now;
+        const float res = in.field->resolution_m((in.pose.p - mon->p0.p).norm());
+        if (std::isfinite(realized) and realized > res) mon->reset();              // the plan delivered: forget it
+        else if (mon->dF_pred > res)
+        {
+            prediction_failed = true;
+            std::snprintf(failed_why, sizeof failed_why, "predicted %.3f m in %.2f s, realized %.3f m (resolution %.3f)",
+                          mon->dF_pred, mon->tau, std::isfinite(realized) ? realized : -1.f, res);
+            mon->reset();
+        }
+        else mon->reset();                                                         // too small to judge
+    }
 
     // ---- Candidates: n_v x n_w over the dynamic window, plus pure turns of both signs and a straight reverse
     const float T = p.horizon_s;
@@ -300,10 +323,11 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     auto ensure_lpc = [&](Cand& c)
     {
         if (c.lpc_done) return;
-        float second = -kInf, second_rate = -kInf;
-        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate);
+        float second = -kInf, second_rate = -kInf, second_dur = 0.f;
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur);
         c.prog2 = std::max(c.prog, second);
         c.rate = std::max(c.prog / c.dur, second_rate);
+        c.tau = c.prog / c.dur >= second_rate ? c.dur : c.dur + second_dur;   // the plan the rate belongs to
         c.lpc_done = true;
     };
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
@@ -355,8 +379,14 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         const float s = c->lps + c->rate / rate_scale + c->lpc;
         if (s > best_s) { best_s = s; best_drive = c; }
     }
-    if (best_drive != nullptr)
+    if (best_drive != nullptr and not prediction_failed)
     {
+        if (monitored and not mon->pending)
+        {
+            // the prediction this Drive commits to: its plan's descent over its plan's duration
+            mon->pending = true; mon->t0 = in.now_s; mon->tau = best_drive->tau;
+            mon->dF_pred = best_drive->rate * best_drive->tau; mon->f0 = in.field->at(in.pose.p); mon->p0 = in.pose;
+        }
         return finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
     }
 
@@ -368,7 +398,10 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     //   the raw hits: one noisy hit (sigma_r 0.02) beside a wall 2.5 cm away lands inside the hull ~10 % of the time
     //   (22 of them at tour3_1_leg3's start held the robot Stuck at t = 0 with nothing touching it).
     float inside = 0.f;
-    for (const Return& r : in.returns) if (r.p_exist > 0.f and hull_distance(*in.body, start, r.p) < 0.f) inside += r.p_exist;
+    // ★ ROUND 6 (B1): LiDAR-derived cells only (aggregate == true). An unseen-contact hypothesis inside the body is not
+    //   a sensing contradiction — it is a hypothesis the body's presence refutes (UnseenContact does that).
+    for (const Return& r : in.returns)
+        if (r.aggregate and r.p_exist > 0.f and hull_distance(*in.body, start, r.p) < 0.f) inside += r.p_exist;
     if (inside > 0.f)
     {
         char buf[96]; std::snprintf(buf, sizeof buf, "%.1f returns inside the body (sensing/pose error): hold", inside);
@@ -435,8 +468,9 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
             if (best == nullptr or c->lpc > best->lpc) best = c;
             if (best->lpc >= lpc_max) break;
         }
-    char buf[200];
-    std::snprintf(buf, sizeof buf, "release: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", words(best->v, best->w).c_str(),
+    char buf[400];
+    std::snprintf(buf, sizeof buf, "release%s%s: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", prediction_failed ? " (prediction failed: " : "",
+                  prediction_failed ? (std::string(failed_why) + ")").c_str() : "", words(best->v, best->w).c_str(),
                   1.f - std::exp(best->lps), lpc_now, best->lpc);
     return finish(Decision::Mode::Release, *best, buf);
 }

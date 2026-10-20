@@ -37,7 +37,10 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
                      float body_geometry_sigma_m = 0.01f;
                      // pose age + command latency: the base keeps (v_now, w_now) for this long before the decided
                      // command takes effect; candidates are rolled out from the pose reached then (policy_start)
-                     float latency_s = 0.f; };
+                     float latency_s = 0.f;
+                     // decision time (s, any monotonic clock): the ProgressMonitor judges a plan when its own
+                     // duration has elapsed (round 6)
+                     double now_s = 0.0; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
@@ -47,7 +50,25 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
 struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode; float v = 0, w = 0;
                   float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why; };
 
-Decision decide(const PolicyInput& in, const PolicyParams& p);
+// ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
+//   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its
+//   rate). The monitor holds ONE pending prediction (made by the first Drive after a reset): once tau_pred has elapsed
+//   it compares the REALIZED descent f(pose then) - f(pose now) with the field's resolution (CostToGo::resolution_m
+//   over the realized displacement): realized <= resolution while dF_pred > resolution -> FAILED, and the next decide()
+//   is a Release whatever the candidates promise; realized > resolution -> success, the record resets. A prediction
+//   no larger than the resolution says nothing and is dropped. No timer or constant beyond the plan's own tau and the
+//   field's resolution.
+//   API: the caller owns one ProgressMonitor per goal and passes it to every decide(); it calls reset() whenever the
+//   field is rebuilt (a trap, a new goal: old field values are not comparable). Heading goals (no field) are not
+//   monitored. decide() without a monitor behaves as before round 6.
+struct ProgressMonitor
+{
+    bool pending = false, failed = false;
+    double t0 = 0.0; float tau = 0.f, dF_pred = 0.f, f0 = 0.f; Pose2 p0{};
+    void reset() { *this = ProgressMonitor{}; }
+};
+
+Decision decide(const PolicyInput& in, const PolicyParams& p, ProgressMonitor* monitor = nullptr);
 
 // Exposed for tests/diagnostics: log((k+1)/(N+2)) of the coarse continuation set from `from` (a pose at rest).
 float log_p_continuable(const PolicyInput& in, const PolicyParams& p, const Pose2& from);

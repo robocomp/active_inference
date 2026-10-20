@@ -83,6 +83,27 @@ int main()
       const auto g = v.hypotheses();
       CHECK("  opposite sense leads with a different corner", h.size() == 1 and g.size() == 1 and (h[0].p - g[0].p).norm() > 0.1f); }
 
+    { // driving_over_hypothesis_refutes_it (round 6, B2): a forward hypothesis from 20 blocked ticks, then the body
+      // drives freely (odometry = command) onto the place: the hypothesis is refuted, the direction back at the prior.
+        UnseenContact u;
+        for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+        const auto h0 = u.hypotheses();
+        Pose2 q = pose; bool gone = false;
+        for (int i = 0; i < 20 and not gone; ++i)
+        {
+            q.p.x() += 0.2f * dt;
+            u.update(0.2f, 0.f, 0.2f, 0.f, 0.2f * dt, 0.f, dt, q, b, body, sig);
+            gone = u.hypotheses().empty();
+        }
+        std::printf("  driving over: hypothesis at x=%.3f, refuted with the body at x=%.3f\n", h0.empty() ? 0.f : h0[0].p.x(), q.p.x());
+        CHECK("driving_over_hypothesis_refutes_it", h0.size() == 1 and gone and u.log_odds(0) == L0prior);
+        // and a body that does NOT move as commanded over it (blocked) keeps it
+        UnseenContact v;
+        for (int i = 0; i < 20; ++i) v.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+        Pose2 r = pose; r.p.x() = h0[0].p.x();   // (teleported onto it, but odometry says blocked)
+        v.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, r, b, body, sig);
+        CHECK("  a blocked tick does not refute", not v.hypotheses().empty());
+    }
     { // startup_ramp_no_hypothesis (D3): a real base (a_lin 1 m/s^2, a_rot 2 rad/s^2, 60 ms of nothing first) asked for
       // 0.5 m/s and 1.5 rad/s from rest; odometry reports exactly the ramp it executes. The free prediction follows the
       // ramp, so no direction may rise above 0.05 (was p ~ 0.45 on the hull edge with cmd*dt: Stuck in open space).

@@ -26,11 +26,11 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 5 (task-6-report.md, "Round 5"): progress as a RATE + field resolution. All Task-4 unit tests
-// green. Scenarios: contacts 0; 9 checks FAIL. dead_end / narrow_doorway never Release: at the edge of the eligible
-// region "back up, then come forward a little" always shows positive two-step progress, so the robot shuttles +-1 cm
-// in front of the 0.55 m gap for ever (no trap, no Unreachable). With unseen ON, reversal ticks also leave weak frozen
-// hypotheses (W > 0, p ~ 1e-5) that the robot later covers -> "0.0 returns inside the body" Stuck.
+// STATUS 2026-10-20 round 6 (task-6-report.md, "Round 6"): ProgressMonitor (stuck = failed prediction) + phantom fixes.
+// Contacts 0, no Stuck. narrow_doorway 20/20 Unreachable (1 release), dead_end 16/20. 9 checks FAIL: a Release from a
+// momentary local wedge (no eligible candidate at 5 cm in a door mouth / passage mouth) lays a trap across the ONLY or
+// the CORRECT opening -> "no plan without the trap" (jamb 7, dead_end 4, tour3 2, try105 1); OU 2/20: believed-pose
+// jitter (3.5 cm/tick) near the goal fails a prediction and the trap covers the goal.
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
@@ -243,6 +243,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     sim2d::Base base; base.lim = limits(); base.latency_s = 0.06f;
     sim2d::PoseError err; err.on = opt.ou; err.pivot = start.p;
     UnseenContact unseen;
+    ProgressMonitor monitor;      // round 6: stuck = a failed prediction (local_policy.h); reset on every field rebuild
     FieldCtx F; F.init(world, opt.grid, goal);
     PolicyParams pp;
     std::vector<Trap> traps;
@@ -275,7 +276,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         PolicyInput in;
         in.pose = bel; in.v_now = base.v; in.w_now = base.w; in.sigma_xy = 0.01f; in.sigma_yaw = 0.01f; in.returns_age_s = 0.f;
         in.returns = ret; in.body = &B; in.base = base.lim; in.goal = &goal; in.field = &F.field; in.latency_s = base.latency_s;
-        const Decision d = decide(in, pp);
+        in.now_s = t;
+        const Decision d = decide(in, pp, &monitor);
         const float fnow = F.field.at(bel.p);
         const float clear = contact.clearance(truth);
         res.min_clear = std::min(res.min_clear, clear);
@@ -314,6 +316,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
             traps.push_back({tc, dir, r_circ});
             F.field.add_trap(tc, r_circ, cost);
             F.rebuild();
+            monitor.reset();                 // old field values are not comparable with the rebuilt field
             best_f = F.field.at(bel.p);      // the field changed: progress is measured on the new one (the clock is not reset)
             if (tr) std::printf("    TRAP at (%+.3f,%+.3f) dir (%+.2f,%+.2f) cost %.2f m; field now %.3f\n", bel.p.x(), bel.p.y(), dir.x(), dir.y(), cost, best_f);
             if (not plan_without_traps(F, traps, bel.p)) { res.unreachable = true; res.why = "no plan without the trap"; break; }

@@ -49,6 +49,7 @@ public:
     {
         const float s = std::max(sigma_odo_m, 1e-6f);
         sigma_ = sigma_odo_m;
+        tested_ = false; blocked_ = false;
         if (std::abs(v_cmd) >= b.v_min_eff and std::abs(v_cmd) > 0.f)
         {
             const int k = v_cmd > 0.f ? 0 : 1;
@@ -63,6 +64,15 @@ public:
             const float sr = s / std::max(body.circumscribed_radius(), 1e-3f);
             const float c = sg * free_travel(w_meas, w_cmd, b.a_rot, b.d_rot, dt);
             if (c > 0.f) accumulate(k, c, sg * dyaw_meas, sr, place(k, pose, body));
+        }
+        // ★ ROUND 6 (B2) — REFUTATION. On a tick whose measured motion matched the command (every tested direction added
+        //   free evidence, llr <= 0), a hypothesis whose place the BARE hull now occupies cannot exist: the body is there
+        //   and touched nothing. Its direction's evidence is reset (W = 0, L = the prior), so it is no longer reported.
+        if (tested_ and not blocked_)
+        {
+            rc::RobotFootprint bare = body; bare.set_safety_margin(0.f);
+            for (auto& d : dir_)
+                if (d.W > 0.f and bare.contains_yaw(d.pos(), pose.p, pose.yaw)) d = Dir{};
         }
     }
 
@@ -117,6 +127,7 @@ private:
     {
         Dir& x = dir_[k];
         const float llr = (c * c - 2.f * d * c) / (2.f * s * s);
+        tested_ = true; blocked_ = blocked_ or llr > 0.f;
         x.seen = true;
         x.latest = at;
         if (llr > 0.f) { x.sum += llr * at; x.W += llr; }
@@ -148,5 +159,6 @@ private:
 
     std::array<Dir, 4> dir_{};   // forward, backward, turn left, turn right
     float sigma_ = 0.02f;
+    bool tested_ = false, blocked_ = false;   // this tick: some direction tested / some tested direction read blocked
 };
 }  // namespace rc::policy
