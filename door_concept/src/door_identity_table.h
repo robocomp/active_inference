@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <utility>
 #include <cmath>
 #include <istream>
 #include <locale>
@@ -260,6 +262,52 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
 inline float restore_existence_prior(const IdentityRow& r, float default_L)
 {
     return r.exist_logodds.has_value() and std::isfinite(*r.exist_logodds) ? *r.exist_logodds : default_L;
+}
+
+/// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door
+/// that is KNOWN without being seen now — the crossed door carried across, a door restored from memory — is given this
+/// many so it is fitted (its belief initialised from its node), which is also what lets the existence channel judge it
+/// and what lets its pragmatic affordances (approach / open / cross, which need a fitted aperture) be offered.
+inline constexpr int kFitWithoutFreshDataFrames = 5;
+inline bool fitted_this_cycle(bool has_fresh_data, int matched_frames)
+{
+    return has_fresh_data or matched_frames >= kFitWithoutFreshDataFrames;
+}
+
+/// Seed the instance of a RESTORED door from its row. ★Writes the pose too (tourP6): the node-added path may already
+/// have built the instance the moment the node was inserted — BEFORE its RT edge existed — reading its place as (0,0);
+/// the restore must not trust that read (nor skip seeding because the instance "already exists"), it must state it.
+/// `Inst` is rc::DoorInstance (templated so the harness needs no DSR).
+template <class Inst>
+void seed_restored_instance(Inst& inst, const IdentityRow& r, float prior_L, float max_L,
+                            std::chrono::steady_clock::time_point now)
+{
+    auto s = inst.model.state();
+    s.cx = s.ap_cx = r.xy.x();
+    s.cy = s.ap_cy = r.xy.y();
+    s.cz = 0.f;
+    if (r.pose.has_value())
+    {
+        s.yaw = s.ap_yaw = r.pose->yaw;
+        s.w = r.pose->width; s.h = r.pose->height; s.thickness = r.pose->depth;
+    }
+    s.phi = 0.f;
+    inst.model.set_state(s);
+    inst.existence.set_max(max_L);
+    inst.existence.set(prior_L);
+    inst.existence_seeded = true;
+    inst.matched_frames   = std::max(inst.matched_frames, kFitWithoutFreshDataFrames);
+    inst.seed_wh_from_box = true;
+    if (r.leaf.has_value())
+    {
+        inst.leaf_side_hint   = std::make_pair(r.leaf->hinge_xy, r.leaf->open_dir);
+        inst.phi_est          = r.leaf->phi;
+        inst.phi_sigma        = r.leaf->phi_sigma;
+        inst.hinge_llr        = r.leaf->hinge_llr;
+        inst.swing_llr        = r.leaf->swing_llr;
+        inst.phi_last_t       = now;
+        inst.phi_from_command = false;
+    }
 }
 
 inline const char* to_string(SkipReason s)

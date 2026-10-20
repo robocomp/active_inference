@@ -12,6 +12,10 @@
 #include <tuple>
 #include <vector>
 #include "../src/door_identity_table.h"
+#include <chrono>
+#include <optional>
+
+struct State { float cx = 0, cy = 0, cz = 0, yaw = 0, w = 0.7f, h = 2.f, thickness = 0.05f, phi = 0, ap_cx = 0, ap_cy = 0, ap_yaw = 0; };
 
 using namespace rc::door;
 static int fails = 0;
@@ -207,6 +211,35 @@ int main()
         const std::vector<LiveDoor> live{{"door_2", Eigen::Vector2f(0.64f, 2.54f)}};  // the carried door
         const auto d = plan_restore(p.rows, "room_1", true, live, radius);
         CHECK(d.restore.size() == 1 and d.restore[0].name == "door_1" and d.restore[0].pose.has_value());
+    }
+
+    // ── 6. tourP6: the restored instance was built at node insert, BEFORE its RT edge (place read as (0,0)), and the
+    //      seeding was skipped. seed_restored_instance must state the pose and make it fitted with no fresh mask, so
+    //      process_door_node runs run_inference and the pragmatic affordances (which need a fitted aperture) appear.
+    {
+        struct FakeModel { State s; const State& state() const { return s; } void set_state(const State& x) { s = x; } };
+        struct FakeExist { float L = 0.f, mx = 4.f; void set_max(float m) { mx = m; } void set(float l) { L = std::clamp(l, -mx, mx); } };
+        struct FakeInst
+        {
+            FakeModel model; FakeExist existence; bool existence_seeded = false; int matched_frames = 0;
+            bool seed_wh_from_box = false;
+            std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
+            float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
+            std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
+        } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
+        CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
+        const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);
+        seed_restored_instance(inst, r, restore_existence_prior(r, 1.0f), 4.0f, std::chrono::steady_clock::now());
+        CHECK(near(inst.model.s.ap_cx, -0.57f) and near(inst.model.s.ap_cy, 4.61f) and near(inst.model.s.cx, -0.57f));
+        CHECK(near(inst.model.s.ap_yaw, 3.10f) and near(inst.model.s.w, 0.95f) and near(inst.model.s.h, 2.13f));
+        CHECK(inst.existence_seeded and near(inst.existence.L, 4.0f));
+        CHECK(fitted_this_cycle(false, inst.matched_frames));               // fitted with no fresh mask
+        CHECK(inst.seed_wh_from_box and inst.leaf_side_hint.has_value() and not inst.phi_from_command);
+        // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.
+        IdentityRow id_only; id_only.room = "room_1"; id_only.name = "door_5"; id_only.xy = {2.f, -3.f};
+        FakeInst j;
+        seed_restored_instance(j, id_only, restore_existence_prior(id_only, 1.0f), 4.0f, std::chrono::steady_clock::now());
+        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.existence.L, 1.0f) and not j.leaf_side_hint.has_value());
     }
 
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");

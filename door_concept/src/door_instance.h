@@ -21,6 +21,7 @@
 #include <Eigen/Dense>
 
 #include "door_model.h"        // DoorModel / DoorState
+#include "door_identity_table.h"   // kFitWithoutFreshDataFrames
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "door_opening_edges.h" // rc::door::AlongWallState — the scan's registration offset (try96)
 #include "door_leaf_channel.h"  // rc::door::LeafChannel — hinge / swing / φ per viewpoint (try102)
@@ -31,10 +32,8 @@
 
 namespace rc {
 
-// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door
-// that is KNOWN without being seen now — the crossed door carried across, a door restored from memory — is given this
-// many so it is fitted (its belief initialised from its node), which is also what lets the existence channel judge it.
-inline constexpr int kFitWithoutFreshDataFrames = 5;
+// kFitWithoutFreshDataFrames lives in door_identity_table.h (rc::door), with the restore seeding that uses it.
+using rc::door::kFitWithoutFreshDataFrames;
 
 struct DoorInstance
 {

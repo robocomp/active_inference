@@ -2864,7 +2864,7 @@ void SpecificWorker::process_door_node(const DSR::Node& node)
     const auto observation = fitter_->observe(inst, node);
 
     // Stale check: skip heavy update if data hasn't moved for too long
-    if (not observation.has_fresh_data and inst.matched_frames < rc::kFitWithoutFreshDataFrames)
+    if (not rc::door::fitted_this_cycle(observation.has_fresh_data, inst.matched_frames))
         return;
 
     const float free_energy = fitter_->run_inference(inst, observation);
@@ -4172,31 +4172,26 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
             continue;
         }
         const auto n = G->get_node(id);
-        if (not n.has_value() or not fitter_->ensure_instance(n.value(), room_node_id_))
+        if (not n.has_value())
             continue;
-        auto& inst = fitter_->instances().at(id);
+        // ★REBUILD, AS THE CARRIED DOOR DOES (tourP6): the node-added path built an instance at insert time, before
+        //  the RT edge existed, so it read (0,0); ensure_instance then answered "already exists" and the old code SKIPPED
+        //  the seeding — door_1 sat unfitted at (0,0) with no approach/cross for 5 minutes, and the tracker birthed a
+        //  duplicate (door_4) on its real hole. Forget that instance, rebuild it now that the RT is written, and seed it.
+        if (fitter_->instances().contains(id))
+            fitter_->forget_node(id);
+        fitter_->ensure_instance(n.value(), room_node_id_);
+        const auto iit = fitter_->instances().find(id);
+        if (iit == fitter_->instances().end())
+            continue;
+        auto& inst = iit->second;
         // ★THE EXISTENCE PRIOR IS THE MEMORY. Not a fresh birth's prior and not certainty either: the belief the door had
         //  when the room was left (or, for a row written without one, Existence.BirthLogodds). The channel takes it from
         //  here — seen ⇒ confirmed, absent where it should be visible (P(detect), wall line of sight) ⇒ removed.
         //  ⚠ Deliberately NOT the ghost convention (re-acquisition restarts at BirthLogodds): a ghost was REMOVED for
         //  absence, a restored door was ALIVE when left — see rc::door::restore_existence_prior.
-        inst.existence.set_max(cfg_.exist_max_logodds);
-        inst.existence.set(prior_L);
-        inst.existence_seeded = true;
-        // A known door is FITTED without a fresh detection (as the carried door is): its belief initialises from the
-        // node, at the remembered size — which is also what lets the existence channel judge it.
-        inst.matched_frames   = std::max(inst.matched_frames, rc::kFitWithoutFreshDataFrames);
-        inst.seed_wh_from_box = true;
-        if (r.leaf.has_value())
-        {
-            inst.leaf_side_hint = std::make_pair(r.leaf->hinge_xy, r.leaf->open_dir);
-            inst.phi_est    = r.leaf->phi;
-            inst.phi_sigma  = r.leaf->phi_sigma;
-            inst.hinge_llr  = r.leaf->hinge_llr;
-            inst.swing_llr  = r.leaf->swing_llr;
-            inst.phi_last_t = std::chrono::steady_clock::now();
-            inst.phi_from_command = false;
-        }
+        // Fitted without a fresh detection (as the carried door is), at the remembered pose and size, with its leaf memory.
+        rc::door::seed_restored_instance(inst, r, prior_L, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
         log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()));
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
                    "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
