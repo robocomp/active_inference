@@ -8,22 +8,23 @@
 #include "../../common/robot_footprint/mesh_hull.h"
 
 #include <cmath>
+#include <filesystem>
 
 #include <cstdio>
 #include <vector>
 
 // Raw hull of shadow.stl (z<=1.45) ∪ the two wheels, printed by tools/shadow_footprint.py. shadow() must CONTAIN it.
 static const std::vector<Eigen::Vector2f> kRaw{
-    {-0.284000f, -0.100000f}, {-0.178020f, -0.223121f}, {-0.175411f, -0.224974f}, {-0.173577f, -0.225663f},
-    {-0.173251f, -0.225743f}, {-0.171000f, -0.226000f}, {-0.040506f, -0.229904f}, {-0.035000f, -0.230000f},
-    {+0.035000f, -0.230000f}, {+0.039490f, -0.229936f}, {+0.168805f, -0.226000f}, {+0.174315f, -0.224684f},
-    {+0.176680f, -0.223116f}, {+0.176965f, -0.222908f}, {+0.178241f, -0.221530f}, {+0.284000f, -0.100000f},
-    {+0.284000f, +0.100000f}, {+0.216794f, +0.186696f}, {+0.213404f, +0.190972f}, {+0.212851f, +0.191630f},
-    {+0.203286f, +0.201556f}, {+0.177411f, +0.223674f}, {+0.176398f, +0.224418f}, {+0.175110f, +0.225116f},
-    {+0.173543f, +0.225671f}, {+0.171000f, +0.226000f}, {+0.139993f, +0.229539f}, {+0.130000f, +0.230000f},
-    {-0.130000f, +0.230000f}, {-0.143711f, +0.229131f}, {-0.171000f, +0.226000f}, {-0.175218f, +0.225067f},
-    {-0.177527f, +0.223576f}, {-0.199002f, +0.205271f}, {-0.208042f, +0.196935f}, {-0.213269f, +0.191135f},
-    {-0.214106f, +0.190122f}, {-0.284000f, +0.100000f},
+    {-0.284001f, +0.070711f}, {-0.284001f, +0.055557f}, {-0.284000f, +0.038268f}, {-0.284000f, +0.019509f},
+    {-0.284000f, -0.000000f}, {-0.284000f, -0.019509f}, {-0.284000f, -0.038268f}, {-0.284000f, -0.055557f},
+    {-0.284000f, -0.070711f}, {-0.284000f, -0.083147f}, {-0.284000f, -0.092388f}, {-0.284000f, -0.098079f},
+    {-0.284000f, -0.100000f}, {-0.220000f, -0.230000f}, {+0.220000f, -0.230000f}, {+0.284000f, -0.100000f},
+    {+0.284000f, -0.098078f}, {+0.284000f, -0.092388f}, {+0.284001f, -0.083147f}, {+0.284001f, -0.070711f},
+    {+0.284001f, -0.055557f}, {+0.284000f, -0.038268f}, {+0.284000f, -0.019509f}, {+0.284000f, +0.000000f},
+    {+0.284000f, +0.019509f}, {+0.284000f, +0.038268f}, {+0.284000f, +0.055557f}, {+0.284000f, +0.070711f},
+    {+0.284000f, +0.083147f}, {+0.284000f, +0.092388f}, {+0.284000f, +0.098079f}, {+0.284000f, +0.100000f},
+    {+0.220000f, +0.230000f}, {-0.220000f, +0.230000f}, {-0.284000f, +0.100000f}, {-0.284000f, +0.098078f},
+    {-0.284000f, +0.092388f}, {-0.284001f, +0.083147f},
 };
 
 static int fails = 0;
@@ -70,8 +71,10 @@ int main()
     {
         const char *obj = "/home/pbustos/robocomp/components/webots-shadow/protos/meshes/shadow_footprint.obj";
         rc::RobotFootprint::MeshReport rep;
-        const auto m = rc::RobotFootprint::from_obj(obj, 0.f, rep);
-        CHECK(m.has_value(), "shadow_footprint.obj loads via RobotFootprint::from_obj");
+        const bool present = std::filesystem::exists(obj);
+        if (not present) std::printf("  SKIP: %s is absent (generate it with tools/shadow_footprint.py)\n", obj);
+        const auto m = present ? rc::RobotFootprint::from_obj(obj, 0.f, rep) : std::nullopt;
+        if (present) CHECK(m.has_value(), "shadow_footprint.obj loads via RobotFootprint::from_obj");
         if (m.has_value())
         {
             std::printf("  mesh hull: %zu verts  x_max %.4f y_max %.4f area %.4f (compiled x_max %.4f area %.4f)\n",
@@ -79,8 +82,7 @@ int main()
             CHECK(std::abs(rep.x_max - xmax) < 1e-3f, "mesh x_max matches shadow() within 1 mm");
             float ymax = 0.f;
             for (const auto &v : p) ymax = std::max(ymax, std::abs(v.y()));
-            // 2 mm, not 1: shadow()'s conservative simplification bulges the rear edge to y = -0.2311 over the mesh's -0.2300.
-            CHECK(std::abs(rep.y_max - ymax) < 2e-3f, "mesh y_max matches shadow() within 2 mm");
+            CHECK(std::abs(rep.y_max - ymax) < 1e-3f, "mesh y_max matches shadow() within 1 mm");
             CHECK(std::abs(rep.area_m2 - area) < 0.01f * area, "mesh hull area matches shadow() within 1 %");
             // shadow() must still CONTAIN the mesh: every raw-hull vertex of the mesh is inside (or on) it.
             const auto raw = rc::mesh::hull_from_obj(obj, -1e30f, 1e30f, 24, 0.01f, nullptr);

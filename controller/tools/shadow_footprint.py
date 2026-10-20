@@ -24,22 +24,75 @@ def area(p):
     x, y = p[:, 0], p[:, 1]
     return 0.5 * np.sum(x*np.roll(y, -1) - np.roll(x, -1)*y)
 
-def wheel_triangles(cx, cz=0.067, r=0.10, half=0.025, seg=32):
-    """Shadow.proto drive wheel: Cylinder r 0.10, height 0.05, axis = the lateral axle (x), centred (cx, 0, cz) in the SAME
-    frame as shadow.stl (the proto's body Shape has no offset; the wheel Solid translation is +-0.259 0 0.067). 32 segments, closed caps."""
+def rot_axis_angle(ax, ang):
+    ax = np.asarray(ax, float); ax = ax / np.linalg.norm(ax); c, s_ = np.cos(ang), np.sin(ang)
+    K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+    return np.eye(3) + s_ * K + (1 - c) * (K @ K)
+
+def xf(tris, R, t):
+    return [tuple(R @ v + t for v in tr) for tr in tris]
+
+def cylinder_z(r, half, seg=32):
+    """Webots Cylinder: axis = local Z (Shadow.proto's own comment), closed caps, centred at the origin."""
+    ring = [(r*np.cos(2*np.pi*k/seg), r*np.sin(2*np.pi*k/seg)) for k in range(seg + 1)]
     tris = []
-    ring = [(np.cos(2*np.pi*k/seg), np.sin(2*np.pi*k/seg)) for k in range(seg + 1)]
-    P = lambda x, a: np.array([cx + x, r*ring[a][0], cz + r*ring[a][1]])        # a = angle index in the y-z plane
     for k in range(seg):
-        a0, a1 = k, k + 1
-        lo0, lo1, hi0, hi1 = P(-half, a0), P(-half, a1), P(half, a0), P(half, a1)
-        tris += [(lo0, hi1, hi0), (lo0, lo1, hi1)]                                # side, outward (y-z radial)
-        tris += [(np.array([cx+half, 0, cz]), hi0, hi1)]                          # +x cap
-        tris += [(np.array([cx-half, 0, cz]), lo1, lo0)]                          # -x cap
+        (x0, y0), (x1, y1) = ring[k], ring[k+1]
+        lo0, lo1, hi0, hi1 = (x0, y0, -half), (x1, y1, -half), (x0, y0, half), (x1, y1, half)
+        tris += [(lo0, lo1, hi1), (lo0, hi1, hi0), ((0, 0, half), hi0, hi1), ((0, 0, -half), lo1, lo0)]
+    return [tuple(np.array(v, float) for v in t) for t in tris]
+
+def sphere(r, nlat=12, nlon=24):
+    tris = []
+    P = lambda i, j: np.array([r*np.sin(np.pi*i/nlat)*np.cos(2*np.pi*j/nlon), r*np.sin(np.pi*i/nlat)*np.sin(2*np.pi*j/nlon), r*np.cos(np.pi*i/nlat)])
+    for i in range(nlat):
+        for j in range(nlon):
+            a, b, c, d = P(i, j), P(i, j+1), P(i+1, j+1), P(i+1, j)
+            if i > 0: tris.append((a, d, b) if False else (a, b, d))
+            if i < nlat - 1: tris.append((b, c, d))
     return tris
 
+def box(sx, sy, sz):
+    h = np.array([sx, sy, sz]) / 2
+    c = [np.array([x*h[0], y*h[1], z*h[2]]) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+    q = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    return [t for a, b, c_, d in q for t in ((c[a], c[b], c[c_]), (c[a], c[c_], c[d]))]
+
+def shadow_parts():
+    """Every Shape / boundingObject geometry Shadow.proto attaches to the robot, in the SAME frame as shadow.stl (the proto's body
+    Shape has no offset; Robot translation 0 0 0.033 applies to everything alike). name -> triangles. The cylinder-Z convention and the
+    transforms are those of Shadow.proto (line numbers in comments)."""
+    Rx90 = rot_axis_angle((1, 0, 0), -1.5708)
+    parts = {}
+    # drive wheels (344-372, 407-): Solid translation (+-0.259,0,0.067) rot z 1.5708, Pose rot x -1.5708 -> Cylinder r 0.1 h 0.05, axis = lateral x
+    for nm, sx in (("wheel_left", -1), ("wheel_right", +1)):
+        parts[nm] = xf(xf(cylinder_z(0.10, 0.025), Rx90, 0), rot_axis_angle((0, 0, 1), 1.5708), np.array([sx*0.259, 0, 0.067]))
+    # casters (466-, 506-): Sphere r 0.04 at (0, +-0.18, 0.007)
+    parts["caster_front"] = xf(sphere(0.04), np.eye(3), np.array([0, 0.18, 0.007]))
+    parts["caster_back"] = xf(sphere(0.04), np.eye(3), np.array([0, -0.18, 0.007]))
+    # THETA 360 camera lens bumps (40-75): camera at (0,-0.17,1.275) rot z -+pi/2; lens spheres r 0.0105 at local x +-0.0115
+    for nm, ang in (("camera_360_2_lens", -1.5707953), ("camera_360_1_lens", +1.5707953)):
+        R = rot_axis_angle((0, 0, 1), ang if nm.endswith("2_lens") else -ang)
+        for sgn in (+1, -1):
+            parts[f"{nm}{'+' if sgn > 0 else '-'}"] = xf(sphere(0.0105, 8, 16), np.eye(3), R @ np.array([sgn*0.0115, 0, 0]) + np.array([0, -0.17, 1.275]))
+    # helios (83-138): Lidar at (0,-0.155,1.075) rot (1,1,0,pi); Cylinder h 0.10 r 0.055 at local (-0.0125,0,0)
+    Rh = rot_axis_angle((1, 1, 0), 3.14159265359)
+    parts["helios_housing"] = xf(cylinder_z(0.055, 0.05), Rh, Rh @ np.array([-0.0125, 0, 0]) + np.array([0, -0.155, 1.075]))
+    # bpearl (206-238): Lidar at (0,0.14,0.67); Sphere r 0.05
+    parts["bpearl_dome"] = xf(sphere(0.05), np.eye(3), np.array([0, 0.14, 0.67]))
+    # boundingObject Group (540-): Box 0.44x0.46x0.76 at z 0.38 and the mast Box 0.1x0.1x0.61 at (0,-0.17,1.03)
+    parts["bounding_body"] = xf(box(0.44, 0.46, 0.76), np.eye(3), np.array([0, 0, 0.38]))
+    parts["bounding_mast"] = xf(box(0.1, 0.1, 0.61), np.eye(3), np.array([0, -0.17, 1.03]))
+    return parts
+
+def keep(tris, zlo=0.0, zhi=1.8):
+    z = np.array([v[2] for t in tris for v in t])
+    return z.max() >= zlo and z.min() <= zhi
+
 def write_meshes(tri_body, out_stem):
-    tris = [tuple(np.asarray(v, float) for v in t) for t in tri_body] + wheel_triangles(+0.259) + wheel_triangles(-0.259)
+    tris = [tuple(np.asarray(v, float) for v in t) for t in tri_body]
+    for nm, pt in shadow_parts().items():
+        if keep(pt): tris += pt
     # outward orientation check on the wheel side faces is by construction; STL
     with open(out_stem + '.stl', 'wb') as f:
         f.write(b'shadow_footprint: shadow.stl + two drive wheels (tools/shadow_footprint.py)'.ljust(80, b' '))
@@ -68,10 +121,16 @@ def main():
     v = rec['v'].reshape(-1, 3).astype(float)
     if len(sys.argv) > 2: write_meshes(rec['v'].astype(float), sys.argv[2])
     print(f"// {n} triangles, bbox min {v.min(0)} max {v.max(0)}")
-    v = v[v[:, 2] <= 1.45]
+    v = v[(v[:, 2] <= 1.8) & (v[:, 2] >= 0.0)]
     body = hull(v[:, :2])
-    wheels = [(s*x, y) for s in (1, -1) for x in (0.234, 0.284) for y in (-0.10, 0.10)]
-    full = hull(np.vstack([body, wheels]))
+    print("// parts (frame of shadow.stl = robot frame), z range kept [0.0, 1.8]:")
+    print(f"//   shadow.stl            x[{body[:,0].min():+.4f},{body[:,0].max():+.4f}] y[{body[:,1].min():+.4f},{body[:,1].max():+.4f}]")
+    pv = [body]
+    for nm, pt in shadow_parts().items():
+        a_ = np.array([vv for t in pt for vv in t])
+        print(f"//   {nm:<22} x[{a_[:,0].min():+.4f},{a_[:,0].max():+.4f}] y[{a_[:,1].min():+.4f},{a_[:,1].max():+.4f}] z[{a_[:,2].min():+.3f},{a_[:,2].max():+.3f}] {'KEPT' if keep(pt) else 'dropped'}")
+        if keep(pt): pv.append(a_[:, :2])
+    full = hull(np.vstack(pv))
     a0 = area(full)
     if area(full) < 0: full = full[::-1]
     p = full.copy()

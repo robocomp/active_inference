@@ -43,9 +43,10 @@ int main()
     const auto fp = rc::RobotFootprint::shadow();
     const auto& body = fp.polygon();
     // The front-left corner of the hull and its outward direction.
-    // ★ 2026-10-20: Shadow's body is now mesh ∪ the TWO drive wheels (x = ±0.284 over y ∈ ±0.10); the front-left hull vertex moved
-    // from (-0.2536, 0.2036) of the old four-mecanum hull to (-0.2141, 0.1901), and the side from x = -0.2716 to -0.2840.
-    const Eigen::Vector2f corner(-0.2141f, 0.1901f);
+    // ★ 2026-10-20: Shadow's body is now everything Shadow.proto draws or collides on (shadow.stl, the two drive wheels, the
+    // 0.44 x 0.46 boundingObject box): side x = ±0.2840 over y ∈ ±0.10, then the box's square corner at (±0.22, ±0.23). The front-left
+    // vertex is (-0.22, 0.23) (was (-0.2536, 0.2036) on the old four-mecanum hull, (-0.2141, 0.1901) on the mesh-only hull).
+    const Eigen::Vector2f corner(-0.22f, 0.23f);
 
     // 1. A jamb point 0.05 m outside the footprint corner, AHEAD of it on the path: driving toward it stops.
     {
@@ -117,7 +118,7 @@ int main()
     //    sampling of the near wall face, the jamb faces, and body self-returns. Count what the old disc deleted.
     {
         std::vector<Eigen::Vector2f> pts;
-        const float y_w = 0.1901f + 0.04f, x_j = -0.2141f + 0.02f, w = 0.90f, t = 0.10f;
+        const float y_w = 0.23f + 0.04f, x_j = -0.22f + 0.02f, w = 0.90f, t = 0.10f;
         for (float x = -2.f; x <= x_j; x += 0.01f) pts.emplace_back(x, y_w);                  // left near face
         for (float x = x_j + w; x <= 2.f; x += 0.01f) pts.emplace_back(x, y_w);               // right near face
         for (float y = y_w; y <= y_w + t; y += 0.01f) { pts.emplace_back(x_j, y); pts.emplace_back(x_j + w, y); }   // jamb faces
@@ -393,7 +394,29 @@ int main()
         CHECK(w1_ccw > 0.f or w1_cw > 0.f);       // and the turn toward the target behind is allowed one way
     }
 
-    // 12. Fix round 5 (try78/79/80): the hull misses the robot's own FRONT. The self footprint from the REAL mesh
+    // 11b. ★ 2026-10-20 (Task 1b): the file the SESSION now loads for the outline is the robot node's `path` = shadow_footprint.obj
+    //      (shadow.stl + wheels + casters + housings + boundingObject boxes). Nothing in Shadow.proto reaches the +0.2471 front
+    //      cover of the DISPLAY mesh shadow.obj, so in simulation this outline lies inside the planning hull and adds no front
+    //      cover. This pins that, and that a return just outside the simulated front is contact for the guard.
+    {
+        rc::RobotFootprint::MeshReport rep;
+        const auto sim = rc::RobotFootprint::from_obj("/home/pbustos/robocomp/components/webots-shadow/protos/meshes/shadow_footprint.obj", 0.f, rep);
+        if (not sim.has_value()) std::println("  SKIP 11b: shadow_footprint.obj absent ({})", rep.reason);
+        else
+        {
+            float fy = 0.f; for (const auto &q : sim->polygon()) fy = std::max(fy, q.y());
+            float by = 0.f; for (const auto &q : body) by = std::max(by, q.y());
+            std::println("  session outline (shadow_footprint.obj): front {:.4f} vs hull {:.4f}", fy, by);
+            CHECK(fy <= by + 1e-3f);
+            const auto r = returns_of({Eigen::Vector2f(0.f, by + 0.02f)}, body);
+            CHECK(r.obstacles.size() == 1);
+            CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
+        }
+    }
+
+    // 12. Fix round 5 (try78/79/80): the hull misses the robot's own FRONT. ★ 2026-10-20: this block and 13 exercise the REAL
+    //     robot's display mesh (shadow.obj, front cover at +0.2471), which Shadow.proto does not draw; they pin that the guard still
+    //     handles a mesh that pokes out of the hull, so they keep loading shadow.obj on purpose. The self footprint from the REAL mesh
     //     (robot_concept/meshes/shadow.obj, read as the controller reads it) ∪ the planning hull, ⊕ σ_r on the mesh.
     {
         rc::RobotFootprint::MeshReport rep;

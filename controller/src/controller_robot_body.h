@@ -27,9 +27,9 @@
  * ★SHADOW IS CROSS-CHECKED AGAINST THE COMPILED HULL (Task 1b, 2026-10-20). The old display mesh `shadow.obj` omitted the two
  * drive wheels (Shadow.proto: r 0.1, h 0.05 on the lateral axle, x = ±0.259): |x|max 0.2420 against the true 0.284, so
  * deriving the body from it would have SHRUNK it ~42 mm per side. The robot node's `path` is now the absolute path of
- * webots-shadow/protos/meshes/shadow_footprint.obj (shadow.stl ∪ the two wheel cylinders, written by
+ * webots-shadow/protos/meshes/shadow_footprint.obj (shadow.stl ∪ the wheels, casters, housings and boundingObject boxes, written by
  * controller/tools/shadow_footprint.py), so ONE mesh is the source of the outline for every agent. The mesh body is used only
- * if it agrees with the compiled `shadow()` (|x|max 1 mm, |y|max 2 mm, area 1 %); an older mesh without wheels is refused
+ * if it agrees with the compiled `shadow()` (|x|max 1 mm, |y|max 1 mm, area 1 %); an older mesh without wheels is refused
  * and the compiled hull stays, with the numbers in the log. The startup report diffs them either way.
  *
  * ★WHAT HAPPENS WHEN IT FAILS. It falls back to `RobotFootprint::shadow()` — today's behaviour, so a failure

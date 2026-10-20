@@ -90,8 +90,7 @@ RobotFootprint load_robot_body(DSR::DSRGraph &graph,
     // ★SHADOW IS CROSS-CHECKED, NOT EXCLUDED (Task 1b, 2026-10-20). The robot node's `path` is now shadow_footprint.obj
     // (shadow.stl + the two drive wheels, ONE mesh for every agent), so for Shadow the mesh outline IS the compiled hull's
     // source. But an OLD mesh (shadow.obj: no wheels, |x|max 0.242) would shrink the body by 4 cm per side, so the mesh is
-    // accepted only if it agrees with the compiled hull: |x|max within 1 mm, |y|max within 2 mm (the compiled hull's
-    // outward simplification bulges the rear edge by 1.1 mm), area within 1 %. Otherwise the compiled hull stays.
+    // accepted only if it agrees with the compiled hull: |x|max and |y|max within 1 mm, area within 1 %. Otherwise the compiled hull stays.
     if (robot_name == "Shadow")
     {
         const RobotFootprint ref = RobotFootprint::shadow();
@@ -104,7 +103,7 @@ RobotFootprint load_robot_body(DSR::DSRGraph &graph,
                 ref_area += 0.5f * (q[i].x() * q[(i + 1) % n].y() - q[(i + 1) % n].x() * q[i].y());
         }
         const auto &m = report.mesh;
-        if (std::abs(m.x_max - rx) > 1e-3f or std::abs(m.y_max - ry) > 2e-3f or std::abs(m.area_m2 - ref_area) > 0.01f * ref_area)
+        if (std::abs(m.x_max - rx) > 1e-3f or std::abs(m.y_max - ry) > 1e-3f or std::abs(m.area_m2 - ref_area) > 0.01f * ref_area)
             return fall_back(std::format("the mesh '{}' disagrees with the compiled Shadow hull (|x|max {:.4f} vs {:.4f}, |y|max {:.4f} "
                                          "vs {:.4f}, area {:.4f} vs {:.4f}) — an old mesh without the two drive wheels?",
                                          report.resolved_path, m.x_max, rx, m.y_max, ry, m.area_m2, ref_area));
