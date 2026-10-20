@@ -59,6 +59,8 @@ void ControllerSession::read_base_odometry(const ControllerWorldModel &world_mod
             odo_v_ = *v;
             odo_w_ = *w;
             odo_valid_ = true;
+            // the producer's wall stamp of this sample (robot_concept: FullPose timestamp, wall ms — rt_twist.h)
+            odo_stamp_ms_ = static_cast<std::uint64_t>(graph_->get_attrib_by_name<robot_current_speed_timestamp_att>(*node).value_or(0));
         }
     }
 }
@@ -73,6 +75,8 @@ void ControllerSession::policy_reset()
     policy_last_why_.clear();
     policy_no_field_since_ms_ = 0;
     policy_last_tick_s_ = -1.0;
+    policy_sign_.reset();          // an operator Stop / a new activity re-arms the check (it is latched otherwise)
+    policy_prev_yaw_.reset();
 }
 
 ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::GoalSpec &spec, const std::string &who,
@@ -94,6 +98,35 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         policy_sent_.push_back({now_s, 0.f, 0.f});
     };
     if (not grid_planner_.has_world()) { hold("no planner map yet — no cost-to-go"); return out; }
+    // ★ review M6: ODOMETRY FRESHNESS — v_now / w_now and the unseen-contact evidence come from robot_current_*; older than
+    //   Controller.CommandFreshnessTauMs (the age past which the base itself treats a command as stale) they describe a
+    //   motion that is over: Blind, hold.
+    {
+        const auto wall_now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const float tau = std::max(1.f, prm.command_freshness_tau_ms);
+        if (not odo_valid_ or odo_stamp_ms_ == 0 or (wall_now > odo_stamp_ms_ and float(wall_now - odo_stamp_ms_) > tau))
+        {
+            const std::string why = not odo_valid_ or odo_stamp_ms_ == 0 ? "Blind — odometry stale (no robot_current_* speeds)"
+                : std::format("Blind — odometry stale ({} ms old > CommandFreshnessTauMs {:.0f})", wall_now - odo_stamp_ms_, tau);
+            if (why.substr(0, 30) != policy_last_why_.substr(0, 30)) std::println("[policy] {}: {}", who, why);
+            policy_last_why_ = why;
+            policy_last_mode_ = -1;
+            hold(why);
+            return out;
+        }
+    }
+    // ★ review I5: a turn sign the pose contradicts (OdoSignCheck, latched) — Blind: do not drive on a mirrored world
+    if (policy_sign_.contradicted())
+    {
+        const std::string why = "Blind — odometry turn sign contradicts the pose (robot_current_angular_speed vs the heading change, "
+                                "3 turning intervals in a row) — check the base/bridge sign";
+        if (why != policy_last_why_) std::println("[policy] {}: {}", who, why);
+        policy_last_why_ = why;
+        policy_last_mode_ = -1;
+        hold(why);
+        return out;
+    }
 
     // ── the BODY: contact is judged against the BARE hull (contact.cpp); the planner's safety margin is a route preference
     policy_body_ = approach_body_;
@@ -101,8 +134,9 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     const rc::RobotFootprint &body = *policy_body_;
 
     // ── the pose (the freshest one, as the tracker's control law used) — the ONLY quarter turn is to_policy_pose
-    const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    const rc::policy::Pose2 pose = rc::policy::to_policy_pose(cpose);
+    // ★ review C1: the pose is the CALLER's — the freshest it has (drive_with_policy: tracker_pose_ else the scan-aligned one;
+    //   a move order: read_robot_pose_latest this cycle). Never a member that only some paths refresh.
+    const rc::policy::Pose2 pose = rc::policy::to_policy_pose(robot_pose);
 
     // ── base limits: the policy's speeds never above the capability; accelerations from it; the deadband measured
     rc::policy::BaseLimitsInputs bi;
@@ -130,7 +164,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //    (GridPlanner::body_risk_at — the A*'s own per-metre charge; see grid_planner.h for the conversion)
     const float r_ins = body.inscribed_radius();
     auto free_fn = [this, r_ins, also_free](const Eigen::Vector2f &p)
-    { return grid_planner_.distance_at(p) > r_ins or (also_free and also_free(p)); };
+    { return rc::policy::field_free_from_distance(grid_planner_.distance_at(p), grid_planner_.cell_size(), r_ins) or (also_free and also_free(p)); };
     auto extra_fn = [this](const Eigen::Vector2f &p)
     { return std::max(0.f, grid_planner_.params.residual_risk_weight) * grid_planner_.body_risk_at(p); };
     const bool new_goal = not policy_goal_.has_value() or policy_goal_who_ != who or not rc::policy::same_goal(*policy_goal_, spec);
@@ -168,10 +202,24 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //   in force" would read a stopped robot as BLOCKED. Beyond the longest interval a tick can legitimately take (0.5 s, the
     //   clamp of the odometry step) the history restarts: no unseen-contact update this tick, the odometry re-anchored — and
     //   the evidence kept in the old odometry frame dropped with it (the base may have moved unseen by this integration).
-    const bool resumed = policy_last_tick_s_ < 0.0 or now_s - policy_last_tick_s_ > 0.5;
+    // ★ review I1: an explicit INTERRUPTION (policy_interrupt(): Pause / Halt / a hold / the LiDAR-stall hold) is the same
+    //   event, and the Navigator's committed plan and pending prediction are dropped unjudged (Navigator::interrupt).
+    const bool resumed = policy_interrupted_ or policy_last_tick_s_ < 0.0 or now_s - policy_last_tick_s_ > 0.5;
     const float dt_tick = resumed ? 0.f : static_cast<float>(std::max(0.0, now_s - policy_last_tick_s_));
     const float v_meas = odo_valid_ ? odo_v_ : 0.f, w_meas = odo_valid_ ? odo_w_ : 0.f;
-    if (resumed) { policy_sent_.clear(); policy_odom_.reset(); policy_unseen_.reset(); }
+    if (resumed)
+    {
+        if (policy_interrupted_ or policy_last_tick_s_ >= 0.0) policy_nav_.interrupt();
+        policy_interrupted_ = false;
+        policy_sent_.clear(); policy_odom_.reset(); policy_unseen_.reset();
+    }
+    // I5 evidence: the odometry's mean turn rate over the interval against the localised heading change over it
+    if (dt_tick > 0.f and policy_prev_yaw_.has_value())
+        policy_sign_.update(0.5f * (policy_prev_w_ + w_meas), std::remainder(pose.yaw - *policy_prev_yaw_, 2.f * std::numbers::pi_v<float>),
+                            dt_tick, limits.w_min_eff, prm.policy_sigma_rel_yaw_rad * std::sqrt(dt_tick));   // sigma: the relative
+                            // yaw sigma (per 1 s) as a random walk over the interval
+    policy_prev_yaw_ = pose.yaw;
+    policy_prev_w_ = w_meas;
     if (not policy_odom_.has_value()) policy_odom_ = pose;
     const rc::policy::Pose2 odom_before = *policy_odom_;
     {
@@ -334,9 +382,9 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     rc::policy::GoalAdapterParams gp;
     gp.tol_xy = path_controller.goal_threshold();
     gp.tol_yaw = path_controller.params.align_yaw_tol_rad;
-    // the cross's goal line lies one tolerance BEYOND the standoff, so the policy's "arrived" (field within tol_xy of the line)
-    // implies s >= standoff and the protocol's `through` (cross_progress) completes first
-    gp.past_m = standoff + gp.tol_xy;
+    // the cross's goal line lies 2 tol_xy BEYOND the standoff (review I3)
+    gp.past_m = standoff + 2.f * gp.tol_xy;   // review I3: real slack — the protocol's through (s >= standoff) is the ONE
+                                              // definition of arrival; decide() never reports Arrived for a Doorway
     gp.inscribed_radius_m = bare.inscribed_radius();
     const auto stop_here = [&](rc::why::Cause c, const std::string &why)
     {
@@ -374,7 +422,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         if (not step.finished and step.goal.has_value())
         {
             const std::string who = std::format("mission '{}' wp {}", mission_.selected_name(), step.index + 1);
-            const auto tick = policy_tick(*step.goal, who, robot_pose, obstacle_tracker, motion_commander, now);
+            const auto tick = policy_tick(*step.goal, who, cpose, obstacle_tracker, motion_commander, now);
             const bool skip = tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck);
             if (skip) std::println("[policy] {}: cannot be reached ({}) — skipped", who, tick.why);
             if (tick.verdict == PolicyVerdict::Arrived or skip)
@@ -420,23 +468,22 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 spec = rc::policy::heading_goal(cpose.pos, rc::policy::to_policy_pose(cpose).yaw + rc::anchor_wait_aim(cp.pose, half_len),
                                                 gp.tol_yaw);
             }
-            const auto tick = policy_tick(spec, who + (cp.drive ? "" : " (waiting)"), robot_pose, obstacle_tracker, motion_commander, now,
+            const auto tick = policy_tick(spec, who + (cp.drive ? "" : " (waiting)"), cpose, obstacle_tracker, motion_commander, now,
                                           corridor);
             if (tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck))
                 cross_hand_back(std::format("the local policy cannot drive it ({})", tick.why), /*timed_out=*/false, motion_commander);
-            else if (tick.verdict == PolicyVerdict::Arrived and cp.drive)
-                // the field's goal line is past the standoff: the protocol's through comes first, so this is a hold until it does
-                note_why(rc::why::Cause::PolicyHold, std::format("{}: at the goal line, waiting for the cross protocol's verdict", who));
+
         }
         anchor_cross_.reset();
         return;
     }
 
-    if (not current_plan_.has_value())
+    // review I4: gated on a TARGET (and, below, on the field), not on an A* route
+    if (not last_target_info_.has_value())
     {
         display.clear_robot_trajectory();
         clear_tracking_state();
-        stop_here(rc::why::Cause::NoTarget, "no plan held (the policy has no goal)");
+        stop_here(rc::why::Cause::NoTarget, "no target (the policy has no goal)");
         policy_reset();
         return;
     }
@@ -453,7 +500,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             return;
         }
         policy_tick(rc::policy::lockon_heading_goal(*last_target_info_, cpose, gp), std::format("lock-on {}", last_target_info_->node_name),
-                    robot_pose, obstacle_tracker, motion_commander, now);
+                    cpose, obstacle_tracker, motion_commander, now);
         return;
     }
 
@@ -482,7 +529,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 }
                 if (const auto spec = rc::policy::goal_for_target(*last_target_info_, cpose, std::nullopt, rc::policy::GoalMode::Orient,
                                                                   false, gp))
-                    policy_tick(*spec, std::format("orient {}", last_target_info_->node_name), robot_pose, obstacle_tracker,
+                    policy_tick(*spec, std::format("orient {}", last_target_info_->node_name), cpose, obstacle_tracker,
                                 motion_commander, now);
                 return;
             }
@@ -499,7 +546,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                                                   wants_final_facing(*last_target_info_), gp);
     if (not spec.has_value()) { stop_here(rc::why::Cause::PolicyHold, "no goal could be built"); return; }
     const std::string who = last_target_info_->node_name.empty() ? std::string("target") : last_target_info_->node_name;
-    const auto tick = policy_tick(*spec, who, robot_pose, obstacle_tracker, motion_commander, now);
+    const auto tick = policy_tick(*spec, who, cpose, obstacle_tracker, motion_commander, now);
     // ARRIVAL: the same protocol the tracker's arrival goes through (servo → lock-on, already there, approach-only, REACH)
     if (consume_goal_reached(tick.verdict == PolicyVerdict::Arrived, robot_pose, path_controller, obstacle_tracker,
                              motion_commander, display, affordance_manager, time_source, /*drive_base=*/false))
@@ -509,11 +556,14 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     }
     // NO FIELD ROUTE: the goal is not reachable on the map from here — the existing no-route clock reports it (5 s, the same
     // liveness bound the planner's no-route hold has: report_unreachable_if_no_route)
+    // review I4 / M4: "no route" = the FIELD at the robot is non-finite; the clock runs on that and nothing else resets it
     if (not std::isfinite(tick.field_m))
     {
         if (no_route_since_ms_ == 0) no_route_since_ms_ = now;
         note_why(rc::why::Cause::NoRoute, std::format("{}: the cost-to-go is infinite at the robot — no way to the goal on the map", who));
     }
+    else if (tick.verdict != PolicyVerdict::Unreachable and not tick.stuck)
+        no_route_since_ms_ = 0;
     // UNREACHABLE / STUCK: handed back through the protocol (a mouse target is dropped by the no-route clock)
     if (tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck))
     {

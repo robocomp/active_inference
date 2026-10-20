@@ -123,6 +123,9 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         world_model_pose_stamp_age_ms_ = static_cast<float>(*age);
     else
         world_model_pose_stamp_age_ms_ = -1.f;
+    // Task 8 (review C1): the wheels' measured speeds for the local policy — refreshed HERE, every cycle, so a move order
+    // (stepped before build_planning_step) reads them fresh too.
+    read_base_odometry(world_model, timestamp_ms);
 
     if (!world_model.refresh_graph_state())
     {
@@ -657,7 +660,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         }
 
     update_base_speed(*robot_pose, timestamp_ms);   // base speed for the contract stillness gate
-    read_base_odometry(world_model, timestamp_ms);  // Task 8: the wheels' measured speeds for the local policy
     overlay_now_ms_ = timestamp_ms;                 // overlay dead-reckoning target + base time
     overlay_lidar_ts_ms_ = obstacle_tracker.last_lidar_timestamp_ms();
     update_overlay_extrapolation(world_model, *robot_pose, timestamp_ms, obstacle_tracker.rt_block_lead_ms(),
@@ -3082,6 +3084,24 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         }
         no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
         short_path_since_ms_ = 0;        // nor a path ending short: there is no path
+        return true;
+    }
+    // ★ Task 8 ruling I4: with the local policy driving, DRIVING IS GATED ON THE FIELD, not on this A*. The A* still runs (the
+    //   route on the canvas, the legacy consumers of current_plan_), but its failure neither holds the base nor starts the
+    //   no-route clock (M4): drive_with_policy runs the policy whenever the cost-to-go at the robot is finite, and "no route"
+    //   — with its 5-s Unreachable clock — means the FIELD at the robot is non-finite. A start pose the footprint planner
+    //   refuses (the bare hull near a wall, inside the margin) therefore still drives.
+    if (policy_enabled())
+    {
+        if (step.target_changed or not current_plan_.has_value())
+        {
+            if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
+                current_plan_ = ControllerPathPlan{.room_path = *route};
+            else
+                current_plan_ = ControllerPathPlan{.room_path = {step.robot_pose.pos, step.target.room_pos}};   // display stub
+            plan_spline_valid_ = false;
+        }
+        short_path_since_ms_ = 0;
         return true;
     }
     if (step.target_changed || !current_plan_.has_value())

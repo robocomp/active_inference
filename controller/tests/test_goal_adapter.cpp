@@ -104,6 +104,19 @@ int main()
         const RoomGap g2{g.centre + Eigen::Vector2f(0.02f, 0.f), g.normal, width + 0.03f};
         const auto spec2 = goal_for_target(t, robot, g2, GoalMode::Cross, false, prm);
         CHECK("identity: a re-measured gap is the same doorway goal", spec and spec2 and same_goal(*spec, *spec2));
+        // I3: the controller places the line at standoff + 2 tol_xy — real slack beyond the protocol's through (s >= standoff):
+        // a gap estimate drifting FORWARD by tol_xy/2 moves the line with it, and through still comes first (no deadlock)
+        {
+            const float standoff = 2.0f, tol = 0.25f;
+            GoalAdapterParams q = prm; q.tol_xy = tol; q.past_m = standoff + 2.f * tol;
+            const auto s0 = doorway_goal(g, q);
+            const RoomGap drifted{g.centre + 0.5f * tol * g.normal, g.normal, g.width};
+            const auto s1 = doorway_goal(drifted, q);
+            const Eigen::Vector2f through_pt = drifted.centre + standoff * drifted.normal;   // where the protocol completes
+            const float line_ahead = (s1.points.front() - through_pt).dot(g.normal);
+            CHECK("I3: after a tol/2 forward drift the goal line is still >= 1.5 tol beyond the protocol's through point", line_ahead >= 1.5f * tol - 1e-4f);
+            CHECK("I3: a tol/2 drift is the same goal (no rebuild)", same_goal(s0, s1));
+        }
         CHECK("doorway: a cross with no measured gap gives no goal", not goal_for_target(t, robot, std::nullopt, GoalMode::Cross, false, prm).has_value());
     }
 
@@ -172,6 +185,59 @@ int main()
         r = route_goal_step(wps, 2, 4, true, 0.25f, 0.06f);
         CHECK("route: the last waypoint of the LAST lap keeps the end heading", r.index == 5 and r.goal and r.goal->goal.yaw and near(*r.goal->goal.yaw, 1.2f));
         CHECK("route: an empty tour is finished at once", route_goal_step({}, 1, 0, false, 0.25f, 0.06f).finished);
+    }
+
+    // ---- 4d. I5: odometry turn sign vs the pose's heading change
+    {
+        OdoSignCheck c;
+        const float dt = 0.1f, w = 0.4f, sig = 0.013f * std::sqrt(dt);
+        for (int k = 0; k < 10; ++k) c.update(w, w * dt, dt, 0.1f, sig);
+        CHECK("I5: consistent turning never contradicts", not c.contradicted());
+        c.update(w, -w * dt, dt, 0.1f, sig); c.update(w, -w * dt, dt, 0.1f, sig);
+        CHECK("I5: two opposite intervals (a pose jump + snap back) do not contradict", not c.contradicted());
+        c.update(w, w * dt, dt, 0.1f, sig);
+        c.update(w, -w * dt, dt, 0.1f, sig); c.update(w, 0.f, dt, 0.1f, sig); c.update(w, -w * dt, dt, 0.1f, sig);
+        CHECK("I5: an interval the pose cannot resolve is neutral (run continues, not reset)", c.run() == 2 and not c.contradicted());
+        c.update(0.05f, -0.05f, dt, 0.1f, sig);
+        CHECK("I5: below the deadband nothing is judged", c.run() == 2);
+        c.update(w, -w * dt, dt, 0.1f, sig);
+        CHECK("I5: a third opposite turning interval in a row contradicts the odometry (latched)", c.contradicted());
+        c.update(w, w * dt, dt, 0.1f, sig);
+        CHECK("I5: latched until reset", c.contradicted());
+    }
+
+    // ---- 4e. C1: the relative-motion path on a pose that MOVES between ticks (the session passes the fresh pose)
+    {
+        rc::RelativeMotion rm;
+        const auto free = [](const Eigen::Vector2f&, float) { return true; };
+        const auto inside = [](const Eigen::Vector2f&) { return true; };
+        Eigen::Vector2f pos(1.f, 1.f); float theta = 0.3f;
+        CHECK("C1: move 0.5 accepted", not rm.start(*rc::RelativeMotion::parse("move 0.5"), pos, theta, 0, free, inside).has_value());
+        const auto g0 = rm.policy_goal();
+        const Eigen::Vector2f fwd = rc::RelativeMotion::forward(theta);
+        CHECK("C1: the move's goal is 0.5 m ahead, facing the start heading (to_policy_pose of it)", g0 and not g0->turn
+              and (g0->pos - (pos + 0.5f * fwd)).norm() < 1e-5f
+              and near(wrapf(to_policy_pose({g0->pos, g0->theta}).yaw - to_policy_pose({pos, theta}).yaw), 0.f));
+        int ticks = 0;
+        for (; ticks < 40 and rm.active(); ++ticks)
+        {
+            pos += 0.05f * fwd;                                       // the robot moves between ticks
+            rm.policy_step(pos, theta, static_cast<std::uint64_t>(100 * (ticks + 1)), std::nullopt);
+            if (rm.active()) CHECK("C1: the goal stays where it was set while the robot moves", (rm.policy_goal()->pos - g0->pos).norm() < 1e-5f);
+        }
+        CHECK("C1: the step completes on the MOVED pose (within the move's 3 cm)", rm.view().phase == rc::RelativeMotion::Phase::Done and ticks <= 10);
+        // a 270-degree left turn on a turning pose: quarter-turn marks, never the short way round
+        rc::RelativeMotion rt; theta = 0.f;
+        CHECK("C1: turn 270 accepted", not rt.start(*rc::RelativeMotion::parse("turn 270"), pos, theta, 0, free, inside).has_value());
+        float last_goal = theta; bool monotone = true;
+        for (int k = 0; k < 200 and rt.active(); ++k)
+        {
+            const auto g = rt.policy_goal();
+            monotone = monotone and g->theta >= last_goal - 1e-4f; last_goal = g->theta;
+            theta += 0.05f;                                           // turning CCW as asked
+            rt.policy_step(pos, std::remainder(theta, 2.f * kPi), static_cast<std::uint64_t>(100 * (k + 1)), std::nullopt);
+        }
+        CHECK("C1: a 270 deg turn completes with goals that only advance CCW", rt.view().phase == rc::RelativeMotion::Phase::Done and monotone);
     }
 
     // ---- 5. goal identity: a goal that moved less than its own tolerance is the same goal (no rebuild)

@@ -207,6 +207,9 @@ public:
                            std::uint64_t now_ms, std::function<bool(const Eigen::Vector2f &)> also_free = {});
     // The policy's state belongs to one goal owner: dropped on Stop / abort and when the owner ends.
     void policy_reset();
+    // review I1: a cycle in which the policy did NOT drive although it owns the base (Pause / Halt / a no-step or hold / the
+    // LiDAR-stall hold): the next tick drops the committed plan and the pending prediction unjudged.
+    void policy_interrupt() { policy_interrupted_ = true; }
 
     // ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only: nothing that drives reads these.
     // The worker begin()s the evidence at the top of each control pass and selects the verdict at its end; every branch
@@ -390,6 +393,11 @@ private:
     double policy_odom_t_ = 0.0, policy_last_tick_s_ = -1.0;
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
     bool odo_valid_ = false;
+    std::uint64_t odo_stamp_ms_ = 0;                             // robot_current_speed_timestamp (wall ms) — review M6
+    bool policy_interrupted_ = false;                            // review I1
+    rc::policy::OdoSignCheck policy_sign_;                       // review I5
+    std::optional<float> policy_prev_yaw_;
+    float policy_prev_w_ = 0.f;
     int policy_last_mode_ = -1;
     std::string policy_last_why_;
     std::ofstream policy_csv_;

@@ -91,16 +91,24 @@ struct ScenarioResult
     std::string why;
 };
 
+// ★ Task 8 ruling I3 — ONE definition of "through": the PROTOCOL's (the controller's rc::cross_progress_complete: s >= the
+//   standoff along the gap normal). decide() never reports Arrived for a Doorway; the driver checks this predicate every
+//   tick, and the field's goal line lies 2 tol_xy BEYOND it (real slack, as the controller's goal_adapter places it).
+// 0.35 m = where the harness's crossings completed before I3 (field within tol_xy 0.25 of a goal line 0.6 m past the gap), so
+// the reviewed time-to-goal baselines measure the same completion point.
+constexpr float kThroughS = 0.35f;
+static bool doorway_through(const Goal& g, const V2& p) { return (p - g.p).dot(g.normal.normalized()) >= kThroughS; }
 static std::vector<V2> goal_points(const Goal& g)
 {
     if (g.kind != Goal::Kind::Doorway) return {g.p};
-    // ★ "distance to being through": a line across the gap, 0.6 m past its centre along the normal, over the lateral
-    //   span where the body's centre can be (half-width minus the inscribed radius; the centre point if none).
+    // "distance to being through": a line across the gap, kThroughS + 2 tol_xy past its centre along the normal, over the
+    // lateral span where the body's centre can be (half-width minus the inscribed radius; the centre point if none).
     const V2 n = g.normal.normalized(), lat(-n.y(), n.x());
     const float half = std::max(0.f, 0.5f * g.width - body().inscribed_radius());
+    const float past = kThroughS + 2.f * g.tol_xy;
     std::vector<V2> pts;
-    for (float t = -half; t <= half + 1e-4f; t += 0.05f) pts.push_back(g.p + 0.6f * n + t * lat);
-    if (pts.empty()) pts.push_back(g.p + 0.6f * n);
+    for (float t = -half; t <= half + 1e-4f; t += 0.05f) pts.push_back(g.p + past * n + t * lat);
+    if (pts.empty()) pts.push_back(g.p + past * n);
     return pts;
 }
 
@@ -187,6 +195,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
             for (const auto& gp : nav.goal_points()) res.goal_truth_clear = std::min(res.goal_truth_clear, world.clearance(err.to_truth(gp), false));
         }
         const Pose2 bel = err.believed(truth);
+        // the protocol's through (I3), judged on the believed pose like the controller's measured gap
+        if (goal.kind == Goal::Kind::Doorway and doorway_through(goal, bel.p)) { res.reached = true; res.why = "through"; break; }
 
         // ---- both LiDARs from the TRUE pose, re-expressed in the room frame on the pose believed at capture, buffered
         std::vector<Return> sweep;

@@ -19,6 +19,8 @@ void Navigator::set_goal(const Goal& goal, const CostToGo::Grid& grid, std::func
     goal_ = goal; grid_ = grid; free_ = std::move(free); extra_ = std::move(extra); goals_ = std::move(goal_points); trap_r_ = trap_radius_m;
     traps_.clear();
     failed_predictions_ = 0;
+    // ★ Task 8 I2: a world queued for the PREVIOUS goal must not overwrite this goal's free/extra (e.g. a doorway's corridor)
+    world_pending_ = false; pending_free_ = {}; pending_extra_ = {};
     monitor_.reset();
     plan_ = Plan{};
     build();

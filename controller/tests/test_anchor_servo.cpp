@@ -747,6 +747,8 @@ static void cross_progress_semantics()
     CHECK(rc::cross_progress(mid, standoff, gate) == rc::CrossProgress::Going);
     rc::interaction::RelPose bad; bad.x = Eigen::Vector3f(NAN, 0.f, 0.f);
     CHECK(rc::cross_progress(bad, standoff, gate) == rc::CrossProgress::Going);         // nothing to judge: not through
+    rc::interaction::RelPose badP = r; badP.P(0, 0) = NAN;                              // review M3: a non-finite covariance
+    CHECK(rc::cross_progress(badP, standoff, gate) == rc::CrossProgress::Going);
 }
 
 int main()

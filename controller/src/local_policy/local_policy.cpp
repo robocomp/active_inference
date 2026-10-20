@@ -159,6 +159,9 @@ Pose2 policy_start(const PolicyInput& in) { return advance(in.pose, in.v_now, in
 bool goal_reached(const PolicyInput& in)
 {
     if (in.goal == nullptr or (in.goal->kind != Goal::Kind::Heading and in.field == nullptr)) return false;
+    // ★ Task 8 ruling I3: a DOORWAY is never "arrived" here — whether a crossing is through is the protocol's one definition
+    //   (rc::cross_progress_complete on the measured gap), decided by the caller; the goal line lies 2 tol_xy beyond it.
+    if (in.goal->kind == Goal::Kind::Doorway) return false;
     return arrived(in, in.pose);
 }
 
@@ -258,7 +261,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     const Goal& g = *in.goal;
     if (g.kind != Goal::Kind::Heading and in.field == nullptr) { d.why = "place/doorway goal without a field"; return d; }
 
-    if (arrived(in, in.pose)) { d.mode = Decision::Mode::Arrived; d.why = "inside the goal tolerances"; return d; }
+    if (goal_reached(in)) { d.mode = Decision::Mode::Arrived; d.why = "inside the goal tolerances"; return d; }   // never a Doorway (I3)
     // ---- Blind: returns older than the window they describe — no contact prediction can be trusted
     if (in.returns_age_s > p.returns_max_age_s)
     {

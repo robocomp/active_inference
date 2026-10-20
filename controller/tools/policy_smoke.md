@@ -85,10 +85,22 @@ PASS criteria (the brief's): both crossings complete (`[anchor] cross: … — t
 **mode flapping < 1 change/s median**; no `Stuck`; no contact (Webots shows none; `v_meas` never stuck at 0 while `v`
 asks for motion for more than a plan duration).
 
+**MUST-PASS GATES (review I5, M5, M6) — stop the run if any fails:**
+
+* **Odometry turn sign** — no `[policy] … Blind — odometry turn sign contradicts the pose` line in the controller log
+  (`grep "turn sign contradicts" $D/logs/controller.log` must be empty), and in Drive rows with `|w_meas|` above the
+  deadband the sign of `w_meas` matches the sign of the change of `yaw` between consecutive rows.
+* **Field rebuild time** — every `[policy] goal for … field built in X ms` line has X <= 100 (two control periods; the unit
+  gate in test_grid_planner_curtain (6) measured 24 ms for a 20 x 12 m map with a soft layer):
+  `grep -o "field built in [0-9.]* ms" $D/logs/controller.log | awk '{if ($4 > 100) bad++} END {print bad+0, "over 100 ms"}'`
+* **Odometry fresh** — no `odometry stale` line while the base is driving (`grep "odometry stale" $D/logs/controller.log`).
+
 Also check, because they are first-time live facts:
 
 * **Rot sign**: in Drive rows, `w` and `w_meas` have the SAME sign (the session sends rot = +w; robot_current_angular_speed
   is CCW-positive). Opposite signs = stop the run: the base turns the wrong way.
+* **Doorway completion** is the protocol's (`[anchor] cross: … — through`); the policy never reports Arrived on a
+  Doorway goal (its goal line is 2 tol_xy beyond the standoff).
 * **The doorway field**: the `[policy] goal for cross door_2 …` line prints `field … m from the robot` — it must be FINITE
   (the far side is joined by the measured-gap corridor, goal_adapter.h `in_doorway_corridor`). `inf` = the goal line is
   not connected on the map.

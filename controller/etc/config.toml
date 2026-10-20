@@ -999,7 +999,10 @@ PoseDriftSigmaM = 0.064
 PoseDriftTimeS = 115.0
 # ── Task 8: the local policy DRIVES the base (controller_policy_drive.cpp). true = ONE authority: escape, backoff,
 # make-room, the returns caps, the band, the tracker's command path, the anchor servo, lock-on/orient motion, the
-# uncertainty limiter and the clearance ceiling are switched OFF (not deleted); false = the old chain, unchanged.
+# uncertainty limiter and the clearance ceiling are switched OFF (not deleted). false = the old chain drives again, but NOT
+# exactly as before Task 8: step_orient now reads the target yaw as the FORWARD heading (one convention, goal_adapter.h
+# facing_yaw_to_theta), which requires room_concept from THIS branch (afford_calib publishes bearing + pi/2); and the
+# helios far floor is cut from the contact band (only the policy reads it).
 Enabled = true
 # The two stated risk levels (local_policy.h PolicyParams): acceptable P(contact) per Drive decision; a Release only if
 # more likely contact-free than not.

@@ -118,6 +118,17 @@ inline bool in_doorway_corridor(const RoomGap& g, const Eigen::Vector2f& p, floa
     return s >= -back_m and s <= ahead_m and lat <= half;
 }
 
+// ★ The cost-to-go's FREE test on the planner's map (review I4: driving is gated on this field, not on the A*): the body's
+//   CENTRE can be at p at some heading iff the planner's distance to the nearest occupied cell exceeds the BARE body's
+//   inscribed radius. The A*'s footprint test (hull + FootprintSafetyMargin at 8 headings) is stricter on purpose — a
+//   route preference — and must not stop a body that fits from driving.
+//   distance_m is to the nearest occupied cell's CENTRE; the cell spans half a cell around it, so the obstacle's surface may be
+//   cell/2 closer: free iff distance - cell/2 > inscribed radius.
+inline bool field_free_from_distance(float distance_m, float cell_m, float inscribed_radius_m)
+{
+    return distance_m - 0.5f * cell_m > inscribed_radius_m;
+}
+
 // What the task layer is asking for.
 //   Place  — a reach standpoint / click target / relative move: p = target.room_pos; yaw = target.yaw_rad when the contract
 //            designed a facing (want_facing). A standpoint's yaw_rad is a FACING yaw (forward = +x at 0, GridPlanner's
@@ -164,6 +175,31 @@ inline RouteGoalStep route_goal_step(std::span<const RouteWaypoint> wps, int lap
     r.goal = place_goal(w.pos, r.index == total - 1 ? w.yaw : std::nullopt, tol_xy, tol_yaw);
     return r;
 }
+
+// ★ Task 8 ruling I5 — IS THE ODOMETRY'S TURN SIGN THE POSE'S? The policy rolls out from the measured w and UnseenContact
+//   predicts from it: a flipped robot_current_angular_speed would drive on a mirrored world. Each control interval in which
+//   the base turns (|w| >= w_min_eff, the deadband) and the localised heading changed by more than its own 2 sigma (sigma =
+//   the relative yaw sigma over the interval — below that the pose carries no sign) is evidence: agreeing signs reset the
+//   run, opposite signs extend it. kConsecutive = 3 opposite intervals in a row CONTRADICT the odometry. Why 3: a single
+//   relocalisation step of the pose touches at most TWO intervals (the jump, and the one after if it snaps back), so no
+//   single pose event can trip it, while a truly flipped sign contradicts every turning interval. Latched until reset.
+class OdoSignCheck
+{
+public:
+    static constexpr int kConsecutive = 3;
+    void update(float w_meas, float dyaw_pose, float dt, float w_min, float sigma_yaw)
+    {
+        if (not (dt > 0.f) or std::abs(w_meas) < w_min or std::abs(dyaw_pose) <= 2.f * sigma_yaw) return;
+        if ((dyaw_pose > 0.f) == (w_meas > 0.f)) run_ = 0;
+        else if (++run_ >= kConsecutive) contradicted_ = true;
+    }
+    [[nodiscard]] bool contradicted() const { return contradicted_; }
+    [[nodiscard]] int run() const { return run_; }
+    void reset() { run_ = 0; contradicted_ = false; }
+private:
+    int run_ = 0;
+    bool contradicted_ = false;
+};
 
 // ★ GOAL IDENTITY — a goal that moved by less than its OWN tolerance is the same goal (its meaning of "there" did not
 //   change), so the Navigator keeps its plan, traps and monitor; anything else is a new goal (set_goal). A measured gap

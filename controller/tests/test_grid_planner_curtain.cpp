@@ -5,12 +5,16 @@
 // invariants are re-checked against the soft layer.
 // Build+run (from controller/; pure Eigen + std):
 //   g++ -std=c++23 -O2 -Wall -Wextra -I/usr/include/eigen3 -Isrc tests/test_grid_planner_curtain.cpp
-//       src/grid_planner.cpp ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp
+//       src/grid_planner.cpp src/local_policy/cost_to_go.cpp ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp
 //       -o /tmp/tgpc && /tmp/tgpc   (one line)
 
 #include "grid_planner.h"
 #include "residual_risk.h"
 #include "route_failure_memory.h"
+#include "local_policy/cost_to_go.h"
+#include "local_policy/goal_adapter.h"
+
+#include <chrono>
 
 #include <cmath>
 #include <cstdio>
@@ -283,6 +287,59 @@ int main()
         check(empty.body_risk_at(on) == 0.f, "(5) no soft layer: 0");
         check((weak.grid_origin() - Eigen::Vector2f(weak.grid_origin())).norm() == 0.f and weak.cell_size() > 0.f,
               "(5) grid geometry exposed");
+    }
+
+    // ── 6. Task 8 review I4 + M5: driving gated on the FIELD; the field's rebuild time at the controller's size ─────────
+    std::printf("\n6. the policy's field vs the A*\n");
+    {
+        auto empty = planner_with({}, {});
+        const rc::RobotFootprint bare = rc::RobotFootprint::shadow();
+        const float r_ins = bare.inscribed_radius();
+        // a pose beside the west wall, facing along it: the bare body fits, the A*'s hull + 0.05 margin does not
+        std::optional<Eigen::Vector2f> beside;
+        for (float x = 0.15f; x < 0.6f and not beside; x += 0.01f)
+        {
+            const Eigen::Vector2f p(x, 3.f);
+            if (not empty.pose_free(p, static_cast<float>(M_PI_2)) and rc::policy::field_free_from_distance(empty.distance_at(p), empty.cell_size(), r_ins))
+                beside = p;
+        }
+        check(beside.has_value(), "(6) there is a pose the A*'s footprint test refuses while the bare body's centre fits");
+        if (beside)
+        {
+            const float cell = 0.05f;
+            const Eigen::Vector2f origin = empty.grid_origin() - 0.5f * Eigen::Vector2f::Constant(empty.cell_size());
+            const rc::policy::CostToGo::Grid g{origin, cell, int(std::ceil(empty.width() * empty.cell_size() / cell)) + 1,
+                                               int(std::ceil(empty.height() * empty.cell_size() / cell)) + 1};
+            rc::policy::CostToGo f;
+            const std::vector<Eigen::Vector2f> goal{{4.f, 3.f}};
+            f.build(g, [&](const Eigen::Vector2f &p) { return rc::policy::field_free_from_distance(empty.distance_at(p), empty.cell_size(), r_ins); },
+                    [](const Eigen::Vector2f &) { return 0.f; }, goal);
+            std::printf("      beside the wall at (%.2f, %.2f): A* pose_free=%d, field %.2f m\n", beside->x(), beside->y(),
+                        empty.pose_free(*beside, static_cast<float>(M_PI_2)) ? 1 : 0, f.at(*beside));
+            check(std::isfinite(f.at(*beside)) and f.reachable(*beside), "(6) I4: the policy's field is finite there — it drives");
+        }
+        // M5: a 20 x 12 m apartment-size map with a soft residual layer over a quarter of it, the field at 0.05 m with the
+        // residual density (the controller's set_goal / update_world path). Gate: <= 100 ms (two 50-ms control periods; a
+        // rebuild happens at most once per plan, >= 1 s apart).
+        rc::GridPlanner big;
+        big.params.cell_size_m = 0.10f;
+        big.params.safety_margin_m = 0.05f;
+        std::vector<Eigen::Vector2f> soft;
+        for (float x = 5.f; x < 10.f; x += kRes) for (float y = 0.f; y < 12.f; y += 0.25f) soft.emplace_back(x, y);
+        big.set_world({{0.f, 0.f}, {20.f, 0.f}, {20.f, 12.f}, {0.f, 12.f}}, {},
+                      rc::OccupiedCells{.centres = soft, .cell_size_m = kRes, .risk_nats = uniform_risk(soft.size(), 0.6f, 1.5f)});
+        const float cell = 0.05f;
+        const Eigen::Vector2f origin = big.grid_origin() - 0.5f * Eigen::Vector2f::Constant(big.cell_size());
+        const rc::policy::CostToGo::Grid g{origin, cell, int(std::ceil(big.width() * big.cell_size() / cell)) + 1,
+                                           int(std::ceil(big.height() * big.cell_size() / cell)) + 1};
+        const std::vector<Eigen::Vector2f> goal{{18.f, 6.f}};
+        const auto t0 = std::chrono::steady_clock::now();
+        rc::policy::CostToGo f;
+        f.build(g, [&](const Eigen::Vector2f &p) { return rc::policy::field_free_from_distance(big.distance_at(p), big.cell_size(), r_ins); },
+                [&](const Eigen::Vector2f &p) { return big.params.residual_risk_weight * big.body_risk_at(p); }, goal);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("      field rebuild, 20 x 12 m at 0.05 m (%d x %d cells) with a soft layer: %.1f ms\n", g.w, g.h, ms);
+        check(ms <= 100.0, "(6) M5: the field rebuild at the controller's size takes <= 100 ms");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILED", failures, failures == 1 ? "" : "s");

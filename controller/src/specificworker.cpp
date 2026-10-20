@@ -783,6 +783,7 @@ void SpecificWorker::compute()
 	const auto now_ms = current_time_ms();
 	if (!sync_world_state(now_ms))
 	{
+		session_.policy_interrupt();   // review I1
 		// No world this cycle: a relative motion must not coast on its last command.
 		if (relative_motion_.active()) motion_commander_.stop_robot();
 		if (base_probe_.active()) { base_probe_.cancel(); motion_commander_.stop_robot(); std::println("[probe] cancelled: no world"); }
@@ -805,7 +806,10 @@ void SpecificWorker::compute()
 	const auto step = build_planning_step(now_ms);
 	update_selected_affordance_label();
 	if (!step.has_value())
+	{
+		session_.policy_interrupt();   // review I1
 		return;
+	}
 
 	// HALT IS CHECKED BEFORE PLANNING, not after. ensure_current_plan() steps an in-flight escape maneuver,
 	// which commands the base directly — so a halt tested further down would leave Stop unable to stop a
@@ -817,6 +821,7 @@ void SpecificWorker::compute()
 		                  paused_ ? std::string("PAUSED — press Pause again to resume (the route is kept)")
 		                          : std::string("driving is off — Run not pressed, or Stop / abort / a finished mission "
 		                                        "disabled it; press Run or click a target"));
+		session_.policy_interrupt();   // review I1: the policy did not drive this cycle
 		if (!stop_sent_when_halted_)
 		{
 			// ★PAUSE MUST NOT CLEAR THE PATH. path_controller_.stop() wipes path_room_, which is
@@ -835,6 +840,7 @@ void SpecificWorker::compute()
 
 	if (!ensure_current_plan(*step))
 	{
+		session_.policy_interrupt();   // review I1: a hold — the policy did not drive this cycle
 		// No route held too long ⇒ tell the producer (the early return below never reaches execute_plan).
 		session_.report_unreachable_if_no_route(affordance_manager_, [this]() { return current_time_ms(); });
 		// ★THE DISPLAY MUST BE UPDATED HERE TOO, and its absence is why a hold looked like a frozen
@@ -1642,6 +1648,7 @@ void SpecificWorker::control_loop()
 			if (stalled)
 			{
 				motion_commander_.stop_robot();
+				session_.policy_interrupt();   // review I1: the LiDAR-stall hold interrupts the policy's plan
 				// Try to bring the stream back. Bounded and spaced; see recover_lidar_media().
 				recover_lidar_media();
 			}
@@ -2266,7 +2273,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		const auto g = relative_motion_.policy_goal();
 		if (g.has_value())
 		{
-			const float yaw = g->theta + static_cast<float>(M_PI_2);   // the controller's theta -> the policy's forward yaw
+			const float yaw = rc::policy::to_policy_pose({g->pos, g->theta}).yaw;   // the ONE conversion (goal_adapter.h)
 			const auto &rp = relative_motion_.params;
 			const auto spec = g->turn ? rc::policy::heading_goal(g->pos, yaw, rp.yaw_tol_rad)
 			                          : rc::policy::place_goal(g->pos, yaw, rp.pos_tol_m, rp.yaw_tol_rad);
@@ -2284,7 +2291,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 			const auto v = relative_motion_.view();
 			std::println("[move] relative motion #{} '{}' {}: {} — at ({:.2f},{:.2f}) yaw {:.0f} deg (local policy)", v.id, v.text,
 			             rc::RelativeMotion::phase_name(v.phase), v.last_event, pose->pos.x(), pose->pos.y(),
-			             (pose->theta + M_PI_2) * 180.0 / M_PI);
+			             rc::policy::to_policy_pose(*pose).yaw * 180.0 / M_PI);
 		}
 		update_custom_widget(*pose);
 		return true;

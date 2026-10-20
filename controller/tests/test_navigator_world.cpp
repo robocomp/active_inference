@@ -62,6 +62,44 @@ int main()
     std::printf("   field at the start: %.2f m open, %.2f m partitioned\n", f_open, nav.field().at(start));
     CHECK("no trap was invented by the world change", nav.traps().empty());
 
+    // ---- I1: an INTERRUPTION is not evidence — the committed plan and its prediction are dropped unjudged
+    {
+        Navigator n2;
+        n2.set_goal(goal, grid, open_room, zero, {goal.p}, body.circumscribed_radius());
+        PolicyInput q = in; q.pose = {start, 0.f}; q.v_now = q.w_now = 0.f; q.now_s = 100.0;
+        const auto a = n2.step(q, pp);
+        CHECK("I1: a Drive plan is committed", a.d.mode == Decision::Mode::Drive and n2.plan().active);
+        // the base is paused for 5 s: nothing moved. Without interrupt() the plan completes and is judged a FAILED prediction.
+        Navigator n3 = n2;
+        q.now_s = 105.0;
+        const auto judged = n3.step(q, pp);
+        CHECK("I1 (control): judged after a pause, the unexecuted plan reads as a failed prediction", judged.d.prediction_failed or n3.failed_predictions() > 0);
+        n2.interrupt();
+        CHECK("I1: interrupt() drops the plan", not n2.plan().active);
+        const auto b = n2.step(q, pp);
+        CHECK("I1: after interrupt() the resumed decision is not a failed prediction, no trap", not b.d.prediction_failed and not b.trap
+              and n2.failed_predictions() == 0 and n2.traps().empty());
+    }
+    // ---- I2: set_goal clears a world queued for the previous goal (Place -> Doorway keeps the corridor)
+    {
+        Navigator n4;
+        n4.set_goal(goal, grid, open_room, zero, {goal.p}, body.circumscribed_radius());
+        const auto walled = [](const Eigen::Vector2f& p) { return p.x() < 4.f and p.x() > 0.3f and p.y() > 0.3f and p.y() < 3.7f; };
+        n4.update_world(walled, zero);                       // queued for the Place goal: the right half is closed
+        const auto with_corridor = [walled](const Eigen::Vector2f& p) { return walled(p) or (p.y() > 1.7f and p.y() < 2.3f and p.x() < 7.8f); };
+        const Goal door{.kind = Goal::Kind::Doorway, .p = {4.f, 2.f}, .yaw = {}, .normal = {1.f, 0.f}, .width = 0.9f};
+        n4.set_goal(door, grid, with_corridor, zero, {Eigen::Vector2f(6.f, 2.f)}, body.circumscribed_radius());
+        CHECK("I2: set_goal clears the pending world", not n4.world_pending());
+        PolicyInput q = in; q.pose = {Eigen::Vector2f(2.f, 2.f), 0.f}; q.v_now = q.w_now = 0.f; q.now_s = 200.0;
+        n4.step(q, pp);
+        CHECK("I2: the doorway's corridor survives the next decision (goal still reachable)", std::isfinite(n4.field().at({2.f, 2.f})));
+        // ---- I3: a Doorway is never Arrived by decide(): standing ON the goal line, the session's protocol decides
+        q.pose = {Eigen::Vector2f(6.f, 2.f), 0.f}; q.now_s = 300.0;
+        n4.interrupt();
+        const auto on_line = n4.step(q, pp);
+        CHECK("I3: on a doorway's goal line decide() does not report Arrived", on_line.d.mode != Decision::Mode::Arrived);
+    }
+
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);
     return fails == 0 ? 0 : 1;
 }

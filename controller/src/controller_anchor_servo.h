@@ -329,7 +329,7 @@ struct CrossThroughGate
 enum class CrossProgress { Going, Through, NotACrossing };
 [[nodiscard]] inline CrossProgress cross_progress(const rc::interaction::RelPose& drive_pose, float standoff, const CrossThroughGate& gate)
 {
-    if (not drive_pose.x.allFinite()) return CrossProgress::Going;
+    if (not drive_pose.x.allFinite() or not drive_pose.P.allFinite()) return CrossProgress::Going;   // review M3
     if (not (anchor_cross_geometry(drive_pose).s >= standoff)) return CrossProgress::Going;
     return gate.through(true) ? CrossProgress::Through : CrossProgress::NotACrossing;
 }

@@ -82,6 +82,10 @@ public:
     void update_world(std::function<bool(const Eigen::Vector2f&)> free, std::function<float(const Eigen::Vector2f&)> extra)
     { pending_free_ = std::move(free); pending_extra_ = std::move(extra); world_pending_ = true; }
     bool world_pending() const { return world_pending_; }
+    // ★ Task 8 ruling I1 — AN INTERRUPTION IS NOT EVIDENCE. After a Pause / Halt / hold / LiDAR stall the committed plan and
+    //   the pending prediction are dropped WITHOUT being judged (the base did not execute them, so their outcome says
+    //   nothing about the world): no failed prediction, no trap. Goal, field and traps are kept.
+    void interrupt() { plan_ = Plan{}; monitor_.reset(); }
 
     const CostToGo& field() const { return field_; }
     const std::vector<Trap>& traps() const { return traps_; }
