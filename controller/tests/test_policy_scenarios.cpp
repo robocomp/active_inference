@@ -240,9 +240,12 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         const float v_meas = base.v, w_meas = base.w;     // odometry at the start of the tick
         const float sv = 1.f + slip(rng), sw = 1.f + slip(rng);
         bool touched = false;
+        std::vector<UnseenContact::CmdSeg> in_force;     // the commands the wheels actually followed this tick
         for (float s = 0.f; s < kTick - 1e-6f; s += kSub)
         {
             base.step_velocity(t + s, kSub);
+            if (not in_force.empty() and in_force.back().v == base.cmd_v and in_force.back().w == base.cmd_w) in_force.back().dt += kSub;
+            else in_force.push_back({kSub, base.cmd_v, base.cmd_w});
             const Pose2 nxt = sim2d::integrate(truth, base.v * sv, base.w * sw, kSub);
             // the world pushes back: the body stays put and the base stalls (its wheels stop)
             if (contact.touches(nxt)) { touched = true; base.v = base.w = 0.f; continue; }
@@ -254,7 +257,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         const V2 fwd(std::cos(odom_before.yaw), std::sin(odom_before.yaw));
         const float ds = (odom.p - odom_before.p).dot(fwd), dyaw = sim2d::wrap(odom.yaw - odom_before.yaw);
         // ★ D3: the command IN EFFECT at the wheels and the measured velocity at the tick's start
-        unseen.update(base.cmd_v, base.cmd_w, v_meas, w_meas, ds, dyaw, kTick, odom, base.lim, B, 0.005f);
+        // ★ review fix round 3: the commands IN FORCE per sub-interval (the latency queue), not the latest one
+        unseen.update(std::span<const UnseenContact::CmdSeg>(in_force), v_meas, w_meas, ds, dyaw, odom, base.lim, B, 0.005f);
         res.path_m += (truth.p - before.p).norm();
 
         // ★ TRAJECTORY ORACLE (review H3): once the true centre has left a trap's disc it must never re-enter it

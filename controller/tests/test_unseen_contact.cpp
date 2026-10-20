@@ -5,6 +5,9 @@
 #include "../src/local_policy/unseen_contact.h"
 
 #include <cmath>
+#include <random>
+#include <span>
+#include <vector>
 #include <cstdio>
 
 using namespace rc::policy;
@@ -117,6 +120,42 @@ int main()
         std::printf("  odometry frame: ahead of the body %.3f m before the jump, %.3f m after\n", ahead_a, ahead_b);
         CHECK("odometry_frame: the hypothesis follows the body through a localisation jump",
               h_odom.size() == 1 and std::abs(ahead_a - ahead_b) < 1e-4f and std::abs(ahead_a - h_odom[0].p.x()) < 1e-4f);
+    }
+    { // rapid_reversal_no_phantom (review fix round 3): w flips +-0.3 every 50 ms tick, each command executed 60 +- 20 ms
+      // after it is sent (uniform jitter); the base ramps at a_rot toward the command in force and odometry reports that
+      // motion. Given the commands IN FORCE per sub-interval, no direction may rise above 0.05. (With the latest command
+      // alone the same data read as blocked turning: printed for contrast.)
+        BaseLimits rb = b; rb.a_lin = 1.f; rb.d_lin = 1.f; rb.a_rot = 2.f; rb.d_rot = 2.f; rb.v_min_eff = 0.03f; rb.w_min_eff = 0.08f;
+        std::mt19937 g(9); std::uniform_real_distribution<float> jit(-0.02f, 0.02f);
+        struct Sent { float t_apply, w; };
+        std::vector<Sent> sent;
+        UnseenContact u, naive;
+        const float tick = 0.05f, sub = 0.001f;
+        float w = 0.f, cmd_in_force = 0.f, last_sent = 0.f;
+        Pose2 odom = pose;
+        for (int i = 0; i < 200; ++i)
+        {
+            const float t0 = i * tick;
+            const float wc = (i % 2 == 0) ? 0.3f : -0.3f;
+            sent.push_back({t0 + 0.06f + jit(g), wc}); last_sent = wc;
+            std::vector<UnseenContact::CmdSeg> segs;
+            const float w_start = w; float dyaw = 0.f;
+            for (float tt = 0.f; tt < tick - 1e-6f; tt += sub)
+            {
+                for (const auto& sd : sent) if (sd.t_apply <= t0 + tt + 1e-6f) cmd_in_force = sd.w;   // latest applied
+                std::erase_if(sent, [&](const Sent& sd) { return sd.t_apply <= t0 + tt + 1e-6f and sd.w != cmd_in_force; });
+                dyaw += UnseenContact::ramp(w, cmd_in_force, rb.a_rot, rb.d_rot, sub, &w);
+                if (not segs.empty() and segs.back().w == cmd_in_force) segs.back().dt += sub; else segs.push_back({sub, 0.f, cmd_in_force});
+            }
+            odom.yaw += dyaw;
+            u.update(std::span<const UnseenContact::CmdSeg>(segs), 0.f, w_start, 0.f, dyaw, odom, rb, body, 0.005f);
+            naive.update(0.f, last_sent, 0.f, w_start, 0.f, dyaw, tick, odom, rb, body, 0.005f);
+        }
+        float worst = 0.f, worst_naive = 0.f;
+        for (const auto& h : u.hypotheses()) worst = std::max(worst, h.p_exist);
+        for (const auto& h : naive.hypotheses()) worst_naive = std::max(worst_naive, h.p_exist);
+        std::printf("  rapid reversal: max p_exist %.2e with the commands in force, %.3f with the latest command alone\n", worst, worst_naive);
+        CHECK("rapid_reversal_no_phantom", worst <= 0.05f);
     }
     { // startup_ramp_no_hypothesis (D3): a real base (a_lin 1 m/s^2, a_rot 2 rad/s^2, 60 ms of nothing first) asked for
       // 0.5 m/s and 1.5 rad/s from rest; odometry reports exactly the ramp it executes. The free prediction follows the

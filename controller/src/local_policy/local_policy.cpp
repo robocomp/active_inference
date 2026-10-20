@@ -99,6 +99,7 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 // rate = best progress RATE (m/s, round 5): max(prog / dur, max over eligible continuations of
 // progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
 struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{}, plan_end{};
+              bool has_cont = false; float cont_v = 0.f, cont_w = 0.f, cont_dur = 0.f;
               bool elig = false, lpc_done = false; int conts = -1; };
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
@@ -155,6 +156,11 @@ const char* mode_name(Decision::Mode m)
 }
 
 Pose2 policy_start(const PolicyInput& in) { return advance(in.pose, in.v_now, in.w_now, std::max(0.f, in.latency_s)); }
+bool goal_reached(const PolicyInput& in)
+{
+    if (in.goal == nullptr or (in.goal->kind != Goal::Kind::Heading and in.field == nullptr)) return false;
+    return arrived(in, in.pose);
+}
 
 // ★ Continuability: from a pose AT REST (every candidate ends braked), the coarse set spans the dynamic window
 //   from rest — v in n_cont_v values over [-min(v_max, a_lin*T), +...], w likewise with a_rot — minus the deadband
@@ -179,7 +185,7 @@ std::vector<std::pair<float, float>> coarse_set(const PolicyInput& in, const Pol
 
 // The coarse continuation ROLLOUTS from a pose at rest, computed once per end pose and cached (round 4: they feed both
 // the continuability count and the second step of the two-step progress, and the Drive bound below).
-struct Conts { std::vector<std::vector<Pose2>> sw; bool arrived = false, done = false; int n = 0; };
+struct Conts { std::vector<std::vector<Pose2>> sw; std::vector<std::pair<float, float>> cmd; bool arrived = false, done = false; int n = 0; };
 Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
 {
     Conts c; c.done = true;
@@ -187,7 +193,7 @@ Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     c.n = int(set.size());
     if (in.body == nullptr or in.goal == nullptr or (in.goal->kind != Goal::Kind::Heading and in.field == nullptr)) return c;
     if (arrived(in, from)) { c.arrived = true; return c; }
-    for (const auto& [v, w] : set) c.sw.push_back(rollout(from, 0.f, 0.f, v, w, p.horizon_s, in.base, p.dt));
+    for (const auto& [v, w] : set) { c.sw.push_back(rollout(from, 0.f, 0.f, v, w, p.horizon_s, in.base, p.dt)); c.cmd.emplace_back(v, w); }
     return c;
 }
 // `in.returns` are surface cells already (decide() merges once per cycle).
@@ -197,7 +203,7 @@ Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
 //   something — count it for continuability (progress from `from` >= 0), or raise best_prog / best_rate.
 float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from, const Conts& c,
                  const Pose2* ref = nullptr, float base_dur = 0.f, float* best_prog = nullptr, float* best_rate = nullptr,
-                 float* best_rate_dur = nullptr, Pose2* best_rate_end = nullptr)
+                 float* best_rate_dur = nullptr, Pose2* best_rate_end = nullptr, std::pair<float, float>* best_rate_cmd = nullptr)
 {
     if (best_rate_dur) *best_rate_dur = 0.f;
     if (best_prog) *best_prog = -kInf;
@@ -222,7 +228,7 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
                                                  std::log1p(-p.risk_eps));
         if (not eligible(lps, p)) continue;
         if (need_k) ++k;
-        if (ref) { bp = std::max(bp, it.pr); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; if (best_rate_end) *best_rate_end = c.sw[it.i].back(); } }
+        if (ref) { bp = std::max(bp, it.pr); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; if (best_rate_end) *best_rate_end = c.sw[it.i].back(); if (best_rate_cmd) *best_rate_cmd = c.cmd[it.i]; } }
     }
     if (best_prog) *best_prog = bp;
     if (best_rate) *best_rate = br;
@@ -235,7 +241,7 @@ float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, cons
 float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pose2& from)
 {
     if (in0.body == nullptr) return log_p_continuable_cells(in0, p, from);   // (it answers the no-body case itself)
-    const auto cells = denoise_returns(in0.returns);
+    const auto cells = in0.returns_denoised ? std::vector<Return>(in0.returns.begin(), in0.returns.end()) : denoise_returns(in0.returns);
     PolicyInput in = in0; in.returns = cells;
     return log_p_continuable_cells(in, p, from);
 }
@@ -247,7 +253,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     // ---- a NaN/inf anywhere would silently poison every probability: no prediction, stop
     if (not finite_input(in0)) { d.mode = Decision::Mode::Blind; d.why = "non-finite input"; return d; }
     // ★ returns -> denoised obstacles ONCE per cycle (contact.h): every candidate and continuation sweeps the same set.
-    const auto cells = denoise_returns(in0.returns);
+    const auto cells = in0.returns_denoised ? std::vector<Return>(in0.returns.begin(), in0.returns.end()) : denoise_returns(in0.returns);
     PolicyInput in = in0; in.returns = cells;
     const Goal& g = *in.goal;
     if (g.kind != Goal::Kind::Heading and in.field == nullptr) { d.why = "place/doorway goal without a field"; return d; }
@@ -335,17 +341,23 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         if (c.lpc_done) return;
         float second = -kInf, second_rate = -kInf, second_dur = 0.f;
         Pose2 second_end = c.end;
-        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end);
+        std::pair<float, float> second_cmd{0.f, 0.f};
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end, &second_cmd);
         c.prog2 = std::max(c.prog, second);
         c.rate = std::max(c.prog / c.dur, second_rate);
         const bool one_step = c.prog / c.dur >= second_rate;
         c.tau = one_step ? c.dur : c.dur + second_dur;          // the plan the rate belongs to
         c.plan_end = one_step ? c.end : second_end;
+        c.has_cont = not one_step; c.cont_v = second_cmd.first; c.cont_w = second_cmd.second; c.cont_dur = one_step ? 0.f : second_dur;
         c.lpc_done = true;
     };
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
     {
         d.mode = m; d.v = c.v; d.w = c.w; d.log_p_safe = c.lps; d.log_p_cont = c.lpc; d.progress_m = c.prog2; d.why = std::move(why);
+        // the PLAN (review fix round 3): the candidate, then — for a Drive whose rate came from it — the continuation
+        d.plan_dur1 = c.dur;
+        d.plan_has_cont = m == Decision::Mode::Drive and c.has_cont;
+        d.plan_v2 = d.plan_has_cont ? c.cont_v : 0.f; d.plan_w2 = d.plan_has_cont ? c.cont_w : 0.f; d.plan_dur2 = d.plan_has_cont ? c.cont_dur : 0.f;
         d.prediction_failed = m == Decision::Mode::Release and prediction_failed;
         // ★ M1 (review): ANY Release abandons the plan the pending prediction was about — clear it; "stuck" is the
         //   failure of an UNINTERRUPTED Drive plan.

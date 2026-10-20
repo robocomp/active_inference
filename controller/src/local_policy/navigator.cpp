@@ -18,6 +18,7 @@ void Navigator::set_goal(const Goal& goal, const CostToGo::Grid& grid, std::func
     goal_ = goal; grid_ = grid; free_ = std::move(free); extra_ = std::move(extra); goals_ = std::move(goal_points); trap_r_ = trap_radius_m;
     traps_.clear();
     monitor_.reset();
+    plan_ = Plan{};
     build();
 }
 
@@ -51,11 +52,75 @@ Eigen::Vector2f Navigator::downhill(const Eigen::Vector2f& p) const
     return dir;
 }
 
+std::pair<float, float> Navigator::command_at(float e, const PolicyParams& p) const
+{
+    if (e < p.horizon_s) return {plan_.v1, plan_.w1};
+    if (e < plan_.dur1 or not plan_.has2) return {0.f, 0.f};                      // braking to rest
+    if (e < plan_.dur1 + p.horizon_s) return {plan_.v2, plan_.w2};
+    return {0.f, 0.f};
+}
+
+std::vector<Pose2> Navigator::remaining_sweep(const Pose2& start, float v0, float w0, float e, const BaseLimits& b, const PolicyParams& p) const
+{
+    std::vector<Pose2> sw;
+    auto append = [&](std::vector<Pose2> part) { if (not sw.empty() and not part.empty()) part.erase(part.begin()); sw.insert(sw.end(), part.begin(), part.end()); };
+    if (e < plan_.dur1)
+    {
+        const float hold = std::max(0.f, p.horizon_s - e);                       // 0: the brake phase
+        append(rollout(start, v0, w0, hold > 0.f ? plan_.v1 : 0.f, hold > 0.f ? plan_.w1 : 0.f, hold, b, p.dt));
+        if (plan_.has2) append(rollout(sw.back(), 0.f, 0.f, plan_.v2, plan_.w2, p.horizon_s, b, p.dt));
+    }
+    else if (plan_.has2)
+    {
+        const float e2 = e - plan_.dur1, hold = std::max(0.f, p.horizon_s - e2);
+        append(rollout(start, v0, w0, hold > 0.f ? plan_.v2 : 0.f, hold > 0.f ? plan_.w2 : 0.f, hold, b, p.dt));
+    }
+    else sw.push_back(start);
+    return sw;
+}
+
 Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
 {
     Step s;
     in.goal = &goal_; in.field = &field_; in.progress_field = nullptr;   // one field for everything
+    // ★ denoise ONCE: the plan check and decide() see the same obstacles
+    const auto obstacles = in.returns_denoised ? std::vector<Return>(in.returns.begin(), in.returns.end()) : denoise_returns(in.returns);
+    in.returns = obstacles; in.returns_denoised = true;
+
+    // ---- continue the committed plan unless (a) its remaining sweep is too risky, (b) it completed, (c) the world
+    //      changed / the input is blind / the goal is reached (those go to decide(), which answers them)
+    if (plan_.active and in.body != nullptr)
+    {
+        const float e = float(in.now_s - plan_.t0);
+        const bool completed = e >= plan_.dur1 + (plan_.has2 ? plan_.dur2 : 0.f);
+        const bool blind_or_done = not std::isfinite(in.pose.p.x()) or in.returns_age_s > p.returns_max_age_s or goal_reached(in);
+        if (not completed and not blind_or_done)
+        {
+            const auto sw = remaining_sweep(policy_start(in), in.v_now, in.w_now, e, in.base, p);
+            const float lps = log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m);
+            const float P = 1.f - std::exp(lps);
+            s.plan_remaining_p = P;
+            const float bar = plan_.mode == Decision::Mode::Release ? p.release_risk_max : p.risk_eps;
+            if (P <= bar)
+            {
+                s.d = plan_.d;
+                const auto [v, w] = command_at(e, p);
+                s.d.v = v; s.d.w = w; s.d.prediction_failed = false;
+                return s;
+            }
+            monitor_.reset();                  // (a): replaced, not judged
+        }
+        else if (not completed) monitor_.reset();   // (c) blind / arrived: not judged
+        plan_.active = false;
+    }
+
+    s.replanned = true;
     s.d = decide(in, p, &monitor_);
+    if (s.d.mode == Decision::Mode::Drive or s.d.mode == Decision::Mode::Release)
+    {
+        plan_ = Plan{.active = true, .mode = s.d.mode, .v1 = s.d.v, .w1 = s.d.w, .dur1 = s.d.plan_dur1, .v2 = s.d.plan_v2, .w2 = s.d.plan_w2,
+                     .dur2 = s.d.plan_dur2, .has2 = s.d.plan_has_cont, .t0 = in.now_s, .d = s.d};
+    }
     if (not s.d.prediction_failed) return s;
     const Eigen::Vector2f dir = downhill(in.pose.p);
     const Trap t{in.pose.p + trap_r_ * dir, dir, trap_r_};
@@ -63,9 +128,10 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     { s.trap_suppressed_by_goal = true; return s; }
     traps_.push_back(t);
     build();
-    monitor_.reset();                    // the field changed: old values are not comparable
+    monitor_.reset();                    // (c): the field changed — old values are not comparable
     s.trap = t;
     s.unreachable = not field_.reachable(in.pose.p);
+    // the Release plan stays committed: it is the response to the failure, and the rebuilt field shapes the next plan
     return s;
 }
 }  // namespace rc::policy

@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <vector>
 #include "policy_types.h"
 #include "../../../common/robot_footprint/robot_footprint.h"
@@ -48,27 +49,74 @@ public:
     //   odometry frame, so a localisation jump cannot move a frozen hypothesis into the body (measured: an OU belief
     //   step of 13 cm put one inside the hull and every candidate read P(contact) = 1). hypotheses(room, odom) converts
     //   them to the room frame each tick; hypotheses() returns them in the odometry frame.
-    void update(float v_cmd, float w_cmd, float v_meas, float w_meas, float ds_meas, float dyaw_meas, float dt, const Pose2& pose,
+    // ★ REVIEW FIX ROUND 3 — THE COMMANDS IN FORCE. The base executes each command latency_s after it was sent, so within
+    //   one tick it may follow several (with jitter): predicting the free motion from the latest command alone read every
+    //   rapid reversal (w = +-0.3 each tick under 60 +- 20 ms latency) as "blocked" turning and froze phantom corner
+    //   hypotheses (2 Stuck seeds in the Task-6 dead end). The caller passes the commands actually in force during the
+    //   tick as consecutive sub-intervals {duration, v, w} summing to dt (the controller reconstructs them from its send
+    //   history shifted by its latency; the harness knows them). The free prediction chains the ramp through them from
+    //   the measured velocity; a command inside the deadband is a target of 0. A direction is tested when the chained
+    //   free displacement is in its sense and some sub-interval actually commanded that sense above the deadband.
+    struct CmdSeg { float dt, v, w; };
+    void update(std::span<const CmdSeg> in_force, float v_meas, float w_meas, float ds_meas, float dyaw_meas, const Pose2& pose,
                 const BaseLimits& b, const rc::RobotFootprint& body, float sigma_odo_m)
     {
         const float s = std::max(sigma_odo_m, 1e-6f);
         sigma_ = sigma_odo_m;
         tested_ = false; blocked_ = false;
-        if (std::abs(v_cmd) >= b.v_min_eff and std::abs(v_cmd) > 0.f)
+        float cv = 0.f, cw = 0.f, xv = v_meas, xw = w_meas;
+        bool pos_v = false, neg_v = false, pos_w = false, neg_w = false;
+        for (const CmdSeg& g : in_force)
         {
-            const int k = v_cmd > 0.f ? 0 : 1;
-            const float sg = v_cmd > 0.f ? 1.f : -1.f;
-            const float c = sg * free_travel(v_meas, v_cmd, b.a_lin, b.d_lin, dt);
-            if (c > 0.f) accumulate(k, c, sg * ds_meas, s, place(k, pose, body));
+            const float tv = std::abs(g.v) >= b.v_min_eff ? g.v : 0.f, tw = std::abs(g.w) >= b.w_min_eff ? g.w : 0.f;
+            pos_v = pos_v or tv > 0.f; neg_v = neg_v or tv < 0.f; pos_w = pos_w or tw > 0.f; neg_w = neg_w or tw < 0.f;
+            cv += ramp(xv, tv, b.a_lin, b.d_lin, g.dt, &xv);
+            cw += ramp(xw, tw, b.a_rot, b.d_rot, g.dt, &xw);
         }
-        if (std::abs(w_cmd) >= b.w_min_eff and std::abs(w_cmd) > 0.f)
+        if ((cv > 0.f and pos_v) or (cv < 0.f and neg_v))
         {
-            const int k = w_cmd > 0.f ? 2 : 3;
-            const float sg = w_cmd > 0.f ? 1.f : -1.f;
+            const int k = cv > 0.f ? 0 : 1;
+            const float sg = cv > 0.f ? 1.f : -1.f;
+            accumulate(k, sg * cv, sg * ds_meas, s, place(k, pose, body));
+        }
+        if ((cw > 0.f and pos_w) or (cw < 0.f and neg_w))
+        {
+            const int k = cw > 0.f ? 2 : 3;
+            const float sg = cw > 0.f ? 1.f : -1.f;
             const float sr = s / std::max(body.circumscribed_radius(), 1e-3f);
-            const float c = sg * free_travel(w_meas, w_cmd, b.a_rot, b.d_rot, dt);
-            if (c > 0.f) accumulate(k, c, sg * dyaw_meas, sr, place(k, pose, body));
+            accumulate(k, sg * cw, sg * dyaw_meas, sr, place(k, pose, body));
         }
+        refute(pose, body);
+    }
+    // One command in force for the whole tick (the Task-5 form; tests and callers without a latency queue).
+    void update(float v_cmd, float w_cmd, float v_meas, float w_meas, float ds_meas, float dyaw_meas, float dt, const Pose2& pose,
+                const BaseLimits& b, const rc::RobotFootprint& body, float sigma_odo_m)
+    {
+        const CmdSeg one{dt, v_cmd, w_cmd};
+        update(std::span<const CmdSeg>(&one, 1), v_meas, w_meas, ds_meas, dyaw_meas, pose, b, body, sigma_odo_m);
+    }
+
+    // Distance covered in dt starting at x0 and ramping toward `target`; *x_end receives the speed reached.
+    static float ramp(float x0, float target, float a, float d, float dt, float* x_end)
+    {
+        float x = x0, rem = dt, dist = 0.f;
+        while (rem > 1e-9f and x != target)
+        {
+            const bool through_zero = (x > 0.f and target < 0.f) or (x < 0.f and target > 0.f);
+            const float goal = through_zero ? 0.f : target;
+            const float rate = std::abs(goal) < std::abs(x) ? d : a;
+            if (rate <= 0.f) { x = goal; continue; }
+            const float need = std::abs(goal - x) / rate, tt = std::min(need, rem);
+            const float x1 = x + (goal > x ? 1.f : -1.f) * rate * tt;
+            dist += 0.5f * (x + x1) * tt; x = x1; rem -= tt;
+        }
+        if (x_end) *x_end = x;
+        return dist + x * rem;
+    }
+
+private:
+    void refute(const Pose2& pose, const rc::RobotFootprint& body)
+    {
         // ★ ROUND 6 (B2) — REFUTATION. On a tick whose measured motion matched the command (every tested direction added
         //   free evidence, llr <= 0), a hypothesis whose place the BARE hull now occupies cannot exist: the body is there
         //   and touched nothing. Its direction's evidence is reset (W = 0, L = the prior), so it is no longer reported.
@@ -79,6 +127,7 @@ public:
                 if (d.W > 0.f and bare.contains_yaw(d.pos(), pose.p, pose.yaw)) d = Dir{};
         }
     }
+public:
 
     // Distance one axis covers in dt starting at x0 and ramping toward `target` (a when |speed| grows, d when it shrinks,
     // through zero on a sign change; rate <= 0 = instantaneous) — the FREE base's prediction.

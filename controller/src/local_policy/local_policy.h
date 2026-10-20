@@ -52,7 +52,10 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_rel_xy = 0, s
                      double now_s = 0.0;
                      // round 8: the TRAP-FREE cost-to-go (the same goal, no trap costs) on which the ProgressMonitor
                      // measures predicted and realized descent; nullptr = use `field`. Candidates are chosen on `field`.
-                     const CostToGo* progress_field = nullptr; };
+                     const CostToGo* progress_field = nullptr;
+                     // review fix round 3: `returns` are ALREADY denoise_returns() output (the Navigator denoises once
+                     // per tick for its plan check and decide() both)
+                     bool returns_denoised = false; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
@@ -63,7 +66,11 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why;
                   // round 7: this Release was caused by the ProgressMonitor (a failed prediction) — the only evidence
                   // that "the body cannot get through from here"; a caller lays a trap on it and on nothing else
-                  bool prediction_failed = false; };
+                  bool prediction_failed = false;
+                  // review fix round 3 — the PLAN this decision commits to (Navigator executes it): the candidate (v, w)
+                  // held for horizon_s then braked, plan_dur1 in all; for a Drive whose rate came from a continuation,
+                  // that continuation from rest (plan_v2, plan_w2) held for horizon_s then braked, plan_dur2 in all
+                  float plan_dur1 = 0.f, plan_v2 = 0.f, plan_w2 = 0.f, plan_dur2 = 0.f; bool plan_has_cont = false; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its
@@ -93,5 +100,7 @@ Decision decide(const PolicyInput& in, const PolicyParams& p, ProgressMonitor* m
 float log_p_continuable(const PolicyInput& in, const PolicyParams& p, const Pose2& from);
 // The pose candidates are rolled out from: `pose` advanced by (v_now, w_now) for latency_s.
 Pose2 policy_start(const PolicyInput& in);
+// Inside the goal's tolerances at in.pose (what decide() calls Arrived).
+bool goal_reached(const PolicyInput& in);
 const char* mode_name(Decision::Mode m);
 }  // namespace rc::policy
