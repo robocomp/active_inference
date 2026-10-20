@@ -52,11 +52,17 @@ Eigen::Vector2f Navigator::downhill(const Eigen::Vector2f& p) const
     return dir;
 }
 
+// ★ ROUND 4: THE BRAKE IS A SAFETY TAIL, NOT A MANEUVER. The plan is its HOLD phases only — (v1, w1) for horizon_s,
+//   then (two-step) (v2, w2) for horizon_s, entered while still moving; it completes at the end of its holds and the
+//   next plan is decided from the current velocity. The brake tail is only ever executed when no new plan passes its
+//   risk bar (decide() then returns no motion and the base brakes to rest). The remaining-sweep check still includes
+//   each rollout's brake tail: "can it still stop" is part of every motion.
+float Navigator::plan_length(const PolicyParams& p) const { return p.horizon_s * (plan_.has2 ? 2.f : 1.f); }
+
 std::pair<float, float> Navigator::command_at(float e, const PolicyParams& p) const
 {
     if (e < p.horizon_s) return {plan_.v1, plan_.w1};
-    if (e < plan_.dur1 or not plan_.has2) return {0.f, 0.f};                      // braking to rest
-    if (e < plan_.dur1 + p.horizon_s) return {plan_.v2, plan_.w2};
+    if (plan_.has2 and e < 2.f * p.horizon_s) return {plan_.v2, plan_.w2};
     return {0.f, 0.f};
 }
 
@@ -64,17 +70,12 @@ std::vector<Pose2> Navigator::remaining_sweep(const Pose2& start, float v0, floa
 {
     std::vector<Pose2> sw;
     auto append = [&](std::vector<Pose2> part) { if (not sw.empty() and not part.empty()) part.erase(part.begin()); sw.insert(sw.end(), part.begin(), part.end()); };
-    if (e < plan_.dur1)
+    if (e < p.horizon_s)
     {
-        const float hold = std::max(0.f, p.horizon_s - e);                       // 0: the brake phase
-        append(rollout(start, v0, w0, hold > 0.f ? plan_.v1 : 0.f, hold > 0.f ? plan_.w1 : 0.f, hold, b, p.dt));
+        append(rollout(start, v0, w0, plan_.v1, plan_.w1, p.horizon_s - e, b, p.dt));
         if (plan_.has2) append(rollout(sw.back(), 0.f, 0.f, plan_.v2, plan_.w2, p.horizon_s, b, p.dt));
     }
-    else if (plan_.has2)
-    {
-        const float e2 = e - plan_.dur1, hold = std::max(0.f, p.horizon_s - e2);
-        append(rollout(start, v0, w0, hold > 0.f ? plan_.v2 : 0.f, hold > 0.f ? plan_.w2 : 0.f, hold, b, p.dt));
-    }
+    else if (plan_.has2) append(rollout(start, v0, w0, plan_.v2, plan_.w2, std::max(0.f, 2.f * p.horizon_s - e), b, p.dt));
     else sw.push_back(start);
     return sw;
 }
@@ -92,7 +93,7 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     if (plan_.active and in.body != nullptr)
     {
         const float e = float(in.now_s - plan_.t0);
-        const bool completed = e >= plan_.dur1 + (plan_.has2 ? plan_.dur2 : 0.f);
+        const bool completed = e >= plan_length(p) - 1e-4f;
         const bool blind_or_done = not std::isfinite(in.pose.p.x()) or in.returns_age_s > p.returns_max_age_s or goal_reached(in);
         if (not completed and not blind_or_done)
         {

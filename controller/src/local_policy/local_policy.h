@@ -87,10 +87,16 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
 //   or a rebuild of the TRAP-FREE progress_field (the only field the monitor reads; laying a trap does not touch it).
 //   Any Release clears the pending prediction (review M1). Navigator (navigator.h) does all of this. Heading goals (no field) are not
 //   monitored. decide() without a monitor behaves as before round 6.
+// ★ REVIEW FIX ROUND 4 — EVERY COMPLETED PLAN IS JUDGED. A Drive plan predicts a field descent (above); a RELEASE plan
+//   predicts a CONTINUABILITY gain, log_p_cont(release end) - log_p_cont(start), at decision time. When it completes
+//   (tau = its hold, horizon_s) the realized gain is log_p_continuable of the actual pose (same coarse set) minus the
+//   start's: realized <= 0, or a predicted gain <= 0 (a release that promised nothing), is a FAILED prediction, and the
+//   next decision is a Release with prediction_failed (the Navigator lays a trap). A Drive plan's tau is its HOLD
+//   (horizon_s, x2 for a two-step plan): the brake is a safety tail, not part of the plan (round 4).
 struct ProgressMonitor
 {
-    bool pending = false;
-    double t0 = 0.0; float tau = 0.f, dF_pred = 0.f, f0 = 0.f; Pose2 p0{};
+    bool pending = false, release = false;
+    double t0 = 0.0; float tau = 0.f, dF_pred = 0.f, f0 = 0.f, lpc0 = 0.f, gain_pred = 0.f; Pose2 p0{};
     void reset() { *this = ProgressMonitor{}; }
 };
 

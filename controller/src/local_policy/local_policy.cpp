@@ -275,7 +275,20 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     const bool monitored = mon != nullptr and g.kind != Goal::Kind::Heading;
     bool prediction_failed = false;
     char failed_why[160] = "";
-    if (monitored and mon->pending and in.now_s - mon->t0 >= double(mon->tau))
+    // (1 ms tolerance: the Navigator replans when its float clock reaches the plan's length; a stricter test here missed
+    //  every judgement by microseconds — measured: a release loop never judged for 51 s)
+    if (monitored and mon->pending and mon->release and in.now_s - mon->t0 >= double(mon->tau) - 1e-3)
+    {
+        // ★ round 4: a completed RELEASE is judged on the continuability it bought
+        const float lpc_real = log_p_continuable_cells(in, p, start) - mon->lpc0;
+        if (mon->gain_pred <= 0.f or lpc_real <= 0.f)
+        {
+            prediction_failed = true;
+            std::snprintf(failed_why, sizeof failed_why, "release predicted a continuability gain of %.2f nats, realized %.2f", mon->gain_pred, lpc_real);
+        }
+        mon->reset();
+    }
+    else if (monitored and mon->pending and in.now_s - mon->t0 >= double(mon->tau) - 1e-3)
     {
         const CostToGo& pf = in.progress_field ? *in.progress_field : *in.field;   // round 8: trap-free
         const float f_now = pf.at(in.pose.p);
@@ -410,13 +423,31 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     }
     if (best_drive != nullptr and not prediction_failed)
     {
-        if (monitored and not mon->pending)
+        if (monitored)
         {
-            // the prediction this Drive commits to: its plan's descent over its plan's duration
-            mon->pending = true; mon->t0 = in.now_s; mon->tau = best_drive->tau;
+            // the prediction this Drive commits to: its plan's descent, judged when its HOLD completes (round 4)
+            mon->reset();
+            mon->pending = true; mon->t0 = in.now_s; mon->tau = p.horizon_s * (best_drive->has_cont ? 2.f : 1.f);
             // round 8: the plan's descent on the TRAP-FREE field, from the pose the realized descent will be measured from
             const CostToGo& pf = in.progress_field ? *in.progress_field : *in.field;
-            mon->f0 = pf.at(in.pose.p); mon->dF_pred = mon->f0 - pf.at(best_drive->plan_end.p); mon->p0 = in.pose;
+            // ★ round 4: the descent predicted is to where the plan's HOLDS end AS EXECUTED — phase 1 from the current
+            //   velocity, phase 2 entered while still moving (no brake between) — not to the rest pose of the from-rest
+            //   rollouts the rate was scored on (measured: a back-up-then-forward plan "realized -0.12 m" against a
+            //   predicted +0.18 m to the rest pose, because the reversal had not happened by the end of the holds).
+            const Pose2 hold_end = [&] {
+                const int k = std::max(1, int(std::lround(p.horizon_s / p.dt)));
+                auto at_hold = [&](const std::vector<Pose2>& sw, float* v, float* w) {
+                    const int i = std::min(k, int(sw.size()) - 1), j = std::max(0, i - 1);
+                    const Eigen::Vector2f fwd(std::cos(sw[j].yaw), std::sin(sw[j].yaw));
+                    if (v) *v = (sw[i].p - sw[j].p).dot(fwd) / p.dt;
+                    if (w) *w = (sw[i].yaw - sw[j].yaw) / p.dt;
+                    return sw[i]; };
+                float v1e = 0.f, w1e = 0.f;
+                const Pose2 e1 = at_hold(rollout(start, in.v_now, in.w_now, best_drive->v, best_drive->w, p.horizon_s, in.base, p.dt), &v1e, &w1e);
+                if (not best_drive->has_cont) return e1;
+                return at_hold(rollout(e1, v1e, w1e, best_drive->cont_v, best_drive->cont_w, p.horizon_s, in.base, p.dt), nullptr, nullptr);
+            }();
+            mon->f0 = pf.at(in.pose.p); mon->dF_pred = mon->f0 - pf.at(hold_end.p); mon->p0 = in.pose;
             if (not std::isfinite(mon->dF_pred)) mon->reset();
         }
         return finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
@@ -507,6 +538,14 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     std::snprintf(buf, sizeof buf, "release%s%s: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", prediction_failed ? " (prediction failed: " : "",
                   prediction_failed ? (std::string(failed_why) + ")").c_str() : "", words(best->v, best->w).c_str(),
                   1.f - std::exp(best->lps), lpc_now, best->lpc);
-    return finish(Decision::Mode::Release, *best, buf);
+    Decision rd = finish(Decision::Mode::Release, *best, buf);
+    if (monitored)
+    {
+        // ★ round 4: the release's own prediction — the continuability it buys, judged when its hold completes
+        mon->reset();
+        mon->pending = true; mon->release = true; mon->t0 = in.now_s; mon->tau = p.horizon_s;
+        mon->lpc0 = lpc_now; mon->gain_pred = best->lpc - lpc_now; mon->p0 = in.pose;
+    }
+    return rd;
 }
 }  // namespace rc::policy

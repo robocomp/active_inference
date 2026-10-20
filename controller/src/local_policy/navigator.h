@@ -22,9 +22,10 @@
 //     (a) that sweep's P(contact) > risk_eps (> release_risk_max for a Release plan),
 //     (b) the plan completed (its own duration elapsed),
 //     (c) the goal or the field changed (a trap laid, set_goal) or the input is Blind / the goal is reached.
-//   No other switching. The ProgressMonitor judges a Drive plan when it completes (decide() is called at (b) with the
-//   prediction made at the plan's start, tau = the plan's duration); a plan replaced by (a) or (c) is not judged — the
-//   monitor is reset first (review M1 then holds by construction).
+//   No other switching. Round 4: a plan COMPLETES at the end of its HOLDS (the brake tail is a safety tail, executed only
+//   when no new plan passes its bar) and the next is decided while moving. EVERY completed plan is judged by the monitor
+//   (a Drive on the field descent, a Release on the continuability it bought); a plan replaced by (a) or (c) is not
+//   judged — the monitor is reset first.
 //   State: plan_ (active, mode, the two phases, start time) — see Plan below.
 //   field(), traps(), goal_points(): read-only views (display, oracles).
 //
@@ -82,6 +83,7 @@ private:
     Plan plan_;
     // the plan's command at elapsed time e, and its remaining sweep from (start, v0, w0)
     std::pair<float, float> command_at(float e, const PolicyParams& p) const;
+    float plan_length(const PolicyParams& p) const;   // the plan's holds: horizon_s, x2 for a two-step plan
     std::vector<Pose2> remaining_sweep(const Pose2& start, float v0, float w0, float e, const BaseLimits& b, const PolicyParams& p) const;
     double last_build_ms_ = 0.0;
 };
