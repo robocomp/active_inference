@@ -20,6 +20,7 @@
 // ★ Review fix round 1: rollouts ramp from the current velocity and start from the latency-advanced pose
 //   (latency_advances_start); cells are swept as support segments (jamb tips); Release scans only releasable
 //   candidates (P < 1 - risk_eps) and every sweep stops once its result is provably below what its caller needs.
+// ★ Review fix round 3: Stuck iff no release has P(contact) < release_risk_max (0.5) — the wedge is Stuck (best 0.978).
 // ★ Review fix round 2: the shared offset is TRUNCATED once by "nothing touches now" (eps > -sd0*) and the
 //   integrand is the product of per-cell ratios (contact.h). P values rose where a motion deepens cells (the old
 //   per-cell conditioning was optimistic): pressed 0.093 -> 0.170, dense-wall slide 0.069 -> 0.159; no verdict moved.
@@ -275,12 +276,10 @@ int main()
         std::sort(ms.begin(), ms.end());
         print("wedge", d);
         std::printf("  wedge per-call median %.2f ms, p90 %.2f ms, max %.2f ms (300 returns, -O2)\n", ms[20], ms[36], ms[39]);
-        // ★ the decision is printed, not pinned: by the ruled bar the wedge is Stuck when the best release reads
-        //   P >= 1 - risk_eps, else a Release at a P close to 1 (the ramp shortens a 0.3 rad/s turn to 0.30 rad, and
-        //   60 independent clear cells shift the conditioned shared offset by ~+2 cm: measured P = 0.982).
-        const float pw = d.mode == Decision::Mode::Release ? p_contact_of(s, d.v, d.w) : 1.f;
-        std::printf("  wedge: %s, P(contact) of the chosen motion %.4f\n", mode_name(d.mode), pw);
-        CHECK("wedge: stuck or a near-certain-contact release", d.mode == Decision::Mode::Stuck or (d.mode == Decision::Mode::Release and pw >= 0.9f));
+        // ★ review fix round 3: Stuck — the least-P motion (the 0.30 rad in-place turn, corner 2 cm into the nose
+        //   wall) reads P = 0.978, nowhere near release_risk_max = 0.5; the best P is in `why`.
+        std::printf("  wedge: %s ; %s\n", mode_name(d.mode), d.why.c_str());
+        CHECK("wedge is stuck", d.mode == Decision::Mode::Stuck and d.v == 0.f and d.w == 0.f and d.why.find("release_risk_max") != std::string::npos);
         CHECK("wedge timing median <= 15 ms", ms[20] <= 15.0);
     }
     { // timing: 300 returns (a 2 x 3 m box around the robot, perimeter 10 m), goal 2 m ahead

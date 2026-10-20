@@ -19,10 +19,15 @@ struct Goal { enum class Kind { Place, Doorway, Heading } kind; Eigen::Vector2f 
               std::optional<float> yaw; Eigen::Vector2f normal{0,1}; float width = 0.f;
               float tol_xy = 0.25f, tol_yaw = 0.06f; };
 
-// ★ risk_eps is the ONE threshold (acceptable P(contact) per decision, a chance constraint). progress_scale_m is
-//   not a gate: it is the distance of progress worth one nat of safety/continuability in the score.
+// ★ The policy's two stated risk levels (chance constraints), nothing else gates a motion:
+//   risk_eps — acceptable P(contact) per DRIVE decision (normal motion toward the goal);
+//   release_risk_max — a RELEASE (back up / turn a bit out of a wedge) is attempted only if it is more likely
+//   contact-free than not (P(contact) < 0.5): the robot never commits to a motion that will probably bump; when no
+//   release clears that bar the base is Stuck and the task layer is told (review ruling: the former bar 1 - risk_eps
+//   let a release run at P = 0.978 — a near-certain bump).
+//   progress_scale_m is not a gate: it is the distance of progress worth one nat of safety/continuability.
 struct PolicyParams { float horizon_s = 1.0f, dt = 0.05f; int n_v = 7, n_w = 11, n_cont_v = 3, n_cont_w = 5;
-                      float risk_eps = 0.01f, progress_scale_m = 0.10f, returns_max_age_s = 0.5f; };
+                      float risk_eps = 0.01f, release_risk_max = 0.5f, progress_scale_m = 0.10f, returns_max_age_s = 0.5f; };
 
 struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma_yaw = 0, returns_age_s = 0;
                      std::span<const Return> returns; const rc::RobotFootprint* body = nullptr; BaseLimits base;
@@ -35,7 +40,7 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen).
 // eligible = number of candidates whose P(contact) <= risk_eps (Drive draws from them; Release from ALL v <= 0 ones).
-// Stuck only when returns lie inside the bare hull, or the best release has P(contact) >= 1 - risk_eps.
+// Stuck only when returns lie inside the bare hull, or no release candidate has P(contact) < release_risk_max.
 // Blind also for a non-finite input (NaN/inf anywhere): no prediction can be made.
 struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode; float v = 0, w = 0;
                   float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why; };

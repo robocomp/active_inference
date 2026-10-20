@@ -95,7 +95,7 @@ struct Cand { float v, w; float lps = 0.f, prog = 0.f, lpc = 0.f; Pose2 end{}; b
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
 // lps_floor: below it only a bound is needed (contact.h) — candidates need exact values only while releasable
-// (lps > log eps), continuations only while eligible (lps >= log(1 - eps)).
+// (P < release_risk_max), continuations only while eligible (lps >= log(1 - eps)).
 float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, float v0, float w0, float v, float w, Pose2* end, float lps_floor)
 {
     const auto sw = rollout(from, v0, w0, v, w, p.horizon_s, in.base, p.dt);
@@ -237,7 +237,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         {
             if (v == 0.f and w == 0.f) continue;     // standing still is the absence of a decision, not a candidate
             Cand c{.v = v, .w = w};
-            c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log(p.risk_eps));
+            c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log1p(-p.release_risk_max));
             c.elig = eligible(c.lps, p);
             if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
             cands.push_back(c);
@@ -285,30 +285,38 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     //      arcs and in-place turns), lexicographically: (a) those that INCREASE continuability
     //      (log_p_cont(end) > log_p_cont(now)) if any exist, else all of them; (b) the smallest P(contact); ties go
     //      to the larger continuability gain, then to the larger reverse travel.
-    // ★ STUCK is the mirror of risk_eps, no new constant: Drive moves only when contact is improbable (P <= eps);
-    //   Release is refused only when contact is as certain as Drive demands it be improbable (P >= 1 - eps) —
-    //   whatever the robot does it touches, so moving buys nothing and the task layer is told.
-    // ★ A candidate at P >= 1 - eps can never be released, whichever pass picks it (the pick would fall through to
-    //   the next pass and finally to Stuck), so its continuations are never rolled out: the scans run over the
-    //   RELEASABLE candidates only — the same decision as scanning all and falling through, at a fraction of the
-    //   cost (the reviewer's wedge: 47 x 14 continuation sweeps -> 0).
+    // ★ STUCK: no release candidate is more likely contact-free than not (P < release_risk_max, the policy's second
+    //   stated risk level — local_policy.h). A release that will probably bump is not a release; the task layer is told.
+    // ★ A candidate at P >= release_risk_max can never be released, whichever pass picks it (the pick would fall
+    //   through to the next pass and finally to Stuck), so its continuations are never rolled out: the scans run
+    //   over the RELEASABLE candidates only — the same decision as scanning all and falling through, at a fraction
+    //   of the cost (the reviewer's wedge: 47 x 14 continuation sweeps -> 0).
     // ★ Exact scan: visiting in decreasing log_p_safe, the first candidate with a gain is the (a)-member with the
     //   smallest P; only its equal-lps ties can beat it (larger gain), and a tie reaching lpc_max ends the scan.
     //   Pass (b) reuses every continuation already rolled out.
-    const float lps_stuck = std::log(p.risk_eps);
+    const float lps_stuck = std::log1p(-p.release_risk_max);     // releasable <=> P(contact) < release_risk_max
     std::vector<Cand*> rel;
-    Cand* least = nullptr;                        // the least likely contact among every v <= 0 candidate
+    bool any_reverse = false;
     for (auto& c : cands)
         if (c.v <= 0.f)
         {
-            if (least == nullptr or c.lps > least->lps) least = &c;
+            any_reverse = true;
             if (c.lps > lps_stuck) rel.push_back(&c);
         }
-    if (least == nullptr) { d.why = "no progress, and no reverse or in-place motion to release with: hold"; return d; }
+    if (not any_reverse) { d.why = "no progress, and no reverse or in-place motion to release with: hold"; return d; }
     if (rel.empty())
     {
+        // ★ the candidates' lps are BOUNDS below the release bar (their sweeps stopped once provably above it), so the
+        //   least likely contact is re-swept exactly here to name it — a terminal branch, worth the cost.
+        const Cand* least = nullptr; float least_lps = -kInf;
+        for (auto& c : cands)
+            if (c.v <= 0.f)
+            {
+                const float lps = lp_safe(in, p, start, in.v_now, in.w_now, c.v, c.w, nullptr, -kInf);
+                if (lps > least_lps) { least_lps = lps; least = &c; }
+            }
         char buf[160];
-        std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= 1-%.3g: hold", words(least->v, least->w).c_str(), 1.f - std::exp(least->lps), p.risk_eps);
+        std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= release_risk_max %.2f: hold", words(least->v, least->w).c_str(), 1.f - std::exp(least_lps), p.release_risk_max);
         d.why = buf; return d;
     }
     const float lpc_now = log_p_continuable_cells(in, p, start);
