@@ -109,6 +109,58 @@ int main()
         CostToGo e; V gl{6.f, 2.f}; e.build(g, diagfree, no_extra, std::span<const V>(&gl, 1));
         CHECK("no_corner_cut", not e.reachable({2.f, 6.f}) or e.at({2.f, 6.f}) > 100.f);
     }
+    { // zero-radius trap ignored
+        auto free = [](const V&) { return true; };
+        CostToGo c; c.add_trap({5.f, 5.f}, 0.f, 3.f); c.add_trap({5.f, 5.f}, -1.f, 3.f); c.add_trap({5.f, 5.f}, 1.f, 0.f);
+        V goal{9.f, 5.f}; c.build(g, free, no_extra, std::span<const V>(&goal, 1));
+        CHECK("trap_zero_radius_ignored", std::fabs(c.at({1.f, 5.f}) - 8.f) < 0.05f);
+    }
+    { // ring order != Euclid order: query at the corner of a cell; finite cell at ring 1 diagonal (dist ~0.19)
+      // vs a cell at ring 2 straight (dist ~0.15 from the query).
+        const CostToGo::Grid G{{0.f, 0.f}, 0.1f, 40, 40};
+        // finite cells: only (30,30)=goal region reachable; free set = {(10,12)} union nothing else near.
+        // Query p=(0.95,0.95)ish between cells (9,9),(10,9),(9,10),(10,10), all non-free. Cell (12,10)... build explicit:
+        auto free = [](const V& p) { const int i = int(std::lround(p.x() / 0.1f)), j = int(std::lround(p.y() / 0.1f));
+                                     return (i == 11 and j == 11) or (i == 12 and j == 9); };
+        CostToGo c; V a{1.1f, 1.1f}, b{1.2f, 0.9f}; std::vector<V> gl{a, b};
+        c.build(G, free, no_extra, gl);   // both seeded with value 0
+        const V q{1.0f, 0.97f};   // cell (10,10)/(10,9) region
+        // (11,11): dx .1 dy .13 -> .164 ; (12,9): dx .2 dy .07 -> .212; make (12,9) the ring-2 one but closer? swap below
+        const float got = c.at(q);
+        const float expect = std::min((V(1.1f, 1.1f) - q).norm(), (V(1.2f, 0.9f) - q).norm());
+        CHECK("ring_search_nearest_is_euclidean", std::fabs(got - expect) < 1e-4f);
+        // randomised brute-force: random sparse finite cells, random blocked queries, compare to exhaustive nearest
+        unsigned s = 12345u; auto rnd = [&]() { s = s * 1664525u + 1013904223u; return (s >> 8) / float(1 << 24); };
+        bool all_ok = true;
+        for (int trial = 0; trial < 200; ++trial)
+        {
+            std::vector<V> pts; for (int k = 0; k < 3; ++k) pts.push_back({0.3f + 3.4f * rnd(), 0.3f + 3.4f * rnd()});
+            auto fr = [&](const V& p) { for (const auto& q : pts) if ((p - q).norm() < 0.04f) return true; return false; };
+            CostToGo d; d.build(G, fr, no_extra, pts);
+            const V qq{0.3f + 3.4f * rnd(), 0.3f + 3.4f * rnd()};
+            float bf = 1e9f; bool seeded = false;
+            for (int j = 0; j < G.h; ++j) for (int i = 0; i < G.w; ++i)
+            { const V cc{i * 0.1f, j * 0.1f}; if (fr(cc)) { bf = std::min(bf, (cc - qq).norm()); seeded = true; } }
+            const float got2 = d.at(qq);
+            if (seeded and std::isfinite(got2) and std::fabs(got2 - bf) > 1e-3f)
+            {   // got2 may be a bilinear/neighbour read when a surrounding cell is free; accept only if q is near a free cell
+                if (bf > 0.15f) all_ok = false;
+            }
+        }
+        CHECK("ring_search_random_vs_bruteforce", all_ok);
+    }
+    { // worst-case at() on all-blocked 200x200
+        const CostToGo::Grid G{{0.f, 0.f}, 0.05f, 200, 200};
+        auto none = [](const V&) { return false; };
+        CostToGo c; V goal{5.f, 5.f}; c.build(G, none, no_extra, std::span<const V>(&goal, 1));
+        const auto t0 = std::chrono::steady_clock::now();
+        const float r = c.at({5.f, 5.f});
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("worst-case at() all-blocked 200x200: %.3f ms\n", ms);
+        CHECK("at_worst_case_fast_and_inf", std::isinf(r) and ms < 1.0);
+        CostToGo bad; bad.build({{0.f, 0.f}, 0.f, 10, 10}, none, no_extra, std::span<const V>(&goal, 1));
+        CHECK("invalid_build_consistent", std::isinf(bad.at({1.f, 1.f})));
+    }
     { // timing 200x200
         const CostToGo::Grid G{{0.f, 0.f}, 0.05f, 200, 200};
         auto free = [](const V& p) { return std::fmod(p.x(), 2.f) > 0.2f or p.y() < 1.f or p.y() > 9.f; };

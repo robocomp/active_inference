@@ -21,7 +21,7 @@ void CostToGo::build(const Grid& g, const std::function<bool(const Eigen::Vector
     const int w = g.w, h = g.h;
     seeded_ = 0;
     field_.assign(static_cast<size_t>(std::max(0, w) * std::max(0, h)), kInf);
-    if (w <= 0 or h <= 0 or g.cell <= 0.f) return;
+    if (w <= 0 or h <= 0 or g.cell <= 0.f) { field_.clear(); free_.clear(); return; }   // consistent: at() -> +inf
     auto centre = [&](int i, int j) { return Eigen::Vector2f(g.origin.x() + i * g.cell, g.origin.y() + j * g.cell); };
 
     // ★ Free test and entry cost are evaluated ONCE per cell: the callbacks (distance-field lookups) dominate a
@@ -110,26 +110,36 @@ float CostToGo::at(const Eigen::Vector2f& p) const
     // all four non-free: nearest finite cell, searched ring by ring, plus the Euclidean distance to its centre
     const int ci = std::clamp(static_cast<int>(std::lround(fx)), 0, g_.w - 1), cj = std::clamp(static_cast<int>(std::lround(fy)), 0, g_.h - 1);
     const int rmax = std::max(g_.w, g_.h);
+    float best_d = kInf, best_v = kInf;
+    auto visit = [&](int i, int j)
+    {
+        if (i < 0 or j < 0 or i >= g_.w or j >= g_.h) return;
+        const float v = field_[static_cast<size_t>(j) * g_.w + i];
+        if (not std::isfinite(v)) return;
+        const float d = (Eigen::Vector2f(g_.origin.x() + i * g_.cell, g_.origin.y() + j * g_.cell) - p).norm();
+        if (d < best_d) { best_d = d; best_v = v; }
+    };
     for (int r = 1; r <= rmax; ++r)
     {
-        float bd = kInf, bv = kInf;
-        for (int j = std::max(0, cj - r); j <= std::min(g_.h - 1, cj + r); ++j)
-            for (int i = std::max(0, ci - r); i <= std::min(g_.w - 1, ci + r); ++i)
-            {
-                if (std::max(std::abs(i - ci), std::abs(j - cj)) != r) continue;
-                const float v = field_[static_cast<size_t>(j) * g_.w + i];
-                if (not std::isfinite(v)) continue;
-                const float d = (Eigen::Vector2f(g_.origin.x() + i * g_.cell, g_.origin.y() + j * g_.cell) - p).norm();
-                if (d < bd) { bd = d; bv = v; }
-            }
-        if (std::isfinite(bv)) return bv + bd;
+        // ★ p lies within half a cell of cell (ci,cj), so any cell on Chebyshev ring r is >= (r-0.5)*cell away:
+        //   once that exceeds the best found, no later ring can beat it (exact nearest by Euclid, not ring order).
+        if ((r - 0.5f) * g_.cell >= best_d) break;
+        for (int i = ci - r; i <= ci + r; ++i) { visit(i, cj - r); visit(i, cj + r); }   // top and bottom rows
+        for (int j = cj - r + 1; j <= cj + r - 1; ++j) { visit(ci - r, j); visit(ci + r, j); }   // sides, no corners twice
     }
+    if (std::isfinite(best_v)) return best_v + best_d;
     return kInf;
 }
 
 bool CostToGo::reachable(const Eigen::Vector2f& p) const { return std::isfinite(at(p)); }
 
-void CostToGo::add_trap(const Eigen::Vector2f& p, float radius_m, float cost_m) { traps_.push_back({p, radius_m, cost_m}); }
+void CostToGo::add_trap(const Eigen::Vector2f& p, float radius_m, float cost_m)
+{
+    // ★ precondition guard, not a model gate: density = cost/(2*radius) is undefined for radius <= 0, and a trap with
+    //   no cost carries no evidence.
+    if (not (radius_m > 0.f) or not (cost_m > 0.f)) return;
+    traps_.push_back({p, radius_m, cost_m});
+}
 
 void CostToGo::decay_traps(float factor)
 {
