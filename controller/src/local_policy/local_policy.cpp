@@ -477,7 +477,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     if (inside > 0.f)
     {
         char buf[96]; std::snprintf(buf, sizeof buf, "%.1f returns inside the body (sensing/pose error): hold", inside);
-        d.why = buf; return d;
+        d.why = buf; d.sensing_contradiction = true; return d;
     }
 
     // ---- Release (controller ruling, fix round 5): NOT held to risk_eps. Among the RELEASABLE candidates with v <= 0

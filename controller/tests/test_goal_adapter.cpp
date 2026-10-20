@@ -267,6 +267,21 @@ int main()
         CHECK("gate: a 0.6 s gap with no hold noted still interrupts", gate.on_tick(10.8));
     }
 
+    // ---- 4g. Live fix 2 (tourP3 retry): a ROOM-FRAME CHANGE (room_concept moved the robot's RT into the next room's frame,
+    //   pose (0.60,2.57) -> (-3.64,0.41) in one cycle) resets the policy, and it drives again only on returns registered
+    //   in the NEW frame — the contact buffer still held sweeps registered in the old one ("9 returns inside the body").
+    {
+        RoomFrameGuard g;
+        CHECK("frame: the first room latches without a reset", not g.on_room("room_1", 1000));
+        CHECK("frame: ready once a scan exists", g.ready(900));
+        CHECK("frame: the same room is no change", not g.on_room("room_1", 1050));
+        CHECK("frame: a new room is a change (reset)", g.on_room("room_2", 1100));
+        CHECK("frame: a scan accepted BEFORE the switch is not ready (old-frame registration)", not g.ready(1080));
+        CHECK("frame: ...nor one accepted at the switch instant", not g.ready(1100));
+        CHECK("frame: a scan accepted after the switch is", g.ready(1150));
+        CHECK("frame: an empty room name (not yet known) is no change", not g.on_room("", 1200));
+    }
+
     // ---- 4e. C1: the relative-motion path on a pose that MOVES between ticks (the session passes the fresh pose)
     {
         rc::RelativeMotion rm;

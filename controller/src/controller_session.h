@@ -390,6 +390,7 @@ private:
     rc::policy::UnseenContact policy_unseen_;
     std::deque<rc::policy::SentCommand> policy_sent_;            // send history (s, steady) for the commands in force
     std::optional<rc::policy::Pose2> policy_odom_;               // odometry pose: integrated wheel speeds, never relocalised
+    rc::policy::RoomFrameGuard policy_frame_;                    // Live fix 2: a room-frame change resets the policy
     rc::policy::PolicyTickGate policy_gate_;                     // review I1 / fix 2.1: holds and gaps interrupt the plan
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
     bool odo_valid_ = false;

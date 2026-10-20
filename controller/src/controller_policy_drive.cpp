@@ -101,6 +101,19 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         policy_gate_.on_hold();   // review fix 2.1: a hold — however short — is an INTERRUPTION of the committed plan
     };
     if (not grid_planner_.has_world()) { hold("no planner map yet — no cost-to-go"); return out; }
+    // ★ Live fix 2 — A ROOM-FRAME CHANGE (policy_tick_gate.h RoomFrameGuard): everything held is in the old frame — reset
+    //   it (goal, field, plan, evidence), and hold until a scan accepted after the change (registered in the new frame).
+    if (policy_frame_.on_room(current_room_name_, steady_now_ms()))
+    {
+        std::println("[policy] {}: the room frame changed to '{}' — goal, field, plan and evidence reset; waiting for a scan "
+                     "registered in the new frame", who, current_room_name_);
+        policy_reset();
+    }
+    if (not policy_frame_.ready(obstacle_tracker.last_scan_accept_steady_ms()))
+    {
+        hold(std::format("Blind — the room frame changed to '{}'; the contact returns are still the old frame's", current_room_name_));
+        return out;
+    }
     // ★ review M6: ODOMETRY FRESHNESS — v_now / w_now and the unseen-contact evidence come from robot_current_*; older than
     //   Controller.CommandFreshnessTauMs (the age past which the base itself treats a command as stale) they describe a
     //   motion that is over: Blind, hold.
@@ -335,7 +348,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     else
     {
         out.verdict = d.mode == Decision::Mode::Arrived ? PolicyVerdict::Arrived : PolicyVerdict::Held;
-        out.stuck = d.mode == Decision::Mode::Stuck;
+        // Live fix 2: a sensing contradiction (returns inside the body) is a HOLD, not a stuck verdict — never a hand back
+        out.stuck = d.mode == Decision::Mode::Stuck and not d.sensing_contradiction;
         out.why = d.why;
         if (d.mode == Decision::Mode::Arrived) note_why(rc::why::Cause::Arrived, std::format("{}: the policy reached the {} goal", who, goal_kind_name(spec.goal.kind)));
         else note_why(rc::why::Cause::PolicyHold, std::format("{}: {} — {}", who, rc::policy::mode_name(d.mode), d.why));

@@ -279,6 +279,19 @@ int main()
         CHECK("heading_release: not 'back up straight' at speed", not (std::fabs(d.w) < 1e-3f and d.v <= -0.5f * s.in.base.v_max));
         CHECK("heading_release: the least-displacing release (well under a full-speed back-up)", disp < 0.5f * straight);
     }
+    { // inside_body_is_a_sensing_contradiction (Live fix 2): returns inside the bare hull (tourP3: old-frame returns read
+      // against the new room frame's pose) are a sensing/pose error — flagged, so the caller holds instead of handing back
+        Scene s; s.ret = wall_x(0.10f, -0.2f, 0.2f, 0.02f);              // a wall THROUGH the body
+        s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish();
+        const auto d = decide(s.in, s.pp); print("inside_body", d);
+        CHECK("inside_body: Stuck, flagged as a sensing contradiction", d.mode == Decision::Mode::Stuck and d.sensing_contradiction);
+        Scene o; o.ret = wall_x(0.30f, -2.f, 2.f); o.goal.p = {1.5f, 0.f};   // pressed_into_wall: not a contradiction
+        V h = o.goal.p; o.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&h, 1));
+        o.finish();
+        CHECK("inside_body: an ordinary decision is not flagged", not decide(o.in, o.pp).sensing_contradiction);
+    }
     { // latency_advances_start (review ruling): moving forward at 0.5 m/s toward a wall 0.45 m ahead of the nose
       // (y = 0.68), goal beyond it (map lag). With latency 0 the policy can keep 0.33 m/s (0.40 m to rest); with
       // 0.3 s of latency the base has coasted 0.15 m before the command bites, and only a slower speed stops short.

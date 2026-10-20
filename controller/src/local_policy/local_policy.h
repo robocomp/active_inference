@@ -67,6 +67,10 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   // round 7: this Release was caused by the ProgressMonitor (a failed prediction) — the only evidence
                   // that "the body cannot get through from here"; a caller lays a trap on it and on nothing else
                   bool prediction_failed = false;
+                  // Live fix 2: a Stuck because LiDAR cells lie INSIDE the bare hull — a sensing/pose contradiction (the robot
+                  // cannot overlap a wall: e.g. old-frame returns read against a new room frame's pose), not evidence that the
+                  // goal is unreachable; the caller holds (Blind-like) instead of handing the goal back
+                  bool sensing_contradiction = false;
                   // review fix round 3 — the PLAN this decision commits to (Navigator executes it): the candidate (v, w)
                   // held for horizon_s then braked, plan_dur1 in all; for a Drive whose rate came from a continuation,
                   // that continuation from rest (plan_v2, plan_w2) held for horizon_s then braked, plan_dur2 in all
