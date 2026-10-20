@@ -9,7 +9,7 @@ B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimati
 echo stop > $B/controller/remote_cmd.txt  # DISARMED until the main door is born: the start pose faces it, and an armed
                                           # controller explores furniture meanwhile (try52: wedged on the table, door never seen).
                                           # Each leg arms it with `run` + `cross` below.
-rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json
+rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.0 6.8 0 >/dev/null 2>&1
 # Doors closed AFTER the teleport: the bridge now HOLDS a commanded leaf, and closing it on a robot still standing in
 # the doorway from the last run pressed the held leaf against the body.

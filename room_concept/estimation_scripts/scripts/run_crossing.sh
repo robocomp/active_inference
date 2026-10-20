@@ -9,7 +9,7 @@
 #                                                        to `collect` too so it is stopped — SIGTERM only, never -9)
 S=$(dirname "$(readlink -f "$0")"); B=/home/pbustos/robocomp/components/active_inference; R=$B/room_concept
 OUT=$(readlink -f "${1:?usage: run_crossing.sh <out_dir> [x y theta | run | stop | collect]}"); mkdir -p $OUT/logs
-FLEET="retina room_concept residual_concept controller door_concept ltsm_agent chair_concept table_concept"
+FLEET=${FLEET:-"retina room_concept residual_concept controller door_concept ltsm_agent chair_concept table_concept"}   # override: FLEET="..." run_crossing.sh ...
 [[ -n "$CHAT" ]] && FLEET="$FLEET chat_agent"
 log(){ echo "$(date +%T) $*" | tee -a $OUT/crossing.log; }
 stop_fleet(){ pkill -TERM -x door_concept; pkill -TERM -x controller; pkill -TERM -x residual_concep; pkill -TERM -x room_concept; pkill -TERM -x retina; pkill -TERM -x ltsm_agent

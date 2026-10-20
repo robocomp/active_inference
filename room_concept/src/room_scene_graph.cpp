@@ -995,6 +995,12 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
             if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
                 k = std::max(k, v);
         }
+    // ★ …AND ONE PAST EVERY room_<k> EVER ISSUED (2026-10-19, three-room world). A room left behind is moved out of the
+    //   live graph into ltsm's memory, which this agent cannot see; scanning the live graph alone named the room behind
+    //   door_1 `room_2` again while the L-shaped room_2 behind door_2 sat in memory, and ltsm — which identifies a
+    //   remembered room by its name — took the new room for the L room and drew it behind the wrong door. The mark is
+    //   persisted because ltsm's memory is: a script that wipes ltsm_memory.json removes etc/room_name_hwm.txt too.
+    k = std::max(k, room_name_hwm());
     ++k;
     std::string name = "room_" + std::to_string(k);
     // ★ A REMEMBERED ROOM KEEPS ITS NAME (2026-10-12, return to room 1). ltsm_agent posts, under each door whose other
@@ -1025,6 +1031,8 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     G_->add_or_modify_attrib_local<parent_att>(proto, dsr_robot_id_);
     rc::provenance::stamp_creation(*G_, proto);
     const auto id = G_->insert_node(proto);
+    if (id.has_value())
+        note_room_name_issued(k);
     if (not id.has_value())
     {
         qWarning() << "[room][proto] failed to insert proto-room node" << QString::fromStdString(name);
@@ -1433,6 +1441,35 @@ bool RoomSceneGraph::birth_startup_proto(const rc::RoomConcept::UpdateResult& re
                                  "driven by the layout explorer until the layout is publishable. See tmp/proto_room.csv.")
                              .arg(id.value()).arg(startup_erode_m(), 0, 'f', 2);
     return true;
+}
+
+// The highest room_<k> this agent has ever issued, read once from kRoomNameHwmFile (0 when absent or unreadable).
+std::uint64_t RoomSceneGraph::room_name_hwm()
+{
+    if (not room_name_hwm_loaded_)
+    {
+        room_name_hwm_loaded_ = true;
+        if (std::ifstream f(kRoomNameHwmFile); f)
+        {
+            std::string line;
+            std::getline(f, line);
+            std::uint64_t v = 0;
+            if (std::from_chars(line.data(), line.data() + line.size(), v).ec == std::errc{})
+                room_name_hwm_ = v;
+        }
+    }
+    return room_name_hwm_;
+}
+
+void RoomSceneGraph::note_room_name_issued(std::uint64_t k)
+{
+    if (k <= room_name_hwm()) return;
+    room_name_hwm_ = k;
+    if (std::ofstream f(kRoomNameHwmFile, std::ios::trunc); f)
+    {
+        f.imbue(std::locale::classic());
+        f << k << '\n';
+    }
 }
 
 std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::DoorAperture& ap) const

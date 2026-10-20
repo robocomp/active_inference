@@ -217,6 +217,12 @@ private:
     };
     /// The recall hung from the crossed door `ap`, if ltsm posted one. Reads node/edge attributes only (thread-safe).
     [[nodiscard]] std::optional<Recall> find_recall(const rc::DoorAperture& ap) const;
+    // Room names are never reused: one past every room_<k> ever issued, not only those live (see the proto birth).
+    static constexpr const char* kRoomNameHwmFile = "etc/room_name_hwm.txt";
+    std::uint64_t room_name_hwm_ = 0;
+    bool room_name_hwm_loaded_ = false;
+    std::uint64_t room_name_hwm();
+    void note_room_name_issued(std::uint64_t k);
     void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door, float p_cross,
                               const std::optional<Recall>& recall = std::nullopt);
     [[nodiscard]] float startup_erode_m() const;
