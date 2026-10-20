@@ -79,8 +79,10 @@ Each fix so far added a rule to one layer, which moved the disagreement to anoth
 ### 4.1 Body
 - Footprint = XY outline of `webots-shadow/protos/meshes/shadow.stl` (z band of the robot that can touch the world)
   ∪ the two drive-wheel rectangles (x ∈ [0.234, 0.284] each side, y ∈ [−0.10, 0.10]) ∪ the casters (inside the body,
-  included for completeness), as a **non-convex polygon**, read from / checked against `Shadow.proto` at start-up
-  (the start-up report already diffs the footprint; it must now diff against the proto's wheels).
+  included for completeness), as the **convex hull** of those parts (designer's call, 2026-10-20: the hull adds only
+  the two slivers between each wheel tab and the body corners; it has the same extent in every direction and the
+  same swept radius, so no contact answer changes, and the planner keeps its exact convex-footprint tests — one body
+  everywhere). Generated offline from `shadow.stl` + `Shadow.proto` and compiled in; the start-up report diffs it.
 - Plus one safety margin (`FootprintSafetyMarginM`, physical meaning: unmodelled geometry). Same polygon in the
   planner, the policy and the LiDAR self-filter. The ESDF disc self-filter and the four-wheel model are removed.
 
