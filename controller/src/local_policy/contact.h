@@ -41,7 +41,7 @@ float hull_distance(const rc::RobotFootprint& body, const Pose2& pose, const Eig
 //   test: the projection ALONE leaves the cell at its mean and reads 0.075 against the extreme hit's 0.149 (fails);
 //   segment + full projection pass it (0.201) but double-count a flat wall seen obliquely by a corner (dense-wall
 //   slide 0.069 -> 0.139, the segment already holds that extent). Segment + residual projection keeps the test
-//   (0.184) and the wall (0.069).
+//   (0.184) and the wall (0.069). ACCEPTED by the controller (review fix round 2) on that variant table.
 //   The side, 0.04 m, is the along-surface scale over which a surface is ONE element: a wall, a door leaf, a table
 //   edge or a chair leg (~0.03-0.05 m) does not change its distance to the body within it, and the sensor itself
 //   blurs any structure finer than ~2-4 sigma_r (0.01 m range noise). It must never merge returns across a gap the
@@ -53,25 +53,28 @@ std::vector<Return> surface_cells(std::span<const Return> r, float cell_m = kSur
 // One obstacle's clearances along a sweep: signed distance to the bare hull at the start (sd0) and the minimum over
 // the sweep (sd_min <= sd0), its independent sigma and its existence. Exposed for the integral-accuracy test.
 struct ContactTerm { double sd0, sd_min, sigma, p_exist; };
-// log E_eps[prod_j F_j(sd_min_j + eps)] - log E_eps[prod_j F_j(sd0_j + eps)], eps ~ N(0, sigma_s^2),
-// F_j(x) = 1 - p_exist_j * (1 - Phi(x / sigma_j)). n_ref = 0: the adaptive rule log_p_no_contact uses (accurate to
-// < 0.005 in P for sigma_j / sigma_s in [0.05, 5], tested); n_ref > 0: brute-force trapezoid with n_ref nodes over
-// +-6 sigma_s (the test's reference). Returns <= 0, or -inf when the denominator carries no mass.
-// ★ The 0.005 accuracy is ABSOLUTE in each integral (numerator and denominator are both in [0, 1] after the shift);
-//   in P it is relative to the denominator, so deep in a wedge (denominator << 1) the ratio is less precise than
-//   its parts — there P is ~1 anyway and only the Stuck bar (P >= 1 - eps) reads it.
-double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, int n_ref = 0);
+// log E_{eps | eps > -sd0_star}[ prod_j F_j(sd_min_j + eps) / F_j(sd0_j + eps) ], eps ~ N(0, sigma_s^2) truncated by
+// the ONE fact "nothing touches now" (sd0_star = the closest cell's clearance now, over ALL cells, not only those
+// in `t`), F_j(x) = 1 - p_exist_j * (1 - Phi(x / sigma_j)); every factor is <= 1 and a cell never brought closer
+// contributes exactly 1. n_ref = 0: the adaptive rule log_p_no_contact uses (accurate to < 0.005 in P for
+// sigma_j / sigma_s in [0.05, 5], tested); n_ref > 0: brute-force trapezoid with n_ref nodes over [-sd0_star, +6
+// sigma_s] (the test's reference). Returns <= 0, or -inf when the truncation leaves no offset in range.
+// ★ The 0.005 accuracy is ABSOLUTE on the truncated average (the integrand is in [0, 1]) — there is no longer a
+//   denominator to divide by; the truncation mass Phi(6) - Phi(u_lo) is exact.
+double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, double sd0_star, int n_ref = 0);
 
 // Log-probability that the swept body touches none of the returns, CONDITIONED ON TOUCHING NONE AT THE START POSE.
 // Returns are first merged into surface cells (above). Distances to the BARE hull (the safety margin is the planner's
 // route standoff, not part of this probability). Error model: a SHARED clearance offset
-// eps ~ N(0, sigma_pose_xy^2 + body_geometry_sigma_m^2) common to every cell, plus an independent per-cell
-// sigma_j^2 = sigma_cell^2 + (rho_j*sigma_pose_yaw)^2 (rho_j = range from the pose centre):
-//   P = E_eps[prod_j F_j(sd_min_j + eps)] / E_eps[prod_j F_j(sd0_j + eps)],  F_j(x) = 1 - p_exist*(1 - Phi(x/sigma_j)).
+// eps ~ N(0, sigma_pose_xy^2 + body_geometry_sigma_m^2) common to every cell, truncated to eps > -sd0* by "nothing
+// touches now" (sd0* = the closest cell now), plus an independent per-cell
+// sigma_j^2 = sigma_cell^2 + (rho_j*sigma_pose_yaw)^2 + residual scatter (rho_j = range from the pose centre):
+//   P = E_{eps > -sd0*}[prod_j F_j(sd_min_j + eps) / F_j(sd0_j + eps)],  F_j(x) = 1 - p_exist*(1 - Phi(x/sigma_j)).
 // body_geometry_sigma_m: residual error of the proto-derived body (tessellation, hull simplification, LiDAR beam
 // footprint) — default 0.01 m at the call sites.
 // lps_floor: the sweep may stop early and return an UPPER BOUND (<= lps_floor) once the result is provably below
-// exp(lps_floor) — P(no contact) <= F_j(sd_min_j + 6 sigma_s) for any deepened cell; -inf (default) keeps it exact.
+// exp(lps_floor) — P(no contact) <= F_j(sd_min_j + 6 sigma_s) / F_j(sd0_j + 6 sigma_s) for any deepened cell with
+// p_exist = 1 (its ratio rises with eps); -inf (default) keeps it exact.
 float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> r,
                        float sigma_pose_xy, float sigma_pose_yaw, float body_geometry_sigma_m,
                        float lps_floor = -std::numeric_limits<float>::infinity());

@@ -236,40 +236,40 @@ double log_free(double x, double p_exist)
 double Phi(double u) { return 0.5 * std::erfc(-u / 1.4142135623730951); }
 double phi(double u) { return 0.3989422804014327 * std::exp(-0.5 * u * u); }
 
-// log G_num(u), log G_den(u): the two products at eps = sigma_s * u.
-void log_products(std::span<const ContactTerm> t, double sigma_s, double u, double& ln, double& ld)
+// log G(u) = sum_j [log F_j(sd_min_j + eps) - log F_j(sd0_j + eps)] at eps = sigma_s * u: the product of the per-cell
+// ratios, each <= 1 (sd_min <= sd0); a cell never brought closer contributes exactly 0.
+double log_G(std::span<const ContactTerm> t, double sigma_s, double u)
 {
-    ln = ld = 0.0;
+    double g = 0.0;
     const double e = sigma_s * u;
     for (const ContactTerm& c : t)
-    {
-        const double f0 = log_free((c.sd0 + e) / c.sigma, c.p_exist);
-        ld += f0;
-        ln += c.sd_min < c.sd0 ? log_free((c.sd_min + e) / c.sigma, c.p_exist) : f0;
-    }
+        if (c.sd_min < c.sd0) g += log_free((c.sd_min + e) / c.sigma, c.p_exist) - log_free((c.sd0 + e) / c.sigma, c.p_exist);
+    return g;
 }
 
-// ★ THE eps INTEGRAL (controller ruling, fix round 4: accurate to 0.005 in P over sigma_j/sigma_s in [0.05, 5]).
-//   Every factor F_j rises with eps, so G(u) = prod_j F_j is MONOTONE in u = eps/sigma_s and bounded in [0, 1]: a soft
-//   step whose width is the smallest sigma_j/sigma_s — down to 0.05, far too sharp for a fixed Gauss-Hermite rule
-//   (round 3 measured 7 points reading 0.072 for a true 0.035). Here G is sampled on a 0.5-wide grid over +-6, taken
-//   LINEAR between nodes, and phi(u) * linear is integrated in closed form (so the Gaussian itself costs nothing);
-//   an interval is bisected while (its jump in G) x (its Gaussian mass) exceeds kRefineTol, down to a width of
-//   kMinWidth. Monotonicity bounds the error of a linear interpolant by jump x mass, so the refined sum is accurate
-//   to ~kRefineTol per interval and to kMinWidth x phi(0) ~ 0.002 at a hard step — both tested against the
-//   4001-node reference. Both products share the nodes (one pass of log_free per node and cell).
-constexpr double kSpanU = 6.0, kCoarseU = 0.5, kRefineTol = 1e-4, kMinWidth = 1.0 / 128.0;
+// ★ THE eps INTEGRAL (controller rulings, fix round 4 + review fix round 2: accurate to 0.005 in P over
+//   sigma_j/sigma_s in [0.05, 5]). "No contact now" is ONE fact about the shared offset: eps ~ N(0, sigma_s^2)
+//   TRUNCATED to eps > -sd0* (sd0* = the closest cell's clearance now; per-cell noise does not enter it — a product
+//   of 56 per-cell conditions over one surface counted that fact 56 times and pushed eps ~+2 cm, the optimistic
+//   wedge Release of review round 1). P(no contact | none now) = E_{eps | eps > -sd0*}[ G(eps) ],
+//   G = prod_j F_j(sd_min_j + eps) / F_j(sd0_j + eps) in [0, 1].
+//   For p_exist = 1 every ratio RISES with eps (log Phi is concave: the inverse Mills ratio decreases), so G is
+//   monotone: a soft step whose width is the smallest sigma_j/sigma_s — down to 0.05, far too sharp for a fixed
+//   Gauss-Hermite rule (round 3 measured 7 points reading 0.072 for a true 0.035). G is sampled on a 0.5-wide grid
+//   from u_lo = -sd0*/sigma_s to +6, taken LINEAR between nodes, and phi(u) * linear is integrated in closed form (so
+//   the Gaussian itself costs nothing); an interval is bisected while (its jump in G) x (its Gaussian mass) exceeds
+//   kRefineTol, down to a width of kMinWidth. Monotonicity bounds the error of a linear interpolant by jump x mass,
+//   so the refined sum is accurate to ~kRefineTol per interval and to kMinWidth x phi(0) ~ 0.002 at a hard step —
+//   tested against the 4001-node reference. p_exist < 1 ratios are 1 at both ends with a dip between: their dip
+//   edges are seeded as nodes (below), so the refinement always sees the walls of a dip.
+constexpr double kSpanU = 6.0, kCoarseU = 0.25, kRefineTol = 1e-4, kMinWidth = 1.0 / 128.0;
 
-struct Node { double u, gn, gd; };   // G_num, G_den relative to the maximum of G_den (at u = +6, G_den is monotone)
+struct Node { double u, g; };
 
 struct Integrator
 {
-    std::span<const ContactTerm> t; double sigma_s, shift; double in = 0, id = 0;
-    Node eval(double u) const
-    {
-        double ln, ld; log_products(t, sigma_s, u, ln, ld);
-        return {u, std::exp(ln - shift), std::exp(ld - shift)};
-    }
+    std::span<const ContactTerm> t; double sigma_s; double integral = 0;
+    Node eval(double u) const { return {u, std::exp(log_G(t, sigma_s, u))}; }
     // exact integral of phi(u) * (linear through (a, Ga), (b, Gb)) over [a, b]
     static double piece(double a, double b, double Ga, double Gb)
     {
@@ -280,51 +280,60 @@ struct Integrator
     void add(const Node& A, const Node& B)
     {
         const double W = Phi(B.u) - Phi(A.u);
-        const double jump = std::max(std::abs(B.gn - A.gn), std::abs(B.gd - A.gd));
-        if (jump * W > kRefineTol and B.u - A.u > kMinWidth)
+        if (std::abs(B.g - A.g) * W > kRefineTol and B.u - A.u > kMinWidth)
         {
             const Node M = eval(0.5 * (A.u + B.u));
             add(A, M); add(M, B);
             return;
         }
-        in += piece(A.u, B.u, A.gn, B.gn);
-        id += piece(A.u, B.u, A.gd, B.gd);
+        integral += piece(A.u, B.u, A.g, B.g);
     }
 };
 }  // namespace
 
-double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, int n_ref)
+double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, double sd0_star, int n_ref)
 {
+    const double u_lo = std::max(-kSpanU, -double(sd0_star) / sigma_s);
+    // ★ a truncation beyond +6 sigma_s leaves no offset that explains "none touching now": no information, -inf
+    if (not (u_lo < kSpanU)) return -std::numeric_limits<double>::infinity();
     if (t.empty()) return 0.0;
-    // the shift keeps exp() in range: G_den is monotone in u, so its value at +6 is its maximum
-    double ln_top, ld_top; log_products(t, sigma_s, kSpanU, ln_top, ld_top);
-    if (not std::isfinite(ld_top)) return -std::numeric_limits<double>::infinity();
-    Integrator I{t, sigma_s, ld_top};
+    const double mass = Phi(kSpanU) - Phi(u_lo);
+    Integrator I{t, sigma_s};
     if (n_ref > 1)
-    {   // brute-force trapezoid reference: n_ref equally spaced nodes over +-6
-        const double h = 2.0 * kSpanU / double(n_ref - 1);
-        double sn = 0, sd = 0;
+    {   // brute-force trapezoid reference: n_ref equally spaced nodes over [u_lo, +6]
+        const double h = (kSpanU - u_lo) / double(n_ref - 1);
         for (int k = 0; k < n_ref; ++k)
         {
-            const Node n = I.eval(-kSpanU + h * k);
-            const double w = (k == 0 or k == n_ref - 1 ? 0.5 : 1.0) * h * phi(n.u);
-            sn += w * n.gn; sd += w * n.gd;
+            const Node n = I.eval(u_lo + h * k);
+            I.integral += (k == 0 or k == n_ref - 1 ? 0.5 : 1.0) * h * phi(n.u) * n.g;
         }
-        I.in = sn; I.id = sd;
     }
     else
     {
-        Node prev = I.eval(-kSpanU);
-        for (double u = -kSpanU + kCoarseU; u <= kSpanU + 1e-9; u += kCoarseU)
+        // ★ nodes: the coarse grid plus, for every p_exist < 1 term, the walls and the bottom of its dip (its ratio
+        //   is 1 on both sides of [-sd0_j, -sd_min_j] and below 1 between: with equal values at two grid nodes the
+        //   jump criterion would never look inside — measured: a dip enclosed in one 0.25 interval read 0.0057
+        //   high). With a node at the bottom the dip is between nodes whose values differ, and refinement follows.
+        std::vector<double> us;
+        for (double u = u_lo; u < kSpanU; u += kCoarseU) us.push_back(u);
+        us.push_back(kSpanU);
+        for (const ContactTerm& c : t)
+            if (c.p_exist < 1.0 and c.sd_min < c.sd0)
+                for (double e : {-c.sd0, -0.5 * (c.sd0 + c.sd_min), -c.sd_min})     // both walls and the bottom
+                    if (const double u = e / sigma_s; u > u_lo and u < kSpanU) us.push_back(u);
+        std::sort(us.begin(), us.end());
+        Node prev = I.eval(us.front());
+        for (std::size_t k = 1; k < us.size(); ++k)
         {
-            const Node cur = I.eval(std::min(u, kSpanU));
+            if (us[k] - prev.u < 1e-9) continue;
+            const Node cur = I.eval(us[k]);
             I.add(prev, cur);
             prev = cur;
         }
     }
-    if (not (I.id > 0.0)) return -std::numeric_limits<double>::infinity();
-    // ★ numeric clamp, not a model gate: the ratio is <= 1 term by term (sd_min <= sd0); rounding can push it a hair over
-    return std::min(0.0, std::log(I.in) - std::log(I.id));
+    if (not (I.integral > 0.0)) return -std::numeric_limits<double>::infinity();
+    // ★ numeric clamp, not a model gate: G <= 1 term by term; rounding can push the average a hair over 1
+    return std::min(0.0, std::log(I.integral) - std::log(mass));
 }
 
 float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> r,
@@ -338,38 +347,37 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
 {
     if (sweep.empty()) return 0.f;
     const auto& poly = body.polygon();
-    // ★ CORRELATED ERROR, INTEGRATED, OVER SURFACE CELLS (controller rulings, fix rounds 3-4). Distances are to the
-    //   BARE hull (the planner's safety margin is a route preference, not part of this probability). The error
-    //   splits in two:
+    // ★ CORRELATED ERROR, INTEGRATED, OVER SURFACE CELLS (controller rulings, fix rounds 3-4, review round 2).
+    //   Distances are to the BARE hull (the planner's safety margin is a route preference, not part of this
+    //   probability). The error splits in two:
     //     SHARED   eps ~ N(0, sigma_s^2), sigma_s^2 = sigma_xy^2 + g^2 — one offset of every clearance at once (the
-    //              pose translation and the body-model residual move all wall points together; + eps = more room);
+    //              pose translation and the body-model residual move all wall points together; + eps = more room),
+    //              TRUNCATED to eps > -sd0* by the one fact "nothing touches now";
     //     PER-CELL sigma_j^2 = sigma_cell^2 + (rho_j * sigma_yaw)^2 + lambda_2 (n . a_perp)^2 (the cell's surface
     //              estimate; yaw lever arm; the scatter the support segment does not capture, projected on the
     //              clearance direction n — see contact.h).
-    //   P(no contact | none now) = E_eps[ prod_j F_j(sd_min_j + eps) ] / E_eps[ prod_j F_j(sd0_j + eps) ],
-    //   F_j(x) = 1 - p_exist_j * (1 - Phi(x / sigma_j)). Conditioning on the present makes a motion that brings no
-    //   cell closer than now cost nothing, continuously across the surface; the shared eps stops N wall points from
-    //   counting one common error N times; the cells stop N hits of one wall from counting as N obstacles.
+    //   P(no contact | none now) = E_{eps > -sd0*}[ prod_j F_j(sd_min_j + eps) / F_j(sd0_j + eps) ],
+    //   F_j(x) = 1 - p_exist_j * (1 - Phi(x / sigma_j)). A motion that brings no cell closer than now costs nothing,
+    //   continuously across the surface; the shared eps stops N wall points from counting one common error N times;
+    //   the cells stop N hits of one wall from counting as N obstacles.
     const double ss = std::sqrt(double(sigma_pose_xy) * sigma_pose_xy + double(body_geometry_sigma_m) * body_geometry_sigma_m);
-    float path = 0.f;
-    for (std::size_t i = 1; i < sweep.size(); ++i) path += (sweep[i].p - sweep[i - 1].p).norm();
+    float path = 0.f, turn = 0.f;
+    for (std::size_t i = 1; i < sweep.size(); ++i) { path += (sweep[i].p - sweep[i - 1].p).norm(); turn += std::abs(sweep[i].yaw - sweep[i - 1].yaw); }
     std::vector<Frame> frames; frames.reserve(sweep.size());
     for (const Pose2& q : sweep) frames.emplace_back(q);
     const EdgeLines lines(poly);
-    // ★ PRUNING, two stages, both "the factor is 1 to working precision at the worst node eps = -6 sigma_s"
-    //   (Phi(7) = 1 - 1.3e-12): by range before any geometry (circumscribed reach + path + the cell's extent), then
-    //   by the swept minimum.
-    // ★ PROVABLE EARLY STOP (review fix: the budget). Every factor rises with eps and the integral spans
-    //   eps <= +6 sigma_s, so for any deepened cell P(no contact) <= F_j(sd_min_j + 6 sigma_s) whatever the other
-    //   cells do (the ratio of expectations is bounded by the supremum of that cell's own factor ratio, itself
-    //   <= its numerator factor). Once that bound falls below exp(lps_floor) the exact value cannot matter to the
-    //   caller and the bound is returned: a candidate sweep stops as soon as it is certainly not releasable, a
-    //   continuation as soon as it is certainly not eligible. lps_floor = -inf keeps the sweep exact.
     constexpr double kOne = 7.0;
-    const float reach = body.circumscribed_radius() + path;
+    const float r_circ = body.circumscribed_radius(), reach = r_circ + path;
     const Frame& f0 = frames.front();
-    std::vector<ContactTerm> terms;
-    terms.reserve(cells.size());
+
+    // ---- pass 1: every cell within range gets its support and its clearance NOW; sd0* is the closest of them.
+    // ★ PRUNING by range before any geometry (circumscribed reach + path + the cell's extent): such a cell is more
+    //   than 6 sigma_s + 7 sigma_j from the body at every pose, its ratio is 1 to working precision at the lowest
+    //   node, and it cannot be the closest cell now either (sd0 > 6 sigma_s puts the truncation below the span).
+    struct Live { const Return* q; double sj0; float h, l2; Eigen::Vector2f axis; float sd0; };
+    std::vector<Live> live;
+    live.reserve(cells.size());
+    float sd0_star = std::numeric_limits<float>::infinity();
     for (const Return& q : cells)
     {
         const float rho = (q.p - f0.p).norm();
@@ -385,17 +393,34 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
             axis = std::abs(q.sxy) > 1e-12f ? Eigen::Vector2f(l1 - q.syy, q.sxy) : (q.sxx >= q.syy ? Eigen::Vector2f(1.f, 0.f) : Eigen::Vector2f(0.f, 1.f));
             axis.normalize();
         }
-        const float sdev = std::sqrt(std::max(0.f, l1));
-        if (double(rho) - reach - h > kSpanU * ss + kOne * (sj0 + sdev)) continue;
-        const int npts = h > 1e-4f ? 3 : 1;
-        const Eigen::Vector2f pts[3] = {q.p, q.p + h * axis, q.p - h * axis};
-        // a cell can only prove the floor once it is inside by more than 6 sigma_s (then its bound starts to fall);
-        // the bound uses sj0 (sigma_j >= sj0 after the residual scatter), which only makes it looser: still valid
-        const double sd_floor = std::isfinite(lps_floor) ? -kSpanU * ss : -std::numeric_limits<double>::infinity();
-        // start pose: exact at every support point; then the running minimum over the sweep with the bound filter
-        float sd0 = 1e30f;
-        for (int k = 0; k < npts; ++k) sd0 = std::min(sd0, sd_local(poly, 0.f, f0.to_robot(pts[k])));
-        float sd = sd0;
+        if (double(rho) - reach - h > kSpanU * ss + kOne * (sj0 + std::sqrt(std::max(0.f, l1)))) continue;
+        float sd0 = sd_local(poly, 0.f, f0.to_robot(q.p));
+        if (h > 1e-4f) sd0 = std::min({sd0, sd_local(poly, 0.f, f0.to_robot(q.p + h * axis)), sd_local(poly, 0.f, f0.to_robot(q.p - h * axis))});
+        sd0_star = std::min(sd0_star, sd0);
+        live.push_back({&q, sj0, h, l2, axis, sd0});
+    }
+    const double eps_lo = std::max(-double(sd0_star), -kSpanU * ss);   // the lowest offset still in range
+    if (not (eps_lo < kSpanU * ss)) return -std::numeric_limits<float>::infinity();
+
+    // ---- pass 2: the swept minimum of every live cell that the motion can bring close enough to matter.
+    // ★ PROVABLE EARLY STOP (review fix: the budget). For p_exist = 1 the ratio rises with eps and the integral
+    //   spans eps <= +6 sigma_s, so P(no contact) <= F_j(sd_min_j + 6 sigma_s) / F_j(sd0_j + 6 sigma_s) for any
+    //   deepened cell whatever the other cells do. Once that bound falls below exp(lps_floor) the exact value cannot
+    //   matter to the caller and the bound is returned: a candidate sweep stops as soon as it is certainly not
+    //   releasable, a continuation as soon as it is certainly not eligible. lps_floor = -inf keeps the sweep exact.
+    std::vector<ContactTerm> terms;
+    terms.reserve(live.size());
+    for (const Live& L : live)
+    {
+        const Return& q = *L.q;
+        // the body's nearest point moves at most path + r_circ * turn: a cell that even then stays 7 sigma_j clear
+        // at the lowest offset keeps a ratio of 1 and never enters the product
+        if (double(L.sd0) - path - r_circ * turn + eps_lo >= kOne * L.sj0) continue;
+        const int npts = L.h > 1e-4f ? 3 : 1;
+        const Eigen::Vector2f pts[3] = {q.p, q.p + L.h * L.axis, q.p - L.h * L.axis};
+        const bool can_prove = std::isfinite(lps_floor) and q.p_exist >= 1.f;
+        const double top = kSpanU * ss, lf0 = can_prove ? log_free((double(L.sd0) + top) / L.sj0, 1.0) : 0.0;
+        float sd = L.sd0;
         std::size_t at = 0;
         bool proven = false;
         for (std::size_t i = 1; i < frames.size() and not proven; ++i)
@@ -407,26 +432,26 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
                 if (v < sd)
                 {
                     sd = v; at = i;
-                    if (sd < sd0 and sd <= sd_floor and log_free((double(sd) + kSpanU * ss) / sj0, q.p_exist) <= lps_floor) { proven = true; break; }
+                    if (can_prove and sd < L.sd0 and double(sd) + top < 0.0 and log_free((double(sd) + top) / L.sj0, 1.0) - lf0 <= lps_floor) { proven = true; break; }
                 }
             }
-        if (proven) return float(log_free((double(sd) + kSpanU * ss) / sj0, q.p_exist));
+        if (proven) return float(log_free((double(sd) + top) / L.sj0, 1.0) - lf0);
+        if (not (sd < L.sd0)) continue;                                      // never closer than now: ratio exactly 1
         // residual scatter (what the segment does not capture: the minor axis) projected on the clearance direction
         // at the pose of the minimum: from the cell's mean to its nearest hull point (room frame)
-        double sj = sj0;
-        if (l2 > 1e-10f)
+        double sj = L.sj0;
+        if (L.l2 > 1e-10f)
         {
             Eigen::Vector2f dir;
             sd_local(poly, 0.f, frames[at].to_robot(q.p), &dir);
             const Eigen::Vector2f n = frames[at].to_room_dir(dir);
-            const float along = n.x() * axis.x() + n.y() * axis.y();
-            sj = std::sqrt(sj0 * sj0 + double(l2) * std::max(0.f, 1.f - along * along));
+            const float along = n.x() * L.axis.x() + n.y() * L.axis.y();
+            sj = std::sqrt(L.sj0 * L.sj0 + double(L.l2) * std::max(0.f, 1.f - along * along));
         }
-        if (double(sd) - kSpanU * ss > kOne * sj) continue;
-        terms.push_back({sd0, sd, sj, q.p_exist});
+        if (double(sd) + eps_lo > kOne * sj) continue;                       // 1 to working precision at the lowest node
+        terms.push_back({L.sd0, sd, sj, q.p_exist});
     }
-    const double lr = log_ratio_shared_offset(terms, ss);
-    // A denominator of -inf (every eps puts the robot inside a cell) has no information: report -inf.
+    const double lr = log_ratio_shared_offset(terms, ss, sd0_star);
     if (not std::isfinite(lr)) return -std::numeric_limits<float>::infinity();
     return float(lr);
 }

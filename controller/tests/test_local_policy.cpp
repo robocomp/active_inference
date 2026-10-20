@@ -20,9 +20,12 @@
 // ★ Review fix round 1: rollouts ramp from the current velocity and start from the latency-advanced pose
 //   (latency_advances_start); cells are swept as support segments (jamb tips); Release scans only releasable
 //   candidates (P < 1 - risk_eps) and every sweep stops once its result is provably below what its caller needs.
-// Timing (-O2, 300 returns, median; this machine): drive 0.7 ms; release worst case (field +inf, 76 eligible)
-//   1.2 ms; the reviewer's no-gain WEDGE (sides +-0.30, nose/tail +-0.26, 56 cells, every candidate P ~ 1) 4.7 ms
-//   (65 ms before this round: 47 x 14 continuation sweeps, un-pruned). n_cont_* left at the brief's 3 x 5.
+// ★ Review fix round 2: the shared offset is TRUNCATED once by "nothing touches now" (eps > -sd0*) and the
+//   integrand is the product of per-cell ratios (contact.h). P values rose where a motion deepens cells (the old
+//   per-cell conditioning was optimistic): pressed 0.093 -> 0.170, dense-wall slide 0.069 -> 0.159; no verdict moved.
+// Timing (-O2, 300 returns, median; this machine): drive 0.6 ms; release worst case (field +inf, 76 eligible)
+//   1.1 ms; the reviewer's no-gain WEDGE (sides +-0.30, nose/tail +-0.26, 56 cells, every candidate P ~ 1) 2.6 ms
+//   (65 ms before review round 1: 47 x 14 continuation sweeps, un-pruned). n_cont_* left at the brief's 3 x 5.
 #include "../src/local_policy/local_policy.h"
 
 #include <algorithm>

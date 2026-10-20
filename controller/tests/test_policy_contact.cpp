@@ -200,8 +200,11 @@ int main()
                 std::uniform_int_distribution<int> nt(1, 30);
                 std::uniform_real_distribution<double> sd0d(-0.01, 0.08), dd(0.0, 0.06), pe(0.3, 1.0);
                 std::vector<ContactTerm> t;
-                for (int i = 0, m = nt(g); i < m; ++i) { const double s0 = sd0d(g); t.push_back({s0, s0 - dd(g), ratio * ss, trial % 3 == 0 ? pe(g) : 1.0}); }
-                wr = std::max(wr, std::abs(std::exp(log_ratio_shared_offset(t, ss)) - std::exp(log_ratio_shared_offset(t, ss, 4001))));
+                double star = 0.08;
+                for (int i = 0, m = nt(g); i < m; ++i) { const double s0 = sd0d(g); star = std::min(star, s0); t.push_back({s0, s0 - dd(g), ratio * ss, trial % 3 == 0 ? pe(g) : 1.0}); }
+                // the closest cell now may be one the motion never deepens (not in t): truncate a little closer
+                if (trial % 2 == 0) star = std::max(-0.02, star - 0.01);
+                wr = std::max(wr, std::abs(std::exp(log_ratio_shared_offset(t, ss, star)) - std::exp(log_ratio_shared_offset(t, ss, star, 4001))));
                 ++cases;
             }
             std::printf("  eps integral, sigma_j/sigma_s=%.2f: max |P - P_ref| = %.5f\n", ratio, wr);
@@ -213,17 +216,18 @@ int main()
             for (auto [v, w] : {std::pair{-0.25f, 0.f}, std::pair{-0.5f, -0.3f}, std::pair{0.f, 1.0f}})
             {
                 const auto sw = rollout(origin, 0.f, 0.f, v, w, 1.f, b, 0.05f);
-                std::vector<ContactTerm> t;
+                std::vector<ContactTerm> t; double star = 1e9;
                 for (const auto& q : surface_cells(wall_x(0.30f, -2.f, 2.f, sr)))
                 {
                     const float rho = (q.p - origin.p).norm();
                     const double sj = std::sqrt(double(q.sigma) * q.sigma + double(rho) * rho * syaw * syaw);
                     float sd0 = hull_distance(f, origin, q.p), sd = sd0;
                     for (std::size_t i = 1; i < sw.size(); ++i) sd = std::min(sd, hull_distance(f, sw[i], q.p));
-                    if (sd - 6.0 * ss > 7.0 * sj) continue;
+                    if (rho < 1.5f) star = std::min(star, double(sd0));
+                    if (not (sd < sd0) or sd - 6.0 * ss > 7.0 * sj) continue;
                     t.push_back({sd0, sd, sj, q.p_exist});
                 }
-                const double P = 1.0 - std::exp(log_ratio_shared_offset(t, ss)), Pref = 1.0 - std::exp(log_ratio_shared_offset(t, ss, 4001));
+                const double P = 1.0 - std::exp(log_ratio_shared_offset(t, ss, star)), Pref = 1.0 - std::exp(log_ratio_shared_offset(t, ss, star, 4001));
                 const double Plib = 1.0 - std::exp(log_p_no_contact(f, sw, wall_x(0.30f, -2.f, 2.f, sr), sxy, syaw, kGeom));
                 std::printf("  wall 0.30 sigma_r=%.4f v=%+.2f w=%+.2f : P=%.4f P_ref=%.4f (log_p_no_contact %.4f)\n", sr, v, w, P, Pref, Plib);
                 worst = std::max({worst, std::abs(P - Pref), std::abs(Plib - Pref)}); ++cases;
