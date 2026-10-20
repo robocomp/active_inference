@@ -91,7 +91,9 @@ bool arrived(const PolicyInput& in, const Pose2& at)
     return xy and (not g.yaw or std::abs(wrap(*g.yaw - at.yaw)) <= g.tol_yaw);
 }
 
-struct Cand { float v, w; float lps = 0.f, prog = 0.f, lpc = 0.f; Pose2 end{}; bool elig = false, lpc_done = false; };
+// prog = ONE-step progress (start -> end); prog2 = TWO-step progress (round-4 ruling): the best of the end itself and every
+// ELIGIBLE coarse continuation from it, measured from the decision's start.
+struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, lpc = 0.f; Pose2 end{}; bool elig = false, lpc_done = false; int conts = -1; };
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
 // lps_floor: below it only a bound is needed (contact.h) — candidates need exact values only while releasable
@@ -163,24 +165,52 @@ std::vector<std::pair<float, float>> coarse_set(const PolicyInput& in, const Pol
     return out;
 }
 
-// `in.returns` are surface cells already (decide() merges once per cycle).
-float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
+// The coarse continuation ROLLOUTS from a pose at rest, computed once per end pose and cached (round 4: they feed both
+// the continuability count and the second step of the two-step progress, and the Drive bound below).
+struct Conts { std::vector<std::vector<Pose2>> sw; bool arrived = false, done = false; int n = 0; };
+Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
 {
+    Conts c; c.done = true;
     const auto set = coarse_set(in, p);
-    const int n = int(set.size());
-    if (in.body == nullptr or in.goal == nullptr or (in.goal->kind != Goal::Kind::Heading and in.field == nullptr))
-        return std::log(1.f / (float(n) + 2.f));
-    int k = 0;
-    if (arrived(in, from)) k = n;
-    else
-        for (const auto& [v, w] : set)
-        {
-            Pose2 end;
-            const float lps = lp_safe(in, p, from, 0.f, 0.f, v, w, &end, std::log1p(-p.risk_eps));
-            if (eligible(lps, p) and progress(in, from, end) >= 0.f) ++k;
-        }
-    return std::log((float(k) + 1.f) / (float(n) + 2.f));
+    c.n = int(set.size());
+    if (in.body == nullptr or in.goal == nullptr or (in.goal->kind != Goal::Kind::Heading and in.field == nullptr)) return c;
+    if (arrived(in, from)) { c.arrived = true; return c; }
+    for (const auto& [v, w] : set) c.sw.push_back(rollout(from, 0.f, 0.f, v, w, p.horizon_s, in.base, p.dt));
+    return c;
 }
+// `in.returns` are surface cells already (decide() merges once per cycle).
+// ref / best_prog (optional): also return the largest progress(ref, continuation end) over the ELIGIBLE continuations
+// (-inf if none) — the second step of the two-step progress.
+// ★ EXACT pruning: a continuation's contact sweep (the expensive part; its rollout is already cached) is evaluated only
+//   if its answer can change something — it could count for continuability (progress from `from` >= 0) or raise
+//   best_prog (progress from `ref` above the best eligible one so far; visited in decreasing order of it).
+float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from, const Conts& c,
+                 const Pose2* ref = nullptr, float* best_prog = nullptr)
+{
+    if (best_prog) *best_prog = -kInf;
+    if (c.arrived) return std::log((float(c.n) + 1.f) / (float(c.n) + 2.f));   // nothing left to continue: k = N
+    if (c.sw.empty()) return std::log(1.f / (float(c.n) + 2.f));
+    struct Item { std::size_t i; float pf, pr; };
+    std::vector<Item> items;
+    for (std::size_t i = 0; i < c.sw.size(); ++i)
+        items.push_back({i, progress(in, from, c.sw[i].back()), ref ? progress(in, *ref, c.sw[i].back()) : -kInf});
+    std::ranges::sort(items, std::greater{}, &Item::pr);
+    int k = 0; float best = -kInf;
+    for (const Item& it : items)
+    {
+        const bool need_k = it.pf >= 0.f, need_b = best_prog != nullptr and it.pr > best;
+        if (not (need_k or need_b)) continue;
+        const float lps = log_p_no_contact_cells(*in.body, c.sw[it.i], in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m,
+                                                 std::log1p(-p.risk_eps));
+        if (not eligible(lps, p)) continue;
+        if (need_k) ++k;
+        if (need_b) best = it.pr;
+    }
+    if (best_prog) *best_prog = best;
+    return std::log((float(k) + 1.f) / (float(c.n) + 2.f));
+}
+float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
+{ return eval_conts(in, p, from, make_conts(in, p, from)); }
 }  // namespace
 
 float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pose2& from)
@@ -246,31 +276,60 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
             if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
             cands.push_back(c);
         }
-    auto ensure_lpc = [&](Cand& c) { if (not c.lpc_done) { c.lpc = log_p_continuable_cells(in, p, c.end); c.lpc_done = true; } };
+    // ★ one continuation rollout set per candidate end pose, cached (make_conts); its sweeps yield BOTH the continuability
+    //   and the second step of the two-step progress (ruling round 4) — no rollout is ever repeated.
+    std::vector<Conts> conts;
+    conts.reserve(cands.size());
+    auto ensure_conts = [&](Cand& c) -> const Conts& { if (c.conts < 0) { c.conts = int(conts.size()); conts.push_back(make_conts(in, p, c.end)); } return conts[c.conts]; };
+    auto ensure_lpc = [&](Cand& c)
+    {
+        if (c.lpc_done) return;
+        float second = -kInf;
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, &second);
+        c.prog2 = std::max(c.prog, second);
+        c.lpc_done = true;
+    };
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
     {
-        d.mode = m; d.v = c.v; d.w = c.w; d.log_p_safe = c.lps; d.log_p_cont = c.lpc; d.progress_m = c.prog; d.why = std::move(why);
+        d.mode = m; d.v = c.v; d.w = c.w; d.log_p_safe = c.lps; d.log_p_cont = c.lpc; d.progress_m = c.prog2; d.why = std::move(why);
         return d;
     };
 
-    // ---- Drive: best score among ELIGIBLE candidates with progress > 0 (risk_eps gates normal motion).
-    // ★ Exact branch-and-bound on the continuation cost: lpc <= log((N+1)/(N+2)) < 0, so once the best score found
-    //   beats every remaining candidate's lps + progress/scale, their continuations need not be rolled out.
+    // ---- Drive: best score among ELIGIBLE candidates whose TWO-STEP progress is > 0 (risk_eps gates normal motion).
+    // ★ ROUND-4 RULING (the user's "evaluate its movements ahead"): a candidate's progress is
+    //     prog2 = progress(start, end) max over its eligible coarse continuations c of progress(start, c.end)
+    //   i.e. field(start) - min(field(end), min field(continuation ends)) for Place/Doorway, the same heading-agreement
+    //   term for Heading goals. "Turn to line up, then go" is a Drive: the turn makes no field progress by itself, the
+    //   continuation it enables does. Release (and the trap the driver lays on it) is left for the genuine wedge: NO
+    //   eligible candidate gets anywhere even one step later. Score = lps + prog2 / scale + lpc.
+    // ★ EXACT branch-and-bound (budget): prog2 <= ub2 = max(prog, max over ALL continuation ends of progress(start, end))
+    //   — the cached rollouts' end poses, no contact sweep needed — and lpc <= lpc_max < 0, so a candidate whose
+    //   lps + ub2/scale + lpc_max cannot beat the best exact score found is never swept. Only candidates with ub2 > 0
+    //   can make two-step progress at all.
+    const float lpc_top = [&] { const float n = float(coarse_set(in, p).size()); return std::log((n + 1.f) / (n + 2.f)); }();
     std::vector<Cand*> drive;
-    for (auto& c : cands) if (c.elig and c.prog > 0.f) drive.push_back(&c);
-    if (not drive.empty())
+    for (auto& c : cands)
     {
-        auto base_score = [&](const Cand* c) { return c->lps + c->prog / p.progress_scale_m; };
-        std::ranges::sort(drive, std::greater{}, base_score);
-        Cand* best = nullptr; float best_s = -kInf;
-        for (Cand* c : drive)
-        {
-            if (base_score(c) <= best_s) break;    // lpc < 0 for every candidate: nothing below can win
-            ensure_lpc(*c);
-            const float s = base_score(c) + c->lpc;
-            if (s > best_s) { best_s = s; best = c; }
-        }
-        return finish(Decision::Mode::Drive, *best, "drive: " + words(best->v, best->w));
+        if (not c.elig) continue;
+        const Conts& cc = ensure_conts(c);
+        c.ub2 = c.prog;
+        for (const auto& sw : cc.sw) c.ub2 = std::max(c.ub2, progress(in, start, sw.back()));
+        if (c.ub2 > 0.f) drive.push_back(&c);
+    }
+    auto bound = [&](const Cand* c) { return c->lps + c->ub2 / p.progress_scale_m + lpc_top; };
+    std::ranges::sort(drive, std::greater{}, bound);
+    Cand* best_drive = nullptr; float best_s = -kInf;
+    for (Cand* c : drive)
+    {
+        if (bound(c) <= best_s) break;
+        ensure_lpc(*c);
+        if (not (c->prog2 > 0.f)) continue;
+        const float s = c->lps + c->prog2 / p.progress_scale_m + c->lpc;
+        if (s > best_s) { best_s = s; best_drive = c; }
+    }
+    if (best_drive != nullptr)
+    {
+        return finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
     }
 
     // ---- No eligible motion makes progress: the robot is in a wedge, and the only option is to move back and turn
@@ -326,7 +385,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= release_risk_max %.2f: hold", words(least->v, least->w).c_str(), 1.f - std::exp(least_lps), p.release_risk_max);
         d.why = buf; return d;
     }
-    const float lpc_now = log_p_continuable_cells(in, p, start);
+    const float lpc_now = eval_conts(in, p, start, make_conts(in, p, start));
     const float n_cont = float(coarse_set(in, p).size());
     const float lpc_max = std::log((n_cont + 1.f) / (n_cont + 2.f));
     std::ranges::sort(rel, std::greater{}, [](const Cand* x) { return std::pair{x->lps, -x->v}; });

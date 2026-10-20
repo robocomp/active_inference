@@ -38,7 +38,8 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
                      // command takes effect; candidates are rolled out from the pose reached then (policy_start)
                      float latency_s = 0.f; };
 
-// log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen).
+// log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
+// TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
 // eligible = number of candidates whose P(contact) <= risk_eps (Drive draws from them; Release from ALL v <= 0 ones).
 // Stuck only when returns lie inside the bare hull, or no release candidate has P(contact) < release_risk_max.
 // Blind also for a non-finite input (NaN/inf anywhere): no prediction can be made.

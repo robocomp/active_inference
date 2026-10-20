@@ -26,10 +26,10 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 3 (task-6-report.md, "Round 3"): R1 (hypotheses = own obstacles, W > 0), R2 (trap only on
-// Mode::Release, one per episode), R3 implemented. 20 seeds, sigma_r 0.02, unseen ON: CONTACTS 0 everywhere; 5 checks FAIL,
-// all "no plan without the trap": the policy's Release also answers "no candidate makes FIELD progress" (aligning with a
-// door needs a turn in place, which makes none), so a Release at try105's / jamb_1p6cm's START lays a trap in the doorway.
+// STATUS 2026-10-20 round 4 (task-6-report.md, "Round 4"): two-step progress in decide(). Contacts 0 everywhere;
+// try105 20/20 and try101 20/20 now, but 7 checks FAIL: a turn in place is credited the full progress of the continuation
+// it enables (prog2 ~0.48 m) and wins on continuability, so the robot turns +-0.3 rad/s in place for ever with the field
+// flat (dead_end 0/20, 80 s without progress; narrow_doorway never releases, 0/20 Unreachable).
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
@@ -279,9 +279,9 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         const float clear = contact.clearance(truth);
         res.min_clear = std::min(res.min_clear, clear);
         if (tr)
-            std::printf("    t=%6.2f true(%+.3f,%+.3f,%+6.1f) bel(%+.3f,%+.3f) %-7s v=%+.2f w=%+.2f el=%d P=%.3f lpc=%.2f clear=%+.3f f=%.3f | %s\n",
+            std::printf("    t=%6.2f true(%+.3f,%+.3f,%+6.1f) bel(%+.3f,%+.3f) %-7s v=%+.2f w=%+.2f el=%d P=%.3f lpc=%.2f prog=%+.3f clear=%+.3f f=%.3f | %s\n",
                         t, truth.p.x(), truth.p.y(), truth.yaw / kDeg, bel.p.x(), bel.p.y(), mode_name(d.mode), d.v, d.w, d.eligible,
-                        1.f - std::exp(d.log_p_safe), d.log_p_cont, clear, fnow, d.why.c_str());
+                        1.f - std::exp(d.log_p_safe), d.log_p_cont, d.progress_m, clear, fnow, d.why.c_str());
 
         if (d.mode == Decision::Mode::Arrived) { res.reached = true; res.why = "arrived"; break; }
         if (d.mode == Decision::Mode::Stuck or d.mode == Decision::Mode::Blind) { res.stuck = true; res.why = d.why; break; }
