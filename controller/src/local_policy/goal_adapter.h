@@ -264,6 +264,7 @@ struct BaseLimitsInputs
     float v_max_policy = 0.5f, w_max_policy = 0.8f;
     std::optional<float> cap_v_max, cap_w_max, cap_a_lin, cap_d_lin, axes_length_m, cap_v_min, cap_w_min;
     float cfg_v_min = 0.04f, cfg_w_min = 0.10f;
+    std::optional<float> measured_wheel_decel;   // [Policy] WheelDecelMps2: overrides the capability's d_lin (Live fix 2)
     float fallback_a_lin = 0.5f, fallback_d_lin = 1.0f, fallback_axes_m = 0.518f;
 };
 inline BaseLimits base_limits(const BaseLimitsInputs& in)
@@ -272,7 +273,9 @@ inline BaseLimits base_limits(const BaseLimitsInputs& in)
     b.v_max = in.cap_v_max ? std::min(in.v_max_policy, *in.cap_v_max) : in.v_max_policy;
     b.w_max = in.cap_w_max ? std::min(in.w_max_policy, *in.cap_w_max) : in.w_max_policy;
     b.a_lin = in.cap_a_lin.value_or(in.fallback_a_lin);
-    b.d_lin = in.cap_d_lin.value_or(in.fallback_d_lin);
+    // ★ Live fix 2 ruling: the MEASURED per-wheel deceleration overrides the capability's (tourP3: ~0.5 against 1.0)
+    b.d_lin = in.measured_wheel_decel.has_value() and *in.measured_wheel_decel > 0.f ? *in.measured_wheel_decel
+                                                                                      : in.cap_d_lin.value_or(in.fallback_d_lin);
     const float lever = 0.5f * std::max(0.05f, in.axes_length_m.value_or(in.fallback_axes_m));
     b.a_rot = b.a_lin / lever;
     b.d_rot = b.d_lin / lever;

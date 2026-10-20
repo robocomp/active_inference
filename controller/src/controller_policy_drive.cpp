@@ -168,6 +168,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     bi.cap_w_min = base_capability_.min_rot_speed;
     bi.cfg_v_min = prm.policy_min_linear_speed_mps;
     bi.cfg_w_min = prm.policy_min_rot_speed_rps;
+    if (prm.policy_wheel_decel_mps2 > 0.f) bi.measured_wheel_decel = prm.policy_wheel_decel_mps2;
     const rc::policy::BaseLimits limits = rc::policy::base_limits(bi);
 
     rc::policy::PolicyParams pp;

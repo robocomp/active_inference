@@ -369,6 +369,10 @@ int main()
         CHECK("limits: a_rot = a_lin / (axes/2) (the wheels' acceleration bound)", near(b.a_rot, 0.5f / 0.259f, 1e-4f) and near(b.d_rot, 1.0f / 0.259f, 1e-4f));
         CHECK("limits: deadband — capability when published, the provisional config otherwise", near(b.v_min_eff, 0.04f) and near(b.w_min_eff, 0.12f));
         CHECK("limits: the axle length for the wheel-coupled rollout (Live fix 2)", near(b.track_m, 0.518f));
+        in.measured_wheel_decel = 0.5f;
+        const BaseLimits bm = base_limits(in);
+        CHECK("limits: the measured wheel decel overrides the capability's (d_lin 0.5, d_rot 0.5/0.259)",
+              near(bm.d_lin, 0.5f) and near(bm.d_rot, 0.5f / 0.259f, 1e-4f));
     }
 
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);

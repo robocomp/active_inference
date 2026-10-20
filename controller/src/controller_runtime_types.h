@@ -396,6 +396,7 @@ struct ControllerParams
     float policy_min_linear_speed_mps = 0.04f;  // PROVISIONAL deadband fallback (capability absent)
     float policy_min_rot_speed_rps = 0.10f;
     float policy_unseen_odo_sigma_m = 0.005f;
+    float policy_wheel_decel_mps2 = 0.5f;       // PROVISIONAL measured per-wheel decel (Live fix 2); <= 0 = the capability's
     // Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor).
     float unmodelled_scan_min_z_m = 0.10f;
     float unmodelled_scan_max_z_m = 1.50f;

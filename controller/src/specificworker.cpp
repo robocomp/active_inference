@@ -1099,6 +1099,8 @@ void SpecificWorker::load_params()
 	cfgr.opt_cast<double>("Policy.MinLinearSpeedMps", params.policy_min_linear_speed_mps, "PROVISIONAL deadband when the capability is absent");
 	cfgr.opt_cast<double>("Policy.MinRotSpeedRps", params.policy_min_rot_speed_rps, "PROVISIONAL deadband when the capability is absent");
 	cfgr.opt_cast<double>("Policy.UnseenOdoSigmaM", params.policy_unseen_odo_sigma_m, "odometry sigma of one tick's displacement (m)");
+	cfgr.opt_cast<double>("Policy.WheelDecelMps2", params.policy_wheel_decel_mps2,
+	     "PROVISIONAL measured per-wheel deceleration (m/s^2) the wheel-coupled rollout uses instead of the capability's");
 	cfgr.opt("Target.EdgeType", params.target_edge_type,
          "");
 	cfgr.opt_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m,

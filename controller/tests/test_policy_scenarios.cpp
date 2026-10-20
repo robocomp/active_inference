@@ -407,14 +407,19 @@ static bool want(const char* name)
     return o == nullptr or std::strcmp(o, name) == 0;
 }
 
-// ★ REVIEW FIX ROUND 4 — PERFORMANCE ORACLE: each scenario's median time-to-goal <= 1.15 x its review-round-2 median
-//   (task-6-runs/runReview2.txt; the door crossings at the controller's stated 5.75 s, below 1.15 x 5.10 / 5.05).
-static void performance_oracle(const std::string& n, const Summary& S, float r2_median, float cap = 1e9f)
+// ★ REVIEW FIX ROUND 4 — PERFORMANCE ORACLE: each scenario's median time-to-goal <= 1.15 x its BASELINE median.
+// ★ RE-BASELINED (Task 8 Live fix 2 ruling, 2026-10-20): the old baselines (review round 2) were measured on a base with
+//   INDEPENDENT v / w ramps, which does not exist; the plant is now wheel-coupled (sim2d::Base, rc::policy::rollout). The
+//   baselines are the 20-seed medians of the first wheel-coupled run (commit 1e4df350), in s:
+//     tour3_1_leg3 2.75 (was 2.55) · try101_corridor 4.05 (3.45) · try105_jamb 2.85 (2.50) · jamb_1p6cm_start 5.55 (4.95) ·
+//     door_crossing_both_ways 4.60 / 4.60 (5.10 / 5.05; the controller's stated 5.75 s cap kept) · dead_end_release 29.00
+//     (27.85) · goal_behind_open_space 4.05 (4.30) · its OU variant 4.40 (4.65) · pose_jump 6.70 (7.00).
+static void performance_oracle(const std::string& n, const Summary& S, float base_median, float cap = 1e9f)
 {
-    const float limit = std::min(1.15f * r2_median, cap);
+    const float limit = std::min(1.15f * base_median, cap);
     const float med = S.tgoal.empty() ? 1e9f : S.tgoal[S.tgoal.size() / 2];
-    std::printf("   time-to-goal median %.2f s, limit %.2f s (1.15 x %.2f)\n", med, limit, r2_median);
-    CHECK((n + ": median time-to-goal <= 1.15 x review-round-2").c_str(), med <= limit);
+    std::printf("   time-to-goal median %.2f s, limit %.2f s (1.15 x %.2f)\n", med, limit, base_median);
+    CHECK((n + ": median time-to-goal <= 1.15 x the wheel-coupled baseline").c_str(), med <= limit);
 }
 
 static void standard_oracles(const std::string& n, const Summary& S)
@@ -444,7 +449,7 @@ int main()
         Options o{.grid = kCorridorGrid, .jumps = {}, .trace_name = "tour3_1_leg3"};
         const auto S = run_seeds("tour3_1_leg3", [&](unsigned seed) { return run_scenario(w, s, g, 30.f, seed, o); });
         standard_oracles("tour3_1_leg3", S);
-        performance_oracle("tour3_1_leg3", S, 2.55f);
+        performance_oracle("tour3_1_leg3", S, 2.75f);
     }
     // ---- try101_corridor: the 1 m stub before DOOR_1 (leaf open 90 deg on the near side), start 0.37 m from the east wall
     if (want("try101_corridor"))
@@ -455,7 +460,7 @@ int main()
         Options o{.grid = kDoorGrid, .jumps = {}, .trace_name = "try101_corridor"};
         const auto S = run_seeds("try101_corridor", [&](unsigned seed) { return run_scenario(w, s, doorway(+1), 60.f, seed, o); });
         standard_oracles("try101_corridor", S);
-        performance_oracle("try101_corridor", S, 3.45f);
+        performance_oracle("try101_corridor", S, 4.05f);
     }
     // ---- try105_jamb: 0.37 m before the plane (room_2's wall face y = 0), 0.14 m east of centre, 15 deg east of the normal
     if (want("try105_jamb"))
@@ -467,7 +472,7 @@ int main()
         Options o{.grid = kDoorGrid, .jumps = {}, .trace_name = "try105_jamb"};
         const auto S = run_seeds("try105_jamb", [&](unsigned seed) { return run_scenario(w, s, doorway(+1), 60.f, seed, o); });
         standard_oracles("try105_jamb", S);
-        performance_oracle("try105_jamb", S, 2.50f);
+        performance_oracle("try105_jamb", S, 2.85f);
     }
     // ---- jamb_1p6cm_start (ruling): the case the OLD controller stalled on (task-1-report): (-0.15, -0.43), heading 104 deg,
     //      the wheel 1.6 cm from the west casing; goal through the door.
@@ -485,7 +490,7 @@ int main()
         Options o{.grid = kDoorGrid, .jumps = {}, .trace_name = "jamb_1p6cm_start"};
         const auto S = run_seeds("jamb_1p6cm_start", [&](unsigned seed) { return run_scenario(w, s, doorway(+1), 60.f, seed, o); });
         standard_oracles("jamb_1p6cm_start", S);
-        performance_oracle("jamb_1p6cm_start", S, 4.95f);
+        performance_oracle("jamb_1p6cm_start", S, 5.55f);
     }
     // ---- door_crossing_both_ways: leaf open 90 deg into room_1 (near side going out, far side coming back), then into room_2
     if (want("door_crossing_both_ways"))
@@ -505,7 +510,7 @@ int main()
                 return b;
             });
             standard_oracles(n, S);
-            performance_oracle(n, S, leaf == 1 ? 5.10f : 5.05f, 5.75f);
+            performance_oracle(n, S, leaf == 1 ? 4.60f : 4.60f, 5.75f);
         }
     // ---- dead_end_release: the map says the 0.8 m passage leads to the goal; a wall it does not know closes it
     if (want("dead_end_release"))
@@ -515,7 +520,7 @@ int main()
         Options o{.grid = kDeadEndGrid, .jumps = {}, .trace_name = "dead_end_release"};
         const auto S = run_seeds("dead_end_release", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, -1.5f), 90.f * kDeg}, g, 120.f, seed, o); });
         standard_oracles("dead_end_release", S);
-        performance_oracle("dead_end_release", S, 27.85f);
+        performance_oracle("dead_end_release", S, 29.00f);
         CHECK("dead_end_release: it released at least once on every seed", S.total_releases >= S.n);
     }
     // ---- narrow_doorway_unreachable: 0.55 m clear gap (the body is 0.568 m wide) -> unreachable, no contact, <= 2 releases
@@ -539,14 +544,14 @@ int main()
         Options o{.grid = kOpenGrid, .jumps = {}, .trace_name = "goal_behind_open_space"};
         const auto S = run_seeds("goal_behind_open_space", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, 0.f), 0.f}, g, 30.f, seed, o); });
         standard_oracles("goal_behind_open_space", S);
-        performance_oracle("goal_behind_open_space", S, 4.30f);
+        performance_oracle("goal_behind_open_space", S, 4.05f);
         CHECK("goal_behind_open_space: path <= 1.5 x geodesic", S.max_path_ratio <= 1.5f);
         // the same with the measured OU pose-error process (0.5 m / 13 deg, tau 20 s): contact is judged on the true pose
         Options ou = o; ou.ou = true; ou.trace_name = "goal_behind_open_space_ou";
         const auto S2 = run_seeds("goal_behind_open_space + OU pose error", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, 0.f), 0.f}, g, 30.f, seed, ou); });
         CHECK("goal_behind_open_space OU: contacts == 0", S2.contacts == 0);
         CHECK("goal_behind_open_space OU: reached on every seed", S2.reached == S2.n);
-        performance_oracle("goal_behind_open_space OU", S2, 4.65f);
+        performance_oracle("goal_behind_open_space OU", S2, 4.40f);
     }
     // ---- pose_jump: 0.3 m / 10 deg jump of the believed pose mid-corridor -> contacts 0, reached
     if (want("pose_jump"))
@@ -559,7 +564,7 @@ int main()
         Options o{.grid = kCorridorGrid, .jumps = {{2.5f, V2(0.3f, 0.f), 10.f * kDeg}}, .trace_name = "pose_jump"};
         const auto S = run_seeds("pose_jump", [&](unsigned seed) { return run_scenario(w, Pose2{V2(-0.84f, 0.8f), 90.f * kDeg}, g, 40.f, seed, o); });
         standard_oracles("pose_jump", S);
-        performance_oracle("pose_jump", S, 7.00f);
+        performance_oracle("pose_jump", S, 6.70f);
         std::printf("   the believed goal maps, after the jump, to a true place %.3f m from the nearest wall\n", S.goal_truth_clear);
         CHECK("pose_jump: the jumped goal is a place the body can be (true clearance >= inscribed radius)", S.goal_truth_clear >= body().inscribed_radius());
     }

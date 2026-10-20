@@ -1021,3 +1021,7 @@ MinLinearSpeedMps = 0.04
 MinRotSpeedRps = 0.10
 # odometry noise for the unseen-contact evidence (unseen_contact.h): sigma of a tick's measured displacement (m)
 UnseenOdoSigmaM = 0.005
+# PROVISIONAL — measured from one reversal in tourP3 (body decel ~0.56 m/s^2; the wheel-coupled rollout reproduces the
+# observed 1.6-1.8 s reversal at 0.5); replace with a dedicated measurement (controller/tools/policy_smoke.md, LIVE TODO).
+# The per-wheel deceleration the rollout uses instead of the capability's max_linear_decel (1.0). <= 0 = the capability's.
+WheelDecelMps2 = 0.5
