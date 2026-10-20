@@ -49,6 +49,14 @@ base_config_file = "/home/pbustos/robocomp/components/robocomp-robolab/component
                        # Merging the two is what let room_concept's pose clamp rate-limit real rotation by
                        # a comfort preference. Consumers assert policy <= capability, never swap them.
                        # Shadow is the DIFFERENTIAL base (the upstream file name is misspelled).
+# The base DEADBAND — the smallest |v| / |w| this base (here: Webots Shadow through the bridge) actually executes.
+# MEASURED, not hardware spec, so it lives here and not in the base file above; published as robot_min_linear_speed /
+# robot_min_rot_speed (cortex must carry them — see common/robot_capability/robot_capability.h). Absent/-1 = unknown.
+# PROVISIONAL — replace with the measured value (controller/tools/measure_policy_inputs.md)
+#   source of the provisional numbers: controller_relative_motion.h's control constants min_adv_mps 0.04 / min_rot_rps 0.10
+#   ("below this the base does not creep") and controller_types.h align_min_rot 0.10 — operator experience, not a measurement.
+base_min_linear_speed = 0.04   # m/s   PROVISIONAL
+base_min_rot_speed    = 0.10   # rad/s PROVISIONAL
 robot_node_id = 200
 # Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
 # Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single

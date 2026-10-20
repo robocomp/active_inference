@@ -390,6 +390,21 @@ void SpecificWorker::initialize()
 		        << " track=" << (axes_length_ ? *axes_length_ : -1.f) << "m"
 		        << " wheelbase=" << (wheel_base_ ? *wheel_base_ : -1.f) << "m";
 	}
+	// The base DEADBAND — measured, so it lives HERE rather than in the base's file (which states what the hardware is
+	// built to do, not what a given base/simulator executes). -1 = ABSENT (unknown), the sentinel outside the range:
+	// a 0 would read as "moves at any speed", which is a claim, not an absence.
+	{
+		double v_min = -1.0, w_min = -1.0;
+		cfgr.opt("Agent.base_min_linear_speed", v_min, "m/s: smallest |v| the base executes (measure_deadband.py); -1 = absent");
+		cfgr.opt("Agent.base_min_rot_speed", w_min, "rad/s: smallest |w| the base executes (measure_deadband.py); -1 = absent");
+		if (v_min > 0.0) min_linear_speed_ = static_cast<float>(v_min);
+		if (w_min > 0.0) min_rot_speed_ = static_cast<float>(w_min);
+#ifndef RC_HAVE_ROBOT_DEADBAND_ATTRS
+		if (min_linear_speed_ or min_rot_speed_)
+			qWarning() << "[Agent] base deadband configured but cortex has no robot_min_* attributes yet — NOT published"
+			              " until cortex is reinstalled (then reconfigure + rebuild robot_concept).";
+#endif
+	}
 	if (scenario_name_.empty())
 		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
 		              " room_concept will refuse to start if its config defines scenario overlays.";
@@ -879,7 +894,8 @@ void SpecificWorker::check_robot_identity()
 	// whenever that key was missing from the base file.
 	if (not scenario_name_.empty() or holonomic_.has_value() or max_linear_speed_.has_value()
 	    or max_rot_speed_.has_value() or max_linear_accel_.has_value() or max_linear_decel_.has_value()
-	    or wheel_radius_.has_value() or axes_length_.has_value() or wheel_base_.has_value())
+	    or wheel_radius_.has_value() or axes_length_.has_value() or wheel_base_.has_value()
+	    or min_linear_speed_.has_value() or min_rot_speed_.has_value())
 	{
 		if (auto n = G->get_node(robot_name); n.has_value())
 		{
@@ -902,6 +918,10 @@ void SpecificWorker::check_robot_identity()
 			if (wheel_radius_)     G->add_or_modify_attrib_local<robot_wheel_radius_att>(n.value(), *wheel_radius_);
 			if (axes_length_)      G->add_or_modify_attrib_local<robot_axes_length_att>(n.value(), *axes_length_);
 			if (wheel_base_)       G->add_or_modify_attrib_local<robot_wheel_base_att>(n.value(), *wheel_base_);
+#ifdef RC_HAVE_ROBOT_DEADBAND_ATTRS
+			if (min_linear_speed_) G->add_or_modify_attrib_local<robot_min_linear_speed_att>(n.value(), *min_linear_speed_);
+			if (min_rot_speed_)    G->add_or_modify_attrib_local<robot_min_rot_speed_att>(n.value(), *min_rot_speed_);
+#endif
 			if (rc::safe_update_node(*G, n.value()))
 				qInfo() << "[graph] scenario_name =" << QString::fromStdString(scenario_name_)
 				        << "| robot_holonomic ="

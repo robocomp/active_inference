@@ -54,6 +54,7 @@
 #include "chat_inbox.h"
 #include "mission_node.h"
 #include "controller_relative_motion.h"
+#include "controller_base_probe.h"
 #include "../../common/mission/mission_interpreter.h"
 #include "../../common/episodic/em_journal.h"
 #include "journal_node.h"
@@ -243,6 +244,13 @@ private:
 	bool step_relative_motion(std::uint64_t now_ms);
 	/// Cancel a running relative motion (no-op otherwise), logging who superseded it.
 	void cancel_relative_motion(const char *why);
+	// ── `probe <v> <w> <s>` (controller_base_probe.h, Task 7): the open-loop measuring command of
+	// tools/measure_deadband.py. Owns the base while active, like a relative motion; one base_probe.csv row per probe. ──
+	rc::BaseProbe base_probe_;
+	struct ProbeStart { Eigen::Vector2f pos = Eigen::Vector2f::Zero(); float theta = 0.f; };
+	ProbeStart probe_start_;
+	void start_base_probe(const std::string &text);
+	bool step_base_probe(std::uint64_t now_ms);
 	ControllerObstacleTracker obstacle_tracker_;
 	ControllerMotionCommander motion_commander_;
 	ControllerDisplay display_;

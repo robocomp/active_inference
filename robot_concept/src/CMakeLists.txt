@@ -20,6 +20,9 @@ LIST(APPEND LIBS
   # is (Agent.robot_name / configFile), so it is the right place to turn the mesh into the dimensions the
   # rest of the fleet reads off the body node. Pure Eigen — no new heavyweight dependency.
   ai_common::geometry
+  # Only for RC_HAVE_ROBOT_DEADBAND_ATTRS (common/CMakeLists.txt): whether cortex carries robot_min_* yet, so the
+  # producer and the consumers switch the deadband channel on together.
+  ai_common::robot
 )
 
 # Sources set

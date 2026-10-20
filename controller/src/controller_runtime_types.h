@@ -2,6 +2,8 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -372,6 +374,18 @@ struct ControllerParams
     // [LidarZ] histogram shows the floor ring is lower AND you need to catch sub-0.20 m obstacles.
     float temporary_obstacle_min_height_m = 0.20f;
     float temporary_obstacle_max_height_m = 1.8f;
+    // Lidar.ContactMinHeightM — the floor of the local policy's CONTACT set (lidar_height_band.h): returns from
+    // here up (to temporary_obstacle_max_height_m) go to the policy; the 0.20 band above stays the old consumers'.
+    // = floor-return p99.9 + sigma_r, measured by controller/tools/floor_band.py on a parked robot on open floor.
+    // PROVISIONAL 0.08 until measured: bpearl reads the floor at -10 mm in 20 mm bins (ROBOT_GEOMETRY.md
+    // [FloorCheck]) ⇒ p99.9 assumed <= 0.05, + sigma_r 0.03 (LidarRangeSigmaM).
+    float lidar_contact_min_height_m = 0.08f;
+    // [Policy] pose-uncertainty inputs (local_policy.h PolicyInput), fitted by controller/tools/pose_error_stats.py from
+    // room_concept's gt_error.csv logs (Task 7; config.toml [Policy] carries the provenance). Sim values.
+    float policy_sigma_rel_xy_m = 0.011f;       // relative (odometry) error over a 1 s rollout, per axis — CONTACT
+    float policy_sigma_rel_yaw_rad = 0.013f;
+    float policy_pose_drift_sigma_m = 0.064f;   // absolute pose error as OU: stationary std — PROGRESS MONITOR
+    float policy_pose_drift_time_s = 115.f;     //   and correlation time
     // Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor).
     float unmodelled_scan_min_z_m = 0.10f;
     float unmodelled_scan_max_z_m = 1.50f;
@@ -600,4 +614,20 @@ struct ControllerPoseUncertainty
 {
     float xy_std_m = 0.f;
     float theta_std_rad = 0.f;
+    // Task 7: the FULL SE(2) covariance (x, y, yaw), room frame — the policy's contact model needs the cross terms the
+    // two scalars above throw away. Zero = no claim. xy_std_m / theta_std_rad are derived from it (unchanged meaning).
+    Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
 };
+
+// The SE(2) block of cortex's 6x6 SE(3) pose covariance [x, y, z, rx, ry, rz] (row-major, RT_COVARIANCE_BLOCK_SIZE 36):
+// rows/cols {0, 1, 5}. Yaw is index 5 — index 2 is z (the old flat[14] read was the robot's HEIGHT uncertainty).
+inline ControllerPoseUncertainty pose_uncertainty_from_se3(const Eigen::Matrix<double, 6, 6> &c6)
+{
+    constexpr int idx[3] = {0, 1, 5};
+    ControllerPoseUncertainty u;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) u.cov(r, c) = static_cast<float>(c6(idx[r], idx[c]));
+    u.xy_std_m = static_cast<float>(std::sqrt(std::max(0.0, std::max(c6(0, 0), c6(1, 1)))));
+    u.theta_std_rad = static_cast<float>(std::sqrt(std::max(0.0, c6(5, 5))));
+    return u;
+}

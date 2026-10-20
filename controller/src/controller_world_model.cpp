@@ -237,10 +237,8 @@ std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncerta
     if (not cov.has_value())
         return std::nullopt;
 
-    ControllerPoseUncertainty uncertainty;
-    uncertainty.xy_std_m = static_cast<float>(std::sqrt(std::max(0.0, std::max((*cov)(0, 0), (*cov)(1, 1)))));
-    uncertainty.theta_std_rad = static_cast<float>(std::sqrt(std::max(0.0, (*cov)(5, 5))));   // yaw, was (2,2)
-    return uncertainty;
+    // Full SE(2) block (x, y, yaw) + the two derived stds — yaw is (5,5), was (2,2) (controller_runtime_types.h).
+    return pose_uncertainty_from_se3(*cov);
 }
 
 std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(std::uint64_t timestamp_ms) const

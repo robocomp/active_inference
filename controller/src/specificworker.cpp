@@ -19,6 +19,9 @@
 #include <print>
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "specificworker.h"
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include "../../common/window_geometry/window_geometry_saver.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
@@ -602,10 +605,21 @@ void SpecificWorker::initialize()
 					enqueue_command([this, cmd = c.mid(8).trimmed().toStdString()]() { run_mission_command(cmd, "remote"); });
 				else if (c == "uncross")
 					enqueue_command([this]() { run_mission_command("uncross", "remote"); });
+				// MEASUREMENT (Task 7, tools/measure_policy_inputs.md): `probe <v> <w> <s>` holds the base open-loop
+				// (measure_deadband.py); `zdump <n>` writes the next n raw sweeps to lidar_z_dump.csv (floor_band.py).
+				else if (c.startsWith("probe "))
+					enqueue_command([this, cmd = c.toStdString()]() { start_base_probe(cmd); });
+				else if (c.startsWith("zdump "))
+				{
+					bool ok = false;
+					const int n = c.mid(6).trimmed().toInt(&ok);   // an integer: no decimal separator, locale-proof
+					if (ok and n > 0 and n <= 200) { obstacle_tracker_.arm_z_dump(n); std::println("[remote] ZDUMP {} sweeps", n); }
+					else std::println("[remote] zdump refused: '{}' (expected zdump <1..200>)", c.toStdString());
+				}
 				else if (c == "cancel" or c == "resume")
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | "
-				                  "uncross | cancel | resume, or a mission script)", c.toStdString());
+				                  "uncross | cancel | resume | probe <v> <w> <s> | zdump <n>, or a mission script)", c.toStdString());
 			}
 		});
 		t->start(300);
@@ -771,8 +785,12 @@ void SpecificWorker::compute()
 	{
 		// No world this cycle: a relative motion must not coast on its last command.
 		if (relative_motion_.active()) motion_commander_.stop_robot();
+		if (base_probe_.active()) { base_probe_.cancel(); motion_commander_.stop_robot(); std::println("[probe] cancelled: no world"); }
 		return;
 	}
+	// A measuring probe (controller_base_probe.h) owns the base until it ends, like a move order.
+	if (step_base_probe(now_ms))
+		return;
 	// A "move" / "turn" owns the base until it ends (controller_relative_motion.h) — before the planner, so neither
 	// an affordance nor a stale plan can take turns with it.
 	if (step_relative_motion(now_ms))
@@ -1055,6 +1073,16 @@ void SpecificWorker::load_params()
          "");
 	cfgr.opt("Lidar.StallTimeoutMs", params.lidar_stall_timeout_ms,
          "Stream watchdog: if no fresh LiDAR frame arrives for this long while operating, the controller enters a local emergency hold (stops the robot, waits…");
+	cfgr.opt_cast<double>("Lidar.ContactMinHeightM", params.lidar_contact_min_height_m,
+         "floor of the local policy's CONTACT band (m above floor): floor-return p99.9 + sigma_r, measured by tools/floor_band.py");
+	cfgr.opt_cast<double>("Policy.SigmaRelXyM", params.policy_sigma_rel_xy_m,
+         "relative body-vs-returns pose error over a 1 s rollout, per axis (m) — tools/pose_error_stats.py");
+	cfgr.opt_cast<double>("Policy.SigmaRelYawRad", params.policy_sigma_rel_yaw_rad,
+         "relative yaw error over a 1 s rollout (rad) — tools/pose_error_stats.py");
+	cfgr.opt_cast<double>("Policy.PoseDriftSigmaM", params.policy_pose_drift_sigma_m,
+         "absolute pose error as an OU process: stationary std (m) — tools/pose_error_stats.py");
+	cfgr.opt_cast<double>("Policy.PoseDriftTimeS", params.policy_pose_drift_time_s,
+         "absolute pose error as an OU process: correlation time (s) — tools/pose_error_stats.py");
 	cfgr.opt("Target.EdgeType", params.target_edge_type,
          "");
 	cfgr.opt_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m,
@@ -2101,6 +2129,7 @@ void SpecificWorker::abort_all(const char *source)
 	// What survives is the mission SELECTION, so Run starts whichever mission is selected.
 	cancel_mission("stopped_by_user", /*hold=*/false);
 	cancel_relative_motion("stopped");
+	if (base_probe_.active()) { base_probe_.cancel(); std::println("[probe] cancelled: stopped"); }
 	// The affordance being executed is ABANDONED, so say so: a claim left standing kept aff_door_1_cross Executing
 	// with nobody driving it, and the next `cross door_1` found nothing eligible (live 2026-10-18).
 	if (G and affordance_manager_.release_execution_claim(G))
@@ -2225,6 +2254,82 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		             (pose->theta + M_PI_2) * 180.0 / M_PI);
 	}
 	update_custom_widget(*pose);
+	return true;
+}
+
+// ── BASE PROBE (controller_base_probe.h, Task 7) ───────────────────────────────────────────────────────────────────
+// Refused unless the pose is known and every pose of the predicted sweep is free on the planner's own grid (the
+// relative motion's predicate). Accepted, it takes the base exactly as a move order does.
+void SpecificWorker::start_base_probe(const std::string &text)
+{
+	const auto spec = rc::BaseProbe::parse(text);
+	if (not spec.has_value()) { std::println("[probe] refused: {}", spec.error()); return; }
+	cancel_relative_motion("superseded by a probe");
+	const auto now = current_time_ms();
+	const auto pose = world_model_.read_robot_pose_latest(now);
+	const auto &grid = session_.grid_planner();
+	if (not pose.has_value()) { std::println("[probe] refused: the robot's pose is not known"); return; }
+	if (not grid.has_world()) { std::println("[probe] refused: no map of the room yet to check the sweep"); return; }
+	for (const auto &[p, th] : rc::BaseProbe::predicted_poses(*spec, pose->pos, pose->theta, 0.05f))
+		if (not grid.pose_free(p, th))
+		{
+			std::println("[probe] refused: the sweep reaches an occupied pose at ({:.2f},{:.2f}) — park the robot on open floor", p.x(), p.y());
+			return;
+		}
+	session_.door_passage().stop();
+	if (session_.mission().running()) session_.mission().stop("superseded by a probe", now);
+	session_.mission().set_mode(rc::DriveMode::Target);
+	session_.mission().set_click_target(std::nullopt);
+	clear_manual_target();
+	paused_ = false;
+	motion_commander_.set_output_enabled(true);
+	driving_enabled_ = true;
+	hibernationTick();
+	base_probe_.start(*spec, now);
+	probe_start_ = {pose->pos, pose->theta};
+	std::println("[probe] #{} v {:+.3f} m/s w {:+.3f} rad/s for {:.2f} s from ({:.3f},{:.3f}) theta {:+.4f}", base_probe_.view().id,
+	             spec->v, spec->w, spec->hold_s, pose->pos.x(), pose->pos.y(), pose->theta);
+}
+
+bool SpecificWorker::step_base_probe(std::uint64_t now_ms)
+{
+	if (not base_probe_.active()) return false;
+	if (not driving_enabled_ or paused_)
+	{
+		base_probe_.cancel();
+		motion_commander_.stop_robot();
+		std::println("[probe] cancelled: driving off");
+		return true;
+	}
+	const auto cmd = base_probe_.step(now_ms);
+	if (base_probe_.active())
+	{
+		motion_commander_.send_speed_command(cmd.adv, 0.f, cmd.rot);
+		session_.note_why(rc::why::Cause::RelativeMotion, std::format("probe #{} holding v {:+.3f} w {:+.3f}", base_probe_.view().id, cmd.adv, cmd.rot));
+		return true;
+	}
+	motion_commander_.stop_robot();
+	// One row per probe; the pose is the localiser's (room frame). measure_deadband.py prefers room_concept's GT over the
+	// same [t_start, t_end] when the gt_error.csv log is there. Same clock as the gt_error.csv ts_ms column.
+	const auto pose = world_model_.read_robot_pose_latest(now_ms);
+	const auto &v = base_probe_.view();
+	static std::ofstream csv;
+	if (not csv.is_open())
+	{
+		const bool fresh = not std::filesystem::exists("base_probe.csv");
+		csv.open("base_probe.csv", std::ios::out | std::ios::app);
+		csv.imbue(std::locale::classic());   // decimal POINT under LANG=es_ES (CLAUDE.md)
+		if (fresh) csv << "id,t_start_ms,t_end_ms,v,w,hold_s,x0,y0,theta0,x1,y1,theta1\n";
+	}
+	if (pose.has_value())
+		csv << std::format("{},{},{},{:.4f},{:.4f},{:.3f},{:.4f},{:.4f},{:.5f},{:.4f},{:.4f},{:.5f}\n", v.id, v.t_start_ms, now_ms,
+		                   v.spec.v, v.spec.w, v.spec.hold_s, probe_start_.pos.x(), probe_start_.pos.y(), probe_start_.theta,
+		                   pose->pos.x(), pose->pos.y(), pose->theta);
+	else
+		csv << std::format("{},{},{},{:.4f},{:.4f},{:.3f},{:.4f},{:.4f},{:.5f},nan,nan,nan\n", v.id, v.t_start_ms, now_ms,
+		                   v.spec.v, v.spec.w, v.spec.hold_s, probe_start_.pos.x(), probe_start_.pos.y(), probe_start_.theta);
+	csv.flush();
+	std::println("[probe] #{} done", v.id);
 	return true;
 }
 

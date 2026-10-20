@@ -968,3 +968,29 @@ overlay_csv_path = "overlay_lag_eval.csv"
 # [LidarStall] fires: at p99 = 56 ms it should be never, and if it fires on a healthy stream then the
 # gap distribution has changed and THAT is the finding, not this number.
 StallTimeoutMs = 500
+# ── Task 7 (local-motion policy): the policy's CONTACT band (lidar_height_band.h) ──────────────────────────────
+# Returns from this height (robot frame = height above the floor) up to Controller.TemporaryObstacleMaxHeight go to
+# the policy's contact set (ObstacleTracker::contact_buffer). The old consumers keep TemporaryObstacleMinHeight 0.20
+# until Task 10. Value = floor-return p99.9 + sigma_r (LidarRangeSigmaM), measured on a parked robot on open floor by
+# controller/tools/floor_band.py — write the measured number AND its run id here.
+# PROVISIONAL — replace with the measured value (controller/tools/measure_policy_inputs.md)
+#   source: bpearl reads the floor at -10 mm in 20 mm bins ([FloorCheck], ROBOT_GEOMETRY.md) => p99.9 assumed
+#   <= 0.05 m, + sigma_r 0.03 = 0.08. The helios's grazing far-floor returns (13-17 cm) start at 3.88 m range.
+ContactMinHeightM = 0.08
+
+[Policy]
+# ── Task 7: pose-uncertainty inputs of the local policy (local_policy.h PolicyInput; ruling T8-2) ──────────────
+# Fitted from room_concept's sdf_localizer gt_error.csv logs by controller/tools/pose_error_stats.py
+# (2026-10-20: 91 healthy runs of estimation_scripts/crossing/*, each run weighted equally; full table in
+# .superpowers/sdd/2026-10-20-local-motion-policy/task-7-report.md). Webots sim — re-fit on the real robot.
+# CONTACT: relative body-vs-returns error over a 1 s rollout = the localiser's motion prior (odometry) vs GT over
+# MOVING 1 s windows, per-axis RMS (lateral 0.008, forward 0.014 m). Per-run median 0.0078 [p10 0.0048, p90 0.0145].
+SigmaRelXyM = 0.011
+# per-run median 0.0103 [0.0082, 0.0180] rad
+SigmaRelYawRad = 0.013
+# PROGRESS MONITOR: absolute pose error as an OU process, fitted on its variogram E[(e(t+tau)-e(t))^2] = 2 s^2 (1-exp(-tau/T)),
+# tau 0.1..300 s (rms log-residual 0.10). Implied drift over 1 s: 0.008 m, over 5 s: 0.019 m. sigma and T trade off
+# across runs (per-run median sigma 0.028 [0.0085, 0.19] m, T 42 [10, 440] s); the small-tau rate q = 0.0084 m/sqrt(s)
+# is the robust number. The latest door-crossing runs (try102-107) drift more: sigma 0.08-0.20 m, T 90-320 s.
+PoseDriftSigmaM = 0.064
+PoseDriftTimeS = 115.0

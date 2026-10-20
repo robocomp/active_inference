@@ -328,6 +328,20 @@ add_library(ai_common::graph3d ALIAS ai_common_graph3d)
 add_library(ai_common_robot STATIC robot_capability/robot_capability.cpp)
 ai_common_defaults(ai_common_robot)
 target_link_libraries(ai_common_robot PUBLIC ai_common_core)
+# The DEADBAND attributes (robot_min_linear_speed / robot_min_rot_speed, Task 7 of the local-motion policy) need a
+# cortex REINSTALL before they exist. Until then the reader/writer compile without them (absent = unknown, the
+# documented meaning) instead of breaking every build that links this library. Detected from the INSTALLED header,
+# and re-detected when that header changes (CMAKE_CONFIGURE_DEPENDS), so a reinstall switches it on by itself.
+find_file(AI_COMMON_DSR_ATTR_NAME_H dsr/core/types/type_checking/dsr_attr_name.h)
+if(AI_COMMON_DSR_ATTR_NAME_H)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${AI_COMMON_DSR_ATTR_NAME_H}")
+  file(STRINGS "${AI_COMMON_DSR_ATTR_NAME_H}" _ai_deadband REGEX "REGISTER_TYPE\\(robot_min_linear_speed")
+  if(_ai_deadband)
+    target_compile_definitions(ai_common_robot PUBLIC RC_HAVE_ROBOT_DEADBAND_ATTRS=1)
+  else()
+    message(STATUS "ai_common::robot: cortex has no robot_min_linear_speed yet — base deadband channel OFF until cortex is reinstalled")
+  endif()
+endif()
 add_library(ai_common::robot ALIAS ai_common_robot)
 
 # =====================================================================================

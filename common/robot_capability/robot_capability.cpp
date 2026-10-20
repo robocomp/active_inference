@@ -30,6 +30,10 @@ BaseCapability read_base_capability(DSR::DSRGraph &graph, std::uint64_t robot_id
     cap.axes_length_m         = graph.get_attrib_by_name<robot_axes_length_att>(*node);
     cap.wheel_base_m          = graph.get_attrib_by_name<robot_wheel_base_att>(*node);
     cap.holonomic             = graph.get_attrib_by_name<robot_holonomic_att>(*node);
+#ifdef RC_HAVE_ROBOT_DEADBAND_ATTRS
+    cap.min_linear_speed      = graph.get_attrib_by_name<robot_min_linear_speed_att>(*node);
+    cap.min_rot_speed         = graph.get_attrib_by_name<robot_min_rot_speed_att>(*node);
+#endif
 
     // A published ZERO is not a capability, it is a producer that read a key it could not parse. Treat it
     // as absent rather than as "this robot cannot move", which is the reading that would clamp a healthy
@@ -51,6 +55,8 @@ BaseCapability read_base_capability(DSR::DSRGraph &graph, std::uint64_t robot_id
     drop_nonpositive(cap.wheel_radius_m,        "robot_wheel_radius");
     drop_nonpositive(cap.axes_length_m,         "robot_axes_length");
     drop_nonpositive(cap.wheel_base_m,          "robot_wheel_base");
+    drop_nonpositive(cap.min_linear_speed,      "robot_min_linear_speed");
+    drop_nonpositive(cap.min_rot_speed,         "robot_min_rot_speed");
     return cap;
 }
 
@@ -99,6 +105,8 @@ void log_base_capability(const BaseCapability &cap, const PolicyAudit &audit, co
     block += QStringLiteral("  linear decel  %1 m/s^2\n").arg(num(cap.max_linear_decel_mps2));
     block += QStringLiteral("  wheel radius  %1 m       track %2 m       wheelbase %3 m\n")
                  .arg(num(cap.wheel_radius_m), num(cap.axes_length_m), num(cap.wheel_base_m));
+    block += QStringLiteral("  deadband      %1 m/s     %2 rad/s   (measured; below it the base does not move)\n")
+                 .arg(num(cap.min_linear_speed), num(cap.min_rot_speed));
     block += QStringLiteral("  holonomic     %1\n")
                  .arg(cap.holonomic.has_value() ? (*cap.holonomic ? "true (lateral DOF)" : "false (no lateral DOF)")
                                                 : "(absent)");

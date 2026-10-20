@@ -2,9 +2,12 @@
 
 #include "../../common/robot_footprint/robot_footprint.h"
 #include "lidar_body_guard.h"
+#include "lidar_height_band.h"
 #include "residual_risk.h"
 
 #include <array>
+#include <format>
+#include <fstream>
 #include <chrono>
 #include <algorithm>
 #include <cmath>
@@ -2196,7 +2199,6 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     const bool robot_from_lidar_is_identity = robot_from_lidar_matrix.isApprox(Eigen::Matrix4d::Identity(), 1e-5);
 
     const float min_h = params_->temporary_obstacle_min_height_m;
-    const float max_h = params_->temporary_obstacle_max_height_m;
 
     // ── RAW-cloud proximity, measured BEFORE the z-band cut below ──
     // Everything else here reads the already-filtered buffer, so every controller diagnostic has been
@@ -2237,6 +2239,44 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
             raw_cloud_proximity_.distance_m = best;
     }
 
+    // ── RAW z DUMP for controller/tools/floor_band.py (Task 7): the next N sweeps, robot frame, pre band, pre
+    // self-filter (the self flag is a column, so the script can drop them itself). Armed by the remote `zdump <n>`;
+    // costs nothing when not armed. Written on this thread only; the arm is an atomic.
+    if (z_dump_scans_left_.load(std::memory_order_relaxed) > 0)
+    {
+        if (not z_dump_.is_open())
+        {
+            z_dump_.open("lidar_z_dump.csv", std::ios::out | std::ios::trunc);
+            z_dump_.imbue(std::locale::classic());   // decimal POINT under LANG=es_ES (CLAUDE.md)
+            z_dump_ << "# controller zdump: robot-frame returns (z = height above floor), pre z-band, pre self-filter\n"
+                       "scan,ts_ms,plane,x,y,z,self\n";
+        }
+        const auto &dump_body = self_body_.empty() ? body_.polygon() : self_body_;
+        float dump_r = 0.f;
+        for (const auto &v : dump_body) dump_r = std::max(dump_r, v.norm());
+        const auto &M = robot_from_lidar_matrix;
+        for (std::size_t i = 0; i < raw_count; ++i)
+        {
+            const double x = proc_xs[i], y = proc_ys[i], z = proc_zs[i];
+            if (not (std::isfinite(x) and std::isfinite(y) and std::isfinite(z))) continue;
+            const Eigen::Vector3d q = robot_from_lidar_is_identity
+                ? Eigen::Vector3d(x, y, z)
+                : Eigen::Vector3d(M(0, 0) * x + M(0, 1) * y + M(0, 2) * z + M(0, 3),
+                                  M(1, 0) * x + M(1, 1) * y + M(1, 2) * z + M(1, 3),
+                                  M(2, 0) * x + M(2, 1) * y + M(2, 2) * z + M(2, 3));
+            const bool self = rc::lidar_capture_is_self(dump_body, dump_r, Eigen::Vector2f(float(q.x()), float(q.y())));
+            z_dump_ << std::format("{},{},{},{:.4f},{:.4f},{:.4f},{}\n", z_dump_scan_, proc_ts,
+                                   i < proc_plane_ids.size() ? int(proc_plane_ids[i]) : -1, q.x(), q.y(), q.z(), self ? 1 : 0);
+        }
+        ++z_dump_scan_;
+        if (z_dump_scans_left_.fetch_sub(1, std::memory_order_relaxed) == 1)
+        {
+            z_dump_.close();
+            std::println("[zdump] {} sweeps written to lidar_z_dump.csv", z_dump_scan_);
+        }
+        else z_dump_.flush();
+    }
+
     // Flatten each plane's room←lidar into the 12 coefficients the hot loop actually uses, indexed by
     // plane id. One entry ⇒ every point takes it, which is the single-matrix path this replaced.
     std::vector<std::array<double, 12>> plane_coeffs;
@@ -2254,17 +2294,20 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 plane_coeffs.push_back(flatten(m));
     }
 
-    lidar_room_buffer_.put<0>(
-        rc::RawLidarPointVectors{
-            .xs = std::move(proc_xs),
-            .ys = std::move(proc_ys),
-            .zs = std::move(proc_zs)},
-        proc_ts,
-        [plane_coeffs = std::move(plane_coeffs), plane_sel = std::move(proc_plane_ids),
-         robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h,
-         body_poly = self_body_.empty() ? body_.polygon() : self_body_,
-         body_r = [&] { float r = 0.f; for (const auto &v : (self_body_.empty() ? body_.polygon() : self_body_)) r = std::max(r, v.norm()); return r; }(),
-         self_dropped = &capture_self_dropped_](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+    // ── TWO SETS FROM ONE CAPTURE (Task 7, lidar_height_band.h) ─────────────────────────────────────
+    // The converter is built once per band: the LEGACY buffer keeps [TemporaryObstacleMinHeight, max] for every old
+    // consumer, unchanged; the CONTACT buffer holds [Lidar.ContactMinHeightM, max] for the local policy. Same
+    // registration, same self-filter — only the floor cut differs. The raw sweep is copied once for the second.
+    const auto bands = rc::lidar_height_bands(*params_);
+    const auto body_poly_now = self_body_.empty() ? body_.polygon() : self_body_;
+    const float body_r_now = [&] { float r = 0.f; for (const auto &v : body_poly_now) r = std::max(r, v.norm()); return r; }();
+    const auto make_converter = [&](bool policy_set, std::atomic<int> *self_dropped)
+    {
+        return
+        [plane_coeffs, plane_sel = proc_plane_ids,
+         robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, bands, policy_set,
+         body_poly = body_poly_now, body_r = body_r_now,
+         self_dropped](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
             int n_self = 0;
             auto &[room_xs, room_ys, room_zs] = room_points;
@@ -2297,7 +2340,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 const float robot_z = robot_from_lidar_is_identity
                     ? z
                     : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
-                if (robot_z < min_h || robot_z > max_h)
+                if (const auto in = rc::lidar_band_membership(robot_z, bands); not (policy_set ? in.policy : in.legacy))
                     continue;
                 // ★ Task 14 fix round 3 (try77): the robot's own returns are dropped HERE, in the rigid robot frame at
                 //   capture (rc::lidar_capture_is_self), not by the reader after the cloud is room-frame — re-expressed on a
@@ -2324,8 +2367,18 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 room_ys.push_back(room_y);
                 room_zs.push_back(room_z);
             }
-            self_dropped->store(n_self, std::memory_order_relaxed);
-        });
+            if (self_dropped != nullptr) self_dropped->store(n_self, std::memory_order_relaxed);
+        };
+    };
+    contact_room_buffer_.put<0>(
+        rc::RawLidarPointVectors{.xs = proc_xs, .ys = proc_ys, .zs = proc_zs},
+        proc_ts, make_converter(/*policy_set=*/true, nullptr));
+    lidar_room_buffer_.put<0>(
+        rc::RawLidarPointVectors{
+            .xs = std::move(proc_xs),
+            .ys = std::move(proc_ys),
+            .zs = std::move(proc_zs)},
+        proc_ts, make_converter(/*policy_set=*/false, &capture_self_dropped_));
 
     // ── ONE BUFFER, BOTH CONSUMERS (the display buffer was removed 2026-09-09) ───────────────────
     // This used to fill a SECOND buffer with the newest scan for the viewer, because the control path

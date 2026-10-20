@@ -70,6 +70,12 @@ struct BaseCapability
     std::optional<float> wheel_radius_m;
     std::optional<float> axes_length_m;
     std::optional<float> wheel_base_m;            // front-rear axle distance; omni base only
+    // The DEADBAND: the smallest |v| (m/s) / |w| (rad/s) the base actually executes — a command below it does not
+    // move the robot. MEASURED (controller/tools/measure_deadband.py), published by robot_concept from its own config
+    // (it is not in SVD48VBase's file). The local policy keeps its candidates at or above it (BaseLimits::v_min_eff /
+    // w_min_eff). Absent until cortex carries robot_min_* (RC_HAVE_ROBOT_DEADBAND_ATTRS) and robot_concept publishes.
+    std::optional<float> min_linear_speed;
+    std::optional<float> min_rot_speed;
     // Derived by the producer from the base config's `baseType`, never declared by hand: the base
     // component already says "Differential"/"Omnidirectional" and always did.
     std::optional<bool>  holonomic;
@@ -82,7 +88,7 @@ struct BaseCapability
         return max_linear_speed_mps.has_value() or max_rot_speed_rps.has_value()
             or max_linear_accel_mps2.has_value() or max_linear_decel_mps2.has_value()
             or wheel_radius_m.has_value() or axes_length_m.has_value() or wheel_base_m.has_value()
-            or holonomic.has_value();
+            or holonomic.has_value() or min_linear_speed.has_value() or min_rot_speed.has_value();
     }
 };
 

@@ -8,6 +8,7 @@
 #include "../src/lidar_body_guard.h"
 #include "../src/lidar_guard_buffer.h"
 #include "../src/controller_runtime_types.h"
+#include "../src/lidar_height_band.h"
 
 #include <cstdlib>
 #include <numbers>
@@ -670,6 +671,29 @@ int main()
                 }
             }
         }
+    }
+
+    // low_returns_reach_policy (Task 7, local-motion policy): the policy's contact set starts just above the floor
+    // (Lidar.ContactMinHeightM), not at the old consumers' 0.20 m band — a 0.10 m kerb, a robot-vacuum, a door sill or
+    // a chair's foot-ring is CONTACT for the policy. The 0.20 band is kept for the old consumers until Task 10.
+    {
+        const ControllerParams p;
+        const auto bands = rc::lidar_height_bands(p);
+        CHECK(bands.legacy_min_m == p.temporary_obstacle_min_height_m);      // old consumers: unchanged
+        CHECK(bands.legacy_min_m == 0.20f);
+        CHECK(bands.contact_min_m < 0.10f);                                  // the low band reaches a 0.10 m return
+        CHECK(bands.contact_min_m > 0.f);                                    // and still rejects the floor itself
+        const auto low = rc::lidar_band_membership(0.10f, bands);
+        std::println("  low_returns_reach_policy: z 0.10 m -> policy {} legacy {} (contact band from {:.3f} m, legacy from {:.2f} m)",
+                     low.policy, low.legacy, bands.contact_min_m, bands.legacy_min_m);
+        CHECK(low.policy and not low.legacy);
+        const auto mid = rc::lidar_band_membership(0.50f, bands);            // above both floors: in both sets
+        CHECK(mid.policy and mid.legacy);
+        const auto floor = rc::lidar_band_membership(0.0f, bands);           // the floor return: in neither
+        CHECK(not floor.policy and not floor.legacy);
+        const auto high = rc::lidar_band_membership(p.temporary_obstacle_max_height_m + 0.1f, bands);   // above the body
+        CHECK(not high.policy and not high.legacy);
+        CHECK(not rc::lidar_band_membership(std::nanf(""), bands).policy);
     }
 
     std::println("{} / {} checks passed", checks - failures, checks);

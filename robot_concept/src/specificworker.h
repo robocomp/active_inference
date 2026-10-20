@@ -189,6 +189,10 @@ private:
 	/// merging the two is what let room_concept's pose clamp bound real motion by a preference.
 	std::optional<float> max_linear_speed_, max_rot_speed_, max_linear_accel_, max_linear_decel_,
 	                     wheel_radius_, axes_length_, wheel_base_;
+	/// The base DEADBAND (m/s, rad/s): the smallest speeds it executes. MEASURED (controller/tools/measure_deadband.py),
+	/// not in the base's own file, so it comes from THIS agent's config (Agent.base_min_linear_speed / _rot_speed).
+	/// Published as robot_min_linear_speed / robot_min_rot_speed once cortex carries them (RC_HAVE_ROBOT_DEADBAND_ATTRS).
+	std::optional<float> min_linear_speed_, min_rot_speed_;
 	// Degrees to rotate the robot's MESH into the ROBOT frame (x right, y forward). A property of the
 	// ASSET, not of the robot: P3Bot's proto wraps the machine in `Pose { rotation 0 0 1 1.5708 }`, so its
 	// mesh's native forward is +x while the graph's robot frame has forward +y. Agent.mesh_yaw_deg.
