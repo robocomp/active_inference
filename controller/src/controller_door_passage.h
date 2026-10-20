@@ -62,12 +62,14 @@ namespace rc
 class DoorPassage
 {
 public:
-    enum class Step { Idle, Approach, Open, Cross, Close, Done };
+    // Look (Live fix 3): the epistemic look at a REMEMBERED door that is not in the graph (door_concept's
+    // `aff_door_look_<door>`, door_look.h) — the passage's first step until the door is re-born.
+    enum class Step { Idle, Look, Approach, Open, Cross, Close, Done };
 
     /// Begin a passage through `door` (the door node's name, e.g. "door_1"). `stop_after` = the last step to run:
     /// Cross (the whole passage) or Open (a mission's `open door`: the passage is Done once the door is open, and
     /// a `cross` on offer — door_concept believing it passable — counts as open already).
-    void start(std::string door, Step stop_after = Step::Cross, bool then_affordances = false)
+    void start(std::string door, Step stop_after = Step::Cross, bool then_affordances = false, bool look_first = false)
     {
         std::scoped_lock lk(m_);
         door_ = std::move(door);
@@ -75,7 +77,7 @@ public:
         then_affordances_ = then_affordances;
         finished_ = false;
         last_outcome_.clear();
-        step_ = Step::Approach;
+        step_ = look_first ? Step::Look : Step::Approach;
         seen_executing_ = false;
         attempts_ = 0;
         cross_room_.clear();
@@ -103,8 +105,16 @@ public:
     [[nodiscard]] bool active() const
     {
         std::scoped_lock lk(m_);
-        return step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross or step_ == Step::Close;
+        return step_ == Step::Look or step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross or step_ == Step::Close;
     }
+    /// Live fix 3: is the epistemic look at a remembered-but-absent `door` on offer (or being executed)? Then a passage can
+    /// start with it (start(..., look_first = true)) instead of failing "not in the graph".
+    [[nodiscard]] static bool look_available(DSR::DSRGraph& G, const std::string& door)
+    {
+        const State st = state_of(G, look_name(door));
+        return st == State::Offered or st == State::Executing;
+    }
+    [[nodiscard]] static std::string look_name(const std::string& door) { return "aff_door_look_" + door; }
     /// True once when the passage reaches Done (not on stop()): the caller hands the base back if then_affordances.
     [[nodiscard]] bool take_finished()
     {
@@ -178,6 +188,40 @@ public:
         std::scoped_lock lk(m_);
         Out out;
         if (step_ == Step::Idle or step_ == Step::Done) return out;
+
+        // ★ Live fix 3 — THE LOOK PRE-STEP (tourP7 leg 1: `cross door_2` with door_2 not in the graph, door_concept offering
+        //   aff_door_look_door_2). While the door node is absent the passage requires the look (driven like any affordance,
+        //   through the policy); the door RE-BORN (its node appears) moves it on to `approach` and the rest as today; the look
+        //   gone without the door (door_concept RULED OUT this visit) fails the passage — the "not in the graph" failure.
+        if (step_ == Step::Look)
+        {
+            const std::string look = look_name(door_);
+            if (G.get_node(door_).has_value())
+            {
+                step_ = Step::Approach;
+                seen_executing_ = false;
+                out.event = std::format("[door-passage] {}: the door is re-born (in the graph again) — {} done, on to {}", door_, look,
+                                        name_of(Step::Approach));
+                last_event_ = *out.event;
+            }
+            else if (G.get_node(look).has_value())
+            {
+                step_state_ = state_name(state_of(G, look));
+                note_ = std::format("{} ({})", look, step_state_);
+                out.required = look;
+                return out;
+            }
+            else
+            {
+                finish();
+                failed_ = true;
+                last_outcome_ = "look_ruled_out";
+                out.event = std::format("[door-passage] {}: {} withdrawn and the door is not in the graph (ruled out this visit) — "
+                                        "passage FAILED", door_, look);
+                last_event_ = *out.event;
+                return out;
+            }
+        }
 
         // Jump to the latest step its producer is offering — EVEN WHILE THE CURRENT ONE IS BEING EXECUTED
         // (2026-10-12). A later step on offer is door_concept saying the current step's purpose is already met:
@@ -451,7 +495,7 @@ public:
     [[nodiscard]] View view() const
     {
         std::scoped_lock lk(m_);
-        const bool live = step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross or step_ == Step::Close;
+        const bool live = step_ == Step::Look or step_ == Step::Approach or step_ == Step::Open or step_ == Step::Cross or step_ == Step::Close;
         return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_,
                 .last_outcome = last_outcome_, .then_affordances = then_affordances_, .failed = failed_,
                 .required = live ? name_of(step_) : std::string{}, .reached_door = reached_door_, .opened = opened_,
@@ -462,6 +506,7 @@ public:
         switch (s)
         {
             case Step::Idle: return "idle";
+            case Step::Look: return "look";
             case Step::Approach: return "approach";
             case Step::Open: return "open";
             case Step::Cross: return "cross";
@@ -483,6 +528,7 @@ private:
 
     [[nodiscard]] std::string name_of(Step s) const
     {
+        if (s == Step::Look) return look_name(door_);
         const char* kind = s == Step::Approach ? "approach" : s == Step::Open ? "open" : s == Step::Close ? "close" : "cross";
         return "aff_" + door_ + "_" + kind;
     }

@@ -135,6 +135,8 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 	{
 		const auto v = w_.session_.door_passage().view();
 		if (v.door != door_ or v.step == rc::DoorPassage::Step::Idle) return {.state = LeafState::Failed, .detail = "abandoned"};
+		// a FAILED passage ends Done too (finish()): it is a failure, not a success (Live fix 3: a ruled-out look)
+		if (v.failed) return {.state = LeafState::Failed, .detail = v.last_outcome.empty() ? std::string("failed") : v.last_outcome};
 		if (v.step == rc::DoorPassage::Step::Done) return {.state = LeafState::Succeeded};
 		if (v.attempts > 0)
 			return {.state = LeafState::Failed,
@@ -303,7 +305,9 @@ std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::m
 {
 	if (r.kind == Ref::Kind::Node)
 	{
-		if (not G->get_node(r.name).has_value()) return std::unexpected(std::format("door '{}' is not in the graph", r.name));
+		// Live fix 3: a remembered door (door_concept offers aff_door_look_<door>) resolves — the passage starts with the look
+		if (not G->get_node(r.name).has_value() and not rc::DoorPassage::look_available(*G, r.name))
+			return std::unexpected(std::format("door '{}' is not in the graph", r.name));
 		return r.name;
 	}
 	if (r.kind != Ref::Kind::Passage) return std::unexpected(std::string("not a door"));

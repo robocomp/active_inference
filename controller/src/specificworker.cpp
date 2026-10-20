@@ -2072,7 +2072,9 @@ SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::stri
                                                                  const char *source, bool then_affordances)
 {
 	const char *kind = stop_after == rc::DoorPassage::Step::Open ? "open" : "cross";
-	if (not G->get_node(door).has_value())
+	// ★ Live fix 3: a door NOT in the graph that door_concept REMEMBERS (it offers aff_door_look_<door>) starts with the look.
+	const bool look_first = not G->get_node(door).has_value() and rc::DoorPassage::look_available(*G, door);
+	if (not G->get_node(door).has_value() and not look_first)
 	{
 		std::println("[{}] {} '{}': the door is not in the graph — nothing to {}", source, kind, door, kind);
 		return {.kind = kind, .door = door, .reason = std::format("door '{}' is not in the graph", door)};
@@ -2080,7 +2082,10 @@ SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::stri
 	cancel_relative_motion("superseded by a door passage");
 	session_.mission().set_mode(rc::DriveMode::Command);
 	session_.set_command_explore(false);   // the passage's own steps are the order now
-	session_.door_passage().start(door, stop_after, then_affordances);
+	session_.door_passage().start(door, stop_after, then_affordances, look_first);
+	if (look_first)
+		std::println("[{}] {} '{}': the door is not in the graph but remembered — the passage starts with {}", source, kind, door,
+		             rc::DoorPassage::look_name(door));
 	std::println("[{}] {} '{}' -> DOOR PASSAGE{}{}", source, kind, door,
 	             stop_after == rc::DoorPassage::Step::Open ? " (stops once open)" : "",
 	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");

@@ -244,6 +244,20 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
             for (const auto &q : spec.points)
                 f << "goal_point " << q.x() << ' ' << q.y() << " free " << (free_fn(q) ? 1 : 0) << " field " << policy_nav_.field().at(q) << '\n';
             for (const auto &t : policy_nav_.traps()) f << "trap " << t.c.x() << ' ' << t.c.y() << " r " << t.r << '\n';
+            // Live fix 3: the density where it matters, and the straight line robot -> nearest goal point every 0.10 m
+            // (free flag, residual density, field) — enough to tell a disconnected free mask from a priced region
+            f << "extra_at_robot " << extra_fn(pose.p) << " ; planner_distance_at_robot " << grid_planner_.distance_at(pose.p)
+              << " ; residual_risk_weight " << grid_planner_.params.residual_risk_weight << '\n';
+            Eigen::Vector2f gq = spec.points.front();
+            for (const auto &q : spec.points) if ((q - pose.p).norm() < (gq - pose.p).norm()) gq = q;
+            f << "extra_at_goal " << extra_fn(gq) << " ; planner_distance_at_goal " << grid_planner_.distance_at(gq) << '\n';
+            const float len = (gq - pose.p).norm();
+            for (float u = 0.f; u <= len + 1e-4f; u += 0.10f)
+            {
+                const Eigen::Vector2f q = pose.p + (len > 0.f ? u / len : 0.f) * (gq - pose.p);
+                f << "line " << u << ' ' << q.x() << ' ' << q.y() << " free " << (free_fn(q) ? 1 : 0) << " dist " << grid_planner_.distance_at(q)
+                  << " extra " << extra_fn(q) << " field " << policy_nav_.field().at(q) << '\n';
+            }
             std::println("[policy] {}: the field at the robot ({:.2f} m) is > 10x the straight distance ({:.2f} m) — field inputs "
                          "dumped to {}", who, f_robot, straight, fname);
         }

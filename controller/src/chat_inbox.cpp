@@ -65,6 +65,7 @@ std::pair<std::string, std::string> ChatInbox::status_of(const Tracked& t, const
             const std::string bt = std::format("{}|{}|{}", DoorPassage::step_name(v.step), v.last_event, drv);
             if (v.door != t.door) return {"aborted", std::format("superseded|another passage ({}) was started|{}",
                                                                  v.door.empty() ? std::string("none") : v.door, drv)};
+            if (v.failed) return {"failed|" + (v.last_outcome.empty() ? std::string("failed") : v.last_outcome), bt};   // Live fix 3
             if (v.step == DoorPassage::Step::Done) return {"completed", bt};
             if (v.step == DoorPassage::Step::Idle) return {"aborted", bt};
             return {"in_progress", bt};

@@ -286,6 +286,54 @@ int main()
         CHECK(p.view().last_outcome != "satisfied" and not p.view().last_outcome.empty());
     }
 
+
+    // ── Live fix 3 (tourP7 leg 1): `cross door_2` while door_2 is NOT in the graph but door_concept offers the epistemic look
+    //    `aff_door_look_door_2` (a remembered door): the passage's first step is that LOOK; when the door is re-born it goes
+    //    on to approach (and the rest as today). The look withdrawn without the door (RULED OUT) fails the passage.
+    {
+        auto G = make_graph(9);
+        DoorPassage p;
+        p.set_clock(clock);
+        offered(*G, "aff_door_look_door_2");
+        CHECK(DoorPassage::look_available(*G, "door_2"));
+        p.start("door_2", Step::Cross, false, /*look_first=*/true);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Look);
+        CHECK(out.required == "aff_door_look_door_2");          // the selector may take only the look
+        executing(*G, "aff_door_look_door_2");
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Look and out.required == "aff_door_look_door_2");
+        // the door is re-born: its node appears (and door_concept withdraws the look)
+        DSR::Node door = DSR::Node::create<door_node_type>("door_2");
+        G->insert_node(door);
+        offered(*G, "aff_door_2_approach");
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach);
+        CHECK(out.event.has_value() and out.event->find("re-born") != std::string::npos);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_2_approach");
+        CHECK(not p.view().failed);
+    }
+    {   // the look RULED OUT: withdrawn (node gone) and the door never appears — the passage fails, the mission sees it
+        auto G = make_graph(10);
+        DoorPassage p;
+        p.set_clock(clock);
+        offered(*G, "aff_door_look_door_3");
+        p.start("door_3", Step::Cross, false, /*look_first=*/true);
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Look);
+        G->delete_node("aff_door_look_door_3");                 // door_concept: RULED OUT this visit
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().failed);
+        CHECK(p.view().last_outcome == "look_ruled_out");
+        CHECK(out.event.has_value() and out.event->find("not in the graph") != std::string::npos);
+        CHECK(not p.active());
+    }
+    {   // never remembered: no look offered and no door — nothing to start from
+        auto G = make_graph(11);
+        CHECK(not DoorPassage::look_available(*G, "door_4"));
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }
