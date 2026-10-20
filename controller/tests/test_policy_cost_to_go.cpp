@@ -38,7 +38,7 @@ int main()
         V start{0.5f, 2.5f}, goal{9.5f, 2.5f};
         CostToGo c; c.build(g, free, no_extra, std::span<const V>(&goal, 1));
         const float before = c.at(start);
-        c.add_trap({5.f, 1.5f}, 0.6f, 2.f); c.build(g, free, no_extra, std::span<const V>(&goal, 1));
+        c.add_trap({5.f, 1.5f}, 0.6f, 12.f); c.build(g, free, no_extra, std::span<const V>(&goal, 1));
         const float after = c.at(start);
         const float longer = 17.5f;   // via the upper corridor: 5 up + ~8 across + 5 down, minus 8-connected corner cuts
         std::printf("  before %.2f after %.2f\n", before, after);
@@ -69,6 +69,45 @@ int main()
         CHECK("bilinear_midpoint", std::fabs(m - 0.5f * (a + b)) < 1e-4f);
         const float e = c.at({4.97f, 1.f});   // between last free column (4.9) and wall (5.0): inf neighbour
         CHECK("inf_neighbour_falls_back_finite", std::isfinite(e));
+    }
+    { // uniform density: 45 deg line vs axis line of equal length
+        auto free = [](const V&) { return true; };
+        auto ex = [](const V&) { return 0.5f; };
+        CostToGo c1, c2; V g1{1.f, 1.f}; c1.build(g, free, ex, std::span<const V>(&g1, 1));
+        const float diag = c1.at({6.f, 6.f}), axis = c1.at({1.f + 5.f * 1.41421356f, 1.f});
+        CHECK("diagonal_vs_straight_consistent", std::fabs(diag - axis) < 0.1f and std::fabs(axis - 5.f * 1.41421356f * 1.5f) < 0.2f);
+    }
+    { // trap resolution independence
+        auto free = [](const V&) { return true; };
+        float v[2]; int k = 0;
+        for (float cell : {0.05f, 0.10f})
+        {
+            const CostToGo::Grid G{{0.f, 0.f}, cell, int(10.f / cell), int(10.f / cell)};
+            CostToGo c; c.add_trap({5.f, 5.f}, 1.f, 2.f); V goal{9.f, 5.f};
+            c.build(G, free, no_extra, std::span<const V>(&goal, 1)); v[k++] = c.at({1.f, 5.f});
+        }
+        std::printf("  trap start values %.3f %.3f\n", v[0], v[1]);
+        CHECK("trap_cost_resolution_independent", std::fabs(v[0] - v[1]) < 0.1f * v[0] and v[0] > 8.5f);
+    }
+    { // pose inside blocked, last row, seeded goals, corner cut
+        auto free = [](const V& p) { return p.x() < 5.f or p.x() > 5.35f; };
+        CostToGo c; V goal{2.f, 2.f}; c.build(g, free, no_extra, std::span<const V>(&goal, 1));
+        const V q{5.15f, 2.f};   // between non-free columns 5.0..5.3: all 4 surrounding cells blocked
+        const float a = c.at(q);
+        CHECK("pose_inside_blocked_reads_nearest_plus_distance", std::isfinite(a) and a > c.at({4.9f, 2.f}) - 0.1f and a < c.at({4.9f, 2.f}) + 0.5f);
+        CHECK("last_row_finite", std::isfinite(c.at({3.f, 9.9f})) and std::isfinite(c.at({0.f, 3.f})) and std::isinf(c.at({10.5f, 3.f})));
+        { auto all = [](const V&) { return true; }; CostToGo f; V gl{2.f, 2.f}; f.build(g, all, no_extra, std::span<const V>(&gl, 1));
+          CHECK("last_col_finite", std::isfinite(f.at({9.9f, 3.f})) and std::isfinite(f.at({3.f, 9.9f}))); }
+        auto blocked = [](const V& p) { return p.x() < 5.f; };
+        CostToGo d; std::vector<V> seg; for (float x = 6.f; x <= 7.f; x += 0.1f) seg.push_back({x, 5.f});
+        d.build(g, blocked, no_extra, seg);
+        CHECK("seeded_goal_cells_zero_when_blocked", d.seeded_goal_cells() == 0);
+        d.build(g, blocked, no_extra, std::span<const V>(&goal, 1));
+        CHECK("seeded_goal_cells_positive", d.seeded_goal_cells() == 1);
+        // two blocked cells touching at a corner: (3.0,3.0) and (3.1,3.1) cells... wall along diagonal
+        auto diagfree = [](const V& p) { return std::fabs(p.x() - p.y()) > 0.05f; };
+        CostToGo e; V gl{6.f, 2.f}; e.build(g, diagfree, no_extra, std::span<const V>(&gl, 1));
+        CHECK("no_corner_cut", not e.reachable({2.f, 6.f}) or e.at({2.f, 6.f}) > 100.f);
     }
     { // timing 200x200
         const CostToGo::Grid G{{0.f, 0.f}, 0.05f, 200, 200};
