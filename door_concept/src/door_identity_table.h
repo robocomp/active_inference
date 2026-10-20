@@ -219,6 +219,20 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
     return d;
 }
 
+/// Upsert BY PLACE WITHIN `room`: one hole in a room's walls carries one name. A row of the same name, or whose centre lies
+/// within `same_hole_m` (reacquire radius + the opening's width), is the same hole and is replaced. Returns false (no
+/// change) for a row that is not a door or not a place.
+inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, IdentityRow row, float same_hole_m)
+{
+    if (room.empty() or not row.name.starts_with("door_") or not row.xy.allFinite() or row.xy.norm() > kIdentityMaxPlaceM)
+        return false;
+    std::erase_if(rows, [&](const IdentityRow& i)
+                  { return i.room == room and (i.name == row.name or (i.xy - row.xy).norm() < same_hole_m); });
+    row.room = room;
+    rows.push_back(std::move(row));
+    return true;
+}
+
 /// A room entered FRESH (not a recall) starts its restorable memory over: the pose, leaf and existence of its rows are
 /// dropped, the NAME and PLACE kept (still an identity: a re-detected door gets its name back, and the number stays
 /// reserved). etc/door_identities.csv outlives ltsm's memory, so without this a later recall of the same room name

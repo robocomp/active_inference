@@ -1952,9 +1952,7 @@ void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2
 void SpecificWorker::upsert_identity(DoorIdentity row, float width_m)
 {
     const std::string room = current_room_name();
-    const Eigen::Vector2f ap = row.xy;
-    if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty() or not row.name.starts_with("door_") or not ap.allFinite()
-        or ap.norm() > rc::door::kIdentityMaxPlaceM)
+    if (cfg_.exist_reacquire_radius_m <= 0.0f)
         return;
     // ★ ONE DOORWAY, ONE NAME (2026-10-18, user). A row whose centre lies within this opening's width plus the
     //   re-acquire radius describes the SAME hole — the openings overlap once their centres are closer than the
@@ -1963,11 +1961,8 @@ void SpecificWorker::upsert_identity(DoorIdentity row, float width_m)
     //   on the far jamb, door_5 @ −0.58), and the next run picked whichever was closer: door_5. The live door's name
     //   wins. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
     const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
-    std::erase_if(identities_, [&](const DoorIdentity& i)
-                  { return i.room == room and (i.name == row.name or (i.xy - ap).norm() < same_hole); });
-    row.room = room;
-    identities_.push_back(std::move(row));
-    save_identities();
+    if (rc::door::upsert_row(identities_, room, std::move(row), same_hole))
+        save_identities();
 }
 
 // What a FITTED door leaves behind to be restored from: its aperture pose and size (room frame), its existence belief,
@@ -4436,6 +4431,14 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         it->second.aff_cross.remove();
         it->second.aff_close.remove();
         std::print("door_concept: node {} removed from DSR, destroying instance and its affordances\n", id);
+        // ★WRITE DOWN WHAT IT WAS, NOW (tourP4, 2026-10-20). An instance still in the map here was deleted by SOMEBODY
+        //  ELSE — our own removals (retire_instance) forget the instance before deleting the node. The usual somebody is
+        //  ltsm evicting the room we are leaving, and it does so BEFORE `current` reaches us, so release_room's
+        //  remember_live_identities found 0 instances and the fitted doors' pose rows were never written: on re-entry
+        //  every row of room_1 was identity-only and nothing could be restored. room_node_id_ is still that room here
+        //  (or its name is cached), so the row lands under the right room.
+        if (it->second.ai2_initialized and not it->second.is_bearing_hypothesis)
+            upsert_identity(identity_of(it->second), it->second.model.state().w);
         fitter_->instances().erase(it);
         if (const auto m = door_memo_.find(id); m != door_memo_.end())
         {

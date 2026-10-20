@@ -9,6 +9,7 @@
 #include <print>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 #include "../src/door_identity_table.h"
 
@@ -174,6 +175,38 @@ int main()
         for (const auto& s : d.skipped) phantom_skipped = phantom_skipped or (s.name == "door_6" and s.reason == SkipReason::NoPose);
         CHECK(phantom_skipped);
         CHECK(strip_restorable(t, "room_9") == 0);
+    }
+
+    // ── 5. tourP4 sequence: fresh entry → birth by identity → fit → (ltsm evicts the room: doors deleted BEFORE the
+    //      switch) → release → recall → restore. The pose row must be written when the evicted door is deleted, because
+    //      release then sees no live instance. Same-hole = radius + width, as the agent uses.
+    {
+        const auto same_hole = [&](float w) { return radius + w; };
+        std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.43f, 4.61f), full_row("room_1", "door_2", 0.64f, 2.54f)};
+        CHECK(strip_restorable(t, "room_1") == 2);                                   // fresh entry (first room)
+        for (auto [n, x, y] : {std::tuple{"door_1", -0.55f, 4.61f}, std::tuple{"door_2", 0.72f, 2.45f}})
+        {
+            IdentityRow birth; birth.name = n; birth.xy = {x, y};
+            CHECK(upsert_row(t, "room_1", birth, same_hole(0.f)));               // birth by identity: id-only
+        }
+        auto replay = t;                                                             // the bug: nothing written after this
+        {
+            const std::vector<IdentityRow> live_at_release{};                        // eviction emptied the instance map
+            for (const auto& r : live_at_release) upsert_row(replay, "room_1", r, same_hole(r.pose->width));
+            const auto d = plan_restore(replay, "room_1", true, {}, radius);
+            CHECK(d.restore.empty());                                                // reproduces "no remembered pose"
+        }
+        // The fix: the externally deleted, fitted doors write their full rows at deletion.
+        for (auto r : {full_row("", "door_1", -0.545f, 4.606f), full_row("", "door_2", 0.642f, 2.536f)})
+            CHECK(upsert_row(t, "room_1", r, same_hole(r.pose->width)));
+        CHECK(t.size() == 2);                                                        // replaced, not duplicated
+        // The next room's fresh entry must not touch room_1's rows.
+        CHECK(strip_restorable(t, "room_2") == 0);
+        // Round-trip through the file as the agent does between visits.
+        std::stringstream ss; write_identity_table(ss, t); const auto p = parse_identity_table(ss);
+        const std::vector<LiveDoor> live{{"door_2", Eigen::Vector2f(0.64f, 2.54f)}};  // the carried door
+        const auto d = plan_restore(p.rows, "room_1", true, live, radius);
+        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_1" and d.restore[0].pose.has_value());
     }
 
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");
