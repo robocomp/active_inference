@@ -1062,11 +1062,14 @@ bool GridPlanner::self_test()
     // (7) FEASIBLE AT BOTH ENDS, IMPOSSIBLE IN THE MIDDLE — the failure the arrival path cannot see.
     // A standpoint is verified at ONE heading; the terminal rotation sweeps the whole arc. The Shadow
     // hull measures 0.568 m across (the two drive wheels, x = ±0.284) and 0.460 m along, so lying in a corridor it needs
-    // 0.568 m — but the span it sweeps while turning PEAKS at 0.602 m around 70 deg (measured off the hull itself, not
-    // guessed from a bounding box). A slot between the two admits the robot pointing along it and traps
-    // it part-way round.
-    // ★2026-10-20: the body is now mesh ∪ the TWO drive wheels (was four mecanum wheels: 0.543 across, peak 0.615 at 30 deg),
-    // so the slot below became 0.51 m (ends at yaw ±90) and test (8)'s 0.52 m.
+    // 0.568 m. (The OLD four-mecanum hull swept a span that PEAKED between planner buckets, 0.615 m near 30 deg against 0.543
+    // m at the ends, so a slot between the two admitted the robot pointing along it and trapped it part-way round.)
+    // ★2026-10-20: the body is now mesh ∪ the TWO drive wheels. Its exact swept span still peaks (0.602 m near 70 deg
+    // measured off the hull), but pose_free() quantises to the planner's 45-degree buckets, where the width is 0.568 at 0
+    // and 0.5684 at 45 deg: the grid cannot tell the peak from the ends, so NO slot admits the ends and refuses the middle at
+    // yaw 0. COVERAGE LOST: this test no longer checks 'both ends fit, a mid-arc PEAK between buckets refuses'. It checks the
+    // plain guarantee instead (ends at yaw ±90 fit the 0.460 m length; the turn is refused because the arc passes the
+    // 0.568 m width), slot 0.51 m, and test (8)'s 0.52 m. The between-bucket peak is NOT covered by any test now.
     // ★THE NUMBERS HERE WERE RESTATED WITH THE YAW CORRECTION, and the old ones are worth recording
     // because they were wrong twice over: they read "0.46 x 0.65 body, diagonal 0.796 m", which is the
     // INSCRIBED and CIRCUMSCRIBED diameters treated as though they were the body's sides. The slot they
@@ -1108,6 +1111,8 @@ bool GridPlanner::self_test()
         // ★2026-10-20: 0.01 m cells (as in (7)). At the default 0.10 m the raster shrinks a wall by up to a cell, and the window
         // between 'stands' (0.460 + raster) and 'turns' (0.568, wheels) is narrower than a cell for the two-wheel hull.
         p.params.cell_size_m = 0.01f;
+        // COVERAGE LOST: the 0.75 m slot at the default raster also exercised coarse-raster inflation; this now runs only at
+        // 0.01 m with a 0.52 m slot (plain 'narrower than the body is wide'), so the raster-inflated path is no longer covered here.
         const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
         p.set_world(room, {{{0.f, 0.f}, {4.f, 0.f}, {4.f, 2.74f}, {0.f, 2.74f}},
                            {{0.f, 3.26f}, {4.f, 3.26f}, {4.f, 6.f}, {0.f, 6.f}}});
@@ -1135,9 +1140,6 @@ bool GridPlanner::self_test()
     // Re-asking the grid there returns the same wrong answer forever; the predicate is what changes it.
     {
         GridPlanner p; p.params.safety_margin_m = 0.f;
-        // ★2026-10-20: 0.01 m cells (as in (7)). At the default 0.10 m the raster shrinks a wall by up to a cell, and the window
-        // between 'stands' (0.460 + raster) and 'turns' (0.568, wheels) is narrower than a cell for the two-wheel hull.
-        p.params.cell_size_m = 0.01f;
         const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
         p.set_world(room, {});                       // NOTHING is occupied: the grid has forgotten
         const Eigen::Vector2f standpoint{3.f, 3.f};

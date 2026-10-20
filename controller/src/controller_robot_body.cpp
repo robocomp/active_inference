@@ -58,11 +58,11 @@ RobotFootprint load_robot_body(DSR::DSRGraph &graph,
     };
 
     // ★SHADOW KEEPS ITS COMPILED HULL. See the header: shadow.obj has no wheels, so deriving from it would
-    // shrink the body 29.6 mm per side. This is checked before the file is even opened, so the refusal reads
+    // shrink the body ~42 mm per side. This is checked before the file is even opened, so the refusal reads
     // as a decision rather than a parse failure.
     if (robot_name == "Shadow")
-        return fall_back("shadow.obj omits the four wheels (|x|max 0.2420 vs the assembly's 0.2464 — "
-                         "ROBOT_GEOMETRY.md); the compiled hull is the better measurement for this robot");
+        return fall_back("shadow.obj omits the two drive wheels (|x|max 0.2420 vs the assembly's 0.2840 — "
+                         "Shadow.proto); the compiled hull is the better measurement for this robot");
 
     const auto node = graph.get_node(robot_id);
     if (not node.has_value())
@@ -141,10 +141,12 @@ void log_robot_body_report(const RobotBodyReport &report, const RobotFootprint &
     // The deltas are the point of the whole line. A body that differs from the compiled one by millimetres is
     // a refactor; one that differs by centimetres changes what the robot may drive through, and which
     // direction it moved in is what says whether that is safer or bolder.
+    float ref_x_max = 0.f, ref_y_max = 0.f;       // the compiled hull's own extent, never a literal that goes stale with the hull
+    for (const auto &v : reference.polygon()) { ref_x_max = std::max(ref_x_max, v.x()); ref_y_max = std::max(ref_y_max, v.y()); }
     std::println("[body]   vs compiled shadow(): inscribed {:+.4f}  circumscribed {:+.4f}  |x|max {:+.4f}  |y|max {:+.4f}",
                  m.inscribed - reference.inscribed_radius(),
                  m.circumscribed - reference.circumscribed_radius(),
-                 m.x_max - 0.2716f, m.y_max - 0.2300f);
+                 m.x_max - ref_x_max, m.y_max - ref_y_max);
     std::println("[body]   hull centroid {:.4f} m from the rotation centre  |  ACTIVE: {}",
                  m.centroid.norm(), report.active);
     (void)active;
