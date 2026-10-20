@@ -81,7 +81,7 @@ struct ScenarioResult
     bool reached = false, unreachable = false, stuck = false, trajectory_ok = true;
     int contacts = 0, release_contacts = 0;
     float max_no_progress_s = 0.f, path_m = 0.f;
-    int releases = 0, traps = 0;
+    int releases = 0, traps = 0, failed_predictions = 0;
     float time_s = 0.f, geodesic_m = 0.f, min_clear = 1e9f;
     float goal_truth_clear = 1e9f;   // pose_jump: the world clearance of the TRUE place the believed goal maps to
     Pose2 end;                       // TRUE end pose
@@ -276,6 +276,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     }
     res.time_s = t;
     res.end = truth;
+    res.failed_predictions = nav.failed_predictions();
     if (res.why.empty()) res.why = "time limit";
     return res;
 }
@@ -339,7 +340,7 @@ static World open_world()
 static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 
 // ---------------------------------------------------------------- reporting
-struct Summary { std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
+struct Summary { int max_failed = 0; std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
                  bool traj_ok = true; int total_traps = 0; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
@@ -359,6 +360,7 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
         S.min_clear = std::min(S.min_clear, r.min_clear);
         if (r.geodesic_m > 0.f) S.max_path_ratio = std::max(S.max_path_ratio, r.path_m / r.geodesic_m);
         if (r.reached) S.tgoal.push_back(r.time_s);
+        S.max_failed = std::max(S.max_failed, r.failed_predictions);
         S.step_ms.insert(S.step_ms.end(), r.step_ms.begin(), r.step_ms.end()); S.returns_max = std::max(S.returns_max, r.returns_max);
         S.build_ms += r.build_ms; S.builds += r.builds; S.goal_truth_clear = std::min(S.goal_truth_clear, r.goal_truth_clear);
         std::printf("   %4d %7d %7d %5d %5d(%d) %8d %7.2f %5.2f %4.2f %6.1f %+9.3f %6d  %s\n", s, int(r.reached), int(r.unreachable), int(r.stuck),
@@ -505,7 +507,9 @@ int main()
         const auto S = run_seeds("narrow_doorway_unreachable", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, -1.0f), 90.f * kDeg}, g, 60.f, seed, o); });
         CHECK("narrow_doorway_unreachable: contacts == 0", S.contacts == 0);
         CHECK("narrow_doorway_unreachable: unreachable on every seed", S.unreachable == S.n);
-        CHECK("narrow_doorway_unreachable: <= 2 release EPISODES", S.max_releases <= 2);
+        // ★ round 5 (RF4-c): FAILED predictions before Unreachable (successful releases are legitimate repositioning)
+        std::printf("   failed predictions before Unreachable: max %d\n", S.max_failed);
+        CHECK("narrow_doorway_unreachable: <= 2 failed predictions", S.max_failed <= 2);
     }
     // ---- goal_behind_open_space: path <= 1.5 x geodesic
     if (want("goal_behind_open_space"))

@@ -29,6 +29,10 @@
 //   State: plan_ (active, mode, the two phases, start time) — see Plan below.
 //   field(), traps(), goal_points(): read-only views (display, oracles).
 //
+// ★ round 5: the trap marks where the body would go NEXT, beyond its current footprint — centre = pose + 2 trap_radius
+//   downhill, so the disc never contains the robot (asserted); NO trap when the field at the robot is non-finite or its
+//   downhill direction is undefined (|grad F| over two cells below the field's resolution there): the failure still
+//   forces the Release, it carries no route evidence.
 // ★ TRAPS ARE BLOCKED REGIONS (review fix round 2): a trap asserts "the body cannot get through from here", and only a
 //   FAILED PREDICTION is evidence of that. The disc (centre = the believed pose + trap_radius downhill, radius =
 //   trap_radius) is made NON-FREE in the field (CostToGo::block_disc): the field becomes the true detour distance around
@@ -50,11 +54,18 @@ class Navigator
 public:
     struct Trap { Eigen::Vector2f c = Eigen::Vector2f::Zero(), dir = Eigen::Vector2f::Zero(); float r = 0.f; };
     struct Step { Decision d{.mode = Decision::Mode::Stuck, .why = {}}; std::optional<Trap> trap; bool trap_suppressed_by_goal = false; bool unreachable = false;
-                  bool replanned = false; float plan_remaining_p = 0.f; };
+                  bool replanned = false; float plan_remaining_p = 0.f;
+                  bool completed_early = false;          // the previous plan reached its predicted outcome early (success)
+                  bool trap_no_route_evidence = false; };  // a failed prediction where the field could not point the way
     // The committed plan: phase 1 = (v1, w1) for horizon_s then brake, dur1 in all; phase 2 (if has2) = (v2, w2) from rest
     // for horizon_s then brake, dur2 in all. t0 = the decision time it started.
+    // round 5: the plan runs PHASE by phase; a phase ends when its hold elapses OR its predicted end state is reached
+    //   (heading-changing phase: the predicted turn reached, or the goal's heading within tolerance; translating phase:
+    //   its predicted descent realized within the field's resolution). phase_t0 / phase_yaw0 / phase_f0 / phase_p0 =
+    //   where the current phase started.
     struct Plan { bool active = false; Decision::Mode mode = Decision::Mode::Drive; float v1 = 0, w1 = 0, dur1 = 0, v2 = 0, w2 = 0, dur2 = 0;
-                  bool has2 = false; double t0 = 0.0; Decision d{.mode = Decision::Mode::Drive, .why = {}}; };
+                  bool has2 = false; double t0 = 0.0; Decision d{.mode = Decision::Mode::Drive, .why = {}};
+                  int phase = 1; double phase_t0 = 0.0; float phase_yaw0 = 0.f, phase_f0 = 0.f; Eigen::Vector2f phase_p0 = Eigen::Vector2f::Zero(); };
 
     void set_goal(const Goal& goal, const CostToGo::Grid& grid, std::function<bool(const Eigen::Vector2f&)> free,
                   std::function<float(const Eigen::Vector2f&)> extra, std::vector<Eigen::Vector2f> goal_points, float trap_radius_m);
@@ -67,6 +78,7 @@ public:
     // downhill direction (-grad, unit) of the field at p
     Eigen::Vector2f downhill(const Eigen::Vector2f& p) const;
     double last_build_ms() const { return last_build_ms_; }
+    int failed_predictions() const { return failed_predictions_; }   // since set_goal
     const Plan& plan() const { return plan_; }
 
 private:
@@ -82,9 +94,11 @@ private:
     ProgressMonitor monitor_;
     Plan plan_;
     // the plan's command at elapsed time e, and its remaining sweep from (start, v0, w0)
-    std::pair<float, float> command_at(float e, const PolicyParams& p) const;
-    float plan_length(const PolicyParams& p) const;   // the plan's holds: horizon_s, x2 for a two-step plan
+    // the remaining sweep of the current phase (and phase 2 if still to come) from (start, v0, w0); e = time in the phase
     std::vector<Pose2> remaining_sweep(const Pose2& start, float v0, float w0, float e, const BaseLimits& b, const PolicyParams& p) const;
+    // has the current phase reached its predicted end state? (early completion, round 5)
+    bool phase_outcome_reached(const PolicyInput& in) const;
     double last_build_ms_ = 0.0;
+    int failed_predictions_ = 0;
 };
 }  // namespace rc::policy

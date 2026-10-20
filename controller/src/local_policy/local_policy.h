@@ -70,7 +70,10 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   // review fix round 3 — the PLAN this decision commits to (Navigator executes it): the candidate (v, w)
                   // held for horizon_s then braked, plan_dur1 in all; for a Drive whose rate came from a continuation,
                   // that continuation from rest (plan_v2, plan_w2) held for horizon_s then braked, plan_dur2 in all
-                  float plan_dur1 = 0.f, plan_v2 = 0.f, plan_w2 = 0.f, plan_dur2 = 0.f; bool plan_has_cont = false; };
+                  float plan_dur1 = 0.f, plan_v2 = 0.f, plan_w2 = 0.f, plan_dur2 = 0.f; bool plan_has_cont = false;
+                  // review fix round 5 — each phase's predicted END STATE where its hold ends as executed: the heading
+                  // change (rad) and the field descent (m) over that phase (Drive plans; zeros otherwise)
+                  float plan_turn1 = 0.f, plan_descent1 = 0.f, plan_turn2 = 0.f, plan_descent2 = 0.f; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its

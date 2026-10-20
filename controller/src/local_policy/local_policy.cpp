@@ -423,34 +423,39 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     }
     if (best_drive != nullptr and not prediction_failed)
     {
-        if (monitored)
+        // ★ round 4: the plan's predicted end states are where its HOLDS end AS EXECUTED — phase 1 from the current
+        //   velocity, phase 2 entered while still moving (no brake between) — not the rest poses of the from-rest rollouts
+        //   the rate was scored on (measured: a back-up-then-forward plan "realized -0.12 m" against a predicted +0.18 m
+        //   to the rest pose, because the reversal had not happened by the end of the holds).
+        const int k_hold = std::max(1, int(std::lround(p.horizon_s / p.dt)));
+        auto at_hold = [&](const std::vector<Pose2>& sw, float* v, float* w) {
+            const int i = std::min(k_hold, int(sw.size()) - 1), j = std::max(0, i - 1);
+            const Eigen::Vector2f fwd(std::cos(sw[j].yaw), std::sin(sw[j].yaw));
+            if (v) *v = (sw[i].p - sw[j].p).dot(fwd) / p.dt;
+            if (w) *w = (sw[i].yaw - sw[j].yaw) / p.dt;
+            return sw[i]; };
+        float v1e = 0.f, w1e = 0.f;
+        const Pose2 hold_e1 = at_hold(rollout(start, in.v_now, in.w_now, best_drive->v, best_drive->w, p.horizon_s, in.base, p.dt), &v1e, &w1e);
+        const Pose2 hold_end = best_drive->has_cont
+            ? at_hold(rollout(hold_e1, v1e, w1e, best_drive->cont_v, best_drive->cont_w, p.horizon_s, in.base, p.dt), nullptr, nullptr) : hold_e1;
+        const CostToGo* pfp = in.progress_field ? in.progress_field : in.field;   // null for a Heading goal
+        if (monitored and pfp != nullptr)
         {
-            // the prediction this Drive commits to: its plan's descent, judged when its HOLD completes (round 4)
+            const CostToGo& pf = *pfp;
+            // the prediction this Drive commits to: its plan's descent, judged when its HOLDS complete
             mon->reset();
             mon->pending = true; mon->t0 = in.now_s; mon->tau = p.horizon_s * (best_drive->has_cont ? 2.f : 1.f);
-            // round 8: the plan's descent on the TRAP-FREE field, from the pose the realized descent will be measured from
-            const CostToGo& pf = in.progress_field ? *in.progress_field : *in.field;
-            // ★ round 4: the descent predicted is to where the plan's HOLDS end AS EXECUTED — phase 1 from the current
-            //   velocity, phase 2 entered while still moving (no brake between) — not to the rest pose of the from-rest
-            //   rollouts the rate was scored on (measured: a back-up-then-forward plan "realized -0.12 m" against a
-            //   predicted +0.18 m to the rest pose, because the reversal had not happened by the end of the holds).
-            const Pose2 hold_end = [&] {
-                const int k = std::max(1, int(std::lround(p.horizon_s / p.dt)));
-                auto at_hold = [&](const std::vector<Pose2>& sw, float* v, float* w) {
-                    const int i = std::min(k, int(sw.size()) - 1), j = std::max(0, i - 1);
-                    const Eigen::Vector2f fwd(std::cos(sw[j].yaw), std::sin(sw[j].yaw));
-                    if (v) *v = (sw[i].p - sw[j].p).dot(fwd) / p.dt;
-                    if (w) *w = (sw[i].yaw - sw[j].yaw) / p.dt;
-                    return sw[i]; };
-                float v1e = 0.f, w1e = 0.f;
-                const Pose2 e1 = at_hold(rollout(start, in.v_now, in.w_now, best_drive->v, best_drive->w, p.horizon_s, in.base, p.dt), &v1e, &w1e);
-                if (not best_drive->has_cont) return e1;
-                return at_hold(rollout(e1, v1e, w1e, best_drive->cont_v, best_drive->cont_w, p.horizon_s, in.base, p.dt), nullptr, nullptr);
-            }();
             mon->f0 = pf.at(in.pose.p); mon->dF_pred = mon->f0 - pf.at(hold_end.p); mon->p0 = in.pose;
             if (not std::isfinite(mon->dF_pred)) mon->reset();
         }
-        return finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
+        Decision dd = finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
+        // ★ round 5: each phase's predicted END STATE (turn and descent), for the Navigator's early completion
+        const float f0 = pfp ? pfp->at(in.pose.p) : NAN, f1 = pfp ? pfp->at(hold_e1.p) : NAN, f2 = pfp ? pfp->at(hold_end.p) : NAN;
+        dd.plan_turn1 = wrap(hold_e1.yaw - in.pose.yaw);
+        dd.plan_descent1 = std::isfinite(f0) and std::isfinite(f1) ? f0 - f1 : 0.f;
+        dd.plan_turn2 = best_drive->has_cont ? wrap(hold_end.yaw - hold_e1.yaw) : 0.f;
+        dd.plan_descent2 = best_drive->has_cont and std::isfinite(f1) and std::isfinite(f2) ? f1 - f2 : 0.f;
+        return dd;
     }
 
     // ---- No eligible motion makes progress: the robot is in a wedge, and the only option is to move back and turn

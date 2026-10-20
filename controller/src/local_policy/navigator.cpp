@@ -2,6 +2,7 @@
 #include "navigator.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 
@@ -17,6 +18,7 @@ void Navigator::set_goal(const Goal& goal, const CostToGo::Grid& grid, std::func
 {
     goal_ = goal; grid_ = grid; free_ = std::move(free); extra_ = std::move(extra); goals_ = std::move(goal_points); trap_r_ = trap_radius_m;
     traps_.clear();
+    failed_predictions_ = 0;
     monitor_.reset();
     plan_ = Plan{};
     build();
@@ -52,32 +54,43 @@ Eigen::Vector2f Navigator::downhill(const Eigen::Vector2f& p) const
     return dir;
 }
 
-// ★ ROUND 4: THE BRAKE IS A SAFETY TAIL, NOT A MANEUVER. The plan is its HOLD phases only — (v1, w1) for horizon_s,
-//   then (two-step) (v2, w2) for horizon_s, entered while still moving; it completes at the end of its holds and the
-//   next plan is decided from the current velocity. The brake tail is only ever executed when no new plan passes its
-//   risk bar (decide() then returns no motion and the base brakes to rest). The remaining-sweep check still includes
-//   each rollout's brake tail: "can it still stop" is part of every motion.
-float Navigator::plan_length(const PolicyParams& p) const { return p.horizon_s * (plan_.has2 ? 2.f : 1.f); }
-
-std::pair<float, float> Navigator::command_at(float e, const PolicyParams& p) const
-{
-    if (e < p.horizon_s) return {plan_.v1, plan_.w1};
-    if (plan_.has2 and e < 2.f * p.horizon_s) return {plan_.v2, plan_.w2};
-    return {0.f, 0.f};
-}
-
+// ★ ROUND 4: THE BRAKE IS A SAFETY TAIL, NOT A MANEUVER. The plan is its HOLD phases only — (v1, w1), then (two-step)
+//   (v2, w2) entered while still moving; it completes when its last phase ends and the next plan is decided from the
+//   current velocity. The brake tail is only ever executed when no new plan passes its risk bar. The remaining-sweep
+//   check still includes each rollout's brake tail: "can it still stop" is part of every motion.
+// ★ ROUND 5: COMMIT TO AN OUTCOME, NOT A CLOCK. A phase ends at the end of its hold or as soon as its predicted end
+//   state is reached; a plan completed early is judged as SUCCEEDED (the monitor is reset, nothing failed).
 std::vector<Pose2> Navigator::remaining_sweep(const Pose2& start, float v0, float w0, float e, const BaseLimits& b, const PolicyParams& p) const
 {
     std::vector<Pose2> sw;
     auto append = [&](std::vector<Pose2> part) { if (not sw.empty() and not part.empty()) part.erase(part.begin()); sw.insert(sw.end(), part.begin(), part.end()); };
-    if (e < p.horizon_s)
-    {
-        append(rollout(start, v0, w0, plan_.v1, plan_.w1, p.horizon_s - e, b, p.dt));
-        if (plan_.has2) append(rollout(sw.back(), 0.f, 0.f, plan_.v2, plan_.w2, p.horizon_s, b, p.dt));
-    }
-    else if (plan_.has2) append(rollout(start, v0, w0, plan_.v2, plan_.w2, std::max(0.f, 2.f * p.horizon_s - e), b, p.dt));
-    else sw.push_back(start);
+    const bool in1 = plan_.phase == 1;
+    const float v = in1 ? plan_.v1 : plan_.v2, w = in1 ? plan_.w1 : plan_.w2;
+    append(rollout(start, v0, w0, v, w, std::max(0.f, p.horizon_s - e), b, p.dt));
+    if (in1 and plan_.has2) append(rollout(sw.back(), 0.f, 0.f, plan_.v2, plan_.w2, p.horizon_s, b, p.dt));
     return sw;
+}
+
+bool Navigator::phase_outcome_reached(const PolicyInput& in) const
+{
+    if (plan_.mode != Decision::Mode::Drive) return false;               // a Release is judged on what it bought, at its end
+    const bool in1 = plan_.phase == 1;
+    const float v = in1 ? plan_.v1 : plan_.v2;
+    const float turn = in1 ? plan_.d.plan_turn1 : plan_.d.plan_turn2, descent = in1 ? plan_.d.plan_descent1 : plan_.d.plan_descent2;
+    auto wrapf = [](float a) { while (a > kPiF) a -= 2.f * kPiF; while (a <= -kPiF) a += 2.f * kPiF; return a; };
+    if (std::abs(v) < in.base.v_min_eff)
+    {
+        // heading-changing phase: the turn it was predicted to make, or the goal's own heading within its tolerance
+        const float done = wrapf(in.pose.yaw - plan_.phase_yaw0);
+        if (std::abs(turn) > goal_.tol_yaw and done * turn > 0.f and std::abs(done) >= std::abs(turn) - goal_.tol_yaw) return true;
+        if (goal_.yaw and std::abs(wrapf(*goal_.yaw - in.pose.yaw)) <= goal_.tol_yaw) return true;
+        return false;
+    }
+    // translating phase: its predicted descent realized within the field's resolution
+    const float f = field_.at(in.pose.p);
+    if (not (std::isfinite(f) and std::isfinite(plan_.phase_f0)) or not (descent > 0.f)) return false;
+    const float res = field_.resolution_m((in.pose.p - plan_.phase_p0).norm());
+    return plan_.phase_f0 - f >= descent - res;
 }
 
 Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
@@ -88,15 +101,31 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     const auto obstacles = in.returns_denoised ? std::vector<Return>(in.returns.begin(), in.returns.end()) : denoise_returns(in.returns);
     in.returns = obstacles; in.returns_denoised = true;
 
-    // ---- continue the committed plan unless (a) its remaining sweep is too risky, (b) it completed, (c) the world
-    //      changed / the input is blind / the goal is reached (those go to decide(), which answers them)
+    // ---- continue the committed plan unless (a) its remaining sweep is too risky, (b) it completed (its last phase's
+    //      hold elapsed or its predicted outcome was reached), (c) the world changed / the input is blind / the goal is
+    //      reached (those go to decide(), which answers them)
     if (plan_.active and in.body != nullptr)
     {
-        const float e = float(in.now_s - plan_.t0);
-        const bool completed = e >= plan_length(p) - 1e-4f;
+        bool completed = false, early = false;
+        for (;;)                                                         // advance through phases that have ended
+        {
+            const float e = float(in.now_s - plan_.phase_t0);
+            const bool hold_done = e >= p.horizon_s - 1e-4f;
+            const bool outcome = not hold_done and phase_outcome_reached(in);
+            if (not hold_done and not outcome) break;
+            early = early or outcome;
+            if (plan_.phase == 1 and plan_.has2)
+            {
+                plan_.phase = 2; plan_.phase_t0 = in.now_s; plan_.phase_yaw0 = in.pose.yaw; plan_.phase_p0 = in.pose.p;
+                plan_.phase_f0 = field_.at(in.pose.p);
+                continue;
+            }
+            completed = true; break;
+        }
         const bool blind_or_done = not std::isfinite(in.pose.p.x()) or in.returns_age_s > p.returns_max_age_s or goal_reached(in);
         if (not completed and not blind_or_done)
         {
+            const float e = float(in.now_s - plan_.phase_t0);
             const auto sw = remaining_sweep(policy_start(in), in.v_now, in.w_now, e, in.base, p);
             const float lps = log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m);
             const float P = 1.f - std::exp(lps);
@@ -105,13 +134,15 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
             if (P <= bar)
             {
                 s.d = plan_.d;
-                const auto [v, w] = command_at(e, p);
-                s.d.v = v; s.d.w = w; s.d.prediction_failed = false;
+                s.d.v = plan_.phase == 1 ? plan_.v1 : plan_.v2; s.d.w = plan_.phase == 1 ? plan_.w1 : plan_.w2;
+                s.d.prediction_failed = false;
                 return s;
             }
             monitor_.reset();                  // (a): replaced, not judged
         }
         else if (not completed) monitor_.reset();   // (c) blind / arrived: not judged
+        else if (early) { monitor_.reset(); s.completed_early = true; }   // reached its outcome early: SUCCEEDED
+        else if (monitor_.pending) monitor_.tau = std::min(monitor_.tau, float(in.now_s - monitor_.t0));   // completed: judge it now
         plan_.active = false;
     }
 
@@ -120,11 +151,23 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     if (s.d.mode == Decision::Mode::Drive or s.d.mode == Decision::Mode::Release)
     {
         plan_ = Plan{.active = true, .mode = s.d.mode, .v1 = s.d.v, .w1 = s.d.w, .dur1 = s.d.plan_dur1, .v2 = s.d.plan_v2, .w2 = s.d.plan_w2,
-                     .dur2 = s.d.plan_dur2, .has2 = s.d.plan_has_cont, .t0 = in.now_s, .d = s.d};
+                     .dur2 = s.d.plan_dur2, .has2 = s.d.plan_has_cont, .t0 = in.now_s, .d = s.d,
+                     .phase = 1, .phase_t0 = in.now_s, .phase_yaw0 = in.pose.yaw, .phase_f0 = field_.at(in.pose.p), .phase_p0 = in.pose.p};
     }
     if (not s.d.prediction_failed) return s;
-    const Eigen::Vector2f dir = downhill(in.pose.p);
-    const Trap t{in.pose.p + trap_r_ * dir, dir, trap_r_};
+    ++failed_predictions_;
+    // ★ round 5: no route evidence where the field cannot point the way (non-finite here, or a slope below what the
+    //   field resolves over two cells) — the Release stands, no trap
+    const float f_here = field_.at(in.pose.p);
+    const float h = grid_.cell;
+    const float fx1 = field_.at(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = field_.at(in.pose.p - Eigen::Vector2f(h, 0.f));
+    const float fy1 = field_.at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = field_.at(in.pose.p - Eigen::Vector2f(0.f, h));
+    const bool slope_defined = std::isfinite(f_here) and std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0)
+                               and std::hypot(fx1 - fx0, fy1 - fy0) > field_.resolution_m(2.f * h);
+    if (not slope_defined) { s.trap_no_route_evidence = true; return s; }
+    const Eigen::Vector2f dir = -Eigen::Vector2f(fx1 - fx0, fy1 - fy0).normalized();
+    const Trap t{in.pose.p + 2.f * trap_r_ * dir, dir, trap_r_};
+    assert((t.c - in.pose.p).norm() > t.r);              // the disc never contains the robot's current position
     if (std::ranges::any_of(goals_, [&](const Eigen::Vector2f& g) { return (g - t.c).norm() < t.r; }))
     { s.trap_suppressed_by_goal = true; return s; }
     traps_.push_back(t);
