@@ -6,8 +6,9 @@
 // integrated in <= 5 mm sub-steps; a blocked sub-step is a contact and the body stays put.
 // The cost-to-go field is built from the MAP's free space (cells whose clearance to the obstacles the map knows is at least
 // the body's inscribed radius — necessary for the body to be there at all, body-agnostic as CostToGo asks).
-// On each RELEASE episode (first Release tick after a non-Release one): add_trap at the believed pose where progress stopped,
-// radius = the body's circumscribed radius, cost_m = 2 x the largest finite field value on the grid (★ the ruling: cost_m >=
+// On each RELEASE episode (first Release tick after a non-Release one) that ends a stretch of progress: add_trap where the
+// body cannot go (controller ruling D2): centre = the believed stall pose + one circumscribed radius along the field's
+// downhill direction (-grad, unit), radius = the body's circumscribed radius, cost_m = 2 x the largest finite field value on the grid (★ the ruling: cost_m >=
 // the field value at the trap; twice the largest one means crossing the trap costs more than ANY route that avoids it, i.e.
 // "not through here"), rebuild. Then "no plan exists without it" -> Unreachable: a flood fill over the map's free cells MINUS
 // the forward half-disc of every trap (the half on the side the old field was pulling toward — "through here") must reach
@@ -22,14 +23,14 @@
 //     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tps && /tmp/tps
 //   Env: ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
-//   DIAGNOSTIC switches (NOT the brief's configuration; used to separate the failure causes in task-6-report.md):
-//     SIGMA_R=<m> LiDAR range sigma (default 0.02); TRAP_AHEAD=1 centre the trap one radius ahead of the stall pose;
-//     UNSEEN=1 feed UnseenContact hypotheses into the returns.
+//   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
+//     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 (task-6-report.md): with the brief's configuration 7 checks FAIL — contacts are 0 everywhere, the
-// failures are reach/route oracles traced to three design questions (D1 surface cells under 2 cm range noise, D2 a trap
-// centred on the stall pose cannot reroute the robot standing in it, D3 unseen-contact prior). SIGMA_R=0.005 TRAP_AHEAD=1
-// leaves 1 failing seed of 20 (jamb_1p6cm_start).
+// STATUS 2026-10-20 round 2 (task-6-report.md, "Round 2"): rulings D1 (bearing cells), D2 (trap ahead) and D3 (free ramp,
+// prior 0.01) implemented. Default config: 11 checks FAIL incl. CONTACTS in narrow_doorway_unreachable — a hypothesis
+// with no blocked evidence rides the hull edge at p ~ prior and the bearing grouping merges it with the casing hits into
+// ONE certain cell at the phantom's position. NO_UNSEEN=1: 0 contacts, 4 FAIL (traps laid after mm of progress block the
+// doorway/goal -> "no plan without the trap").
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
@@ -70,10 +71,9 @@ struct Options
     bool ou = false;
     std::vector<Jump> jumps;
     std::string trace_name;     // scenario name, for TRACE matching
-    // ★ OFF by default: the brief's driver loop is raycast -> decide -> base. With it ON (UNSEEN=1) every start-up ramp
-    //   creates direction hypotheses at p ~ 0.45 on the hull edge (L starts at 0 = p 0.5) and decide() holds Stuck with
-    //   "returns inside the body" — reported as a Task-5 defect (task-6-report.md), not patched here.
-    bool unseen = std::getenv("UNSEEN") != nullptr;
+    // ★ ON by default (ruling D3: the free prediction follows the base's ramp, prior 0.01 — start-up no longer reads as
+    //   an obstacle on the hull edge).
+    bool unseen = std::getenv("NO_UNSEEN") == nullptr;
 };
 
 struct ScenarioResult
@@ -137,9 +137,17 @@ struct FieldCtx
             for (int i = 0; i < grid.w; ++i) { const float v = field.at(centre(i, j)); if (std::isfinite(v)) m = std::max(m, v); }
         return m;
     }
-    // steepest descent direction of the field at p (unit), by probing 32 directions one body-radius-ish away
+    // downhill direction -grad f at p (unit), central differences over one cell; where a neighbour is +inf (beside a wall)
+    // fall back to the lowest of 32 probes 0.15 m away
     V2 descent_dir(const V2& p) const
     {
+        const float h = grid.cell;
+        const float fx1 = field.at(p + V2(h, 0.f)), fx0 = field.at(p - V2(h, 0.f)), fy1 = field.at(p + V2(0.f, h)), fy0 = field.at(p - V2(0.f, h));
+        if (std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0))
+        {
+            const V2 g(fx1 - fx0, fy1 - fy0);
+            if (g.norm() > 1e-6f) return -g.normalized();
+        }
         float best = field.at(p); V2 dir = V2::Zero();
         for (int k = 0; k < 32; ++k)
         {
@@ -216,8 +224,6 @@ static bool plan_without_traps(const FieldCtx& F, const std::vector<Trap>& traps
 
 // LiDAR range sigma: 0.02 m (the brief); SIGMA_R=<m> overrides it for diagnosis only.
 static float sigma_r() { static const float s = std::getenv("SIGMA_R") ? std::strtof(std::getenv("SIGMA_R"), nullptr) : 0.02f; return s; }
-
-static bool trap_ahead() { return std::getenv("TRAP_AHEAD") != nullptr; }
 
 static bool trace_on(const std::string& name, unsigned seed)
 {
@@ -301,9 +307,10 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
             progressed = false;
             const V2 dir = F.descent_dir(bel.p);
             const float cost = 2.f * F.max_finite();
-            // DIAGNOSTIC ONLY (TRAP_AHEAD=1, not a ruling): centre the trap one radius AHEAD of the stall pose along the
-            // way the old field pulled, so the robot stands at its back edge (see task-6-report.md, design question D2).
-            const V2 tc = trap_ahead() ? V2(bel.p + r_circ * dir) : bel.p;
+            // ★ D2: the trap marks where the body CANNOT go — one radius ahead of the stall pose, downhill. Centred on the
+            //   stall pose itself it could not reroute the robot standing in it (both exits cost the same; the shorter way
+            //   on still won: dead_end_release dithered 91 s at the trap centre on 20/20 seeds).
+            const V2 tc = bel.p + r_circ * dir;
             traps.push_back({tc, dir, r_circ});
             F.field.add_trap(tc, r_circ, cost);
             F.rebuild();
@@ -317,12 +324,11 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         // ---- the base: command latency, ramps, deadband; contact every <= 5 mm
         base.send(t, d.v, d.w);
         const Pose2 before = truth;
-        float exp_ds = 0.f, exp_dyaw = 0.f;
+        const float v_meas = base.v, w_meas = base.w;     // odometry at the start of the tick
         bool touched = false;
         for (float s = 0.f; s < kTick - 1e-6f; s += kSub)
         {
             base.step_velocity(t + s, kSub);
-            exp_ds += base.v * kSub; exp_dyaw += base.w * kSub;
             const Pose2 nxt = sim2d::integrate(truth, base.v, base.w, kSub);
             // the world pushes back: the body stays put and the base stalls (its wheels stop)
             if (contact.touches(nxt)) { touched = true; base.v = base.w = 0.f; continue; }
@@ -332,9 +338,9 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         // odometry: displacement along the heading at the start of the tick, and the turn
         const V2 fwd(std::cos(before.yaw), std::sin(before.yaw));
         const float ds = (truth.p - before.p).dot(fwd), dyaw = sim2d::wrap(truth.yaw - before.yaw);
-        // ★ the evidence compares what the base SHOULD have done (its own ramped velocity, unobstructed) with what it did:
-        //   comparing against the raw command would read every acceleration ramp as an obstacle.
-        unseen.update(exp_ds / kTick, exp_dyaw / kTick, ds, dyaw, kTick, bel, base.lim, B, 0.005f);
+        // ★ D3: the command IN EFFECT at the wheels (the 60 ms latency: the one sent last tick, active for 40 of these 50 ms)
+        //   and the measured velocity at the tick's start; UnseenContact predicts the free ramp from them.
+        unseen.update(base.cmd_v, base.cmd_w, v_meas, w_meas, ds, dyaw, kTick, bel, base.lim, B, 0.005f);
         res.path_m += (truth.p - before.p).norm();
 
         const float fn = F.field.at(err.believed(truth).p);

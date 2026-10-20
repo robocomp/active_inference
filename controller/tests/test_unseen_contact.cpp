@@ -20,10 +20,13 @@ int main()
     const Pose2 pose{{1.f, 2.f}, 0.f};   // forward = +x
     const float dt = 0.1f, sig = 0.01f;
     const Eigen::Vector2f fwd(1.f, 0.f);
+    // ★ D3 (Task 6): L starts at the stated prior logit(0.01); limits() has no acceleration rates (instantaneous ramps),
+    //   so the free prediction there is cmd*dt and the original checks keep their meaning.
+    const float L0prior = std::log(UnseenContact::kPriorBlocked / (1.f - UnseenContact::kPriorBlocked));
 
     auto fwd_h = [](const UnseenContact& u) { const auto h = u.hypotheses(); return h.empty() ? std::optional<Return>{} : std::optional<Return>{h[0]}; };
     { UnseenContact u;
-      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
       const auto hs = u.hypotheses(); const auto h = fwd_h(u);
       CHECK("commanded_no_motion_grows: one hypothesis, p_exist > 0.9", hs.size() == 1 and h and h->p_exist > 0.9f);
       const float bare = body.support_radius_yaw(0.f, fwd) - body.safety_margin();
@@ -34,50 +37,72 @@ int main()
       CHECK("reset clears", u.hypotheses().empty()); }
 
     { UnseenContact u;
-      for (int i = 0; i < 40; ++i) u.update(0.2f, 0.f, 0.2f * dt, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 40; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.2f * dt, 0.f, dt, pose, b, body, sig);
       const auto h = fwd_h(u);
       CHECK("moving_freely_none: weak hypothesis, no switch", h and h->p_exist < 1e-6f); }
 
     { UnseenContact u;
-      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
-      for (int i = 0; i < 30; ++i) u.update(0.2f, 0.f, 0.2f * dt, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 30; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.2f * dt, 0.f, dt, pose, b, body, sig);
       CHECK("evidence reverses once it moves again", fwd_h(u)->p_exist < 1e-3f); }
 
     { UnseenContact u;
-      for (int i = 0; i < 50; ++i) u.update(0.02f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
-      CHECK("below_deadband_no_evidence", u.hypotheses().empty() and u.log_odds(0) == 0.f); }
+      for (int i = 0; i < 50; ++i) u.update(0.02f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+      CHECK("below_deadband_no_evidence", u.hypotheses().empty() and u.log_odds(0) == L0prior); }
 
     { UnseenContact u;
-      for (int i = 0; i < 20; ++i) u.update(-0.2f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) u.update(-0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
       const auto h = u.hypotheses();
       CHECK("reverse_blocked_behind", h.size() == 1 and h[0].p_exist > 0.9f and h[0].p.x() < pose.p.x() - 0.1f); }
 
     { UnseenContact u;
-      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
       const Eigen::Vector2f before = fwd_h(u)->p;
       Pose2 q = pose;
-      for (int i = 0; i < 15; ++i) { q.p.x() -= 0.02f; u.update(-0.2f, 0.f, -0.2f * dt, 0.f, dt, q, b, body, sig); }
+      for (int i = 0; i < 15; ++i) { q.p.x() -= 0.02f; u.update(-0.2f, 0.f, 0.f, 0.f, -0.2f * dt, 0.f, dt, q, b, body, sig); }
       const auto hs = u.hypotheses();
       CHECK("hypothesis_stays_after_backing_away", hs.size() == 2 and (hs[0].p - before).norm() < 1e-5f
             and hs[0].p.x() > q.p.x() + 0.3f);
       UnseenContact w;
-      for (int i = 0; i < 20; ++i) w.update(0.2f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) w.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
       const float L0 = w.log_odds(0);
-      for (int i = 0; i < 15; ++i) w.update(-0.2f, 0.f, -0.2f * dt, 0.f, dt, q, b, body, sig);
+      for (int i = 0; i < 15; ++i) w.update(-0.2f, 0.f, 0.f, 0.f, -0.2f * dt, 0.f, dt, q, b, body, sig);
       CHECK("backing_leaves_forward_evidence", w.log_odds(0) == L0); }
 
     { UnseenContact u;
-      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.1f * dt, 0.f, dt, pose, b, body, sig);
-      CHECK("partial_motion_break_even", std::abs(u.log_odds(0)) < 1e-4f); }
+      for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.1f * dt, 0.f, dt, pose, b, body, sig);
+      CHECK("partial_motion_break_even", std::abs(u.log_odds(0) - L0prior) < 1e-4f); }
 
     { UnseenContact u;   // pure rotation commanded, yaw does not change: a hull corner on the leading side
-      for (int i = 0; i < 20; ++i) u.update(0.f, 0.8f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) u.update(0.f, 0.8f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
       const auto h = u.hypotheses();
       CHECK("rotation_blocked: hypothesis at a corner", h.size() == 1 and h[0].p_exist > 0.9f
             and (h[0].p - pose.p).norm() > body.inscribed_radius());
       UnseenContact v;
-      for (int i = 0; i < 20; ++i) v.update(0.f, -0.8f, 0.f, 0.f, dt, pose, b, body, sig);
+      for (int i = 0; i < 20; ++i) v.update(0.f, -0.8f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
       const auto g = v.hypotheses();
       CHECK("  opposite sense leads with a different corner", h.size() == 1 and g.size() == 1 and (h[0].p - g[0].p).norm() > 0.1f); }
+
+    { // startup_ramp_no_hypothesis (D3): a real base (a_lin 1 m/s^2, a_rot 2 rad/s^2, 60 ms of nothing first) asked for
+      // 0.5 m/s and 1.5 rad/s from rest; odometry reports exactly the ramp it executes. The free prediction follows the
+      // ramp, so no direction may rise above 0.05 (was p ~ 0.45 on the hull edge with cmd*dt: Stuck in open space).
+        BaseLimits rb = b; rb.a_lin = 1.f; rb.d_lin = 1.f; rb.a_rot = 2.f; rb.d_rot = 2.f; rb.v_min_eff = 0.03f; rb.w_min_eff = 0.08f;
+        UnseenContact u; float v = 0.f, w = 0.f; const float tick = 0.05f;
+        for (int i = 0; i < 30; ++i)
+        {
+            // the base: one tick of latency, then the ramp (the driver passes the command in effect at the wheels)
+            const float vc = i == 0 ? 0.f : 0.5f, wc = i == 0 ? 0.f : 1.5f;
+            const float ds = UnseenContact::free_travel(v, vc, rb.a_lin, rb.d_lin, tick), dy = UnseenContact::free_travel(w, wc, rb.a_rot, rb.d_rot, tick);
+            u.update(0.5f, 1.5f, v, w, ds, dy, tick, pose, rb, body, 0.005f);
+            v = std::min(0.5f, v + (i == 0 ? 0.f : rb.a_lin * tick)); w = std::min(1.5f, w + (i == 0 ? 0.f : rb.a_rot * tick));
+        }
+        float worst = 0.f; for (const auto& h : u.hypotheses()) worst = std::max(worst, h.p_exist);
+        std::printf("  start-up ramp: %zu directions with evidence, max p_exist %.2e\n", u.hypotheses().size(), worst);
+        CHECK("startup_ramp_no_hypothesis_above_0.05", worst <= 0.05f);
+        // and the same base, blocked from rest (measured velocity 0, nothing moves): the evidence still accrues
+        UnseenContact x;
+        for (int i = 0; i < 200; ++i) x.update(0.3f, 0.f, 0.f, 0.f, 0.f, 0.f, tick, pose, rb, body, 0.005f);
+        std::printf("  blocked from rest with a real ramp: p_exist %.3f after 10 s\n", x.hypotheses().empty() ? 0.f : x.hypotheses()[0].p_exist);
+    }
     return fails ? 1 : 0;
 }

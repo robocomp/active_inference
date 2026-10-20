@@ -185,7 +185,8 @@ float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, cons
 
 float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pose2& from)
 {
-    const auto cells = surface_cells(in0.returns);
+    if (in0.body == nullptr) return log_p_continuable_cells(in0, p, from);   // (it answers the no-body case itself)
+    const auto cells = surface_cells(in0.returns, in0.pose.p, bearing_bin_rad(*in0.body));
     PolicyInput in = in0; in.returns = cells;
     return log_p_continuable_cells(in, p, from);
 }
@@ -196,8 +197,11 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     if (in0.body == nullptr or in0.goal == nullptr) { d.why = "no body or no goal"; return d; }
     // ---- a NaN/inf anywhere would silently poison every probability: no prediction, stop
     if (not finite_input(in0)) { d.mode = Decision::Mode::Blind; d.why = "non-finite input"; return d; }
-    // ★ returns -> surface cells ONCE per cycle (contact.h): every candidate and continuation sweeps the same cells
-    const auto cells = surface_cells(in0.returns);
+    // ★ returns -> surface cells ONCE per cycle (contact.h): every candidate and continuation sweeps the same cells.
+    //   Sensor origin for the bearing bins = the robot centre at the DECISION pose `pose` (where the returns were
+    //   re-expressed; the live buffer's returns come from nearby poses and two off-centre LiDARs — an approximation
+    //   whose error is the bin's arc, not a bias in range).
+    const auto cells = surface_cells(in0.returns, in0.pose.p, bearing_bin_rad(*in0.body));
     PolicyInput in = in0; in.returns = cells;
     const Goal& g = *in.goal;
     if (g.kind != Goal::Kind::Heading and in.field == nullptr) { d.why = "place/doorway goal without a field"; return d; }
@@ -273,8 +277,11 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     //      a bit (user's rule). First the impossible case: a return inside the BARE hull contradicts "not touching
     //      now" (the robot cannot overlap a wall) — a sensing/pose error, not a place a motion can be chosen from.
     //      Returns count by their existence (a ghost inside the body is not a contradiction).
+    // ★ D1 (Task 6): judged on the SURFACE CELLS — each one the estimate of the nearest surface on its bearing — not on
+    //   the raw hits: one noisy hit (sigma_r 0.02) beside a wall 2.5 cm away lands inside the hull ~10 % of the time
+    //   (22 of them at tour3_1_leg3's start held the robot Stuck at t = 0 with nothing touching it).
     float inside = 0.f;
-    for (const Return& r : in0.returns) if (r.p_exist > 0.f and hull_distance(*in.body, start, r.p) < 0.f) inside += r.p_exist;
+    for (const Return& r : in.returns) if (r.p_exist > 0.f and hull_distance(*in.body, start, r.p) < 0.f) inside += r.p_exist;
     if (inside > 0.f)
     {
         char buf[96]; std::snprintf(buf, sizeof buf, "%.1f returns inside the body (sensing/pose error): hold", inside);

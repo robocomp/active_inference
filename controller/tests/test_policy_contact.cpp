@@ -157,14 +157,17 @@ int main()
         const auto sw = rollout(origin, 0.f, 0.f, 0.5f, 0.f, 1.f, b, 0.05f);
         const float Pt = 1.f - std::exp(log_p_no_contact(body(), sw, tip, sxy, syaw, kGeom));
         const float Pe = 1.f - std::exp(log_p_no_contact(body(), sw, extreme, sxy, syaw, kGeom));
-        const auto c = surface_cells(tip);
+        const auto c = surface_cells(tip, origin.p, bearing_bin_rad(body()));
         std::printf("  jamb tip: P(4 hits as cells)=%.4f P(extreme hit alone)=%.4f ; cells %zu, cell0 sigma=%.4f sxx=%.2e syy=%.2e\n", Pt, Pe, c.size(), c[0].sigma, c[0].sxx, c[0].syy);
         CHECK("jamb_tip_not_overconfident", Pt >= Pe - 1e-3f);
         // and on a flat wall seen along its normal the scatter is orthogonal to the clearance: nothing changes
         std::vector<Return> dense; for (float y = -1.f; y <= 2.f; y += 0.01f) dense.push_back({{0.40f, y}, 0.01f, 1.f});
-        const auto flat = surface_cells(dense);
-        std::printf("  flat wall cell (1 cm hits): sigma=%.4f sxx=%.2e syy=%.2e\n", flat[5].sigma, flat[5].sxx, flat[5].syy);
-        CHECK("flat wall scatter is along the wall", flat[5].sxx < 1e-9f and flat[5].syy > 1e-5f);
+        const auto flat = surface_cells(dense, origin.p, bearing_bin_rad(body()));
+        // ★ bearing cells: the one straddling the wall's normal (y ~ 0) is the square-on face
+        const auto& fc = *std::ranges::min_element(flat, {}, [](const Return& q) { return std::abs(q.p.y()); });
+        std::printf("  flat wall cell (1 cm hits): sigma=%.4f sxx=%.2e syy=%.2e\n", fc.sigma, fc.sxx, fc.syy);
+        // (the noise removal leaves a residue ~1e-4 of the along-wall variance across it: float rounding of the PSD clamp)
+        CHECK("flat wall scatter is along the wall", fc.sxx < 1e-3f * fc.syy and fc.syy > 1e-5f);
     }
     { // p_exist scales the hit; a far return is ignored
         const std::vector<Return> hit{{{0.f, 0.3f}, 0.01f, 1.f}}, ghost{{{0.f, 0.3f}, 0.01f, 0.1f}}, far{{{50.f, 0.f}, 0.01f, 1.f}};
@@ -173,19 +176,45 @@ int main()
         CHECK("p_exist=0.1 hits ~10x less", g > a and std::abs(g - std::log(0.9f)) < 0.02f);
         CHECK("far return ignored", log_p_no_contact(body(), sw, far, sxy, syaw, kGeom) == 0.f);
     }
-    { // surface_cells: n hits of one surface element are ONE obstacle at their mean with sigma_r / sqrt(n)
+    { // surface_cells (D1, Task 6: BEARING aggregation about the sensor origin). n hits of one surface on one bearing are
+      // ONE obstacle at their mean with sigma_r / sqrt(n); a farther surface on the same bearing is hidden by a certain
+      // nearer one but not by an uncertain one; existence combines; range noise is removed from the scatter.
+        const Eigen::Vector2f o(0.f, 0.f);
+        const float bw = bearing_bin_rad(body());
         std::vector<Return> r;
-        for (int i = 0; i < 4; ++i) r.push_back({{0.301f + 0.002f * i, 0.011f + 0.005f * i}, 0.01f, 1.f});   // one 0.04 cell
-        r.push_back({{0.30f, 0.11f}, 0.01f, 1.f});                                                            // alone in its cell
-        r.push_back({{0.30f, 0.21f}, 0.01f, 0.5f}); r.push_back({{0.31f, 0.22f}, 0.01f, 0.5f});              // two half-sure hits
-        const auto c = surface_cells(r);
-        std::printf("  cells: %zu ; cell0 p=(%.4f,%.4f) sigma=%.4f ; cell1 sigma=%.4f ; cell2 p_exist=%.3f\n", c.size(),
-                    c[0].p.x(), c[0].p.y(), c[0].sigma, c[1].sigma, c[2].p_exist);
-        CHECK("surface_cells count", c.size() == 3);
-        CHECK("surface_cells mean + sigma/sqrt(n)", std::abs(c[0].p.x() - 0.304f) < 1e-4f and std::abs(c[0].p.y() - 0.0185f) < 1e-4f and std::abs(c[0].sigma - 0.005f) < 1e-5f);
-        CHECK("surface_cells isolated hit keeps sigma_r", std::abs(c[1].sigma - 0.01f) < 1e-6f and c[1].p_exist == 1.f);
-        CHECK("surface_cells existence combines", std::abs(c[2].p_exist - 0.75f) < 1e-5f);
-        CHECK("surface_cells idempotent", surface_cells(c).size() == 3 and std::abs(surface_cells(c)[0].sigma - 0.005f) < 1e-5f);
+        for (int i = 0; i < 4; ++i) r.push_back({{0.300f + 0.002f * i, 0.011f + 0.005f * i}, 0.01f, 1.f});   // one surface, one bearing
+        r.push_back({{0.60f, 0.03f}, 0.01f, 1.f});                                                            // behind it: hidden
+        r.push_back({{0.f, 0.50f}, 0.01f, 1.f});                                                              // alone on its bearing
+        r.push_back({{-0.30f, 0.01f}, 0.01f, 0.5f}); r.push_back({{-0.302f, 0.012f}, 0.01f, 0.5f});           // two half-sure hits
+        r.push_back({{-0.60f, 0.02f}, 0.01f, 1.f});                                                           // behind uncertain: kept
+        const auto c = surface_cells(r, o, bw);
+        std::printf("  cells: %zu (bin %.4f rad)\n", c.size(), bw);
+        for (const auto& q : c) std::printf("    (%.4f,%.4f) sigma=%.4f p=%.3f\n", q.p.x(), q.p.y(), q.sigma, q.p_exist);
+        auto near = [&](float x, float y) { return std::ranges::find_if(c, [&](const Return& q) { return (q.p - Eigen::Vector2f(x, y)).norm() < 0.01f; }); };
+        CHECK("surface_cells count (hidden surface dropped, uncertain one keeps the one behind)", c.size() == 4);
+        const auto c0 = near(0.303f, 0.0185f);
+        CHECK("surface_cells mean + sigma/sqrt(n)", c0 != c.end() and std::abs(c0->p.x() - 0.303f) < 1e-4f and std::abs(c0->p.y() - 0.0185f) < 1e-4f and std::abs(c0->sigma - 0.005f) < 1e-5f);
+        const auto c1 = near(0.f, 0.50f);
+        CHECK("surface_cells isolated hit keeps sigma_r", c1 != c.end() and std::abs(c1->sigma - 0.01f) < 1e-6f and c1->p_exist == 1.f);
+        const auto c2 = near(-0.301f, 0.011f);
+        CHECK("surface_cells existence combines", c2 != c.end() and std::abs(c2->p_exist - 0.75f) < 1e-5f);
+        CHECK("surface_cells behind an uncertain surface is kept", near(-0.60f, 0.02f) != c.end() and near(0.60f, 0.03f) == c.end());
+        CHECK("surface_cells idempotent", surface_cells(c, o, bw).size() == 4);
+        // grid alignment no longer splits a surface: a noisy wall (sigma_r 0.02) 0.309 m away straddling any boundary
+        std::mt19937 g(1); std::normal_distribution<float> n(0.f, 0.02f);
+        std::vector<Return> wall;
+        for (int k = 0; k < 1440; ++k)
+        {
+            const float a = 6.2831853f * k / 1440.f; const Eigen::Vector2f d(std::cos(a), std::sin(a));
+            if (d.x() <= 0.05f) continue;
+            const float t = 0.309f / d.x();
+            if (t > 3.f) continue;
+            wall.push_back({d * (t + n(g)), 0.02f, 1.f});
+        }
+        float worst = 1.f;
+        for (const auto& q : surface_cells(wall, o, bw)) if (std::abs(q.p.y()) < 0.5f) worst = std::min(worst, q.p.x() - 0.309f);
+        std::printf("  noisy wall (sigma_r 0.02, 0.309 m): worst cell %.4f m inside the face (grid cells read 0.053)\n", -worst);
+        CHECK("surface_cells: no noise-tail cell inside a noisy wall", -worst < 0.015f);
     }
     { // epsilon_integral_accuracy: the adaptive shared-offset integral vs a brute-force 4001-node trapezoid, over
       // sigma_j / sigma_s in [0.05, 5] (random clearance sets, with and without p_exist < 1), and on real sweeps:
@@ -217,7 +246,12 @@ int main()
             {
                 const auto sw = rollout(origin, 0.f, 0.f, v, w, 1.f, b, 0.05f);
                 std::vector<ContactTerm> t; double star = 1e9;
-                for (const auto& q : surface_cells(wall_x(0.30f, -2.f, 2.f, sr)))
+                // ★ D1 (Task 6): bearing cells carry extent (support segments) the mean-only reference below does not
+                //   model; this check is about the INTEGRAL, so the library is fed the same cells with the scatter
+                //   stripped and both sides build identical terms.
+                auto cells = surface_cells(wall_x(0.30f, -2.f, 2.f, sr), origin.p, bearing_bin_rad(f));
+                for (auto& q : cells) q.sxx = q.sxy = q.syy = 0.f;
+                for (const auto& q : cells)
                 {
                     const float rho = (q.p - origin.p).norm();
                     const double sj = std::sqrt(double(q.sigma) * q.sigma + double(rho) * rho * syaw * syaw);
@@ -228,7 +262,7 @@ int main()
                     t.push_back({sd0, sd, sj, q.p_exist});
                 }
                 const double P = 1.0 - std::exp(log_ratio_shared_offset(t, ss, star)), Pref = 1.0 - std::exp(log_ratio_shared_offset(t, ss, star, 4001));
-                const double Plib = 1.0 - std::exp(log_p_no_contact(f, sw, wall_x(0.30f, -2.f, 2.f, sr), sxy, syaw, kGeom));
+                const double Plib = 1.0 - std::exp(log_p_no_contact_cells(f, sw, cells, sxy, syaw, kGeom));
                 std::printf("  wall 0.30 sigma_r=%.4f v=%+.2f w=%+.2f : P=%.4f P_ref=%.4f (log_p_no_contact %.4f)\n", sr, v, w, P, Pref, Plib);
                 worst = std::max({worst, std::abs(P - Pref), std::abs(Plib - Pref)}); ++cases;
             }

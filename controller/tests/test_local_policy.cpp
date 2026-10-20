@@ -34,6 +34,8 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <random>
+#include <string>
 #include <vector>
 
 using namespace rc::policy;
@@ -141,12 +143,36 @@ int main()
         {
             const float p1 = p_contact_of(d1, v, w), p4 = p_contact_of(d4, v, w);
             std::printf("  dense wall v=%+.2f w=%+.2f : P(1 cm)=%.4f P(4 cm)=%.4f  (cells %zu vs %zu)\n", v, w, p1, p4,
-                        surface_cells(d1.ret).size(), surface_cells(d4.ret).size());
+                        surface_cells(d1.ret, V(0.f, 0.f), bearing_bin_rad(d1.b)).size(), surface_cells(d4.ret, V(0.f, 0.f), bearing_bin_rad(d4.b)).size());
             worst_gap = std::max(worst_gap, std::fabs(p1 - p4)); worst_rise = std::max(worst_rise, p1 - p4);
         }
         const auto e1 = decide(d1.in, d1.pp), e4 = decide(d4.in, d4.pp); print("dense 1 cm", e1); print("dense 4 cm", e4);
         std::printf("  dense wall: worst rise %.4f, largest |difference| %.4f\n", worst_rise, worst_gap);
         CHECK("dense_wall_not_riskier (denser never raises P)", worst_rise <= 1e-3f);
+    }
+    { // noisy_wall_not_inside (D1 ruling, Task 6): a wall PARALLEL to the right flank, 2.5 cm from the bare hull (x = 0.309),
+      // seen by 1440 beams with sigma_r 0.02 as the sensor really reports it. Square-grid cells put single noise-tail hits
+      // 4-5 cm inside the face and the robot read "returns inside the body" (tour3_1_leg3 Stuck at t = 0). Bearing cells:
+      // no inside verdict, and sliding along the wall is below risk_eps.
+        Scene s; s.goal.p = {0.f, 3.f};
+        std::mt19937 g(5); std::normal_distribution<float> n(0.f, 0.02f);
+        for (int k = 0; k < 1440; ++k)
+        {
+            const float a = 6.2831853f * float(k) / 1440.f; const V d(std::cos(a), std::sin(a));
+            if (d.x() <= 0.05f) continue;
+            const float t = 0.309f / d.x();
+            if (t > 4.f) continue;
+            s.ret.push_back({d * (t + n(g)), 0.02f, 1.f});
+        }
+        V gp = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&gp, 1));
+        s.finish();
+        int raw_inside = 0; for (const auto& r : s.ret) raw_inside += hull_distance(s.b, s.in.pose, r.p) < 0.f;
+        const auto d = decide(s.in, s.pp); print("noisy wall 2.5 cm", d);
+        const float Pf = p_contact_of(s, 0.25f, 0.f), Pb = p_contact_of(s, -0.25f, 0.f);
+        std::printf("  noisy wall: %d raw hits inside the hull; P(forward 0.25)=%.4f P(back 0.25)=%.4f\n", raw_inside, Pf, Pb);
+        CHECK("noisy_wall_not_inside: no inside-the-body verdict", d.why.find("inside the body") == std::string::npos);
+        CHECK("noisy_wall_not_inside: drives", d.mode == Decision::Mode::Drive);
+        CHECK("noisy_wall_not_inside: parallel move P < risk_eps", Pf < s.pp.risk_eps and Pb < s.pp.risk_eps);
     }
     { // wall_inside_bare_hull_is_stuck: wall at x = +0.274 penetrates the bare hull — physically impossible
         Scene s; s.ret = wall_x(0.274f, -2.f, 2.f); s.goal.p = {1.5f, 0.f};

@@ -174,41 +174,86 @@ float hull_distance(const rc::RobotFootprint& body, const Pose2& pose, const Eig
     return sd_local(body.polygon(), 0.f, Frame(pose).to_robot(q));
 }
 
-std::vector<Return> surface_cells(std::span<const Return> r, float cell_m)
+std::vector<Return> surface_cells(std::span<const Return> r, const Eigen::Vector2f& origin, float bin_rad)
 {
-    struct Acc { double wx = 0, wy = 0, w = 0, wxx = 0, wxy = 0, wyy = 0, log_absent = 0; };
-    std::unordered_map<std::int64_t, Acc> acc;
-    acc.reserve(r.size());
-    std::vector<std::int64_t> order;      // first-seen order: deterministic output
-    order.reserve(r.size());
-    const double inv_c = 1.0 / std::max(cell_m, 1e-4f);
+    // contact.h: bearing bins about the sensor origin, nearest-surface groups split at kSplitSigmas, noise-free scatter.
+    constexpr double kTwoPi = 6.283185307179586;
+    const double bw = std::max(double(bin_rad), 1e-4);
+    const auto nbins = static_cast<std::int64_t>(std::ceil(kTwoPi / bw));
+    struct Hit { std::int64_t bin; double range; const Return* q; };
+    std::vector<Hit> hits;
+    hits.reserve(r.size());
     for (const Return& q : r)
     {
         if (q.p_exist <= 0.f) continue;
-        const auto ci = static_cast<std::int64_t>(std::floor(q.p.x() * inv_c)), cj = static_cast<std::int64_t>(std::floor(q.p.y() * inv_c));
-        const std::int64_t key = (ci << 32) ^ (cj & 0xffffffff);
-        auto [it, fresh] = acc.try_emplace(key);
-        if (fresh) order.push_back(key);
-        // precision-weighted mean of the hits: n equal hits -> sigma_r / sqrt(n); one hit keeps its own sigma.
-        // Second moments carry the hit's own scatter (within) plus its offset (between): merging is idempotent.
-        const double w = 1.0 / std::max(double(q.sigma) * q.sigma, 1e-12);
-        const double x = q.p.x(), y = q.p.y();
-        Acc& a = it->second;
-        a.wx += w * x; a.wy += w * y; a.w += w;
-        a.wxx += w * (x * x + q.sxx); a.wxy += w * (x * y + q.sxy); a.wyy += w * (y * y + q.syy);
-        a.log_absent += q.p_exist >= 1.f ? -std::numeric_limits<double>::infinity() : std::log1p(-double(q.p_exist));
+        const Eigen::Vector2d d = (q.p - origin).cast<double>();
+        const double th = std::atan2(d.y(), d.x()) + 0.5 * kTwoPi;          // [0, 2 pi]
+        hits.push_back({std::min(nbins - 1, static_cast<std::int64_t>(std::floor(th / bw))), d.norm(), &q});
     }
+    std::ranges::sort(hits, [](const Hit& x, const Hit& y) { return x.bin != y.bin ? x.bin < y.bin : x.range < y.range; });
+
+    struct Acc { double w = 0, wr = 0, wx = 0, wy = 0, wxx = 0, wxy = 0, wyy = 0, log_absent = 0; int n = 0; };
     std::vector<Return> out;
-    out.reserve(order.size());
-    for (const std::int64_t key : order)
+    auto emit = [&](const Acc& a)
     {
-        const Acc& a = acc[key];
         const double mx = a.wx / a.w, my = a.wy / a.w;
         Return c{{float(mx), float(my)}, float(std::sqrt(1.0 / a.w)), float(-std::expm1(a.log_absent))};
-        c.sxx = float(std::max(0.0, a.wxx / a.w - mx * mx));
-        c.syy = float(std::max(0.0, a.wyy / a.w - my * my));
-        c.sxy = float(a.wxy / a.w - mx * my);
+        double cxx = std::max(0.0, a.wxx / a.w - mx * mx), cyy = std::max(0.0, a.wyy / a.w - my * my), cxy = a.wxy / a.w - mx * my;
+        // ★ remove the range noise the hits are KNOWN to carry along the ray: its expected weighted sample variance is
+        //   sigma_bar^2 (n-1)/n, sigma_bar^2 = sum w sigma^2 / sum w = n / sum w (w = 1/sigma^2). What remains is extent.
+        //   (Tried and rejected, Task 6: the ray-frame split WITHOUT the cross term — t'Ct across, excess u'Cu along —
+        //   turns an oblique wall's segment onto the tangent and pokes one end at the body: dense-wall slide 0.19 -> 0.69,
+        //   jamb tip 0.08 < the extreme hit's 0.149. The cross term IS the surface's slope; it stays.)
+        Eigen::Vector2d u(mx - origin.x(), my - origin.y());
+        if (a.n > 1 and u.norm() > 1e-9)
+        {
+            u.normalize();
+            const double nv = (double(a.n) / a.w) * double(a.n - 1) / double(a.n);
+            cxx -= nv * u.x() * u.x(); cxy -= nv * u.x() * u.y(); cyy -= nv * u.y() * u.y();
+        }
+        // clamp positive semi-definite (eigenvalues >= 0); principal axis of the unclamped matrix
+        const double tr = cxx + cyy, det = cxx * cyy - cxy * cxy, disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - det));
+        const double l1 = std::max(0.0, 0.5 * tr + disc), l2 = std::max(0.0, 0.5 * tr - disc);
+        Eigen::Vector2d e1 = std::abs(cxy) > 1e-15 ? Eigen::Vector2d(0.5 * tr + disc - cyy, cxy)
+                                                   : (cxx >= cyy ? Eigen::Vector2d(1, 0) : Eigen::Vector2d(0, 1));
+        e1.normalize();
+        const Eigen::Vector2d e2(-e1.y(), e1.x());
+        const Eigen::Matrix2d S = l1 * e1 * e1.transpose() + l2 * e2 * e2.transpose();
+        c.sxx = float(S(0, 0)); c.sxy = float(S(0, 1)); c.syy = float(S(1, 1));
         out.push_back(c);
+    };
+    auto add = [](Acc& a, const Hit& h)
+    {
+        const Return& q = *h.q;
+        const double w = 1.0 / std::max(double(q.sigma) * q.sigma, 1e-12);
+        const double x = q.p.x(), y = q.p.y();
+        a.w += w; a.wr += w * h.range; a.wx += w * x; a.wy += w * y; ++a.n;
+        a.wxx += w * (x * x + q.sxx); a.wxy += w * (x * y + q.sxy); a.wyy += w * (y * y + q.syy);
+        a.log_absent += q.p_exist >= 1.f ? -std::numeric_limits<double>::infinity() : std::log1p(-double(q.p_exist));
+    };
+    for (std::size_t i = 0; i < hits.size();)
+    {
+        const std::int64_t bin = hits[i].bin;
+        Acc g;
+        bool hidden = false;      // a certain group has been emitted: everything farther in this bin is behind it
+        for (; i < hits.size() and hits[i].bin == bin; ++i)
+        {
+            if (hidden) continue;
+            const Hit& h = hits[i];
+            if (g.n > 0)
+            {
+                const double mean = g.wr / g.w, s = std::sqrt(double(h.q->sigma) * h.q->sigma + 1.0 / g.w);
+                if (h.range - mean > double(kSplitSigmas) * s)                   // a farther surface starts
+                {
+                    emit(g);
+                    hidden = std::isinf(g.log_absent);
+                    g = Acc{};
+                    if (hidden) continue;
+                }
+            }
+            add(g, h);
+        }
+        if (g.n > 0) emit(g);
     }
     return out;
 }
@@ -339,7 +384,7 @@ double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, d
 float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> r,
                        float sigma_pose_xy, float sigma_pose_yaw, float body_geometry_sigma_m, float lps_floor)
 {
-    return log_p_no_contact_cells(body, sweep, surface_cells(r), sigma_pose_xy, sigma_pose_yaw, body_geometry_sigma_m, lps_floor);
+    return log_p_no_contact_cells(body, sweep, surface_cells(r, sweep.empty() ? Eigen::Vector2f::Zero() : sweep.front().p, bearing_bin_rad(body)), sigma_pose_xy, sigma_pose_yaw, body_geometry_sigma_m, lps_floor);
 }
 
 float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> cells,
