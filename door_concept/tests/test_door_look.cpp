@@ -76,23 +76,41 @@ int main()
         CHECK(c3.size() == 1 and c3[0].name == "door_2");
     }
 
-    // ── 3. Absence evidence from the view: misses where it should be visible rule it out; a detection does not ──
+    // ── 3. Absence evidence is POOLED PER VIEWPOINT (tourP9: door_2 ruled out from ONE spot 2.8 m away, p_detect 0.41,
+    //      by many frames of non-detection treated as independent). Frames from one viewpoint are copies of one look:
+    //      that viewpoint contributes ONE look's evidence however many frames it sends; new viewpoints add evidence.
     {
         rc::exist::RemovalPolicy pol; pol.logodds_max = 4.0f; pol.removal_prob = 0.12f; pol.remove_frames = 15.f;
-        look::Evidence ev(0.73f, pol);
+        const Eigen::Vector2f cam_a(0.35f, -0.28f);                      // tourP9's look standpoint for door_2
+        IdentityRow r2 = d2; r2.xy = {0.56f, 2.54f};
+        look::Evidence one(0.73f, pol);
         bool out = false;
-        int frames = 0;
-        for (; frames < 400 and not out; ++frames)
-            out = ev.observe(0.8f, false, 0.85f, 0.05f, pol);            // p_detect 0.8, nothing detected there
+        for (int k = 0; k < 2000 and not out; ++k)
+            out = one.observe(0.41f, false, 0.85f, 0.05f, look::view_of(r2, room, cam_a + Eigen::Vector2f(0.002f * (k % 5), 0.f)), pol);
+        CHECK(not out);
+        std::print("one viewpoint, 2000 absent frames at p_detect 0.41: P(exists) {:.3f} (not ruled out)\n", one.p_exists());
+        CHECK(one.p_exists() > 0.4f);
+        // Several DISTINCT viewpoints (an arc in front of the door): each adds one look's evidence ⇒ ruled out.
+        look::Evidence many(0.73f, pol);
+        int views = 0;
+        for (int v = 0; v < 12 and not out; ++v)
+        {
+            const float a = (-50.f + 10.f * v) * std::numbers::pi_v<float> / 180.f;
+            const Eigen::Vector2f cam = r2.xy + 2.0f * Eigen::Vector2f(std::sin(a), -std::cos(a));
+            for (int k = 0; k < 30 and not out; ++k)
+                out = many.observe(0.6f, false, 0.85f, 0.05f, look::view_of(r2, room, cam), pol);
+            ++views;
+        }
         CHECK(out);
-        std::print("ruled out after {} absent looks (P now {:.3f})\n", frames, ev.p_exists());
+        std::print("ruled out after {} distinct viewpoints (P now {:.3f})\n", views, many.p_exists());
+        CHECK(views >= 3);
         // Occluded / out of view (p_detect 0) is NOT evidence: HOLD for ever.
         look::Evidence held(0.73f, pol);
-        for (int k = 0; k < 400; ++k) CHECK(not held.observe(0.0f, false, 0.85f, 0.05f, pol));
+        for (int k = 0; k < 400; ++k) CHECK(not held.observe(0.0f, false, 0.85f, 0.05f, look::view_of(r2, room, cam_a), pol));
         CHECK(std::abs(held.p_exists() - 0.73f) < 1e-3f);
         // A detection at the place confirms.
         look::Evidence seen(0.73f, pol);
-        for (int k = 0; k < 20; ++k) CHECK(not seen.observe(0.8f, true, 0.85f, 0.05f, pol));
+        for (int k = 0; k < 20; ++k) CHECK(not seen.observe(0.8f, true, 0.85f, 0.05f, look::view_of(r2, room, cam_a), pol));
         CHECK(seen.p_exists() > 0.9f);
     }
 

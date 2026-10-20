@@ -1951,10 +1951,16 @@ void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2
     DoorIdentity row;
     row.name = name;
     row.xy   = ap;
-    upsert_identity(std::move(row), width_m);
+    // A birth: the door exists with the birth prior's probability (Existence.BirthLogodds).
+    upsert_identity(std::move(row), width_m, 1.0f / (1.0f + std::exp(-cfg_.exist_birth_logodds)));
 }
 
-void SpecificWorker::upsert_identity(DoorIdentity row, float width_m)
+float SpecificWorker::identity_weight(const rc::DoorInstance& inst) const
+{
+    return inst.existence_seeded ? inst.existence.p_exists() : 1.0f / (1.0f + std::exp(-cfg_.exist_birth_logodds));
+}
+
+void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weight)
 {
     const std::string room = current_room_name();
     if (cfg_.exist_reacquire_radius_m <= 0.0f)
@@ -1963,10 +1969,11 @@ void SpecificWorker::upsert_identity(DoorIdentity row, float width_m)
     //   re-acquire radius describes the SAME hole — the openings overlap once their centres are closer than the
     //   width, and the radius is the place uncertainty this agent already uses for "same door". Matching on the
     //   radius alone kept room_1's main doorway under two names 1.07 m apart (door_1 @ −1.65 from an aperture fitted
-    //   on the far jamb, door_5 @ −0.58), and the next run picked whichever was closer: door_5. The live door's name
-    //   wins. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
+    //   on the far jamb, door_5 @ −0.58), and the next run picked whichever was closer: door_5.
+    //   ⚠ SUPERSEDED 2026-10-21 (tourP9): the OLDEST name of the hole wins, and the place moves by the writer's P(exists)
+    //   — see rc::door::upsert_row. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
     const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
-    if (rc::door::upsert_row(identities_, room, std::move(row), same_hole))
+    if (rc::door::upsert_row(identities_, room, std::move(row), same_hole, weight))
         save_identities();
 }
 
@@ -2029,7 +2036,7 @@ void SpecificWorker::remember_live_identities()
     {
         if (not inst.ai2_initialized or inst.is_bearing_hypothesis)
             continue;
-        upsert_identity(identity_of(inst), inst.model.state().w);
+        upsert_identity(identity_of(inst), inst.model.state().w, identity_weight(inst));
     }
 }
 
@@ -4309,7 +4316,8 @@ void SpecificWorker::step_remembered_looks()
             const float pd = rc::door::look::p_detect_from(r, cxy, cyaw, poly, sensor, furniture, gaps, prm);
             const float same_hole = cfg_.exist_reacquire_radius_m + (r.pose.has_value() ? r.pose->width : 0.0f);
             const bool seen = std::ranges::any_of(look_dets_xy_, [&](const Eigen::Vector2f& d) { return (d - r.xy).norm() < same_hole; });
-            if (e.ev.observe(pd, seen, prm.detection_prob, prm.clutter_prob, pol))
+            if (e.ev.observe(pd, seen, prm.detection_prob, prm.clutter_prob,
+                             rc::door::look::view_of(r, poly, cxy, prm.prior_w_m), pol))
             {
                 e.ruled_out = true;
                 e.aff.remove();
@@ -4586,7 +4594,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         //  every row of room_1 was identity-only and nothing could be restored. room_node_id_ is still that room here
         //  (or its name is cached), so the row lands under the right room.
         if (it->second.ai2_initialized and not it->second.is_bearing_hypothesis)
-            upsert_identity(identity_of(it->second), it->second.model.state().w);
+            upsert_identity(identity_of(it->second), it->second.model.state().w, identity_weight(it->second));
         fitter_->instances().erase(it);
         if (const auto m = door_memo_.find(id); m != door_memo_.end())
         {

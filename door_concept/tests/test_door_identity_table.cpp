@@ -242,6 +242,34 @@ int main()
         CHECK(near(j.model.s.ap_cx, 2.f) and near(j.existence.L, 1.0f) and not j.leaf_side_hint.has_value());
     }
 
+    // ── 7. tourP9 NAME DRIFT: a duplicate (door_4) on door_1's hole does not rename it; one row per hole ──
+    {
+        std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.58f, 4.61f), full_row("room_1", "door_2", 0.56f, 2.54f)};
+        auto dup = full_row("", "door_4", -0.54f, 4.61f);
+        CHECK(upsert_row(t, "room_1", dup, radius + 0.95f, 1.0f));
+        CHECK(t.size() == 2);
+        CHECK(t[0].name == "door_1" and near(t[0].xy.x(), -0.54f));               // the oldest name, the new place
+        // A table that already holds BOTH (door_1 oldest, then door_4 on the same hole) collapses to door_1 on the next write.
+        std::vector<IdentityRow> u{full_row("room_1", "door_1", -0.58f, 4.61f), full_row("room_1", "door_4", -0.54f, 4.61f)};
+        CHECK(upsert_row(u, "room_1", full_row("", "door_4", -0.55f, 4.61f), radius + 0.95f, 1.0f));
+        CHECK(u.size() == 1 and u[0].name == "door_1");
+        // Birth by identity (no pose) on a hole keeps the row's pose and name.
+        IdentityRow birth; birth.name = "door_1"; birth.xy = {-0.56f, 4.61f};
+        CHECK(upsert_row(u, "room_1", birth, radius, 0.73f));
+        CHECK(u.size() == 1 and u[0].pose.has_value());
+    }
+    // ── 8. tourP8→P9 PLACE DRIFT: a dying door's degraded estimate barely moves the remembered place ──
+    {
+        IdentityRow id2; id2.room = "room_1"; id2.name = "door_2"; id2.xy = {0.56f, 2.54f};    // stripped, id-only
+        std::vector<IdentityRow> t{id2};
+        auto drifted = full_row("", "door_2", 0.35f, 2.54f);                                // fit at shutdown, P(exists) 0.02
+        CHECK(upsert_row(t, "room_1", drifted, radius + 0.84f, 0.02f));
+        CHECK(t.size() == 1 and std::abs(t[0].xy.x() - 0.556f) < 0.01f);
+        // A credible door (P ≈ 1) moves it fully.
+        CHECK(upsert_row(t, "room_1", full_row("", "door_2", 0.60f, 2.54f), radius + 0.84f, 0.98f));
+        CHECK(std::abs(t[0].xy.x() - 0.599f) < 0.01f);
+    }
+
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");
     return fails == 0 ? 0 : 1;
 }

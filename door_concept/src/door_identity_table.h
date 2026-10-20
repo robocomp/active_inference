@@ -26,6 +26,7 @@
 #include <cmath>
 #include <istream>
 #include <locale>
+#include <numbers>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -221,17 +222,70 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
     return d;
 }
 
-/// Upsert BY PLACE WITHIN `room`: one hole in a room's walls carries one name. A row of the same name, or whose centre lies
-/// within `same_hole_m` (reacquire radius + the opening's width), is the same hole and is replaced. Returns false (no
-/// change) for a row that is not a door or not a place.
-inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, IdentityRow row, float same_hole_m)
+/// Upsert BY PLACE WITHIN `room`: ONE row per hole, under its REMEMBERED (oldest) name.
+/// The target is the oldest row of this room that has the same name or lies on the same hole (`same_hole_m` = reacquire
+/// radius + the opening's width); later duplicates of it are dropped. Rows are updated IN PLACE, so table order is age.
+/// ★THE OLDEST NAME WINS (tourP9, 2026-10-21; supersedes the 2026-10-18 "the live door's name wins"). room_1's main door
+///  kept turning into `door_4`: a duplicate birth on door_1's hole (tourP6: the restored door_1 sat at (0,0), the tracker
+///  re-detected the real hole and could not reuse the live name) wrote ITS row over door_1's, and every later run
+///  re-acquired the hole as door_4. A hole's name is a fact about the building, learnt once; a duplicate does not rename it.
+/// ★THE PLACE IS A POSTERIOR, NOT THE LAST WRITE (tourP8 → tourP9). door_2's row moved 0.56 → 0.35 m along its wall: at
+///  shutdown the door's fit had degraded (FE 1.60 vs 0.06, existence L = −4, P 0.02) and its estimate replaced a good
+///  memory; tourP9's look then aimed 0.2–0.4 m off the hole. The writer is THIS hole's door with probability `weight`
+///  (its P(exists)); otherwise the memory stands — so the remembered place moves to the posterior mean
+///  xy + weight·(xy_new − xy). A credible door updates its row fully, a dying one barely moves it.
+inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, IdentityRow row, float same_hole_m,
+                       float weight = 1.0f)
 {
     if (room.empty() or not row.name.starts_with("door_") or not row.xy.allFinite() or row.xy.norm() > kIdentityMaxPlaceM)
         return false;
-    std::erase_if(rows, [&](const IdentityRow& i)
-                  { return i.room == room and (i.name == row.name or (i.xy - row.xy).norm() < same_hole_m); });
-    row.room = room;
-    rows.push_back(std::move(row));
+    const auto same = [&](const IdentityRow& i, const Eigen::Vector2f& at, const std::string& nm)
+    { return i.room == room and (i.name == nm or (i.xy - at).norm() < same_hole_m); };
+    auto it = std::ranges::find_if(rows, [&](const IdentityRow& i) { return same(i, row.xy, row.name); });
+    if (it == rows.end())
+    {
+        row.room = room;
+        rows.push_back(std::move(row));
+        return true;
+    }
+    const float a = std::isfinite(weight) ? std::clamp(weight, 0.f, 1.f) : 0.f;
+    const auto mix = [a](float o, float n) { return o + a * (n - o); };
+    const auto mix_angle = [a](float o, float n) { return o + a * std::remainder(n - o, 2.0f * std::numbers::pi_v<float>); };
+    IdentityRow& t = *it;
+    const std::string incoming = row.name;
+    t.xy = t.xy + a * (row.xy - t.xy);
+    if (row.pose.has_value())
+    {
+        if (t.pose.has_value())
+            t.pose = RestorePose{mix_angle(t.pose->yaw, row.pose->yaw), mix(t.pose->width, row.pose->width),
+                                 mix(t.pose->height, row.pose->height), mix(t.pose->depth, row.pose->depth)};
+        else
+            t.pose = row.pose;
+    }
+    if (row.exist_logodds.has_value())
+        t.exist_logodds = row.exist_logodds;   // the belief as it is now: it is already a posterior
+    if (row.leaf.has_value())
+    {
+        if (t.leaf.has_value())
+        {
+            LeafMemory m;
+            m.hinge_xy  = t.leaf->hinge_xy + a * (row.leaf->hinge_xy - t.leaf->hinge_xy);
+            const Eigen::Vector2f od = t.leaf->open_dir + a * (row.leaf->open_dir - t.leaf->open_dir);
+            m.open_dir  = od.norm() > 1e-6f ? Eigen::Vector2f(od.normalized()) : row.leaf->open_dir;
+            m.hinge_llr = mix(t.leaf->hinge_llr, row.leaf->hinge_llr);
+            m.swing_llr = mix(t.leaf->swing_llr, row.leaf->swing_llr);
+            m.phi       = mix(t.leaf->phi, row.leaf->phi);
+            m.phi_sigma = mix(t.leaf->phi_sigma, row.leaf->phi_sigma);
+            t.leaf = m;
+        }
+        else
+            t.leaf = row.leaf;
+    }
+    // ONE row per hole: drop every later row of this room that is the incoming name or lies on the target's hole.
+    const IdentityRow keep = t;
+    const auto first = std::distance(rows.begin(), it);
+    for (auto j = rows.begin() + first + 1; j != rows.end();)
+        j = (same(*j, keep.xy, keep.name) or (j->room == room and j->name == incoming)) ? rows.erase(j) : j + 1;
     return true;
 }
 

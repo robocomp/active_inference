@@ -207,7 +207,9 @@ private:
     void load_identities();                                            // once, at startup
     void save_identities() const;                                      // whole table, locale-independent
     void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
-    void upsert_identity(DoorIdentity row, float width_m);             // note_identity with the full row (pose, existence, leaf)
+    // note_identity with the full row (pose, existence, leaf); `weight` = P(the writer is this hole's door), its P(exists)
+    void upsert_identity(DoorIdentity row, float width_m, float weight);
+    float identity_weight(const rc::DoorInstance& inst) const;
     DoorIdentity identity_of(const rc::DoorInstance& inst) const;      // a FITTED door's restorable row (current room)
     void forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m);       // a removal for absence
     const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;

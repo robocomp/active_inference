@@ -32,6 +32,7 @@
 
 #include "door_identity_table.h"
 #include "door_standpoint.h"
+#include "door_leaf_channel.h"   // ViewBearings / view_bearings / ViewpointLedger — the viewpoint, shared
 #include "../../common/nbv/viewpoint_score.h"
 #include "../../common/existence_belief/existence_belief.h"
 
@@ -206,9 +207,33 @@ inline std::vector<IdentityRow> offer_rows(std::span<const IdentityRow> rows, st
     return out;
 }
 
-/// The existence belief of ONE remembered-but-absent door, fed from the views the robot actually has of its place:
-/// the shared rc::exist accumulation (p_vis weighting, frame correlation) and removal decision (debounced). A look
-/// that could not have seen it (p_detect 0: behind, occluded, out of range) HOLDS.
+/// The viewpoint a camera at `cam` has on the remembered aperture: its bearing from EACH jamb, in the door's own frame —
+/// the leaf channel's viewpoint (door_leaf_channel.h, try102), so "the same viewpoint" means the same thing in both.
+inline ViewBearings view_of(const IdentityRow& r, std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& cam,
+                            float prior_w_m = 0.90f)
+{
+    Aperture ap;
+    const Eigen::Vector2f u = along_wall(r, poly).value_or(Eigen::Vector2f(1.f, 0.f));
+    ap.wall_u = u;
+    ap.w = r.pose.has_value() ? r.pose->width : prior_w_m;
+    ap.wall_O = r.xy - 0.5f * ap.w * u;
+    ap.s = 0.f;
+    return view_bearings(ap, cam);
+}
+
+/// A viewpoint is the jamb bearings within the leaf channel's viewpoint radius: the φ grid's step (5°), the model's
+/// own resolution (door_leaf_channel.h, kViewpointRad).
+inline constexpr double kLookViewpointRad = 5.0 * std::numbers::pi / 180.0;
+
+/// The existence belief of ONE remembered-but-absent door, fed from the views the robot actually has of its place.
+/// ★POOLED PER VIEWPOINT (tourP9, 2026-10-21). door_2 was ruled out (P 0.018) from ONE standpoint 2.8 m away at
+///  p_detect 0.41 by many frames of non-detection treated as independent — a real, closed door. Frames from the same
+///  viewpoint share everything that decides whether the detector fires there (the framing, the lighting, the occluder,
+///  the detector's own blind spot for that aspect): they are copies of ONE look. So a viewpoint contributes the MEAN of
+///  its frames' evidence (each frame p_detect · log-ratio, the rc::exist weighting), i.e. one look's worth, bounded however
+///  many frames it sends; a revisit re-uses its record; only NEW viewpoints add evidence — the leaf channel's rule (term 2,
+///  commit 6f267858) in its simplest form. The removal decision is the shared rc::exist::decide_removal.
+///  A look that could not have seen the door (p_detect 0: behind, occluded, out of range) HOLDS.
 class Evidence
 {
 public:
@@ -216,23 +241,41 @@ public:
     {
         rc::exist::arm(b_, pol);
         const float p = std::clamp(p_prior, 1e-4f, 1.f - 1e-4f);
-        b_.set(std::log(p / (1.f - p)));
+        L0_ = std::log(p / (1.f - p));
+        b_.set(L0_);
     }
-    /// One mask frame. `detected_here` = a door detection landed on this hole. Returns true when ruled out.
-    bool observe(float p_detect, bool detected_here, float p_hit, float p_false, const rc::exist::RemovalPolicy& pol)
+    /// One mask frame seen from viewpoint `at`. `detected_here` = a door detection landed on this hole. True ⇒ ruled out.
+    bool observe(float p_detect, bool detected_here, float p_hit, float p_false, const ViewBearings& at,
+                 const rc::exist::RemovalPolicy& pol)
     {
         rc::exist::arm(b_, pol);
-        const float ph = std::clamp(p_hit, 1e-3f, 1.f - 1e-3f), pf = std::clamp(p_false, 1e-3f, 1.f - 1e-3f);
-        const float llr = detected_here ? std::log(ph / pf) : std::log((1.f - ph) / (1.f - pf));
-        b_.integrate(p_detect, llr);
-        return rc::exist::decide_removal(b_, deb_, pol, p_detect).remove;
+        const float pd = std::isfinite(p_detect) ? std::clamp(p_detect, 0.f, 1.f) : 0.f;
+        if (pd > 0.f)
+        {
+            const float ph = std::clamp(p_hit, 1e-3f, 1.f - 1e-3f), pf = std::clamp(p_false, 1e-3f, 1.f - 1e-3f);
+            const double llr = detected_here ? std::log(ph / pf) : std::log((1.f - ph) / (1.f - pf));
+            ledger_.advance(at, kLookViewpointRad);
+            if (pool_.size() < ledger_.views.size()) pool_.resize(ledger_.views.size());
+            auto& v = pool_[std::size_t(ledger_.current)];
+            v.sum += double(pd) * llr;
+            v.n   += 1;
+            double L = L0_;
+            for (const auto& q : pool_) if (q.n > 0) L += q.sum / q.n;
+            b_.set(static_cast<float>(L));
+        }
+        return rc::exist::decide_removal(b_, deb_, pol, pd).remove;
     }
-    float p_exists() const { return b_.p_exists(); }
-    float logodds()  const { return b_.logodds(); }
+    float p_exists()   const { return b_.p_exists(); }
+    float logodds()    const { return b_.logodds(); }
+    int   viewpoints() const { return static_cast<int>(ledger_.views.size()); }
 
 private:
+    struct Pool { double sum = 0.0; int n = 0; };
+    float L0_ = 0.f;
     rc::exist::ExistenceBelief b_{};
     rc::exist::RemovalDebounce deb_{};
+    ViewpointLedger ledger_;
+    std::vector<Pool> pool_;
 };
 
 }   // namespace rc::door::look

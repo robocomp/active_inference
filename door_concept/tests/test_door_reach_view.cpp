@@ -59,8 +59,8 @@ int main()
         CHECK(asserted_at == 2);                            // after 3 MEASURED cycles
         // An unmeasured cycle in the middle holds the streak (neither advances nor resets).
         TransitableStreaks h;
-        transitable_step(h, false, 0.99f, true, 0.90f, 0.20f, 3);
-        transitable_step(h, false, 0.99f, false, 0.90f, 0.20f, 3);
+        (void)transitable_step(h, false, 0.99f, true, 0.90f, 0.20f, 3);
+        (void)transitable_step(h, false, 0.99f, false, 0.90f, 0.20f, 3);
         CHECK(h.yes == 1);
         CHECK(transitable_step(h, false, 0.99f, true, 0.90f, 0.20f, 3).assert_now == false and h.yes == 2);
         // Retraction is the safe direction and may follow a measured shut leaf as before.
