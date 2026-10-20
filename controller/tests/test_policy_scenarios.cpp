@@ -26,10 +26,7 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 8 (task-6-report.md, "Round 8"): sigma split (relative -> contact, OU drift -> monitor) and the
-// monitor on the TRAP-FREE field. Contacts 0, Stuck 0; every catalogued scenario passes 20/20 except tour3_1_leg3 19/20;
-// OU variant 18/20. Both failures: a failed prediction within ~0.45 m of the goal lays its trap (r_circ, centred r_circ
-// downhill) OVER the goal -> "no plan without the trap".
+// STATUS 2026-10-20 round 9 (task-6-report.md, "Round 9"): see the report for the final 20-seed table.
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
@@ -317,9 +314,19 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         // ★ R6-1 (round 7): a trap asserts "the body cannot get through from here"; only a FAILED PREDICTION is evidence
         //   of that. One per failed prediction (the monitor resets as it fails). A Release from a momentary all-too-risky
         //   moment backs off as defined and lays nothing.
-        if (d.prediction_failed)
+        // ★ ROUND 9 (driver logic; the policy is unchanged): a trap means "route around this place", and the GOAL cannot
+        //   be routed around. A failed-prediction Release whose trap disc would contain any goal point lays NO trap: the
+        //   Release itself (backing off toward the most room) is the response, and the next prediction gets a fresh try.
+        //   Persistent failure near the goal is ended by the caller's own time budget (here the scenario's time limit;
+        //   in the controller the mission's), not by the policy. (Supersedes round 7's "no goal rule", which concerned
+        //   pose-noise false failures — now absorbed by the drift term of the monitor's resolution.)
+        const V2 trap_dir = d.prediction_failed ? F.descent_dir(bel.p) : V2::Zero();
+        const bool trap_covers_goal = d.prediction_failed and std::ranges::any_of(F.goals, [&](const V2& gp)
+                                      { return (gp - (bel.p + r_circ * trap_dir)).norm() < r_circ; });
+        if (tr and trap_covers_goal) std::printf("    no trap: its disc would contain the goal\n");
+        if (d.prediction_failed and not trap_covers_goal)
         {
-            const V2 dir = F.descent_dir(bel.p);
+            const V2 dir = trap_dir;
             const float cost = 2.f * F.max_finite();
             // ★ D2: the trap marks where the body CANNOT go — one radius ahead of the stall pose, downhill. Centred on the
             //   stall pose itself it could not reroute the robot standing in it (both exits cost the same; the shorter way
