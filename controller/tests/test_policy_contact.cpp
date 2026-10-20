@@ -35,6 +35,27 @@ int main()
     const Pose2 origin{{0.f, 0.f}, kHalfPi};
     const float sxy = 0.005f, syaw = 0.005f;
 
+    { // Live fix 2 ruling 1 — WHEEL-COUPLED: tourP3's reversal, back-left (v -0.26, w +0.25) -> forward-right (v 0.24, w -1.0),
+      // at Shadow's limits (axle 0.518 m, a_lin 0.5 m/s^2). The two wheels ramp at the per-wheel rates: the left one
+      // -0.325 -> +0.499 m/s through zero. Independent axes reached w = -1 in ~0.74 s; the base took 1.6-1.8 s.
+        auto time_to_w = [&](const BaseLimits& lim, float w_target) {
+            const auto s = rollout(origin, -0.26f, 0.25f, 0.24f, -1.0f, 3.f, lim, 0.01f);
+            for (std::size_t i = 1; i < s.size(); ++i)
+                if ((s[i].yaw - s[i - 1].yaw) / 0.01f <= 0.97f * w_target) return 0.01f * float(i);
+            return 99.f; };
+        BaseLimits sh; sh.v_max = 0.5f; sh.w_max = 1.5f; sh.a_lin = 0.5f; sh.d_lin = 1.0f; sh.track_m = 0.518f;
+        sh.a_rot = sh.a_lin / 0.259f; sh.d_rot = sh.d_lin / 0.259f;
+        const float t_cap = time_to_w(sh, -1.0f);
+        BaseLimits sh_measured = sh; sh_measured.d_lin = 0.5f; sh_measured.d_rot = 0.5f / 0.259f;   // tourP3's body decel ~0.56
+        const float t_meas = time_to_w(sh_measured, -1.0f);
+        std::printf("  reversal to w=-1: %.2f s at the capability's limits (d_lin 1.0), %.2f s with the measured decel (0.5)\n", t_cap, t_meas);
+        CHECK("wheel-coupled reversal: ~1.32 s at the capability's limits (independent axes: ~0.74 s)", std::abs(t_cap - 1.32f) < 0.06f);
+        CHECK("wheel-coupled reversal: within the measured 1.6-1.8 s at the measured decel", t_meas >= 1.6f and t_meas <= 1.8f);
+        // pure axes are unchanged: straight motion ramps at a_lin, an in-place turn at a_lin / (L/2)
+        const auto st = rollout(origin, 0.f, 0.f, 0.3f, 0.f, 1.f, sh, 0.01f);
+        CHECK("wheel-coupled: a straight command still ramps at a_lin (0.6 s to 0.3 m/s, then 0.4 s, + brake)",
+              std::abs(st.back().p.y() - (0.09f + 0.12f + 0.045f)) < 0.005f);
+    }
     { // rollout_straight: from rest, 0.3 m/s commanded for 1 s, brake at 1.0 m/s^2.
       // ★ review ruling: rollouts ramp from the current velocity — ramp 0.3 s (0.045 m) + 0.7 s at 0.3 (0.21 m) +
       //   brake (0.045 m) = 0.300 m (was 0.345 with an instant jump to the command).
@@ -52,13 +73,14 @@ int main()
         CHECK("rollout_turn_in_place yaw", std::abs(dyaw - 1.0f) < 0.02f);
         CHECK("rollout_turn_in_place no translation", (s.back().p - origin.p).norm() < 1e-5f);
     }
-    { // arc closes: v=0.3,w=0.5 commanded for 2 s lies on the circle of radius v/w once both axes have ramped up
-      // (v at t = 0.3 s, w at 0.25 s; dt 0.1 => from pose 3 to the end of the command at pose 20).
+    { // arc closes: v=0.3,w=0.5 commanded for 2 s lies on the circle of radius v/w once both WHEELS have ramped up
+      // (Live fix 2: wheels v -+ w L/2 with L = 2 a_lin / a_rot = 1.0 m: 0.05 m/s at 0.05 s, 0.55 m/s at 0.55 s; dt 0.1 =>
+      // from pose 6 to the end of the command at pose 20).
         const auto s = rollout(origin, 0.f, 0.f, 0.3f, 0.5f, 2.f, {b}, 0.1f);
-        const Pose2& r0 = s[3];
+        const Pose2& r0 = s[6];
         const Eigen::Vector2f c = r0.p + (0.3f / 0.5f) * Eigen::Vector2f(-std::sin(r0.yaw), std::cos(r0.yaw));
         // ★ only the steady part of the command phase is one circle: the two axes brake at different times afterwards
-        float worst = 0; for (std::size_t i = 3; i < 21; ++i) { const auto& q = s[i]; worst = std::max(worst, std::abs((q.p - c).norm() - 0.6f)); }
+        float worst = 0; for (std::size_t i = 6; i < 21; ++i) { const auto& q = s[i]; worst = std::max(worst, std::abs((q.p - c).norm() - 0.6f)); }
         CHECK("rollout_arc stays on circle", worst < 1e-4f);
     }
     { // rollout_from_speed: already at 0.5 m/s, commanded 0.2 for 1 s: decelerate 0.3 s (0.105 m) + 0.7 s at 0.2

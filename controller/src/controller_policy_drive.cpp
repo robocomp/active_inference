@@ -85,7 +85,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                                                              const ControllerRobotPose &robot_pose,
                                                              ControllerObstacleTracker &obstacle_tracker,
                                                              ControllerMotionCommander &motion_commander, std::uint64_t now_ms,
-                                                             std::function<bool(const Eigen::Vector2f &)> also_free)
+                                                             std::function<bool(const Eigen::Vector2f &)> also_free,
+                                                             std::function<bool(const Eigen::Vector2f &, float)> trap_veto)
 {
     using rc::policy::Decision;
     PolicyTick out;
@@ -205,6 +206,49 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                      spec.goal.yaw ? std::format(" facing {:.0f} deg", *spec.goal.yaw * 57.29578f) : std::string(),
                      policy_nav_.last_build_ms(), policy_nav_.field().at(pose.p));
     }
+    // ★ Live fix 2 ruling 4 — DIAGNOSTIC: a new goal whose field at the robot exceeds 10x the straight-line distance is
+    //   dumped (free mask summary, traps, residual density stats, goal points) to a file named in the log.
+    if (new_goal)
+    {
+        float straight = std::numeric_limits<float>::infinity();
+        for (const auto &q : spec.points) straight = std::min(straight, (q - pose.p).norm());
+        const float f_robot = policy_nav_.field().at(pose.p);
+        if (std::isfinite(straight) and (not std::isfinite(f_robot) or f_robot > 10.f * std::max(straight, 0.05f)))
+        {
+            const std::string fname = std::format("policy_field_dump_{}.txt", now_ms);
+            std::ofstream f(fname, std::ios::out | std::ios::trunc);
+            f.imbue(std::locale::classic());
+            const float span_x = static_cast<float>(grid_planner_.width()) * grid_planner_.cell_size();
+            const float span_y = static_cast<float>(grid_planner_.height()) * grid_planner_.cell_size();
+            const Eigen::Vector2f o = grid_planner_.grid_origin() - 0.5f * Eigen::Vector2f::Constant(grid_planner_.cell_size());
+            long n = 0, n_free = 0, n_risk = 0; double sum_risk = 0.0; float max_risk = 0.f;
+            for (float y = o.y(); y <= o.y() + span_y; y += 0.05f)
+                for (float x = o.x(); x <= o.x() + span_x; x += 0.05f)
+                {
+                    const Eigen::Vector2f q(x, y);
+                    ++n;
+                    if (not free_fn(q)) continue;
+                    ++n_free;
+                    const float e = extra_fn(q);
+                    if (e > 0.f) { ++n_risk; sum_risk += e; max_risk = std::max(max_risk, e); }
+                }
+            f << "who " << who << "\nroom " << current_room_name_ << "\nrobot " << pose.p.x() << ' ' << pose.p.y() << ' ' << pose.yaw
+              << "\nfield_at_robot " << f_robot << "\nstraight_m " << straight
+              << "\ngoal_kind " << goal_kind_name(spec.goal.kind) << " p " << spec.goal.p.x() << ' ' << spec.goal.p.y()
+              << "\ngrid origin " << o.x() << ' ' << o.y() << " span " << span_x << ' ' << span_y << " cell 0.05"
+              << "\nfree_cells " << n_free << " of " << n << " ; free_at_robot " << (free_fn(pose.p) ? 1 : 0)
+              << " ; also_free_at_robot " << (also_free and also_free(pose.p) ? 1 : 0)
+              << "\nrisk_density cells>0 " << n_risk << " mean " << (n_risk > 0 ? sum_risk / double(n_risk) : 0.0) << " max " << max_risk
+              << " (metres per metre, residual_risk_weight x body_risk_at)\n";
+            for (const auto &q : spec.points)
+                f << "goal_point " << q.x() << ' ' << q.y() << " free " << (free_fn(q) ? 1 : 0) << " field " << policy_nav_.field().at(q) << '\n';
+            for (const auto &t : policy_nav_.traps()) f << "trap " << t.c.x() << ' ' << t.c.y() << " r " << t.r << '\n';
+            std::println("[policy] {}: the field at the robot ({:.2f} m) is > 10x the straight distance ({:.2f} m) — field inputs "
+                         "dumped to {}", who, f_robot, straight, fname);
+        }
+    }
+    policy_nav_.set_trap_veto(trap_veto);   // Live fix 2 ruling 2 (after set_goal, which clears it); empty = none
+    if (new_goal) {}
     else if (grid_planner_.world_hash() != policy_world_hash_)
     {
         // the planner's map moved under the goal: applied by the Navigator between plans (navigator.h update_world)
@@ -233,7 +277,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     // ── I5 evidence, TIME-ALIGNED (review fix 2.2): the odometry sample describes the base at now - its age (wall now minus
     //    robot_current_speed_timestamp); the pose describes it at now - the pose age. The pose's heading change between its
     //    last two times is compared with the odometry INTEGRATED over that same interval (OdoSignCheck::update_interval).
-    const float pose_age_s = world_model_pose_stamp_age_ms_ >= 0.f ? std::min(0.5f, world_model_pose_stamp_age_ms_ * 1e-3f) : 0.f;
+    // Live fix 2 ruling 3: the TRUE pose age (no clamp) — tourP3 had 30 % of rows >= 0.5 s, hidden by the old 0.5 s clamp
+    const float pose_age_s = world_model_pose_stamp_age_ms_ >= 0.f ? world_model_pose_stamp_age_ms_ * 1e-3f : 0.f;
     {
         const auto wall_now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -359,6 +404,9 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
 
     // ── one [policy] line per MODE CHANGE (and on a trap / an unreachable verdict)
     const int mode_i = static_cast<int>(d.mode);
+    if (st.trap_vetoed)
+        std::println("[policy] {}: a failed prediction's trap would block the measured doorway corridor — not laid (the Release "
+                     "stands)", who);
     if (mode_i != policy_last_mode_ or st.trap or st.unreachable)
     {
         std::println("[policy] {} -> {} ({}): {} | v {:+.2f} w {:+.2f} P(contact) {:.3f} cont {:.2f} prog {:+.3f} m eligible {} | "
@@ -485,6 +533,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             const std::string who = std::format("cross {}", anchor_latched_for_);
             rc::policy::GoalSpec spec;
             std::function<bool(const Eigen::Vector2f &)> corridor;
+            std::function<bool(const Eigen::Vector2f &, float)> veto;
             if (cp.drive)
             {
                 const auto gap = rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose);
@@ -493,6 +542,11 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 // line (1 m back into the room just left; one field cell past the line)
                 const float back = 1.0f, ahead = gp.past_m + 0.05f, r_ins = gp.inscribed_radius_m;
                 corridor = [gap, back, ahead, r_ins](const Eigen::Vector2f &p) { return rc::policy::in_doorway_corridor(gap, p, back, ahead, r_ins); };
+                // Live fix 2 ruling 2: the measured opening (at least the body's width) is evidence the body fits there — no
+                // trap may block it; the bare body's full width = its lateral support both sides
+                const float body_w = bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)) + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f));
+                veto = [gap, back, ahead, r_ins, body_w](const Eigen::Vector2f &c, float r)
+                { return rc::policy::disc_meets_doorway_corridor(gap, c, r, back, ahead, r_ins, body_w); };
             }
             else
             {
@@ -501,7 +555,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                                                 gp.tol_yaw);
             }
             const auto tick = policy_tick(spec, who + (cp.drive ? "" : " (waiting)"), cpose, obstacle_tracker, motion_commander, now,
-                                          corridor);
+                                          corridor, veto);
             if (tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck))
                 cross_hand_back(std::format("the local policy cannot drive it ({})", tick.why), /*timed_out=*/false, motion_commander);
 

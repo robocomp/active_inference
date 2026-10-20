@@ -212,7 +212,12 @@ int main()
         const float sd0 = min_sd(s, s.in.pose), sd1 = min_sd(s, e);
         std::printf("  clearance start %.3f -> end %.3f ; log_p_cont now %.3f -> end %.3f ; P(contact)=%.5f\n", sd0, sd1,
                     log_p_continuable(s.in, s.pp, s.in.pose), log_p_continuable(s.in, s.pp, e), p_contact_of(s, d.v, d.w));
-        CHECK("release_side_on release, v<=0", d.mode == Decision::Mode::Release and d.v <= 0.f);
+        // ★ Live fix 2 (wheel-coupled rollout): with the two wheels ramping on their shared budget, a forward arc away from
+        //   the wall ramps its turn slowly enough to clear the flank, and becomes an eligible two-step Drive (+0.022 m); the
+        //   release path this scene used to reach is covered by dead_end / pressed_into_wall / heading_release_holds_position.
+        //   What the scene asserts is the escape: a contact-free motion that buys room — a Release (v <= 0) or that Drive.
+        CHECK("release_side_on: Release with v<=0, or a contact-free Drive (wheel-coupled)",
+              (d.mode == Decision::Mode::Release and d.v <= 0.f) or d.mode == Decision::Mode::Drive);
         CHECK("release_side_on buys room", sd1 > sd0 + 1e-3f and d.log_p_cont > log_p_continuable(s.in, s.pp, s.in.pose));
         CHECK("release_side_on clear", p_contact_of(s, d.v, d.w) <= s.pp.risk_eps);
     }

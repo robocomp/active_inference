@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <tuple>
 
 using namespace rc::policy;
 static int fails = 0;
@@ -106,6 +107,26 @@ int main()
         };
         CHECK("hold (control): without the gate the plan is judged after the hold — a failed prediction", not run(false));
         CHECK("hold: with the gate a 0.1 s hold lays no trap and judges nothing", run(true));
+    }
+    // ---- Live fix 2 ruling 2: MEASURED EVIDENCE OVERRIDES A TRAP. A failed prediction lays no trap whose disc meets the
+    //   region the caller vetoes (the active Doorway's measured corridor); the Release still happens.
+    {
+        auto run = [&](bool veto) {
+            Navigator n6;
+            n6.set_goal(goal, grid, open_room, zero, {goal.p}, body.circumscribed_radius());
+            if (veto) n6.set_trap_veto([](const Eigen::Vector2f&, float) { return true; });
+            PolicyInput q = in; q.pose = {start, 0.f}; q.v_now = q.w_now = 0.f;
+            Navigator::Step last;
+            bool released = false, vetoed = false;
+            for (double t = 600.0; t < 604.0; t += 0.05)    // the base never moves: the Drive prediction fails
+            { q.now_s = t; last = n6.step(q, pp); released = released or last.d.prediction_failed; vetoed = vetoed or last.trap_vetoed; }
+            return std::tuple{released, n6.traps().size(), vetoed};
+        };
+        const auto [rel0, traps0, v0] = run(false);
+        const auto [rel1, traps1, v1] = run(true);
+        CHECK("trap veto (control): without it the failed prediction lays a trap", rel0 and traps0 > 0);
+        CHECK("trap veto: with it the Release still happens", rel1);
+        CHECK("trap veto: ...and no trap is laid (reported as vetoed)", traps1 == 0 and v1);
     }
     // ---- I2: set_goal clears a world queued for the previous goal (Place -> Doorway keeps the corridor)
     {

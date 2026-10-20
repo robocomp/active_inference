@@ -267,6 +267,16 @@ int main()
         CHECK("gate: a 0.6 s gap with no hold noted still interrupts", gate.on_tick(10.8));
     }
 
+    // ---- 4h. Live fix 2 ruling 2: does a trap disc meet the measured doorway's corridor? (only an opening the body fits)
+    {
+        const RoomGap g{{0.f, 0.f}, {0.f, 1.f}, 0.80f};
+        CHECK("trap/corridor: a disc in the doorway mouth meets it", disc_meets_doorway_corridor(g, {0.f, -0.3f}, 0.32f, 1.0f, 2.55f, 0.23f, 0.568f));
+        CHECK("trap/corridor: a disc 1 m to the side does not", not disc_meets_doorway_corridor(g, {1.2f, -0.3f}, 0.32f, 1.0f, 2.55f, 0.23f, 0.568f));
+        CHECK("trap/corridor: a disc touching the corridor's edge does", disc_meets_doorway_corridor(g, {0.17f + 0.30f, 0.5f}, 0.32f, 1.0f, 2.55f, 0.23f, 0.568f));
+        const RoomGap narrow{{0.f, 0.f}, {0.f, 1.f}, 0.50f};   // narrower than the body: no evidence that it fits
+        CHECK("trap/corridor: an opening narrower than the body vetoes nothing", not disc_meets_doorway_corridor(narrow, {0.f, -0.3f}, 0.32f, 1.0f, 2.55f, 0.23f, 0.568f));
+    }
+
     // ---- 4g. Live fix 2 (tourP3 retry): a ROOM-FRAME CHANGE (room_concept moved the robot's RT into the next room's frame,
     //   pose (0.60,2.57) -> (-3.64,0.41) in one cycle) resets the policy, and it drives again only on returns registered
     //   in the NEW frame — the contact buffer still held sweeps registered in the old one ("9 returns inside the body").
@@ -358,6 +368,7 @@ int main()
         CHECK("limits: v_max = min(policy, capability)", near(b.v_max, 0.5f) and near(b.w_max, 0.8f));
         CHECK("limits: a_rot = a_lin / (axes/2) (the wheels' acceleration bound)", near(b.a_rot, 0.5f / 0.259f, 1e-4f) and near(b.d_rot, 1.0f / 0.259f, 1e-4f));
         CHECK("limits: deadband — capability when published, the provisional config otherwise", near(b.v_min_eff, 0.04f) and near(b.w_min_eff, 0.12f));
+        CHECK("limits: the axle length for the wheel-coupled rollout (Live fix 2)", near(b.track_m, 0.518f));
     }
 
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);

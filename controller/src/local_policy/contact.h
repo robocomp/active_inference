@@ -9,6 +9,8 @@
 
 namespace rc::policy
 {
+// ★ Live fix 2: the two WHEELS ramp (v -+ w L/2, each at a_lin growing / d_lin shrinking — BaseLimits::track_m), not v
+//   and w independently; a pure straight or in-place command ramps as before. (contact.cpp)
 // ★ Rollouts start from the CURRENT velocity (review ruling). Each axis ramps from v0 / w0 to the command at a_lin /
 //   a_rot when its speed grows and at d_lin / d_rot when it shrinks (through zero on a sign change), the command is
 //   applied for hold_s (the ramp lies inside it: a command at the edge of the dynamic window is reached exactly at

@@ -25,6 +25,7 @@
 #include "local_policy.h"
 #include "unseen_contact.h"
 #include "policy_tick_gate.h"
+#include "doorway_corridor.h"
 #include "../controller_runtime_types.h"
 #include "../../../common/interaction_anchor/relative_pose.h"
 
@@ -47,10 +48,6 @@ struct SessionCommand { float adv = 0.f, side = 0.f, rot = 0.f; };
 // A differential base: side is always 0 (Shadow's bridge drops it). rot = +w (see the header note).
 inline SessionCommand to_session_command(float v, float w) { return {v, 0.f, w}; }
 
-// The measured doorway gap in the ROOM frame. RelPose is the opening in the robot frame (x right, y forward): x.head<2>
-// the centre, x.z() the wall's yaw psi; its normal (the direction of travel through it) is (-sin psi, cos psi) there
-// (controller_anchor_servo.h anchor_cross_geometry).
-struct RoomGap { Eigen::Vector2f centre = Eigen::Vector2f::Zero(), normal{0.f, 1.f}; float width = 0.f; };
 inline RoomGap gap_in_room(const rc::interaction::RelPose& gap_robot, float width, const ControllerRobotPose& robot)
 {
     const Eigen::Rotation2Df R(robot.theta);
@@ -104,22 +101,6 @@ inline GoalSpec doorway_goal(const RoomGap& g, const GoalAdapterParams& p)
     for (float t = -half; t <= half + 1e-4f; t += step) s.points.push_back(g.centre + p.past_m * g.normal + t * lat);
     if (s.points.empty()) s.points.push_back(g.centre + p.past_m * g.normal);
     return s;
-}
-
-// ★ THE DOORWAY'S CORRIDOR (where the cost-to-go may run through the opening). The planner's map is the CURRENT room plus
-//   the door passage's corridor, which ends 2.0 m past the aperture (controller_door_passage.h: the cross standpoint 1.2 m
-//   + 0.8 m) — the far room is not in it, so a goal line past the standoff would be unreachable on it. The opening AS
-//   MEASURED supplies the rest: a strip along the normal from back_m before the gap centre to ahead_m past it, over the
-//   lateral span the body's centre can occupy (|lateral| <= half the width - the inscribed radius; empty when the
-//   opening is narrower than the body, so a too-narrow door stays unreachable). Contact with the jambs, the leaf and the
-//   far room is the LiDAR's to judge (contact model), not this strip's.
-inline bool in_doorway_corridor(const RoomGap& g, const Eigen::Vector2f& p, float back_m, float ahead_m, float inscribed_radius_m)
-{
-    const float half = 0.5f * g.width - inscribed_radius_m;
-    if (not (half >= 0.f)) return false;
-    const Eigen::Vector2f d = p - g.centre;
-    const float s = d.dot(g.normal), lat = std::abs(d.dot(Eigen::Vector2f(-g.normal.y(), g.normal.x())));
-    return s >= -back_m and s <= ahead_m and lat <= half;
 }
 
 // ★ The cost-to-go's FREE test on the planner's map (review I4: driving is gated on this field, not on the A*): the body's
@@ -295,6 +276,7 @@ inline BaseLimits base_limits(const BaseLimitsInputs& in)
     const float lever = 0.5f * std::max(0.05f, in.axes_length_m.value_or(in.fallback_axes_m));
     b.a_rot = b.a_lin / lever;
     b.d_rot = b.d_lin / lever;
+    b.track_m = 2.f * lever;   // Live fix 2: the axle the wheel-coupled rollout ramps the wheels on
     b.v_min_eff = in.cap_v_min.value_or(in.cfg_v_min);
     b.w_min_eff = in.cap_w_min.value_or(in.cfg_w_min);
     return b;

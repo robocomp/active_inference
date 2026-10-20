@@ -185,7 +185,18 @@ float obstacle_hull_distance(const rc::RobotFootprint& body, const Pose2& pose, 
 std::vector<Pose2> rollout(const Pose2& start, float v0, float w0, float v, float w, float hold_s, const BaseLimits& b, float dt)
 {
     const float H = std::max(0.f, hold_s);
-    const Profile pv = profile(v0, v, H, b.a_lin, b.d_lin), pw = profile(w0, w, H, b.a_rot, b.d_rot);
+    // ★ Live fix 2 ruling 1 — DIFFERENTIAL-DRIVE DYNAMICS. The two WHEELS (v -+ w L/2) ramp toward the command's wheel
+    //   speeds, each at the per-wheel rates a_lin (speed growing) / d_lin (shrinking, through zero on a sign change): a
+    //   straight acceleration is both wheels at a_lin, so a_lin IS the per-wheel bound (and d_lin likewise). Converted back,
+    //   v = (vl + vr)/2, w = (vr - vl)/L. A pure command keeps its old ramp (straight: a_lin; in place: a_lin / (L/2) =
+    //   a_rot); a COMBINED change shares the wheels' budget — tourP3's back-left -> forward-right reversal took 1.6-1.8 s
+    //   on the base against the ~0.6-0.7 s independent axes predicted, and the plan was judged a failed prediction.
+    //   L = track_m, else the axle the limits imply (2 a_lin / a_rot); without one, independent axes (legacy).
+    const float L = b.track_m > 0.f ? b.track_m : (b.a_lin > 0.f and b.a_rot > 0.f ? 2.f * b.a_lin / b.a_rot : 0.f);
+    const bool wheels = L > 0.f;
+    const float hl = 0.5f * L;
+    const Profile pv = wheels ? profile(v0 - w0 * hl, v - w * hl, H, b.a_lin, b.d_lin) : profile(v0, v, H, b.a_lin, b.d_lin);
+    const Profile pw = wheels ? profile(v0 + w0 * hl, v + w * hl, H, b.a_lin, b.d_lin) : profile(w0, w, H, b.a_rot, b.d_rot);
     const float T = std::max(pv.end(), pw.end());
     std::vector<Pose2> out{start};
     Pose2 cur = start;
@@ -193,7 +204,8 @@ std::vector<Pose2> rollout(const Pose2& start, float v0, float w0, float v, floa
     while (t < T - 1e-6f)
     {
         t = std::min(t + dt, T);
-        const float nv = pv.travelled(t), nw = pw.travelled(t);
+        const float a1 = pv.travelled(t), a2 = pw.travelled(t);   // wheels: left / right travel; legacy: distance / angle
+        const float nv = wheels ? 0.5f * (a1 + a2) : a1, nw = wheels ? (a2 - a1) / L : a2;
         const float dist = nv - sv, dth = nw - sw;
         sv = nv; sw = nw;
         // exact arc: chord = dist * sinc(dth/2) along the mean heading; the straight limit falls out as dth -> 0

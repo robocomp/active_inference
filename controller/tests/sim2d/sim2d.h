@@ -247,8 +247,21 @@ struct Base
         while (not queue.empty() and queue.front().t <= t + 1e-6f) { cmd_v = queue.front().v; cmd_w = queue.front().w; queue.pop_front(); }
         const float tv = std::abs(cmd_v) < deadband_scale * lim.v_min_eff ? 0.f : std::clamp(cmd_v, -lim.v_max, lim.v_max);
         const float tw = std::abs(cmd_w) < deadband_scale * lim.w_min_eff ? 0.f : std::clamp(cmd_w, -lim.w_max, lim.w_max);
-        v = ramp(v, tv, lim.a_lin, lim.d_lin, dt);
-        w = ramp(w, tw, lim.a_rot, lim.d_rot, dt);
+        // ★ Live fix 2 ruling 1: the plant is a DIFFERENTIAL base — its two wheels ramp at a_lin / d_lin each (the same
+        //   coupling as rc::policy::rollout); L = track_m, else the axle the limits imply (2 a_lin / a_rot).
+        const float L = lim.track_m > 0.f ? lim.track_m : (lim.a_lin > 0.f and lim.a_rot > 0.f ? 2.f * lim.a_lin / lim.a_rot : 0.f);
+        if (L > 0.f)
+        {
+            const float hl = 0.5f * L;
+            const float vl = ramp(v - w * hl, tv - tw * hl, lim.a_lin, lim.d_lin, dt);
+            const float vr = ramp(v + w * hl, tv + tw * hl, lim.a_lin, lim.d_lin, dt);
+            v = 0.5f * (vl + vr); w = (vr - vl) / L;
+        }
+        else
+        {
+            v = ramp(v, tv, lim.a_lin, lim.d_lin, dt);
+            w = ramp(w, tw, lim.a_rot, lim.d_rot, dt);
+        }
     }
 };
 

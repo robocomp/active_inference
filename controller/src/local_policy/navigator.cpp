@@ -21,6 +21,7 @@ void Navigator::set_goal(const Goal& goal, const CostToGo::Grid& grid, std::func
     failed_predictions_ = 0;
     // ★ Task 8 I2: a world queued for the PREVIOUS goal must not overwrite this goal's free/extra (e.g. a doorway's corridor)
     world_pending_ = false; pending_free_ = {}; pending_extra_ = {};
+    trap_veto_ = {};
     monitor_.reset();
     plan_ = Plan{};
     build();
@@ -183,6 +184,7 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     assert((t.c - in.pose.p).norm() > t.r);              // the disc never contains the robot's current position
     if (std::ranges::any_of(goals_, [&](const Eigen::Vector2f& g) { return (g - t.c).norm() < t.r; }))
     { if (swap) rebuild_on_new_world(); s.trap_suppressed_by_goal = true; return s; }
+    if (trap_veto_ and trap_veto_(t.c, t.r)) { if (swap) rebuild_on_new_world(); s.trap_vetoed = true; return s; }   // Live fix 2
     traps_.push_back(t);
     build();
     monitor_.reset();                    // (c): the field changed — old values are not comparable

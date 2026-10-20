@@ -112,3 +112,13 @@ Also check, because they are first-time live facts:
 * **returns_age_s** stays below 0.5 s (above it the policy is Blind and holds).
 * **unseen contact**: `n_unseen` > 0 only after a real block; frequent hypotheses in open floor = the odometry sign/scale
   or the command latency (`[Policy] CommandLatencyS`, PROVISIONAL 0.06) is wrong.
+
+## LIVE TODO (not part of the smoke run): measure `[Policy] CommandLatencyS`
+
+`CommandLatencyS = 0.06` is PROVISIONAL (the Task-6 harness's plant value). tourP3 suggests the base kept the previous
+turn ~0.3 s after a reversal command (blurred by the odometry sample age). Measure it on open floor with the base probe:
+a step command (`probe 0 0.6 2` after rest, then `probe 0 -0.6 2`), and read the delay from the command's send time to the
+first change of `robot_current_angular_speed` in the probe's CSV, correcting for `robot_current_speed_timestamp` age
+(measure_deadband.py has the plumbing). Also read the effective per-wheel deceleration from a forward -> reverse step:
+tourP3's body decel was ~0.56 m/s^2 against the capability's 1.0 (the wheel-coupled rollout uses d_lin per wheel).
+

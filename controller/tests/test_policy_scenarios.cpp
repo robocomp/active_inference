@@ -30,6 +30,7 @@
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/navigator.h"
 #include "../src/local_policy/unseen_contact.h"
+#include "../src/local_policy/doorway_corridor.h"
 
 #include <charconv>
 #include <chrono>
@@ -167,6 +168,15 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     Navigator nav;
     nav.set_goal(goal, mapfree.grid, [&mapfree](const V2& c) { return mapfree(c); }, [](const V2&) { return 0.f; }, goal_points(goal),
                  B.circumscribed_radius());
+    // ★ Live fix 2 ruling 2 — as the controller does: a Doorway's measured opening (at least the body's width) vetoes traps
+    if (goal.kind == Goal::Kind::Doorway)
+    {
+        const RoomGap gap{goal.p, goal.normal.normalized(), goal.width};
+        rc::RobotFootprint bare = B; bare.set_safety_margin(0.f);
+        const float body_w = bare.support_radius(0.f, V2(1.f, 0.f)) + bare.support_radius(0.f, V2(-1.f, 0.f));
+        const float r_ins = bare.inscribed_radius(), ahead = kThroughS + 2.f * goal.tol_xy + 0.05f;
+        nav.set_trap_veto([gap, r_ins, body_w, ahead](const V2& c, float r) { return disc_meets_doorway_corridor(gap, c, r, 1.0f, ahead, r_ins, body_w); });
+    }
     res.build_ms += nav.last_build_ms(); ++res.builds;
     PolicyParams pp;
     Pose2 truth = start;

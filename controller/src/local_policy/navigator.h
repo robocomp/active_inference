@@ -55,6 +55,7 @@ public:
     struct Trap { Eigen::Vector2f c = Eigen::Vector2f::Zero(), dir = Eigen::Vector2f::Zero(); float r = 0.f; };
     struct Step { Decision d{.mode = Decision::Mode::Stuck, .why = {}}; std::optional<Trap> trap; bool trap_suppressed_by_goal = false; bool unreachable = false;
                   bool world_applied = false;            // Task 8: a pending update_world() was applied this step
+                  bool trap_vetoed = false;              // Live fix 2: the trap met the caller's veto region (measured corridor)
                   bool replanned = false; float plan_remaining_p = 0.f;
                   bool completed_early = false;          // the previous plan reached its predicted outcome early (success)
                   bool trap_no_route_evidence = false; };  // a failed prediction where the field could not point the way
@@ -86,6 +87,10 @@ public:
     //   the pending prediction are dropped WITHOUT being judged (the base did not execute them, so their outcome says
     //   nothing about the world): no failed prediction, no trap. Goal, field and traps are kept.
     void interrupt() { plan_ = Plan{}; monitor_.reset(); }
+    // ★ Live fix 2 ruling 2 — MEASURED EVIDENCE OVERRIDES A TRAP. veto(c, r) true = a trap disc there contradicts direct
+    //   evidence that the body fits (the active Doorway's MEASURED corridor, an opening at least the body's width): the
+    //   failed prediction still forces its Release, but no trap is laid (Step::trap_vetoed). Cleared by set_goal.
+    void set_trap_veto(std::function<bool(const Eigen::Vector2f&, float)> veto) { trap_veto_ = std::move(veto); }
 
     const CostToGo& field() const { return field_; }
     const std::vector<Trap>& traps() const { return traps_; }
@@ -119,6 +124,7 @@ private:
     std::function<bool(const Eigen::Vector2f&)> pending_free_;
     std::function<float(const Eigen::Vector2f&)> pending_extra_;
     bool world_pending_ = false;
+    std::function<bool(const Eigen::Vector2f&, float)> trap_veto_;
     void rebuild_on_new_world();   // build() + re-baseline the monitor and the plan phase (update_world)
 };
 }  // namespace rc::policy

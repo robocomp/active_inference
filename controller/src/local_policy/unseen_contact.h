@@ -66,13 +66,28 @@ public:
         tested_ = false; blocked_ = false;
         float cv = 0.f, cw = 0.f, xv = v_meas, xw = w_meas;
         bool pos_v = false, neg_v = false, pos_w = false, neg_w = false;
+        // ★ Live fix 2 ruling 1: the FREE base's prediction uses the same differential-drive dynamics as rc::policy::rollout —
+        //   the two wheels (v -+ w L/2) ramp at a_lin / d_lin each. With independent axes a reversal the real (coupled) base
+        //   executes more slowly read as "blocked" and froze phantom hypotheses behind the robot (harness, narrow doorway).
+        const float L = b.track_m > 0.f ? b.track_m : (b.a_lin > 0.f and b.a_rot > 0.f ? 2.f * b.a_lin / b.a_rot : 0.f);
+        const float hl = 0.5f * L;
+        float xl = xv - xw * hl, xr = xv + xw * hl, dl = 0.f, dr = 0.f;
         for (const CmdSeg& g : in_force)
         {
             const float tv = std::abs(g.v) >= b.v_min_eff ? g.v : 0.f, tw = std::abs(g.w) >= b.w_min_eff ? g.w : 0.f;
             pos_v = pos_v or tv > 0.f; neg_v = neg_v or tv < 0.f; pos_w = pos_w or tw > 0.f; neg_w = neg_w or tw < 0.f;
-            cv += ramp(xv, tv, b.a_lin, b.d_lin, g.dt, &xv);
-            cw += ramp(xw, tw, b.a_rot, b.d_rot, g.dt, &xw);
+            if (L > 0.f)
+            {
+                dl += ramp(xl, tv - tw * hl, b.a_lin, b.d_lin, g.dt, &xl);
+                dr += ramp(xr, tv + tw * hl, b.a_lin, b.d_lin, g.dt, &xr);
+            }
+            else
+            {
+                cv += ramp(xv, tv, b.a_lin, b.d_lin, g.dt, &xv);
+                cw += ramp(xw, tw, b.a_rot, b.d_rot, g.dt, &xw);
+            }
         }
+        if (L > 0.f) { cv = 0.5f * (dl + dr); cw = (dr - dl) / L; }
         if ((cv > 0.f and pos_v) or (cv < 0.f and neg_v))
         {
             const int k = cv > 0.f ? 0 : 1;
