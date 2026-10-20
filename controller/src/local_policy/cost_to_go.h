@@ -29,6 +29,11 @@ public:
     // radius) reads the nearest finite cell's value PLUS the Euclidean distance to its centre: continuous, and progress
     // stays meaningful. Poses in the last row/column are clamped into the grid. +inf only if no finite cell exists.
     float at(const Eigen::Vector2f& p) const;
+    // ★ Live fix 3 ruling — PRICE CHOOSES THE ROUTE, METRES MEASURE PROGRESS. The Dijkstra minimises the PRICED cost
+    //   (length x (1 + density), blocked traps) — at() — and stores beside it the PATH LENGTH (metres) of that cheapest
+    //   route to the goal: at_length(), interpolated / fallen back exactly as at() (the same cells decide). Progress and the
+    //   ProgressMonitor read at_length(); reachability (+inf = disconnected) stays on the priced field.
+    float at_length(const Eigen::Vector2f& p) const;
     int seeded_goal_cells() const { return seeded_; }   // goal cells seeded by the last build (0 = goal fully blocked)
     // ★ RESOLUTION of a field DIFFERENCE f(a) - f(b) between two points `separation_m` apart (round-5 ruling: a decrease
     //   below it is not a measurement of progress). Derivation: the 8-connected Dijkstra measures the octile metric,
@@ -51,7 +56,8 @@ public:
 private:
     struct Trap { Eigen::Vector2f p; float radius, cost; };
     Grid g_{{0.f, 0.f}, 1.f, 0, 0};
-    std::vector<float> field_;
+    std::vector<float> field_, length_;
+    float sample(const std::vector<float>& vals, const Eigen::Vector2f& p) const;   // at()'s rule, values from `vals`
     std::vector<Trap> traps_, blocked_;
     int seeded_ = 0;
     std::vector<char> free_;

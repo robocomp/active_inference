@@ -21,7 +21,8 @@ void CostToGo::build(const Grid& g, const std::function<bool(const Eigen::Vector
     const int w = g.w, h = g.h;
     seeded_ = 0;
     field_.assign(static_cast<size_t>(std::max(0, w) * std::max(0, h)), kInf);
-    if (w <= 0 or h <= 0 or g.cell <= 0.f) { field_.clear(); free_.clear(); return; }   // consistent: at() -> +inf
+    length_.assign(field_.size(), kInf);
+    if (w <= 0 or h <= 0 or g.cell <= 0.f) { field_.clear(); length_.clear(); free_.clear(); return; }   // consistent: at() -> +inf
     auto centre = [&](int i, int j) { return Eigen::Vector2f(g.origin.x() + i * g.cell, g.origin.y() + j * g.cell); };
 
     // ★ Free test and entry cost are evaluated ONCE per cell: the callbacks (distance-field lookups) dominate a
@@ -61,6 +62,7 @@ void CostToGo::build(const Grid& g, const std::function<bool(const Eigen::Vector
         if (bi < 0) continue;
         if (field_[static_cast<size_t>(bj) * w + bi] != 0.f) ++seeded_;
         field_[static_cast<size_t>(bj) * w + bi] = 0.f;
+        length_[static_cast<size_t>(bj) * w + bi] = 0.f;
         pq.push({0.f, bj * w + bi});
     }
     constexpr float kDiag = 1.41421356f;
@@ -83,27 +85,33 @@ void CostToGo::build(const Grid& g, const std::function<bool(const Eigen::Vector
                 if (diag and (std::isinf(enter[j * w + ni]) or std::isinf(enter[nj * w + i]))) continue;
                 const float len = g.cell * (diag ? kDiag : 1.f);
                 const float nd = d + len * (1.f + 0.5f * (enter[idx] + e));
-                if (nd < field_[nidx]) { field_[nidx] = nd; pq.push({nd, nidx}); }
+                if (nd < field_[nidx]) { field_[nidx] = nd; length_[nidx] = length_[idx] + len; pq.push({nd, nidx}); }
             }
     }
 }
 
-float CostToGo::at(const Eigen::Vector2f& p) const
+float CostToGo::at(const Eigen::Vector2f& p) const { return sample(field_, p); }
+float CostToGo::at_length(const Eigen::Vector2f& p) const { return sample(length_, p); }
+
+// The PRICED field decides which cells count (finite / free / nearest); the values come from `vals` (the price itself, or
+// the route length of the same cheapest route) — so both read the SAME cells, and are finite at the same points.
+float CostToGo::sample(const std::vector<float>& vals_in, const Eigen::Vector2f& p) const
 {
-    if (field_.empty() or g_.w < 2 or g_.h < 2) return kInf;
+    if (field_.empty() or vals_in.size() != field_.size() or g_.w < 2 or g_.h < 2) return kInf;
     const float fx = (p.x() - g_.origin.x()) / g_.cell, fy = (p.y() - g_.origin.y()) / g_.cell;
     if (fx < 0.f or fy < 0.f or fx > g_.w - 1 + 1e-3f or fy > g_.h - 1 + 1e-3f) return kInf;   // off-grid
     const int i0 = std::min(static_cast<int>(std::floor(fx)), g_.w - 2), j0 = std::min(static_cast<int>(std::floor(fy)), g_.h - 2);
     const float tx = fx - i0, ty = fy - j0;
-    const float v00 = field_[static_cast<size_t>(j0) * g_.w + i0], v10 = field_[static_cast<size_t>(j0) * g_.w + i0 + 1];
-    const float v01 = field_[static_cast<size_t>(j0 + 1) * g_.w + i0], v11 = field_[static_cast<size_t>(j0 + 1) * g_.w + i0 + 1];
-    if (std::isfinite(v00) and std::isfinite(v10) and std::isfinite(v01) and std::isfinite(v11))
+    const size_t k00 = static_cast<size_t>(j0) * g_.w + i0, k10 = k00 + 1, k01 = k00 + g_.w, k11 = k01 + 1;
+    const float v00 = vals_in[k00], v10 = vals_in[k10], v01 = vals_in[k01], v11 = vals_in[k11];
+    if (std::isfinite(field_[k00]) and std::isfinite(field_[k10]) and std::isfinite(field_[k01]) and std::isfinite(field_[k11]))
         return (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty;
     const float vals[4] = {v00, v10, v01, v11};
+    const bool fin[4] = {std::isfinite(field_[k00]), std::isfinite(field_[k10]), std::isfinite(field_[k01]), std::isfinite(field_[k11])};
     const float wts[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};   // larger weight = nearer
     float best = kInf, bw = -1.f;
     for (int k = 0; k < 4; ++k)
-        if (std::isfinite(vals[k]) and wts[k] > bw) { bw = wts[k]; best = vals[k]; }
+        if (fin[k] and wts[k] > bw) { bw = wts[k]; best = vals[k]; }
     if (std::isfinite(best)) return best;
     // ★ only when the four are NON-FREE (inside the inscribed-radius margin); free-but-inf cells are truly unreachable
     if (free_[static_cast<size_t>(j0) * g_.w + i0] or free_[static_cast<size_t>(j0) * g_.w + i0 + 1] or
@@ -115,8 +123,9 @@ float CostToGo::at(const Eigen::Vector2f& p) const
     auto visit = [&](int i, int j)
     {
         if (i < 0 or j < 0 or i >= g_.w or j >= g_.h) return;
-        const float v = field_[static_cast<size_t>(j) * g_.w + i];
-        if (not std::isfinite(v)) return;
+        const size_t k = static_cast<size_t>(j) * g_.w + i;
+        if (not std::isfinite(field_[k])) return;
+        const float v = vals_in[k];
         const float d = (Eigen::Vector2f(g_.origin.x() + i * g_.cell, g_.origin.y() + j * g_.cell) - p).norm();
         if (d < best_d) { best_d = d; best_v = v; }
     };

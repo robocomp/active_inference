@@ -382,7 +382,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     const rc::policy::Navigator::Step st = policy_nav_.step(in, pp);
     const double step_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     const Decision &d = st.d;
-    const float f_here = policy_nav_.field().at(pose.p);
+    const float f_here = policy_nav_.field().at(pose.p);             // the PRICED cost-to-go (route choice, reachability)
+    const float route_here = policy_nav_.field().at_length(pose.p);  // the cheapest route's METRES (progress; Live fix 3)
 
     // ── act
     const bool moving = d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release;
@@ -425,9 +426,9 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     if (mode_i != policy_last_mode_ or st.trap or st.unreachable)
     {
         std::println("[policy] {} -> {} ({}): {} | v {:+.2f} w {:+.2f} P(contact) {:.3f} cont {:.2f} prog {:+.3f} m eligible {} | "
-                     "field {:.2f} m, {} returns + {} unseen, age {:.2f} s{}{}",
+                     "field {:.2f} m (route {:.2f} m), {} returns + {} unseen, age {:.2f} s{}{}",
                      who, rc::policy::mode_name(d.mode), goal_kind_name(spec.goal.kind), d.why, d.v, d.w, 1.f - std::exp(d.log_p_safe),
-                     d.log_p_cont, d.progress_m, d.eligible, f_here, n_lidar, returns.size() - n_lidar, returns_age_s,
+                     d.log_p_cont, d.progress_m, d.eligible, f_here, route_here, n_lidar, returns.size() - n_lidar, returns_age_s,
                      st.trap ? std::format(" | TRAP at ({:.2f},{:.2f}) r {:.2f}", st.trap->c.x(), st.trap->c.y(), st.trap->r) : std::string(),
                      st.unreachable ? " | UNREACHABLE" : "");
         policy_last_mode_ = mode_i;
@@ -441,7 +442,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         if (policy_csv_.is_open())
             policy_csv_ << "t_ms,who,goal_kind,mode,v,w,log_p_safe,log_p_cont,progress_m,eligible,replanned,plan_remaining_p,"
                            "prediction_failed,trap,unreachable,world_applied,x,y,yaw,v_meas,w_meas,odo_valid,field_m,n_returns,n_unseen,"
-                           "returns_age_s,latency_s,step_ms,why\n";
+                           "returns_age_s,latency_s,step_ms,route_m,why\n";
     }
     if (policy_csv_.is_open())
     {
@@ -455,11 +456,12 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                     << (st.trap ? 1 : 0) << ',' << (st.unreachable ? 1 : 0) << ',' << (st.world_applied ? 1 : 0) << ','
                     << pose.p.x() << ',' << pose.p.y() << ',' << pose.yaw << ',' << v_meas << ',' << w_meas << ',' << (odo_valid_ ? 1 : 0) << ','
                     << f_here << ',' << n_lidar << ',' << (returns.size() - n_lidar) << ',' << returns_age_s << ',' << latency_s << ','
-                    << step_ms << ',' << why << '\n';
+                    << step_ms << ',' << route_here << ',' << why << '\n';
         policy_csv_.flush();
     }
     if (out.why.empty()) out.why = d.why;
     out.field_m = f_here;
+    out.route_m = route_here;
     return out;
 }
 

@@ -297,6 +297,19 @@ int main()
         o.finish();
         CHECK("inside_body: an ordinary decision is not flagged", not decide(o.in, o.pp).sensing_contradiction);
     }
+    { // progress_is_metres (Live fix 3 ruling): a high-risk band (density 200) right in front, unavoidable: the price
+      // falls by ~40 m across 0.2 m of it, the route by 0.2 m. Progress is the route's metres — bounded by what the
+      // base can travel in the plan (v_max x its holds), never the priced drop.
+        Scene s; s.goal.p = {0.f, 3.f};
+        V g = s.goal.p;
+        s.field.build(kGrid, [](const V&) { return true; },
+                      [](const V& q) { return (q.y() >= 0.3f and q.y() <= 0.5f) ? 200.f : 0.f; }, std::span<const V>(&g, 1));
+        s.finish();
+        const auto d = decide(s.in, s.pp); print("progress_is_metres", d);
+        const float bound = s.in.base.v_max * 2.f * s.pp.horizon_s + 0.05f;
+        CHECK("progress_is_metres: Drive", d.mode == Decision::Mode::Drive);
+        CHECK("progress_is_metres: progress <= v_max x the plan's holds (metres, not price)", d.progress_m > 0.f and d.progress_m <= bound);
+    }
     { // latency_advances_start (review ruling): moving forward at 0.5 m/s toward a wall 0.45 m ahead of the nose
       // (y = 0.68), goal beyond it (map lag). With latency 0 the policy can keep 0.33 m/s (0.40 m to rest); with
       // 0.3 s of latency the base has coasted 0.15 m before the command bites, and only a slower speed stops short.

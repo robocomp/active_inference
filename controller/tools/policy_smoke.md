@@ -58,7 +58,7 @@ $B/room_concept/estimation_scripts/scripts/run_crossing.sh $D collect
 
 `policy_decisions.csv` (one row per control cycle; classic-locale CSV): `t_ms, who, goal_kind, mode, v, w, log_p_safe,
 log_p_cont, progress_m, eligible, replanned, plan_remaining_p, prediction_failed, trap, unreachable, world_applied, x, y,
-yaw, v_meas, w_meas, odo_valid, field_m, n_returns, n_unseen, returns_age_s, latency_s, step_ms, why`.
+yaw, v_meas, w_meas, odo_valid, field_m, n_returns, n_unseen, returns_age_s, latency_s, step_ms, route_m, why` (`field_m` = the priced cost-to-go, `route_m` = the cheapest route's metres — progress is measured on `route_m`).
 
 ```bash
 python3 - $D/policy_decisions.csv <<'EOF'

@@ -40,26 +40,26 @@ void Navigator::rebuild_on_new_world()
 {
     build();
     if (monitor_.pending and monitor_.release) monitor_.reset();
-    else if (monitor_.pending) monitor_.f0 = field_.at(monitor_.p0.p);
-    if (plan_.active) plan_.phase_f0 = field_.at(plan_.phase_p0);
+    else if (monitor_.pending) monitor_.f0 = field_.at_length(monitor_.p0.p);
+    if (plan_.active) plan_.phase_f0 = field_.at_length(plan_.phase_p0);
 }
 
 Eigen::Vector2f Navigator::downhill(const Eigen::Vector2f& p) const
 {
     const float h = grid_.cell;
-    const float fx1 = field_.at(p + Eigen::Vector2f(h, 0.f)), fx0 = field_.at(p - Eigen::Vector2f(h, 0.f));
-    const float fy1 = field_.at(p + Eigen::Vector2f(0.f, h)), fy0 = field_.at(p - Eigen::Vector2f(0.f, h));
+    const float fx1 = field_.at_length(p + Eigen::Vector2f(h, 0.f)), fx0 = field_.at_length(p - Eigen::Vector2f(h, 0.f));
+    const float fy1 = field_.at_length(p + Eigen::Vector2f(0.f, h)), fy0 = field_.at_length(p - Eigen::Vector2f(0.f, h));
     if (std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0))
     {
         const Eigen::Vector2f g(fx1 - fx0, fy1 - fy0);
         if (g.norm() > 1e-6f) return -g.normalized();
     }
     // beside a wall a neighbour is +inf: the lowest of 32 probes 0.15 m away
-    float best = field_.at(p); Eigen::Vector2f dir = Eigen::Vector2f::Zero();
+    float best = field_.at_length(p); Eigen::Vector2f dir = Eigen::Vector2f::Zero();
     for (int k = 0; k < 32; ++k)
     {
         const Eigen::Vector2f u(std::cos(2.f * kPiF * k / 32.f), std::sin(2.f * kPiF * k / 32.f));
-        const float v = field_.at(p + 0.15f * u);
+        const float v = field_.at_length(p + 0.15f * u);
         if (v < best) { best = v; dir = u; }
     }
     return dir;
@@ -98,7 +98,7 @@ bool Navigator::phase_outcome_reached(const PolicyInput& in) const
         return false;
     }
     // translating phase: its predicted descent realized within the field's resolution
-    const float f = field_.at(in.pose.p);
+    const float f = field_.at_length(in.pose.p);
     if (not (std::isfinite(f) and std::isfinite(plan_.phase_f0)) or not (descent > 0.f)) return false;
     const float res = field_.resolution_m((in.pose.p - plan_.phase_p0).norm());
     return plan_.phase_f0 - f >= descent - res;
@@ -128,7 +128,7 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
             if (plan_.phase == 1 and plan_.has2)
             {
                 plan_.phase = 2; plan_.phase_t0 = in.now_s; plan_.phase_yaw0 = in.pose.yaw; plan_.phase_p0 = in.pose.p;
-                plan_.phase_f0 = field_.at(in.pose.p);
+                plan_.phase_f0 = field_.at_length(in.pose.p);
                 continue;
             }
             completed = true; break;
@@ -166,16 +166,16 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     {
         plan_ = Plan{.active = true, .mode = s.d.mode, .v1 = s.d.v, .w1 = s.d.w, .dur1 = s.d.plan_dur1, .v2 = s.d.plan_v2, .w2 = s.d.plan_w2,
                      .dur2 = s.d.plan_dur2, .has2 = s.d.plan_has_cont, .t0 = in.now_s, .d = s.d,
-                     .phase = 1, .phase_t0 = in.now_s, .phase_yaw0 = in.pose.yaw, .phase_f0 = field_.at(in.pose.p), .phase_p0 = in.pose.p};
+                     .phase = 1, .phase_t0 = in.now_s, .phase_yaw0 = in.pose.yaw, .phase_f0 = field_.at_length(in.pose.p), .phase_p0 = in.pose.p};
     }
     if (not s.d.prediction_failed) { if (swap) rebuild_on_new_world(); return s; }
     ++failed_predictions_;
     // ★ round 5: no route evidence where the field cannot point the way (non-finite here, or a slope below what the
     //   field resolves over two cells) — the Release stands, no trap
-    const float f_here = field_.at(in.pose.p);
+    const float f_here = field_.at_length(in.pose.p);
     const float h = grid_.cell;
-    const float fx1 = field_.at(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = field_.at(in.pose.p - Eigen::Vector2f(h, 0.f));
-    const float fy1 = field_.at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = field_.at(in.pose.p - Eigen::Vector2f(0.f, h));
+    const float fx1 = field_.at_length(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = field_.at_length(in.pose.p - Eigen::Vector2f(h, 0.f));
+    const float fy1 = field_.at_length(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = field_.at_length(in.pose.p - Eigen::Vector2f(0.f, h));
     const bool slope_defined = std::isfinite(f_here) and std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0)
                                and std::hypot(fx1 - fx0, fy1 - fy0) > field_.resolution_m(2.f * h);
     if (not slope_defined) { if (swap) rebuild_on_new_world(); s.trap_no_route_evidence = true; return s; }

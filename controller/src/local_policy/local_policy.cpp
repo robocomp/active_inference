@@ -56,6 +56,9 @@ std::optional<float> target_yaw(const Goal& g, const Pose2& at)
 //   Place with `yaw`: the same heading term weighted by w = tol_xy / max(tol_xy, d), d = distance of the START to
 //   the goal — full weight inside the tolerance, fading as 1/d beyond it (no new constant: the goal's own
 //   tolerance is the scale), so the heading emerges from the path far away and is held near the goal.
+// ★ Live fix 3 ruling: progress is the decrease of the cheapest route's LENGTH in metres (CostToGo::at_length) — the price
+//   (risk density, traps) chose that route, it does not measure how far along it the robot got (tourP3: +243 "m" of
+//   progress across a priced band).
 float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
 {
     const Goal& g = *in.goal;
@@ -63,9 +66,9 @@ float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
     float pr = 0.f, wt = 1.f;
     if (g.kind != Goal::Kind::Heading)
     {
-        const float fa = in.field->at(a.p);
+        const float fa = in.field->at_length(a.p);
         if (not std::isfinite(fa)) return 0.f;
-        const float fb = in.field->at(b.p);
+        const float fb = in.field->at_length(b.p);
         if (not std::isfinite(fb)) return -kInf;
         pr = fa - fb;
         // ★ ROUND 5 (field resolution): a decrease the field cannot resolve (CostToGo::resolution_m — octile metric +
@@ -91,7 +94,7 @@ bool arrived(const PolicyInput& in, const Pose2& at)
         const auto ty = target_yaw(g, at);
         return not ty or std::abs(wrap(*ty - at.yaw)) <= g.tol_yaw;
     }
-    const bool xy = g.kind == Goal::Kind::Doorway ? in.field->at(at.p) <= g.tol_xy : (at.p - g.p).norm() <= g.tol_xy;
+    const bool xy = g.kind == Goal::Kind::Doorway ? in.field->at_length(at.p) <= g.tol_xy : (at.p - g.p).norm() <= g.tol_xy;
     return xy and (not g.yaw or std::abs(wrap(*g.yaw - at.yaw)) <= g.tol_yaw);
 }
 
@@ -295,13 +298,13 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     else if (monitored and mon->pending and in.now_s - mon->t0 >= double(mon->tau) - 1e-3)
     {
         const CostToGo& pf = in.progress_field ? *in.progress_field : *in.field;   // round 8: trap-free
-        const float f_now = pf.at(in.pose.p);
+        const float f_now = pf.at_length(in.pose.p);
         const float realized = mon->f0 - f_now;
         // ★ ROUND 7: the instrument's full resolution — field interpolation and the pose noise seen through the slope
         const float slope = [&] {
             const float h = pf.cell();
-            const float fx1 = pf.at(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = pf.at(in.pose.p - Eigen::Vector2f(h, 0.f));
-            const float fy1 = pf.at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = pf.at(in.pose.p - Eigen::Vector2f(0.f, h));
+            const float fx1 = pf.at_length(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = pf.at_length(in.pose.p - Eigen::Vector2f(h, 0.f));
+            const float fy1 = pf.at_length(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = pf.at_length(in.pose.p - Eigen::Vector2f(0.f, h));
             if (not (std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0))) return 1.f;
             return 0.5f * std::hypot(fx1 - fx0, fy1 - fy0) / h; }();
         const float res_field = pf.resolution_m((in.pose.p - mon->p0.p).norm());
@@ -449,12 +452,12 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             // the prediction this Drive commits to: its plan's descent, judged when its HOLDS complete
             mon->reset();
             mon->pending = true; mon->t0 = in.now_s; mon->tau = p.horizon_s * (best_drive->has_cont ? 2.f : 1.f);
-            mon->f0 = pf.at(in.pose.p); mon->dF_pred = mon->f0 - pf.at(hold_end.p); mon->p0 = in.pose;
+            mon->f0 = pf.at_length(in.pose.p); mon->dF_pred = mon->f0 - pf.at_length(hold_end.p); mon->p0 = in.pose;
             if (not std::isfinite(mon->dF_pred)) mon->reset();
         }
         Decision dd = finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
         // ★ round 5: each phase's predicted END STATE (turn and descent), for the Navigator's early completion
-        const float f0 = pfp ? pfp->at(in.pose.p) : NAN, f1 = pfp ? pfp->at(hold_e1.p) : NAN, f2 = pfp ? pfp->at(hold_end.p) : NAN;
+        const float f0 = pfp ? pfp->at_length(in.pose.p) : NAN, f1 = pfp ? pfp->at_length(hold_e1.p) : NAN, f2 = pfp ? pfp->at_length(hold_end.p) : NAN;
         dd.plan_turn1 = wrap(hold_e1.yaw - in.pose.yaw);
         dd.plan_descent1 = std::isfinite(f0) and std::isfinite(f1) ? f0 - f1 : 0.f;
         dd.plan_turn2 = best_drive->has_cont ? wrap(hold_end.yaw - hold_e1.yaw) : 0.f;

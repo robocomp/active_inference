@@ -172,6 +172,29 @@ int main()
         std::printf("build 200x200: %.2f ms\n", ms);
         CHECK("build_reachable", c.reachable({0.5f, 0.5f}));
     }
+    { // Live fix 3 ruling: PRICE CHOOSES THE ROUTE, METRES MEASURE PROGRESS. A 6 x 6 m open area, goal at (5, 3), start (1, 3).
+      // (i) an UNAVOIDABLE band (x 2.9 .. 3.1, full height) of density 5: the route crosses it; priced = 4 + 0.2 x 5 = 5 m,
+      //     its length 4 m. (ii) a high band (density 200) with a gap at y > 5: the cheapest route DETOURS through the gap;
+      //     the length is the detour's metres, the priced value equals it (no risk on the detour).
+        const CostToGo::Grid g{{0.f, 0.f}, 0.05f, 121, 121};
+        const std::vector<Eigen::Vector2f> goal{{5.f, 3.f}};
+        CostToGo band;
+        band.build(g, [](const Eigen::Vector2f&) { return true; },
+                   [](const Eigen::Vector2f& p) { return (p.x() >= 2.9f and p.x() <= 3.1f) ? 5.f : 0.f; }, goal);
+        std::printf("  unavoidable band: priced %.3f m, route length %.3f m\n", band.at({1.f, 3.f}), band.at_length({1.f, 3.f}));
+        CHECK("route length: the route's METRES (4.0), not its price (5.0)", std::abs(band.at_length({1.f, 3.f}) - 4.f) < 0.05f
+              and std::abs(band.at({1.f, 3.f}) - 5.f) < 0.1f);
+        CostToGo det;
+        det.build(g, [](const Eigen::Vector2f&) { return true; },
+                  [](const Eigen::Vector2f& p) { return (p.x() >= 2.9f and p.x() <= 3.1f and p.y() < 5.f) ? 200.f : 0.f; }, goal);
+        const float L = det.at_length({1.f, 3.f}), P = det.at({1.f, 3.f});
+        const float detour = 2.f * std::hypot(2.f, 2.05f);   // via the gap's lower edge (3, 5.05)
+        std::printf("  detour: priced %.3f m, route length %.3f m (straight 4.0, detour ~%.2f)\n", P, L, detour);
+        CHECK("route length: the cheapest route detours — length ~ the detour (> 4 m), equal to its price", L > 5.f and std::abs(L - P) < 0.05f
+              and std::abs(L - detour) < 0.3f);
+        CHECK("route length: 0 at the goal", det.at_length({5.f, 3.f}) < 0.05f);
+        CHECK("route length: +inf off-grid, like the price", std::isinf(det.at_length({-1.f, 3.f})));
+    }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);
     return fails ? 1 : 0;
 }

@@ -199,7 +199,8 @@ public:
     // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
     enum class PolicyVerdict { Driving, Arrived, Held, Unreachable };
     struct PolicyTick { PolicyVerdict verdict = PolicyVerdict::Held; std::string why; bool stuck = false;
-                        float field_m = std::numeric_limits<float>::infinity(); };
+                        float field_m = std::numeric_limits<float>::infinity();    // priced cost-to-go at the robot
+                        float route_m = std::numeric_limits<float>::infinity(); };  // the cheapest route's metres (Live fix 3)
     // `also_free`: space the planner's map does not hold but the goal may be reached through (a doorway's measured corridor,
     // goal_adapter.h in_doorway_corridor); empty = the map alone.
     PolicyTick policy_tick(const rc::policy::GoalSpec &spec, const std::string &who, const ControllerRobotPose &robot_pose,
