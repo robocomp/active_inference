@@ -76,12 +76,13 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
 //   is a Release whatever the candidates promise; realized > resolution -> success, the record resets. A prediction
 //   no larger than the resolution says nothing and is dropped. No timer or constant beyond the plan's own tau and the
 //   field's resolution.
-//   API: the caller owns one ProgressMonitor per goal and passes it to every decide(); it calls reset() whenever the
-//   field is rebuilt (a trap, a new goal: old field values are not comparable). Heading goals (no field) are not
+//   API: the caller owns one ProgressMonitor per goal and passes it to every decide(); it calls reset() on a goal change
+//   or a rebuild of the TRAP-FREE progress_field (the only field the monitor reads; laying a trap does not touch it).
+//   Any Release clears the pending prediction (review M1). Navigator (navigator.h) does all of this. Heading goals (no field) are not
 //   monitored. decide() without a monitor behaves as before round 6.
 struct ProgressMonitor
 {
-    bool pending = false, failed = false;
+    bool pending = false;
     double t0 = 0.0; float tau = 0.f, dF_pred = 0.f, f0 = 0.f; Pose2 p0{};
     void reset() { *this = ProgressMonitor{}; }
 };

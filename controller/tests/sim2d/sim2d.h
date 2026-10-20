@@ -135,6 +135,45 @@ inline std::vector<Beam> scan(const World& w, const Pose2& truth, std::mt19937& 
     return out;
 }
 
+// ★ REVIEW H1: Shadow's two LiDARs at their real mounts, robot frame (x right, y forward): helios (0, -0.155), bpearl
+//   (0, +0.140). The mast (0.10 x 0.10 m at the robot centre, the proto's boundingObject; full height in 2-D) occludes the
+//   body's own beams: helios cannot see forward through it, bpearl backward (~36 deg sectors). A hit is returned as a
+//   ROBOT-FRAME point (the controller's sensors report in the robot frame; the caller re-expresses it on the pose it
+//   believes at capture).
+struct Mount { V2 xy; };   // robot frame
+inline std::vector<V2> scan_mount(const World& w, const Pose2& truth, const Mount& m, std::mt19937& rng, float sigma_r = 0.02f,
+                                  int n = 1440, float max_r = 10.f, float mast_half = 0.05f)
+{
+    std::normal_distribution<float> nd(0.f, sigma_r);
+    const V2 fwd(std::cos(truth.yaw), std::sin(truth.yaw)), right(std::sin(truth.yaw), -std::cos(truth.yaw));
+    const V2 o = truth.p + m.xy.x() * right + m.xy.y() * fwd;
+    std::vector<V2> out;
+    out.reserve(n);
+    for (int k = 0; k < n; ++k)
+    {
+        const float a = truth.yaw + 2.f * kPi * float(k) / float(n);
+        const V2 d(std::cos(a), std::sin(a));
+        const float r = w.raycast(o, d, max_r);
+        if (not (r < max_r)) continue;
+        // mast occlusion: the ray in the robot frame (slab test against the square |x|,|y| <= mast_half)
+        const V2 dl(d.dot(right), d.dot(fwd));
+        float t0 = 0.f, t1 = r; bool hit = true;
+        for (int ax = 0; ax < 2 and hit; ++ax)
+        {
+            const float oo = m.xy[ax], dd = dl[ax];
+            if (std::abs(dd) < 1e-9f) { if (std::abs(oo) > mast_half) hit = false; continue; }
+            float ta = (-mast_half - oo) / dd, tb = (mast_half - oo) / dd;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+            if (t0 > t1) hit = false;
+        }
+        if (hit) continue;                                         // the beam ends on the robot's own mast
+        const float rr = r + nd(rng);
+        out.push_back(m.xy + rr * dl);                             // robot frame
+    }
+    return out;
+}
+
 // The true contact test: any surface point inside the BARE hull at `pose`. Broad phase by the circumscribed radius.
 struct ContactTester
 {
@@ -150,27 +189,40 @@ struct ContactTester
             if ((q - pose.p).squaredNorm() <= (r_circ + 0.5f) * (r_circ + 0.5f)) m = std::min(m, rc::policy::hull_distance(*body, pose, q));
         return m;
     }
+    // ★ REVIEW (minor): the contact ORACLE uses RobotFootprint::contains_yaw on the bare polygon — independent of the
+    //   policy's own signed-distance geometry.
     bool touches(const Pose2& pose) const
     {
         for (const auto& q : pts)
-            if ((q - pose.p).squaredNorm() <= r_circ * r_circ and rc::policy::hull_distance(*body, pose, q) < 0.f) return true;
+            if ((q - pose.p).squaredNorm() <= r_circ * r_circ and bare.contains_yaw(q, pose.p, pose.yaw)) return true;
         return false;
     }
+    rc::RobotFootprint bare = [this] { rc::RobotFootprint b = *body; b.set_safety_margin(0.f); return b; }();
 };
 
 // ★ Differential base: commands reach the wheels `latency_s` after they are sent; each axis ramps to the command
 //   (a when the speed grows, d when it shrinks, through zero on a sign change); a command inside the deadband is not
 //   executed (the axis goes to 0, as the real base does when it ignores it).
+// ★ REVIEW H2 — PLANT MISMATCH (the policy keeps its nominal model): each command's latency is latency_s + U(-jitter,
+//   +jitter) (jitter 20 ms: order is kept, the tick is 50 ms); the deadband is the model's x deadband_scale (drawn per run
+//   in [0.8, 1.2]); the executed velocity slips: v_exec = v (1 + e), e ~ N(0, slip_sigma) per tick, independently for w
+//   (slip_sigma 0.05 = 5 %). Odometry measures the TRUE motion.
 struct Base
 {
     BaseLimits lim;
-    float latency_s = 0.06f;
+    float latency_s = 0.06f, jitter_s = 0.f, deadband_scale = 1.f, slip_sigma = 0.f;
+    std::mt19937* rng = nullptr;
     float v = 0.f, w = 0.f;        // actual
     float cmd_v = 0.f, cmd_w = 0.f; // the command currently in effect at the wheels
     struct Cmd { float t, v, w; };
     std::deque<Cmd> queue;
 
-    void send(float t_now, float v_cmd, float w_cmd) { queue.push_back({t_now + latency_s, v_cmd, w_cmd}); }
+    void send(float t_now, float v_cmd, float w_cmd)
+    {
+        float lat = latency_s;
+        if (rng and jitter_s > 0.f) lat += std::uniform_real_distribution<float>(-jitter_s, jitter_s)(*rng);
+        queue.push_back({t_now + lat, v_cmd, w_cmd});
+    }
 
     static float ramp(float x, float target, float a, float d, float dt)
     {
@@ -193,8 +245,8 @@ struct Base
     void step_velocity(float t, float dt)
     {
         while (not queue.empty() and queue.front().t <= t + 1e-6f) { cmd_v = queue.front().v; cmd_w = queue.front().w; queue.pop_front(); }
-        const float tv = std::abs(cmd_v) < lim.v_min_eff ? 0.f : std::clamp(cmd_v, -lim.v_max, lim.v_max);
-        const float tw = std::abs(cmd_w) < lim.w_min_eff ? 0.f : std::clamp(cmd_w, -lim.w_max, lim.w_max);
+        const float tv = std::abs(cmd_v) < deadband_scale * lim.v_min_eff ? 0.f : std::clamp(cmd_v, -lim.v_max, lim.v_max);
+        const float tw = std::abs(cmd_w) < deadband_scale * lim.w_min_eff ? 0.f : std::clamp(cmd_w, -lim.w_max, lim.w_max);
         v = ramp(v, tv, lim.a_lin, lim.d_lin, dt);
         w = ramp(w, tw, lim.a_rot, lim.d_rot, dt);
     }

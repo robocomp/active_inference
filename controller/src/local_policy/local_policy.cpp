@@ -235,7 +235,7 @@ float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, cons
 float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pose2& from)
 {
     if (in0.body == nullptr) return log_p_continuable_cells(in0, p, from);   // (it answers the no-body case itself)
-    const auto cells = surface_cells(in0.returns, in0.pose.p, bearing_bin_rad(*in0.body));
+    const auto cells = denoise_returns(in0.returns);
     PolicyInput in = in0; in.returns = cells;
     return log_p_continuable_cells(in, p, from);
 }
@@ -246,11 +246,8 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     if (in0.body == nullptr or in0.goal == nullptr) { d.why = "no body or no goal"; return d; }
     // ---- a NaN/inf anywhere would silently poison every probability: no prediction, stop
     if (not finite_input(in0)) { d.mode = Decision::Mode::Blind; d.why = "non-finite input"; return d; }
-    // ★ returns -> surface cells ONCE per cycle (contact.h): every candidate and continuation sweeps the same cells.
-    //   Sensor origin for the bearing bins = the robot centre at the DECISION pose `pose` (where the returns were
-    //   re-expressed; the live buffer's returns come from nearby poses and two off-centre LiDARs — an approximation
-    //   whose error is the bin's arc, not a bias in range).
-    const auto cells = surface_cells(in0.returns, in0.pose.p, bearing_bin_rad(*in0.body));
+    // ★ returns -> denoised obstacles ONCE per cycle (contact.h): every candidate and continuation sweeps the same set.
+    const auto cells = denoise_returns(in0.returns);
     PolicyInput in = in0; in.returns = cells;
     const Goal& g = *in.goal;
     if (g.kind != Goal::Kind::Heading and in.field == nullptr) { d.why = "place/doorway goal without a field"; return d; }
@@ -350,6 +347,9 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     {
         d.mode = m; d.v = c.v; d.w = c.w; d.log_p_safe = c.lps; d.log_p_cont = c.lpc; d.progress_m = c.prog2; d.why = std::move(why);
         d.prediction_failed = m == Decision::Mode::Release and prediction_failed;
+        // ★ M1 (review): ANY Release abandons the plan the pending prediction was about — clear it; "stuck" is the
+        //   failure of an UNINTERRUPTED Drive plan.
+        if (m == Decision::Mode::Release and mon != nullptr) mon->reset();
         return d;
     };
 
@@ -463,6 +463,9 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
                 if (lps > least_lps) { least_lps = lps; least = &c; }
             }
         char buf[160];
+        // ★ ledgered MUST-FIX (reached in the Task-6 review-fix harness, OU variant): every reverse candidate can read
+        //   log P = -inf (certain contact: "nothing touches now" leaves no offset in range), and then no least exists.
+        if (least == nullptr) { d.why = "stuck: every release candidate certainly touches (P(contact) = 1): hold"; return d; }
         std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= release_risk_max %.2f: hold", words(least->v, least->w).c_str(), 1.f - std::exp(least_lps), p.release_risk_max);
         d.why = buf; return d;
     }

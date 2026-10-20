@@ -1,8 +1,9 @@
 // Task 2 (local-motion policy): rollout + swept-body contact probability.
 // Review fix round 1: rollouts ramp from the current velocity (v0, w0); cells carry their hits' scatter and are
 //   swept as support segments (jamb_tip_not_overconfident, turn_in_place_from_speed_sees_wall_ahead).
-// Fix round 4: returns are merged into surface cells (kSurfaceCellM) and the shared-offset integral is adaptive;
-//   `surface_cells` and `epsilon_integral_accuracy` (vs a 4001-node reference, sigma_j/sigma_s in [0.05, 5]) cover them.
+// Review fix round 1 (Task 6): returns are DENOISED one by one (denoise_returns: each moved onto its local line along the
+//   normal, anisotropic sigma); the shared-offset integral is adaptive (`epsilon_integral_accuracy` vs a 4001-node
+//   reference, sigma_j/sigma_s in [0.05, 5]).
 // Build+run (from controller/):
 //   g++ -std=c++23 -O2 -Wall -Wextra -I/usr/include/eigen3 -I../common tests/test_policy_contact.cpp src/local_policy/contact.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tpc && /tmp/tpc
@@ -150,24 +151,27 @@ int main()
     { // jamb_tip_not_overconfident (review ruling): four hits spread along a jamb tip END (x = 0.30..0.33 at
       // y = 0.60, 1 cm apart — two 0.04 m cells), body threading forward past the tip with its flank (0.284) 1.6 cm
       // from the extreme hit. The cells must not be surer than that extreme hit alone with sigma_r.
-      // ★ a mean-only cell at 0.305 with sigma_r/sqrt(2) reads 2.4 sigma where the extreme hit reads 1.6: that is
-      //   what the support segment + projected scatter correct.
+      // ★ review fix round 1: denoising moves each hit along the fitted line's NORMAL only (y here), so the extreme hit
+      //   stays at x = 0.30 and keeps its raw sigma ALONG the line (x = the clearance direction for the flank).
         std::vector<Return> tip; for (float x : {0.30f, 0.31f, 0.32f, 0.33f}) tip.push_back({{x, 0.60f}, 0.01f, 1.f});
         const std::vector<Return> extreme{{{0.30f, 0.60f}, 0.01f, 1.f}};
         const auto sw = rollout(origin, 0.f, 0.f, 0.5f, 0.f, 1.f, b, 0.05f);
         const float Pt = 1.f - std::exp(log_p_no_contact(body(), sw, tip, sxy, syaw, kGeom));
         const float Pe = 1.f - std::exp(log_p_no_contact(body(), sw, extreme, sxy, syaw, kGeom));
-        const auto c = surface_cells(tip, origin.p, bearing_bin_rad(body()));
-        std::printf("  jamb tip: P(4 hits as cells)=%.4f P(extreme hit alone)=%.4f ; cells %zu, cell0 sigma=%.4f sxx=%.2e syy=%.2e\n", Pt, Pe, c.size(), c[0].sigma, c[0].sxx, c[0].syy);
+        const auto c = denoise_returns(tip);
+        std::printf("  jamb tip: P(4 hits denoised)=%.4f P(extreme hit alone)=%.4f ; extreme: (%.4f,%.4f) sigma_perp=%.4f sxx=%.2e syy=%.2e\n", Pt, Pe, c[0].p.x(), c[0].p.y(), c[0].sigma, c[0].sxx, c[0].syy);
+        CHECK("jamb tip: the extreme hit stays the extreme (no pull along the surface)", std::abs(c[0].p.x() - 0.30f) < 1e-5f);
         CHECK("jamb_tip_not_overconfident", Pt >= Pe - 1e-3f);
-        // and on a flat wall seen along its normal the scatter is orthogonal to the clearance: nothing changes
+        // and inside a flat wall the obstacle is tight and isotropic (the surface continues on both sides: its along-line
+        // error does not matter); only its ENDS keep the raw sigma along the wall
         std::vector<Return> dense; for (float y = -1.f; y <= 2.f; y += 0.01f) dense.push_back({{0.40f, y}, 0.01f, 1.f});
-        const auto flat = surface_cells(dense, origin.p, bearing_bin_rad(body()));
-        // ★ bearing cells: the one straddling the wall's normal (y ~ 0) is the square-on face
+        const auto flat = denoise_returns(dense);
         const auto& fc = *std::ranges::min_element(flat, {}, [](const Return& q) { return std::abs(q.p.y()); });
-        std::printf("  flat wall cell (1 cm hits): sigma=%.4f sxx=%.2e syy=%.2e\n", fc.sigma, fc.sxx, fc.syy);
-        // (the noise removal leaves a residue ~1e-4 of the along-wall variance across it: float rounding of the PSD clamp)
-        CHECK("flat wall scatter is along the wall", fc.sxx < 1e-3f * fc.syy and fc.syy > 1e-5f);
+        std::printf("  flat wall return (1 cm hits): sigma_perp=%.4f sxx=%.2e syy=%.2e\n", fc.sigma, fc.sxx, fc.syy);
+        const auto& end = *std::ranges::max_element(flat, {}, [](const Return& q) { return q.p.y(); });
+        std::printf("  flat wall END return: sigma_perp=%.4f sxx=%.2e syy=%.2e\n", end.sigma, end.sxx, end.syy);
+        CHECK("flat wall: interior tight and isotropic, the end keeps sigma_r along the wall",
+              fc.sigma < 0.005f and fc.sxx == 0.f and fc.syy == 0.f and std::abs(end.syy + end.sigma * end.sigma - 1e-4f) < 1e-7f and end.sxx < 1e-9f);
     }
     { // p_exist scales the hit; a far return is ignored
         const std::vector<Return> hit{{{0.f, 0.3f}, 0.01f, 1.f}}, ghost{{{0.f, 0.3f}, 0.01f, 0.1f}}, far{{{50.f, 0.f}, 0.01f, 1.f}};
@@ -176,39 +180,28 @@ int main()
         CHECK("p_exist=0.1 hits ~10x less", g > a and std::abs(g - std::log(0.9f)) < 0.02f);
         CHECK("far return ignored", log_p_no_contact(body(), sw, far, sxy, syaw, kGeom) == 0.f);
     }
-    { // surface_cells (D1, Task 6: BEARING aggregation about the sensor origin). n hits of one surface on one bearing are
-      // ONE obstacle at their mean with sigma_r / sqrt(n); a farther surface on the same bearing is hidden by a certain
-      // nearer one but not by an uncertain one; existence combines; range noise is removed from the scatter.
-        const Eigen::Vector2f o(0.f, 0.f);
-        const float bw = bearing_bin_rad(body());
+    { // denoise_returns (review fix round 1): every LiDAR return stays its own obstacle, moved along its local line's
+      // normal; isolated ones untouched; another source (aggregate = false) passed through.
         std::vector<Return> r;
-        for (int i = 0; i < 4; ++i) r.push_back({{0.300f + 0.002f * i, 0.011f + 0.005f * i}, 0.01f, 1.f});   // one surface, one bearing
-        r.push_back({{0.60f, 0.03f}, 0.01f, 1.f});                                                            // behind it: hidden
-        r.push_back({{0.f, 0.50f}, 0.01f, 1.f});                                                              // alone on its bearing
-        r.push_back({{-0.30f, 0.01f}, 0.01f, 0.5f}); r.push_back({{-0.302f, 0.012f}, 0.01f, 0.5f});           // two half-sure hits
-        r.push_back({{-0.60f, 0.02f}, 0.01f, 1.f});                                                           // behind uncertain: kept
-        const auto c = surface_cells(r, o, bw);
-        std::printf("  cells: %zu (bin %.4f rad)\n", c.size(), bw);
-        for (const auto& q : c) std::printf("    (%.4f,%.4f) sigma=%.4f p=%.3f\n", q.p.x(), q.p.y(), q.sigma, q.p_exist);
-        auto near = [&](float x, float y) { return std::ranges::find_if(c, [&](const Return& q) { return (q.p - Eigen::Vector2f(x, y)).norm() < 0.01f; }); };
-        CHECK("surface_cells count (hidden surface dropped, uncertain one keeps the one behind)", c.size() == 4);
-        const auto c0 = near(0.303f, 0.0185f);
-        CHECK("surface_cells mean + sigma/sqrt(n)", c0 != c.end() and std::abs(c0->p.x() - 0.303f) < 1e-4f and std::abs(c0->p.y() - 0.0185f) < 1e-4f and std::abs(c0->sigma - 0.005f) < 1e-5f);
-        const auto c1 = near(0.f, 0.50f);
-        CHECK("surface_cells isolated hit keeps sigma_r", c1 != c.end() and std::abs(c1->sigma - 0.01f) < 1e-6f and c1->p_exist == 1.f);
-        const auto c2 = near(-0.301f, 0.011f);
-        CHECK("surface_cells existence combines", c2 != c.end() and std::abs(c2->p_exist - 0.75f) < 1e-5f);
-        CHECK("surface_cells behind an uncertain surface is kept", near(-0.60f, 0.02f) != c.end() and near(0.60f, 0.03f) == c.end());
-        CHECK("surface_cells idempotent", surface_cells(c, o, bw).size() == 4);
-        // R1 (round 3): a hypothesis of another source (aggregate = false) on the same bearing as LiDAR hits 6.5 cm behind
-        // it stays its OWN obstacle (it used to capture them into one certain cell at its own place)
-        std::vector<Return> mix{{{0.f, 0.235f}, 0.005f, 0.001f, 0.f, 0.f, 0.f, false}};
-        for (int i = -5; i <= 5; ++i) mix.push_back({{0.01f * i, 0.30f}, 0.02f, 1.f});
-        const auto m = surface_cells(mix, o, bw);
-        const bool kept = std::ranges::any_of(m, [](const Return& q) { return not q.aggregate and q.p == Eigen::Vector2f(0.f, 0.235f) and q.p_exist == 0.001f; });
-        const bool wall_kept = std::ranges::none_of(m, [](const Return& q) { return q.aggregate and q.p.y() < 0.29f; });
-        CHECK("surface_cells: a hypothesis is never merged with LiDAR hits", kept and wall_kept and m.size() >= 2);
-        // grid alignment no longer splits a surface: a noisy wall (sigma_r 0.02) 0.309 m away straddling any boundary
+        for (int i = 0; i < 6; ++i) r.push_back({{0.300f + (i % 2 ? 0.004f : -0.004f), 0.01f * i}, 0.01f, 1.f});   // a noisy line x = 0.30
+        r.push_back({{0.f, 0.50f}, 0.01f, 1.f});                                                                    // isolated
+        r.push_back({{0.f, 0.235f}, 0.005f, 0.001f, 0.f, 0.f, 0.f, false});                                         // a hypothesis
+        const auto c = denoise_returns(r);
+        std::printf("  denoised: %zu of %zu\n", c.size(), r.size());
+        for (const auto& q : c) std::printf("    (%.4f,%.4f) sigma=%.4f sxx=%.2e sxy=%.2e syy=%.2e p=%.3f agg=%d\n", q.p.x(), q.p.y(), q.sigma, q.sxx, q.sxy, q.syy, q.p_exist, int(q.aggregate));
+        CHECK("denoise: one obstacle per return", c.size() == r.size());
+        bool on_line = true, along_kept = true;
+        for (std::size_t i = 0; i < c.size(); ++i)
+            if (c[i].aggregate and c[i].p.y() < 0.06f)
+            {
+                on_line = on_line and std::abs(c[i].p.x() - 0.300f) < 0.0035f;
+                along_kept = along_kept and std::ranges::any_of(r, [&](const Return& q) { return std::abs(q.p.y() - c[i].p.y()) < 2e-3f; });
+            }
+        CHECK("denoise: the line's hits move onto it, along its normal only", on_line and along_kept);
+        const auto iso = std::ranges::find_if(c, [](const Return& q) { return q.aggregate and std::abs(q.p.y() - 0.50f) < 1e-6f; });
+        CHECK("denoise: an isolated return keeps its position and sigma_r", iso != c.end() and iso->p.x() == 0.f and iso->sigma == 0.01f and iso->sxx == 0.f);
+        CHECK("denoise: a hypothesis (aggregate = false) passes untouched", std::ranges::any_of(c, [](const Return& q) { return not q.aggregate and q.p == Eigen::Vector2f(0.f, 0.235f) and q.p_exist == 0.001f; }));
+        // a noisy wall (sigma_r 0.02) 0.309 m away: no denoised return inside the face by more than its own sigma x 3
         std::mt19937 g(1); std::normal_distribution<float> n(0.f, 0.02f);
         std::vector<Return> wall;
         for (int k = 0; k < 1440; ++k)
@@ -219,10 +212,61 @@ int main()
             if (t > 3.f) continue;
             wall.push_back({d * (t + n(g)), 0.02f, 1.f});
         }
-        float worst = 1.f;
-        for (const auto& q : surface_cells(wall, o, bw)) if (std::abs(q.p.y()) < 0.5f) worst = std::min(worst, q.p.x() - 0.309f);
-        std::printf("  noisy wall (sigma_r 0.02, 0.309 m): worst cell %.4f m inside the face (grid cells read 0.053)\n", -worst);
-        CHECK("surface_cells: no noise-tail cell inside a noisy wall", -worst < 0.015f);
+        float worst = 1.f, worst_z = 0.f;
+        for (const auto& q : denoise_returns(wall)) if (std::abs(q.p.y()) < 0.5f) { worst = std::min(worst, q.p.x() - 0.309f); worst_z = std::max(worst_z, (0.309f - q.p.x()) / q.sigma); }
+        std::printf("  noisy wall (sigma_r 0.02, 0.309 m): worst denoised return %.4f m inside the face, %.2f of its sigma\n", -worst, worst_z);
+        CHECK("denoise: no noise-tail return inside a noisy wall", -worst < 0.01f and worst_z < 4.f);
+    }
+    { // long_wall_no_gaps (review C1): a parallel noisy wall x = 0.309 with hits to 3 m. Every 0.1 m of wall that holds a
+      // raw return holds a denoised obstacle (the representation loses no observed wall; the bearing cells left a 0.58 m
+      // gap at y 1.04-1.62), and within the look-ahead (|y| <= 1.6 m) every 0.1 m is covered.
+        std::mt19937 g(2); std::normal_distribution<float> n(0.f, 0.02f);
+        std::vector<Return> wall;
+        for (int k = 0; k < 1440; ++k)
+        {
+            const float a = 6.2831853f * k / 1440.f; const Eigen::Vector2f d(std::cos(a), std::sin(a));
+            if (d.x() <= 0.f) continue;
+            const float t = 0.309f / d.x();
+            if (t > 3.f) continue;
+            wall.push_back({d * (t + n(g)), 0.02f, 1.f});
+        }
+        const auto c = denoise_returns(wall);
+        int raw_bins = 0, lost = 0, gaps_near = 0;
+        for (float y0 = -3.f; y0 < 3.f; y0 += 0.1f)
+        {
+            auto in = [&](const Return& q) { return q.p.y() >= y0 and q.p.y() < y0 + 0.1f; };
+            const bool raw = std::ranges::any_of(wall, in), den = std::ranges::any_of(c, in);
+            raw_bins += raw; lost += raw and not den; gaps_near += std::abs(y0 + 0.05f) <= 1.6f and not den;
+        }
+        std::printf("  long wall: %zu returns -> %zu obstacles; 0.1 m bins with returns %d, lost %d, uncovered within 1.6 m %d\n", wall.size(), c.size(), raw_bins, lost, gaps_near);
+        CHECK("long_wall_no_gaps", lost == 0 and gaps_near == 0);
+    }
+    { // sensor_offset_irrelevant (review C2): the same wall scanned from the helios mount (y -0.155) and the bpearl mount
+      // (y +0.140), robot at the origin facing +y sliding forward beside it: P within 0.01.
+        auto scan_from = [](float sy, unsigned seed)
+        {
+            std::mt19937 g(seed); std::normal_distribution<float> n(0.f, 0.02f);
+            std::vector<Return> w; const Eigen::Vector2f o(0.f, sy);
+            for (int k = 0; k < 1440; ++k)
+            {
+                const float a = 6.2831853f * k / 1440.f; const Eigen::Vector2f d(std::cos(a), std::sin(a));
+                if (d.x() <= 0.f) continue;
+                const float t = 0.34f / d.x();
+                if (t > 4.f) continue;
+                w.push_back({o + d * (t + n(g)), 0.02f, 1.f});
+            }
+            return w;
+        };
+        float worst = 0.f;
+        for (auto [v, w] : {std::pair{0.25f, 0.f}, std::pair{0.5f, 0.3f}, std::pair{-0.25f, 0.f}})
+        {
+            const auto sw = rollout(origin, 0.f, 0.f, v, w, 1.f, b, 0.05f);
+            const float Ph = 1.f - std::exp(log_p_no_contact(body(), sw, scan_from(-0.155f, 3u), sxy, syaw, kGeom));
+            const float Pb = 1.f - std::exp(log_p_no_contact(body(), sw, scan_from(+0.140f, 4u), sxy, syaw, kGeom));
+            std::printf("  sensor offset v=%+.2f w=%+.2f : P(helios)=%.4f P(bpearl)=%.4f\n", v, w, Ph, Pb);
+            worst = std::max(worst, std::abs(Ph - Pb));
+        }
+        CHECK("sensor_offset_irrelevant (|dP| <= 0.01)", worst <= 0.01f);
     }
     { // epsilon_integral_accuracy: the adaptive shared-offset integral vs a brute-force 4001-node trapezoid, over
       // sigma_j / sigma_s in [0.05, 5] (random clearance sets, with and without p_exist < 1), and on real sweeps:
@@ -257,7 +301,7 @@ int main()
                 // ★ D1 (Task 6): bearing cells carry extent (support segments) the mean-only reference below does not
                 //   model; this check is about the INTEGRAL, so the library is fed the same cells with the scatter
                 //   stripped and both sides build identical terms.
-                auto cells = surface_cells(wall_x(0.30f, -2.f, 2.f, sr), origin.p, bearing_bin_rad(f));
+                auto cells = denoise_returns(wall_x(0.30f, -2.f, 2.f, sr));
                 for (auto& q : cells) q.sxx = q.sxy = q.syy = 0.f;
                 for (const auto& q : cells)
                 {

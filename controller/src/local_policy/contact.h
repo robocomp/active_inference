@@ -25,41 +25,38 @@ float signed_distance(const rc::RobotFootprint& body, const Pose2& pose, const E
 // Same against the BARE hull (margin 0): negative = the point is inside the robot itself.
 float hull_distance(const rc::RobotFootprint& body, const Pose2& pose, const Eigen::Vector2f& q);
 
-// ★ SURFACE CELLS — BEARING aggregation (controller ruling D1, Task 6; replaces the square-grid cells of fix round 4).
-//   LiDAR returns are MEASUREMENTS of surfaces: n hits of one surface pin it down better, not worse. The range noise
-//   lies ALONG THE RAY, so the grid cells of fix round 4 cut each surface's noise band across 2-3 bins whenever sigma_r
-//   is comparable to the cell (measured in the Task-6 closed loop at sigma_r 0.02: single-hit "tail" cells 4-5 cm
-//   inside a wall, treated as independent obstacles — tour3_1_leg3 Stuck at t = 0, P(contact) 0.04-0.10 for straight
-//   driving 8 cm from a wall). Now:
-//   · BINS are bearings about the SENSOR ORIGIN `origin` (the caller passes where the scan was taken: decide() uses the
-//     robot centre at the decision pose, log_p_no_contact the sweep's first pose). Their width is bin_rad =
-//     kSurfaceCellM / circumscribed radius (bearing_bin_rad(): 0.04 / 0.318 = 0.126 rad = 7.2 deg for Shadow), i.e. a
-//     bin's arc at the body's own reach is the 0.04 m surface element. One surface's hits on one bearing average
-//     together however the bin is aligned.
-//   · Within a bin only the NEAREST surface can be touched first: hits are sorted by range and grouped, a new group
-//     starting when a hit lies more than kSplitSigmas sigma beyond the current group's running mean (sigma of that
-//     difference: sqrt(sigma_hit^2 + sigma_mean^2)). Groups are kept from the nearest outward up to and including the
-//     first CERTAIN one (combined existence 1): a surface behind a certain one is hidden by it, behind an uncertain one
-//     (a ghost, an unseen-contact hypothesis) it still matters.
-//   · Each kept group is ONE obstacle: position = precision-weighted mean (var = 1 / sum 1/sigma_i^2 = sigma_r^2 / n),
-//     existence = 1 - prod (1 - p_exist_i), and its SCATTER with the known range noise removed: the weighted covariance
-//     of the hits (+ their own carried scatter) minus the expected noise sigma_bar^2 (n-1)/n along the mean ray,
-//     clamped positive semi-definite. What remains is surface EXTENT: along the surface for a face seen square-on (so
-//     dense sampling still pins the wall down), along the ray for a jamb side seen end-on. The existing model then
-//     sweeps it as its support segment (half-extent sqrt(3 lambda_1) on the principal axis) and adds the residual
-//     lambda_2 projected on the clearance direction to sigma_j^2 (see fix round 2 below).
-//     ★ DEVIATION from the ruling's letter ("its tangential scatter"): the tangential part alone drops the extent along
-//       the ray, which is exactly the jamb side seen end-on (the support would stop at the group's mean range, inside
-//       the jamb's near end). Removing the noise instead keeps both: equal to the tangential scatter for a face seen
-//       square-on, the full extent otherwise.
-//   kSplitSigmas = 4 is the only grouping constant: a STATED statistical level, two-sided P ~ 6e-5 of wrongly splitting
-//   one surface's hits (and a split costs only a duplicate obstacle, never a hidden one: the nearer group is kept).
-//   Fix-round-2 note kept for the support model: segment + residual projection keeps the jamb test and does not
-//   double-count a flat wall seen obliquely by a corner (ACCEPTED by the controller on that variant table).
-constexpr float kSurfaceCellM = 0.04f;
-constexpr float kSplitSigmas = 4.f;
-inline float bearing_bin_rad(const rc::RobotFootprint& b) { return kSurfaceCellM / std::max(b.circumscribed_radius() - b.safety_margin(), 1e-3f); }   // BARE reach
-std::vector<Return> surface_cells(std::span<const Return> r, const Eigen::Vector2f& origin, float bin_rad);
+// ★ LOCAL SURFACE DENOISING (review fix round 1; replaces the bearing cells of Task-6 round 2, which discarded observed
+//   wall — within ONE scan each beam returns one range, so nothing in a bearing bin occludes anything: the "nearest
+//   surface only" rule left a 0.58 m gap inside the look-ahead on a parallel noisy wall — and assumed the sensor at the
+//   robot centre, while Shadow's helios sits at y -0.155, its bpearl at +0.140 and live returns come from a buffer of
+//   poses). Each LiDAR return (aggregate == true) stays ITS OWN obstacle — no grouping, no occlusion rule:
+//   · its neighbours within kDenoiseRadiusM (hash grid of that side) are fitted with a line (PCA);
+//   · the return moves toward that line ALONG THE LINE'S NORMAL ONLY — an endpoint stays an endpoint (a jamb tip is
+//     never pulled inward along the surface). Across the line the raw hit (variance sigma_r^2) is FUSED with the line's
+//     prediction at that point, whose variance is the regression's plus the misfit:
+//       v_line = max(s^2, sigma_r^2) (1/n + a^2 / (n lambda_t)) + max(0, s^2 - sigma_r^2)
+//     (s^2 = residual variance about the line, unbiased; a = the return's offset along the line from the neighbours'
+//     centroid; lambda_t = their variance along it; sigma_r^2 = the hits' own mean variance):
+//       moved by v_r / (v_r + v_line) of its offset, sigma_perp^2 = v_r v_line / (v_r + v_line) <= min(v_r, v_line).
+//     A clean wall pulls a noise-tail hit onto it; at a corner or a jamb tip the misfit leaves the hit near its place;
+//   · ALONG the line it keeps its raw position. Inside a surface (neighbours beyond it on both sides) that position's
+//     error does not matter — the surface is there either way — so the obstacle is isotropic at sigma_perp. At an END
+//     of the observed surface (no neighbour beyond it on one side) the along-line error moves where the surface stops:
+//     (sxx, sxy, syy) carry the extra variance (sigma_r^2 - sigma_perp^2) t t' and the contact model projects it on the
+//     clearance direction;
+//   · fewer than kDenoiseMinNeighbours neighbours (itself included): the raw return, sigma_r, isotropic.
+//   kDenoiseRadiusM = 0.15 m: the neighbourhood must hold a surface's WHOLE noise band around any of its hits, or the
+//   fit inherits the truncation bias the grid cells had — a noise-tail hit sits up to ~3 sigma_r (6 cm at sigma_r 0.02)
+//   off its surface and the band is +-3 sigma_r wide, so the disc must reach ~2 x 3 sigma_r across plus a few sigma_r
+//   along for the PCA axis to be the surface's (measured at 0.05 m: a tail hit 2.9 cm inside a wall, 6 sigma off; at
+//   0.15 m: see test_policy_contact); and it stays below the ~0.2 m straight edges of the hull, so a corner or a jamb
+//   tip inside the disc shows up as misfit (s^2 > sigma_r^2) — a WIDER sigma and a weaker pull, never a tighter one.
+//   kDenoiseMinNeighbours = 4: a line has 2 parameters; with fewer than 2 residual degrees of freedom its residual says
+//   nothing. Support segments are GONE: each return is its own obstacle, so a surface's extent is its returns.
+//   Returns with aggregate == false (unseen-contact hypotheses) are passed through untouched.
+constexpr float kDenoiseRadiusM = 0.15f;
+constexpr int kDenoiseMinNeighbours = 4;
+std::vector<Return> denoise_returns(std::span<const Return> r, float radius_m = kDenoiseRadiusM);
 
 // One obstacle's clearances along a sweep: signed distance to the bare hull at the start (sd0) and the minimum over
 // the sweep (sd_min <= sd0), its independent sigma and its existence. Exposed for the integral-accuracy test.
@@ -75,11 +72,12 @@ struct ContactTerm { double sd0, sd_min, sigma, p_exist; };
 double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, double sd0_star, int n_ref = 0);
 
 // Log-probability that the swept body touches none of the returns, CONDITIONED ON TOUCHING NONE AT THE START POSE.
-// Returns are first merged into surface cells (above). Distances to the BARE hull (the safety margin is the planner's
+// Returns are first denoised (above). Distances to the BARE hull (the safety margin is the planner's
 // route standoff, not part of this probability). Error model: a SHARED clearance offset
 // eps ~ N(0, sigma_pose_xy^2 + body_geometry_sigma_m^2) common to every cell, truncated to eps > -sd0* by "nothing
 // touches now" (sd0* = the closest cell now), plus an independent per-cell
-// sigma_j^2 = sigma_cell^2 + (rho_j*sigma_pose_yaw)^2 + residual scatter (rho_j = range from the pose centre):
+// sigma_j^2 = sigma^2 + (rho_j*sigma_pose_yaw)^2 + n' S n (S = the obstacle's anisotropic part, n = the clearance
+// direction; rho_j = range from the pose centre):
 //   P = E_{eps > -sd0*}[prod_j F_j(sd_min_j + eps) / F_j(sd0_j + eps)],  F_j(x) = 1 - p_exist*(1 - Phi(x/sigma_j)).
 // body_geometry_sigma_m: residual error of the proto-derived body (tessellation, hull simplification, LiDAR beam
 // footprint) — default 0.01 m at the call sites.
@@ -89,7 +87,7 @@ double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, d
 float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> r,
                        float sigma_pose_xy, float sigma_pose_yaw, float body_geometry_sigma_m,
                        float lps_floor = -std::numeric_limits<float>::infinity());
-// Same, for `cells` ALREADY merged by surface_cells() (decide() merges once per cycle, not once per candidate).
+// Same, for `cells` ALREADY denoised by denoise_returns() (decide() denoises once per cycle, not once per candidate).
 float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> cells,
                              float sigma_pose_xy, float sigma_pose_yaw, float body_geometry_sigma_m,
                              float lps_floor = -std::numeric_limits<float>::infinity());

@@ -1,43 +1,44 @@
 // Task 6 (local-motion policy): the 2-D closed loop and the catalogued wedge scenarios.
 //
-// Each tick (20 Hz): 1440-beam raycast from the TRUE pose (sigma 0.02 m) -> returns re-expressed on the BELIEVED pose in the
-// room frame (+ unseen-contact hypotheses) -> decide() -> the differential base (BaseLimits, 60 ms command latency,
-// deadband). Contact = the TRUE bare hull (RobotFootprint::shadow()) against the world's surfaces every 5 mm, the motion
-// integrated in <= 5 mm sub-steps; a blocked sub-step is a contact and the body stays put.
-// The cost-to-go field is built from the MAP's free space (cells whose clearance to the obstacles the map knows is at least
-// the body's inscribed radius — necessary for the body to be there at all, body-agnostic as CostToGo asks).
-// On each RELEASE episode (opened by the policy's Mode::Release, closed by a Drive tick that decreases the field): add_trap
-// where the body cannot go (controller ruling D2): centre = the believed stall pose + one circumscribed radius along the field's
-// downhill direction (-grad, unit), radius = the body's circumscribed radius, cost_m = 2 x the largest finite field value on the grid (★ the ruling: cost_m >=
-// the field value at the trap; twice the largest one means crossing the trap costs more than ANY route that avoids it, i.e.
-// "not through here"), rebuild. Then "no plan exists without it" -> Unreachable: a flood fill over the map's free cells MINUS
-// the forward half-disc of every trap (the half on the side the old field was pulling toward — "through here") must reach
-// the robot from the goal, or the scenario ends Unreachable. Stuck -> the scenario ends.
+// Each tick (20 Hz):
+//   · SENSORS (review H1): Shadow's two LiDARs at their real mounts (helios y -0.155, bpearl +0.140, robot frame), 1440
+//     beams each, sigma_r 0.02, the mast occluding the body's own beams; each sweep is re-expressed in the room frame on
+//     the pose BELIEVED AT CAPTURE and kept in a buffer of the last kBufferCycles = 2 cycles (the controller's room-frame
+//     buffer of ~2 merged sweeps): a pose jump or drift makes the older sweep disagree with the newer, as it does live.
+//   · + unseen-contact hypotheses (aggregate = false) -> Navigator::step() (navigator.h: decide() + the monitor + traps +
+//     Unreachable — the same code the controller calls) -> the differential base.
+//   · PLANT MISMATCH (review H2; sim2d::Base): latency 60 ms +- 20 ms jitter per command, deadband = the model's x U[0.8, 1.2]
+//     per run, slip 5 % (v and w each x (1 + N(0, 0.05)) per tick). The policy keeps its nominal model.
+//   · Contact = the TRUE bare hull (RobotFootprint::contains_yaw, independent of the policy's geometry) against the world's
+//     surfaces every 5 mm, motion integrated in <= 5 mm sub-steps; a blocked sub-step is a contact and the body stays put.
+// The cost-to-go fields are built by the Navigator from the MAP's free space (cells whose clearance to the obstacles the map
+// knows is at least the body's inscribed radius — necessary for the body to be there at all).
 //
 // Oracles: contacts == 0 (ALL motion, release motion counted separately as well); reached unless stated; no window longer
-// than 20 s without the field decreasing; after a release the next route (steepest descent of the rebuilt field from the
-// robot at the end of the release) does not go back through the trap's forward half-disc.
+// than 20 s without the (trapped) field decreasing; TRAJECTORY (review H3): after a trap is laid the TRUE robot centre,
+// once outside the trap's disc (taken to the true frame at the moment it is laid), never enters it again before the run
+// ends.
 //
 // Build+run (from controller/; one line):
 //   g++ -std=c++23 -O2 -Wall -Wextra -pthread -I/usr/include/eigen3 tests/test_policy_scenarios.cpp
-//     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp
+//     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp src/local_policy/navigator.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tps && /tmp/tps
 //   Env: ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
-//
-// STATUS 2026-10-20 round 9 (task-6-report.md, "Round 9"): see the report for the final 20-seed table.
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
+#include "../src/local_policy/navigator.h"
 #include "../src/local_policy/unseen_contact.h"
 
+#include <charconv>
 #include <chrono>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <future>
-#include <queue>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,9 @@ static BaseLimits limits()
     b.v_min_eff = 0.03f; b.w_min_eff = 0.08f; return b;
 }
 static const rc::RobotFootprint& body() { static const rc::RobotFootprint f = rc::RobotFootprint::shadow(); return f; }
+constexpr int kBufferCycles = 2;
+static const sim2d::Mount kHelios{V2(0.f, -0.155f)}, kBpearl{V2(0.f, 0.140f)};
+constexpr float kSlipSigma = 0.05f, kLatencyJitterS = 0.02f, kDeadbandSpread = 0.2f;
 
 // ---------------------------------------------------------------- scenario plumbing
 struct Bounds { float x0, y0, x1, y1; };
@@ -68,20 +72,22 @@ struct Options
     bool ou = false;
     std::vector<Jump> jumps;
     std::string trace_name;     // scenario name, for TRACE matching
-    // ★ ON by default (ruling D3: the free prediction follows the base's ramp, prior 0.01 — start-up no longer reads as
-    //   an obstacle on the hull edge).
+    // ★ ON by default (ruling D3: the free prediction follows the base's ramp, prior 0.01).
     bool unseen = std::getenv("NO_UNSEEN") == nullptr;
 };
 
 struct ScenarioResult
 {
-    bool reached = false, unreachable = false, stuck = false, routes_differ = true;
+    bool reached = false, unreachable = false, stuck = false, trajectory_ok = true;
     int contacts = 0, release_contacts = 0;
     float max_no_progress_s = 0.f, path_m = 0.f;
-    int releases = 0;
+    int releases = 0, traps = 0;
     float time_s = 0.f, geodesic_m = 0.f, min_clear = 1e9f;
-    Pose2 end;                  // TRUE end pose
-    double build_ms = 0.0; int builds = 0;   // round 8: CostToGo build cost (trapped field; the trap-free one is a copy)
+    float goal_truth_clear = 1e9f;   // pose_jump: the world clearance of the TRUE place the believed goal maps to
+    Pose2 end;                       // TRUE end pose
+    double build_ms = 0.0; int builds = 0;
+    std::vector<float> step_ms;      // wall time of every Navigator::step (decide + traps)
+    std::size_t returns_max = 0;     // largest return set handed to the policy
     std::string why;
 };
 
@@ -98,136 +104,35 @@ static std::vector<V2> goal_points(const Goal& g)
     return pts;
 }
 
-struct FieldCtx
+// The map's free cells (clearance to MAP-known obstacles >= the inscribed radius), precomputed once per run.
+struct MapFree
 {
-    const World* w;
     CostToGo::Grid grid;
-    std::vector<V2> goals;
-    std::vector<char> free_;    // map free per cell
-    bool free_built = false;
-    CostToGo field;
-    CostToGo free_field;        // round 8: the same goal WITHOUT traps — built once, the monitor measures progress on it
-    double build_ms_total = 0.0; int builds = 0;
-    int idx(int i, int j) const { return j * grid.w + i; }
-    V2 centre(int i, int j) const { return grid.origin + V2(i * grid.cell, j * grid.cell); }
-
-    void init(const World& world, const Bounds& b, const Goal& g)
+    std::vector<char> free_;
+    MapFree(const World& w, const Bounds& b)
     {
-        w = &world;
         grid = {V2(b.x0, b.y0), 0.05f, int(std::lround((b.x1 - b.x0) / 0.05f)) + 1, int(std::lround((b.y1 - b.y0) / 0.05f)) + 1};
-        goals = goal_points(g);
-        const float r_ins = body().inscribed_radius();
         free_.assign(size_t(grid.w * grid.h), 0);
+        const float r_ins = body().inscribed_radius();
         for (int j = 0; j < grid.h; ++j)
-            for (int i = 0; i < grid.w; ++i) free_[idx(i, j)] = world.clearance(centre(i, j), true) >= r_ins;
-        rebuild();
+            for (int i = 0; i < grid.w; ++i) free_[size_t(j * grid.w + i)] = w.clearance(grid.origin + V2(i * grid.cell, j * grid.cell), true) >= r_ins;
     }
-    void rebuild()
+    bool operator()(const V2& c) const
     {
-        auto is_free = [&](const V2& c)
-        {
-            const int i = int(std::lround((c.x() - grid.origin.x()) / grid.cell)), j = int(std::lround((c.y() - grid.origin.y()) / grid.cell));
-            return i >= 0 and j >= 0 and i < grid.w and j < grid.h and free_[idx(i, j)];
-        };
-        const auto t0 = std::chrono::steady_clock::now();
-        field.build(grid, is_free, [](const V2&) { return 0.f; }, goals);
-        build_ms_total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); ++builds;
-        if (not free_built) { free_field = field; free_built = true; }    // no traps yet: identical, copied once
-    }
-    float max_finite() const
-    {
-        float m = 0.f;
-        for (int j = 0; j < grid.h; ++j)
-            for (int i = 0; i < grid.w; ++i) { const float v = field.at(centre(i, j)); if (std::isfinite(v)) m = std::max(m, v); }
-        return m;
-    }
-    // downhill direction -grad f at p (unit), central differences over one cell; where a neighbour is +inf (beside a wall)
-    // fall back to the lowest of 32 probes 0.15 m away
-    V2 descent_dir(const V2& p) const
-    {
-        const float h = grid.cell;
-        const float fx1 = field.at(p + V2(h, 0.f)), fx0 = field.at(p - V2(h, 0.f)), fy1 = field.at(p + V2(0.f, h)), fy0 = field.at(p - V2(0.f, h));
-        if (std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0))
-        {
-            const V2 g(fx1 - fx0, fy1 - fy0);
-            if (g.norm() > 1e-6f) return -g.normalized();
-        }
-        float best = field.at(p); V2 dir = V2::Zero();
-        for (int k = 0; k < 32; ++k)
-        {
-            const V2 u(std::cos(2.f * kPi * k / 32.f), std::sin(2.f * kPi * k / 32.f));
-            const float v = field.at(p + 0.15f * u);
-            if (v < best) { best = v; dir = u; }
-        }
-        return dir;
-    }
-    // route = steepest descent from p, one cell per step
-    std::vector<V2> route(V2 p) const
-    {
-        std::vector<V2> r{p};
-        float f = field.at(p);
-        for (int s = 0; s < 600 and std::isfinite(f) and f > 1e-3f; ++s)
-        {
-            float best = f; V2 nb = p;
-            for (int k = 0; k < 16; ++k)
-            {
-                const V2 q = p + grid.cell * V2(std::cos(2.f * kPi * k / 16.f), std::sin(2.f * kPi * k / 16.f));
-                const float v = field.at(q);
-                if (v < best) { best = v; nb = q; }
-            }
-            if (nb == p) break;
-            p = nb; f = best; r.push_back(p);
-        }
-        return r;
+        const int i = int(std::lround((c.x() - grid.origin.x()) / grid.cell)), j = int(std::lround((c.y() - grid.origin.y()) / grid.cell));
+        return i >= 0 and j >= 0 and i < grid.w and j < grid.h and free_[size_t(j * grid.w + i)];
     }
 };
 
-struct Trap { V2 c, dir; float r; };
-static bool in_forward_half(const Trap& t, const V2& q, float slack)
-{ return (q - t.c).norm() < t.r and (q - t.c).dot(t.dir) > slack; }
-
-// "No plan without the traps": flood from the goal cells over map-free cells outside every trap's forward half-disc;
-// reachable iff a flooded cell lies within 0.25 m of the robot (the cells it can step into).
-static bool plan_without_traps(const FieldCtx& F, const std::vector<Trap>& traps, const V2& robot)
+// LiDAR range sigma: 0.02 m (the brief); SIGMA_R=<m> overrides it for diagnosis only (std::from_chars: locale-proof).
+static float sigma_r()
 {
-    const int W = F.grid.w, H = F.grid.h;
-    std::vector<char> ok(size_t(W * H), 0), seen(size_t(W * H), 0);
-    for (int j = 0; j < H; ++j)
-        for (int i = 0; i < W; ++i)
-        {
-            if (not F.free_[F.idx(i, j)]) continue;
-            bool blocked = false;
-            for (const auto& t : traps) if (in_forward_half(t, F.centre(i, j), 0.f)) { blocked = true; break; }
-            ok[F.idx(i, j)] = not blocked;
-        }
-    std::queue<int> q;
-    for (const auto& g : F.goals)
-    {
-        const int i = int(std::lround((g.x() - F.grid.origin.x()) / F.grid.cell)), j = int(std::lround((g.y() - F.grid.origin.y()) / F.grid.cell));
-        if (i >= 0 and j >= 0 and i < W and j < H and ok[F.idx(i, j)] and not seen[F.idx(i, j)]) { seen[F.idx(i, j)] = 1; q.push(F.idx(i, j)); }
-    }
-    while (not q.empty())
-    {
-        const int k = q.front(); q.pop();
-        const int i = k % W, j = k / W;
-        for (int dj = -1; dj <= 1; ++dj)
-            for (int di = -1; di <= 1; ++di)
-            {
-                const int ni = i + di, nj = j + dj;
-                if ((di == 0 and dj == 0) or ni < 0 or nj < 0 or ni >= W or nj >= H) continue;
-                if (di != 0 and dj != 0 and (not ok[F.idx(ni, j)] or not ok[F.idx(i, nj)])) continue;
-                const int n = F.idx(ni, nj);
-                if (ok[n] and not seen[n]) { seen[n] = 1; q.push(n); }
-            }
-    }
-    for (int j = 0; j < H; ++j)
-        for (int i = 0; i < W; ++i)
-            if (seen[F.idx(i, j)] and (F.centre(i, j) - robot).norm() <= 0.25f) return true;
-    return false;
+    static const float s = [] {
+        float v = 0.02f;
+        if (const char* e = std::getenv("SIGMA_R")) { const auto r = std::from_chars(e, e + std::strlen(e), v); if (r.ec != std::errc{}) v = 0.02f; }
+        return v; }();
+    return s;
 }
-
-// LiDAR range sigma: 0.02 m (the brief); SIGMA_R=<m> overrides it for diagnosis only.
-static float sigma_r() { static const float s = std::getenv("SIGMA_R") ? std::strtof(std::getenv("SIGMA_R"), nullptr) : 0.02f; return s; }
 
 static bool trace_on(const std::string& name, unsigned seed)
 {
@@ -245,47 +150,65 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     const auto& B = body();
     sim2d::ContactTester contact(world, B);
     sim2d::Base base; base.lim = limits(); base.latency_s = 0.06f;
+    base.rng = &rng; base.jitter_s = kLatencyJitterS; base.slip_sigma = kSlipSigma;
+    base.deadband_scale = std::uniform_real_distribution<float>(1.f - kDeadbandSpread, 1.f + kDeadbandSpread)(rng);
+    std::normal_distribution<float> slip(0.f, kSlipSigma);
     sim2d::PoseError err; err.on = opt.ou; err.pivot = start.p;
     UnseenContact unseen;
-    ProgressMonitor monitor;      // round 6: stuck = a failed prediction (local_policy.h); reset on every field rebuild
-    FieldCtx F; F.init(world, opt.grid, goal);
+    const MapFree mapfree(world, opt.grid);
+    Navigator nav;
+    nav.set_goal(goal, mapfree.grid, [&mapfree](const V2& c) { return mapfree(c); }, [](const V2&) { return 0.f; }, goal_points(goal),
+                 B.circumscribed_radius());
+    res.build_ms += nav.last_build_ms(); ++res.builds;
     PolicyParams pp;
-    std::vector<Trap> traps;
     Pose2 truth = start;
-    res.geodesic_m = F.field.at(start.p);
+    res.geodesic_m = nav.field().at(start.p);
     if (contact.touches(truth)) { res.why = "start pose overlaps the world"; res.contacts = 1; res.end = truth; return res; }
     if (not std::isfinite(res.geodesic_m)) { res.unreachable = true; res.why = "goal not reachable on the map"; res.end = truth; return res; }
 
     constexpr float kTick = 0.05f, kSub = 0.005f;
     float t = 0.f, best_f = res.geodesic_m, last_progress_t = 0.f;
-    bool route_check_pending = false, in_release_episode = false;
+    bool in_release_episode = false;
     size_t next_jump = 0;
-    const float r_circ = B.circumscribed_radius();
+    struct TrueTrap { V2 c; float r; bool left = false; };
+    std::vector<TrueTrap> true_traps;
+    std::deque<std::vector<Return>> buffer;      // last kBufferCycles sweeps (both sensors), room frame at capture
 
     for (; t < time_limit_s; t += kTick)
     {
         err.step(kTick, rng);
         while (next_jump < opt.jumps.size() and opt.jumps[next_jump].t <= t)
-        { err.jump(truth.p, opt.jumps[next_jump].de, opt.jumps[next_jump].deyaw); ++next_jump; }
+        {
+            err.jump(truth.p, opt.jumps[next_jump].de, opt.jumps[next_jump].deyaw); ++next_jump;
+            // the place the believed goal now maps to in the world (the scenario must ask for a place the body can be)
+            for (const auto& gp : nav.goal_points()) res.goal_truth_clear = std::min(res.goal_truth_clear, world.clearance(err.to_truth(gp), false));
+        }
         const Pose2 bel = err.believed(truth);
 
-        // ---- LiDAR in the room frame, on the believed pose
-        const auto beams = sim2d::scan(world, truth, rng, sigma_r());
+        // ---- both LiDARs from the TRUE pose, re-expressed in the room frame on the pose believed at capture, buffered
+        std::vector<Return> sweep;
+        const V2 bf(std::cos(bel.yaw), std::sin(bel.yaw)), br(std::sin(bel.yaw), -std::cos(bel.yaw));
+        for (const auto& m : {kHelios, kBpearl})
+            for (const V2& q : sim2d::scan_mount(world, truth, m, rng, sigma_r()))
+                sweep.push_back({bel.p + q.x() * br + q.y() * bf, sigma_r(), 1.f});
+        buffer.push_back(std::move(sweep));
+        while (int(buffer.size()) > kBufferCycles) buffer.pop_front();
         std::vector<Return> ret;
-        ret.reserve(beams.size() + 4);
-        for (const auto& b : beams)
-            ret.push_back({bel.p + b.range * V2(std::cos(bel.yaw + b.bearing), std::sin(bel.yaw + b.bearing)), sigma_r(), 1.f});
+        for (const auto& sw : buffer) ret.insert(ret.end(), sw.begin(), sw.end());
         if (opt.unseen) for (const auto& h : unseen.hypotheses()) ret.push_back(h);
 
         PolicyInput in;
-        in.pose = bel; in.v_now = base.v; in.w_now = base.w; in.sigma_rel_xy = 0.01f; in.sigma_rel_yaw = 0.01f;   // round 8: odometry-scale RELATIVE error (contact model)
+        in.pose = bel; in.v_now = base.v; in.w_now = base.w;
+        in.sigma_rel_xy = 0.01f; in.sigma_rel_yaw = 0.01f;                                       // odometry-scale RELATIVE error
         if (opt.ou) { in.pose_drift_sigma_m = err.sigma_xy; in.pose_drift_time_s = err.tau; }   // the OU's own process (monitor)
-        in.progress_field = &F.free_field;
-        in.returns_age_s = 0.f;
-        in.returns = ret; in.body = &B; in.base = base.lim; in.goal = &goal; in.field = &F.field; in.latency_s = base.latency_s;
-        in.now_s = t;
-        const Decision d = decide(in, pp, &monitor);
-        const float fnow = F.field.at(bel.p);
+        in.returns_age_s = float(kBufferCycles - 1) * kTick;                                     // the older sweep's age
+        in.returns = ret; in.body = &B; in.base = base.lim; in.latency_s = base.latency_s; in.now_s = t;
+        const auto t_step = std::chrono::steady_clock::now();
+        const Navigator::Step st = nav.step(in, pp);
+        res.step_ms.push_back(float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_step).count()));
+        res.returns_max = std::max(res.returns_max, ret.size());
+        const Decision& d = st.d;
+        const float fnow = nav.field().at(bel.p);
         const float clear = contact.clearance(truth);
         res.min_clear = std::min(res.min_clear, clear);
         if (tr)
@@ -295,84 +218,56 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
 
         if (d.mode == Decision::Mode::Arrived) { res.reached = true; res.why = "arrived"; break; }
         if (d.mode == Decision::Mode::Stuck or d.mode == Decision::Mode::Blind) { res.stuck = true; res.why = d.why; break; }
-
-        if (route_check_pending and d.mode != Decision::Mode::Release)
-        {
-            // ★ the next route, from where the release left the robot: it must not go back through a trap's forward half
-            route_check_pending = false;
-            const auto r = F.route(bel.p);
-            for (const auto& q : r)
-                for (const auto& tp : traps)
-                    if (in_forward_half(tp, q, F.grid.cell)) res.routes_differ = false;
-            if (tr) std::printf("    route after release: %zu pts, differs=%d\n", r.size(), int(res.routes_differ));
-        }
-        // ★ R2 (round 3): a trap is laid ONLY on the policy's own stuck verdict, Mode::Release — one per Release EPISODE.
-        //   The episode ends when a Drive tick decreases the field (below); further Release ticks before that belong to it.
-        //   (Round 2's driver-side "progress since the last trap" heuristic is gone: it fired on mm of dither and laid traps
-        //   across the only doorway.)
         if (d.mode == Decision::Mode::Release and not in_release_episode) { in_release_episode = true; ++res.releases; }
-        // ★ R6-1 (round 7): a trap asserts "the body cannot get through from here"; only a FAILED PREDICTION is evidence
-        //   of that. One per failed prediction (the monitor resets as it fails). A Release from a momentary all-too-risky
-        //   moment backs off as defined and lays nothing.
-        // ★ ROUND 9 (driver logic; the policy is unchanged): a trap means "route around this place", and the GOAL cannot
-        //   be routed around. A failed-prediction Release whose trap disc would contain any goal point lays NO trap: the
-        //   Release itself (backing off toward the most room) is the response, and the next prediction gets a fresh try.
-        //   Persistent failure near the goal is ended by the caller's own time budget (here the scenario's time limit;
-        //   in the controller the mission's), not by the policy. (Supersedes round 7's "no goal rule", which concerned
-        //   pose-noise false failures — now absorbed by the drift term of the monitor's resolution.)
-        const V2 trap_dir = d.prediction_failed ? F.descent_dir(bel.p) : V2::Zero();
-        const bool trap_covers_goal = d.prediction_failed and std::ranges::any_of(F.goals, [&](const V2& gp)
-                                      { return (gp - (bel.p + r_circ * trap_dir)).norm() < r_circ; });
-        if (tr and trap_covers_goal) std::printf("    no trap: its disc would contain the goal\n");
-        if (d.prediction_failed and not trap_covers_goal)
+        if (tr and st.trap_suppressed_by_goal) std::printf("    no trap: its disc would contain the goal\n");
+        if (st.trap)
         {
-            const V2 dir = trap_dir;
-            const float cost = 2.f * F.max_finite();
-            // ★ D2: the trap marks where the body CANNOT go — one radius ahead of the stall pose, downhill. Centred on the
-            //   stall pose itself it could not reroute the robot standing in it (both exits cost the same; the shorter way
-            //   on still won: dead_end_release dithered 91 s at the trap centre on 20/20 seeds).
-            const V2 tc = bel.p + r_circ * dir;
-            traps.push_back({tc, dir, r_circ});
-            F.field.add_trap(tc, r_circ, cost);
-            F.rebuild();
-            monitor.reset();                 // old field values are not comparable with the rebuilt field
-            best_f = F.field.at(bel.p);      // the field changed: progress is measured on the new one (the clock is not reset)
-            if (tr) std::printf("    TRAP at (%+.3f,%+.3f) dir (%+.2f,%+.2f) cost %.2f m; field now %.3f\n", bel.p.x(), bel.p.y(), dir.x(), dir.y(), cost, best_f);
-            if (not plan_without_traps(F, traps, bel.p)) { res.unreachable = true; res.why = "no plan without the trap"; break; }
-            route_check_pending = true;
+            ++res.traps; res.build_ms += nav.last_build_ms(); ++res.builds;
+            true_traps.push_back({err.to_truth(st.trap->c), st.trap->r});
+            best_f = nav.field().at(bel.p);      // the trapped field changed: progress is measured on the new one (clock kept)
+            if (tr) std::printf("    TRAP at (%+.3f,%+.3f) dir (%+.2f,%+.2f) cost %.2f m; field now %.3f\n", st.trap->c.x(), st.trap->c.y(),
+                                st.trap->dir.x(), st.trap->dir.y(), st.trap->cost, best_f);
         }
+        if (st.unreachable) { res.unreachable = true; res.why = "no plan without the trap"; break; }
 
-        // ---- the base: command latency, ramps, deadband; contact every <= 5 mm
+        // ---- the base: command latency (+ jitter), ramps, deadband (x scale), slip; contact every <= 5 mm
         base.send(t, d.v, d.w);
         const Pose2 before = truth;
-        const float f_before_tick = F.field.at(bel.p);
+        const float f_before_tick = nav.field().at(bel.p);
         const float v_meas = base.v, w_meas = base.w;     // odometry at the start of the tick
+        const float sv = 1.f + slip(rng), sw = 1.f + slip(rng);
         bool touched = false;
         for (float s = 0.f; s < kTick - 1e-6f; s += kSub)
         {
             base.step_velocity(t + s, kSub);
-            const Pose2 nxt = sim2d::integrate(truth, base.v, base.w, kSub);
+            const Pose2 nxt = sim2d::integrate(truth, base.v * sv, base.w * sw, kSub);
             // the world pushes back: the body stays put and the base stalls (its wheels stop)
             if (contact.touches(nxt)) { touched = true; base.v = base.w = 0.f; continue; }
             truth = nxt;
         }
         if (touched) { ++res.contacts; if (d.mode == Decision::Mode::Release) ++res.release_contacts; }
-        // odometry: displacement along the heading at the start of the tick, and the turn
+        // odometry: the TRUE displacement along the heading at the start of the tick, and the turn
         const V2 fwd(std::cos(before.yaw), std::sin(before.yaw));
         const float ds = (truth.p - before.p).dot(fwd), dyaw = sim2d::wrap(truth.yaw - before.yaw);
-        // ★ D3: the command IN EFFECT at the wheels (the 60 ms latency: the one sent last tick, active for 40 of these 50 ms)
-        //   and the measured velocity at the tick's start; UnseenContact predicts the free ramp from them.
+        // ★ D3: the command IN EFFECT at the wheels and the measured velocity at the tick's start
         unseen.update(base.cmd_v, base.cmd_w, v_meas, w_meas, ds, dyaw, kTick, bel, base.lim, B, 0.005f);
         res.path_m += (truth.p - before.p).norm();
 
-        const float fn = F.field.at(err.believed(truth).p);
+        // ★ TRAJECTORY ORACLE (review H3): once the true centre has left a trap's disc it must never re-enter it
+        for (auto& tt : true_traps)
+        {
+            const float dist = (truth.p - tt.c).norm();
+            if (dist > tt.r) tt.left = true;
+            else if (tt.left) res.trajectory_ok = false;
+        }
+
+        const float fn = nav.field().at(err.believed(truth).p);
         if (fn < best_f - 1e-3f) { best_f = fn; last_progress_t = t + kTick; }
         if (d.mode == Decision::Mode::Drive and fn < f_before_tick) in_release_episode = false;   // Drive with field decrease
         res.max_no_progress_s = std::max(res.max_no_progress_s, t + kTick - last_progress_t);
     }
     res.time_s = t;
     res.end = truth;
-    res.build_ms = F.build_ms_total; res.builds = F.builds;
     if (res.why.empty()) res.why = "time limit";
     return res;
 }
@@ -436,8 +331,8 @@ static World open_world()
 static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 
 // ---------------------------------------------------------------- reporting
-struct Summary { double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
-                 bool routes_ok = true; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
+struct Summary { std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
+                 bool traj_ok = true; int total_traps = 0; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
 {
@@ -446,20 +341,21 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
     std::vector<std::future<ScenarioResult>> fut;
     for (int s = 0; s < nseeds; ++s) fut.push_back(std::async(std::launch::async, fn, unsigned(s)));
     Summary S;
-    std::printf("== %s\n   seed reached unreach stuck contacts(rel) releases  t_goal  path  geo  max_np  min_clear  routes  why\n", name.c_str());
+    std::printf("== %s\n   seed reached unreach stuck contacts(rel) releases  t_goal  path  geo  max_np  min_clear  traj  why\n", name.c_str());
     for (int s = 0; s < nseeds; ++s)
     {
         const auto r = fut[s].get();
         ++S.n; S.reached += r.reached; S.unreachable += r.unreachable; S.stuck += r.stuck; S.contacts += r.contacts;
         S.rel_contacts += r.release_contacts; S.max_releases = std::max(S.max_releases, r.releases); S.total_releases += r.releases;
-        S.routes_ok = S.routes_ok and r.routes_differ; S.max_np = std::max(S.max_np, r.max_no_progress_s);
+        S.traj_ok = S.traj_ok and r.trajectory_ok; S.total_traps += r.traps; S.max_np = std::max(S.max_np, r.max_no_progress_s);
         S.min_clear = std::min(S.min_clear, r.min_clear);
         if (r.geodesic_m > 0.f) S.max_path_ratio = std::max(S.max_path_ratio, r.path_m / r.geodesic_m);
         if (r.reached) S.tgoal.push_back(r.time_s);
-        S.build_ms += r.build_ms; S.builds += r.builds;
+        S.step_ms.insert(S.step_ms.end(), r.step_ms.begin(), r.step_ms.end()); S.returns_max = std::max(S.returns_max, r.returns_max);
+        S.build_ms += r.build_ms; S.builds += r.builds; S.goal_truth_clear = std::min(S.goal_truth_clear, r.goal_truth_clear);
         std::printf("   %4d %7d %7d %5d %5d(%d) %8d %7.2f %5.2f %4.2f %6.1f %+9.3f %6d  %s\n", s, int(r.reached), int(r.unreachable), int(r.stuck),
                     r.contacts, r.release_contacts, r.releases, r.time_s, r.path_m, r.geodesic_m, r.max_no_progress_s, r.min_clear,
-                    int(r.routes_differ), r.why.c_str());
+                    int(r.trajectory_ok), r.why.c_str());
     }
     std::ranges::sort(S.tgoal);
     const float med = S.tgoal.empty() ? NAN : S.tgoal[S.tgoal.size() / 2], mx = S.tgoal.empty() ? NAN : S.tgoal.back();
@@ -468,6 +364,10 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
                 S.reached, S.n, S.unreachable, S.stuck, S.contacts, S.rel_contacts, S.total_releases, S.max_releases, med, mx, S.max_np,
                 S.min_clear, S.max_path_ratio);
     std::printf("   field builds: %d, mean %.1f ms each (grid as stated per world)\n", S.builds, S.builds ? S.build_ms / S.builds : 0.0);
+    std::ranges::sort(S.step_ms);
+    if (not S.step_ms.empty())
+        std::printf("   decision time (Navigator::step, all seeds/ticks): median %.2f ms, p90 %.2f ms, max %.2f ms; returns up to %zu\n",
+                    S.step_ms[S.step_ms.size() / 2], S.step_ms[S.step_ms.size() * 9 / 10], S.step_ms.back(), S.returns_max);
     return S;
 }
 
@@ -482,7 +382,7 @@ static void standard_oracles(const std::string& n, const Summary& S)
     CHECK((n + ": contacts == 0").c_str(), S.contacts == 0);
     CHECK((n + ": reached on every seed").c_str(), S.reached == S.n);
     CHECK((n + ": no window > 20 s without field decrease").c_str(), S.max_np <= 20.f);
-    CHECK((n + ": a release is followed by a different route").c_str(), S.routes_ok);
+    CHECK((n + ": after a trap the true robot never re-enters it (trajectory)").c_str(), S.traj_ok);
 }
 
 int main()
@@ -557,7 +457,7 @@ int main()
                 auto b = run_scenario(w, a.end, doorway(-1), 60.f, seed + 1000u, o);
                 b.contacts += a.contacts; b.release_contacts += a.release_contacts; b.releases += a.releases; b.time_s += a.time_s;
                 b.path_m += a.path_m; b.geodesic_m += a.geodesic_m; b.min_clear = std::min(a.min_clear, b.min_clear);
-                b.max_no_progress_s = std::max(a.max_no_progress_s, b.max_no_progress_s); b.routes_differ = a.routes_differ and b.routes_differ;
+                b.max_no_progress_s = std::max(a.max_no_progress_s, b.max_no_progress_s); b.trajectory_ok = a.trajectory_ok and b.trajectory_ok; b.traps += a.traps; b.build_ms += a.build_ms; b.builds += a.builds;
                 return b;
             });
             standard_oracles(n, S);
@@ -603,11 +503,14 @@ int main()
     {
         const World w = corridor_world();
         const Goal g{.kind = Goal::Kind::Place, .p = V2(-0.84f, 4.2f), .yaw = {}};
-        // ★ +0.3 m east and +10 deg (CCW): where the believed goal lies in TRUTH after the jump is checked below — the
-        //   scenario asks the policy to stay out of contact through the jump, not to reach a goal inside a wall.
+        // ★ +0.3 m east and +10 deg (CCW). The scenario asks the policy to stay out of contact through the jump, not to
+        //   reach a goal inside a wall: at the jump the harness records the world clearance of the TRUE place the believed
+        //   goal now maps to, and that place must be one the body can occupy (clearance >= the inscribed radius).
         Options o{.grid = kCorridorGrid, .jumps = {{2.5f, V2(0.3f, 0.f), 10.f * kDeg}}, .trace_name = "pose_jump"};
         const auto S = run_seeds("pose_jump", [&](unsigned seed) { return run_scenario(w, Pose2{V2(-0.84f, 0.8f), 90.f * kDeg}, g, 40.f, seed, o); });
         standard_oracles("pose_jump", S);
+        std::printf("   the believed goal maps, after the jump, to a true place %.3f m from the nearest wall\n", S.goal_truth_clear);
+        CHECK("pose_jump: the jumped goal is a place the body can be (true clearance >= inscribed radius)", S.goal_truth_clear >= body().inscribed_radius());
     }
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;

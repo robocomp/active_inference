@@ -174,87 +174,83 @@ float hull_distance(const rc::RobotFootprint& body, const Pose2& pose, const Eig
     return sd_local(body.polygon(), 0.f, Frame(pose).to_robot(q));
 }
 
-std::vector<Return> surface_cells(std::span<const Return> r, const Eigen::Vector2f& origin, float bin_rad)
+std::vector<Return> denoise_returns(std::span<const Return> r, float radius_m)
 {
-    // contact.h: bearing bins about the sensor origin, nearest-surface groups split at kSplitSigmas, noise-free scatter.
-    constexpr double kTwoPi = 6.283185307179586;
-    const double bw = std::max(double(bin_rad), 1e-4);
-    const auto nbins = static_cast<std::int64_t>(std::ceil(kTwoPi / bw));
-    struct Hit { std::int64_t bin; double range; const Return* q; };
-    std::vector<Hit> hits;
-    hits.reserve(r.size());
+    // contact.h: each LiDAR return projected onto the line fitted to its neighbours, along the line's NORMAL only.
     std::vector<Return> out;
+    out.reserve(r.size());
+    std::vector<const Return*> lidar;
+    lidar.reserve(r.size());
     for (const Return& q : r)
     {
         if (q.p_exist <= 0.f) continue;
-        if (not q.aggregate) { out.push_back(q); continue; }   // another source: its own obstacle, never grouped (R1)
-        const Eigen::Vector2d d = (q.p - origin).cast<double>();
-        const double th = std::atan2(d.y(), d.x()) + 0.5 * kTwoPi;          // [0, 2 pi]
-        hits.push_back({std::min(nbins - 1, static_cast<std::int64_t>(std::floor(th / bw))), d.norm(), &q});
+        if (not q.aggregate) { out.push_back(q); continue; }     // another source: its own obstacle, untouched
+        lidar.push_back(&q);
     }
-    std::ranges::sort(hits, [](const Hit& x, const Hit& y) { return x.bin != y.bin ? x.bin < y.bin : x.range < y.range; });
-
-    struct Acc { double w = 0, wr = 0, wx = 0, wy = 0, wxx = 0, wxy = 0, wyy = 0, log_absent = 0; int n = 0; };
-    auto emit = [&](const Acc& a)
+    const double c = std::max(double(radius_m), 1e-4), inv = 1.0 / c;
+    auto key = [&](double x, double y) { return (static_cast<std::int64_t>(std::floor(x * inv)) << 32) ^ (static_cast<std::int64_t>(std::floor(y * inv)) & 0xffffffff); };
+    std::unordered_map<std::int64_t, std::vector<int>> grid;
+    grid.reserve(lidar.size());
+    for (int i = 0; i < int(lidar.size()); ++i) grid[key(lidar[i]->p.x(), lidar[i]->p.y())].push_back(i);
+    std::vector<int> nb;
+    for (const Return* q : lidar)
     {
-        const double mx = a.wx / a.w, my = a.wy / a.w;
-        Return c{{float(mx), float(my)}, float(std::sqrt(1.0 / a.w)), float(-std::expm1(a.log_absent))};
-        double cxx = std::max(0.0, a.wxx / a.w - mx * mx), cyy = std::max(0.0, a.wyy / a.w - my * my), cxy = a.wxy / a.w - mx * my;
-        // ★ remove the range noise the hits are KNOWN to carry along the ray: its expected weighted sample variance is
-        //   sigma_bar^2 (n-1)/n, sigma_bar^2 = sum w sigma^2 / sum w = n / sum w (w = 1/sigma^2). What remains is extent.
-        //   (Tried and rejected, Task 6: the ray-frame split WITHOUT the cross term — t'Ct across, excess u'Cu along —
-        //   turns an oblique wall's segment onto the tangent and pokes one end at the body: dense-wall slide 0.19 -> 0.69,
-        //   jamb tip 0.08 < the extreme hit's 0.149. The cross term IS the surface's slope; it stays.)
-        Eigen::Vector2d u(mx - origin.x(), my - origin.y());
-        if (a.n > 1 and u.norm() > 1e-9)
-        {
-            u.normalize();
-            const double nv = (double(a.n) / a.w) * double(a.n - 1) / double(a.n);
-            cxx -= nv * u.x() * u.x(); cxy -= nv * u.x() * u.y(); cyy -= nv * u.y() * u.y();
-        }
-        // clamp positive semi-definite (eigenvalues >= 0); principal axis of the unclamped matrix
-        const double tr = cxx + cyy, det = cxx * cyy - cxy * cxy, disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - det));
-        const double l1 = std::max(0.0, 0.5 * tr + disc), l2 = std::max(0.0, 0.5 * tr - disc);
-        Eigen::Vector2d e1 = std::abs(cxy) > 1e-15 ? Eigen::Vector2d(0.5 * tr + disc - cyy, cxy)
-                                                   : (cxx >= cyy ? Eigen::Vector2d(1, 0) : Eigen::Vector2d(0, 1));
-        e1.normalize();
-        const Eigen::Vector2d e2(-e1.y(), e1.x());
-        const Eigen::Matrix2d S = l1 * e1 * e1.transpose() + l2 * e2 * e2.transpose();
-        c.sxx = float(S(0, 0)); c.sxy = float(S(0, 1)); c.syy = float(S(1, 1));
-        out.push_back(c);
-    };
-    auto add = [](Acc& a, const Hit& h)
-    {
-        const Return& q = *h.q;
-        const double w = 1.0 / std::max(double(q.sigma) * q.sigma, 1e-12);
-        const double x = q.p.x(), y = q.p.y();
-        a.w += w; a.wr += w * h.range; a.wx += w * x; a.wy += w * y; ++a.n;
-        a.wxx += w * (x * x + q.sxx); a.wxy += w * (x * y + q.sxy); a.wyy += w * (y * y + q.syy);
-        a.log_absent += q.p_exist >= 1.f ? -std::numeric_limits<double>::infinity() : std::log1p(-double(q.p_exist));
-    };
-    for (std::size_t i = 0; i < hits.size();)
-    {
-        const std::int64_t bin = hits[i].bin;
-        Acc g;
-        bool hidden = false;      // a certain group has been emitted: everything farther in this bin is behind it
-        for (; i < hits.size() and hits[i].bin == bin; ++i)
-        {
-            if (hidden) continue;
-            const Hit& h = hits[i];
-            if (g.n > 0)
+        nb.clear();
+        const double qx = q->p.x(), qy = q->p.y();
+        const auto ci = static_cast<std::int64_t>(std::floor(qx * inv)), cj = static_cast<std::int64_t>(std::floor(qy * inv));
+        for (std::int64_t di = -1; di <= 1; ++di)
+            for (std::int64_t dj = -1; dj <= 1; ++dj)
             {
-                const double mean = g.wr / g.w, s = std::sqrt(double(h.q->sigma) * h.q->sigma + 1.0 / g.w);
-                if (h.range - mean > double(kSplitSigmas) * s)                   // a farther surface starts
-                {
-                    emit(g);
-                    hidden = std::isinf(g.log_absent);
-                    g = Acc{};
-                    if (hidden) continue;
-                }
+                const auto it = grid.find(((ci + di) << 32) ^ ((cj + dj) & 0xffffffff));
+                if (it == grid.end()) continue;
+                for (int j : it->second)
+                    if ((lidar[j]->p - q->p).squaredNorm() <= c * c) nb.push_back(j);
             }
-            add(g, h);
+        Return o = *q;
+        o.sxx = o.sxy = o.syy = 0.f;
+        const int n = int(nb.size());
+        if (n < kDenoiseMinNeighbours) { out.push_back(o); continue; }   // isolated: the raw hit, sigma_r, isotropic
+        double mx = 0, my = 0, s2r = 0;
+        for (int j : nb) { mx += lidar[j]->p.x(); my += lidar[j]->p.y(); s2r += double(lidar[j]->sigma) * lidar[j]->sigma; }
+        mx /= n; my /= n; s2r /= n;                                          // s2r: the sensor's own variance (mean)
+        double cxx = 0, cxy = 0, cyy = 0;
+        for (int j : nb) { const double dx = lidar[j]->p.x() - mx, dy = lidar[j]->p.y() - my; cxx += dx * dx; cxy += dx * dy; cyy += dy * dy; }
+        cxx /= n; cxy /= n; cyy /= n;
+        const double tr = cxx + cyy, disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - (cxx * cyy - cxy * cxy)));
+        const double lt = 0.5 * tr + disc, ln = std::max(0.0, 0.5 * tr - disc);   // along / across the fitted line
+        Eigen::Vector2d t = std::abs(cxy) > 1e-15 ? Eigen::Vector2d(lt - cyy, cxy) : (cxx >= cyy ? Eigen::Vector2d(1, 0) : Eigen::Vector2d(0, 1));
+        t.normalize();
+        const Eigen::Vector2d nrm(-t.y(), t.x());
+        const Eigen::Vector2d dq(qx - mx, qy - my);
+        const double along = dq.dot(t), across = dq.dot(nrm);
+        // residual variance of the line fit (unbiased, 2 parameters) and the regression's variance at this point
+        const double s2 = n > 2 ? ln * n / double(n - 2) : ln;
+        const double noise = std::max(s2, s2r);                              // never claim less noise than the sensor's
+        const double fit = noise * (1.0 / n + along * along / std::max(lt * n, 1e-12));
+        const double misfit = std::max(0.0, s2 - s2r);                       // the surface is not a line at this scale
+        // ★ FUSE, along the normal, the raw hit (variance sigma_r^2) with the line's prediction at this point (variance
+        //   fit + misfit): a well-fitted surface pulls the hit onto it, a corner or a jamb tip (large misfit) leaves it
+        //   near its raw place — the line is never trusted beyond what its own residual supports.
+        const double vr = double(q->sigma) * q->sigma, vl = fit + misfit;
+        const double wl = vr / (vr + vl);                                    // weight of the line
+        const double sp2 = vr * vl / (vr + vl);                              // <= min(vr, vl)
+        o.p = Eigen::Vector2f(float(qx - wl * across * nrm.x()), float(qy - wl * across * nrm.y()));   // along the NORMAL only
+        o.sigma = float(std::sqrt(sp2));
+        // ★ ALONG the line the hit keeps its raw position. Where the surface continues on BOTH sides of it (neighbours
+        //   beyond it in both directions) its along-line error is irrelevant — the surface is there either way — so the
+        //   obstacle is tight. Only at an END of the observed surface (no neighbour beyond it on one side: a jamb tip, a
+        //   leaf's edge) does the along-line error move where the surface stops: there it keeps its raw sigma along t
+        //   (extra = sigma_r^2 - sigma_perp^2). Giving every interior hit that freedom made a denser wall riskier (each
+        //   hit one more independent chance: dense-wall arc 0.18 vs 0.13).
+        bool before = false, after = false;
+        for (int j : nb)
+        {
+            const double aj = Eigen::Vector2d(lidar[j]->p.x() - mx, lidar[j]->p.y() - my).dot(t);
+            before = before or aj < along; after = after or aj > along;
         }
-        if (g.n > 0) emit(g);
+        const double ex = (before and after) ? 0.0 : std::max(0.0, double(q->sigma) * q->sigma - sp2);
+        o.sxx = float(ex * t.x() * t.x()); o.sxy = float(ex * t.x() * t.y()); o.syy = float(ex * t.y() * t.y());
+        out.push_back(o);
     }
     return out;
 }
@@ -385,7 +381,7 @@ double log_ratio_shared_offset(std::span<const ContactTerm> t, double sigma_s, d
 float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> r,
                        float sigma_pose_xy, float sigma_pose_yaw, float body_geometry_sigma_m, float lps_floor)
 {
-    return log_p_no_contact_cells(body, sweep, surface_cells(r, sweep.empty() ? Eigen::Vector2f::Zero() : sweep.front().p, bearing_bin_rad(body)), sigma_pose_xy, sigma_pose_yaw, body_geometry_sigma_m, lps_floor);
+    return log_p_no_contact_cells(body, sweep, denoise_returns(r), sigma_pose_xy, sigma_pose_yaw, body_geometry_sigma_m, lps_floor);
 }
 
 float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> cells,
@@ -420,7 +416,7 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
     // ★ PRUNING by range before any geometry (circumscribed reach + path + the cell's extent): such a cell is more
     //   than 6 sigma_s + 7 sigma_j from the body at every pose, its ratio is 1 to working precision at the lowest
     //   node, and it cannot be the closest cell now either (sd0 > 6 sigma_s puts the truncation below the span).
-    struct Live { const Return* q; double sj0; float h, l2; Eigen::Vector2f axis; float sd0; };
+    struct Live { const Return* q; double sj0; float sd0; };
     std::vector<Live> live;
     live.reserve(cells.size());
     float sd0_star = std::numeric_limits<float>::infinity();
@@ -428,22 +424,11 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
     {
         const float rho = (q.p - f0.p).norm();
         const double sj0 = std::sqrt(double(q.sigma) * q.sigma + double(rho) * rho * sigma_pose_yaw * sigma_pose_yaw);
-        // the cell's support: principal axis of its scatter, half-extent of the uniform spread with that variance
-        const float tr = q.sxx + q.syy, det = q.sxx * q.syy - q.sxy * q.sxy;
-        const float disc = std::sqrt(std::max(0.f, 0.25f * tr * tr - det));
-        const float l1 = 0.5f * tr + disc, l2 = std::max(0.f, 0.5f * tr - disc);
-        const float h = std::sqrt(3.f * std::max(0.f, l1));
-        Eigen::Vector2f axis(1.f, 0.f);
-        if (h > 1e-4f)
-        {
-            axis = std::abs(q.sxy) > 1e-12f ? Eigen::Vector2f(l1 - q.syy, q.sxy) : (q.sxx >= q.syy ? Eigen::Vector2f(1.f, 0.f) : Eigen::Vector2f(0.f, 1.f));
-            axis.normalize();
-        }
-        if (double(rho) - reach - h > kSpanU * ss + kOne * (sj0 + std::sqrt(std::max(0.f, l1)))) continue;
-        float sd0 = sd_local(poly, 0.f, f0.to_robot(q.p));
-        if (h > 1e-4f) sd0 = std::min({sd0, sd_local(poly, 0.f, f0.to_robot(q.p + h * axis)), sd_local(poly, 0.f, f0.to_robot(q.p - h * axis))});
+        const double sext = std::sqrt(std::max(0.f, q.sxx + q.syy));      // the largest the anisotropic part can add
+        if (double(rho) - reach > kSpanU * ss + kOne * (sj0 + sext)) continue;
+        const float sd0 = sd_local(poly, 0.f, f0.to_robot(q.p));
         sd0_star = std::min(sd0_star, sd0);
-        live.push_back({&q, sj0, h, l2, axis, sd0});
+        live.push_back({&q, sj0, sd0});
     }
     const double eps_lo = std::max(-double(sd0_star), -kSpanU * ss);   // the lowest offset still in range
     if (not (eps_lo < kSpanU * ss)) return -std::numeric_limits<float>::infinity();
@@ -461,38 +446,37 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
         const Return& q = *L.q;
         // the body's nearest point moves at most path + r_circ * turn: a cell that even then stays 7 sigma_j clear
         // at the lowest offset keeps a ratio of 1 and never enters the product
-        if (double(L.sd0) - path - r_circ * turn + eps_lo >= kOne * L.sj0) continue;
-        const int npts = L.h > 1e-4f ? 3 : 1;
-        const Eigen::Vector2f pts[3] = {q.p, q.p + L.h * L.axis, q.p - L.h * L.axis};
+        // sj_max: the largest sigma the anisotropic covariance can give in any clearance direction — the prune and the
+        // early-stop proof must hold for it (the ratio is closer to 1 for a larger sigma)
+        const double sj_max = std::sqrt(L.sj0 * L.sj0 + std::max(0.f, q.sxx + q.syy));
+        if (double(L.sd0) - path - r_circ * turn + eps_lo >= kOne * sj_max) continue;
         const bool can_prove = std::isfinite(lps_floor) and q.p_exist >= 1.f;
-        const double top = kSpanU * ss, lf0 = can_prove ? log_free((double(L.sd0) + top) / L.sj0, 1.0) : 0.0;
+        const double top = kSpanU * ss, lf0 = can_prove ? log_free((double(L.sd0) + top) / sj_max, 1.0) : 0.0;
         float sd = L.sd0;
         std::size_t at = 0;
         bool proven = false;
-        for (std::size_t i = 1; i < frames.size() and not proven; ++i)
-            for (int k = 0; k < npts; ++k)
+        for (std::size_t i = 1; i < frames.size(); ++i)
+        {
+            const Eigen::Vector2f ql = frames[i].to_robot(q.p);
+            if (lines.lower_bound(ql) >= sd) continue;
+            const float v = sd_local(poly, 0.f, ql);
+            if (v < sd)
             {
-                const Eigen::Vector2f ql = frames[i].to_robot(pts[k]);
-                if (lines.lower_bound(ql) >= sd) continue;
-                const float v = sd_local(poly, 0.f, ql);
-                if (v < sd)
-                {
-                    sd = v; at = i;
-                    if (can_prove and sd < L.sd0 and double(sd) + top < 0.0 and log_free((double(sd) + top) / L.sj0, 1.0) - lf0 <= lps_floor) { proven = true; break; }
-                }
+                sd = v; at = i;
+                if (can_prove and sd < L.sd0 and double(sd) + top < 0.0 and log_free((double(sd) + top) / sj_max, 1.0) - lf0 <= lps_floor) { proven = true; break; }
             }
-        if (proven) return float(log_free((double(sd) + top) / L.sj0, 1.0) - lf0);
+        }
+        if (proven) return float(log_free((double(sd) + top) / sj_max, 1.0) - lf0);
         if (not (sd < L.sd0)) continue;                                      // never closer than now: ratio exactly 1
-        // residual scatter (what the segment does not capture: the minor axis) projected on the clearance direction
-        // at the pose of the minimum: from the cell's mean to its nearest hull point (room frame)
+        // the obstacle's ANISOTROPIC covariance (denoise_returns: tight across the fitted surface, the raw sigma along it)
+        // projected on the clearance direction at the pose of the minimum (obstacle -> nearest hull point, room frame)
         double sj = L.sj0;
-        if (L.l2 > 1e-10f)
+        if (q.sxx + q.syy > 1e-12f)
         {
             Eigen::Vector2f dir;
             sd_local(poly, 0.f, frames[at].to_robot(q.p), &dir);
             const Eigen::Vector2f n = frames[at].to_room_dir(dir);
-            const float along = n.x() * L.axis.x() + n.y() * L.axis.y();
-            sj = std::sqrt(L.sj0 * L.sj0 + double(L.l2) * std::max(0.f, 1.f - along * along));
+            sj = std::sqrt(L.sj0 * L.sj0 + double(n.x() * n.x() * q.sxx + 2.f * n.x() * n.y() * q.sxy + n.y() * n.y() * q.syy));
         }
         if (double(sd) + eps_lo > kOne * sj) continue;                       // 1 to working precision at the lowest node
         terms.push_back({L.sd0, sd, sj, q.p_exist});

@@ -29,7 +29,7 @@ public:
     // radius) reads the nearest finite cell's value PLUS the Euclidean distance to its centre: continuous, and progress
     // stays meaningful. Poses in the last row/column are clamped into the grid. +inf only if no finite cell exists.
     float at(const Eigen::Vector2f& p) const;
-    int seeded_goal_cells() const { return seeded_; }
+    int seeded_goal_cells() const { return seeded_; }   // goal cells seeded by the last build (0 = goal fully blocked)
     // ★ RESOLUTION of a field DIFFERENCE f(a) - f(b) between two points `separation_m` apart (round-5 ruling: a decrease
     //   below it is not a measurement of progress). Derivation: the 8-connected Dijkstra measures the octile metric,
     //   whose length gain over the Euclidean one varies with direction between 1 and sqrt(4 - 2 sqrt2) = 1.0824
@@ -39,7 +39,7 @@ public:
     //   2 sqrt2 cell): 1.2 cm at zero separation for 0.05 m cells (one cell x 0.233), +0.82 cm per 0.1 m apart.
     float resolution_m(float separation_m) const { return kOctileGainExcess * (separation_m + 2.f * 1.41421356f * g_.cell); }
     float cell() const { return g_.cell; }
-    static constexpr float kOctileGainExcess = 0.0823922f;   // sqrt(4 - 2 sqrt2) - 1   // goal cells seeded by the last build (0 = goal fully blocked)
+    static constexpr float kOctileGainExcess = 0.0823922f;   // sqrt(4 - 2 sqrt2) - 1
     bool reachable(const Eigen::Vector2f& p) const;
     void add_trap(const Eigen::Vector2f& p, float radius_m, float cost_m);   // applied at the next build()
     void decay_traps(float factor);                                           // multiplies costs; drops < 1e-3 m

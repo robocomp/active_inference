@@ -142,8 +142,8 @@ int main()
         for (auto [v, w] : {std::pair{-0.25f, 0.f}, std::pair{0.25f, 0.f}, std::pair{-0.5f, -0.3f}})
         {
             const float p1 = p_contact_of(d1, v, w), p4 = p_contact_of(d4, v, w);
-            std::printf("  dense wall v=%+.2f w=%+.2f : P(1 cm)=%.4f P(4 cm)=%.4f  (cells %zu vs %zu)\n", v, w, p1, p4,
-                        surface_cells(d1.ret, V(0.f, 0.f), bearing_bin_rad(d1.b)).size(), surface_cells(d4.ret, V(0.f, 0.f), bearing_bin_rad(d4.b)).size());
+            std::printf("  dense wall v=%+.2f w=%+.2f : P(1 cm)=%.4f P(4 cm)=%.4f  (obstacles %zu vs %zu)\n", v, w, p1, p4,
+                        denoise_returns(d1.ret).size(), denoise_returns(d4.ret).size());
             worst_gap = std::max(worst_gap, std::fabs(p1 - p4)); worst_rise = std::max(worst_rise, p1 - p4);
         }
         const auto e1 = decide(d1.in, d1.pp), e4 = decide(d4.in, d4.pp); print("dense 1 cm", e1); print("dense 4 cm", e4);
