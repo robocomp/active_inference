@@ -353,8 +353,11 @@ int main()
     }
     // (c) The jamb inside the margin and off-centre approaches, mid-claim (near side already seen), on a right anchor ±5 cm.
     std::println("(c) jamb inside the margin / off-centre, a right anchor +-5 cm");
+    // ★ 2026-10-20: Shadow's body is now mesh ∪ two drive wheels (|x|max 0.284, was 0.2716), so the west case starts 0.012 m
+    // nearer the centre (-0.138, was -0.15) to keep the same ~0.027 m jamb clearance it was written for; at -0.15 the wheel starts
+    // 0.016 m from the casing and the cross stalls (NOT through after 60 s, no contact) — recorded in task-1-report.md.
     for (const auto& [x, y, hd] : {std::array{0.15f, -0.43f, 76.f}, std::array{0.15f, -0.43f, 90.f}, std::array{0.17f, -0.40f, 80.f},
-                                   std::array{0.10f, -0.45f, 76.f}, std::array{-0.15f, -0.43f, 104.f}})
+                                   std::array{0.10f, -0.45f, 76.f}, std::array{-0.138f, -0.43f, 104.f}})
         for (const float ax : {0.f, 0.05f, -0.05f})
         {
             const auto o = run(Pose{V2(x, y), hd * deg}, V2(ax, -0.24f), 0.f, true, 7u);

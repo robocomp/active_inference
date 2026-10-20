@@ -43,12 +43,14 @@ int main()
     const auto fp = rc::RobotFootprint::shadow();
     const auto& body = fp.polygon();
     // The front-left corner of the hull and its outward direction.
-    const Eigen::Vector2f corner(-0.2536f, 0.2036f);
+    // ★ 2026-10-20: Shadow's body is now mesh ∪ the TWO drive wheels (x = ±0.284 over y ∈ ±0.10); the front-left hull vertex moved
+    // from (-0.2536, 0.2036) of the old four-mecanum hull to (-0.2141, 0.1901), and the side from x = -0.2716 to -0.2840.
+    const Eigen::Vector2f corner(-0.2141f, 0.1901f);
 
     // 1. A jamb point 0.05 m outside the footprint corner, AHEAD of it on the path: driving toward it stops.
     {
-        const Eigen::Vector2f jamb = corner + Eigen::Vector2f(0.01f, 0.05f);   // ahead of the corner, inside the corridor
-        CHECK(rc::anchor_signed_distance(body, jamb) > 0.04f);
+        const Eigen::Vector2f jamb = corner + Eigen::Vector2f(0.0f, 0.05f);   // 0.05 m straight ahead of the front-left vertex of the corner, inside the corridor
+        CHECK(rc::anchor_signed_distance(body, jamb) > 0.03f);   // ★ was 0.04: the chamfer is 0.037 m off along its normal
         const auto r = returns_of({jamb}, body);
         CHECK(r.obstacles.size() == 1 and r.n_self == 0);
         CHECK(rc::lidar_return_dropped_by_disc(jamb, fp.circumscribed_radius()));   // the old filter deleted it
@@ -59,7 +61,7 @@ int main()
         const float v0 = rc::lidar_return_speed_limit(r.obstacles, kFwd, body, 0.f, kAdec, kVmax);
         CHECK(v0 > 0.f and v0 <= std::sqrt(2.f * kAdec * 0.05f) + 1e-4f);
         // Closer (just outside the self-filter): slower without the standoff, exactly 0 with it — no 0.05 m/s floor.
-        const auto rc0 = returns_of({corner + Eigen::Vector2f(0.01f, 0.04f)}, body);
+        const auto rc0 = returns_of({corner + Eigen::Vector2f(0.0f, 0.04f)}, body);
         CHECK(rc0.obstacles.size() == 1);
         CHECK(rc::lidar_return_speed_limit(rc0.obstacles, kFwd, body, 0.f, kAdec, kVmax) < v0);
         CHECK(rc::lidar_return_speed_limit(rc0.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
@@ -73,7 +75,7 @@ int main()
     {
         for (const float y : {-0.10f, 0.0f, 0.10f, 0.15f})
         {
-            const Eigen::Vector2f beside(-0.2716f - 0.05f, y);
+            const Eigen::Vector2f beside(-0.2840f - 0.05f, y);
             const auto r = returns_of({beside}, body);
             CHECK(r.obstacles.size() == 1);
             const float v = rc::lidar_return_speed_limit(r.obstacles, kFwd, body, kMargin, kAdec, kVmax);
@@ -81,25 +83,25 @@ int main()
             CHECK(v > 0.85f * kVmax);
         }
         // Behind the body, on the corridor: forward is free, reverse is capped.
-        const auto r = returns_of({Eigen::Vector2f(0.f, -0.23f - 0.05f)}, body);
+        const auto r = returns_of({Eigen::Vector2f(0.f, -0.2292f - 0.045f)}, body);
         CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, body, kMargin, kAdec, kVmax) > 0.99f * kVmax);
         CHECK(rc::lidar_return_speed_limit(r.obstacles, kBack, body, kMargin, kAdec, kVmax) < 0.01f);
     }
     // 3. Body-own points inside the footprint are filtered: the r ≈ 0 population, a wheel's outer face, a point on the hull.
     {
-        const std::vector<Eigen::Vector2f> self{{0.001f, 0.0005f}, {0.26f, 0.16f}, {-0.249f, -0.10f}, {0.f, 0.229f}};
+        const std::vector<Eigen::Vector2f> self{{0.001f, 0.0005f}, {0.28f, 0.05f}, {-0.249f, -0.10f}, {0.f, 0.229f}};
         const auto r = returns_of(self, body);
         CHECK(r.n_self == int(self.size()) and r.obstacles.empty());
         for (const auto& q : self) CHECK(rc::lidar_return_is_self(body, q));
         // Monotone (fix round 1): 2 cm OUTSIDE the hull, inside σ_r, is KEPT — it is contact, not the body.
-        CHECK(not rc::lidar_return_is_self(body, Eigen::Vector2f(0.2716f + 0.02f, 0.f)));
-        const auto band = returns_of({Eigen::Vector2f(0.2716f + 0.02f, 0.f)}, body);
+        CHECK(not rc::lidar_return_is_self(body, Eigen::Vector2f(0.2840f + 0.02f, 0.f)));
+        const auto band = returns_of({Eigen::Vector2f(0.2840f + 0.02f, 0.f)}, body);
         CHECK(band.obstacles.size() == 1 and band.n_band == 1 and band.n_self == 0);
     }
     // 4. Rotation: a turn cannot grind a corner into a real return; the turn away stays free.
     {
         // Just beside the front of the left side; a CCW turn swings the left side's front leftward onto it.
-        const Eigen::Vector2f q(-0.2716f - 0.04f, 0.15f);
+        const Eigen::Vector2f q(-0.2840f - 0.04f, 0.09f);
         const auto r = returns_of({q}, body);
         CHECK(r.obstacles.size() == 1);
         const float w_ccw = rc::lidar_return_rot_limit(r.obstacles, +1.f, body, kMargin, kAdec, kWmax);
@@ -115,13 +117,13 @@ int main()
     //    sampling of the near wall face, the jamb faces, and body self-returns. Count what the old disc deleted.
     {
         std::vector<Eigen::Vector2f> pts;
-        const float y_w = 0.2036f + 0.04f, x_j = -0.2536f + 0.02f, w = 0.90f, t = 0.10f;
+        const float y_w = 0.1901f + 0.04f, x_j = -0.2141f + 0.02f, w = 0.90f, t = 0.10f;
         for (float x = -2.f; x <= x_j; x += 0.01f) pts.emplace_back(x, y_w);                  // left near face
         for (float x = x_j + w; x <= 2.f; x += 0.01f) pts.emplace_back(x, y_w);               // right near face
         for (float y = y_w; y <= y_w + t; y += 0.01f) { pts.emplace_back(x_j, y); pts.emplace_back(x_j + w, y); }   // jamb faces
         const int n_world = int(pts.size());
         for (const Eigen::Vector2f& s : {Eigen::Vector2f(0.001f, 0.f), Eigen::Vector2f(-0.0008f, 0.0012f),
-                                        Eigen::Vector2f(0.249f, 0.16f), Eigen::Vector2f(-0.249f, 0.16f),
+                                        Eigen::Vector2f(0.28f, 0.09f), Eigen::Vector2f(-0.28f, 0.09f),
                                         Eigen::Vector2f(0.249f, -0.10f), Eigen::Vector2f(-0.249f, -0.10f)})
             pts.push_back(s);
         int old_dropped = 0, new_dropped = 0, kept_new_dropped_old = 0, world_old_dropped = 0, world_new_dropped = 0, self_new_kept = 0;
@@ -175,8 +177,10 @@ int main()
     // 7. Fix round 1, item 2 — the deadlock's way out: a return pinning the front-left corner and one beside the left
     //    side's front: forward, CCW and CW all capped to 0. The backoff opens the min clearance over 0.5 s at 20 Hz.
     {
-        std::vector<Eigen::Vector2f> pts{corner + Eigen::Vector2f(0.005f, 0.02f), Eigen::Vector2f(-0.2716f - 0.04f, 0.15f),
-                                         Eigen::Vector2f(-0.2716f - 0.04f, 0.05f)};
+        // ★ the pin sits at the WHEEL's front corner (-0.284, 0.10): the new hull is rounder above it, so a point on the chamfer is
+        // tangent to a CCW swing and no rotation could open it (that is the body's shape, not a defect of the backoff).
+        std::vector<Eigen::Vector2f> pts{Eigen::Vector2f(-0.2840f + 0.004f, 0.10f + 0.02f), Eigen::Vector2f(-0.2840f - 0.04f, 0.09f),
+                                         Eigen::Vector2f(-0.2840f - 0.04f, 0.05f)};
         auto r = returns_of(pts, body);
         CHECK(rc::lidar_return_speed_limit(r.obstacles, kFwd, body, kMargin, kAdec, kVmax) == 0.f);
         const float w_ccw = rc::lidar_return_rot_limit(r.obstacles, +1.f, body, kMargin, kAdec, kWmax);
@@ -200,7 +204,9 @@ int main()
         std::println("  backoff: first command adv {:+.3f} side {:+.3f} rot {:+.3f}; min clearance {:.3f} -> {:.3f} m over 0.5 s",
                      first.adv, first.side, first.rot, sd0, sd1);
         CHECK(first.adv < 0.f or first.rot != 0.f);
-        CHECK(sd1 > sd0 + 0.01f);
+        // ★ 0.01 -> 0.005 (2026-10-20): the two-wheel hull is rounder above the wheel, so the swing the backoff picks (rot only)
+        // opens the pinned point by 0.007 m in 0.5 s rather than >0.01; it still opens, which is the invariant.
+        CHECK(sd1 > sd0 + 0.005f);
         CHECK(rc::lidar_return_speed_limit(returns_of(pts, body).obstacles, kBack, body, kMargin, kAdec, kVmax) > 0.f);
         // No penetration of the band ⇒ no backoff.
         CHECK(not rc::lidar_return_backoff(returns_of({Eigen::Vector2f(0.f, 1.f)}, body).obstacles, body, kMargin, kSigma,
@@ -276,7 +282,7 @@ int main()
         {
             const auto c = rc::lidar_guard_census(*ro, body, kMargin, kAdec, kVmax, kWmax);
             CHECK(c.n_read == 2 and c.n_far == 2 and c.n_kept == 0);
-            CHECK(std::abs(c.nearest_any_sd - (1.2f - 0.2716f)) < 0.01f and std::abs(c.nearest_any_bearing_deg + 90.f) < 1.f);
+            CHECK(std::abs(c.nearest_any_sd - (1.2f - 0.2840f)) < 0.01f and std::abs(c.nearest_any_bearing_deg + 90.f) < 1.f);
         }
     }
 
@@ -352,7 +358,7 @@ int main()
         auto fpm = rc::RobotFootprint::shadow();
         fpm.set_safety_margin(kMargin);
         std::vector<Eigen::Vector2f> pts;
-        for (float y = -1.5f; y <= 1.5f; y += 0.01f) pts.emplace_back(-0.2716f - kGap, y);
+        for (float y = -1.5f; y <= 1.5f; y += 0.01f) pts.emplace_back(-0.2840f - kGap, y);
         const auto r0 = returns_of(pts, body);
         const float w0_ccw = rc::lidar_return_rot_limit(r0.obstacles, +1.f, body, kMargin, kAdec, kWmax);
         const float w0_cw = rc::lidar_return_rot_limit(r0.obstacles, -1.f, body, kMargin, kAdec, kWmax);

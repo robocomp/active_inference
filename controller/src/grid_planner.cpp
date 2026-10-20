@@ -1061,10 +1061,12 @@ bool GridPlanner::self_test()
 
     // (7) FEASIBLE AT BOTH ENDS, IMPOSSIBLE IN THE MIDDLE — the failure the arrival path cannot see.
     // A standpoint is verified at ONE heading; the terminal rotation sweeps the whole arc. The Shadow
-    // hull measures 0.543 m across and 0.460 m along, so lying in a corridor it needs 0.543 m — but the
-    // span it sweeps while turning PEAKS at 0.615 m around 30 deg (measured off the hull itself, not
+    // hull measures 0.568 m across (the two drive wheels, x = ±0.284) and 0.460 m along, so lying in a corridor it needs
+    // 0.568 m — but the span it sweeps while turning PEAKS at 0.602 m around 70 deg (measured off the hull itself, not
     // guessed from a bounding box). A slot between the two admits the robot pointing along it and traps
     // it part-way round.
+    // ★2026-10-20: the body is now mesh ∪ the TWO drive wheels (was four mecanum wheels: 0.543 across, peak 0.615 at 30 deg),
+    // so the slot below became 0.51 m (ends at yaw ±90) and test (8)'s 0.52 m.
     // ★THE NUMBERS HERE WERE RESTATED WITH THE YAW CORRECTION, and the old ones are worth recording
     // because they were wrong twice over: they read "0.46 x 0.65 body, diagonal 0.796 m", which is the
     // INSCRIBED and CIRCUMSCRIBED diameters treated as though they were the body's sides. The slot they
@@ -1076,12 +1078,15 @@ bool GridPlanner::self_test()
         GridPlanner p; p.params.safety_margin_m = 0.f;
         p.params.cell_size_m = 0.01f;   // the trapping window is 7 cm wide; the raster must not fill it
         const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {3.f, 0.f}, {3.f, 3.f}, {0.f, 3.f}};
-        // A 0.58 m slot running along x at y = 1.5: wider than the body lying in it (0.543), narrower
-        // than the widest span it sweeps turning round (0.615).
-        p.set_world(room, {{{0.f, 0.f}, {3.f, 0.f}, {3.f, 1.21f}, {0.f, 1.21f}},
-                           {{0.f, 1.79f}, {3.f, 1.79f}, {3.f, 3.f}, {0.f, 3.f}}});
+        // A 0.51 m slot running along x at y = 1.5: wider than the body's LENGTH (0.460, the robot pointing along the slot),
+        // narrower than its width (0.568) which turning round must present on the way. ★2026-10-20: the old trap
+        // (ends at yaw 0, a mid-arc PEAK between planner buckets) cannot be built with the two-wheel hull: at the
+        // planner's 45-degree buckets it is 0.568 at 0 and 0.568 at 45, so no slot separates them. A body that cannot
+        // turn in a slot narrower than its width is the same guarantee, stated at the ends the robot really drives.
+        p.set_world(room, {{{0.f, 0.f}, {3.f, 0.f}, {3.f, 1.245f}, {0.f, 1.245f}},
+                           {{0.f, 1.755f}, {3.f, 1.755f}, {3.f, 3.f}, {0.f, 3.f}}});
         const Eigen::Vector2f spot{1.5f, 1.5f};
-        const float along = 0.f, back = static_cast<float>(M_PI);
+        const float along = static_cast<float>(M_PI) / 2.f, back = 3.f * static_cast<float>(M_PI) / 2.f;
         const auto sweep = p.rotation_sweep(spot, along, back);
         std::printf("  narrow slot: free along=%s free reversed=%s | can it TURN? %s (tightest %.3f m at %.0f deg)\n",
                     p.pose_free(spot, along) ? "yes" : "no", p.pose_free(spot, back) ? "yes" : "no",
@@ -1100,15 +1105,18 @@ bool GridPlanner::self_test()
     // whole point: with GoalFacingYawEnabled the robot turns in place at the standpoint.
     {
         GridPlanner p; p.params.safety_margin_m = 0.f;
+        // ★2026-10-20: 0.01 m cells (as in (7)). At the default 0.10 m the raster shrinks a wall by up to a cell, and the window
+        // between 'stands' (0.460 + raster) and 'turns' (0.568, wheels) is narrower than a cell for the two-wheel hull.
+        p.params.cell_size_m = 0.01f;
         const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
-        p.set_world(room, {{{0.f, 0.f}, {4.f, 0.f}, {4.f, 2.625f}, {0.f, 2.625f}},
-                           {{0.f, 3.375f}, {4.f, 3.375f}, {4.f, 6.f}, {0.f, 6.f}}});
-        const Eigen::Vector2f slot{2.f, 3.f};        // inside the 0.75 m slot: stand yes, turn no
+        p.set_world(room, {{{0.f, 0.f}, {4.f, 0.f}, {4.f, 2.74f}, {0.f, 2.74f}},
+                           {{0.f, 3.26f}, {4.f, 3.26f}, {4.f, 6.f}, {0.f, 6.f}}});
+        const Eigen::Vector2f slot{2.f, 3.f};        // inside the 0.52 m slot: stand yes, turn no
         const auto out = p.nearest_rotatable(slot);
         std::printf("  nearest_rotatable from a slot you cannot turn in: %s (moved %.2f m)\n",
                     out ? std::format("({:.2f},{:.2f})", out->x(), out->y()).c_str() : "none",
                     out ? (*out - slot).norm() : 0.f);
-        check(p.pose_free(slot, 0.f), "the slot must be STANDABLE, or the test proves nothing");
+        check(p.pose_free(slot, static_cast<float>(M_PI) / 2.f), "the slot must be STANDABLE, or the test proves nothing");
         check(out.has_value(), "the open half of the room is right there — something must be found");
         check(out and (*out - slot).norm() > 1e-6f, "it must MOVE: the slot cannot be turned in");
         if (out) for (int h = 0; h < kHeadings; ++h)
@@ -1127,6 +1135,9 @@ bool GridPlanner::self_test()
     // Re-asking the grid there returns the same wrong answer forever; the predicate is what changes it.
     {
         GridPlanner p; p.params.safety_margin_m = 0.f;
+        // ★2026-10-20: 0.01 m cells (as in (7)). At the default 0.10 m the raster shrinks a wall by up to a cell, and the window
+        // between 'stands' (0.460 + raster) and 'turns' (0.568, wheels) is narrower than a cell for the two-wheel hull.
+        p.params.cell_size_m = 0.01f;
         const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
         p.set_world(room, {});                       // NOTHING is occupied: the grid has forgotten
         const Eigen::Vector2f standpoint{3.f, 3.f};

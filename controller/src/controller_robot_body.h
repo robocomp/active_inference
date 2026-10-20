@@ -24,10 +24,10 @@
  * to the dangerous axis. So the angle is explicit, logged, and cross-checked against the mounts; it is never
  * guessed from the mesh's aspect ratio.
  *
- * ★SHADOW IS DELIBERATELY EXCLUDED. `shadow.obj` omits the four wheels: its |x|max is 0.2420 against the
- * assembly's true 0.2464 (ROBOT_GEOMETRY.md, which settles the wheel axis). Deriving Shadow's body from its
- * own mesh would therefore SHRINK it by 29.6 mm per side, of which ~4.4 mm is real wheel the file simply does
- * not contain. For that robot the compiled hull is the better measurement and stays in force. This is a
+ * ★SHADOW IS DELIBERATELY EXCLUDED. `shadow.obj` omits the two drive wheels (Shadow.proto: r 0.1, h 0.05 on the lateral
+ * axle, x = ±0.259): its |x|max is 0.2420 against the assembly's true 0.284. (The older 0.2464 / four-mecanum
+ * note described the OLD assembly, since replaced 2026-10-20.) Deriving Shadow's body from its own mesh
+ * would therefore SHRINK it by ~42 mm per side, which is real wheel the file simply does not contain. For that robot the compiled hull is the better measurement and stays in force. This is a
  * stated geometric fact with a citation, not a special case for convenience.
  *
  * ★WHAT HAPPENS WHEN IT FAILS. It falls back to `RobotFootprint::shadow()` — today's behaviour, so a failure
