@@ -2818,7 +2818,12 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     // no target to replan to, and re-issuing a path is exactly what destroys the follower's continuity.
     hold_reason_.clear();      // set again below by whichever branch refuses
     if (params_ and params_->route_continuous and mission_.running())
+    {
+        // Task 8 ruling 1: with the local policy driving, the tour's waypoints are its successive place goals
+        // (drive_with_policy) — no arc-length curve is built or followed.
+        if (policy_enabled()) return true;
         return drive_mission_route(step, path_controller, motion_commander, time_source);
+    }
     return drive_point_target(step, obstacle_tracker, path_controller, motion_commander,
                              display, time_source);
 }
@@ -5161,7 +5166,9 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     // completed on cycle one having turned nothing.
     if (orient)
     {
-        const float target_yaw = last_target_info_->yaw_rad;
+        // Task 8 ruling 2: yaw_rad is the FORWARD heading (goal_adapter.h facing_yaw_to_theta); the body angle facing it is
+        // yaw - pi/2 — compared with theta in that convention.
+        const float target_yaw = rc::policy::facing_yaw_to_theta(last_target_info_->yaw_rad);
         const float yaw_err = std::atan2(std::sin(target_yaw - robot_pose.theta),
                                          std::cos(target_yaw - robot_pose.theta));
         constexpr float kAligned = 0.05f;                  // the executor's own band
@@ -7362,6 +7369,11 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
                                     ControllerMotionCommander &motion_commander,
                                     const TimeSource &time_source, float target_yaw, bool drive_base)
 {
+    // ★ Task 8 ruling 2 — ONE YAW CONVENTION: the contract's target yaw is the FORWARD heading (goal_adapter.h
+    //   facing_yaw_to_theta cites the writers); everything below compares it with the controller's body angle theta, so it
+    //   is converted once, here. (Before, it was compared with theta directly — a quarter turn off for every writer that
+    //   fills a forward heading; afford_calib, the only writer that filled a body angle, now publishes the heading too.)
+    target_yaw = rc::policy::facing_yaw_to_theta(target_yaw);
     const std::uint64_t now = time_source();
     if (!orient_start_ms_)
         {

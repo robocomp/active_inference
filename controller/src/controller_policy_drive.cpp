@@ -344,14 +344,54 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         note_no_command(); motion_commander.stop_robot();
     };
 
-    // ── 0. a continuous mission ROUTE is the tracker's (arc-length) job; the policy has no route goal yet
+    // ── 0. A CONTINUOUS MISSION ROUTE (Task 8 ruling 1): its waypoints are successive Place goals for the Navigator
+    //       (goal_adapter.h route_goal_step) — the authored order (reversed with the run), laps as the mission counts them,
+    //       each repaired to the nearest feasible pose as build_route repairs them; the next one on Arrived; the final one
+    //       keeps the route's end heading if it has one. A waypoint the policy cannot reach (Stuck / Unreachable) is
+    //       skipped with a line, as the route builder defers one. The tour ends by the mission's own stop.
     if (params_ != nullptr and params_->route_continuous and mission_.running())
     {
-        stop_here(rc::why::Cause::PolicyHold, std::format("mission '{}': continuous-route tours are not driven by the local "
-                                                           "policy (Task 8 scope) — set RouteContinuous=false or [Policy] Enabled=false",
-                                                           mission_.selected_name()));
+        if (policy_route_index_ < 0)
+        {
+            policy_route_wps_.clear();
+            if (const auto *m = mission_.running_mission(); m != nullptr)
+                for (const auto &w : m->waypoints) policy_route_wps_.push_back({w.pos, w.yaw_rad});
+            if (route_reverse_) std::ranges::reverse(policy_route_wps_);
+            const int n = static_cast<int>(policy_route_wps_.size());
+            for (int i = 0; i < n; ++i)
+            {
+                auto &w = policy_route_wps_[static_cast<std::size_t>(i)];
+                const Eigen::Vector2f d = policy_route_wps_[static_cast<std::size_t>((i + 1) % n)].pos - w.pos;
+                if (const auto safe = grid_planner_.nearest_free(w.pos, d.squaredNorm() > 1e-9f ? std::atan2(d.y(), d.x()) : 0.f);
+                    safe.has_value()) w.pos = *safe;
+            }
+            policy_route_laps_ = std::max(1, mission_.laps_remaining());
+            policy_route_index_ = 0;
+            std::println("[policy] mission '{}': {} waypoints x {} lap(s) as successive place goals", mission_.selected_name(), n,
+                         policy_route_laps_);
+        }
+        auto step = rc::policy::route_goal_step(policy_route_wps_, policy_route_laps_, policy_route_index_, false, gp.tol_xy, gp.tol_yaw);
+        if (not step.finished and step.goal.has_value())
+        {
+            const std::string who = std::format("mission '{}' wp {}", mission_.selected_name(), step.index + 1);
+            const auto tick = policy_tick(*step.goal, who, robot_pose, obstacle_tracker, motion_commander, now);
+            const bool skip = tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck);
+            if (skip) std::println("[policy] {}: cannot be reached ({}) — skipped", who, tick.why);
+            if (tick.verdict == PolicyVerdict::Arrived or skip)
+                step = rc::policy::route_goal_step(policy_route_wps_, policy_route_laps_, policy_route_index_, true, gp.tol_xy, gp.tol_yaw);
+            policy_route_index_ = step.index;
+        }
+        if (step.finished)
+        {
+            mission_.stop("completed", time_source());
+            route_active_ = false;
+            policy_route_index_ = -1;
+            policy_reset();
+            stop_here(rc::why::Cause::MissionDone, std::format("mission '{}' completed (local policy)", mission_.selected_name()));
+        }
         return;
     }
+    policy_route_index_ = -1;   // no tour running: the next one latches afresh
 
     // ── 1. THE CROSS: the protocol (gap, near side, through / not-a-crossing / waits) is shared; the motion is a Doorway goal
     //       on the MEASURED gap (the anchor while no gap is held), or — waiting for an anchor never seen — a Heading goal

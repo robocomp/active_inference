@@ -33,6 +33,14 @@ inline Pose2 to_policy_pose(const ControllerRobotPose& r)
 {
     return {r.pos, r.theta + std::numbers::pi_v<float> / 2.f};
 }
+// ★ ONE YAW CONVENTION (Task 8 ruling 2). An affordance's target yaw (epistemic_target_yaw_rad -> ControllerTargetInfo::
+//   yaw_rad) is the FORWARD heading, room frame, +x at 0, CCW — for Reach and Orient alike. The writers: the NBV reach
+//   pose, common/nbv/viewpoint_score.h:787 / :821 `yaw = atan2(t.cy - pos.y, t.cx - pos.x)` ("look back at the object
+//   centre"), published by door_concept/src/door_scene_graph.cpp:530 (and every concept's scene graph); the Orient
+//   hypothesis, door_concept/src/specificworker.cpp:3034 `epistemic_target_yaw_rad = inst.hypothesis_azimuth`, the room
+//   bearing of the ray door_fitter.cpp:203/212 seeds as wall_u = (cos az, sin az). So it IS the policy's yaw; the
+//   controller's body angle that faces it is yaw - pi/2 (the inverse of to_policy_pose).
+inline float facing_yaw_to_theta(float yaw) { return yaw - std::numbers::pi_v<float> / 2.f; }
 
 struct SessionCommand { float adv = 0.f, side = 0.f, rot = 0.f; };
 // A differential base: side is always 0 (Shadow's bridge drops it). rot = +w (see the header note).
@@ -115,9 +123,7 @@ inline bool in_doorway_corridor(const RoomGap& g, const Eigen::Vector2f& p, floa
 //            designed a facing (want_facing). A standpoint's yaw_rad is a FACING yaw (forward = +x at 0, GridPlanner's
 //            convention), so no quarter turn.
 //   Cross  — the doorway from the MEASURED gap (nullopt without one: nothing measured to drive through).
-//   Orient — turn in place: step_orient aligns the controller's THETA with target.yaw_rad, so the policy yaw is
-//            yaw_rad + pi/2 (that path's existing convention, kept; the Reach facing above uses the other one — both as
-//            their callers have always read them).
+//   Orient — turn in place to face target.yaw_rad (the same forward-heading convention, facing_yaw_to_theta above).
 enum class GoalMode { Place, Cross, Orient };
 inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, const ControllerRobotPose& robot,
                                                const std::optional<RoomGap>& gap, GoalMode mode, bool want_facing,
@@ -129,7 +135,7 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
             if (not gap.has_value() or not (gap->width > 0.f)) return std::nullopt;
             return doorway_goal(*gap, p);
         case GoalMode::Orient:
-            return heading_goal(robot.pos, t.yaw_rad + std::numbers::pi_v<float> / 2.f, p.tol_yaw);
+            return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
         case GoalMode::Place:
             return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, p.tol_xy, p.tol_yaw);
     }
@@ -140,6 +146,23 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
 inline GoalSpec lockon_heading_goal(const ControllerTargetInfo& t, const ControllerRobotPose& robot, const GoalAdapterParams& p)
 {
     return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
+}
+
+// ★ A CONTINUOUS ROUTE THROUGH THE POLICY (Task 8 ruling 1): the tour's waypoints (authored order, `laps` times) are
+//   successive Place goals — tol_xy as for a place, the next one on Arrived (or when the caller skips one it cannot
+//   reach); only the FINAL waypoint of the last lap keeps the route's end heading, if it has one (a tour does not stop to
+//   face at every corner). index = the waypoint being driven to, counted across laps; finished = the tour is done.
+struct RouteWaypoint { Eigen::Vector2f pos = Eigen::Vector2f::Zero(); std::optional<float> yaw; };
+struct RouteGoalStep { int index = 0; bool finished = false; std::optional<GoalSpec> goal; };
+inline RouteGoalStep route_goal_step(std::span<const RouteWaypoint> wps, int laps, int index, bool advance, float tol_xy, float tol_yaw)
+{
+    RouteGoalStep r;
+    const int n = static_cast<int>(wps.size()), total = n * std::max(1, laps);
+    r.index = std::max(0, index) + (advance ? 1 : 0);
+    if (n == 0 or r.index >= total) { r.finished = true; r.index = std::min(r.index, total); return r; }
+    const RouteWaypoint& w = wps[static_cast<std::size_t>(r.index % n)];
+    r.goal = place_goal(w.pos, r.index == total - 1 ? w.yaw : std::nullopt, tol_xy, tol_yaw);
+    return r;
 }
 
 // ★ GOAL IDENTITY — a goal that moved by less than its OWN tolerance is the same goal (its meaning of "there" did not

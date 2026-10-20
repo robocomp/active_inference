@@ -2771,7 +2771,11 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
 
     // In the PUBLISHED room frame (identity unless this room is a promoted start-up proto).
     const Eigen::Vector2f calib_xy = T_pub_int_ * res.robot_pose.translation();
-    const float calib_yaw = calib_bearing_rad_ + std::atan2(T_pub_int_.linear()(1, 0), T_pub_int_.linear()(0, 0));
+    // ★ (controller Task 8 ruling 2) the affordance target yaw is the FORWARD heading (+x at 0, CCW) for every writer —
+    //   the NBV reach poses (common/nbv/viewpoint_score.h) and door_concept's orient azimuth. calib_bearing_rad_ is a BODY
+    //   angle (theta from room<-robot R, whose forward is +y), so the published facing is bearing + pi/2.
+    const float calib_yaw = calib_bearing_rad_ + static_cast<float>(M_PI_2)
+                          + std::atan2(T_pub_int_.linear()(1, 0), T_pub_int_.linear()(0, 0));
     const bool published = calib_manager_.publish_target(
         G_, dsr_room_id_,
         calib_xy.x(),        // its own pose: an orient does not navigate, and

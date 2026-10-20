@@ -114,8 +114,8 @@ int main()
         GoalAdapterParams prm;
         const auto o = goal_for_target(t, robot, std::nullopt, GoalMode::Orient, false, prm);
         CHECK("orient: Heading goal", o.has_value() and o->goal.kind == Goal::Kind::Heading);
-        // step_orient aligns the controller's theta with target.yaw_rad: the policy yaw is that + pi/2
-        CHECK("orient: yaw = target.yaw_rad + pi/2 (step_orient's convention)", o and o->goal.yaw and near(wrapf(*o->goal.yaw - (0.4f + kPi / 2.f)), 0.f));
+        // ONE convention (Task 8 ruling 2): target.yaw_rad is the FORWARD heading for orient and reach alike
+        CHECK("orient: yaw = target.yaw_rad (the forward heading, as the contract writers fill it)", o and o->goal.yaw and near(wrapf(*o->goal.yaw - 0.4f), 0.f));
         CHECK("orient: holds the robot's position", o and (o->goal.p - robot.pos).norm() < 1e-6f and o->points.size() == 1);
         const auto pf = goal_for_target(t, robot, std::nullopt, GoalMode::Place, true, prm);
         // a REACH standpoint's yaw_rad is a FACING yaw (GridPlanner: forward = +x at 0): no quarter turn
@@ -125,6 +125,53 @@ int main()
         CHECK("place: no facing -> no yaw", pn and not pn->goal.yaw.has_value());
         const auto lk = lockon_heading_goal(t, robot, prm);
         CHECK("lock-on: Heading toward the object (the standpoint's facing yaw)", lk.goal.kind == Goal::Kind::Heading and lk.goal.yaw and near(*lk.goal.yaw, 0.4f));
+    }
+
+    // ---- 4b. ONE YAW CONVENTION, pinned on the contract writers' own formula: a "face the door" yaw is
+    //   atan2(door - standpoint) (common/nbv/viewpoint_score.h:787/821, door_concept's NBV reach) or the room bearing of the
+    //   ray toward the door (door_fitter.cpp:203/212, the Orient hypothesis azimuth). Either way the policy goal must point
+    //   AT the door, and a robot whose controller theta faces the door (forward = RelativeMotion::forward(theta)) satisfies it.
+    {
+        const Eigen::Vector2f stand(1.f, -0.5f), door(3.f, 2.5f);
+        const float contract_yaw = std::atan2(door.y() - stand.y(), door.x() - stand.x());
+        ControllerTargetInfo t; t.room_pos = stand; t.yaw_rad = contract_yaw;
+        const ControllerRobotPose robot{.pos = stand, .theta = 0.f};
+        GoalAdapterParams prm;
+        const Eigen::Vector2f to_door = (door - stand).normalized();
+        for (const GoalMode m : {GoalMode::Orient, GoalMode::Place})
+        {
+            const auto g = goal_for_target(t, robot, std::nullopt, m, true, prm);
+            const bool ok = g and g->goal.yaw and (Eigen::Vector2f(std::cos(*g->goal.yaw), std::sin(*g->goal.yaw)) - to_door).norm() < 1e-5f;
+            CHECK(m == GoalMode::Orient ? "one yaw: an orient contract yaw for 'face the door' points the policy AT the door"
+                                        : "one yaw: a reach facing yaw for 'face the door' points the policy AT the door", ok);
+        }
+        // the controller's theta that faces the door, through the ONE conversion, is the goal heading
+        const float theta = facing_yaw_to_theta(contract_yaw);
+        CHECK("one yaw: facing_yaw_to_theta -> RelativeMotion::forward(theta) points at the door",
+              (rc::RelativeMotion::forward(theta) - to_door).norm() < 1e-5f);
+        CHECK("one yaw: to_policy_pose(theta) recovers the contract yaw", near(wrapf(to_policy_pose({stand, theta}).yaw - contract_yaw), 0.f));
+    }
+
+    // ---- 4c. a continuous ROUTE through the policy: waypoints as successive Place goals (Task 8 ruling 1)
+    {
+        const std::vector<RouteWaypoint> wps{{{0.f, 0.f}, std::nullopt}, {{2.f, 0.f}, 0.7f}, {{2.f, 2.f}, 1.2f}};
+        auto r = route_goal_step(wps, 1, 0, false, 0.25f, 0.06f);
+        CHECK("route: index 0, not finished, a Place goal at waypoint 0", not r.finished and r.index == 0 and r.goal
+              and r.goal->goal.kind == Goal::Kind::Place and (r.goal->goal.p - wps[0].pos).norm() < 1e-6f and near(r.goal->goal.tol_xy, 0.25f));
+        CHECK("route: an intermediate waypoint holds no heading (even if it has one)", r.goal and not r.goal->goal.yaw);
+        r = route_goal_step(wps, 1, 0, true, 0.25f, 0.06f);
+        CHECK("route: Arrived advances to the next waypoint", r.index == 1 and r.goal and (r.goal->goal.p - wps[1].pos).norm() < 1e-6f
+              and not r.goal->goal.yaw);
+        r = route_goal_step(wps, 1, 1, true, 0.25f, 0.06f);
+        CHECK("route: the FINAL waypoint keeps the route's end heading", r.index == 2 and r.goal and r.goal->goal.yaw and near(*r.goal->goal.yaw, 1.2f));
+        r = route_goal_step(wps, 1, 2, true, 0.25f, 0.06f);
+        CHECK("route: Arrived on the last one finishes the route (no goal)", r.finished and not r.goal);
+        r = route_goal_step(wps, 2, 2, true, 0.25f, 0.06f);
+        CHECK("route: with 2 laps the tour starts again at waypoint 0", not r.finished and r.index == 3 and r.goal
+              and (r.goal->goal.p - wps[0].pos).norm() < 1e-6f);
+        r = route_goal_step(wps, 2, 4, true, 0.25f, 0.06f);
+        CHECK("route: the last waypoint of the LAST lap keeps the end heading", r.index == 5 and r.goal and r.goal->goal.yaw and near(*r.goal->goal.yaw, 1.2f));
+        CHECK("route: an empty tour is finished at once", route_goal_step({}, 1, 0, false, 0.25f, 0.06f).finished);
     }
 
     // ---- 5. goal identity: a goal that moved less than its own tolerance is the same goal (no rebuild)

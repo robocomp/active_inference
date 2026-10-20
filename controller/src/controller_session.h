@@ -394,6 +394,9 @@ private:
     std::string policy_last_why_;
     std::ofstream policy_csv_;
     std::uint64_t policy_no_field_since_ms_ = 0;
+    // Task 8 ruling 1: a continuous-route tour driven by the policy — its waypoints as successive Place goals
+    std::vector<rc::policy::RouteWaypoint> policy_route_wps_;
+    int policy_route_laps_ = 1, policy_route_index_ = -1;   // -1 = no tour latched
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
     // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and
