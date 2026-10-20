@@ -1,3 +1,4 @@
+#include <cassert>
 #include "local_policy.h"
 
 #include <algorithm>
@@ -479,10 +480,14 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         d.why = buf; return d;
     }
 
-    // ---- Release (controller ruling, fix round 5): NOT held to risk_eps. Among ALL candidates with v <= 0 (reverse
-    //      arcs and in-place turns), lexicographically: (a) those that INCREASE continuability
-    //      (log_p_cont(end) > log_p_cont(now)) if any exist, else all of them; (b) the smallest P(contact); ties go
-    //      to the larger continuability gain, then to the larger reverse travel.
+    // ---- Release (controller ruling, fix round 5): NOT held to risk_eps. Among the RELEASABLE candidates with v <= 0
+    //      (reverse arcs and in-place turns, P(contact) < release_risk_max), lexicographically: (a) those that INCREASE
+    //      continuability (log_p_cont(end) > log_p_cont(now)) if any exist, else all of them; then
+    //        Place / Doorway goals: (b) the smallest P(contact); ties to the larger continuability gain, then to the larger
+    //          reverse travel;
+    //        Heading goals (Live fix 1): (b) the smallest displacement of the end pose from the hold position (goal.p when
+    //          the goal has a yaw, else the current position — without a yaw goal.p is the point to face);
+    //          ties (1 mm) to the smaller P(contact) — a turn-here goal holds its position in Release too.
     // ★ STUCK: no release candidate is more likely contact-free than not (P < release_risk_max, the policy's second
     //   stated risk level — local_policy.h). A release that will probably bump is not a release; the task layer is told.
     // ★ A candidate at P >= release_risk_max can never be released, whichever pass picks it (the pick would fall
@@ -538,7 +543,11 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         if (lpc_now < lpc_max)
             for (Cand* c : rel) { ensure_lpc(*c); if (c->lpc > lpc_now) pool.push_back(c); }
         if (pool.empty()) pool = rel;
-        const Eigen::Vector2f hold = in.goal->p;
+        // The hold position: a Heading goal WITH a yaw holds goal.p (goal_adapter.h heading_goal sets p = here, the robot's
+        // position when the goal was made). Without a yaw, goal.p is the point to FACE (local_policy.h Goal) — then the hold
+        // is where the robot stands now.
+        const Eigen::Vector2f hold = in.goal->yaw.has_value() ? in.goal->p : in.pose.p;
+        assert(hold.allFinite());
         for (Cand* c : pool)
         {
             const float dd = (c->end.p - hold).norm();

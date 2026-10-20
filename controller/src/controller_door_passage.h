@@ -90,6 +90,7 @@ public:
         clearing_ = false;
         anchored_ = false;
         through_ = false;
+        last_open_sp_.reset();
         last_event_ = std::format("[door-passage] {}: started", door_);
     }
     void stop()
@@ -124,6 +125,14 @@ public:
     }
     /// Task 12 Fix E — the session's word on the cross, each cycle before update(): is it being driven on an interaction
     /// anchor (engaged, not lost), and has the servo reached `through` (s ≥ AnchorCrossStandoffM)?
+    /// Live fix 1 (review): the robot's position (room frame of the affordances; nullopt = unknown) and the arrival tolerance
+    /// the approach completes with — the EVIDENCE for falling back to `approach` once at the door (see update()).
+    void note_robot(std::optional<Eigen::Vector2f> pos, float arrival_tol_m)
+    {
+        std::scoped_lock lk(m_);
+        robot_ = pos;
+        arrival_tol_ = arrival_tol_m;
+    }
     void note_anchor(bool engaged, bool through)
     {
         std::scoped_lock lk(m_);
@@ -220,6 +229,20 @@ public:
         //   kept, so a re-offer of `open` after it is still the flicker of the door just opened, not news that it shut).
         //   Falling back to `open` stays forbidden once at the door (try36-40). With the policy driving, an approach
         //   standpoint the robot already stands on completes at once (instant completion), so a flicker costs one cycle.
+        // ★ REVIEW (Live fix 1): at the door the fall back needs EVIDENCE the robot is out of position — its measured distance
+        //   from the reference standpoint (door_concept's approach standpoint as offered now, else the `open` standpoint the
+        //   passage last saw) beyond the arrival tolerance the approach completes with. Inside it the passage waits for
+        //   door_concept as before (a one-cycle `cross` flicker at the door is not a reason to walk away; and with the robot
+        //   at the approach standpoint, `open`/`cross` absent cannot cycle Approach <-> Open). And only while the last
+        //   outcome is unset or satisfied: after a FAILED step the retry path ("waiting for it to be offered again",
+        //   kMaxCrossUnreachable) stands unchanged.
+        if (const auto sp = standpoint_of(G, Step::Open); sp.has_value()) last_open_sp_ = sp;
+        const auto ref_sp = [&]() -> std::optional<Eigen::Vector2f> {
+            if (const auto a = standpoint_of(G, Step::Approach); a.has_value()) return a;
+            return last_open_sp_;
+        }();
+        const bool out_of_position = robot_.has_value() and ref_sp.has_value() and (*robot_ - *ref_sp).norm() > arrival_tol_;
+        const bool outcome_ok = last_outcome_.empty() or last_outcome_ == "satisfied";
         if (step_ == Step::Cross or step_ == Step::Open)
         {
             const State st_now = state_of(G, name_of(step_));
@@ -227,7 +250,7 @@ public:
                 for (Step earlier : {Step::Open, Step::Approach})
                 {
                     if (static_cast<int>(earlier) >= static_cast<int>(step_)) continue;
-                    if (reached_door_ and earlier != Step::Approach) continue;
+                    if (reached_door_ and (earlier != Step::Approach or not out_of_position or not outcome_ok)) continue;
                     if (state_of(G, name_of(earlier)) == State::Offered)
                     {
                         out.event = std::format("[door-passage] {}: {} is not offered — back to {}{}", door_,
@@ -536,6 +559,19 @@ private:
     std::string step_state_;   // view()
     std::string last_event_;   // view()
     std::string last_outcome_; // view()
+    std::optional<Eigen::Vector2f> robot_;          // note_robot (Live fix 1 review)
+    float arrival_tol_ = 0.25f;
+    std::optional<Eigen::Vector2f> last_open_sp_;   // the `open` standpoint as last seen
+    // An affordance's standpoint (epistemic_target_x/y_m) as its producer writes it; nullopt = node or attribute absent.
+    std::optional<Eigen::Vector2f> standpoint_of(DSR::DSRGraph& G, Step s) const
+    {
+        const auto n = G.get_node(name_of(s));
+        if (not n.has_value()) return std::nullopt;
+        const auto x = G.get_attrib_by_name<epistemic_target_x_m_att>(*n);
+        const auto y = G.get_attrib_by_name<epistemic_target_y_m_att>(*n);
+        if (not x.has_value() or not y.has_value() or not std::isfinite(*x) or not std::isfinite(*y)) return std::nullopt;
+        return Eigen::Vector2f(*x, *y);
+    }
     int  cross_unreachable_ = 0;   // Unreachable cross completions in this passage (kMaxCrossUnreachable)
     bool failed_ = false;          // finished by the cap, not by crossing
     bool clearing_ = false;        // Task 12 Fix E: crossing on past the room switch, on the anchor

@@ -176,6 +176,13 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         // Task 12 Fix E: whether the cross is driven on an anchor, and whether its servo is through — the passage keeps the
         // cross going past a room switch on the anchor until then.
         door_passage_.note_anchor(anchor_cross_engaged_, anchor_through_);
+        // Live fix 1 (review): the evidence for falling back to `approach` at the door — where the robot is, and the arrival
+        // tolerance an approach completes with (the controller's goal_threshold).
+        {
+            const auto rp = world_model.read_robot_pose_latest(timestamp_ms);
+            door_passage_.note_robot(rp.has_value() ? std::optional<Eigen::Vector2f>(rp->pos) : std::nullopt,
+                                     path_controller.goal_threshold());
+        }
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
         if (dp.event.has_value()) std::println("{}", *dp.event);
         // A single command's passage is over (crossed, door closed behind or left open): the base goes back to the

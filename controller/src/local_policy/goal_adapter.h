@@ -82,6 +82,9 @@ inline GoalSpec place_goal(const Eigen::Vector2f& p, std::optional<float> yaw, f
     return s;
 }
 // "Turn to face yaw, here": Heading goals hold position (round-4 ruling); the field is seeded at the robot.
+// ★ CONTRACT: a Heading goal's p IS its hold position (`here`) — decide() charges displacement from it as negative progress
+//   and, in a Release, picks the end pose closest to it (local_policy.cpp, Live fix 1). It always carries a yaw: a
+//   Heading goal WITHOUT one reads p as the point to face (local_policy.h), which this helper never builds.
 inline GoalSpec heading_goal(const Eigen::Vector2f& here, float yaw, float tol_yaw)
 {
     GoalSpec s;

@@ -49,6 +49,15 @@ void put(DSR::DSRGraph& G, const std::string& name, bool pending, bool active,
     G.update_node(*n);
 }
 void offered(DSR::DSRGraph& G, const std::string& n) { put(G, n, true, false); }
+/// The standpoint an affordance names (epistemic_target_x/y_m), as door_concept writes it.
+void place(DSR::DSRGraph& G, const std::string& name, float x, float y)
+{
+    auto n = G.get_node(name);
+    if (not n.has_value()) return;
+    G.add_or_modify_attrib_local<epistemic_target_x_m_att>(*n, x);
+    G.add_or_modify_attrib_local<epistemic_target_y_m_att>(*n, y);
+    G.update_node(*n);
+}
 void executing(DSR::DSRGraph& G, const std::string& n) { put(G, n, true, true); }
 void satisfied(DSR::DSRGraph& G, const std::string& n) { put(G, n, false, false, rc::affordance::Outcome::Satisfied); }
 
@@ -183,50 +192,98 @@ int main()
     }
 
 
-    // ── Live fix 1 (tourP1 leg 1): OPEN satisfied, then the robot drifted OUT of the reach band — door_concept withholds
-    //    `cross` (P(reach) 0.09) and keeps offering `approach`. The passage goes BACK to approach (a robot outside the band
-    //    must get back into it) instead of waiting for a cross that cannot appear; then on to cross once it is offered.
-    {
-        auto G = make_graph(5);
-        DoorPassage p;
+    // ── Live fix 1 (+ review): the fallback to `approach` after reaching the door needs EVIDENCE the robot is out of
+    //    position — its measured distance from door_concept's approach standpoint beyond the arrival tolerance — and a last
+    //    outcome unset or Satisfied. Helper: approach → open satisfied, robot at the approach standpoint (0, 0), tol 0.25.
+    auto to_cross = [&](DSR::DSRGraph& G, DoorPassage& p) {
         p.set_clock(clock);
         p.start("door_2", Step::Cross);
-        offered(*G, "aff_door_2_approach");
-        p.update(*G, nullptr, "room_1");
-        executing(*G, "aff_door_2_approach");
-        p.update(*G, nullptr, "room_1");
-        satisfied(*G, "aff_door_2_approach");
-        p.update(*G, nullptr, "room_1");                      // approach SATISFIED -> open
-        CHECK(p.view().step == Step::Open);
-        offered(*G, "aff_door_2_open");
-        p.update(*G, nullptr, "room_1");
-        executing(*G, "aff_door_2_open");
-        p.update(*G, nullptr, "room_1");
-        satisfied(*G, "aff_door_2_open");
-        p.update(*G, nullptr, "room_1");                      // open SATISFIED -> cross
+        p.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
+        offered(G, "aff_door_2_approach"); place(G, "aff_door_2_approach", 0.f, 0.f);
+        p.update(G, nullptr, "room_1");
+        executing(G, "aff_door_2_approach"); p.update(G, nullptr, "room_1");
+        satisfied(G, "aff_door_2_approach"); p.update(G, nullptr, "room_1");   // -> open
+        offered(G, "aff_door_2_open"); place(G, "aff_door_2_open", 0.1f, 0.1f);
+        p.update(G, nullptr, "room_1");
+        executing(G, "aff_door_2_open"); p.update(G, nullptr, "room_1");
+        satisfied(G, "aff_door_2_open"); p.update(G, nullptr, "room_1");       // -> cross
+    };
+    {   // (c) the live case: the robot drifted 0.26 m BEYOND the arrival tolerance — falls back, then proceeds to cross
+        auto G = make_graph(5);
+        DoorPassage p;
+        to_cross(*G, p);
         CHECK(p.view().step == Step::Cross);
-        auto out = p.update(*G, nullptr, "room_1");
+        p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Cross);                  // nothing offered: it waits
-        offered(*G, "aff_door_2_approach");                   // out of the band: door_concept offers approach again
-        out = p.update(*G, nullptr, "room_1");
+        p.note_robot(Eigen::Vector2f(0.f, -0.51f), 0.25f);    // released 0.51 m from the approach standpoint
+        offered(*G, "aff_door_2_approach");
+        auto out = p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Approach);               // back to approach — not a wait for ever
         CHECK(out.event.has_value() and out.event->find("back to") != std::string::npos);
         CHECK(out.required == "aff_door_2_approach");
         executing(*G, "aff_door_2_approach");
         p.update(*G, nullptr, "room_1");
+        p.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
         satisfied(*G, "aff_door_2_approach");                 // back inside the band
-        offered(*G, "aff_door_2_cross");                      // door_concept offers cross again (the door stays open)
+        offered(*G, "aff_door_2_cross");
         p.update(*G, nullptr, "room_1");
         p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Cross);
         out = p.update(*G, nullptr, "room_1");
         CHECK(out.required == "aff_door_2_cross");
-        // existing protocol kept: while cross is EXECUTING, an approach on offer does not pull it back
-        executing(*G, "aff_door_2_cross");
+        executing(*G, "aff_door_2_cross");                    // existing protocol: an executing cross is not pulled back
         p.update(*G, nullptr, "room_1");
+        p.note_robot(Eigen::Vector2f(0.f, -0.8f), 0.25f);
         offered(*G, "aff_door_2_approach");
         p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Cross);
+    }
+    {   // (a) cross flickers absent for one cycle while the robot is INSIDE the band and approach is offered: NO fallback
+        auto G = make_graph(6);
+        DoorPassage p;
+        to_cross(*G, p);
+        offered(*G, "aff_door_2_cross"); p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        put(*G, "aff_door_2_cross", false, false);            // withdrawn for a cycle (a P(passable) flicker)
+        offered(*G, "aff_door_2_approach");
+        p.note_robot(Eigen::Vector2f(0.05f, 0.1f), 0.25f);    // at the door, inside the tolerance
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);                  // waits for door_concept as before
+        offered(*G, "aff_door_2_cross");
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_2_cross");
+    }
+    {   // (b) open absent AND cross absent, robot AT the approach standpoint: no Approach<->Open cycling, no repeated events
+        auto G = make_graph(7);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_2", Step::Cross);
+        p.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
+        offered(*G, "aff_door_2_approach"); place(*G, "aff_door_2_approach", 0.f, 0.f);
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_2_approach"); p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_2_approach"); p.update(*G, nullptr, "room_1");   // -> open
+        CHECK(p.view().step == Step::Open);
+        offered(*G, "aff_door_2_approach");                    // door_concept keeps offering approach; open and cross absent
+        int events = 0;
+        for (int i = 0; i < 10; ++i) { const auto o = p.update(*G, nullptr, "room_1"); if (o.event.has_value()) ++events; }
+        CHECK(p.view().step == Step::Open);
+        CHECK(events == 0);
+    }
+    {   // (2) after a FAILED cross the existing retry path is unchanged: no fallback, "waiting for it to be offered again"
+        auto G = make_graph(8);
+        DoorPassage p;
+        to_cross(*G, p);
+        offered(*G, "aff_door_2_cross"); p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_2_cross"); p.update(*G, nullptr, "room_1");
+        put(*G, "aff_door_2_cross", false, false, rc::affordance::Outcome::Unreachable);
+        const auto failed = p.update(*G, nullptr, "room_1");
+        CHECK(failed.event.has_value() and failed.event->find("waiting for it to be offered again") != std::string::npos);
+        p.note_robot(Eigen::Vector2f(0.f, -0.8f), 0.25f);    // even out of position
+        offered(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);                  // the retry path waits for cross; no fallback
+        CHECK(p.view().last_outcome != "satisfied" and not p.view().last_outcome.empty());
     }
 
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
