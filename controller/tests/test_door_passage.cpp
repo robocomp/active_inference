@@ -334,6 +334,53 @@ int main()
         CHECK(not DoorPassage::look_available(*G, "door_4"));
     }
 
+
+    // ── Live fix 4 ruling 3: an `open` PRE-EMPTED by `cross` whose door is MEASURED open (door_open_prob known and > 0.5)
+    //    counts as opened — no cross -> open -> cross flip when the released open is re-offered (tourP8). Unmeasured
+    //    (door_open_prob -1): the existing "the door is shut: back to open" rule stands (control).
+    for (const float p_open : {0.92f, -1.0f})
+    {
+        auto G = make_graph(p_open > 0.f ? 12 : 13);
+        DoorPassage p;
+        p.set_clock(clock);
+        DSR::Node door = DSR::Node::create<door_node_type>("door_5");
+        G->add_or_modify_attrib_local<door_open_prob_att>(door, p_open);
+        G->insert_node(door);
+        p.start("door_5", Step::Cross);
+        offered(*G, "aff_door_5_open");                      // skip approach: open on offer
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_5_open");
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open);
+        offered(*G, "aff_door_5_cross");                     // cross pre-empts the executing open
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        offered(*G, "aff_door_5_open");                      // the released open is Offered again for a cycle
+        p.update(*G, nullptr, "room_1");
+        if (p_open > 0.f) CHECK(p.view().step == Step::Cross and p.view().opened);
+        else CHECK(p.view().step == Step::Open);
+    }
+    // ── Live fix 4 ruling 4: reposition() — the session hands a stale-anchor cross back and the passage returns to approach
+    {
+        auto G = make_graph(14);
+        DoorPassage p;
+        p.set_clock(clock);
+        DSR::Node door = DSR::Node::create<door_node_type>("door_6");
+        G->insert_node(door);
+        p.start("door_6", Step::Cross);
+        offered(*G, "aff_door_6_cross");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_6_cross");
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        p.reposition("the anchor stayed unpublished from here");
+        CHECK(p.view().step == Step::Approach and not p.view().reached_door);
+        put(*G, "aff_door_6_cross", false, false, rc::affordance::Outcome::Unreachable);   // the hand-back lands
+        offered(*G, "aff_door_6_approach");
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_6_approach" and p.view().attempts == 0 and not p.view().failed);
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

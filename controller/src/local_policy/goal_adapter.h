@@ -119,7 +119,8 @@ inline bool field_free_from_distance(float distance_m, float cell_m, float inscr
 //            designed a facing (want_facing). A standpoint's yaw_rad is a FACING yaw (forward = +x at 0, GridPlanner's
 //            convention), so no quarter turn.
 //   Cross  — the doorway from the MEASURED gap (nullopt without one: nothing measured to drive through).
-//   Orient — turn in place to face target.yaw_rad (the same forward-heading convention, facing_yaw_to_theta above).
+//   Orient — go to the standpoint (Place with yaw) while farther than tol_xy, then turn in place to target.yaw_rad (the
+//            same forward-heading convention, facing_yaw_to_theta above).
 enum class GoalMode { Place, Cross, Orient };
 inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, const ControllerRobotPose& robot,
                                                const std::optional<RoomGap>& gap, GoalMode mode, bool want_facing,
@@ -131,6 +132,10 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
             if (not gap.has_value() or not (gap->width > 0.f)) return std::nullopt;
             return doorway_goal(*gap, p);
         case GoalMode::Orient:
+            // ★ Live fix 4 ruling 1: an orient GOES TO its standpoint first — a Place WITH the contract's yaw while the robot
+            //   is farther than the arrival tolerance from it; only there does it turn in place (tourP8: turned to +1.57 at a
+            //   spot 1.2 m from the open standpoint, 58 deg off the door normal).
+            if ((robot.pos - t.room_pos).norm() > p.tol_xy) return place_goal(t.room_pos, t.yaw_rad, p.tol_xy, p.tol_yaw);
             return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
         case GoalMode::Place:
             return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, p.tol_xy, p.tol_yaw);

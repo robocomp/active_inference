@@ -543,6 +543,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     //       toward where it was last published
     if (anchor_cross_.has_value())
     {
+        policy_no_anchor_since_ms_ = 0;
         const CrossProtocol cp = cross_protocol(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
                                                 affordance_manager, time_source);
         if (not cp.ended)
@@ -575,6 +576,17 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                                           corridor, veto);
             if (tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck))
                 cross_hand_back(std::format("the local policy cannot drive it ({})", tick.why), /*timed_out=*/false, motion_commander);
+            // ★ Live fix 4 ruling 4: waiting for an anchor never seen, FACING where it was published, for one plan duration
+            //   (2 holds) — nothing at this pose changes it: hand the cross back and let the passage reposition (approach).
+            else if (not cp.drive and policy_stale_wait_.on_tick(tick.verdict == PolicyVerdict::Arrived, steady_now_s(),
+                                                                2.0 * (params_ != nullptr ? params_->policy_horizon_s : 1.0)))
+            {
+                cross_hand_back("the anchor stays unpublished from where the robot stands (facing it for a plan duration)",
+                                /*timed_out=*/false, motion_commander);
+                door_passage_.reposition("the cross's anchor stays unpublished from here");
+                policy_stale_wait_.reset();
+            }
+            if (cp.drive) policy_stale_wait_.reset();
 
         }
         anchor_cross_.reset();
@@ -622,9 +634,13 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             {
                 active_contract_ = contract;
                 feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id : last_target_info_->parent_node_id;
-                note_why(rc::why::Cause::Orienting, std::format("orient '{}': a heading goal for the policy", last_target_info_->node_name));
-                if (step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
-                                last_target_info_->yaw_rad, /*drive_base=*/false))
+                // Live fix 4 ruling 1: the orient goes to its standpoint first (a Place with yaw); its protocol (look / timeout)
+                // runs only once there — on the way, an incidental heading match is not the look
+                const bool at_standpoint = (cpose.pos - last_target_info_->room_pos).norm() <= gp.tol_xy;
+                note_why(rc::why::Cause::Orienting, std::format("orient '{}': {}", last_target_info_->node_name,
+                                                                at_standpoint ? "turning in place" : "driving to its standpoint"));
+                if (at_standpoint and step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
+                                                  last_target_info_->yaw_rad, /*drive_base=*/false))
                 {
                     finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
                     policy_reset();
@@ -645,6 +661,24 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         stop_here(rc::why::Cause::NoTarget, "a plan is held but no target names where it goes");
         return;
     }
+    // ★ Live fix 4 ruling 2: a CROSS whose anchor door_concept has not hung yet is WAITED for, still — never driven as a room
+    //   route to the far room's through-pose (tourP8: `back up v=-0.35` toward a target 6.8 m away for a cycle per claim).
+    //   door_concept hangs one on every cross claim (the cycle after it sees it); bounded by the cross contract's timeout.
+    if (last_target_info_->from_affordance and last_target_info_->node_name.ends_with("_cross"))
+    {
+        if (policy_no_anchor_since_ms_ == 0) policy_no_anchor_since_ms_ = now;
+        if (target_contract_known_ and double(now - policy_no_anchor_since_ms_) > double(target_contract_.timeout_ms))
+        {
+            cross_hand_back(std::format("no anchor was hung for '{}' within the cross contract's timeout", last_target_info_->node_name),
+                            /*timed_out=*/true, motion_commander);
+            policy_no_anchor_since_ms_ = 0;
+            return;
+        }
+        stop_here(rc::why::Cause::AnchorWaiting, std::format("'{}': waiting for door_concept to hang the cross's anchor ({:.1f} s)",
+                                                             last_target_info_->node_name, (now - policy_no_anchor_since_ms_) * 1e-3));
+        return;
+    }
+    policy_no_anchor_since_ms_ = 0;
     const auto spec = rc::policy::goal_for_target(*last_target_info_, cpose, std::nullopt, rc::policy::GoalMode::Place,
                                                   wants_final_facing(*last_target_info_), gp);
     if (not spec.has_value()) { stop_here(rc::why::Cause::PolicyHold, "no goal could be built"); return; }

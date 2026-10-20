@@ -55,4 +55,21 @@ private:
     std::string room_;
     std::uint64_t switched_ms_ = 0;
 };
+// ★ Live fix 4 ruling 4 — A STALE-ANCHOR WAIT THAT CANNOT SEE IT. The cross waits for an anchor not yet published by
+//   turning toward where it was published (a Heading goal). Once that turn has ARRIVED and the anchor stays unpublished
+//   for one plan duration (the policy's own unit of commitment: 2 holds), nothing at this pose will change it (tourP8: 36 s
+//   still at 58 deg off the door normal, p_view never >= 0.5): the cross is handed back and the passage repositions.
+class StaleAnchorWait
+{
+public:
+    bool on_tick(bool arrived, double now_s, double plan_duration_s)
+    {
+        if (not arrived) { since_ = -1.0; return false; }
+        if (since_ < 0.0) since_ = now_s;
+        return now_s - since_ >= plan_duration_s;
+    }
+    void reset() { since_ = -1.0; }
+private:
+    double since_ = -1.0;
+};
 }  // namespace rc::policy

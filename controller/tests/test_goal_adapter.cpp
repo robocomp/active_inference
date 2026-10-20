@@ -122,7 +122,7 @@ int main()
 
     // ---- 4. Heading goal for an orient target; Place goals for a reach (with / without facing)
     {
-        const ControllerRobotPose robot{.pos = {0.5f, 0.5f}, .theta = 0.f};
+        const ControllerRobotPose robot{.pos = {2.9f, 1.05f}, .theta = 0.f};   // at the standpoint (Live fix 4: orient turns there)
         ControllerTargetInfo t; t.room_pos = {3.f, 1.f}; t.yaw_rad = 0.4f;
         GoalAdapterParams prm;
         const auto o = goal_for_target(t, robot, std::nullopt, GoalMode::Orient, false, prm);
@@ -275,6 +275,34 @@ int main()
         CHECK("trap/corridor: a disc touching the corridor's edge does", disc_meets_doorway_corridor(g, {0.17f + 0.30f, 0.5f}, 0.32f, 1.0f, 2.55f, 0.23f, 0.568f));
         const RoomGap narrow{{0.f, 0.f}, {0.f, 1.f}, 0.50f};   // narrower than the body: no evidence that it fits
         CHECK("trap/corridor: an opening narrower than the body vetoes nothing", not disc_meets_doorway_corridor(narrow, {0.f, -0.3f}, 0.32f, 1.0f, 2.55f, 0.23f, 0.568f));
+    }
+
+    // ---- 4i. Live fix 4 ruling 1: an ORIENT with a standpoint goes TO it first (Place WITH the contract's yaw) when the robot is
+    //   farther than the arrival tolerance; only there does it turn in place (Heading). tourP8: aff_door_2_open at (0.51,
+    //   0.86) yaw +1.57 was turned to at (-0.64, 1.89), 58 deg off the door normal.
+    {
+        ControllerTargetInfo t; t.room_pos = {0.51f, 0.86f}; t.yaw_rad = 1.5708f;
+        GoalAdapterParams prm; prm.tol_xy = 0.25f;
+        const ControllerRobotPose far{.pos = {-0.64f, 1.89f}, .theta = 0.f};
+        const auto g1 = goal_for_target(t, far, std::nullopt, GoalMode::Orient, false, prm);
+        CHECK("orient far: a Place goal at the standpoint WITH the contract's yaw", g1 and g1->goal.kind == Goal::Kind::Place
+              and (g1->goal.p - t.room_pos).norm() < 1e-6f and g1->goal.yaw and near(*g1->goal.yaw, 1.5708f));
+        const ControllerRobotPose there{.pos = {0.55f, 0.80f}, .theta = 0.f};
+        const auto g2 = goal_for_target(t, there, std::nullopt, GoalMode::Orient, false, prm);
+        CHECK("orient there: a Heading goal, turning in place", g2 and g2->goal.kind == Goal::Kind::Heading and near(*g2->goal.yaw, 1.5708f)
+              and (g2->goal.p - there.pos).norm() < 1e-6f);
+    }
+    // ---- 4j. Live fix 4 ruling 4: a stale-anchor wait that has ARRIVED (facing where the anchor was published) and stays
+    //   unpublished for one plan duration hands the cross back so the passage repositions (back to approach).
+    {
+        StaleAnchorWait w;
+        CHECK("stale wait: not arrived -> no hand back", not w.on_tick(false, 100.0, 2.0));
+        CHECK("stale wait: arrived just now -> waits", not w.on_tick(true, 101.0, 2.0));
+        CHECK("stale wait: arrived 1.5 s -> still waits (plan 2.0 s)", not w.on_tick(true, 102.5, 2.0));
+        CHECK("stale wait: arrived for a plan duration -> hand back", w.on_tick(true, 103.05, 2.0));
+        w.reset();
+        CHECK("stale wait: a turn in between restarts the clock", not w.on_tick(true, 200.0, 2.0) and not w.on_tick(false, 201.0, 2.0)
+              and not w.on_tick(true, 202.5, 2.0));
     }
 
     // ---- 4g. Live fix 2 (tourP3 retry): a ROOM-FRAME CHANGE (room_concept moved the robot's RT into the next room's frame,

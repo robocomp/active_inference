@@ -405,6 +405,8 @@ private:
     std::string policy_last_why_;
     std::ofstream policy_csv_;
     std::uint64_t policy_no_field_since_ms_ = 0;
+    std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
+    rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
     // Task 8 ruling 1: a continuous-route tour driven by the policy — its waypoints as successive Place goals
     std::vector<rc::policy::RouteWaypoint> policy_route_wps_;
     int policy_route_laps_ = 1, policy_route_index_ = -1;   // -1 = no tour latched

@@ -42,6 +42,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <print>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -142,6 +143,19 @@ public:
         std::scoped_lock lk(m_);
         robot_ = pos;
         arrival_tol_ = arrival_tol_m;
+    }
+    /// Live fix 4 ruling 4: the session handed the cross back because the anchor stays unpublished from where the robot
+    /// stands — go back to `approach` (door_concept's standpoint) to change the viewpoint. The cross's late Unreachable
+    /// completion lands on a step the passage has left, so it costs no attempt.
+    void reposition(const std::string& why)
+    {
+        std::scoped_lock lk(m_);
+        if (step_ != Step::Cross and step_ != Step::Open) return;
+        last_event_ = std::format("[door-passage] {}: {} — back to {} to change the viewpoint", door_, why, name_of(Step::Approach));
+        std::println("{}", last_event_);
+        step_ = Step::Approach;
+        reached_door_ = false;
+        seen_executing_ = false;
     }
     void note_anchor(bool engaged, bool through)
     {
@@ -252,6 +266,13 @@ public:
                                                       : std::string("skipping"));
                 if (was_executing) preempted_ = true;
                 if (step_ == Step::Approach) reached_door_ = true;   // `open`/`cross` offered ⇒ the door is within reach
+                // ★ Live fix 4 ruling 3: an EXECUTING `open` pre-empted by `cross` whose door is MEASURED open (door_concept's
+                //   door_open_prob known — not its -1 sentinel — and more likely open than not) counts as opened: the released
+                //   open re-offered for a cycle is not news that the door shut (tourP8: cross -> open -> cross within 1 s).
+                if (step_ == Step::Open and later == Step::Cross and was_executing)
+                    if (const auto dn = G.get_node(door_); dn.has_value())
+                        if (const auto po = G.get_attrib_by_name<door_open_prob_att>(*dn); po.has_value() and *po >= 0.f and *po > 0.5f)
+                        { opened_ = true; reached_door_ = true; }
                 step_ = later;
                 seen_executing_ = false;
                 break;
