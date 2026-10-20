@@ -24,6 +24,7 @@
 #include "policy_types.h"
 #include "local_policy.h"
 #include "unseen_contact.h"
+#include "policy_tick_gate.h"
 #include "../controller_runtime_types.h"
 #include "../../../common/interaction_anchor/relative_pose.h"
 
@@ -183,6 +184,7 @@ inline RouteGoalStep route_goal_step(std::span<const RouteWaypoint> wps, int lap
 //   run, opposite signs extend it. kConsecutive = 3 opposite intervals in a row CONTRADICT the odometry. Why 3: a single
 //   relocalisation step of the pose touches at most TWO intervals (the jump, and the one after if it snaps back), so no
 //   single pose event can trip it, while a truly flipped sign contradicts every turning interval. Latched until reset.
+struct OdoSample { double t = 0.0; float w = 0.f; };   // an odometry turn rate and the time it describes
 class OdoSignCheck
 {
 public:
@@ -192,6 +194,23 @@ public:
         if (not (dt > 0.f) or std::abs(w_meas) < w_min or std::abs(dyaw_pose) <= 2.f * sigma_yaw) return;
         if ((dyaw_pose > 0.f) == (w_meas > 0.f)) run_ = 0;
         else if (++run_ >= kConsecutive) contradicted_ = true;
+    }
+    // ★ review fix 2, item 2 — TIME-ALIGNED: the pose's heading change over [t_a, t_b] in the POSE's time base (each pose
+    //   stamp = its tick minus the pose age) against the odometry turn INTEGRATED over the same interval (samples placed at
+    //   their own times, each held until the next). Comparing the current wheel rate with a lagged pose reads every turn
+    //   reversal as a contradiction for one pose lag. An interval the history does not cover judges nothing.
+    void update_interval(std::span<const OdoSample> hist, double t_a, double t_b, float dyaw_pose, float w_min, float sigma_yaw)
+    {
+        const double dt = t_b - t_a;
+        if (not (dt > 0.0) or hist.empty() or hist.front().t > t_a + 1e-9) return;
+        double turn = 0.0;
+        for (std::size_t i = 0; i < hist.size(); ++i)
+        {
+            const double s0 = hist[i].t, s1 = i + 1 < hist.size() ? hist[i + 1].t : t_b;
+            const double lo = std::max(s0, t_a), hi = std::min(s1, t_b);
+            if (hi > lo) turn += double(hist[i].w) * (hi - lo);
+        }
+        update(static_cast<float>(turn / dt), dyaw_pose, static_cast<float>(dt), w_min, sigma_yaw);
     }
     [[nodiscard]] bool contradicted() const { return contradicted_; }
     [[nodiscard]] int run() const { return run_; }

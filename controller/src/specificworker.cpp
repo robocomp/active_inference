@@ -2140,7 +2140,7 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	hibernationTick();
 	const auto v = relative_motion_.view();
 	std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
-	             v.text, pose->pos.x(), pose->pos.y(), (pose->theta + M_PI_2) * 180.0 / M_PI);
+	             v.text, pose->pos.x(), pose->pos.y(), rc::policy::to_policy_pose(*pose).yaw * 180.0 / M_PI);
 	return {.accepted = true, .kind = "move", .motion_id = v.id};
 }
 
@@ -2254,6 +2254,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 	{
 		session_.note_why(rc::why::Cause::NoPose, "move order holding: no robot pose to close the loop on");
 		motion_commander_.stop_robot();   // no pose ⇒ no closed loop ⇒ hold
+		session_.policy_interrupt();      // review fix 2.1: a hold interrupts the policy's plan
 		return true;
 	}
 	session_.update_display(pose, display_, obstacle_tracker_.display_obstacle_polygons(),
@@ -2263,6 +2264,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		session_.note_why(rc::why::Cause::Halted, paused_ ? std::string("PAUSED during a move order")
 		                                                  : std::string("driving is off during a move order — press Run"));
 		motion_commander_.stop_robot();
+		session_.policy_interrupt();      // review fix 2.1
 		update_custom_widget(*pose);
 		return true;
 	}
@@ -2307,7 +2309,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		const auto v = relative_motion_.view();
 		std::println("[move] relative motion #{} '{}' {}: {} — at ({:.2f},{:.2f}) yaw {:.0f} deg", v.id, v.text,
 		             rc::RelativeMotion::phase_name(v.phase), v.last_event, pose->pos.x(), pose->pos.y(),
-		             (pose->theta + M_PI_2) * 180.0 / M_PI);
+		             rc::policy::to_policy_pose(*pose).yaw * 180.0 / M_PI);
 	}
 	update_custom_widget(*pose);
 	return true;

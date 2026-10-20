@@ -74,9 +74,11 @@ void ControllerSession::policy_reset()
     policy_last_mode_ = -1;
     policy_last_why_.clear();
     policy_no_field_since_ms_ = 0;
-    policy_last_tick_s_ = -1.0;
+    policy_gate_.reset();
     policy_sign_.reset();          // an operator Stop / a new activity re-arms the check (it is latched otherwise)
     policy_prev_yaw_.reset();
+    policy_prev_pose_t_.reset();
+    policy_odo_hist_.clear();
 }
 
 ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::GoalSpec &spec, const std::string &who,
@@ -96,6 +98,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         note_why(rc::why::Cause::PolicyHold, std::format("{}: {}", who, why));
         note_no_command(); motion_commander.stop_robot();
         policy_sent_.push_back({now_s, 0.f, 0.f});
+        policy_gate_.on_hold();   // review fix 2.1: a hold — however short — is an INTERRUPTION of the committed plan
     };
     if (not grid_planner_.has_world()) { hold("no planner map yet — no cost-to-go"); return out; }
     // ★ review M6: ODOMETRY FRESHNESS — v_now / w_now and the unseen-contact evidence come from robot_current_*; older than
@@ -204,22 +207,39 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //   the evidence kept in the old odometry frame dropped with it (the base may have moved unseen by this integration).
     // ★ review I1: an explicit INTERRUPTION (policy_interrupt(): Pause / Halt / a hold / the LiDAR-stall hold) is the same
     //   event, and the Navigator's committed plan and pending prediction are dropped unjudged (Navigator::interrupt).
-    const bool resumed = policy_interrupted_ or policy_last_tick_s_ < 0.0 or now_s - policy_last_tick_s_ > 0.5;
-    const float dt_tick = resumed ? 0.f : static_cast<float>(std::max(0.0, now_s - policy_last_tick_s_));
+    const double prev_tick_s = policy_gate_.last_tick_s();
+    const bool resumed = policy_gate_.on_tick(now_s);   // a hold / Halt / stall noted, the first tick, or a gap (policy_tick_gate.h)
+    const float dt_tick = resumed ? 0.f : static_cast<float>(std::max(0.0, now_s - prev_tick_s));
     const float v_meas = odo_valid_ ? odo_v_ : 0.f, w_meas = odo_valid_ ? odo_w_ : 0.f;
     if (resumed)
     {
-        if (policy_interrupted_ or policy_last_tick_s_ >= 0.0) policy_nav_.interrupt();
-        policy_interrupted_ = false;
+        policy_nav_.interrupt();   // drop the committed plan and its prediction UNJUDGED (an interruption is not evidence)
         policy_sent_.clear(); policy_odom_.reset(); policy_unseen_.reset();
+        policy_odo_hist_.clear(); policy_prev_pose_t_.reset();
     }
-    // I5 evidence: the odometry's mean turn rate over the interval against the localised heading change over it
-    if (dt_tick > 0.f and policy_prev_yaw_.has_value())
-        policy_sign_.update(0.5f * (policy_prev_w_ + w_meas), std::remainder(pose.yaw - *policy_prev_yaw_, 2.f * std::numbers::pi_v<float>),
-                            dt_tick, limits.w_min_eff, prm.policy_sigma_rel_yaw_rad * std::sqrt(dt_tick));   // sigma: the relative
-                            // yaw sigma (per 1 s) as a random walk over the interval
-    policy_prev_yaw_ = pose.yaw;
-    policy_prev_w_ = w_meas;
+    // ── I5 evidence, TIME-ALIGNED (review fix 2.2): the odometry sample describes the base at now - its age (wall now minus
+    //    robot_current_speed_timestamp); the pose describes it at now - the pose age. The pose's heading change between its
+    //    last two times is compared with the odometry INTEGRATED over that same interval (OdoSignCheck::update_interval).
+    const float pose_age_s = world_model_pose_stamp_age_ms_ >= 0.f ? std::min(0.5f, world_model_pose_stamp_age_ms_ * 1e-3f) : 0.f;
+    {
+        const auto wall_now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const double odo_age_s = odo_stamp_ms_ != 0 and wall_now > odo_stamp_ms_ ? double(wall_now - odo_stamp_ms_) * 1e-3 : 0.0;
+        const double t_odo = now_s - odo_age_s;
+        if (policy_odo_hist_.empty() or t_odo > policy_odo_hist_.back().t) policy_odo_hist_.push_back({t_odo, w_meas});
+        while (policy_odo_hist_.size() > 2 and policy_odo_hist_[1].t < now_s - 2.0) policy_odo_hist_.pop_front();
+        const double t_pose = now_s - pose_age_s;
+        if (policy_prev_pose_t_.has_value() and t_pose > *policy_prev_pose_t_)
+        {
+            const std::vector<rc::policy::OdoSample> hist(policy_odo_hist_.begin(), policy_odo_hist_.end());
+            const float dt_pose = static_cast<float>(t_pose - *policy_prev_pose_t_);
+            // sigma: the relative yaw sigma (per 1 s) as a random walk over the interval
+            policy_sign_.update_interval(hist, *policy_prev_pose_t_, t_pose,
+                                         std::remainder(pose.yaw - policy_prev_yaw_.value_or(pose.yaw), 2.f * std::numbers::pi_v<float>),
+                                         limits.w_min_eff, prm.policy_sigma_rel_yaw_rad * std::sqrt(dt_pose));
+        }
+        if (not policy_prev_pose_t_.has_value() or t_pose > *policy_prev_pose_t_) { policy_prev_pose_t_ = t_pose; policy_prev_yaw_ = pose.yaw; }
+    }
     if (not policy_odom_.has_value()) policy_odom_ = pose;
     const rc::policy::Pose2 odom_before = *policy_odom_;
     {
@@ -238,7 +258,6 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                               prm.policy_unseen_odo_sigma_m);
     }
     while (not policy_sent_.empty() and policy_sent_.front().t < now_s - 2.0) policy_sent_.pop_front();
-    policy_last_tick_s_ = now_s;
 
     // ── the returns: the policy's CONTACT band (Lidar.ContactMinHeightM up; the helios far floor cut by source at capture),
     //    room frame as registered at capture, re-expressed on the current pose by being compared with it; sigma_r =
@@ -246,7 +265,6 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //    circumscribed radius + v_max over (2 horizons + latency) + the brake + 6 sigma — beyond it a return is dropped
     //    (the contact model would prune it anyway; this keeps the denoising cheap).
     std::vector<rc::policy::Return> returns;
-    const float pose_age_s = world_model_pose_stamp_age_ms_ >= 0.f ? std::min(0.5f, world_model_pose_stamp_age_ms_ * 1e-3f) : 0.f;
     const float latency_s = pose_age_s + cmd_latency;
     const float sigma_r = prm.lidar_range_sigma_m;
     const float reach = body.circumscribed_radius() + limits.v_max * (2.f * pp.horizon_s + latency_s)

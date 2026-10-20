@@ -5,6 +5,7 @@
 //     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp src/local_policy/navigator.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tnw && /tmp/tnw
 #include "../src/local_policy/navigator.h"
+#include "../src/local_policy/policy_tick_gate.h"
 
 #include <cmath>
 #include <cstdio>
@@ -79,6 +80,32 @@ int main()
         const auto b = n2.step(q, pp);
         CHECK("I1: after interrupt() the resumed decision is not a failed prediction, no trap", not b.d.prediction_failed and not b.trap
               and n2.failed_predictions() == 0 and n2.traps().empty());
+    }
+    // ---- review fix 2, item 1: a 0.1 s hold at the end of a plan (odometry stale for two ticks) is an INTERRUPTION. Ticks
+    //   run every 50 ms (no gap rule applies); the base has not moved. The session's gate turns the hold into interrupt();
+    //   the control run without it judges the plan and lays a trap.
+    {
+        auto run = [&](bool with_gate) {
+            Navigator n5;
+            n5.set_goal(goal, grid, open_room, zero, {goal.p}, body.circumscribed_radius());
+            PolicyInput q = in; q.pose = {start, 0.f}; q.v_now = q.w_now = 0.f;
+            PolicyTickGate gate;
+            Navigator::Step last;
+            double t = 400.0;
+            for (; t < 400.0 + pp.horizon_s - 0.1 + 1e-9; t += 0.05)
+            { q.now_s = t; if (gate.on_tick(t) and with_gate) n5.interrupt(); last = n5.step(q, pp); }
+            gate.on_hold(); gate.on_hold();                            // two held ticks (0.1 s): no step
+            t += 0.1;
+            q.now_s = t;
+            if (gate.on_tick(t) and with_gate) n5.interrupt();
+            last = n5.step(q, pp);
+            q.now_s = t + 0.05;
+            if (gate.on_tick(q.now_s) and with_gate) n5.interrupt();
+            const auto after = n5.step(q, pp);
+            return n5.failed_predictions() == 0 and n5.traps().empty() and not last.d.prediction_failed and not after.d.prediction_failed;
+        };
+        CHECK("hold (control): without the gate the plan is judged after the hold — a failed prediction", not run(false));
+        CHECK("hold: with the gate a 0.1 s hold lays no trap and judges nothing", run(true));
     }
     // ---- I2: set_goal clears a world queued for the previous goal (Place -> Doorway keeps the corridor)
     {

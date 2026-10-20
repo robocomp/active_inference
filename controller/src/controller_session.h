@@ -209,7 +209,7 @@ public:
     void policy_reset();
     // review I1: a cycle in which the policy did NOT drive although it owns the base (Pause / Halt / a no-step or hold / the
     // LiDAR-stall hold): the next tick drops the committed plan and the pending prediction unjudged.
-    void policy_interrupt() { policy_interrupted_ = true; }
+    void policy_interrupt() { policy_gate_.on_hold(); }
 
     // ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only: nothing that drives reads these.
     // The worker begin()s the evidence at the top of each control pass and selects the verdict at its end; every branch
@@ -390,14 +390,14 @@ private:
     rc::policy::UnseenContact policy_unseen_;
     std::deque<rc::policy::SentCommand> policy_sent_;            // send history (s, steady) for the commands in force
     std::optional<rc::policy::Pose2> policy_odom_;               // odometry pose: integrated wheel speeds, never relocalised
-    double policy_odom_t_ = 0.0, policy_last_tick_s_ = -1.0;
+    rc::policy::PolicyTickGate policy_gate_;                     // review I1 / fix 2.1: holds and gaps interrupt the plan
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
     bool odo_valid_ = false;
     std::uint64_t odo_stamp_ms_ = 0;                             // robot_current_speed_timestamp (wall ms) — review M6
-    bool policy_interrupted_ = false;                            // review I1
     rc::policy::OdoSignCheck policy_sign_;                       // review I5
-    std::optional<float> policy_prev_yaw_;
-    float policy_prev_w_ = 0.f;
+    std::optional<float> policy_prev_yaw_;                       // review fix 2.2: the pose's last (time, heading) for I5
+    std::optional<double> policy_prev_pose_t_;
+    std::deque<rc::policy::OdoSample> policy_odo_hist_;          // odometry turn rate at its own times (steady s)
     int policy_last_mode_ = -1;
     std::string policy_last_why_;
     std::ofstream policy_csv_;

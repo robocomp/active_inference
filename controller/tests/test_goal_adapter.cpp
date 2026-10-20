@@ -206,6 +206,67 @@ int main()
         CHECK("I5: latched until reset", c.contradicted());
     }
 
+    // ---- 4d'. I5 TIME-ALIGNED: the pose's heading change over [t_a, t_b] (its own time base: the tick minus the pose age)
+    //   against the odometry integrated over the SAME interval. A turn REVERSAL with a 250 ms pose lag, ramped at the
+    //   capability's a_rot, must not trip; a true sign inversion must trip within 3 turning intervals.
+    {
+        const double tick = 0.05, lag = 0.25; const float a_rot = 0.5f / 0.259f, w0 = 0.5f;
+        auto run = [&](float odo_sign, int* trip_after) {
+            OdoSignCheck c; std::vector<OdoSample> hist; double yaw_true = 0.0; float w = w0; double prev_pose_t = -1.0; float prev_pose_yaw = 0.f;
+            std::vector<std::pair<double, double>> yaw_hist;   // (t, true yaw)
+            int turning_intervals = 0; *trip_after = -1;
+            for (int k = 0; k < 120; ++k)
+            {
+                const double t = k * tick;
+                const float target = t < 2.0 ? w0 : -w0;                 // the reversal at t = 2 s
+                const float step = a_rot * float(tick);
+                w = w < target ? std::min(target, w + step) : std::max(target, w - step);
+                yaw_true += w * tick;
+                yaw_hist.push_back({t, yaw_true});
+                hist.push_back({t, odo_sign * w});                     // fresh odometry
+                const double tp = t - lag;                             // the pose describes the robot at t - lag
+                if (tp < 0.0) continue;
+                float yp = 0.f;
+                for (const auto& [ts, y] : yaw_hist) if (ts <= tp + 1e-9) yp = float(y);
+                if (prev_pose_t >= 0.0)
+                {
+                    c.update_interval(hist, prev_pose_t, tp, yp - prev_pose_yaw, 0.1f, 0.013f * std::sqrt(float(tp - prev_pose_t)));
+                    ++turning_intervals;
+                    if (c.contradicted() and *trip_after < 0) *trip_after = turning_intervals;
+                }
+                prev_pose_t = tp; prev_pose_yaw = yp;
+            }
+            return c.contradicted();
+        };
+        int trip = -1;
+        CHECK("I5 aligned: a reversal under a 250 ms pose lag does NOT trip", not run(+1.f, &trip));
+        CHECK("I5 aligned: a true sign inversion trips", run(-1.f, &trip));
+        CHECK("I5 aligned: ...within 3 turning intervals", trip > 0 and trip <= 3);
+        // the unaligned comparison (current wheel rate vs the lagged pose) WOULD trip on the same reversal
+        OdoSignCheck naive; double yaw_true = 0.0; float w = w0; std::vector<double> yaws;
+        for (int k = 0; k < 120; ++k)
+        {
+            const double t = k * tick; const float target = t < 2.0 ? w0 : -w0; const float stepw = a_rot * float(tick);
+            const float w_prev = w; w = w < target ? std::min(target, w + stepw) : std::max(target, w - stepw);
+            yaw_true += w * tick; yaws.push_back(yaw_true);
+            const int lagk = k - int(lag / tick + 0.5);
+            if (lagk >= 1) naive.update(0.5f * (w + w_prev), float(yaws[lagk] - yaws[lagk - 1]), float(tick), 0.1f, 0.013f * std::sqrt(float(tick)));
+        }
+        // (information, not a check: with this ramp the unaligned comparison sees ~3 contradicting intervals — at the edge)
+        std::printf("   I5: the unaligned comparison on the same reversal: run %d, %s\n", naive.run(), naive.contradicted() ? "TRIPS" : "does not trip");
+    }
+
+    // ---- 4f. review fix 2, item 1: a policy-tick HOLD is an interruption (PolicyTickGate)
+    {
+        PolicyTickGate gate;
+        CHECK("gate: the first tick restarts", gate.on_tick(10.0));
+        CHECK("gate: a tick 50 ms later continues", not gate.on_tick(10.05));
+        gate.on_hold();                                               // a 0.1 s odometry-stale hold
+        CHECK("gate: the tick after a 0.1 s hold interrupts (well under the 0.5 s gap rule)", gate.on_tick(10.15));
+        CHECK("gate: and the next one continues", not gate.on_tick(10.2));
+        CHECK("gate: a 0.6 s gap with no hold noted still interrupts", gate.on_tick(10.8));
+    }
+
     // ---- 4e. C1: the relative-motion path on a pose that MOVES between ticks (the session passes the fresh pose)
     {
         rc::RelativeMotion rm;
