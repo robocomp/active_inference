@@ -31,6 +31,11 @@
 
 namespace rc {
 
+// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door
+// that is KNOWN without being seen now — the crossed door carried across, a door restored from memory — is given this
+// many so it is fitted (its belief initialised from its node), which is also what lets the existence channel judge it.
+inline constexpr int kFitWithoutFreshDataFrames = 5;
+
 struct DoorInstance
 {
     uint64_t    node_id;
@@ -209,6 +214,10 @@ struct DoorInstance
     // room's own wall frame (wall_u along the polygon edge, n = its left normal = inward), so the same physical leaf
     // that opens INTO the room it was first seen from opens OUT of this one. Consumed once, at belief init.
     std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
+    // A door RESTORED from memory (SpecificWorker::restore_remembered_doors): its node carries the remembered width and
+    // height, so the belief init seeds w,h from the published box instead of the template priors — otherwise a door never
+    // re-seen would be re-remembered at the template size on the next room switch.
+    bool seed_wh_from_box = false;
     // The side of the aperture plane the robot was on when `cross` was CLAIMED. Held while the claim stands: the
     // robot changes side by doing the crossing, and a through-pose recomputed from the live side flips back into
     // the room being left at the doorway (live try17/try19: the robot turned round in the doorway).

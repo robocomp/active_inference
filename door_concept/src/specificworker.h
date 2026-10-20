@@ -59,6 +59,7 @@
 #include "epistemic_planner.h"
 #include "../../common/object_affordance/object_affordance.h"
 #include "door_model.h"
+#include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/evidence_monitor.h"
@@ -194,18 +195,18 @@ private:
     // ★KEYED BY ROOM (2026-10-13). xy is in THAT room's frame; rows from different rooms are different faces of
     //   (possibly) the same doorway and must never be compared by place. The un-keyed table mixed room_1 and room_2
     //   coordinates, grew to 14 rows for 3 doors and carried a 3.7e13 m row from a transform read mid-birth.
-    struct DoorIdentity
-    {
-        std::string     room;
-        std::string     name;
-        Eigen::Vector2f xy = Eigen::Vector2f::Zero();
-    };
+    // ★AND, SINCE 2026-10-20, THE POSE TO RESTORE IT (door_identity_table.h): yaw/size, the existence belief and the leaf
+    //   memory, so a room re-entered FROM MEMORY gets its remembered doors back (restore_remembered_doors). A 4-column
+    //   row (older table, or written at birth before the fit) is still an identity, just not restorable.
+    using DoorIdentity = rc::door::IdentityRow;
     std::string current_room_name() const;
     mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
     std::vector<DoorIdentity> identities_;
     void load_identities();                                            // once, at startup
     void save_identities() const;                                      // whole table, locale-independent
     void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
+    void upsert_identity(DoorIdentity row, float width_m);             // note_identity with the full row (pose, existence, leaf)
+    DoorIdentity identity_of(const rc::DoorInstance& inst) const;      // a FITTED door's restorable row (current room)
     void forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m);       // a removal for absence
     const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;
     void remember_live_identities();                                   // shutdown: persist the doors still alive
@@ -244,6 +245,19 @@ private:
     // nodes — a stranger deleting an affordance mid-execution is the stranded-Completed-for-ever defect
     // the fleet already paid for once, and only the owner knows the protocol state.
     void release_room(std::uint64_t old_room, std::uint64_t new_room);
+
+    // ── RESTORE ON RE-ENTRY (2026-10-20, tourP2) ───────────────────────────────────────────────────────────────────
+    // A room re-entered FROM MEMORY gets its remembered doors back — not only the one just crossed (that keeps its carry
+    // path). Each is recreated under the room at its remembered room-frame pose, with its size, leaf memory and its
+    // remembered existence belief as a PRIOR; the existence channel then confirms or removes it like any door.
+    // ★THE RECALL SIGNAL: ltsm_agent posts `recall_<room>` (metaconcept, object_subtype "room_recall") under each live
+    //   door whose other side it remembers, and room_concept re-creates THAT room under that name when the robot
+    //   crosses. ltsm retires the recall as soon as the room is live again — possibly before `current` reaches us — so
+    //   the names are LATCHED every cycle and the latch is cleared at each switch. A room is a recall iff its name was
+    //   announced by a recall since the previous switch. A fresh room never qualifies, whatever its name.
+    std::unordered_set<std::string> recall_names_seen_;
+    void latch_recall_names();
+    void restore_remembered_doors(std::uint64_t new_room);
 
     // ── ENTRY MIRRORS: the door a PROTO-ROOM was entered through ───────────────────────────────────
     // room_concept births a proto-room (a `room` with a `proto` self-edge) when the robot crosses a door into

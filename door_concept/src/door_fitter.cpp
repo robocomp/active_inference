@@ -542,8 +542,9 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
             cam_xy = Eigen::Vector2f(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
         DoorBeliefParams p = make_belief_params();
         DoorBeliefState s0;
-        s0.w = cfg_.door_prior_w_m;
-        s0.h = cfg_.door_prior_h_m;
+        s0.w = inst.seed_wh_from_box ? m.w : cfg_.door_prior_w_m;
+        s0.h = inst.seed_wh_from_box ? m.h : cfg_.door_prior_h_m;
+        inst.seed_wh_from_box = false;
         // Wall association: the belief's centre = O + (s + w/2)·u, so seed s so the panel centre lands on the
         // detection centroid. Off the wall (no polygon) → keep the identity frame and s = along-x of centroid.
         if (const WallFrame wf = associate_wall(pts_xy, cam_xy); wf.ok)

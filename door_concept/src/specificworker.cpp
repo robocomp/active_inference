@@ -1907,40 +1907,22 @@ void SpecificWorker::load_identities()
     if (not f)
         return;
     identities_.clear();
-    std::string line;
-    std::getline(f, line);                       // header
-    // A pre-2026-10-13 table (name,ap_x,ap_y) has no room column: its coordinates are in whichever room the agent sat
-    // in when each row was written, so they cannot be trusted against any one room. Start clean.
-    if (not line.starts_with("room,"))
+    // Parsing is rc::door::parse_identity_table (door_identity_table.h): std::from_chars, both the 4-column rows of the
+    // 2026-10-13 table (identity only) and the 17-column ones that carry the pose to restore.
+    auto parsed = rc::door::parse_identity_table(f);
+    if (parsed.unkeyed_format)
     {
         std::print("door_concept: [identity] etc/door_identities.csv has the old un-keyed format — ignored "
                    "(rewritten room-keyed on the next save)\n");
         return;
     }
-    const auto num = [](std::string_view v, float& out)
-    { return std::from_chars(v.data(), v.data() + v.size(), out).ec == std::errc{} and std::isfinite(out); };
-    while (std::getline(f, line))
-    {
-        std::vector<std::string_view> c;
-        for (std::size_t p = 0;;)
-        {
-            const auto q = line.find(',', p);
-            c.emplace_back(std::string_view(line).substr(p, q == std::string::npos ? std::string::npos : q - p));
-            if (q == std::string::npos) break;
-            p = q + 1;
-        }
-        float x = 0.f, y = 0.f;
-        if (c.size() != 4 or c[0].empty() or not c[1].starts_with("door_") or not num(c[2], x) or not num(c[3], y))
-            continue;
-        if (std::hypot(x, y) > 1.0e3f)            // a transform read before the room existed — not a place
-            continue;
-        identities_.push_back({std::string(c[0]), std::string(c[1]), Eigen::Vector2f(x, y)});
-    }
+    identities_ = std::move(parsed.rows);
     if (not identities_.empty())
     {
-        std::print("door_concept: [identity] loaded {} remembered door face(s):", identities_.size());
+        std::print("door_concept: [identity] loaded {} remembered door face(s) ({} dropped as malformed):",
+                   identities_.size(), parsed.malformed);
         for (const auto& i : identities_)
-            std::print(" {}:{}@({:.2f},{:.2f})", i.room, i.name, i.xy.x(), i.xy.y());
+            std::print(" {}:{}@({:.2f},{:.2f}){}", i.room, i.name, i.xy.x(), i.xy.y(), i.pose.has_value() ? "" : "[id-only]");
         std::print("\n");
     }
 }
@@ -1952,19 +1934,25 @@ void SpecificWorker::save_identities() const
     std::ofstream f("etc/door_identities.csv", std::ios::trunc);
     if (not f)
         return;
-    f.imbue(std::locale::classic());             // never emit a comma decimal separator
-    f << "room,name,ap_x,ap_y\n";
-    for (const auto& i : identities_)
-        f << i.room << ',' << i.name << ',' << i.xy.x() << ',' << i.xy.y() << '\n';
+    rc::door::write_identity_table(f, identities_);   // imbues the classic locale: never a comma decimal separator
 }
 
 // Upsert BY PLACE WITHIN THE CURRENT ROOM: one hole in this room's walls carries one name. The same name may hold a
 // row in another room — that is the doorway's other face, not a conflict.
 void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m)
 {
+    DoorIdentity row;
+    row.name = name;
+    row.xy   = ap;
+    upsert_identity(std::move(row), width_m);
+}
+
+void SpecificWorker::upsert_identity(DoorIdentity row, float width_m)
+{
     const std::string room = current_room_name();
-    if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty() or not name.starts_with("door_") or not ap.allFinite()
-        or ap.norm() > 1.0e3f)
+    const Eigen::Vector2f ap = row.xy;
+    if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty() or not row.name.starts_with("door_") or not ap.allFinite()
+        or ap.norm() > rc::door::kIdentityMaxPlaceM)
         return;
     // ★ ONE DOORWAY, ONE NAME (2026-10-18, user). A row whose centre lies within this opening's width plus the
     //   re-acquire radius describes the SAME hole — the openings overlap once their centres are closer than the
@@ -1974,9 +1962,30 @@ void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2
     //   wins. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
     const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
     std::erase_if(identities_, [&](const DoorIdentity& i)
-                  { return i.room == room and (i.name == name or (i.xy - ap).norm() < same_hole); });
-    identities_.push_back({room, name, ap});
+                  { return i.room == room and (i.name == row.name or (i.xy - ap).norm() < same_hole); });
+    row.room = room;
+    identities_.push_back(std::move(row));
     save_identities();
+}
+
+// What a FITTED door leaves behind to be restored from: its aperture pose and size (room frame), its existence belief,
+// and its leaf memory — the same quantities the crossed door carries across (EntryMirror), here in the room frame.
+SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance& inst) const
+{
+    const auto& s = inst.model.state();
+    DoorIdentity row;
+    row.name = inst.node_name;
+    row.xy   = Eigen::Vector2f(s.ap_cx, s.ap_cy);
+    if (std::isfinite(s.ap_yaw) and s.w > 0.0f and s.h > 0.0f and s.thickness > 0.0f)
+        row.pose = rc::door::RestorePose{s.ap_yaw, s.w, s.h, s.thickness};
+    if (inst.existence_seeded)
+        row.exist_logodds = inst.existence.logodds();
+    const Eigen::Vector2f open = inst.leaf.swing * inst.aperture.across_u();
+    if (inst.leaf_pose.hinge_xy.allFinite() and open.allFinite() and std::isfinite(inst.phi_est)
+        and std::isfinite(inst.phi_sigma) and std::isfinite(inst.hinge_llr) and std::isfinite(inst.swing_llr))
+        row.leaf = rc::door::LeafMemory{inst.leaf_pose.hinge_xy, open, inst.hinge_llr, inst.swing_llr,
+                                        inst.phi_est, inst.phi_sigma};
+    return row;
 }
 
 // The persistent row(s) of a door removed for absence: its name, or any row on the same hole (see note_identity).
@@ -2018,8 +2027,7 @@ void SpecificWorker::remember_live_identities()
     {
         if (not inst.ai2_initialized or inst.is_bearing_hypothesis)
             continue;
-        const auto& s = inst.model.state();
-        note_identity(inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy), s.w);
+        upsert_identity(identity_of(inst), inst.model.state().w);
     }
 }
 
@@ -2854,7 +2862,7 @@ void SpecificWorker::process_door_node(const DSR::Node& node)
     const auto observation = fitter_->observe(inst, node);
 
     // Stale check: skip heavy update if data hasn't moved for too long
-    if (not observation.has_fresh_data and inst.matched_frames < 5)
+    if (not observation.has_fresh_data and inst.matched_frames < rc::kFitWithoutFreshDataFrames)
         return;
 
     const float free_energy = fitter_->run_inference(inst, observation);
@@ -3723,6 +3731,7 @@ std::optional<std::uint64_t> SpecificWorker::resolve_current_room() const
 void SpecificWorker::step_room_following()
 {
     if (not G) return;
+    latch_recall_names();   // BEFORE the switch below: ltsm may retire the recall the moment the room is live again
     const auto current = resolve_current_room();
 
     // ★ABSENCE OF A `current` EDGE IS NOT A RELEASE, and this is the whole backward-compatibility
@@ -4054,6 +4063,103 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     fitter_->set_room_geometry(Eigen::Vector2f::Zero(), {});
     refresh_room_geometry();         // and pick the new one up in the same cycle
     install_carried_door(new_room, adopt_mirror, adopted_from);
+    // AFTER the carry: the crossed door is live by now (or still HELD under its name for the late carry), so the
+    // restore below cannot duplicate it.
+    restore_remembered_doors(new_room);
+    recall_names_seen_.clear();      // a recall is evidence about THIS crossing only
+}
+
+// ─── RESTORE ON RE-ENTRY ──────────────────────────────────────────────────────────────────────────────────────────
+
+void SpecificWorker::latch_recall_names()
+{
+    // ltsm_agent's room_recall.h: `recall_<room>` metaconcept, object_subtype "room_recall", RT child of a live door.
+    for (const auto& n : G->get_nodes_by_type("metaconcept"))
+        if (n.name().starts_with("recall_")
+            and G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_recall")
+            if (const auto room = n.name().substr(7); not room.empty() and recall_names_seen_.insert(room).second)
+                std::print("door_concept: [restore] ltsm announces remembered '{}' behind a door — its doors will be "
+                           "restored if the robot enters it\n", room);
+}
+
+void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
+{
+    if (not G or not fitter_ or not scene_graph_)
+        return;
+    const auto room = G->get_node(new_room);
+    if (not room.has_value())
+        return;
+    const bool recalled = recall_names_seen_.contains(room->name());
+
+    // Every door node live in the graph, with its aperture in the ENTERED room's frame when that resolves (ts==0 on the
+    // main-thread instance; always check the optional). A door held in the room left behind still blocks by name.
+    std::vector<rc::door::LiveDoor> live;
+    for (const auto& n : G->get_nodes_by_type("object"))
+    {
+        if (not n.name().starts_with("door_")) continue;
+        rc::door::LiveDoor l{n.name(), std::nullopt};
+        if (inner_eigen_)
+            if (const auto T = inner_eigen_->get_transformation_matrix(room->name(), n.name(), 0);
+                T.has_value() and T->matrix().allFinite() and T->translation().head<2>().norm() < rc::door::kIdentityMaxPlaceM)
+                l.xy_in_room = T->translation().head<2>().cast<float>();
+        live.push_back(std::move(l));
+    }
+    const auto d = rc::door::plan_restore(identities_, room->name(), recalled, live, cfg_.exist_reacquire_radius_m);
+    if (d.not_recalled)
+    {
+        std::print("door_concept: [restore] '{}' is not a recall (no ltsm recall announced it since the last switch) — "
+                   "no door restored; its doors are earned from evidence\n", room->name());
+        return;
+    }
+    for (const auto& k : d.skipped)
+        std::print("door_concept: [restore] '{}' in '{}' NOT restored: {}\n", k.name, room->name(), rc::door::to_string(k.reason));
+
+    for (const auto& r : d.restore)
+    {
+        const auto names = reserved_names();
+        const float prior_L = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds);
+        // Door node origin = aperture centre on the floor, yaw = the aperture's (write_rt_pose's room-frame form).
+        const auto id = scene_graph_->create_door_copy(room.value(), r.pose->width, r.pose->depth, r.pose->height,
+                                                       std::nullopt, r.leaf.has_value() ? std::optional<float>(r.leaf->phi) : std::nullopt,
+                                                       Eigen::Vector3f(r.xy.x(), r.xy.y(), 0.0f),
+                                                       Eigen::Vector3f(0.0f, 0.0f, r.pose->yaw), names,
+                                                       std::format("'{}' remembered in {}", r.name, room->name()), r.name);
+        if (id == 0)
+        {
+            std::print("door_concept: [restore] '{}' could not be recreated in '{}' (insert failed)\n", r.name, room->name());
+            continue;
+        }
+        const auto n = G->get_node(id);
+        if (not n.has_value() or not fitter_->ensure_instance(n.value(), room_node_id_))
+            continue;
+        auto& inst = fitter_->instances().at(id);
+        // ★THE EXISTENCE PRIOR IS THE MEMORY. Not a fresh birth's prior and not certainty either: the belief the door had
+        //  when the room was left (or, for a row written without one, Existence.BirthLogodds). The channel takes it from
+        //  here — seen ⇒ confirmed, absent where it should be visible (P(detect), wall line of sight) ⇒ removed.
+        inst.existence.set_max(cfg_.exist_max_logodds);
+        inst.existence.set(prior_L);
+        inst.existence_seeded = true;
+        // A known door is FITTED without a fresh detection (as the carried door is): its belief initialises from the
+        // node, at the remembered size — which is also what lets the existence channel judge it.
+        inst.matched_frames   = std::max(inst.matched_frames, rc::kFitWithoutFreshDataFrames);
+        inst.seed_wh_from_box = true;
+        if (r.leaf.has_value())
+        {
+            inst.leaf_side_hint = std::make_pair(r.leaf->hinge_xy, r.leaf->open_dir);
+            inst.phi_est    = r.leaf->phi;
+            inst.phi_sigma  = r.leaf->phi_sigma;
+            inst.hinge_llr  = r.leaf->hinge_llr;
+            inst.swing_llr  = r.leaf->swing_llr;
+            inst.phi_last_t = std::chrono::steady_clock::now();
+            inst.phi_from_command = false;
+        }
+        log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()));
+        std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
+                   "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
+                   n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, prior_L,
+                   inst.existence.p_exists(), r.exist_logodds.has_value() ? "remembered" : "default BirthLogodds",
+                   r.leaf.has_value() ? "yes" : "no");
+    }
 }
 
 // The door carried across a room switch becomes the new room's door: its instance rebuilt against the room we are in,

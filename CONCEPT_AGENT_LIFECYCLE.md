@@ -215,7 +215,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ `zed_detectability` | — no silhouette channel | ✅ | ✅ *(fixed)* |
 | bottle | ✅ | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
 | cabinet | ✅ | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| door | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed)* |
+| door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed)* |
 | refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -227,6 +227,24 @@ command channel to the controller: listed in `[Owns]` (`["chat_agent 25", "chat_
 stamped with `rc::provenance::stamp_creation`, swept at `initialize()` and again on first Operating, deleted by the
 shared coordinator on SIGTERM/SIGINT (verified 2026-10-12: `[Graph] node 'chat_intention' deleted`). It connects no
 DSR signal; the digest and the command status are polled on the main thread.
+
+**door_concept CREATE exceptions (2026-10-20).** Birth stays tracker-only for every door *first seen*. Two creations do
+not go through the tracker, and neither is a birth in §1's sense — both RESTORE a door that some earlier evidence
+already birthed, as a prior the existence channel then judges like any other door:
+1. **The carried door** (`release_room` / `recreate_lost_door` / `install_carried_door`, and the late carry in
+   `step_room_following`): the doorway the robot has just crossed, recreated (or its proto-room entry mirror adopted)
+   in the room entered. The robot's body went through the aperture, so the door's existence was established by the
+   crossing itself; from the new side an open door is the one thing the tracker cannot re-detect.
+2. **Restored remembered doors** (`restore_remembered_doors`, `door_concept/src/door_identity_table.h`): on entering a
+   room that is a RECALL — ltsm_agent announced it with a `recall_<room>` node (object_subtype `room_recall`) since
+   the previous room switch — every door of that room in `etc/door_identities.csv` that has a remembered pose is
+   recreated at its remembered room-frame pose, size and leaf memory, unless a door of that name or on that hole is
+   already live (the carried door is never duplicated). Its existence starts from the REMEMBERED log-odds (or
+   `Existence.BirthLogodds` = 1.0 nats, P = 0.73, for a row written without one); seen ⇒ confirmed, absent where it
+   should be visible (P(detect), wall line of sight) ⇒ removed and its identity row forgotten. A fresh room never
+   restores anything, whatever its name. Justification: the doors were birthed by evidence on an earlier visit and
+   memory holds them; re-requiring a sighting made `cross door_1` fail in tourP2 because the 60 s exploration did not
+   look at that wall. Rows of the older 4-column table carry no pose and are skipped with a log line.
 
 ⚠️ **unattributable** = the agent records births and deaths, but retires on *divergence* (clutter), not on
 sensor absence, so it has no `p_detect` to report. Those deaths carry an explicit
