@@ -7,6 +7,21 @@
 #include "../../common/robot_footprint/robot_footprint.h"
 
 #include <cstdio>
+#include <vector>
+
+// Raw hull of shadow.stl (z<=1.45) ∪ the two wheels, printed by tools/shadow_footprint.py. shadow() must CONTAIN it.
+static const std::vector<Eigen::Vector2f> kRaw{
+    {-0.284000f, -0.100000f}, {-0.178020f, -0.223121f}, {-0.175411f, -0.224974f}, {-0.173577f, -0.225663f},
+    {-0.173251f, -0.225743f}, {-0.171000f, -0.226000f}, {-0.040506f, -0.229904f}, {-0.035000f, -0.230000f},
+    {+0.035000f, -0.230000f}, {+0.039490f, -0.229936f}, {+0.168805f, -0.226000f}, {+0.174315f, -0.224684f},
+    {+0.176680f, -0.223116f}, {+0.176965f, -0.222908f}, {+0.178241f, -0.221530f}, {+0.284000f, -0.100000f},
+    {+0.284000f, +0.100000f}, {+0.216794f, +0.186696f}, {+0.213404f, +0.190972f}, {+0.212851f, +0.191630f},
+    {+0.203286f, +0.201556f}, {+0.177411f, +0.223674f}, {+0.176398f, +0.224418f}, {+0.175110f, +0.225116f},
+    {+0.173543f, +0.225671f}, {+0.171000f, +0.226000f}, {+0.139993f, +0.229539f}, {+0.130000f, +0.230000f},
+    {-0.130000f, +0.230000f}, {-0.143711f, +0.229131f}, {-0.171000f, +0.226000f}, {-0.175218f, +0.225067f},
+    {-0.177527f, +0.223576f}, {-0.199002f, +0.205271f}, {-0.208042f, +0.196935f}, {-0.213269f, +0.191135f},
+    {-0.214106f, +0.190122f}, {-0.284000f, +0.100000f},
+};
 
 static int fails = 0;
 #define CHECK(c, m) do { if (not (c)) { ++fails; std::printf("  FAIL: %s\n", m); } } while (0)
@@ -38,6 +53,15 @@ int main()
     }
     CHECK(convex, "convex");
     CHECK(f.contains({0.f, 0.f}), "origin inside");
+    // ★ the simplification may only GROW the body: every raw-hull vertex is inside or on the polygon (margin 0, 1e-5 slack).
+    int outside = 0;
+    for (const auto &q : kRaw)
+        for (std::size_t i = 0, n = p.size(); i < n; ++i)
+        {
+            const auto &a = p[i], &b = p[(i + 1) % n];
+            if ((b.x() - a.x()) * (q.y() - a.y()) - (b.y() - a.y()) * (q.x() - a.x()) < -1e-5f) { ++outside; break; }
+        }
+    CHECK(kRaw.size() == 38 and outside == 0, "every raw-hull vertex is contained by shadow()");
     CHECK(rc::RobotFootprint::self_test(), "self_test");
     std::printf(fails ? "FAIL\n" : "PASS\n");
     return fails ? 1 : 0;

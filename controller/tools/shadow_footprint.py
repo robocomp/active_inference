@@ -4,7 +4,7 @@
 body  = XY outline of the vertices of shadow.stl (binary, metres, z-up, x lateral, y forward = robot frame) with z <= 1.45
 wheels= the TWO drive wheels of Shadow.proto: Cylinder r 0.1, h 0.05 along the lateral axle, centred x = +-0.259, y = 0
         => rectangles x in [0.234, 0.284] (and mirrored), y in [-0.10, 0.10]
-Hulls the union, simplifies (drops the vertex that adds least area while total hull area loss stays <= +0.5 %), prints the
+Hulls the union, simplifies (CONSERVATIVE: replaces edges by the intersection of their neighbours' lines, so the result contains the raw hull; growth <= +0.5 %), prints the
 C++ vertex list CCW. Usage: shadow_footprint.py shadow.stl
 """
 import sys, numpy as np
@@ -35,14 +35,40 @@ def main():
     wheels = [(s*x, y) for s in (1, -1) for x in (0.234, 0.284) for y in (-0.10, 0.10)]
     full = hull(np.vstack([body, wheels]))
     a0 = area(full)
+    if area(full) < 0: full = full[::-1]
     p = full.copy()
+    # CONSERVATIVE simplification: the result must CONTAIN the raw hull (an under-reported body is the unsafe direction for every
+    # contact check). Replace edge (i,i+1) by the intersection of its two neighbouring edges' lines: that vertex lies OUTSIDE the
+    # old polygon, so the polygon only GROWS. Greedy on least growth, total growth <= +0.5 % of the raw area.
+    def cross(u, v): return u[0]*v[1] - u[1]*v[0]
+    def drop(p, i):
+        m = len(p); A, B, C, D = p[(i-1) % m], p[i], p[(i+1) % m], p[(i+2) % m]
+        d1, d2 = B - A, C - D            # line A->B forward, line D->C backward
+        den = cross(d1, d2)
+        if abs(den) < 1e-12: return None
+        t = cross(D - A, d2) / den
+        X = A + t * d1
+        if t < 1.0 or cross(X - A, X - D) == 0: return None   # intersection must lie beyond B (outward)
+        if cross(C - D, X - D) < -1e-12 and False: return None
+        idx = [j for j in range(m) if j not in (i, (i+1) % m)]
+        q = [p[j] for j in range(m)]
+        out = []
+        for j in range(m):
+            if j == i: out.append(X)
+            elif j == (i+1) % m: continue
+            else: out.append(q[j])
+        return np.array(out)
     while len(p) > 3:
-        m = len(p)
-        loss = [abs(area(p) - area(np.delete(p, i, 0))) for i in range(m)]   # hull stays convex; removing a vertex only shrinks
-        i = int(np.argmin(loss))
-        q = np.delete(p, i, 0)
-        if a0 - area(q) > 0.005 * a0: break
-        p = q
+        best = None
+        for i in range(len(p)):
+            q = drop(p, i)
+            if q is None or area(q) <= 0: continue
+            g = area(q) - area(p)
+            if g >= -1e-12 and (best is None or g < best[0]): best = (g, q)
+        if best is None or area(best[1]) - a0 > 0.005 * a0: break
+        p = best[1]
+    print("// raw hull (test fixture, every vertex must be contained):")
+    print("//   " + " ".join(f"{{{x:+.6f}f, {y:+.6f}f}}," for x, y in full))
     # CCW starting at the lowest-left vertex
     if area(p) < 0: p = p[::-1]
     print(f"// raw hull {len(full)} verts area {a0:.4f}; simplified {len(p)} verts area {area(p):.4f} ({100*(area(p)/a0-1):+.2f} %)")
