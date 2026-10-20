@@ -169,6 +169,15 @@ public:
     // The footprint placed at a world pose: translation + heading (rad), safety margin applied.
     std::vector<Eigen::Vector2f> at_pose(const Eigen::Vector2f& pos, float theta) const;
 
+    // The polygon placed at a room pose with FORWARD heading `yaw` (forward = (cos yaw, sin yaw)): at_pose() with the
+    // quarter turn applied here, once. with_margin false = the bare hull (at_pose always applies the margin).
+    std::vector<Eigen::Vector2f> at_pose_yaw(const Eigen::Vector2f& pos, float yaw, bool with_margin) const
+    {
+        if (with_margin) return at_pose(pos, yaw - 1.57079633f);
+        RobotFootprint bare = *this; bare.set_safety_margin(0.f);
+        return bare.at_pose(pos, yaw - 1.57079633f);
+    }
+
     // Body extent in a given WORLD direction, for a body at heading `theta`. For a CONVEX footprint this is
     // the support function, and it is exactly the right number to compare an ESDF reading against: the ESDF
     // gives the distance from the body ORIGIN to the nearest obstacle, and the gradient gives the direction,

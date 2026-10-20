@@ -98,6 +98,21 @@ int main()
             CHECK(out == 0, "every raw-hull vertex of shadow_footprint.obj is contained by shadow()");
         }
     }
+    { // at_pose_yaw agrees with contains_yaw / support_radius_yaw
+        auto f = rc::RobotFootprint::shadow(); f.set_safety_margin(0.05f);
+        const Eigen::Vector2f c(1.f, -2.f); const float yaw = 0.7f;
+        bool inside = true, reach = true;
+        for (const auto& v : f.at_pose_yaw(c, yaw, true))
+        {
+            const Eigen::Vector2f toward = (v - c).normalized();
+            if (not f.contains_yaw(c + 0.999f * (v - c), c, yaw)) inside = false;
+            if (std::abs(f.support_radius_yaw(yaw, toward) - (v - c).norm()) > 0.03f) reach = false;
+        }
+        double mx = 0; for (const auto& v : f.at_pose_yaw(c, yaw, false)) mx = std::max(mx, double((v - c).dot(Eigen::Vector2f(std::cos(yaw), std::sin(yaw)))));
+        CHECK(inside, "at_pose_yaw vertices lie on the contains_yaw boundary");
+        CHECK(reach, "at_pose_yaw vertices agree with support_radius_yaw");
+        CHECK(std::abs(mx + f.safety_margin() - f.support_radius_yaw(yaw, Eigen::Vector2f(std::cos(yaw), std::sin(yaw)))) < 1e-4, "bare at_pose_yaw forward reach = support - margin");
+    }
     CHECK(rc::RobotFootprint::self_test(), "self_test");
     std::printf(fails ? "FAIL\n" : "PASS\n");
     return fails ? 1 : 0;
