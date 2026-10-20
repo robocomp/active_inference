@@ -12,15 +12,11 @@
 // Fields: 8 x 8 m grid, 0.05 m cells, centred on the robot. Where a test says "map lag" the field's free predicate
 //   does NOT contain the wall (a newly seen obstacle the map has not absorbed — the case release exists for).
 //
-// ★ KNOWN FAIL (4 lines, reported to the controller in task-4-report.md, NOT worked around here):
-//   pressed_into_wall_releases (x2) and dead_end_releases (x2) end Stuck with eligible = 0. Cause is the contact
-//   model (contact.cpp, Task 2), not decide(): every sweep includes the START pose, so a return within ~3 sigma
-//   OUTSIDE the grown body is charged to every motion, even one moving straight away (dead end, wall at the grown
-//   nose: P = 0.41 standing still, 0.41 backing out); and the "inside at start" exemption is a step (sd0 = -0.001
-//   -> 0.446, sd0 = +0.001 -> 0.998). The pressed case additionally needs a motion that brings no NEW wall point
-//   into the body, which a differential base sliding along a wall it already penetrates does not have.
-//   The *_margin_clear / release_side_on variants are the same scenes with the wall clear of the grown body and
-//   show the release path itself working.
+// ★ KNOWN FAIL (2 lines, fix round 1, reported in task-4-report.md, NOT worked around): pressed_into_wall_releases.
+//   With contact conditioned on not touching now (contact.cpp), dead_end now releases; pressed does not, because a
+//   differential base pressed 1 cm into a wall has no motion that leaves every return no closer than now: straight
+//   motion drags outside wall points (sd0 +0.007 .. +0.18) onto the flank (sd_min -0.06), any turn deepens the
+//   inside ones (sd0 -0.015 -> -0.035 .. -0.13). Every one of the 76 candidates has P(contact) >= 0.956.
 // Timing (-O2, 300 returns, median of 100): drive 4.5 ms; release worst case (field +inf, 76 eligible) 9.8 ms
 //   (19.3 ms before the exact early stop in the release scan). n_cont_* left at the brief's 3 x 5.
 #include "../src/local_policy/local_policy.h"
@@ -193,6 +189,9 @@ int main()
         Scene o; o.goal.kind = Goal::Kind::Heading; o.goal.yaw = 0.f; o.finish(); o.in.field = nullptr;
         const auto e = decide(o.in, o.pp); print("heading_goal_open(diag)", e);
         CHECK("heading_goal_open turns right", e.mode == Decision::Mode::Drive and e.w < 0.f);
+        const Pose2 ee = end_of(o, e.v, e.w);
+        std::printf("  heading open: end displacement %.4f m\n", (ee.p - o.in.pose.p).norm());
+        CHECK("heading_goal_open_space_turns_in_place", std::fabs(e.v) < 0.05f and (ee.p - o.in.pose.p).norm() < 0.05f);
     }
     { // timing: 300 returns (a 2 x 3 m box around the robot, perimeter 10 m), goal 2 m ahead
         Scene s;

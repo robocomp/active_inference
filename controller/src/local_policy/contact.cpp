@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace rc::policy
 {
@@ -53,7 +54,6 @@ Eigen::Vector2f to_robot(const Pose2& pose, const Eigen::Vector2f& q)
     return {c * d.x() + s * d.y(), -s * d.x() + c * d.y()};
 }
 
-double Phi(double x) { return 0.5 * std::erfc(-x / 1.4142135623730951); }
 }  // namespace
 
 std::vector<Pose2> rollout(const Pose2& start, float v, float w, float hold_s, const BaseLimits& b, float dt)
@@ -108,11 +108,23 @@ float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sw
         const float sd0 = sd_local(poly, margin, to_robot(s0, q.p));
         float sd = sd0;
         for (std::size_t i = 1; i < sweep.size(); ++i) sd = std::min(sd, sd_local(poly, margin, to_robot(sweep[i], q.p)));
-        // ★ already overlapping at the start: only motion that digs deeper is charged — backing out is free
-        if (sd0 < 0.f and sd >= sd0) continue;
-        const double pc = double(q.p_exist) * Phi(-double(sd) / double(sig));
-        // 1e-12 only stops log(0) when p_exist = 1 and the point is deep inside; it is arithmetic, not a gate
-        lp += std::log(std::max(1.0 - pc, 1e-12));
+        // ★ CONDITIONED ON NOT TOUCHING NOW. The pose/range error eps ~ N(0, sig^2) is common-mode over a 1 s sweep,
+        //   so with true distance sd - eps the sweep touches iff eps > sd_min, the start pose iff eps > sd0. Where the
+        //   robot stands is a given, not a consequence of the motion:
+        //     P_j = p_exist * P(eps > sd_min | eps <= sd0) = p_exist * [Phi(-sd_min/s) - Phi(-sd0/s)] / [1 - Phi(-sd0/s)]
+        //   (0 when sd_min >= sd0: a motion that never gets closer than now cannot produce contact). Continuous across
+        //   the surface — it replaces the Task-2 step rule "inside at start counts only if deeper".
+        if (sd >= sd0) continue;
+        // stable form: P/p_exist = 1 - Phi(sd_min/s)/Phi(sd0/s) = 1 - erfc(-sd_min*k)/erfc(-sd0*k), k = 1/(s*sqrt2)
+        const double k = 1.0 / (double(sig) * 1.4142135623730951);
+        const double ea = std::erfc(-double(sd0) * k), eb = std::erfc(-double(sd) * k);
+        // ★ numeric guard, not a model gate: deep inside, erfc(a) underflows; the smallest positive double keeps the
+        //   ratio finite (=> P_j -> p_exist, the right limit for a motion that sinks further into a return).
+        const double ratio = std::min(1.0, eb / std::max(ea, std::numeric_limits<double>::min()));
+        const double pc = double(q.p_exist) * (1.0 - ratio);
+        // log1p for the small-P regime; near P = 1 take the log of the complement directly (1 - pc rounds to 0 there)
+        lp += pc < 0.5 ? std::log1p(-pc)
+                       : std::log(std::max((1.0 - double(q.p_exist)) + double(q.p_exist) * ratio, std::numeric_limits<double>::min()));
     }
     return float(lp);
 }

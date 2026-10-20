@@ -94,6 +94,24 @@ int main()
         CHECK("start_inside separating is free", log_p_no_contact(body(), away, r, sxy, syaw) > std::log(0.99f));
         CHECK("start_inside deeper hits", log_p_no_contact(body(), into, r, sxy, syaw) < std::log(0.5f));
     }
+    { // conditional_continuous_at_surface: a return on the grown nose line at sd0 = -1 mm, 0, +1 mm; the body
+      // advances 5 mm into it (a small deepening keeps P mid-range, where a step would show)
+        const std::vector<Pose2> sw{origin, {{0.f, 0.005f}, kHalfPi}};
+        float P[3]; int i = 0;
+        for (float d : {-0.001f, 0.f, 0.001f})
+        {
+            const std::vector<Return> r{{{0.f, 0.28f + d}, 0.01f, 1.f}};
+            P[i++] = 1.f - std::exp(log_p_no_contact(body(), sw, r, sxy, syaw));
+        }
+        std::printf("  P(-1mm)=%.4f P(0)=%.4f P(+1mm)=%.4f\n", P[0], P[1], P[2]);
+        CHECK("conditional_continuous_at_surface", std::abs(P[0] - P[1]) < 0.05f and std::abs(P[1] - P[2]) < 0.05f and P[1] > 0.1f and P[1] < 0.9f);
+    }
+    { // backing_away_free: a wall exactly at the grown nose (y = 0.23 + 0.05), straight back
+        const auto r = wall_y(0.28f, -0.4f, 0.4f);
+        const float P = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, -0.3f, 0.f, 1.f, b, 0.05f), r, sxy, syaw));
+        std::printf("  backing away from a wall at the margin edge: P=%.2e\n", P);
+        CHECK("backing_away_free", P < 1e-3f);
+    }
     { // p_exist scales the hit; a far return is ignored
         const std::vector<Return> hit{{{0.f, 0.3f}, 0.01f, 1.f}}, ghost{{{0.f, 0.3f}, 0.01f, 0.1f}}, far{{{50.f, 0.f}, 0.01f, 1.f}};
         const auto sw = rollout(origin, 0.3f, 0.f, 1.f, b, 0.05f);

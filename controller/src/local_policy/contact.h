@@ -17,8 +17,9 @@ float signed_distance(const rc::RobotFootprint& body, const Pose2& pose, const E
 
 // Log-probability that the swept body touches none of the returns. Per return j: sd_j = min over the sweep of the
 // signed distance; sigma_j^2 = sigma_r^2 + sigma_xy^2 + (rho_j*sigma_yaw)^2, rho_j = distance of the return from
-// the pose centre; P(contact_j) = p_exist * Phi(-sd_j/sigma_j); result = sum_j log(1 - P(contact_j)).
-// A return already inside the body at the START pose counts only if the sweep makes it deeper.
+// the pose centre. Contact is CONDITIONED ON NOT TOUCHING AT THE START POSE (common-mode error over the sweep):
+// P(contact_j) = p_exist * [Phi(-sd_j/sigma_j) - Phi(-sd0_j/sigma_j)] / [1 - Phi(-sd0_j/sigma_j)] if sd_j < sd0_j,
+// else 0 (sd0_j = signed distance at the start pose); result = sum_j log(1 - P(contact_j)).
 float log_p_no_contact(const rc::RobotFootprint& body, std::span<const Pose2> sweep, std::span<const Return> r,
                        float sigma_pose_xy, float sigma_pose_yaw);
 }  // namespace rc::policy

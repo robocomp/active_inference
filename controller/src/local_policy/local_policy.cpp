@@ -50,7 +50,8 @@ std::optional<float> target_yaw(const Goal& g, const Pose2& at)
 //   be measured) every motion makes zero progress — no direction is preferred and only release can act. If it is
 //   finite at the start but +inf at the end, the motion leaves the reachable set: -inf.
 // ★ Heading: reduction of |angle error| (rad) times the body's circumscribed radius — a radian of heading and a
-//   metre of travel trade at the body's own lever arm (a radian of turn moves its outermost point that far).
+//   metre of travel trade at the body's own lever arm (a radian of turn moves its outermost point that far) —
+//   minus the distance travelled (controller ruling: a heading goal holds position).
 //   Place with `yaw`: the same heading term is added only when the START is within 2*tol_xy of the goal; farther
 //   away the heading is free and emerges from the path.
 float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
@@ -68,8 +69,11 @@ float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
         if (not g.yaw or (a.p - g.p).norm() > 2.f * g.tol_xy) return pr;
     }
     const auto ty = target_yaw(g, a);
-    if (not ty) return pr;
-    return pr + (std::abs(wrap(*ty - a.yaw)) - std::abs(wrap(*ty - b.yaw))) * lever;
+    const float turn = ty ? (std::abs(wrap(*ty - a.yaw)) - std::abs(wrap(*ty - b.yaw))) * lever : 0.f;
+    // ★ A heading goal HOLDS POSITION: travel is pure cost (metres), so a turn in place beats an arc that lands the
+    //   same heading 0.6 m away (measured before this term: open space chose "back up arcing right v=-0.50 w=-1.20").
+    if (g.kind == Goal::Kind::Heading) return turn - (b.p - a.p).norm();
+    return pr + turn;
 }
 
 // Inside the goal's own tolerances at `at` (they are the goal's, not the policy's).
