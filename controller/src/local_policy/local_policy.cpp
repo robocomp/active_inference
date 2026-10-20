@@ -98,7 +98,7 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 // ELIGIBLE coarse continuation from it, measured from the decision's start.
 // rate = best progress RATE (m/s, round 5): max(prog / dur, max over eligible continuations of
 // progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
-struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{};
+struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{}, plan_end{};
               bool elig = false, lpc_done = false; int conts = -1; };
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
@@ -114,7 +114,7 @@ float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, f
     const auto sw = rollout(from, v0, w0, v, w, p.horizon_s, in.base, p.dt);
     if (end) *end = sw.back();
     if (dur) *dur = duration(sw, p);
-    return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m, lps_floor);
+    return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m, lps_floor);
 }
 
 bool eligible(float lps, const PolicyParams& p) { return 1.f - std::exp(lps) <= p.risk_eps; }
@@ -133,8 +133,8 @@ std::string words(float v, float w)
 bool finite_input(const PolicyInput& in)
 {
     auto ok = [](float x) { return std::isfinite(x); };
-    if (not (ok(in.pose.p.x()) and ok(in.pose.p.y()) and ok(in.pose.yaw) and ok(in.v_now) and ok(in.w_now) and ok(in.sigma_xy)
-             and ok(in.sigma_yaw) and ok(in.returns_age_s) and ok(in.latency_s) and ok(in.body_geometry_sigma_m))) return false;
+    if (not (ok(in.pose.p.x()) and ok(in.pose.p.y()) and ok(in.pose.yaw) and ok(in.v_now) and ok(in.w_now) and ok(in.sigma_rel_xy)
+             and ok(in.sigma_rel_yaw) and ok(in.pose_drift_sigma_m) and ok(in.pose_drift_time_s) and ok(in.returns_age_s) and ok(in.latency_s) and ok(in.body_geometry_sigma_m))) return false;
     for (const Return& r : in.returns)
         if (not (ok(r.p.x()) and ok(r.p.y()) and ok(r.sigma) and ok(r.p_exist) and ok(r.sxx) and ok(r.sxy) and ok(r.syy))) return false;
     return true;
@@ -197,7 +197,7 @@ Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
 //   something — count it for continuability (progress from `from` >= 0), or raise best_prog / best_rate.
 float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from, const Conts& c,
                  const Pose2* ref = nullptr, float base_dur = 0.f, float* best_prog = nullptr, float* best_rate = nullptr,
-                 float* best_rate_dur = nullptr)
+                 float* best_rate_dur = nullptr, Pose2* best_rate_end = nullptr)
 {
     if (best_rate_dur) *best_rate_dur = 0.f;
     if (best_prog) *best_prog = -kInf;
@@ -218,11 +218,11 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     {
         const bool need_k = it.pf >= 0.f, need_b = ref != nullptr and (it.pr > bp or it.rt > br);
         if (not (need_k or need_b)) continue;
-        const float lps = log_p_no_contact_cells(*in.body, c.sw[it.i], in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m,
+        const float lps = log_p_no_contact_cells(*in.body, c.sw[it.i], in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m,
                                                  std::log1p(-p.risk_eps));
         if (not eligible(lps, p)) continue;
         if (need_k) ++k;
-        if (ref) { bp = std::max(bp, it.pr); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; } }
+        if (ref) { bp = std::max(bp, it.pr); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; if (best_rate_end) *best_rate_end = c.sw[it.i].back(); } }
     }
     if (best_prog) *best_prog = bp;
     if (best_rate) *best_rate = br;
@@ -274,17 +274,22 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     char failed_why[160] = "";
     if (monitored and mon->pending and in.now_s - mon->t0 >= double(mon->tau))
     {
-        const float f_now = in.field->at(in.pose.p);
+        const CostToGo& pf = in.progress_field ? *in.progress_field : *in.field;   // round 8: trap-free
+        const float f_now = pf.at(in.pose.p);
         const float realized = mon->f0 - f_now;
         // ★ ROUND 7: the instrument's full resolution — field interpolation and the pose noise seen through the slope
         const float slope = [&] {
-            const float h = in.field->cell();
-            const float fx1 = in.field->at(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = in.field->at(in.pose.p - Eigen::Vector2f(h, 0.f));
-            const float fy1 = in.field->at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = in.field->at(in.pose.p - Eigen::Vector2f(0.f, h));
+            const float h = pf.cell();
+            const float fx1 = pf.at(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = pf.at(in.pose.p - Eigen::Vector2f(h, 0.f));
+            const float fy1 = pf.at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = pf.at(in.pose.p - Eigen::Vector2f(0.f, h));
             if (not (std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0))) return 1.f;
             return 0.5f * std::hypot(fx1 - fx0, fy1 - fy0) / h; }();
-        const float res_field = in.field->resolution_m((in.pose.p - mon->p0.p).norm());
-        const float res = std::hypot(res_field, slope * in.sigma_xy);
+        const float res_field = pf.resolution_m((in.pose.p - mon->p0.p).norm());
+        // round 8: the CHANGE of the absolute pose error over the elapsed time (OU: sigma sqrt(2 (1 - e^{-tau/T})))
+        const double el = in.now_s - mon->t0;
+        const float sd = in.pose_drift_sigma_m > 0.f and in.pose_drift_time_s > 0.f
+                       ? in.pose_drift_sigma_m * std::sqrt(2.f * (1.f - std::exp(-float(el) / in.pose_drift_time_s))) : 0.f;
+        const float res = std::hypot(res_field, slope * sd);
         if (std::isfinite(realized) and realized > res) mon->reset();              // the plan delivered: forget it
         else if (mon->dF_pred > res)
         {
@@ -332,10 +337,13 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     {
         if (c.lpc_done) return;
         float second = -kInf, second_rate = -kInf, second_dur = 0.f;
-        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur);
+        Pose2 second_end = c.end;
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end);
         c.prog2 = std::max(c.prog, second);
         c.rate = std::max(c.prog / c.dur, second_rate);
-        c.tau = c.prog / c.dur >= second_rate ? c.dur : c.dur + second_dur;   // the plan the rate belongs to
+        const bool one_step = c.prog / c.dur >= second_rate;
+        c.tau = one_step ? c.dur : c.dur + second_dur;          // the plan the rate belongs to
+        c.plan_end = one_step ? c.end : second_end;
         c.lpc_done = true;
     };
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
@@ -394,7 +402,10 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         {
             // the prediction this Drive commits to: its plan's descent over its plan's duration
             mon->pending = true; mon->t0 = in.now_s; mon->tau = best_drive->tau;
-            mon->dF_pred = best_drive->rate * best_drive->tau; mon->f0 = in.field->at(in.pose.p); mon->p0 = in.pose;
+            // round 8: the plan's descent on the TRAP-FREE field, from the pose the realized descent will be measured from
+            const CostToGo& pf = in.progress_field ? *in.progress_field : *in.field;
+            mon->f0 = pf.at(in.pose.p); mon->dF_pred = mon->f0 - pf.at(best_drive->plan_end.p); mon->p0 = in.pose;
+            if (not std::isfinite(mon->dF_pred)) mon->reset();
         }
         return finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
     }

@@ -30,7 +30,16 @@ struct Goal { enum class Kind { Place, Doorway, Heading } kind; Eigen::Vector2f 
 struct PolicyParams { float horizon_s = 1.0f, dt = 0.05f; int n_v = 7, n_w = 11, n_cont_v = 3, n_cont_w = 5;
                       float risk_eps = 0.01f, release_risk_max = 0.5f, progress_scale_m = 0.10f, returns_max_age_s = 0.5f; };
 
-struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma_yaw = 0, returns_age_s = 0;
+// ★ ROUND 8 — pose uncertainty split by WHAT IT AFFECTS:
+//   sigma_rel_xy / sigma_rel_yaw: the RELATIVE body-vs-returns error accumulated over a rollout (odometry / motion noise
+//     over the horizon + latency). Returns are re-expressed on the believed pose, so absolute localisation error moves
+//     body and returns together and cancels: only this enters the CONTACT model.
+//   pose_drift_sigma_m / pose_drift_time_s: the absolute pose error as an Ornstein-Uhlenbeck process (stationary std,
+//     correlation time). The ProgressMonitor needs the std of its CHANGE over a prediction's elapsed time tau,
+//     sigma_drift(tau) = sigma * sqrt(2 (1 - exp(-tau / T))); it computes that itself from these two numbers (0 = no
+//     drift). A random-walk localiser with rate q m/sqrt(s) is the limit T -> inf, sigma = q sqrt(T/2).
+struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_rel_xy = 0, sigma_rel_yaw = 0, returns_age_s = 0;
+                     float pose_drift_sigma_m = 0, pose_drift_time_s = 0;
                      std::span<const Return> returns; const rc::RobotFootprint* body = nullptr; BaseLimits base;
                      const Goal* goal = nullptr; const CostToGo* field = nullptr;
                      // residual error of the proto-derived body (tessellation, hull simplification, beam footprint)
@@ -40,7 +49,10 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
                      float latency_s = 0.f;
                      // decision time (s, any monotonic clock): the ProgressMonitor judges a plan when its own
                      // duration has elapsed (round 6)
-                     double now_s = 0.0; };
+                     double now_s = 0.0;
+                     // round 8: the TRAP-FREE cost-to-go (the same goal, no trap costs) on which the ProgressMonitor
+                     // measures predicted and realized descent; nullptr = use `field`. Candidates are chosen on `field`.
+                     const CostToGo* progress_field = nullptr; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
@@ -57,9 +69,10 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its
 //   rate). The monitor holds ONE pending prediction (made by the first Drive after a reset): once tau_pred has elapsed
 //   it compares the REALIZED descent f(pose then) - f(pose now) with the instrument's FULL resolution (round 7)
-//   res = sqrt(res_field^2 + (|grad F| sigma_xy)^2): res_field = CostToGo::resolution_m over the realized displacement,
+//   res = sqrt(res_field^2 + (|grad F| sigma_drift(tau))^2): res_field = CostToGo::resolution_m over the realized displacement,
 //   |grad F| = the field's slope at the pose (central differences over one cell; 1, the distance-field slope, where a
-//   neighbour is not finite), sigma_xy = PolicyInput::sigma_xy (the pose std): realized <= resolution while dF_pred > resolution -> FAILED, and the next decide()
+//   neighbour is not finite), sigma_drift(tau) from PolicyInput::pose_drift_* (round 8). Round 8: predicted AND realized
+//   descents are measured on PolicyInput::progress_field (trap-free) — a trap's own cost is not a failure to progress: realized <= resolution while dF_pred > resolution -> FAILED, and the next decide()
 //   is a Release whatever the candidates promise; realized > resolution -> success, the record resets. A prediction
 //   no larger than the resolution says nothing and is dropped. No timer or constant beyond the plan's own tau and the
 //   field's resolution.

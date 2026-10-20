@@ -66,7 +66,7 @@ struct Scene
     void finish()
     {
         in.pose = {{0.f, 0.f}, kHalfPi};
-        in.sigma_xy = 0.005f; in.sigma_yaw = 0.005f;
+        in.sigma_rel_xy = 0.005f; in.sigma_rel_yaw = 0.005f;
         in.returns = ret; in.body = &b; in.base = limits(); in.goal = &goal; in.field = &field;
     }
 };
@@ -80,7 +80,7 @@ static void print(const char* name, const Decision& d)
 static std::vector<Pose2> sweep_of(const Scene& s, float v, float w)
 { return rollout(policy_start(s.in), s.in.v_now, s.in.w_now, v, w, s.pp.horizon_s, s.in.base, s.pp.dt); }
 static float p_contact_of(const Scene& s, float v, float w)
-{ return 1.f - std::exp(log_p_no_contact(s.b, sweep_of(s, v, w), s.ret, s.in.sigma_xy, s.in.sigma_yaw, s.in.body_geometry_sigma_m)); }
+{ return 1.f - std::exp(log_p_no_contact(s.b, sweep_of(s, v, w), s.ret, s.in.sigma_rel_xy, s.in.sigma_rel_yaw, s.in.body_geometry_sigma_m)); }
 static Pose2 end_of(const Scene& s, float v, float w) { return sweep_of(s, v, w).back(); }
 static float min_sd(const Scene& s, const Pose2& at)
 { float m = 1e9f; for (const auto& r : s.ret) m = std::min(m, signed_distance(s.b, at, r.p)); return m; }

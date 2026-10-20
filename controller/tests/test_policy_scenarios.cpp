@@ -26,15 +26,15 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 7 (task-6-report.md, "Round 7"): traps only on Decision::prediction_failed; monitor judged at
-// sqrt(res_field^2 + (|grad F| sigma_xy)^2). Contacts 0, Stuck 0; try105 / dead_end / narrow / doors / try101 / open /
-// jump pass 20/20. 4 checks FAIL: OU 1/20 (sigma_xy 0.5 passed to the policy also feeds the CONTACT model: walls 3 m
-// away read P ~ 0.7 %), jamb 16/20 and tour3 19/20 (a prediction made while crossing a trap disc fails because the
-// trap's own density raises the field along the way -> a second trap -> "no plan without the trap").
+// STATUS 2026-10-20 round 8 (task-6-report.md, "Round 8"): sigma split (relative -> contact, OU drift -> monitor) and the
+// monitor on the TRAP-FREE field. Contacts 0, Stuck 0; every catalogued scenario passes 20/20 except tour3_1_leg3 19/20;
+// OU variant 18/20. Both failures: a failed prediction within ~0.45 m of the goal lays its trap (r_circ, centred r_circ
+// downhill) OVER the goal -> "no plan without the trap".
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +84,7 @@ struct ScenarioResult
     int releases = 0;
     float time_s = 0.f, geodesic_m = 0.f, min_clear = 1e9f;
     Pose2 end;                  // TRUE end pose
+    double build_ms = 0.0; int builds = 0;   // round 8: CostToGo build cost (trapped field; the trap-free one is a copy)
     std::string why;
 };
 
@@ -106,7 +107,10 @@ struct FieldCtx
     CostToGo::Grid grid;
     std::vector<V2> goals;
     std::vector<char> free_;    // map free per cell
+    bool free_built = false;
     CostToGo field;
+    CostToGo free_field;        // round 8: the same goal WITHOUT traps — built once, the monitor measures progress on it
+    double build_ms_total = 0.0; int builds = 0;
     int idx(int i, int j) const { return j * grid.w + i; }
     V2 centre(int i, int j) const { return grid.origin + V2(i * grid.cell, j * grid.cell); }
 
@@ -128,7 +132,10 @@ struct FieldCtx
             const int i = int(std::lround((c.x() - grid.origin.x()) / grid.cell)), j = int(std::lround((c.y() - grid.origin.y()) / grid.cell));
             return i >= 0 and j >= 0 and i < grid.w and j < grid.h and free_[idx(i, j)];
         };
+        const auto t0 = std::chrono::steady_clock::now();
         field.build(grid, is_free, [](const V2&) { return 0.f; }, goals);
+        build_ms_total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); ++builds;
+        if (not free_built) { free_field = field; free_built = true; }    // no traps yet: identical, copied once
     }
     float max_finite() const
     {
@@ -274,7 +281,9 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         if (opt.unseen) for (const auto& h : unseen.hypotheses()) ret.push_back(h);
 
         PolicyInput in;
-        in.pose = bel; in.v_now = base.v; in.w_now = base.w; in.sigma_xy = opt.ou ? err.sigma_xy : 0.01f; in.sigma_yaw = opt.ou ? err.sigma_yaw : 0.01f;   // R6-2: the OU variant's own sigma
+        in.pose = bel; in.v_now = base.v; in.w_now = base.w; in.sigma_rel_xy = 0.01f; in.sigma_rel_yaw = 0.01f;   // round 8: odometry-scale RELATIVE error (contact model)
+        if (opt.ou) { in.pose_drift_sigma_m = err.sigma_xy; in.pose_drift_time_s = err.tau; }   // the OU's own process (monitor)
+        in.progress_field = &F.free_field;
         in.returns_age_s = 0.f;
         in.returns = ret; in.body = &B; in.base = base.lim; in.goal = &goal; in.field = &F.field; in.latency_s = base.latency_s;
         in.now_s = t;
@@ -356,6 +365,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     }
     res.time_s = t;
     res.end = truth;
+    res.build_ms = F.build_ms_total; res.builds = F.builds;
     if (res.why.empty()) res.why = "time limit";
     return res;
 }
@@ -419,7 +429,7 @@ static World open_world()
 static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 
 // ---------------------------------------------------------------- reporting
-struct Summary { int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
+struct Summary { double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
                  bool routes_ok = true; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
@@ -439,6 +449,7 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
         S.min_clear = std::min(S.min_clear, r.min_clear);
         if (r.geodesic_m > 0.f) S.max_path_ratio = std::max(S.max_path_ratio, r.path_m / r.geodesic_m);
         if (r.reached) S.tgoal.push_back(r.time_s);
+        S.build_ms += r.build_ms; S.builds += r.builds;
         std::printf("   %4d %7d %7d %5d %5d(%d) %8d %7.2f %5.2f %4.2f %6.1f %+9.3f %6d  %s\n", s, int(r.reached), int(r.unreachable), int(r.stuck),
                     r.contacts, r.release_contacts, r.releases, r.time_s, r.path_m, r.geodesic_m, r.max_no_progress_s, r.min_clear,
                     int(r.routes_differ), r.why.c_str());
@@ -449,6 +460,7 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
                 "max no-progress %.1f s, min true clearance %+.3f m, max path/geodesic %.2f\n",
                 S.reached, S.n, S.unreachable, S.stuck, S.contacts, S.rel_contacts, S.total_releases, S.max_releases, med, mx, S.max_np,
                 S.min_clear, S.max_path_ratio);
+    std::printf("   field builds: %d, mean %.1f ms each (grid as stated per world)\n", S.builds, S.builds ? S.build_ms / S.builds : 0.0);
     return S;
 }
 
