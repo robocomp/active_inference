@@ -276,7 +276,15 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     {
         const float f_now = in.field->at(in.pose.p);
         const float realized = mon->f0 - f_now;
-        const float res = in.field->resolution_m((in.pose.p - mon->p0.p).norm());
+        // ★ ROUND 7: the instrument's full resolution — field interpolation and the pose noise seen through the slope
+        const float slope = [&] {
+            const float h = in.field->cell();
+            const float fx1 = in.field->at(in.pose.p + Eigen::Vector2f(h, 0.f)), fx0 = in.field->at(in.pose.p - Eigen::Vector2f(h, 0.f));
+            const float fy1 = in.field->at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = in.field->at(in.pose.p - Eigen::Vector2f(0.f, h));
+            if (not (std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0))) return 1.f;
+            return 0.5f * std::hypot(fx1 - fx0, fy1 - fy0) / h; }();
+        const float res_field = in.field->resolution_m((in.pose.p - mon->p0.p).norm());
+        const float res = std::hypot(res_field, slope * in.sigma_xy);
         if (std::isfinite(realized) and realized > res) mon->reset();              // the plan delivered: forget it
         else if (mon->dF_pred > res)
         {
@@ -333,6 +341,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     auto finish = [&](Decision::Mode m, const Cand& c, std::string why)
     {
         d.mode = m; d.v = c.v; d.w = c.w; d.log_p_safe = c.lps; d.log_p_cont = c.lpc; d.progress_m = c.prog2; d.why = std::move(why);
+        d.prediction_failed = m == Decision::Mode::Release and prediction_failed;
         return d;
     };
 

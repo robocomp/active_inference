@@ -48,13 +48,18 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
 // Stuck only when returns lie inside the bare hull, or no release candidate has P(contact) < release_risk_max.
 // Blind also for a non-finite input (NaN/inf anywhere): no prediction can be made.
 struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode; float v = 0, w = 0;
-                  float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why; };
+                  float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why;
+                  // round 7: this Release was caused by the ProgressMonitor (a failed prediction) — the only evidence
+                  // that "the body cannot get through from here"; a caller lays a trap on it and on nothing else
+                  bool prediction_failed = false; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its
 //   rate). The monitor holds ONE pending prediction (made by the first Drive after a reset): once tau_pred has elapsed
-//   it compares the REALIZED descent f(pose then) - f(pose now) with the field's resolution (CostToGo::resolution_m
-//   over the realized displacement): realized <= resolution while dF_pred > resolution -> FAILED, and the next decide()
+//   it compares the REALIZED descent f(pose then) - f(pose now) with the instrument's FULL resolution (round 7)
+//   res = sqrt(res_field^2 + (|grad F| sigma_xy)^2): res_field = CostToGo::resolution_m over the realized displacement,
+//   |grad F| = the field's slope at the pose (central differences over one cell; 1, the distance-field slope, where a
+//   neighbour is not finite), sigma_xy = PolicyInput::sigma_xy (the pose std): realized <= resolution while dF_pred > resolution -> FAILED, and the next decide()
 //   is a Release whatever the candidates promise; realized > resolution -> success, the record resets. A prediction
 //   no larger than the resolution says nothing and is dropped. No timer or constant beyond the plan's own tau and the
 //   field's resolution.

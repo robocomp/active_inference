@@ -38,6 +38,7 @@ public:
     //   from the point is at most one cell diagonal sqrt2 * cell. Hence |error of f(a) - f(b)| <= 0.0824 x (separation +
     //   2 sqrt2 cell): 1.2 cm at zero separation for 0.05 m cells (one cell x 0.233), +0.82 cm per 0.1 m apart.
     float resolution_m(float separation_m) const { return kOctileGainExcess * (separation_m + 2.f * 1.41421356f * g_.cell); }
+    float cell() const { return g_.cell; }
     static constexpr float kOctileGainExcess = 0.0823922f;   // sqrt(4 - 2 sqrt2) - 1   // goal cells seeded by the last build (0 = goal fully blocked)
     bool reachable(const Eigen::Vector2f& p) const;
     void add_trap(const Eigen::Vector2f& p, float radius_m, float cost_m);   // applied at the next build()

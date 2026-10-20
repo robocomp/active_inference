@@ -26,11 +26,11 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 6 (task-6-report.md, "Round 6"): ProgressMonitor (stuck = failed prediction) + phantom fixes.
-// Contacts 0, no Stuck. narrow_doorway 20/20 Unreachable (1 release), dead_end 16/20. 9 checks FAIL: a Release from a
-// momentary local wedge (no eligible candidate at 5 cm in a door mouth / passage mouth) lays a trap across the ONLY or
-// the CORRECT opening -> "no plan without the trap" (jamb 7, dead_end 4, tour3 2, try105 1); OU 2/20: believed-pose
-// jitter (3.5 cm/tick) near the goal fails a prediction and the trap covers the goal.
+// STATUS 2026-10-20 round 7 (task-6-report.md, "Round 7"): traps only on Decision::prediction_failed; monitor judged at
+// sqrt(res_field^2 + (|grad F| sigma_xy)^2). Contacts 0, Stuck 0; try105 / dead_end / narrow / doors / try101 / open /
+// jump pass 20/20. 4 checks FAIL: OU 1/20 (sigma_xy 0.5 passed to the policy also feeds the CONTACT model: walls 3 m
+// away read P ~ 0.7 %), jamb 16/20 and tour3 19/20 (a prediction made while crossing a trap disc fails because the
+// trap's own density raises the field along the way -> a second trap -> "no plan without the trap").
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
@@ -274,7 +274,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         if (opt.unseen) for (const auto& h : unseen.hypotheses()) ret.push_back(h);
 
         PolicyInput in;
-        in.pose = bel; in.v_now = base.v; in.w_now = base.w; in.sigma_xy = 0.01f; in.sigma_yaw = 0.01f; in.returns_age_s = 0.f;
+        in.pose = bel; in.v_now = base.v; in.w_now = base.w; in.sigma_xy = opt.ou ? err.sigma_xy : 0.01f; in.sigma_yaw = opt.ou ? err.sigma_yaw : 0.01f;   // R6-2: the OU variant's own sigma
+        in.returns_age_s = 0.f;
         in.returns = ret; in.body = &B; in.base = base.lim; in.goal = &goal; in.field = &F.field; in.latency_s = base.latency_s;
         in.now_s = t;
         const Decision d = decide(in, pp, &monitor);
@@ -303,10 +304,12 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         //   The episode ends when a Drive tick decreases the field (below); further Release ticks before that belong to it.
         //   (Round 2's driver-side "progress since the last trap" heuristic is gone: it fired on mm of dither and laid traps
         //   across the only doorway.)
-        if (d.mode == Decision::Mode::Release and not in_release_episode)
+        if (d.mode == Decision::Mode::Release and not in_release_episode) { in_release_episode = true; ++res.releases; }
+        // ★ R6-1 (round 7): a trap asserts "the body cannot get through from here"; only a FAILED PREDICTION is evidence
+        //   of that. One per failed prediction (the monitor resets as it fails). A Release from a momentary all-too-risky
+        //   moment backs off as defined and lays nothing.
+        if (d.prediction_failed)
         {
-            in_release_episode = true;
-            ++res.releases;
             const V2 dir = F.descent_dir(bel.p);
             const float cost = 2.f * F.max_finite();
             // ★ D2: the trap marks where the body CANNOT go — one radius ahead of the stall pose, downhill. Centred on the
