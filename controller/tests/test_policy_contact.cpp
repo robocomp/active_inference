@@ -200,6 +200,14 @@ int main()
         CHECK("surface_cells existence combines", c2 != c.end() and std::abs(c2->p_exist - 0.75f) < 1e-5f);
         CHECK("surface_cells behind an uncertain surface is kept", near(-0.60f, 0.02f) != c.end() and near(0.60f, 0.03f) == c.end());
         CHECK("surface_cells idempotent", surface_cells(c, o, bw).size() == 4);
+        // R1 (round 3): a hypothesis of another source (aggregate = false) on the same bearing as LiDAR hits 6.5 cm behind
+        // it stays its OWN obstacle (it used to capture them into one certain cell at its own place)
+        std::vector<Return> mix{{{0.f, 0.235f}, 0.005f, 0.001f, 0.f, 0.f, 0.f, false}};
+        for (int i = -5; i <= 5; ++i) mix.push_back({{0.01f * i, 0.30f}, 0.02f, 1.f});
+        const auto m = surface_cells(mix, o, bw);
+        const bool kept = std::ranges::any_of(m, [](const Return& q) { return not q.aggregate and q.p == Eigen::Vector2f(0.f, 0.235f) and q.p_exist == 0.001f; });
+        const bool wall_kept = std::ranges::none_of(m, [](const Return& q) { return q.aggregate and q.p.y() < 0.29f; });
+        CHECK("surface_cells: a hypothesis is never merged with LiDAR hits", kept and wall_kept and m.size() >= 2);
         // grid alignment no longer splits a surface: a noisy wall (sigma_r 0.02) 0.309 m away straddling any boundary
         std::mt19937 g(1); std::normal_distribution<float> n(0.f, 0.02f);
         std::vector<Return> wall;

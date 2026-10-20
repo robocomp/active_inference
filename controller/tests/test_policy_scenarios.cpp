@@ -6,8 +6,8 @@
 // integrated in <= 5 mm sub-steps; a blocked sub-step is a contact and the body stays put.
 // The cost-to-go field is built from the MAP's free space (cells whose clearance to the obstacles the map knows is at least
 // the body's inscribed radius — necessary for the body to be there at all, body-agnostic as CostToGo asks).
-// On each RELEASE episode (first Release tick after a non-Release one) that ends a stretch of progress: add_trap where the
-// body cannot go (controller ruling D2): centre = the believed stall pose + one circumscribed radius along the field's
+// On each RELEASE episode (opened by the policy's Mode::Release, closed by a Drive tick that decreases the field): add_trap
+// where the body cannot go (controller ruling D2): centre = the believed stall pose + one circumscribed radius along the field's
 // downhill direction (-grad, unit), radius = the body's circumscribed radius, cost_m = 2 x the largest finite field value on the grid (★ the ruling: cost_m >=
 // the field value at the trap; twice the largest one means crossing the trap costs more than ANY route that avoids it, i.e.
 // "not through here"), rebuild. Then "no plan exists without it" -> Unreachable: a flood fill over the map's free cells MINUS
@@ -26,11 +26,10 @@
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3).
 //
-// STATUS 2026-10-20 round 2 (task-6-report.md, "Round 2"): rulings D1 (bearing cells), D2 (trap ahead) and D3 (free ramp,
-// prior 0.01) implemented. Default config: 11 checks FAIL incl. CONTACTS in narrow_doorway_unreachable — a hypothesis
-// with no blocked evidence rides the hull edge at p ~ prior and the bearing grouping merges it with the casing hits into
-// ONE certain cell at the phantom's position. NO_UNSEEN=1: 0 contacts, 4 FAIL (traps laid after mm of progress block the
-// doorway/goal -> "no plan without the trap").
+// STATUS 2026-10-20 round 3 (task-6-report.md, "Round 3"): R1 (hypotheses = own obstacles, W > 0), R2 (trap only on
+// Mode::Release, one per episode), R3 implemented. 20 seeds, sigma_r 0.02, unseen ON: CONTACTS 0 everywhere; 5 checks FAIL,
+// all "no plan without the trap": the policy's Release also answers "no candidate makes FIELD progress" (aligning with a
+// door needs a turn in place, which makes none), so a Release at try105's / jamb_1p6cm's START lays a trap in the doorway.
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/unseen_contact.h"
@@ -253,8 +252,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
 
     constexpr float kTick = 0.05f, kSub = 0.005f;
     float t = 0.f, best_f = res.geodesic_m, last_progress_t = 0.f;
-    Decision::Mode prev = Decision::Mode::Drive;
-    bool route_check_pending = false, progressed = false;
+    bool route_check_pending = false, in_release_episode = false;
     size_t next_jump = 0;
     const float r_circ = B.circumscribed_radius();
 
@@ -298,13 +296,14 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
                     if (in_forward_half(tp, q, F.grid.cell)) res.routes_differ = false;
             if (tr) std::printf("    route after release: %zu pts, differs=%d\n", r.size(), int(res.routes_differ));
         }
-        if (d.mode == Decision::Mode::Release and prev != Decision::Mode::Release) ++res.releases;
-        // ★ A trap marks "the pose where progress STOPPED": only a release that ends a stretch of progress lays one. A
-        //   release before any progress (the first decision at try105's skewed start: a pure turn makes no field progress,
-        //   so aligning with the door IS a release) is repositioning, not evidence that the way is blocked.
-        if (d.mode == Decision::Mode::Release and prev != Decision::Mode::Release and progressed)
+        // ★ R2 (round 3): a trap is laid ONLY on the policy's own stuck verdict, Mode::Release — one per Release EPISODE.
+        //   The episode ends when a Drive tick decreases the field (below); further Release ticks before that belong to it.
+        //   (Round 2's driver-side "progress since the last trap" heuristic is gone: it fired on mm of dither and laid traps
+        //   across the only doorway.)
+        if (d.mode == Decision::Mode::Release and not in_release_episode)
         {
-            progressed = false;
+            in_release_episode = true;
+            ++res.releases;
             const V2 dir = F.descent_dir(bel.p);
             const float cost = 2.f * F.max_finite();
             // ★ D2: the trap marks where the body CANNOT go — one radius ahead of the stall pose, downhill. Centred on the
@@ -319,11 +318,11 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
             if (not plan_without_traps(F, traps, bel.p)) { res.unreachable = true; res.why = "no plan without the trap"; break; }
             route_check_pending = true;
         }
-        prev = d.mode;
 
         // ---- the base: command latency, ramps, deadband; contact every <= 5 mm
         base.send(t, d.v, d.w);
         const Pose2 before = truth;
+        const float f_before_tick = F.field.at(bel.p);
         const float v_meas = base.v, w_meas = base.w;     // odometry at the start of the tick
         bool touched = false;
         for (float s = 0.f; s < kTick - 1e-6f; s += kSub)
@@ -344,7 +343,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         res.path_m += (truth.p - before.p).norm();
 
         const float fn = F.field.at(err.believed(truth).p);
-        if (fn < best_f - 1e-3f) { best_f = fn; last_progress_t = t + kTick; progressed = true; }
+        if (fn < best_f - 1e-3f) { best_f = fn; last_progress_t = t + kTick; }
+        if (d.mode == Decision::Mode::Drive and fn < f_before_tick) in_release_episode = false;   // Drive with field decrease
         res.max_no_progress_s = std::max(res.max_no_progress_s, t + kTick - last_progress_t);
     }
     res.time_s = t;

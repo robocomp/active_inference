@@ -27,8 +27,10 @@ namespace rc::policy
 //   backward. Ticks below the base's deadband (v_min_eff / w_min_eff) add nothing: the base would not have moved
 //   anyway, so the absence of motion discriminates nothing.
 //   Translation s = sigma_odo_m; rotation s = sigma_odo_m / circumscribed radius.
-//   hypotheses(): one Return per direction that has ever received evidence, p_exist = logistic(L_k). There is NO
-//   switch: the contact model weights by p_exist, so a weak hypothesis counts weakly.
+//   hypotheses(): one Return per direction that has accumulated BLOCKED evidence (W > 0; round-3 ruling R1 — a
+//   direction only ever seen moving freely has no place for an obstacle), p_exist = logistic(L_k). No switch on p: the
+//   contact model weights by p_exist, so a weak hypothesis counts weakly. Each is flagged aggregate = false (its own
+//   obstacle, never merged with LiDAR returns).
 //   ★ A hypothesis marks a PLACE, so its room-frame position is frozen where the evidence accrued: it is the
 //   evidence-weighted mean of the per-tick placements, updated only on ticks that ADD blocked evidence (llr > 0).
 //   When the robot backs away the obstacle stays where it was. Before any blocked evidence the latest placement
@@ -86,7 +88,10 @@ public:
     {
         std::vector<Return> out;
         for (const auto& d : dir_)
-            if (d.seen) out.push_back({d.pos(), sigma_, 1.f / (1.f + std::exp(-d.L))});
+            // ★ R1 (round 3): only directions with BLOCKED evidence (W > 0) — a direction only ever seen moving freely
+            //   has no place for an obstacle; reported, it rode the hull edge at p ~ prior and held the robot Stuck.
+            //   aggregate = false: a different measurement source, never merged with LiDAR returns (policy_types.h).
+            if (d.seen and d.W > 0.f) out.push_back({d.pos(), sigma_, 1.f / (1.f + std::exp(-d.L)), 0.f, 0.f, 0.f, false});
         return out;
     }
 

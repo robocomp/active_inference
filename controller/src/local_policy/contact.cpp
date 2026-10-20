@@ -183,9 +183,11 @@ std::vector<Return> surface_cells(std::span<const Return> r, const Eigen::Vector
     struct Hit { std::int64_t bin; double range; const Return* q; };
     std::vector<Hit> hits;
     hits.reserve(r.size());
+    std::vector<Return> out;
     for (const Return& q : r)
     {
         if (q.p_exist <= 0.f) continue;
+        if (not q.aggregate) { out.push_back(q); continue; }   // another source: its own obstacle, never grouped (R1)
         const Eigen::Vector2d d = (q.p - origin).cast<double>();
         const double th = std::atan2(d.y(), d.x()) + 0.5 * kTwoPi;          // [0, 2 pi]
         hits.push_back({std::min(nbins - 1, static_cast<std::int64_t>(std::floor(th / bw))), d.norm(), &q});
@@ -193,7 +195,6 @@ std::vector<Return> surface_cells(std::span<const Return> r, const Eigen::Vector
     std::ranges::sort(hits, [](const Hit& x, const Hit& y) { return x.bin != y.bin ? x.bin < y.bin : x.range < y.range; });
 
     struct Acc { double w = 0, wr = 0, wx = 0, wy = 0, wxx = 0, wxy = 0, wyy = 0, log_absent = 0; int n = 0; };
-    std::vector<Return> out;
     auto emit = [&](const Acc& a)
     {
         const double mx = a.wx / a.w, my = a.wy / a.w;

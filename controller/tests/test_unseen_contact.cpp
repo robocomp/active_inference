@@ -39,7 +39,7 @@ int main()
     { UnseenContact u;
       for (int i = 0; i < 40; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.2f * dt, 0.f, dt, pose, b, body, sig);
       const auto h = fwd_h(u);
-      CHECK("moving_freely_none: weak hypothesis, no switch", h and h->p_exist < 1e-6f); }
+      CHECK("moving_freely_none: no blocked evidence, no hypothesis (R1)", not h); }
 
     { UnseenContact u;
       for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
@@ -61,7 +61,7 @@ int main()
       Pose2 q = pose;
       for (int i = 0; i < 15; ++i) { q.p.x() -= 0.02f; u.update(-0.2f, 0.f, 0.f, 0.f, -0.2f * dt, 0.f, dt, q, b, body, sig); }
       const auto hs = u.hypotheses();
-      CHECK("hypothesis_stays_after_backing_away", hs.size() == 2 and (hs[0].p - before).norm() < 1e-5f
+      CHECK("hypothesis_stays_after_backing_away", hs.size() == 1 and (hs[0].p - before).norm() < 1e-5f
             and hs[0].p.x() > q.p.x() + 0.3f);
       UnseenContact w;
       for (int i = 0; i < 20; ++i) w.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, pose, b, body, sig);
