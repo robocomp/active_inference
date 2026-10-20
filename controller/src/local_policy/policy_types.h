@@ -9,7 +9,11 @@ namespace rc::policy
 struct Pose2 { Eigen::Vector2f p = Eigen::Vector2f::Zero(); float yaw = 0.f; };
 
 // One LiDAR/map return in the room frame. sigma = range sigma (m); p_exist = probability it is a real obstacle.
-struct Return { Eigen::Vector2f p = Eigen::Vector2f::Zero(); float sigma = 0.02f; float p_exist = 1.f; };
+// sxx/sxy/syy: scatter (m^2) of the hits a surface cell was merged from, about p — zero for a raw return; it is the
+// cell's extent along the surface (contact.h: a cell is swept as that segment, and the scatter projected on the
+// clearance direction widens its sigma — a jamb tip seen end-on is not pinned down by hits spread along it).
+struct Return { Eigen::Vector2f p = Eigen::Vector2f::Zero(); float sigma = 0.02f; float p_exist = 1.f;
+                float sxx = 0.f, sxy = 0.f, syy = 0.f; };
 
 // Speed/acceleration envelope of the base. v_min_eff / w_min_eff are its deadband: the smallest speeds it
 // actually executes (filled in from measurements in a later task).

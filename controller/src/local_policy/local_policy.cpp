@@ -52,13 +52,14 @@ std::optional<float> target_yaw(const Goal& g, const Pose2& at)
 // ★ Heading: reduction of |angle error| (rad) times the body's circumscribed radius — a radian of heading and a
 //   metre of travel trade at the body's own lever arm (a radian of turn moves its outermost point that far) —
 //   minus the distance travelled (controller ruling: a heading goal holds position).
-//   Place with `yaw`: the same heading term is added only when the START is within 2*tol_xy of the goal; farther
-//   away the heading is free and emerges from the path.
+//   Place with `yaw`: the same heading term weighted by w = tol_xy / max(tol_xy, d), d = distance of the START to
+//   the goal — full weight inside the tolerance, fading as 1/d beyond it (no new constant: the goal's own
+//   tolerance is the scale), so the heading emerges from the path far away and is held near the goal.
 float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
 {
     const Goal& g = *in.goal;
     const float lever = in.body->circumscribed_radius();
-    float pr = 0.f;
+    float pr = 0.f, wt = 1.f;
     if (g.kind != Goal::Kind::Heading)
     {
         const float fa = in.field->at(a.p);
@@ -66,14 +67,15 @@ float progress(const PolicyInput& in, const Pose2& a, const Pose2& b)
         const float fb = in.field->at(b.p);
         if (not std::isfinite(fb)) return -kInf;
         pr = fa - fb;
-        if (not g.yaw or (a.p - g.p).norm() > 2.f * g.tol_xy) return pr;
+        if (not g.yaw) return pr;
+        wt = g.tol_xy / std::max(g.tol_xy, (a.p - g.p).norm());
     }
     const auto ty = target_yaw(g, a);
     const float turn = ty ? (std::abs(wrap(*ty - a.yaw)) - std::abs(wrap(*ty - b.yaw))) * lever : 0.f;
     // ★ A heading goal HOLDS POSITION: travel is pure cost (metres), so a turn in place beats an arc that lands the
     //   same heading 0.6 m away (measured before this term: open space chose "back up arcing right v=-0.50 w=-1.20").
     if (g.kind == Goal::Kind::Heading) return turn - (b.p - a.p).norm();
-    return pr + turn;
+    return pr + wt * turn;
 }
 
 // Inside the goal's own tolerances at `at` (they are the goal's, not the policy's).
@@ -91,11 +93,14 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 
 struct Cand { float v, w; float lps = 0.f, prog = 0.f, lpc = 0.f; Pose2 end{}; bool elig = false, lpc_done = false; };
 
-float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, float v, float w, Pose2* end)
+// Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
+// lps_floor: below it only a bound is needed (contact.h) — candidates need exact values only while releasable
+// (lps > log eps), continuations only while eligible (lps >= log(1 - eps)).
+float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, float v0, float w0, float v, float w, Pose2* end, float lps_floor)
 {
-    const auto sw = rollout(from, v, w, p.horizon_s, in.base, p.dt);
+    const auto sw = rollout(from, v0, w0, v, w, p.horizon_s, in.base, p.dt);
     if (end) *end = sw.back();
-    return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m);
+    return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_xy, in.sigma_yaw, in.body_geometry_sigma_m, lps_floor);
 }
 
 bool eligible(float lps, const PolicyParams& p) { return 1.f - std::exp(lps) <= p.risk_eps; }
@@ -109,6 +114,16 @@ std::string words(float v, float w)
     else if (w == 0.f) std::snprintf(buf, sizeof buf, "%s %s (v=%+.2f)", lin, ang, v);
     else std::snprintf(buf, sizeof buf, "%s arcing %s (v=%+.2f w=%+.2f)", lin, ang, v, w);
     return buf;
+}
+
+bool finite_input(const PolicyInput& in)
+{
+    auto ok = [](float x) { return std::isfinite(x); };
+    if (not (ok(in.pose.p.x()) and ok(in.pose.p.y()) and ok(in.pose.yaw) and ok(in.v_now) and ok(in.w_now) and ok(in.sigma_xy)
+             and ok(in.sigma_yaw) and ok(in.returns_age_s) and ok(in.latency_s) and ok(in.body_geometry_sigma_m))) return false;
+    for (const Return& r : in.returns)
+        if (not (ok(r.p.x()) and ok(r.p.y()) and ok(r.sigma) and ok(r.p_exist) and ok(r.sxx) and ok(r.sxy) and ok(r.syy))) return false;
+    return true;
 }
 }  // namespace
 
@@ -124,6 +139,8 @@ const char* mode_name(Decision::Mode m)
     }
     return "?";
 }
+
+Pose2 policy_start(const PolicyInput& in) { return advance(in.pose, in.v_now, in.w_now, std::max(0.f, in.latency_s)); }
 
 // ★ Continuability: from a pose AT REST (every candidate ends braked), the coarse set spans the dynamic window
 //   from rest — v in n_cont_v values over [-min(v_max, a_lin*T), +...], w likewise with a_rot — minus the deadband
@@ -145,10 +162,7 @@ std::vector<std::pair<float, float>> coarse_set(const PolicyInput& in, const Pol
     for (float v : vs) for (float w : ws) if (v != 0.f or w != 0.f) out.emplace_back(v, w);
     return out;
 }
-}  // namespace
 
-namespace
-{
 // `in.returns` are surface cells already (decide() merges once per cycle).
 float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
 {
@@ -162,7 +176,7 @@ float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, cons
         for (const auto& [v, w] : set)
         {
             Pose2 end;
-            const float lps = lp_safe(in, p, from, v, w, &end);
+            const float lps = lp_safe(in, p, from, 0.f, 0.f, v, w, &end, std::log1p(-p.risk_eps));
             if (eligible(lps, p) and progress(in, from, end) >= 0.f) ++k;
         }
     return std::log((float(k) + 1.f) / (float(n) + 2.f));
@@ -180,6 +194,8 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
 {
     Decision d{.mode = Decision::Mode::Stuck, .why = {}};
     if (in0.body == nullptr or in0.goal == nullptr) { d.why = "no body or no goal"; return d; }
+    // ---- a NaN/inf anywhere would silently poison every probability: no prediction, stop
+    if (not finite_input(in0)) { d.mode = Decision::Mode::Blind; d.why = "non-finite input"; return d; }
     // ★ returns -> surface cells ONCE per cycle (contact.h): every candidate and continuation sweeps the same cells
     const auto cells = surface_cells(in0.returns);
     PolicyInput in = in0; in.returns = cells;
@@ -194,13 +210,19 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         d.mode = Decision::Mode::Blind; d.why = buf; return d;
     }
 
+    // ★ LATENCY (review ruling): the command decided now takes effect latency_s later (pose age + command latency);
+    //   until then the base keeps (v_now, w_now). Every candidate is rolled out from THAT pose, starting at the
+    //   current velocity — the coast of a moving base is part of every motion, including "stop and turn".
+    const Pose2 start = policy_start(in);
+
     // ---- Candidates: n_v x n_w over the dynamic window, plus pure turns of both signs and a straight reverse
     const float T = p.horizon_s;
     const float vlo = std::max(-in.base.v_max, in.v_now - in.base.a_lin * T), vhi = std::min(in.base.v_max, in.v_now + in.base.a_lin * T);
     const float wlo = std::max(-in.base.w_max, in.w_now - in.base.a_rot * T), whi = std::min(in.base.w_max, in.w_now + in.base.a_rot * T);
     auto vs = linspace(vlo, vhi, p.n_v), ws = linspace(wlo, whi, p.n_w);
     // ★ always present: v = 0 (pure turns), w = 0 (straight lines), a reverse speed and turns of BOTH signs —
-    //   whatever the current velocity, "stop and turn" and "back straight out" are always on the table.
+    //   whatever the current velocity, "stop and turn" and "back straight out" are always on the table (and are
+    //   rolled out from the current velocity like every other candidate).
     const float vr = std::min(in.base.v_max, in.base.a_lin * T), wr = std::min(in.base.w_max, in.base.a_rot * T);
     vs.push_back(0.f); ws.push_back(0.f);
     if (vlo >= 0.f) vs.push_back(-vr);
@@ -215,9 +237,9 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
         {
             if (v == 0.f and w == 0.f) continue;     // standing still is the absence of a decision, not a candidate
             Cand c{.v = v, .w = w};
-            c.lps = lp_safe(in, p, in.pose, v, w, &c.end);
+            c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log(p.risk_eps));
             c.elig = eligible(c.lps, p);
-            if (c.elig) { c.prog = progress(in, in.pose, c.end); ++d.eligible; }
+            if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
             cands.push_back(c);
         }
     auto ensure_lpc = [&](Cand& c) { if (not c.lpc_done) { c.lpc = log_p_continuable_cells(in, p, c.end); c.lpc_done = true; } };
@@ -250,23 +272,49 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
     // ---- No eligible motion makes progress: the robot is in a wedge, and the only option is to move back and turn
     //      a bit (user's rule). First the impossible case: a return inside the BARE hull contradicts "not touching
     //      now" (the robot cannot overlap a wall) — a sensing/pose error, not a place a motion can be chosen from.
-    const auto inside = std::ranges::count_if(in0.returns, [&](const Return& r) { return hull_distance(*in.body, in.pose, r.p) < 0.f; });
-    if (inside > 0) { d.why = std::to_string(inside) + " returns inside the body (sensing/pose error): hold"; return d; }
+    //      Returns count by their existence (a ghost inside the body is not a contradiction).
+    float inside = 0.f;
+    for (const Return& r : in0.returns) if (r.p_exist > 0.f and hull_distance(*in.body, start, r.p) < 0.f) inside += r.p_exist;
+    if (inside > 0.f)
+    {
+        char buf[96]; std::snprintf(buf, sizeof buf, "%.1f returns inside the body (sensing/pose error): hold", inside);
+        d.why = buf; return d;
+    }
 
     // ---- Release (controller ruling, fix round 5): NOT held to risk_eps. Among ALL candidates with v <= 0 (reverse
     //      arcs and in-place turns), lexicographically: (a) those that INCREASE continuability
     //      (log_p_cont(end) > log_p_cont(now)) if any exist, else all of them; (b) the smallest P(contact); ties go
     //      to the larger continuability gain, then to the larger reverse travel.
+    // ★ STUCK is the mirror of risk_eps, no new constant: Drive moves only when contact is improbable (P <= eps);
+    //   Release is refused only when contact is as certain as Drive demands it be improbable (P >= 1 - eps) —
+    //   whatever the robot does it touches, so moving buys nothing and the task layer is told.
+    // ★ A candidate at P >= 1 - eps can never be released, whichever pass picks it (the pick would fall through to
+    //   the next pass and finally to Stuck), so its continuations are never rolled out: the scans run over the
+    //   RELEASABLE candidates only — the same decision as scanning all and falling through, at a fraction of the
+    //   cost (the reviewer's wedge: 47 x 14 continuation sweeps -> 0).
     // ★ Exact scan: visiting in decreasing log_p_safe, the first candidate with a gain is the (a)-member with the
     //   smallest P; only its equal-lps ties can beat it (larger gain), and a tie reaching lpc_max ends the scan.
     //   Pass (b) reuses every continuation already rolled out.
-    const float lpc_now = log_p_continuable_cells(in, p, in.pose);
+    const float lps_stuck = std::log(p.risk_eps);
+    std::vector<Cand*> rel;
+    Cand* least = nullptr;                        // the least likely contact among every v <= 0 candidate
+    for (auto& c : cands)
+        if (c.v <= 0.f)
+        {
+            if (least == nullptr or c.lps > least->lps) least = &c;
+            if (c.lps > lps_stuck) rel.push_back(&c);
+        }
+    if (least == nullptr) { d.why = "no progress, and no reverse or in-place motion to release with: hold"; return d; }
+    if (rel.empty())
+    {
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= 1-%.3g: hold", words(least->v, least->w).c_str(), 1.f - std::exp(least->lps), p.risk_eps);
+        d.why = buf; return d;
+    }
+    const float lpc_now = log_p_continuable_cells(in, p, start);
     const float n_cont = float(coarse_set(in, p).size());
     const float lpc_max = std::log((n_cont + 1.f) / (n_cont + 2.f));
-    std::vector<Cand*> rel;
-    for (auto& c : cands) if (c.v <= 0.f) rel.push_back(&c);
     std::ranges::sort(rel, std::greater{}, [](const Cand* x) { return std::pair{x->lps, -x->v}; });
-    if (rel.empty()) { d.why = "no progress, and no reverse or in-place motion to release with: hold"; return d; }
     constexpr float kTie = 1e-6f;
     Cand* best = nullptr;
     if (lpc_now < lpc_max)                        // (a): a gain is possible at all
@@ -285,18 +333,9 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p)
             if (best == nullptr or c->lpc > best->lpc) best = c;
             if (best->lpc >= lpc_max) break;
         }
-    const float P = 1.f - std::exp(best->lps);
-    // ★ STUCK is the mirror of risk_eps, no new constant: Drive moves only when contact is improbable (P <= eps);
-    //   Release is refused only when contact is as certain as Drive demands it be improbable (P >= 1 - eps) —
-    //   whatever the robot does it touches, so moving buys nothing and the task layer is told.
-    if (best->lps <= std::log(p.risk_eps))
-    {
-        char buf[160];
-        std::snprintf(buf, sizeof buf, "stuck: best release %s has P(contact)=%.3f >= 1-%.3g: hold", words(best->v, best->w).c_str(), P, p.risk_eps);
-        d.why = buf; return d;
-    }
     char buf[200];
-    std::snprintf(buf, sizeof buf, "release: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", words(best->v, best->w).c_str(), P, lpc_now, best->lpc);
+    std::snprintf(buf, sizeof buf, "release: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", words(best->v, best->w).c_str(),
+                  1.f - std::exp(best->lps), lpc_now, best->lpc);
     return finish(Decision::Mode::Release, *best, buf);
 }
 }  // namespace rc::policy

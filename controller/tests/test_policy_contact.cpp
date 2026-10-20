@@ -1,4 +1,6 @@
 // Task 2 (local-motion policy): rollout + swept-body contact probability.
+// Review fix round 1: rollouts ramp from the current velocity (v0, w0); cells carry their hits' scatter and are
+//   swept as support segments (jamb_tip_not_overconfident, turn_in_place_from_speed_sees_wall_ahead).
 // Fix round 4: returns are merged into surface cells (kSurfaceCellM) and the shared-offset integral is adaptive;
 //   `surface_cells` and `epsilon_integral_accuracy` (vs a 4001-node reference, sigma_j/sigma_s in [0.05, 5]) cover them.
 // Build+run (from controller/):
@@ -32,26 +34,41 @@ int main()
     const Pose2 origin{{0.f, 0.f}, kHalfPi};
     const float sxy = 0.005f, syaw = 0.005f;
 
-    { // rollout_straight: 0.3 m/s for 1 s then brake at 1.0 m/s^2 -> 0.3 + 0.045
-        const auto s = rollout(origin, 0.3f, 0.f, 1.f, b, 0.05f);
-        CHECK("rollout_straight advance", std::abs((s.back().p.y() - 0.f) - 0.345f) < 0.005f and std::abs(s.back().p.x()) < 1e-4f);
+    { // rollout_straight: from rest, 0.3 m/s commanded for 1 s, brake at 1.0 m/s^2.
+      // ★ review ruling: rollouts ramp from the current velocity — ramp 0.3 s (0.045 m) + 0.7 s at 0.3 (0.21 m) +
+      //   brake (0.045 m) = 0.300 m (was 0.345 with an instant jump to the command).
+        const auto s = rollout(origin, 0.f, 0.f, 0.3f, 0.f, 1.f, b, 0.05f);
+        CHECK("rollout_straight advance", std::abs((s.back().p.y() - 0.f) - 0.300f) < 0.005f and std::abs(s.back().p.x()) < 1e-4f);
         CHECK("rollout_straight starts at start", (s.front().p - origin.p).norm() < 1e-6f);
         // final speed 0: the last step must not still be moving
         const float last = (s.back().p - s[s.size() - 2].p).norm();
         CHECK("rollout_straight final speed 0", last < 0.3f * 0.05f * 0.5f);
     }
-    { // rollout_turn_in_place: 1 rad/s for 1 s then brake at 2 rad/s^2 -> 1 + 0.25
-        const auto s = rollout(origin, 0.f, 1.f, 1.f, b, 0.05f);
+    { // rollout_turn_in_place: 1 rad/s commanded for 1 s from rest, a_rot = d_rot = 2.
+      // ★ ramp 0.5 s (0.25 rad) + 0.5 s at 1 rad/s (0.5) + brake (0.25) = 1.00 rad (was 1.25 with an instant jump).
+        const auto s = rollout(origin, 0.f, 0.f, 0.f, 1.f, 1.f, b, 0.05f);
         const float dyaw = s.back().yaw - origin.yaw;
-        CHECK("rollout_turn_in_place yaw", std::abs(dyaw - (1.f + 0.5f / b.d_rot)) < 0.02f);
+        CHECK("rollout_turn_in_place yaw", std::abs(dyaw - 1.0f) < 0.02f);
         CHECK("rollout_turn_in_place no translation", (s.back().p - origin.p).norm() < 1e-5f);
     }
-    { // arc closes: v=0.3,w=0.5 for 2 s lies on the circle of radius v/w about its centre
-        const auto s = rollout(origin, 0.3f, 0.5f, 2.f, {b}, 0.1f);
-        const Eigen::Vector2f c = origin.p + (0.3f / 0.5f) * Eigen::Vector2f(-std::sin(origin.yaw), std::cos(origin.yaw));
-        // ★ only the HOLD phase (first 20 steps) is one circle: the two axes brake at different times afterwards
-        float worst = 0; for (std::size_t i = 0; i < 21; ++i) { const auto& q = s[i]; worst = std::max(worst, std::abs((q.p - c).norm() - 0.6f)); }
+    { // arc closes: v=0.3,w=0.5 commanded for 2 s lies on the circle of radius v/w once both axes have ramped up
+      // (v at t = 0.3 s, w at 0.25 s; dt 0.1 => from pose 3 to the end of the command at pose 20).
+        const auto s = rollout(origin, 0.f, 0.f, 0.3f, 0.5f, 2.f, {b}, 0.1f);
+        const Pose2& r0 = s[3];
+        const Eigen::Vector2f c = r0.p + (0.3f / 0.5f) * Eigen::Vector2f(-std::sin(r0.yaw), std::cos(r0.yaw));
+        // ★ only the steady part of the command phase is one circle: the two axes brake at different times afterwards
+        float worst = 0; for (std::size_t i = 3; i < 21; ++i) { const auto& q = s[i]; worst = std::max(worst, std::abs((q.p - c).norm() - 0.6f)); }
         CHECK("rollout_arc stays on circle", worst < 1e-4f);
+    }
+    { // rollout_from_speed: already at 0.5 m/s, commanded 0.2 for 1 s: decelerate 0.3 s (0.105 m) + 0.7 s at 0.2
+      // (0.14) + brake (0.02) = 0.265 m; and a sign change 0.5 -> -0.3: 0.5 s to stop (0.125) then 0.3 s to -0.3
+      // (-0.045) + 0.2 s at -0.3 (-0.06) + brake (-0.045) = -0.025 m.
+        const auto a = rollout(origin, 0.5f, 0.f, 0.2f, 0.f, 1.f, b, 0.05f), r = rollout(origin, 0.5f, 0.f, -0.3f, 0.f, 1.f, b, 0.05f);
+        std::printf("  from speed: 0.5->0.2 advance %.4f (0.265) ; 0.5->-0.3 advance %.4f (-0.025)\n", a.back().p.y(), r.back().p.y());
+        CHECK("rollout_from_speed decelerates into the command", std::abs(a.back().p.y() - 0.265f) < 0.003f);
+        CHECK("rollout_from_speed through zero on a sign change", std::abs(r.back().p.y() + 0.025f) < 0.003f);
+        const Pose2 adv = advance(origin, 0.5f, 0.f, 0.2f);
+        CHECK("advance straight", std::abs(adv.p.y() - 0.1f) < 1e-5f and std::abs(adv.p.x()) < 1e-6f);
     }
     { // signed_distance agrees with RobotFootprint::contains_yaw (quarter-turn convention)
         // margin 0: exact agreement. margin > 0: ours is a ROUNDED (Euclidean) grow, contains() mitres the corners,
@@ -70,14 +87,14 @@ int main()
         CHECK("signed_distance flank value", std::abs(signed_distance(fm, origin, {0.40f, 0.f}) - (0.40f - 0.284f - 0.05f)) < 1e-4f);
     }
     { // wall_beside_parallel_free
-        const auto sw = rollout(origin, 0.3f, 0.f, 1.f, b, 0.05f);
+        const auto sw = rollout(origin, 0.f, 0.f, 0.3f, 0.f, 1.f, b, 0.05f);
         const auto r = wall_x(0.40f, -1.f, 2.f);
         const float lp = log_p_no_contact(body(), sw, r, sxy, syaw, kGeom);
         std::printf("  parallel lp=%.5f\n", lp);
         CHECK("wall_beside_parallel_free", lp > std::log(0.99f));
     }
     { // wall_beside_turn_hits
-        const auto sw = rollout(origin, 0.f, 1.f, 1.f, b, 0.05f);
+        const auto sw = rollout(origin, 0.f, 0.f, 0.f, 1.f, 1.f, b, 0.05f);
         const auto r = wall_x(0.34f, -1.f, 1.f);
         const float lp = log_p_no_contact(body(), sw, r, sxy, syaw, kGeom);
         std::printf("  turn lp=%.5f\n", lp);
@@ -88,8 +105,8 @@ int main()
     }
     { // wall_ahead_fast_vs_slow
         const auto r = wall_y(0.8f, -1.f, 1.f);
-        const float fast = log_p_no_contact(body(), rollout(origin, 0.35f, 0.f, 2.f, b, 0.05f), r, sxy, syaw, kGeom);
-        const float slow = log_p_no_contact(body(), rollout(origin, 0.10f, 0.f, 2.f, b, 0.05f), r, sxy, syaw, kGeom);
+        const float fast = log_p_no_contact(body(), rollout(origin, 0.f, 0.f, 0.35f, 0.f, 2.f, b, 0.05f), r, sxy, syaw, kGeom);
+        const float slow = log_p_no_contact(body(), rollout(origin, 0.f, 0.f, 0.10f, 0.f, 2.f, b, 0.05f), r, sxy, syaw, kGeom);
         std::printf("  fast=%.4f slow=%.4f\n", fast, slow);
         CHECK("wall_ahead_fast_vs_slow", fast < slow and fast < std::log(0.5f) and slow > std::log(0.99f));
     }
@@ -115,13 +132,43 @@ int main()
     }
     { // backing_away_free: a wall exactly at the grown nose (y = 0.23 + 0.05), straight back
         const auto r = wall_y(0.28f, -0.4f, 0.4f);
-        const float P = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, -0.3f, 0.f, 1.f, b, 0.05f), r, sxy, syaw, kGeom));
+        const float P = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, 0.f, 0.f, -0.3f, 0.f, 1.f, b, 0.05f), r, sxy, syaw, kGeom));
         std::printf("  backing away from a wall at the margin edge: P=%.2e\n", P);
         CHECK("backing_away_free", P < 1e-3f);
     }
+    { // turn_in_place_from_speed_sees_wall_ahead (review ruling): moving at 0.5 m/s, the command "turn in place"
+      // still coasts 0.125 m (d_lin = 1) while turning, so the corner (reach 0.318) sweeps out to 0.443 m from the
+      // start. ★ the wall is 0.15 m ahead of the nose (0.38 m from the centre): clear from rest by 6 cm (5 sigma_s),
+      //   hit while coasting. (The ruling's 0.35 m ahead of the nose = 0.58 m is beyond the coast's reach at this
+      //   deceleration: 0.125 + 0.318 = 0.443 < 0.58, so that geometry charges nothing and would not discriminate.)
+        const auto r = wall_y(0.38f, -1.f, 1.f);
+        const float moving = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, 0.5f, 0.f, 0.f, 1.f, 1.f, b, 0.05f), r, sxy, syaw, kGeom));
+        const float rest = 1.f - std::exp(log_p_no_contact(body(), rollout(origin, 0.f, 0.f, 0.f, 1.f, 1.f, b, 0.05f), r, sxy, syaw, kGeom));
+        std::printf("  turn in place with a wall 0.35 m ahead: P(moving at 0.5)=%.4f P(from rest)=%.4f\n", moving, rest);
+        CHECK("turn_in_place_from_speed_sees_wall_ahead", moving > 0.01f and rest < 0.01f);
+    }
+    { // jamb_tip_not_overconfident (review ruling): four hits spread along a jamb tip END (x = 0.30..0.33 at
+      // y = 0.60, 1 cm apart — two 0.04 m cells), body threading forward past the tip with its flank (0.284) 1.6 cm
+      // from the extreme hit. The cells must not be surer than that extreme hit alone with sigma_r.
+      // ★ a mean-only cell at 0.305 with sigma_r/sqrt(2) reads 2.4 sigma where the extreme hit reads 1.6: that is
+      //   what the support segment + projected scatter correct.
+        std::vector<Return> tip; for (float x : {0.30f, 0.31f, 0.32f, 0.33f}) tip.push_back({{x, 0.60f}, 0.01f, 1.f});
+        const std::vector<Return> extreme{{{0.30f, 0.60f}, 0.01f, 1.f}};
+        const auto sw = rollout(origin, 0.f, 0.f, 0.5f, 0.f, 1.f, b, 0.05f);
+        const float Pt = 1.f - std::exp(log_p_no_contact(body(), sw, tip, sxy, syaw, kGeom));
+        const float Pe = 1.f - std::exp(log_p_no_contact(body(), sw, extreme, sxy, syaw, kGeom));
+        const auto c = surface_cells(tip);
+        std::printf("  jamb tip: P(4 hits as cells)=%.4f P(extreme hit alone)=%.4f ; cells %zu, cell0 sigma=%.4f sxx=%.2e syy=%.2e\n", Pt, Pe, c.size(), c[0].sigma, c[0].sxx, c[0].syy);
+        CHECK("jamb_tip_not_overconfident", Pt >= Pe - 1e-3f);
+        // and on a flat wall seen along its normal the scatter is orthogonal to the clearance: nothing changes
+        std::vector<Return> dense; for (float y = -1.f; y <= 2.f; y += 0.01f) dense.push_back({{0.40f, y}, 0.01f, 1.f});
+        const auto flat = surface_cells(dense);
+        std::printf("  flat wall cell (1 cm hits): sigma=%.4f sxx=%.2e syy=%.2e\n", flat[5].sigma, flat[5].sxx, flat[5].syy);
+        CHECK("flat wall scatter is along the wall", flat[5].sxx < 1e-9f and flat[5].syy > 1e-5f);
+    }
     { // p_exist scales the hit; a far return is ignored
         const std::vector<Return> hit{{{0.f, 0.3f}, 0.01f, 1.f}}, ghost{{{0.f, 0.3f}, 0.01f, 0.1f}}, far{{{50.f, 0.f}, 0.01f, 1.f}};
-        const auto sw = rollout(origin, 0.3f, 0.f, 1.f, b, 0.05f);
+        const auto sw = rollout(origin, 0.f, 0.f, 0.3f, 0.f, 1.f, b, 0.05f);
         const float a = log_p_no_contact(body(), sw, hit, sxy, syaw, kGeom), g = log_p_no_contact(body(), sw, ghost, sxy, syaw, kGeom);
         CHECK("p_exist=0.1 hits ~10x less", g > a and std::abs(g - std::log(0.9f)) < 0.02f);
         CHECK("far return ignored", log_p_no_contact(body(), sw, far, sxy, syaw, kGeom) == 0.f);
@@ -165,7 +212,7 @@ int main()
         for (float sr : {0.0006f, 0.003f, 0.01f, 0.05f})
             for (auto [v, w] : {std::pair{-0.25f, 0.f}, std::pair{-0.5f, -0.3f}, std::pair{0.f, 1.0f}})
             {
-                const auto sw = rollout(origin, v, w, 1.f, b, 0.05f);
+                const auto sw = rollout(origin, 0.f, 0.f, v, w, 1.f, b, 0.05f);
                 std::vector<ContactTerm> t;
                 for (const auto& q : surface_cells(wall_x(0.30f, -2.f, 2.f, sr)))
                 {

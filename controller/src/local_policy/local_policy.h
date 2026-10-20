@@ -28,11 +28,15 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_xy = 0, sigma
                      std::span<const Return> returns; const rc::RobotFootprint* body = nullptr; BaseLimits base;
                      const Goal* goal = nullptr; const CostToGo* field = nullptr;
                      // residual error of the proto-derived body (tessellation, hull simplification, beam footprint)
-                     float body_geometry_sigma_m = 0.01f; };
+                     float body_geometry_sigma_m = 0.01f;
+                     // pose age + command latency: the base keeps (v_now, w_now) for this long before the decided
+                     // command takes effect; candidates are rolled out from the pose reached then (policy_start)
+                     float latency_s = 0.f; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen).
 // eligible = number of candidates whose P(contact) <= risk_eps (Drive draws from them; Release from ALL v <= 0 ones).
 // Stuck only when returns lie inside the bare hull, or the best release has P(contact) >= 1 - risk_eps.
+// Blind also for a non-finite input (NaN/inf anywhere): no prediction can be made.
 struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode; float v = 0, w = 0;
                   float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why; };
 
@@ -40,5 +44,7 @@ Decision decide(const PolicyInput& in, const PolicyParams& p);
 
 // Exposed for tests/diagnostics: log((k+1)/(N+2)) of the coarse continuation set from `from` (a pose at rest).
 float log_p_continuable(const PolicyInput& in, const PolicyParams& p, const Pose2& from);
+// The pose candidates are rolled out from: `pose` advanced by (v_now, w_now) for latency_s.
+Pose2 policy_start(const PolicyInput& in);
 const char* mode_name(Decision::Mode m);
 }  // namespace rc::policy

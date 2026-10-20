@@ -17,13 +17,19 @@
 //   Stuck only for returns inside the bare hull or a release with P(contact) >= 1 - risk_eps. pressed_into_wall
 //   (parallel wall at x = 0.30, 1.6 cm gap) therefore RELEASES at P = 0.078 (best of the 0.04 m surface cells with one
 //   return each at this file's 0.05 m sampling; 0.045 at 1 cm sampling). Drive decisions are untouched.
-// Timing (-O2, 300 returns, median of 100): see the timing test's printout; n_cont_* left at the brief's 3 x 5.
+// ★ Review fix round 1: rollouts ramp from the current velocity and start from the latency-advanced pose
+//   (latency_advances_start); cells are swept as support segments (jamb tips); Release scans only releasable
+//   candidates (P < 1 - risk_eps) and every sweep stops once its result is provably below what its caller needs.
+// Timing (-O2, 300 returns, median; this machine): drive 0.7 ms; release worst case (field +inf, 76 eligible)
+//   1.2 ms; the reviewer's no-gain WEDGE (sides +-0.30, nose/tail +-0.26, 56 cells, every candidate P ~ 1) 4.7 ms
+//   (65 ms before this round: 47 x 14 continuation sweeps, un-pruned). n_cont_* left at the brief's 3 x 5.
 #include "../src/local_policy/local_policy.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 using namespace rc::policy;
@@ -65,12 +71,11 @@ static void print(const char* name, const Decision& d)
                 name, mode_name(d.mode), d.v, d.w, d.log_p_safe, d.log_p_cont, d.progress_m, d.eligible, d.why.c_str());
 }
 // Independent re-evaluation of the chosen command's sweep (does not trust the Decision's own numbers).
+static std::vector<Pose2> sweep_of(const Scene& s, float v, float w)
+{ return rollout(policy_start(s.in), s.in.v_now, s.in.w_now, v, w, s.pp.horizon_s, s.in.base, s.pp.dt); }
 static float p_contact_of(const Scene& s, float v, float w)
-{
-    const auto sw = rollout(s.in.pose, v, w, s.pp.horizon_s, s.in.base, s.pp.dt);
-    return 1.f - std::exp(log_p_no_contact(s.b, sw, s.ret, s.in.sigma_xy, s.in.sigma_yaw, s.in.body_geometry_sigma_m));
-}
-static Pose2 end_of(const Scene& s, float v, float w) { return rollout(s.in.pose, v, w, s.pp.horizon_s, s.in.base, s.pp.dt).back(); }
+{ return 1.f - std::exp(log_p_no_contact(s.b, sweep_of(s, v, w), s.ret, s.in.sigma_xy, s.in.sigma_yaw, s.in.body_geometry_sigma_m)); }
+static Pose2 end_of(const Scene& s, float v, float w) { return sweep_of(s, v, w).back(); }
 static float min_sd(const Scene& s, const Pose2& at)
 { float m = 1e9f; for (const auto& r : s.ret) m = std::min(m, signed_distance(s.b, at, r.p)); return m; }
 
@@ -113,7 +118,7 @@ int main()
         std::printf("  bare-hull clearance start %.3f -> end %.3f ; P(contact)=%.5f\n", h0, h1, p_contact_of(s, d.v, d.w));
         // ★ fix round 5: Release with v <= 0 (not gated by risk_eps); its P(contact) is printed above
         CHECK("pressed_into_wall release", d.mode == Decision::Mode::Release and d.v <= 0.f);
-        CHECK("pressed_into_wall does not close on the wall", h1 >= h0 - 1e-4f);
+        CHECK("pressed_into_wall opens the clearance", h1 > h0);
         for (float v : {-0.5f, -0.25f, 0.25f}) for (float w : {-0.6f, 0.f, 0.6f})
             std::printf("  diag x=0.30 P(contact) v=%+.2f w=%+.2f : %.3f\n", v, w, p_contact_of(s, v, w));
     }
@@ -220,6 +225,60 @@ int main()
         const Pose2 ee = end_of(o, e.v, e.w);
         std::printf("  heading open: end displacement %.4f m\n", (ee.p - o.in.pose.p).norm());
         CHECK("heading_goal_open_space_turns_in_place", std::fabs(e.v) < 0.05f and (ee.p - o.in.pose.p).norm() < 0.05f);
+    }
+    { // latency_advances_start (review ruling): moving forward at 0.5 m/s toward a wall 0.45 m ahead of the nose
+      // (y = 0.68), goal beyond it (map lag). With latency 0 the policy can keep 0.33 m/s (0.40 m to rest); with
+      // 0.3 s of latency the base has coasted 0.15 m before the command bites, and only a slower speed stops short.
+        Scene s; s.ret = wall_y(0.68f, -1.f, 1.f); s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish(); s.in.v_now = 0.5f;
+        const auto d0 = decide(s.in, s.pp); print("latency 0", d0);
+        const float P0 = p_contact_of(s, d0.v, d0.w);
+        s.in.latency_s = 0.3f;
+        const Pose2 st = policy_start(s.in);
+        const auto d1 = decide(s.in, s.pp); print("latency 0.3", d1);
+        std::printf("  start advanced by %.3f m (0.150) ; chosen v %.3f -> %.3f ; P(contact) %.4f -> %.4f\n", (st.p - s.in.pose.p).norm(), d0.v, d1.v,
+                    P0, p_contact_of(s, d1.v, d1.w));
+        CHECK("latency_advances_start pose", std::fabs((st.p - s.in.pose.p).norm() - 0.15f) < 1e-4f and std::fabs(st.yaw - s.in.pose.yaw) < 1e-6f);
+        CHECK("latency_advances_start slows the drive", d0.mode == Decision::Mode::Drive and d1.mode == Decision::Mode::Drive and d1.v < d0.v - 0.05f);
+    }
+    { // non-finite input -> Blind
+        Scene s; s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish(); s.in.v_now = std::numeric_limits<float>::quiet_NaN();
+        const auto d = decide(s.in, s.pp); print("nan input", d);
+        CHECK("non_finite_input_is_blind", d.mode == Decision::Mode::Blind and d.v == 0.f and d.w == 0.f and d.why == "non-finite input");
+    }
+    { // wedge timing (reviewer's scene): a box so tight nothing can move or gain — sides x = +-0.30, nose/tail
+      // y = +-0.26, 300 returns at ~7 mm. Every candidate reads P ~ 1, so no continuation is ever rolled out.
+        Scene s;
+        for (int i = 0; i < 75; ++i)
+        {
+            const float t = -0.6f + 1.2f * float(i) / 74.f;
+            s.ret.push_back({{0.30f, t * 0.45f}, 0.01f, 1.f}); s.ret.push_back({{-0.30f, t * 0.45f}, 0.01f, 1.f});
+            s.ret.push_back({{t * 0.5f, 0.26f}, 0.01f, 1.f}); s.ret.push_back({{t * 0.5f, -0.26f}, 0.01f, 1.f});
+        }
+        for (auto& q : s.ret) if (std::fabs(q.p.x()) < 0.29f and std::fabs(q.p.y()) < 0.25f) q.p.y() = q.p.y() > 0.f ? 0.26f : -0.26f;
+        s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish();
+        std::vector<double> ms; Decision d{};
+        for (int i = 0; i < 40; ++i)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            d = decide(s.in, s.pp);
+            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::sort(ms.begin(), ms.end());
+        print("wedge", d);
+        std::printf("  wedge per-call median %.2f ms, p90 %.2f ms, max %.2f ms (300 returns, -O2)\n", ms[20], ms[36], ms[39]);
+        // ★ the decision is printed, not pinned: by the ruled bar the wedge is Stuck when the best release reads
+        //   P >= 1 - risk_eps, else a Release at a P close to 1 (the ramp shortens a 0.3 rad/s turn to 0.30 rad, and
+        //   60 independent clear cells shift the conditioned shared offset by ~+2 cm: measured P = 0.982).
+        const float pw = d.mode == Decision::Mode::Release ? p_contact_of(s, d.v, d.w) : 1.f;
+        std::printf("  wedge: %s, P(contact) of the chosen motion %.4f\n", mode_name(d.mode), pw);
+        CHECK("wedge: stuck or a near-certain-contact release", d.mode == Decision::Mode::Stuck or (d.mode == Decision::Mode::Release and pw >= 0.9f));
+        CHECK("wedge timing median <= 15 ms", ms[20] <= 15.0);
     }
     { // timing: 300 returns (a 2 x 3 m box around the robot, perimeter 10 m), goal 2 m ahead
         Scene s;
