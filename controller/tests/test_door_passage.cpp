@@ -182,6 +182,53 @@ int main()
         CHECK(p.take_finished());
     }
 
+
+    // ── Live fix 1 (tourP1 leg 1): OPEN satisfied, then the robot drifted OUT of the reach band — door_concept withholds
+    //    `cross` (P(reach) 0.09) and keeps offering `approach`. The passage goes BACK to approach (a robot outside the band
+    //    must get back into it) instead of waiting for a cross that cannot appear; then on to cross once it is offered.
+    {
+        auto G = make_graph(5);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_2", Step::Cross);
+        offered(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");                      // approach SATISFIED -> open
+        CHECK(p.view().step == Step::Open);
+        offered(*G, "aff_door_2_open");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_2_open");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_2_open");
+        p.update(*G, nullptr, "room_1");                      // open SATISFIED -> cross
+        CHECK(p.view().step == Step::Cross);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);                  // nothing offered: it waits
+        offered(*G, "aff_door_2_approach");                   // out of the band: door_concept offers approach again
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach);               // back to approach — not a wait for ever
+        CHECK(out.event.has_value() and out.event->find("back to") != std::string::npos);
+        CHECK(out.required == "aff_door_2_approach");
+        executing(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_2_approach");                 // back inside the band
+        offered(*G, "aff_door_2_cross");                      // door_concept offers cross again (the door stays open)
+        p.update(*G, nullptr, "room_1");
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_2_cross");
+        // existing protocol kept: while cross is EXECUTING, an approach on offer does not pull it back
+        executing(*G, "aff_door_2_cross");
+        p.update(*G, nullptr, "room_1");
+        offered(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

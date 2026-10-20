@@ -212,17 +212,28 @@ public:
         // …but NOT once the robot has reached the door (2026-10-13, try36/37/40): a `cross` withdrawn for a few cycles by
         // a flickering P(passable) sent the robot back to `approach` while it stood AT the door, inside the band the
         // approach servo needs, and the servo gave up for ever. At the door the passage waits for `cross` instead.
-        if ((step_ == Step::Cross or step_ == Step::Open) and not reached_door_)
+        // ★ Live fix 1 (controller ruling, tourP1 leg 1, 2026-10-20): …EXCEPT back to `approach` itself. After `open` the
+        //   local policy's release moved the robot 0.26 m back, out of the 2.0 m reach band: door_concept withheld `cross`
+        //   (P(reach) 0.09) and kept offering `approach`, and the passage waited 9 min for a `cross` that could not appear.
+        //   A robot OUTSIDE the band must get back into it: when the current step is not on offer and `approach` IS, the
+        //   passage returns to `approach` even after reaching the door (its completion re-arms reached_door_; `opened_` is
+        //   kept, so a re-offer of `open` after it is still the flicker of the door just opened, not news that it shut).
+        //   Falling back to `open` stays forbidden once at the door (try36-40). With the policy driving, an approach
+        //   standpoint the robot already stands on completes at once (instant completion), so a flicker costs one cycle.
+        if (step_ == Step::Cross or step_ == Step::Open)
         {
             const State st_now = state_of(G, name_of(step_));
             if (st_now != State::Offered and st_now != State::Executing and not seen_executing_)
                 for (Step earlier : {Step::Open, Step::Approach})
                 {
                     if (static_cast<int>(earlier) >= static_cast<int>(step_)) continue;
+                    if (reached_door_ and earlier != Step::Approach) continue;
                     if (state_of(G, name_of(earlier)) == State::Offered)
                     {
-                        out.event = std::format("[door-passage] {}: {} is not offered — back to {}", door_,
-                                                name_of(step_), name_of(earlier));
+                        out.event = std::format("[door-passage] {}: {} is not offered — back to {}{}", door_,
+                                                name_of(step_), name_of(earlier),
+                                                reached_door_ ? " (the robot left the door's reach band)" : "");
+                        if (earlier == Step::Approach) reached_door_ = false;   // re-armed by approach's completion
                         step_ = earlier;
                         break;
                     }

@@ -973,13 +973,13 @@ StallTimeoutMs = 500
 # the policy's contact set (ObstacleTracker::contact_buffer). The old consumers keep TemporaryObstacleMinHeight 0.20
 # until Task 10. Value = floor-return p99.9 + sigma_r (LidarRangeSigmaM), measured on a parked robot on open floor by
 # controller/tools/floor_band.py — write the measured number AND its run id here.
-# PROVISIONAL — replace with the measured value (controller/tools/measure_policy_inputs.md)
+# MEASURED 2026-10-20 (see the value line below); the provisional estimate it replaced:
 #   source: bpearl reads the floor at -10 mm in 20 mm bins ([FloorCheck], ROBOT_GEOMETRY.md) => p99.9 assumed
 #   <= 0.05 m, + sigma_r 0.03 = 0.08.
 # Task 8: the helios's grazing far-floor returns (13-17 cm high, beyond ~3.9 m) are cut from this band BY SOURCE — below
 #   TemporaryObstacleMinHeight (0.20) a helios return can only be >= 3.16 m away at a <= 15.5 deg grazing angle, where it
 #   is the floor; the low band is the bpearl's (lidar_height_band.h).
-ContactMinHeightM = 0.08
+ContactMinHeightM = 0.074   # measured 2026-10-20 22:08: floor p99.9 +0.0442 + sigma_r 0.03 (floor_band.py, 205029 floor returns <= 3.0 m, 20 sweeps, run policy_inputs_1020_2206)
 
 [Policy]
 # ── Task 7: pose-uncertainty inputs of the local policy (local_policy.h PolicyInput; ruling T8-2) ──────────────

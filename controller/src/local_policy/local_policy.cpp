@@ -526,7 +526,29 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     std::ranges::sort(rel, std::greater{}, [](const Cand* x) { return std::pair{x->lps, -x->v}; });
     constexpr float kTie = 1e-6f;
     Cand* best = nullptr;
-    if (lpc_now < lpc_max)                        // (a): a gain is possible at all
+    // ★ Live fix 1 (controller ruling, tourP1 2026-10-20): a HEADING goal holds position — in Release too. Its order is
+    //   (a) the continuability gain as for every goal (the members that INCREASE it, if any; else all releasable), then
+    //   (b) the SMALLEST displacement of the end pose from the hold position (goal.p), ties to the smaller P(contact). Without
+    //   it an orient goal released by "back up straight" at v_max (0.26 m live) and left door_2's 2.0 m reach band.
+    //   Ties: displacements within kDispTie = 1 mm (below anything the pose resolves) are equal.
+    if (in.goal != nullptr and in.goal->kind == Goal::Kind::Heading)
+    {
+        constexpr float kDispTie = 1e-3f;
+        std::vector<Cand*> pool;
+        if (lpc_now < lpc_max)
+            for (Cand* c : rel) { ensure_lpc(*c); if (c->lpc > lpc_now) pool.push_back(c); }
+        if (pool.empty()) pool = rel;
+        const Eigen::Vector2f hold = in.goal->p;
+        for (Cand* c : pool)
+        {
+            const float dd = (c->end.p - hold).norm();
+            if (best == nullptr) { best = c; continue; }
+            const float db = (best->end.p - hold).norm();
+            if (dd < db - kDispTie or (std::abs(dd - db) <= kDispTie and c->lps > best->lps)) best = c;
+        }
+        ensure_lpc(*best);
+    }
+    if (best == nullptr and lpc_now < lpc_max)    // (a): a gain is possible at all
         for (Cand* c : rel)
         {
             if (best != nullptr and c->lps < best->lps - kTie) break;

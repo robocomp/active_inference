@@ -260,6 +260,25 @@ int main()
         std::printf("  heading open: end displacement %.4f m\n", (ee.p - o.in.pose.p).norm());
         CHECK("heading_goal_open_space_turns_in_place", std::fabs(e.v) < 0.05f and (ee.p - o.in.pose.p).norm() < 0.05f);
     }
+    { // heading_release_holds_position (Live fix 1, tourP1: an orient goal's Release "back up straight" 0.26 m took the robot
+      // out of door_2's reach band). A HEADING goal near a door frame where the in-place turn is risky: among the releases
+      // that gain continuability, the one whose end pose is CLOSEST to the hold position — not "back up straight".
+        Scene s;
+        // a door frame's jamb beside the right flank (x = +0.31, y -0.30 .. +0.25): the right turn sweeps the front-right
+        // corner into it (P ~0.75). The pre-fix choice here was "back up straight" at v_max (0.50 m); the arcs that also
+        // gain continuability end ~0.16 m from the hold position.
+        s.ret = wall_x(0.31f, -0.30f, 0.25f, 0.02f);
+        s.goal.kind = Goal::Kind::Heading; s.goal.yaw = 0.f; s.goal.p = {0.f, 0.f};   // face east, here
+        s.finish(); s.in.field = nullptr;
+        const auto d = decide(s.in, s.pp); print("heading_release_holds_position", d);
+        const float disp = (end_of(s, d.v, d.w).p - s.goal.p).norm();
+        const float straight = (end_of(s, -s.in.base.v_max, 0.f).p - s.goal.p).norm();
+        std::printf("  chosen end displacement %.3f m ; back up straight at v_max %.3f m ; in-place right turn P(contact)=%.3f\n",
+                    disp, straight, p_contact_of(s, 0.f, -0.75f));
+        CHECK("heading_release: releases (the in-place turn is too risky here)", d.mode == Decision::Mode::Release);
+        CHECK("heading_release: not 'back up straight' at speed", not (std::fabs(d.w) < 1e-3f and d.v <= -0.5f * s.in.base.v_max));
+        CHECK("heading_release: the least-displacing release (well under a full-speed back-up)", disp < 0.5f * straight);
+    }
     { // latency_advances_start (review ruling): moving forward at 0.5 m/s toward a wall 0.45 m ahead of the nose
       // (y = 0.68), goal beyond it (map lag). With latency 0 the policy can keep 0.33 m/s (0.40 m to rest); with
       // 0.3 s of latency the base has coasted 0.15 m before the command bites, and only a slower speed stops short.
