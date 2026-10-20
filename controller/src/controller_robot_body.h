@@ -24,11 +24,13 @@
  * to the dangerous axis. So the angle is explicit, logged, and cross-checked against the mounts; it is never
  * guessed from the mesh's aspect ratio.
  *
- * ★SHADOW IS DELIBERATELY EXCLUDED. `shadow.obj` omits the two drive wheels (Shadow.proto: r 0.1, h 0.05 on the lateral
- * axle, x = ±0.259): its |x|max is 0.2420 against the assembly's true 0.284. (The older 0.2464 / four-mecanum
- * note described the OLD assembly, since replaced 2026-10-20.) Deriving Shadow's body from its own mesh
- * would therefore SHRINK it by ~42 mm per side, which is real wheel the file simply does not contain. For that robot the compiled hull is the better measurement and stays in force. This is a
- * stated geometric fact with a citation, not a special case for convenience.
+ * ★SHADOW IS CROSS-CHECKED AGAINST THE COMPILED HULL (Task 1b, 2026-10-20). The old display mesh `shadow.obj` omitted the two
+ * drive wheels (Shadow.proto: r 0.1, h 0.05 on the lateral axle, x = ±0.259): |x|max 0.2420 against the true 0.284, so
+ * deriving the body from it would have SHRUNK it ~42 mm per side. The robot node's `path` is now the absolute path of
+ * webots-shadow/protos/meshes/shadow_footprint.obj (shadow.stl ∪ the two wheel cylinders, written by
+ * controller/tools/shadow_footprint.py), so ONE mesh is the source of the outline for every agent. The mesh body is used only
+ * if it agrees with the compiled `shadow()` (|x|max 1 mm, |y|max 2 mm, area 1 %); an older mesh without wheels is refused
+ * and the compiled hull stays, with the numbers in the log. The startup report diffs them either way.
  *
  * ★WHAT HAPPENS WHEN IT FAILS. It falls back to `RobotFootprint::shadow()` — today's behaviour, so a failure
  * is never a regression — but it says so at qCritical with a reason, and the source string travels with the

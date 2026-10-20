@@ -5,6 +5,9 @@
 //   g++ -std=c++23 -O1 -Wall -Wextra -I/usr/include/eigen3 -I../common tests/test_shadow_footprint.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tsf && /tmp/tsf
 #include "../../common/robot_footprint/robot_footprint.h"
+#include "../../common/robot_footprint/mesh_hull.h"
+
+#include <cmath>
 
 #include <cstdio>
 #include <vector>
@@ -62,6 +65,37 @@ int main()
             if ((b.x() - a.x()) * (q.y() - a.y()) - (b.y() - a.y()) * (q.x() - a.x()) < -1e-5f) { ++outside; break; }
         }
     CHECK(kRaw.size() == 38 and outside == 0, "every raw-hull vertex is contained by shadow()");
+    // ★ Task 1b: the ONE mesh every agent reads (robot node `path` = shadow_footprint.obj = shadow.stl + the two wheels, written by
+    // tools/shadow_footprint.py) must give the same body as the compiled shadow(). Skipped (not failed) if the asset is absent.
+    {
+        const char *obj = "/home/pbustos/robocomp/components/webots-shadow/protos/meshes/shadow_footprint.obj";
+        rc::RobotFootprint::MeshReport rep;
+        const auto m = rc::RobotFootprint::from_obj(obj, 0.f, rep);
+        CHECK(m.has_value(), "shadow_footprint.obj loads via RobotFootprint::from_obj");
+        if (m.has_value())
+        {
+            std::printf("  mesh hull: %zu verts  x_max %.4f y_max %.4f area %.4f (compiled x_max %.4f area %.4f)\n",
+                        m->polygon().size(), rep.x_max, rep.y_max, rep.area_m2, xmax, area);
+            CHECK(std::abs(rep.x_max - xmax) < 1e-3f, "mesh x_max matches shadow() within 1 mm");
+            float ymax = 0.f;
+            for (const auto &v : p) ymax = std::max(ymax, std::abs(v.y()));
+            // 2 mm, not 1: shadow()'s conservative simplification bulges the rear edge to y = -0.2311 over the mesh's -0.2300.
+            CHECK(std::abs(rep.y_max - ymax) < 2e-3f, "mesh y_max matches shadow() within 2 mm");
+            CHECK(std::abs(rep.area_m2 - area) < 0.01f * area, "mesh hull area matches shadow() within 1 %");
+            // shadow() must still CONTAIN the mesh: every raw-hull vertex of the mesh is inside (or on) it.
+            const auto raw = rc::mesh::hull_from_obj(obj, -1e30f, 1e30f, 24, 0.01f, nullptr);
+            CHECK(raw.has_value(), "raw hull of the mesh");
+            int out = 0;
+            if (raw.has_value())
+                for (const auto &q : raw->hull_raw)
+                    for (std::size_t i = 0, n = p.size(); i < n; ++i)
+                    {
+                        const auto &a = p[i], &b = p[(i + 1) % n];
+                        if ((b.x() - a.x()) * (q.y() - a.y()) - (b.y() - a.y()) * (q.x() - a.x()) < -2e-5f) { ++out; break; }
+                    }
+            CHECK(out == 0, "every raw-hull vertex of shadow_footprint.obj is contained by shadow()");
+        }
+    }
     CHECK(rc::RobotFootprint::self_test(), "self_test");
     std::printf(fails ? "FAIL\n" : "PASS\n");
     return fails ? 1 : 0;

@@ -74,7 +74,7 @@
           },
           "path": {
             "type": 0,
-            "value": "meshes/shadow.obj"
+            "value": "/home/pbustos/robocomp/components/webots-shadow/protos/meshes/shadow_footprint.obj"
           },
           "port": {
             "type": 1,

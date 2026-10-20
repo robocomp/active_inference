@@ -93,7 +93,7 @@ CellSize = 0.06
 # Shadow hull it replaces, which is correct; at 0 the same file yields a body 45 mm NARROWER — the
 # error moves onto the axis along which a corridor closes. Read the [body] block at startup: it
 # prints the extents and the delta, so this is checkable in one line rather than trusted.
-# ★Shadow keeps its compiled hull regardless (shadow.obj has no wheels — ROBOT_GEOMETRY.md).
+# Shadow: the mesh is accepted only if it agrees with the compiled hull (shadow_footprint.obj = body + wheels); see controller_robot_body.h.
 RobotMeshYawDeg = 90.0
 # ── CLEARANCE PREFERENCE INSIDE THE A* COST ──
 # The search cost was distance + a small turn penalty and NOTHING ELSE, with the footprint test
