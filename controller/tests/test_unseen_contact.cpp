@@ -104,6 +104,20 @@ int main()
         v.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, r, b, body, sig);
         CHECK("  a blocked tick does not refute", not v.hypotheses().empty());
     }
+    { // odometry_frame (review fix round 2): stored in the odometry frame, converted with the current room<-odom pair; a
+      // room-frame jump moves the hypothesis with the body (it stays in front of it), not into it.
+        UnseenContact u;
+        const Pose2 odom{{0.f, 0.f}, 0.f};
+        for (int i = 0; i < 20; ++i) u.update(0.2f, 0.f, 0.f, 0.f, 0.f, 0.f, dt, odom, b, body, sig);
+        const auto h_odom = u.hypotheses();
+        const Pose2 room_a{{1.f, 2.f}, 0.f}, room_b{{1.3f, 2.1f}, 0.2f};   // the localiser jumps 0.3 m / 0.2 rad
+        const auto ha = u.hypotheses(room_a, odom), hb = u.hypotheses(room_b, odom);
+        const Eigen::Vector2f fwd_b(std::cos(0.2f), std::sin(0.2f));
+        const float ahead_a = (ha[0].p - room_a.p).dot(Eigen::Vector2f(1.f, 0.f)), ahead_b = (hb[0].p - room_b.p).dot(fwd_b);
+        std::printf("  odometry frame: ahead of the body %.3f m before the jump, %.3f m after\n", ahead_a, ahead_b);
+        CHECK("odometry_frame: the hypothesis follows the body through a localisation jump",
+              h_odom.size() == 1 and std::abs(ahead_a - ahead_b) < 1e-4f and std::abs(ahead_a - h_odom[0].p.x()) < 1e-4f);
+    }
     { // startup_ramp_no_hypothesis (D3): a real base (a_lin 1 m/s^2, a_rot 2 rad/s^2, 60 ms of nothing first) asked for
       // 0.5 m/s and 1.5 rad/s from rest; odometry reports exactly the ramp it executes. The free prediction follows the
       // ramp, so no direction may rise above 0.05 (was p ~ 0.45 on the hull edge with cmd*dt: Stuck in open space).

@@ -33,6 +33,7 @@ void CostToGo::build(const Grid& g, const std::function<bool(const Eigen::Vector
         {
             const Eigen::Vector2f c = centre(i, j);
             if (not free(c)) continue;
+            if (std::ranges::any_of(blocked_, [&](const Trap& t) { return (c - t.p).squaredNorm() <= t.radius * t.radius; })) continue;
             float e = extra_cost_m ? extra_cost_m(c) : 0.f;
             for (const auto& t : traps_)
                 if ((c - t.p).squaredNorm() <= t.radius * t.radius) e += t.cost / (2.f * t.radius);   // density

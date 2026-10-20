@@ -42,13 +42,17 @@ public:
     static constexpr float kOctileGainExcess = 0.0823922f;   // sqrt(4 - 2 sqrt2) - 1
     bool reachable(const Eigen::Vector2f& p) const;
     void add_trap(const Eigen::Vector2f& p, float radius_m, float cost_m);   // applied at the next build()
+    // ★ REVIEW FIX ROUND 2: a BLOCKED disc — its cells are non-free at the next build(), so the field is the true detour
+    //   distance around it and at() inside it is "nearest finite + distance" (as for any non-free cell). This is what a
+    //   Navigator trap is ("the body cannot get through here"). add_trap (a cost) is kept for its Task-3 callers.
+    void block_disc(const Eigen::Vector2f& p, float radius_m) { if (radius_m > 0.f) blocked_.push_back({p, radius_m, 0.f}); }
     void decay_traps(float factor);                                           // multiplies costs; drops < 1e-3 m
 
 private:
     struct Trap { Eigen::Vector2f p; float radius, cost; };
     Grid g_{{0.f, 0.f}, 1.f, 0, 0};
     std::vector<float> field_;
-    std::vector<Trap> traps_;
+    std::vector<Trap> traps_, blocked_;
     int seeded_ = 0;
     std::vector<char> free_;
 };

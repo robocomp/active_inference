@@ -162,6 +162,9 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     res.build_ms += nav.last_build_ms(); ++res.builds;
     PolicyParams pp;
     Pose2 truth = start;
+    // ★ ODOMETRY (review fix round 2): the wheels' velocities integrated (the encoders), i.e. the motion WITHOUT the
+    //   plant's slip — it drifts from the truth by the slip and never jumps. UnseenContact lives in this frame.
+    Pose2 odom = start;
     res.geodesic_m = nav.field().at(start.p);
     if (contact.touches(truth)) { res.why = "start pose overlaps the world"; res.contacts = 1; res.end = truth; return res; }
     if (not std::isfinite(res.geodesic_m)) { res.unreachable = true; res.why = "goal not reachable on the map"; res.end = truth; return res; }
@@ -195,7 +198,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         while (int(buffer.size()) > kBufferCycles) buffer.pop_front();
         std::vector<Return> ret;
         for (const auto& sw : buffer) ret.insert(ret.end(), sw.begin(), sw.end());
-        if (opt.unseen) for (const auto& h : unseen.hypotheses()) ret.push_back(h);
+        if (opt.unseen) for (const auto& h : unseen.hypotheses(bel, odom)) ret.push_back(h);   // odometry -> room frame
 
         PolicyInput in;
         in.pose = bel; in.v_now = base.v; in.w_now = base.w;
@@ -225,14 +228,14 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
             ++res.traps; res.build_ms += nav.last_build_ms(); ++res.builds;
             true_traps.push_back({err.to_truth(st.trap->c), st.trap->r});
             best_f = nav.field().at(bel.p);      // the trapped field changed: progress is measured on the new one (clock kept)
-            if (tr) std::printf("    TRAP at (%+.3f,%+.3f) dir (%+.2f,%+.2f) cost %.2f m; field now %.3f\n", st.trap->c.x(), st.trap->c.y(),
-                                st.trap->dir.x(), st.trap->dir.y(), st.trap->cost, best_f);
+            if (tr) std::printf("    TRAP (blocked disc) at (%+.3f,%+.3f) dir (%+.2f,%+.2f); field now %.3f\n", st.trap->c.x(), st.trap->c.y(),
+                                st.trap->dir.x(), st.trap->dir.y(), best_f);
         }
-        if (st.unreachable) { res.unreachable = true; res.why = "no plan without the trap"; break; }
+        if (st.unreachable) { res.unreachable = true; res.why = "goal not reachable on the trapped field"; break; }
 
         // ---- the base: command latency (+ jitter), ramps, deadband (x scale), slip; contact every <= 5 mm
         base.send(t, d.v, d.w);
-        const Pose2 before = truth;
+        const Pose2 before = truth, odom_before = odom;
         const float f_before_tick = nav.field().at(bel.p);
         const float v_meas = base.v, w_meas = base.w;     // odometry at the start of the tick
         const float sv = 1.f + slip(rng), sw = 1.f + slip(rng);
@@ -243,14 +246,15 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
             const Pose2 nxt = sim2d::integrate(truth, base.v * sv, base.w * sw, kSub);
             // the world pushes back: the body stays put and the base stalls (its wheels stop)
             if (contact.touches(nxt)) { touched = true; base.v = base.w = 0.f; continue; }
+            odom = sim2d::integrate(odom, base.v, base.w, kSub);
             truth = nxt;
         }
         if (touched) { ++res.contacts; if (d.mode == Decision::Mode::Release) ++res.release_contacts; }
-        // odometry: the TRUE displacement along the heading at the start of the tick, and the turn
-        const V2 fwd(std::cos(before.yaw), std::sin(before.yaw));
-        const float ds = (truth.p - before.p).dot(fwd), dyaw = sim2d::wrap(truth.yaw - before.yaw);
+        // odometry: the encoders' displacement along the heading at the start of the tick, and the turn
+        const V2 fwd(std::cos(odom_before.yaw), std::sin(odom_before.yaw));
+        const float ds = (odom.p - odom_before.p).dot(fwd), dyaw = sim2d::wrap(odom.yaw - odom_before.yaw);
         // ★ D3: the command IN EFFECT at the wheels and the measured velocity at the tick's start
-        unseen.update(base.cmd_v, base.cmd_w, v_meas, w_meas, ds, dyaw, kTick, bel, base.lim, B, 0.005f);
+        unseen.update(base.cmd_v, base.cmd_w, v_meas, w_meas, ds, dyaw, kTick, odom, base.lim, B, 0.005f);
         res.path_m += (truth.p - before.p).norm();
 
         // ★ TRAJECTORY ORACLE (review H3): once the true centre has left a trap's disc it must never re-enter it

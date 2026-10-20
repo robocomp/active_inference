@@ -44,6 +44,10 @@ class UnseenContact
 {
 public:
     // v_meas / w_meas: the base's measured velocity at the START of the tick (odometry); ds/dyaw: measured over dt.
+    // ★ REVIEW FIX ROUND 2 — `pose` is the ODOMETRY pose (continuous, never relocalised): hypotheses are stored in the
+    //   odometry frame, so a localisation jump cannot move a frozen hypothesis into the body (measured: an OU belief
+    //   step of 13 cm put one inside the hull and every candidate read P(contact) = 1). hypotheses(room, odom) converts
+    //   them to the room frame each tick; hypotheses() returns them in the odometry frame.
     void update(float v_cmd, float w_cmd, float v_meas, float w_meas, float ds_meas, float dyaw_meas, float dt, const Pose2& pose,
                 const BaseLimits& b, const rc::RobotFootprint& body, float sigma_odo_m)
     {
@@ -94,6 +98,18 @@ public:
         return dist + x * rem;
     }
 
+    // The hypotheses in the ROOM frame: q_room = room.p + R(room.yaw - odom.yaw) (q_odom - odom.p).
+    std::vector<Return> hypotheses(const Pose2& room_pose, const Pose2& odom_pose) const
+    {
+        auto out = hypotheses();
+        const float a = room_pose.yaw - odom_pose.yaw, c = std::cos(a), sn = std::sin(a);
+        for (auto& h : out)
+        {
+            const Eigen::Vector2f d = h.p - odom_pose.p;
+            h.p = room_pose.p + Eigen::Vector2f(c * d.x() - sn * d.y(), sn * d.x() + c * d.y());
+        }
+        return out;
+    }
     std::vector<Return> hypotheses() const
     {
         std::vector<Return> out;

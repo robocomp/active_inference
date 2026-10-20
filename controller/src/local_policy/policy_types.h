@@ -16,8 +16,10 @@ struct Pose2 { Eigen::Vector2f p = Eigen::Vector2f::Zero(); float yaw = 0.f; };
 // DIFFERENT source — an unseen-contact hypothesis (unseen_contact.h) — which is passed to the contact model as its own
 // obstacle and never grouped with LiDAR hits (round-3 ruling R1: a sigma-0.005 hypothesis captured sigma-0.02 casing
 // hits into one certain cell at the hypothesis's place, and the robot drove into the casing).
+// seg (review fix round 2): a SURFACE SAMPLE's half-extent vector — the obstacle is the segment p +- seg (zero for a
+// point). Set by denoise_returns() only.
 struct Return { Eigen::Vector2f p = Eigen::Vector2f::Zero(); float sigma = 0.02f; float p_exist = 1.f;
-                float sxx = 0.f, sxy = 0.f, syy = 0.f; bool aggregate = true; };
+                float sxx = 0.f, sxy = 0.f, syy = 0.f; bool aggregate = true; Eigen::Vector2f seg = Eigen::Vector2f::Zero(); };
 
 // Speed/acceleration envelope of the base. v_min_eff / w_min_eff are its deadband: the smallest speeds it
 // actually executes (filled in from measurements in a later task).

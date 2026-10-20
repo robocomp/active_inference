@@ -421,7 +421,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     // ★ ROUND 6 (B1): LiDAR-derived cells only (aggregate == true). An unseen-contact hypothesis inside the body is not
     //   a sensing contradiction — it is a hypothesis the body's presence refutes (UnseenContact does that).
     for (const Return& r : in.returns)
-        if (r.aggregate and r.p_exist > 0.f and hull_distance(*in.body, start, r.p) < 0.f) inside += r.p_exist;
+        if (r.aggregate and r.p_exist > 0.f and obstacle_hull_distance(*in.body, start, r) < 0.f) inside += r.p_exist;
     if (inside > 0.f)
     {
         char buf[96]; std::snprintf(buf, sizeof buf, "%.1f returns inside the body (sensing/pose error): hold", inside);

@@ -159,19 +159,22 @@ int main()
         const float Pt = 1.f - std::exp(log_p_no_contact(body(), sw, tip, sxy, syaw, kGeom));
         const float Pe = 1.f - std::exp(log_p_no_contact(body(), sw, extreme, sxy, syaw, kGeom));
         const auto c = denoise_returns(tip);
-        std::printf("  jamb tip: P(4 hits denoised)=%.4f P(extreme hit alone)=%.4f ; extreme: (%.4f,%.4f) sigma_perp=%.4f sxx=%.2e syy=%.2e\n", Pt, Pe, c[0].p.x(), c[0].p.y(), c[0].sigma, c[0].sxx, c[0].syy);
-        CHECK("jamb tip: the extreme hit stays the extreme (no pull along the surface)", std::abs(c[0].p.x() - 0.30f) < 1e-5f);
+        const auto ext = std::ranges::min_element(c, {}, [](const Return& q) { return q.seg.norm() > 0.f ? 9.f : q.p.x(); });
+        std::printf("  jamb tip: P(4 hits denoised)=%.4f P(extreme hit alone)=%.4f ; %zu obstacles; end: (%.4f,%.4f) sigma_perp=%.4f sxx=%.2e syy=%.2e\n", Pt, Pe, c.size(), ext->p.x(), ext->p.y(), ext->sigma, ext->sxx, ext->syy);
+        CHECK("jamb tip: the extreme hit is kept as an END, where it was (no pull along the surface)", ext->seg.norm() == 0.f and std::abs(ext->p.x() - 0.30f) < 1e-5f);
         CHECK("jamb_tip_not_overconfident", Pt >= Pe - 1e-3f);
         // and inside a flat wall the obstacle is tight and isotropic (the surface continues on both sides: its along-line
         // error does not matter); only its ENDS keep the raw sigma along the wall
         std::vector<Return> dense; for (float y = -1.f; y <= 2.f; y += 0.01f) dense.push_back({{0.40f, y}, 0.01f, 1.f});
         const auto flat = denoise_returns(dense);
-        const auto& fc = *std::ranges::min_element(flat, {}, [](const Return& q) { return std::abs(q.p.y()); });
-        std::printf("  flat wall return (1 cm hits): sigma_perp=%.4f sxx=%.2e syy=%.2e\n", fc.sigma, fc.sxx, fc.syy);
-        const auto& end = *std::ranges::max_element(flat, {}, [](const Return& q) { return q.p.y(); });
-        std::printf("  flat wall END return: sigma_perp=%.4f sxx=%.2e syy=%.2e\n", end.sigma, end.sxx, end.syy);
-        CHECK("flat wall: interior tight and isotropic, the end keeps sigma_r along the wall",
-              fc.sigma < 0.005f and fc.sxx == 0.f and fc.syy == 0.f and std::abs(end.syy + end.sigma * end.sigma - 1e-4f) < 1e-7f and end.sxx < 1e-9f);
+        const auto& fc = *std::ranges::min_element(flat, {}, [](const Return& q) { return std::abs(q.p.y()) + (q.seg.norm() > 0.f ? 0.f : 9.f); });
+        std::printf("  flat wall (1 cm hits, 3 m): %zu obstacles; a sample: (%.4f,%.4f) half-length %.3f sigma=%.4f\n", flat.size(), fc.p.x(), fc.p.y(), fc.seg.norm(), fc.sigma);
+        const auto& end = *std::ranges::max_element(flat, {}, [](const Return& q) { return q.seg.norm() > 0.f ? -9.f : q.p.y(); });
+        std::printf("  flat wall END: (%.4f,%.4f) sigma_perp=%.4f sxx=%.2e syy=%.2e\n", end.p.x(), end.p.y(), end.sigma, end.sxx, end.syy);
+        CHECK("flat wall: samples on the wall, tight and isotropic; the ends keep sigma_r along it",
+              std::abs(fc.p.x() - 0.40f) < 1e-4f and fc.sigma < 0.005f and fc.sxx == 0.f and std::abs(end.p.y() - 2.f) < 0.011f
+              and std::abs(end.syy + end.sigma * end.sigma - 1e-4f) < 1e-7f and end.sxx < 1e-9f
+              and flat.size() < dense.size() / 4);
     }
     { // p_exist scales the hit; a far return is ignored
         const std::vector<Return> hit{{{0.f, 0.3f}, 0.01f, 1.f}}, ghost{{{0.f, 0.3f}, 0.01f, 0.1f}}, far{{{50.f, 0.f}, 0.01f, 1.f}};
@@ -189,15 +192,17 @@ int main()
         const auto c = denoise_returns(r);
         std::printf("  denoised: %zu of %zu\n", c.size(), r.size());
         for (const auto& q : c) std::printf("    (%.4f,%.4f) sigma=%.4f sxx=%.2e sxy=%.2e syy=%.2e p=%.3f agg=%d\n", q.p.x(), q.p.y(), q.sigma, q.sxx, q.sxy, q.syy, q.p_exist, int(q.aggregate));
-        CHECK("denoise: one obstacle per return", c.size() == r.size());
-        bool on_line = true, along_kept = true;
-        for (std::size_t i = 0; i < c.size(); ++i)
-            if (c[i].aggregate and c[i].p.y() < 0.06f)
-            {
-                on_line = on_line and std::abs(c[i].p.x() - 0.300f) < 0.0035f;
-                along_kept = along_kept and std::ranges::any_of(r, [&](const Return& q) { return std::abs(q.p.y() - c[i].p.y()) < 2e-3f; });
-            }
-        CHECK("denoise: the line's hits move onto it, along its normal only", on_line and along_kept);
+        // every raw LiDAR return lies within c/2 of an obstacle's support (nothing observed is dropped)
+        auto dist_to = [](const Return& o, const Eigen::Vector2f& x) { const Eigen::Vector2f a = o.p - o.seg, b = o.p + o.seg, ab = b - a;
+            const float t = ab.squaredNorm() > 0.f ? std::clamp((x - a).dot(ab) / ab.squaredNorm(), 0.f, 1.f) : 0.f; return (a + t * ab - x).norm(); };
+        bool covered = true;
+        for (const auto& q : r) if (q.aggregate) covered = covered and std::ranges::any_of(c, [&](const Return& o) { return o.aggregate and dist_to(o, q.p) <= 0.5f * kDenoiseRadiusM; });
+        CHECK("denoise: every return lies within c/2 of an obstacle", covered);
+        bool on_line = true;
+        for (const auto& o : c) if (o.aggregate and o.p.y() < 0.06f) on_line = on_line and std::abs(o.p.x() - 0.300f) < 0.0035f;
+        CHECK("denoise: the line's obstacles lie on it", on_line);
+        const auto ends = std::ranges::count_if(c, [](const Return& o) { return o.aggregate and o.seg.norm() == 0.f and o.p.y() < 0.06f and (o.p.y() < 0.001f or o.p.y() > 0.049f); });
+        CHECK("denoise: both ends of the line are kept where they were (y 0 and 0.05)", ends == 2);
         const auto iso = std::ranges::find_if(c, [](const Return& q) { return q.aggregate and std::abs(q.p.y() - 0.50f) < 1e-6f; });
         CHECK("denoise: an isolated return keeps its position and sigma_r", iso != c.end() and iso->p.x() == 0.f and iso->sigma == 0.01f and iso->sxx == 0.f);
         CHECK("denoise: a hypothesis (aggregate = false) passes untouched", std::ranges::any_of(c, [](const Return& q) { return not q.aggregate and q.p == Eigen::Vector2f(0.f, 0.235f) and q.p_exist == 0.001f; }));
@@ -213,8 +218,14 @@ int main()
             wall.push_back({d * (t + n(g)), 0.02f, 1.f});
         }
         float worst = 1.f, worst_z = 0.f;
-        for (const auto& q : denoise_returns(wall)) if (std::abs(q.p.y()) < 0.5f) { worst = std::min(worst, q.p.x() - 0.309f); worst_z = std::max(worst_z, (0.309f - q.p.x()) / q.sigma); }
-        std::printf("  noisy wall (sigma_r 0.02, 0.309 m): worst denoised return %.4f m inside the face, %.2f of its sigma\n", -worst, worst_z);
+        for (const auto& q : denoise_returns(wall))
+            if (std::abs(q.p.y()) < 0.5f)
+                for (const float s2 : {-1.f, 1.f})
+                {
+                    const float x = (q.p + s2 * q.seg).x();
+                    worst = std::min(worst, x - 0.309f); worst_z = std::max(worst_z, (0.309f - x) / q.sigma);
+                }
+        std::printf("  noisy wall (sigma_r 0.02, 0.309 m): worst obstacle point %.4f m inside the face, %.2f of its sigma\n", -worst, worst_z);
         CHECK("denoise: no noise-tail return inside a noisy wall", -worst < 0.01f and worst_z < 4.f);
     }
     { // long_wall_no_gaps (review C1): a parallel noisy wall x = 0.309 with hits to 3 m. Every 0.1 m of wall that holds a
@@ -235,7 +246,9 @@ int main()
         for (float y0 = -3.f; y0 < 3.f; y0 += 0.1f)
         {
             auto in = [&](const Return& q) { return q.p.y() >= y0 and q.p.y() < y0 + 0.1f; };
-            const bool raw = std::ranges::any_of(wall, in), den = std::ranges::any_of(c, in);
+            // an obstacle covers the bin if its SUPPORT (segment or point) overlaps it along the wall
+            auto sup = [&](const Return& q) { const float a = q.p.y() - std::abs(q.seg.y()), b = q.p.y() + std::abs(q.seg.y()); return b >= y0 and a < y0 + 0.1f; };
+            const bool raw = std::ranges::any_of(wall, in), den = std::ranges::any_of(c, sup);
             raw_bins += raw; lost += raw and not den; gaps_near += std::abs(y0 + 0.05f) <= 1.6f and not den;
         }
         std::printf("  long wall: %zu returns -> %zu obstacles; 0.1 m bins with returns %d, lost %d, uncovered within 1.6 m %d\n", wall.size(), c.size(), raw_bins, lost, gaps_near);
@@ -302,7 +315,7 @@ int main()
                 //   model; this check is about the INTEGRAL, so the library is fed the same cells with the scatter
                 //   stripped and both sides build identical terms.
                 auto cells = denoise_returns(wall_x(0.30f, -2.f, 2.f, sr));
-                for (auto& q : cells) q.sxx = q.sxy = q.syy = 0.f;
+                for (auto& q : cells) { q.sxx = q.sxy = q.syy = 0.f; q.seg.setZero(); }   // points on both sides
                 for (const auto& q : cells)
                 {
                     const float rho = (q.p - origin.p).norm();

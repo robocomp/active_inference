@@ -129,7 +129,58 @@ struct EdgeLines
         return m;
     }
 };
+// Signed distance from a SEGMENT [a, b] (robot frame) to the polygon grown by `margin`; `dir` (optional): unit direction
+// from the segment's nearest point to the boundary. Separated: the exact distance (endpoints vs edges, vertices vs the
+// segment). Overlapping (an endpoint inside, or the segment crossing an edge): the deepest of 9 points along it.
+float sd_segment(const std::vector<Eigen::Vector2f>& poly, float margin, const Eigen::Vector2f& a, const Eigen::Vector2f& b,
+                 Eigen::Vector2f* dir = nullptr)
+{
+    if ((b - a).squaredNorm() < 1e-12f) return sd_local(poly, margin, a, dir);
+    Eigen::Vector2f da_dir, db_dir;
+    const float da = sd_local(poly, margin, a, &da_dir), db = sd_local(poly, margin, b, &db_dir);
+    bool crosses = da < 0.f or db < 0.f;
+    const std::size_t n = poly.size();
+    auto cross2 = [](const Eigen::Vector2f& u, const Eigen::Vector2f& v) { return u.x() * v.y() - u.y() * v.x(); };
+    for (std::size_t i = 0; i < n and not crosses; ++i)
+    {
+        const Eigen::Vector2f p = poly[i], q = poly[(i + 1) % n], r = q - p, sseg = b - a;
+        const float den = cross2(r, sseg);
+        if (std::abs(den) < 1e-12f) continue;
+        const float t = cross2(a - p, sseg) / den, u = cross2(a - p, r) / den;
+        if (t >= 0.f and t <= 1.f and u >= 0.f and u <= 1.f) crosses = true;
+    }
+    if (crosses)
+    {
+        float best = 1e30f; Eigen::Vector2f bd = Eigen::Vector2f::Zero();
+        for (int k = 0; k <= 8; ++k)
+        {
+            Eigen::Vector2f d; const float v = sd_local(poly, margin, a + (b - a) * (float(k) / 8.f), &d);
+            if (v < best) { best = v; bd = d; }
+        }
+        if (dir) *dir = bd;
+        return std::min(best, 0.f);
+    }
+    float best = da; Eigen::Vector2f bd = da_dir;
+    if (db < best) { best = db; bd = db_dir; }
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        // a vertex of the (grown) polygon against the segment: distance minus the margin
+        const Eigen::Vector2f c = closest_on_seg(poly[i], a, b);
+        const float v = (poly[i] - c).norm() - margin;
+        if (v < best) { best = v; bd = (poly[i] - c).normalized(); }
+    }
+    if (dir) *dir = bd;
+    return best;
+}
+float sd_obstacle(const std::vector<Eigen::Vector2f>& poly, const Frame& f, const Return& q, Eigen::Vector2f* dir = nullptr)
+{
+    if (q.seg.squaredNorm() < 1e-12f) return sd_local(poly, 0.f, f.to_robot(q.p), dir);
+    return sd_segment(poly, 0.f, f.to_robot(q.p - q.seg), f.to_robot(q.p + q.seg), dir);
+}
 }  // namespace
+
+float obstacle_hull_distance(const rc::RobotFootprint& body, const Pose2& pose, const Return& q)
+{ return sd_obstacle(body.polygon(), Frame(pose), q); }
 
 std::vector<Pose2> rollout(const Pose2& start, float v0, float w0, float v, float w, float hold_s, const BaseLimits& b, float dt)
 {
@@ -176,81 +227,106 @@ float hull_distance(const rc::RobotFootprint& body, const Pose2& pose, const Eig
 
 std::vector<Return> denoise_returns(std::span<const Return> r, float radius_m)
 {
-    // contact.h: each LiDAR return projected onto the line fitted to its neighbours, along the line's NORMAL only.
+    // contact.h: local line fits -> SURFACE SAMPLES (segments at spacing ~c) + the surfaces' ENDS + isolated hits.
     std::vector<Return> out;
-    out.reserve(r.size());
-    std::vector<const Return*> lidar;
-    lidar.reserve(r.size());
+    std::vector<const Return*> L;
+    L.reserve(r.size());
     for (const Return& q : r)
     {
         if (q.p_exist <= 0.f) continue;
         if (not q.aggregate) { out.push_back(q); continue; }     // another source: its own obstacle, untouched
-        lidar.push_back(&q);
+        L.push_back(&q);
     }
     const double c = std::max(double(radius_m), 1e-4), inv = 1.0 / c;
-    auto key = [&](double x, double y) { return (static_cast<std::int64_t>(std::floor(x * inv)) << 32) ^ (static_cast<std::int64_t>(std::floor(y * inv)) & 0xffffffff); };
+    auto cell_of = [&](double v) { return static_cast<std::int64_t>(std::floor(v * inv)); };
+    auto key = [](std::int64_t i, std::int64_t j) { return (i << 32) ^ (j & 0xffffffff); };
     std::unordered_map<std::int64_t, std::vector<int>> grid;
-    grid.reserve(lidar.size());
-    for (int i = 0; i < int(lidar.size()); ++i) grid[key(lidar[i]->p.x(), lidar[i]->p.y())].push_back(i);
-    std::vector<int> nb;
-    for (const Return* q : lidar)
+    grid.reserve(L.size());
+    for (int i = 0; i < int(L.size()); ++i) grid[key(cell_of(L[i]->p.x()), cell_of(L[i]->p.y()))].push_back(i);
+    auto neighbours = [&](int i, std::vector<int>& nb)
     {
         nb.clear();
-        const double qx = q->p.x(), qy = q->p.y();
-        const auto ci = static_cast<std::int64_t>(std::floor(qx * inv)), cj = static_cast<std::int64_t>(std::floor(qy * inv));
+        const auto ci = cell_of(L[i]->p.x()), cj = cell_of(L[i]->p.y());
         for (std::int64_t di = -1; di <= 1; ++di)
             for (std::int64_t dj = -1; dj <= 1; ++dj)
-            {
-                const auto it = grid.find(((ci + di) << 32) ^ ((cj + dj) & 0xffffffff));
-                if (it == grid.end()) continue;
-                for (int j : it->second)
-                    if ((lidar[j]->p - q->p).squaredNorm() <= c * c) nb.push_back(j);
-            }
-        Return o = *q;
-        o.sxx = o.sxy = o.syy = 0.f;
-        const int n = int(nb.size());
-        if (n < kDenoiseMinNeighbours) { out.push_back(o); continue; }   // isolated: the raw hit, sigma_r, isotropic
-        double mx = 0, my = 0, s2r = 0;
-        for (int j : nb) { mx += lidar[j]->p.x(); my += lidar[j]->p.y(); s2r += double(lidar[j]->sigma) * lidar[j]->sigma; }
-        mx /= n; my /= n; s2r /= n;                                          // s2r: the sensor's own variance (mean)
+                if (const auto it = grid.find(key(ci + di, cj + dj)); it != grid.end())
+                    for (int j : it->second)
+                        if ((L[j]->p - L[i]->p).squaredNorm() <= c * c) nb.push_back(j);
+    };
+    struct Fit { Eigen::Vector2d m, t, n; double lt, s2, s2r; int k; };
+    auto fit = [&](const std::vector<int>& nb)
+    {
+        Fit f; f.k = int(nb.size());
+        f.m.setZero(); f.s2r = 0;
+        for (int j : nb) { f.m += L[j]->p.cast<double>(); f.s2r += double(L[j]->sigma) * L[j]->sigma; }
+        f.m /= f.k; f.s2r /= f.k;
         double cxx = 0, cxy = 0, cyy = 0;
-        for (int j : nb) { const double dx = lidar[j]->p.x() - mx, dy = lidar[j]->p.y() - my; cxx += dx * dx; cxy += dx * dy; cyy += dy * dy; }
-        cxx /= n; cxy /= n; cyy /= n;
+        for (int j : nb) { const Eigen::Vector2d d = L[j]->p.cast<double>() - f.m; cxx += d.x() * d.x(); cxy += d.x() * d.y(); cyy += d.y() * d.y(); }
+        cxx /= f.k; cxy /= f.k; cyy /= f.k;
         const double tr = cxx + cyy, disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - (cxx * cyy - cxy * cxy)));
-        const double lt = 0.5 * tr + disc, ln = std::max(0.0, 0.5 * tr - disc);   // along / across the fitted line
-        Eigen::Vector2d t = std::abs(cxy) > 1e-15 ? Eigen::Vector2d(lt - cyy, cxy) : (cxx >= cyy ? Eigen::Vector2d(1, 0) : Eigen::Vector2d(0, 1));
-        t.normalize();
-        const Eigen::Vector2d nrm(-t.y(), t.x());
-        const Eigen::Vector2d dq(qx - mx, qy - my);
-        const double along = dq.dot(t), across = dq.dot(nrm);
-        // residual variance of the line fit (unbiased, 2 parameters) and the regression's variance at this point
-        const double s2 = n > 2 ? ln * n / double(n - 2) : ln;
-        const double noise = std::max(s2, s2r);                              // never claim less noise than the sensor's
-        const double fit = noise * (1.0 / n + along * along / std::max(lt * n, 1e-12));
-        const double misfit = std::max(0.0, s2 - s2r);                       // the surface is not a line at this scale
-        // ★ FUSE, along the normal, the raw hit (variance sigma_r^2) with the line's prediction at this point (variance
-        //   fit + misfit): a well-fitted surface pulls the hit onto it, a corner or a jamb tip (large misfit) leaves it
-        //   near its raw place — the line is never trusted beyond what its own residual supports.
-        const double vr = double(q->sigma) * q->sigma, vl = fit + misfit;
-        const double wl = vr / (vr + vl);                                    // weight of the line
-        const double sp2 = vr * vl / (vr + vl);                              // <= min(vr, vl)
-        o.p = Eigen::Vector2f(float(qx - wl * across * nrm.x()), float(qy - wl * across * nrm.y()));   // along the NORMAL only
-        o.sigma = float(std::sqrt(sp2));
-        // ★ ALONG the line the hit keeps its raw position. Where the surface continues on BOTH sides of it (neighbours
-        //   beyond it in both directions) its along-line error is irrelevant — the surface is there either way — so the
-        //   obstacle is tight. Only at an END of the observed surface (no neighbour beyond it on one side: a jamb tip, a
-        //   leaf's edge) does the along-line error move where the surface stops: there it keeps its raw sigma along t
-        //   (extra = sigma_r^2 - sigma_perp^2). Giving every interior hit that freedom made a denser wall riskier (each
-        //   hit one more independent chance: dense-wall arc 0.18 vs 0.13).
-        bool before = false, after = false;
+        f.lt = 0.5 * tr + disc;
+        const double ln = std::max(0.0, 0.5 * tr - disc);
+        f.t = std::abs(cxy) > 1e-15 ? Eigen::Vector2d(f.lt - cyy, cxy) : (cxx >= cyy ? Eigen::Vector2d(1, 0) : Eigen::Vector2d(0, 1));
+        f.t.normalize();
+        f.n = Eigen::Vector2d(-f.t.y(), f.t.x());
+        f.s2 = f.k > 2 ? ln * f.k / double(f.k - 2) : ln;
+        return f;
+    };
+    // the line's prediction variance at along-coordinate a (from the centroid): regression + misfit
+    auto v_line = [](const Fit& f, double a)
+    { return std::max(f.s2, f.s2r) * (1.0 / f.k + a * a / std::max(f.lt * f.k, 1e-12)) + std::max(0.0, f.s2 - f.s2r); };
+
+    std::vector<char> covered(L.size(), 0), end_done(L.size(), 0);
+    std::vector<int> nb, nb2;
+    for (int i = 0; i < int(L.size()); ++i)
+    {
+        if (covered[i]) continue;
+        neighbours(i, nb);
+        if (int(nb.size()) < kDenoiseMinNeighbours) { covered[i] = 1; Return o = *L[i]; o.sxx = o.sxy = o.syy = 0.f; o.seg.setZero(); out.push_back(o); continue; }
+        const Fit f = fit(nb);
+        const Eigen::Vector2d pi = L[i]->p.cast<double>();
+        const double ai = (pi - f.m).dot(f.t);
+        double alo = 1e30, ahi = -1e30; int jlo = i, jhi = i;
         for (int j : nb)
         {
-            const double aj = Eigen::Vector2d(lidar[j]->p.x() - mx, lidar[j]->p.y() - my).dot(t);
-            before = before or aj < along; after = after or aj > along;
+            const double aj = (L[j]->p.cast<double>() - f.m).dot(f.t);
+            if (aj < alo) { alo = aj; jlo = j; }
+            if (aj > ahi) { ahi = aj; jhi = j; }
+            if ((L[j]->p - L[i]->p).squaredNorm() <= 0.25 * c * c) covered[j] = 1;   // within c/2: this sample's span
         }
-        const double ex = (before and after) ? 0.0 : std::max(0.0, double(q->sigma) * q->sigma - sp2);
-        o.sxx = float(ex * t.x() * t.x()); o.sxy = float(ex * t.x() * t.y()); o.syy = float(ex * t.y() * t.y());
-        out.push_back(o);
+        // ★ the SAMPLE: the fitted line over [ai - c/2, ai + c/2], clipped to where the data are; sigma = the line's at
+        //   the farther end of that span (never claims more than the fit supports there)
+        const double lo = std::max(ai - 0.5 * c, alo), hi = std::min(ai + 0.5 * c, ahi);
+        const double mid = 0.5 * (lo + hi), half = 0.5 * (hi - lo);
+        const double vs = std::max(v_line(f, lo), v_line(f, hi));
+        Return smp;
+        const Eigen::Vector2d pc = f.m + mid * f.t;          // ON the line (its fused position IS the line here)
+        smp.p = pc.cast<float>(); smp.seg = (half * f.t).cast<float>();
+        smp.sigma = float(std::sqrt(std::min(vs, f.s2r)));   // never wider than one raw hit
+        double pe = 0; for (int j : nb) pe += L[j]->p_exist >= 1.f ? -1e300 : std::log1p(-double(L[j]->p_exist));
+        smp.p_exist = float(-std::expm1(std::max(pe, -700.0)));
+        out.push_back(smp);
+        // ★ the surface's ENDS inside this span: an extreme hit with no neighbour beyond it along t is where the surface
+        //   stops — kept as its own point obstacle, fused onto the line along the normal only, with its raw sigma along t
+        for (const auto& [ja, aa, sgn] : {std::tuple{jlo, alo, -1.0}, std::tuple{jhi, ahi, +1.0}})
+        {
+            if (end_done[ja] or std::abs(aa - ai) > 0.5 * c) continue;   // beyond this span: a later sample owns it
+            neighbours(ja, nb2);
+            bool beyond = false;
+            for (int j : nb2) if (sgn * ((L[j]->p.cast<double>() - f.m).dot(f.t) - aa) > 0.0) { beyond = true; break; }
+            if (beyond) continue;
+            end_done[ja] = 1;
+            const Return& q = *L[ja];
+            const double vr = double(q.sigma) * q.sigma, vl = v_line(f, aa);
+            const double across = (q.p.cast<double>() - f.m).dot(f.n), wl = vr / (vr + vl), sp2 = vr * vl / (vr + vl);
+            Return e = q;
+            e.p = (q.p.cast<double>() - wl * across * f.n).cast<float>();
+            e.sigma = float(std::sqrt(sp2));
+            e.seg.setZero();
+            const double ex = std::max(0.0, vr - sp2);
+            e.sxx = float(ex * f.t.x() * f.t.x()); e.sxy = float(ex * f.t.x() * f.t.y()); e.syy = float(ex * f.t.y() * f.t.y());
+            out.push_back(e);
+        }
     }
     return out;
 }
@@ -425,8 +501,8 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
         const float rho = (q.p - f0.p).norm();
         const double sj0 = std::sqrt(double(q.sigma) * q.sigma + double(rho) * rho * sigma_pose_yaw * sigma_pose_yaw);
         const double sext = std::sqrt(std::max(0.f, q.sxx + q.syy));      // the largest the anisotropic part can add
-        if (double(rho) - reach > kSpanU * ss + kOne * (sj0 + sext)) continue;
-        const float sd0 = sd_local(poly, 0.f, f0.to_robot(q.p));
+        if (double(rho) - reach - q.seg.norm() > kSpanU * ss + kOne * (sj0 + sext)) continue;
+        const float sd0 = sd_obstacle(poly, f0, q);
         sd0_star = std::min(sd0_star, sd0);
         live.push_back({&q, sj0, sd0});
     }
@@ -457,9 +533,10 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
         bool proven = false;
         for (std::size_t i = 1; i < frames.size(); ++i)
         {
-            const Eigen::Vector2f ql = frames[i].to_robot(q.p);
-            if (lines.lower_bound(ql) >= sd) continue;
-            const float v = sd_local(poly, 0.f, ql);
+            // lower bound: the edge-line bound is 1-Lipschitz, so a segment's points are no closer than the bound at its
+            // centre minus its half-length
+            if (lines.lower_bound(frames[i].to_robot(q.p)) - q.seg.norm() >= sd) continue;
+            const float v = sd_obstacle(poly, frames[i], q);
             if (v < sd)
             {
                 sd = v; at = i;
@@ -474,7 +551,7 @@ float log_p_no_contact_cells(const rc::RobotFootprint& body, std::span<const Pos
         if (q.sxx + q.syy > 1e-12f)
         {
             Eigen::Vector2f dir;
-            sd_local(poly, 0.f, frames[at].to_robot(q.p), &dir);
+            sd_obstacle(poly, frames[at], q, &dir);
             const Eigen::Vector2f n = frames[at].to_room_dir(dir);
             sj = std::sqrt(L.sj0 * L.sj0 + double(n.x() * n.x() * q.sxx + 2.f * n.x() * n.y() * q.sxy + n.y() * n.y() * q.syy));
         }
