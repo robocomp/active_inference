@@ -2264,6 +2264,12 @@ void SpecificWorker::start_base_probe(const std::string &text)
 {
 	const auto spec = rc::BaseProbe::parse(text);
 	if (not spec.has_value()) { std::println("[probe] refused: {}", spec.error()); return; }
+	// ★ NEVER RE-ARMS (review fix round 1): the operator's Stop always wins over a measuring script.
+	if (const auto no = rc::BaseProbe::refusal(motion_commander_.output_enabled(), driving_enabled_, paused_); no.has_value())
+	{
+		std::println("[probe] refused: {}", *no);
+		return;
+	}
 	cancel_relative_motion("superseded by a probe");
 	const auto now = current_time_ms();
 	const auto pose = world_model_.read_robot_pose_latest(now);
@@ -2281,9 +2287,6 @@ void SpecificWorker::start_base_probe(const std::string &text)
 	session_.mission().set_mode(rc::DriveMode::Target);
 	session_.mission().set_click_target(std::nullopt);
 	clear_manual_target();
-	paused_ = false;
-	motion_commander_.set_output_enabled(true);
-	driving_enabled_ = true;
 	hibernationTick();
 	base_probe_.start(*spec, now);
 	probe_start_ = {pose->pos, pose->theta};

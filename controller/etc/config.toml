@@ -975,7 +975,9 @@ StallTimeoutMs = 500
 # controller/tools/floor_band.py — write the measured number AND its run id here.
 # PROVISIONAL — replace with the measured value (controller/tools/measure_policy_inputs.md)
 #   source: bpearl reads the floor at -10 mm in 20 mm bins ([FloorCheck], ROBOT_GEOMETRY.md) => p99.9 assumed
-#   <= 0.05 m, + sigma_r 0.03 = 0.08. The helios's grazing far-floor returns (13-17 cm) start at 3.88 m range.
+#   <= 0.05 m, + sigma_r 0.03 = 0.08.
+# ⚠⚠ TODO(Task 8): FLOOR LEAK — the helios's grazing far-floor returns (13-17 cm high) beyond ~3.9 m range FALL IN THIS
+#   LOW BAND. They MUST be cut (range limit / elevation test) before the policy consumes contact_buffer().
 ContactMinHeightM = 0.08
 
 [Policy]

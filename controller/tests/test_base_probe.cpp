@@ -65,6 +65,14 @@ int main()
         b.cancel();
         CHECK(not b.active());
     }
+    // 4. Never re-arms: refused when disarmed (Stop), driving off, or paused; allowed only when all three are fine.
+    {
+        CHECK(BaseProbe::refusal(false, true, false).has_value());   // output disarmed by Stop
+        CHECK(BaseProbe::refusal(true, false, false).has_value());   // driving off
+        CHECK(BaseProbe::refusal(true, true, true).has_value());     // paused
+        CHECK(BaseProbe::refusal(false, false, false).has_value());  // the state right after Stop
+        CHECK(not BaseProbe::refusal(true, true, false).has_value());
+    }
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

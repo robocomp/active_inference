@@ -2198,7 +2198,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     // double-counts — keep the edge identity for this data convention.
     const bool robot_from_lidar_is_identity = robot_from_lidar_matrix.isApprox(Eigen::Matrix4d::Identity(), 1e-5);
 
-    const float min_h = params_->temporary_obstacle_min_height_m;
+    const float min_h = params_->temporary_obstacle_min_height_m;   // legacy floor: only the raw-proximity count below uses it
 
     // ── RAW-cloud proximity, measured BEFORE the z-band cut below ──
     // Everything else here reads the already-filtered buffer, so every controller diagnostic has been
@@ -2246,6 +2246,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     {
         if (not z_dump_.is_open())
         {
+            z_dump_scan_ = 0;
             z_dump_.open("lidar_z_dump.csv", std::ios::out | std::ios::trunc);
             z_dump_.imbue(std::locale::classic());   // decimal POINT under LANG=es_ES (CLAUDE.md)
             z_dump_ << "# controller zdump: robot-frame returns (z = height above floor), pre z-band, pre self-filter\n"

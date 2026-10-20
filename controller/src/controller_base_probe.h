@@ -11,6 +11,7 @@
  *   whole sweep is at most 0.6 m / 2.4 rad. The caller checks the predicted sweep (predicted_poses) against the
  *   planner's footprint predicate BEFORE starting and refuses if any pose is not free; while it runs, Stop / driving
  *   off / no pose stop it (SpecificWorker::step_base_probe). These limits are a measuring instrument's range, flagged.
+ * ★ It never ARMS the base: refused unless the output is already armed, driving on and not paused (refusal()).
  *
  * Conventions (= RelativeMotion): the robot faces theta + pi/2, forward = (-sin theta, cos theta); + w = CCW (left).
  * Pure: Eigen + std. Control-thread only.
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -85,6 +87,17 @@ public:
             out.emplace_back(pos, theta);
         }
         return out;
+    }
+
+    /// ★ A PROBE NEVER ARMS THE BASE (review fix round 1): the operator's Stop always wins. It runs only when the base
+    /// output is already armed, driving is on and nothing is paused — i.e. after the operator (or the script) sent
+    /// `run`. Returns the refusal, or nullopt when the probe may start.
+    static std::optional<std::string> refusal(bool output_armed, bool driving_enabled, bool paused)
+    {
+        if (not output_armed) return std::string("base output is DISARMED (Stop) — send `run` first; a probe never re-arms");
+        if (not driving_enabled) return std::string("driving is off — send `run` first; a probe never re-arms");
+        if (paused) return std::string("PAUSED — resume first");
+        return std::nullopt;
     }
 
     void start(const Spec &s, std::uint64_t now_ms)

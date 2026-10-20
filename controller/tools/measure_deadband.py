@@ -17,7 +17,8 @@ gate). The value to configure (robot_concept etc/config_shadow.toml Agent.base_m
 is the LARGER of the two signs.
 
 PRECONDITIONS (measure_policy_inputs.md): fleet up (run_crossing.sh <dir> here), robot parked on OPEN floor with
->= 0.7 m free ahead and behind (the controller refuses a probe whose predicted sweep is not free), no mission running.
+>= 0.7 m free ahead and behind (the controller refuses a probe whose predicted sweep is not free), no mission running,
+and the base ARMED by the operator (`run_crossing.sh <dir> run`): a probe never re-arms a stopped base.
 
 Usage: measure_deadband.py [--controller-dir DIR] [--gt FILE] [--hold 2.0] [--out results.csv]
 """
@@ -114,7 +115,7 @@ def main():
         time.sleep(a.hold + a.settle)
         rows = probe_rows(a.controller_dir)
         if len(rows) <= n_before:
-            print(f'probe v {v:+.3f} w {w:+.3f}: NO ROW (refused? see the controller log: [probe] ...)', file=sys.stderr)
+            print(f'probe v {v:+.3f} w {w:+.3f}: NO ROW (refused? disarmed => send `run` first; see the controller log: [probe] ...)', file=sys.stderr)
             continue
         r = rows.iloc[-1]
         n_before = len(rows)

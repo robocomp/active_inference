@@ -43,11 +43,15 @@ class ControllerObstacleTracker
         // scan; the one-frame hold that made it necessary is gone, so both consumers read this one
         // (which is also the better of the two — it registers room←lidar per plane).
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
+        // ⚠⚠ TODO(Task 8): FLOOR LEAK — the helios's grazing far-floor returns (beyond ~3.9 m range) read 0.13-0.17 m high
+        //   (ROBOT_GEOMETRY.md) and therefore FALL IN THIS LOW BAND. They MUST be cut (range limit or elevation test)
+        //   before the policy consumes this buffer, or they become phantom contact returns.
         // Task 7: the local policy's CONTACT set — the same registered sweep, cut at Lidar.ContactMinHeightM instead of the
         // legacy 0.20 m (lidar_height_band.h). Same timestamps as lidar_buffer(): a read at one ts gets the same sweep.
         rc::LidarPointBuffer *contact_buffer() { return &contact_room_buffer_; }
         // Task 7 / controller/tools/floor_band.py: dump the next n raw sweeps (robot frame) to lidar_z_dump.csv.
-        void arm_z_dump(int n) { z_dump_scan_ = 0; z_dump_scans_left_.store(std::max(0, n), std::memory_order_relaxed); }
+        // Only the atomic is touched here (control thread); the scan counter and the file belong to the lidar thread.
+        void arm_z_dump(int n) { z_dump_scans_left_.store(std::max(0, n), std::memory_order_relaxed); }
         // Task 14 fix round 3: returns the newest converted sweep dropped as the robot itself (rigid robot frame, at capture).
         [[nodiscard]] int capture_self_dropped() const { return capture_self_dropped_.load(std::memory_order_relaxed); }
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
@@ -338,7 +342,7 @@ class ControllerObstacleTracker
         rc::LidarPointBuffer lidar_room_buffer_{5};
         rc::LidarPointBuffer contact_room_buffer_{5};   // Task 7: policy band (Lidar.ContactMinHeightM .. max)
         std::atomic<int> z_dump_scans_left_{0};          // armed by arm_z_dump (control thread); consumed by the lidar thread
-        int z_dump_scan_ = 0;
+        int z_dump_scan_ = 0;                            // lidar thread only (reset when the dump file is opened)
         std::ofstream z_dump_;
         RawCloudProximity raw_cloud_proximity_;   // measured on the raw sweep, pre z-band (see the struct)
         std::vector<GraphObstacleRecord> known_graph_obstacles_;

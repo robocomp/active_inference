@@ -53,7 +53,11 @@ before pasting anything: the 0.10 m test expectation (`low_returns_reach_policy`
 
 ## 3. Deadband → `base_min_linear_speed / base_min_rot_speed`
 
+A probe NEVER arms the base (the operator's Stop always wins): `run_crossing.sh … here` leaves the controller STOPPED,
+so arm it first — with no target and no mission it holds still — then probe:
+
 ```bash
+$B/room_concept/estimation_scripts/scripts/run_crossing.sh $D run      # arms the base output (Run button)
 python3 $WT/controller/tools/measure_deadband.py --out $D/deadband.csv | tee $D/deadband.txt
 ```
 
@@ -63,8 +67,9 @@ zero), plus one zero command for the noise floor; reads the motion from `$B/room
 Paste the two printed lines into `$WT/robot_concept/etc/config_shadow.toml` `[Agent]` (replacing the PROVISIONAL
 ones) and restart robot_concept. The script sends `stop` at the end.
 
-The probe is refused (logged as `[probe] refused: ...` in `$D/logs/controller.log`) if the predicted sweep is not
-free on the planner's grid — move the robot to more open floor.
+The probe is refused (logged as `[probe] refused: ...` in `$D/logs/controller.log`) if the base is disarmed / driving
+off / paused (send `run`), or if the predicted sweep is not free on the planner's grid — move the robot to more open
+floor. ⚠ Check after `run` that the controller has no mission or affordance to drive to (Mission mode idle, no target).
 
 ## 4. Stop the fleet — SIGTERM only
 
