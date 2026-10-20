@@ -89,6 +89,6 @@ private:
     std::array<float, 4> L_{0.f, 0.f, 0.f, 0.f};   // forward, backward, turn left, turn right
     Pose2 pose_;
     float sigma_ = 0.02f;
-    const rc::RobotFootprint* body_.reset();   // ★ observed only; the caller's body outlives the evidence
+    std::optional<rc::RobotFootprint> body_;   // ★ a copy: the hypothesis must not dangle if the caller body moves
 };
 }  // namespace rc::policy
