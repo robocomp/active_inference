@@ -72,6 +72,7 @@ enum class Cause : std::uint8_t
     Blockage,           ///< the follower hit a blockage and dropped the plan to re-route
     PathShort,          ///< the path ends short of the goal
     ReturnsHold,        ///< the live-returns net capped the command (to zero or below the ask)
+    PolicyHold,         ///< Task 8: the local policy holds the base (Stuck / Blind / no field / not its goal kind)
     LockOn,             ///< the lock-on micro-search owns the base
     Orienting,          ///< an orient affordance turns in place
     Arrived,            ///< the goal was reached this cycle
@@ -93,7 +94,7 @@ enum class Cause : std::uint8_t
         case Cause::NoWorld: case Cause::NoPose: case Cause::PassageWaiting: case Cause::AnchorWaiting:
         case Cause::MissionWaiting: case Cause::NoTarget: return Klass::WaitingOnAgent;
         case Cause::Escape: case Cause::ReturnsBackoff: case Cause::AnchorHandBack: case Cause::TargetRejected:
-        case Cause::NoRoute: case Cause::Blockage: case Cause::PathShort: case Cause::ReturnsHold:
+        case Cause::NoRoute: case Cause::Blockage: case Cause::PathShort: case Cause::ReturnsHold: case Cause::PolicyHold:
             return Klass::BlockedByWorld;
         case Cause::PresenceDegraded: case Cause::LidarStalled: case Cause::TrackerZero: case Cause::Unexplained:
             return Klass::Fault;
@@ -140,6 +141,7 @@ enum class Cause : std::uint8_t
         case Cause::Blockage: return "BLOCKED";
         case Cause::PathShort: return "PATH SHORT";
         case Cause::ReturnsHold: return "HELD BY RETURNS";
+        case Cause::PolicyHold: return "POLICY HOLD";
         case Cause::LockOn: return "LOCK-ON";
         case Cause::Orienting: return "ORIENTING";
         case Cause::Arrived: return "ARRIVED";

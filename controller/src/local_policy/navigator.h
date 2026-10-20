@@ -54,6 +54,7 @@ class Navigator
 public:
     struct Trap { Eigen::Vector2f c = Eigen::Vector2f::Zero(), dir = Eigen::Vector2f::Zero(); float r = 0.f; };
     struct Step { Decision d{.mode = Decision::Mode::Stuck, .why = {}}; std::optional<Trap> trap; bool trap_suppressed_by_goal = false; bool unreachable = false;
+                  bool world_applied = false;            // Task 8: a pending update_world() was applied this step
                   bool replanned = false; float plan_remaining_p = 0.f;
                   bool completed_early = false;          // the previous plan reached its predicted outcome early (success)
                   bool trap_no_route_evidence = false; };  // a failed prediction where the field could not point the way
@@ -70,6 +71,17 @@ public:
     void set_goal(const Goal& goal, const CostToGo::Grid& grid, std::function<bool(const Eigen::Vector2f&)> free,
                   std::function<float(const Eigen::Vector2f&)> extra, std::vector<Eigen::Vector2f> goal_points, float trap_radius_m);
     Step step(PolicyInput in, const PolicyParams& p);
+    // ★ Task 8 — THE WORLD CHANGES UNDER A GOAL (the controller's planner map: furniture beliefs, residual cells). A new
+    //   free/extra is NOT applied at once — that would replace the committed plan every cycle the map twitches (plan
+    //   commitment, review fix round 3) — but at the next point step() decides a new plan anyway (the plan completed, was
+    //   replaced, or there was none), AFTER the completed plan was judged on the field it was predicted on. Traps are
+    //   kept (re-applied as blocked discs); a pending Drive prediction and the running plan's phase baseline are
+    //   re-read on the new field at their own start points (a descent is a difference of field values: the baseline
+    //   must be on the field the realized value will be read from); a pending Release prediction is dropped.
+    //   The goal and its points are unchanged — a new goal is set_goal.
+    void update_world(std::function<bool(const Eigen::Vector2f&)> free, std::function<float(const Eigen::Vector2f&)> extra)
+    { pending_free_ = std::move(free); pending_extra_ = std::move(extra); world_pending_ = true; }
+    bool world_pending() const { return world_pending_; }
 
     const CostToGo& field() const { return field_; }
     const std::vector<Trap>& traps() const { return traps_; }
@@ -100,5 +112,9 @@ private:
     bool phase_outcome_reached(const PolicyInput& in) const;
     double last_build_ms_ = 0.0;
     int failed_predictions_ = 0;
+    std::function<bool(const Eigen::Vector2f&)> pending_free_;
+    std::function<float(const Eigen::Vector2f&)> pending_extra_;
+    bool world_pending_ = false;
+    void rebuild_on_new_world();   // build() + re-baseline the monitor and the plan phase (update_world)
 };
 }  // namespace rc::policy

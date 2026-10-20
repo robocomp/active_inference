@@ -729,6 +729,26 @@ void anchor_gone_while_clearing_ends()
     CHECK(rc::anchor_gone_action(rc::cross_continues_without_anchor(true, gate), true) == A::EndClearing);
 }
 
+// Task 8: the cross's COMPLETION, extracted from step_anchor_cross so the local policy's doorway drive and the servo share it:
+// through only at s >= standoff AND observed on the near side in this claim; s >= standoff without that is not a crossing.
+static void cross_progress_semantics()
+{
+    const float standoff = 2.0f, half_len = 0.3f;
+    rc::interaction::RelPose r; r.x = Eigen::Vector3f(0.f, -2.1f, 0.f);   // centre 2.1 m BEHIND the robot: s = +2.1
+    rc::CrossThroughGate gate;
+    CHECK(rc::cross_progress(r, standoff, gate) == rc::CrossProgress::NotACrossing);   // never seen on the near side
+    CHECK(not rc::cross_progress_complete(r, standoff, gate));
+    rc::interaction::RelPose before; before.x = Eigen::Vector3f(0.f, 1.0f, 0.f);       // s = -1.0: wholly before the plane
+    CHECK(rc::cross_progress(before, standoff, gate) == rc::CrossProgress::Going);
+    CHECK(gate.observe(true, rc::anchor_cross_geometry(before).s, half_len));
+    CHECK(rc::cross_progress(r, standoff, gate) == rc::CrossProgress::Through);
+    CHECK(rc::cross_progress_complete(r, standoff, gate));
+    rc::interaction::RelPose mid; mid.x = Eigen::Vector3f(0.f, -1.0f, 0.f);           // s = +1.0 < standoff
+    CHECK(rc::cross_progress(mid, standoff, gate) == rc::CrossProgress::Going);
+    rc::interaction::RelPose bad; bad.x = Eigen::Vector3f(NAN, 0.f, 0.f);
+    CHECK(rc::cross_progress(bad, standoff, gate) == rc::CrossProgress::Going);         // nothing to judge: not through
+}
+
 int main()
 {
     centred_goes_straight();
@@ -757,6 +777,7 @@ int main()
     clearing_completes_on_odometry();
     stale_past_the_plane_continues();
     anchor_gone_while_clearing_ends();
+    cross_progress_semantics();
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

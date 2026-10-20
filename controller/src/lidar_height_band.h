@@ -15,9 +15,21 @@
  * ⚑ DECISION LEVEL, flagged: a return either is or is not in a set. The level is not tuned; it is the floor the
  *   sensor actually reports (measured), plus one sigma_r — a return the floor could have produced is not contact.
  *
+ * ★ Task 8 — THE HELIOS'S FAR FLOOR IS CUT FROM THE POLICY SET (the Task-7 review's required item). The helios hangs
+ *   INVERTED at z 1.075 m; its fan spans +54.5 .. -15.5 deg (ROBOT_GEOMETRY.md), so its LOWEST beam meets the floor
+ *   1.075 / tan(15.5 deg) = 3.88 m out, and those grazing floor returns read 0.13-0.17 m high (the bias grows with range:
+ *   residual_concept fits its floor from the bpearl only for this reason). They fall inside [ContactMinHeightM, 0.20).
+ *   PHYSICAL RULE: the same beam reaches the 0.20 m band floor only (1.075 - 0.20) / tan(15.5 deg) = 3.16 m out, so ANY
+ *   helios return below 0.20 m is at >= 3.16 m and at a <= 15.5 deg grazing angle, where the floor itself returns at
+ *   0.13-0.17 m — the helios cannot tell a low obstacle from the floor there. The policy's low band is therefore the
+ *   BPEARL's (the downward dome, the floor-datum sensor); the helios contributes from the legacy floor (0.20 m, the level
+ *   that was set above its floor ring in the first place: TemporaryObstacleMinHeight) up. No range constant: the cut is
+ *   the existing legacy level applied by SOURCE. A return whose plane is unknown (no plane ids) keeps the plain bands.
+ *
  * Pure: no Qt, no graph.
  */
 
+#include <algorithm>
 #include <cmath>
 
 #include "controller_runtime_types.h"
@@ -45,10 +57,22 @@ inline LidarHeightBands lidar_height_bands(const ControllerParams &p)
             .max_m = p.temporary_obstacle_max_height_m};
 }
 
-inline LidarBandMembership lidar_band_membership(float z, const LidarHeightBands &b)
+// Which sensor a return came from (the media plane id the obstacle tracker receives per point: helios 0, bpearl 1 —
+// ROBOT_GEOMETRY.md "Media plane id").
+enum class LidarSource { Unknown, Helios, Bpearl };
+inline LidarSource lidar_source_of_plane(int plane_id)
+{
+    return plane_id == 0 ? LidarSource::Helios : plane_id == 1 ? LidarSource::Bpearl : LidarSource::Unknown;
+}
+// The geometry behind the helios cut (documentation and test only; the rule itself uses legacy_min_m).
+inline constexpr float kHeliosMountZ = 1.075f;                       // shadow.json body<-helios z
+inline constexpr float kHeliosLowestBeamRad = 15.5f * 3.14159265f / 180.f;   // the inverted fan's lowest beam below horizontal
+
+inline LidarBandMembership lidar_band_membership(float z, const LidarHeightBands &b, LidarSource src = LidarSource::Unknown)
 {
     if (not std::isfinite(z) or z > b.max_m) return {};
-    return {.policy = z >= b.contact_min_m, .legacy = z >= b.legacy_min_m};
+    const float policy_min = src == LidarSource::Helios ? std::max(b.contact_min_m, b.legacy_min_m) : b.contact_min_m;
+    return {.policy = z >= policy_min, .legacy = z >= b.legacy_min_m};
 }
 
 }  // namespace rc

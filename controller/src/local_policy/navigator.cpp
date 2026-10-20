@@ -33,6 +33,14 @@ void Navigator::build()
     last_build_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
+void Navigator::rebuild_on_new_world()
+{
+    build();
+    if (monitor_.pending and monitor_.release) monitor_.reset();
+    else if (monitor_.pending) monitor_.f0 = field_.at(monitor_.p0.p);
+    if (plan_.active) plan_.phase_f0 = field_.at(plan_.phase_p0);
+}
+
 Eigen::Vector2f Navigator::downhill(const Eigen::Vector2f& p) const
 {
     const float h = grid_.cell;
@@ -148,13 +156,16 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
 
     s.replanned = true;
     s.d = decide(in, p, &monitor_);
+    // Task 8: a pending world is applied now — the completed plan was judged inside decide() on the field it was predicted on
+    const bool swap = world_pending_;
+    if (swap) { free_ = std::move(pending_free_); extra_ = std::move(pending_extra_); world_pending_ = false; s.world_applied = true; }
     if (s.d.mode == Decision::Mode::Drive or s.d.mode == Decision::Mode::Release)
     {
         plan_ = Plan{.active = true, .mode = s.d.mode, .v1 = s.d.v, .w1 = s.d.w, .dur1 = s.d.plan_dur1, .v2 = s.d.plan_v2, .w2 = s.d.plan_w2,
                      .dur2 = s.d.plan_dur2, .has2 = s.d.plan_has_cont, .t0 = in.now_s, .d = s.d,
                      .phase = 1, .phase_t0 = in.now_s, .phase_yaw0 = in.pose.yaw, .phase_f0 = field_.at(in.pose.p), .phase_p0 = in.pose.p};
     }
-    if (not s.d.prediction_failed) return s;
+    if (not s.d.prediction_failed) { if (swap) rebuild_on_new_world(); return s; }
     ++failed_predictions_;
     // ★ round 5: no route evidence where the field cannot point the way (non-finite here, or a slope below what the
     //   field resolves over two cells) — the Release stands, no trap
@@ -164,12 +175,12 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     const float fy1 = field_.at(in.pose.p + Eigen::Vector2f(0.f, h)), fy0 = field_.at(in.pose.p - Eigen::Vector2f(0.f, h));
     const bool slope_defined = std::isfinite(f_here) and std::isfinite(fx1) and std::isfinite(fx0) and std::isfinite(fy1) and std::isfinite(fy0)
                                and std::hypot(fx1 - fx0, fy1 - fy0) > field_.resolution_m(2.f * h);
-    if (not slope_defined) { s.trap_no_route_evidence = true; return s; }
+    if (not slope_defined) { if (swap) rebuild_on_new_world(); s.trap_no_route_evidence = true; return s; }
     const Eigen::Vector2f dir = -Eigen::Vector2f(fx1 - fx0, fy1 - fy0).normalized();
     const Trap t{in.pose.p + 2.f * trap_r_ * dir, dir, trap_r_};
     assert((t.c - in.pose.p).norm() > t.r);              // the disc never contains the robot's current position
     if (std::ranges::any_of(goals_, [&](const Eigen::Vector2f& g) { return (g - t.c).norm() < t.r; }))
-    { s.trap_suppressed_by_goal = true; return s; }
+    { if (swap) rebuild_on_new_world(); s.trap_suppressed_by_goal = true; return s; }
     traps_.push_back(t);
     build();
     monitor_.reset();                    // (c): the field changed — old values are not comparable

@@ -258,6 +258,52 @@ public:
         return {adv, rot};
     }
 
+    // ── Task 8: WITH THE LOCAL POLICY DRIVING, a relative step is a GOAL, not a control law. ─────────────────────────────
+    // The step's goal pose (the controller's theta convention, the robot faces theta + pi/2):
+    //   Move — the segment's end at the segment heading (a Place with that facing: reversing keeps the heading);
+    //   Turn — a heading at the start position. The ACCUMULATED turn is preserved: while more than a quarter turn
+    //          remains, the goal is the next quarter-turn mark from the step's start heading (start + k·pi/2 toward the
+    //          sense asked), so a 270-degree left turn is not taken as 90 degrees right by a heading goal that wraps.
+    // Completion stays this class's own (yaw_tol_rad / pos_tol_m); failure is the policy's verdict (policy_step).
+    struct PolicyGoal { bool turn = false; Eigen::Vector2f pos = Eigen::Vector2f::Zero(); float theta = 0.f; };
+    [[nodiscard]] std::optional<PolicyGoal> policy_goal() const
+    {
+        if (not active()) return std::nullopt;
+        const Step& s = steps_[index_];
+        if (s.kind == Step::Kind::Move) return PolicyGoal{false, goal_pos_, seg_theta_};
+        const float start = goal_theta_ - s.value;
+        const float quarter = std::numbers::pi_v<float> / 2.f;
+        const float remaining = s.value - turned_;
+        if (std::abs(remaining) <= quarter) return PolicyGoal{true, start_pos_, goal_theta_};
+        const float done_q = std::floor(std::abs(turned_) / quarter + 1e-3f) * (turned_ * s.value >= 0.f ? 1.f : 0.f);
+        return PolicyGoal{true, start_pos_, start + std::copysign((done_q + 1.f) * quarter, s.value)};
+    }
+    // One cycle of a policy-driven step: the budget, the accumulated turn, this class's own completion test, and — when the
+    // policy cannot reach the goal (`failed`: Stuck / Unreachable) — the failure, with the policy's reason.
+    void policy_step(const Eigen::Vector2f& pos, float theta, std::uint64_t now_ms, const std::optional<std::string>& failed)
+    {
+        if (not active()) return;
+        active_ms_ += std::min<std::uint64_t>(now_ms >= last_step_ms_ ? now_ms - last_step_ms_ : 0, 250);
+        last_step_ms_ = now_ms;
+        if (active_ms_ > budget_ms_) { fail(std::format("timed out after {:.0f} s ({})", active_ms_ / 1000.0, progress(pos))); return; }
+        const Step& s = steps_[index_];
+        bool done = false;
+        if (s.kind == Step::Kind::Turn)
+        {
+            turned_ += wrap(theta - prev_theta_);
+            prev_theta_ = theta;
+            done = std::abs(s.value - turned_) < params.yaw_tol_rad;
+        }
+        else
+        {
+            const float dir = s.value > 0 ? 1.f : -1.f;
+            done = dir * (goal_pos_ - pos).dot(forward(seg_theta_)) < params.pos_tol_m;
+        }
+        if (done) { next_step(pos, theta); return; }
+        if (failed.has_value()) { fail(std::format("stopped: {} ({})", *failed, progress(pos))); return; }
+        last_event_ = progress(pos);
+    }
+
     void cancel(const std::string& why)
     {
         if (not active()) return;

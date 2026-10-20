@@ -322,6 +322,22 @@ struct CrossThroughGate
     [[nodiscard]] bool through(bool servo_through) const { return servo_through and near_seen; }
 };
 
+// ── IS THE CROSS COMPLETE? (Task 8: shared by the anchor servo and the local policy's doorway drive) ───────────────────────
+// `through` = s >= standoff along the normal of the pose driven on (the measured gap, else the anchor); it COMPLETES only if
+// the robot was observed on the near side in this claim (CrossThroughGate, try89); s >= standoff without that is NOT A
+// CROSSING (a flipped / leftover frame) — the session hands the claim back. A non-finite pose judges nothing (Going).
+enum class CrossProgress { Going, Through, NotACrossing };
+[[nodiscard]] inline CrossProgress cross_progress(const rc::interaction::RelPose& drive_pose, float standoff, const CrossThroughGate& gate)
+{
+    if (not drive_pose.x.allFinite()) return CrossProgress::Going;
+    if (not (anchor_cross_geometry(drive_pose).s >= standoff)) return CrossProgress::Going;
+    return gate.through(true) ? CrossProgress::Through : CrossProgress::NotACrossing;
+}
+[[nodiscard]] inline bool cross_progress_complete(const rc::interaction::RelPose& drive_pose, float standoff, const CrossThroughGate& gate)
+{
+    return cross_progress(drive_pose, standoff, gate) == CrossProgress::Through;
+}
+
 // ── THE ANCHOR GONE MID-CROSS (try90) ───────────────────────────────────────────────────────────────────────────────────
 // door_concept removes the anchor once the passage is over by ITS rule (Task 21: through the room switch, the predicted window
 // spent — try90: ~0.8 m past the plane). The anchor was only the prior for WHICH gap; once the cross holds a measured (or
@@ -370,11 +386,17 @@ enum class AnchorGoneAction { RoomRoute, CarryOnGap, EndClearing };
 // half a body length of the wall plane (s > −half_len) — or past it — the centre may be beside or behind the robot, and
 // facing along the crossing (the normal: heading_err) is what brings the doorway back into view. The servo's own heading
 // loop (w_max·tanh(·/(w_max·τ_rot))). Pure: tests/test_anchor_servo.cpp.
+// Task 8: the wait-turn's AIM as a bearing (rad from forward, CCW positive) — the local policy turns to it as a Heading goal.
+[[nodiscard]] inline float anchor_wait_aim(const rc::interaction::RelPose& r, float half_len)
+{
+    if (not r.x.allFinite()) return 0.f;
+    const auto g = anchor_cross_geometry(r);
+    return g.s > -half_len ? g.heading_err : std::atan2(-r.x.x(), r.x.y());
+}
 [[nodiscard]] inline float anchor_wait_turn(const rc::interaction::RelPose& r, float w_max, float half_len)
 {
     if (not r.x.allFinite() or not (w_max > 0.f)) return 0.f;
-    const auto g = anchor_cross_geometry(r);
-    const float aim = g.s > -half_len ? g.heading_err : std::atan2(-r.x.x(), r.x.y());
+    const float aim = anchor_wait_aim(r, half_len);
     return w_max * std::tanh(aim / (w_max * kAnchorTauRot));
 }
 

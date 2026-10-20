@@ -386,6 +386,16 @@ struct ControllerParams
     float policy_sigma_rel_yaw_rad = 0.013f;
     float policy_pose_drift_sigma_m = 0.064f;   // absolute pose error as OU: stationary std — PROGRESS MONITOR
     float policy_pose_drift_time_s = 115.f;     //   and correlation time
+    // Task 8 ([Policy], config.toml carries the provenance): the local policy drives the base; the old chain is OFF.
+    bool  policy_enabled = false;               // default OFF in code: the config turns it on
+    float policy_risk_eps = 0.01f;
+    float policy_release_risk_max = 0.5f;
+    float policy_progress_scale_m = 0.10f;
+    float policy_horizon_s = 1.0f;
+    float policy_command_latency_s = 0.06f;     // PROVISIONAL (the harness's plant value)
+    float policy_min_linear_speed_mps = 0.04f;  // PROVISIONAL deadband fallback (capability absent)
+    float policy_min_rot_speed_rps = 0.10f;
+    float policy_unseen_odo_sigma_m = 0.005f;
     // Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor).
     float unmodelled_scan_min_z_m = 0.10f;
     float unmodelled_scan_max_z_m = 1.50f;

@@ -2341,7 +2341,9 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 const float robot_z = robot_from_lidar_is_identity
                     ? z
                     : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
-                if (const auto in = rc::lidar_band_membership(robot_z, bands); not (policy_set ? in.policy : in.legacy))
+                // Task 8: the helios's grazing far floor is cut from the POLICY set by source (lidar_height_band.h).
+                const auto src = plane_sel.size() >= count ? rc::lidar_source_of_plane(int(plane_sel[index])) : rc::LidarSource::Unknown;
+                if (const auto in = rc::lidar_band_membership(robot_z, bands, src); not (policy_set ? in.policy : in.legacy))
                     continue;
                 // ★ Task 14 fix round 3 (try77): the robot's own returns are dropped HERE, in the rigid robot frame at
                 //   capture (rc::lidar_capture_is_self), not by the reader after the cloud is room-frame — re-expressed on a

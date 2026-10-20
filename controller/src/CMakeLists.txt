@@ -27,6 +27,12 @@ LIST(APPEND SOURCES
   ../src/controller_obstacle_model.cpp
   ../src/controller_obstacle_tracker.cpp
   ../src/controller_session.cpp
+  # Task 8: the local look-ahead motion policy drives the base ([Policy] Enabled) — the session's drive + the pure policy.
+  ../src/controller_policy_drive.cpp
+  ../src/local_policy/local_policy.cpp
+  ../src/local_policy/contact.cpp
+  ../src/local_policy/cost_to_go.cpp
+  ../src/local_policy/navigator.cpp
   ../src/controller_world_model.cpp
   # This robot's body, from the mesh the graph names — see controller_robot_body.h.
   ../src/controller_robot_body.cpp

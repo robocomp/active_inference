@@ -976,8 +976,9 @@ StallTimeoutMs = 500
 # PROVISIONAL — replace with the measured value (controller/tools/measure_policy_inputs.md)
 #   source: bpearl reads the floor at -10 mm in 20 mm bins ([FloorCheck], ROBOT_GEOMETRY.md) => p99.9 assumed
 #   <= 0.05 m, + sigma_r 0.03 = 0.08.
-# ⚠⚠ TODO(Task 8): FLOOR LEAK — the helios's grazing far-floor returns (13-17 cm high) beyond ~3.9 m range FALL IN THIS
-#   LOW BAND. They MUST be cut (range limit / elevation test) before the policy consumes contact_buffer().
+# Task 8: the helios's grazing far-floor returns (13-17 cm high, beyond ~3.9 m) are cut from this band BY SOURCE — below
+#   TemporaryObstacleMinHeight (0.20) a helios return can only be >= 3.16 m away at a <= 15.5 deg grazing angle, where it
+#   is the floor; the low band is the bpearl's (lidar_height_band.h).
 ContactMinHeightM = 0.08
 
 [Policy]
@@ -996,3 +997,24 @@ SigmaRelYawRad = 0.013
 # is the robust number. The latest door-crossing runs (try102-107) drift more: sigma 0.08-0.20 m, T 90-320 s.
 PoseDriftSigmaM = 0.064
 PoseDriftTimeS = 115.0
+# ── Task 8: the local policy DRIVES the base (controller_policy_drive.cpp). true = ONE authority: escape, backoff,
+# make-room, the returns caps, the band, the tracker's command path, the anchor servo, lock-on/orient motion, the
+# uncertainty limiter and the clearance ceiling are switched OFF (not deleted); false = the old chain, unchanged.
+Enabled = true
+# The two stated risk levels (local_policy.h PolicyParams): acceptable P(contact) per Drive decision; a Release only if
+# more likely contact-free than not.
+RiskEps = 0.01
+ReleaseRiskMax = 0.5
+# metres of progress worth one nat of safety/continuability over one horizon (not a gate)
+ProgressScaleM = 0.10
+# candidate hold time (s) before the brake tail
+HorizonS = 1.0
+# PROVISIONAL: command latency (s) from send_speed_command to the wheels (the output loop period + the bridge); the policy
+# rolls out from the pose reached after pose age + this. 0.06 = the Task-6 harness's plant value — measure it live.
+CommandLatencyS = 0.06
+# PROVISIONAL deadband, used only while robot_concept does not publish robot_min_* (cortex not reinstalled): the same
+# values robot_concept/etc/config_shadow.toml would publish (RelativeMotion's min_adv_mps / min_rot_rps).
+MinLinearSpeedMps = 0.04
+MinRotSpeedRps = 0.10
+# odometry noise for the unseen-contact evidence (unseen_contact.h): sigma of a tick's measured displacement (m)
+UnseenOdoSigmaM = 0.005

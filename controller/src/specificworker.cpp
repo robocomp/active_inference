@@ -1083,6 +1083,16 @@ void SpecificWorker::load_params()
          "absolute pose error as an OU process: stationary std (m) — tools/pose_error_stats.py");
 	cfgr.opt_cast<double>("Policy.PoseDriftTimeS", params.policy_pose_drift_time_s,
          "absolute pose error as an OU process: correlation time (s) — tools/pose_error_stats.py");
+	cfgr.opt("Policy.Enabled", params.policy_enabled,
+         "Task 8: the local look-ahead policy drives every motion; the old chain (escape, backoff, caps, band, tracker, servo) is OFF");
+	cfgr.opt_cast<double>("Policy.RiskEps", params.policy_risk_eps, "acceptable P(contact) per Drive decision");
+	cfgr.opt_cast<double>("Policy.ReleaseRiskMax", params.policy_release_risk_max, "a Release only below this P(contact)");
+	cfgr.opt_cast<double>("Policy.ProgressScaleM", params.policy_progress_scale_m, "metres of progress worth one nat over one horizon");
+	cfgr.opt_cast<double>("Policy.HorizonS", params.policy_horizon_s, "candidate hold time (s) before the brake tail");
+	cfgr.opt_cast<double>("Policy.CommandLatencyS", params.policy_command_latency_s, "PROVISIONAL: send -> wheels latency (s)");
+	cfgr.opt_cast<double>("Policy.MinLinearSpeedMps", params.policy_min_linear_speed_mps, "PROVISIONAL deadband when the capability is absent");
+	cfgr.opt_cast<double>("Policy.MinRotSpeedRps", params.policy_min_rot_speed_rps, "PROVISIONAL deadband when the capability is absent");
+	cfgr.opt_cast<double>("Policy.UnseenOdoSigmaM", params.policy_unseen_odo_sigma_m, "odometry sigma of one tick's displacement (m)");
 	cfgr.opt("Target.EdgeType", params.target_edge_type,
          "");
 	cfgr.opt_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m,
@@ -2086,6 +2096,11 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	std::string why;
 	if (not pose.has_value()) why = "the robot's pose in the room is not known";
 	else if (not grid.has_world() or room.size() < 3) why = "there is no map of the room yet to check the way is clear";
+	// ★ Task 8: with the local policy driving, a relative move NEVER re-arms the base — the operator's Stop always wins (the
+	//   probe's rule, Task 7 review): a disarmed / paused base refuses the move with the reason.
+	else if (session_.policy_enabled() and (not motion_commander_.output_enabled() or not driving_enabled_ or paused_))
+		why = paused_ ? "the base is paused — press Pause again to resume first"
+		              : "the base is disarmed (Stop) — press Run first; a move order never re-arms it";
 	if (why.empty())
 	{
 		const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.pose_free(p, yaw); };
@@ -2108,9 +2123,13 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	clear_manual_target();
 	// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
 	// by chat_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
-	paused_ = false;
-	motion_commander_.set_output_enabled(true);
-	driving_enabled_ = true;
+	// ★ Task 8: NOT with the local policy driving (refused above when disarmed) — there is nothing to arm here then.
+	if (not session_.policy_enabled())
+	{
+		paused_ = false;
+		motion_commander_.set_output_enabled(true);
+		driving_enabled_ = true;
+	}
 	hibernationTick();
 	const auto v = relative_motion_.view();
 	std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
@@ -2237,6 +2256,36 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		session_.note_why(rc::why::Cause::Halted, paused_ ? std::string("PAUSED during a move order")
 		                                                  : std::string("driving is off during a move order — press Run"));
 		motion_commander_.stop_robot();
+		update_custom_widget(*pose);
+		return true;
+	}
+	// ★ Task 8: with the local policy driving, the step is a GOAL for it (RelativeMotion::policy_goal) — its control law and
+	//   its own lookahead free tests are off; the policy judges contact. Completion stays RelativeMotion's own tolerance.
+	if (session_.policy_enabled())
+	{
+		const auto g = relative_motion_.policy_goal();
+		if (g.has_value())
+		{
+			const float yaw = g->theta + static_cast<float>(M_PI_2);   // the controller's theta -> the policy's forward yaw
+			const auto &rp = relative_motion_.params;
+			const auto spec = g->turn ? rc::policy::heading_goal(g->pos, yaw, rp.yaw_tol_rad)
+			                          : rc::policy::place_goal(g->pos, yaw, rp.pos_tol_m, rp.yaw_tol_rad);
+			const auto rv = relative_motion_.view();
+			const auto tick = session_.policy_tick(spec, std::format("move #{}", rv.id), *pose, obstacle_tracker_, motion_commander_, now_ms);
+			const bool failed = tick.verdict == ControllerSession::PolicyVerdict::Unreachable
+			                    or (tick.verdict == ControllerSession::PolicyVerdict::Held and tick.stuck);
+			relative_motion_.policy_step(pose->pos, pose->theta, now_ms,
+			                             failed ? std::optional<std::string>("the local policy cannot continue: " + tick.why) : std::nullopt);
+		}
+		if (not relative_motion_.active())
+		{
+			motion_commander_.stop_robot();
+			session_.policy_reset();
+			const auto v = relative_motion_.view();
+			std::println("[move] relative motion #{} '{}' {}: {} — at ({:.2f},{:.2f}) yaw {:.0f} deg (local policy)", v.id, v.text,
+			             rc::RelativeMotion::phase_name(v.phase), v.last_event, pose->pos.x(), pose->pos.y(),
+			             (pose->theta + M_PI_2) * 180.0 / M_PI);
+		}
 		update_custom_widget(*pose);
 		return true;
 	}

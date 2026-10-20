@@ -3,6 +3,7 @@
 #include <QPointF>
 
 #include <algorithm>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -31,6 +32,9 @@
 #include "stall_judge.h"
 #include "trajectory_controller.h"
 #include "../../common/affordance_manager/affordance_manager.h"
+#include "local_policy/goal_adapter.h"
+#include "local_policy/navigator.h"
+#include "local_policy/unseen_contact.h"
 
 class ControllerSession
 {
@@ -184,6 +188,26 @@ public:
               ControllerMotionCommander &motion_commander,
               std::source_location loc = std::source_location::current());
 
+    // ── Task 8: ONE LOCAL POLICY DRIVES EVERY MOTION (controller_policy_drive.cpp) ─────────────────────────────────────────
+    // [Policy] Enabled: execute_plan hands the cycle to drive_with_policy BEFORE the escape / backoff / anchor servo /
+    // lock-on / orient / band / tracker branches, which then do not run; ensure_current_plan skips escape and backoff. The
+    // old chain is switched OFF, not deleted. The protocol halves (arrival → finalize_reached, the cross's through /
+    // hand-back, the lock-on and orient completion predicates, Unreachable) are unchanged and shared.
+    [[nodiscard]] bool policy_enabled() const { return params_ != nullptr and params_->policy_enabled; }
+    // One policy tick toward `spec` (also the relative-motion path, SpecificWorker::step_relative_motion): builds the
+    // input, keeps the Navigator's goal (set_goal only when the goal moved beyond its own tolerance), steps it, sends the
+    // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
+    enum class PolicyVerdict { Driving, Arrived, Held, Unreachable };
+    struct PolicyTick { PolicyVerdict verdict = PolicyVerdict::Held; std::string why; bool stuck = false;
+                        float field_m = std::numeric_limits<float>::infinity(); };
+    // `also_free`: space the planner's map does not hold but the goal may be reached through (a doorway's measured corridor,
+    // goal_adapter.h in_doorway_corridor); empty = the map alone.
+    PolicyTick policy_tick(const rc::policy::GoalSpec &spec, const std::string &who, const ControllerRobotPose &robot_pose,
+                           ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                           std::uint64_t now_ms, std::function<bool(const Eigen::Vector2f &)> also_free = {});
+    // The policy's state belongs to one goal owner: dropped on Stop / abort and when the owner ends.
+    void policy_reset();
+
     // ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only: nothing that drives reads these.
     // The worker begin()s the evidence at the top of each control pass and selects the verdict at its end; every branch
     // of this class that ends a cycle without motion notes its cause here, with the numbers it decided on.
@@ -260,7 +284,7 @@ private:
     // (LOCKED or GIVE_UP); drives the base directly via the motion commander.
     bool step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                     const TimeSource &time_source);
+                     const TimeSource &time_source, bool drive_base = true);   // Task 8: false = protocol only
     // try104: the in-place turns and nudges that own the base (Orient, lock-on) go through the SAME live-returns net as
     // the tracker, the escape and the anchor servo — they used to reach the base uncapped. Sends what the net allows,
     // or stops when it holds the whole command.
@@ -276,7 +300,7 @@ private:
     // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
     bool step_orient(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                     const TimeSource &time_source, float target_yaw);
+                     const TimeSource &time_source, float target_yaw, bool drive_base = true);   // Task 8: false = protocol only
     // What the 2D view draws for a running Orient: the bearing asked for, and whether to draw it at
     // all. Latched where the program is built (which is the only place that knows the policy) and
     // pushed to the display beside the rest of the overlay.
@@ -326,6 +350,50 @@ private:
                           // reported to the producer as one.
                           std::optional<rc::affordance::Outcome> outcome_override = std::nullopt,
                           std::source_location floc = std::source_location::current());
+
+    // ── Task 8: the policy drive (controller_policy_drive.cpp) ─────────────────────────────────────────────────────────
+    void drive_with_policy(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+                           ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                           ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
+    // The ARRIVAL protocol of a point target (servo → lock-on, already-there, approach-only retry, REACH), extracted from
+    // execute_plan so the tracker and the policy consume an arrival through the same code. Returns true when the cycle is
+    // over (an arrival was consumed or a lock-on started). `drive_base` false: a lock-on started here does not move the
+    // base (the policy drives its heading).
+    bool consume_goal_reached(bool goal_reached, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source,
+                              bool drive_base);
+    // The cross's PROTOCOL half (step_anchor_cross's bookkeeping, shared with the policy): the measured gap, the near-side
+    // gate, through / not-a-crossing / wait timeouts. `ended` = this cycle is over (finalized, handed back or stopped).
+    struct CrossProtocol
+    {
+        bool ended = false, drive = false, on_gap = false;
+        rc::interaction::RelPose drive_pose, pose;     // the pose driven on; the pose the guards / the wait-turn are asked about
+        float drive_width = 0.f;
+        std::string drive_name;
+        std::vector<rc::interaction::AnchorLeaf> drive_leaves;
+    };
+    CrossProtocol cross_protocol(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+                                 ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                                 ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
+    void cross_hand_back(const std::string &why, bool timed_out, ControllerMotionCommander &motion_commander);
+    static std::string contract_key_of(const DSR::Node &node);   // the affordance contract key of a parent object node
+    void read_base_odometry(const ControllerWorldModel &world_model, std::uint64_t timestamp_ms);
+    rc::policy::Navigator policy_nav_;
+    std::optional<rc::policy::GoalSpec> policy_goal_;            // the goal the Navigator holds
+    std::string policy_goal_who_;
+    std::size_t policy_world_hash_ = 0;                          // the planner world the field was built on
+    std::optional<rc::RobotFootprint> policy_body_;              // the BARE body (contact is against the bare hull)
+    rc::policy::UnseenContact policy_unseen_;
+    std::deque<rc::policy::SentCommand> policy_sent_;            // send history (s, steady) for the commands in force
+    std::optional<rc::policy::Pose2> policy_odom_;               // odometry pose: integrated wheel speeds, never relocalised
+    double policy_odom_t_ = 0.0, policy_last_tick_s_ = -1.0;
+    float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
+    bool odo_valid_ = false;
+    int policy_last_mode_ = -1;
+    std::string policy_last_why_;
+    std::ofstream policy_csv_;
+    std::uint64_t policy_no_field_since_ms_ = 0;
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
     // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and

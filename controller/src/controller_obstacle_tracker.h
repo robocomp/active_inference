@@ -43,9 +43,9 @@ class ControllerObstacleTracker
         // scan; the one-frame hold that made it necessary is gone, so both consumers read this one
         // (which is also the better of the two — it registers room←lidar per plane).
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
-        // ⚠⚠ TODO(Task 8): FLOOR LEAK — the helios's grazing far-floor returns (beyond ~3.9 m range) read 0.13-0.17 m high
-        //   (ROBOT_GEOMETRY.md) and therefore FALL IN THIS LOW BAND. They MUST be cut (range limit or elevation test)
-        //   before the policy consumes this buffer, or they become phantom contact returns.
+        // ★ Task 8: the helios's grazing far-floor returns (beyond ~3.9 m, reading 0.13-0.17 m high) are NOT in this buffer —
+        //   a helios return below the legacy 0.20 m floor is cut by SOURCE at capture (lidar_height_band.h, the physical rule
+        //   there); the low band is the bpearl's.
         // Task 7: the local policy's CONTACT set — the same registered sweep, cut at Lidar.ContactMinHeightM instead of the
         // legacy 0.20 m (lidar_height_band.h). Same timestamps as lidar_buffer(): a read at one ts gets the same sweep.
         rc::LidarPointBuffer *contact_buffer() { return &contact_room_buffer_; }
@@ -69,6 +69,9 @@ class ControllerObstacleTracker
         // source STAMP spacing, which is blind to dropped frames by construction). The two differ by
         // the drop rate. -1 until enough scans have arrived to measure one.
         float lidar_processed_hz() const { return lidar_processed_hz_; }
+        // Task 8: steady-clock ms at which the newest scan was ACCEPTED (0 = none yet) — the local policy's returns age.
+        // Control thread (handle_lidar_points runs there).
+        std::uint64_t last_scan_accept_steady_ms() const { return lidar_accept_wall_ms_.empty() ? 0 : lidar_accept_wall_ms_.back(); }
 
         // ── WHAT THE DRAWN CLOUD IS ACTUALLY ANCHORED TO ─────────────────────────────────────────
         // The room←robot YAW used to place the cloud now sitting in the room buffer, and the scan

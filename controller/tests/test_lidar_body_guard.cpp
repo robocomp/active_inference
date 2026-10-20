@@ -694,6 +694,26 @@ int main()
         const auto high = rc::lidar_band_membership(p.temporary_obstacle_max_height_m + 0.1f, bands);   // above the body
         CHECK(not high.policy and not high.legacy);
         CHECK(not rc::lidar_band_membership(std::nanf(""), bands).policy);
+
+        // helios_far_floor_cut (Task 8, the Task-7 review's required item): the inverted helios's lowest beam (-15.5 deg at
+        // 1.075 m) meets the floor 3.88 m out and its grazing floor returns read 0.13-0.17 m — inside the low band. Below the
+        // legacy floor (0.20) a helios return is that floor (or something >= 3.16 m away at the same grazing angle, which the
+        // floor masks): the policy's low band is the BPEARL's. At or above 0.20 m the helios contributes as before.
+        const auto helios_floor = rc::lidar_band_membership(0.15f, bands, rc::LidarSource::Helios);
+        CHECK(not helios_floor.policy and not helios_floor.legacy);
+        const auto bpearl_low = rc::lidar_band_membership(0.15f, bands, rc::LidarSource::Bpearl);
+        CHECK(bpearl_low.policy and not bpearl_low.legacy);
+        const auto helios_wall = rc::lidar_band_membership(0.25f, bands, rc::LidarSource::Helios);
+        CHECK(helios_wall.policy and helios_wall.legacy);
+        const auto unknown_low = rc::lidar_band_membership(0.15f, bands, rc::LidarSource::Unknown);   // no plane id: unchanged
+        CHECK(unknown_low.policy);
+        CHECK(rc::lidar_source_of_plane(0) == rc::LidarSource::Helios and rc::lidar_source_of_plane(1) == rc::LidarSource::Bpearl
+              and rc::lidar_source_of_plane(-1) == rc::LidarSource::Unknown);
+        // the geometry the rule rests on: the lowest helios beam cannot reach the 0.20 m band floor closer than ~3.16 m
+        const float r_020 = (rc::kHeliosMountZ - 0.20f) / std::tan(rc::kHeliosLowestBeamRad);
+        std::println("  helios_far_floor_cut: helios lowest beam reaches z 0.20 m at {:.2f} m, the floor at {:.2f} m", r_020,
+                     rc::kHeliosMountZ / std::tan(rc::kHeliosLowestBeamRad));
+        CHECK(r_020 > 3.0f);
     }
 
     std::println("{} / {} checks passed", checks - failures, checks);

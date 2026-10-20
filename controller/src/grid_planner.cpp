@@ -269,6 +269,15 @@ float GridPlanner::risk_at(const Eigen::Vector2f& pos_room) const
     return risk_[idx(ix, iy)];
 }
 
+float GridPlanner::body_risk_at(const Eigen::Vector2f& pos_room) const
+{
+    int ix, iy;
+    if (risk_.empty() or offsets_.size() != kHeadings or not world_to_cell(pos_room, ix, iy)) return 0.f;
+    float r = std::numeric_limits<float>::infinity();
+    for (int h = 0; h < kHeadings; ++h) r = std::min(r, state_risk(ix, iy, h));
+    return std::isfinite(r) ? r : 0.f;
+}
+
 float GridPlanner::state_risk(int ix, int iy, int h) const
 {
     if (risk_.empty() or offsets_.size() != kHeadings) return 0.f;

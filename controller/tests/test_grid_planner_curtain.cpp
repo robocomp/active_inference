@@ -270,6 +270,21 @@ int main()
         check(not m.failed_here("aff_a", {1.f, 1.f}, {0.f, 0.f}, true), "cleared (approach end): asks the planner again");
     }
 
+    // ── 5. THE LOCAL POLICY'S DENSITY (Task 8) ────────────────────────────────────────────────────────────────
+    std::printf("\n5. body risk for the policy's cost-to-go\n");
+    {
+        auto weak = planner_with(wall, uniform_risk(wall.size(), 0.6f, 1.5f));
+        const Eigen::Vector2f on = wall[wall.size() / 2];
+        const float cell = weak.risk_at(on), body = weak.body_risk_at(on);
+        std::printf("      on the curtain: one cell %.2f nats, under the body (cheapest heading) %.2f nats\n", cell, body);
+        check(body > cell and cell > 0.f, "(5) the body covers more than one soft cell: its risk exceeds one cell's");
+        check(weak.body_risk_at(start) == 0.f, "(5) open floor: no risk under the body");
+        auto empty = planner_with({}, {});
+        check(empty.body_risk_at(on) == 0.f, "(5) no soft layer: 0");
+        check((weak.grid_origin() - Eigen::Vector2f(weak.grid_origin())).norm() == 0.f and weak.cell_size() > 0.f,
+              "(5) grid geometry exposed");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

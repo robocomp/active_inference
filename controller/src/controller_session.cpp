@@ -74,6 +74,8 @@ std::string parent_contract_key(const DSR::Node &node)
 }
 }  // namespace
 
+std::string ControllerSession::contract_key_of(const DSR::Node &node) { return parent_contract_key(node); }
+
 void ControllerSession::set_params(const ControllerParams *params)
 {
     params_ = params;
@@ -655,6 +657,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         }
 
     update_base_speed(*robot_pose, timestamp_ms);   // base speed for the contract stillness gate
+    read_base_odometry(world_model, timestamp_ms);  // Task 8: the wheels' measured speeds for the local policy
     overlay_now_ms_ = timestamp_ms;                 // overlay dead-reckoning target + base time
     overlay_lidar_ts_ms_ = obstacle_tracker.last_lidar_timestamp_ms();
     update_overlay_extrapolation(world_model, *robot_pose, timestamp_ms, obstacle_tracker.rt_block_lead_ms(),
@@ -2787,7 +2790,9 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         }
     }
 
-    if (escape_active_)
+    // Task 8: with the local policy driving, the escape and the returns' backoff are OFF (the policy's Release is the only
+    // recovery) — neither may own the base.
+    if (escape_active_ and not policy_enabled())
     {
         display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
         step_escape(step.robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
@@ -2795,7 +2800,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         return false;
     }
     // Task 14 fix round 4: the returns' backoff owns the base the same way, until clearance is open; then the planner.
-    if (returns_backoff_active_
+    if (returns_backoff_active_ and not policy_enabled()
         and step_returns_backoff(step.robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
     {
         note_hold("returns' backoff owns the base");
@@ -3131,7 +3136,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         // ★ Task 14 fix round 4 (try79: "HOLDING — no route" for 300 s beside room_2's east wall): a planner that cannot
         //   route from a pose hemmed in by REAL returns is not "a planner fault reversing cannot fix" — the start pose is
         //   inside the band the body's own margin claims. Back off those returns first (step_returns_backoff), then re-plan.
-        if (not returns_backoff_failed_)
+        if (not returns_backoff_failed_ and not policy_enabled())   // Task 8: no backoff while the policy drives
         {
             const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
             if (hemmed_in_by_returns(live_returns(pose, obstacle_tracker, path_controller))
@@ -3717,68 +3722,52 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
     return gap_line_.has_value();
 }
 
-// One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
-//   1. the anchor's jambs (rc::anchor_jamb_guard: translation along the direction the base actually moves, unfloored, for
-//      the last ~0.4 m the LiDAR self-filter cannot see; |rot| by the corners' sweep onto the jambs, unfloored; and, Task 9
-//      fix C, the servo's own way out of the deadlock those two caps make with a jamb inside the grown body); then the
-//      live field (LiDAR only, see refresh_lidar_field) along the same direction, floored at 0.05 m/s exactly as
-//      set_speed_limit floors the tracker's; and (Task 14) the raw returns, body-filtered, on the swept path and the
-//      corner sweep, UNFLOORED (lidar_body_guard.h) — the net that does not trust the anchor;
-//   2. motion_commander.apply_uncertainty_speed_limit;
-//   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts — Task 9: a Spinning verdict on the
-//      servo's own rotation-dominant command is not a wedge, bounded below by the cross contract's timeout);
-//   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
-// A STALE anchor (Task 9, fix A) is waited for: after a fresh one in this step the base stops; before, it turns in place
-// toward where the anchor was last published. The wait is bounded by the cross contract's timeout, then Unreachable.
-// The LiDAR-stall EMERGENCY hold sits above all of this in SpecificWorker (compute() is not called at all).
-void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
-                                          rc::TrajectoryController &path_controller,
-                                          ControllerObstacleTracker &obstacle_tracker,
-                                          ControllerMotionCommander &motion_commander,
-                                          ControllerDisplay &display,
-                                          rc::AffordanceManager &affordance_manager,
-                                          const TimeSource &time_source)
+// ── THE CROSS'S PROTOCOL HALF (Task 8: extracted from step_anchor_cross; the servo and the local policy share it) ────────
+// One cycle of bookkeeping on this cycle's anchor: the measured gap (update_doorway_gap), whether to drive or wait (Task 9
+// fix A, Task 13/16), the near-side gate (try89), and the completion: rc::cross_progress — THROUGH (finalize, or the door
+// passage's when clearing), NOT A CROSSING (handed back), or going on; on a wait, the contract's timeout and the engaged
+// stop. Returns ended = true when this cycle is over (nothing may be commanded after it).
+void ControllerSession::cross_hand_back(const std::string &why, bool timed_out, ControllerMotionCommander &motion_commander)
 {
-    const auto &a = *anchor_cross_;
-    const std::uint64_t now = time_source();
-    const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
-    const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
-    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
-    // The body's lateral half-width: the footprint's reach along body ±x (the passage code's own body model, safety
-    // margin included).
-    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
-                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
-    // Shadow is DIFFERENTIAL (the bridge drops `side`); an unknown capability is treated the same way, since a side
-    // command the base may drop is the one assumption that fails silently.
-    const bool holonomic = base_capability_.holonomic.value_or(false);
-    // The bound on a wait and on a non-wedge spin: the cross contract's own timeout (door_concept's CrossTimeoutS) — no
-    // new constant. Handed back as Unreachable, which the door passage counts as an attempt and re-offers.
-    auto hand_back = [&](const std::string &why, bool timed_out = true)
+    if (door_passage_.clearing())
     {
-        if (door_passage_.clearing())
-        {
-            // Task 12 Fix E: no claim to hand back past the room switch — the anchor is lost; the passage moves on (its
-            // room-switch rule) with the robot where it is.
-            std::println("[anchor] cross: {} while going through past the room switch — the anchor is given up", why);
-            note_why(rc::why::Cause::AnchorHandBack, std::format("past the room switch: {} — the anchor is given up", why));
-            anchor_cross_engaged_ = false;
-            anchor_wait_since_ms_ = 0;
-            anchor_spin_since_ms_ = 0;
-            note_no_command(); motion_commander.stop_robot();
-            return;
-        }
-        if (timed_out)
-            std::println("[anchor] cross: {} — beyond the cross contract's timeout ({:.1f} s): handing '{}' back Unreachable",
-                         why, target_contract_.timeout_ms * 1e-3f, anchor_latched_for_);
-        else
-            std::println("[anchor] cross: {}: handing '{}' back Unreachable", why, anchor_latched_for_);
-        flag_reach_unreachable("anchor cross: " + why);
-        note_why(rc::why::Cause::AnchorHandBack, std::format("'{}' handed back Unreachable: {}", anchor_latched_for_, why));
+        // Task 12 Fix E: no claim to hand back past the room switch — the anchor is lost; the passage moves on (its
+        // room-switch rule) with the robot where it is.
+        std::println("[anchor] cross: {} while going through past the room switch — the anchor is given up", why);
+        note_why(rc::why::Cause::AnchorHandBack, std::format("past the room switch: {} — the anchor is given up", why));
+        anchor_cross_engaged_ = false;
         anchor_wait_since_ms_ = 0;
         anchor_spin_since_ms_ = 0;
         note_no_command(); motion_commander.stop_robot();
-    };
+        return;
+    }
+    if (timed_out)
+        std::println("[anchor] cross: {} — beyond the cross contract's timeout ({:.1f} s): handing '{}' back Unreachable",
+                     why, target_contract_.timeout_ms * 1e-3f, anchor_latched_for_);
+    else
+        std::println("[anchor] cross: {}: handing '{}' back Unreachable", why, anchor_latched_for_);
+    flag_reach_unreachable("anchor cross: " + why);
+    note_why(rc::why::Cause::AnchorHandBack, std::format("'{}' handed back Unreachable: {}", anchor_latched_for_, why));
+    anchor_wait_since_ms_ = 0;
+    anchor_spin_since_ms_ = 0;
+    note_no_command(); motion_commander.stop_robot();
+}
 
+ControllerSession::CrossProtocol ControllerSession::cross_protocol(const ControllerRobotPose &robot_pose,
+                                                                   rc::TrajectoryController &path_controller,
+                                                                   ControllerObstacleTracker &obstacle_tracker,
+                                                                   ControllerMotionCommander &motion_commander,
+                                                                   ControllerDisplay &display,
+                                                                   rc::AffordanceManager &affordance_manager,
+                                                                   const TimeSource &time_source)
+{
+    CrossProtocol out;
+    const auto &a = *anchor_cross_;
+    const std::uint64_t now = time_source();
+    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+    auto hand_back = [&](const std::string &why, bool timed_out = true) { cross_hand_back(why, timed_out, motion_commander); };
     // Task 12 fix A (fix round 1: every hinge × swing hypothesis with its probability): the swung leaf the owner publishes
     // (anchor frame) — obstacles for the guards, weighted by their probability, and the cross line from the gaps they leave.
     // Rigid in the anchor frame, so it serves the waited-for pose as well as a fresh one.
@@ -3820,7 +3809,6 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     const float drive_width = on_gap ? gap_width_ : a.width_m;
     const std::span<const rc::interaction::AnchorLeaf> drive_leaves = on_gap ? no_leaves : leaves;
     const std::string drive_name = on_gap ? std::format("the measured gap of {}", a.name) : a.name;
-    rc::AnchorCommand cmd;
     rc::interaction::RelPose pose = drive_pose;   // the pose the guards are asked about
     // ★ Task 13 (try74 leg 1: 40 s at s +1.56 waiting for a far-side anchor that never published): past the room switch
     //   the cross is completed on the ODOMETRY-CARRIED pose door_concept keeps writing (its wait pose: the last sighting,
@@ -3858,31 +3846,20 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         }
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
-        // try101: P(body fits) read where the body will ENTER the opening — a differential base re-centres by advancing, not
-        // by turning to face along the wall. The advance it has for that: up to the mouth (its front = the footprint's reach
-        // ahead, margin included, like half_w), and no further than the body, aligned with the normal where it stands, can go
-        // before the live cloud is in its way (rc::lidar_free_advance: a leaf, a jamb — the gap's span ends at the leaf, its
-        // depth toward the robot is only in the cloud).
-        float free_advance = std::numeric_limits<float>::infinity();
-        if (auto *lidar = obstacle_tracker.lidar_buffer(); lidar != nullptr and drive_pose.x.allFinite())
-        {
-            const auto &cp = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-            if (const auto pts = rc::lidar_robot_points_from_buffer(*lidar, cp.as_transform(), returns_body(), self_body_);
-                pts.has_value())
-                free_advance = rc::lidar_free_advance(*pts, rc::anchor_cross_geometry(drive_pose).n, returns_body());
-        }
-        cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
-                                       approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)), free_advance);
-        if (cmd.through and not cross_gate_.through(cmd.through))
+        // ★ Task 8: the completion is rc::cross_progress on the pose driven on (s >= standoff, gated by the near side) — the
+        //   servo's `through` was the same test (anchor_cross_command: s >= standoff); one definition for both drivers.
+        const auto progress = rc::cross_progress(drive_pose, standoff, cross_gate_);
+        if (progress == rc::CrossProgress::NotACrossing)
         {
             // try89 fix: s ≥ standoff on a claim that never saw the robot on the near side is not a crossing — the frame is
             // wrong (a flipped leftover anchor), not the robot through. Handed back; the passage counts it and re-offers.
             const auto g = rc::anchor_cross_geometry(drive_pose);
             hand_back(std::format("{} reads s {:+.2f} m (≥ standoff) but the robot was never observed on its near side in this "
                                   "claim — not a crossing", drive_name, g.s), /*timed_out=*/false);
-            return;
+            out.ended = true;
+            return out;
         }
-        if (cmd.through)
+        if (progress == rc::CrossProgress::Through)
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);
             // Task 12 Fix E: past a room switch the cross's node is gone — `through` is the door passage's to act on.
@@ -3896,14 +3873,16 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                      drive_name, g.s, standoff));
                 path_controller.stop();
                 note_no_command(); motion_commander.stop_robot();
-                return;
+                out.ended = true;
+                return out;
             }
             std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through{}",
                          drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
             path_controller.stop();
             finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos,
                              time_source(), /*allow_dwell=*/false);
-            return;
+            out.ended = true;
+            return out;
         }
     }
     else
@@ -3912,7 +3891,8 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         if (target_contract_known_ and double(now - anchor_wait_since_ms_) > double(target_contract_.timeout_ms))
         {
             hand_back(std::format("the anchor {} stayed stale for {:.1f} s", a.name, (now - anchor_wait_since_ms_) * 1e-3));
-            return;
+            out.ended = true;
+            return out;
         }
         if (anchor_cross_engaged_)
         {
@@ -3923,7 +3903,8 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                  (now - anchor_wait_since_ms_) * 1e-3));
             reset_stuck_window();
             note_no_command(); motion_commander.stop_robot();
-            return;
+            out.ended = true;
+            return out;
         }
         // Not seen yet: turn in place toward where it was last published, carried by the robot's own turn since then.
         if (a.pose.stamp_ms != anchor_wait_stamp_)
@@ -3935,6 +3916,85 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         pose = anchor_wait_pose_;
         pose.x = rc::interaction::move_mean(anchor_wait_pose_.x, 0.f, 0.f,
                                             rc::interaction::wrap_pi(robot_pose.theta - anchor_wait_theta_));
+    }
+    out.drive = drive;
+    out.on_gap = on_gap;
+    out.drive_pose = drive_pose;
+    out.pose = pose;
+    out.drive_width = drive_width;
+    out.drive_name = drive_name;
+    out.drive_leaves.assign(drive_leaves.begin(), drive_leaves.end());
+    return out;
+}
+
+
+// One cycle of the cross on the anchor. The command takes the SAME guarded path the tracker's does in execute_plan:
+//   1. the anchor's jambs (rc::anchor_jamb_guard: translation along the direction the base actually moves, unfloored, for
+//      the last ~0.4 m the LiDAR self-filter cannot see; |rot| by the corners' sweep onto the jambs, unfloored; and, Task 9
+//      fix C, the servo's own way out of the deadlock those two caps make with a jamb inside the grown body); then the
+//      live field (LiDAR only, see refresh_lidar_field) along the same direction, floored at 0.05 m/s exactly as
+//      set_speed_limit floors the tracker's; and (Task 14) the raw returns, body-filtered, on the swept path and the
+//      corner sweep, UNFLOORED (lidar_body_guard.h) — the net that does not trust the anchor;
+//   2. motion_commander.apply_uncertainty_speed_limit;
+//   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts — Task 9: a Spinning verdict on the
+//      servo's own rotation-dominant command is not a wedge, bounded below by the cross contract's timeout);
+//   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
+// A STALE anchor (Task 9, fix A) is waited for: after a fresh one in this step the base stops; before, it turns in place
+// toward where the anchor was last published. The wait is bounded by the cross contract's timeout, then Unreachable.
+// The LiDAR-stall EMERGENCY hold sits above all of this in SpecificWorker (compute() is not called at all).
+void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
+                                          rc::TrajectoryController &path_controller,
+                                          ControllerObstacleTracker &obstacle_tracker,
+                                          ControllerMotionCommander &motion_commander,
+                                          ControllerDisplay &display,
+                                          rc::AffordanceManager &affordance_manager,
+                                          const TimeSource &time_source)
+{
+    const auto &a = *anchor_cross_;
+    const std::uint64_t now = time_source();
+    const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
+    const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
+    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    // The body's lateral half-width: the footprint's reach along body ±x (the passage code's own body model, safety
+    // margin included).
+    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+    // Shadow is DIFFERENTIAL (the bridge drops `side`); an unknown capability is treated the same way, since a side
+    // command the base may drop is the one assumption that fails silently.
+    const bool holonomic = base_capability_.holonomic.value_or(false);
+    auto hand_back = [&](const std::string &why, bool timed_out = true) { cross_hand_back(why, timed_out, motion_commander); };
+    // ★ Task 8: the PROTOCOL half (gap, near-side gate, through / not-a-crossing, the stale-anchor wait) is cross_protocol,
+    //   shared with the local policy's doorway drive; what follows is the servo's own motion law and its guard chain.
+    const CrossProtocol cp = cross_protocol(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
+                                            affordance_manager, time_source);
+    if (cp.ended) return;
+    const bool drive = cp.drive;
+    const rc::interaction::RelPose &drive_pose = cp.drive_pose;
+    const float drive_width = cp.drive_width;
+    const std::string &drive_name = cp.drive_name;
+    const std::span<const rc::interaction::AnchorLeaf> drive_leaves(cp.drive_leaves);
+    rc::AnchorCommand cmd;
+    rc::interaction::RelPose pose = cp.pose;   // the pose the guards are asked about
+    if (drive)
+    {
+        // try101: P(body fits) read where the body will ENTER the opening — a differential base re-centres by advancing, not
+        // by turning to face along the wall. The advance it has for that: up to the mouth (its front = the footprint's reach
+        // ahead, margin included, like half_w), and no further than the body, aligned with the normal where it stands, can go
+        // before the live cloud is in its way (rc::lidar_free_advance: a leaf, a jamb — the gap's span ends at the leaf, its
+        // depth toward the robot is only in the cloud).
+        float free_advance = std::numeric_limits<float>::infinity();
+        if (auto *lidar = obstacle_tracker.lidar_buffer(); lidar != nullptr and drive_pose.x.allFinite())
+        {
+            const auto &cp_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+            if (const auto pts = rc::lidar_robot_points_from_buffer(*lidar, cp_pose.as_transform(), returns_body(), self_body_);
+                pts.has_value())
+                free_advance = rc::lidar_free_advance(*pts, rc::anchor_cross_geometry(drive_pose).n, returns_body());
+        }
+        cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
+                                       approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)), free_advance);
+    }
+    else
+    {
         // Fix round 1: toward the opening's centre while it is ahead; once the body's centre is within half a body length of
         // the wall plane (or past it, a retry that starts in the doorway) the centre may lie BESIDE or BEHIND the robot, and
         // the way to see it again is to face along the crossing: the normal (heading_err).
@@ -5647,6 +5707,203 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
     }
 }
 
+// ── THE ARRIVAL PROTOCOL OF A POINT TARGET (Task 8: extracted from execute_plan, shared with the local policy) ──────────
+bool ControllerSession::consume_goal_reached(bool goal_reached, const ControllerRobotPose &robot_pose,
+                                             rc::TrajectoryController &path_controller,
+                                             ControllerObstacleTracker &obstacle_tracker,
+                                             ControllerMotionCommander &motion_commander, ControllerDisplay &display,
+                                             rc::AffordanceManager &affordance_manager, const TimeSource &time_source,
+                                             bool drive_base)
+{
+    // ★★★A "REACHED" WITH NO PATH IS NOT AN ARRIVAL. compute()'s FIRST line returns
+    //     if (!active_ || path_room_.empty()) { active_ = false; out.goal_reached = true; return out; }
+    // so a target adopted this cycle — before any path is installed — reports reached. Consuming that
+    // told the producer a cell was visited while the robot stood 3.11 m away: 383 completions, robot
+    // stationary, room re-offering an unvisited cell and the consumer answering "I just did that".
+    // ★THE DISCRIMINATOR IS WHERE THE ROBOT ACTUALLY IS. A genuine arrival has the body overlapping
+    // the standpoint (measured live: 0.18 m of a 6.85 m approach); the degenerate one had the robot
+    // 3.11 m away. The bound is the arrival band plus the body radius — both already in the system,
+    // so nothing new is introduced, and it is deliberately generous: it exists to reject a metres-away
+    // "arrival", not to re-judge a close one. Being slightly outside the band is still an arrival.
+    const float d_here =
+        last_target_info_.has_value()
+            ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
+            : std::numeric_limits<float>::infinity();
+    // ★★★AND IT MUST BE THE STANDPOINT THAT WAS ASKED FOR. d_here measures against OUR target — the
+    // pose after the repair — so a repair that relocated the goal onto the robot satisfies this test
+    // without the robot moving: 140 of 163 accepted arrivals were a median 2.86 m from the published
+    // cell (measured 2026-08-19, standpoint_audit.jsonl). The producer is then told a cell was visited
+    // that nothing ever looked at, its neglect drops, and the standpoint is never offered again — the
+    // one failure the whole protocol exists to prevent, reported as success.
+    // ★The allowance is the repair WE applied, so an honest few-centimetre correction still arrives and
+    // a substitution cannot. No new constant: the band is the arrival band, the slack is our own edit.
+    // ★DELIBERATELY NOT KEYED ON "a path was active". Measured: 163 of 163 arrivals — the genuine ones
+    // included — report no active path, because the follower deactivates itself on reaching the goal.
+    // The empty-path degenerate and a real arrival are indistinguishable there; only distance separates
+    // them, which is why this test is a distance and not a state.
+    const float d_published =
+        (last_target_info_.has_value() and last_raw_target_pos_.has_value())
+            ? (*last_raw_target_pos_ - robot_pose.pos.head<2>().cast<float>()).norm()
+            : d_here;
+    const float arrival_band = path_controller.goal_threshold() + approach_body_.circumscribed_radius();
+    // ★AN APPROACH IS JUDGED AGAINST THE APPROACH POSE, and completed as `unreachable`. Without the
+    // first half the robot would arrive at the closest reachable pose and the guard would reject it
+    // (the published cell is metres away, correctly), leaving the claim standing for ever; without the
+    // second half we would be back to reporting an arrival at a cell nothing ever looked at.
+    const bool arrival_is_real =
+        not last_target_info_.has_value() or not last_target_info_->from_affordance
+        or (target_is_approach_only_ ? d_here <= arrival_band
+                                     : (d_here <= arrival_band
+                                        and d_published <= arrival_band + last_repair_applied_m_));
+    // ★AUDIT EVERY ARRIVAL DECISION, both verdicts. "Reached" is the claim the producer trusts, so the
+    // operands that produced it have to be on disk: which pose the test measured against (the REPAIRED
+    // target, not the published cell), how far the robot was from EACH, and whether a path existed at
+    // all — compute() reports goal_reached with an empty path, which is not an arrival.
+    if (goal_reached)
+        audit_standpoint("arrival", time_source(),
+                         last_raw_target_pos_.value_or(
+                             last_target_info_.has_value() ? last_target_info_->room_pos
+                                                           : robot_pose.pos.head<2>().cast<float>()),
+                         last_target_info_.has_value() ? last_target_info_->room_pos
+                                                       : robot_pose.pos.head<2>().cast<float>(),
+                         robot_pose.pos.head<2>().cast<float>(),
+                         path_controller.is_active() ? "path-active" : "no-path",
+                         current_plan_.has_value() ? "plan" : "no-plan",
+                         target_is_new_ ? 1 : 0, 1, arrival_is_real ? 1 : 0);
+    if (goal_reached and arrival_is_real)
+    {
+        // Reached an affordance pose. Resolve its contract (type-level defaults + per-node
+        // overrides). A Servo policy runs the lock-on micro-search to satisfy the contract's
+        // completion predicate before consuming the target; Reach (and non-affordance targets like a
+        // mouse click) finalise immediately.
+        bool want_servo = false;
+        if (params_ && params_->lockon_enabled && graph_
+            && last_target_info_.has_value() && last_target_info_->from_affordance && active_target_id_ != 0)
+        {
+            if (const auto aff_node = graph_->get_node(active_target_id_); aff_node.has_value())
+            {
+                // Resolve the contract from the PARENT object's type (stable across affordance-node
+                // renames on restart), not the affordance node name.
+                std::string parent_type;
+                if (last_target_info_->parent_node_id != 0)
+                    if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
+                        parent_type = parent_contract_key(pn.value());
+                active_contract_ = rc::affordance::read_contract(aff_node.value(), parent_type);
+                feedback_node_id_ = active_contract_.feedback_node_id != 0
+                                  ? active_contract_.feedback_node_id
+                                  : last_target_info_->parent_node_id;   // default: the parent object
+                want_servo = active_contract_.policy == rc::affordance::Policy::Servo
+                          && feedback_node_id_ != 0;
+            }
+        }
+        if (want_servo)
+        {
+            qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
+                    << "reached -> SERVO lock-on | feedback node" << feedback_node_id_
+                    << "| goal clauses" << static_cast<int>(active_contract_.goal.size())
+                    << "| timeout(ms)" << active_contract_.timeout_ms;
+            last_look_succeeded_ = false;   // this look has not happened yet; do not inherit the last one's
+            lockon_.begin(time_source(), active_contract_.scalar_target,
+                          active_contract_.stable_n, active_contract_.timeout_ms);
+            path_controller.stop();
+            if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source, drive_base))
+                finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source());
+            return true;
+        }
+        // ★★★THE "ALREADY THERE ⇒ REFUSE" RULE IS GONE (2026-08-19). Introduced by 9b3e5a4 for a real
+        // problem — a standpoint the robot already occupies yields no new image, so consuming it as an
+        // arrival and dwelling 3 s for an acquisition that cannot come was a loop — but reporting it as
+        // a REFUSAL made the producer and consumer livelock instead, and that turned out to be far
+        // worse. It was the proximate cause of every stall measured today:
+        //   · ~104 completions/min with the robot standing still (refuse → re-offer → refuse)
+        //   · the take→refuse cycle at exactly the retry period, target never held long enough to plan
+        //   · "REFUSED: already at this standpoint" logged with the published cell 1.55 m away
+        // ★A refusal is a statement to the PRODUCER that its cell is not standable. "I am already here"
+        // is not that: the cell was fine, the robot simply arrived early. Reporting it as SATISFIED is
+        // both true and terminating — room stamps the cell visited (mark_and_refresh writes the robot's
+        // own pose into the visit grid), its neglect drops, and the next selection goes elsewhere. That
+        // is the behaviour that ran for weeks before this rule existed.
+        // ★9b3e5a4's ACTUAL insight is kept: there is no acquisition to wait for, so skip the dwell.
+        // That removes the loop it was written to fix without inventing a refusal to do it.
+        // ★★★AND IT MUST ACTUALLY BE THERE. `goal_reached` is ALSO returned true by the follower's
+        // first line when it has no path yet (`if (!active_ || path_room_.empty()) { goal_reached =
+        // true; return; }`), so a target adopted this cycle reads "reached" BEFORE any path exists.
+        // Reporting that as Satisfied told the producer a cell had been visited that the robot was
+        // 3.11 m away from: 383 completions, robot stationary, room re-offering the same unvisited
+        // cell and the consumer answering "I just did that" — both frozen for 40 s at a time.
+        // ★So require the robot to be within the arrival band of the standpoint. Same quantity the
+        // arrival gate itself compares; no new constant. A degenerate "reached" with no path fails it.
+        const float d_to_standpoint =
+            last_target_info_.has_value()
+                ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
+                : std::numeric_limits<float>::infinity();
+        // ★ONCE PER STANDPOINT. Without this the branch re-fires every cycle (see instant_completed_at_).
+        // Cleared when the robot leaves, so a genuine later re-offer of the same cell still works.
+        const bool already_instant_done =
+            instant_completed_at_.has_value()
+            and (last_target_info_.has_value()
+                 and (last_target_info_->room_pos - *instant_completed_at_).norm() < 0.30f);
+        if (instant_completed_at_.has_value()
+            and (robot_pose.pos.head<2>().cast<float>() - *instant_completed_at_).norm() > 0.60f)
+            instant_completed_at_.reset();        // moved away: the cell may legitimately return
+        if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance
+            and d_to_standpoint <= path_controller.goal_threshold()
+            and not already_instant_done
+            and not target_is_approach_only_)   // an approach pose is ours, never the producer's: not SATISFIED
+        {
+            instant_completed_at_ = last_target_info_->room_pos;
+            qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
+                    << "reached on the first cycle at" << d_to_standpoint
+                    << "m — already at this standpoint. Completing as SATISFIED without the dwell.";
+            finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source(), /*allow_dwell=*/false);
+            return true;
+        }
+        // ── THE END OF AN APPROACH IS A NEW VANTAGE, NOT A VERDICT (2026-10-19, try96 leg 3) ────────
+        // The approach existed because the real standpoint did not route from where the robot WAS. The
+        // robot is now somewhere else, has looked at the space in between, and the residual that sealed
+        // the way may have cleared (a false curtain does, once the robot sees through it). So ask again
+        // instead of reporting: drop the plan and the failure record and let the next cycle route to the
+        // real standpoint. If it still does not route, that cycle records the failure from HERE and the
+        // one after runs nearest_reachable from here — which returns where the robot already stands
+        // when nothing reachable is closer, and THAT is reported Unreachable at once (the approach branch
+        // in build_planning_step). Each approach must end strictly closer to the goal than it began, so
+        // this cannot cycle on an unchanged map.
+        if (target_is_approach_only_)
+        {
+            std::println("[controller] '{}' — approach ended at ({:.2f},{:.2f}); re-asking the planner for the "
+                         "real standpoint from here before giving any verdict",
+                         last_target_info_.has_value() ? last_target_info_->node_name : std::string{"?"},
+                         robot_pose.pos.x(), robot_pose.pos.y());
+            audit_standpoint("approach-end-retry", time_source(),
+                             last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
+                             last_target_info_.has_value() ? last_target_info_->room_pos
+                                                           : robot_pose.pos.head<2>().cast<float>(),
+                             robot_pose.pos.head<2>().cast<float>(), "approach", "", -1, 1, 1);
+            route_failure_.clear();
+            unroutable_fix_.reset();
+            target_is_approach_only_ = false;
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            path_controller.stop();
+            motion_commander.stop_robot();
+            return true;
+        }
+        qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
+                << "reached -> REACH (consume immediately)";
+        audit_standpoint("arrival-end", time_source(),
+                         last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
+                         last_target_info_.has_value() ? last_target_info_->room_pos
+                                                       : robot_pose.pos.head<2>().cast<float>(),
+                         robot_pose.pos.head<2>().cast<float>(), "standpoint", "", -1, 1, 1);
+        finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                         robot_pose.pos, time_source(), /*allow_dwell=*/true);
+        return true;
+    }
+    return false;
+}
+
 void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      rc::TrajectoryController &path_controller,
                                      ControllerObstacleTracker &obstacle_tracker,
@@ -5715,6 +5972,18 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         display.set_orient_overlay(robot_pose.pos.x(), robot_pose.pos.y(), orient_overlay_yaw_,
                                    robot_pose.theta, orient_overlay_visible_);
     };
+
+    // ── Task 8: THE LOCAL POLICY DRIVES ([Policy] Enabled). Dispatched BEFORE every branch below — the escape, the
+    //    returns' backoff, the anchor servo, lock-on and orient motion, the band, the clearance ceiling, the tracker's
+    //    command path and its caps, the uncertainty limiter — none of which runs, so none can write the base. The
+    //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
+    if (policy_enabled())
+    {
+        drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
+                          time_source);
+        refresh_view_only();
+        return;
+    }
 
     // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
     // out — bypass the planner/follower entirely, just like the lock-on micro-search below.
@@ -6365,192 +6634,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         return;
     }
 
-    // ★★★A "REACHED" WITH NO PATH IS NOT AN ARRIVAL. compute()'s FIRST line returns
-    //     if (!active_ || path_room_.empty()) { active_ = false; out.goal_reached = true; return out; }
-    // so a target adopted this cycle — before any path is installed — reports reached. Consuming that
-    // told the producer a cell was visited while the robot stood 3.11 m away: 383 completions, robot
-    // stationary, room re-offering an unvisited cell and the consumer answering "I just did that".
-    // ★THE DISCRIMINATOR IS WHERE THE ROBOT ACTUALLY IS. A genuine arrival has the body overlapping
-    // the standpoint (measured live: 0.18 m of a 6.85 m approach); the degenerate one had the robot
-    // 3.11 m away. The bound is the arrival band plus the body radius — both already in the system,
-    // so nothing new is introduced, and it is deliberately generous: it exists to reject a metres-away
-    // "arrival", not to re-judge a close one. Being slightly outside the band is still an arrival.
+    if (consume_goal_reached(control_output.goal_reached, robot_pose, path_controller, obstacle_tracker, motion_commander,
+                             display, affordance_manager, time_source, /*drive_base=*/true))
+        return;
     const float d_here =
         last_target_info_.has_value()
             ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
             : std::numeric_limits<float>::infinity();
-    // ★★★AND IT MUST BE THE STANDPOINT THAT WAS ASKED FOR. d_here measures against OUR target — the
-    // pose after the repair — so a repair that relocated the goal onto the robot satisfies this test
-    // without the robot moving: 140 of 163 accepted arrivals were a median 2.86 m from the published
-    // cell (measured 2026-08-19, standpoint_audit.jsonl). The producer is then told a cell was visited
-    // that nothing ever looked at, its neglect drops, and the standpoint is never offered again — the
-    // one failure the whole protocol exists to prevent, reported as success.
-    // ★The allowance is the repair WE applied, so an honest few-centimetre correction still arrives and
-    // a substitution cannot. No new constant: the band is the arrival band, the slack is our own edit.
-    // ★DELIBERATELY NOT KEYED ON "a path was active". Measured: 163 of 163 arrivals — the genuine ones
-    // included — report no active path, because the follower deactivates itself on reaching the goal.
-    // The empty-path degenerate and a real arrival are indistinguishable there; only distance separates
-    // them, which is why this test is a distance and not a state.
-    const float d_published =
-        (last_target_info_.has_value() and last_raw_target_pos_.has_value())
-            ? (*last_raw_target_pos_ - robot_pose.pos.head<2>().cast<float>()).norm()
-            : d_here;
-    const float arrival_band = path_controller.goal_threshold() + approach_body_.circumscribed_radius();
-    // ★AN APPROACH IS JUDGED AGAINST THE APPROACH POSE, and completed as `unreachable`. Without the
-    // first half the robot would arrive at the closest reachable pose and the guard would reject it
-    // (the published cell is metres away, correctly), leaving the claim standing for ever; without the
-    // second half we would be back to reporting an arrival at a cell nothing ever looked at.
-    const bool arrival_is_real =
-        not last_target_info_.has_value() or not last_target_info_->from_affordance
-        or (target_is_approach_only_ ? d_here <= arrival_band
-                                     : (d_here <= arrival_band
-                                        and d_published <= arrival_band + last_repair_applied_m_));
-    // ★AUDIT EVERY ARRIVAL DECISION, both verdicts. "Reached" is the claim the producer trusts, so the
-    // operands that produced it have to be on disk: which pose the test measured against (the REPAIRED
-    // target, not the published cell), how far the robot was from EACH, and whether a path existed at
-    // all — compute() reports goal_reached with an empty path, which is not an arrival.
-    if (control_output.goal_reached)
-        audit_standpoint("arrival", time_source(),
-                         last_raw_target_pos_.value_or(
-                             last_target_info_.has_value() ? last_target_info_->room_pos
-                                                           : robot_pose.pos.head<2>().cast<float>()),
-                         last_target_info_.has_value() ? last_target_info_->room_pos
-                                                       : robot_pose.pos.head<2>().cast<float>(),
-                         robot_pose.pos.head<2>().cast<float>(),
-                         path_controller.is_active() ? "path-active" : "no-path",
-                         current_plan_.has_value() ? "plan" : "no-plan",
-                         target_is_new_ ? 1 : 0, 1, arrival_is_real ? 1 : 0);
-    if (control_output.goal_reached and arrival_is_real)
-    {
-        // Reached an affordance pose. Resolve its contract (type-level defaults + per-node
-        // overrides). A Servo policy runs the lock-on micro-search to satisfy the contract's
-        // completion predicate before consuming the target; Reach (and non-affordance targets like a
-        // mouse click) finalise immediately.
-        bool want_servo = false;
-        if (params_ && params_->lockon_enabled && graph_
-            && last_target_info_.has_value() && last_target_info_->from_affordance && active_target_id_ != 0)
-        {
-            if (const auto aff_node = graph_->get_node(active_target_id_); aff_node.has_value())
-            {
-                // Resolve the contract from the PARENT object's type (stable across affordance-node
-                // renames on restart), not the affordance node name.
-                std::string parent_type;
-                if (last_target_info_->parent_node_id != 0)
-                    if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
-                        parent_type = parent_contract_key(pn.value());
-                active_contract_ = rc::affordance::read_contract(aff_node.value(), parent_type);
-                feedback_node_id_ = active_contract_.feedback_node_id != 0
-                                  ? active_contract_.feedback_node_id
-                                  : last_target_info_->parent_node_id;   // default: the parent object
-                want_servo = active_contract_.policy == rc::affordance::Policy::Servo
-                          && feedback_node_id_ != 0;
-            }
-        }
-        if (want_servo)
-        {
-            qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
-                    << "reached -> SERVO lock-on | feedback node" << feedback_node_id_
-                    << "| goal clauses" << static_cast<int>(active_contract_.goal.size())
-                    << "| timeout(ms)" << active_contract_.timeout_ms;
-            last_look_succeeded_ = false;   // this look has not happened yet; do not inherit the last one's
-            lockon_.begin(time_source(), active_contract_.scalar_target,
-                          active_contract_.stable_n, active_contract_.timeout_ms);
-            path_controller.stop();
-            if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source))
-                finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source());
-            return;
-        }
-        // ★★★THE "ALREADY THERE ⇒ REFUSE" RULE IS GONE (2026-08-19). Introduced by 9b3e5a4 for a real
-        // problem — a standpoint the robot already occupies yields no new image, so consuming it as an
-        // arrival and dwelling 3 s for an acquisition that cannot come was a loop — but reporting it as
-        // a REFUSAL made the producer and consumer livelock instead, and that turned out to be far
-        // worse. It was the proximate cause of every stall measured today:
-        //   · ~104 completions/min with the robot standing still (refuse → re-offer → refuse)
-        //   · the take→refuse cycle at exactly the retry period, target never held long enough to plan
-        //   · "REFUSED: already at this standpoint" logged with the published cell 1.55 m away
-        // ★A refusal is a statement to the PRODUCER that its cell is not standable. "I am already here"
-        // is not that: the cell was fine, the robot simply arrived early. Reporting it as SATISFIED is
-        // both true and terminating — room stamps the cell visited (mark_and_refresh writes the robot's
-        // own pose into the visit grid), its neglect drops, and the next selection goes elsewhere. That
-        // is the behaviour that ran for weeks before this rule existed.
-        // ★9b3e5a4's ACTUAL insight is kept: there is no acquisition to wait for, so skip the dwell.
-        // That removes the loop it was written to fix without inventing a refusal to do it.
-        // ★★★AND IT MUST ACTUALLY BE THERE. `goal_reached` is ALSO returned true by the follower's
-        // first line when it has no path yet (`if (!active_ || path_room_.empty()) { goal_reached =
-        // true; return; }`), so a target adopted this cycle reads "reached" BEFORE any path exists.
-        // Reporting that as Satisfied told the producer a cell had been visited that the robot was
-        // 3.11 m away from: 383 completions, robot stationary, room re-offering the same unvisited
-        // cell and the consumer answering "I just did that" — both frozen for 40 s at a time.
-        // ★So require the robot to be within the arrival band of the standpoint. Same quantity the
-        // arrival gate itself compares; no new constant. A degenerate "reached" with no path fails it.
-        const float d_to_standpoint =
-            last_target_info_.has_value()
-                ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
-                : std::numeric_limits<float>::infinity();
-        // ★ONCE PER STANDPOINT. Without this the branch re-fires every cycle (see instant_completed_at_).
-        // Cleared when the robot leaves, so a genuine later re-offer of the same cell still works.
-        const bool already_instant_done =
-            instant_completed_at_.has_value()
-            and (last_target_info_.has_value()
-                 and (last_target_info_->room_pos - *instant_completed_at_).norm() < 0.30f);
-        if (instant_completed_at_.has_value()
-            and (robot_pose.pos.head<2>().cast<float>() - *instant_completed_at_).norm() > 0.60f)
-            instant_completed_at_.reset();        // moved away: the cell may legitimately return
-        if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance
-            and d_to_standpoint <= path_controller.goal_threshold()
-            and not already_instant_done
-            and not target_is_approach_only_)   // an approach pose is ours, never the producer's: not SATISFIED
-        {
-            instant_completed_at_ = last_target_info_->room_pos;
-            qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
-                    << "reached on the first cycle at" << d_to_standpoint
-                    << "m — already at this standpoint. Completing as SATISFIED without the dwell.";
-            finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source(), /*allow_dwell=*/false);
-            return;
-        }
-        // ── THE END OF AN APPROACH IS A NEW VANTAGE, NOT A VERDICT (2026-10-19, try96 leg 3) ────────
-        // The approach existed because the real standpoint did not route from where the robot WAS. The
-        // robot is now somewhere else, has looked at the space in between, and the residual that sealed
-        // the way may have cleared (a false curtain does, once the robot sees through it). So ask again
-        // instead of reporting: drop the plan and the failure record and let the next cycle route to the
-        // real standpoint. If it still does not route, that cycle records the failure from HERE and the
-        // one after runs nearest_reachable from here — which returns where the robot already stands
-        // when nothing reachable is closer, and THAT is reported Unreachable at once (the approach branch
-        // in build_planning_step). Each approach must end strictly closer to the goal than it began, so
-        // this cannot cycle on an unchanged map.
-        if (target_is_approach_only_)
-        {
-            std::println("[controller] '{}' — approach ended at ({:.2f},{:.2f}); re-asking the planner for the "
-                         "real standpoint from here before giving any verdict",
-                         last_target_info_.has_value() ? last_target_info_->node_name : std::string{"?"},
-                         robot_pose.pos.x(), robot_pose.pos.y());
-            audit_standpoint("approach-end-retry", time_source(),
-                             last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
-                             last_target_info_.has_value() ? last_target_info_->room_pos
-                                                           : robot_pose.pos.head<2>().cast<float>(),
-                             robot_pose.pos.head<2>().cast<float>(), "approach", "", -1, 1, 1);
-            route_failure_.clear();
-            unroutable_fix_.reset();
-            target_is_approach_only_ = false;
-            current_plan_.reset();
-            plan_spline_valid_ = false;
-            path_controller.stop();
-            motion_commander.stop_robot();
-            return;
-        }
-        qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
-                << "reached -> REACH (consume immediately)";
-        audit_standpoint("arrival-end", time_source(),
-                         last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
-                         last_target_info_.has_value() ? last_target_info_->room_pos
-                                                       : robot_pose.pos.head<2>().cast<float>(),
-                         robot_pose.pos.head<2>().cast<float>(), "standpoint", "", -1, 1, 1);
-        finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                         robot_pose.pos, time_source(), /*allow_dwell=*/true);
-        return;
-    }
 
     if (!path_controller.is_active())
     {
@@ -7224,13 +7314,15 @@ void ControllerSession::send_through_returns(const ControllerRobotPose &robot_po
 
 bool ControllerSession::step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                                     ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                                    const TimeSource &time_source)
+                                    const TimeSource &time_source, bool drive_base)
 {
     const auto reading = read_servo_reading(feedback_node_id_);
     const bool met = goal_met(feedback_node_id_);
     const auto cmd = lockon_.update(reading, met, time_source(), masks_frame_seq());
     // Quasi-static: drive the (tiny, capped) nudge only during STEP; hold still while SETTLING/done.
-    if (lockon_.active() && (cmd.adv != 0.0f || cmd.side != 0.0f || cmd.rot != 0.0f))
+    // Task 8: with the policy driving (drive_base false) the nudge is NOT sent — the policy holds the heading goal.
+    if (not drive_base) {}
+    else if (lockon_.active() && (cmd.adv != 0.0f || cmd.side != 0.0f || cmd.rot != 0.0f))
         send_through_returns(robot_pose, path_controller, obstacle_tracker, motion_commander, cmd.adv, cmd.side, cmd.rot,
                              "lock-on");
     else
@@ -7268,7 +7360,7 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
                                     const rc::TrajectoryController &path_controller,
                                     ControllerObstacleTracker &obstacle_tracker,
                                     ControllerMotionCommander &motion_commander,
-                                    const TimeSource &time_source, float target_yaw)
+                                    const TimeSource &time_source, float target_yaw, bool drive_base)
 {
     const std::uint64_t now = time_source();
     if (!orient_start_ms_)
@@ -7333,6 +7425,7 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
     float rot = std::clamp(k * yaw_err, -cap, cap);
     if (aligned)
         rot = 0.0f;
+    if (not drive_base) return false;   // Task 8: the policy drives the turn (a Heading goal); this is the protocol only
     if (rot != 0.0f) send_through_returns(robot_pose, path_controller, obstacle_tracker, motion_commander, 0.f, 0.f, rot, "orient");
     else             motion_commander.stop_robot();
     return false;
@@ -7979,6 +8072,7 @@ void ControllerSession::abort(rc::TrajectoryController &path_controller,
                               ControllerMotionCommander &motion_commander)
 {
     stop(path_controller, motion_commander);
+    policy_reset();   // Task 8: the policy's goal, plan and evidence belong to the activity being aborted
     // Everything that would let the next Run resume the OLD activity rather than start a new one.
     // The dwell included: it is a wait belonging to an affordance the operator has just abandoned, and
     // leaving it armed would hold the base still for seconds after an explicit Stop.

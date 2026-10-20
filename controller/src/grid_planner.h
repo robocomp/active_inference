@@ -212,6 +212,16 @@ public:
     float last_route_risk_nats() const { return last_route_risk_nats_; }
     float last_route_cost_m() const { return last_route_cost_m_; }   // the A* cost of that route (metres-equivalent)
     float risk_at(const Eigen::Vector2f& pos_room) const;
+    // ── Task 8: WHAT THE LOCAL POLICY'S COST-TO-GO NEEDS FROM THE PLANNER ──────────────────────────────────
+    // body_risk_at: the soft residual risk (nats) the BODY covers centred at p — the A*'s own state_risk, minimised over
+    // the 8 heading buckets (the field is heading-free, so it takes the cheapest way the body can stand there, as its
+    // free test takes the inscribed disc). ★ UNIT CONVERSION for rc::policy::CostToGo (extra_cost_m is a DENSITY,
+    // metres-equivalent per metre): the A* charges a step of length L as L·(1 + tight + residual_risk_weight·R), so the
+    // density is residual_risk_weight·R with R = body_risk_at — NOT risk_at (one cell's nats), and NOT divided by the cell
+    // size: the planner already prices risk per metre travelled. 0 with no soft layer.
+    float body_risk_at(const Eigen::Vector2f& pos_room) const;
+    Eigen::Vector2f grid_origin() const { return cell_to_world(0, 0); }   // centre of cell (0, 0), room frame
+    float cell_size() const { return cell_; }
 
     // ── MIGRATION MONITOR (temporary; delete once the yaw correction is trusted) ───────────────────
     // The same question answered with the body oriented as it WAS before the correction — turned 90 deg

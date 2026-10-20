@@ -1,0 +1,221 @@
+// goal_adapter.h — where the controller's types meet the local policy's (Task 8). Pure (Eigen + std + the two type
+// headers), so every conversion here is unit-tested (tests/test_goal_adapter.cpp) and nowhere else re-derives one.
+//
+// ★ THE ONLY POSE CONVERSION. The controller's ControllerRobotPose::theta is the body angle whose robot frame has x right,
+//   y forward: the robot FACES theta + pi/2 (GridPlanner, RelativeMotion::forward = (-sin theta, cos theta)). The policy's
+//   Pose2::yaw is the forward heading itself (forward = (cos yaw, sin yaw)). to_policy_pose adds the quarter turn; nothing
+//   else in the controller may.
+// ★ THE ROT SIGN. The session's send_speed_command(adv, side, rot) is CCW-positive — a positive rot increases theta
+//   (RelativeMotion's "turn +90" = left sends rot > 0; step_orient sends k (target - theta); trajectory_controller.cpp's
+//   align branch says so). The policy's w is CCW-positive about the forward heading, and d(yaw)/dt = d(theta)/dt, so the
+//   session rot is +w. (The session's `rot = -control_output.rot` at the tracker's send site negates the TRACKER's own
+//   clockwise-positive out.rot — plain_tracker.cpp "FRAME conversion (2/2)" — not the base's convention.)
+#pragma once
+
+#include <Eigen/Dense>
+
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+#include <optional>
+#include <span>
+#include <vector>
+
+#include "policy_types.h"
+#include "local_policy.h"
+#include "unseen_contact.h"
+#include "../controller_runtime_types.h"
+#include "../../../common/interaction_anchor/relative_pose.h"
+
+namespace rc::policy
+{
+inline Pose2 to_policy_pose(const ControllerRobotPose& r)
+{
+    return {r.pos, r.theta + std::numbers::pi_v<float> / 2.f};
+}
+
+struct SessionCommand { float adv = 0.f, side = 0.f, rot = 0.f; };
+// A differential base: side is always 0 (Shadow's bridge drops it). rot = +w (see the header note).
+inline SessionCommand to_session_command(float v, float w) { return {v, 0.f, w}; }
+
+// The measured doorway gap in the ROOM frame. RelPose is the opening in the robot frame (x right, y forward): x.head<2>
+// the centre, x.z() the wall's yaw psi; its normal (the direction of travel through it) is (-sin psi, cos psi) there
+// (controller_anchor_servo.h anchor_cross_geometry).
+struct RoomGap { Eigen::Vector2f centre = Eigen::Vector2f::Zero(), normal{0.f, 1.f}; float width = 0.f; };
+inline RoomGap gap_in_room(const rc::interaction::RelPose& gap_robot, float width, const ControllerRobotPose& robot)
+{
+    const Eigen::Rotation2Df R(robot.theta);
+    const float psi = gap_robot.x.z();
+    RoomGap g;
+    g.centre = robot.pos + R * Eigen::Vector2f(gap_robot.x.x(), gap_robot.x.y());
+    g.normal = (R * Eigen::Vector2f(-std::sin(psi), std::cos(psi))).normalized();
+    g.width = width;
+    return g;
+}
+
+// A goal and the points its cost-to-go is seeded from.
+struct GoalSpec { Goal goal{.kind = Goal::Kind::Place, .yaw = {}}; std::vector<Eigen::Vector2f> points; };
+
+struct GoalAdapterParams
+{
+    float tol_xy = 0.25f;            // the controller's goal_threshold (Place arrival)
+    float tol_yaw = 0.06f;           // the tracker's align_yaw_tol_rad (facing arrival)
+    float past_m = 2.0f;             // a cross's goal line, this far past the gap centre along its normal
+    float inscribed_radius_m = 0.23f;   // the body's: where its CENTRE can be across an opening
+    float lateral_step_m = 0.05f;    // spacing of the goal line's seed points (the field's own cell)
+};
+
+inline GoalSpec place_goal(const Eigen::Vector2f& p, std::optional<float> yaw, float tol_xy, float tol_yaw)
+{
+    GoalSpec s;
+    s.goal = Goal{.kind = Goal::Kind::Place, .p = p, .yaw = yaw, .tol_xy = tol_xy, .tol_yaw = tol_yaw};
+    s.points = {p};
+    return s;
+}
+// "Turn to face yaw, here": Heading goals hold position (round-4 ruling); the field is seeded at the robot.
+inline GoalSpec heading_goal(const Eigen::Vector2f& here, float yaw, float tol_yaw)
+{
+    GoalSpec s;
+    s.goal = Goal{.kind = Goal::Kind::Heading, .p = here, .yaw = yaw, .tol_yaw = tol_yaw};
+    s.points = {here};
+    return s;
+}
+// "Distance to being through": a line across the opening past_m beyond its centre along the normal, over the lateral span
+// the body's centre can occupy (half width minus the inscribed radius; the centre point when the opening has none).
+inline GoalSpec doorway_goal(const RoomGap& g, const GoalAdapterParams& p)
+{
+    GoalSpec s;
+    s.goal = Goal{.kind = Goal::Kind::Doorway, .p = g.centre, .yaw = {}, .normal = g.normal, .width = g.width, .tol_xy = p.tol_xy, .tol_yaw = p.tol_yaw};
+    const Eigen::Vector2f lat(-g.normal.y(), g.normal.x());
+    const float half = std::max(0.f, 0.5f * g.width - p.inscribed_radius_m);
+    const float step = std::max(1e-3f, p.lateral_step_m);
+    for (float t = -half; t <= half + 1e-4f; t += step) s.points.push_back(g.centre + p.past_m * g.normal + t * lat);
+    if (s.points.empty()) s.points.push_back(g.centre + p.past_m * g.normal);
+    return s;
+}
+
+// ★ THE DOORWAY'S CORRIDOR (where the cost-to-go may run through the opening). The planner's map is the CURRENT room plus
+//   the door passage's corridor, which ends 2.0 m past the aperture (controller_door_passage.h: the cross standpoint 1.2 m
+//   + 0.8 m) — the far room is not in it, so a goal line past the standoff would be unreachable on it. The opening AS
+//   MEASURED supplies the rest: a strip along the normal from back_m before the gap centre to ahead_m past it, over the
+//   lateral span the body's centre can occupy (|lateral| <= half the width - the inscribed radius; empty when the
+//   opening is narrower than the body, so a too-narrow door stays unreachable). Contact with the jambs, the leaf and the
+//   far room is the LiDAR's to judge (contact model), not this strip's.
+inline bool in_doorway_corridor(const RoomGap& g, const Eigen::Vector2f& p, float back_m, float ahead_m, float inscribed_radius_m)
+{
+    const float half = 0.5f * g.width - inscribed_radius_m;
+    if (not (half >= 0.f)) return false;
+    const Eigen::Vector2f d = p - g.centre;
+    const float s = d.dot(g.normal), lat = std::abs(d.dot(Eigen::Vector2f(-g.normal.y(), g.normal.x())));
+    return s >= -back_m and s <= ahead_m and lat <= half;
+}
+
+// What the task layer is asking for.
+//   Place  — a reach standpoint / click target / relative move: p = target.room_pos; yaw = target.yaw_rad when the contract
+//            designed a facing (want_facing). A standpoint's yaw_rad is a FACING yaw (forward = +x at 0, GridPlanner's
+//            convention), so no quarter turn.
+//   Cross  — the doorway from the MEASURED gap (nullopt without one: nothing measured to drive through).
+//   Orient — turn in place: step_orient aligns the controller's THETA with target.yaw_rad, so the policy yaw is
+//            yaw_rad + pi/2 (that path's existing convention, kept; the Reach facing above uses the other one — both as
+//            their callers have always read them).
+enum class GoalMode { Place, Cross, Orient };
+inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, const ControllerRobotPose& robot,
+                                               const std::optional<RoomGap>& gap, GoalMode mode, bool want_facing,
+                                               const GoalAdapterParams& p)
+{
+    switch (mode)
+    {
+        case GoalMode::Cross:
+            if (not gap.has_value() or not (gap->width > 0.f)) return std::nullopt;
+            return doorway_goal(*gap, p);
+        case GoalMode::Orient:
+            return heading_goal(robot.pos, t.yaw_rad + std::numbers::pi_v<float> / 2.f, p.tol_yaw);
+        case GoalMode::Place:
+            return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, p.tol_xy, p.tol_yaw);
+    }
+    return std::nullopt;
+}
+// The lock-on micro-search's MOTION as a goal: face the object from where the robot stands. The standpoint's facing yaw
+// was computed toward the object (atan2 object - standpoint, build_planning_step), so it is the heading to hold.
+inline GoalSpec lockon_heading_goal(const ControllerTargetInfo& t, const ControllerRobotPose& robot, const GoalAdapterParams& p)
+{
+    return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
+}
+
+// ★ GOAL IDENTITY — a goal that moved by less than its OWN tolerance is the same goal (its meaning of "there" did not
+//   change), so the Navigator keeps its plan, traps and monitor; anything else is a new goal (set_goal). A measured gap
+//   re-estimated every cycle moves by centimetres; rebuilding on each would reset the plan commitment every tick.
+inline bool same_goal(const GoalSpec& a, const GoalSpec& b)
+{
+    if (a.goal.kind != b.goal.kind or a.points.empty() != b.points.empty()) return false;
+    const float tol = std::min(a.goal.tol_xy, b.goal.tol_xy);
+    // a goal LINE (a doorway's) is compared by its two ends: a re-measured width changes how many seed points it has, not
+    // where it is; a point goal by its point
+    if (a.points.size() != b.points.size() and a.goal.kind != Goal::Kind::Doorway) return false;
+    if (not a.points.empty()
+        and ((a.points.front() - b.points.front()).norm() > tol or (a.points.back() - b.points.back()).norm() > tol)) return false;
+    if (a.points.size() == b.points.size())
+        for (std::size_t i = 0; i < a.points.size(); ++i)
+            if ((a.points[i] - b.points[i]).norm() > tol) return false;
+    if (a.goal.kind != Goal::Kind::Heading and (a.goal.p - b.goal.p).norm() > tol) return false;
+    if (a.goal.yaw.has_value() != b.goal.yaw.has_value()) return false;
+    if (a.goal.yaw and std::abs(std::remainder(*a.goal.yaw - *b.goal.yaw, 2.f * std::numbers::pi_v<float>)) > std::min(a.goal.tol_yaw, b.goal.tol_yaw))
+        return false;
+    return true;
+}
+
+// ★ THE COMMANDS IN FORCE over the tick (t_end - dt, t_end] (UnseenContact, review fix round 3): the base executes each
+//   command latency_s after it was sent, so the command at the wheels at time t is the last one SENT at or before
+//   t - latency_s. Returned as consecutive {duration, v, w} sub-intervals summing to dt; zero before the first send.
+struct SentCommand { double t = 0.0; float v = 0.f, w = 0.f; };
+inline std::vector<UnseenContact::CmdSeg> commands_in_force(std::span<const SentCommand> sent, double t_end, float dt, float latency_s)
+{
+    std::vector<UnseenContact::CmdSeg> out;
+    const double a = t_end - dt, b = t_end;
+    // the command at the wheels at time x
+    auto at = [&](double x) -> std::pair<float, float> {
+        float v = 0.f, w = 0.f;
+        for (const auto& s : sent) { if (s.t + latency_s <= x + 1e-9) { v = s.v; w = s.w; } else break; }
+        return {v, w};
+    };
+    std::vector<double> cuts{a};
+    for (const auto& s : sent) { const double c = s.t + latency_s; if (c > a + 1e-9 and c < b - 1e-9) cuts.push_back(c); }
+    cuts.push_back(b);
+    for (std::size_t i = 0; i + 1 < cuts.size(); ++i)
+    {
+        const auto [v, w] = at(cuts[i]);
+        const float d = float(cuts[i + 1] - cuts[i]);
+        if (d <= 0.f) continue;
+        if (not out.empty() and out.back().v == v and out.back().w == w) out.back().dt += d;
+        else out.push_back({d, v, w});
+    }
+    return out;
+}
+
+// ★ BASE LIMITS. Speeds: the policy's (config) choice, never above what the base can do. Accelerations: the capability's.
+//   Rotation: a differential base's wheels share one acceleration bound, so a_rot = a_lin / (axes_length / 2) — the
+//   wheel's linear limit at the wheel's lever arm (Shadow: 0.5 / 0.259 = 1.93 rad/s^2). Deadband: the capability's
+//   measured min speeds when robot_concept publishes them (RC_HAVE_ROBOT_DEADBAND_ATTRS), else the PROVISIONAL config
+//   values ([Policy] MinLinearSpeedMps / MinRotSpeedRps — the same numbers robot_concept would publish).
+struct BaseLimitsInputs
+{
+    float v_max_policy = 0.5f, w_max_policy = 0.8f;
+    std::optional<float> cap_v_max, cap_w_max, cap_a_lin, cap_d_lin, axes_length_m, cap_v_min, cap_w_min;
+    float cfg_v_min = 0.04f, cfg_w_min = 0.10f;
+    float fallback_a_lin = 0.5f, fallback_d_lin = 1.0f, fallback_axes_m = 0.518f;
+};
+inline BaseLimits base_limits(const BaseLimitsInputs& in)
+{
+    BaseLimits b;
+    b.v_max = in.cap_v_max ? std::min(in.v_max_policy, *in.cap_v_max) : in.v_max_policy;
+    b.w_max = in.cap_w_max ? std::min(in.w_max_policy, *in.cap_w_max) : in.w_max_policy;
+    b.a_lin = in.cap_a_lin.value_or(in.fallback_a_lin);
+    b.d_lin = in.cap_d_lin.value_or(in.fallback_d_lin);
+    const float lever = 0.5f * std::max(0.05f, in.axes_length_m.value_or(in.fallback_axes_m));
+    b.a_rot = b.a_lin / lever;
+    b.d_rot = b.d_lin / lever;
+    b.v_min_eff = in.cap_v_min.value_or(in.cfg_v_min);
+    b.w_min_eff = in.cap_w_min.value_or(in.cfg_w_min);
+    return b;
+}
+}  // namespace rc::policy
