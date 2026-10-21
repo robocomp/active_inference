@@ -64,3 +64,19 @@ step), tests in `controller/tests/`.
 - [ ] Implement: the explore order carries its room; the contest's candidate set is filtered by target room (resolve
   the target's room from its RT parent chain / the affordance's object; an unresolvable target is NOT in room_X).
   Log the excluded candidates once per change in the `[aff-select]` line. Tests green. Commit by pathspec.
+
+### Task 5: an `explored(room)` belief, so `explore` ends when the room is known (user request 2026-10-21)
+Today `until explored(room)` can never be satisfied (no graph attribute — specificworker_mission.cpp:18, :239), so every
+`explore` runs its full budget, and an LTSM-recalled room is re-explored exactly like a new one (tourP2 leg 3).
+**Files:** room_concept (publisher: the room node attribute — new cortex attribute `room_explored_p` via
+`REGISTER_TYPE` per CLAUDE.md, the USER reinstalls cortex; until then the task stops at the header change + a stub
+reader test), `controller/src/specificworker_mission.cpp` (the `explored` predicate and `until`), tests.
+- [ ] Design note first (in the report, reviewed before code): `explored_p` is a BELIEF, not a threshold — derived from
+  what room_concept already computes: the boundary actually SEEN (seen_frac / per-wall observation evidence) and the
+  expected information gain left in `afford_room` vs its time cost. A recalled room starts from what LTSM restored (its
+  layout + seen boundary), so a well-remembered room is already explored; a partly remembered one explores only the
+  rest. The mission's `until explored(room)` resolves when continuing to explore no longer pays (EIG of afford_room below
+  the objective's time cost) — no fixed fraction.
+- [ ] Failing tests: predicate unknown → never satisfies (today); attribute present → satisfies by the rule; recalled-room
+  fixture starts explored when its layout is complete. Implement; tests green; commit by pathspec. Live check rides on
+  the next round-trip run (legs whose room is recalled should end explore early).
