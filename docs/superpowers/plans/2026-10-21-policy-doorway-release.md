@@ -80,3 +80,36 @@ reader test), `controller/src/specificworker_mission.cpp` (the `explored` predic
 - [ ] Failing tests: predicate unknown → never satisfies (today); attribute present → satisfies by the rule; recalled-room
   fixture starts explored when its layout is complete. Implement; tests green; commit by pathspec. Live check rides on
   the next round-trip run (legs whose room is recalled should end explore early).
+
+### Task 6: structured near-field clearance for the spline route optimiser (user decision 2026-10-21)
+**Why (user):** the smooth, analytical, differentiable spline connecting robot and target is the right local↔global
+bridge; it fails in NARROW passages because the noisy LiDAR ESDF / raw field gives the clearance term of the spline's
+NEAR part no usable traction (in a 0.90 m doorway the margin is 1–3 cm per side, the size of the return noise; the
+min-distance gradient flips between jambs, is flat across the opening and steep at the edges).
+**Hook:** `RouteOptimizerConfig::distance` / `distance_gradient` (`controller/src/route_optimizer.h:66-70`) — the
+optimiser is UNCHANGED; it is handed a better field.
+**Files:** new `controller/src/near_field_clearance.{h,cpp}` (pure Eigen/STL), the place that builds the optimiser's
+callables (find it: the ESDF/lidar distance wiring for the spline tracker), tests
+`controller/tests/test_near_field_clearance.cpp`.
+- [ ] Design (in the report, reviewed before wiring): near the robot (radius from the body + route look-ahead, stated),
+  the field is the EXPECTED clearance to the FITTED surfaces — reuse the policy's local surface model
+  (`local_policy/contact.h` surface samples, ends, isolated hits, each with its σ), and, when a measured gap is active
+  for the goal, its two jamb segments with σ_lat/σ_s — i.e. the distance to the segments convolved with their
+  Gaussian uncertainty (closed form for a segment), which is smooth and differentiable everywhere; far away, the
+  existing ESDF. The two are joined by a smooth weight from the model (e.g. the near model's coverage/σ), not a
+  switch radius. One obstacle model shared with the policy — no second fit.
+- [ ] Failing tests: (a) between two parallel jamb segments 0.90 m apart with 1.5 cm return noise, the field's
+  gradient points to the centre line everywhere in the opening and its maximum is on the centre line (± 1 cm), where
+  the raw-ESDF field (same noisy returns) shows sign flips — assert both; (b) far from the robot the field equals the
+  ESDF; (c) continuity of value and gradient across the near/far blend; (d) the optimiser, given the new field, puts
+  the spline's near part on the doorway centre line from a 0.15 m-off-centre, 20° approach.
+- [ ] Implement behind a config key `[Route] NearFieldClearance` (default false, so the old tracker is unchanged for the
+  A/B). Tests + existing route optimiser/tracker tests green. Commit by pathspec.
+
+### Task 7: three-arm A/B on the DOOR_1 round trips (controller session, live)
+Same code, same start state (identity table, ltsm wiped, `round_trips_door1.sh`, 3 × 2 legs), N ≥ 2 runs per arm:
+(A) old spline tracker (`[Policy] Enabled = false`, `NearFieldClearance = false`); (B) spline tracker with the structured
+near field (`Enabled = false`, `NearFieldClearance = true`); (C) local policy with F1+F2+F4 (`Enabled = true`).
+Report per arm: crossings completed / 6, time per crossing, contacts (bridge/bumper), stuck/hand-back events, minimum
+measured jamb clearance in the doorway. The old chain is NOT removed whatever the result (user, 2026-10-21); the
+result decides the default and whether a hybrid (route tracker + policy in narrow passages) is worth designing.
