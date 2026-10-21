@@ -84,6 +84,11 @@ std::vector<Pose2> Navigator::remaining_sweep(const Pose2& start, float v0, floa
 
 bool Navigator::phase_outcome_reached(const PolicyInput& in) const
 {
+    // ★ F2 fix round 1: a Release(stop) (v = w = 0, local_policy.cpp) promises REST, and its outcome is reached the moment
+    //   the base is at rest — by the same deadband fact that made the stop a candidate (|v| < v_min_eff and |w| < w_min_eff).
+    //   Holding it for the rest of horizon_s would only idle; the next decision is to be made from rest, now.
+    if (plan_.mode == Decision::Mode::Release and plan_.v1 == 0.f and plan_.w1 == 0.f)
+        return std::abs(in.v_now) < in.base.v_min_eff and std::abs(in.w_now) < in.base.w_min_eff;
     if (plan_.mode != Decision::Mode::Drive) return false;               // a Release is judged on what it bought, at its end
     const bool in1 = plan_.phase == 1;
     const float v = in1 ? plan_.v1 : plan_.v2;

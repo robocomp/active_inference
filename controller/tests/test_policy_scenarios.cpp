@@ -95,6 +95,7 @@ struct ScenarioResult
     std::string why;
     // F2: the first decision, every Release(stop), and the first decision made after a stop (v = w = 0 at rest)
     std::string first_mode; float first_v = 0.f, first_w = 0.f;
+    bool stuck_moving = false;
     int stops = 0; std::string after_stop_mode; float after_stop_v = 0.f, after_stop_w = 0.f;
 };
 
@@ -251,7 +252,13 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
                         1.f - std::exp(d.log_p_safe), d.log_p_cont, d.progress_m, clear, fnow, d.why.c_str());
 
         if (d.mode == Decision::Mode::Arrived) { res.reached = true; res.why = "arrived"; break; }
-        if (d.mode == Decision::Mode::Stuck or d.mode == Decision::Mode::Blind) { res.stuck = true; res.why = d.why; break; }
+        if (d.mode == Decision::Mode::Stuck or d.mode == Decision::Mode::Blind)
+        {
+            res.stuck = true; res.why = d.why;
+            // F2: a Stuck from REST (the policy's own deadband test on the odometry it was given) is the place-level verdict
+            res.stuck_moving = std::abs(in.v_now) >= in.base.v_min_eff or std::abs(in.w_now) >= in.base.w_min_eff;
+            break;
+        }
         if (d.mode == Decision::Mode::Release and not in_release_episode) { in_release_episode = true; ++res.releases; }
         if (tr and st.replanned) std::printf("    (replanned; remaining-plan P was %.3f)\n", st.plan_remaining_p);
         if (tr and st.trap_suppressed_by_goal) std::printf("    no trap: its disc would contain the goal\n");
@@ -372,7 +379,7 @@ static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 
 // ---------------------------------------------------------------- reporting
 struct Summary { int max_failed = 0; std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
-                 bool traj_ok = true; int total_traps = 0, total_stops = 0; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
+                 bool traj_ok = true; int total_traps = 0, total_stops = 0, stuck_moving = 0; std::vector<float> tunreach, tstuck; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
 {
@@ -391,6 +398,9 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
         S.min_clear = std::min(S.min_clear, r.min_clear);
         if (r.geodesic_m > 0.f) S.max_path_ratio = std::max(S.max_path_ratio, r.path_m / r.geodesic_m);
         if (r.reached) S.tgoal.push_back(r.time_s);
+        if (r.unreachable) S.tunreach.push_back(r.time_s);
+        if (r.stuck) S.tstuck.push_back(r.time_s);
+        S.stuck_moving += r.stuck_moving;
         S.max_failed = std::max(S.max_failed, r.failed_predictions);
         S.step_ms.insert(S.step_ms.end(), r.step_ms.begin(), r.step_ms.end()); S.returns_max = std::max(S.returns_max, r.returns_max);
         S.build_ms += r.build_ms; S.builds += r.builds; S.goal_truth_clear = std::min(S.goal_truth_clear, r.goal_truth_clear);
@@ -580,37 +590,73 @@ int main()
         std::printf("   the believed goal maps, after the jump, to a true place %.3f m from the nearest wall\n", S.goal_truth_clear);
         CHECK("pose_jump: the jumped goal is a place the body can be (true clearance >= inscribed radius)", S.goal_truth_clear >= body().inscribed_radius());
     }
-    // ---- stop_is_the_only_release (F2, 2026-10-21 doorway-release spec, scenario (c)): the robot CREEPS forward at 0.10 m/s
-    //      into a pocket — a wall across its nose 6 cm beyond where it can come to rest (coast = 0.06 s latency + braking at
-    //      d_lin = 1.1 cm), a wall across its tail 5 cm behind, both 0.70 m long. Every reverse backs >= ~0.15 m (into the tail
-    //      wall); every in-place turn is rolled out from the MOVING state with its wheels coupled, so it arcs forward and swings
+    // ---- stop_is_the_only_release (F2, 2026-10-21 doorway-release spec, scenario (c)): the robot CREEPS forward into a
+    //      pocket — a wall across its nose, a wall across its tail, the sides open. Every reverse backs further than the gap
+    //      behind; every in-place turn is rolled out from the MOVING state with its wheels coupled, so it arcs forward and swings
     //      a front corner into the nose wall; only the brake-to-rest sweep is releasable. Before F2 (stop not a candidate) the
-    //      first decision is Stuck on every seed (measured 8/8 at this geometry; at a 6.5 cm nose gap a turn is releasable on
-    //      1/8, at 5.5 cm the decision from rest is Stuck too — the band is narrow because a decision from rest evaluates the
-    //      same post-coast motions, only without the coupled arc). With F2: Release(stop), then — at rest — an ordinary
-    //      decision that MOVES (an in-place turn). The pocket is a genuine trap for this body (no 90 deg turn fits between the
-    //      walls), so the run ends with the Navigator's trapped-field Unreachable, a verdict about the place, not a one-tick Stuck.
+    //      first decision is Stuck on every seed. With F2: Release(stop), then — at rest — an ordinary decision that moves.
+    //      The band is narrow because a decision from rest evaluates the same post-coast motions, only without the coupled arc.
+    //   (c1) TRAP: nose 6 cm past the rest pose, tail 5 cm behind, walls 0.70 m long (v0 0.10 m/s). No 90 deg turn fits between
+    //        the walls, so every run must end in a verdict about the PLACE: the trapped field's Unreachable (15/20) or a Stuck
+    //        FROM REST (5/20 — the stop phase now ends at rest, navigator.cpp, and from some rest poses no turn is releasable).
+    //        Never a Stuck while moving. Measured time to the verdict (fix round 1, 20 seeds): median 3.35 s, max 3.90 s.
+    //        ★ This is F1's bounded-time guard: within 1.15 x 3.90 s; once F1 folds the from-rest Stuck into its accumulated
+    //        belief, tighten the verdict oracle to S.unreachable == S.n.
+    //   (c2) REACH: nose 8 cm past the rest pose, tail 16 cm behind, walls 1.20 m long, v0 0.20 m/s; goal 1.5 m to the left.
+    //        Pre-F2 code: Stuck 20/20 on the first tick. With F2: Release(stop) 20/20, then from rest the in-place turn clears the
+    //        walls (the 0.318 m corner circle fits) and the robot drives out — reached 20/20, time-to-goal median 5.05 s, max
+    //        5.75 s (fix round 1); oracle: median <= 1.15 x 5.05 s.
     if (want("stop_is_the_only_release"))
     {
-        const float v0 = 0.10f, coast = v0 * 0.06f + v0 * v0 / (2.f * limits().d_lin), nose = 0.23f + coast + 0.06f, tail = -0.23f - 0.05f;
-        World w = open_world();
-        w.boxes.push_back({-0.35f, nose, 0.35f, nose + 0.1f});
-        w.boxes.push_back({-0.35f, tail - 0.1f, 0.35f, tail});
-        const Goal g{.kind = Goal::Kind::Place, .p = V2(-1.5f, 0.f), .yaw = {}};
-        Options o{.grid = kOpenGrid, .jumps = {}, .trace_name = "stop_is_the_only_release", .v0 = v0};
-        int first_stop = 0, moves_after = 0;
-        std::mutex m;
-        const auto S = run_seeds("stop_is_the_only_release", [&](unsigned seed) {
-            auto r = run_scenario(w, Pose2{V2(0.f, 0.f), 90.f * kDeg}, g, 30.f, seed, o);
-            const std::lock_guard lk(m);
-            first_stop += r.first_mode == "Release" and r.first_v == 0.f and r.first_w == 0.f;
-            moves_after += (r.after_stop_mode == "Release" or r.after_stop_mode == "Drive") and not (r.after_stop_v == 0.f and r.after_stop_w == 0.f);
-            return r; });
-        std::printf("   first decision Release(stop) on %d/%d seeds; the first decision from rest moved on %d/%d\n", first_stop, S.n, moves_after, S.n);
-        CHECK("stop_is_the_only_release: contacts == 0", S.contacts == 0);
-        CHECK("stop_is_the_only_release: the first decision is Release(stop) on every seed (not Stuck)", first_stop == S.n);
-        CHECK("stop_is_the_only_release: from rest the next decision moves (no second stop, no Stuck)", moves_after == S.n);
-        CHECK("stop_is_the_only_release: never a one-tick Stuck", S.stuck == 0);
+        constexpr float kTrapVerdictMaxS = 3.90f;     // (c1)'s measured max time to the place-level verdict (fix round 1)
+        struct Pocket { const char* name; float v0, gap_nose, gap_tail, half; };
+        auto run_pocket = [&](const Pocket& pk, int* first_stop, int* moves_after) {
+            const float coast = pk.v0 * 0.06f + pk.v0 * pk.v0 / (2.f * limits().d_lin), nose = 0.23f + coast + pk.gap_nose, tail = -0.23f - pk.gap_tail;
+            World w = open_world();
+            w.boxes.push_back({-pk.half, nose, pk.half, nose + 0.1f});
+            w.boxes.push_back({-pk.half, tail - 0.1f, pk.half, tail});
+            const Goal g{.kind = Goal::Kind::Place, .p = V2(-1.5f, 0.f), .yaw = {}};
+            Options o{.grid = kOpenGrid, .jumps = {}, .trace_name = pk.name, .v0 = pk.v0};
+            std::mutex m;
+            *first_stop = 0; *moves_after = 0;
+            const auto S = run_seeds(pk.name, [&](unsigned seed) {
+                auto r = run_scenario(w, Pose2{V2(0.f, 0.f), 90.f * kDeg}, g, 30.f, seed, o);
+                const std::lock_guard lk(m);
+                *first_stop += r.first_mode == "Release" and r.first_v == 0.f and r.first_w == 0.f;
+                *moves_after += (r.after_stop_mode == "Release" or r.after_stop_mode == "Drive") and not (r.after_stop_v == 0.f and r.after_stop_w == 0.f);
+                return r; });
+            std::printf("   first decision Release(stop) on %d/%d seeds; the first decision from rest moved on %d/%d\n", *first_stop, S.n, *moves_after, S.n);
+            return S;
+        };
+        for (const Pocket& pk : {Pocket{"stop_is_the_only_release trap", 0.10f, 0.06f, 0.05f, 0.35f},
+                                 Pocket{"stop_is_the_only_release reach", 0.20f, 0.08f, 0.16f, 0.60f}})
+        {
+            int first_stop = 0, moves_after = 0;
+            const auto S = run_pocket(pk, &first_stop, &moves_after);
+            const std::string n = pk.name;
+            CHECK((n + ": contacts == 0").c_str(), S.contacts == 0);
+            CHECK((n + ": the first decision is Release(stop) on every seed (not Stuck)").c_str(), first_stop == S.n);
+            CHECK((n + ": never a Stuck while MOVING (F2: the stop is releasable)").c_str(), S.stuck_moving == 0);
+            if (n.ends_with("trap"))
+            {
+                // the place-level verdict: the trapped field's Unreachable, or a Stuck FROM REST (nothing moves it safely from
+                // here); F1 will fold the latter into its accumulated belief, after which this must read S.unreachable == S.n
+                auto t = S.tunreach; t.insert(t.end(), S.tstuck.begin(), S.tstuck.end()); std::ranges::sort(t);
+                const float med = t.empty() ? NAN : t[t.size() / 2], mx = t.empty() ? 1e9f : t.back();
+                std::printf("   verdicts: Unreachable %d, Stuck from rest %d; time to the verdict median %.2f s, max %.2f s (guard 1.15 x %.2f s)\n",
+                            S.unreachable, S.stuck - S.stuck_moving, med, mx, kTrapVerdictMaxS);
+                CHECK((n + ": every seed ends in a place-level verdict (Unreachable, or Stuck from rest)").c_str(),
+                      S.unreachable + (S.stuck - S.stuck_moving) == S.n);
+                CHECK((n + ": the verdict comes within 1.15 x the measured max").c_str(), mx <= 1.15f * kTrapVerdictMaxS);
+            }
+            else
+            {
+                CHECK((n + ": from rest the next decision moves (no second stop, no Stuck)").c_str(), moves_after == S.n);
+                CHECK((n + ": never a Stuck").c_str(), S.stuck == 0);
+                CHECK((n + ": reached on every seed").c_str(), S.reached == S.n);
+                performance_oracle(n, S, 5.05f);
+            }
+        }
     }
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;

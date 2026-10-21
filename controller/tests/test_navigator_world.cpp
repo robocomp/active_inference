@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <tuple>
+#include <vector>
 
 using namespace rc::policy;
 static int fails = 0;
@@ -127,6 +128,40 @@ int main()
         CHECK("trap veto (control): without it the failed prediction lays a trap", rel0 and traps0 > 0);
         CHECK("trap veto: with it the Release still happens", rel1);
         CHECK("trap veto: ...and no trap is laid (reported as vetoed)", traps1 == 0 and v1);
+    }
+    // ---- F2 fix round 1: a Release(stop) plan ends as soon as the base is AT REST (below its deadband), not after horizon_s.
+    //   The pocket of test_local_policy stop_is_a_release (grown hull 2 cm from the side and tail walls, nose wall 1 cm past
+    //   the rest pose; body + 0.05 m margin), the robot creeping forward at 0.10 m/s with 0.10 s latency.
+    {
+        rc::RobotFootprint mb = rc::RobotFootprint::shadow(); mb.set_safety_margin(0.05f);
+        BaseLimits lb = b; lb.a_lin = 1.f; lb.d_lin = 1.f; lb.a_rot = 2.f; lb.d_rot = 2.f; lb.w_max = 1.5f; lb.v_min_eff = 0.03f; lb.w_min_eff = 0.08f;
+        const Eigen::Vector2f c0(2.f, 2.f);
+        const float hx = mb.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)), hy = mb.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)),
+                    hyb = mb.support_radius(0.f, Eigen::Vector2f(0.f, -1.f));
+        const float coast = 0.10f * 0.10f + 0.10f * 0.10f / (2.f * lb.d_lin), xs = hx + 0.02f, yn = hy + coast + 0.01f, yt = -(hyb + 0.02f);
+        std::vector<Return> pocket;
+        for (float y = yt; y <= yn; y += 0.02f) { pocket.push_back({c0 + Eigen::Vector2f(xs, y), 0.01f, 1.f}); pocket.push_back({c0 + Eigen::Vector2f(-xs, y), 0.01f, 1.f}); }
+        for (float x = -xs; x <= xs; x += 0.02f) { pocket.push_back({c0 + Eigen::Vector2f(x, yn), 0.01f, 1.f}); pocket.push_back({c0 + Eigen::Vector2f(x, yt), 0.01f, 1.f}); }
+        auto run = [&](bool at_rest) {
+            Navigator n7;
+            const Goal ahead{.kind = Goal::Kind::Place, .p = {2.f, 3.5f}, .yaw = {}};
+            n7.set_goal(ahead, grid, open_room, zero, {ahead.p}, mb.circumscribed_radius());
+            PolicyInput q; q.pose = {c0, 1.5707963f}; q.body = &mb; q.base = lb; q.returns = pocket;
+            q.sigma_rel_xy = 0.005f; q.sigma_rel_yaw = 0.005f; q.v_now = 0.10f; q.latency_s = 0.10f; q.now_s = 700.0;
+            const auto s0 = n7.step(q, pp);
+            // 0.30 s later (well inside horizon_s = 1 s): at rest, or still creeping above the deadband
+            q.now_s = 700.3; q.latency_s = 0.f; q.v_now = at_rest ? 0.5f * lb.v_min_eff : 2.f * lb.v_min_eff;
+            const auto s1 = n7.step(q, pp);
+            return std::tuple{s0.d, s1};
+        };
+        const auto [d0, rest] = run(true);
+        const auto [d0b, moving] = run(false);
+        std::printf("  stop plan: first %s (%+.2f, %+.2f) ; at rest -> replanned %d early %d %s (%+.2f, %+.2f)\n", mode_name(d0.mode), d0.v, d0.w,
+                    int(rest.replanned), int(rest.completed_early), mode_name(rest.d.mode), rest.d.v, rest.d.w);
+        CHECK("stop plan: the moving robot is told to stop (Release v = w = 0)", d0.mode == Decision::Mode::Release and d0.v == 0.f and d0.w == 0.f);
+        CHECK("stop plan: at rest (below the deadband) the phase ends early and a new decision is made", rest.replanned and rest.completed_early);
+        CHECK("stop plan: ...from rest — not another stop", not (rest.d.mode == Decision::Mode::Release and rest.d.v == 0.f and rest.d.w == 0.f));
+        CHECK("stop plan (control): still moving above the deadband, the stop is held", not moving.replanned);
     }
     // ---- I2: set_goal clears a world queued for the previous goal (Place -> Doorway keeps the corridor)
     {

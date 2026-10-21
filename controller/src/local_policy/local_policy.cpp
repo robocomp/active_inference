@@ -547,23 +547,31 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     const float lpc_max = std::log((n_cont + 1.f) / (n_cont + 2.f));
     std::ranges::sort(rel, std::greater{}, [](const Cand* x) { return std::pair{x->lps, -x->v}; });
     constexpr float kTie = 1e-6f;
+    // ★ F2 fix round 1 (review): the stop has NO POSITIONAL ADVANTAGE. Its sweep is a prefix of every candidate's, so it is
+    //   always the least likely contact: left in the passes below it would take pass (a) whenever its rest pose gains anything
+    //   (it is visited first) and always take pass (b) — a continued reverse out of a wedge would become reverse/stop/reverse.
+    //   The passes pick the best MOTION; the stop then competes with it on the spec's release order itself: continuability
+    //   GAIN first, then (equal gain) the goal's own second key — least P, or for a Heading goal the smaller displacement.
+    Cand* stop_c = nullptr;
+    if (const auto it = std::ranges::find_if(rel, [](const Cand* c) { return c->stop; }); it != rel.end()) { stop_c = *it; rel.erase(it); }
+    constexpr float kDispTie = 1e-3f;
     Cand* best = nullptr;
     // ★ Live fix 1 (controller ruling, tourP1 2026-10-20): a HEADING goal holds position — in Release too. Its order is
     //   (a) the continuability gain as for every goal (the members that INCREASE it, if any; else all releasable), then
     //   (b) the SMALLEST displacement of the end pose from the hold position (goal.p), ties to the smaller P(contact). Without
     //   it an orient goal released by "back up straight" at v_max (0.26 m live) and left door_2's 2.0 m reach band.
     //   Ties: displacements within kDispTie = 1 mm (below anything the pose resolves) are equal.
-    if (in.goal != nullptr and in.goal->kind == Goal::Kind::Heading)
+    const bool heading = in.goal != nullptr and in.goal->kind == Goal::Kind::Heading;
+    // The hold position: a Heading goal WITH a yaw holds goal.p (goal_adapter.h heading_goal sets p = here, the robot's
+    // position when the goal was made). Without a yaw, goal.p is the point to FACE (local_policy.h Goal) — then the hold
+    // is where the robot stands now.
+    const Eigen::Vector2f hold = heading and in.goal->yaw.has_value() ? in.goal->p : in.pose.p;
+    if (heading and not rel.empty())
     {
-        constexpr float kDispTie = 1e-3f;
         std::vector<Cand*> pool;
         if (lpc_now < lpc_max)
             for (Cand* c : rel) { ensure_lpc(*c); if (c->lpc > lpc_now) pool.push_back(c); }
         if (pool.empty()) pool = rel;
-        // The hold position: a Heading goal WITH a yaw holds goal.p (goal_adapter.h heading_goal sets p = here, the robot's
-        // position when the goal was made). Without a yaw, goal.p is the point to FACE (local_policy.h Goal) — then the hold
-        // is where the robot stands now.
-        const Eigen::Vector2f hold = in.goal->yaw.has_value() ? in.goal->p : in.pose.p;
         assert(hold.allFinite());
         for (Cand* c : pool)
         {
@@ -590,6 +598,17 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             if (best == nullptr or c->lpc > best->lpc) best = c;
             if (best->lpc >= lpc_max) break;
         }
+    if (stop_c != nullptr)                        // the stop against the best motion: gain first, then the goal's second key
+    {
+        ensure_lpc(*stop_c);
+        const auto second_key_wins = [&] {
+            if (not heading) return stop_c->lps > best->lps + kTie;
+            const float ds = (stop_c->end.p - hold).norm(), db = (best->end.p - hold).norm();
+            return ds < db - kDispTie or (std::abs(ds - db) <= kDispTie and stop_c->lps > best->lps);
+        };
+        // (lpc values are the same log((k+1)/(N+2)) of integer counts, so equal gains compare exactly)
+        if (best == nullptr or stop_c->lpc > best->lpc or (stop_c->lpc == best->lpc and second_key_wins())) best = stop_c;
+    }
     char buf[400];
     std::snprintf(buf, sizeof buf, "release%s%s: %s; P(contact)=%.3f; continuability %.2f -> %.2f nats", prediction_failed ? " (prediction failed: " : "",
                   prediction_failed ? (std::string(failed_why) + ")").c_str() : "", words(best->v, best->w).c_str(),

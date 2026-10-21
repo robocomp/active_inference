@@ -206,6 +206,25 @@ int main()
         CHECK("dead_end release reverse", d.mode == Decision::Mode::Release and d.v < 0.f);
         CHECK("dead_end release clear", p_contact_of(s, d.v, d.w) <= s.pp.risk_eps);
     }
+    { // ★ F2 fix round 1: the stop has NO positional advantage — it competes on the spec's release order, continuability GAIN
+      // first, then least P. The pressed wall (x = 0.30, inside the grown shell) ends 0.10 m ahead of the robot, which slides
+      // along it at 0.30 m/s (0.10 s latency); the goal is walled off (field +inf: nothing makes progress, Release decides).
+      // Measured: the stop is releasable (P 0.000) and its rest pose — the coast carries it toward the wall's end — gains
+      // (-2.08 -> -1.67 nats); the reverse arc away from the wall (v -0.50, w -0.30) is riskier (P 0.138) but gains MORE
+      // (-> -1.39). Before the fix the stop, visited first as the least likely contact, took pass (a).
+        Scene s; s.ret = wall_x(0.30f, -2.f, 0.10f);
+        V far{3.5f, 3.5f}; s.field.build(kGrid, [](const V& q) { return q.x() < 3.f; }, no_extra, std::span<const V>(&far, 1));
+        s.goal.p = far;
+        s.finish(); s.in.v_now = 0.30f; s.in.latency_s = 0.10f;
+        const Pose2 st = policy_start(s.in), stop_end = end_of(s, 0.f, 0.f);
+        const float lpc_now = log_p_continuable(s.in, s.pp, st), lpc_stop = log_p_continuable(s.in, s.pp, stop_end);
+        const auto d = decide(s.in, s.pp); print("stop_no_positional_advantage", d);
+        std::printf("  stop: P %.3f, continuability %.2f -> %.2f ; chosen continuability %.2f, P %.3f\n", p_contact_of(s, 0.f, 0.f), lpc_now, lpc_stop,
+                    d.log_p_cont, p_contact_of(s, d.v, d.w));
+        CHECK("stop_no_positional_advantage: scene — the stop is releasable and gains", p_contact_of(s, 0.f, 0.f) < s.pp.release_risk_max and lpc_stop > lpc_now);
+        CHECK("stop_no_positional_advantage: a releasable reverse with a larger gain wins over the stop",
+              d.mode == Decision::Mode::Release and d.v < 0.f and d.log_p_cont > lpc_stop and p_contact_of(s, d.v, d.w) < s.pp.release_risk_max);
+    }
     { // release_from_side_on_wall_goal_through_it: the pressed scene with the flank 0.036 m CLEAR of the grown body
       // (wall x = 0.37), goal through the wall (map lag). Exercises the release path where eligibility is possible.
         Scene s; s.ret = wall_x(0.37f, -2.f, 2.f); s.goal.p = {1.5f, 0.f};
@@ -354,7 +373,10 @@ int main()
         V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
         s.finish();
         s.in.v_now = v0; s.in.latency_s = lat;
-        // independent re-evaluation over the policy's own v <= 0 grid (n_v 7 over [-0.5, 0.5], n_w 11 over [-1.5, 1.5])
+        // independent re-evaluation over a HAND-BUILT v <= 0 grid: v in {-0.5, -1/3, -1/6, 0} x w in {-1.5, -1.2, ..., 1.5} — the
+        // values n_v = 7 / n_w = 11 give over the dynamic window at THIS state (v_now 0.1, w_now 0, a_lin 1, a_rot 2), not the
+        // policy's candidate set itself (decide() also appends extra reverses/turns and drops the deadband, none of which
+        // changes this grid here)
         float least = 1.f;
         for (int i = 0; i <= 3; ++i)
             for (int j = 0; j <= 10; ++j)

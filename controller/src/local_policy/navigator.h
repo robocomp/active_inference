@@ -63,7 +63,8 @@ public:
     // for horizon_s then brake, dur2 in all. t0 = the decision time it started.
     // round 5: the plan runs PHASE by phase; a phase ends when its hold elapses OR its predicted end state is reached
     //   (heading-changing phase: the predicted turn reached, or the goal's heading within tolerance; translating phase:
-    //   its predicted descent realized within the field's resolution). phase_t0 / phase_yaw0 / phase_f0 / phase_p0 =
+    //   its predicted descent realized within the field's resolution; F2: a Release(stop) phase, the base at rest — below
+    //   its deadband). phase_t0 / phase_yaw0 / phase_f0 / phase_p0 =
     //   where the current phase started.
     struct Plan { bool active = false; Decision::Mode mode = Decision::Mode::Drive; float v1 = 0, w1 = 0, dur1 = 0, v2 = 0, w2 = 0, dur2 = 0;
                   bool has2 = false; double t0 = 0.0; Decision d{.mode = Decision::Mode::Drive, .why = {}};
