@@ -183,6 +183,18 @@ int main()
         CHECK("I3: on a doorway's goal line decide() does not report Arrived", on_line.d.mode != Decision::Mode::Arrived);
     }
 
+    // ---- F1 fix round 1 (I4): an Unreachable verdict is LATCHED for its goal — the next tick (the belief restarted after its
+    //      hand back) must not clear the no-route clock that reports a non-Reach Place / mouse target
+    {
+        UnreachLatch l;
+        CHECK("I4 latch: before any verdict the clock may reset on a normal tick", l.clock_may_reset(false, false));
+        l.on_verdict(true);
+        CHECK("I4 latch: the tick after a hand back (verdict no longer Unreachable) does NOT reset the clock", not l.clock_may_reset(false, false));
+        CHECK("I4 latch: nor does any later tick of the same goal", not l.clock_may_reset(false, false));
+        l.on_new_goal();
+        CHECK("I4 latch: a new goal clears it", l.clock_may_reset(false, false));
+        CHECK("I4 latch: a Stuck hold never resets the clock", not l.clock_may_reset(false, true));
+    }
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);
     return fails == 0 ? 0 : 1;
 }

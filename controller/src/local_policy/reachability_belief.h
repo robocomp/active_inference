@@ -1,83 +1,70 @@
 // reachability_belief.h — F1 (2026-10-21 doorway-release spec): "Unreachable" is an ACCUMULATED belief about a PLACE, not
-// the verdict of one tick. Eigen + std only (no Qt/DSR); the Navigator owns one per goal (navigator.h), so the controller and
-// the sim2d harness run the same code.
+// the verdict of one tick. Eigen + std only (no Qt/DSR); the Navigator owns one per goal (navigator.h) and decides what each
+// tick observed, so the controller and the sim2d harness run the same code. This class holds the places, the evidence algebra
+// and the decision.
 //
-// ★ WHY: a Stuck is a statement about ONE decision from ONE (often moving) state — "from here, at this speed, no release is
-//   more likely contact-free than not". rtD1b: 4 of 4 doorway Stucks were followed on the very next tick by Drive with ~70
-//   eligible motions, and each one handed the crossing back. The task layer needs a statement about the PLACE: "from here no
-//   motion escapes". That is a hypothesis, weighed decision by decision against its rival.
+// ★ WHY: a Stuck is a statement about ONE decision from ONE (often moving) state. rtD1b: 4 of 4 doorway Stucks were followed on
+//   the very next tick by Drive with ~70 eligible motions, and each one handed the crossing back. The task layer needs a
+//   statement about the PLACE: "from here no motion escapes".
 //
-// HYPOTHESES (per place): U = "no motion from here ESCAPES" — none is both contact-free (the policy's risk levels) and either
-//   makes progress on the field or buys continuability; R = "some fraction theta > 0 of the motions escapes", theta uniform.
-//   L = log P(U)/P(R) at the robot's place.
-// PRIOR: a place is not unknown — the goal was handed to the policy because the map's cost-to-go is finite here, i.e. the map
-//   holds a route that leaves this place. That is the statement a decision makes when it finds an escape, and it is weighed as
-//   one delivered at rest, at one decision's resolution: L0 = -log(N+1) (N = the candidates a decision searches; the latest
-//   decision's, before any decision 0). Measured why it is needed: with L0 = 0 (P(U) = 1/2 at every place) ONE repositioning
-//   decision at rest cleared the bar — jamb_1p6cm_start was handed back on its first decision (3 of 20 seeds) and
-//   dead_end_release after two back-ups at the stale wall (7 of 20), before the trap mechanism had judged anything.
-//   The Navigator decides what each tick observed (navigator.cpp step()); this class holds the places, the evidence algebra
-//   and the decision.
+// HYPOTHESES (per place): U = "no motion from here escapes" (none both stays within the policy's risk levels and shortens the
+//   goal's remaining time); R = "some do". L = log P(U)/P(R) at the robot's place.
 //
-// LIKELIHOOD of one DECISION (a tick on which decide() searched its N candidates; a tick that only continues a committed plan
-//   searched nothing and is no observation):
-//   · NO ESCAPE FOUND — Stuck, a Release that buys no continuability (pass (b)), or a REPOSITIONING Drive (one whose own plan
-//       predicts no descent the field resolves: "back up, then forward" ending behind its start — chosen for a two-step rate,
-//       but the ProgressMonitor would call it "too small to judge"): 0 of N candidates escape.
-//       P(0 of N | U) = 1, P(0 of N | R) = integral_0^1 (1 - theta)^N dtheta = 1/(N+1)  =>  evidence = +log(N+1), FOR U.
-//       (The same rule of succession, log((k+1)/(N+2)), that the policy's continuability term uses.) This is the F2 review's
-//       carried requirement made exact: a no-gain turn shows that some motion is SAFE, never that one ESCAPES, so it can never
-//       count against U — a real trap that dithers stop/turn closes (measured: sim2d blocked_doorway).
-//   · AN ESCAPE CLAIMED — a Drive whose plan predicts a resolvable descent, or a Release predicted to BUY continuability — is a
-//       PREDICTION. It is folded when its plan ends, at the place it was claimed from and with that decision's exposure:
-//         DELIVERED as predicted: under R the escape is real unless it touches, under U only if the contact model is wrong
-//           about it — the ratio q/(1-q), q = its P(contact), read no finer than one in N+2 (the factor above, the other way
-//           round): delivered(q) = logit(max(q, 1/(N+2))) in [-log(N+1), 0), AGAINST U;
-//         FAILED: the escape it claimed did not exist — in hindsight a decision that found none: +log(N+1), FOR U. These are
-//           the failures whose traps a measured doorway vetoes (Live fix 2 ruling 2): the veto keeps the field open, the
-//           belief keeps the evidence;
-//         a Drive is GRADED by the fraction of its predicted descent it delivered, phi = realized / predicted (clamped to
-//           [0, 1]): U does not forbid local progress — under U the robot advances to the obstruction and no further — so the
-//           claim is read as its predicted descent in steps of the field's resolution, one correlated observation whose
-//           evidence is the mean of its steps, phi delivered(q) + (1 - phi) log(N+1). A Release keeps the monitor's binary
-//           verdict (its claim is continuability, not descent);
-//         a plan that ended before it could deliver (replaced because its remaining sweep turned risky, interrupted, the goal
-//           or the field changed, a prediction too small to judge): nothing.
-//       The Navigator (navigator.cpp step()) says which decisions and judgements happened; the measurements behind each rule
-//       are recorded there.
-//   · Release(stop): NO observation — its point is that the next decision is made from rest (F2), which answers the question
-//       about the place without the coast. (Never against U: the F2 review's carried requirement.)
-//   · A continued plan (searched nothing), Blind, a sensing contradiction, Arrived, a frozen pose sample: no observation; a
-//       judgement read on a frozen pose sample is no observation either (its realized descent was read from a stale pose).
+// THE GOAL'S REMAINING TIME (fix round 1, C1) is the one progress measure: T = route / v_max + |dyaw| / w_max — the field's
+//   route metres at v_max, plus, for a goal that asks for a heading (Heading; Place with a yaw), the turn still owed at w_max.
+//   A heading goal's or a final turn's progress is time like any descent (round 0 measured descent only, so every turn was
+//   "no progress" and a Heading goal — route ~0 — was handed back on its first tick).
 //
-// EXPOSURE (moving decisions): every candidate of a moving decision first carries the coast (latency + braking), so what it says
-//   about the place is said about the coast's end, c metres away; it enters at the place kernel's weight there,
-//   w = exp(-c / cell). At 0.35 m/s and WheelDecel 0.5 (coast ~0.16 m) w ~ 0.04: a Stuck while moving barely moves the belief —
-//   the coast explains it. At rest c = 0, w = 1. c is the base's own braking: |v| latency + v^2/(2 d_lin) plus, for a turn,
-//   the body's farthest point r_body (|w| latency + w^2/(2 d_rot)).
+// EVIDENCE
+//   · A CLAIM: every Drive commits to a plan. When that plan ENDS — completed, completed early, or replaced because its
+//     remaining sweep turned risky — the realized shortening of T from the claim's place, r, is compared with what the plan
+//     predicted for the time that actually elapsed, D(el) (the plan rolled out to el exactly as decide() predicts its holds:
+//     latency coast, phase 1 from the claim's velocity, phase 2 entered while moving). sigma = the ProgressMonitor's own
+//     resolution (field resolution over the displacement (+) pose drift over el, / v_max; (+) the relative heading sigma /
+//     w_max for a goal that asks for a heading):
+//       under R  r ~ N(D, sigma^2)          (it delivered what it predicted)
+//       under U  r ~ N(min(D, 0), sigma^2)  (it cannot advance past the place — bounded by the obstruction, taken AT the place;
+//                                            a predicted retreat is equally possible under both and says nothing)
+//       evidence = ((r - D)^2 - (r - mu_U)^2) / (2 sigma^2) — continuous, no clamp. A plan replaced 0.1 s in predicted ~nothing
+//       and says ~nothing; a back-up-and-realign plan (D ~ 0) says ~nothing (I3); one that stopped short says much.
+//       Dropped: an interruption, a Blind tick, a trap that rebuilt the route, a new goal.
+//   · A COUNT — every decision is also a statement about its OPTIONS: "none of my n effective options escapes" has
+//       P(0 of n | U) = 1, P(0 of n | R) = integral_0^1 (1 - theta)^n dtheta = 1/(n+1)  =>  +log(n+1),
+//     n = Decision::n_effective (distinct end poses at the place resolution). It is GRADED by the probability that no option
+//     really shortens T: from the best shortening any ELIGIBLE option offers over the policy's own two steps (a candidate,
+//     then a coarse continuation), along the sweeps (Decision::best_shortening_s), D_best, and two hypotheses of equal prior —
+//     NONE: D_best ~ N(0, sigma^2); SOME: the true shortening is uniform on (0, T] (no escape shortens more than what remains),
+//     p(D_best) = [Phi((T - D_best)/sigma) - Phi(-D_best/sigma)] / T — so P(none | D_best) needs no new scale. No eligible
+//     option at all: 1 (a full count). Weighted by the EXPOSURE w = exp(-coast / cell): a moving decision's options all carry
+//     the coast; at 0.35 m/s, WheelDecel 0.5 (coast ~0.16 m) w ~ 0.04.
+//   · Release(stop), a continued plan, Blind, Arrived, a sensing contradiction, a frozen pose: nothing.
 //
-// PLACE: the evidence is about the place it was gathered at. Places are the cost-to-go field's cells (two positions in one cell
-//   are one node of the field — the finest place the policy distinguishes); each cell keeps the sum of the evidence gathered in
-//   it, and the belief at the robot is L = sum_cells exp(-|cell - here| / cell_size) x evidence(cell): one cell away counts e^-1.
-//   It is distance FROM the place, not distance travelled: a stop/turn dither returning to the same cell recalls what was
-//   gathered there (a path-length discount would erase it every turn and keep the trap open — measured). Heading is not part of
-//   the place: a turn in place reaches every heading it sweeps, and a turn that buys nothing is no escape.
-//   FROZEN POSE (rtD1b 175.34-175.38: the pose did not move for 3 ticks at 0.34 m/s): a pose sample identical to the last one
-//   while the base moves above its deadband is a stale sample — its decision is not an observation of where the robot is.
+// PRIOR (fix round 1, I2): from the route's own risk. The planner prices the residual belief per metre as
+//   residual_risk_weight x R_body (nats of doubt the body covers — grid_planner.h), so the priced field minus its length is
+//   weight x the integral of R_body over the route. Independent body placements along the route are one body length apart
+//   (2 r_body, the circumscribed diameter), so the route's surprisal is R = (priced - length) / (weight x 2 r_body) nats and
+//   P(route free) = e^-R. On top, the base rate of what the map cannot hold — UnseenContact::kPriorBlocked = 0.01, "the
+//   fraction of commanded motions blocked by something the LiDAR cannot see" — so P(U) = 1 - (1 - 0.01) e^-R. It is
+//   evaluated at the robot's place every tick (and so holds from the moment of a reset — C1).
 //
-// DECISION (the objective's own terms, no constant). The score values a field-descent RATE at progress_scale_m / horizon_s per
-//   nat: a tick that does not descend costs v_max dt / progress_scale_m nats (the rate the field — slope 1 m/m — could have
-//   descended at), and the goal is worth route_m / progress_scale_m nats (its remaining route on the field). One more tick:
-//     cost  = P(U) x v_max dt / s   (wasted if the place is a trap)
-//     value = P(R) x route_m / s    (forfeited by a hand back if it is not)
-//   Hand back iff cost > value  <=>  L > bar = log(route_m / (v_max dt)), dt = the measured tick period. s cancels: the goal is
-//   worth route_m / v_max seconds of driving, a tick costs dt. Evaluated on every tick (a tick that found an escape lowers L).
+// PLACE: the cost-to-go field's cells; each keeps the sum of the evidence gathered in it, and
+//   L(here) = prior(here) + sum_cells exp(-|cell - here| / cell) x evidence(cell)
+//   (M2: the kernel is NOT normalised — evidence gathered in this cell counts once, a neighbour's at e^-1 — and the prior is
+//   added once, not per cell). Distance FROM the place, not travelled: a dither returning to a cell recalls it. Cells beyond
+//   10 cell lengths (weight e^-10 = 4.5e-5) are skipped in the sum (M1; they are kept, the robot may come back).
+//   FROZEN POSE (rtD1b: the pose did not move for 3 ticks at 0.34 m/s): identical to the last sample while the base moves above
+//   its deadband — not an observation.
+//
+// DECISION (the objective's own terms). Waiting for the next observation costs P(U) x dt_obs (wasted if this is a trap);
+//   handing back forfeits P(R) x T (the goal's remaining time). Hand back iff L > bar = log(T / dt_obs). dt_obs is the
+//   measured interval BETWEEN OBSERVATIONS (I1) — independent of the tick rate; before a second observation, the current
+//   decision's committed plan duration (the time to the next decision it promises); before any, no bar (+inf). The progress
+//   scale of the score cancels: both terms are times.
 #pragma once
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <map>
-#include <optional>
 #include "policy_types.h"
 
 namespace rc::policy
@@ -85,35 +72,42 @@ namespace rc::policy
 class ReachabilityBelief
 {
 public:
-    // cell_m: the field's cell (the place resolution); body_r_m: the body's circumscribed radius (a turn's coast)
     void reset(float cell_m, float body_r_m) { *this = ReachabilityBelief{}; cell_ = std::max(cell_m, 1e-3f); r_ = std::max(body_r_m, 0.f); }
 
-    // Every tick: where the robot is now, and the tick period (dt_fallback on a goal's first tick or after an interruption).
-    // Returns false for a FROZEN pose sample (identical to the last one while the base moves above its deadband): nothing read
-    // on it is an observation.
-    bool tick(const Pose2& pose, float v_now, float w_now, double now_s, const BaseLimits& base, float dt_fallback)
+    // Every tick: where the robot is. Returns false for a FROZEN pose sample (nothing read on it is an observation).
+    bool tick(const Pose2& pose, float v_now, float w_now, const BaseLimits& base)
     {
         const bool moving = std::abs(v_now) >= base.v_min_eff or std::abs(w_now) >= base.w_min_eff;
-        const bool frozen = has_last_ and moving and pose.p == last_pose_.p and pose.yaw == last_pose_.yaw;
-        dt_ = has_last_ ? float(std::max(0.0, now_s - last_t_)) : dt_fallback;
-        has_last_ = true; last_t_ = now_s; last_pose_ = pose;
-        here_ = key(pose.p);
+        const bool frozen = has_pose_ and moving and pose.p == last_pose_.p and pose.yaw == last_pose_.yaw;
+        has_pose_ = true; last_pose_ = pose; here_ = key(pose.p);
         return not frozen;
     }
-    // An interruption (Pause / Halt / a hold): the places are kept, but the next interval is a gap, not a tick period
-    void interrupt() { has_last_ = false; }
-
-    // The evidence of one decision (nats, before the exposure weight): it found no escape among n candidates / an escape with
-    // P(contact) q was delivered. n <= 0 (nothing searched) = 0.
-    static float no_escape(int n) { return n > 0 ? std::log(float(n) + 1.f) : 0.f; }
-    static float delivered(float q, int n)
+    // An observation was made at now_s; `expected_s` = the time to the next one it promises (its plan's duration; 0 = none)
+    void observed(double now_s, float expected_s)
     {
-        if (n <= 0) return 0.f;
-        const float qq = std::clamp(q, 1.f / (float(n) + 2.f), 0.5f);
-        return std::log(qq / (1.f - qq));
+        dt_obs_ = has_obs_ ? float(now_s - last_obs_t_) : expected_s;
+        has_obs_ = true; last_obs_t_ = now_s;
     }
-    // The coast (m) of the base's own braking from (v, w) after the latency; a turn's as the body's farthest point; and the
-    // place kernel's weight at the coast's end — what a decision made at (v, w) says about the place at rest
+    // An interruption (Pause / Halt / a hold): the places are kept, the next interval is a gap, not an observation interval
+    void interrupt() { has_obs_ = false; }
+
+    // The prior at the robot's place from the route's surprisal R (nats) — see PRIOR
+    void set_route_surprisal(float R)
+    {
+        const float Rc = std::max(R, 0.f);   // log P(U)/P(R) = log(1 - k e^-R) - log(k e^-R)
+        prior_ = std::log(1.f - kFreeBase * std::exp(-Rc)) - std::log(kFreeBase) + Rc;
+    }
+    float prior() const { return prior_; }
+
+    // COUNT evidence: no escape among n effective options
+    static float no_escape(int n) { return n > 0 ? std::log(float(n) + 1.f) : 0.f; }
+    // CLAIM evidence: predicted shortening D, realized r, resolution sigma (same units)
+    static float claim(float D, float r, float sigma)
+    {
+        if (not (sigma > 0.f) or not std::isfinite(D) or not std::isfinite(r)) return 0.f;
+        const float mu_u = std::min(D, 0.f);
+        return ((r - D) * (r - D) - (r - mu_u) * (r - mu_u)) / (2.f * sigma * sigma);
+    }
     float coast_m(float v_now, float w_now, float latency_s, const BaseLimits& b) const
     {
         const float v = std::abs(v_now), w = std::abs(w_now), lat = std::max(latency_s, 0.f);
@@ -122,36 +116,37 @@ public:
         return lin + r_ * rot;
     }
     float exposure(float v_now, float w_now, float latency_s, const BaseLimits& b) const { return std::exp(-coast_m(v_now, w_now, latency_s, b) / cell_); }
-    // Fold evidence (already exposure-weighted) into the place `at`
-    void add(const Eigen::Vector2f& at, float nats) { if (nats != 0.f) cells_[key(at)] += nats; }
-    // The map's word on every place (PRIOR above), at the resolution of a decision that searched n candidates
-    void set_prior(int n) { prior_ = -no_escape(n); }
-    float prior() const { return prior_; }
+    void add(const Eigen::Vector2f& at, float nats) { if (nats != 0.f and std::isfinite(nats)) cells_[key(at)] += nats; }
 
-    // L at the robot's place: the kernel-weighted evidence of every cell (one cell away counts e^-1)
     float log_odds() const
     {
         float L = prior_;
         for (const auto& [k, e] : cells_)
-            L += std::exp(-std::hypot(float(k.first - here_.first), float(k.second - here_.second))) * e;
+        {
+            const float d = std::hypot(float(k.first - here_.first), float(k.second - here_.second));
+            if (d <= kReachCells) L += std::exp(-d) * e;
+        }
         return L;
     }
     float p_unreachable() const { return 1.f / (1.f + std::exp(-log_odds())); }
-    // The hand-back bar log(route_m / (v_max dt)); +inf when no value can be compared (route not finite, v_max or dt not > 0).
-    float bar(float route_m, float v_max) const
+    // bar = log(T / dt_obs); +inf while no observation interval is known or T is not finite
+    float bar(float T_goal) const
     {
-        if (not std::isfinite(route_m) or not (v_max > 0.f) or not (dt_ > 0.f)) return INFINITY;
-        return std::log(std::max(route_m, 0.f) / (v_max * dt_));
+        if (not std::isfinite(T_goal) or not (dt_obs_ > 0.f)) return INFINITY;
+        return std::log(std::max(T_goal, 0.f) / dt_obs_);
     }
-    bool hand_back(float route_m, float v_max) const { return log_odds() > bar(route_m, v_max); }
-    float last_dt() const { return dt_; }
+    bool hand_back(float T_goal) const { return log_odds() > bar(T_goal); }
+    float dt_obs() const { return dt_obs_; }
+
+    static constexpr float kFreeBase = 1.f - 0.01f;   // 1 - UnseenContact::kPriorBlocked (unseen_contact.h)
+    static constexpr float kReachCells = 10.f;        // M1: e^-10 = 4.5e-5 of a cell's evidence — skipped in the sum
 
 private:
     std::pair<std::int32_t, std::int32_t> key(const Eigen::Vector2f& p) const
     { return {std::int32_t(std::floor(p.x() / cell_)), std::int32_t(std::floor(p.y() / cell_))}; }
     std::map<std::pair<std::int32_t, std::int32_t>, float> cells_;
     std::pair<std::int32_t, std::int32_t> here_{0, 0};
-    float cell_ = 0.05f, r_ = 0.f, dt_ = 0.f, prior_ = 0.f;
-    bool has_last_ = false; double last_t_ = 0.0; Pose2 last_pose_{};
+    float cell_ = 0.05f, r_ = 0.f, dt_obs_ = 0.f, prior_ = std::log(0.01f / 0.99f);
+    bool has_pose_ = false, has_obs_ = false; double last_obs_t_ = 0.0; Pose2 last_pose_{};
 };
 }  // namespace rc::policy

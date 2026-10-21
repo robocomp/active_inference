@@ -74,6 +74,7 @@ void ControllerSession::policy_reset()
     policy_last_mode_ = -1;
     policy_last_why_.clear();
     policy_no_field_since_ms_ = 0;
+    policy_unreach_latch_.on_new_goal();
     policy_gate_.reset();
     policy_sign_.reset();          // an operator Stop / a new activity re-arms the check (it is latched otherwise)
     policy_prev_yaw_.reset();
@@ -199,6 +200,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         policy_nav_.set_goal(spec.goal, g, free_fn, extra_fn, spec.points, body.circumscribed_radius());
         policy_goal_ = spec;
         policy_goal_who_ = who;
+        policy_unreach_latch_.on_new_goal();   // F1 (I4): a new goal is a new question
         policy_world_hash_ = grid_planner_.world_hash();
         // (the unseen-contact evidence is KEPT across goals: it is about what the body touched, in the odometry frame)
         policy_last_mode_ = -1;
@@ -392,6 +394,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     if (st.unreachable or st.hand_back)
     {
         out.verdict = PolicyVerdict::Unreachable;
+        policy_unreach_latch_.on_verdict(true);   // F1 (I4): reported by the protocol even after the belief restarts
         out.why = st.unreachable
             ? std::format("the goal is no longer reachable from ({:.2f},{:.2f}) after a trap at ({:.2f},{:.2f})", pose.p.x(),
                           pose.p.y(), st.trap ? st.trap->c.x() : 0.f, st.trap ? st.trap->c.y() : 0.f)
@@ -709,8 +712,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         if (no_route_since_ms_ == 0) no_route_since_ms_ = now;
         note_why(rc::why::Cause::NoRoute, std::format("{}: the cost-to-go is infinite at the robot — no way to the goal on the map", who));
     }
-    else if (tick.verdict != PolicyVerdict::Unreachable and not tick.stuck)
-        no_route_since_ms_ = 0;
+    else if (policy_unreach_latch_.clock_may_reset(tick.verdict == PolicyVerdict::Unreachable, tick.stuck))
+        no_route_since_ms_ = 0;   // F1 (I4): never while an Unreachable verdict is latched for this goal (policy_tick_gate.h)
     // UNREACHABLE: handed back through the protocol (a mouse target is dropped by the no-route clock). F1: a Stuck is a hold —
     // the reachability belief's verdict, not a single Stuck tick, is what hands back
     if (tick.verdict == PolicyVerdict::Unreachable)

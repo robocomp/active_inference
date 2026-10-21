@@ -408,6 +408,10 @@ private:
     std::string policy_last_why_;
     std::ofstream policy_csv_;
     std::uint64_t policy_no_field_since_ms_ = 0;
+    // F1 fix round 1 (I4): an Unreachable verdict for the current policy goal (trapped field or reachability belief) is LATCHED
+    // until the goal changes or the policy resets — the Navigator restarts its belief after a hand back, so the next tick is
+    // no longer Unreachable, and it must not clear the no-route clock that reports a non-Reach target (Place / mouse)
+    rc::policy::UnreachLatch policy_unreach_latch_;
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
     rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
     // Task 8 ruling 1: a continuous-route tour driven by the policy — its waypoints as successive Place goals

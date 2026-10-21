@@ -72,4 +72,18 @@ public:
 private:
     double since_ = -1.0;
 };
+// ★ F1 fix round 1 (I4): an Unreachable verdict (trapped field or reachability belief) is LATCHED for its goal. The Navigator
+//   restarts its belief after a hand back, so the next tick is no longer Unreachable; for a non-Reach target (a Place, a mouse
+//   click) the hand back is the 5-s no-route clock (report_unreachable_if_no_route), which that next tick must not clear.
+//   The clock may reset only on a tick that is neither Unreachable, nor a Stuck hold, nor under a latched verdict.
+class UnreachLatch
+{
+public:
+    void on_verdict(bool unreachable) { latched_ = latched_ or unreachable; }
+    void on_new_goal() { latched_ = false; }
+    bool clock_may_reset(bool unreachable, bool stuck) const { return not unreachable and not stuck and not latched_; }
+    bool latched() const { return latched_; }
+private:
+    bool latched_ = false;
+};
 }  // namespace rc::policy

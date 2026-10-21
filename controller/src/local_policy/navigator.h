@@ -114,16 +114,26 @@ public:
     double last_build_ms() const { return last_build_ms_; }
     int failed_predictions() const { return failed_predictions_; }   // since set_goal
     const ReachabilityBelief& reachability() const { return belief_; }
+    // F1 (I2): the planner's residual_risk_weight (grid_planner.h) — converts the field's priced-minus-length into nats of
+    // route doubt for the reachability prior; 1 = the planner's default
+    void set_route_risk_weight(float w) { route_risk_weight_ = w; }
     const Plan& plan() const { return plan_; }
 
 private:
     Step step_core(PolicyInput in, const PolicyParams& p);   // the plan / decide / trap logic; step() adds the F1 belief
     ReachabilityBelief belief_;
-    // F1: the escape the committed plan claimed (a Drive / a gaining Release with an armed prediction), folded when judged
-    //   (drive: a Drive's descent claim, dF_pred its predicted descent at its holds' end; else a Release's continuability claim)
-    struct Claim { bool pending = false, drive = false; Eigen::Vector2f at = Eigen::Vector2f::Zero(); float q = 0.f, w = 1.f; int n = 0;
-                   float dF_pred = 0.f; double t0 = 0.0; };
+    // F1: the committed Drive's claim — from pose `at` (remaining time T0 there) it shortens the goal's remaining time by D;
+    //   judged against its own rollout when its plan ends (navigator.cpp step())
+    struct Claim { bool pending = false; Pose2 at{}; float T0 = 0.f; double t0 = 0.0;
+                   float v0 = 0.f, w0 = 0.f, lat = 0.f, v1 = 0.f, w1 = 0.f, v2 = 0.f, w2 = 0.f; bool has2 = false;
+                   float hold = 1.f, dt = 0.05f; BaseLimits base{}; };
     Claim claim_;
+    Pose2 predicted_pose(const Claim& c, float el) const;
+    static float no_shortening(float D, float sig, float T);
+    float route_risk_weight_ = 1.f;
+    std::optional<float> goal_heading(const Pose2& at) const;
+    float remaining_time(const Pose2& at, const BaseLimits& b) const;
+    float route_surprisal(const Eigen::Vector2f& at) const;
     void build();
     Goal goal_{.kind = Goal::Kind::Place, .yaw = {}};
     CostToGo::Grid grid_{{0.f, 0.f}, 0.05f, 0, 0};

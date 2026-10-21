@@ -2,6 +2,7 @@
 #include "local_policy.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -368,6 +369,17 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             cands.push_back(c);
         }
     d.n_candidates = int(cands.size());   // F1: what this decision searched (every Drive / Release / Stuck below carries it)
+    {
+        // F1 fix round 1 (I2): distinct end poses at the place resolution — position in field cells, heading as the body's
+        // farthest point's arc in the same cells (reachability_belief.h PLACE)
+        const float c = in.field != nullptr ? in.field->cell() : 0.05f, r = in.body->circumscribed_radius();
+        std::vector<std::array<int, 3>> keys;
+        for (const Cand& k : cands)
+            if (not k.stop)
+                keys.push_back({int(std::floor(k.end.p.x() / c)), int(std::floor(k.end.p.y() / c)), int(std::floor(wrap(k.end.yaw) * r / c))});
+        std::ranges::sort(keys);
+        d.n_effective = int(std::ranges::distance(keys.begin(), std::ranges::unique(keys).begin()));
+    }
     // ★ one continuation rollout set per candidate end pose, cached (make_conts); its sweeps yield BOTH the continuability
     //   and the second step of the two-step progress (ruling round 4) — no rollout is ever repeated.
     std::vector<Conts> conts;
@@ -433,6 +445,45 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             c.ub_rate = std::max(c.ub_rate, pr / (c.dur + duration(sw, p)));
         }
         if (c.ub2 > 0.f) drive.push_back(&c);
+    }
+    {
+        // ★ F1 fix round 1 — the best shortening of the goal's REMAINING TIME (route / v_max + owed heading / w_max,
+        //   reachability_belief.h) any eligible option offers, over the same TWO steps the policy's own progress term looks
+        //   (round 4: an eligible candidate, then an eligible coarse continuation from its rest pose), along the sweeps — the
+        //   goal is reached when T passes its tolerance during a motion (measured: rest poses counted a 0.075 rad final turn,
+        //   0.14 s from a Place goal, as "no option shortens T"; one step only counted the jamb start's turn-then-go as "no
+        //   option" three times in 0.6 s and handed it back). Exact: continuation sweeps are visited by their least T and only
+        //   checked for contact until the first eligible one.
+        auto remaining = [&](const Pose2& q) {
+            float T = 0.f;
+            if (g.kind != Goal::Kind::Heading) T += in.base.v_max > 0.f ? in.field->at_length(q.p) / in.base.v_max : kInf;
+            if (const auto ty = target_yaw(g, q); ty and in.base.w_max > 0.f) T += std::abs(wrap(*ty - q.yaw)) / in.base.w_max;
+            return T; };
+        const float T_here = remaining(in.pose);
+        if (std::isfinite(T_here))
+        {
+            float best_T = kInf;
+            std::vector<std::pair<float, const std::vector<Pose2>*>> second;
+            for (auto& c : cands)
+            {
+                if (not c.elig) continue;
+                for (const Pose2& q : rollout(start, in.v_now, in.w_now, c.v, c.w, p.horizon_s, in.base, p.dt)) best_T = std::min(best_T, remaining(q));
+                for (const auto& sw : ensure_conts(c).sw)
+                {
+                    float m = kInf;
+                    for (const Pose2& q : sw) m = std::min(m, remaining(q));
+                    second.push_back({m, &sw});
+                }
+            }
+            std::ranges::sort(second, {}, &std::pair<float, const std::vector<Pose2>*>::first);
+            for (const auto& [m, sw] : second)
+            {
+                if (not (m < best_T)) break;
+                if (eligible(log_p_no_contact_cells(*in.body, *sw, in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m,
+                                                    std::log1p(-p.risk_eps)), p)) { best_T = m; break; }
+            }
+            if (std::isfinite(best_T)) d.best_shortening_s = T_here - best_T;
+        }
     }
     auto bound = [&](const Cand* c) { return c->lps + c->ub_rate / rate_scale + lpc_top; };
     std::ranges::sort(drive, std::greater{}, bound);

@@ -1,6 +1,7 @@
 // local_policy.h — the look-ahead decision: which (v, w) to send this cycle, or why none.
 // Eigen + std only (no Qt/DSR). Room frame; yaw = FORWARD heading (policy_types.h).
 #pragma once
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -86,6 +87,14 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   // continuability at the start a Release is compared with — a Release with log_p_cont > log_p_cont_now is
                   // predicted to BUY continuability (an escape); one without is not
                   int n_candidates = 0; float log_p_cont_now = 0.f;
+                  // F1 fix round 1 (I2): the EFFECTIVE number of candidates — distinct end poses at the place resolution (the
+                  // field's cell in position, the body's far point moving one cell in heading); candidates ending in one such
+                  // place are one option, not several (the stop excluded)
+                  int n_effective = 0;
+                  // F1 fix round 1: the largest shortening of the goal's REMAINING TIME (route / v_max + owed heading / w_max —
+                  // reachability_belief.h) that any ELIGIBLE candidate offers at its rest pose; -inf when none is eligible.
+                  // The premise of the belief's "no escape among n" count, graded (navigator.cpp)
+                  float best_shortening_s = -std::numeric_limits<float>::infinity();
                   // F1: the ProgressMonitor's verdict on the PREVIOUS plan's prediction, judged in this decide(): +1 delivered,
                   // -1 failed, 0 none (nothing pending, not yet due, or too small to judge); and whether THIS decision armed a
                   // prediction of its own (a monitored Drive with a finite descent, a monitored non-stop Release)
