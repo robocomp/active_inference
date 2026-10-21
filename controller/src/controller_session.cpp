@@ -3502,6 +3502,73 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_last_reading_.reset();
     anchor_gone_logged_ = false;
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
+    anchor_claim_since_ms_ = 0;                      // Task 3e: the next read stamps the claim's start
+    anchor_prev_room_.reset();
+    anchor_lambda_ = rc::policy::kDoorwayAnchorLostPrior;
+    anchor_parked_logged_ = false;
+    policy_goal_line_known_ = false;
+}
+
+// ★ Task 3e (2) — rtD1h leg 5 attempt 2. ([Policy] Enabled only: the old chain's servo path is unchanged for the A/B.)
+//   (a) A PARKED BLOCK IS NOT THIS CLAIM'S. door_concept parks the anchor when a cross ends without the robot through, and its
+//       last predicted block keeps its drivable mark; the retry's first read found it within kAnchorStaleMs and drove one tick on
+//       it ("driving on the PREDICTED anchor (last seen 6045 ms)"), which set `engaged`. A block stamped before this claim began
+//       was written for the claim that ended: not drivable for this one. (door_concept clearing the mark at park time is D-B.)
+//   (b) A RE-INITIALISED ANCHOR IS LOOKED FOR, NOT WAITED FOR. door_concept then re-initialised the anchor 2.17 m away and
+//       published it as a wait pose; `engaged` (driven on a sighting in this attempt) made the controller STOP and wait 40 s for
+//       an anchor 90° to its left instead of turning toward it. Each newer block is scored against the last one
+//       (rc::policy::p_reinitialised, the two-hypothesis test door_concept's own belief_lost uses); where re-initialisation is
+//       the MAP (P > 1/2) `engaged` ends — the wait turns toward the new pose — and the anchor's lost belief rises
+//       (anchor_lost_after_reinit), which the goal line's MAP reads.
+void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
+{
+    if (not anchor_cross_.has_value() or not policy_enabled()) return;
+    auto &a = *anchor_cross_;
+    const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
+    if (anchor_claim_since_ms_ == 0) anchor_claim_since_ms_ = now;
+    if (a.fresh and a.pose.stamp_ms < anchor_claim_since_ms_)
+    {
+        a.fresh = false;
+        if (not anchor_parked_logged_)
+            std::println("[anchor] cross: {}'s newest block was written {} ms before this claim began — a parked prediction of the "
+                         "claim that ended, not drivable for this one (waiting for this claim's own)", a.name,
+                         anchor_claim_since_ms_ - a.pose.stamp_ms);
+        anchor_parked_logged_ = true;
+    }
+    else anchor_parked_logged_ = false;
+    if (not a.pose.x.allFinite() or not a.pose.P.allFinite()) return;
+    // only a block written since the last one (a different stamp) by a live owner: an old block is relative to the robot AT ITS
+    // stamp, so converting it with the current pose would invent a jump
+    if (a.age_ms > rc::interaction::kAnchorStaleMs) return;
+    if (anchor_prev_room_.has_value() and anchor_prev_room_->stamp_ms == a.pose.stamp_ms) return;
+    const auto cur = rc::policy::anchor_in_room(a.pose, robot_pose.pos, robot_pose.theta);
+    if (anchor_prev_room_.has_value())
+    {
+        // the localiser's pose sigma, and the motion each block's robot frame is behind the pose it is converted with (a block
+        // is relative to the robot at its stamp; the conversion uses this cycle's pose): |v|·age along, |w|·age in heading
+        const double ages = double(a.age_ms + anchor_prev_age_ms_) * 1e-3;
+        const double dv = odo_valid_ ? double(std::abs(odo_v_)) * ages : 0.0, dw = odo_valid_ ? double(std::abs(odo_w_)) * ages : 0.0;
+        Eigen::Matrix3d robot_cov = Eigen::Vector3d(double(policy_pose_xy_std_) * policy_pose_xy_std_ + dv * dv,
+                                                    double(policy_pose_xy_std_) * policy_pose_xy_std_ + dv * dv,
+                                                    double(policy_pose_theta_std_) * policy_pose_theta_std_ + dw * dw).asDiagonal();
+        const double range = a.pose.x.head<2>().norm();
+        const double p = rc::policy::p_reinitialised(*anchor_prev_room_, cur, a.width_m, robot_cov, range);
+        if (p > 0.5)   // the MAP of {continuation, re-initialisation}
+        {
+            const double before = anchor_lambda_;
+            anchor_lambda_ = rc::policy::anchor_lost_after_reinit(anchor_lambda_, p);
+            const Eigen::Vector3d d = cur.x - anchor_prev_room_->x;
+            std::println("[anchor] cross: {} RE-INITIALISED ({:.2f} m, {:+.1f} deg from its last block; P {:.3f}) — P(anchor lost) "
+                         "{:.2f} -> {:.2f}{}", a.name, d.head<2>().norm(), std::remainder(d.z(), 2.0 * std::numbers::pi) * 57.2958, p,
+                         before, anchor_lambda_,
+                         anchor_cross_engaged_ and not a.fresh and not door_passage_.clearing()
+                             ? "; a new belief to LOOK for — no longer engaged, turning toward it" : "");
+            // past the room switch the carried pose IS the crossing (Task 13): nothing to turn toward there
+            if (not a.fresh and not door_passage_.clearing()) anchor_cross_engaged_ = false;
+        }
+    }
+    anchor_prev_room_ = cur;
+    anchor_prev_age_ms_ = a.age_ms;
 }
 
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
@@ -3523,6 +3590,7 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         reset_anchor_cross_state();
     }
     anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name, /*accept_stale=*/true);
+    note_anchor_block(step.robot_pose);   // Task 3e (policy only): a parked block is not this claim's; a re-init ends `engaged`
     if (anchor_cross_.has_value())
     {
         anchor_last_reading_ = anchor_cross_;
@@ -4101,6 +4169,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     out.drive_width = drive_width;
     out.anchor_pose = a.pose;
     out.anchor_width = a.width_m;
+    out.anchor_fresh = a.fresh;
     out.gap_score = on_gap ? gap_score_ : 0.f;
     out.drive_name = drive_name;
     out.drive_leaves.assign(drive_leaves.begin(), drive_leaves.end());

@@ -678,11 +678,36 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             policy_leaf_room_ = current_room_name_;
             if (cp.drive)
             {
-                // ★ Task 3b (rtD1c leg 5: a 0.03-0.3-score gap locked on the open leaf set the goal line and the veto): the goal
-                //   line is the ANCHOR's (the door; arrival is the protocol's s >= standoff on what it drives), the measured gap
-                //   enters through F4's risk mixture and the corridor union below, and the trap veto is that union's
-                //   (doorway_corridor.h disc_meets_doorway_risk_corridor — fix round 1, I-2: no mean of a bimodal mixture)
-                spec = rc::policy::doorway_goal(rc::policy::gap_in_room(cp.anchor_pose, cp.anchor_width, cpose), gp);
+                // ★ Task 3b (rtD1c leg 5: a 0.03-0.3-score gap locked on the open leaf set the goal line and the veto): the
+                //   measured gap enters through F4's risk mixture and the corridor union below, and the trap veto is that union's
+                //   (doorway_corridor.h disc_meets_doorway_risk_corridor — fix round 1, I-2: no mean of a bimodal mixture). The
+                //   goal line was the ANCHOR's always; since Task 3e it is the MAP line below (a low-score leaf gap still loses).
+                // ★ Task 3e (1) (rtD1h leg 5: an anchor aliased ~1.9 m / 70° off the door replaced a 0.99-score gap on the true
+                //   opening and pulled the robot back out of the doorway): the goal line is the MAP of the two hypotheses —
+                //   "the anchor is the door" (its own P(not lost) × its lateral coverage) vs "the gap is the door" (its score ×
+                //   its coverage) — a SELECTION, never their average (doorway_hypotheses.h says why the disagreement cannot
+                //   choose). An anchor its owner has not marked drivable this claim is no line to drive on (credibility 0).
+                //   The risk mixture and the veto below still carry BOTH (F4 / 3b), unchanged.
+                const float body_half_w = 0.5f * (bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f))
+                                                  + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+                const double lambda = anchor_owner_p_lost().value_or(anchor_lambda_);   // ⚑ D-B hook: the owner's P(lost)
+                const rc::policy::DoorwayLine a_line{cp.anchor_pose, cp.anchor_width, cp.anchor_fresh ? 1.0 - lambda : 0.0};
+                const std::optional<rc::policy::DoorwayLine> g_line =
+                    cp.on_gap ? std::optional<rc::policy::DoorwayLine>(rc::policy::DoorwayLine{cp.drive_pose, cp.drive_width, cp.gap_score})
+                              : std::nullopt;
+                const auto choice = rc::policy::choose_doorway_line(a_line, g_line, body_half_w);
+                if (not policy_goal_line_known_ or choice.gap != policy_goal_on_gap_logged_)
+                {
+                    policy_goal_line_known_ = true;
+                    policy_goal_on_gap_logged_ = choice.gap;
+                    std::println("[policy] cross goal line: the {} (pi_anchor {:.2f} = (1-lambda {:.2f}{}) x coverage {:.2f}; pi_gap {:.2f} "
+                                 "= score {:.2f} x coverage {:.2f}; P(both the same opening) {:.2f}, d2 {:.1f})",
+                                 choice.gap ? "measured GAP" : "ANCHOR", choice.pi_anchor, lambda,
+                                 cp.anchor_fresh ? "" : ", not drivable: 0", choice.c_anchor, choice.pi_gap,
+                                 cp.on_gap ? cp.gap_score : 0.f, choice.c_gap, choice.p_both_right, choice.d2);
+                }
+                spec = choice.gap ? rc::policy::doorway_goal(rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose), gp)
+                                  : rc::policy::doorway_goal(rc::policy::gap_in_room(cp.anchor_pose, cp.anchor_width, cpose), gp);
                 // the far side is not in the planner's map: the measured opening's corridor joins the near room to the goal
                 // line (1 m back into the room just left; one field cell past the line)
                 const float back = 1.0f, ahead = gp.past_m + 0.05f;
