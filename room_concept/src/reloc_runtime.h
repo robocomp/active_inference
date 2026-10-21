@@ -29,9 +29,6 @@ namespace rc::reloc
         bool  anchor_prev_valid = false;
         float passage_term = 0.f;                                ///< this frame's doorway term (0 = none)
         float view_beyond  = 0.f;                                ///< this frame's through-a-doorway fraction (Task R2)
-        /// Nats of tracking evidence earned since the hand-over, on views the room owes and that are new (Task R2): the
-        /// anchor retires once this exceeds the anchor's own information about the pose (anchor_information).
-        double anchor_track_nats = 0.0;
     };
 
     /// The room's doorways as the SCAN sees them, ROOM (internal) frame: the door list, the crossed door at the geometry
@@ -52,12 +49,13 @@ namespace rc::reloc
             const Eigen::Vector2f a = pg.centre - 0.5f * pg.width * pg.tangent, b = pg.centre + 0.5f * pg.width * pg.tangent;
             bool found = false;
             for (auto& d : doors)
-                if (pg.door_id != 0 and d.id == pg.door_id) { d.a = a; d.b = b; found = true; }
+                if (pg.door_id != 0 and d.id == pg.door_id) { d.a = a; d.b = b; d.sigma_along = pg.sig_t; found = true; }
             if (not found and passage_only)
             {
                 DoorAperture d;
                 d.a = a; d.b = b; d.id = pg.door_id; d.name = "passage";
                 d.p_open = pg.p_open;
+                d.sigma_along = pg.sig_t;
                 d.prior_closed = pg.p_open < 0.f ? 0.5f : 1.f - std::clamp(pg.p_open, 0.f, 1.f);
                 doors.push_back(std::move(d));
             }
@@ -79,7 +77,7 @@ namespace rc::reloc
             const float open = 1.f - std::clamp(d.prior_closed, 0.f, 1.f);
             if (not (open > 0.f)) continue;   // a door whose leaf covers its whole span: every beam is a room return
             const float p_open = d.p_open < 0.f ? 0.5f : std::clamp(d.p_open, 0.f, 1.f);
-            out.push_back({d.a, d.b, d.n_out, open, 1.f - (1.f - h) * p_open});
+            out.push_back({d.a, d.b, d.n_out, open, 1.f - (1.f - h) * p_open, d.sigma_along});
         }
         return out;
     }
@@ -102,18 +100,26 @@ namespace rc::reloc
         return static_cast<float>(acc / static_cast<double>(pts_robot.size()));
     }
 
-    /// The anchor's information about the pose, in nats: KL(A ‖ uniform over the room × the circle), mixed over its
-    /// components — log(area·2π) − ½ log((2πe)³ |Σ_c|). Zero or less ⇔ it says no more than "somewhere in the room".
+    /// Pose information of a Gaussian in nats: KL(N(·, Σ) ‖ uniform over the room × the circle) = log(area·2π) − H(N),
+    /// H = ½ log((2πe)³ |Σ|). Zero or less ⇔ it says no more than "somewhere in the room".
+    inline double gaussian_information(const Eigen::Matrix3f& cov, double area)
+    {
+        const double det = std::max(1e-30, static_cast<double>(cov.determinant()));
+        return std::log(std::max(area, 1e-6) * 2.0 * M_PI) - 0.5 * (3.0 * std::log(2.0 * M_PI * M_E) + std::log(det));
+    }
+
+    /// The anchor's pose information, KL(A ‖ uniform), EXACT for components with disjoint support (forward and reversed
+    /// through the door differ by π in yaw, σ_θ ≲ 0.3 rad): H(A) = Σ w_c H(N_c) + H(w), so KL = Σ w_c KL(N_c) − H(w).
     inline double anchor_information(const std::vector<rc::passage::Anchor>& anchor, double area)
     {
-        double info = 0.0;
+        double info = 0.0, hw = 0.0;
         for (const auto& a : anchor)
         {
-            const double det = std::max(1e-30, static_cast<double>(a.cov.determinant()));
-            const double h = 0.5 * (3.0 * std::log(2.0 * M_PI * M_E) + std::log(det));
-            info += static_cast<double>(a.w) * (std::log(std::max(area, 1e-6) * 2.0 * M_PI) - h);
+            const double w = std::clamp(static_cast<double>(a.w), 0.0, 1.0);
+            info += w * gaussian_information(a.cov, area);
+            if (w > 0.0) hw -= w * std::log(w);
         }
-        return info;
+        return info - hw;
     }
 
     /// A lost search's posterior over its modes and the held pose (RoomConcept::mode_posterior).

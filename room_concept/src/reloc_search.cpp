@@ -12,6 +12,9 @@
 #include <random>
 #include <ranges>
 #include <unordered_map>
+#include <cstdlib>
+#include <charconv>
+#include <cstring>
 
 namespace rc::reloc
 {
@@ -42,6 +45,9 @@ namespace rc::reloc
                 return out;
             }
         };
+
+        /// The opening model is on when the room lists a door.
+        bool openings_on(const Params& p) { return not p.apertures.empty(); }
 
         float lse(float x, float y)
         {
@@ -79,67 +85,188 @@ namespace rc::reloc
             return dw.back().first;
         }
 
-        /// ── THE DOORWAY MIXTURE OVER A SCAN, WITH THE DOOR'S STATE COMMON TO ITS BEAMS ──────────────────────────
-        /// `room_ll[i]` is point i's room term, `ap_of[i]` the aperture its beam goes through (−1 none). Returns ℓ and
-        /// fills `room_post[i]` = P(point i is a room return | the scan).
-        /// Per door k, over the beams S_k through it:
-        ///   OPEN (as door_concept believes, 1 − q_k): each beam independently meets the leaf (coverage c_k: a room-like
-        ///         surface at the mouth) or the next room (uniform over beyond_extent);
-        ///   SHUT (q_k): every beam is a room return.
-        ///   ℓ_k = log[(1 − q_k)·Π_i ((1−c_k)/L_b + c_k·room_i) + q_k·Π_i room_i]
-        /// ★ WHY THE STATE IS COMMON-MODE: whether a door is open is ONE fact shared by every beam through it, exactly
-        ///   like a wall's offset (wall_offset_sigma). Taken per beam, a door believed open but actually shut charged
-        ///   every return at its mouth line as "should have been beyond" — measured in reloc_selftest Q's exploration:
-        ///   a shut door listed open cost the TRUE pose 199 nats and the search moved it to the twin. Common-mode, being
-        ///   wrong about the door costs log(1/q_k) once.
-        float door_mixture(const std::vector<float>& room_ll, const std::vector<int>& ap_of, const Params& p,
-                           const PointTerm& term, const BeyondLines& bl, std::vector<float>& room_post)
+        /// ── EACH LISTED DOOR IS ONE OPENING OF UNCERTAIN PLACE (fix round 1, I-1) ───────────────────────────────────
+        /// The boundary is cut into cells of about Params::opening_cell_m (a doorway's width). Door k is shut (q_k) or
+        /// open in exactly ONE cell c with prior π_k(c) = (1 − w)·cover_k(c)/Σ cover_k + w/N_cells: where door_concept
+        /// lists it, smeared by its own position σ along the wall (cover), or — w, "the list is wrong here" — anywhere.
+        struct Cells
+        {
+            std::vector<int>   first, count;          ///< per polygon edge: its first cell and how many
+            std::vector<float> leaf;                  ///< per cell: P(leaf | open), from the doors that list it
+            std::vector<std::vector<float>> pi;       ///< per door: π_k(c) over all cells
+            std::vector<float> q;                     ///< per door: P(shut)
+        };
+
+        Cells build_cells(const std::vector<Eigen::Vector2f>& poly, const Params& p)
+        {
+            Cells c;
+            const std::size_t ne = poly.size();
+            c.first.resize(ne); c.count.resize(ne);
+            const float cell = std::max(p.opening_cell_m, 1e-2f);
+            std::vector<float> cell_len;
+            std::vector<std::size_t> cell_edge;
+            std::vector<int> cell_k;
+            for (std::size_t e = 0; e < ne; ++e)
+            {
+                const float L = (poly[(e + 1) % ne] - poly[e]).norm();
+                const int n = std::max(1, static_cast<int>(std::ceil(L / cell)));
+                c.first[e] = static_cast<int>(cell_len.size());
+                c.count[e] = n;
+                for (int k = 0; k < n; ++k) { cell_len.push_back(L / static_cast<float>(n)); cell_edge.push_back(e); cell_k.push_back(k); }
+            }
+            const std::size_t N = cell_len.size();
+            c.leaf.assign(N, 0.f);
+            std::vector<float> leaf_w(N, 0.f);
+            auto Phi = [](float z) { return 0.5f * std::erfc(-z / std::sqrt(2.f)); };
+            const float w = std::clamp(p.list_wrong, 0.f, 1.f);
+            for (const auto& ap : p.apertures)
+            {
+                // The door belongs to the edge nearest its centre (where seat_in_room put it), as [t0, t1] along it.
+                const Eigen::Vector2f m = 0.5f * (ap.a + ap.b);
+                float best = kInf; std::size_t be = 0;
+                for (std::size_t e = 0; e < ne; ++e)
+                {
+                    const Eigen::Vector2f e0 = poly[e], ab = poly[(e + 1) % ne] - e0;
+                    const float L2 = ab.squaredNorm();
+                    if (L2 < 1e-12f) continue;
+                    const float t = std::clamp((m - e0).dot(ab) / L2, 0.f, 1.f);
+                    if (const float d = (m - e0 - t * ab).norm(); d < best) { best = d; be = e; }
+                }
+                const Eigen::Vector2f e0 = poly[be], u = (poly[(be + 1) % ne] - e0).normalized();
+                const float t0 = std::min((ap.a - e0).dot(u), (ap.b - e0).dot(u)), t1 = std::max((ap.a - e0).dot(u), (ap.b - e0).dot(u));
+                std::vector<float> cover(N, 0.f);
+                float csum = 0.f;
+                for (std::size_t ci = 0; ci < N; ++ci)
+                {
+                    if (cell_edge[ci] != be) continue;
+                    // mean over the cell of P(this point of wall is inside the mouth), the mouth uncertain by door_concept's
+                    // own σ along the wall (8-point quadrature).
+                    float cv = 0.f;
+                    for (int j = 0; j < 8; ++j)
+                    {
+                        const float sx = (static_cast<float>(cell_k[ci]) + (static_cast<float>(j) + 0.5f) / 8.f) * cell_len[ci];
+                        if (ap.sigma_along > 1e-4f) cv += Phi((t1 - sx) / ap.sigma_along) - Phi((t0 - sx) / ap.sigma_along);
+                        else cv += (sx >= t0 and sx <= t1) ? 1.f : 0.f;
+                    }
+                    cover[ci] = cv / 8.f;
+                    csum += cover[ci];
+                }
+                std::vector<float> pi(N);
+                for (std::size_t ci = 0; ci < N; ++ci)
+                {
+                    pi[ci] = (csum > 0.f ? (1.f - w) * cover[ci] / csum : 0.f) + (csum > 0.f ? w : 1.f) / static_cast<float>(N);
+                    const float lw = cover[ci];
+                    c.leaf[ci] += lw * std::clamp(1.f - ap.open, 0.f, 1.f);
+                    leaf_w[ci] += lw;
+                }
+                c.pi.push_back(std::move(pi));
+                c.q.push_back(std::clamp(ap.p_shut, 0.f, 1.f));
+            }
+            for (std::size_t ci = 0; ci < N; ++ci) c.leaf[ci] = leaf_w[ci] > 0.f ? c.leaf[ci] / leaf_w[ci] : 0.f;
+            return c;
+        }
+
+        /// The boundary cell the beam's RAY reaches first (origin inside the room), and whether the return lies PAST it
+        /// (`passed`). Every beam belongs to the cell its ray meets: an open cell predicts that its beams pass it, so a
+        /// return that ends at or before the wall there is evidence AGAINST the opening. −1 when the origin is outside.
+        int exit_cell(const std::vector<Eigen::Vector2f>& poly, const Cells& c, const Eigen::Vector2f& origin,
+                      bool origin_inside, const Eigen::Vector2f& q, bool* passed);
+
+        /// ℓ over a scan given each point's room term and the cell its ray reaches; fills room_post[i] = P(room return).
+        ///   Per cell C with beams S_C: shut ⇒ Π room_i; open ⇒ Π_i ((1−c)·o_i + c·room_i)·e^{−Occam(lines)}, o_i =
+        ///   beyond_i for a return PAST the cell and the room's clutter term for one that ended before it (an open
+        ///   stretch has no wall to return from). Δ_C = log open − log shut.
+        ///   ℓ = Σ_i room_i + Σ_k log[ q_k + (1 − q_k)·Σ_C π_k(C)·e^{Δ_C} ]   (cells without beams: Δ = 0)
+        /// ★ ONE OPENING PER LISTED DOOR, COMMON TO ITS BEAMS. A door's state is one fact shared by every beam through it
+        ///   (a per-beam state charged a shut door wrongly listed open 199 nats, Q's exploration), and the room has as
+        ///   many openings as doors are listed: a wrong pose cannot open the boundary wherever its scan crosses it. A
+        ///   generic "any wall cell may be open" prior was tried in fix round 1 and measured: with the next-room line
+        ///   density a wrong pose explained its boundary violations as openings for ~14 nats each against ~5 nats per
+        ///   return, and kidnap recovery fell (F on L 14/15 → 8/15; J rect/L/notched 20/20 → 15–17/20).
+        float cell_mixture(const std::vector<float>& room_ll, const std::vector<int>& cell_of,
+                           const std::vector<char>& passed, const Cells& cells, const Params& p, const PointTerm& term,
+                           const BeyondLines& bl, std::vector<float>& room_post)
         {
             const std::size_t n = room_ll.size();
             room_post.assign(n, 1.f);
-            // A return beyond the door: the room term on a line of the next room — same σ, same ε, the clutter spread
-            // over the beyond range instead of the room's extent.
             const float log_clut = std::log(std::max(p.outlier_frac, 1e-6f)) - std::log(std::max(p.beyond_extent, 1e-3f));
+            const float sig2 = 1.f / (2.f * term.inv_2s2);
             auto beyond_ll = [&](std::size_t i)
             {
                 if (i >= bl.r.size() or not std::isfinite(bl.r[i])) return log_clut;
                 return lse(term.log_in_norm - bl.r[i] * bl.r[i] * term.inv_2s2, log_clut);
             };
-            float ll = 0.f;
+            double ll = 0.0;
+            std::unordered_map<int, std::vector<std::size_t>> groups;
             for (std::size_t i = 0; i < n; ++i)
-                if (ap_of[i] < 0) ll += room_ll[i];
-            for (std::size_t k = 0; k < p.apertures.size(); ++k)
             {
-                const auto& ap = p.apertures[k];
-                const float c = std::clamp(1.f - ap.open, 0.f, 1.f);
-                const float q = std::clamp(ap.p_shut, 0.f, 1.f);
-                const float lc = c > 0.f ? std::log(c) : -kInf, l1c = c < 1.f ? std::log1p(-c) : -kInf;
-                double so = 0.0, ss = 0.0;
-                bool any = false;
-                std::unordered_map<int, int> line_use;   // next-room lines this door's beams lie on, and how many
-                for (std::size_t i = 0; i < n; ++i)
-                    if (ap_of[i] == static_cast<int>(k))
-                    {
-                        any = true;
-                        so += lse(l1c + beyond_ll(i), lc + room_ll[i]);
-                        ss += room_ll[i];
-                        if (i < bl.seg.size() and bl.seg[i] >= 0) ++line_use[bl.seg[i]];
-                    }
-                if (not any) continue;
-                for (const auto& [line, cnt] : line_use) so -= std::log(static_cast<double>(cnt));   // Occam: ½·log n × 2
-                const float lo = (q < 1.f ? std::log1p(-q) : -kInf) + static_cast<float>(so);
-                const float ls = (q > 0.f ? std::log(q) : -kInf) + static_cast<float>(ss);
-                const float lk = lse(lo, ls);
-                ll += lk;
-                const float rho = std::exp(ls - lk);   // P(shut | these beams)
-                for (std::size_t i = 0; i < n; ++i)
-                    if (ap_of[i] == static_cast<int>(k))
-                    {
-                        const float leaf = std::exp(lc + room_ll[i] - lse(l1c + beyond_ll(i), lc + room_ll[i]));   // P(leaf | open, r_i)
-                        room_post[i] = rho + (1.f - rho) * leaf;
-                    }
+                ll += room_ll[i];
+                if (cell_of[i] >= 0) groups[cell_of[i]].push_back(i);
             }
-            return ll;
+            std::unordered_map<int, double> delta;
+            for (const auto& [cid, idx] : groups)
+            {
+                const float cf = cells.leaf[static_cast<std::size_t>(cid)];
+                const float lc = cf > 0.f ? std::log(cf) : -kInf, l1c = cf < 1.f ? std::log1p(-cf) : -kInf;
+                double so = 0.0, ss = 0.0;
+                struct LineUse { int n = 0; double st = 0.0, st2 = 0.0; };
+                std::unordered_map<int, LineUse> lines;
+                for (const std::size_t i : idx)
+                {
+                    const float o = passed[i] ? beyond_ll(i) : term.log_out;
+                    so += lse(l1c + o, lc + room_ll[i]);
+                    ss += room_ll[i];
+                    if (passed[i] and i < bl.seg.size() and bl.seg[i] >= 0)
+                    {
+                        auto& u = lines[bl.seg[i]];
+                        ++u.n; u.st += bl.t[i]; u.st2 += static_cast<double>(bl.t[i]) * bl.t[i];
+                    }
+                }
+                // The full marginal of each next-room line these beams use (BeyondLines; fix round 1, I-2).
+                for (const auto& [line, u] : lines)
+                {
+                    const double nn = u.n, mean = u.st / nn;
+                    const double var_t = std::max(u.st2 / nn - mean * mean, static_cast<double>(sig2) / 12.0);
+                    so -= std::log(M_PI * p.beyond_extent) - std::log(2.0 * M_PI)
+                          + 0.5 * std::log(nn / sig2) + 0.5 * std::log(nn * var_t / sig2);
+                }
+                delta[cid] = so - ss;
+            }
+            // Each door: shut, or open in one cell. P(cell C open) = 1 − Π_k (1 − r_k(C)).
+            std::unordered_map<int, double> stay;
+            for (std::size_t k = 0; k < cells.pi.size(); ++k)
+            {
+                const auto& pi = cells.pi[k];
+                const double q = cells.q[k];
+                double hi = 0.0;
+                for (const auto& [cid, d] : delta) hi = std::max(hi, d);
+                // Z_k = q + (1 − q)·[1 + Σ_C π(C)(e^{Δ_C} − 1)], computed with e^{−hi} factored out.
+                double zs = (q + (1.0 - q)) * std::exp(-hi);
+                for (const auto& [cid, d] : delta)
+                    zs += (1.0 - q) * pi[static_cast<std::size_t>(cid)] * (std::exp(d - hi) - std::exp(-hi));
+                ll += hi + std::log(std::max(zs, 1e-300));
+                for (const auto& [cid, d] : delta)
+                {
+                    const double r = (1.0 - q) * pi[static_cast<std::size_t>(cid)] * std::exp(d - hi) / std::max(zs, 1e-300);
+                    auto [it, fresh] = stay.try_emplace(cid, 1.0);
+                    it->second *= 1.0 - std::clamp(r, 0.0, 1.0);
+                }
+            }
+            for (const auto& [cid, idx] : groups)
+            {
+                const auto it = stay.find(cid);
+                const float rho = it == stay.end() ? 1.f : static_cast<float>(it->second);   // P(cell shut | scan)
+                if (rho >= 1.f) continue;
+                const float cf = cells.leaf[static_cast<std::size_t>(cid)];
+                const float lc = cf > 0.f ? std::log(cf) : -kInf, l1c = cf < 1.f ? std::log1p(-cf) : -kInf;
+                for (const std::size_t i : idx)
+                {
+                    if (not passed[i]) continue;
+                    const float leaf = std::exp(lc + room_ll[i] - lse(l1c + beyond_ll(i), lc + room_ll[i]));
+                    room_post[i] = rho + (1.f - rho) * leaf;
+                }
+            }
+            return static_cast<float>(ll);
         }
 
         float polygon_extent(const std::vector<Eigen::Vector2f>& poly)
@@ -202,11 +329,29 @@ namespace rc::reloc
                 return ap.n_out.dot(hit - ap.a) > 0.f;          // the sensor stands in the opening
             return crosses(origin, hit - origin, ap.a, ab);     // the sensor is in the room
         }
-        int through_aperture(const std::vector<Aperture>& aps, const Eigen::Vector2f& origin, const Eigen::Vector2f& hit)
+        int exit_cell(const std::vector<Eigen::Vector2f>& poly, const Cells& c, const Eigen::Vector2f& origin,
+                      bool origin_inside, const Eigen::Vector2f& q, bool* passed)
         {
-            for (std::size_t k = 0; k < aps.size(); ++k)
-                if (goes_through(aps[k], origin, hit)) return static_cast<int>(k);
-            return -1;
+            *passed = false;
+            if (not origin_inside) return -1;
+            const std::size_t ne = poly.size();
+            const Eigen::Vector2f r = q - origin;
+            float best_t = kInf; int cell = -1;
+            for (std::size_t e = 0; e < ne; ++e)
+            {
+                const Eigen::Vector2f e0 = poly[e], s = poly[(e + 1) % ne] - e0;
+                const float rxs = r.x() * s.y() - r.y() * s.x();
+                if (std::abs(rxs) < 1e-9f) continue;
+                const Eigen::Vector2f qp = e0 - origin;
+                const float t = (qp.x() * s.y() - qp.y() * s.x()) / rxs;   // along the RAY (t > 1: past the return)
+                const float u = (qp.x() * r.y() - qp.y() * r.x()) / rxs;
+                if (t <= 0.f or u < 0.f or u > 1.f or t >= best_t) continue;
+                best_t = t;
+                const int k = std::min(c.count[e] - 1, static_cast<int>(u * static_cast<float>(c.count[e])));
+                cell = c.first[e] + std::max(k, 0);
+            }
+            *passed = best_t < 1.f;
+            return cell;
         }
     }   // namespace
 
@@ -287,8 +432,9 @@ namespace rc::reloc
     BeyondLines beyond_lines(const std::vector<Eigen::Vector2f>& pts_robot, const Params& p)
     {
         BeyondLines bl;
-        if (p.apertures.empty() or pts_robot.size() < 10) return bl;
+        if (not openings_on(p) or pts_robot.size() < 10) return bl;
         bl.r.assign(pts_robot.size(), kInf);
+        bl.t.assign(pts_robot.size(), 0.f);
         bl.seg.assign(pts_robot.size(), -1);
         std::mt19937 rng(20261021u);   // fixed: the same point set must always give the same lines
         const wallseg::Params sp;
@@ -299,7 +445,9 @@ namespace rc::reloc
             for (const int i : sg.inliers)
             {
                 if (i < 0 or i >= static_cast<int>(pts_robot.size())) continue;
-                bl.r[static_cast<std::size_t>(i)] = std::abs(sg.normal.dot(pts_robot[static_cast<std::size_t>(i)]) - sg.d);
+                const Eigen::Vector2f& pt = pts_robot[static_cast<std::size_t>(i)];
+                bl.r[static_cast<std::size_t>(i)] = std::abs(sg.normal.dot(pt) - sg.d);
+                bl.t[static_cast<std::size_t>(i)] = Eigen::Vector2f(-sg.normal.y(), sg.normal.x()).dot(pt);
                 bl.seg[static_cast<std::size_t>(i)] = static_cast<int>(j);
             }
         }
@@ -312,23 +460,29 @@ namespace rc::reloc
                          const BeyondLines* beyond)
     {
         BeyondLines own;
-        if (beyond == nullptr and not p.apertures.empty()) { own = beyond_lines(pts_robot, p); beyond = &own; }
+        if (beyond == nullptr and openings_on(p)) { own = beyond_lines(pts_robot, p); beyond = &own; }
         const BeyondLines& bl = beyond != nullptr ? *beyond : own;
         const PointTerm term(p, extent);
         const float c = std::cos(pose.z()), s = std::sin(pose.z());
         const Eigen::Vector2f origin = pose.head<2>();
+        const bool on = openings_on(p);
+        const Cells cells = on ? build_cells(polygon, p) : Cells{};
+        const bool o_in = on and inside_polygon(polygon, origin);
         const std::size_t n = pts_robot.size();
         std::vector<float> ds(n), room_ll(n), room_post;
         std::vector<int> ap_of(n, -1);
+        std::vector<char> passed(n, 0);
         for (std::size_t i = 0; i < n; ++i)
         {
             const auto& pr = pts_robot[i];
             const Eigen::Vector2f q(c * pr.x() - s * pr.y() + pose.x(), s * pr.x() + c * pr.y() + pose.y());
             ds[i] = polygon_distance(polygon, q);
             room_ll[i] = term.ll(ds[i]);
-            if (not p.apertures.empty()) ap_of[i] = through_aperture(p.apertures, origin, q);
+            bool ps = false;
+            if (on) ap_of[i] = exit_cell(polygon, cells, origin, o_in, q, &ps);
+            passed[i] = ps ? 1 : 0;
         }
-        const float ll = door_mixture(room_ll, ap_of, p, term, bl, room_post);
+        const float ll = cell_mixture(room_ll, ap_of, passed, cells, p, term, bl, room_post);
         if (median_abs != nullptr)
         {
             std::vector<std::pair<float, float>> dw;
@@ -426,8 +580,10 @@ namespace rc::reloc
                 const Eigen::Vector3f& start, const Params& p, float extent, const BeyondLines* beyond)
     {
         BeyondLines own;
-        if (beyond == nullptr and not p.apertures.empty()) { own = beyond_lines(pts_robot, p); beyond = &own; }
+        if (beyond == nullptr and openings_on(p)) { own = beyond_lines(pts_robot, p); beyond = &own; }
         const BeyondLines& bl = beyond != nullptr ? *beyond : own;
+        const bool on = openings_on(p);
+        const Cells cells = on ? build_cells(polygon, p) : Cells{};
         // σ is ESTIMATED here, by EM on the inlier responsibilities (σ² ← Σγd²/Σγ), annealing down from the wide
         // σ_sdf the lattice needs for its basins. A polish at the fixed σ_sdf = 0.15 m — the agent's model-
         // mismatch noise, ~7x a scan's real spread — left the likelihood flat over ±10 cm and let one-sided
@@ -453,6 +609,7 @@ namespace rc::reloc
         std::vector<EdgeSum> edge_sums;
         std::vector<Eigen::Vector2f> pt_rp, pt_diff;   // per-point scratch, reused across evaluations
         std::vector<int> pt_edge, pt_ap;
+        std::vector<char> pt_passed;
         std::vector<float> pt_li, pt_room, pt_post;
         auto evaluate = [&](const Eigen::Vector3f& pose, Eigen::Matrix3f* Hout, Eigen::Vector3f* gout) -> float
         {
@@ -465,6 +622,8 @@ namespace rc::reloc
             // crossing is a step function of the pose, held constant within a step like γ and re-evaluated at every
             // accepted pose. Pass 2 (below) needs the door's posterior state, which depends on all its beams.
             const std::size_t n = pts_robot.size();
+            const bool o_in = on and inside_polygon(polygon, pose.head<2>());
+            pt_passed.assign(n, 0);
             pt_rp.resize(n); pt_diff.resize(n); pt_edge.resize(n); pt_li.resize(n); pt_room.resize(n); pt_ap.assign(n, -1);
             for (std::size_t i = 0; i < n; ++i)
             {
@@ -474,9 +633,11 @@ namespace rc::reloc
                 const Eigen::Vector2f cl = closest_on_polygon(polygon, q, &pt_edge[i]);
                 pt_diff[i] = q - cl;
                 pt_room[i] = term.ll(pt_diff[i].norm(), nullptr, &pt_li[i]);
-                if (not p.apertures.empty()) pt_ap[i] = through_aperture(p.apertures, pose.head<2>(), q);
+                bool ps = false;
+                if (on) pt_ap[i] = exit_cell(polygon, cells, pose.head<2>(), o_in, q, &ps);
+                pt_passed[i] = ps ? 1 : 0;
             }
-            ll = door_mixture(pt_room, pt_ap, p, term, bl, pt_post);
+            ll = cell_mixture(pt_room, pt_ap, pt_passed, cells, p, term, bl, pt_post);
             for (std::size_t i = 0; i < n and Hout != nullptr; ++i)
             {
                 const float d = pt_diff[i].norm();

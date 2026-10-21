@@ -48,10 +48,10 @@ namespace
 
 int main(int argc, char** argv)
 {
-    QCoreApplication app(argc, argv);   // the InnerEigenAPI's cache invalidation is a queued slot: it needs an event loop
+    QCoreApplication app(argc, argv);   // the InnerEigenAPI's cache invalidation is a queued slot: events are pumped
     std::setlocale(LC_ALL, "");          // behave like the Qt agent (es_ES) — CLAUDE.md
     auto G = std::make_shared<DSR::DSRGraph>("door_apertures_selftest", 991, std::string(SHADOW_JSON), true,
-                                             static_cast<int8_t>(73), DSR::Queue);
+                                             static_cast<int8_t>(73), DSR::QT);   // the agent's signal mode: the InnerEigenAPI invalidations fire
     auto rt = G->get_rt_api();
     auto inner = G->get_inner_eigen_api();
     auto root = G->get_node_root();
@@ -85,10 +85,6 @@ int main(int argc, char** argv)
 
     // (2) door_concept re-fits it to the true horizontal opening at (0.67, 2.54), yaw π.
     write_door(0.67f, 2.54f, std::numbers::pi_v<float>);
-    // (Measured while writing this test: re-walking the chain through the SHARED InnerEigenAPI at ts == 0 after the
-    //  rewrite still returned the first placement, (−0.01, 2.67), where a fresh instance returned (0.67, 2.54) — its
-    //  cache entry for room<-door was not invalidated by the local edge rewrite. So refresh() reads the door's own link
-    //  through RT_API and uses the cache only for the links above it, which a re-fit does not touch.)
     out = doors.refresh(*G, *inner, "room_t");
     check(out.size() == 1 and near_seg(out[0], {0.17f, 2.54f}, {1.17f, 2.54f}),
           "(2) a rewritten RT edge is followed (pre-R2: the first read was kept for the node's life)");

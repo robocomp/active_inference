@@ -23,6 +23,7 @@
  */
 
 #pragma once
+#include <limits>
 
 #include <algorithm>
 #include <array>
@@ -440,6 +441,24 @@ public:
         //   (try97: +2309 nats for the wrong swing from room_1, carried to room_2, phi 73°/49° for a leaf at 90°).
         //   Empty ⇒ no background (the field as before, used by the synthetic harnesses).
         std::vector<std::array<Eigen::Vector2f, 2>> room_walls;
+        // phi_field_loglik only (Task D-C, rtD1i door_5): ★THE ROOM'S WALLS ARE PLACED WITH THE SAME UNCERTAINTY AS THE
+        //   DOOR'S OWN WALL. Each room wall carries a per-frame offset along its normal, a COMMON MODE shared by every return
+        //   on it, prior N(0, room_wall_sigma²) — the room polygon's face uncertainty (Existence.BoundarySigmaM, the σ the
+        //   wall-band prior already reads) — marginalised on the door wall's own depth grid [depth_lo, depth_hi] × depth_n.
+        //   Before this the door's leaf had two placement nuisances (depth, slide) and the room walls had none: a partition
+        //   wall 2.7 cm off its polygon edge, seen from the far side of a SHUT DOOR_0 with the doorway itself occluded, was
+        //   fitted better by a leaf at 90° slid 0.17 m onto that wall than by the wall it is (17-35 rays, +2..+10 nats a
+        //   frame ⇒ phi 0.18 → 1.55 in 0.8 s, then the image channels refuted the "open" leaf: L +4 → −4). One side was
+        //   scored at its optimum. <= 0 ⇒ rigid room walls (the old field, exactly).
+        float room_wall_sigma = 0.0f;
+        // phi_field_loglik only (Task D-C): ★THE APERTURE LIES ON ITS OWN WALL. The along-wall extent [wall_seg_lo,
+        //   wall_seg_hi] (m from Aperture::wall_O along wall_u) of the polygon edge(s) the doorway is cut in, placed with the
+        //   same polygon-face σ (room_wall_sigma). The slide's prior gains log Φ((s+lat − lo)/σ) + log Φ((hi − s−lat−w)/σ):
+        //   an aperture slid past the end of its wall — into the perpendicular wall at that corner — is improbable in
+        //   proportion to how far past it is. rtD1i door_5: the 90° leaf won by sliding the aperture +0.20 m (3.3σ of the
+        //   placement) until the leaf lay on the partition wall that meets DOOR_0's wall 7 cm from its jamb, i.e. with the
+        //   hinge 0.2 m inside that partition. Non-finite ⇒ unbounded (the old prior).
+        float wall_seg_lo = std::numeric_limits<float>::quiet_NaN(), wall_seg_hi = std::numeric_limits<float>::quiet_NaN();
     };
     [[nodiscard]] std::vector<std::pair<float, float>>
     phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, float phi_max, int nstep,

@@ -403,7 +403,6 @@ namespace rc
             }
             rt_.door_anchor.clear();
             rt_.door_anchor_frames = 0;
-            rt_.anchor_track_nats = 0.0;
             if (rt_.passage.has_value())
                 rt_.door_anchor = rc::passage::anchor_at_handover(*rt_.passage);
             rt_.hold_open = false;
@@ -478,26 +477,28 @@ namespace rc
                 rt_.hold_open = false;
             if (p_lost >= 0.5f and not rt_.hold_open)   // ⚠ the equal-cost Bayes decision, flagged
                 relocalise_from_belief(lidar_points, s, p_lost);
-            // RETIRE THE DOOR ANCHOR BY INFORMATION (Task R2), once its window is over. Its information about the pose is
-            // KL(anchor ‖ uniform over the room) in nats (anchor_information); tracking EARNS information since the
-            // hand-over at log p_track(s) − log p_broad(s) per frame, counted only on views that are new (view_change —
-            // a parked robot re-reads one view) and owed by the room (1 − the through-door fraction, 1 − outside). The
-            // anchor is dropped when tracking has earned at least as much as it holds AND the body has left the passage
-            // (the doorway term past ½ — the equal-cost decision, flagged). R1b retired it on geometry and P(track) ≥ ½
-            // alone, i.e. on the first healthy frames after the mouth — exactly the frames whose view is still mostly
-            // through the door (rtD1i). Its information also decays on its own: odometry widens Σ, the kidnap hazard
-            // fades its weight in the search's prior (mode_posterior).
+            // RETIRE THE DOOR ANCHOR BY INFORMATION (Task R2; fix round 1, M-1: one currency). Both sides are pose
+            // information in nats, KL(· ‖ uniform over the room × the circle):
+            //   the anchor's — exact for its two disjoint components (forward / reversed through the door), faded by the
+            //   chance the robot was carried off since the hand-over (1 − p_kid);
+            //   the tracker's — its own covariance, weighted by how far it is to be believed now: P(track) and the part
+            //   of the view the room owes (1 − outside, which carries the through-door fraction).
+            // The anchor is dropped when the tracker holds at least as much AND the body has left the passage (the doorway
+            // term past ½ — the equal-cost decision, flagged). Both sides move: odometry widens the anchor, a doorway view
+            // or a misfit discounts the tracker.
             if (not rt_.door_anchor.empty())
             {
-                const double earned = log_tracking_emission(s) - log_broad_emission(s);
-                rt_.anchor_track_nats += std::max(0.0, earned) * std::clamp(static_cast<double>(view_change), 0.0, 1.0)
-                                         * (1.0 - std::clamp(static_cast<double>(outside), 0.0, 1.0));   // f is in `outside`
                 const auto poly = current_room_polygon();
                 double area2 = 0.0;
                 for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
                     area2 += static_cast<double>(poly[j].x()) * poly[i].y() - static_cast<double>(poly[i].x()) * poly[j].y();
-                const double held = rc::reloc::anchor_information(rt_.door_anchor, 0.5 * std::abs(area2));
-                if (rt_.passage_term < 0.5f and rt_.anchor_track_nats >= held)
+                const double area = 0.5 * std::abs(area2);
+                const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
+                const double p_kid = 1.0 - std::pow(1.0 - h, static_cast<double>(rt_.door_anchor_frames + 1));
+                const double anchor_kl = (1.0 - p_kid) * rc::reloc::anchor_information(rt_.door_anchor, area);
+                const double trust = std::clamp(belief_[kTrack], 0.0, 1.0) * (1.0 - std::clamp(static_cast<double>(outside), 0.0, 1.0));
+                const double track_kl = trust * rc::reloc::gaussian_information(res.covariance, area);
+                if (rt_.passage_term < 0.5f and track_kl >= anchor_kl)
                     rt_.door_anchor.clear();
             }
             // A HELD episode publishes its mixture spread on EVERY frame it stays open (added to the next published

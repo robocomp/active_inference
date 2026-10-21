@@ -2,6 +2,7 @@
 // half, observe, run_inference, estimate_phi, refresh_geometry, associate_wall, seed_bearing_hypothesis,
 // compute_projected_roi, compute_chain_cov, the two CSV rows, confirm_only / motion_magnitude / periphery_penalty.
 #include "door_fit.h"
+#include <tuple>
 #include "door_core.h"                  // point_in_polygon — the containment rule, shared with the birth test
 #include "../door_standpoint.h"
 #include "../door_phi_posterior.h"      // the phi channel as pure functions (tested offline)
@@ -947,7 +948,13 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     // plane: a leaf swung toward the sensor is seen, and a corridor wall is not taken for one), and the registration
     // attributes them to their own wall instead of the door's.
     if (has_room_polygon())
+    {
         nz.room_walls = rc::door::room_walls_beside(inst.aperture, room_polygon_, nz.depth_lo, nz.depth_hi);
+        // Task D-C: the room walls are placed with the polygon face's own uncertainty (Existence.BoundarySigmaM — the σ the
+        // wall-band prior reads), a common-mode offset per wall marginalised in the field, as the door's own wall's depth is.
+        nz.room_wall_sigma = cfg_.exist_boundary_sigma_m;
+        std::tie(nz.wall_seg_lo, nz.wall_seg_hi) = rc::door::door_wall_segment(inst.aperture, room_polygon_, nz.depth_lo, nz.depth_hi);
+    }
     rc::ai::LidarRays rays;
     // ★try96: THE SWEEP IS REGISTERED TO THE WALL IT SEES before any doorway likelihood (door_opening_edges.h). A heading /
     //   across-wall error of the room's pose misregisters the cloud in the room frame (try96: 14-20°, 0.3-0.45 m for ~30 s ⇒

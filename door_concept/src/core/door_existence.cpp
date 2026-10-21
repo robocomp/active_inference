@@ -19,6 +19,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "../door_geometry.h"
+#include "../door_phi_posterior.h"                                // room_walls_beside, phi_field_nuisance (one own-wall definition)
 #include "../../../common/occlusion/occlusion.h"                 // rc::occlusion::{cone_blocks, walls_block} (SHARED)
 #include "../../../common/contour_edge/contour_edge_check.h"     // rc::edges::PreparedFrame / contour_edge_support
 #include "../../../common/contour_edge/contour_depth_check.h"    // rc::edges::contour_depth_support
@@ -52,6 +53,36 @@ struct MaskCells
         return occluder.contains(k) and not door.contains(k);
     }
 };
+
+// ★Task D-C (rtD1i door_5): LINE OF SIGHT AGAINST EVERY WALL BUT THE DOOR'S OWN. rc::occlusion::walls_block skips any
+// polygon edge closer than 0.30 m to the target as "the target's own wall". DOOR_0's hinge jamb stands 7 cm from the corner
+// where a PARTITION wall meets its wall, so both faces of that partition were skipped for every sample near the jamb (and its
+// near face for the whole hinge half): seen from the far side of the partition, the door's frame and leaf were scored as
+// VISIBLE and absent — the image channels walked a shut door from +4 to −4 while it was hidden. The own wall is not "any wall
+// near the target": it is the run of polygon edges the doorway is cut in, the edges room_walls_beside leaves out (both ends in
+// the doorway plane's depth band — one definition with the leaf field's background walls). Every other edge occludes.
+bool other_walls_block(const Eigen::Vector2f& cam, const Eigen::Vector2f& target,
+                       const std::vector<std::array<Eigen::Vector2f, 2>>& walls)
+{
+    const auto cross = [](const Eigen::Vector2f& p, const Eigen::Vector2f& q) { return p.x() * q.y() - p.y() * q.x(); };
+    const Eigen::Vector2f d = target - cam;
+    for (const auto& [a, b] : walls)
+    {
+        const Eigen::Vector2f ab = b - a;
+        const float rxs = cross(d, ab);
+        if (std::abs(rxs) < 1e-9f) continue;
+        const float t = cross(a - cam, ab) / rxs;
+        const float u = cross(a - cam, d) / rxs;
+        if (t > 1e-3f and t < 1.0f - 1e-3f and u > 0.0f and u < 1.0f)
+            return true;
+    }
+    return false;
+}
+std::vector<std::array<Eigen::Vector2f, 2>> occluding_walls(const rc::DoorFitState& inst, const std::vector<Eigen::Vector2f>& polygon)
+{
+    const auto nz = rc::door::phi_field_nuisance(inst.aperture);
+    return rc::door::room_walls_beside(inst.aperture, polygon, nz.depth_lo, nz.depth_hi);
+}
 
 MaskCells build_mask_cells(const MaskPacket& pkt)
 {
@@ -244,6 +275,7 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
                             static_cast<float>(Mopt->coeff(1, 3)),
                             static_cast<float>(Mopt->coeff(2, 3)));
     const Eigen::Vector2f Oxy(O.x(), O.y());
+    const auto occ_walls = occluding_walls(inst, sc.polygon);   // Task D-C: every wall but the door's own
     const float occ_margin = std::max(0.0f, sc.cfg.exist_occlusion_margin_m);
 
     // ── THE LEAF BEYOND THE APERTURE (door_room_band.h) ─────────────────────────────────────────────────
@@ -311,7 +343,7 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
         // Per SAMPLE, not per instance: a partially-hidden door keeps the visible part of its footprint and
         // votes with it, instead of the old all-or-nothing `continue` that froze a phantom indefinitely.
         const Eigen::Vector3f Pw(static_cast<float>(Pr.x()), static_cast<float>(Pr.y()), static_cast<float>(Pr.z()));
-        if (rc::occlusion::walls_block(Oxy, {Pw.x(), Pw.y()}, sc.polygon, /*own_wall_skip_m=*/0.30f))
+        if (other_walls_block(Oxy, {Pw.x(), Pw.y()}, occ_walls))
         { ++out.n_occluded; return; }
         {
             Eigen::Vector3f dc = Pw - O;
@@ -515,6 +547,7 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
     const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)), static_cast<float>(Mopt->coeff(1, 3)),
                             static_cast<float>(Mopt->coeff(2, 3)));
     const Eigen::Vector2f Oxy(O.x(), O.y());
+    const auto occ_walls = occluding_walls(inst, sc.polygon);   // Task D-C: every wall but the door's own
     const float occ_margin = std::max(0.0f, sc.cfg.exist_occlusion_margin_m);
 
     // The leaf hypotheses and their weights: the phi posterior when there is one, else the modal pose.
@@ -571,7 +604,7 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
             return 0.0f;
         if (cells.hides(v->px.x, v->px.y))
             return 0.0f;
-        if (rc::occlusion::walls_block(Oxy, {P.x(), P.y()}, sc.polygon, /*own_wall_skip_m=*/0.30f))
+        if (other_walls_block(Oxy, {P.x(), P.y()}, occ_walls))
             return 0.0f;
         Eigen::Vector3f dc = P - O;
         const float rc_len = dc.norm();

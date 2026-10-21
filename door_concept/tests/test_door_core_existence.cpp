@@ -389,6 +389,56 @@ int main()
         CHECK(not L.empty() and L.back() > L_remove);
     }
 
+    // ── 11. Task D-C (rtD1i door_5, visit 1): A DOOR HIDDEN BEHIND A PARTITION IS NOT SEEN, SO IT IS NOT ABSENT. DOOR_0's
+    //     hinge jamb stands 7 cm from the corner where a partition meets its wall; rc::occlusion::walls_block skipped every
+    //     edge within 0.30 m of a sample as "the target's own wall", so both faces of the partition were skipped for the
+    //     hinge half of the door, and from behind the partition the frame and leaf samples there read VISIBLE and empty —
+    //     the image channels walked the shut door +4 → −4 while it was hidden. Here: the door confirmed square-on, then the
+    //     robot steps 2.2 m west, behind a partition whose face is 2 cm from the jamb (room polygon with that spur): the
+    //     doorway frame and the leaf silhouette must be wholly HIDDEN from there (no sample visible ⇒ no absence charged),
+    //     and visible again from the open side.
+    {
+        ExistWorld w;
+        w.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {0.48f, 5.f}, {0.48f, 1.5f}, {0.38f, 1.5f}, {0.38f, 5.f}, {-5.f, 5.f}};
+        DoorCoreConfig cfg;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        std::vector<rc::door::DoorDecision> removes;
+        std::vector<double> Lh;
+        core.connect(&w, {.decision = [&](const rc::door::DoorDecision& d)
+                          {
+                              if (d.kind == static_cast<std::uint16_t>(K::Remove)) removes.push_back(d);
+                              if (d.kind == static_cast<std::uint16_t>(K::Existence)) Lh.push_back(d.a);
+                          }, .diag = {}});
+        int c = 1;
+        for (; c <= 40; ++c)   // confirmed, the robot at (1.6, 0.5): the partition is west of its line of sight
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c), c, Phase::Present, false, kWallY, 1.6f));
+        CHECK(w.st.size() == 1);
+        if (w.st.size() == 1)
+        {
+            // the doorway FRAME probe (jambs + lintel), seen from behind the partition: every sample hidden
+            const auto& inst = w.st.begin()->second;
+            const DoorCycleInput in = cycle_input(static_cast<std::uint64_t>(c), c, Phase::Absent, false, kWallY, -1.2f);
+            const auto T = CameraModel::room_T_zed(in.robot);
+            const std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> doors{{w.st.begin()->first, &w.st.begin()->second}};
+            const ExistenceScene behind{cfg.door, T, in.camera, *in.masks, w.polygon, core.fit().room_band(), doors};
+            const auto fp = compute_frame_probe(behind, inst);
+            const auto sil = compute_silhouette_existence(behind, inst, nullptr);
+            // and from the open side (x 1.6), the same probes see it
+            const DoorCycleInput in2 = cycle_input(static_cast<std::uint64_t>(c), c, Phase::Absent, false, kWallY, 1.6f);
+            const ExistenceScene open_side{cfg.door, CameraModel::room_T_zed(in2.robot), in2.camera, *in2.masks, w.polygon,
+                                           core.fit().room_band(), doors};
+            const auto fp2 = compute_frame_probe(open_side, inst);
+            std::print("hidden behind a partition 2 cm from its jamb: frame visible {:.2f} ({} samples), silhouette detectable {}/{}; "
+                       "from the open side frame visible {:.2f}\n", fp.vis_frac(), fp.samples.size(), sil.n_detectable, sil.n_total,
+                       fp2.vis_frac());
+            CHECK(fp.vis_frac() == 0.0f and fp.samples.empty());
+            CHECK(sil.n_detectable == 0);
+            CHECK(fp2.vis_frac() > 0.5f);
+        }
+    }
+
     // ── 6. ImageSource: patches + the recorded frame_ref reproduce the full frame inside the patch ──────────────────
     {
         cv::Mat full(120, 200, CV_8UC1);

@@ -45,28 +45,31 @@ namespace rc
     {
         std::vector<DoorAperture> out;
         std::unordered_map<std::uint64_t, Cached> kept;
-        // The door's own placement: its parent and the NEWEST block of the parent → door RT edge (what door_concept
-        // writes when it re-fits the aperture). Read through RT_API, never the ts == 0 transform cache: that cache is
-        // what made the re-walk return the old placement in door_apertures_selftest (a rewritten edge, the shared
-        // instance still serving the first transform). RT_API is built only when some door is read at all.
+        // The door's own placement: the newest block of the RT edge INTO the door node (whatever its parent is — the
+        // `parent` attribute is not required: fix round 1, M-5, a door without it froze on its first read), plus that
+        // edge's own position σ. The key is what door_concept rewrites when it re-fits the aperture; a change re-walks.
         std::unique_ptr<DSR::RT_API> rt_api;
-        struct Own { std::uint64_t parent = 0; Eigen::Matrix4d local = Eigen::Matrix4d::Identity(); std::vector<float> key; };
+        struct Own { std::vector<float> key; float sigma = 0.f; };
         const auto own_placement = [&](const DSR::Node& n) -> Own
         {
             Own o;
-            const auto par = G.get_attrib_by_name<parent_att>(n);
-            if (not par.has_value()) return o;
-            const auto pn = G.get_node(par.value());
-            if (not pn.has_value()) return o;
-            if (not rt_api) rt_api = G.get_rt_api();
-            const auto e = rt_api->get_edge_RT(pn.value(), n.id());
-            if (not e.has_value()) return o;
-            const auto m = rt_api->get_edge_RT_as_rtmat(e.value());
-            if (not m.has_value() or not m->matrix().allFinite()) return o;
-            o.parent = par.value();
-            o.local = m->matrix();
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 4; ++c) o.key.push_back(static_cast<float>(o.local(r, c)));
+            for (const auto& e : G.get_edges_to_id(n.id()))
+            {
+                if (e.type() != "RT") continue;
+                if (not rt_api) rt_api = G.get_rt_api();
+                const auto m = rt_api->get_edge_RT_as_rtmat(e);
+                if (not m.has_value() or not m->matrix().allFinite()) continue;
+                o.key.push_back(static_cast<float>(e.from()));
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c) o.key.push_back(static_cast<float>(m->matrix()(r, c)));
+                if (const auto C = rt_api->get_edge_RT_covariance(e); C.has_value() and C->allFinite())
+                {
+                    const Eigen::Matrix2d xy = C->topLeftCorner<2, 2>();
+                    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(0.5 * (xy + xy.transpose()));
+                    o.sigma = static_cast<float>(std::sqrt(std::max(0.0, es.eigenvalues().maxCoeff())));
+                }
+                break;
+            }
             return o;
         };
         tally_ = Tally{};
@@ -122,29 +125,12 @@ namespace rc
                 if (not w.has_value() or not std::isfinite(w.value()) or w.value() <= 0.f)
                 { ++tally_.no_width; continue; }
 
-                // room <- door = (room <- parent, latest, ts == 0) ∘ (parent <- door, the edge just read). The cached chain
-                // only ever covers links ABOVE the door, which do not change when door_concept re-fits it; the door's own
-                // link is the fresh read. Every optional is checked (CLAUDE.md): a missing link ⇒ not an aperture yet.
-                Eigen::Matrix4d M;
-                if (own.parent == 0)
-                {
-                    const auto T = inner.get_transformation_matrix(room_frame, n.name());
-                    if (not T.has_value()) { ++tally_.no_transform; continue; }
-                    M = T.value().matrix();
-                }
-                else
-                {
-                    const auto par = G.get_node(own.parent);
-                    if (not par.has_value()) { ++tally_.no_transform; continue; }
-                    Eigen::Matrix4d up = Eigen::Matrix4d::Identity();
-                    if (par->name() != room_frame)
-                    {
-                        const auto T = inner.get_transformation_matrix(room_frame, par->name());
-                        if (not T.has_value()) { ++tally_.no_transform; continue; }
-                        up = T.value().matrix();
-                    }
-                    M = up * own.local;
-                }
+                // room <- door, latest (ts == 0). Returns nullopt at any missing link in the chain
+                // rather than throwing, so a door whose wall has gone is simply not an aperture yet —
+                // check the optional, never dereference it (CLAUDE.md, and still true).
+                const auto T = inner.get_transformation_matrix(room_frame, n.name());
+                if (not T.has_value()) { ++tally_.no_transform; continue; }
+                const Eigen::Matrix4d M = T.value().matrix();
                 if (not M.allFinite()) { ++tally_.no_transform; continue; }
 
                 const Eigen::Vector2f c(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)));
@@ -167,6 +153,7 @@ namespace rc
             DoorAperture ap;
             ap.a = it->second.seg.first;
             ap.b = it->second.seg.second;
+            ap.sigma_along = own.sigma;
             ap.p_open = p_open;
             // ★ π FROM THE LEAF ANGLE, NOT FROM PASSABILITY (2026-10-12). door_open_prob is P(clear span >= the
             //   ROBOT's passage width) — the right question for `cross`, the wrong one for a beam: a door ajar at

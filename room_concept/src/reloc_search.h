@@ -65,6 +65,7 @@ namespace rc::reloc
         Eigen::Vector2f n_out{0.f, 0.f};            ///< unit normal out of the room; zero when unseated
         float open = 0.f;     ///< per beam, if the door is as believed: P(no leaf in its way) = 1 − prior_closed
         float p_shut = 0.f;   ///< P(the door is in fact shut) — ONE fact for all its beams (common-mode; reloc_search.cpp)
+        float sigma_along = 0.f;   ///< m — door_concept's own position σ along the wall (its RT covariance); 0 unknown
     };
 
     /// π_b = P(the return of the beam origin→hit came from BEYOND an open doorway), a priori: the union over apertures
@@ -85,9 +86,13 @@ namespace rc::reloc
     /// Occam cost, ½·log n per fitted parameter (2): the room's walls are known, the next room's are fitted.
     /// ⚠ The SAME σ as the room term, deliberately: with the line's own 2 cm fit σ against the room's 15 cm, "beyond"
     ///   out-scored "on a known wall" by ~2 nats a return and every pose that put beams through a door gained by it.
+    /// Each line used as "beyond" pays its FULL marginal (fix round 1, I-2): flat priors over its offset (beyond_extent)
+    /// and its angle (π), Laplace over the n returns it explains — log(π·L_b) − log 2π + ½log(n/σ²) + ½log(n·var_t/σ²),
+    /// var_t the spread of those returns along it. ≈ 8–13 nats a line for 20–100 returns, not the ½·log n × 2 of BIC.
     struct BeyondLines
     {
         std::vector<float> r;     ///< per point: perpendicular distance to its own line (m); +∞ when on none
+        std::vector<float> t;     ///< per point: coordinate along its own line (m)
         std::vector<int>   seg;   ///< per point: its line, −1 none
     };
 
@@ -111,8 +116,22 @@ namespace rc::reloc
         // Two polished seeds are the SAME mode when their difference is not resolvable under the pair's
         // combined covariance: χ²₃ at 99%. ⚠ A discrete merge decision, flagged; same form as wallseg's.
         float chi2_merge     = 11.34f;
-        /// Open doorways of the room (Task R2). Empty ⇒ ℓ is the room-only model, exactly as before.
+        /// Doorways door_concept lists for the room (Task R2). They set WHERE an opening is likely; they are not the only
+        /// place one can be (list_wrong below).
         std::vector<Aperture> apertures;
+        /// ── A LISTED DOOR IS AN OPENING OF UNCERTAIN PLACE (fix round 1, I-1) ───────────────────────────────────────
+        /// The boundary is cut into cells of about `opening_cell_m` (a doorway's width). Each listed door is shut, or open
+        /// in ONE cell: where door_concept lists it (smeared by its own position σ along the wall), or — with probability
+        /// `list_wrong` — anywhere on the boundary. One state per door, common to all its beams.
+        /// ★ WHY: a door list taken as exact let a MISPLACED door explain a wrong pose's returns almost free while the
+        ///   truth's real but unlisted opening charged clutter per return — reloc_selftest O, the list 4.4 m off as it
+        ///   is for ~1 s after every recall: the forced search MOVED a correct pose to the twin. Now the truth explains
+        ///   its door at the price of log(N_cells/list_wrong) once.
+        /// ⚠ two modelling constants (priors, not gates), flagged: the cell scale and list_wrong. list_wrong = 0.1 is of
+        ///   the order measured live: the crossed door placed 4.3–4.6 m off for ~1 s after each recall (rtD1g2), door_5
+        ///   rotated 90° for whole visits (rtD1i).
+        float opening_cell_m = 1.0f;    ///< m — a doorway's width
+        float list_wrong     = 0.1f;    ///< P(a listed door is not where door_concept lists it)
         /// m — a return from beyond a doorway is spread uniformly over this range past it. The SAME constant as the
         /// tracker's next-room hypothesis (DoorApertures::kBeyondExtentM): one generative model for both.
         float beyond_extent  = 20.f;
@@ -174,15 +193,16 @@ namespace rc::reloc
     float polygon_distance(const std::vector<Eigen::Vector2f>& polygon, const Eigen::Vector2f& q);
     bool  inside_polygon(const std::vector<Eigen::Vector2f>& polygon, const Eigen::Vector2f& q);
 
-    /// ℓ(pose) evaluated exactly (no raster), plus the median |d| for comparison with the trigger. With apertures, each
-    /// point's term is the per-beam mixture (1−π_b)·room(d) + π_b / beyond_extent under THIS pose, and the median is
-    /// weighted by each point's posterior of being a room return — the tracker's door-weighted statistic.
+    /// ℓ(pose) evaluated exactly (no raster), plus the median |d| for comparison with the trigger. With listed doors,
+    /// each door is shut or open in one boundary cell (Params::opening_cell_m), and the beams whose rays reach that cell
+    /// under THIS pose are explained by it — the leaf, or a wall of the next room (BeyondLines). The median is weighted by each point's posterior of
+    /// being a room return — the tracker's door-weighted statistic.
     float log_likelihood(const std::vector<Eigen::Vector2f>& polygon,
                          const std::vector<Eigen::Vector2f>& pts_robot,
                          const Eigen::Vector3f& pose, const Params& p, float extent,
                          float* median_abs = nullptr, const BeyondLines* beyond = nullptr);
 
-    /// The lines of a point set (robot frame) as the beyond-a-door density needs them. Empty when p has no apertures.
+    /// The lines of a point set (robot frame) as the beyond-a-door density needs them. Empty without listed doors.
     /// Pass it to log_likelihood/polish when scoring many poses on ONE point set; omitted, they compute it themselves.
     BeyondLines beyond_lines(const std::vector<Eigen::Vector2f>& pts_robot, const Params& p);
 

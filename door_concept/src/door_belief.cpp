@@ -2,6 +2,7 @@
  * door_belief.cpp  —  AI2 door belief (single wall-anchored thin panel; state θ=[s,w,h,d] in the wall frame; d = the leaf plane's depth off the wall line, Task 5b).
  */
 
+#include <cstdint>
 #include "door_belief.h"
 
 #include <algorithm>
@@ -481,6 +482,34 @@ namespace
         }
         return best;
     }
+    // The same, also naming the wall met (index into `walls`, −1 for none) and dt/dδ: how the hit distance moves when
+    // that wall is moved by δ along its unit normal n = (−e_y, e_x)/|e| (the plane n·(x − a) = δ).
+    struct RoomWallHit { float t = -1.0f; int wall = -1; float dt_ddelta = 0.0f; };
+    RoomWallHit ray_room_walls_hit(const Eigen::Vector3f& o, const Eigen::Vector3f& u,
+                                   const std::vector<std::array<Eigen::Vector2f, 2>>& walls, float floor_z)
+    {
+        RoomWallHit best;
+        const Eigen::Vector2f o2 = o.head<2>(), u2 = u.head<2>();
+        for (std::size_t j = 0; j < walls.size(); ++j)
+        {
+            const auto& [a, b] = walls[j];
+            const Eigen::Vector2f e = b - a, d = a - o2;
+            const float den = u2.x() * e.y() - u2.y() * e.x();
+            if (std::abs(den) < 1e-9f) continue;
+            const float t = (d.x() * e.y() - d.y() * e.x()) / den;
+            const float s = (d.x() * u2.y() - d.y() * u2.x()) / den;
+            if (t <= 0.0f or s < 0.0f or s > 1.0f) continue;
+            if (o.z() + t * u.z() < floor_z) continue;
+            if (best.t < 0.0f or t < best.t)
+            {
+                const float el = e.norm();
+                const Eigen::Vector2f nrm = el > 1e-9f ? Eigen::Vector2f(-e.y() / el, e.x() / el) : Eigen::Vector2f::Zero();
+                const float c = nrm.dot(u2);
+                best = {t, static_cast<int>(j), std::abs(c) > 1e-6f ? 1.0f / c : 0.0f};
+            }
+        }
+        return best;
+    }
 }   // namespace
 
 std::vector<std::pair<float, float>>
@@ -730,9 +759,21 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     std::vector<double> base(static_cast<std::size_t>(NN) * M, 0.0);
     // The room's walls (FieldNuisance::room_walls, try97): static, so once per ray.
     std::vector<float> t_room(static_cast<std::size_t>(M), -1.0f);
+    // Task D-C: which room wall each ray meets and dt/dδ, for the walls' common-mode offset (FieldNuisance::room_wall_sigma).
+    const bool wall_nuisance = nz.room_wall_sigma > 0.0f and not nz.room_walls.empty();
+    std::vector<int>   ray_wall(static_cast<std::size_t>(M), -1);
+    std::vector<float> ray_g(static_cast<std::size_t>(M), 0.0f);
     if (not nz.room_walls.empty())
         for (int i = 0; i < M; ++i)
-            t_room[static_cast<std::size_t>(i)] = ray_room_walls(o, U[static_cast<std::size_t>(i)], nz.room_walls, ap0.floor_z);
+        {
+            const auto h = ray_room_walls_hit(o, U[static_cast<std::size_t>(i)], nz.room_walls, ap0.floor_z);
+            t_room[static_cast<std::size_t>(i)] = h.t;
+            ray_wall[static_cast<std::size_t>(i)] = h.wall;
+            ray_g[static_cast<std::size_t>(i)] = h.dt_ddelta;
+        }
+    // is_room[idx]: in nuisance cell (di, li) ray i's first modelled surface is a ROOM wall (it stops before the door's
+    // wall or hole) — the rays whose density moves with that wall's offset.
+    std::vector<std::uint8_t> is_room(wall_nuisance ? static_cast<std::size_t>(NN) * M : 0, 0);
     for (int di = 0; di < dn; ++di)
     {
         const float depth = grid(nz.depth_lo, nz.depth_hi, dn, di);
@@ -769,7 +810,7 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
                 // A room wall met before the door's wall / hole stops the ray there (the same rule as phi_field_likelihood).
                 if (const float tr = t_room[static_cast<std::size_t>(i)];
                     tr > 0.0f and (t_wall <= 0.0f or tr < t_wall) and (t_ap <= 0.0f or tr < t_ap))
-                { t_wall = tr; t_ap = -1.0f; }
+                { t_wall = tr; t_ap = -1.0f; if (wall_nuisance) is_room[static_cast<std::size_t>(di * ln + li) * M + i] = 1; }
                 const std::size_t idx = static_cast<std::size_t>(di * ln + li) * M + i;
                 t_wall_eff[idx] = t_wall;
                 t_ap_v[idx]     = t_ap;
@@ -880,6 +921,109 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
         const double lz = z + std::log(acc / static_cast<double>(ln));   // so a flat prior is exactly 0
         for (double& v : lprior) v -= lz;
     }
+    // Task D-C: the aperture on its own wall (FieldNuisance::wall_seg_lo/hi) — a soft support from the polygon's extent.
+    if ((std::isfinite(nz.wall_seg_lo) or std::isfinite(nz.wall_seg_hi)) and nz.room_wall_sigma > 0.0f)
+    {
+        const auto log_Phi = [](double z) { return std::log(std::max(1e-300, 0.5 * std::erfc(-z / std::sqrt(2.0)))); };
+        for (int li = 0; li < ln; ++li)
+        {
+            const double lo_edge = static_cast<double>(ap0.s) + grid(nz.lat_lo, nz.lat_hi, ln, li);
+            const double hi_edge = lo_edge + static_cast<double>(ap0.w);
+            double t = 0.0;
+            if (std::isfinite(nz.wall_seg_lo)) t += log_Phi((lo_edge - nz.wall_seg_lo) / nz.room_wall_sigma);
+            if (std::isfinite(nz.wall_seg_hi)) t += log_Phi((nz.wall_seg_hi - hi_edge) / nz.room_wall_sigma);
+            lprior[static_cast<std::size_t>(li)] += t;
+        }
+    }
+
+    // ── Task D-C: THE ROOM WALLS' COMMON-MODE OFFSET (FieldNuisance::room_wall_sigma) ──
+    // Wall w moves by δ_m (the door wall's own depth grid) along its normal, prior N(0, σ²) normalised over the grid; every
+    // return on it moves with it (dt = g·δ). Exact on the grid: for a nuisance cell, the rays wall w stops (and the leaf
+    // does not intercept first) contribute log Σ_m π_m Π_i p_i(δ_m). p_i(δ) does not depend on the cell or the leaf (a
+    // room ray's density is its wall hit's), so LP[i][m] is computed once; S[cell][w][m] sums it over the cell's room rays,
+    // and a leaf that intercepts a room ray removes that ray from its wall's product (C below) and scores it on the leaf.
+    const int G = wall_nuisance ? dn : 0;
+    std::vector<int> wall_slot(nz.room_walls.size(), -1);
+    int W = 0;
+    std::vector<double> LP, S, logpi;
+    if (wall_nuisance)
+    {
+        for (int i = 0; i < M; ++i)
+            if (const int j = ray_wall[static_cast<std::size_t>(i)]; j >= 0 and wall_slot[static_cast<std::size_t>(j)] < 0)
+                wall_slot[static_cast<std::size_t>(j)] = W++;
+        logpi.resize(static_cast<std::size_t>(G));
+        double zmax = -std::numeric_limits<double>::infinity();
+        for (int m = 0; m < G; ++m)
+        {
+            const double r = grid(nz.depth_lo, nz.depth_hi, dn, m) / nz.room_wall_sigma;
+            logpi[static_cast<std::size_t>(m)] = -0.5 * r * r;
+            zmax = std::max(zmax, logpi[static_cast<std::size_t>(m)]);
+        }
+        double zs = 0.0;
+        for (const double v : logpi) zs += std::exp(v - zmax);
+        for (double& v : logpi) v -= zmax + std::log(zs);           // Σ_m π_m = 1
+        LP.assign(static_cast<std::size_t>(M) * G, 0.0);
+        for (int i = 0; i < M; ++i)
+        {
+            const std::size_t si = static_cast<std::size_t>(i);
+            if (ray_wall[si] < 0) continue;
+            for (int m = 0; m < G; ++m)
+            {
+                const float t = t_room[si] + ray_g[si] * grid(nz.depth_lo, nz.depth_hi, dn, m);
+                LP[si * G + m] = log_density(t > 0.0f ? t : -1.0f, -1.0f, Rr[si]);
+            }
+        }
+        S.assign(static_cast<std::size_t>(NN) * W * G, 0.0);
+        for (int c = 0; c < NN; ++c)
+            for (int i = 0; i < M; ++i)
+                if (is_room[static_cast<std::size_t>(c) * M + i])
+                {
+                    const int w = wall_slot[static_cast<std::size_t>(ray_wall[static_cast<std::size_t>(i)])];
+                    for (int m = 0; m < G; ++m)
+                        S[(static_cast<std::size_t>(c) * W + w) * G + m] += LP[static_cast<std::size_t>(i) * G + m];
+                }
+    }
+    std::vector<double> Cw(static_cast<std::size_t>(W) * G, 0.0);
+    // One cell's frame log-likelihood: every ray, the room rays through their wall's offset marginal.
+    const auto cell_loglik = [&](int k, int di, int li, float depth, float lat) -> double
+    {
+        double acc = 0.0;
+        if (not wall_nuisance)
+        {
+            for (int i = 0; i < M; ++i)
+                acc += ray_term(k, di, li, i, depth, lat);
+            return acc;
+        }
+        std::fill(Cw.begin(), Cw.end(), 0.0);
+        const std::size_t c = static_cast<std::size_t>(di * ln + li);
+        const LeafK& q = leaves[static_cast<std::size_t>(k)];
+        for (int i = 0; i < M; ++i)
+        {
+            const std::size_t idx = c * M + static_cast<std::size_t>(i);
+            if (not is_room[idx]) { acc += ray_term(k, di, li, i, depth, lat); continue; }
+            const std::size_t si = static_cast<std::size_t>(i);
+            const float e[3] = {ex0 + depth * q.exn + lat * q.exu, ey0 + depth * q.eyn + lat * q.eyu, ez0};
+            const float f[3] = {fx[si], fy[si], U[si].z()};
+            const float t_leaf = slab(e, f, q.half);
+            if (t_leaf > 0.0f and t_leaf < t_wall_eff[idx])
+            {
+                acc += log_density(t_leaf, t_ap_v[idx], Rr[si]);
+                const int w = wall_slot[static_cast<std::size_t>(ray_wall[si])];
+                for (int m = 0; m < G; ++m) Cw[static_cast<std::size_t>(w) * G + m] += LP[si * G + m];
+            }
+        }
+        for (int w = 0; w < W; ++w)
+        {
+            double b = -std::numeric_limits<double>::infinity();
+            for (int m = 0; m < G; ++m)
+                b = std::max(b, logpi[static_cast<std::size_t>(m)] + S[(c * W + w) * G + m] - Cw[static_cast<std::size_t>(w) * G + m]);
+            double a = 0.0;
+            for (int m = 0; m < G; ++m)
+                a += std::exp(logpi[static_cast<std::size_t>(m)] + S[(c * W + w) * G + m] - Cw[static_cast<std::size_t>(w) * G + m] - b);
+            acc += b + std::log(a);
+        }
+        return acc;
+    };
 
     std::vector<double> ll(static_cast<std::size_t>(KK) * NN, 0.0);
     double best = -std::numeric_limits<double>::infinity();
@@ -893,9 +1037,7 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
             for (int li = 0; li < ln; ++li)
             {
                 const float lat = grid(nz.lat_lo, nz.lat_hi, ln, li);
-                double acc = 0.0;
-                for (int i = 0; i < M; ++i)
-                    acc += ray_term(k, di, li, i, depth, lat);
+                const double acc = cell_loglik(k, di, li, depth, lat);
                 ll[static_cast<std::size_t>(k) * NN + di * ln + li] = acc;
                 // The MAP nuisance and n_inf below are the BELIEVED leaf's (k < nstep), exactly as before the hinge
                 // was marginalised: they measure how much this frame says about the ANGLE, and the other hinge's

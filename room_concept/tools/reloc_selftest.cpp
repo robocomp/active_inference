@@ -1182,6 +1182,67 @@ int main()
         std::printf("  Q correct pose 0.39 m inside an open door (%.0f%% of the scan through it): KEPT %d/20 with the door "
                     "list (expect 20), %d/20 with the pre-R2 ℓ (the live defect: < 20); door SHUT but listed open: KEPT "
                     "%d/20 (expect 20) — %s\n", 100.f * frac_open, kept_d, kept_n, kept_s, pass ? "PASS" : "FAIL");
+
+        // S (fix round 1, I-1): THE DOOR LIST IS WRONG — a correct pose 0.39 m inside the real door, a search forced at
+        //    P(lost) = 0.506, the listed door (a) MISPLACED 4.4 m onto the far wall (the 1 Hz list for ~1 s after every
+        //    recall, rtD1g2) or (b) ROTATED 90° onto the side wall (door_5 in rtD1i). Expect the pose kept 20/20 in both.
+        auto run_wrong = [&](const rc::DoorAperture& listed)
+        {
+            std::mt19937 rng(9292);
+            std::uniform_real_distribution<float> uj(-1.f, 1.f);
+            int kept = 0;
+            for (int run = 0; run < 20; ++run)
+            {
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(room.poly);
+                const Eigen::Vector3f truth(1.2f + 0.08f * uj(rng), -2.f + 0.39f + 0.03f * uj(rng), th_in + 0.08f * uj(rng));
+                rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+                rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
+                rcn.set_door_apertures({listed});
+                Acc::relocalise(rcn, scan_world(w_open, truth, rng), 0.055f, 0.506f);
+                const auto st = rcn.get_current_state();
+                if (near(Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.10f, 5.f) and not Acc::moved(rcn)) ++kept;
+            }
+            return kept;
+        };
+        rc::DoorAperture mis = door, rot = door;
+        mis.a = door.a + Eigen::Vector2f(-0.6f, 4.f); mis.b = door.b + Eigen::Vector2f(-0.6f, 4.f);   // onto the top wall
+        rot.a = {3.f, -1.7f}; rot.b = {3.f, -0.7f};                                                     // vertical, right wall
+        const int kept_mis = run_wrong(mis), kept_rot = run_wrong(rot);
+        const bool pass_s = kept_mis == 20 and kept_rot == 20;
+        r2_failures += pass_s ? 0 : 1;
+        std::printf("  S the door list is WRONG, correct pose inside the real door, forced search: kept %d/20 with the list "
+                    "4.4 m off, %d/20 with it rotated 90° (expect 20/20 both) — %s\n", kept_mis, kept_rot, pass_s ? "PASS" : "FAIL");
+
+        // T (fix round 1, I-1/M-2): A KIDNAP IN A ROOM WITH A LISTED DOOR STILL RECOVERS. The robot is carried elsewhere in
+        //    the doored room (the next room visible through the door when the geometry allows), the held pose stale with an
+        //    inflated covariance (J's protocol), a search at P(lost) = 0.9. Arms: the door listed vs no list (pre-R2 ℓ).
+        auto run_kidnap = [&](bool listed)
+        {
+            std::mt19937 rng(9393);
+            int right = 0;
+            for (int run = 0; run < 20; ++run)
+            {
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(room.poly);
+                const Eigen::Vector3f stale = random_pose(room.poly, rng, 0.8f);
+                Eigen::Vector3f truth = random_pose(room.poly, rng, 0.8f);
+                while ((truth.head<2>() - stale.head<2>()).norm() < 1.5f) truth = random_pose(room.poly, rng, 0.8f);
+                rcn.set_robot_pose(stale.x(), stale.y(), stale.z(), false);
+                rcn.current_covariance = Eigen::Vector3f(4.f, 4.f, 4.f).asDiagonal();
+                if (listed) rcn.set_door_apertures({door});
+                Acc::relocalise(rcn, scan_world(w_open, truth, rng), 0.4f, 0.9f);
+                const auto st = rcn.get_current_state();
+                const Eigen::Vector3f now(st[2], st[3], st[4]);
+                if (near(now, truth, 0.30f, 10.f) or near(now, room.symmetries.front()(truth), 0.30f, 10.f)) ++right;
+            }
+            return right;
+        };
+        const int k_listed = run_kidnap(true), k_none = run_kidnap(false);
+        const bool pass_t = k_listed >= k_none;
+        r2_failures += pass_t ? 0 : 1;
+        std::printf("  T kidnap in a room with a listed door (next room visible through it): recovered %d/20 with the door "
+                    "listed, %d/20 without a list (pre-R2 ℓ; expect listed ≥ none) — %s\n", k_listed, k_none, pass_t ? "PASS" : "FAIL");
     }
     // R (Task R2): "NO POSE EXPLAINS THIS VIEW" KEEPS THE RIVALS. Live rtD1i 742.81 s: that branch cleared them, so the
     //    true pose (a rival since the wrong move 100 ms before) was never scored again. A carried rival, then a search on

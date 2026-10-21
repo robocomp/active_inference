@@ -144,6 +144,39 @@ inline std::vector<std::array<Eigen::Vector2f, 2>> room_walls_beside(const Apert
     return out;
 }
 
+// ─── THE DOOR'S OWN WALL SEGMENT (Task D-C) ────────────────────────────────────────────────────────────────────────────
+// The along-wall extent (m from ap.wall_O along ap.wall_u) of the run of polygon edges the doorway is cut in: the edges
+// room_walls_beside leaves out (both ends inside the field's depth band of the doorway plane), merged where they touch,
+// and the run that contains the aperture's centre (or the nearest one). NaN, NaN when the polygon has no such edge.
+// Feeds FieldNuisance::wall_seg_lo/hi: the aperture lies on its own wall, not past its end inside a perpendicular one.
+inline std::pair<float, float> door_wall_segment(const Aperture& ap, const std::vector<Eigen::Vector2f>& polygon,
+                                                 float depth_lo, float depth_hi)
+{
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const std::size_t n = polygon.size();
+    if (n < 3) return {kNaN, kNaN};
+    const Eigen::Vector2f nrm = ap.across_u();
+    const auto in_band = [&](const Eigen::Vector2f& p) { const float d = nrm.dot(p - ap.wall_O); return d >= depth_lo and d <= depth_hi; };
+    std::vector<std::pair<float, float>> iv;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& a = polygon[i];
+        const Eigen::Vector2f& b = polygon[(i + 1) % n];
+        if (not (in_band(a) and in_band(b))) continue;
+        const float ta = ap.wall_u.dot(a - ap.wall_O), tb = ap.wall_u.dot(b - ap.wall_O);
+        iv.emplace_back(std::min(ta, tb), std::max(ta, tb));
+    }
+    if (iv.empty()) return {kNaN, kNaN};
+    std::ranges::sort(iv);
+    std::vector<std::pair<float, float>> runs{iv.front()};
+    for (std::size_t i = 1; i < iv.size(); ++i)
+        if (iv[i].first <= runs.back().second + 1e-3f) runs.back().second = std::max(runs.back().second, iv[i].second);
+        else runs.push_back(iv[i]);
+    const float c = ap.s + 0.5f * ap.w;
+    const auto dist = [c](const std::pair<float, float>& r) { return c < r.first ? r.first - c : (c > r.second ? c - r.second : 0.0f); };
+    return *std::ranges::min_element(runs, {}, dist);
+}
+
 // ─── THE φ GRID, ONE DEFINITION (Task 11 fix round 1) ─────────────────────────────────────────────────────────────────
 // DoorFitter::estimate_phi and the passage anchor's φ curve (door_anchor_open.h) must score the same hypotheses: the
 // range [0, max(0.1, phi_max)] and the step count derived from the declared resolution, as estimate_phi always did.

@@ -68,6 +68,9 @@ namespace rc
         /// Unit normal of the MOUTH pointing OUT of the room (toward the next room); zero until seat_in_room()
         /// finds the room's edge at the doorway. Lets weight() tell which side of the doorway a return ended on.
         Eigen::Vector2f n_out{0.f, 0.f};
+        /// m — door_concept's own position σ (largest of its RT edge's xy covariance); 0 = unknown. The relocaliser
+        /// smears the opening along the wall by it (reloc_search.h, Params::opening_cell_m).
+        float           sigma_along = 0.f;
         std::uint64_t   id     = 0;    ///< the door node, for logging
         std::string     name;
     };

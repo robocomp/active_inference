@@ -220,9 +220,10 @@ namespace rc
             pts2.emplace_back(lidar_points[i].x(), lidar_points[i].y());
 
         const float extent = reloc_raster_.extent();
-        const float ll_cur = rc::reloc::log_likelihood(poly, pts2, cur, rp, extent);
+        const auto lines = rc::reloc::beyond_lines(pts2, rp);   // pose-independent: segmented once for every hypothesis
+        const float ll_cur = rc::reloc::log_likelihood(poly, pts2, cur, rp, extent, nullptr, &lines);
         for (auto& rv : rivals_)
-            rv.llr += rc::reloc::log_likelihood(poly, pts2, rv.pose, rp, extent) - ll_cur;
+            rv.llr += rc::reloc::log_likelihood(poly, pts2, rv.pose, rp, extent, nullptr, &lines) - ll_cur;
         // Wald's SPRT: switch when the accumulated ratio passes log((1−α)/α), α = the hazard. A symmetric twin
         // (ratio ≡ 0) never passes; after a switch the old pose needs the same margin to come back, so noise
         // around a near-tie cannot flip-flop the published pose.
@@ -243,7 +244,7 @@ namespace rc
         // Same explain-away as the search: a rival that out-scores the pose but still leaves a misfit tracking
         // would not produce is a warp of an unexplained view, not the robot's pose.
         float rival_med = std::numeric_limits<float>::quiet_NaN();
-        rc::reloc::log_likelihood(poly, pts2, best->pose, rp, extent, &rival_med);
+        rc::reloc::log_likelihood(poly, pts2, best->pose, rp, extent, &rival_med, &lines);
         if (not explains_like_tracking(rival_med))
             return;
 
