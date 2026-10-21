@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>   // std::move
 
 #include <Eigen/Dense>
 

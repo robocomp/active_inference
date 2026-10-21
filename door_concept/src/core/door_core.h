@@ -8,16 +8,22 @@
 // specificworker.cpp's run_instance_tracker / merge_overlapping_instances, plus the two pieces of DoorFitter the
 // birth rule leans on (frame_admissible and the ego-motion it reads; point_in_room).
 //
+// ★AND THE FIT (Task 4b): observe → run_inference → estimate_phi for every door the world offers, after the births —
+// where compute() ran process_door_node — then one Phi decision per door (door_fit.h). The beliefs it builds are the
+// ones the tracker associates with on the next cycle: step() produces each door's belief from the input alone.
 // ★WHAT IS NOT IN IT YET, AND HOW IT GETS IN. Existence (Task 5), identity / room following / carry / restore / look
-// (Task 6), affordances and the anchor (Task 7) — and the FIT itself (observe / run_inference / estimate_phi: the
-// instance beliefs). The tracker reads the state those slices own (which room, the room polygon, each door's fitted
-// pose and covariance, ghosts, identities) and acts on it (retire a merged door, hand a slice to a door, create and
-// adopt a newborn). It does both ONLY through TrackerWorld below: live, SpecificWorker implements it over its DSR-bound
-// instances; in the replay tool, a world rebuilt from the recorded decision log does. As each slice moves in, its part
-// of TrackerWorld becomes core state and the interface shrinks.
+// (Task 6), affordances and the anchor (Task 7). The tracker and the fit read the state those slices own (which room,
+// the room polygon, ghosts, identities) and act on it (retire a merged door, hand a slice to a door, create and adopt a
+// newborn, publish a fitted door). They do both ONLY through TrackerWorld below: live, SpecificWorker implements it over
+// its DSR-bound instances; in the replay tool, a world rebuilt from the recorded decision log does. ★THE INSTANCES' FIT
+// STATE (rc::DoorFitState) is still STORED by the world (live: DoorFitter::instances_, whose rc::DoorInstance derives
+// from it and adds the DSR-bound affordance handles) and lent to the core by pointer for the cycle; it moves into the
+// core with the slices that still read the DSR members. As each slice moves in, its part of TrackerWorld becomes core
+// state and the interface shrinks.
 //
 // ★ONE CALL, IN THE ORDER THE OLD CODE RAN. step() = merge → associate → TrackerWorld::after_association() (live: the
-// semantic/image pumps and the existence update, which ran between association and birth) → births. Effects on the
+// semantic/image pumps and the existence update, which ran between association and birth) → births → the fit of each
+// door (begin_fit / fit / after_fit: live, after_fit is the old publish_door_cycle) → the Phi decisions. Effects on the
 // world are made SYNCHRONOUSLY at the point the old code made them (a newborn is created and adopted before the next
 // birth is judged: a second birth in the same cycle is tested against the first one's swept arc), and decisions reach
 // the sink at the same point, so the DDEC stream keeps its order (IdentityUpsert written by the old identity code
@@ -37,6 +43,7 @@
 #include <Eigen/Dense>
 #include "door_cycle_io.h"
 #include "sensing.h"
+#include "door_fit.h"
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -113,10 +120,14 @@ public:
     virtual ~TrackerWorld() = default;
     // ── read: room following (Task 6), the fit, ghosts + identities (Tasks 5/6) ──
     [[nodiscard]] virtual std::uint64_t room_id() const = 0;
-    /// The room-containment prior's polygon as the fit holds it (empty = none loaded: no prior).
+    /// The room-containment prior's polygon (empty = none loaded: no prior). The core hands it to its fit each cycle.
     [[nodiscard]] virtual std::vector<Vec2f> room_polygon() const = 0;
-    /// The live instances, in the agent's own iteration order (ties in the association resolve by it).
-    [[nodiscard]] virtual std::vector<TrackedDoor> doors() const = 0;
+    /// The live instances' fit state, in the agent's own iteration order (DoorFitter::instances_, an unordered_map:
+    /// association ties and the Phi rows follow it). Lent for the cycle; the world owns them.
+    [[nodiscard]] virtual std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const { return {}; }
+    /// The live instances as the tracker sees them — by default tracked_view() of fit_states(). (A tracker-only test
+    /// world may override this instead and hold no fit state.)
+    [[nodiscard]] virtual std::vector<TrackedDoor> doors() const;
     [[nodiscard]] virtual std::optional<GhostMatch> match_ghost(const Vec2f& xy) const = 0;
     [[nodiscard]] virtual std::optional<IdentityMatch> match_identity(const Vec2f& xy) const = 0;
     [[nodiscard]] virtual std::vector<std::string> reserved_names() const = 0;
@@ -126,14 +137,29 @@ public:
     /// The old code between association and births (live: semantic/RGB/depth pumps, actuation UI, detect probe,
     /// update_existence_beliefs — which may retire doors). The cycle's tracker numbers are final at this point.
     virtual void after_association(const TrackerCycleInfo& info) = 0;
-    /// Create the door node; 0 = the insert failed (nothing else happens for that birth).
+    /// Create the door node; 0 = the insert failed (nothing else happens for that birth). ★Live, the insert ALSO builds
+    /// the instance (modify_node_slot runs synchronously inside it → ensure_instance, pre-belief box at (0, 0), no seed);
+    /// a world that replays the agent must do the same (tools/door_replay.cpp).
     virtual std::uint64_t create_door(const BirthRequest& r) = 0;
     virtual void reacquire(std::uint64_t new_id, const GhostMatch& g) = 0;   // resume the ghost's belief
     virtual void forget_ghost(const Vec2f& xy) = 0;                        // consume the ghost(s) at that place
     /// Materialise the newborn's instance NOW, hand it its birth slice, note its identity; its name, or nullopt if the
-    /// node could not be read back (no instance this cycle).
+    /// node could not be read back (no instance this cycle). Live it runs DoorFitter::ensure_instance, which builds the
+    /// fit state through DoorCore::fit().init_instance (the birth seed the core noted places it).
     virtual std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f& centroid) = 0;
+    // ── the fit (Task 4b) — what compute()'s door loop did around process_door_node's fit ──
+    /// The doors to fit this cycle, in the order to fit them (live: the graph's "door*" object nodes that are not a
+    /// mirror, not the passage anchor, not held).
+    virtual std::vector<std::uint64_t> fit_targets() { return {}; }
+    /// Make sure the door has an instance (live: ensure_instance + the dashboard series and the canvas placement) and
+    /// lend its fit state; nullptr = skip it this cycle.
+    virtual rc::DoorFitState* begin_fit(std::uint64_t) { return nullptr; }
+    /// A door the fit updated this cycle (live: publish_door_cycle — persist the belief, convergence, the epistemic step).
+    virtual void after_fit(std::uint64_t, const DoorObservation&, float /*free_energy*/) {}
 };
+
+/// The tracker's view of one fit state (what CoreWorld::doors() built off rc::DoorInstance, field for field).
+[[nodiscard]] TrackedDoor tracked_view(std::uint64_t id, const rc::DoorFitState& inst);
 
 // ═══ THE CORE ════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -153,15 +179,25 @@ class DoorCore
 {
 public:
     explicit DoorCore(const DoorCoreConfig& cfg);
+    DoorCore(const DoorCore&) = delete;              // the fit holds references into this object
+    DoorCore& operator=(const DoorCore&) = delete;
 
-    void connect(TrackerWorld* world, DoorCoreSinks sinks = {}) { world_ = world; sinks_ = std::move(sinks); }
+    /// The fit's stdout lines and CSV rows go to sinks.diag too (streams "stdout", "ai2_log.csv", "ai2_log_phi.csv").
+    void connect(TrackerWorld* world, DoorCoreSinks sinks = {});
 
     /// Take the cycle's media (mask packet, bpearl sweep) into the views. step() calls it; call it ALONE on a cycle
     /// whose decision step does not run (no room) — see sensing.h.
     void observe_media(const DoorCycleInput& in);
 
-    /// One cycle of the slices the core owns. Task 4: the tracker slice. Requires connect().
+    /// One cycle of the slices the core owns: the tracker (Task 4) and the fit (Task 4b). Requires connect().
     DoorCycleOutput step(const DoorCycleInput& in);
+
+    /// The fit: its per-door functions are called by the world too (ensure_instance → init_instance, note_reacquire),
+    /// and the adapter's DoorFitter shares its room polygon.
+    [[nodiscard]] DoorFit& fit() { return fit_; }
+    /// The cycle's clock and camera, for fit calls the adapter makes OUTSIDE step() in the same cycle (a restore or a
+    /// carry builds an instance before the step runs). step() and observe_media() set them too.
+    void set_cycle_views(const DoorCycleInput& in);
 
     [[nodiscard]] const TrackerCycleInfo& tracker_info() const { return info_; }
     [[nodiscard]] const EgoMotion& ego() const { return ego_; }
@@ -182,6 +218,7 @@ private:
     void merge(DoorCycleOutput& out);
     void associate(const DoorCycleInput& in, DoorCycleOutput& out);
     void births(const DoorCycleInput& in, DoorCycleOutput& out);
+    void fit_doors(DoorCycleOutput& out);
 
     DoorCoreConfig cfg_;
     TrackerWorld*  world_ = nullptr;
@@ -191,6 +228,7 @@ private:
     LeafSweep  leaf_sweep_;
     EgoMotion  ego_;
     std::vector<rc::exclusion::Claim> claims_;
+    DoorFit fit_{cfg_.door};   // after cfg_ (it keeps a reference to it)
 
     rc::InstanceTracker tracker_;
     long last_birth_mask_frame_ = -1;

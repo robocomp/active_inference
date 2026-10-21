@@ -1,16 +1,14 @@
 /*
  * door_fitter.h
  *
- * The active-inference core of door_concept (mirrors bottle_concept/bottle_fitter.h). Owns the
- * per-door instance map and runs the AI2 full-covariance belief update for each "door_*" node:
- *   - instance lifecycle (ensure_instance + the DoorModel factory),
- *   - observation: split the selected mask's support points into on-surface vs off-surface sets,
- *   - inference: support-bank ingest + one recursive belief update (DoorBelief) with the mask-motion
- *     channel as the observation precision R / bias gate, written back into inst.model,
- *   - the door-owned support-point memory (ownership gate + FNV cell keys).
+ * The DSR-bound side of door_concept's fit (mirrors bottle_concept/bottle_fitter.h): the per-door instance map
+ * (rc::DoorInstance), ensure_instance's read of the node, and the existence probes that still ask cortex for the
+ * camera (silhouette, aperture frame, obliquity).
  *
- * Collaborates with MaskIngestor (masks) and DoorSceneGraph. SpecificWorker keeps the orchestration
- * (process_door_node), the DSR write-back call, and the post-fit epistemic / affordance / Qt steps.
+ * ★The FIT itself — observation (the assigned mask slice → candidate / residual points), inference (support-bank
+ * ingest + one recursive belief update), the leaf angle, the pre-belief geometry and read-back — moved into the
+ * DSR-free DoorCore (src/core/door_fit.h, Task 4b), which runs it inside DoorCore::step(). SpecificWorker keeps the
+ * DSR write-back (CoreWorld::after_fit → publish_door_cycle) and the post-fit epistemic / affordance / Qt steps.
  * Plain class (no Q_OBJECT).
  */
 
@@ -40,6 +38,7 @@
 
 #include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet — the shared silhouette + its null
 
+#include "core/door_fit.h"    // rc::door::core::DoorFit — the fit, in the DSR-free DoorCore
 #include "door_config.h"        // rc::DoorConfig
 #include "door_instance.h"      // rc::DoorInstance, DoorState
 #include "door_model.h"         // DoorModel / DoorModelParams
@@ -174,35 +173,22 @@ struct DoorSilhouette
 class DoorFitter
 {
 public:
-    // The other concepts' standing claims on space (common/exclusion). Set once per cycle by the
-    // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
-    // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
-    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
-
-    struct DoorObservation
-    {
-        bool has_fresh_data = false;
-        float explanation_ratio = 1.0f;
-        std::vector<Eigen::Vector3f> candidate_pts;
-        std::vector<Eigen::Vector3f> residual_pts;
-    };
+    // ★THE FIT MOVED INTO THE DoorCore (Task 4b; src/core/door_fit.h). What stays here is what needs the graph: the
+    // instance map (rc::DoorInstance = the core's rc::DoorFitState + the DSR-bound affordance handles), the node read
+    // of ensure_instance, and the existence probes that still query cortex for the camera (Task 5 moves those).
+    using DoorObservation = rc::door::core::DoorObservation;
 
     DoorFitter(std::shared_ptr<DSR::DSRGraph> graph,
                 DSR::InnerEigenAPI* inner_eigen,
                 DoorConfig& cfg,
                 MaskIngestor* mask_ingestor,
-                DoorSceneGraph* scene_graph);
+                DoorSceneGraph* scene_graph,
+                rc::door::core::DoorFit& fit);
 
     // Create the instance for a "door_*" node if absent (from prior/RT). Returns true the
     // first time it is created (so the worker can register Qt series / canvas pos). Latches room_id.
+    // The node's attributes and its room→door RT are read here; the rest is DoorFit::init_instance.
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_id);
-
-    // Read the "masks" node → candidate/residual split against the current SDF.
-    DoorObservation observe(DoorInstance& inst, const DSR::Node& node);
-    // One recursive full-covariance belief update (DoorBelief) on this frame's mask points, with the
-    // mask-motion channel as the observation precision R / bias gate. Writes the result into inst.model
-    // so all downstream publish/viewer code is unchanged. Returns the update free energy.
-    float run_inference(DoorInstance& inst, const DoorObservation& observation);
 
     std::unordered_map<std::uint64_t, DoorInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
@@ -211,42 +197,23 @@ public:
     // so it is a legitimate strong prior: P(a door's centre outside the walls) ≈ 0. Loaded from the room
     // node's delimiting_polygon_{x,y}. Used to suppress out-of-room births AND remove an instance that a
     // localization glitch placed outside (it can't be reached by the sensor to vacate it — behind a wall).
-    void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
-    { room_interior_ = interior; room_polygon_ = std::move(polygon); }
-    bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    // ★ONE copy: the DoorCore's fit holds it (the interior point was never read).
+    void set_room_geometry(const Eigen::Vector2f& /*interior*/, std::vector<Eigen::Vector2f> polygon)
+    { fit_.set_room_polygon(std::move(polygon)); }
+    bool has_room_polygon() const { return fit_.has_room_polygon(); }
     // The walls, for anything that needs them as GEOMETRY rather than as a containment prior — notably the
     // NBV sight test, which must know the wall a door is set into is opaque. See rc::nbv::wall_obstacles.
-    const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
+    const std::vector<Eigen::Vector2f>& room_polygon() const { return fit_.room_polygon(); }
     // camera→room at the current pose (ts=0, main thread); nullopt while the chain does not resolve. Public read of
     // the transform the silhouette uses, for the remembered-door look's absence channel.
     std::optional<Eigen::Matrix4d> camera_in_room() const { return room_T_zed_matrix(); }
 
-    // Robot/camera ego-motion (room frame) — computed ONCE per cycle by the DoorCore (core/sensing.h EgoMotion, moved
-    // from here: the birth gate and this fit gate must read one value) and handed over each cycle; run_inference then
-    // gates the pose/shape update to STILLNESS ("be-still-to-update").
-    void  set_ego_motion(float lin_mps, float ang_radps) { ego_lin_mps_ = lin_mps; ego_ang_radps_ = ang_radps; }
-    float ego_lin_mps() const   { return ego_lin_mps_; }
-    float ego_ang_radps() const { return ego_ang_radps_; }
-    // True when this frame must be CONFIRMATION-ONLY (no pose/shape change): robot linear/angular speed above
-    // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
-    // (A/B FALLBACK path only — the hard gate; used when cfg.ai2_motion_confirm_only is true.)
-    // ★Its pre-birth twin, frame_admissible (the SAME admissibility on a raw slice with no instance yet — a frame the
-    // fit would REFUSE can never create an object), moved with the birth rule into the DoorCore
-    // (core/door_core.h DoorCore::frame_admissible). Keep the two in step.
-    bool  confirm_only(const DoorInstance& inst) const;
     // PIXEL-LEVEL silhouette existence evidence: project the panel face into the ZED and split the predicted
     // samples into occupancy / absence / occluded / out-of-frustum. See DoorSilhouette + DoorInstance::existence.
     // This is the ONLY channel that may remove a door — it is the only one that can tell "looked and found
     // nothing" from "never looked".
     // `field` may be null / invalid, in which case the silhouette's field_* accumulators stay 0 and the
     // existence channel is bit-for-bit what it was before this channel existed.
-    // ★M1 — PHI AS A REAL DOF. Estimated per cycle by scoring candidate leaf angles against the LiDAR rays
-    // that cross the doorway (where they stop, and where they fly through), with the agent's own actuation
-    // command as the prior. The camera does NOT score phi (removed 2026-09-14: the door mask labels the
-    // frame, not the leaf). Writes phi_est / phi_sigma / phi_curve onto the instance. Must run BEFORE the leaf pose
-    // is read, since every projection downstream is built from it.
-    void estimate_phi(DoorInstance& inst);
-
     DoorSilhouette compute_silhouette_existence(const DoorInstance& inst,
                                                 const rc::SemanticProbField* field = nullptr);
     // The APERTURE FRAME (jambs + lintel), projected and visibility-weighted, ready to be scored against
@@ -257,8 +224,7 @@ public:
     // The wall band this agent's existence model uses (door_room_band.h), from Existence.WallThicknessM /
     // Existence.BoundarySigmaM. One definition for the containment prior, the leaf-beyond weight and the
     // frame probe's seat on the room-side face.
-    [[nodiscard]] rc::door::RoomBand room_band() const
-    { return {cfg_.exist_wall_thickness_m, cfg_.exist_boundary_sigma_m}; }
+    [[nodiscard]] rc::door::RoomBand room_band() const { return fit_.room_band(); }
     // Signed offset of the APERTURE centre from the room polygon (> 0 outside); NaN with no polygon.
     [[nodiscard]] float aperture_band_offset(const DoorInstance& inst) const;
     // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central" (the
@@ -271,106 +237,27 @@ public:
     // on its own. Keeping both would double-count the same geometry — and the standalone ramp was what froze a
     // grazing phantom at oblq=0.15 for 1200 frames.
     float door_view_obliquity(const DoorInstance& inst) const;
-    float motion_magnitude(const DoorInstance& inst) const;   // combined ego-motion speed (m/s)
-    float periphery_penalty(const DoorInstance& inst) const;  // off-axis penalty ∈ [0,1] (0 on-axis → 1 at periph_ref)
     // true if q is inside the polygon, or outside by no more than margin_m (tolerance for a wall-hugging door
     // whose centroid noise pokes through the wall). No polygon loaded ⇒ always true (unknown room → no prior).
     bool point_in_room(const Eigen::Vector2f& q, float margin_m = 0.0f) const;
-
-    // Wall frame a door is anchored to: near corner O and along-wall unit u (room frame). A door lives IN a
-    // wall, so its belief works in this frame (θ=[s,w,h]); the fitter associates the door to the
-    // room-polygon wall it was SEEN THROUGH at birth (door_standpoint.h associate_wall) and sets it on the belief.
-    struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f; };
-    // The wall the observed points were SEEN THROUGH from cam_xy (nearest wall per point without a camera).
-    WallFrame associate_wall(std::span<const Eigen::Vector2f> pts_xy, const std::optional<Eigen::Vector2f>& cam_xy) const;
-    bool should_log(const DoorInstance& inst) const;
-    // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
-    // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
-    void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
-
-
-    // The newest low-LiDAR sweep, already in the ROOM frame. Staged once per cycle by the worker; the
-    // hinge branch selects from it per door. Copy-free: the ingestor owns the storage for the cycle.
-    // ★THE ORIGIN IS NOT OPTIONAL. A LiDAR return is not a point, it is "the ray from HERE in this
-    // direction stopped at range r". Without the origin the only question askable is "is this endpoint on
-    // the door", and a ray that flew THROUGH an open doorway has its endpoint in the next room — from the
-    // endpoint alone it is indistinguishable from any other far-away point. From the origin it is the
-    // evidence: that ray traversed the aperture, and a closed leaf would have stopped it.
-    void set_leaf_points(const std::vector<Eigen::Vector3f>& pts, const Eigen::Vector3f& origin)
-    { leaf_pts_ = &pts; leaf_origin_ = origin; }
-    // Room-frame XY a NEWLY born instance's model should cold-start at (from the tracker's detection).
-    // The room→door RT written at birth is not reliably composable the same cycle, so without this the
-    // model would start at 0,0; consumed once by ensure_instance.
-    void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
-
-    // IDENTITY RE-ACQUISITION: hand a newly created node the CONVERGED belief of the door it is bringing back,
-    // so it resumes that geometry (state + Σ, i.e. the accumulated evidence) instead of cold-starting at the
-    // w,h template priors. Consumed once by the lazy belief init in run_inference. The existence log-odds is
-    // deliberately NOT restored — the door was removed because absence evidence won, so its EXISTENCE is
-    // re-earned from the birth prior even though its SHAPE is remembered.
-    void note_reacquire(std::uint64_t id, const DoorBelief& belief) { restore_seeds_[id] = belief; }
-
-    // Part C-birth: initialise `inst` as a bearing-only hypothesis — belief mean placed at `nominal_range`
-    // along the ray from `robot_xy` at `azimuth`, with a broad along-ray / tight across-ray Σ (see
-    // DoorBelief::seed_bearing). Sets ai2_initialized + is_bearing_hypothesis and writes the mean into the
-    // model so the scene-graph/viewer show the hypothesis on the ray. No depth mask needed.
-    void seed_bearing_hypothesis(DoorInstance& inst, const Eigen::Vector2f& robot_xy, float azimuth,
-                                 float nominal_range, float along_std, float across_std, float yaw_std);
+    bool should_log(const DoorInstance& inst) const { return fit_.should_log(inst); }
 
 private:
-    const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
-    mutable std::size_t n_explained_away_ = 0;   // points dropped this cycle (diagnostic)
-    DoorBeliefParams make_belief_params() const;   // config → belief params (shared by init + hypothesis seed)
-    // The SINGLE authoring point for a door's geometry: refresh the cached aperture / leaf / leaf_pose from
-    // the belief and write the room-frame read-back into DoorState. Called from ensure_instance (pre-belief),
-    // the bearing seed, and the per-cycle write-back — the only three places a door's shape can change.
-    void refresh_geometry(DoorInstance& inst);
     // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
     // query); the rigid body→zed mount is always queried latest. 0 → current pose.
     std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;
-    // Project the current model through the camera extrinsic → normalised in-image ROI (centre
-    // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
-    void compute_projected_roi(DoorInstance& inst);
-    // Part B: localization/chain cov J·Σ_chain·Jᵀ at the door centre (measurement frame → room, zero
-    // input cov), stored on the instance for the RT-cov write. No-op unless set_chain_cov_source enabled.
-    void compute_chain_cov(DoorInstance& inst);
-
-    void ingest_observation_support(DoorInstance& inst, const DoorObservation& observation);
-
-    DoorModelParams  make_model_params() const;
-
-    void log_phi_csv(const DoorInstance& inst, const rc::ai::LidarRays& rays,
-                     const std::vector<std::pair<float, float>>& loglik,
-                     float prior_mean, float prior_sigma, float post_mean, float post_sigma, bool measured);
-    // Append one AI2 belief row (state + Σ diag + range/motion) to cfg_.ai2_csv_path. No-op if empty.
-    void log_ai2_csv(const DoorInstance& inst, int npts, float R, bool gated, float energy);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
-    Eigen::Vector3f                leaf_origin_ = Eigen::Vector3f::Zero();   // bpearl centre, room frame
-    const std::vector<Eigen::Vector3f>* leaf_pts_ = nullptr;   // bpearl sweep, room frame (set_leaf_points)
-    DSR::InnerGaussianAPI*         gaussian_    = nullptr;   // Part B: chain covariance (set_chain_cov_source)
-    std::string                    chain_src_frame_;
-    bool                           chain_cov_enabled_ = false;
     DoorConfig&                   cfg_;
     MaskIngestor*                  mask_ingestor_ = nullptr;
     DoorSceneGraph*               scene_graph_   = nullptr;
+    rc::door::core::DoorFit&      fit_;            // the DoorCore's fit (init_instance, the room polygon)
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
     float                           central_region_frac_ = 0.25f;   // central-image box [f,1-f]² (set from config)
 
     std::unordered_map<std::uint64_t, DoorInstance> instances_;
-    std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (note_birth)
-    std::unordered_map<std::uint64_t, DoorBelief> restore_seeds_;      // re-acquired identity's belief (note_reacquire)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
-    std::vector<Eigen::Vector2f>   room_polygon_;       // room-frame delimiting polygon (containment prior)
-    Eigen::Vector2f                room_interior_ = Eigen::Vector2f::Zero();   // a known-interior point (centroid)
-    // Ego-motion (camera pose deltas → robot speed), set once per cycle from the DoorCore (set_ego_motion).
-    float           ego_lin_mps_   = 0.0f;
-    float           ego_ang_radps_ = 0.0f;
-    std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
-    std::ofstream                  phi_trace_csv_;      // one row per estimate_phi() call (ai2 path + "_phi")
-    std::ofstream                  phi_curve_csv_;      // one row per HYPOTHESIS (leaf-tracker forensics)
-    std::ofstream                  phi_points_csv_;     // one row per cycle: the selected cloud's geometry
 };
 
 }  // namespace rc

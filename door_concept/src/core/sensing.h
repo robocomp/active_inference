@@ -103,20 +103,24 @@ private:
 };
 
 /// The newest low-LiDAR (bpearl) sweep in the ROOM frame with its origin (ConceptLidarIngestor::sweep_bpearl_room /
-/// origin_bpearl_room as DoorFitter::set_leaf_points receives them). Not read by the tracker slice; the leaf-angle
-/// slice consumes it.
+/// origin_bpearl_room as DoorFitter::set_leaf_points received them). The fit's leaf-angle channel (door_fit.cpp
+/// estimate_phi) reads it.
+/// ★present(): the old fitter held a POINTER to the ingestor's sweep, null until the first room-frame sweep was staged,
+/// and the leaf channel's `have_sensor` was exactly "that pointer is set" — an empty-but-staged sweep still counts.
 class LeafSweep
 {
 public:
     void apply(const std::optional<BpearlSweep>& s)
     {
-        if (s.has_value() and s->room_fresh) { pts_ = s->pts_room; origin_ = s->origin_room; }
+        if (s.has_value() and s->room_fresh) { pts_ = s->pts_room; origin_ = s->origin_room; present_ = true; }
     }
+    [[nodiscard]] bool present() const { return present_; }
     [[nodiscard]] const std::vector<Vec3f>& points() const { return pts_; }
     [[nodiscard]] const Vec3f& origin() const { return origin_; }
 private:
     std::vector<Vec3f> pts_;
     Vec3f origin_ = Vec3f::Zero();
+    bool present_ = false;
 };
 
 }  // namespace rc::door::core

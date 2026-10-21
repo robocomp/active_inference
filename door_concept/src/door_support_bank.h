@@ -17,12 +17,12 @@
 
 #include "../../common/support_bank/support_bank.h"   // rc::support_bank:: (SHARED)
 #include "door_config.h"
-#include "door_instance.h"
+#include "door_fit_state.h"   // rc::DoorFitState (DSR-free: the DoorCore fit ingests through here)
 
 namespace rc::support_bank {
 
 // This door's extent + the allowances its geometry earns. The ONLY per-object part of the bank.
-inline std::pair<Extent, Params> extent_of(const DoorInstance& inst, const DoorConfig& cfg)
+inline std::pair<Extent, Params> extent_of(const DoorFitState& inst, const DoorConfig& cfg)
 {
     const auto& s = inst.model.state();
     Extent e;
@@ -42,7 +42,7 @@ inline std::pair<Extent, Params> extent_of(const DoorInstance& inst, const DoorC
 }
 
 // Ingest this cycle's points, then log on the agent's own period.
-inline void ingest(DoorInstance& inst, const std::vector<Eigen::Vector3f>& candidate_pts,
+inline void ingest(DoorFitState& inst, const std::vector<Eigen::Vector3f>& candidate_pts,
                    const std::vector<Eigen::Vector3f>& residual_pts, const DoorConfig& cfg)
 {
     const auto [e, prm] = extent_of(inst, cfg);

@@ -433,28 +433,37 @@ void SpecificWorker::initialize()
     else
         qWarning() << "door_concept: no room node found at startup";
 
-    // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
-    fitter_ = std::make_unique<rc::DoorFitter>(
-        G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
-    fitter_->set_central_region_frac(cfg_.exist_central_region_frac);   // existence: "is the robot looking AT it"
-
     // The DSR-free decision core (src/core/door_core.h). It reads ONLY the DoorCycleInput, so the snapshot builds one
     // every cycle from here on (recording stays behind DoorConcept.RecordInputs). Its decisions reach the DDEC log and
     // etc/door_events.csv through log_tracker_event — the same writer, at the same point in the cycle, as before.
+    // ★BUILT BEFORE THE FITTER: the fit lives in the core (Task 4b), and the DoorFitter (the instance map + the
+    // existence probes that still need cortex) builds its instances through it and shares its room polygon.
     input_snapshot_.enable_for_core(static_cast<std::uint32_t>(agent_id));
     core_ = std::make_unique<rc::door::core::DoorCore>(rc::door::core::DoorCoreConfig{cfg_});
+
+    // The DSR-bound side of the fit. Owns the instance map; collaborates with the ingestor + scene graph.
+    fitter_ = std::make_unique<rc::DoorFitter>(
+        G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get(), core_->fit());
+    fitter_->set_central_region_frac(cfg_.exist_central_region_frac);   // existence: "is the robot looking AT it"
     {
         rc::door::core::DoorCoreSinks sinks;
         sinks.decision = [](const rc::door::DoorDecision& d)
         {
             using K = rc::door::DoorDecisionKind;
             const auto k = static_cast<K>(d.kind);
+            // The per-door leaf-angle row goes to the decision log only (it never had a door_events.csv line); the core
+            // stamps it with the same cycle / t_ms the log's own clock carries.
+            if (k == K::Phi)
+            {
+                if (g_decisions != nullptr and g_decisions->enabled()) g_decisions->append(d);
+                return;
+            }
             const char* ev = k == K::Birth ? "BIRTH" : k == K::Suppress ? "SUPPRESS" : k == K::Merge ? "MERGE"
                            : k == K::Reacquire ? "REACQUIRE" : k == K::Remove ? "REMOVE" : k == K::Release ? "RELEASE"
                            : k == K::Restore ? "RESTORE" : "OTHER";
             log_tracker_event(ev, d.door_id, static_cast<float>(d.a), static_cast<float>(d.b), d.note, d.name);
         };
-        sinks.diag = [](const rc::door::core::DiagRow& r)
+        sinks.diag = [ai2_path = cfg_.ai2_csv_path](const rc::door::core::DiagRow& r)
         {
             if (r.stream == "stdout")
                 std::print("{}", r.line);
@@ -476,6 +485,24 @@ void SpecificWorker::initialize()
                     return f;
                 }();
                 if (dcsv) { dcsv << r.line; dcsv.flush(); }
+            }
+            else if (r.stream == "ai2_log.csv" or r.stream == "ai2_log_phi.csv")
+            {
+                // The fit's two per-cycle logs (DoorModel.AI2CsvPath and its _phi twin): rows formatted by the core,
+                // the files opened (rotating) on the first row with their header, as DoorFitter::log_*_csv did. A file
+                // that cannot be opened stays closed and its rows are dropped (the old code cleared the path).
+                struct Log { std::ofstream f; bool tried = false; };
+                static Log ai2, phi;
+                const bool is_phi = r.stream == "ai2_log_phi.csv";
+                Log& L = is_phi ? phi : ai2;
+                if (not L.tried)
+                {
+                    L.tried = true;
+                    const std::string& base = ai2_path;
+                    rc::diag::open_rotating(L.f, is_phi ? rc::door::core::phi_csv_path(base) : base);
+                    if (L.f.is_open()) L.f << (is_phi ? rc::door::core::kPhiCsvHeader : rc::door::core::kAi2CsvHeader);
+                }
+                if (L.f.is_open()) { L.f << r.line; L.f.flush(); }
             }
         };
         core_->connect(&core_world_, std::move(sinks));
@@ -500,9 +527,8 @@ void SpecificWorker::initialize()
     connect(G.get(), &DSR::DSRGraph::del_node_signal,
             this, &SpecificWorker::del_node_slot);
 
-    // Part B: localization/chain covariance on the published RT edge (mirrors bottle/table).
-    gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
-    fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
+    // (Part B, the localization/chain covariance on the published RT edge, is computed by the DoorCore's fit from the RT
+    //  chain the input snapshot records with each mask packet — door_fit.h chain_point_cov — gated by RtCovAddChain.)
 
     // ★CREATED HERE, ON THE MAIN THREAD, AFTER THE GRAPH IS UP — the media-plane consumer rule. The
     // ingestor itself discovers the sensor node lazily inside pump() and stays dormant (no DDS
@@ -1213,11 +1239,8 @@ void SpecificWorker::compute()
 {
     // Input recording: every delete this cycle causes is OURS (input_latch.h — what tells it from another agent's).
     const auto self_scope = input_snapshot_.self_scope();
-    // ★ONE graph walk per cycle for the SHARED mutual-exclusion rule: who else claims room space.
-    // Feeds BOTH the birth filter (a candidate on somebody else's object accrues no evidence) and
-    // the existence occupancy discount. Main thread — collect_graph_obstacles uses ts==0 (CLAUDE.md).
-    if (G) foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), "door");
-    if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
+    // (The SHARED mutual-exclusion rule's claim set — who else claims room space — is the DoorCore's, computed ONCE per
+    //  cycle from the snapshot below and read by both its birth filter and its fit. This walk used to be a second copy.)
 
     if (not G or not rt_api_)
         return;
@@ -1232,6 +1255,8 @@ void SpecificWorker::compute()
     input_snapshot_.begin_cycle(*G, inner_eigen_.get(), rt_api_.get(), dec_cycle_, cycle_ns,
                                 static_cast<std::int64_t>(rc::provenance::now_ms()), mask_ingestor_.get());
     struct EndRecordedCycle { rc::door::InputSnapshot& s; ~EndRecordedCycle() { s.end_cycle(); } } end_recorded_cycle{input_snapshot_};
+    // The fit's clock and camera for this cycle, before anything below can build an instance (a restore, a carry).
+    if (core_) core_->set_cycle_views(input_snapshot_.current());
 
     // Which room are we in? Follows ltsm_agent's `current` edge and LETS GO of a room we have left.
     // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
@@ -1277,33 +1302,20 @@ void SpecificWorker::compute()
 
     refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
     // Low LiDAR sweep in the ROOM frame — the hinge branch's evidence. Main thread (reads the graph).
-    const bool lidar_pumped = lidar_ingestor_ and lidar_ingestor_->pump();
-    if (lidar_ingestor_)   // after EVERY pump: its return omits the robot-frame plane (make_bpearl_sweep)
+    // (The fit reads it from the recorded sweep — core/sensing.h LeafSweep — no longer from the ingestor's storage.)
+    if (lidar_ingestor_)
+    {
+        lidar_ingestor_->pump();
+        // after EVERY pump: its return omits the robot-frame plane (make_bpearl_sweep)
         input_snapshot_.capture_bpearl(*G, inner_eigen_.get(), *lidar_ingestor_);
-    if (lidar_pumped and lidar_ingestor_->bpearl_fresh())
-        fitter_->set_leaf_points(lidar_ingestor_->sweep_bpearl_room(),
-                                 lidar_ingestor_->origin_bpearl_room());
+    }
 
     mask_ingestor_->refresh();
     input_snapshot_.capture_masks(*G, inner_eigen_.get(), rt_api_.get(), *mask_ingestor_);
-    // The DoorCore's tracker slice on this cycle's input: ego-motion, merge, associate, [the existence update — old
-    // code, through CoreWorld::after_association], birth. The only instance-lifecycle path.
+    // The DoorCore on this cycle's input: ego-motion, merge, associate, [the existence update — old code, through
+    // CoreWorld::after_association], birth — the only instance-lifecycle path — then the FIT of every door
+    // (CoreWorld::fit_targets / begin_fit / after_fit = the old door loop and process_door_node) and the Phi rows.
     run_tracker_slice();
-
-    // Doors are generic `object` nodes named "door_*" (schema migration); filter by name prefix.
-    const auto door_nodes = G->get_nodes_by_type("object");
-    for (const auto& node : door_nodes)
-        if (node.name().starts_with("door") and not rc::room::is_proto_mirror(*G, node)   // a mirror is not a belief
-            and not rc::interaction::is_anchor(*G, node)    // nor is the passage door's robot-relative copy
-            and not held_doors_.contains(node.id()))        // nor a door HELD in the room left behind (release_room)
-            process_door_node(node);
-
-    // Decision log: each instance's leaf-angle posterior as it stands after this cycle's fitting.
-    if (decision_log_.enabled() and fitter_)
-        for (const auto& [door_id, inst] : fitter_->instances())
-            if (not inst.is_bearing_hypothesis)
-                decision_log_.record(rc::door::DoorDecisionKind::Phi, door_id, inst.node_name, inst.phi_est,
-                                   inst.phi_sigma, inst.phi_measured ? 1.0 : 0.0, inst.phi_support);
 
     // ── The three PRAGMATIC affordances: approach / open / cross ──────────────────────────────────
     // ★DELIBERATELY OUTSIDE the loop above. process_door_node() bails early on a stale or young
@@ -1377,8 +1389,6 @@ void SpecificWorker::retire_instance(std::uint64_t id)
 void SpecificWorker::run_tracker_slice()
 {
     core_->step(input_snapshot_.current());
-    // ONE ego-motion: the fit's confirm-only gate reads the value the birth gate just used (was update_ego_motion).
-    fitter_->set_ego_motion(core_->ego().lin_mps, core_->ego().ang_radps);
 }
 
 std::uint64_t SpecificWorker::CoreWorld::room_id() const { return w_.room_node_id_; }
@@ -1386,31 +1396,68 @@ std::uint64_t SpecificWorker::CoreWorld::room_id() const { return w_.room_node_i
 std::vector<Eigen::Vector2f> SpecificWorker::CoreWorld::room_polygon() const
 { return w_.fitter_ ? w_.fitter_->room_polygon() : std::vector<Eigen::Vector2f>{}; }
 
-std::vector<rc::door::core::TrackedDoor> SpecificWorker::CoreWorld::doors() const
+std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> SpecificWorker::CoreWorld::fit_states() const
 {
-    std::vector<rc::door::core::TrackedDoor> out;
+    std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> out;
     if (not w_.fitter_) return out;
     out.reserve(w_.fitter_->instances().size());
-    for (const auto& [id, inst] : w_.fitter_->instances())   // ★the map's own order: association ties resolve by it
-    {
-        rc::door::core::TrackedDoor d;
-        d.id = id;
-        d.name = inst.node_name;
-        d.state = inst.model.state();
-        d.aperture = inst.aperture;
-        d.leaf_pose = inst.leaf_pose;
-        d.phi_est = inst.phi_est;
-        d.is_bearing_hypothesis = inst.is_bearing_hypothesis;
-        d.ai2_initialized = inst.ai2_initialized;
-        d.belief = inst.ai2_initialized ? &inst.ai2_belief : nullptr;
-        d.chain_cov_xx = inst.chain_cov_xx;
-        d.chain_cov_yy = inst.chain_cov_yy;
-        d.roi_valid = inst.roi_valid;
-        d.matched_frames = inst.matched_frames;
-        d.assigned_mask_idx = inst.assigned_mask_idx;
-        out.push_back(std::move(d));
-    }
+    for (auto& [id, inst] : w_.fitter_->instances())   // ★the map's own order: association ties and Phi rows follow it
+        out.emplace_back(id, &inst);
     return out;
+}
+
+// compute()'s old door loop, its graph half: the doors to fit, in graph order. Doors are generic `object` nodes named
+// "door_*" (schema migration); filter by name prefix.
+std::vector<std::uint64_t> SpecificWorker::CoreWorld::fit_targets()
+{
+    fit_nodes_.clear();
+    std::vector<std::uint64_t> ids;
+    for (const auto& node : w_.G->get_nodes_by_type("object"))
+        if (node.name().starts_with("door") and not rc::room::is_proto_mirror(*w_.G, node)   // a mirror is not a belief
+            and not rc::interaction::is_anchor(*w_.G, node)    // nor is the passage door's robot-relative copy
+            and not w_.held_doors_.contains(node.id()))        // nor a door HELD in the room left behind (release_room)
+        {
+            ids.push_back(node.id());
+            fit_nodes_.insert_or_assign(node.id(), node);
+        }
+    return ids;
+}
+
+// process_door_node's graph half, before the fit: the instance (ensure_instance), the dashboard series and the canvas.
+rc::DoorFitState* SpecificWorker::CoreWorld::begin_fit(std::uint64_t id)
+{
+    const auto nit = fit_nodes_.find(id);
+    if (nit == fit_nodes_.end()) return nullptr;
+    const DSR::Node& node = nit->second;
+    const bool created = w_.fitter_->ensure_instance(node, w_.room_node_id_);
+    auto& inst = w_.fitter_->instances().at(node.id());
+
+    if (created)
+    {
+        // Register per-instance time-series (Qt dashboards stay in the worker).
+        if (w_.ts_plot_)
+        {
+            w_.ts_plot_->add_series(inst.node_name + "_fe",  QColor(255, 170,   0), 1.1f);
+            if (w_.ts_cov_plot_) w_.ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(  0, 190, 255), 1.1f);
+            if (w_.ts_res_plot_) w_.ts_res_plot_->add_series(inst.node_name + "_res", QColor(170,  80, 255), 1.1f);
+        }
+        w_.place_door_on_canvas(node, inst);
+    }
+
+    // The RT parent is resolved lazily — a door is born hanging from the room and moves under a wall_*
+    // node as soon as one is near enough. Re-place it when that happens, or the canvas keeps drawing it
+    // where its FIRST parent was.
+    w_.place_door_on_canvas(node, inst);
+    return &inst;
+}
+
+// process_door_node's graph half, after a fit that ran: persist the belief, convergence, the epistemic step.
+void SpecificWorker::CoreWorld::after_fit(std::uint64_t id, const rc::door::core::DoorObservation& obs, float free_energy)
+{
+    const auto nit = fit_nodes_.find(id);
+    auto it = w_.fitter_->instances().find(id);
+    if (nit == fit_nodes_.end() or it == w_.fitter_->instances().end()) return;
+    w_.publish_door_cycle(it->second, nit->second, obs, free_energy);
 }
 
 std::optional<rc::door::core::GhostMatch> SpecificWorker::CoreWorld::match_ghost(const Eigen::Vector2f& xy) const
@@ -1494,18 +1541,19 @@ std::uint64_t SpecificWorker::CoreWorld::create_door(const rc::door::core::Birth
     const auto new_id = w_.scene_graph_->create_instance_from_detection(c, r.room_id, r.preferred_name, r.reserved);
     if (new_id != 0)
     {
-        w_.fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+        // (The birth seed — the room-frame XY the newborn's model starts at — is noted by the DoorCore itself.)
         // ★SENIORITY IS OBSERVED AT BIRTH, not inferred later (common/exclusion). Birth is the only
         // moment at which "who was here first" is actually seen: resolving it on a later cycle would
         // have a real object, standing legitimately beside a real neighbour, wake up after a RESTART,
         // find the neighbour present, and declare ITSELF the junior. Anything not created this run
         // stays senior by default — the rule can fail to catch a collision, never invent one.
-        // ⚠(Unchanged by the move, and inert as it was: the instance is materialised in adopt_birth, AFTER this
-        //  lookup, so it finds nothing and the newborn's seniority resolves lazily as SENIOR. Reported, not fixed:
-        //  a behaviour-preserving slice.)
+        // ⚠CORRECTION (Task 4b, replaying the fit): this lookup is NOT inert. Task 4 reported the instance as built
+        //  only in adopt_birth, after it; but the insert above fired modify_node_slot synchronously (same thread), so
+        //  ensure_instance has ALREADY built it and resolve_at_birth runs — against the DoorCore's claim set, the SAME
+        //  set the worker's own walk produced (that walk is gone). Behaviour unchanged; on tourR1/R2 the set is empty.
         if (auto it = w_.fitter_->instances().find(new_id); it != w_.fitter_->instances().end())
             it->second.exclusion.resolve_at_birth({c.x(), c.y(), w_.cfg_.door_prior_w_m, 0.10f /*leaf thickness*/, 0.0f},
-                                                  w_.foreign_claims_, 0.0f, w_.cfg_.door_prior_h_m);
+                                                  w_.core_->claims(), 0.0f, w_.cfg_.door_prior_h_m);
         // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): place + viewpoint that
         // produced it, so a phantom that dies young is attributable to both.
         w_.log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
@@ -1516,7 +1564,7 @@ std::uint64_t SpecificWorker::CoreWorld::create_door(const rc::door::core::Birth
 void SpecificWorker::CoreWorld::reacquire(std::uint64_t new_id, const rc::door::core::GhostMatch& g)
 {
     if (g.handle < w_.ghosts_.size())
-        w_.fitter_->note_reacquire(new_id, w_.ghosts_[g.handle].belief);
+        w_.core_->fit().note_reacquire(new_id, w_.ghosts_[g.handle].belief);
 }
 
 void SpecificWorker::CoreWorld::forget_ghost(const Eigen::Vector2f& xy) { w_.forget_ghost(xy); }
@@ -2646,39 +2694,8 @@ void SpecificWorker::update_existence_beliefs()
 }
 
 ///////////////////////////////////////////////////////////////
-void SpecificWorker::process_door_node(const DSR::Node& node)
-{
-    const bool created = fitter_->ensure_instance(node, room_node_id_);
-    auto& inst = fitter_->instances().at(node.id());
-
-    if (created)
-    {
-        // Register per-instance time-series (Qt dashboards stay in the worker).
-        if (ts_plot_)
-        {
-            ts_plot_->add_series(inst.node_name + "_fe",  QColor(255, 170,   0), 1.1f);
-            if (ts_cov_plot_) ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(  0, 190, 255), 1.1f);
-            if (ts_res_plot_) ts_res_plot_->add_series(inst.node_name + "_res", QColor(170,  80, 255), 1.1f);
-        }
-        place_door_on_canvas(node, inst);
-    }
-
-    // The RT parent is resolved lazily — a door is born hanging from the room and moves under a wall_*
-    // node as soon as one is near enough. Re-place it when that happens, or the canvas keeps drawing it
-    // where its FIRST parent was.
-    place_door_on_canvas(node, inst);
-
-    ++inst.processed_cycles;
-    const auto observation = fitter_->observe(inst, node);
-
-    // Stale check: skip heavy update if data hasn't moved for too long
-    if (not rc::door::fitted_this_cycle(observation.has_fresh_data, inst.matched_frames))
-        return;
-
-    const float free_energy = fitter_->run_inference(inst, observation);
-    publish_door_cycle(inst, node, observation, free_energy);
-}
-
+// (process_door_node moved: its fit into DoorCore::fit_doors (src/core/door_core.cpp), its graph half into
+//  CoreWorld::begin_fit / after_fit above.)
 
 void SpecificWorker::publish_door_cycle(rc::DoorInstance& inst,
                                          const DSR::Node& node,

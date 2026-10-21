@@ -75,7 +75,57 @@ const TrackedDoor* find_door(const std::vector<TrackedDoor>& doors, std::uint64_
 }
 }  // namespace
 
-DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg) {}
+DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg)
+{
+    // The fit reads the core's views of the input: the mask packet, the low-LiDAR sweep, and the ONE claim set per cycle.
+    fit_.set_sources(&masks_, &leaf_sweep_, &claims_);
+}
+
+void DoorCore::connect(TrackerWorld* world, DoorCoreSinks sinks)
+{
+    world_ = world;
+    sinks_ = std::move(sinks);
+    // The fit's stdout lines and CSV rows reach the adapter through the same diag sink (not into out.diag: the fit can
+    // run outside step(), for a restored or carried door, where there is no cycle output to append to).
+    if (sinks_.diag) fit_.set_diag([this](const DiagRow& r) { sinks_.diag(r); });
+    else             fit_.set_diag({});
+}
+
+TrackedDoor tracked_view(std::uint64_t id, const rc::DoorFitState& inst)
+{
+    TrackedDoor d;
+    d.id = id;
+    d.name = inst.node_name;
+    d.state = inst.model.state();
+    d.aperture = inst.aperture;
+    d.leaf_pose = inst.leaf_pose;
+    d.phi_est = inst.phi_est;
+    d.is_bearing_hypothesis = inst.is_bearing_hypothesis;
+    d.ai2_initialized = inst.ai2_initialized;
+    d.belief = inst.ai2_initialized ? &inst.ai2_belief : nullptr;
+    d.chain_cov_xx = inst.chain_cov_xx;
+    d.chain_cov_yy = inst.chain_cov_yy;
+    d.roi_valid = inst.roi_valid;
+    d.matched_frames = inst.matched_frames;
+    d.assigned_mask_idx = inst.assigned_mask_idx;
+    return d;
+}
+
+std::vector<TrackedDoor> TrackerWorld::doors() const
+{
+    std::vector<TrackedDoor> out;
+    const auto states = fit_states();
+    out.reserve(states.size());
+    for (const auto& [id, inst] : states)   // ★the world's own order: association ties resolve by it
+        out.push_back(tracked_view(id, *inst));
+    return out;
+}
+
+void DoorCore::set_cycle_views(const DoorCycleInput& in)
+{
+    fit_.set_clock(in.t_steady_ns, in.t_wall_ms);
+    fit_.set_camera(CameraModel::room_T_zed(in.robot), in.camera);
+}
 
 void DoorCore::record(K k, std::uint64_t id, float x, float y, std::string note, std::string name, DoorCycleOutput& out)
 {
@@ -97,6 +147,7 @@ void DoorCore::observe_media(const DoorCycleInput& in)
 {
     masks_.apply(in.masks);
     leaf_sweep_.apply(in.bpearl);
+    set_cycle_views(in);
 }
 
 bool DoorCore::frame_admissible(const MaskSlice& sl, const EgoMotion& ego, const rc::DoorConfig& cfg)
@@ -142,16 +193,54 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     out.room_id = world_->room_id();
     // robot/camera speed → "be-still-to-update" gate (once per cycle) — was fitter_->update_ego_motion()
     ego_.update(CameraModel::room_T_zed(in.robot), in.t_steady_ns);
+    // ONE ego-motion: the fit's confirm-only gate reads the value the birth gate uses (was fitter_->set_ego_motion).
+    fit_.set_ego_motion(ego_.lin_mps, ego_.ang_radps);
     // ★ONE claim set per cycle for the SHARED mutual-exclusion rule: who else claims room space (was the graph walk at
-    // the top of compute(); now the snapshot of the same nodes taken at the top of the cycle).
+    // the top of compute(); now the snapshot of the same nodes taken at the top of the cycle). The birth filter AND the
+    // fit's point exclusion read it (Task 4b: the worker's own second walk, foreign_claims_, is gone).
     claims_ = claims_from(in.objects);
+    // The containment prior's polygon, as the world holds it (live: the fit's own copy, set by refresh_room_geometry).
+    fit_.set_room_polygon(world_->room_polygon());
     info_ = {};
 
     merge(out);                 // enforce physical exclusion before associating/birthing this cycle
     associate(in, out);
     world_->after_association(info_);
     births(in, out);
+    fit_doors(out);
     return out;
+}
+
+// The fit of every door the world offers — compute()'s door loop and process_door_node's fit, moved (Task 4b) — then
+// the decision log's Phi row per door. In the old order: births first (a newborn's belief initialises on its birth
+// slice this very cycle), each door published right after its own fit (after_fit), the Phi rows after the loop.
+void DoorCore::fit_doors(DoorCycleOutput& out)
+{
+    for (const auto id : world_->fit_targets())
+    {
+        rc::DoorFitState* inst = world_->begin_fit(id);
+        if (inst == nullptr)
+            continue;
+        ++inst->processed_cycles;
+        const auto observation = fit_.observe(*inst);
+
+        // Stale check: skip heavy update if data hasn't moved for too long
+        if (not rc::door::fitted_this_cycle(observation.has_fresh_data, inst->matched_frames))
+            continue;
+
+        const float free_energy = fit_.run_inference(*inst, observation);
+        world_->after_fit(id, observation, free_energy);
+    }
+
+    // Decision log: each instance's leaf-angle posterior as it stands after this cycle's fitting.
+    for (const auto& [id, inst] : world_->fit_states())
+        if (not inst->is_bearing_hypothesis)
+        {
+            rc::door::DoorDecision d{out.cycle, out.t_ms, static_cast<std::uint16_t>(K::Phi), id, inst->node_name,
+                                     inst->phi_est, inst->phi_sigma, inst->phi_measured ? 1.0 : 0.0, inst->phi_support, {}};
+            if (sinks_.decision) sinks_.decision(d);
+            out.decisions.push_back(std::move(d));
+        }
 }
 
 // Collapse instances whose seat footprints overlap (same physical door fitted twice): keep the one with
@@ -671,6 +760,14 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         const auto new_id = world_->create_door(req);
         if (new_id != 0)
         {
+            // Room-frame XY the newborn's model was MEANT to cold-start at (consumed once by init_instance): the room→door
+            // RT written at birth is not reliably composable the same cycle (was fitter_->note_birth inside create_door).
+            // ⚠DEAD IN PRACTICE, KEPT (behaviour-preserving slice; found while replaying the fit, task-4b-report.md): live,
+            // the node insert inside create_door fires modify_node_slot SYNCHRONOUSLY (same thread ⇒ a direct call), so
+            // ensure_instance has already built the instance — before the RT edge and before this seed — with its
+            // pre-belief box at (0, 0). This seed is never consumed; the birth cycle's first estimate_phi selects its
+            // rays around (0, 0) (tourR1 door_1: 14686 rays against 114 around the seed). Parked for the defect phase.
+            fit_.note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
             out.creates.push_back({++create_seq_, CreateKind::DoorFromDetection, req.room_id, {}, preferred_name,
                                    Mat4d::Identity(), cfg.door_prior_w_m, cfg.door_thickness_m, cfg.door_prior_h_m,
                                    std::nullopt, std::nullopt, 0, std::format("slice {}", slice)});

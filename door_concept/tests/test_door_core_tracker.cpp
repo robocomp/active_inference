@@ -12,8 +12,8 @@
 //   5. The core is DSR / Qt / Ice / media free (the include scan of tests/test_door_cycle_io.cpp, run over src/core).
 //
 // Build + run (from door_concept/):
-//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_core_tracker.cpp src/core/door_core.cpp \
-//       src/core/door_cycle_io.cpp src/door_belief.cpp -lzstd -o /tmp/test_door_core_tracker && /tmp/test_door_core_tracker
+//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_core_tracker.cpp src/core/door_core.cpp src/core/door_fit.cpp \
+//       src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp -lzstd -o /tmp/test_door_core_tracker && /tmp/test_door_core_tracker
 #include <clocale>
 #include <filesystem>
 #include <fstream>

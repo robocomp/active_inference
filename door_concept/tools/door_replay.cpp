@@ -1,10 +1,15 @@
 // door_replay — run door_concept's DoorCore over a recorded input tape (DCIN, core/door_cycle_io.h) and diff the decisions
 // it makes against the decision log the live run wrote (DDEC, decision_log.h). The seed of Task 8's replay tool.
 //
-// ★WHAT IT REPLAYS (Task 4). The core holds the TRACKER slice (birth / associate / merge, core/door_core.h). The kinds
-// that slice decides are BIRTH, SUPPRESS, MERGE and REACQUIRE; only those are diffed, field for field and bit for bit
-// (cycle, t_ms, kind, door id, name, a, b, c, d, note).
-// ★WHAT IT CANNOT REPLAY YET, AND WHAT STANDS IN FOR IT. The tracker reads state the later slices own (TrackerWorld in
+// ★WHAT IT REPLAYS (Tasks 4 + 4b). The core holds the TRACKER slice (birth / associate / merge) and the FIT (observe /
+// run_inference / the leaf angle — core/door_fit.h): every door's belief is built from the tape alone. Diffed:
+//   · the tracker kinds BIRTH, SUPPRESS, MERGE, REACQUIRE — field for field and bit for bit (cycle, t_ms, kind, door id,
+//     name, a, b, c, d, note);
+//   · every PHI row (a = phi_est, b = phi_sigma, c = measured, d = phi_support) — bit for bit, and where a row differs
+//     the largest absolute and relative difference per field is reported;
+//   · and, as a localiser for any Phi difference, the fitted centre (model.state().cx/cy) against the c,d of every
+//     EXISTENCE row the live run wrote at the existence update (which reads the previous cycle's fit).
+// ★WHAT IT CANNOT REPLAY YET, AND WHAT STANDS IN FOR IT. The core reads state the later slices own (TrackerWorld in
 // door_core.h). Those slices are still in SpecificWorker, so this tool rebuilds their state from the RECORDED decision
 // log — the run's own record of what they decided — instead of re-deciding it:
 //   · room (Task 6): IdentityLoad.initial_room, then each RoomSwitch row; the containment polygon latched from the
@@ -13,21 +18,22 @@
 //     the ghost remember_ghost leaves;
 //   · identities (Task 6): the IdentityLoad csv parsed with the agent's parser, then every IdentityUpsert / Forget row
 //     re-applied with the agent's own upsert_row / forget rule at the point of the cycle the old code made it;
-//   · ★the FIT (observe / run_inference — no slice owns it yet): a door's state after birth is the pre-belief geometry
-//     at its birth seed (door_model.h pre_belief_geometry, exactly as ensure_instance builds it), then MOVED to the leaf
-//     centre each EXISTENCE row reports (the fitted model.state().cx/cy, logged per fresh-mask cycle), as a box at
-//     yaw 0 with the aperture on that centre. No belief: such a door gates association on the metric fallback, not on
-//     its Σ, never scores Pass-1 association, and holds no slice. Every mismatch this stand-in can cause is listed by
-//     the diff, not hidden.
+//   · the affordance / anchor / actuation slices (Task 7): NOT rebuilt — a door's hinge_question_live, anchor φ curve
+//     and commanded swing stay at rest, which is what they were on a run with no claim, no anchor and no actuator call
+//     (the tool counts the recorded AffExecuting / AnchorHung / ActuatorRequest rows and says so).
+// ★THE FIT'S CLOCK. The live agent (before Task 4b) read steady_clock mid-cycle for the leaf channel's dt; the core
+// reads the cycle's t_steady_ns. A tape recorded by a pre-4b binary therefore cannot reproduce its Phi rows to the bit
+// wherever dt enters — the report quantifies that, per field.
 // Node ids: create_door answers with the id the recorded run got (the BIRTH row of the same cycle at the same
 // position), so a reproduced birth diffs equal; an unmatched birth gets a synthetic id and shows up as a mismatch.
 //
 // Build + run (from door_concept/):
-//   g++ -std=c++23 -O2 -I/usr/include/eigen3 tools/door_replay.cpp src/core/door_core.cpp src/core/door_cycle_io.cpp \
-//       src/door_belief.cpp -lzstd -o /tmp/door_replay
-//   /tmp/door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose]
-// Exit: 0 = the tracker kinds are equal; 1 = mismatches (listed); 2 = usage / unreadable input.
+//   g++ -std=c++23 -O2 -I/usr/include/eigen3 tools/door_replay.cpp src/core/door_core.cpp src/core/door_fit.cpp \
+//       src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp -lzstd -o /tmp/door_replay
+//   /tmp/door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--clock-jitter-ms J]
+// Exit: 0 = the tracker kinds AND the Phi rows are equal; 1 = mismatches (listed); 2 = usage / unreadable input.
 #include <charconv>
+#include <chrono>
 #include <clocale>
 #include <cmath>
 #include <cstdlib>
@@ -192,17 +198,6 @@ public:
                     room_name_ = r.name;
                     if (r.polygon.size() >= 3) polygon_ = r.polygon;
                 }
-        // the FIT's stand-in: each door reported by an EXISTENCE row this cycle is where that row says (see header)
-        for_rows([&](const DoorDecision& d)
-        {
-            if (d.kind != static_cast<std::uint16_t>(K::Existence)) return;
-            if (auto it = live_.find(d.door_id); it != live_.end())
-            {
-                place(it->second, static_cast<float>(d.c), static_cast<float>(d.d));
-                it->second.ai2_initialized = true;   // fitted (its row exists), but the tool holds no belief
-                ++moved_by_existence_;
-            }
-        });
     }
 
     // ── after the core's step: what the old code did after run_instance_tracker (remember_door's identity upserts) ──
@@ -218,12 +213,22 @@ public:
 
     std::uint64_t room_id() const override { return room_; }
     std::vector<Vec2f> room_polygon() const override { return polygon_; }
-    std::vector<TrackedDoor> doors() const override
+    std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override
     {
-        std::vector<TrackedDoor> v;
-        for (const auto& [id, d] : live_) v.push_back(d);   // ★an unordered_map like fitter_->instances(): same order
+        std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> v;
+        for (auto& [id, d] : live_) v.emplace_back(id, &d);   // ★an unordered_map like fitter_->instances(): same order
         return v;
     }
+    // the fit: every live door, each cycle (live: the graph's door nodes — the same set on a run with no mirror, no
+    // anchor and no held door; the ORDER differs, which no fit result depends on: each door's fit reads only its own state)
+    std::vector<std::uint64_t> fit_targets() override
+    {
+        std::vector<std::uint64_t> v;
+        for (const auto& [id, d] : live_) v.push_back(id);
+        return v;
+    }
+    rc::DoorFitState* begin_fit(std::uint64_t id) override
+    { const auto it = live_.find(id); return it == live_.end() ? nullptr : &it->second; }
     std::optional<GhostMatch> match_ghost(const Vec2f& xy) const override
     {
         if (cfg_.exist_reacquire_radius_m <= 0.0f) return std::nullopt;
@@ -256,9 +261,25 @@ public:
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = live_.find(id); it != live_.end()) it->second.assigned_mask_idx = slice; }
 
-    // update_existence_beliefs' place in the cycle: the recorded REMOVEs (and the identity rows they forget)
+    // update_existence_beliefs' place in the cycle: the recorded REMOVEs (and the identity rows they forget). The
+    // EXISTENCE rows the live run wrote here carry each door's fitted centre as it stood (the previous cycle's fit):
+    // compared with ours, they localise any Phi difference to the pose or to the leaf channel.
     void after_association(const TrackerCycleInfo&) override
     {
+        for_rows([&](const DoorDecision& d)
+        {
+            if (d.kind != static_cast<std::uint16_t>(K::Existence)) return;
+            const auto it = live_.find(d.door_id);
+            if (it == live_.end()) { ++exist_missing_; return; }
+            const auto& s = it->second.model.state();
+            ++exist_rows_;
+            const double dx = std::abs(static_cast<double>(s.cx) - d.c), dy = std::abs(static_cast<double>(s.cy) - d.d);
+            if (dx == 0.0 and dy == 0.0) ++exist_equal_;
+            else if (first_exist_diff_.empty())
+                first_exist_diff_ = std::format("cycle {} {} fitted ({:.9g},{:.9g}) recorded ({:.9g},{:.9g})", d.cycle,
+                                                d.name, s.cx, s.cy, d.c, d.d);
+            exist_max_diff_ = std::max({exist_max_diff_, dx, dy});
+        });
         for_rows([&](const DoorDecision& d)
         {
             if (d.kind == static_cast<std::uint16_t>(K::Remove))
@@ -289,38 +310,50 @@ public:
         if (id == 0) { id = 0xFFF0'0000'0000'0000ull + (++synthetic_); ++unmatched_creates_; }
         // DoorSceneGraph::next_door_name over the names the graph would hold: our live doors + foreign door_* nodes.
         std::vector<std::string> graph_names;
-        for (const auto& [lid, d] : live_) graph_names.push_back(d.name);
+        for (const auto& [lid, d] : live_) graph_names.push_back(d.node_name);
         if (in_ != nullptr)
             for (const auto& o : in_->objects)
                 if (o.name.rfind("door_", 0) == 0) graph_names.push_back(o.name);
         pending_name_ = allocate_door_name(r.preferred_name, graph_names, r.reserved);
+        // ★THE INSTANCE IS BORN INSIDE THE INSERT, NOT IN adopt_birth. Live, create_instance_from_detection's
+        // insert_node emits update_node_signal on the MAIN thread, so modify_node_slot runs synchronously inside it
+        // (AutoConnection, same thread ⇒ direct) and ensure_instance reads the node BEFORE its RT edge exists and
+        // BEFORE the birth seed is noted: the newborn's pre-belief box sits at (0, 0), yaw 0, the prior size. The
+        // replay must build it the same way — the first estimate_phi selects its rays around that box (tourR1:
+        // 14686 rays on the birth cycle, against 114 around the seed). See task-4b-report.md (a pre-existing defect).
+        rc::DoorState s;
+        s.cx = 0.0f; s.cy = 0.0f; s.yaw = 0.0f;
+        s.w = cfg_.door_prior_w_m; s.thickness = cfg_.door_thickness_m; s.h = cfg_.door_prior_h_m;
+        rc::DoorFitState f;
+        fit_->init_instance(f, id, pending_name_, s);
+        live_.insert_or_assign(id, std::move(f));
         return id;
     }
-    void reacquire(std::uint64_t, const GhostMatch&) override {}   // the ghost's BELIEF is not rebuilt (no fit here)
+    void reacquire(std::uint64_t, const GhostMatch&) override {}   // the ghost's BELIEF is not kept (none on these tapes)
     void forget_ghost(const Vec2f& xy) override
     { std::erase_if(ghosts_, [&](const Ghost& g) { return (g.xy - xy).norm() < cfg_.exist_reacquire_radius_m; }); }
-    std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f& c) override
+    std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f&) override
     {
-        // ensure_instance: the node's attributes as create_instance_from_detection wrote them, the birth seed for the
-        // centre, yaw 0 (the RT edge hangs from a wall, or from the room with zero rotation) → refresh_geometry.
-        TrackedDoor d;
-        d.id = id;
-        d.name = pending_name_;
-        rc::DoorState s;
-        s.w = cfg_.door_prior_w_m; s.thickness = cfg_.door_thickness_m; s.h = cfg_.door_prior_h_m;
-        live_[id] = d;
-        place(live_[id], c.x(), c.y(), s);
-        live_[id].assigned_mask_idx = slice;
+        // ensure_instance: the instance already exists (create_door above, as the synchronous slot made it live), so it
+        // only takes its birth slice.
+        const auto it = live_.find(id);
+        if (it == live_.end()) return std::nullopt;
+        it->second.assigned_mask_idx = slice;
+        const std::string name = it->second.node_name;
         // note_identity(name, birth xy): the IdentityUpsert row the old code wrote right here, if it wrote one
         for_rows([&](const DoorDecision& r)
         {
-            if (r.kind == static_cast<std::uint16_t>(K::IdentityUpsert) and r.name == d.name) upsert(r);
+            if (r.kind == static_cast<std::uint16_t>(K::IdentityUpsert) and r.name == name) upsert(r);
         });
-        births_named_.push_back(d.name);
-        return d.name;
+        births_named_.push_back(name);
+        return name;
     }
 
-    int moved_by_existence_ = 0, removed_ = 0, unmatched_creates_ = 0;
+    void set_fit(DoorFit* f) { fit_ = f; }
+    int removed_ = 0, unmatched_creates_ = 0;
+    long exist_rows_ = 0, exist_equal_ = 0, exist_missing_ = 0;
+    double exist_max_diff_ = 0.0;
+    std::string first_exist_diff_;
     [[nodiscard]] std::size_t n_identities() const { return identities_.size(); }
 
 private:
@@ -332,16 +365,6 @@ private:
         bool b = false;
         for_rows([&](const DoorDecision& d) { b |= d.kind == static_cast<std::uint16_t>(K::Birth) and d.name == name; });
         return b;
-    }
-
-    // The stand-in geometry: a box of the door's size at leaf centre (x, y), yaw 0 — pre_belief_geometry's construction.
-    void place(TrackedDoor& d, float x, float y, std::optional<rc::DoorState> base = std::nullopt)
-    {
-        rc::DoorState s = base.value_or(d.state);
-        s.cx = x; s.cy = y; s.yaw = 0.0f;
-        const auto g = rc::pre_belief_geometry(s);
-        rc::read_back_leaf(s, g.leaf_pose, g.leaf);
-        d.state = s; d.aperture = g.aperture; d.leaf_pose = g.leaf_pose;
     }
 
     void load(const IdentityLoad& l)
@@ -370,13 +393,13 @@ private:
         std::erase_if(identities_, [&](const rc::door::IdentityRow& i)
                       { return i.room == d.note and (i.name == d.name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
     }
-    void remember_ghost(const TrackedDoor& d)
+    void remember_ghost(const rc::DoorFitState& d)
     {
-        // SpecificWorker::remember_ghost — keyed on the aperture (here the stand-in's: the leaf centre, see header)
+        // SpecificWorker::remember_ghost — keyed on the fitted aperture
         if (cfg_.exist_reacquire_radius_m <= 0.0f or not d.ai2_initialized or d.is_bearing_hypothesis) return;
-        const Vec2f ap(d.state.ap_cx, d.state.ap_cy);
+        const Vec2f ap(d.model.state().ap_cx, d.model.state().ap_cy);
         std::erase_if(ghosts_, [&](const Ghost& g) { return (g.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
-        ghosts_.push_back({d.name, ap, 0});
+        ghosts_.push_back({d.node_name, ap, 0});
         while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max)) ghosts_.erase(ghosts_.begin());
     }
 
@@ -387,7 +410,8 @@ private:
     std::uint64_t cycle_ = 0, room_ = 0;
     std::string room_name_;
     std::vector<Vec2f> polygon_;
-    std::unordered_map<std::uint64_t, TrackedDoor> live_;
+    mutable std::unordered_map<std::uint64_t, rc::DoorFitState> live_;
+    DoorFit* fit_ = nullptr;
     std::vector<Ghost> ghosts_;
     std::vector<rc::door::IdentityRow> identities_;
     std::set<const DoorDecision*> used_births_;
@@ -403,16 +427,24 @@ int main(int argc, char** argv)
     if (std::setlocale(LC_ALL, "es_ES.UTF-8") == nullptr) std::setlocale(LC_ALL, "");
     if (argc < 3)
     {
-        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose]");
+        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR]");
         return 2;
     }
     std::uint64_t until = ~0ull;
     bool verbose = false;
+    std::string csv_dir;
+    // --clock-jitter-ms J: add a deterministic pseudo-random delay in [0, J) ms to every record's clock (steady and wall).
+    // A SENSITIVITY probe, not a replay: it shows how far the Phi rows move when only the time at which the cycle is
+    // read moves — which is what separates a pre-4b tape (mid-cycle clocks) from this core (cycle-top clock). The decision
+    // stamps move with it, so with J > 0 the Phi comparison ignores t_ms.
+    double jitter_ms = 0.0;
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
         if (a == "--until" and i + 1 < argc) until = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--verbose") verbose = true;
+        else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
+        else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
     }
 
     // the recorded decisions (the reference) — every kind, indexed by cycle; the tracker kinds kept apart
@@ -438,11 +470,39 @@ int main(int argc, char** argv)
 
     ReplayWorld world(cfg.door, by_cycle);
     DoorCore core(cfg);
-    core.connect(&world);
+    world.set_fit(&core.fit());
+    // A sink that only counts: the fit formats its stdout lines and CSV rows exactly as live (so the timing includes
+    // that cost), and the tool writes no file.
+    long diag_rows = 0;
+    std::ofstream ai2_csv, phi_csv;   // --csv DIR: the fit's two logs, as the live agent writes them (diff them against its own)
+    if (not csv_dir.empty())
+    {
+        ai2_csv.open(csv_dir + "/ai2_log.csv");
+        phi_csv.open(csv_dir + "/ai2_log_phi.csv");
+        ai2_csv << kAi2CsvHeader;
+        phi_csv << kPhiCsvHeader;
+    }
+    core.connect(&world, {.decision = {}, .diag = [&](const DiagRow& r)
+    {
+        ++diag_rows;
+        if (r.stream == "ai2_log.csv" and ai2_csv.is_open()) ai2_csv << r.line;
+        else if (r.stream == "ai2_log_phi.csv" and phi_csv.is_open()) phi_csv << r.line;
+    }});
 
-    std::vector<DoorDecision> got;
+    // the slices the tool does not rebuild — counted, so a tape that exercised them says so
+    int n_exec = 0, n_anchor = 0, n_act = 0;
+    for (const auto& d : *ref_all)
+    {
+        n_exec   += d.kind == static_cast<std::uint16_t>(K::AffExecuting);
+        n_anchor += d.kind == static_cast<std::uint16_t>(K::AnchorHung);
+        n_act    += d.kind == static_cast<std::uint16_t>(K::ActuatorRequest);
+    }
+
+    std::vector<DoorDecision> got, got_phi;
     std::uint64_t n = 0, first = 0, last = 0;
     int stepped = 0, media_only = 0;
+    double step_ms_sum = 0.0, step_ms_max = 0.0, copy_ms_sum = 0.0;
+    std::vector<double> step_ms;
     while (true)
     {
         auto in = read_input(f, version);
@@ -450,6 +510,21 @@ int main(int argc, char** argv)
         if (in->cycle > until) break;
         if (n++ == 0) first = in->cycle;
         last = in->cycle;
+        if (jitter_ms > 0.0)
+        {
+            static std::uint64_t lcg = 0x9E3779B97F4A7C15ull;
+            lcg = lcg * 6364136223846793005ull + 1442695040888963407ull;
+            const double u = static_cast<double>(lcg >> 11) / 9007199254740992.0;   // [0, 1)
+            const auto j_ns = static_cast<std::int64_t>(u * jitter_ms * 1e6);
+            in->t_steady_ns += j_ns;
+            in->t_wall_ms += j_ns / 1'000'000;
+        }
+        {   // the live snapshot's copy cost, proxied: one deep copy of the cycle's input (the packet, the sweep, the graph rows)
+            const auto t0 = std::chrono::steady_clock::now();
+            const DoorCycleInput copy = *in;
+            copy_ms_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (copy.cycle != in->cycle) return 2;
+        }
         world.begin_cycle(*in);
         if (world.room_id() == 0)
         {
@@ -458,16 +533,88 @@ int main(int argc, char** argv)
         }
         else
         {
+            const auto t0 = std::chrono::steady_clock::now();
             const auto out = core.step(*in);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            step_ms_sum += ms; step_ms_max = std::max(step_ms_max, ms); step_ms.push_back(ms);
             ++stepped;
             for (const auto& d : out.decisions)
+            {
                 if (is_tracker_kind(d.kind)) got.push_back(d);
+                if (d.kind == static_cast<std::uint16_t>(K::Phi)) got_phi.push_back(d);
+            }
         }
         world.end_cycle();
     }
-    std::println("replayed {} records (cycles {}..{}): tracker stepped {}, media-only {}", n, first, last, stepped, media_only);
-    std::println("stand-ins from the decision log: {} door moves from EXISTENCE rows, {} REMOVEs, {} births without a recorded id",
-                 world.moved_by_existence_, world.removed_, world.unmatched_creates_);
+    std::println("replayed {} records (cycles {}..{}): stepped {}, media-only {}", n, first, last, stepped, media_only);
+    std::println("stand-ins from the decision log: {} REMOVEs, {} births without a recorded id; not rebuilt: {} AffExecuting, "
+                 "{} AnchorHung, {} ActuatorRequest rows on this tape", world.removed_, world.unmatched_creates_,
+                 n_exec, n_anchor, n_act);
+    if (not step_ms.empty())
+    {
+        std::ranges::sort(step_ms);
+        std::println("cost: DoorCore::step {:.3f} ms/step mean, p50 {:.3f}, p99 {:.3f}, max {:.3f} ms ({} fit diag rows formatted); "
+                     "input deep copy {:.3f} ms/record mean",
+                     step_ms_sum / static_cast<double>(step_ms.size()), step_ms[step_ms.size() / 2],
+                     step_ms[std::min(step_ms.size() - 1, step_ms.size() * 99 / 100)], step_ms_max, diag_rows,
+                     copy_ms_sum / static_cast<double>(n));
+    }
+    std::println("fit pose vs the EXISTENCE rows (the live fitted centre at the existence update): {} rows, {} bit-equal, "
+                 "max |diff| {:.3g} m, {} for a door the replay does not hold{}{}", world.exist_rows_, world.exist_equal_,
+                 world.exist_max_diff_, world.exist_missing_, world.first_exist_diff_.empty() ? "" : "; first: ",
+                 world.first_exist_diff_);
+
+    // ── Phi rows: every one, in order ──
+    std::vector<DoorDecision> ref_phi;
+    for (const auto& d : *ref_all)
+        if (d.kind == static_cast<std::uint16_t>(K::Phi) and d.cycle <= until) ref_phi.push_back(d);
+    int phi_mismatch = 0;
+    {
+        struct FieldDiff { double max_abs = 0, max_rel = 0; long n = 0; std::string first; };
+        FieldDiff fa, fb, fc, fd;
+        long equal = 0, key_diff = 0;
+        const std::size_t m = std::max(ref_phi.size(), got_phi.size());
+        const auto note = [](FieldDiff& fd_, double r, double g, const DoorDecision& d, const char* name)
+        {
+            if (r == g) return;
+            ++fd_.n;
+            const double ad = std::abs(g - r);
+            fd_.max_abs = std::max(fd_.max_abs, ad);
+            fd_.max_rel = std::max(fd_.max_rel, ad / std::max(1e-12, std::abs(r)));
+            if (fd_.first.empty()) fd_.first = std::format("cycle {} {} {}: ref {:.9g} replay {:.9g}", d.cycle, d.name, name, r, g);
+        };
+        for (std::size_t i = 0; i < m; ++i)
+        {
+            const DoorDecision* r = i < ref_phi.size() ? &ref_phi[i] : nullptr;
+            const DoorDecision* g = i < got_phi.size() ? &got_phi[i] : nullptr;
+            if (r and g and *r == *g) { ++equal; continue; }
+            ++phi_mismatch;
+            if (r and g and jitter_ms > 0.0 and r->t_ms != g->t_ms)   // the stamp moved with the probe: compare the rest
+            {
+                DoorDecision gg = *g;
+                gg.t_ms = r->t_ms;
+                if (*r == gg) { ++equal; --phi_mismatch; continue; }
+            }
+            if (not (r and g) or r->cycle != g->cycle or r->door_id != g->door_id or r->name != g->name
+                or (r->t_ms != g->t_ms and jitter_ms <= 0.0))
+            {
+                if (++key_diff <= 3)
+                    std::println("  PHI row #{} differs in its KEY: ref {} / replay {}", i, r ? show(*r) : std::string{"(none)"},
+                                 g ? show(*g) : std::string{"(none)"});
+                continue;
+            }
+            note(fa, r->a, g->a, *r, "phi_est"); note(fb, r->b, g->b, *r, "phi_sigma");
+            note(fc, r->c, g->c, *r, "measured"); note(fd, r->d, g->d, *r, "phi_support");
+        }
+        std::println("\nPHI rows: reference {}, replay {}; {} bit-equal, {} differ ({} in cycle/door/name)",
+                     ref_phi.size(), got_phi.size(), equal, phi_mismatch, key_diff);
+        const auto line = [](const char* nm, const FieldDiff& x)
+        {
+            if (x.n == 0) std::println("  {:<11}: all equal", nm);
+            else std::println("  {:<11}: {} rows differ, max |diff| {:.3g}, max rel {:.3g}; first {}", nm, x.n, x.max_abs, x.max_rel, x.first);
+        };
+        line("phi_est", fa); line("phi_sigma", fb); line("measured", fc); line("phi_support", fd);
+    }
 
     // the diff: the tracker kinds, in order, every field
     std::println("\nreference (live run) tracker decisions: {}   replay: {}", ref.size(), got.size());
@@ -507,6 +654,8 @@ int main(int argc, char** argv)
             std::println("     fields:{}", fields);
         }
     }
-    std::println("\n{}: {} tracker decision(s) compared, {} mismatch(es)", mismatches == 0 ? "EQUAL" : "DIFFERENT", m, mismatches);
-    return mismatches == 0 ? 0 : 1;
+    std::println("\nTRACKER {}: {} decision(s) compared, {} mismatch(es)", mismatches == 0 ? "EQUAL" : "DIFFERENT", m, mismatches);
+    std::println("PHI     {}: {} row(s) compared, {} mismatch(es)", phi_mismatch == 0 ? "EQUAL" : "DIFFERENT",
+                 std::max(ref_phi.size(), got_phi.size()), phi_mismatch);
+    return (mismatches == 0 and phi_mismatch == 0) ? 0 : 1;
 }

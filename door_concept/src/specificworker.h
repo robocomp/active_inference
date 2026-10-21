@@ -98,10 +98,8 @@ class SpecificWorker : public GenericWorker
 Q_OBJECT
 public:
 
-    // Other concepts' standing claims on room space (SHARED, common/exclusion). Refreshed ONCE
-    // per compute() cycle — one graph walk feeding both the birth filter and the existence
-    // occupancy discount, so the two can never disagree about who is where.
-    std::vector<rc::exclusion::Claim> foreign_claims_;
+    // (Other concepts' standing claims on room space: the DoorCore computes them ONCE per cycle from the snapshot —
+    //  DoorCore::claims() — and both its birth filter and its fit read that set. The worker's own graph walk is gone.)
     SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
     ~SpecificWorker();
     bool is_shutting_down() const noexcept { return shutting_down_.load(); }
@@ -133,13 +131,13 @@ private:
     // The fit (observe/infer/belief/support-bank) lives in rc::DoorFitter; perception in
     // rc::MaskIngestor; DSR I/O in rc::DoorSceneGraph. The worker keeps orchestration + the
     // post-fit epistemic/affordance/Qt-diagnostics steps.
-    using DoorObservation = rc::DoorFitter::DoorObservation;
+    using DoorObservation = rc::door::core::DoorObservation;
 
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
-    void process_door_node(const DSR::Node& node);
-    // The tracker slice (birth / associate / merge) lives in the DSR-free DoorCore (src/core/door_core.h, Task 4 of the
-    // door-core replay plan); this runs it on the cycle's input and keeps the old code it interleaves with.
+    // The tracker slice (birth / associate / merge, Task 4) AND the fit (observe / run_inference / phi, Task 4b) live in
+    // the DSR-free DoorCore (src/core/door_core.h); this runs it on the cycle's input. process_door_node is gone: its
+    // graph half is CoreWorld::begin_fit / after_fit.
     void run_tracker_slice();
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
 
@@ -151,7 +149,7 @@ private:
         explicit CoreWorld(SpecificWorker& w) : w_(w) {}
         std::uint64_t room_id() const override;
         std::vector<Eigen::Vector2f> room_polygon() const override;
-        std::vector<rc::door::core::TrackedDoor> doors() const override;
+        std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override;
         std::optional<rc::door::core::GhostMatch> match_ghost(const Eigen::Vector2f& xy) const override;
         std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
         std::vector<std::string> reserved_names() const override;
@@ -162,8 +160,12 @@ private:
         void reacquire(std::uint64_t new_id, const rc::door::core::GhostMatch& g) override;
         void forget_ghost(const Eigen::Vector2f& xy) override;
         std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Eigen::Vector3f& centroid) override;
+        std::vector<std::uint64_t> fit_targets() override;
+        rc::DoorFitState* begin_fit(std::uint64_t id) override;
+        void after_fit(std::uint64_t id, const rc::door::core::DoorObservation& obs, float free_energy) override;
     private:
         SpecificWorker& w_;
+        std::unordered_map<std::uint64_t, DSR::Node> fit_nodes_;   // this cycle's door nodes, by id (fit_targets)
     };
     CoreWorld core_world_{*this};
     std::unique_ptr<rc::door::core::DoorCore> core_;   // built in initialize(), once the config is loaded
@@ -564,7 +566,7 @@ private:
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
-    std::unique_ptr<DSR::InnerGaussianAPI>            gaussian_api_;    // Part B: chain covariance propagation
+    // (gaussian_api_ gone: the chain covariance is the DoorCore fit's, over the recorded RT chain — door_fit.h)
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
 
     // rc::probe row per live door: viewpoint + framing + detector outcome. See the definition for why
