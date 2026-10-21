@@ -3,6 +3,7 @@
  */
 
 #include "door_scene_graph.h"
+#include "door_rt_publish.h"
 
 #include "../../common/rt_covariance/rt_covariance.h"   // rc::rtcov::publish (SHARED)
 
@@ -457,12 +458,11 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
     const std::uint64_t old_parent = G_->get_attrib_by_name<parent_att>(door_opt.value()).value_or(room_id);
     const bool reparent = new_parent != old_parent;
 
-    // Dead-band: suppress RT edge updates below ~5 cm to avoid pos churn from gradient oscillations — but
-    // NEVER skip a re-parent (the door must move onto its wall even when it hasn't translated).
-    constexpr float kMinWriteDistSq = 0.05f * 0.05f;
-    const float dx = ap_cx - inst.last_written_cx;
-    const float dy = ap_cy - inst.last_written_cy;
-    if (not reparent and dx * dx + dy * dy < kMinWriteDistSq)
+    // Dead-band: suppress RT edge updates that move the aperture's jambs by less than 5 cm (pos churn from gradient
+    // oscillations) — but NEVER skip a re-parent (the door must move onto its wall even when it hasn't translated).
+    // ★Task D-C (M-6): the JAMBS, not the centre — a pure yaw re-fit is published too (door_rt_publish.h).
+    if (not reparent and not rc::door::rt_write_due(inst.last_written_cx, inst.last_written_cy, inst.last_written_yaw,
+                                                    ap_cx, ap_cy, ap_yaw, 0.5f * s.w))
         return;
 
     // Door node origin = BASE on the floor (z=0 in room). In the wall frame that base sits z0 below the wall
@@ -497,6 +497,7 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
     rt_api_->insert_or_assign_edge_RT(parent_node.value(), inst.node_id, {lx, ly, lz}, {0.0f, 0.0f, lyaw});
     inst.last_written_cx = ap_cx;
     inst.last_written_cy = ap_cy;
+    inst.last_written_yaw = ap_yaw;
 }
 
 void DoorSceneGraph::write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop)

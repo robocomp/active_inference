@@ -393,6 +393,7 @@ struct DoorFitState
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();
+    float last_written_yaw  = std::numeric_limits<float>::quiet_NaN();   // Task D-C (M-6): the yaw written with them
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
     // settled door stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
