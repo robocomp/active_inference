@@ -541,8 +541,14 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             pts_xy.push_back(centroid_xy);
         // The camera the points were seen from (room frame, current pose; ALWAYS check the optional). Without
         // it every point votes for its nearest wall — the old rule, which is what a missing pose can support.
+        // ★Task D-C (rtD1i door_5): ONLY POINTS THAT WERE SEEN VOTE BY THEIR SIGHTLINE. With no mask points (a door RESTORED
+        //  from memory, a carried door) the "point" is the remembered place, and a ray from wherever the camera stands now
+        //  to it is not a sightline anything was seen along: re-entering room_1 behind the partition, that ray crossed the
+        //  partition first and every restore of DOOR_0 was initialised IN THE PARTITION (yaw 1.547 for a remembered −3.20),
+        //  which room_concept then reused as its aperture. With no observation the place is the only evidence: the door
+        //  belongs to the wall it lies on (the nearest-wall rule).
         std::optional<Eigen::Vector2f> cam_xy;
-        if (room_T_zed_.has_value())
+        if (room_T_zed_.has_value() and npts > 0)
             cam_xy = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
         rc::DoorBeliefParams p = make_belief_params();
         rc::DoorBeliefState s0;

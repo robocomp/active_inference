@@ -22,6 +22,7 @@
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_core_existence && /tmp/test_door_core_existence
 #include <charconv>
+#include <chrono>
 #include <clocale>
 #include <cmath>
 #include <print>
@@ -539,6 +540,48 @@ int main()
             CHECK(fp.vis_frac() == 0.0f and fp.samples.empty());
             CHECK(sil.n_detectable == 0);
             CHECK(fp2.vis_frac() > 0.5f);
+        }
+    }
+
+    // ── 12. Task D-C (rtD1i door_5, the restore): A RESTORED DOOR KEEPS ITS REMEMBERED WALL. Each RESTORE seeded DOOR_0 at
+    //     (0.89, 2.66) yaw −3.20 (in its wall, y 2.54), yet the fitter's first rows held it at (−0.006, 2.67) yaw 1.547 — on
+    //     the PARTITION — and room_concept reused that as DOOR_0's aperture. The lazy belief init associates a door with the
+    //     wall "it was seen through": the wall crossed by the ray from the CURRENT camera to the door. A restored door has not
+    //     been seen; with no mask points that ray is from wherever the robot stands (re-entering through door_1, behind the
+    //     partition) to a remembered place, and it crosses the partition first. With no observation the place itself is the
+    //     only evidence — the door belongs to the wall it lies on. Here: the remembered door in the top wall, the camera
+    //     west of a partition whose sightline crosses it; the belief must be initialised in the top wall (u ∥ x).
+    {
+        ExistWorld w;
+        w.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {0.48f, 5.f}, {0.48f, 1.5f}, {0.38f, 1.5f}, {0.38f, 5.f}, {-5.f, 5.f}};
+        DoorCoreConfig cfg;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        core.connect(&w, {.decision = {}, .diag = {}});
+        (void)core.step(cycle_input(1, 1, Phase::Absent, false, kWallY, -1.2f));   // the room and the camera, no door yet
+        rc::DoorState st0;
+        st0.w = 1.0f; st0.h = 2.1f; st0.thickness = 0.1f;
+        rc::DoorFitState f;
+        core.fit().init_instance(f, 4242, "door_9", st0);
+        rc::door::IdentityRow row;
+        row.room = "room_1"; row.name = "door_9"; row.xy = {kDoorX, 5.0f};
+        row.pose = rc::door::RestorePose{0.0f, 1.0f, 2.1f, 0.1f};
+        rc::door::seed_restored_instance(f, row, 1.0f, 4.0f, std::chrono::steady_clock::now());
+        w.st.emplace(4242, std::move(f));
+        for (int c = 2; c <= 4; ++c)
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c), c, Phase::Absent, false, kWallY, -1.2f));
+        CHECK(w.st.contains(4242));
+        if (w.st.contains(4242))
+        {
+            const auto& inst = w.st.at(4242);
+            const auto ap = inst.ai2_belief.aperture();
+            std::print("restored door seen from behind a partition: initialised {} — wall u ({:+.2f},{:+.2f}), centre ({:.2f},{:.2f}) "
+                       "(remembered (1.00,5.00), wall along x)\n", inst.ai2_initialized, ap.wall_u.x(), ap.wall_u.y(),
+                       ap.centre_xy().x(), ap.centre_xy().y());
+            CHECK(inst.ai2_initialized);
+            CHECK(std::abs(ap.wall_u.y()) < 0.05f);                       // the top wall, not the partition
+            CHECK((ap.centre_xy() - Eigen::Vector2f(kDoorX, 5.0f)).norm() < 0.2f);
         }
     }
 
