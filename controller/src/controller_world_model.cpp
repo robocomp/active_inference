@@ -1,5 +1,6 @@
 #include "controller_world_model.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "rt_ring.h"                                  // rc::rt::latest_slot_from_head (cortex head-index decode)
 
 #include <algorithm>
 #include <cmath>
@@ -174,17 +175,18 @@ std::optional<std::uint64_t> ControllerWorldModel::pose_stamp_age_ms(std::uint64
         rt_edge = graph_->get_edge(graph_state_.room_id, graph_state_.robot_id, "RT");
     if (!rt_edge.has_value())
         return std::nullopt;
-    // The edge keeps a RING BUFFER of stamps (rt_timestamps) with rt_head_index pointing at the newest,
-    // so the freshest stamp is NOT simply the last element. Fall back to the maximum when the index is
-    // missing — a wrong pick here would silently report a whole buffer's worth of extra latency.
+    // The edge keeps a RING BUFFER of stamps (rt_timestamps), so the freshest stamp is NOT simply the last element.
+    // ★ rt_head_index is cortex's packed offset of the slot it writes NEXT, not an index into rt_timestamps:
+    //   decode it as cortex does (rt_ring.h). Reading v[head] picked an OLD slot on 8 of every 25 writes and
+    //   reported a pose up to 1.2 s stale; the policy projected the robot 0.3 m into DOOR_1's jamb (rtD1a, 10-21).
+    //   Fall back to the maximum when the index is missing.
     const auto stamps = graph_->get_attrib_by_name<rt_timestamps_att>(rt_edge.value());
     if (!stamps.has_value()) return std::nullopt;
     const auto &v = stamps.value().get();
     if (v.empty()) return std::nullopt;
     std::uint64_t newest = 0;
-    if (const auto head = graph_->get_attrib_by_name<rt_head_index_att>(rt_edge.value());
-        head.has_value() and head.value() >= 0 and static_cast<std::size_t>(head.value()) < v.size())
-        newest = v[static_cast<std::size_t>(head.value())];
+    if (const auto head = graph_->get_attrib_by_name<rt_head_index_att>(rt_edge.value()); head.has_value() and head.value() >= 0)
+        newest = v[rc::rt::latest_slot_from_head(static_cast<std::size_t>(head.value()), v.size())];
     else
         newest = *std::max_element(v.begin(), v.end());
     if (newest == 0 or now_ms < newest) return std::nullopt;   // unstamped, or clocks disagree
