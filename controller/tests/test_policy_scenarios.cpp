@@ -188,17 +188,18 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     //   (residual_risk_weight 1, the config default). The gap's sigmas as the [gap] detector states them for a LiDAR range
     //   sigma sigma_r (doorway_gap.h doorway_gap_meas_cov: each axis sigma_r / sqrt 2), the contact model's shared offset
     //   from the relative sigma the policy is given below (0.01) and PolicyInput's body-geometry sigma.
-    std::optional<DoorwayJambs> jambs;
+    std::optional<DoorwayRisk> jambs;   // the goal's opening is the anchor; the harness has no separate gap measurement
     if (goal.kind == Goal::Kind::Doorway and not opt.no_jambs)
     {
         rc::RobotFootprint bare = B; bare.set_safety_margin(0.f);
         const float sg = sigma_r() * 0.70710678f;
-        jambs = doorway_jambs(RoomGap{goal.p, goal.normal.normalized(), goal.width}, sg, sg,
+        jambs = DoorwayRisk{};
+        jambs->anchor = doorway_jambs(RoomGap{goal.p, goal.normal.normalized(), goal.width}, sg, sg,
                               std::hypot(0.01f, PolicyInput{}.body_geometry_sigma_m), sigma_r(), bare, 1.0f,
                               kThroughS + 2.f * goal.tol_xy + 0.05f);
     }
     nav.set_goal(goal, mapfree.grid, [&mapfree](const V2& c) { return mapfree(c); },
-                 [jambs](const V2& c) { return jambs ? doorway_jamb_density(*jambs, c) : 0.f; }, goal_points(goal),
+                 [jambs](const V2& c) { return jambs ? doorway_risk_density(*jambs, c) : 0.f; }, goal_points(goal),
                  B.circumscribed_radius());
     // ★ Live fix 2 ruling 2 — as the controller does: a Doorway's measured opening (at least the body's width) vetoes traps
     if (goal.kind == Goal::Kind::Doorway)

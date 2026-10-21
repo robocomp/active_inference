@@ -88,7 +88,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                                                              ControllerMotionCommander &motion_commander, std::uint64_t now_ms,
                                                              std::function<bool(const Eigen::Vector2f &)> also_free,
                                                              std::function<bool(const Eigen::Vector2f &, float)> trap_veto,
-                                                             std::optional<rc::policy::DoorwayJambs> jambs)
+                                                             std::optional<rc::policy::DoorwayRisk> jambs)
 {
     using rc::policy::Decision;
     PolicyTick out;
@@ -191,7 +191,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     auto extra_fn = [this, jambs](const Eigen::Vector2f &p)
     {
         const float w = std::max(0.f, grid_planner_.params.residual_risk_weight);
-        return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_jamb_density(*jambs, p) : 0.f));
+        return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_risk_density(*jambs, p) : 0.f));
     };
     const bool new_goal = not policy_goal_.has_value() or policy_goal_who_ != who or not rc::policy::same_goal(*policy_goal_, spec);
     if (new_goal)
@@ -573,7 +573,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             rc::policy::GoalSpec spec;
             std::function<bool(const Eigen::Vector2f &)> corridor;
             std::function<bool(const Eigen::Vector2f &, float)> veto;
-            std::optional<rc::policy::DoorwayJambs> jambs;
+            std::optional<rc::policy::DoorwayRisk> jambs;
             if (cp.drive)
             {
                 const auto gap = rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose);
@@ -581,22 +581,31 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 // the far side is not in the planner's map: the measured opening's corridor joins the near room to the goal
                 // line (1 m back into the room just left; one field cell past the line)
                 const float back = 1.0f, ahead = gp.past_m + 0.05f, r_ins = gp.inscribed_radius_m;
-                corridor = [gap, back, ahead, r_ins](const Eigen::Vector2f &p) { return rc::policy::in_doorway_corridor(gap, p, back, ahead, r_ins); };
+                // ★ F4: the jambs in the route's risk. Each opening's along-wall / along-normal sigmas from its own pose, the
+                //   contact model's shared offset (sigma_rel_xy with the body-geometry sigma PolicyInput carries — the sigma the
+                //   policy's rollouts use), each jamb edge measured with the LiDAR's range sigma.
+                const float g_body = rc::policy::PolicyInput{}.body_geometry_sigma_m;
+                const float sigma_s = std::hypot(params_ != nullptr ? params_->policy_sigma_rel_xy_m : 0.f, g_body);
+                const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+                auto jambs_of = [&](const rc::interaction::RelPose &rp, float width)
+                {
+                    const auto geo = rc::anchor_cross_geometry(rp);
+                    const float sigma_n = std::sqrt(std::max(0.f, geo.n.dot(rp.P.topLeftCorner<2, 2>() * geo.n)));
+                    return rc::policy::doorway_jambs(rc::policy::gap_in_room(rp, width, cpose), geo.sigma_lat, sigma_n, sigma_s,
+                                                     sigma_r, bare, back, ahead);
+                };
+                // ★ rtD1c leg 5: the [gap] detector locked onto the open LEAF (0.40-0.52 m, score 0.03-0.3, against an 0.87 m
+                //   door) and the corridor followed it. The ANCHOR's opening is the door; the gap measurement is a second
+                //   hypothesis weighted by its own score (doorway_corridor.h DoorwayRisk) — and the corridor is either one's.
+                rc::policy::DoorwayRisk risk{jambs_of(cp.anchor_pose, cp.anchor_width), std::nullopt, 0.f};
+                if (cp.on_gap) { risk.gap = jambs_of(cp.drive_pose, cp.drive_width); risk.p_gap = cp.gap_score; }
+                jambs = risk;
+                corridor = [risk](const Eigen::Vector2f &p) { return rc::policy::in_doorway_risk_corridor(risk, p); };
                 // Live fix 2 ruling 2: the measured opening (at least the body's width) is evidence the body fits there — no
                 // trap may block it; the bare body's full width = its lateral support both sides
                 const float body_w = bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)) + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f));
                 veto = [gap, back, ahead, r_ins, body_w](const Eigen::Vector2f &c, float r)
                 { return rc::policy::disc_meets_doorway_corridor(gap, c, r, back, ahead, r_ins, body_w); };
-                // ★ F4: the measured jambs in the route's risk — the opening's along-wall / along-normal sigmas from the pose
-                //   driven on (the gap's, or the anchor's while no gap is held), and the contact model's shared offset
-                //   (sigma_rel_xy with the body-geometry sigma PolicyInput carries), the same sigma the policy's rollouts use;
-                //   each jamb edge measured with the LiDAR's range sigma (the [gap] detector's own)
-                const auto geo = rc::anchor_cross_geometry(cp.drive_pose);
-                const float sigma_n = std::sqrt(std::max(0.f, geo.n.dot(cp.drive_pose.P.topLeftCorner<2, 2>() * geo.n)));
-                const float g_body = rc::policy::PolicyInput{}.body_geometry_sigma_m;
-                const float sigma_s = std::hypot(params_ != nullptr ? params_->policy_sigma_rel_xy_m : 0.f, g_body);
-                const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-                jambs = rc::policy::doorway_jambs(gap, geo.sigma_lat, sigma_n, sigma_s, sigma_r, bare, back, ahead);
             }
             else
             {

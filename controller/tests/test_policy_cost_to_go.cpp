@@ -267,6 +267,43 @@ int main()
             CHECK("F4: live sigmas — the crossing is drivable too, nearer the centre than without", 1.f - std::exp(-doorway_jamb_crossing_nats(L, e_live)) < risk_eps
                   and std::abs(e_live) < std::abs(e_plain));
         }
+        { // ★ rtD1c leg 5: the [gap] detector locked onto the open LEAF (0.40-0.52 m at score 0.03-0.3 against an 0.87 m door).
+          // The anchor's opening (door_concept's door: 0.87 m, here centred at x = 0) and a LOW-SCORE gap measurement of 0.52 m (wide enough that its corridor exists: 0.45 m would have none)
+          // whose centre sits 0.20 m east: the gap enters only as a hypothesis weighted by its score — the route's risk and its
+          // centre line stay the anchor's. A reliable (score 0.99) measurement of the same door does move it.
+            const RoomGap door{{0.f, 0.f}, {0.f, 1.f}, 0.87f}, leaf{{0.20f, 0.f}, {0.f, 1.f}, 0.52f};
+            const DoorwayJambs A = doorway_jambs(door, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.03f, B, 1.0f, 2.05f);
+            const DoorwayJambs Gl = doorway_jambs(leaf, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.03f, B, 1.0f, 2.05f);
+            auto free87 = [&](const V& p) { const float dy = std::max(0.f, std::abs(p.y()) - 0.075f), dx = std::max(0.f, 0.435f - std::abs(p.x()));
+                                            return std::hypot(dx, dy) > r_ins or in_doorway_corridor(door, p, 1.0f, 2.05f, r_ins)
+                                                   or in_doorway_corridor(leaf, p, 1.0f, 2.05f, r_ins); };
+            std::vector<V> l87; for (float x = -0.205f; x <= 0.2051f; x += 0.05f) l87.push_back({x, 2.f});
+            const DoorwayRisk anchor_only{A, std::nullopt, 0.f}, low{A, Gl, 0.03f};
+            CostToGo ca, cl;
+            ca.build(G, free87, [&](const V& p) { return w * doorway_risk_density(anchor_only, p); }, l87);
+            cl.build(G, free87, [&](const V& p) { return w * doorway_risk_density(low, p); }, l87);
+            const V st{-0.15f, -0.15f / std::tan(th20)};   // from the WEST, so the phantom's centre (east) would pull it across
+            const float ea = crossing(ca, st), el = crossing(cl, st);
+            std::printf("  anchor 0.87 alone: crossing e %+.3f, field at start %.3f; + a 0.52 m gap at score 0.03: e %+.3f, field %.3f\n",
+                        ea, ca.at(st), el, cl.at(st));
+            // the discriminating baseline: had the phantom REPLACED the anchor (weight 1), the anchor's jambs would not price the route
+            CostToGo cr; cr.build(G, free87, [&](const V& p) { return w * doorway_risk_density(DoorwayRisk{A, Gl, 1.f}, p); }, l87);
+            const float er = crossing(cr, st);
+            std::printf("  (the phantom as THE geometry, weight 1: crossing e %+.3f, P(contact) on the real door %.3f)\n", er,
+                        1.f - std::exp(-doorway_jamb_crossing_nats(A, er)));
+            CHECK("F4 mixture: a score-0.03 phantom gap leaves the centre line the anchor's (+- one cell)", std::abs(el - ea) <= G.cell
+                  and std::abs(er - ea) > G.cell);
+            CHECK("F4 mixture: ...and the field at the robot within -log(1 - 0.03) x placement of the anchor's",
+                  std::abs(cl.at(st) - ca.at(st)) <= -std::log(1.f - 0.03f) * A.placement_m + 0.02f);
+            CHECK("F4 mixture: no gap = the anchor's jambs exactly", doorway_risk_density(anchor_only, V(0.1f, 0.f)) == doorway_jamb_density(A, V(0.1f, 0.f)));
+            const DoorwayJambs Gs = doorway_jambs(RoomGap{{0.10f, 0.f}, {0.f, 1.f}, 0.87f}, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.03f, B, 1.0f, 2.05f);
+            const DoorwayRisk sure{A, Gs, 0.99f};
+            CostToGo cs; cs.build(G, free87, [&](const V& p) { return w * doorway_risk_density(sure, p); }, l87);
+            const float es = crossing(cs, V(0.25f, -0.15f / std::tan(th20)));
+            const float es_anchor = crossing(ca, V(0.25f, -0.15f / std::tan(th20)));
+            std::printf("  a score-0.99 gap measured 0.10 m east: crossing e %+.3f (anchor alone %+.3f)\n", es, es_anchor);
+            CHECK("F4 mixture: a reliable gap measurement moves the route toward ITS centre", es > es_anchor);
+        }
         // no gap active: the controller adds nothing (std::optional empty) — the density helper is the only F4 term
         const std::optional<DoorwayJambs> none;
         auto extra_none = [&](const V& p) { return none ? w * doorway_jamb_density(*none, p) : 0.f; };

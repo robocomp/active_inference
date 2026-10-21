@@ -205,13 +205,14 @@ public:
                         float field_m = std::numeric_limits<float>::infinity();    // priced cost-to-go at the robot
                         float route_m = std::numeric_limits<float>::infinity(); };  // the cheapest route's metres (Live fix 3)
     // `also_free`: space the planner's map does not hold but the goal may be reached through (a doorway's measured corridor,
-    // goal_adapter.h in_doorway_corridor); empty = the map alone. `jambs` (F4): the measured opening's jambs, whose contact
-    // risk is added to the field's per-metre density over the corridor (doorway_corridor.h doorway_jamb_density); nullopt = none.
+    // goal_adapter.h in_doorway_corridor); empty = the map alone. `jambs` (F4): the opening's jambs (the anchor's, and the
+    // measured gap's weighted by its score), whose contact risk is added to the field's per-metre density over the corridor
+    // (doorway_corridor.h doorway_risk_density); nullopt = none.
     PolicyTick policy_tick(const rc::policy::GoalSpec &spec, const std::string &who, const ControllerRobotPose &robot_pose,
                            ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                            std::uint64_t now_ms, std::function<bool(const Eigen::Vector2f &)> also_free = {},
                            std::function<bool(const Eigen::Vector2f &, float)> trap_veto = {},
-                           std::optional<rc::policy::DoorwayJambs> jambs = std::nullopt);
+                           std::optional<rc::policy::DoorwayRisk> jambs = std::nullopt);
     // The policy's state belongs to one goal owner: dropped on Stop / abort and when the owner ends.
     void policy_reset();
     // review I1: a cycle in which the policy did NOT drive although it owns the base (Pause / Halt / a no-step or hold / the
@@ -380,6 +381,10 @@ private:
         bool ended = false, drive = false, on_gap = false;
         rc::interaction::RelPose drive_pose, pose;     // the pose driven on; the pose the guards / the wait-turn are asked about
         float drive_width = 0.f;
+        // F4 (rtD1c leg 5): the anchor's opening (door_concept's door) and the measured gap's score — the route's jamb risk
+        // weighs the gap against the anchor by it (doorway_corridor.h DoorwayRisk)
+        rc::interaction::RelPose anchor_pose;
+        float anchor_width = 0.f, gap_score = 0.f;
         std::string drive_name;
         std::vector<rc::interaction::AnchorLeaf> drive_leaves;
     };
@@ -1123,6 +1128,7 @@ private:
     // the prior until then and says where along which wall to look. Reset with every claim (reset_anchor_cross_state).
     std::optional<rc::interaction::RelPose> gap_line_;          // the gap's line, robot frame (anchor convention), seen or carried
     float gap_width_ = 0.f;                                     // its clear width as last MEASURED
+    float gap_score_ = 0.f;                                     // ...and that measurement's score (doorway_gap.h, in [0, 1])
     bool gap_seen_now_ = false;                                 // this cycle measured it (else carried)
     std::optional<ControllerRobotPose> gap_carry_pose_;         // the pose gap_line_ is expressed at
     std::string gap_carry_room_;                                // ...and its room frame

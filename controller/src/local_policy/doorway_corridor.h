@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace rc::policy
 {
@@ -118,19 +119,50 @@ inline float doorway_jamb_crossing_nats(const DoorwayJambs& j, float e)
     return p > 0.0 ? float(-std::log(p)) : std::numeric_limits<float>::infinity();
 }
 
-// The per-metre density at p (nats per metre, before residual_risk_weight); 0 outside the corridor.
-inline float doorway_jamb_density(const DoorwayJambs& j, const Eigen::Vector2f& p)
+// The nats the body covers at p crossing this opening: R(e) x q(s) (q = P(the body is on the jamb line)); 0 outside the corridor.
+inline float doorway_jamb_cell_nats(const DoorwayJambs& j, const Eigen::Vector2f& p)
 {
     if (not in_doorway_corridor(j.gap, p, j.corridor_back_m, j.corridor_ahead_m, j.inscribed_radius_m)) return 0.f;
-    const float span = j.front_m + j.back_m;
-    if (not (span > 0.f)) return 0.f;
     const Eigen::Vector2f d = p - j.gap.centre, lat(-j.gap.normal.y(), j.gap.normal.x());
     const double s = d.dot(j.gap.normal), e = d.dot(lat);
     const double sn = std::sqrt(double(j.sigma_n_m) * j.sigma_n_m + double(j.sigma_s_m) * j.sigma_s_m);
     const double q = sn > 0.0 ? detail::normal_interval((s + j.front_m) / sn, (s - j.back_m) / sn)
                               : ((s >= -j.front_m and s <= j.back_m) ? 1.0 : 0.0);
     if (not (q > 0.0)) return 0.f;
-    return float(q * doorway_jamb_crossing_nats(j, float(e)) * j.placement_m / span);
+    return float(q * doorway_jamb_crossing_nats(j, float(e)));
+}
+// The per-metre density at p (nats per metre, before residual_risk_weight); 0 outside the corridor.
+inline float doorway_jamb_density(const DoorwayJambs& j, const Eigen::Vector2f& p)
+{
+    const float span = j.front_m + j.back_m;
+    if (not (span > 0.f)) return 0.f;
+    return doorway_jamb_cell_nats(j, p) * j.placement_m / span;
+}
+
+// ★ rtD1c leg 5 — WHICH OPENING IS THE DOOR is itself uncertain. The anchor (door_concept's door, a fitted model) and the
+//   controller's [gap] measurement are two hypotheses about where the jambs are; the gap enters with the weight its own
+//   score gives it (doorway_gap.h: the product of its location, width and fit agreements with the anchor, in [0, 1]),
+//   p_gap = score — the [gap] detector locked onto an open LEAF at score 0.03-0.3 and reported 0.40-0.52 m against an
+//   0.87 m door, and a 0.03-score phantom must not replace the anchor's geometry. Per place, the body is contact-free with
+//   probability p_gap e^{-n_gap(p)} + (1 - p_gap) e^{-n_anchor(p)} (n = the cell's nats, doorway_jamb_cell_nats); the
+//   density is that mixture's -log, so a phantom that closes the opening costs at most -log(1 - p_gap) over the anchor's
+//   (it cannot make the field impassable), and a reliable gap (score ~1) is the geometry. No gap: the anchor's, exactly.
+struct DoorwayRisk { DoorwayJambs anchor; std::optional<DoorwayJambs> gap; float p_gap = 0.f; };
+inline float doorway_risk_density(const DoorwayRisk& r, const Eigen::Vector2f& p)
+{
+    const float pg = std::clamp(r.p_gap, 0.f, 1.f);   // a weight: a probability by construction (score in [0,1])
+    if (not r.gap.has_value() or not (pg > 0.f)) return doorway_jamb_density(r.anchor, p);
+    const float span = r.anchor.front_m + r.anchor.back_m;   // the same body under both hypotheses
+    if (not (span > 0.f)) return 0.f;
+    const double na = doorway_jamb_cell_nats(r.anchor, p), ng = doorway_jamb_cell_nats(*r.gap, p);
+    const double pnc = double(pg) * std::exp(-ng) + (1.0 - pg) * std::exp(-na);
+    return pnc > 0.0 ? float(-std::log(pnc) * r.anchor.placement_m / span) : std::numeric_limits<float>::infinity();
+}
+// The space the opening adds to the planner's map: either hypothesis's corridor (a mask, not a cost — the risk prices it).
+inline bool in_doorway_risk_corridor(const DoorwayRisk& r, const Eigen::Vector2f& p)
+{
+    const auto in = [&](const DoorwayJambs& j) { return in_doorway_corridor(j.gap, p, j.corridor_back_m, j.corridor_ahead_m, j.inscribed_radius_m); };
+    return in(r.anchor) or (r.gap.has_value() and r.p_gap > 0.f and in(*r.gap));
 }
 
 // The jambs of a measured opening for a body crossing it along its normal. sigma_range_m = the LiDAR range sigma each edge

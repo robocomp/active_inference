@@ -3723,6 +3723,7 @@ bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const Co
         const bool first = not gap_line_.has_value() or gap_lost_logged_;
         gap_line_ = rc::doorway_gap_pose(g, sigma);
         gap_width_ = g.width;
+        gap_score_ = g.score;
         gap_seen_now_ = true;
         const float heading = rc::doorway_gap_yaw(g.normal);
         const float e_now = rc::anchor_cross_geometry(*gap_line_).e;   // the robot-frame centre moves with the robot: compare e
@@ -3954,6 +3955,9 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     out.drive_pose = drive_pose;
     out.pose = pose;
     out.drive_width = drive_width;
+    out.anchor_pose = a.pose;
+    out.anchor_width = a.width_m;
+    out.gap_score = on_gap ? gap_score_ : 0.f;
     out.drive_name = drive_name;
     out.drive_leaves.assign(drive_leaves.begin(), drive_leaves.end());
     return out;
