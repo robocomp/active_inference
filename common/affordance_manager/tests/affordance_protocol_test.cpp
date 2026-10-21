@@ -334,6 +334,103 @@ void consumer_release_frees_its_claim(TestFailure &failure)
     expect_protocol_state(graph, "door_cross_affordance", false, true, failure);
     failure.expect(not controller.release_execution_claim(graph), "a second release has nothing left to free");
 }
+
+// ★ Task 3e (3) — rtD1h leg 5: the cross was handed back Unreachable, the passage switched to `approach` before the deferred
+// report ran, and mark_reached stamped `unreachable` on the APPROACH (the claim current by then) while the cross stayed
+// Executing with nobody driving it. A hand-back completes the node it NAMES, whatever the current claim has become.
+void hand_back_completes_the_named_claim(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    rc::AffordanceManager approach{"aff_d_approach"};
+    rc::AffordanceManager cross{"aff_d_cross"};
+    rc::AffordanceManager controller;
+    failure.expect(approach.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.5f), "approach publish failed");
+    failure.expect(cross.publish_target(graph, room_id, 2.f, 1.f, 0.f, 0.5f), "cross publish failed");
+
+    controller.set_required_name("aff_d_cross");
+    const auto c = controller.select_target(graph);
+    failure.expect(c.has_value() and c->node_name == "aff_d_cross", "the required cross must be claimed");
+    const std::uint64_t cross_id = c.has_value() ? c->node_id : 0;
+    expect_protocol_state(graph, "aff_d_cross", true, true, failure);
+
+    // (a) the claim is still current: the named completion is the ordinary one
+    failure.expect(controller.complete_claim(graph, cross_id, rc::affordance::Outcome::Unreachable),
+                   "completing the current claim by name must succeed");
+    expect_protocol_state(graph, "aff_d_cross", false, false, failure);
+    if (const auto n = graph->get_node("aff_d_cross"); n.has_value())
+        failure.expect(rc::affordance::read_outcome(n.value()) == rc::affordance::Outcome::Unreachable,
+                       "the cross must carry the Unreachable outcome");
+
+    // (b) the current claim has MOVED on (the session dropped the cross, the passage required the approach and the
+    //     selector claimed it) before the deferred report runs: the named node is completed, the approach untouched
+    failure.expect(cross.publish_target(graph, room_id, 2.5f, 1.f, 0.f, 0.5f), "cross re-publish failed");
+    const auto c2 = controller.select_target(graph);
+    failure.expect(c2.has_value() and c2->node_name == "aff_d_cross", "the re-offered cross must be claimed");
+    controller.clear_current();
+    controller.set_required_name("aff_d_approach");
+    const auto a = controller.select_target(graph);
+    failure.expect(a.has_value() and a->node_name == "aff_d_approach", "the approach must be claimed");
+    failure.expect(controller.complete_claim(graph, cross_id, rc::affordance::Outcome::Unreachable),
+                   "completing a claim that is no longer current must still complete IT");
+    expect_protocol_state(graph, "aff_d_cross", false, false, failure);
+    expect_protocol_state(graph, "aff_d_approach", true, true, failure);   // still Executing, no outcome stamped
+    if (const auto n = graph->get_node("aff_d_approach"); n.has_value())
+        failure.expect(rc::affordance::read_outcome(n.value()) == rc::affordance::Outcome::None,
+                       "the approach must not receive the cross's outcome");
+    failure.expect(controller.current_name() == "aff_d_approach", "the current claim must stay the approach");
+
+    // (c) a node that is not ours to complete (Offered, nobody claimed it) is left alone
+    failure.expect(cross.publish_target(graph, room_id, 3.f, 1.f, 0.f, 0.5f), "cross re-publish failed");
+    failure.expect(not controller.complete_claim(graph, cross_id, rc::affordance::Outcome::Unreachable),
+                   "an Offered node is no claim of ours: nothing to complete");
+    expect_protocol_state(graph, "aff_d_cross", false, true, failure);
+}
+
+// ★ Task 3e (4) — rtD1h leg 5: the selector never released a claim its required-name filter removed from the contest (the
+// keep-current branch looks only among the eligible), so the cross stayed Executing for 7 min with no driver.
+// Ownership invariant: an Executing node always has a driver — a claim the filter excludes is released.
+void selector_releases_a_claim_its_filter_excludes(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    rc::AffordanceManager approach{"aff_e_approach"};
+    rc::AffordanceManager cross{"aff_e_cross"};
+    rc::AffordanceManager controller;
+    failure.expect(approach.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.5f), "approach publish failed");
+    failure.expect(cross.publish_target(graph, room_id, 2.f, 1.f, 0.f, 0.5f), "cross publish failed");
+
+    controller.set_required_name("aff_e_cross");
+    failure.expect(controller.select_target(graph).has_value(), "the cross must be claimed");
+    expect_protocol_state(graph, "aff_e_cross", true, true, failure);
+
+    // a name nothing carries, EXTENDING the claim's (DoorPassage::kClearingSuffix): the claim is driven outside the contest
+    // (past the room switch) — held, never released, nothing selected
+    controller.set_required_name("aff_e_cross#through");
+    failure.expect(not controller.select_target(graph).has_value(), "nothing is selectable while clearing");
+    expect_protocol_state(graph, "aff_e_cross", true, true, failure);
+    failure.expect(controller.current_name() == "aff_e_cross", "the held claim stays current while clearing");
+
+    // the required name moves to ANOTHER affordance: the excluded claim is released (Offered again), the new one claimed
+    controller.set_required_name("aff_e_approach");
+    const auto a = controller.select_target(graph);
+    failure.expect(a.has_value() and a->node_name == "aff_e_approach", "the approach must be claimed");
+    expect_protocol_state(graph, "aff_e_cross", false, true, failure);
+    expect_protocol_state(graph, "aff_e_approach", true, true, failure);
+
+    // a required name that is NOT on offer at all still releases the excluded claim (nothing selected, nothing orphaned)
+    controller.set_required_name("aff_e_open");
+    failure.expect(not controller.select_target(graph).has_value(), "an absent required node selects nothing");
+    expect_protocol_state(graph, "aff_e_approach", false, true, failure);
+
+    // the room scope excludes the claim the same way
+    controller.set_required_name("");
+    rc::AffordanceManager other_room_producer{"aff_e_look"};
+    failure.expect(other_room_producer.publish_target(graph, room_id, 1.f, 2.f, 0.f, 5.f), "look publish failed");
+    const auto l = controller.select_target(graph);
+    failure.expect(l.has_value() and l->node_name == "aff_e_look", "the look must be claimed in the open contest");
+    controller.set_room_scope("some_other_room");
+    (void)controller.select_target(graph);
+    expect_protocol_state(graph, "aff_e_look", false, true, failure);
+}
 } // namespace
 
 int main()
@@ -348,6 +445,8 @@ int main()
         test_completion_event_is_consumed_once(failure);
         claim_observer_start_preempt_outcome(failure);
         consumer_release_frees_its_claim(failure);
+        hand_back_completes_the_named_claim(failure);
+        selector_releases_a_claim_its_filter_excludes(failure);
     }
     catch (const std::exception &e)
     {

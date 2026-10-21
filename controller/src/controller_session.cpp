@@ -965,6 +965,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     }
     dwell_logged_ = false;
 
+    // ★ Task 3e (3): a flagged hand-back is reported on the node it names BEFORE the selection can move the claim on.
+    report_flagged_unreachable(affordance_manager);
+
     // ── ACT ON A PENDING REJECTION, BEFORE THE NEXT SELECTION ────────────────────────────────────
     // Set by begin_escape after kMaxEscapesPerAffordance wedges against one standpoint. Done here
     // because this is where the manager is reachable, and it must land BEFORE read_target_in_room or
@@ -5990,26 +5993,44 @@ void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::Route
               << band_solve_ms_ << ',' << band_near_elements_ << '\n';
 }
 
+// ★ Task 3e (3) — A HAND-BACK COMPLETES THE NODE IT NAMES (rtD1h leg 5). The verdict is flagged in one cycle and reported in
+//   a later one; in between the door passage could move to `approach` (reposition) and the selector claim it, and the report
+//   used to complete the CURRENT claim: door_concept logged `aff_door_1_approach → COMPLETED, unreachable` while the cross
+//   stayed Executing with no driver, and the passage waited 7 min. Now (a) the report runs before the selection too
+//   (build_planning_step), so the claim it names is normally still current, and (b) it completes the NAMED node
+//   (AffordanceManager::complete_claim) — if the claim has moved on, the current one is left alone. A protocol fix: both
+//   drivers (old chain and local policy) take it.
+void ControllerSession::report_flagged_unreachable(rc::AffordanceManager &affordance_manager)
+{
+    if (reach_unreachable_why_.empty()) return;
+    // fix round 1 (M-4): scripts grep "Reach standpoint handed back"; an object standpoint (Task 3c) says so apart
+    std::println("[controller] {} standpoint handed back — {} — reporting Unreachable to the producer",
+                 (target_contract_known_ and target_contract_.policy == rc::affordance::Policy::Reach) ? "Reach" : "object",
+                 reach_unreachable_why_);
+    std::fflush(stdout);
+    const bool named_is_current = reach_unreachable_node_ == 0 or affordance_manager.current_name() == reach_unreachable_name_;
+    if (reach_unreachable_node_ == 0)
+        affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
+    else if (not affordance_manager.complete_claim(graph_, reach_unreachable_node_, rc::affordance::Outcome::Unreachable))
+        std::println("[controller] '{}' is no longer our claim (released or re-offered meanwhile) — the verdict has nothing to "
+                     "complete", reach_unreachable_name_);
+    reach_unreachable_why_.clear();
+    reach_unreachable_node_ = 0;
+    reach_unreachable_name_.clear();
+    if (not named_is_current) return;   // the claim being driven now is another one: its route and state are its own
+    route_dropped_ = true;
+    approach_commit_.reset();
+    approach_fix_.reset();
+    reset_anchor_cross_state();      // the claim is over: its re-offer starts a fresh one (fix round 1)
+    contract_for_node_id_ = 0;       // ...and is resolved again even if the producer keeps the same epoch
+    no_route_since_ms_ = 0;
+    short_path_since_ms_ = 0;
+}
+
 void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &affordance_manager,
                                                        const TimeSource &time_source)
 {
-    if (not reach_unreachable_why_.empty())
-    {
-        // fix round 1 (M-4): scripts grep "Reach standpoint handed back"; an object standpoint (Task 3c) says so apart
-        std::println("[controller] {} standpoint handed back — {} — reporting Unreachable to the producer",
-                     (target_contract_known_ and target_contract_.policy == rc::affordance::Policy::Reach) ? "Reach" : "object",
-                     reach_unreachable_why_);
-        std::fflush(stdout);
-        affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
-        route_dropped_ = true;
-        approach_commit_.reset();
-        approach_fix_.reset();
-        reach_unreachable_why_.clear();
-        reset_anchor_cross_state();      // the claim is over: its re-offer starts a fresh one (fix round 1)
-        contract_for_node_id_ = 0;       // ...and is resolved again even if the producer keeps the same epoch
-        no_route_since_ms_ = 0;
-        short_path_since_ms_ = 0;
-    }
+    report_flagged_unreachable(affordance_manager);
     // ── NO ROUTE FOR LONG ⇒ REPORT UNREACHABLE (2026-10-09) ─────────────────────────────────────────────
     // The HOLD below (drive_point_target) never ended: the repair stage's unroutable_at_ record only applies
     // while world_hash() is unchanged, and the live obstacle layer changes it every cycle, so a claimed

@@ -291,6 +291,15 @@ public:
     // through here. source_location names the caller in one run instead of reading every call site.
     void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph, rc::affordance::Outcome outcome,
                       std::source_location loc = std::source_location::current());
+    // ★ Task 3e (3) — A HAND-BACK COMPLETES THE NODE IT NAMES (rtD1h leg 5). A consumer decides a verdict in one cycle and may
+    // report it in a later one; by then the CURRENT claim can be another affordance (the door passage moved to `approach`, the
+    // selector claimed it), and mark_reached stamped the cross's Unreachable on the approach while the cross stayed Executing
+    // with nobody driving it. complete_claim(node_id) completes THAT node: through mark_reached when it is still current;
+    // otherwise only if it is still OUR claim (Executing — the consumer abandoned it but never released it): outcome on, flags
+    // off, our executing edge dropped, the current claim untouched. false = nothing of ours to complete (gone, or Offered /
+    // Completed — re-offered or released meanwhile; the verdict is about a claim that no longer exists).
+    bool complete_claim(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t node_id, rc::affordance::Outcome outcome,
+                        std::source_location loc = std::source_location::current());
 
     // Producer side: how the affordance this manager owns last ended. Valid after
     // consume_completion_event() returns true; Outcome::None before any completion.

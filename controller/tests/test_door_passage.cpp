@@ -381,6 +381,52 @@ int main()
         CHECK(out.required == "aff_door_6_approach" and p.view().attempts == 0 and not p.view().failed);
     }
 
+    // ── Task 3e (5), rtD1h leg 5: `open` WITHDRAWN BECAUSE ITS GOAL HOLDS. After the approach was satisfied the passage
+    //    moved to `open`; door_concept had withdrawn aff_door_1_open (P(in band)·P(shut) = 0: the door was open) and the
+    //    passage waited for it 7 min. An `open` step not on offer while the door is MEASURED open (door_open_prob known and
+    //    > 1/2 — the evidence ruling 3 uses) is Satisfied: opened, and on to `cross`. Unmeasured (-1) or measured shut: the
+    //    wait stands (control).
+    for (const float p_open : {0.97f, -1.0f, 0.2f})
+    {
+        auto G = make_graph(p_open > 0.9f ? 15 : p_open < 0.f ? 16 : 17);
+        DoorPassage p;
+        p.set_clock(clock);
+        DSR::Node door = DSR::Node::create<door_node_type>("door_8");
+        G->add_or_modify_attrib_local<door_open_prob_att>(door, p_open);
+        G->insert_node(door);
+        p.start("door_8", Step::Cross);
+        offered(*G, "aff_door_8_approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_8_approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_8_approach");
+        p.update(*G, nullptr, "room_1");                      // approach SATISFIED -> open (not on offer: never published)
+        offered(*G, "aff_door_8_approach");                   // door_concept re-offers approach; `cross` not (yet) on offer
+        const auto out = p.update(*G, nullptr, "room_1");
+        if (p_open > 0.5f)
+        {
+            CHECK(p.view().step == Step::Cross and p.view().opened);
+            CHECK(out.required == "aff_door_8_cross");
+            offered(*G, "aff_door_8_cross");                  // and it is taken as soon as it is offered
+            CHECK(p.update(*G, nullptr, "room_1").required == "aff_door_8_cross");
+        }
+        else
+            CHECK(p.view().step == Step::Open and not p.view().opened);
+    }
+    // …and an `open` that IS on offer is a shut-door belief: it is taken, never skipped by the measured-open rule
+    {
+        auto G = make_graph(18);
+        DoorPassage p;
+        p.set_clock(clock);
+        DSR::Node door = DSR::Node::create<door_node_type>("door_3");
+        G->add_or_modify_attrib_local<door_open_prob_att>(door, 0.9f);
+        G->insert_node(door);
+        p.start("door_3", Step::Cross);
+        offered(*G, "aff_door_3_open");
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open and out.required == "aff_door_3_open");
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

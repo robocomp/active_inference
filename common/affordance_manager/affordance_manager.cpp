@@ -945,6 +945,24 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                   << " score=" << c.efe_score << " |";
     const std::string candidates_str = all_cands.str();
 
+    // ★ Task 3e (4) — AN EXECUTING NODE ALWAYS HAS A DRIVER (rtD1h leg 5). The keep-current branch below looks only among the
+    //   ELIGIBLE: a claim the required name, the room scope or the pragmatic/zero-gain filter removed from the contest was
+    //   neither kept nor released — the cross stayed Executing for 7 min while the robot was sent elsewhere, and its producer
+    //   (door_concept) never re-offered a node it believed was being executed. A claim this selection will not keep is
+    //   released here (Offered again). The ONE exception is a claim driven OUTSIDE the contest on purpose: a required name
+    //   that extends the claim's own name ("<name>#…", DoorPassage::kClearingSuffix — the cross carried past the room switch
+    //   on its anchor), which selects nothing and holds the claim.
+    if (current_affordance_id_ != 0
+        and std::ranges::none_of(affordances, [&](const DSR::Node &n) { return n.id() == current_affordance_id_; })
+        and not (not required_name_.empty() and not current_affordance_name_.empty()
+                 and required_name_.starts_with(current_affordance_name_ + "#")))
+    {
+        const std::string was = current_affordance_name_;
+        if (release_execution_claim(graph))
+            std::print("[aff-select] '{}' is out of this contest (required '{}', room scope '{}') — its claim released: an "
+                       "Executing node must have a driver\n", was, required_name_, room_scope_);
+    }
+
     if (current_affordance_id_ != 0)
     {
         for (const auto &node : affordances)
@@ -1311,6 +1329,36 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
     current_affordance_name_.clear();
     reset_observation();
     transition_to(State::Idle, "affordance completed and cleared");
+}
+
+bool AffordanceManager::complete_claim(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t node_id,
+                                       rc::affordance::Outcome outcome, std::source_location loc)
+{
+    if (not graph or node_id == 0) return false;
+    if (node_id == current_affordance_id_)
+    {
+        mark_reached(graph, outcome, loc);
+        return true;
+    }
+    auto node_opt = graph->get_node(node_id);
+    if (not node_opt.has_value()) return false;
+    auto node = node_opt.value();
+    const bool active = graph->get_attrib_by_name<active_att>(node).value_or(false);
+    const bool pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+    if (decode_protocol_state(active, pending) != ProtocolState::Executing) return false;
+    // The journal: this claim's End carries its outcome when it is the open one (the current claim's Start came after it
+    // only if the claim moved, in which case note_claim already ended it "preempted").
+    if (open_claim_id_ == node_id) end_claim(std::string(rc::affordance::to_string(outcome)));
+    std::println("[aff-select] '{}' completed by name ({}) — not the current claim '{}' ({}:{})", node.name(),
+                 rc::affordance::to_string(outcome), current_affordance_name_, loc.function_name(), loc.line());
+    clear_executing(graph, node_id);
+    // Same single write as mark_reached: the outcome goes on before the flags come off, in one update_node.
+    rc::affordance::write_outcome(*graph, node, outcome);
+    graph->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
+    graph->add_or_modify_attrib_local<active_att>(node, false);
+    graph->update_node(node);
+    if (abandoned_claim_id_ == node_id) abandoned_claim_id_ = 0;
+    return true;
 }
 
 // ── THE MAP-ONLY VERDICT CACHE (see the header for why it is not a timer) ───────────────────────

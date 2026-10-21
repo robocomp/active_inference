@@ -839,6 +839,10 @@ private:
     std::uint64_t no_route_since_ms_    = 0;   ///< first cycle of the current no-route HOLD (0 = routing fine)
     std::uint64_t short_path_since_ms_  = 0;   ///< first cycle the path ENDED short of an affordance standpoint
     std::string   reach_unreachable_why_;      ///< non-empty ⇒ report this Reach standpoint Unreachable next cycle
+    /// ★ Task 3e (3): the affordance node the flagged verdict is ABOUT (id + name), captured when it is flagged — the report
+    /// completes THAT node (AffordanceManager::complete_claim), never whatever the current claim has become by then.
+    std::uint64_t reach_unreachable_node_ = 0;
+    std::string   reach_unreachable_name_;
     bool          route_dropped_ = false;      ///< an Unreachable was just reported: stop and drop the old route
     std::ofstream plan_track_csv_;             ///< plan_track.csv: per-cycle plan geometry + tracking errors
     /// A Reach standpoint (exploration: where exactly does not matter) the body cannot take — occupied, or wedged
@@ -847,15 +851,23 @@ private:
     {
         if (not last_target_info_.has_value() or not last_target_info_->from_affordance) return false;
         if (not target_contract_known_ or target_contract_.policy != rc::affordance::Policy::Reach) return false;
-        if (reach_unreachable_why_.empty()) reach_unreachable_why_ = std::move(why);
+        if (reach_unreachable_why_.empty()) name_flagged_node(std::move(why));
         return true;
     }
+    void name_flagged_node(std::string why)
+    {
+        reach_unreachable_why_ = std::move(why);
+        reach_unreachable_node_ = last_target_info_.has_value() ? last_target_info_->node_id : 0;
+        reach_unreachable_name_ = last_target_info_.has_value() ? last_target_info_->node_name : std::string{};
+    }
+    /// The flagged verdict, reported on the node it names. Run BEFORE the selection (Task 3e (3)) and from the no-plan hold.
+    void report_flagged_unreachable(rc::AffordanceManager &affordance_manager);
     /// Task 3c ([Policy] Enabled only): ANY affordance standpoint the occupancy belief says the body cannot take
     /// (standpoint_fit.h) is handed back the same way — never re-sited — so the producer re-solves inside its own band.
     bool flag_standpoint_unreachable(std::string why)
     {
         if (not last_target_info_.has_value() or not last_target_info_->from_affordance) return false;
-        if (reach_unreachable_why_.empty()) reach_unreachable_why_ = std::move(why);
+        if (reach_unreachable_why_.empty()) name_flagged_node(std::move(why));
         return true;
     }
 public:
