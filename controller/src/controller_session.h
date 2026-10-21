@@ -35,6 +35,8 @@
 #include "local_policy/goal_adapter.h"
 #include "local_policy/doorway_hypotheses.h"   // Task 3e: the MAP goal line, the anchor re-init test
 #include "local_policy/navigator.h"
+#include "local_policy/field_extent.h"     // Task 3f (b): the field over extent ∪ goals; unseen cells at the prior
+#include "local_policy/cross_through.h"    // Task 3f (a): `through` as a posterior past the room switch
 #include "local_policy/unseen_contact.h"
 
 class ControllerSession
@@ -440,6 +442,7 @@ private:
     // until the goal changes or the policy resets — the Navigator restarts its belief after a hand back, so the next tick is
     // no longer Unreachable, and it must not clear the no-route clock that reports a non-Reach target (Place / mouse)
     rc::policy::UnreachLatch policy_unreach_latch_;
+    rc::policy::ClearingNoRoute policy_clearing_no_route_;            // Task 3f (c): a clearing with no route is given up
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
     rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
     // ★ Task 3b (rtD1c leg 5): the leaf door_concept models, in the room frame of `policy_leaf_room_`, held by the policy's cross
@@ -1171,6 +1174,8 @@ private:
     std::deque<std::tuple<std::int64_t, Eigen::Vector2f, float>> policy_pose_ring_;
     [[nodiscard]] std::optional<ControllerRobotPose> policy_pose_at(std::int64_t stamp_ms) const;
     bool anchor_prev_covered_ = false;                               // the last block was placed through a recorded pose
+    rc::policy::BlockFrame anchor_block_frame_;                      // Task 3f (d): the room frame the ring / last block are in
+    bool anchor_clearing_released_ = false;                          // Task 3f (c): the clearing was given up — no re-engaging on the gap
     std::int64_t anchor_uncovered_logged_stamp_ = 0;                 // the last uncovered stamp logged (one line per block)
     rc::policy::AnchorLostBelief anchor_lost_;                       // P(the anchor is lost), recursive per block (fix round 1, I-2)
     rc::policy::DoorwayBelief doorway_belief_;                       // P(the gap's line is the door), recursive per cycle (I-2)

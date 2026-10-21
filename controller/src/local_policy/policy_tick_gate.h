@@ -104,6 +104,31 @@ inline std::uint64_t advance_no_route_clock(std::uint64_t since_ms, std::uint64_
     }
     return since_ms;
 }
+// ★ Task 3f (c) (tour3A leg 1) — A CLEARING THE POLICY CANNOT SERVE IS GIVEN UP, NEVER WAITED ON FOR EVER. Past the room switch
+//   the passage waits in `clearing` for `through`; the cross goal there had no Unreachable path for a built infinite field (F1
+//   folds no evidence at T = ∞, and the cross path had no no-route clock), so 9 minutes of `route=inf` Released in place. The
+//   SAME observation the 5-s no-route clock runs on for every other goal (advance_no_route_clock: a field BUILT and READ
+//   non-finite at the robot) now runs while clearing; past kNoRouteReportMs it says "give the clearing up" — the session hands
+//   the cross back (the anchor is given up) and the passage concludes by its room-switch rule: the robot is in the new room.
+//   ⚑ kNoRouteReportMs = report_unreachable_if_no_route's 5 s liveness constant (flagged there), reused, not a new level.
+inline constexpr std::uint64_t kNoRouteReportMs = 5000;
+class ClearingNoRoute
+{
+public:
+    // one policy tick of the clearing cross; true = the clearing must be given up (once per episode: the clock restarts)
+    bool on_tick(std::uint64_t now_ms, NoRouteObs obs, bool unreachable, bool stuck, const UnreachLatch& latch)
+    {
+        since_ = advance_no_route_clock(since_, now_ms, prev_, obs, unreachable, stuck, latch);
+        prev_ = now_ms;
+        if (since_ == 0 or now_ms - since_ <= kNoRouteReportMs) return false;
+        since_ = 0;
+        return true;
+    }
+    void reset() { since_ = 0; prev_ = 0; }
+    std::uint64_t since_ms() const { return since_; }
+private:
+    std::uint64_t since_ = 0, prev_ = 0;
+};
 // ★ Task 3d fix round 2 (CRITICAL-2) — THE TURN-SIGN EMERGENCY IS A LATCHED SAFETY STATE. Entered when the probe confirms a flipped
 //   odometry sign (goal_adapter.h TurnSignBelief::probe_decisive). Its ENTRY tick hands the active goal back ONCE; every later tick
 //   holds idle — no per-tick Unreachable (which re-entered the hand-back sites every tick: explorer cells poisoned, cross_hand_back

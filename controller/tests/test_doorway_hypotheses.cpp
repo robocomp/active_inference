@@ -270,6 +270,30 @@ int main()
               and lateral_sigma(aged_anchor(base, 0.3, 0.0)) < lateral_sigma(aged_anchor(base, 0.3, 0.5)));
     }
 
+    // ---- Task 3f (d) — tour3A leg 1: at the ROOM SWITCH the same robot-relative block, placed through the pose in the room
+    //      left and then through the pose in the room entered, read as a 2.2-m RE-INITIALISATION (P(lost) 0.031 -> 1.000).
+    //      Blocks are compared only within one frame: the switch drops the reference (BlockFrame), nothing is tested across it.
+    {
+        const Eigen::Matrix3d robot_cov = Eigen::Vector3d(0.02 * 0.02, 0.02 * 0.02, 0.01 * 0.01).asDiagonal();
+        const RelPose blk = rel(0.05f, -0.45f, 3.10f, 0.03f, 0.03f);   // the door 0.45 m behind the robot that just went through
+        // live fix 2's switch: (0.60, 2.57) in room_1 → (-3.64, 0.41) in room_2, the heading re-expressed too
+        const auto old_frame = anchor_in_room(blk, Eigen::Vector2f(0.60f, 2.57f), 1.20f);
+        auto new_frame = anchor_in_room(blk, Eigen::Vector2f(-3.64f, 0.41f), 0.97f);
+        new_frame.stamp_ms = old_frame.stamp_ms + 50;
+        const double p_cross_frame = p_reinitialised(old_frame, new_frame, kDoorW, robot_cov, 0.45, 0.031);
+        std::printf("      the same block across the switch, compared as if one frame: P(re-init) %.3f\n", p_cross_frame);
+        CHECK("(3f d) the bug reproduced: a cross-frame comparison reads a re-initialisation", p_cross_frame > 0.5);
+        BlockFrame f;
+        CHECK("(3f d) the first frame seen is not a change", not f.changed("room_1"));
+        CHECK("(3f d) the same frame again is not a change", not f.changed("room_1"));
+        CHECK("(3f d) the switch IS a frame change: the held block is dropped, no re-initialisation test", f.changed("room_2"));
+        CHECK("(3f d) ... and the new frame then holds", not f.changed("room_2"));
+        // within the new frame the next block of the same door is a continuation
+        auto next = anchor_in_room(rel(0.05f, -0.50f, 3.10f, 0.03f, 0.03f), Eigen::Vector2f(-3.64f, 0.46f), 0.97f);
+        CHECK("(3f d) within the new frame the next block is a CONTINUATION",
+              p_reinitialised(new_frame, next, kDoorW, robot_cov, 0.5, 0.031) < 0.5);
+    }
+
     std::printf("%s (%d failures)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;
 }

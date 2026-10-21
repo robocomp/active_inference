@@ -241,8 +241,28 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //    some heading); extra = the residual belief as a per-METRE density: residual_risk_weight x the nats the BODY covers
     //    (GridPlanner::body_risk_at — the A*'s own per-metre charge; see grid_planner.h for the conversion)
     const float r_ins = body.inscribed_radius();
-    auto free_fn = [this, r_ins, also_free](const Eigen::Vector2f &p)
-    { return rc::policy::field_free_from_distance(grid_planner_.distance_at(p), grid_planner_.cell_size(), r_ins) or (also_free and also_free(p)); };
+    // ★ Task 3f (b) (tour3A leg 1: the doorway goal line 2.4 m past the door lay beyond the newborn room's planner raster ⇒ the
+    //   field was +inf everywhere for 9 min). The field's grid covers the planner's extent ∪ the goal points ∪ the robot
+    //   (local_policy/field_extent.h); a cell OUTSIDE the planner's raster is UNSEEN — its distance to a known obstacle is the
+    //   raster's border value plus the way out (extended_distance), its price the honest prior for unseen space: ln 2 nats per
+    //   planner cell the body covers (residual_risk.h's surprisal at the Beta(1,1) prior), not free and not a wall.
+    const float planner_cell = grid_planner_.cell_size();
+    const Eigen::Vector2f ext_lo = grid_planner_.grid_origin() - 0.5f * Eigen::Vector2f::Constant(planner_cell);
+    const rc::policy::PlannerExtent ext{ext_lo, ext_lo + planner_cell * Eigen::Vector2f(float(grid_planner_.width()), float(grid_planner_.height()))};
+    const float body_area = [&body]
+    {
+        const auto &poly = body.polygon();
+        double a = 0.0;
+        for (std::size_t i = 0, n = poly.size(); i < n; ++i)
+            a += double(poly[i].x()) * poly[(i + 1) % n].y() - double(poly[(i + 1) % n].x()) * poly[i].y();
+        return static_cast<float>(0.5 * std::abs(a));
+    }();
+    const float unseen_density = rc::policy::unseen_prior_density(body_area, planner_cell,
+                                                                    std::max(0.f, grid_planner_.params.residual_risk_weight));
+    auto dist_fn = [this, ext](const Eigen::Vector2f &p)
+    { return rc::policy::extended_distance(ext, p, [this](const Eigen::Vector2f &q) { return grid_planner_.distance_at(q); }); };
+    auto free_fn = [this, r_ins, also_free, dist_fn](const Eigen::Vector2f &p)
+    { return rc::policy::field_free_from_distance(dist_fn(p), grid_planner_.cell_size(), r_ins) or (also_free and also_free(p)); };
     // ★ F4: with a measured opening, its jambs' contact risk joins the density over the doorway's corridor — the SAME weight
     //   turns its nats into metres, so F1's route surprisal reads it as nats too (a crossing at offset e adds R(e) nats:
     //   ~0 on the centre line of a passable opening, so a passable door does not lean Unreachable; see doorway_corridor.h)
@@ -250,23 +270,22 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //   excess of the soft residual cells it explains this cycle (sync_world_state), one mixture over its hypotheses prices the
     //   body's centre at p (door_leaf.h door_leaf_density, on the bare inscribed radius free_fn uses). Every goal adds it: the
     //   planner's prices this cycle are the share all hypotheses agree on.
-    auto extra_fn = [this, jambs, leaf = policy_leaf_evidence_](const Eigen::Vector2f &p)
+    auto extra_fn = [this, jambs, leaf = policy_leaf_evidence_, ext, unseen_density, dist_fn](const Eigen::Vector2f &p)
     {
         const float w = std::max(0.f, grid_planner_.params.residual_risk_weight);
-        return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_risk_density(*jambs, p, [&](const Eigen::Vector2f &q) { return rc::policy::field_free_from_distance(grid_planner_.distance_at(q), grid_planner_.cell_size(), jambs->anchor.inscribed_radius_m); }) : 0.f)
-                    + (leaf ? rc::policy::door_leaf_density(*leaf, p) : 0.f));
+        return (ext.contains(p) ? w * grid_planner_.body_risk_at(p) : unseen_density)   // Task 3f (b): unseen = the prior
+               + w * ((jambs ? rc::policy::doorway_risk_density(*jambs, p, [&](const Eigen::Vector2f &q) { return rc::policy::field_free_from_distance(dist_fn(q), grid_planner_.cell_size(), jambs->anchor.inscribed_radius_m); }) : 0.f)
+                      + (leaf ? rc::policy::door_leaf_density(*leaf, p) : 0.f));
     };
     const bool new_goal = not policy_goal_.has_value() or policy_goal_who_ != who or not rc::policy::same_goal(*policy_goal_, spec);
     if (new_goal)
     {
-        // The field's grid: the planner's extent at the harness's validated 0.05 m resolution (the field's own resolution
-        // bounds what the progress monitor can call progress — CostToGo::resolution_m).
+        // The field's grid: the planner's extent ∪ the goal points ∪ the robot (Task 3f (b): a goal is never off the grid it
+        // seeds), at the harness's validated 0.05 m resolution (the field's own resolution bounds what the progress monitor
+        // can call progress — CostToGo::resolution_m).
         constexpr float kFieldCell = 0.05f;
-        const float span_x = static_cast<float>(grid_planner_.width()) * grid_planner_.cell_size();
-        const float span_y = static_cast<float>(grid_planner_.height()) * grid_planner_.cell_size();
-        const Eigen::Vector2f origin = grid_planner_.grid_origin() - 0.5f * Eigen::Vector2f::Constant(grid_planner_.cell_size());
-        const rc::policy::CostToGo::Grid g{origin, kFieldCell, static_cast<int>(std::ceil(span_x / kFieldCell)) + 1,
-                                           static_cast<int>(std::ceil(span_y / kFieldCell)) + 1};
+        const rc::policy::CostToGo::Grid g = rc::policy::field_grid(ext, spec.points, pose.p, body.circumscribed_radius() + kFieldCell,
+                                                                    kFieldCell);
         // ★ F1: the navigator turns the field's priced-minus-length back into nats with the SAME weight extra_fn used.
         policy_nav_.set_route_risk_weight(std::max(0.f, grid_planner_.params.residual_risk_weight));
         policy_nav_.set_goal(spec.goal, g, free_fn, extra_fn, spec.points, body.circumscribed_radius());
@@ -767,8 +786,23 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             const auto tick = policy_tick(spec, who + (cp.drive ? "" : " (waiting)"), cpose, obstacle_tracker, motion_commander, now,
                                           corridor, veto, jambs);
             // F1: a Stuck is a hold; the crossing is handed back only on the Unreachable verdict (trapped field / belief)
+            // ★ Task 3f (c): past the room switch a field BUILT and READ non-finite at the robot for the no-route clock's span
+            //   gives the clearing up (policy_tick_gate.h ClearingNoRoute) — the passage concludes by its room-switch rule
+            bool clearing_no_route = false;
+            if (door_passage_.clearing())
+            {
+                using O = rc::policy::NoRouteObs;
+                const O obs = not tick.field_evaluated ? O::NotEvaluated : std::isfinite(tick.field_m) ? O::Finite : O::Infinite;
+                clearing_no_route = policy_clearing_no_route_.on_tick(now, obs, tick.verdict == PolicyVerdict::Unreachable, tick.stuck,
+                                                                      policy_unreach_latch_);
+            }
+            else
+                policy_clearing_no_route_.reset();
             if (tick.verdict == PolicyVerdict::Unreachable)
                 cross_hand_back(std::format("the local policy cannot drive it ({})", tick.why), /*timed_out=*/false, motion_commander);
+            else if (clearing_no_route)
+                cross_hand_back(std::format("the local policy has no route to the goal line for {:.1f} s", rc::policy::kNoRouteReportMs * 1e-3),
+                                /*timed_out=*/false, motion_commander);
             // ★ Live fix 4 ruling 4: waiting for an anchor never seen, FACING where it was published, for one plan duration
             //   (2 holds) — nothing at this pose changes it: hand the cross back and let the passage reposition (approach).
             else if (not cp.drive and policy_stale_wait_.on_tick(tick.verdict == PolicyVerdict::Arrived, steady_now_s(),

@@ -41,6 +41,7 @@
 #include <cmath>
 #include <numbers>
 #include <optional>
+#include <string>
 
 #include "../../../common/interaction_anchor/relative_pose.h"
 
@@ -162,6 +163,25 @@ struct RoomAnchor { Eigen::Vector3d x = Eigen::Vector3d::Zero(); Eigen::Matrix3d
     const double a = std::log(pr) + ll->l_other, b = std::log(1.0 - pr) + ll->l_same;
     return 1.0 / (1.0 + std::exp(b - a));
 }
+
+// ★ Task 3f (d) (tour3A leg 1: "door_2@robot RE-INITIALISED (2.23 m, -13.0 deg) — P(anchor lost) 0.031 -> 1.000" right after the
+//   room switch). A RoomAnchor is the block placed through the robot's pose IN ONE ROOM'S FRAME. Across a room switch the last
+//   block was placed in the room just left and the newer one in the room entered: their difference is the transform between the
+//   two rooms' frames, not a move of the anchor, and the re-initialisation test read it as one. The controller does not hold
+//   that transform (room_concept owns it), so blocks — and the poses recorded to place them — are compared only WITHIN one
+//   frame: a frame change drops them (the next block is the first in the new frame; nothing is evidence across the change).
+//   changed(room) records `room` and says whether it differs from the frame the held blocks were placed in.
+struct BlockFrame
+{
+    std::string frame;
+    [[nodiscard]] bool changed(const std::string& room)
+    {
+        if (room == frame) return false;
+        const bool had = not frame.empty();
+        frame = room;
+        return had;
+    }
+};
 
 // ─── FIX ROUND 1 (review of 142d8d3a) ───────────────────────────────────────────────────────────────────────────────────────────
 // ⚑ τ_view: door_concept's PREDICTION HORIZON (kAnchorPredictMs, 3 s), reused as the time over which consecutive frames

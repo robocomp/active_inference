@@ -188,7 +188,9 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     {
         // Task 12 Fix E: whether the cross is driven on an anchor, and whether its servo is through — the passage keeps the
         // cross going past a room switch on the anchor until then.
-        door_passage_.note_anchor(anchor_cross_engaged_, anchor_through_);
+        // Task 3f (c): a clearing the session gave up stays given up — the held gap re-engaged it on the next cycle, so
+        // cross_hand_back's "the anchor is given up" never took effect (both drivers: a protocol bug)
+        door_passage_.note_anchor(anchor_cross_engaged_ and not anchor_clearing_released_, anchor_through_);
         // Live fix 1 (review): the evidence for falling back to `approach` at the door — where the robot is, and the arrival
         // tolerance an approach completes with (the controller's goal_threshold).
         {
@@ -3512,6 +3514,8 @@ void ControllerSession::reset_anchor_cross_state()
     doorway_belief_t_ = -1.0;
     policy_pose_ring_.clear();                       // poses recorded for an earlier claim never serve this one
     anchor_uncovered_logged_stamp_ = 0;
+    anchor_clearing_released_ = false;               // Task 3f (c): a given-up clearing belongs to its claim
+    policy_clearing_no_route_.reset();
 }
 
 // ★ Task 3e (2) — rtD1h leg 5 attempt 2. ([Policy] Enabled only: the old chain's servo path is unchanged for the A/B.)
@@ -3539,6 +3543,19 @@ void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
 {
     if (not policy_enabled()) return;
     const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
+    // ★ Task 3f (d) (tour3A leg 1: "RE-INITIALISED (2.23 m, -13.0 deg) — P(anchor lost) 0.031 -> 1.000" at the room switch): the
+    //   ring's poses and the last block are in the frame of the room they were recorded in; across a room switch they are
+    //   dropped — the controller does not hold the transform between the two rooms' frames, so nothing is compared across it
+    //   (doorway_hypotheses.h BlockFrame). The next block is the first one in the new frame.
+    if (anchor_block_frame_.changed(current_room_name_))
+    {
+        if (anchor_prev_room_.has_value() or not policy_pose_ring_.empty())
+            std::println("[anchor] cross: the room frame changed to '{}' — the pose record and the last block are the old frame's: "
+                         "dropped, no re-initialisation test across the switch", current_room_name_);
+        policy_pose_ring_.clear();
+        anchor_prev_room_.reset();
+        anchor_prev_covered_ = false;
+    }
     policy_pose_ring_.emplace_back(now, robot_pose.pos, robot_pose.theta);
     while (not policy_pose_ring_.empty()
            and double(now - std::get<0>(policy_pose_ring_.front())) * 1e-3 > rc::policy::kDoorwaySwitchS)
@@ -4014,6 +4031,7 @@ void ControllerSession::cross_hand_back(const std::string &why, bool timed_out, 
         std::println("[anchor] cross: {} while going through past the room switch — the anchor is given up", why);
         note_why(rc::why::Cause::AnchorHandBack, std::format("past the room switch: {} — the anchor is given up", why));
         anchor_cross_engaged_ = false;
+        anchor_clearing_released_ = true;   // Task 3f (c): and stays given up — a held gap must not re-engage it next cycle
         anchor_wait_since_ms_ = 0;
         anchor_spin_since_ms_ = 0;
         note_no_command(); motion_commander.stop_robot();
@@ -4126,7 +4144,26 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
         // ★ Task 8: the completion is rc::cross_progress on the pose driven on (s >= standoff, gated by the near side) — the
         //   servo's `through` was the same test (anchor_cross_command: s >= standoff); one definition for both drivers.
-        const auto progress = rc::cross_progress(drive_pose, standoff, cross_gate_);
+        auto progress = rc::cross_progress(drive_pose, standoff, cross_gate_);
+        // ★ Task 3f (a) (tour3A leg 1: 9 min in `clearing` 0.5 m past the plane, room_concept already localising the robot in
+        //   room_2, the 2.0-m line beyond the newborn room's outline). [Policy] only — the old chain's servo keeps its line.
+        //   Past the room switch `through` is a POSTERIOR (local_policy/cross_through.h): P(body wholly past the plane | s on the
+        //   pose driven on with its σ, the switch into the target room judged on room_concept's published pose σ); the MAP
+        //   (> ½) is through. The near side must still have been observed in this claim (try89's gate: a claim that never saw
+        //   the robot before the door cannot complete). The s ≥ standoff rule above stands; this is a second, earlier exit.
+        double p_through = -1.0;
+        if (progress == rc::CrossProgress::Going and policy_enabled() and door_passage_.clearing() and cross_gate_.near_seen
+            and drive_pose.x.allFinite() and drive_pose.P.allFinite())
+        {
+            const auto g = rc::anchor_cross_geometry(drive_pose);
+            const float sigma_s = std::sqrt(std::max(0.f, g.n.dot(drive_pose.P.topLeftCorner<2, 2>() * g.n)));
+            // the body's extent behind its centre along the normal (its support toward −n, robot frame): wholly past = s > it
+            const float h = approach_body_.support_radius(0.f, -g.n);
+            // room_concept's pose σ is what the switch was judged on; unpublished (0) ⇒ ours (flagged: no tighter than the pose)
+            const float sigma_r = policy_pose_xy_std_ > 0.f ? policy_pose_xy_std_ : sigma_s;
+            p_through = rc::policy::p_through_given_switch(g.s, sigma_s, h, sigma_r);
+            if (p_through > 0.5) progress = rc::CrossProgress::Through;
+        }
         if (progress == rc::CrossProgress::NotACrossing)
         {
             // try89 fix: s ≥ standoff on a claim that never saw the robot on the near side is not a crossing — the frame is
@@ -4144,6 +4181,11 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
             anchor_through_ = true;
             if (door_passage_.clearing())
             {
+                if (p_through > 0.5)
+                    std::println("[anchor] cross: {} is {:.2f} m behind along its normal — THROUGH the doorway, in the new room: "
+                                 "P(body wholly past | s, room switch) {:.3f} (Task 3f; standoff {:.2f} m not needed){}", drive_name,
+                                 g.s, p_through, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
+                else
                 std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — THROUGH the doorway, "
                              "in the new room{}", drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
                 note_why(rc::why::Cause::PassageClearing,
