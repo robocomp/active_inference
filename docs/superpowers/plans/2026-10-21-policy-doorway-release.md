@@ -154,3 +154,22 @@ rtD1e: the hand-over into room_1 resolved to the 180°-symmetric mode (P(lost) �
 the crossed door, on the new room's side, facing in — a strong prior. First MEASURE how often hand-overs flip across
 rtD1b–e (relocaliser mode/jump events vs gt), then seed/weight the relocaliser mixture with the crossing pose (door
 pose + crossing direction + its σ) — room_concept code, its own tests and estimation scripts.
+
+### Task 3e: cross goal line by hypothesis posterior; anchor state; passage protocol (rtD1h leg 5)
+Analysis: scratchpad rtD1h_leg5_analysis.md. (A) door_concept's passage anchor sat on an alias ~1.9 m / 65–80° off the
+door; `controller_policy_drive.cpp:685` (goal line = the anchor, always — 3b's ruling) overrode a correct gap (score
+0.99); on retry a parked block still marked drivable left the controller `engaged` (`controller_session.cpp:3580`) and
+the engaged branch waits instead of turning (`:4071-4080`). (B) `reposition()` (`controller_door_passage.h:150-159`,
+called from `controller_policy_drive.cpp:733`) switched to approach before the deferred Unreachable was reported ⇒
+`mark_reached` completed the APPROACH, the CROSS stayed Executing (orphaned); the selector never releases a claim its
+filter excludes (`affordance_manager.cpp:948-984`, `:1194`); the passage then moved to `open` (withdrawn because the door is
+open) and could never reach cross (`reached_door_`, line 318).
+- [ ] Failing tests, then fix: (1) the goal line is the MAP of two hypotheses — anchor-is-the-door (weighted by the
+  anchor's own belief: lost/re-init state, covariance) vs gap-is-the-door (score) — a selection, never their average
+  (3b review I-2); a 0.99-score gap vs a fresh/lost anchor ⇒ the gap's line; (2) parking an anchor block clears its
+  drivable mark; `engaged` resets when the anchor is re-initialised; the engaged branch turns toward a non-drivable
+  re-initialised anchor rather than waiting; (3) a hand-back completes the affordance node it NAMES, not the current
+  claim (or reposition releases the cross as take_preempted does); (4) the selector releases any claim its required-name /
+  room-scope filter excludes; (5) an `open` step not on offer while P(open) > 1/2 is Satisfied — the passage proceeds to
+  cross. Old chain unchanged with the policy off where these paths are policy-only; protocol fixes (3)–(5) apply to both
+  (they are bugs, not policy behaviour) — state which.

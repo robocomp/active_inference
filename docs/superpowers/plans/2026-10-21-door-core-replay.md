@@ -133,3 +133,9 @@ remembered `door_1` (tourR2; also P7/P9/P10) — name drift on the identity matc
   jump by more than its own posterior predicts; the main door keeps `door_1`), the model-level fix (CLAUDE.md: no
   thresholds — the probabilistic model), then: all other decisions on both tapes unchanged except the named ones
   (list every changed decision with its reason). Unit tests + door tests green; build; commit per defect.
+
+### Task D-B: the passage anchor's lost/re-init check runs on every cycle of a claimed cross (rtD1h leg 5)
+door_concept's anchor jumped onto an alias ~1.9 m / 65–80° off within ~1 s of being hung (door_decisions.bin rows
+5164→5174) and was only re-initialised at the controller's retry. Run the existing belief_lost / retry_reinit mixture
+every cycle while a cross is claimed; publish the anchor's lost belief so the controller can weigh it (Task 3e). Test on
+the rtD1h tape (record it: the run had recording on) — the alias must not survive.
