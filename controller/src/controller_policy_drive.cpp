@@ -408,7 +408,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
             ? std::format("the goal is no longer reachable from ({:.2f},{:.2f}) after a trap at ({:.2f},{:.2f})", pose.p.x(),
                           pose.p.y(), st.trap ? st.trap->c.x() : 0.f, st.trap ? st.trap->c.y() : 0.f)
             : std::format("no motion escapes from ({:.2f},{:.2f}): reachability log-odds {:.2f} > bar {:.2f} (the {:.2f} m route vs "
-                          "one tick) — last decision: {}", pose.p.x(), pose.p.y(), st.unreach_L, st.unreach_bar, route_here, d.why);
+                          "{:.2f} s between decisions) — last decision: {}", pose.p.x(), pose.p.y(), st.unreach_L, st.unreach_bar, route_here, st.unreach_dt_obs, d.why);
         note_why(rc::why::Cause::PolicyHold, std::format("{}: {}", who, out.why));
         note_no_command(); motion_commander.stop_robot();
         policy_sent_.push_back({now_s, 0.f, 0.f});

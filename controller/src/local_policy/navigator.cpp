@@ -24,8 +24,9 @@ void Navigator::set_goal(const Goal& goal, const CostToGo::Grid& grid, std::func
     trap_veto_ = {};
     monitor_.reset();
     plan_ = Plan{};
-    belief_.reset(grid.cell, trap_radius_m);   // F1: a new goal starts from its route's prior (set every tick)
+    belief_.reset(grid.cell, trap_radius_m);   // F1: a new goal starts from the base-rate prior
     claim_ = Claim{};
+    hold_since_ = -1.0;
     build();
 }
 
@@ -200,7 +201,14 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
             const float res_route = goal_.kind == Goal::Kind::Heading ? 0.f
                                   : std::hypot(field_.resolution_m((in.pose.p - claim_.at.p).norm()), sd) / std::max(in.base.v_max, 1e-3f);
             const float res_yaw = goal_heading(in.pose) ? in.sigma_rel_yaw / std::max(in.base.w_max, 1e-3f) : 0.f;
-            const float ev = ReachabilityBelief::claim(D, r, std::hypot(res_route, res_yaw));
+            // ★ FIX ROUND 3 (live rtD1d leg 4): (2) only the part of D a CHOICE made — the stop rollout's shortening (the coast
+            //   every candidate carries) is subtracted from D and r; (1) + (3) sigma adds the dynamics model's own prediction
+            //   variance, widened by the time a hold had been in force when the claim was opened (reachability_belief.h)
+            Claim stop = claim_; stop.v1 = stop.w1 = stop.v2 = stop.w2 = 0.f; stop.has2 = false;
+            const float D_stop = claim_.T0 - remaining_time(predicted_pose(stop, el), in.base);
+            const float sig_dyn = ReachabilityBelief::dynamics_sigma_s(claim_.v0, claim_.w0, claim_.lat, claim_.tau, claim_.base,
+                                                                      goal_.kind != Goal::Kind::Heading, goal_heading(in.pose).has_value());
+            const float ev = ReachabilityBelief::claim_choice(D, r, D_stop, std::hypot(std::hypot(res_route, res_yaw), sig_dyn));
             belief_.add(claim_.at.p, ev, std::isfinite(claim_.T0) ? T_now : INFINITY);   // round 2: nothing gathered at T = inf
         }
         claim_ = Claim{};
@@ -216,7 +224,9 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
             // (I3) is graded like any plan by what it predicted for the time it ran — never counted as "no escape"
             claim_ = Claim{.pending = true, .at = in.pose, .T0 = remaining_time(in.pose, in.base), .t0 = in.now_s,
                            .v0 = in.v_now, .w0 = in.w_now, .lat = in.latency_s, .v1 = d.v, .w1 = d.w, .v2 = d.plan_v2, .w2 = d.plan_w2,
-                           .has2 = d.plan_has_cont, .hold = p.horizon_s, .dt = p.dt, .base = in.base};
+                           .has2 = d.plan_has_cont, .hold = p.horizon_s, .dt = p.dt, .base = in.base,
+                           // (3): the base's state is unobserved for the latency, and for as long as a hold has been in force
+                           .tau = in.latency_s + (hold_since_ >= 0.0 ? float(in.now_s - hold_since_) : 0.f)};
         }
         // ★ The COUNT "no escape among n options" (+log(n+1)) is a statement about the OPTIONS, not about the plan chosen; it is
         //   graded by P(no option really shortens T | the best shortening any ELIGIBLE option offers over two steps, along the
@@ -237,8 +247,13 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
             belief_.add(in.pose.p, ev, T_here);   // round 2: at T = inf (no route on the map) the count says nothing about the place
         }
     }
+    // (3) a HOLD is in force from a Stuck decision (the caller stops the base) or an interruption until a motion is commanded
+    if ((d.mode == M::Drive or d.mode == M::Release) and not is_stop) hold_since_ = -1.0;
+    else if ((d.mode == M::Stuck or is_stop) and hold_since_ < 0.0) hold_since_ = in.now_s;   // a Stuck and a stop command zero
+    last_now_ = in.now_s;
     const float T = remaining_time(in.pose, in.base);
     s.unreach_L = belief_.log_odds();
+    s.unreach_dt_obs = belief_.dt_obs();
     s.unreach_bar = belief_.bar(T);
     s.hand_back = d.mode != M::Arrived and not s.unreachable and s.unreach_L > s.unreach_bar;
     // A hand back is the verdict on THIS attempt: the same goal asked again (the passage re-claims a crossing at once — rtD1b)

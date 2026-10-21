@@ -102,6 +102,41 @@ public:
         const float mu_u = std::min(D, 0.f);
         return ((r - D) * (r - D) - (r - mu_u) * (r - mu_u)) / (2.f * sigma * sigma);
     }
+    // ★ FIX ROUND 3 (live rtD1d leg 4: one claim, +27.5 nats — a back-up decided at 0.33 m/s right after a one-tick Stuck hold
+    //   predicted 0.123 m of shortening, all of it braking coast, and realized 0.010 m; sigma held only the field resolution
+    //   (+) drift, so the dynamics model's own error scored ~7 sigma).
+    // (2) Only the part of D a CHOICE made is tested: the stop rollout's predicted shortening D_stop (the coast every candidate
+    //     carries — under U and R alike) is subtracted from both the prediction and the realization.
+    static float claim_choice(float D, float r, float D_stop, float sigma) { return claim(D - D_stop, r - D_stop, sigma); }
+    // (1) The variance of the PREDICTED displacement under the dynamics model, in time units (route part / v_max, heading part /
+    //     w_max), from three sources:
+    //       the deceleration — coast c = v0^2 / (2 d), dc = c x sigma_d / d with sigma_d / d = kDecelRelSigma;
+    //       the latency — the latency coast v0 x lat, d = v0 x kLatencySigmaS;
+    //       the speed itself — v0 is a sample of the past: over the unobserved interval tau (pose age + command latency; plus,
+    //         (3), the time a HOLD has been in force, during which the base brakes while the samples lag) the speed can have
+    //         changed by up to d x tau toward rest (never past it): uniform, sigma_v = min(|v0|, d tau) / sqrt(3), and it moves
+    //         the latency coast and the brake coast together, d(lat v0 + v0^2/(2d))/dv0 = lat + |v0| / d.
+    //     A claim opened under a hold is therefore DOWN-WEIGHTED by the larger sigma, not dropped by a rule.
+    static float dynamics_sigma_s(float v0, float w0, float lat, float tau, const BaseLimits& b, bool route_term, bool heading_term)
+    {
+        auto part = [&](float x0, float dec) {
+            const float x = std::abs(x0);
+            if (not (dec > 0.f)) return 0.f;
+            const float c = x * x / (2.f * dec);
+            const float s_x0 = std::min(x, dec * std::max(tau, 0.f)) / 1.7320508f;
+            const float a = c * kDecelRelSigma, l = x * kLatencySigmaS, v = (std::max(lat, 0.f) + x / dec) * s_x0;
+            return a * a + l * l + v * v; };
+        float var = 0.f;
+        if (route_term and b.v_max > 0.f) var += part(v0, b.d_lin) / (b.v_max * b.v_max);
+        if (heading_term and b.w_max > 0.f) var += part(w0, b.d_rot) / (b.w_max * b.w_max);
+        return std::sqrt(var);
+    }
+    // PROVISIONAL, from the config's own provisional values (controller etc/config.toml [Policy]):
+    //   WheelDecelMps2 = 0.5 was fitted to ONE reversal whose body deceleration measured 0.56 m/s^2 — no spread is measured, so
+    //   the relative spread is that one discrepancy, (0.56 - 0.5) / 0.5 = 0.12;
+    //   CommandLatencyS = 0.06 is "the Task-6 harness's plant value", whose jitter is 0.02 s (sim2d Base) — the latency spread.
+    static constexpr float kDecelRelSigma = 0.12f, kLatencySigmaS = 0.02f;
+
     float coast_m(float v_now, float w_now, float latency_s, const BaseLimits& b) const
     {
         const float v = std::abs(v_now), w = std::abs(w_now), lat = std::max(latency_s, 0.f);

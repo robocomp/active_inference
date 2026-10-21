@@ -115,6 +115,36 @@ int main()
         r3.add(P0.p, 1.f, 2.f);
         CHECK("round 2 (3): evidence at a finite T is", near(r3.log_odds(), kPrior0 + 1.f));
     }
+    // 8. FIX ROUND 3 (live rtD1d leg 4): ONE claim of +27.5 nats — a back-up decided at v0 0.33 m/s right after a one-tick Stuck
+    //    hold (the base already braking) predicted 0.123 m of shortening, ALL of it the forward braking coast, and realized
+    //    0.010 m. sigma held only the field resolution (+) drift (~1.5 cm). Replay, in time units at v_max 0.5:
+    {
+        BaseLimits lb = b; lb.d_lin = 0.5f;                       // WheelDecelMps2 0.5 (live)
+        const float vmax = lb.v_max, v0 = 0.33f, lat = 0.07f;     // latency as in the analysis' coast (0.33 x 0.07)
+        const float D = 0.123f / vmax, r = 0.010f / vmax;
+        const float D_stop = (v0 * lat + v0 * v0 / (2.f * lb.d_lin)) / vmax;   // the stop rollout: the common coast
+        const float sig_meas = 0.015f / vmax;
+        const float old = RB::claim(D, r, sig_meas);
+        std::printf("   rtD1d replay: round-2 grading %+.1f nats (live +27.5)\n", old);
+        CHECK("round 3 replay: the round-2 grading reproduces the live jump (> 20 nats)", old > 20.f);
+        // (1) the dynamics model's own prediction variance; (3) the hold in force 0.15 s before the claim (488.64 -> 488.79)
+        const float sig_dyn = RB::dynamics_sigma_s(v0, 0.f, lat, lat + 0.15f, lb, true, false);
+        // (2) only the part of D a CHOICE made: the stop rollout's coast is subtracted from both D and r
+        const float ev = RB::claim_choice(D, r, D_stop, std::hypot(sig_meas, sig_dyn));
+        std::printf("   rtD1d replay: round-3 grading %+.2f nats (sigma_dyn %.3f s = %.3f m)\n", ev, sig_dyn, sig_dyn * vmax);
+        CHECK("round 3 replay: the coast misprediction is worth a couple of nats at most, not 27", std::abs(ev) < 3.f);
+        CHECK("round 3: sigma_dyn > 0 for a moving base", sig_dyn > 0.f);
+        // a GENUINE non-delivery from rest still counts: from rest, 0.30 m predicted, nothing realized, no coast, no hold
+        const float sig_rest = std::hypot(sig_meas, RB::dynamics_sigma_s(0.f, 0.f, lat, lat, lb, true, false));
+        const float ev_rest = RB::claim_choice(0.30f / vmax, 0.f, 0.f, sig_rest);
+        std::printf("   from rest, 0.30 m predicted, 0 realized: %+.1f nats\n", ev_rest);
+        CHECK("round 3: a genuine non-delivery from rest still accumulates strongly (> 20 nats)", ev_rest > 20.f);
+        CHECK("round 3: and a delivery from rest is strongly against", RB::claim_choice(0.30f / vmax, 0.30f / vmax, 0.f, sig_rest) < -20.f);
+        // the dynamics sigma grows with the unobserved braking time (a hold in force) and with v0
+        CHECK("round 3: a hold in force widens sigma_dyn", RB::dynamics_sigma_s(v0, 0.f, lat, lat + 0.3f, lb, true, false) > RB::dynamics_sigma_s(v0, 0.f, lat, lat, lb, true, false));
+        CHECK("round 3: the heading part only for a goal that asks for a heading", RB::dynamics_sigma_s(0.f, 1.f, lat, lat, lb, true, false) == 0.f
+              and RB::dynamics_sigma_s(0.f, 1.f, lat, lat, lb, false, true) > 0.f);
+    }
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;
 }

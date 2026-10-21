@@ -68,7 +68,8 @@ public:
                   // ★ F1 (reachability_belief.h): the accumulated belief that no motion escapes from this place — its log-odds
                   //   at the robot, the hand-back bar log(route / (v_max dt)), and the verdict: hand the goal back iff L > bar.
                   //   This, not a Stuck tick, is the place-level "Unreachable" the caller hands back on.
-                  float unreach_L = 0.f, unreach_bar = INFINITY; bool hand_back = false; };
+                  float unreach_L = 0.f, unreach_bar = INFINITY; bool hand_back = false;
+                  float unreach_dt_obs = 0.f; };                 // F1 round 3: the measured interval between observations (s)
     // The committed plan: phase 1 = (v1, w1) for horizon_s then brake, dur1 in all; phase 2 (if has2) = (v2, w2) from rest
     // for horizon_s then brake, dur2 in all. t0 = the decision time it started.
     // round 5: the plan runs PHASE by phase; a phase ends when its hold elapses OR its predicted end state is reached
@@ -99,7 +100,7 @@ public:
     //   nothing about the world): no failed prediction, no trap. Goal, field and traps are kept.
     //   F1: the reachability belief is KEPT (it is about places, and an interruption gathered nothing), but the interval to the
     //   next tick is a gap, not a tick period: the hand-back bar is not priced on it (ReachabilityBelief::interrupt).
-    void interrupt() { plan_ = Plan{}; monitor_.reset(); belief_.interrupt(); claim_ = Claim{}; }
+    void interrupt() { plan_ = Plan{}; monitor_.reset(); belief_.interrupt(); claim_ = Claim{}; if (hold_since_ < 0.0) hold_since_ = last_now_; }
     // ★ Live fix 2 ruling 2 — MEASURED EVIDENCE OVERRIDES A TRAP. veto(c, r) true = a trap disc there contradicts direct
     //   evidence that the body fits (the active Doorway's MEASURED corridor, an opening at least the body's width): the
     //   failed prediction still forces its Release, but no trap is laid (Step::trap_vetoed). Cleared by set_goal.
@@ -127,7 +128,8 @@ private:
     //   judged against its own rollout when its plan ends (navigator.cpp step())
     struct Claim { bool pending = false; Pose2 at{}; float T0 = 0.f; double t0 = 0.0;
                    float v0 = 0.f, w0 = 0.f, lat = 0.f, v1 = 0.f, w1 = 0.f, v2 = 0.f, w2 = 0.f; bool has2 = false;
-                   float hold = 1.f, dt = 0.05f; BaseLimits base{}; };
+                   float hold = 1.f, dt = 0.05f; BaseLimits base{}; float tau = 0.f; };
+    double hold_since_ = -1.0, last_now_ = 0.0;   // F1 round 3: when the current hold began (-1: none)
     Claim claim_;
     Pose2 predicted_pose(const Claim& c, float el) const;
     static float no_shortening(float D, float sig, float T);
