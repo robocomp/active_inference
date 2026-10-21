@@ -247,6 +247,23 @@ struct ExistenceScene
 [[nodiscard]] float door_view_obliquity(const std::optional<Mat4d>& room_T_zed, const rc::DoorFitState& inst);
 [[nodiscard]] float aperture_band_offset(const std::vector<Eigen::Vector2f>& polygon, const rc::DoorFitState& inst);
 
+/// ★Task D-C (rtD1i door_5): THE DOOR'S IMAGE CHANNELS UNDER THE ROBOT POSE'S UNCERTAINTY. Every image channel predicts
+/// WHERE the door is in the frame from the robot↔room pose; under a bearing error e (rad) the prediction is shifted by e,
+/// and a window of angular width a = 2·atan(half-diagonal / range) still overlaps the true door by max(0, 1 − |e|/a). With
+/// e ~ N(0, σ_b²), σ_b² = σ_yaw² + σ_xy²/range² (σ_xy² the largest eigenvalue of the published RT covariance's position
+/// block — conservative, frame-free):
+///   kappa     — the expected overlap, closed form (2Φ(a/σ_b) − 1) − (2σ_b/(a√(2π)))·(1 − e^{−a²/(2σ_b²)}): 1 for a
+///               well-localised robot, → a/(σ_b√(2π)) → 0 as the pose spreads. It multiplies P(detect) and the image
+///               evidence: a look is about the door only in that proportion.
+///   spread_m  — σ_b·range, the lateral spread of the door's predicted place. The pose error is COMMON MODE: one wrong pose
+///               is wrong for every frame taken under it, so frames whose viewpoints differ by less than this spread are not
+///               independent looks. It widens the view pools' novelty scale (door_view_pool.h) — under a 4 m spread the
+///               whole room is one view, worth κ of one observation, instead of hundreds of new ones.
+/// No covariance on the input ⇒ {1, 0} (the old behaviour). No gate: the covariance does it.
+struct PoseOverlap { float kappa = 1.0f; float spread_m = 0.0f; };
+[[nodiscard]] PoseOverlap pose_overlap_factor(const std::optional<Mat6d>& rt_cov, const std::optional<Mat4d>& room_T_zed,
+                                              const Eigen::Vector2f& door_xy, float half_diag_m);
+
 /// The header line of etc/door_existence_log.csv (the adapter writes it once, when it opens the file).
 extern const char* const kExistenceCsvHeader;
 

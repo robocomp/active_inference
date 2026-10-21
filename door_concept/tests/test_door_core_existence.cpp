@@ -122,6 +122,8 @@ static void door_pixels(std::vector<Vec2f>& px, float leaf_y = kWallY, float rob
 }
 
 enum class Phase { Present, Absent };
+// Task D-C: the robot↔room RT covariance the inputs carry (σ of x, y in m and of yaw in rad); < 0 ⇒ none recorded.
+static double g_pose_sd_xy = -1.0, g_pose_sd_yaw = -1.0;
 
 // leaf_y: where the leaf really is (Task 5b: the wall line is the room polygon's face, the leaf may stand off it); robot_x:
 // the robot's x (1 = square-on; off it the view is oblique and a plane at the wrong depth projects to the wrong pixels).
@@ -135,6 +137,14 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, Phase phase
     in.robot.present = true;
     in.robot.room_T_body = pose(robot_x, kRobotY, 0.0, turned_away);
     in.robot.body_T_zed = pose(0.0, 0.0, 1.2, false);
+    if (g_pose_sd_xy >= 0.0)
+    {
+        Mat6d C = Mat6d::Zero();
+        C(0, 0) = C(1, 1) = g_pose_sd_xy * g_pose_sd_xy;
+        C(2, 2) = C(3, 3) = C(4, 4) = 1e-6;
+        C(5, 5) = g_pose_sd_yaw * g_pose_sd_yaw;
+        in.robot.rt_cov = C;
+    }
     in.camera.present = true;
     in.camera.width = kW; in.camera.height = kH; in.camera.focal_x = kF; in.camera.focal_y = kF;
 
@@ -441,6 +451,45 @@ int main()
             CHECK(L_min >= L_entry - 1e-6);                   // the data since entry are net positive …
             CHECK(removes.empty());                           // … so the remembered prior alone does not remove it
         }
+    }
+
+    // ── 10. Task D-C (rtD1i door_5): THE IMAGE CHANNELS ARE WEIGHTED BY THE POSE'S UNCERTAINTY. The door was removed on
+    //     looks taken from a pose 4 m wrong. pose_overlap_factor κ — the expected fraction of the predicted image that lands
+    //     on the door when the bearing is uncertain — is 1 for a precise pose and falls toward 0 as the pose spreads, and it
+    //     multiplies P(detect) and the image evidence: the same absence (section 1's sweep) that removes the door from a
+    //     well-localised robot (σ 3 cm, 0.6°: the tapes' typical RT covariance) must not move it from a robot whose pose is
+    //     spread over metres.
+    {
+        const Mat4d cam = pose(1.0, kRobotY, 1.2, false);
+        const Eigen::Vector2f door(kDoorX, kWallY);
+        const auto k_of = [&](double sxy, double syaw)
+        {
+            Mat6d C = Mat6d::Zero(); C(0, 0) = C(1, 1) = sxy * sxy; C(5, 5) = syaw * syaw;
+            return pose_overlap_factor(C, cam, door, 0.5f * std::hypot(1.0f, 2.1f)).kappa;
+        };
+        const float k0 = k_of(0.0, 0.0), k3 = k_of(0.03, 0.0105), k30 = k_of(0.30, 0.05), k4 = k_of(4.0, 1.0);
+        std::print("pose overlap κ: exact {:.4f}, σ 3 cm/0.6° {:.4f}, 30 cm/3° {:.4f}, 4 m/57° {:.4f}; no covariance {:.1f}\n",
+                   k0, k3, k30, k4, pose_overlap_factor(std::nullopt, cam, door, 1.0f).kappa);
+        CHECK(k0 == 1.0f);
+        CHECK(k3 > 0.97f and k3 < 1.0f);
+        CHECK(k30 < k3 and k4 < k30);
+        CHECK(k4 < 0.15f);
+        CHECK(pose_overlap_factor(std::nullopt, cam, door, 1.0f).kappa == 1.0f);
+        CHECK(pose_overlap_factor(std::nullopt, cam, door, 1.0f).spread_m == 0.0f);
+        for (const double sd : {0.03, 4.0})
+        {
+            g_pose_sd_xy = sd; g_pose_sd_yaw = sd < 1.0 ? 0.0105 : 1.0;
+            ExistWorld w;
+            const Run r = run(40, 200, false, -1, &w);
+            const auto L = L_of(r);
+            double L40 = 0.0;
+            for (const auto& d : r.exist) if (d.cycle <= 40) L40 = d.a;
+            std::print("absence from new views, pose σ {:.2f} m: {} REMOVE, L at the end of presence {:.2f}, last {:.2f}\n", sd,
+                       r.removes.size(), L40, L.empty() ? -99.0 : L.back());
+            if (sd < 1.0) CHECK(r.removes.size() == 1);
+            else { CHECK(r.removes.empty()); CHECK(not L.empty() and L.back() > L_remove); }
+        }
+        g_pose_sd_xy = g_pose_sd_yaw = -1.0;
     }
 
     // ── 11. Task D-C (rtD1i door_5, visit 1): A DOOR HIDDEN BEHIND A PARTITION IS NOT SEEN, SO IT IS NOT ABSENT. DOOR_0's

@@ -17,6 +17,7 @@
 #include <unordered_set>
 
 #include <opencv2/imgproc.hpp>
+#include <Eigen/Eigenvalues>
 
 #include "../door_geometry.h"
 #include "../door_phi_posterior.h"                                // room_walls_beside, phi_field_nuisance (one own-wall definition)
@@ -217,6 +218,28 @@ void ImageSource::stage_live(const cv::Mat& bgr, const cv::Mat& depth_m)
     rgb_ = bgr;
     depth_ = depth_m;
     frame_ref_.reset();
+}
+
+// ─── the pose-uncertainty overlap (Task D-C, door_existence.h) ─────────────────────────────────────────────────────
+
+PoseOverlap pose_overlap_factor(const std::optional<Mat6d>& rt_cov, const std::optional<Mat4d>& room_T_zed,
+                                const Eigen::Vector2f& door_xy, float half_diag_m)
+{
+    if (not rt_cov.has_value() or not room_T_zed.has_value() or not rt_cov->allFinite())
+        return {};
+    const Eigen::Vector2d cam(room_T_zed->coeff(0, 3), room_T_zed->coeff(1, 3));
+    const double range = std::max(1e-2, (door_xy.cast<double>() - cam).norm());
+    const Eigen::Matrix2d Pxy = rt_cov->topLeftCorner<2, 2>();
+    const double var_xy = std::max(0.0, Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d>(Pxy).eigenvalues().maxCoeff());
+    const double var_b = std::max(0.0, rt_cov->coeff(5, 5)) + var_xy / (range * range);
+    if (not (var_b > 0.0))
+        return {};
+    const double sb = std::sqrt(var_b);
+    const double a = 2.0 * std::atan(std::max(1e-3, static_cast<double>(half_diag_m)) / range);
+    const double z = a / sb;
+    const double k = std::erf(z / std::sqrt(2.0))
+                   - (2.0 / (z * std::sqrt(2.0 * std::numbers::pi))) * (1.0 - std::exp(-0.5 * z * z));
+    return {static_cast<float>(std::clamp(k, 0.0, 1.0)), static_cast<float>(sb * range)};
 }
 
 // ─── the probes (DoorFitter's, moved) ────────────────────────────────────────────────────────────────────────────────
@@ -834,6 +857,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
 
         // ── SILHOUETTE CHANNEL (the only one that may remove a door) ──────────────────────────────────
         const auto sil = compute_silhouette_existence(scene, inst, &semantic_);
+        // Task D-C: how much of the door's predicted image lands on the door under the pose's uncertainty (κ, see
+        // pose_overlap_factor) — every image channel below is weighted by it.
+        const float view_R = 0.5f * std::hypot(inst.aperture.w, inst.aperture.h);   // the door's half-diagonal
+        const PoseOverlap po = pose_overlap_factor(in.robot.rt_cov, room_T_zed, inst.aperture.centre_xy(), view_R);
+        const float kappa = po.kappa;
+        const float pool_R = std::hypot(view_R, po.spread_m);   // views closer than the pose spread are one look
+        inst.dbg_pose_kappa = kappa;
 
         // ── RGB CONTOUR CHECK ────────────────────────────────────────────────────────────────────
         // Does the IMAGE have a boundary where this door's own projected leaf face predicts one? No
@@ -984,14 +1014,14 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             // No camera pose ⇒ no viewpoint to pool by ⇒ HOLD (nothing integrated), as for an unmeasured cycle.
             if (not room_T_zed.has_value())
             { inst.dbg_edge_delta = 0.0f; return; }
-            const float llr = rc::exist::contour_evidence(1e9f, n, sm).log_odds_delta;   // one confident observation
+            // one confident observation, worth κ of one under the pose's uncertainty (Task D-C)
+            const float llr = kappa * rc::exist::contour_evidence(1e9f, n, sm).log_odds_delta;
             const Eigen::Vector2f cam(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)));
             // The view's scale is the door's half-DIAGONAL, the same as the silhouette's pool (add_logodds below): "a new
             // view" is one question about one object, and two channels judging it at different scales let the one that
             // sees novelty sooner (the narrower) out-run the other — measured, tourR1 DOOR_1 at RecessPriorStd 0.2:
             // the image channel at 0.5·w walked a door the silhouette read occupied (150/30) to the floor in 13 frames.
-            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(),
-                                                      0.5f * std::hypot(inst.aperture.w, inst.aperture.h), verdict, llr);
+            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), pool_R, verdict, llr);
             const float L0 = inst.existence.logodds();
             inst.existence.integrate(1.0f, dL);
             inst.image_view_pool.commit(inst.existence.logodds() - L0);   // what the view really moved L (the clamp)
@@ -1111,7 +1141,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // is the same shape as the documented hood failure, so a door believed permanently edge-on
         // would be hard to remove. The aperture-side evidence is what has to keep that in check.
         const float leaf_oblq = door_view_obliquity(room_T_zed, inst);
-        float p_detect = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
+        float p_detect = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac() * kappa;
 
         // ★THE CONTOUR CHECK. Everything above is geometry: it says how well the camera could have
         // resolved the door IN PRINCIPLE. This asks what the classifier actually computed AT the door's
@@ -1173,8 +1203,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         if (room_T_zed.has_value())
         {
             const Eigen::Vector2f cam(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)));
-            ev.log_odds_delta = inst.silhouette_view_pool.add_logodds(cam, inst.aperture.centre_xy(),
-                                                                      0.5f * std::hypot(inst.aperture.w, inst.aperture.h),
+            ev.log_odds_delta = inst.silhouette_view_pool.add_logodds(cam, inst.aperture.centre_xy(), pool_R,
                                                                       ev.log_odds_delta);
             pooled_sil = true;
         }
