@@ -220,6 +220,13 @@ public:
     // density is residual_risk_weight·R with R = body_risk_at — NOT risk_at (one cell's nats), and NOT divided by the cell
     // size: the planner already prices risk per metre travelled. 0 with no soft layer.
     float body_risk_at(const Eigen::Vector2f& pos_room) const;
+    // ── Task 3c: -log P(the body fits at p), from the same belief (standpoint_fit.h) ──────────────────────────────────
+    // fit_nats_some_heading: the body standing at ONE heading (the cheapest): min over the hard-free headings of the soft
+    //   nats it covers; +inf when no heading is hard-free (a wall, an object polygon, a corroborated residual cell).
+    // fit_nats_turning: the body turning in place through EVERY heading (a terminal facing turn): +inf unless free at all
+    //   eight, else the soft nats of the UNION of the eight footprints — each cell counted once, since a turn covers it once.
+    float fit_nats_some_heading(const Eigen::Vector2f& pos_room) const;
+    float fit_nats_turning(const Eigen::Vector2f& pos_room) const;
     Eigen::Vector2f grid_origin() const { return cell_to_world(0, 0); }   // centre of cell (0, 0), room frame
     float cell_size() const { return cell_; }
 

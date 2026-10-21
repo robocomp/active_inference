@@ -833,6 +833,14 @@ private:
         if (reach_unreachable_why_.empty()) reach_unreachable_why_ = std::move(why);
         return true;
     }
+    /// Task 3c ([Policy] Enabled only): ANY affordance standpoint the occupancy belief says the body cannot take
+    /// (standpoint_fit.h) is handed back the same way — never re-sited — so the producer re-solves inside its own band.
+    bool flag_standpoint_unreachable(std::string why)
+    {
+        if (not last_target_info_.has_value() or not last_target_info_->from_affordance) return false;
+        if (reach_unreachable_why_.empty()) reach_unreachable_why_ = std::move(why);
+        return true;
+    }
 public:
     /// No route for > 5 s ⇒ report Unreachable to the affordance producer. Called on EVERY cycle the worker
     /// fails to plan (ensure_current_plan false returns before execute_plan) and from execute_plan.

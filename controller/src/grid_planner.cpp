@@ -12,6 +12,7 @@
 #include <format>
 #include <istream>
 #include <set>
+#include <unordered_set>
 #include <limits>
 #include <ostream>
 #include <queue>
@@ -276,6 +277,38 @@ float GridPlanner::body_risk_at(const Eigen::Vector2f& pos_room) const
     float r = std::numeric_limits<float>::infinity();
     for (int h = 0; h < kHeadings; ++h) r = std::min(r, state_risk(ix, iy, h));
     return std::isfinite(r) ? r : 0.f;
+}
+
+float GridPlanner::fit_nats_some_heading(const Eigen::Vector2f& pos_room) const
+{
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) return kInf;
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    float best = kInf;
+    for (int h = 0; h < kHeadings; ++h)
+        if (cell_free(ix, iy, h)) best = std::min(best, state_risk(ix, iy, h));
+    return best;
+}
+
+float GridPlanner::fit_nats_turning(const Eigen::Vector2f& pos_room) const
+{
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) return kInf;
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    for (int h = 0; h < kHeadings; ++h)
+        if (not cell_free(ix, iy, h)) return kInf;
+    if (risk_.empty()) return 0.f;
+    std::unordered_set<int> covered;
+    float r = 0.f;
+    for (int h = 0; h < kHeadings; ++h)
+        for (const auto& o : offsets_[h])
+        {
+            const int nx = ix + o.x(), ny = iy + o.y();
+            if (in_bounds(nx, ny) and covered.insert(idx(nx, ny)).second) r += risk_[idx(nx, ny)];
+        }
+    return r;
 }
 
 float GridPlanner::state_risk(int ix, int iy, int h) const

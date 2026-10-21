@@ -5,6 +5,7 @@
 #include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor's clock
 #include "residual_risk.h"
+#include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
 
 #include <algorithm>
 #include <array>
@@ -1504,6 +1505,22 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         std::string why;
         std::optional<Eigen::Vector2f> in_cell_pose;
 
+        // ── Task 3c ([Policy] Enabled): AN OBJECT STANDPOINT IS SERVED AS PUBLISHED OR HANDED BACK — NEVER RE-SITED ───
+        // The cell semantics below are room's (a Reach standpoint IS a 0.5 m exploration cell, so resolving it inside the
+        // cell edits nobody's decision). An OBJECT producer publishes a POSE chosen by a predicate this side does not share
+        // — door_concept's reach band [1.55, 2.00] m judges arrival by P(reach) — so moving it up to half a cell (and the
+        // widening below, without bound) can carry it out of that band, where it can never complete (rtD1d leg 4). With the
+        // policy driving, the one predicate is standpoint_fit.h: hard occupancy under the body ⇒ Unreachable to the
+        // producer, which re-solves inside its own band. The old chain ([Policy] Enabled = false) keeps the repair.
+        const bool object_standpoint_under_policy = policy_enabled() and target_contract_known_
+                                                    and target_contract_.policy != rc::affordance::Policy::Reach;
+        if (object_standpoint_under_policy)
+        {
+            resolved_standpoint_.reset();
+            const auto f = rc::standpoint::body_fit(grid_planner_, step.target.room_pos, will_rotate_here);
+            if (rc::standpoint::verdict(f) == rc::standpoint::Verdict::Serves) in_cell_pose = step.target.room_pos;
+        }
+
         // ── REUSE THE STANDPOINT WE ALREADY RESOLVED FOR THIS CELL ──────────────────────────────
         // Held for the life of the target and revalidated cheaply — see resolved_standpoint_. Without
         // this the search re-answers every cycle against a grid that flickers, the target walks, and
@@ -1517,13 +1534,13 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             if (still_good) in_cell_pose = resolved_standpoint_;
             else            resolved_standpoint_.reset();
         }
-        if (not in_cell_pose.has_value() and will_rotate_here)
+        if (not in_cell_pose.has_value() and will_rotate_here and not object_standpoint_under_policy)
         {
             in_cell_pose = grid_planner_.nearest_rotatable(step.target.room_pos, in_cell_m);
             if (not in_cell_pose.has_value())
                 in_cell_pose = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad, in_cell_m);
         }
-        else if (not in_cell_pose.has_value())
+        else if (not in_cell_pose.has_value() and not object_standpoint_under_policy)
             in_cell_pose = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad, in_cell_m);
         // ★THE RING SEARCH IS QUANTISED TO THE PLANNER'S 0.10 m GRID, so `max_radius_m` bounds the
         // search, not the answer: measured p50 0.403 m and max 0.455 m against a 0.354 m half-diagonal,
@@ -1538,7 +1555,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // occupied leaves the robot idle beside a perfectly good vantage half a metre further out, so
         // widen the search rather than give up — and RECORD how far it went, because the arrival test
         // and the audit both need to know this is no longer the cell that was asked for.
-        if (not in_cell_pose.has_value())
+        if (not in_cell_pose.has_value() and not object_standpoint_under_policy)
         {
             in_cell_pose = will_rotate_here
                              ? grid_planner_.nearest_rotatable(step.target.room_pos)
@@ -1559,7 +1576,12 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                                              producer_cell_m, (*in_cell_pose - step.target.room_pos).norm()),
                                  -1, -1, -1);
         }
-        if (not in_cell_pose.has_value())
+        if (not in_cell_pose.has_value() and object_standpoint_under_policy)
+        { fact = rc::affordance::Outcome::Unreachable;
+          why = std::format("occupancy belief: the body cannot take the published standpoint ({}) — handed back, not "
+                            "re-sited (Task 3c)", will_rotate_here ? "a hard cell in the turn it ends with"
+                                                                    : "a hard cell under it at every heading"); }
+        else if (not in_cell_pose.has_value())
         { fact = rc::affordance::Outcome::Infeasible;
           why = std::format("no pose the body fits in anywhere within reach of the {:.2f} m cell",
                             producer_cell_m); }
@@ -4757,6 +4779,34 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
         approach_fix_.reset();
         return;
     }
+    // ── Task 3c ([Policy] Enabled): RE-ASKED CLOSE IN, BUT NEVER RE-SITED ─────────────────────────────────────────────
+    // rtD1d leg 4: below, ANY live return inside a 0.62 m disc (hull + margin + goal_threshold, as a disc because a facing
+    // turn sweeps every heading) MOVED door_concept's approach standpoint 0.44 m and then 0.58 m — to 2.09 m from the door,
+    // outside the producer's [1.55, 2.00] m band, so P(reach) stayed 0.17 and the approach timed out twice. The policy's own
+    // contact set held 0-1 returns there. With the policy driving, the question is the one standpoint_fit.h asks: can the
+    // body be there under the occupancy belief (hard cells: walls, objects, residual cells a LIVE return re-measures this
+    // cycle — which is how the cloud reaches this test, and why it is re-asked close in, where the LiDAR sees the spot;
+    // soft cells are priced, never a hand-back). Not ⇒ hand it back (Reach and object alike) so the producer re-solves
+    // inside its own band. No fix is ever taken: the policy's contact model keeps the body off every live return on the way.
+    // The old chain ([Policy] Enabled = false) keeps the disc test and the repair below unchanged.
+    if (policy_enabled())
+    {
+        approach_fix_.reset();
+        if (window <= 0.f or (step.plan_origin - anchor).squaredNorm() > window * window) return;
+        const bool turning = wants_final_facing(step.target);
+        if (not grid_planner_.has_world()) return;   // no belief yet: no verdict (never a hand-back)
+        const auto f = rc::standpoint::body_fit(grid_planner_, anchor, turning);
+        if (rc::standpoint::verdict(f) != rc::standpoint::Verdict::HandBack) return;
+        const bool news = reach_unreachable_why_.empty();
+        if (flag_standpoint_unreachable(std::format("occupancy belief: the body cannot take standpoint ({:.2f},{:.2f}) {} "
+                                                    "(-log P(fits) {:.1f}) — handed back, not re-sited", anchor.x(), anchor.y(),
+                                                    turning ? "through its facing turn" : "at any heading", f.nats))
+            and news)
+            std::println("[approach] '{}' — {:.2f} m out: a hard cell lies under the body at ({:.2f},{:.2f}); handing it back "
+                         "to the producer (Task 3c: object and Reach standpoints are never re-sited under the policy)",
+                         step.target.node_name, (step.plan_origin - anchor).norm(), anchor.x(), anchor.y());
+        return;
+    }
     // ★MEASURED TO WHAT WE ARE DRIVING TO, not to the anchor. Once a fix is taken the robot approaches
     // the MOVED pose, so a window measured against the anchor walks out of range exactly because the fix
     // worked — which would drop it and put the target straight back where the returns said it must not
@@ -5713,7 +5763,7 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
 {
     if (not reach_unreachable_why_.empty())
     {
-        std::println("[controller] Reach standpoint handed back — {} — reporting Unreachable to the producer",
+        std::println("[controller] standpoint handed back — {} — reporting Unreachable to the producer",
                      reach_unreachable_why_);
         std::fflush(stdout);
         affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
