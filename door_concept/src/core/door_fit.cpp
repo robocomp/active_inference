@@ -959,6 +959,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     {
         reg_sweep = rc::door::register_sweep(inst.ai2_belief.aperture(), leaf_origin, *leaf_pts, nz.room_walls);
         inst.dbg_reg = reg_sweep.reg;
+        if (reg_sweep.reg.ok) inst.wall_reg = reg_sweep.reg;   // the model's copy holds the last registration (M-6)
     }
     // ★Task 5b: THE FIELD RUNS IN THE WALL-REGISTERED FRAME, the leaf plane's depth d in the ROOM frame. Registration moved
     // the sweep by reg.depth along across_u so the wall it sees lies on the polygon line; d is measured from that line in

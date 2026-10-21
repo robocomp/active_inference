@@ -9,7 +9,11 @@
 // ★The anchor frame registers the WALL (door_anchor_update.h measures the opening in the wall it sees), so the offset is the
 // leaf relative to that wall: −(d + reg_depth) along across_u (d > 0 out of the room = −across_u; the low LiDAR's wall
 // registration reg_depth > 0 into the room = +across_u), and the anchor's y axis is sign·across_u (the robot on −y).
-// No registration this cycle ⇒ relative to the polygon line (reg_depth 0).
+// No registration yet ⇒ relative to the polygon line (reg_depth 0); DoorFitState::wall_reg holds the last one (M-6).
+// ★ALL FOUR hinge × swing hypotheses move by the SAME offset, the opposite-swing ones included (review M-6): what the swing
+// changes is which FACE of the leaf the hinge pin sits on — anchor_leaf_hypotheses negates face_y = ±half the thickness
+// about the leaf's own mid-plane for it — and which side the leaf turns toward; it does not change WHERE the leaf hangs in
+// the wall. The plane is the leaf's (DoorBeliefState::d), one for every hypothesis, so the shift is rigid and common.
 #pragma once
 
 #include <vector>

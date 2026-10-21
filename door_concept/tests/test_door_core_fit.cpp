@@ -228,6 +228,9 @@ int main()
             // 2. a shut leaf: phi ~ 0, measured, its width well below "nothing known" (2.0944)
             CHECK(f.phi_measured);
             CHECK(f.phi_est < 0.35f);
+            // M-6 (Task 5b): the wall's LiDAR registration is a MODEL input (the anchor's leaf plane, the field's frame) — a
+            // real field that holds the last registration, not the per-cycle debug copy
+            CHECK(f.wall_reg.ok and std::abs(f.wall_reg.depth) < 0.05f);
             CHECK(f.phi_sigma < 1.0f);
             // the tracker now associates with the belief the fit built
             const auto d = w.doors();

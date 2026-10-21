@@ -1049,8 +1049,8 @@ void SpecificWorker::step_passage_anchor()
                                                          inst->hinge_llr, inst->swing_llr);
             // Task 5b: onto the leaf plane door_concept believes in (DoorBeliefState::d, relative to the wall the anchor
             // registers) — the controller's known-obstacle leaf and this agent's model are one (door_anchor_leaf_plane.h).
-            rc::door::place_leaves_on_plane(al, rc::door::anchor_leaf_plane_y(inst->ai2_belief.recess(), inst->dbg_reg.depth,
-                                                                              inst->dbg_reg.ok, pa.axis_sign));
+            rc::door::place_leaves_on_plane(al, rc::door::anchor_leaf_plane_y(inst->ai2_belief.recess(), inst->wall_reg.depth,
+                                                                              inst->wall_reg.ok, pa.axis_sign));
         }
         if (not al.empty() != pa.leaf_published)
         {
