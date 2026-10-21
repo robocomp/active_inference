@@ -4040,6 +4040,13 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
                                      drive_name, g.s, standoff));
                 path_controller.stop();
                 note_no_command(); motion_commander.stop_robot();
+                // [Route] BandDrivesCross: the route through the opening is spent — drop it, so a cycle whose target is
+                // unchanged cannot reinstall it (drive_point_target installs a plan it finds and a stopped follower)
+                if (band_drives_cross())
+                {
+                    current_plan_.reset();
+                    plan_spline_valid_ = false;
+                }
                 out.ended = true;
                 return out;
             }
