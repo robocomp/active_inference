@@ -487,6 +487,20 @@ int main()
         std::printf("  release per-call median %.2f ms, p90 %.2f ms, max %.2f ms\n", ms[50], ms[90], ms[99]);
         CHECK("timing release median <= 15 ms", ms[50] <= 15.0);
     }
+    { // Task 3d fix round 1 (c): the turn-sign PROBE — while Blind the policy may turn in place at the base's smallest executable
+      // rate to settle the sign, but only if the contact model clears BOTH directions (a flipped sign mirrors the command)
+        Scene s; s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish();
+        const auto w = sign_probe(s.in, s.pp);
+        CHECK("3d probe: open space — a probe turn at w_min_eff", w.has_value() and std::abs(*w - s.in.base.w_min_eff) < 1e-6f);
+        Scene t; t.ret = wall_y(0.240f, -1.f, 1.f); auto back = wall_y(-0.240f, -1.f, 1.f);   // 1 cm from nose and tail (half-length 0.230) t.ret.insert(t.ret.end(), back.begin(), back.end());
+        t.goal.p = {0.f, 3.f};
+        V g2 = t.goal.p; t.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g2, 1));
+        t.finish();
+        std::printf("  probe pocket: P(contact) turn +w %.3f, -w %.3f\n", p_contact_of(t, 0.f, t.in.base.w_min_eff), p_contact_of(t, 0.f, -t.in.base.w_min_eff));
+        CHECK("3d probe: a pocket whose turn sweeps a corner into a wall — no probe (hold and report)", not sign_probe(t.in, t.pp).has_value());
+    }
     std::printf("%s (%d failure%s)\n", fails ? "FAILED" : "ALL PASS", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }

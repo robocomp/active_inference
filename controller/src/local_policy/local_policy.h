@@ -137,4 +137,10 @@ Pose2 policy_start(const PolicyInput& in);
 // Inside the goal's tolerances at in.pose (what decide() calls Arrived).
 bool goal_reached(const PolicyInput& in);
 const char* mode_name(Decision::Mode m);
+// ★ Task 3d fix round 1 (c) — THE TURN-SIGN PROBE (goal_adapter.h TurnSignBelief). While the odometry's turn sign is in doubt
+//   (Blind) the policy settles it by EVIDENCE: an in-place turn at the base's smallest executable rate (w_min_eff — the smallest
+//   motion that produces turning evidence at all). A flipped sign mirrors the command, so the probe is offered only if the contact
+//   model clears BOTH directions (each held for horizon_s then braked, from the current velocity, at risk_eps); else nullopt —
+//   hold and report. Returns +w_min_eff; the caller alternates the sign between probes so the net rotation stays ~0.
+std::optional<float> sign_probe(const PolicyInput& in, const PolicyParams& p);
 }  // namespace rc::policy

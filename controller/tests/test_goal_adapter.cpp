@@ -9,6 +9,7 @@
 #include "../src/local_policy/cost_to_go.h"
 
 #include <cmath>
+#include <random>
 #include <format>
 #include <string>
 #include <cstdio>
@@ -191,38 +192,61 @@ int main()
         CHECK("route: an empty tour is finished at once", route_goal_step({}, 1, 0, false, 0.25f, 0.06f).finished);
     }
 
-    // ---- 4d. Task 3d (rtD1e leg 5): the odometry turn sign is a BELIEF, not a latch. A relocaliser correction (the pose moved
-    //      more than the odometry predicts plus its covariance) carries ~no evidence for "sign flipped"; agreeing intervals decay
-    //      it; a genuine sustained flip is still detected; nothing latches.
+    // ---- 4d. Task 3d (rtD1e leg 5) + fix round 1: the odometry turn sign is a BELIEF about a PERSISTENT FAULT, not a latch.
+    //      sigmas: odometry relative heading over the interval sy; the pose's own heading std st (published by room_concept —
+    //      rtD1e: p50 0.0086 rad, rising to 0.16-0.18 rad at the relocalisation jumps); odometry displacement sp; correction size sc.
     {
-        const float dt = 0.1f, w = 0.4f, sy = 0.013f * std::sqrt(dt);
-        const float sp = 0.006f, sc = 0.064f;   // odometry displacement sigma per interval; a correction's scale (pose drift sigma)
+        const float dt = 0.1f, w = 0.4f, sy = 0.013f * std::sqrt(dt), st = 0.0086f, sp = 0.006f, sc = 0.064f;
+        std::mt19937 rng(7); std::normal_distribution<float> nz(0.f, 1.f);
+        const float sn = std::sqrt(sy * sy + 2.f * st * st);
+        // (review C-1) a LONG stretch with no turning evidence — straight driving / parked, 2000 noisy intervals — never Blinds
+        {
+            TurnSignBelief c; bool ever = false;
+            for (int k = 0; k < 2000; ++k)
+            {
+                const float th = 0.001f * nz(rng);                       // odometry turn noise, straight
+                c.update(th, k % 2 ? 0.03f : 0.f, th + sn * nz(rng), k % 2 ? 0.03f : 0.f, sy, st, sp, sc);
+                ever = ever or c.flipped();
+            }
+            std::printf("   3d r1: 2000 straight/parked intervals: P(flipped) %.2e, ever Blind: %d\n", c.p_flipped(), int(ever));
+            CHECK("3d r1: >= 1000 straight/parked intervals never Blind (no drift toward 1/2)", not ever and c.p_flipped() < 0.02f);
+        }
         TurnSignBelief c;
-        for (int k = 0; k < 10; ++k) c.update(w * dt, 0.f, w * dt, 0.f, sy, sp, sc);
-        CHECK("3d: consistent turning is never 'flipped'", not c.flipped() and c.p_flipped() < 0.05f);
-        // rtD1e 439.98-440.17: odometry turning right while the pose's yaw RISES and x/y jump 0.25 m over 3 intervals —
-        // the localiser correcting, the base turning in place (odometry displacement ~0)
-        TurnSignBelief r = c;
-        for (int k = 0; k < 3; ++k) r.update(-0.02f, 0.f, +0.048f, 0.083f, sy, sp, sc);
-        std::printf("   3d: rtD1e correction (3 opposite intervals, 0.08 m jumps): P(flipped) %.4f\n", r.p_flipped());
-        CHECK("3d: a relocaliser correction (pose jumped >> odometry + covariance) is NOT a flipped sign", not r.flipped());
-        // the SAME yaw evidence without the jump: sustained opposite turning — a genuine flip
+        for (int k = 0; k < 10; ++k) c.update(w * dt, 0.f, w * dt + sn * nz(rng), 0.f, sy, st, sp, sc);
+        CHECK("3d: consistent turning is never 'flipped'", not c.flipped());
+        // rtD1e 439.98-440.17 (xy variant): odometry turning right, the pose's yaw RISING, x/y jumping ~0.08 m per interval, the
+        // published heading std at the jump 0.16 rad
+        { TurnSignBelief r; for (int k = 0; k < 3; ++k) r.update(-0.02f, 0.f, +0.048f, 0.083f, sy, 0.16f, sp, sc);   // from the PRIOR
+          std::printf("   3d: rtD1e correction, xy variant: P(flipped) %.4f\n", r.p_flipped());
+          CHECK("3d: the rtD1e relocaliser correction (xy variant) does not Blind", not r.flipped()); }
+        // yaw-only variant: no translation residual; the published heading std rises as room_concept doubts (0.05 rad between jumps)
+        { TurnSignBelief r; for (int k = 0; k < 3; ++k) r.update(-0.02f, 0.f, +0.048f, 0.f, sy, 0.05f, sp, sc);   // from the PRIOR
+          std::printf("   3d: rtD1e correction, yaw-only variant: P(flipped) %.4f\n", r.p_flipped());
+          CHECK("3d: the rtD1e correction (yaw-only variant) does not Blind", not r.flipped()); }
+        // a genuine sustained flip under turning is caught within the stated time (1 interval at w 0.4 rad/s, normal pose noise)
         TurnSignBelief f = c; int trip = -1;
-        for (int k = 0; k < 6; ++k) { f.update(w * dt, 0.f, -w * dt, 0.f, sy, sp, sc); if (f.flipped() and trip < 0) trip = k + 1; }
-        CHECK("3d: a genuine sustained sign flip is detected", f.flipped());
-        CHECK("3d: ...within 3 turning intervals", trip > 0 and trip <= 3);
-        // no latch: once the sign agrees again (a bridge fixed), the belief drops and Blind ends
-        for (int k = 0; k < 3; ++k) f.update(w * dt, 0.f, w * dt, 0.f, sy, sp, sc);
-        CHECK("3d: no latch — agreeing intervals bring it back below 1/2", not f.flipped());
-        // an interval with no turn says nothing
-        TurnSignBelief n = c; const float p0 = n.p_flipped();
-        n.update(0.f, 0.f, 0.01f, 0.f, sy, sp, sc);
-        CHECK("3d: an interval without odometry turn is ~neutral (only the switch prior moves it)", std::abs(n.p_flipped() - p0) < 0.02f);
-        // one unexplained opposite interval (a glitch) is decayed by the next agreeing ones
-        TurnSignBelief g = c;
-        g.update(w * dt, 0.f, -w * dt, 0.f, sy, sp, sc);
-        for (int k = 0; k < 2; ++k) g.update(w * dt, 0.f, w * dt, 0.f, sy, sp, sc);
-        CHECK("3d: a one-interval glitch is decayed by agreeing intervals", not g.flipped());
+        for (int k = 0; k < 6; ++k) { f.update(w * dt, 0.f, -w * dt + sn * nz(rng), 0.f, sy, st, sp, sc); if (f.flipped() and trip < 0) trip = k + 1; }
+        std::printf("   3d: true flip caught after %d interval(s)\n", trip);
+        CHECK("3d: a sustained true flip under turning is caught within 3 intervals", trip > 0 and trip <= 3);
+        // a TRUE flip followed by HELD intervals (no turning evidence) stays Blind — a persistent fault is not repaired by waiting
+        TurnSignBelief held = f;
+        for (int k = 0; k < 100000; ++k) held.update(0.f, 0.f, sn * nz(rng), 0.f, sy, st, sp, sc);
+        CHECK("3d r1: a true flip stays Blind through 100000 held intervals (no repair by waiting)", held.flipped());
+        // ... and the PROBE turn settles it the other way for a FALSE Blind: agreeing turning intervals end it
+        TurnSignBelief fb;                                                 // at the prior: a contradicting burst Blinds
+        for (int k = 0; k < 2; ++k) fb.update(w * dt, 0.f, -w * dt, 0.f, sy, st, sp, sc);
+        for (int k = 0; k < 500; ++k) fb.update(0.f, 0.f, sn * nz(rng), 0.f, sy, st, sp, sc);   // held
+        const bool blind_before = fb.flipped();
+        int probe = 0;
+        while (fb.flipped() and probe < 40) { const float tp = 0.1f * dt; fb.update(tp, 0.f, tp + sn * nz(rng), 0.f, sy, st, sp, sc); ++probe; }
+        std::printf("   3d r1: a false Blind ended by the probe (w 0.1 rad/s) after %d intervals\n", probe);
+        CHECK("3d r1: a false Blind ... stays Blind while held", blind_before);
+        CHECK("3d r1: ... and the probe turn (w_min_eff 0.1 rad/s) ends it within one plan horizon (10 intervals)", not fb.flipped() and probe <= 10);
+        // while the belief is certain the probe stops (it would buy nothing): confirmed at P(S) >= 1 - prior
+        // a TRUE flip under the same probe stays Blind: the probe's turns contradict the odometry again (alternating directions)
+        TurnSignBelief tp = held;
+        for (int k = 0; k < 40; ++k) { const float th = (k / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; tp.update(th, 0.f, -th + sn * nz(rng), 0.f, sy, st, sp, sc); }
+        CHECK("3d r1: a TRUE flip under alternating probe turns stays Blind", tp.flipped());
     }
 
     // ---- 4d'. TIME-ALIGNED (review fix 2.2, kept): the pose's heading change over [t_a, t_b] (its own time base) against the
@@ -250,7 +274,7 @@ int main()
                 if (prev_pose_t >= 0.0)
                 {
                     const float dtp = float(tp - prev_pose_t);
-                    c.update_interval(hist, prev_pose_t, tp, yp - prev_pose_yaw, 0.f, 0.013f * std::sqrt(dtp), 0.006f, 0.064f);
+                    c.update_interval(hist, prev_pose_t, tp, yp - prev_pose_yaw, 0.f, 0.013f * std::sqrt(dtp), 0.0086f, 0.006f, 0.064f);
                     ++turning_intervals;
                     ever = ever or c.flipped();
                     if (c.flipped() and *trip_after < 0) *trip_after = turning_intervals;

@@ -81,6 +81,8 @@ void ControllerSession::policy_reset()
     policy_prev_pose_t_.reset();
     policy_prev_pose_p_.reset();
     policy_odo_hist_.clear();
+    policy_clock_prev_ms_ = 0;      // Task 3d fix round 1 (M-1): a reset clock has no previous tick
+    policy_probe_t0_ = -1.0;
     policy_leaf_ = {};
     policy_leaf_room_.clear();
     policy_leaf_evidence_.reset();
@@ -169,24 +171,19 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
             const float s_yaw = prm.policy_sigma_rel_yaw_rad * std::sqrt(dt_pose);
             const float s_p = std::hypot(prm.policy_unseen_odo_sigma_m, prm.policy_sigma_rel_xy_m * std::sqrt(dt_pose));
             const float s_corr = policy_pose_xy_std_ > 0.f ? policy_pose_xy_std_ : prm.policy_pose_drift_sigma_m;
+            // fix round 1 (review C-1/b): the POSE's own heading noise — room_concept's published heading std, the larger of the
+            // interval's two ends (it rises to 0.16-0.18 rad at a relocalisation, rtD1e). 0 = not published: only the odometry's
+            // relative sigma remains, and a yaw-only correction is then explained only through the translation residual (flagged)
+            const float s_pose_yaw = std::max(policy_pose_theta_std_, policy_prev_theta_std_);
             policy_sign_.update_interval(hist, *policy_prev_pose_t_, t_pose,
                                          std::remainder(sp.yaw - policy_prev_yaw_.value_or(sp.yaw), 2.f * std::numbers::pi_v<float>),
-                                         (sp.p - policy_prev_pose_p_.value_or(sp.p)).norm(), s_yaw, s_p, s_corr);
+                                         (sp.p - policy_prev_pose_p_.value_or(sp.p)).norm(), s_yaw, s_pose_yaw, s_p, s_corr);
         }
         if (not policy_prev_pose_t_.has_value() or t_pose > *policy_prev_pose_t_)
-        { policy_prev_pose_t_ = t_pose; policy_prev_yaw_ = sp.yaw; policy_prev_pose_p_ = sp.p; }
+        { policy_prev_pose_t_ = t_pose; policy_prev_yaw_ = sp.yaw; policy_prev_pose_p_ = sp.p; policy_prev_theta_std_ = policy_pose_theta_std_; }
     }
-    if (policy_sign_.flipped())
-    {
-        const std::string why = std::format("Blind — odometry turn sign contradicts the pose (P(flipped) {:.2f}: robot_current_angular_speed "
-                                            "vs the heading change, relocaliser corrections discounted) — check the base/bridge sign",
-                                            policy_sign_.p_flipped());
-        if (why.substr(0, 40) != policy_last_why_.substr(0, 40)) std::println("[policy] {}: {}", who, why);
-        policy_last_why_ = why;
-        policy_last_mode_ = -1;
-        hold(why);
-        return out;
-    }
+    // Blind is decided below, once the contact returns are assembled: the policy may PROBE (fix round 1, review C-1/c)
+    const bool sign_blind = policy_sign_.flipped();
 
     // ── the BODY: contact is judged against the BARE hull (contact.cpp); the planner's safety margin is a route preference
     policy_body_ = approach_body_;
@@ -416,6 +413,40 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     in.base = limits;
     in.latency_s = latency_s;
     in.now_s = now_s;
+
+    // ★ Task 3d fix round 1 (c) — BLIND WHILE THE TURN SIGN IS IN DOUBT, AND AN EPISTEMIC WAY OUT. The goal is not driven
+    //   (the world may be mirrored); instead the policy turns in place at the base's smallest executable rate if the contact
+    //   model clears BOTH directions (local_policy.h sign_probe) — the turn's evidence settles the sign either way: a false Blind
+    //   ends, a true flip stays Blind. The probe alternates direction every horizon so the net rotation stays ~0. No safe probe:
+    //   held, and reported. Any of these interrupts the Navigator's plan (a hold).
+    if (sign_blind)
+    {
+        const std::string head = std::format("Blind — odometry turn sign contradicts the pose (P(flipped) {:.2f}: robot_current_angular_speed "
+                                             "vs the heading change, relocaliser corrections discounted) — check the base/bridge sign",
+                                             policy_sign_.p_flipped());
+        if (const auto wp = rc::policy::sign_probe(in, pp); wp.has_value())
+        {
+            if (policy_probe_t0_ < 0.0 or now_s - policy_probe_t0_ >= pp.horizon_s) { policy_probe_t0_ = now_s; policy_probe_sign_ = -policy_probe_sign_; }
+            const float w = policy_probe_sign_ * *wp;
+            const std::string why = head + std::format("; probing in place at w {:+.2f} rad/s to settle it", w);
+            if (why.substr(0, 40) != policy_last_why_.substr(0, 40)) std::println("[policy] {}: {}", who, why);
+            policy_last_why_ = why; policy_last_mode_ = -1;
+            out.verdict = PolicyVerdict::Held; out.why = why;
+            note_why(rc::why::Cause::PolicyHold, std::format("{}: {}", who, why));
+            const auto c = rc::policy::to_session_command(0.f, w);
+            motion_commander.send_speed_command(c.adv, c.side, c.rot);
+            policy_sent_.push_back({now_s, 0.f, w});
+            policy_gate_.on_hold();
+            return out;
+        }
+        const std::string why = head + "; no probe turn clears the contact model here — held";
+        if (why.substr(0, 40) != policy_last_why_.substr(0, 40)) std::println("[policy] {}: {}", who, why);
+        policy_last_why_ = why; policy_last_mode_ = -1;
+        policy_probe_t0_ = -1.0;
+        hold(why);
+        return out;
+    }
+    policy_probe_t0_ = -1.0;
 
     const auto t0 = std::chrono::steady_clock::now();
     const rc::policy::Navigator::Step st = policy_nav_.step(in, pp);

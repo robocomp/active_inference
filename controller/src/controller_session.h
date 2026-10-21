@@ -268,8 +268,9 @@ public:
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
     rc::DoorPassage &door_passage() { return door_passage_; }
-    /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open.
-    void set_command_explore(bool on) { command_explore_ = on; }
+    /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open — and,
+    /// when the order names its room, only for affordances whose target is in that room (affordance_room_scope.h).
+    void set_command_explore(bool on, std::string room = {}) { command_explore_ = on; explore_room_ = on ? std::move(room) : std::string{}; }
     rc::MissionRunner &mission() { return mission_; }
     // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
     // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
@@ -415,6 +416,8 @@ private:
     rc::policy::TurnSignBelief policy_sign_;                     // review I5 → Task 3d: a belief, not a latch (goal_adapter.h)
     std::optional<Eigen::Vector2f> policy_prev_pose_p_;          // Task 3d: the pose's last position (the correction residual)
     float policy_pose_xy_std_ = 0.f;                             // Task 3d: room_concept's published pose xy std (0 = none)
+    float policy_pose_theta_std_ = 0.f, policy_prev_theta_std_ = 0.f;   // Task 3d r1: its published heading std (now / interval start)
+    double policy_probe_t0_ = -1.0; float policy_probe_sign_ = -1.f;    // Task 3d r1: the turn-sign probe's phase
     std::uint64_t policy_clock_prev_ms_ = 0;                     // Task 3d: the last tick the no-route clock saw
     std::optional<float> policy_prev_yaw_;                       // review fix 2.2: the pose's last (time, heading) for I5
     std::optional<double> policy_prev_pose_t_;
@@ -1114,6 +1117,7 @@ private:
     rc::DoorPassage door_passage_;                                  // controller_door_passage.h
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
+    std::string explore_room_;                                       // …and the room it confines the contest to ("" = none)
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
     std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
     std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's anchor, fresh or WAITED for (nullopt = room route)

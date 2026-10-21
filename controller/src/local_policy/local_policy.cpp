@@ -256,6 +256,22 @@ float log_p_continuable(const PolicyInput& in0, const PolicyParams& p, const Pos
     return log_p_continuable_cells(in, p, from);
 }
 
+std::optional<float> sign_probe(const PolicyInput& in0, const PolicyParams& p)
+{
+    if (in0.body == nullptr or not (in0.base.w_min_eff > 0.f) or not finite_input(in0)) return std::nullopt;
+    const auto cells = in0.returns_denoised ? std::vector<Return>(in0.returns.begin(), in0.returns.end()) : denoise_returns(in0.returns);
+    PolicyInput in = in0; in.returns = cells;
+    const Pose2 start = policy_start(in);
+    const float w = in.base.w_min_eff;
+    for (const float s : {w, -w})
+    {
+        const auto sw = rollout(start, in.v_now, in.w_now, 0.f, s, p.horizon_s, in.base, p.dt);
+        if (not eligible(log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m), p))
+            return std::nullopt;
+    }
+    return w;
+}
+
 Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* mon)
 {
     Decision d{.mode = Decision::Mode::Stuck, .why = {}};
