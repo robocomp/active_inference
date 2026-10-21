@@ -1087,6 +1087,132 @@ int main()
     }
     if (r1_failures > 0) std::printf("\n  Task R1 cases: %d FAILED\n", r1_failures);
 
+    // Q (Task R2): A CORRECT POSE JUST INSIDE AN OPEN DOOR IS KEPT. Live rtD1i 742.71 s: 1.1 s after a recall, the robot
+    //    0.39 m inside the open door_1 (the aperture ≈104° of its scan), the pose 1 cm from the truth; P(lost) reached
+    //    0.506 and the search moved it 4.1 m / −160° to a twin that fitted the through-door returns onto walls, because
+    //    the relocaliser's ℓ scored every return against the room polygon alone. Fixture: the 6 × 4 model room
+    //    (y ∈ [−2, 2]) with a 1 m door in its bottom wall (x ∈ [0.7, 1.7]); the robot 0.39 m inside it, heading in; the
+    //    door's leaf open 90° INTO the room on its hinge jamb (live: door_1 at phi 94°, opening into the room); a search
+    //    forced at P(lost) = 0.506 through the real relocalise_from_belief, 20 jittered runs. Two worlds:
+    //      defect — behind the door a 6 × 2 room: the scan (this room + the next through the door) is then explained
+    //               by the room turned 90°, as rtD1i's was by its −160° twin. Pre-R2 ℓ (no door list) must MOVE (the
+    //               live defect, else the fixture proves nothing); with the door list the pose must be KEPT 20/20.
+    //      stale  — the door is in fact SHUT but door_concept lists it open (p_open 1, phi 90°; live door_5 visit 1):
+    //               the door's state is common to its beams, so the wrong belief costs log(1/h) once — KEPT 20/20.
+    int r2_failures = 0;
+    {
+        const auto& room = all_rooms[0];
+        struct Seg { Eigen::Vector2f a, b; };
+        auto make_world = [](bool shut)
+        {
+            std::vector<Seg> w{{{-3.f, 2.f}, {3.f, 2.f}}, {{3.f, 2.f}, {3.f, -2.f}}, {{-3.f, -2.f}, {-3.f, 2.f}},
+                               {{-3.f, -2.f}, {0.7f, -2.f}}, {{1.7f, -2.f}, {3.f, -2.f}}};
+            if (shut) { w.push_back({{0.7f, -2.f}, {1.7f, -2.f}}); return w; }
+            w.push_back({{-3.f, -4.f}, {3.f, -4.f}}); w.push_back({{3.f, -4.f}, {3.f, -2.f}}); w.push_back({{-3.f, -4.f}, {-3.f, -2.f}});
+            w.push_back({{0.7f, -2.f}, {0.7f, -1.f}});   // the leaf, open 90° into the room
+            return w;
+        };
+        auto scan_world = [&](const std::vector<Seg>& world, const Eigen::Vector3f& pose, std::mt19937& rng)
+        {
+            std::normal_distribution<float> nz(0.f, 0.02f);
+            std::vector<Eigen::Vector3f> out;
+            for (int i = 0; i < 360; ++i)
+            {
+                const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / 360.f;
+                const float wd = pose.z() + bearing;
+                const Eigen::Vector2f dir(std::cos(wd), std::sin(wd));
+                float best = std::numeric_limits<float>::max();
+                for (const auto& sg : world)
+                {
+                    const Eigen::Vector2f e = sg.b - sg.a;
+                    const float den = dir.x() * e.y() - dir.y() * e.x();
+                    if (std::abs(den) < 1e-9f) continue;
+                    const Eigen::Vector2f w = sg.a - pose.head<2>();
+                    const float sp = (w.x() * e.y() - w.y() * e.x()) / den;
+                    const float t = (w.x() * dir.y() - w.y() * dir.x()) / den;
+                    if (sp > 1e-4f and t >= 0.f and t <= 1.f) best = std::min(best, sp);
+                }
+                if (best == std::numeric_limits<float>::max()) continue;
+                const float r = best + nz(rng);
+                out.emplace_back(r * std::cos(bearing), r * std::sin(bearing), 0.f);
+            }
+            return out;
+        };
+        rc::DoorAperture door;
+        door.id = 91; door.name = "door_1"; door.p_open = 1.f; door.prior_closed = 0.f;   // phi 90°: cos φ = 0
+        door.a = {0.7f, -2.f}; door.b = {1.7f, -2.f};
+        const float th_in = rc::passage::heading_along({0.f, 1.f});
+        float through_frac = 0.f;
+        auto run_arm = [&](const std::vector<Seg>& world, bool doors)
+        {
+            std::mt19937 rng(9191);
+            std::uniform_real_distribution<float> uj(-1.f, 1.f);
+            int kept = 0;
+            for (int run = 0; run < 20; ++run)
+            {
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(room.poly);
+                const Eigen::Vector3f truth(1.2f + 0.08f * uj(rng), -2.f + 0.39f + 0.03f * uj(rng), th_in + 0.08f * uj(rng));
+                rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+                rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
+                if (doors) rcn.set_door_apertures({door});
+                const auto pts = scan_world(world, truth, rng);
+                if (run == 0)
+                {
+                    int n = 0;
+                    for (const auto& q : pts)
+                        n += rc::reloc::exit_prior({{door.a, door.b, {0.f, -1.f}, 1.f, 0.f}}, truth.head<2>(),
+                                                   truth.head<2>() + Eigen::Rotation2Df(truth.z()) * q.head<2>()) > 0.5f;
+                    through_frac = static_cast<float>(n) / static_cast<float>(pts.size());
+                }
+                Acc::relocalise(rcn, pts, 0.055f, 0.506f);
+                const auto st = rcn.get_current_state();
+                if (near(Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.10f, 5.f) and not Acc::moved(rcn) and not Acc::held(rcn))
+                    ++kept;
+            }
+            return kept;
+        };
+        const auto w_open = make_world(false), w_shut = make_world(true);
+        const int kept_d = run_arm(w_open, true);
+        const float frac_open = through_frac;
+        const int kept_n = run_arm(w_open, false);
+        const int kept_s = run_arm(w_shut, true);
+        const bool pass = kept_d == 20 and kept_n < 20 and kept_s == 20;
+        r2_failures += pass ? 0 : 1;
+        std::printf("  Q correct pose 0.39 m inside an open door (%.0f%% of the scan through it): KEPT %d/20 with the door "
+                    "list (expect 20), %d/20 with the pre-R2 ℓ (the live defect: < 20); door SHUT but listed open: KEPT "
+                    "%d/20 (expect 20) — %s\n", 100.f * frac_open, kept_d, kept_n, kept_s, pass ? "PASS" : "FAIL");
+    }
+    // R (Task R2): "NO POSE EXPLAINS THIS VIEW" KEEPS THE RIVALS. Live rtD1i 742.81 s: that branch cleared them, so the
+    //    true pose (a rival since the wrong move 100 ms before) was never scored again. A carried rival, then a search on
+    //    a view nothing explains (a 200° through-door sector, the C scan): the rival must still be there afterwards.
+    {
+        const auto& room = all_rooms[1];
+        std::mt19937 rng(5353);
+        int branch = 0, kept_rivals = 0;
+        for (int run = 0; run < 10; ++run)
+        {
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
+            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+            Acc::rivals(rcn).clear();
+            Acc::rivals(rcn).push_back({random_pose(room.poly, rng, 0.8f), -1.f});
+            Acc::set_ref(rcn, truth);
+            const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng, 100.f);
+            Acc::relocalise(rcn, to3(scan), median_d(room.poly, scan, truth), 0.506f);
+            if (Acc::moved(rcn) or Acc::held(rcn) or Acc::confirmed(rcn)) continue;   // not the branch under test
+            ++branch;
+            kept_rivals += Acc::rivals(rcn).size() == 1 ? 1 : 0;
+        }
+        const bool pass = branch > 0 and kept_rivals == branch;
+        r2_failures += pass ? 0 : 1;
+        std::printf("  R \"no pose explains this view\" keeps the rivals     reached in %d/10 searches, rival kept in %d "
+                    "(expect all) — %s\n", branch, kept_rivals, pass ? "PASS" : "FAIL");
+    }
+    if (r2_failures > 0) std::printf("\n  Task R2 cases: %d FAILED\n", r2_failures);
+    r1_failures += r2_failures;
+
     // D / E: healthy residual stream with turn spikes, then a kidnap.
     {
         std::mt19937 rng(99);

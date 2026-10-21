@@ -58,6 +58,13 @@ namespace rc
         rp.body_clearance    = params.reloc_body_clearance;
         rp.max_points        = params.reloc_max_points;
         rp.max_modes         = params.reloc_max_modes;
+        // The room's open doorways, seated on its boundary — the tracker's per-beam doorway mixture inside ℓ, evaluated
+        // per hypothesis (reloc_search.h, Aperture; Task R2). Never while the room is being estimated: there is no room
+        // polygon of THIS room to seat them on, and relocalisation is disarmed then anyway.
+        if (not estimating())
+            rp.apertures = rc::reloc::reloc_apertures(
+                rc::reloc::seated_doors(door_apertures(), rt_.passage, current_room_polygon(), false), params.reloc_hazard);
+        rp.beyond_extent     = DoorApertures::kBeyondExtentM;
         return rp;
     }
 
@@ -241,9 +248,10 @@ namespace rc
         if (not last_search_confirmed_incumbent_ and not explains_like_tracking(top.median_abs))
         {
             ep.success = false;
-            rivals_.clear();
-            rival_ref_valid_ = false;
-            publish_rival_snapshot();
+            // ★ THE RIVALS ARE KEPT (Task R2). "Nothing explains this view" is a statement about THIS scan, not about the
+            //   hypotheses already carried: live rtD1i 742.81 s cleared them here, so the truth (a rival since the wrong
+            //   move 100 ms earlier) could never be scored again and the pose stayed 4 m off for the last 21 s. The
+            //   rivals keep their accumulated ratios and their SPRT (step_rival_modes) — kept or rejected by evidence.
             qWarning().noquote() << QString("[reloc] %1: best mode (%2 m / %3° away) leaves median |SDF| %4 m — "
                                             "no pose explains this view; keeping the pose")
                 .arg(ep.trigger).arg(ep.jump_m, 0, 'f', 2).arg(ep.jump_rad * 57.2958f, 0, 'f', 0)
@@ -395,6 +403,7 @@ namespace rc
             }
             rt_.door_anchor.clear();
             rt_.door_anchor_frames = 0;
+            rt_.anchor_track_nats = 0.0;
             if (rt_.passage.has_value())
                 rt_.door_anchor = rc::passage::anchor_at_handover(*rt_.passage);
             rt_.hold_open = false;
@@ -447,6 +456,20 @@ namespace rc
                                                           res.covariance.topLeftCorner<2, 2>());
                 outside = 1.f - (1.f - outside) * (1.f - rt_.passage_term);
             }
+            // THE VIEW THROUGH A DOORWAY (Task R2): the fraction f of this scan that the tracker's own per-beam doorway
+            // mixture assigns to "beyond the door" under this frame's pose — returns the room does not owe. It joins the
+            // union of reasons the room does not owe the view, so the misfit is tempered for as long as the view goes
+            // through the door and the tempering expires as the door leaves the field of view — not when the body leaves
+            // the mouth, as the doorway term above does (live rtD1i searched 1.1 s after a hand-over, the body 0.39 m
+            // past the mouth, ~104° of the scan still through the door). Tempering, NOT a TRACKING → MISMATCH transition:
+            // that variant (tried, Task R2) held P(lost) near h/f for ~f/h frames, i.e. it would hide a wrong recall or a
+            // kidnap for as long as any open door stays in view (reloc_selftest K: the wrong recall never searched).
+            const Eigen::Vector3f pose_now(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
+                                           std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0)));
+            rt_.view_beyond = rc::reloc::view_beyond_fraction(
+                rc::reloc::seated_doors(door_apertures(), rt_.passage, current_room_polygon(), false), pose_now,
+                lidar_points, params.rfe_obs_sigma);
+            outside = 1.f - (1.f - outside) * (1.f - rt_.view_beyond);
             const float p_lost = update_lost_belief(s, outside, view_change);
             // A HELD episode (msprt_decide → Hold) is carried by its rivals: step_rival_modes above scores them on
             // every scan and switches the moment one is decisive. It ends when they resolve or empty, or when the
@@ -455,12 +478,28 @@ namespace rc
                 rt_.hold_open = false;
             if (p_lost >= 0.5f and not rt_.hold_open)   // ⚠ the equal-cost Bayes decision, flagged
                 relocalise_from_belief(lidar_points, s, p_lost);
-            // RETIRE THE DOOR ANCHOR once its window is over: the body has left the passage (doorway term past ½) AND
-            // tracking has recovered (P(track) past ½) — the same equal-cost decision as the trigger, both flagged.
-            // Its information is about the hand-over; carried for minutes by odometry that over-reports rotation ~41%
-            // on Shadow (memory: command-prior-over-rotates-shadow), it would become a biased prior, not a helpful one.
-            if (not rt_.door_anchor.empty() and rt_.passage_term < 0.5f and belief_[kTrack] >= 0.5)
-                rt_.door_anchor.clear();
+            // RETIRE THE DOOR ANCHOR BY INFORMATION (Task R2), once its window is over. Its information about the pose is
+            // KL(anchor ‖ uniform over the room) in nats (anchor_information); tracking EARNS information since the
+            // hand-over at log p_track(s) − log p_broad(s) per frame, counted only on views that are new (view_change —
+            // a parked robot re-reads one view) and owed by the room (1 − the through-door fraction, 1 − outside). The
+            // anchor is dropped when tracking has earned at least as much as it holds AND the body has left the passage
+            // (the doorway term past ½ — the equal-cost decision, flagged). R1b retired it on geometry and P(track) ≥ ½
+            // alone, i.e. on the first healthy frames after the mouth — exactly the frames whose view is still mostly
+            // through the door (rtD1i). Its information also decays on its own: odometry widens Σ, the kidnap hazard
+            // fades its weight in the search's prior (mode_posterior).
+            if (not rt_.door_anchor.empty())
+            {
+                const double earned = log_tracking_emission(s) - log_broad_emission(s);
+                rt_.anchor_track_nats += std::max(0.0, earned) * std::clamp(static_cast<double>(view_change), 0.0, 1.0)
+                                         * (1.0 - std::clamp(static_cast<double>(outside), 0.0, 1.0));   // f is in `outside`
+                const auto poly = current_room_polygon();
+                double area2 = 0.0;
+                for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+                    area2 += static_cast<double>(poly[j].x()) * poly[i].y() - static_cast<double>(poly[i].x()) * poly[j].y();
+                const double held = rc::reloc::anchor_information(rt_.door_anchor, 0.5 * std::abs(area2));
+                if (rt_.passage_term < 0.5f and rt_.anchor_track_nats >= held)
+                    rt_.door_anchor.clear();
+            }
             // A HELD episode publishes its mixture spread on EVERY frame it stays open (added to the next published
             // covariance in run()): Σ_k w_k d_k d_kᵀ over the held pose (d = 0) and its rivals, w from the carried odds.
             rt_.held_spread.setZero();

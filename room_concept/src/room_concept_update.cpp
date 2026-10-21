@@ -282,42 +282,23 @@ namespace rc
         // right, because these weights are detached constants AT that point by contract.
         // Empty snapshot (every door shut, or none known) ⇒ empty here ⇒ no cost at all downstream.
         doors_robot_.clear();
-        auto doors_room = door_apertures();
-        // ★ THE DOOR JUST CROSSED, WHERE THE CROSSING MEASURED IT (Task R1b). The 1 Hz door list resolves each door
-        //   through the graph's CURRENT room frame, and right after a hand-over that frame is not yet consistent: live
-        //   rtD1g2 put the crossed door 4.3–4.6 m off for ~1 s after each recall (door_filter.csv +375/+618/+611 ms),
-        //   the per-beam weights then discounted the wrong beams and the post-fit median jumped to 2.6 m. The crossing
-        //   measured that door in the INTERNAL frame, which is continuous through the doorway, so its geometry is kept
-        //   for the whole visit; door_concept's live belief (p_open, prior_closed) still rules whether it is open.
-        if (rt_.passage.has_value())
-        {
-            const auto& pg = *rt_.passage;
-            const Eigen::Vector2f a = pg.centre - 0.5f * pg.width * pg.tangent, b = pg.centre + 0.5f * pg.width * pg.tangent;
-            bool found = false;
-            for (auto& d : doors_room)
-                if (pg.door_id != 0 and d.id == pg.door_id) { d.a = a; d.b = b; found = true; }
-            if (not found)
-            {
-                DoorAperture d;
-                d.a = a; d.b = b; d.id = pg.door_id; d.name = "passage";
-                d.p_open = pg.p_open;
-                d.prior_closed = pg.p_open < 0.f ? 0.5f : 1.f - std::clamp(pg.p_open, 0.f, 1.f);
-                doors_room.push_back(std::move(d));
-            }
-        }
+        // ★ THE DOOR JUST CROSSED, WHERE THE CROSSING MEASURED IT (Task R1b; rc::reloc::seated_doors). The 1 Hz door list
+        //   resolves each door through the graph's CURRENT room frame, and right after a hand-over that frame is not yet
+        //   consistent: live rtD1g2 put the crossed door 4.3–4.6 m off for ~1 s after each recall. The crossing measured
+        //   that door in the INTERNAL frame, continuous through the doorway, so its geometry is kept for the whole visit;
+        //   door_concept's live belief (p_open, prior_closed) still rules whether it is open. Each aperture is seated on
+        //   the room's OWN boundary (the polygon the SDF scores against): the crossing test runs at the mouth, the leaf δ
+        //   behind it. The relocaliser and the lost belief read the SAME list (Task R2).
+        const auto doors_room = rc::reloc::seated_doors(door_apertures(), rt_.passage, current_room_polygon());
         if (not doors_room.empty() and not window_mgr_.empty())
         {
             const Eigen::Vector3f& npa = window_mgr_.newest().pose;
             const Eigen::Rotation2Df R_inv(-npa[2]);
             const Eigen::Vector2f t(npa[0], npa[1]);
             doors_robot_.reserve(doors_room.size());
-            // Seat each aperture on the room's OWN boundary (the polygon the SDF scores against, same frame) before
-            // carrying it across: the crossing test runs at the mouth, the leaf δ behind it (DoorApertures::seat_in_room).
-            const auto poly = current_room_polygon();
             for (const auto& d : doors_room)
             {
                 DoorAperture r = d;
-                DoorApertures::seat_in_room(r, poly);
                 if (const auto it = door_recess_logged_.find(r.id);
                     it == door_recess_logged_.end() or std::abs(it->second - r.recess) > 0.5f * params.rfe_obs_sigma)
                 {   // log on change of the seat by half the SDF noise scale — a reporting cadence, not a model gate

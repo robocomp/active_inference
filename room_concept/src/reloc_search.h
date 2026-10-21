@@ -16,6 +16,9 @@
  *      ℓ(x) = Σ_i log[ (1−ε)·2·N(d_i(x); 0, σ²) + ε/L ].
  *  A SUM over points: batchable as one integer gather per candidate on a precomputed raster, and exp(ℓ)
  *  IS the likelihood, so the posterior over candidates needs no temperature.
+ *  With the room's open doorways (Params::apertures, Task R2) a return whose beam goes through a doorway under
+ *  pose x is instead explained by the door: shut, or open and the return on a wall of the next room (see Aperture,
+ *  BeyondLines). The lattice still scores the room-only raster; the polish and every mode weight use the full ℓ.
  *  ⚠ ε (clutter fraction) is the one modelling constant; it is physical and measurable on healthy frames.
  *  ⚠ Points are treated as independent. Neighbouring returns are correlated, so ℓ is OVERCONFIDENT in
  *    absolute terms (mode weights too decisive, Laplace Σ too tight). It does not bias WHICH mode wins,
@@ -44,6 +47,50 @@
 
 namespace rc::reloc
 {
+    /// ── AN OPEN DOORWAY, AS THE RELOCALISER'S LIKELIHOOD SEES IT (2026-10-21, Task R2) ─────────────────────────
+    /// The MOUTH of a doorway (the aperture seated on the room polygon, DoorApertures::seat_in_room), in the ROOM
+    /// frame, with `open` = P(a beam that crosses it is not stopped by a surface in it) = 1 − prior_closed.
+    /// ★ WHY THE RELOCALISER NEEDS IT. The tracker explains a return through an open door by the per-beam mixture
+    ///   "a surface in the aperture, or the next room" (DoorApertures::weight). The relocaliser's ℓ did not: it scored
+    ///   every return against the room polygon alone, so a correct pose looking through a door was charged a clutter
+    ///   term for each through-door return, while a twin that warped those returns onto other walls was charged
+    ///   nothing. Live rtD1i (742.71 s): the robot 0.39 m inside the open door_1 (the aperture ≈104° of the scan),
+    ///   the correct pose (1 cm from truth) at median |SDF| 0.134 m on the search's points against a 4.1 m / −160°
+    ///   twin at 0.023 m — and the search moved the pose to the twin and kept it to the end of the run.
+    ///   The mixture is evaluated PER HYPOTHESIS: each candidate pose puts the sensor somewhere else, so which beams
+    ///   cross the mouth — and are explained by "beyond the door" — is a property of that pose, not of the scan.
+    struct Aperture
+    {
+        Eigen::Vector2f a{0.f, 0.f}, b{0.f, 0.f};   ///< the mouth, room frame
+        Eigen::Vector2f n_out{0.f, 0.f};            ///< unit normal out of the room; zero when unseated
+        float open = 0.f;     ///< per beam, if the door is as believed: P(no leaf in its way) = 1 − prior_closed
+        float p_shut = 0.f;   ///< P(the door is in fact shut) — ONE fact for all its beams (common-mode; reloc_search.cpp)
+    };
+
+    /// π_b = P(the return of the beam origin→hit came from BEYOND an open doorway), a priori: the union over apertures
+    /// of (1 − p_shut)·open × [the beam goes through that mouth]. (ℓ itself treats the door's state as common to all
+    /// its beams; this per-beam marginal is for diagnostics and tests.) The crossing is exact geometry, the same two cases as
+    /// DoorApertures::weight: a sensor inside the room — the beam crosses the mouth segment before its return; a
+    /// sensor standing in the opening (past the mouth line, within its span) — the return ended past the mouth line.
+    float exit_prior(const std::vector<Aperture>& apertures, const Eigen::Vector2f& origin, const Eigen::Vector2f& hit);
+
+    /// ── WHAT LIES BEYOND A DOOR IS ANOTHER ROOM'S WALLS (Task R2) ─────────────────────────────────────────────
+    /// A return through an open doorway is not "anywhere within 20 m": it lies on a wall of the next room, which this
+    /// map does not hold. With "beyond" uniform, a correct pose looking through a door paid ~6 nats per through-door
+    /// return against any pose that warped those returns onto a known wall — the reloc_selftest Q world in which the
+    /// view through the door plus the room fits the room turned 90°: kept 0/20 (and rtD1i's −160° twin). So the
+    /// beyond density is the ROOM TERM ITSELF, evaluated on a wall of UNKNOWN placement: d = the return's distance to a
+    /// line segmented from the scan itself (wallseg, robot frame — pose-independent, computed once per point set), with
+    /// the room term's own σ and ε (clutter spread over the beyond range). Each such line used as "beyond" pays its
+    /// Occam cost, ½·log n per fitted parameter (2): the room's walls are known, the next room's are fitted.
+    /// ⚠ The SAME σ as the room term, deliberately: with the line's own 2 cm fit σ against the room's 15 cm, "beyond"
+    ///   out-scored "on a known wall" by ~2 nats a return and every pose that put beams through a door gained by it.
+    struct BeyondLines
+    {
+        std::vector<float> r;     ///< per point: perpendicular distance to its own line (m); +∞ when on none
+        std::vector<int>   seg;   ///< per point: its line, −1 none
+    };
+
     struct Params
     {
         float sigma_sdf      = 0.15f;   // m — SDF observation noise (RoomConcept::Params::sigma_sdf)
@@ -64,6 +111,11 @@ namespace rc::reloc
         // Two polished seeds are the SAME mode when their difference is not resolvable under the pair's
         // combined covariance: χ²₃ at 99%. ⚠ A discrete merge decision, flagged; same form as wallseg's.
         float chi2_merge     = 11.34f;
+        /// Open doorways of the room (Task R2). Empty ⇒ ℓ is the room-only model, exactly as before.
+        std::vector<Aperture> apertures;
+        /// m — a return from beyond a doorway is spread uniformly over this range past it. The SAME constant as the
+        /// tracker's next-room hypothesis (DoorApertures::kBeyondExtentM): one generative model for both.
+        float beyond_extent  = 20.f;
     };
 
     /// A rival pose hypothesis the localiser is carrying, and its accumulated log-likelihood ratio against the
@@ -81,7 +133,7 @@ namespace rc::reloc
         float log_lik    = 0.f;                               // ℓ at the polished pose
         float log_weight = 0.f;                               // ℓ + ½ log|Σ|, normalised over modes
         float weight     = 0.f;                               // exp(log_weight)
-        float median_abs = 0.f;                               // median |d| (m) — comparable with the trigger
+        float median_abs = 0.f;                               // median |d| (m), door-weighted — comparable with the trigger
     };
 
     struct Result
@@ -122,11 +174,17 @@ namespace rc::reloc
     float polygon_distance(const std::vector<Eigen::Vector2f>& polygon, const Eigen::Vector2f& q);
     bool  inside_polygon(const std::vector<Eigen::Vector2f>& polygon, const Eigen::Vector2f& q);
 
-    /// ℓ(pose) evaluated exactly (no raster), plus the median |d| for comparison with the trigger.
+    /// ℓ(pose) evaluated exactly (no raster), plus the median |d| for comparison with the trigger. With apertures, each
+    /// point's term is the per-beam mixture (1−π_b)·room(d) + π_b / beyond_extent under THIS pose, and the median is
+    /// weighted by each point's posterior of being a room return — the tracker's door-weighted statistic.
     float log_likelihood(const std::vector<Eigen::Vector2f>& polygon,
                          const std::vector<Eigen::Vector2f>& pts_robot,
                          const Eigen::Vector3f& pose, const Params& p, float extent,
-                         float* median_abs = nullptr);
+                         float* median_abs = nullptr, const BeyondLines* beyond = nullptr);
+
+    /// The lines of a point set (robot frame) as the beyond-a-door density needs them. Empty when p has no apertures.
+    /// Pass it to log_likelihood/polish when scoring many poses on ONE point set; omitted, they compute it themselves.
+    BeyondLines beyond_lines(const std::vector<Eigen::Vector2f>& pts_robot, const Params& p);
 
     /// Yaw hypotheses from pose-independent wall segments paired with polygon edges.
     std::vector<float> structural_yaws(const std::vector<Eigen::Vector2f>& polygon,
@@ -144,7 +202,7 @@ namespace rc::reloc
     /// Robust IRLS Gauss-Newton on ℓ from `start`; returns the polished mode (weight unset).
     Mode polish(const std::vector<Eigen::Vector2f>& polygon,
                 const std::vector<Eigen::Vector2f>& pts_robot,
-                const Eigen::Vector3f& start, const Params& p, float extent);
+                const Eigen::Vector3f& start, const Params& p, float extent, const BeyondLines* beyond = nullptr);
 
     /// The point subset search() polishes and scores its modes on. A caller scoring a hypothesis of its own
     /// (the KEEP hypothesis) against the search's modes must use THIS set: evidences over different point

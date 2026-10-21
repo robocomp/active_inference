@@ -11,6 +11,7 @@
 #include <numbers>
 #include <random>
 #include <ranges>
+#include <unordered_map>
 
 namespace rc::reloc
 {
@@ -31,15 +32,115 @@ namespace rc::reloc
                 : log_in_norm(std::log((1.f - p.outlier_frac) * 2.f / (std::sqrt(2.f * kPi) * p.sigma_sdf))),
                   log_out(std::log(p.outlier_frac / std::max(extent, 1e-3f))),
                   inv_2s2(1.f / (2.f * p.sigma_sdf * p.sigma_sdf)) {}
-            float ll(float d, float* gamma = nullptr) const
+            float ll(float d, float* gamma = nullptr, float* li_out = nullptr) const
             {
                 const float li = log_in_norm - d * d * inv_2s2;
                 const float hi = std::max(li, log_out), lo = std::min(li, log_out);
                 const float out = hi + std::log1p(std::exp(lo - hi));
                 if (gamma != nullptr) *gamma = std::exp(li - out);
+                if (li_out != nullptr) *li_out = li;
                 return out;
             }
         };
+
+        float lse(float x, float y)
+        {
+            if (x == -kInf) return y;
+            if (y == -kInf) return x;
+            const float hi = std::max(x, y), lo = std::min(x, y);
+            return hi + std::log1p(std::exp(lo - hi));
+        }
+
+        /// Do the segments p→p+r and q→q+s cross, with the crossing strictly before p+r? (DoorApertures' test.)
+        bool crosses(const Eigen::Vector2f& p, const Eigen::Vector2f& r, const Eigen::Vector2f& q, const Eigen::Vector2f& s)
+        {
+            const float rxs = r.x() * s.y() - r.y() * s.x();
+            if (std::abs(rxs) < 1e-9f) return false;
+            const Eigen::Vector2f qp = q - p;
+            const float t = (qp.x() * s.y() - qp.y() * s.x()) / rxs;
+            const float u = (qp.x() * r.y() - qp.y() * r.x()) / rxs;
+            return t > 1e-4f and t < 1.f - 1e-4f and u >= 0.f and u <= 1.f;
+        }
+
+        /// Weighted median of d (weights ≥ 0); the plain median when every weight is equal.
+        float weighted_median(std::vector<std::pair<float, float>>& dw)
+        {
+            if (dw.empty()) return std::numeric_limits<float>::quiet_NaN();
+            std::ranges::sort(dw, {}, &std::pair<float, float>::first);
+            // Equal weights (no doorway in play): the plain median, the same element the unweighted code returned.
+            if (std::ranges::all_of(dw, [&](const auto& x) { return x.second == dw.front().second; }))
+                return dw[dw.size() / 2].first;
+            double tot = 0.0;
+            for (const auto& [d, w] : dw) tot += w;
+            if (not (tot > 0.0)) return dw[dw.size() / 2].first;
+            double acc = 0.0;
+            for (const auto& [d, w] : dw)
+                if ((acc += w) >= 0.5 * tot) return d;
+            return dw.back().first;
+        }
+
+        /// ── THE DOORWAY MIXTURE OVER A SCAN, WITH THE DOOR'S STATE COMMON TO ITS BEAMS ──────────────────────────
+        /// `room_ll[i]` is point i's room term, `ap_of[i]` the aperture its beam goes through (−1 none). Returns ℓ and
+        /// fills `room_post[i]` = P(point i is a room return | the scan).
+        /// Per door k, over the beams S_k through it:
+        ///   OPEN (as door_concept believes, 1 − q_k): each beam independently meets the leaf (coverage c_k: a room-like
+        ///         surface at the mouth) or the next room (uniform over beyond_extent);
+        ///   SHUT (q_k): every beam is a room return.
+        ///   ℓ_k = log[(1 − q_k)·Π_i ((1−c_k)/L_b + c_k·room_i) + q_k·Π_i room_i]
+        /// ★ WHY THE STATE IS COMMON-MODE: whether a door is open is ONE fact shared by every beam through it, exactly
+        ///   like a wall's offset (wall_offset_sigma). Taken per beam, a door believed open but actually shut charged
+        ///   every return at its mouth line as "should have been beyond" — measured in reloc_selftest Q's exploration:
+        ///   a shut door listed open cost the TRUE pose 199 nats and the search moved it to the twin. Common-mode, being
+        ///   wrong about the door costs log(1/q_k) once.
+        float door_mixture(const std::vector<float>& room_ll, const std::vector<int>& ap_of, const Params& p,
+                           const PointTerm& term, const BeyondLines& bl, std::vector<float>& room_post)
+        {
+            const std::size_t n = room_ll.size();
+            room_post.assign(n, 1.f);
+            // A return beyond the door: the room term on a line of the next room — same σ, same ε, the clutter spread
+            // over the beyond range instead of the room's extent.
+            const float log_clut = std::log(std::max(p.outlier_frac, 1e-6f)) - std::log(std::max(p.beyond_extent, 1e-3f));
+            auto beyond_ll = [&](std::size_t i)
+            {
+                if (i >= bl.r.size() or not std::isfinite(bl.r[i])) return log_clut;
+                return lse(term.log_in_norm - bl.r[i] * bl.r[i] * term.inv_2s2, log_clut);
+            };
+            float ll = 0.f;
+            for (std::size_t i = 0; i < n; ++i)
+                if (ap_of[i] < 0) ll += room_ll[i];
+            for (std::size_t k = 0; k < p.apertures.size(); ++k)
+            {
+                const auto& ap = p.apertures[k];
+                const float c = std::clamp(1.f - ap.open, 0.f, 1.f);
+                const float q = std::clamp(ap.p_shut, 0.f, 1.f);
+                const float lc = c > 0.f ? std::log(c) : -kInf, l1c = c < 1.f ? std::log1p(-c) : -kInf;
+                double so = 0.0, ss = 0.0;
+                bool any = false;
+                std::unordered_map<int, int> line_use;   // next-room lines this door's beams lie on, and how many
+                for (std::size_t i = 0; i < n; ++i)
+                    if (ap_of[i] == static_cast<int>(k))
+                    {
+                        any = true;
+                        so += lse(l1c + beyond_ll(i), lc + room_ll[i]);
+                        ss += room_ll[i];
+                        if (i < bl.seg.size() and bl.seg[i] >= 0) ++line_use[bl.seg[i]];
+                    }
+                if (not any) continue;
+                for (const auto& [line, cnt] : line_use) so -= std::log(static_cast<double>(cnt));   // Occam: ½·log n × 2
+                const float lo = (q < 1.f ? std::log1p(-q) : -kInf) + static_cast<float>(so);
+                const float ls = (q > 0.f ? std::log(q) : -kInf) + static_cast<float>(ss);
+                const float lk = lse(lo, ls);
+                ll += lk;
+                const float rho = std::exp(ls - lk);   // P(shut | these beams)
+                for (std::size_t i = 0; i < n; ++i)
+                    if (ap_of[i] == static_cast<int>(k))
+                    {
+                        const float leaf = std::exp(lc + room_ll[i] - lse(l1c + beyond_ll(i), lc + room_ll[i]));   // P(leaf | open, r_i)
+                        room_post[i] = rho + (1.f - rho) * leaf;
+                    }
+            }
+            return ll;
+        }
 
         float polygon_extent(const std::vector<Eigen::Vector2f>& poly)
         {
@@ -89,6 +190,35 @@ namespace rc::reloc
     } // namespace
 
     // ── geometry ────────────────────────────────────────────────────────────────────────────────────
+    namespace
+    {
+        bool goes_through(const Aperture& ap, const Eigen::Vector2f& origin, const Eigen::Vector2f& hit)
+        {
+            const Eigen::Vector2f ab = ap.b - ap.a;
+            const float w2 = ab.squaredNorm();
+            if (w2 < 1e-12f) return false;
+            const float u_org = (origin - ap.a).dot(ab) / w2;
+            if (ap.n_out.squaredNorm() > 0.f and ap.n_out.dot(origin - ap.a) > 0.f and u_org >= 0.f and u_org <= 1.f)
+                return ap.n_out.dot(hit - ap.a) > 0.f;          // the sensor stands in the opening
+            return crosses(origin, hit - origin, ap.a, ab);     // the sensor is in the room
+        }
+        int through_aperture(const std::vector<Aperture>& aps, const Eigen::Vector2f& origin, const Eigen::Vector2f& hit)
+        {
+            for (std::size_t k = 0; k < aps.size(); ++k)
+                if (goes_through(aps[k], origin, hit)) return static_cast<int>(k);
+            return -1;
+        }
+    }   // namespace
+
+    float exit_prior(const std::vector<Aperture>& apertures, const Eigen::Vector2f& origin, const Eigen::Vector2f& hit)
+    {
+        float stay = 1.f;   // Π (1 − P(open state)·(1 − coverage) · through_k)
+        for (const auto& ap : apertures)
+            if (goes_through(ap, origin, hit))
+                stay *= 1.f - std::clamp(1.f - ap.p_shut, 0.f, 1.f) * std::clamp(ap.open, 0.f, 1.f);
+        return 1.f - stay;
+    }
+
     float polygon_distance(const std::vector<Eigen::Vector2f>& polygon, const Eigen::Vector2f& q)
     {
         return (q - closest_on_polygon(polygon, q)).norm();
@@ -154,31 +284,57 @@ namespace rc::reloc
     }
 
     // ── exact likelihood ────────────────────────────────────────────────────────────────────────────
+    BeyondLines beyond_lines(const std::vector<Eigen::Vector2f>& pts_robot, const Params& p)
+    {
+        BeyondLines bl;
+        if (p.apertures.empty() or pts_robot.size() < 10) return bl;
+        bl.r.assign(pts_robot.size(), kInf);
+        bl.seg.assign(pts_robot.size(), -1);
+        std::mt19937 rng(20261021u);   // fixed: the same point set must always give the same lines
+        const wallseg::Params sp;
+        const auto res = wallseg::segment(pts_robot, sp, rng);
+        for (std::size_t j = 0; j < res.segments.size(); ++j)
+        {
+            const auto& sg = res.segments[j];
+            for (const int i : sg.inliers)
+            {
+                if (i < 0 or i >= static_cast<int>(pts_robot.size())) continue;
+                bl.r[static_cast<std::size_t>(i)] = std::abs(sg.normal.dot(pts_robot[static_cast<std::size_t>(i)]) - sg.d);
+                bl.seg[static_cast<std::size_t>(i)] = static_cast<int>(j);
+            }
+        }
+        return bl;
+    }
+
     float log_likelihood(const std::vector<Eigen::Vector2f>& polygon,
                          const std::vector<Eigen::Vector2f>& pts_robot,
-                         const Eigen::Vector3f& pose, const Params& p, float extent, float* median_abs)
+                         const Eigen::Vector3f& pose, const Params& p, float extent, float* median_abs,
+                         const BeyondLines* beyond)
     {
+        BeyondLines own;
+        if (beyond == nullptr and not p.apertures.empty()) { own = beyond_lines(pts_robot, p); beyond = &own; }
+        const BeyondLines& bl = beyond != nullptr ? *beyond : own;
         const PointTerm term(p, extent);
         const float c = std::cos(pose.z()), s = std::sin(pose.z());
-        float ll = 0.f;
-        std::vector<float> ds;
-        if (median_abs != nullptr) ds.reserve(pts_robot.size());
-        for (const auto& pr : pts_robot)
+        const Eigen::Vector2f origin = pose.head<2>();
+        const std::size_t n = pts_robot.size();
+        std::vector<float> ds(n), room_ll(n), room_post;
+        std::vector<int> ap_of(n, -1);
+        for (std::size_t i = 0; i < n; ++i)
         {
+            const auto& pr = pts_robot[i];
             const Eigen::Vector2f q(c * pr.x() - s * pr.y() + pose.x(), s * pr.x() + c * pr.y() + pose.y());
-            const float d = polygon_distance(polygon, q);
-            ll += term.ll(d);
-            if (median_abs != nullptr) ds.push_back(d);
+            ds[i] = polygon_distance(polygon, q);
+            room_ll[i] = term.ll(ds[i]);
+            if (not p.apertures.empty()) ap_of[i] = through_aperture(p.apertures, origin, q);
         }
+        const float ll = door_mixture(room_ll, ap_of, p, term, bl, room_post);
         if (median_abs != nullptr)
         {
-            if (ds.empty()) *median_abs = std::numeric_limits<float>::quiet_NaN();
-            else
-            {
-                const auto mid = ds.begin() + static_cast<std::ptrdiff_t>(ds.size() / 2);
-                std::ranges::nth_element(ds, mid);
-                *median_abs = *mid;
-            }
+            std::vector<std::pair<float, float>> dw;
+            dw.reserve(n);
+            for (std::size_t i = 0; i < n; ++i) dw.emplace_back(ds[i], room_post[i]);
+            *median_abs = weighted_median(dw);
         }
         return ll;
     }
@@ -267,8 +423,11 @@ namespace rc::reloc
     // ── polish ──────────────────────────────────────────────────────────────────────────────────────
     Mode polish(const std::vector<Eigen::Vector2f>& polygon,
                 const std::vector<Eigen::Vector2f>& pts_robot,
-                const Eigen::Vector3f& start, const Params& p, float extent)
+                const Eigen::Vector3f& start, const Params& p, float extent, const BeyondLines* beyond)
     {
+        BeyondLines own;
+        if (beyond == nullptr and not p.apertures.empty()) { own = beyond_lines(pts_robot, p); beyond = &own; }
+        const BeyondLines& bl = beyond != nullptr ? *beyond : own;
         // σ is ESTIMATED here, by EM on the inlier responsibilities (σ² ← Σγd²/Σγ), annealing down from the wide
         // σ_sdf the lattice needs for its basins. A polish at the fixed σ_sdf = 0.15 m — the agent's model-
         // mismatch noise, ~7x a scan's real spread — left the likelihood flat over ±10 cm and let one-sided
@@ -292,6 +451,9 @@ namespace rc::reloc
         // Per-edge sums for the common-mode marginalisation below: Σw and Σw·J over the points on each edge.
         struct EdgeSum { float sw = 0.f; Eigen::Vector3f swj = Eigen::Vector3f::Zero(); };
         std::vector<EdgeSum> edge_sums;
+        std::vector<Eigen::Vector2f> pt_rp, pt_diff;   // per-point scratch, reused across evaluations
+        std::vector<int> pt_edge, pt_ap;
+        std::vector<float> pt_li, pt_room, pt_post;
         auto evaluate = [&](const Eigen::Vector3f& pose, Eigen::Matrix3f* Hout, Eigen::Vector3f* gout) -> float
         {
             const float c = std::cos(pose.z()), s = std::sin(pose.z());
@@ -299,27 +461,38 @@ namespace rc::reloc
             Eigen::Matrix3f Hs = prior;
             Eigen::Vector3f g = Eigen::Vector3f::Zero();
             if (Hout != nullptr) { edge_sums.assign(polygon.size(), EdgeSum{}); em_wd2 = 0.0; em_w = 0.0; }
-            for (const auto& pr : pts_robot)
+            // Pass 1: each point's room term; and, under THIS pose (Task R2), which doorway its beam goes through. The
+            // crossing is a step function of the pose, held constant within a step like γ and re-evaluated at every
+            // accepted pose. Pass 2 (below) needs the door's posterior state, which depends on all its beams.
+            const std::size_t n = pts_robot.size();
+            pt_rp.resize(n); pt_diff.resize(n); pt_edge.resize(n); pt_li.resize(n); pt_room.resize(n); pt_ap.assign(n, -1);
+            for (std::size_t i = 0; i < n; ++i)
             {
-                const Eigen::Vector2f rp(c * pr.x() - s * pr.y(), s * pr.x() + c * pr.y());
-                const Eigen::Vector2f q = rp + pose.head<2>();
-                int edge = 0;
-                const Eigen::Vector2f cl = closest_on_polygon(polygon, q, &edge);
-                const Eigen::Vector2f diff = q - cl;
-                const float d = diff.norm();
-                float gamma = 0.f;
-                ll += term.ll(d, &gamma);
-                if (Hout == nullptr) continue;
+                const auto& pr = pts_robot[i];
+                pt_rp[i] = Eigen::Vector2f(c * pr.x() - s * pr.y(), s * pr.x() + c * pr.y());
+                const Eigen::Vector2f q = pt_rp[i] + pose.head<2>();
+                const Eigen::Vector2f cl = closest_on_polygon(polygon, q, &pt_edge[i]);
+                pt_diff[i] = q - cl;
+                pt_room[i] = term.ll(pt_diff[i].norm(), nullptr, &pt_li[i]);
+                if (not p.apertures.empty()) pt_ap[i] = through_aperture(p.apertures, pose.head<2>(), q);
+            }
+            ll = door_mixture(pt_room, pt_ap, p, term, bl, pt_post);
+            for (std::size_t i = 0; i < n and Hout != nullptr; ++i)
+            {
+                const float d = pt_diff[i].norm();
+                // inlier responsibility = P(room return) · P(wall, not clutter | room return)
+                const float gamma = pt_post[i] * std::exp(pt_li[i] - pt_room[i]);
                 em_wd2 += static_cast<double>(gamma) * d * d;
                 em_w   += gamma;
                 if (d < 1e-6f) continue;
-                const Eigen::Vector2f u = diff / d;
+                const Eigen::Vector2f u = pt_diff[i] / d;
+                const Eigen::Vector2f& rp = pt_rp[i];
                 // ∂q/∂θ = R'·p = (−rp.y, rp.x)
                 const Eigen::Vector3f J(u.x(), u.y(), -u.x() * rp.y() + u.y() * rp.x());
                 const float w = gamma * inv_s2;
                 Hs += w * J * J.transpose();
                 g  += (w * d) * J;     // ∂(−ℓ)/∂x
-                auto& es = edge_sums[static_cast<std::size_t>(edge)];
+                auto& es = edge_sums[static_cast<std::size_t>(pt_edge[i])];
                 es.sw += w;
                 es.swj += w * J;
             }
@@ -398,7 +571,7 @@ namespace rc::reloc
         m.pose.z() = wrap(m.pose.z());
         m.cov = H_marg.inverse();
         float med = 0.f;
-        m.log_lik = log_likelihood(polygon, pts_robot, m.pose, p, extent, &med);
+        m.log_lik = log_likelihood(polygon, pts_robot, m.pose, p, extent, &med, &bl);
         m.median_abs = med;
         return m;
     }
@@ -426,6 +599,9 @@ namespace rc::reloc
         res.n_yaws = static_cast<int>(yaws.size());
 
         // 2. translation lattice, aligned to the raster so a lattice offset is an integer cell offset.
+        //    ⚠ The lattice scores the ROOM-ONLY raster (no doorway mixture: it would need a per-point crossing test per
+        //    candidate). It only PROPOSES seeds; every mode is then polished and weighed on the full ℓ, doorways
+        //    included, and the caller's seeds (the incumbent) are always polished — so the doorway model decides.
         const int m = std::max(1, static_cast<int>(std::lround(p.lattice_step / raster.res())));
         const float step = m * raster.res();
         const int lx = raster.nx() / m, ly = raster.ny() / m;
@@ -507,10 +683,11 @@ namespace rc::reloc
         // The lattice ran on the subsample for speed; the polish is per seed and cheap, so it uses the
         // denser set — mode PRECISION comes from here, and a 150-point polish left modes ~10 cm off.
         const auto pts_polish = subsample(pts_all, 4 * p.max_points);
+        const BeyondLines bl = beyond_lines(pts_polish, p);   // pose-independent: once for every seed
         std::vector<Mode> modes;
         for (const auto& st : starts)
         {
-            Mode md = polish(polygon, pts_polish, st, p, extent);
+            Mode md = polish(polygon, pts_polish, st, p, extent, &bl);
             if (not md.pose.allFinite() or not std::isfinite(md.log_lik)) continue;
             bool merged = false;
             for (auto& other : modes)

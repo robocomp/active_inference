@@ -61,9 +61,17 @@ namespace rc
             const double logdet = ldlt.vectorD().array().abs().max(1e-30f).log().sum();
             const double log_near = std::isfinite(maha) ? -0.5 * maha - 0.5 * (3.0 * std::log(2.0 * M_PI) + logdet)
                                                         : -std::numeric_limits<double>::infinity();
-            // LOST is not KIDNAPPED. With the tracker lost, odometry still carries the door anchor (passage_prior.h),
-            // unless the robot was carried off since the hand-over: the hazard h per frame, over the frames since.
-            double b = std::log(pl) + log_uniform;
+            // ★ THE DOOR ANCHOR IS EVIDENCE ABOUT THE POSE IN BOTH BRANCHES (Task R2). Two independent readings of the
+            //   pose x: the tracker's μ (worth something only if not lost) and the door anchor A carried by odometry
+            //   since the hand-over (worth something unless the robot was carried off since: the hazard h per frame,
+            //   p_kid). So   p(x | μ, A) ∝ A(x) · [(1 − P(lost))·N(μ; x) + P(lost)·U],
+            //   A(x) = (1 − p_kid)·Σ_c w_c N(x; anchor_c) + p_kid·U, relative to the uniform (A ≡ U without an anchor).
+            //   R1b put A in the lost branch only, so a held pose next to the anchor got nothing from it — and at the
+            //   moment a doorway view makes the likelihood unreliable, that is the hypothesis it most supports.
+            const double b = std::log(pl) + log_uniform;
+            const double a = std::log(1.0 - pl) + log_near;
+            const double hi = std::max(a, b);
+            double log_a_rel = 0.0;   // log A(x) − log U
             if (not rt_.door_anchor.empty())
             {
                 const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
@@ -85,11 +93,9 @@ namespace rc
                 }
                 const double x1 = std::log1p(-p_kid) + log_door, x2 = std::log(p_kid) + log_uniform;
                 const double hx = std::max(x1, x2);
-                b = std::log(pl) + hx + std::log(std::exp(x1 - hx) + std::exp(x2 - hx));
+                log_a_rel = hx + std::log(std::exp(x1 - hx) + std::exp(x2 - hx)) - log_uniform;
             }
-            const double a = std::log(1.0 - pl) + log_near;
-            const double hi = std::max(a, b);
-            return hi + std::log(std::exp(a - hi) + std::exp(b - hi));
+            return log_a_rel + hi + std::log(std::exp(a - hi) + std::exp(b - hi));
         };
         for (const auto& m : res.modes)
             log_post.push_back(static_cast<double>(rc::reloc::log_evidence(m)) + log_prior(m.pose, m.cov));
