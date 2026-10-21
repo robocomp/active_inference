@@ -6,6 +6,7 @@
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor's clock
 #include "residual_risk.h"
 #include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
+#include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
 
 #include <algorithm>
 #include <array>
@@ -1024,6 +1025,30 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         plan_spline_valid_ = false;
     }
     affordance_manager.set_required_name(door_required_);
+    // ★ `explore room_X` CONFINES THE CONTEST TO room_X (2026-10-21, user: "anything in room_X"). No order, or a door
+    //   passage's required entrant ⇒ "" ⇒ the old contest. On ENTERING a scope the standing claim is released, exactly
+    //   as on a passage start above: a claim on another room's target would otherwise stay Executing with nobody to
+    //   drive it, since the selector no longer sees it (the scope removes it before the keep-executing branch).
+    if (const std::string scope = rc::affordance::contest_room_scope(command_explore_, door_required_, explore_room_);
+        scope != affordance_manager.room_scope())
+    {
+        if (not scope.empty())
+        {
+            std::println("[controller] explore '{}': the contest is confined to its affordances — releasing the current claim",
+                         scope);
+            affordance_manager.release_execution_claim(graph_);
+            lockon_.reset();
+            orient_start_ms_.reset();
+            orient_stable_ = 0;
+            feedback_node_id_ = 0;
+            last_target_info_.reset();
+            current_target_room_.reset();
+            active_target_id_ = 0;
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+        }
+        affordance_manager.set_room_scope(scope);
+    }
     // ★ MISSION (COMMAND) MODE TAKES ORDERS, IT DOES NOT FORAGE (2026-10-18, user). The selector runs there only
     //   for an order: a door passage (door_required_ names its step) or an `explore`, which opens the contest on
     //   purpose. With no order standing — after `stop`, or before the first — the contest stayed open and the robot

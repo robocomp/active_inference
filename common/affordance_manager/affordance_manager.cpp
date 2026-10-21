@@ -778,6 +778,26 @@ static bool is_same_request(const rc::AffordanceManager::Target &t, float last_x
 // How long a refused STANDPOINT stays un-offerable. Long enough that the situation can change,
 // short enough that a genuine retry is not deferred noticeably.
 static constexpr std::uint64_t kRefusalRetryMs = 3000;
+// The room an affordance's TARGET is in: up its `parent` chain to the first "room" node (affordance_room_scope.h).
+// A node without a `parent` attribute falls back to its RT parent (an incoming RT edge), the tree `parent` mirrors.
+static std::optional<std::string> target_room_name(DSR::DSRGraph &G, const DSR::Node &affordance)
+{
+    const auto parent_of = [&](const DSR::Node &n) -> std::optional<std::uint64_t>
+    {
+        if (const auto p = G.get_attrib_by_name<parent_att>(n); p.has_value()) return p.value();
+        for (const auto &e : G.get_edges_to_id(n.id()))
+            if (e.type() == "RT") return e.from();
+        return std::nullopt;
+    };
+    const auto lookup = [&](std::uint64_t id) -> std::optional<rc::affordance::ChainNode>
+    {
+        const auto n = G.get_node(id);
+        if (not n.has_value()) return std::nullopt;
+        return rc::affordance::ChainNode{n->type(), n->name(), parent_of(*n)};
+    };
+    return rc::affordance::room_of_chain(parent_of(affordance), lookup);
+}
+
 std::optional<AffordanceManager::Target> AffordanceManager::select_target(const std::shared_ptr<DSR::DSRGraph> &graph,
                                                                           std::optional<Eigen::Vector2f> robot_pos)
 {
@@ -824,6 +844,24 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                           const auto g = graph->get_attrib_by_name<epistemic_gain_att>(n);
                           return g.has_value() and not (g.value() > 0.f);
                       });
+
+    // ★ AN `explore room_X` ORDER CONFINES THE CONTEST TO room_X (2026-10-21, user: "anything in room_X"). After the
+    //   filters above, so a door passage's required entrant is never second-guessed here (its scope is "" anyway —
+    //   rc::affordance::contest_room_scope). The target's room is where its object hangs in the parent tree; an
+    //   affordance whose chain reaches no room is not eligible. Rule + why: affordance_room_scope.h.
+    last_room_excluded_ = rc::affordance::scope_to_room(
+        affordances, room_scope_, [](const DSR::Node &n) { return n.name(); },
+        [&](const DSR::Node &n) { return target_room_name(*graph, n); });
+    if (const std::string key = room_scope_.empty() ? std::string{}
+                                                    : room_scope_ + "|" + rc::affordance::describe_excluded(last_room_excluded_);
+        key != room_scope_log_key_)
+    {
+        room_scope_log_key_ = key;
+        if (not room_scope_.empty())
+            std::print("[aff-select] explore '{}': only its affordances compete; out of the room:{}\n", room_scope_,
+                       last_room_excluded_.empty() ? std::string(" none")
+                                                   : rc::affordance::describe_excluded(last_room_excluded_));
+    }
 
     // ── IS ANY OBJECT AFFORDANCE IN THE RUNNING? ──────────────────────────────────────────────────
     // Decided over the ELIGIBLE set only (Offered or Executing): an object affordance its own producer

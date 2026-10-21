@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../affordance_protocol/affordance_protocol.h"   // rc::affordance::Outcome
+#include "affordance_room_scope.h"                         // rc::affordance::ExcludedCandidate
 
 namespace DSR
 {
@@ -227,6 +228,13 @@ public:
     /// select_target returns nothing.
     void set_required_name(std::string name) { required_name_ = std::move(name); }
     [[nodiscard]] const std::string &required_name() const { return required_name_; }
+    /// Confine selection to affordances whose TARGET hangs (via the `parent` chain) under the room node with this NAME
+    /// ("" = no restriction, the default). Set by the controller from a mission's `explore room_X` order; an affordance
+    /// whose chain does not reach a room is not eligible. Rule + why: affordance_room_scope.h.
+    void set_room_scope(std::string room) { room_scope_ = std::move(room); }
+    [[nodiscard]] const std::string &room_scope() const { return room_scope_; }
+    /// What the scope left out of the last select_target(), with where each one resolved to.
+    [[nodiscard]] const std::vector<rc::affordance::ExcludedCandidate> &last_room_excluded() const { return last_room_excluded_; }
 
     // ── A VERDICT READ OFF THE MAP, REMEMBERED AGAINST THE MAP ───────────────────────────────────
     // "The body does not fit in that cell" and "there is no route to it and nowhere closer" are
@@ -424,6 +432,9 @@ private:
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     std::vector<Candidate> last_candidates_;
     std::string required_name_;        // set_required_name: "" = every affordance competes
+    std::string room_scope_;           // set_room_scope: "" = every room competes
+    std::vector<rc::affordance::ExcludedCandidate> last_room_excluded_;
+    std::string room_scope_log_key_;   // the last [aff-select] scope line printed: once per change
     std::string last_reject_reason_;   // all affordances evaluated in the last select_target()
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;

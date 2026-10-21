@@ -97,7 +97,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission:
 		w_.session_.mission().set_click_target(std::nullopt);
 		w_.clear_manual_target();
 		w_.session_.mission().set_mode(rc::DriveMode::Command);   // no door required: the selector chooses freely
-		w_.session_.set_command_explore(true);                     // …and is opened on purpose by this order
+		w_.session_.set_command_explore(true, room->name);         // …opened on purpose by this order, for its room only
 		room_ = room->name;
 		ground(leaf, room_, {{"room", QString::fromStdString(room_)}});
 		return std::nullopt;
