@@ -122,5 +122,6 @@ reader), cost-to-go input, tests.
 - [ ] Failing tests: an open leaf modelled by the door (hinge, free edge, φ, σ) + residual returns on it → the field
   routes around the free edge and stays finite from the near side; the leaf's cells no longer count as unexplained
   risk; a leaf with large σ_φ is priced by its swept uncertainty.
+- [ ] Also (from F4): the cross goal line and the trap veto must come from the anchor opening with the gap weighted by its score (today a phantom gap still sets the goal line).
 - [ ] Implement: returns explained by the door's leaf hypothesis are removed from the residual's unexplained mass and
   the leaf enters as a known obstacle (segment + σ) in free/extra; tests + scenarios green; commit by pathspec.
