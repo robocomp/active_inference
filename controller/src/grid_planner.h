@@ -59,6 +59,12 @@ struct OccupiedCells
     // ★EMPTY (or the wrong length) ⇒ EVERY cell is hard, exactly as before: a caller that has no belief
     // to offer gets the conservative planner, never a permissive one.
     std::vector<float> risk_nats;
+    // ── Task 3c fix round 1: WHICH HARD CELLS COME AND GO ─────────────────────────────────────────────
+    // One entry per centre (or empty): 1 = the cell is hard ONLY because a live return lands in it this cycle
+    // (residual_risk.h harden_corroborated; it had a finite price before). GridPlanner keeps such cells out of its
+    // PERSISTENT occupancy (fit_nats_* with persistent_only), so a standpoint verdict can tell a wall from a person
+    // walking past. occ_ — routing, pose_free, the distance map — is unchanged: they stay hard there.
+    std::vector<std::uint8_t> live_hard;
 };
 
 class GridPlanner
@@ -225,8 +231,10 @@ public:
     //   nats it covers; +inf when no heading is hard-free (a wall, an object polygon, a corroborated residual cell).
     // fit_nats_turning: the body turning in place through EVERY heading (a terminal facing turn): +inf unless free at all
     //   eight, else the soft nats of the UNION of the eight footprints — each cell counted once, since a turn covers it once.
-    float fit_nats_some_heading(const Eigen::Vector2f& pos_room) const;
-    float fit_nats_turning(const Eigen::Vector2f& pos_room) const;
+    // persistent_only (fix round 1): count as hard only causes that do not come and go — walls, object polygons, residual
+    //   cells with no belief — and NOT cells hard only from a live return this cycle (OccupiedCells::live_hard).
+    float fit_nats_some_heading(const Eigen::Vector2f& pos_room, bool persistent_only = false) const;
+    float fit_nats_turning(const Eigen::Vector2f& pos_room, bool persistent_only = false) const;
     Eigen::Vector2f grid_origin() const { return cell_to_world(0, 0); }   // centre of cell (0, 0), room frame
     float cell_size() const { return cell_; }
 
@@ -386,6 +394,8 @@ private:
     float state_risk(int ix, int iy, int h) const;
 
     std::vector<std::uint8_t> occ_;
+    std::vector<std::uint8_t> live_only_;   // Task 3c: cells occ_ marks ONLY because of a live-hard residual cell (or empty)
+    bool cell_free_persistent(int ix, int iy, int h) const;
     // Soft residual risk per planner cell, nats (0 = none). Empty when nothing soft was supplied, which
     // is how plan() skips the footprint sum entirely in the common case.
     std::vector<float> risk_;

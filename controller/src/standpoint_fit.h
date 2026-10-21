@@ -54,17 +54,51 @@ struct Fit
     [[nodiscard]] float p() const { return std::exp(-nats); }
 };
 
-[[nodiscard]] inline Fit body_fit(const rc::GridPlanner& g, const Eigen::Vector2f& p, bool turning)
+[[nodiscard]] inline Fit body_fit(const rc::GridPlanner& g, const Eigen::Vector2f& p, bool turning, bool persistent_only = false)
 {
-    return {turning ? g.fit_nats_turning(p) : g.fit_nats_some_heading(p), turning};
+    return {turning ? g.fit_nats_turning(p, persistent_only) : g.fit_nats_some_heading(p, persistent_only), turning};
 }
 
 // P(fits) = 0 (a hard cell under the body) -> HandBack; otherwise Serves (header). Unknown before the planner has a world.
 [[nodiscard]] inline Verdict verdict(const Fit& f) { return std::isfinite(f.nats) ? Verdict::Serves : Verdict::HandBack; }
 
-[[nodiscard]] inline Verdict judge(const rc::GridPlanner& g, const Eigen::Vector2f& p, bool turning)
+[[nodiscard]] inline Verdict judge(const rc::GridPlanner& g, const Eigen::Vector2f& p, bool turning, bool persistent_only = false)
 {
     if (not g.has_world()) return Verdict::Unknown;
-    return verdict(body_fit(g, p, turning));
+    return verdict(body_fit(g, p, turning, persistent_only));
+}
+
+// ── THE ONE DECISION BOTH CALL SITES MAKE (fix round 1, I-2) ─────────────────────────────────────────────────────────
+// Stage::Planning — build_planning_step, every cycle, at ANY range: hands back only for causes that do not come and go
+//   (walls, object polygons, residual cells with no belief). A cell hard only because a live return lands in it THIS
+//   cycle (a person walking past the standpoint while the robot is metres away) does not hand back here (I-1): it is
+//   judged where the LiDAR measures the spot —
+// Stage::ApproachWindow — recheck_standpoint_on_approach, inside its window: every hard cell counts.
+// Actions: LegacyRepair = the old chain's repair runs unchanged (always with the policy OFF — the A/B arm; and a Reach
+//   cell at the Planning stage, which room publishes as a 0.5 m CELL, so resolving inside it edits nobody's decision);
+//   ServeAsPublished = keep the producer's pose exactly; HandBack = Unreachable to the producer. There is no action that
+//   moves a pose: under the policy no branch re-sites.
+// Which footprint (M-2): every non-Reach contract under the policy ends in a turn in place — Servo's facing turn or its
+//   lock-on micro-search (controller_lockon.h: yaw centring and a yaw dither at the standpoint, to whatever heading the
+//   detection needs, whether or not GoalFacingYawEnabled), Orient its whole purpose — so it is judged through the turn; a Reach only where it arrives (`rotate`: wants_final_facing).
+//   An unknown contract under the policy is not assumed to be Reach: it is never re-sited either.
+enum class Stage { Planning, ApproachWindow };
+enum class Action { LegacyRepair, ServeAsPublished, HandBack };
+struct Decision { Action action = Action::LegacyRepair; Fit fit{}; };
+
+[[nodiscard]] inline Decision decide_standpoint(const rc::GridPlanner& g, const Eigen::Vector2f& published, bool rotate,
+                                                bool policy_on, bool contract_known, bool is_reach, Stage stage)
+{
+    if (not policy_on) return {Action::LegacyRepair, {}};
+    const bool reach = contract_known and is_reach;
+    if (stage == Stage::Planning and reach) return {Action::LegacyRepair, {}};
+    if (not g.has_world()) return {Action::ServeAsPublished, {}};      // no belief yet: no verdict, and never a move
+    const Fit f = body_fit(g, published, rotate or not reach, /*persistent_only=*/stage == Stage::Planning);
+    return {verdict(f) == Verdict::HandBack ? Action::HandBack : Action::ServeAsPublished, f};
+}
+
+[[nodiscard]] inline const char* action_name(Action a)
+{
+    return a == Action::LegacyRepair ? "LegacyRepair" : a == Action::ServeAsPublished ? "ServeAsPublished" : "HandBack";
 }
 }  // namespace rc::standpoint

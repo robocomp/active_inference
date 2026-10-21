@@ -362,6 +362,10 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     // a measurement of one, this cycle — so it goes back to HARD: the planner never routes the body
     // through something the sensors currently see. Same buffer and body band the approach checks use.
     std::vector<float> residual_risk = obstacle_tracker.residual_cell_risk_nats();
+    // Task 3c fix round 1: which cells were priced BEFORE the live LiDAR hardened them — hard only from a return this
+    // cycle, a cause that comes and goes (a person passing). GridPlanner keeps them out of its persistent occupancy.
+    std::vector<std::uint8_t> live_hard(residual_risk.size(), 0);
+    for (std::size_t k = 0; k < residual_risk.size(); ++k) live_hard[k] = std::isfinite(residual_risk[k]) ? 1 : 0;
     int corroborated = 0;
     if (auto *lidar = obstacle_tracker.lidar_buffer(); lidar != nullptr and not residual_risk.empty())
         if (const auto [cloud_opt] = lidar->read_last(); cloud_opt.has_value())
@@ -400,7 +404,13 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
                             {.centres = obstacle_tracker.residual_cells(),
                              .cell_size_m = obstacle_tracker.residual_cell_size_m(),
-                             .risk_nats = std::move(residual_risk)});
+                             .risk_nats = residual_risk,
+                             .live_hard = [&]
+                             {   // 1 = finite before harden_corroborated, +inf after (the leaf never hardens a cell)
+                                 for (std::size_t k = 0; k < live_hard.size(); ++k)
+                                     live_hard[k] = (live_hard[k] and k < residual_risk.size() and not std::isfinite(residual_risk[k])) ? 1 : 0;
+                                 return std::move(live_hard);
+                             }()});
     // One line when the split changes materially — the soft/hard census is what says whether a "no route"
     // was decided by belief or by measurement.
     {
@@ -1514,13 +1524,17 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // widening below, without bound) can carry it out of that band, where it can never complete (rtD1d leg 4). With the
         // policy driving, the one predicate is standpoint_fit.h: hard occupancy under the body ⇒ Unreachable to the
         // producer, which re-solves inside its own band. The old chain ([Policy] Enabled = false) keeps the repair.
-        const bool object_standpoint_under_policy = policy_enabled() and target_contract_known_
-                                                    and target_contract_.policy != rc::affordance::Policy::Reach;
+        // fix round 1 (I-1, I-2): ONE pure decision (standpoint_fit.h decide_standpoint), shared with the approach recheck.
+        // Here — every cycle, at any range — only causes that do not come and go hand back; a cell hard only from a live
+        // return this cycle is left to the windowed recheck, where the LiDAR measures the spot.
+        const auto standpoint_decision = rc::standpoint::decide_standpoint(
+            grid_planner_, step.target.room_pos, will_rotate_here, policy_enabled(), target_contract_known_,
+            target_contract_.policy == rc::affordance::Policy::Reach, rc::standpoint::Stage::Planning);
+        const bool object_standpoint_under_policy = standpoint_decision.action != rc::standpoint::Action::LegacyRepair;
         if (object_standpoint_under_policy)
         {
             resolved_standpoint_.reset();
-            const auto f = rc::standpoint::body_fit(grid_planner_, step.target.room_pos, will_rotate_here);
-            if (rc::standpoint::verdict(f) == rc::standpoint::Verdict::Serves) in_cell_pose = step.target.room_pos;
+            if (standpoint_decision.action == rc::standpoint::Action::ServeAsPublished) in_cell_pose = step.target.room_pos;
         }
 
         // ── REUSE THE STANDPOINT WE ALREADY RESOLVED FOR THIS CELL ──────────────────────────────
@@ -1580,14 +1594,16 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         }
         if (not in_cell_pose.has_value() and object_standpoint_under_policy)
         { fact = rc::affordance::Outcome::Unreachable;
-          why = std::format("occupancy belief: the body cannot take the published standpoint ({}) — handed back, not "
-                            "re-sited (Task 3c)", will_rotate_here ? "a hard cell in the turn it ends with"
-                                                                    : "a hard cell under it at every heading"); }
+          why = std::format("occupancy belief: a wall, object or unbelieved residual cell lies under the body in the turn "
+                            "it ends with at the published standpoint — object standpoint handed back, not re-sited "
+                            "(Task 3c)"); }
         else if (not in_cell_pose.has_value())
         { fact = rc::affordance::Outcome::Infeasible;
           why = std::format("no pose the body fits in anywhere within reach of the {:.2f} m cell",
                             producer_cell_m); }
-        else if (routing_failed_here)
+        // fix round 1 (M-3): under the policy an object standpoint is not re-sited toward the robot either — no route is
+        // the policy's to report (the no-route clock, report_unreachable_if_no_route), at the pose the producer chose.
+        else if (routing_failed_here and not object_standpoint_under_policy)
         {
             // ── GO AS CLOSE AS THE MAP ALLOWS — AND SAY THAT IS WHAT HAPPENED ───────────────────
             // ★Driving to the closest reachable pose is RIGHT: it makes progress, it changes what the
@@ -4795,10 +4811,15 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     {
         approach_fix_.reset();
         if (window <= 0.f or (step.plan_origin - anchor).squaredNorm() > window * window) return;
-        const bool turning = wants_final_facing(step.target);
-        if (not grid_planner_.has_world()) return;   // no belief yet: no verdict (never a hand-back)
-        const auto f = rc::standpoint::body_fit(grid_planner_, anchor, turning);
-        if (rc::standpoint::verdict(f) != rc::standpoint::Verdict::HandBack) return;
+        // fix round 1 (I-2): the same pure decision as build_planning_step, at the ApproachWindow stage (every hard cell
+        // counts, live returns included — this is where the LiDAR measures the spot); Reach is judged here too.
+        const auto d = rc::standpoint::decide_standpoint(grid_planner_, anchor, wants_final_facing(step.target), true,
+                                                         target_contract_known_,
+                                                         target_contract_.policy == rc::affordance::Policy::Reach,
+                                                         rc::standpoint::Stage::ApproachWindow);
+        if (d.action != rc::standpoint::Action::HandBack) return;
+        const auto &f = d.fit;
+        const bool turning = f.turning;
         const bool news = reach_unreachable_why_.empty();
         if (flag_standpoint_unreachable(std::format("occupancy belief: the body cannot take standpoint ({:.2f},{:.2f}) {} "
                                                     "(-log P(fits) {:.1f}) — handed back, not re-sited", anchor.x(), anchor.y(),
@@ -5765,7 +5786,9 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
 {
     if (not reach_unreachable_why_.empty())
     {
-        std::println("[controller] standpoint handed back — {} — reporting Unreachable to the producer",
+        // fix round 1 (M-4): scripts grep "Reach standpoint handed back"; an object standpoint (Task 3c) says so apart
+        std::println("[controller] {} standpoint handed back — {} — reporting Unreachable to the producer",
+                     (target_contract_known_ and target_contract_.policy == rc::affordance::Policy::Reach) ? "Reach" : "object",
                      reach_unreachable_why_);
         std::fflush(stdout);
         affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);

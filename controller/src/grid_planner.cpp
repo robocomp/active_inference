@@ -123,6 +123,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     dist_valid_ = false;          // the world changed; any cached distance field describes the old one
     risk_.clear();
     residual_soft_in_ = residual_hard_in_ = 0;
+    live_only_.clear();
     if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); dist_.clear(); return; }
 
     float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
@@ -201,9 +202,15 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     {
         const float h = 0.5f * cells.cell_size_m;
         const bool priced = cells.risk_nats.size() == cells.centres.size();
+        const bool flagged = cells.live_hard.size() == cells.centres.size();
+        // Task 3c fix round 1: persistent hard cells are marked first, so a planner cell a live-hard cell touches is
+        // "live only" exactly when nothing persistent occupies it as well.
+        std::vector<std::size_t> live_cells;
         for (std::size_t k = 0; k < cells.centres.size(); ++k)
         {
             const auto& c = cells.centres[k];
+            if (flagged and cells.live_hard[k] and not (priced and std::isfinite(cells.risk_nats[k])))
+            { live_cells.push_back(k); continue; }
             if (priced and std::isfinite(cells.risk_nats[k]))
             {
                 ++residual_soft_in_;
@@ -220,6 +227,18 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
             for (int iy = std::max(0, iy0); iy <= std::min(h_ - 1, iy1); ++iy)
                 for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
                     occ_[idx(ix, iy)] = 1;
+        }
+        if (not live_cells.empty()) live_only_.assign(static_cast<std::size_t>(w_) * h_, 0);
+        for (const std::size_t k : live_cells)
+        {
+            ++residual_hard_in_;
+            const auto& c = cells.centres[k];
+            int ix0, iy0, ix1, iy1;
+            world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
+            world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
+            for (int iy = std::max(0, iy0); iy <= std::min(h_ - 1, iy1); ++iy)
+                for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
+                    if (not occ_[idx(ix, iy)]) { occ_[idx(ix, iy)] = 1; live_only_[idx(ix, iy)] = 1; }
         }
     }
     rebuild_offsets();
@@ -279,7 +298,20 @@ float GridPlanner::body_risk_at(const Eigen::Vector2f& pos_room) const
     return std::isfinite(r) ? r : 0.f;
 }
 
-float GridPlanner::fit_nats_some_heading(const Eigen::Vector2f& pos_room) const
+bool GridPlanner::cell_free_persistent(int ix, int iy, int h) const
+{
+    if (offsets_.size() != kHeadings) return false;
+    for (const auto& o : offsets_[h])
+    {
+        const int nx = ix + o.x(), ny = iy + o.y();
+        if (not in_bounds(nx, ny)) return false;
+        const std::size_t i = static_cast<std::size_t>(idx(nx, ny));
+        if (occ_[i] and not (i < live_only_.size() and live_only_[i])) return false;
+    }
+    return true;
+}
+
+float GridPlanner::fit_nats_some_heading(const Eigen::Vector2f& pos_room, bool persistent_only) const
 {
     constexpr float kInf = std::numeric_limits<float>::infinity();
     int ix, iy;
@@ -287,18 +319,18 @@ float GridPlanner::fit_nats_some_heading(const Eigen::Vector2f& pos_room) const
     const_cast<GridPlanner*>(this)->rebuild_offsets();
     float best = kInf;
     for (int h = 0; h < kHeadings; ++h)
-        if (cell_free(ix, iy, h)) best = std::min(best, state_risk(ix, iy, h));
+        if (persistent_only ? cell_free_persistent(ix, iy, h) : cell_free(ix, iy, h)) best = std::min(best, state_risk(ix, iy, h));
     return best;
 }
 
-float GridPlanner::fit_nats_turning(const Eigen::Vector2f& pos_room) const
+float GridPlanner::fit_nats_turning(const Eigen::Vector2f& pos_room, bool persistent_only) const
 {
     constexpr float kInf = std::numeric_limits<float>::infinity();
     int ix, iy;
     if (not world_to_cell(pos_room, ix, iy)) return kInf;
     const_cast<GridPlanner*>(this)->rebuild_offsets();
     for (int h = 0; h < kHeadings; ++h)
-        if (not cell_free(ix, iy, h)) return kInf;
+        if (not (persistent_only ? cell_free_persistent(ix, iy, h) : cell_free(ix, iy, h))) return kInf;
     if (risk_.empty()) return 0.f;
     std::unordered_set<int> covered;
     float r = 0.f;
@@ -352,7 +384,7 @@ void GridPlanner::write_grid(std::ostream& os) const
 
 bool GridPlanner::read_grid(std::istream& is)
 {
-    w_ = h_ = 0; occ_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear();
+    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear();
     std::string tok;
     while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     if (tok != "grid") return false;
@@ -1293,7 +1325,7 @@ bool GridPlanner::self_test()
         const std::vector<Eigen::Vector2f> room1{{-3.f, 0.f}, {2.f, 0.f}, {2.f, 4.61f}, {-3.f, 4.61f}};
         const Eigen::Vector2f robot{-0.5f, 2.0f}, goal{-0.52f, 5.81f}, leaf{-1.05f, 5.12f};
         constexpr float kHeading = 1.56f, kWidth = 1.0f;
-        OccupiedCells cells{.centres = {}, .cell_size_m = 0.05f, .risk_nats = {}};   // no belief: every cell hard
+        OccupiedCells cells{.centres = {}, .cell_size_m = 0.05f, .risk_nats = {}, .live_hard = {}};   // no belief: every cell hard
         for (float y = 3.61f; y <= 4.61f; y += 0.05f) cells.centres.emplace_back(-1.10f, y);   // the open leaf
         for (float y = 4.61f; y <= 4.76f; y += 0.05f) cells.centres.emplace_back(-0.10f, y);   // the far jamb
         const auto world = [&](std::vector<std::vector<Eigen::Vector2f>> passages)

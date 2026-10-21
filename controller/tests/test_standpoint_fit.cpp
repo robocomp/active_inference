@@ -46,12 +46,14 @@ float nats(float p, float kobs)
 }
 
 rc::GridPlanner planner_with(const std::vector<Eigen::Vector2f> &cells, std::vector<float> risk,
-                             const std::vector<std::vector<Eigen::Vector2f>> &objects = {})
+                             const std::vector<std::vector<Eigen::Vector2f>> &objects = {},
+                             std::vector<std::uint8_t> live_hard = {})
 {
     rc::GridPlanner p;
     p.params.cell_size_m = 0.10f;
     p.params.safety_margin_m = 0.05f;
-    p.set_world(kRoom, objects, rc::OccupiedCells{.centres = cells, .cell_size_m = kRes, .risk_nats = std::move(risk)});
+    p.set_world(kRoom, objects, rc::OccupiedCells{.centres = cells, .cell_size_m = kRes, .risk_nats = std::move(risk),
+                                                  .live_hard = std::move(live_hard)});
     return p;
 }
 
@@ -80,11 +82,10 @@ int main()
     {
         const auto empty = planner_with({}, {});
         check(rc::standpoint::judge(empty, sp, true) == Verdict::Serves, "empty room: a turning standpoint serves");
-        // A single return 0.50 m out (rtD1d: the policy's contact set held 0-1 returns there). With no residual cell behind
-        // it, the occupancy belief does not contain it at all.
+        // A single return 0.50 m out (rtD1d: the policy's contact set held 0-1 returns there). (fix round 1, M-1: a lone
+        // return with no residual cell is simply absent from the belief — the empty-room case above — so it is not re-tested.)
         const Eigen::Vector2f stray = sp + Eigen::Vector2f(0.50f, 0.f);
         check((stray - sp).norm() < kOldDisc, "the stray return is inside the old disc (the old repair would MOVE the standpoint)");
-        check(rc::standpoint::judge(empty, sp, true) == Verdict::Serves, "a lone live return with no residual cell: serves");
         // Even if residual latched it — one weakly evidenced cell, and one CONFIRMED cell — it is not under the body.
         for (const float r : {nats(0.6f, 1.5f), nats(0.993f, 40.f)})
         {
@@ -171,6 +172,107 @@ int main()
     {
         rc::GridPlanner none;
         check(rc::standpoint::judge(none, sp, true) == Verdict::Unknown, "no planner world: Unknown (never a hand-back)");
+    }
+
+    // ── fix round 1 (I-1, I-2, M-2): the ONE decision both call sites make ─────────────────────────────────────────────
+    using rc::standpoint::Action;
+    using rc::standpoint::Stage;
+    using rc::standpoint::decide_standpoint;
+    const Eigen::Vector2f under = sp + Eigen::Vector2f(0.10f, 0.f);
+    const auto clear = planner_with({}, {});
+    const auto walled = planner_with({under}, {kInf});                              // hard, persistent (no belief)
+    const auto passerby = planner_with({under}, {kInf}, {}, {1});                   // hard ONLY from a live return now
+    const std::vector<std::vector<Eigen::Vector2f>> box{{{3.05f, 2.95f}, {3.15f, 2.95f}, {3.15f, 3.05f}, {3.05f, 3.05f}}};
+    const auto both = planner_with({under}, {kInf}, box, {1});                      // a live return ON a real object
+    rc::GridPlanner none;
+    const std::vector<const rc::GridPlanner *> worlds{&clear, &walled, &passerby, &both, &none};
+
+    std::printf("\n6. the policy OFF: LegacyRepair, always (the old chain's A/B arm)\n");
+    {
+        bool all = true;
+        for (const auto *g : worlds)
+            for (const Stage st : {Stage::Planning, Stage::ApproachWindow})
+                for (const bool known : {false, true})
+                    for (const bool reach : {false, true})
+                        for (const bool rot : {false, true})
+                            all = all and decide_standpoint(*g, sp, rot, false, known, reach, st).action == Action::LegacyRepair;
+        check(all, "policy_on = false -> LegacyRepair for every world, stage, contract and rotation (160 cases)");
+    }
+
+    std::printf("\n7. the policy ON: no branch moves a pose; only a known Reach at Planning keeps the in-cell repair\n");
+    {
+        bool never_moves = true, reach_repairs = true;
+        for (const auto *g : worlds)
+            for (const Stage st : {Stage::Planning, Stage::ApproachWindow})
+                for (const bool known : {false, true})
+                    for (const bool reach : {false, true})
+                        for (const bool rot : {false, true})
+                        {
+                            const auto a = decide_standpoint(*g, sp, rot, true, known, reach, st).action;
+                            const bool is_reach_planning = st == Stage::Planning and known and reach;
+                            if (is_reach_planning) reach_repairs = reach_repairs and a == Action::LegacyRepair;
+                            else never_moves = never_moves and (a == Action::ServeAsPublished or a == Action::HandBack);
+                        }
+        check(never_moves, "every policy case except Reach@Planning is ServeAsPublished or HandBack (no re-siting action)");
+        check(reach_repairs, "a known Reach at Planning -> LegacyRepair (room's 0.5 m cell is resolved inside the cell)");
+        check(decide_standpoint(walled, sp, false, true, false, true, Stage::Planning).action == Action::HandBack,
+              "an UNKNOWN contract is not assumed Reach: never re-sited (here handed back)");
+        check(decide_standpoint(none, sp, true, true, true, false, Stage::Planning).action == Action::ServeAsPublished,
+              "no world under the policy: served as published (no verdict, no move)");
+    }
+
+    std::printf("\n8. a TRANSIENT hard cell (a live return this cycle) does not hand back from the planning stage\n");
+    {
+        const auto plan_p = decide_standpoint(passerby, sp, true, true, true, false, Stage::Planning);
+        const auto win_p = decide_standpoint(passerby, sp, true, true, true, false, Stage::ApproachWindow);
+        std::printf("    passer-by under the body: Planning %s, ApproachWindow %s\n", rc::standpoint::action_name(plan_p.action),
+                    rc::standpoint::action_name(win_p.action));
+        check(plan_p.action == Action::ServeAsPublished, "Planning (any range): a cell hard only from a live return -> served");
+        check(win_p.action == Action::HandBack, "ApproachWindow (the LiDAR measures the spot): the same cell -> handed back");
+        check(not passerby.can_turn_here(sp), "...and the planner's own occupancy (routing, pose_free) still has it hard");
+        check(decide_standpoint(walled, sp, true, true, true, false, Stage::Planning).action == Action::HandBack,
+              "a persistent hard cell (no belief) hands back at Planning, at any range");
+        check(decide_standpoint(both, sp, true, true, true, false, Stage::Planning).action == Action::HandBack,
+              "a live return ON an object polygon: the object is persistent -> handed back at Planning");
+        check(decide_standpoint(clear, sp, true, true, true, false, Stage::Planning).action == Action::ServeAsPublished,
+              "a clear standpoint: served exactly as published");
+    }
+
+    std::printf("\n9. two consecutive cycles, same pose, persistent hard cell: how many hand-backs\n");
+    {
+        int handbacks = 0;
+        float n1 = 0.f, n2 = 0.f;
+        for (int cycle = 0; cycle < 2; ++cycle)
+        {
+            const auto d = decide_standpoint(walled, sp, true, true, true, false, Stage::Planning);
+            handbacks += d.action == Action::HandBack ? 1 : 0;
+            (cycle == 0 ? n1 : n2) = d.fit.nats;
+        }
+        // ★ EXPECTED COUNT. The decision is pure and stateless: it says HandBack on BOTH cycles (2), with the identical fit.
+        //   What reaches the producer is fewer: build_planning_step's fact path records note_map_verdict(cell, robot pose)
+        //   and AffordanceManager::select_target skips an offer that has a verdict from this (cell, pose 5 cm quantum, grid
+        //   identity) — so a producer re-offering the IDENTICAL pose gets ONE Unreachable per robot-pose quantum per grid
+        //   identity. The grid identity (world_hash) covers hard occupancy incl. live-hard cells, so a changing live cloud
+        //   re-opens the question: a re-offer of the same occupied pose is reported again each time the hard map changes.
+        //   Ending that loop is the producer's (door_concept re-solving inside its band — ruled a separate task).
+        std::printf("    decisions HandBack: %d of 2 (fit %.1f / %.1f)\n", handbacks, n1, n2);
+        check(handbacks == 2 and std::isinf(n1) and std::isinf(n2), "stateless: HandBack on both cycles, identical verdict");
+    }
+
+    std::printf("\n10. M-2: a non-Reach contract is judged THROUGH THE TURN even when it does not end in a facing turn\n");
+    {
+        // A hard cell some heading clears but a turn sweeps (as in 4): a Servo with facing off still lock-ons (yaw centring
+        // and dither in place), so it is judged turning; a Reach that does not turn is judged where it arrives.
+        bool found = false;
+        for (float d = 0.20f; d < 0.45f and not found; d += 0.01f)
+            for (float a = 0.f; a < 3.1416f and not found; a += 0.19635f)
+            {
+                const auto g = planner_with({sp + d * Eigen::Vector2f(std::cos(a), std::sin(a))}, {kInf});
+                const auto servo = decide_standpoint(g, sp, /*rotate=*/false, true, true, /*reach=*/false, Stage::Planning).action;
+                const auto reach = decide_standpoint(g, sp, /*rotate=*/false, true, true, /*reach=*/true, Stage::ApproachWindow).action;
+                if (servo == Action::HandBack and reach == Action::ServeAsPublished) found = true;
+            }
+        check(found, "rotate = false: Servo judged through the turn (handed back), Reach at one heading (served)");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
