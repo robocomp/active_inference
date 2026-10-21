@@ -197,6 +197,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         const Eigen::Vector2f origin = grid_planner_.grid_origin() - 0.5f * Eigen::Vector2f::Constant(grid_planner_.cell_size());
         const rc::policy::CostToGo::Grid g{origin, kFieldCell, static_cast<int>(std::ceil(span_x / kFieldCell)) + 1,
                                            static_cast<int>(std::ceil(span_y / kFieldCell)) + 1};
+        // ★ F1: the navigator turns the field's priced-minus-length back into nats with the SAME weight extra_fn used.
+        policy_nav_.set_route_risk_weight(std::max(0.f, grid_planner_.params.residual_risk_weight));
         policy_nav_.set_goal(spec.goal, g, free_fn, extra_fn, spec.points, body.circumscribed_radius());
         policy_goal_ = spec;
         policy_goal_who_ = who;
