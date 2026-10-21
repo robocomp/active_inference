@@ -117,6 +117,9 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         note_why(rc::why::Cause::PolicyHold, std::format("{}: {}", who, why));
         note_no_command(); motion_commander.stop_robot();
         policy_sent_.push_back({now_s, 0.f, 0.f});
+        // Task 3d: a hold that returns before the tick's own 2-s trim (the latched turn-sign EMERGENCY holds every tick) must not
+        // grow the send history without bound
+        while (not policy_sent_.empty() and policy_sent_.front().t < now_s - 2.0) policy_sent_.pop_front();
         policy_gate_.on_hold();   // review fix 2.1: a hold — however short — is an INTERRUPTION of the committed plan
     };
     // ★ Task 3d fix round 2 (CRITICAL-2): the latched turn-sign EMERGENCY holds the base idle whatever the goal — no hand-back here
