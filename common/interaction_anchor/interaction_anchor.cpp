@@ -212,6 +212,26 @@ bool Anchor::set_unseen_ms(DSR::DSRGraph& G, int unseen_ms)
     return G.update_node(n.value());
 }
 
+bool Anchor::set_lost_prob(DSR::DSRGraph& G, float p_lost)
+{
+    if (not std::isfinite(p_lost)) return false;
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    const float exist = 1.f - std::clamp(p_lost, 0.f, 1.f);
+    if (const auto v = G.get_attrib_by_name<obj_exist_prob_att>(n.value()); v.has_value() and v.value() == exist) return true;
+    G.add_or_modify_attrib_local<obj_exist_prob_att>(n.value(), exist);
+    return G.update_node(n.value());
+}
+
+std::optional<float> read_anchor_lost_prob(DSR::DSRGraph& G, std::uint64_t anchor_id)
+{
+    const auto n = G.get_node(anchor_id);
+    if (not n.has_value()) return std::nullopt;
+    const auto e = G.get_attrib_by_name<obj_exist_prob_att>(n.value());
+    if (not e.has_value() or not std::isfinite(e.value())) return std::nullopt;
+    return 1.f - std::clamp(e.value(), 0.f, 1.f);
+}
+
 bool Anchor::set_drivable(DSR::DSRGraph& G, bool drivable)
 {
     auto n = G.get_node(id_);

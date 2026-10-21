@@ -411,6 +411,114 @@ int main()
         check(s_of(Eigen::Vector2f(0.f, 0.1f), -1.f) > 0.f, "mid-doorway retry: the side the cross LEAVES holds (s > 0, past the plane, not flipped)");
     }
 
+    std::print("(16) Task D-B (rtD1h leg 5): the lost check on every cycle of a claimed cross — a two-mode (IMM) filter\n");
+    {
+        // rtD1h leg 5, anchor_frames.bin t 445.28 s: hung from the room at (−0.10, +1.95, +0.06), σ (0.309, 0.203, 0.101) in
+        // anchor axes; the FIRST update put it at (−0.623, +0.626, +1.526), σ (0.022, 0.065, 0.019), and every later frame held it.
+        const double tau = 3.0;   // kAnchorPredictMs (interaction_anchor.h), in s — the worker passes the constant itself
+        const double T_mix = 40.0;   // DoorAffordance.CrossTimeoutS (door_config.h default): the mode's mixing time
+        const float yaw0 = 0.059f;
+        rc::interaction::RelPose room;
+        room.x = {-0.100f, 1.948f, yaw0};
+        room.P = rc::door::anchor_axes_to_robot(Eigen::Vector3f(0.309f * 0.309f, 0.203f * 0.203f, 0.101f * 0.101f).asDiagonal(), yaw0);
+        // The beams as a measurement of the pose (H = I, Kalman): the alias or the opening, each an attractor. The odometry's
+        // per-cycle noise (1 cm, 0.5 cm-equivalent in yaw) holds the tracker's σ near the live anchor's ~2 cm (rtD1h: 2.0–2.2 cm).
+        const auto beams = [](rc::interaction::RelPose prior, const V3& z, float sd)
+        {
+            prior.P += Eigen::Vector3f(1e-4f, 1e-4f, 2.5e-5f).asDiagonal().toDenseMatrix();
+            rc::interaction::RelPose post = prior;
+            const Eigen::Matrix3f R = Eigen::Vector3f(sd * sd, sd * sd, 0.5f * sd * 0.5f * sd).asDiagonal();
+            const Eigen::Matrix3f K = prior.P * (prior.P + R).inverse();
+            V3 nu = z - prior.x; nu.z() = rc::interaction::wrap_pi(nu.z());
+            post.x += K * nu; post.x.z() = rc::interaction::wrap_pi(post.x.z());
+            post.P = (Eigen::Matrix3f::Identity() - K) * prior.P;
+            post.P = 0.5f * (post.P + post.P.transpose());
+            return post;
+        };
+        const auto maha = [](const rc::interaction::RelPose& a, const rc::interaction::RelPose& b)
+        {
+            V3 d = a.x - b.x; d.z() = rc::interaction::wrap_pi(d.z());
+            return double(d.dot(b.P.inverse() * d));
+        };
+        const V3 alias(-0.623f, 0.626f, 1.526f);
+        struct Run { std::vector<float> p; std::vector<double> d_room, d_track; rc::interaction::RelPose last_out, last_track; };
+        // `truth`: what the beams lock on, as a persistent attractor; `room_at`: the room initialisation each cycle.
+        const auto run = [&](const V3& lock, const rc::interaction::RelPose& rm, double seconds, double hz, double view_pv)
+        {
+            Run r;
+            rc::door::AnchorLostMode m;
+            rc::door::AnchorBias bias;
+            rc::interaction::RelPose tracker = room;   // born from the room (creation)
+            const double dt = 1.0 / hz;
+            for (double t = dt; t <= seconds + 1e-9; t += dt)
+            {
+                rc::door::lost_mode_mix(m, tracker, &bias, rm, dt, T_mix);
+                tracker = beams(tracker, lock, 0.03f);
+                rc::door::lost_mode_observe(m, tracker, rm, 0.9f, rc::door::view_lost_llr_step(float(view_pv), dt, tau), dt, tau);
+                const auto out = rc::door::lost_mode_output(tracker, rm, m.p);
+                r.p.push_back(m.p);
+                r.d_room.push_back(maha(out, rm));
+                r.d_track.push_back(double((out.x.head<2>() - tracker.x.head<2>()).norm()));
+                r.last_out = out; r.last_track = tracker;
+            }
+            return r;
+        };
+        // (a) the alias. Its own evidence rate fixes the detection time: the room channel's log-ratio at the alias, ·dt/τ per
+        //     cycle, has to carry P(lost) from the prior to 0.99 — t_det = τ·(logit 0.99 − logit π)/room_llr (+ one cycle).
+        {
+            rc::interaction::RelPose a; a.x = alias; a.P = Eigen::Vector3f(0.022f * 0.022f, 0.065f * 0.065f, 0.019f * 0.019f).asDiagonal();
+            const double llr = rc::door::belief_lost(a, room, 0.9f).room_llr;
+            const auto lg = [](double p) { return std::log(p / (1.0 - p)); };
+            const double t_det = tau * (lg(0.99) - lg(rc::door::kAnchorLostPrior)) / llr + 0.1;
+            const auto r = run(alias, room, 10.0, 10.0, 0.25);   // p_view 0.25: what the alias read live (pv_rec 0.24–0.26)
+            const std::size_t k_det = std::size_t(std::ceil(t_det / 0.1)) - 1;
+            double worst_after = 0.0;
+            float p_min_after = 1.f;
+            for (std::size_t k = k_det; k < r.p.size(); ++k) { worst_after = std::max(worst_after, r.d_room[k]); p_min_after = std::min(p_min_after, r.p[k]); }
+            std::print("  alias (Mahalanobis² {:.1f} vs the room init): room log-ratio {:+.1f} nats ⇒ the model's detection time {:.2f} s; "
+                       "P(lost) at 0.1/0.3/0.5/1.0 s {:.2f}/{:.2f}/{:.2f}/{:.2f}; after t_det: min P(lost) {:.3f}, published pose's worst "
+                       "Mahalanobis² from the room init {:.2f}; the tracker still on the alias at 10 s: ({:+.2f},{:+.2f},{:+.2f})\n",
+                       maha(a, room), llr, t_det, r.p[0], r.p[2], r.p[4], r.p[9], p_min_after, worst_after,
+                       r.last_track.x.x(), r.last_track.x.y(), r.last_track.x.z());
+            check(llr > 0.0 and t_det < 1.0, std::format("rtD1h's alias is believed within a second by its own evidence (t_det {:.2f} s)", t_det));
+            check(p_min_after > 0.95f, "after the detection time P(lost) stays high while the beams sit on the alias");
+            check(worst_after < 7.81, "after the detection time the PUBLISHED pose is the room's (within its 95 % χ²₃ region), not the alias");
+        }
+        // (b) a CORRECT anchor whose room init is off by a 3-σ_model room error it cannot see (0.25 m along, 0.15 m across,
+        //     6°): 60 s at 10 Hz with the opening in view (p_view 0.7). Not re-initialised, not dragged onto the room.
+        {
+            const V3 truth = room.x + V3(0.25f, 0.15f, 0.105f);
+            const auto r = run(truth, room, 60.0, 10.0, 0.7);
+            const float p_max_late = *std::max_element(r.p.begin() + 50, r.p.end());
+            const double drift = *std::max_element(r.d_track.begin() + 50, r.d_track.end());
+            const double track_err = double((r.last_track.x.head<2>() - truth.head<2>()).norm());
+            std::print("  correct anchor, room init 0.29 m / 6° off: P(lost) after 5 s ≤ {:.3f} (prior {:.2f}); the published pose ≤ {:.3f} m "
+                       "from the tracker; the tracker {:.4f} m from the opening at 60 s; published σ_x {:.3f} vs the tracker's {:.3f}\n",
+                       p_max_late, rc::door::kAnchorLostPrior, drift, track_err, std::sqrt(r.last_out.P(0, 0)), std::sqrt(r.last_track.P(0, 0)));
+            check(p_max_late < float(rc::door::kAnchorLostPrior), "a correct anchor's P(lost) falls below the prior and stays there");
+            check(drift < 0.02, "a correct anchor is not pulled onto the room (published ≤ 2 cm from the tracker)");
+            check(std::sqrt(r.last_out.P(0, 0)) < 2.0f * std::sqrt(r.last_track.P(0, 0)),
+                  "a correct anchor's published σ is not inflated by the room's (less than twice the tracker's)");
+            check(track_err < 0.01, "the tracker stays on the opening (≤ 1 cm) for 60 s");
+        }
+        // (c) no fixed count: the same physics at 20 Hz gives the same P(lost) in TIME as at 10 Hz (the alias case).
+        {
+            const auto r10 = run(alias, room, 2.0, 10.0, 0.25), r20 = run(alias, room, 2.0, 20.0, 0.25);
+            float worst = 0.f;
+            for (std::size_t k = 0; k < r10.p.size(); ++k) worst = std::max(worst, std::abs(r10.p[k] - r20.p[2 * k + 1]));
+            std::print("  10 Hz vs 20 Hz: worst |ΔP(lost)| at the same instants {:.3f}\n", worst);
+            check(worst < 0.1f, "P(lost) is a function of time, not of the cycle count");
+        }
+        // (d) the transition alone (no evidence) relaxes to the prior, and a re-init (a fresh mode) starts there.
+        {
+            rc::door::AnchorLostMode m; m.p = 0.99f;
+            rc::interaction::RelPose t = room;
+            for (int k = 0; k < 2000; ++k) { rc::door::lost_mode_mix(m, t, nullptr, room, 0.1, T_mix); m.p = m.p_pred; }
+            check(std::abs(m.p - float(rc::door::kAnchorLostPrior)) < 0.01f, std::format("no evidence for 5 T: P(lost) relaxes to the prior ({:.3f})", m.p));
+            check(rc::door::AnchorLostMode{}.p == float(rc::door::kAnchorLostPrior), "a fresh mode (creation / re-init) starts at the prior");
+        }
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

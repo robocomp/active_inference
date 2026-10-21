@@ -106,6 +106,10 @@ public:
     // free edge one σ further open; door_phi_rad = φ). nullopt REMOVES both (no leaf known — never a sentinel). Written
     // only on a change.
     bool set_leaves(DSR::DSRGraph& G, const std::vector<AnchorLeaf>& leaves);   // empty = remove (fix round 1: hypotheses)
+    // Task D-B: the owner's P(lost) — the probability that what its sensors track is NOT the object (an alias) — published as
+    // obj_exist_prob = 1 − P(lost) (an existing attribute: "the object exists where this copy says"). Written only on a change.
+    // See read_anchor_lost_prob for the contract.
+    bool set_lost_prob(DSR::DSRGraph& G, float p_lost);
     void remove(DSR::DSRGraph& G);                               // node, edge, and the affordance's link
     [[nodiscard]] std::uint64_t id() const { return id_; }
     [[nodiscard]] std::uint64_t object_id() const { return object_id_; }
@@ -171,5 +175,14 @@ std::optional<std::pair<RelPose, float>> read_anchor_latest(DSR::DSRGraph& G, st
 
 // Task 12 fix A: the leaf the owner publishes on the anchor (anchor_leaf.h), or nullopt (none known / malformed).
 std::vector<AnchorLeaf> read_anchor_leaves(DSR::DSRGraph& G, std::uint64_t anchor_id);
+
+// ★ Task D-B — THE OWNER'S P(lost), read back: 1 − obj_exist_prob on the anchor node; nullopt = not stated (absent, or an owner
+// that does not run the check) — NEVER read as 0 or 1. door_concept runs a two-mode filter on its passage anchor every cycle
+// of a claimed cross (door_anchor_open.h AnchorLostMode): P(lost) = P(its beams track an alias, not the opening). The pose on
+// the RT edge is ALREADY the two modes combined, moment-matched — (1 − P)·the beam track + P·the room-frame initialisation —
+// so as P(lost) rises the published pose becomes the room's and its covariance carries the disagreement. A consumer weighing
+// the anchor against an INDEPENDENT measurement of the same opening (the controller's gap) uses 1 − P(lost) as the anchor's
+// credibility; it must not inflate the covariance by it again (that is already in it).
+std::optional<float> read_anchor_lost_prob(DSR::DSRGraph& G, std::uint64_t anchor_id);
 
 }  // namespace rc::interaction

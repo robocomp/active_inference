@@ -43,6 +43,12 @@
 //   --no-bias        Task 10 ablation: the persistent bias factor is NOT carried between frames (the agent carries it).
 //   --casing C       the caller's leaf for records written before it (leaf.len = 0, v1/v2): hinged at and spanning the clear
 //                    width rc::door::anchor_clear_width(width, C) — what the agent now passes (DoorConcept.FrameCasingM, 0.06).
+//   --lost-check     Task D-B, with --chain and --gt: the per-cycle lost check (AnchorLostMode: IMM mixing before each update,
+//                    evidence after it, the two modes' combination as the scored pose) — the room init each cycle is the
+//                    chain's first record (a fresh anchor's prior is the room init) carried through the TRUE robot pose.
+//                    Prints a LOST row per frame: P(lost), the room channel, the mixing weight, tracker vs published pose.
+//   --lost-mix-s T   the lost mode's mixing time (default 40 s = DoorAffordance.CrossTimeoutS).
+//   --lost-no-feedback  diagnosis: the mode's output only, the tracker never mixed (see lost_no_feedback).
 // The held camera term is replayed as live (the last mask frame for kAnchorStaleMs, carried by the step motion), so the
 // chained p_view is the one that would be PUBLISHED. ⚠ The rays are the ones select_anchor_rays kept AT THE LIVE PRIOR: a
 // chained prior far from the live one is scored on that selection (floor returns through the opening it predicts are
@@ -57,6 +63,7 @@
 #include <vector>
 
 #include "anchor_frame_record.h"
+#include "door_anchor_open.h"   // Task D-B: --lost-check (AnchorLostMode)
 #include "interaction_anchor/interaction_anchor.h"   // kAnchorStaleMs
 #include <algorithm>
 #include <locale>
@@ -138,18 +145,24 @@ constexpr double kDoorX = -4.77, kDoorY = 9.425;
 // true normal coordinate s; plus the claimed σ along the same axis. The anchor's axes may be flipped (the robot on the
 // other side): then the yaw differs by π and the along-wall axis is reversed.
 struct GtErr { bool ok = false; double lat = 0, yaw = 0, s = 0, sig_lat = 0, sig_yaw = 0; };
+// The truth at t, interpolated between the two bracketing rows (≈ 20 Hz; the next row alone is up to 110 ms late,
+// 3° of a 0.5 rad/s turn).
+std::optional<GtRow> gt_at(const std::vector<GtRow>& gt, std::int64_t t)
+{
+    auto it = std::lower_bound(gt.begin(), gt.end(), t, [](const GtRow& r, std::int64_t v) { return r.t < v; });
+    if (it == gt.end() or it == gt.begin()) return std::nullopt;
+    const GtRow& g1 = *it; const GtRow& g0 = *std::prev(it);
+    if (g1.t - g0.t > 200 or g1.t == g0.t) return std::nullopt;
+    const double a_ = double(t - g0.t) / double(g1.t - g0.t);
+    return GtRow{t, g0.x + a_ * (g1.x - g0.x), g0.y + a_ * (g1.y - g0.y), g0.th + a_ * std::remainder(g1.th - g0.th, 2 * M_PI)};
+}
 GtErr gt_error(const std::vector<GtRow>& gt, std::int64_t t, const rc::interaction::RelPose& post)
 {
     GtErr e;
     if (gt.empty()) return e;
-    // The truth at t, interpolated between the two bracketing rows (≈ 20 Hz; the next row alone is up to 110 ms late,
-    // 3° of a 0.5 rad/s turn).
-    auto it = std::lower_bound(gt.begin(), gt.end(), t, [](const GtRow& r, std::int64_t v) { return r.t < v; });
-    if (it == gt.end() or it == gt.begin()) return e;
-    const GtRow& g1 = *it; const GtRow& g0 = *std::prev(it);
-    if (g1.t - g0.t > 200 or g1.t == g0.t) return e;
-    const double a_ = double(t - g0.t) / double(g1.t - g0.t);
-    const GtRow gi{t, g0.x + a_ * (g1.x - g0.x), g0.y + a_ * (g1.y - g0.y), g0.th + a_ * std::remainder(g1.th - g0.th, 2 * M_PI)};
+    const auto gi_ = gt_at(gt, t);
+    if (not gi_.has_value()) return e;
+    const GtRow gi = gi_.value();
     const GtRow* it2 = &gi;
     const double c = std::cos(it2->th), s = std::sin(it2->th), dx = kDoorX - it2->x, dy = kDoorY - it2->y;
     const double tx = c * dx + s * dy, ty = -s * dx + c * dy, tz = std::remainder(-it2->th, 2 * M_PI);
@@ -206,10 +219,40 @@ void print_leg(const LegStats& s, int k)
     s.cal.print("seen");
 }
 
+// --lost-check (Task D-B): the per-cycle lost check (door_anchor_open.h AnchorLostMode) replayed with the anchor. The
+// room initialisation each cycle is rebuilt from the chain's FIRST record — a fresh anchor's prior IS the room
+// initialisation (hung from the room) — taken into the world with the robot's true pose at that instant (--gt), and then
+// brought back into each later frame's robot frame by the true pose then; its P0 is the first record's, carried in anchor
+// axes. So the replayed room init holds the live room-frame error at the hang and no later localisation noise (stated).
+bool lost_check = false;
+double lost_mix_s = 40.0;   // DoorAffordance.CrossTimeoutS (door_config.h default)
+bool lost_no_feedback = false;   // --lost-no-feedback: the mode's OUTPUT only — the tracker is never mixed (diagnosis: the
+                                 // records' rays were selected at the LIVE prior, so a tracker the mixing moves is scored on
+                                 // rays chosen for somewhere else; this isolates what the output alone does)
+
+float wk_lost(const rc::door::rec::Frame& f) { return rc::door::anchor_clear_width(f.width, 0.06f); }   // pa.clear_width (FrameCasingM 0.06)
+
 int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool freeze, double from_s, double to_s, int every,
           double win_a, double win_b, double width_override, double casing, const std::vector<PoseRow>& motion,
           const Eigen::Vector3f& motion_var, const std::vector<GtRow>& gt)
 {
+    rc::door::AnchorLostMode lost_mode;
+    bool lost_ok = false;                       // an opening in the world for this chain (its first record + the truth)
+    Eigen::Vector3d open_world = Eigen::Vector3d::Zero();   // x, y, yaw of the room init's opening, world
+    Eigen::Matrix3f P0_axes = Eigen::Matrix3f::Zero();       // its P0 in anchor axes
+    std::int64_t lost_stamp = 0;
+    const auto room_init_at = [&](std::int64_t t) -> std::optional<rc::interaction::RelPose>
+    {
+        if (not lost_ok) return std::nullopt;
+        const auto g = gt_at(gt, t);
+        if (not g.has_value()) return std::nullopt;
+        const double c = std::cos(g->th), s = std::sin(g->th), dx = open_world.x() - g->x, dy = open_world.y() - g->y;
+        rc::interaction::RelPose r;
+        r.x = Eigen::Vector3f(float(c * dx + s * dy), float(-s * dx + c * dy), float(std::remainder(open_world.z() - g->th, 2 * M_PI)));
+        r.P = rc::door::anchor_axes_to_robot(P0_axes, r.x.z());
+        r.stamp_ms = t;
+        return r;
+    };
     using rc::interaction::RelPose;
     const std::int64_t t0 = frames.empty() ? 0 : frames.front().t_ms;
     std::print("{:>8} {:>5} | {:>7} {:>7} {:>7} | {:>6} {:>6} | {:>6} = {:>5} x {:>5} x {:>5} | {:>5} {:>6} | {:>6} {}\n", "t_ms", "rays", "x", "y",
@@ -235,6 +278,21 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             x = f.prior;
             bias = f.bias;
             hold = {};
+            lost_mode = {};
+            lost_ok = false;
+            lost_stamp = f.t_ms;
+            if (lost_check)
+                if (const auto g = gt_at(gt, f.t_ms); g.has_value())
+                {
+                    const double c = std::cos(g->th), sn = std::sin(g->th);
+                    open_world = {g->x + c * f.prior.x.x() - sn * f.prior.x.y(), g->y + sn * f.prior.x.x() + c * f.prior.x.y(),
+                                  std::remainder(g->th + f.prior.x.z(), 2 * M_PI)};
+                    P0_axes = rc::door::robot_to_anchor_axes(f.prior.P, f.prior.x.z());
+                    lost_ok = true;
+                    std::print("LOST-CHECK chain at {} ms: room init opening (world) ({:+.3f},{:+.3f}) yaw {:+.3f}; P0 σ (anchor axes) "
+                               "({:.3f},{:.3f},{:.3f})\n", f.t_ms - t0, open_world.x(), open_world.y(), open_world.z(),
+                               std::sqrt(P0_axes(0, 0)), std::sqrt(P0_axes(1, 1)), std::sqrt(P0_axes(2, 2)));
+                }
             w = f.width; u0 = f.wall_u_min; u1 = f.wall_u_max;
             have = true;
         }
@@ -287,6 +345,17 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             (void)Qm;
         }
         staged:
+        const double lost_dt = 1e-3 * double(f.t_ms - lost_stamp);
+        lost_stamp = f.t_ms;
+        const auto room_now = lost_check ? room_init_at(f.t_ms) : std::nullopt;
+        float lost_w = 0.f;
+        if (room_now.has_value())
+        {
+            rc::interaction::RelPose x_mixed = x;
+            rc::door::AnchorBias b_mixed = bias;
+            lost_w = rc::door::lost_mode_mix(lost_mode, x_mixed, no_bias ? nullptr : &b_mixed, room_now.value(), lost_dt, lost_mix_s);
+            if (not lost_no_feedback) { x = x_mixed; bias = b_mixed; }
+        }
         rc::door::AnchorStaging st = f.staging;   // v2: the record's budgeted sets; v1: empty, its pre-budget rays are staged
         st.replay = f.version != 1;
         const float wk = width_override > 0 ? float(width_override) : freeze ? w : f.width, lo = freeze ? u0 : f.wall_u_min, hi = freeze ? u1 : f.wall_u_max;
@@ -305,6 +374,21 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
         ev.p_cam = rc::door::held_camera_view(hold, f.t_ms, rc::interaction::kAnchorStaleMs, f.cam, wk, post);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
         x = post;
+        if (room_now.has_value())
+        {
+            const double tau = 1e-3 * double(rc::interaction::kAnchorPredictMs);
+            const auto le = rc::door::lost_mode_observe(lost_mode, x, room_now.value(), wk_lost(f),
+                                                        rc::door::view_lost_llr_step(ev.p_view, lost_dt, tau), lost_dt, tau);
+            post = rc::door::lost_mode_output(x, room_now.value(), lost_mode.p);   // what would be PUBLISHED
+            const auto gt_t = gt_error(gt, f.t_ms, x), gt_o = gt_error(gt, f.t_ms, post);
+            if (k % std::size_t(every) == 0)
+                std::print("{:8d} LOST P {:.3f} (d2 {:7.1f} room_llr {:+7.1f}) w_mix {:.3f} | tracker ({:+.3f},{:+.3f},{:+.3f}) out ({:+.3f},{:+.3f},{:+.3f}) "
+                           "σ_out ({:.3f},{:.3f}) | room ({:+.3f},{:+.3f},{:+.3f}){}\n",
+                           f.t_ms - t0, lost_mode.p, le.d2, le.room_llr, lost_w, x.x.x(), x.x.y(), x.x.z(), post.x.x(), post.x.y(), post.x.z(),
+                           std::sqrt(post.P(0, 0)), std::sqrt(post.P(1, 1)), room_now->x.x(), room_now->x.y(), room_now->x.z(),
+                           gt_t.ok ? std::format(" | GT err tracker lat {:+.2f} yaw {:+.0f}° out lat {:+.2f} yaw {:+.0f}°", gt_t.lat,
+                                                 gt_t.yaw * 180 / M_PI, gt_o.lat, gt_o.yaw * 180 / M_PI) : std::string{});
+        }
         ++leg.n; leg.sum += ev.p_view; leg.min = std::min(leg.min, double(ev.p_view));
         leg.published += ev.p_view >= 0.5f ? 1 : 0; leg.ge06 += ev.p_view >= 0.6f ? 1 : 0; leg.t1 = f.t_ms - t0;
         const GtErr ge = gt_error(gt, f.t_ms, post);
@@ -398,6 +482,9 @@ int main(int argc, char** argv)
             dump << "t_ms,x,y,yaw,P00,P01,P02,P10,P11,P12,P20,P21,P22,p_view\n";
         }
         else if (std::strcmp(argv[i], "--freeze") == 0) freeze = true;
+        else if (std::strcmp(argv[i], "--lost-check") == 0) lost_check = true;
+        else if (std::strcmp(argv[i], "--lost-no-feedback") == 0) lost_no_feedback = true;
+        else if (std::strcmp(argv[i], "--lost-mix-s") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) lost_mix_s = v; }
         else if (std::strcmp(argv[i], "--time-scale") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) scale = v; }
         else if (std::strcmp(argv[i], "--from") == 0 and i + 1 < argc) { if (num(argv[++i], v)) from_s = v; }
         else if (std::strcmp(argv[i], "--to") == 0 and i + 1 < argc) { if (num(argv[++i], v)) to_s = v; }

@@ -62,6 +62,7 @@
 #include "door_model.h"
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
 #include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
+#include "door_anchor_open.h"       // rc::door::AnchorLostMode (Task D-B: the passage anchor's per-cycle lost check)
 #include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
 #include "input_snapshot.h"        // rc::door::InputSnapshot (DoorCycleInput recording, default off)
 #include <map>
@@ -420,6 +421,9 @@ private:
         bool  leaf_published = false;
         bool  crossing_through = false;
         double view_lost_llr = 0.0;                       // Task 17 add-on: the belief's own visibility evidence (view_lost_llr_step)
+        rc::door::AnchorLostMode lost;                    // Task D-B: P(the beams track an alias), every cycle of a claimed cross
+        std::int64_t lost_stamp_ms = 0;                   // ...its clock (system ms, as view_llr_stamp_ms)
+        int lost_logged_decile = -1;                      // ...logged per tenth (a log quantisation, not a decision)
         std::int64_t view_llr_stamp_ms = 0;                   // Task 12 Fix E: a room switch came during the cross — still crossing                     // Task 12 fix A: the anchor carries the leaf (logs the transitions)
         rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame, held kAnchorStaleMs (odometry-carried)
         bool  az_logged = false;                          // the bpearl's measured azimuth step logged once per anchor
@@ -458,7 +462,7 @@ private:
     // edge (either direction). nullopt ⇒ no edge or no covariance on it. Used by the approach's arrival σ (D-A fix round 2).
     std::optional<Eigen::Matrix3f> robot_pose_cov_in_room() const;
     std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,
-                                                             float* axis_sign_out = nullptr) const;
+                                                             float* axis_sign_out = nullptr, bool log_p0 = true) const;
     void remove_passage_anchor(std::string_view why);
     void anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const;   // width, thickness, height, run
     void refresh_anchor_geometry(const rc::DoorInstance& inst, PassageAnchor& pa);            // ...and the published clear width

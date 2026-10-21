@@ -163,7 +163,7 @@ std::optional<Eigen::Matrix3f> SpecificWorker::robot_pose_cov_in_room() const
 // existing anchor already has (a re-init must not flip yaw by π under the consumer).
 std::optional<rc::interaction::RelPose>
 SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
-                                 float* axis_sign_out) const
+                                 float* axis_sign_out, bool log_p0) const
 {
     if (not G or not inner_eigen_) return std::nullopt;
     const std::string room = rc::room::current_room_frame(*G);
@@ -238,6 +238,7 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
         }
     const Eigen::Matrix3f P_anchor = rc::door::anchor_prior_cov(P_belief, P_robot, kSigmaModel);
     r.P = rc::door::anchor_axes_to_robot(P_anchor, r.x.z());
+    if (log_p0)   // Task D-B: the per-cycle lost check reads the room init every cycle — logged only when it initialises
     std::print("door_concept: [anchor] P0 for {} (anchor axes, σ): belief {:.3f} m · localisation ({:.3f}, {:.3f}) m "
                "{:.3f} rad · model ({:.2f}, {:.2f}) m {:.2f} rad ⇒ lateral {:.3f} m\n", inst.node_name,
                std::sqrt(P_belief(0, 0)), std::sqrt(std::max(0.f, P_robot(0, 0))), std::sqrt(std::max(0.f, P_robot(1, 1))),
@@ -296,7 +297,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
         anchor_log_.open("etc/anchor_log.csv", std::ios::out | std::ios::trunc);
         anchor_log_.imbue(std::locale::classic());   // a comma decimal separator can never reach the file
         if (anchor_log_.is_open())
-            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view\n";
+            anchor_log_ << "t_ms,x,y,yaw,sx,sy,syaw,n_through,n_blocked,n_short,p_open,camera_nis,p_view,p_lost\n";
     }
     return true;
 }
@@ -376,6 +377,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
         pa.axis_sign = near_sign;
         pa.bias = {};
         pa.view_lost_llr = 0.0;
+        pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
         refresh_anchor_geometry(inst, pa);
         pa.retry = false;
         return;
@@ -403,6 +405,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.pose.x = fused.x;
     pa.pose.P = fused.P;
     pa.view_lost_llr = 0.0;   // Task 17 add-on: a new belief, a new visibility record
+    pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
     pa.bias = {};   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
     // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
     // claim fails), and nothing seen before it may be published as "predicted" after it.
@@ -655,6 +658,7 @@ void SpecificWorker::step_passage_anchor()
                     pa.init_pose = r.value();   // Task 11 fix 4
                     pa.bias = {};
                     pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
+                    pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
                     refresh_anchor_geometry(*inst, pa);
                     pa.reinit_on_next_claim = false;
                     pa.retry = false;
@@ -675,6 +679,7 @@ void SpecificWorker::step_passage_anchor()
                         pa.init_pose = r.value();   // Task 11 fix 4
                         pa.bias = {};
                         pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
+                        pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
                         refresh_anchor_geometry(*inst, pa);
                     }
                 }
@@ -758,6 +763,26 @@ void SpecificWorker::step_passage_anchor()
     {
         pa.wall_u_min = -1.5f * pa.width;
         pa.wall_u_max = 1.5f * pa.width;
+    }
+
+    // ── Task D-B (rtD1h leg 5): THE LOST CHECK ON EVERY CYCLE OF A CLAIMED CROSS (door_anchor_open.h AnchorLostMode) ────────
+    //    The retry's belief_lost / retry_reinit ran only when the controller retried: rtD1h leg 5's anchor sat on an alias
+    //    1.4 m / 84° off from its FIRST update for 46 s, published as drivable, while the room-frame door was right to 7 cm.
+    //    Now a two-mode filter runs every cycle the cross is claimed: the room initialisation (the same anchor_from_room the
+    //    creation and the retry use) mixes into the tracker's prior by the IMM weight BEFORE the update, the room channel and
+    //    the view evidence update P(lost) AFTER it, and the PUBLISHED pose is the two modes combined. Not past the room switch
+    //    (crossing_through: the room init is the next room's), not while parked (no cross claim; the retry fuses as before).
+    const bool lost_active = inst != nullptr and crs and not pa.crossing_through;
+    const double lost_dt_s = pa.lost_stamp_ms > 0 ? 1e-3 * double(now - pa.lost_stamp_ms) : 0.0;
+    pa.lost_stamp_ms = now;
+    std::optional<rc::interaction::RelPose> lost_room;
+    float lost_w = 0.f;
+    if (lost_active)
+    {
+        float side_unused = pa.axis_sign;   // the room init's own near side (Task 21), not written back
+        lost_room = anchor_from_room(*inst, &side_unused, false);
+        if (lost_room.has_value())
+            lost_w = rc::door::lost_mode_mix(pa.lost, pa.pose, &pa.bias, lost_room.value(), lost_dt_s, cfg_.pragmatic.cross_timeout_s);
     }
 
     // ── UPDATE: bpearl rays + the door mask, in the ROBOT frame OF NOW, each capture used once ──────────────
@@ -922,14 +947,18 @@ void SpecificWorker::step_passage_anchor()
     //    A new frame replaces it (no door slice ⇒ no points: the camera looked and saw none). Its camera term is
     //    recomputed at the CURRENT posterior every measured cycle, so the published p_view stays the published pose's.
     if (new_mask_frame) rc::door::hold_mask_frame(pa.cam_hold, mask_pts, mask_stamp);
+    double view_step = 0.0;   // this cycle's visibility evidence, shared by the retry's record and the lost mode (Task D-B)
     if (measured)
     {
         ev.p_cam  = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, pa.pose);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
         // Task 17 add-on: a measured frame is a frame the belief predicted the doorway in — its p_view is evidence about it.
         if (pa.view_llr_stamp_ms > 0)
-            pa.view_lost_llr += rc::door::view_lost_llr_step(ev.p_view, 1e-3 * double(now - pa.view_llr_stamp_ms),
-                                                             1e-3 * double(rc::interaction::kAnchorPredictMs));
+        {
+            view_step = rc::door::view_lost_llr_step(ev.p_view, 1e-3 * double(now - pa.view_llr_stamp_ms),
+                                                     1e-3 * double(rc::interaction::kAnchorPredictMs));
+            pa.view_lost_llr += view_step;
+        }
         // ★ Task 11 fix 2 (fix round 1): the anchor's own beams as evidence about the LEAF ANGLE, at the POSTERIOR it is
         //   about to publish, tempered by that posterior's p_view — scored under the swung leaf over door_concept's own φ
         //   grid, for the believed jamb and the other (rc::door::anchor_phi_loglik), and handed to the door's estimate_phi,
@@ -959,6 +988,29 @@ void SpecificWorker::step_passage_anchor()
         }
     }
     pa.view_llr_stamp_ms = now;   // every cycle: unmeasured time passes and carries no evidence (Task 17 add-on)
+    // Task D-B, step 2: this cycle's evidence on the lost mode, and the pose to PUBLISH — the two modes combined (an alias the
+    // beams keep returning to is the room's initialisation in what the controller reads once P(lost) has risen).
+    rc::interaction::RelPose published = pa.pose;
+    if (lost_room.has_value())
+    {
+        const auto le = rc::door::lost_mode_observe(pa.lost, pa.pose, lost_room.value(), pa.clear_width, view_step, lost_dt_s,
+                                                    1e-3 * double(rc::interaction::kAnchorPredictMs));
+        published = rc::door::lost_mode_output(pa.pose, lost_room.value(), pa.lost.p);
+        published.stamp_ms = now;
+        // Logged per tenth of P(lost) — a LOG quantisation, not a decision: the filter and the output are continuous.
+        if (const int decile = int(std::floor(10.f * pa.lost.p)); decile != pa.lost_logged_decile)
+        {
+            pa.lost_logged_decile = decile;
+            Eigen::Vector3f dv = published.x - pa.pose.x;
+            dv.z() = rc::interaction::wrap_pi(dv.z());
+            record_anchor_state(pa, std::format("lost P {:.2f} (d2 {:.1f}, room log-ratio {:+.1f}, mix {:.2f}): published ({:+.3f},{:+.3f},{:+.3f})",
+                                                pa.lost.p, le.d2, le.room_llr, lost_w, published.x.x(), published.x.y(), published.x.z()));
+            std::print("door_concept: [anchor] {}@robot P(lost) {:.2f} — Mahalanobis² {:.1f} to the room init (log-ratio {:+.1f}), "
+                       "view {:+.2f}; tracker ({:+.2f},{:+.2f},{:+.2f}), published {:.2f} m / {:+.1f}° from it toward the room\n",
+                       pa.door_name, pa.lost.p, le.d2, le.room_llr, view_step, pa.pose.x.x(), pa.pose.x.y(), pa.pose.x.z(),
+                       dv.head<2>().norm(), dv.z() * 57.2958f);
+        }
+    }
     // ── Task 8 fix 3: the frame record (etc/anchor_frames.bin) — every measured cycle, inputs and outputs ──────────
     //    Only when DoorConcept.AnchorFrameRecord opened it (final review I-4): building a Frame is not free either.
     if (measured and anchor_frames_.is_open())
@@ -1006,7 +1058,7 @@ void SpecificWorker::step_passage_anchor()
     // ★ Task 12 fix B: the predicted window bounds the CHARGED unseen time — wall time weighted by P(out of the doorway band)
     //   at the predicted pose (rc::door::anchor_doorway_band / anchor_unseen_charge): inside the band "not seen" is what
     //   the geometry predicts, and the carried pose's covariance grows with the motion, not with the wait.
-    if (publish) { pa.seen_once = true; pa.last_seen_ms = now; pa.seen_pose = pa.pose; pa.unseen_charge_ms = 0; }
+    if (publish) { pa.seen_once = true; pa.last_seen_ms = now; pa.seen_pose = published; pa.unseen_charge_ms = 0; }
     else if (pa.charge_stamp_ms > 0)
     {
         pa.unseen_charge_ms = rc::door::anchor_unseen_charge(pa.unseen_charge_ms, now - pa.charge_stamp_ms,
@@ -1046,7 +1098,7 @@ void SpecificWorker::step_passage_anchor()
     // Final review I-2: every block is stamped monotonically; "drive on it" / "only look at it" is the node's drivable mark
     // (Anchor::set_drivable — written AFTER a drivable block, BEFORE a wait pose; interaction_anchor.h says why).
     if (measured and mode == rc::door::AnchorPublish::Seen)
-        wrote = pa.anchor->write(*G, pa.pose) and pa.anchor->set_unseen_ms(*G, 0) and pa.anchor->set_drivable(*G, true);
+        wrote = pa.anchor->write(*G, published) and pa.anchor->set_unseen_ms(*G, 0) and pa.anchor->set_drivable(*G, true);
     else if (mode == rc::door::AnchorPublish::Predicted)
     {
         rc::interaction::RelPose out = pa.seen_pose;
@@ -1107,6 +1159,8 @@ void SpecificWorker::step_passage_anchor()
         }
         pa.anchor->set_leaves(*G, al);
     }
+    // Task D-B: the lost belief on the anchor node, obj_exist_prob = 1 − P(lost) (Anchor::set_lost_prob; written on a change).
+    if (wrote) pa.anchor->set_lost_prob(*G, pa.lost.p);
     const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)
     {
@@ -1127,7 +1181,7 @@ void SpecificWorker::step_passage_anchor()
                     << std::sqrt(std::max(0.0f, P(2, 2))) << ','
                     << (measured ? ev.n_through : -1) << ',' << (measured ? ev.n_blocked : -1) << ','
                     << (measured ? ev.n_short : -1) << ',' << (measured ? ev.p_open : -1.0f) << ','
-                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << '\n';
+                    << (measured ? ev.camera_nis : -1.0f) << ',' << (measured ? ev.p_view : -1.0f) << ',' << pa.lost.p << '\n';
         // Final review I-4: batched, not per row (request_shutdown closes the stream, flushing the tail).
         if (++anchor_log_rows_ % rc::door::rec::kAnchorRecordFlushEvery == 0) anchor_log_.flush();
     }
