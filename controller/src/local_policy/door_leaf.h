@@ -24,7 +24,13 @@
 //   leaf could claim. Flagged, not hidden (task-3b-report).
 //   Under k the cell's price is the mixture over its cause: as k's leaf it adds nothing of its own (k's leaf is priced once,
 //   as an object); as unknown occupancy it keeps residual's price r:
-//     P_k(cell free) = w_k + (1 − w_k) e^{−r}   ⇒   r_k = −log(w_k + (1 − w_k) e^{−r})        (r = +inf, hard ⇒ r_k = −log w_k)
+//     P_k(cell free) = w_k + (1 − w_k) e^{−r}   ⇒   r_k = −log(w_k + (1 − w_k) e^{−r})
+//   ★ ONLY A BELIEF IS RE-EXPLAINED, NEVER OCCUPANCY (Task 3b fix round 1, I-1). A HARD cell is a live return inside the
+//     body's height band THIS cycle (residual_risk.h harden_corroborated) — the cell is occupied, whatever caused it; with
+//     no belief behind it, it is hard for the same conservative reason. Explanation re-assigns a cell's CAUSE and COUNT; it
+//     cannot make an occupied place free. So a hard cell stays +inf under every hypothesis and stays in the planner's
+//     distance map (a chair or a person inside the leaf's swept region is not "explained" into free space), and the
+//     re-pricing applies to the SOFT cells only — where the smear of a leaf that moved and the correlated over-count live.
 //
 // ─── 2. ONE MIXTURE OVER THE HYPOTHESES — LEAF AND CELLS TOGETHER (DoorLeafEvidence, door_leaf_density) ────────────────
 //   The world under hypothesis k is k's leaf PLUS the residual cells k does not explain. The body's centre at p (heading-free,
@@ -37,13 +43,15 @@
 //     while the returns that say something IS there were handed to the leaf and forgotten: the field ran through the leaf
 //     and the policy dithered at its face (1/20 reached against 20/20 with the leaf hard in the map). Under the other
 //     hypotheses those same cells are UNEXPLAINED, so they still block: the coupling is the joint model, not a correction.
-//   The cells the leaf can explain at all (some w_k > 0 in float) are therefore TAKEN from the planner's residual and priced
-//   here, per hypothesis; every one keeps its exact price under every hypothesis that does not explain it (r_k = r when
-//   w_k = 0), so the partition is arithmetic (where the sum is evaluated), not a model level. A hard cell no hypothesis
-//   explains is +inf in every term, i.e. impassable exactly where the planner's free mask would have blocked it.
+//   THE SPLIT, BY THE MODEL'S OWN WEIGHTS (fix round 1: no take rule). Every soft cell's price factors exactly into the
+//   part ALL hypotheses agree on, m = min_k r_k, and the hypothesis-dependent excess e_k = r_k − m ≥ 0:
+//     Σ_k p_k Φ_k exp(−Σ r_k) = exp(−Σ m) · Σ_k p_k Φ_k exp(−Σ e_k)
+//   so the PLANNER keeps every cell, at price m (residual's belief minus what every hypothesis explains — hard cells
+//   untouched), and the door's density carries the rest: −log Σ_k p_k Φ_k exp(−Σ_{cells under the disc} e_k). A cell no
+//   hypothesis explains has e_k = 0 for all k and adds nothing here (an identity, not a cut-off); nothing leaves the map.
 //   No gate anywhere; P = 0 (to double precision, in log space) is +inf, which the field reads as impassable.
-//   ⚑ Two approximations, both stated: the cells are summed under the inscribed DISC (the planner's body_risk_at takes the
-//   hull, minimised over 8 headings — a disc under-counts a hull), and summed cell nats inherit residual's convention of
+//   ⚑ Two approximations, both stated: the EXCESS is summed under the inscribed DISC (the planner prices m under the hull,
+//   minimised over 8 headings — a disc under-counts a hull), and summed cell nats inherit residual's convention of
 //   independent cells (the correlated-cells over-count rtD1c exposed is residual's pricing, not changed here).
 #pragma once
 #include <Eigen/Dense>
@@ -113,44 +121,56 @@ inline double log_phi(double z)
     return pf > 0.0 ? float(-std::log(std::min(1.0, pf))) : std::numeric_limits<float>::infinity();
 }
 
-// §2: the door's leaf with the residual cells it can explain, each priced under every hypothesis.
+// §2: the door's leaf with the hypothesis-dependent excess of the soft residual cells it explains.
 struct DoorLeafEvidence
 {
     DoorLeaf leaf;
     float cell_m = 0.f;
-    std::vector<Eigen::Vector2f> cells;      // the cells taken from the planner's residual
-    std::vector<float> r_k;                  // cells.size() x hyps.size(), row-major: r_k(cell) per hypothesis
-    // a coarse bucket grid over the cells (a lookup structure; the bucket is one inscribed radius — any size gives the
-    // same sums)
+    float body_r = 0.f;                      // the ONE inscribed radius the density sums under (the field's free test's, M-4)
+    std::vector<Eigen::Vector2f> cells;      // the soft cells with a non-zero excess under some hypothesis
+    std::vector<float> e_k;                  // cells.size() x hyps.size(), row-major: r_k − min_k r_k per hypothesis
+    // a coarse bucket grid over the cells (a lookup structure; the bucket is the disc's reach — any size gives the same sums)
     Eigen::Vector2f b0 = Eigen::Vector2f::Zero(); float bsize = 0.25f; int bw = 0, bh = 0;
     std::vector<std::vector<int>> buckets;
-    float mass = 0.f;                        // Σ over the taken cells of Σ_k p_k w_k: the occupancy the leaf explains (diagnostic)
+    float mass = 0.f;                        // Σ over the soft cells of Σ_k p_k w_k: the belief the leaf explains (diagnostic)
+    int hard_in_swept = 0;                   // hard cells the leaf could explain — kept occupied (diagnostic)
     [[nodiscard]] bool empty() const { return leaf.empty(); }
 };
 
-// §2: take from residual's cells (centres + risk_nats; an EMPTY risk vector means "every cell hard") the ones the leaf can
-// explain; `keep` receives the indices of the cells the planner keeps. body_r: the radius the density will sum under (the
-// bucket size).
-inline DoorLeafEvidence take_explained_cells(const DoorLeaf& L, std::span<const Eigen::Vector2f> centres, float cell_m,
-                                             std::span<const float> risk, float body_r, std::vector<std::size_t>& keep)
+// §1–§2 over residual's cells (centres + risk_nats; an EMPTY risk vector means "every cell hard" and is left so). `risk` is
+// rewritten IN PLACE to the planner's share m for every soft cell; hard cells are untouched. body_r: the bare body's
+// inscribed radius — the same value the field's free test and door_leaf_density use (M-4).
+inline DoorLeafEvidence explain_residual_by_leaf(const DoorLeaf& L, std::span<const Eigen::Vector2f> centres, float cell_m,
+                                                 std::vector<float>& risk, float body_r)
 {
     DoorLeafEvidence ev;
     ev.leaf = L;
     ev.cell_m = cell_m;
-    keep.clear();
-    keep.reserve(centres.size());
+    ev.body_r = body_r;
     const std::size_t K = L.hyps.size();
-    const bool all_hard = risk.size() != centres.size();
-    std::vector<float> w(K);
+    if (K == 0 or risk.size() != centres.size()) return ev;
+    std::vector<float> w(K), rk(K);
     double mass = 0.0;
     for (std::size_t i = 0; i < centres.size(); ++i)
     {
-        bool any = false;
-        for (std::size_t k = 0; k < K; ++k) { w[k] = leaf_explained(L.hyps[k], centres[i], cell_m); any = any or w[k] > 0.f; }
-        if (not any) { keep.push_back(i); continue; }
-        const float r = all_hard ? std::numeric_limits<float>::infinity() : risk[i];
+        for (std::size_t k = 0; k < K; ++k) w[k] = leaf_explained(L.hyps[k], centres[i], cell_m);
+        if (not std::isfinite(risk[i]))   // occupied: re-assigned cause, never freed (I-1)
+        {
+            if (std::ranges::any_of(w, [](float x) { return x > 0.f; })) ++ev.hard_in_swept;
+            continue;
+        }
+        float m = std::numeric_limits<float>::infinity();
+        for (std::size_t k = 0; k < K; ++k)
+        {
+            rk[k] = explained_risk_nats(risk[i], w[k]);
+            if (L.hyps[k].p > 0.f) m = std::min(m, rk[k]);
+            mass += double(L.hyps[k].p) * w[k];
+        }
+        if (not std::isfinite(m)) continue;   // no hypothesis carries probability: nothing to split
+        risk[i] = m;
+        if (std::ranges::all_of(rk, [m](float x) { return x == m; })) continue;   // no excess anywhere: an identity
         ev.cells.push_back(centres[i]);
-        for (std::size_t k = 0; k < K; ++k) { ev.r_k.push_back(explained_risk_nats(r, w[k])); mass += double(L.hyps[k].p) * w[k]; }
+        for (std::size_t k = 0; k < K; ++k) ev.e_k.push_back(rk[k] - m);
     }
     ev.mass = float(mass);
     if (not ev.cells.empty())
@@ -171,9 +191,11 @@ inline DoorLeafEvidence take_explained_cells(const DoorLeaf& L, std::span<const 
     return ev;
 }
 
-// §2: −log P(the body's centre at p is contact-free) under the door's mixture (leaf + the cells it took). 0 with no leaf.
-[[nodiscard]] inline float door_leaf_density(const DoorLeafEvidence& ev, const Eigen::Vector2f& p, float body_r)
+// §2: −log of the door's factor of P(the body's centre at p is contact-free): the leaf mixture with each hypothesis's excess
+// of the cells under the disc (the common part m is the planner's). 0 with no leaf. Radius: ev.body_r (M-4).
+[[nodiscard]] inline float door_leaf_density(const DoorLeafEvidence& ev, const Eigen::Vector2f& p)
 {
+    const float body_r = ev.body_r;
     const auto& H = ev.leaf.hyps;
     if (H.empty()) return 0.f;
     const std::size_t K = H.size();
@@ -189,7 +211,7 @@ inline DoorLeafEvidence take_explained_cells(const DoorLeaf& L, std::span<const 
                 if (x < 0 or y < 0 or x >= ev.bw or y >= ev.bh) continue;
                 for (const int i : ev.buckets[std::size_t(y) * std::size_t(ev.bw) + std::size_t(x)])
                     if ((ev.cells[std::size_t(i)] - p).norm() <= reach)
-                        for (std::size_t k = 0; k < K; ++k) R[k] += double(ev.r_k[std::size_t(i) * K + k]);
+                        for (std::size_t k = 0; k < K; ++k) R[k] += double(ev.e_k[std::size_t(i) * K + k]);
             }
     }
     // log Σ_k p_k Φ_k e^{−R_k}, in log space (log-sum-exp) so a large finite price stays finite
@@ -225,7 +247,8 @@ inline DoorLeafEvidence take_explained_cells(const DoorLeaf& L, std::span<const 
 {
     DoorLeafEvidence ev;
     ev.leaf = L;
-    return door_leaf_density(ev, p, body_r);
+    ev.body_r = body_r;
+    return door_leaf_density(ev, p);
 }
 
 }  // namespace rc::policy

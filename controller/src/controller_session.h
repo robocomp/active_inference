@@ -207,8 +207,8 @@ public:
     // `also_free`: space the planner's map does not hold but the goal may be reached through (a doorway's measured corridor,
     // goal_adapter.h in_doorway_corridor); empty = the map alone. `jambs` (F4): the opening's jambs (the anchor's, and the
     // measured gap's weighted by its score), whose contact risk is added to the field's per-metre density over the corridor
-    // (doorway_corridor.h doorway_risk_density); nullopt = none. Task 3b: the door's leaf with the residual cells it took from
-    // the planner this cycle (policy_leaf_evidence_) joins the density for every goal (door_leaf.h door_leaf_density).
+    // (doorway_corridor.h doorway_risk_density); nullopt = none. Task 3b: the door's leaf with the hypothesis-dependent excess
+    // of the soft residual cells it explains this cycle (policy_leaf_evidence_) joins the density for every goal (door_leaf.h).
     PolicyTick policy_tick(const rc::policy::GoalSpec &spec, const std::string &who, const ControllerRobotPose &robot_pose,
                            ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                            std::uint64_t now_ms, std::function<bool(const Eigen::Vector2f &)> also_free = {},
@@ -423,13 +423,13 @@ private:
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
     rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
     // ★ Task 3b (rtD1c leg 5): the leaf door_concept models, in the room frame of `policy_leaf_room_`, held by the policy's cross
-    //   (drive_with_policy) — sync_world_state gives the residual cells it can EXPLAIN to it before set_world (door_leaf.h
-    //   take_explained_cells), so the leaf's returns stop counting as unexplained occupancy. Empty = no leaf known.
+    //   (drive_with_policy) — sync_world_state re-prices residual's SOFT cells by it before set_world (door_leaf.h
+    //   explain_residual_by_leaf; hard cells stay occupied), so the leaf's smear stops counting as unexplained belief.
     rc::policy::DoorLeaf policy_leaf_;
     std::string policy_leaf_room_;
-    // ...and what sync_world_state did with it this cycle: the cells it took from the planner's residual, each priced under every
-    // hypothesis (door_leaf.h take_explained_cells). The planner world lacks them, so EVERY policy field this cycle adds
-    // door_leaf_density over it (policy_tick extra_fn). Null = nothing taken.
+    // ...and what sync_world_state did with it this cycle: the planner keeps every cell at the price all hypotheses agree on,
+    // and this holds each hypothesis's excess, so EVERY policy field this cycle adds door_leaf_density over it (policy_tick
+    // extra_fn). Null = no leaf held.
     std::shared_ptr<const rc::policy::DoorLeafEvidence> policy_leaf_evidence_;
     float policy_leaf_mass_logged_ = -1.f;                       // the explained mass last logged (one line per material change)
     // Task 8 ruling 1: a continuous-route tour driven by the policy — its waypoints as successive Place goals

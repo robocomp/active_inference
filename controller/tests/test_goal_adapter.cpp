@@ -1,13 +1,16 @@
 // Task 8 (local-motion policy): the controller ↔ policy adapter (src/local_policy/goal_adapter.h).
 // Build+run (from controller/; relative_pose.h pulls rt_twist.h → dsr_api.h, hence Qt/fastdds on the line):
 //   Q=/usr/include/x86_64-linux-gnu/qt5; g++ -std=c++23 -O1 -Wall -Wextra -I/usr/include/eigen3 -I../common -Isrc
-//     -I$Q -I$Q/QtCore -I$Q/QtGui -I$Q/QtWidgets -fPIC tests/test_goal_adapter.cpp -o /tmp/tga
+//     -I$Q -I$Q/QtCore -I$Q/QtGui -I$Q/QtWidgets -fPIC tests/test_goal_adapter.cpp src/local_policy/cost_to_go.cpp -o /tmp/tga
 //     -lfastdds -lfastcdr -lQt5Core && /tmp/tga          (one line)
 #include "../src/local_policy/goal_adapter.h"
 #include "../src/controller_relative_motion.h"
 #include "../src/controller_anchor_servo.h"
+#include "../src/local_policy/cost_to_go.h"
 
 #include <cmath>
+#include <format>
+#include <string>
 #include <cstdio>
 #include <numbers>
 
@@ -404,43 +407,52 @@ int main()
               near(bm.d_lin, 0.5f) and near(bm.d_rot, 0.5f / 0.259f, 1e-4f));
     }
 
-    // ---- 8. Task 3b (rtD1c leg 5): the cross's GOAL LINE and TRAP VETO from the anchor's opening, the gap weighted by its
-    //         score (doorway_corridor.h expected_opening) — a 0.03-score phantom locked on the leaf must not set the goal line
+    // ---- 8. Task 3b (rtD1c leg 5) + fix round 1 (I-2): the cross's GOAL LINE is the ANCHOR's line; the TRAP VETO is the union
+    //         of the two hypotheses' corridors (doorway_corridor.h disc_meets_doorway_risk_corridor). A phantom gap locked on
+    //         the leaf — 0.5 m from the door's centre, its normal 120 deg off the door's, 0.62 m wide — at scores 0.03 / 0.3 / 0.5.
     {
         GoalAdapterParams gp; gp.past_m = 2.5f; gp.inscribed_radius_m = 0.23f;
         const RoomGap anchor{Eigen::Vector2f(0.f, 0.f), Eigen::Vector2f(0.f, 1.f), 0.87f};
-        // the leaf + the west jamb seen obliquely: 0.62 m (wide enough to veto on its own), its normal 120 deg off the door's
         const Eigen::Vector2f ng(-std::sin(2.f * kPi / 3.f), std::cos(2.f * kPi / 3.f));
-        const RoomGap phantom{Eigen::Vector2f(-0.45f, -0.6f), ng, 0.62f};
-        const float score = 0.03f;
-        const auto centroid = [](const GoalSpec& g) { Eigen::Vector2f c = Eigen::Vector2f::Zero(); for (const auto& q : g.points) c += q; return Eigen::Vector2f(c / float(g.points.size())); };
-        const GoalSpec ga = doorway_goal(anchor, gp), gph = doorway_goal(phantom, gp);
-        const GoalSpec gm = doorway_goal(expected_opening(anchor, phantom, score), gp);
-        const float d_ph = (centroid(gph) - centroid(ga)).norm(), d_m = (centroid(gm) - centroid(ga)).norm();
-        std::printf("   goal line centroid: phantom's %.2f m from the anchor's; the score-weighted one %.3f m\n", d_ph, d_m);
-        CHECK("3b goal line: a score-0.03 phantom moves it by at most ~its weight x the distance (<= 1.5 x 0.03 x d)", d_m <= 1.5f * score * d_ph);
-        bool past_anchor = true;
-        for (const auto& q : gm.points)
-            past_anchor = past_anchor and std::abs(q.y() - 2.5f) < 0.1f and std::abs(q.x()) <= 0.5f * 0.87f - 0.23f + 0.1f;
-        CHECK("3b goal line: every seed point is past the ANCHOR's opening, inside its lateral span", past_anchor);
-        CHECK("3b goal line: no gap / score 0 = the anchor's exactly",
-              (centroid(doorway_goal(expected_opening(anchor, std::nullopt, 0.9f), gp)) - centroid(ga)).norm() < 1e-6f
-              and (centroid(doorway_goal(expected_opening(anchor, phantom, 0.f), gp)) - centroid(ga)).norm() < 1e-6f);
-        const RoomGap good{Eigen::Vector2f(0.08f, 0.02f), Eigen::Vector2f(0.f, -1.f), 0.85f};   // a reliable gap; opposite sign convention
-        const RoomGap og = expected_opening(anchor, good, 1.f);
-        CHECK("3b goal line: a score-1 gap IS the geometry (its normal taken in the anchor's sense)",
-              (og.centre - good.centre).norm() < 1e-6f and (og.normal - Eigen::Vector2f(0.f, 1.f)).norm() < 1e-6f and near(og.width, 0.85f));
-        // the trap veto on the same opening
-        const float body_w = 0.568f, back = 1.0f, ahead = gp.past_m + 0.05f;
-        const Eigen::Vector2f on_phantom = phantom.centre + 0.5f * phantom.normal;   // in the phantom's strip, off the door
-        const Eigen::Vector2f on_door(0.f, -0.3f);
-        const RoomGap om = expected_opening(anchor, phantom, score);
-        CHECK("3b veto: (baseline) on the phantom alone a trap in its strip would be vetoed",
-              disc_meets_doorway_corridor(phantom, on_phantom, 0.2f, back, ahead, 0.23f, body_w));
-        CHECK("3b veto: score-weighted, a trap in the phantom's strip (on the leaf) is NOT vetoed",
-              not disc_meets_doorway_corridor(om, on_phantom, 0.2f, back, ahead, 0.23f, body_w));
-        CHECK("3b veto: a trap in the door's own corridor still is",
-              disc_meets_doorway_corridor(om, on_door, 0.2f, back, ahead, 0.23f, body_w));
+        const RoomGap phantom{Eigen::Vector2f(-0.5f, 0.f), ng, 0.62f};
+        const float back = 1.0f, ahead = gp.past_m + 0.05f, body_w = 0.568f;
+        auto strip = [&](const RoomGap& g) { DoorwayJambs j; j.gap = g; j.corridor_back_m = back; j.corridor_ahead_m = ahead; j.inscribed_radius_m = 0.23f; return j; };
+        // the near room: y < 0 minus the wall's band (the body's centre an inscribed radius off the wall face at y = -0.2)
+        const auto map_free = [](const Eigen::Vector2f& q) { return q.y() < -0.43f and q.y() > -3.f and std::abs(q.x()) < 2.5f; };
+        const rc::policy::CostToGo::Grid G{Eigen::Vector2f(-3.f, -3.2f), 0.05f, 120, 130};
+        const Eigen::Vector2f start(0.f, -1.5f);
+        for (const float score : {0.03f, 0.3f, 0.5f})
+        {
+            const DoorwayRisk risk{strip(anchor), strip(phantom), score};
+            const auto free = [&](const Eigen::Vector2f& q) { return map_free(q) or in_doorway_risk_corridor(risk, q); };
+            // the PRE-fix goal line: the mean of the bimodal mixture (centre, normal in the anchor's sense, width)
+            const float pp = score;
+            Eigen::Vector2f nm = (1.f - pp) * anchor.normal + pp * (-ng); nm.normalize();
+            const RoomGap mean{(1.f - pp) * anchor.centre + pp * phantom.centre, nm, (1.f - pp) * anchor.width + pp * phantom.width};
+            const GoalSpec g_mean = doorway_goal(mean, gp), g_anchor = doorway_goal(anchor, gp);
+            rc::policy::CostToGo f_mean, f_anchor;
+            f_mean.build(G, free, [](const Eigen::Vector2f&) { return 0.f; }, g_mean.points);
+            f_anchor.build(G, free, [](const Eigen::Vector2f&) { return 0.f; }, g_anchor.points);
+            float off = 0.f; for (const auto& q : g_mean.points) off = std::max(off, std::abs(q.x()));
+            std::printf("   score %.2f: the mean line lies up to %.2f m off the door's axis, field at the robot %.2f; the anchor's line %.2f\n",
+                        score, off, f_mean.at(start), f_anchor.at(start));
+            const std::string sc = std::format("{:.2f}", score);
+            if (score >= 0.3f)
+                CHECK(("3b I-2 (baseline) score " + sc + ": the mixture's MEAN line is outside both corridors - infinite field").c_str(),
+                      std::isinf(f_mean.at(start)));
+            CHECK(("3b I-2 score " + sc + ": the anchor's goal line is reachable - finite field").c_str(), std::isfinite(f_anchor.at(start)));
+            // the veto: either hypothesis's corridor
+            const Eigen::Vector2f in_phantom = phantom.centre + 0.5f * phantom.normal, in_door(0.f, -0.3f), elsewhere(1.5f, -1.5f);
+            CHECK(("3b I-2 veto score " + sc + ": a trap in the phantom's strip is vetoed (the union)").c_str(),
+                  disc_meets_doorway_risk_corridor(risk, in_phantom, 0.2f, body_w));
+            CHECK(("3b I-2 veto score " + sc + ": a trap in the door's corridor is vetoed").c_str(),
+                  disc_meets_doorway_risk_corridor(risk, in_door, 0.2f, body_w));
+            CHECK(("3b I-2 veto score " + sc + ": a trap away from both is not").c_str(),
+                  not disc_meets_doorway_risk_corridor(risk, elsewhere, 0.2f, body_w));
+        }
+        const DoorwayRisk no_gap{strip(anchor), strip(phantom), 0.f};
+        CHECK("3b I-2 veto: a gap of score 0 adds nothing (the anchor's corridor alone)",
+              not disc_meets_doorway_risk_corridor(no_gap, phantom.centre + 0.5f * phantom.normal, 0.2f, body_w));
     }
 
     // ---- 9. Task 3b: the leaf hypotheses in the ROOM frame — the same points and covariances anchor_leaf_points gives in the

@@ -191,14 +191,15 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     // ★ F4: with a measured opening, its jambs' contact risk joins the density over the doorway's corridor — the SAME weight
     //   turns its nats into metres, so F1's route surprisal reads it as nats too (a crossing at offset e adds R(e) nats:
     //   ~0 on the centre line of a passable opening, so a passable door does not lean Unreachable; see doorway_corridor.h)
-    // ★ Task 3b: the door's LEAF (door_concept's hypotheses, room frame) is a known obstacle: with the residual cells it took
-    //   from the planner this cycle (sync_world_state), one mixture over its hypotheses prices the body's centre at p (the
-    //   inscribed radius, as free_fn) — door_leaf.h door_leaf_density. Every goal adds it: the planner world lacks those cells.
-    auto extra_fn = [this, jambs, leaf = policy_leaf_evidence_, r_ins](const Eigen::Vector2f &p)
+    // ★ Task 3b: the door's LEAF (door_concept's hypotheses, room frame) is a known obstacle: with the hypothesis-dependent
+    //   excess of the soft residual cells it explains this cycle (sync_world_state), one mixture over its hypotheses prices the
+    //   body's centre at p (door_leaf.h door_leaf_density, on the bare inscribed radius free_fn uses). Every goal adds it: the
+    //   planner's prices this cycle are the share all hypotheses agree on.
+    auto extra_fn = [this, jambs, leaf = policy_leaf_evidence_](const Eigen::Vector2f &p)
     {
         const float w = std::max(0.f, grid_planner_.params.residual_risk_weight);
         return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_risk_density(*jambs, p, [&](const Eigen::Vector2f &q) { return rc::policy::field_free_from_distance(grid_planner_.distance_at(q), grid_planner_.cell_size(), jambs->anchor.inscribed_radius_m); }) : 0.f)
-                    + (leaf ? rc::policy::door_leaf_density(*leaf, p, r_ins) : 0.f));
+                    + (leaf ? rc::policy::door_leaf_density(*leaf, p) : 0.f));
     };
     const bool new_goal = not policy_goal_.has_value() or policy_goal_who_ != who or not rc::policy::same_goal(*policy_goal_, spec);
     if (new_goal)
@@ -264,9 +265,10 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
             for (const auto &t : policy_nav_.traps()) f << "trap " << t.c.x() << ' ' << t.c.y() << " r " << t.r << '\n';
             // Live fix 3: the density where it matters, and the straight line robot -> nearest goal point every 0.10 m
             // (free flag, residual density, field) — enough to tell a disconnected free mask from a priced region
-            f << "leaf_hypotheses " << (policy_leaf_evidence_ ? policy_leaf_evidence_->leaf.hyps.size() : 0u) << " ; leaf_cells_taken "
-              << (policy_leaf_evidence_ ? policy_leaf_evidence_->cells.size() : 0u) << " ; leaf_nats_at_robot "
-              << (policy_leaf_evidence_ ? rc::policy::door_leaf_density(*policy_leaf_evidence_, pose.p, r_ins) : 0.f) << '\n';
+            f << "leaf_hypotheses " << (policy_leaf_evidence_ ? policy_leaf_evidence_->leaf.hyps.size() : 0u) << " ; leaf_excess_cells "
+              << (policy_leaf_evidence_ ? policy_leaf_evidence_->cells.size() : 0u) << " ; leaf_hard_in_swept "
+              << (policy_leaf_evidence_ ? policy_leaf_evidence_->hard_in_swept : 0) << " ; leaf_nats_at_robot "
+              << (policy_leaf_evidence_ ? rc::policy::door_leaf_density(*policy_leaf_evidence_, pose.p) : 0.f) << '\n';
             f << "extra_at_robot " << extra_fn(pose.p) << " ; planner_distance_at_robot " << grid_planner_.distance_at(pose.p)
               << " ; residual_risk_weight " << grid_planner_.params.residual_risk_weight << '\n';
             Eigen::Vector2f gq = spec.points.front();
@@ -594,16 +596,13 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             if (cp.drive)
             {
                 // ★ Task 3b (rtD1c leg 5: a 0.03-0.3-score gap locked on the open leaf set the goal line and the veto): the goal
-                //   line and the trap veto are built on the opening's EXPECTED geometry — the anchor's, the measured gap's
-                //   weighted by its score (doorway_corridor.h expected_opening; the jamb risk below mixes the same two)
-                const auto anchor_gap = rc::policy::gap_in_room(cp.anchor_pose, cp.anchor_width, cpose);
-                const auto gap = cp.on_gap
-                    ? rc::policy::expected_opening(anchor_gap, rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose), cp.gap_score)
-                    : rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose);
-                spec = rc::policy::doorway_goal(gap, gp);
+                //   line is the ANCHOR's (the door; arrival is the protocol's s >= standoff on what it drives), the measured gap
+                //   enters through F4's risk mixture and the corridor union below, and the trap veto is that union's
+                //   (doorway_corridor.h disc_meets_doorway_risk_corridor — fix round 1, I-2: no mean of a bimodal mixture)
+                spec = rc::policy::doorway_goal(rc::policy::gap_in_room(cp.anchor_pose, cp.anchor_width, cpose), gp);
                 // the far side is not in the planner's map: the measured opening's corridor joins the near room to the goal
                 // line (1 m back into the room just left; one field cell past the line)
-                const float back = 1.0f, ahead = gp.past_m + 0.05f, r_ins = gp.inscribed_radius_m;
+                const float back = 1.0f, ahead = gp.past_m + 0.05f;
                 // ★ F4: the jambs in the route's risk. Each opening's along-wall / along-normal sigmas from its own pose, the
                 //   contact model's shared offset (sigma_rel_xy with the body-geometry sigma PolicyInput carries — the sigma the
                 //   policy's rollouts use), each jamb edge measured with the LiDAR's range sigma.
@@ -627,8 +626,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 // Live fix 2 ruling 2: the measured opening (at least the body's width) is evidence the body fits there — no
                 // trap may block it; the bare body's full width = its lateral support both sides
                 const float body_w = bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)) + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f));
-                veto = [gap, back, ahead, r_ins, body_w](const Eigen::Vector2f &c, float r)
-                { return rc::policy::disc_meets_doorway_corridor(gap, c, r, back, ahead, r_ins, body_w); };
+                veto = [risk, body_w](const Eigen::Vector2f &c, float r)
+                { return rc::policy::disc_meets_doorway_risk_corridor(risk, c, r, body_w); };
             }
             else
             {

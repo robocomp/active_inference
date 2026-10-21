@@ -140,25 +140,45 @@ int main()
         CHECK("3b: explanation never ADDS risk", explained_risk_nats(3.f, 0.4f) <= 3.f and explained_risk_nats(0.f, 0.4f) == 0.f);
     }
 
-    // ---- 2. the field from the hinge side: hard leaf cells disconnect it; taken by the door's leaf, it is finite and goes
-    //         AROUND the free edge
-    const auto cells = leaf_cells(L.hyps.front(), sphi);
-    World raw{cells, std::vector<float>(cells.size(), kInf)};   // every leaf cell corroborated by a live return: hard
-    std::vector<std::size_t> keep;
-    const DoorLeafEvidence ev = take_explained_cells(L, cells, kCell, raw.risk, kRins, keep);
-    World planner;   // what the planner keeps
-    for (const auto i : keep) { planner.cells.push_back(cells[i]); planner.risk.push_back(raw.risk[i]); }
-    std::printf("leaf cells %zu: %zu taken by the door's leaf (explained mass %.1f), %zu kept by the planner\n", cells.size(),
-                ev.cells.size(), ev.mass, keep.size());
-    CHECK("3b: every leaf cell is taken from the planner's unexplained residual (none stays a hard cell there)", keep.empty());
+    // ---- 2. the field from the hinge side (fix round 1, I-1: a PHYSICAL residual). The live returns land on the leaf as it
+    //         hangs now — those cells are HARD (harden_corroborated); the smear the leaf left while it swung (+-2 sigma_phi) is
+    //         residual's BELIEF, soft at 4 nats a cell. A chair stands inside the swept region east of the free edge: its
+    //         cells are hard too (a live return in them), and no explanation may free them.
+    const LeafHypothesis& H = L.hyps.front();
+    std::vector<V> cells; std::vector<float> risk;
+    for (const auto& c : leaf_cells(H, 0.f)) { cells.push_back(c); risk.push_back(kInf); }   // the leaf as it hangs: hard
+    for (const auto& c : leaf_cells(H, sphi))
+    {
+        bool dup = false;
+        for (const auto& e : cells) dup = dup or (e - c).squaredNorm() < 1e-8f;
+        if (not dup) { cells.push_back(c); risk.push_back(4.f); }                         // the smear: soft belief
+    }
+    // the chair: inside the swept region, 2 sigma_phi east of the MAP free edge (where only the swing could put the leaf)
+    const V chair = H.hinge + H.length * V(std::sin(2.f * sphi), -std::cos(2.f * sphi));
+    const std::size_t chair_i = cells.size();
+    cells.push_back(V(std::round(chair.x() / kCell) * kCell, std::round(chair.y() / kCell) * kCell)); risk.push_back(kInf);
+    const World raw{cells, risk};
+    World planner{cells, risk};
+    const DoorLeafEvidence ev = explain_residual_by_leaf(L, planner.cells, kCell, planner.risk, kRins);
+    int hard_before = 0, hard_after = 0; float soft_before = 0.f, soft_after = 0.f;
+    for (std::size_t i = 0; i < cells.size(); ++i)
+    {
+        hard_before += not std::isfinite(raw.risk[i]); hard_after += not std::isfinite(planner.risk[i]);
+        if (std::isfinite(raw.risk[i])) { soft_before += raw.risk[i]; soft_after += planner.risk[i]; }
+    }
+    std::printf("cells %zu: hard %d -> %d (in the swept region: %d), soft belief %.1f -> %.1f nats in the planner, %zu carry an excess\n",
+                cells.size(), hard_before, hard_after, ev.hard_in_swept, soft_before, soft_after, ev.cells.size());
+    CHECK("3b I-1: every HARD cell stays hard (occupancy is never explained away)", hard_after == hard_before and hard_before > 0);
+    CHECK("3b I-1: ...the chair in the leaf's swept region included", not std::isfinite(planner.risk[chair_i]) and ev.hard_in_swept > 0);
+    CHECK("3b I-1: the field's free test still blocks the chair", not planner.free(cells[chair_i]));
+    CHECK("3b: the smear's belief is re-explained by the leaf (planner's soft nats drop by > half)", soft_after < 0.5f * soft_before);
     CostToGo f_raw, f_leaf;
     f_raw.build(G, [&](const V& p) { return raw.free(p); }, [&](const V& p) { return raw.body_risk(p); }, goal_line);
     f_leaf.build(G, [&](const V& p) { return planner.free(p); },
-                 [&](const V& p) { return planner.body_risk(p) + door_leaf_density(ev, p, kRins); }, goal_line);
-    std::printf("   field at the pocket: unexplained %.2f, the door's leaf %.2f\n", f_raw.at(pocket), f_leaf.at(pocket));
-    CHECK("3b: (the baseline) the pocket is FREE on the unexplained map (the body's centre fits there)", raw.free(pocket));
-    CHECK("3b: (the baseline) ...and the leaf as hard unexplained cells disconnects it: no route (rtD1c leg 5)", not f_raw.reachable(pocket));
-    CHECK("3b: with the door's leaf, the pocket is reachable: the field is FINITE", f_leaf.reachable(pocket) and std::isfinite(f_leaf.at(pocket)));
+                 [&](const V& p) { return planner.body_risk(p) + door_leaf_density(ev, p); }, goal_line);
+    std::printf("   field at the pocket: unexplained %.2f, with the door's leaf %.2f\n", f_raw.at(pocket), f_leaf.at(pocket));
+    CHECK("3b: with the door's leaf the pocket is reachable (finite field)", f_leaf.reachable(pocket) and std::isfinite(f_leaf.at(pocket)));
+    CHECK("3b: and its price is lower than the smear counted as unexplained", f_leaf.at(pocket) < f_raw.at(pocket));
     {
         const auto c_leaf = crossing_of_leaf_line(f_leaf, pocket);
         if (c_leaf) std::printf("   descent crosses x = -0.5 at y %+.2f\n", c_leaf->y());
@@ -179,30 +199,43 @@ int main()
               c_known.has_value() and c_known->y() < -1.15f);
     }
 
-    // ---- 2b. THE COUPLING (the harness's leaf_known_hinge_side finding): two hypotheses, the west hinge P 0.9 and the east
-    //          0.1; residual's hard cells lie on the WEST leaf. Under the east hypothesis those cells are unexplained, so the
-    //          west leaf stays (all but) impassable; priced apart, "10 % it hangs from the other jamb" made it cost 2.3 nats/m.
+    // ---- 2b. THE COUPLING: two hypotheses, the west hinge P 0.9 and the east 0.1; residual's SOFT belief (6 nats a cell) lies
+    //          on the WEST leaf. Under the east hypothesis that belief is unexplained, so the west leaf stays (all but)
+    //          impassable; priced apart, "10 % it hangs from the other jamb" made it cost 2.3 nats/m.
     {
         DoorLeaf two; two.hyps = {map_leaf(0.05f, 0.9f), map_leaf(0.05f, 0.1f)};
         two.hyps[1].hinge = V(0.5f, -0.2f);
         std::vector<V> west;
         for (float y = -0.2f; y >= -1.15f - 1e-4f; y -= kCell) west.push_back(V(-0.5f, std::round(y / kCell) * kCell));
-        std::vector<std::size_t> kp;
-        const std::vector<float> hard(west.size(), kInf);
-        const DoorLeafEvidence e2 = take_explained_cells(two, west, kCell, hard, kRins, kp);
-        const float on_west = door_leaf_density(e2, V(-0.5f, -0.6f), kRins);
+        std::vector<float> soft(west.size(), 6.f);
+        const DoorLeafEvidence e2 = explain_residual_by_leaf(two, west, kCell, soft, kRins);
+        float planner_on = 0.f; for (const float r : soft) planner_on = std::max(planner_on, r);
+        const float on_west = door_leaf_density(e2, V(-0.5f, -0.6f));
         const float leaf_only = leaf_contact_nats(two, V(-0.5f, -0.6f), kRins);
-        const float near_east = door_leaf_density(e2, V(0.30f, -0.7f), kRins);
-        std::printf("   coupling: on the seen west leaf %.1f nats (leaf mixture alone %.2f); 0.20 m from the unseen east hypothesis %.3f nats\n",
-                    on_west, leaf_only, near_east);
+        const float near_east = door_leaf_density(e2, V(0.30f, -0.7f));
+        std::printf("   coupling: planner keeps <= %.3f nats a cell; the door's factor on the seen west leaf %.1f nats (leaf mixture alone "
+                    "%.2f); 0.20 m from the unseen east hypothesis %.3f nats\n", planner_on, on_west, leaf_only, near_east);
+        CHECK("3b coupling: the planner keeps only what EVERY hypothesis agrees on (<= -log 0.9 + rounding a cell)", planner_on < 0.2f);
         CHECK("3b coupling: (baseline) the leaf mixture alone prices the seen leaf at ~-log(0.1) (crossable)", leaf_only < 2.4f);
-        CHECK("3b coupling: with the cells it explains, the seen leaf is (all but) impassable (> 20 nats)", on_west > 20.f);
+        CHECK("3b coupling: with the belief it explains, the seen leaf is (all but) impassable (> 20 nats)", on_west > 20.f);
         CHECK("3b coupling: where only the 0.1 hypothesis puts a leaf and nothing was seen, ~-log(0.9) at most",
               near_east <= -std::log(0.9f) + 0.01f);
-        const std::vector<float> none_soft(west.size(), 0.f);
-        const DoorLeafEvidence e3 = take_explained_cells(two, west, kCell, none_soft, kRins, kp);
+        std::vector<float> zero(west.size(), 0.f);
+        const DoorLeafEvidence e3 = explain_residual_by_leaf(two, west, kCell, zero, kRins);
         CHECK("3b coupling: cells residual believes FREE (0 nats) add nothing: the leaf mixture alone",
-              std::abs(door_leaf_density(e3, V(-0.5f, -0.6f), kRins) - leaf_only) < 1e-4f);
+              e3.cells.empty() and std::abs(door_leaf_density(e3, V(-0.5f, -0.6f)) - leaf_only) < 1e-4f);
+        // the factorisation is exact: planner share + door excess = each hypothesis's price, cell by cell
+        std::vector<float> s6(west.size(), 6.f);
+        const DoorLeafEvidence e4 = explain_residual_by_leaf(two, west, kCell, s6, kRins);
+        float worst = 0.f;
+        for (std::size_t i = 0; i < e4.cells.size(); ++i)
+            for (std::size_t k = 0; k < 2; ++k)
+            {
+                std::size_t j = 0; while ((west[j] - e4.cells[i]).squaredNorm() > 1e-10f) ++j;
+                const float rk = explained_risk_nats(6.f, leaf_explained(two.hyps[k], west[j], kCell));
+                worst = std::max(worst, std::abs(s6[j] + e4.e_k[i * 2 + k] - rk));
+            }
+        CHECK("3b: planner share m + the door's excess e_k = r_k for every cell and hypothesis (exact factorisation)", worst < 1e-5f);
     }
 
     // ---- 3. sigma_phi widens the swept region the leaf is priced over
@@ -221,12 +254,11 @@ int main()
               std::abs(leaf_contact_nats(wide, q, kRins) - leaf_contact_nats(sharp, q, kRins)) < 0.05f);
         CHECK("3b: the body on the leaf is all but certain contact (> 20 nats)", leaf_contact_nats(sharp, V(-0.5f, -0.6f), kRins) > 20.f);
         DoorLeaf none;
-        std::vector<std::size_t> kp;
         const std::vector<V> one{V(-0.5f, -0.6f)};
-        const std::vector<float> hard{kInf};
-        const DoorLeafEvidence en = take_explained_cells(none, one, kCell, hard, kRins, kp);
-        CHECK("3b: no leaf known -> no price, and the planner keeps every cell", leaf_contact_nats(none, V(-0.5f, -0.6f), kRins) == 0.f
-              and en.cells.empty() and kp.size() == 1);
+        std::vector<float> soft1{3.f};
+        const DoorLeafEvidence en = explain_residual_by_leaf(none, one, kCell, soft1, kRins);
+        CHECK("3b: no leaf known -> no price, and the planner's prices unchanged", leaf_contact_nats(none, V(-0.5f, -0.6f), kRins) == 0.f
+              and en.cells.empty() and soft1[0] == 3.f);
     }
 
     std::printf("%s (%d failure%s)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails, fails == 1 ? "" : "s");
