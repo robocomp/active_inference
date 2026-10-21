@@ -40,6 +40,7 @@
 #include <cstring>
 #include <functional>
 #include <future>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,8 @@ struct Options
     std::string trace_name;     // scenario name, for TRACE matching
     // ★ ON by default (ruling D3: the free prediction follows the base's ramp, prior 0.01).
     bool unseen = std::getenv("NO_UNSEEN") == nullptr;
+    // F2 scenario (c): the base's velocity (and the command in force) at t = 0 — a run that starts MOVING
+    float v0 = 0.f, w0 = 0.f;
 };
 
 struct ScenarioResult
@@ -90,6 +93,9 @@ struct ScenarioResult
     std::vector<float> step_ms;      // wall time of every Navigator::step (decide + traps)
     std::size_t returns_max = 0;     // largest return set handed to the policy
     std::string why;
+    // F2: the first decision, every Release(stop), and the first decision made after a stop (v = w = 0 at rest)
+    std::string first_mode; float first_v = 0.f, first_w = 0.f;
+    int stops = 0; std::string after_stop_mode; float after_stop_v = 0.f, after_stop_w = 0.f;
 };
 
 // ★ Task 8 ruling I3 — ONE definition of "through": the PROTOCOL's (the controller's rc::cross_progress_complete: s >= the
@@ -161,6 +167,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     sim2d::Base base; base.lim = limits(); base.latency_s = 0.06f;
     base.rng = &rng; base.jitter_s = kLatencyJitterS; base.slip_sigma = kSlipSigma;
     base.deadband_scale = std::uniform_real_distribution<float>(1.f - kDeadbandSpread, 1.f + kDeadbandSpread)(rng);
+    base.v = base.cmd_v = opt.v0; base.w = base.cmd_w = opt.w0;
     std::normal_distribution<float> slip(0.f, kSlipSigma);
     sim2d::PoseError err; err.on = opt.ou; err.pivot = start.p;
     UnseenContact unseen;
@@ -231,6 +238,10 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         res.step_ms.push_back(float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_step).count()));
         res.returns_max = std::max(res.returns_max, ret.size());
         const Decision& d = st.d;
+        if (res.first_mode.empty()) { res.first_mode = mode_name(d.mode); res.first_v = d.v; res.first_w = d.w; }
+        const bool is_stop = d.mode == Decision::Mode::Release and d.v == 0.f and d.w == 0.f;
+        if (is_stop and st.replanned) ++res.stops;
+        else if (res.stops > 0 and res.after_stop_mode.empty() and st.replanned) { res.after_stop_mode = mode_name(d.mode); res.after_stop_v = d.v; res.after_stop_w = d.w; }
         const float fnow = nav.field().at(bel.p);
         const float clear = contact.clearance(truth);
         res.min_clear = std::min(res.min_clear, clear);
@@ -361,7 +372,7 @@ static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 
 // ---------------------------------------------------------------- reporting
 struct Summary { int max_failed = 0; std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
-                 bool traj_ok = true; int total_traps = 0; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
+                 bool traj_ok = true; int total_traps = 0, total_stops = 0; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
 {
@@ -376,7 +387,7 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
         const auto r = fut[s].get();
         ++S.n; S.reached += r.reached; S.unreachable += r.unreachable; S.stuck += r.stuck; S.contacts += r.contacts;
         S.rel_contacts += r.release_contacts; S.max_releases = std::max(S.max_releases, r.releases); S.total_releases += r.releases;
-        S.traj_ok = S.traj_ok and r.trajectory_ok; S.total_traps += r.traps; S.max_np = std::max(S.max_np, r.max_no_progress_s);
+        S.traj_ok = S.traj_ok and r.trajectory_ok; S.total_traps += r.traps; S.total_stops += r.stops; S.max_np = std::max(S.max_np, r.max_no_progress_s);
         S.min_clear = std::min(S.min_clear, r.min_clear);
         if (r.geodesic_m > 0.f) S.max_path_ratio = std::max(S.max_path_ratio, r.path_m / r.geodesic_m);
         if (r.reached) S.tgoal.push_back(r.time_s);
@@ -393,6 +404,7 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
                 "max no-progress %.1f s, min true clearance %+.3f m, max path/geodesic %.2f\n",
                 S.reached, S.n, S.unreachable, S.stuck, S.contacts, S.rel_contacts, S.total_releases, S.max_releases, med, mx, S.max_np,
                 S.min_clear, S.max_path_ratio);
+    std::printf("   Release(stop) decisions (F2): %d over all seeds\n", S.total_stops);
     std::printf("   field builds: %d, mean %.1f ms each (grid as stated per world)\n", S.builds, S.builds ? S.build_ms / S.builds : 0.0);
     std::ranges::sort(S.step_ms);
     if (not S.step_ms.empty())
@@ -567,6 +579,38 @@ int main()
         performance_oracle("pose_jump", S, 6.70f);
         std::printf("   the believed goal maps, after the jump, to a true place %.3f m from the nearest wall\n", S.goal_truth_clear);
         CHECK("pose_jump: the jumped goal is a place the body can be (true clearance >= inscribed radius)", S.goal_truth_clear >= body().inscribed_radius());
+    }
+    // ---- stop_is_the_only_release (F2, 2026-10-21 doorway-release spec, scenario (c)): the robot CREEPS forward at 0.10 m/s
+    //      into a pocket — a wall across its nose 6 cm beyond where it can come to rest (coast = 0.06 s latency + braking at
+    //      d_lin = 1.1 cm), a wall across its tail 5 cm behind, both 0.70 m long. Every reverse backs >= ~0.15 m (into the tail
+    //      wall); every in-place turn is rolled out from the MOVING state with its wheels coupled, so it arcs forward and swings
+    //      a front corner into the nose wall; only the brake-to-rest sweep is releasable. Before F2 (stop not a candidate) the
+    //      first decision is Stuck on every seed (measured 8/8 at this geometry; at a 6.5 cm nose gap a turn is releasable on
+    //      1/8, at 5.5 cm the decision from rest is Stuck too — the band is narrow because a decision from rest evaluates the
+    //      same post-coast motions, only without the coupled arc). With F2: Release(stop), then — at rest — an ordinary
+    //      decision that MOVES (an in-place turn). The pocket is a genuine trap for this body (no 90 deg turn fits between the
+    //      walls), so the run ends with the Navigator's trapped-field Unreachable, a verdict about the place, not a one-tick Stuck.
+    if (want("stop_is_the_only_release"))
+    {
+        const float v0 = 0.10f, coast = v0 * 0.06f + v0 * v0 / (2.f * limits().d_lin), nose = 0.23f + coast + 0.06f, tail = -0.23f - 0.05f;
+        World w = open_world();
+        w.boxes.push_back({-0.35f, nose, 0.35f, nose + 0.1f});
+        w.boxes.push_back({-0.35f, tail - 0.1f, 0.35f, tail});
+        const Goal g{.kind = Goal::Kind::Place, .p = V2(-1.5f, 0.f), .yaw = {}};
+        Options o{.grid = kOpenGrid, .jumps = {}, .trace_name = "stop_is_the_only_release", .v0 = v0};
+        int first_stop = 0, moves_after = 0;
+        std::mutex m;
+        const auto S = run_seeds("stop_is_the_only_release", [&](unsigned seed) {
+            auto r = run_scenario(w, Pose2{V2(0.f, 0.f), 90.f * kDeg}, g, 30.f, seed, o);
+            const std::lock_guard lk(m);
+            first_stop += r.first_mode == "Release" and r.first_v == 0.f and r.first_w == 0.f;
+            moves_after += (r.after_stop_mode == "Release" or r.after_stop_mode == "Drive") and not (r.after_stop_v == 0.f and r.after_stop_w == 0.f);
+            return r; });
+        std::printf("   first decision Release(stop) on %d/%d seeds; the first decision from rest moved on %d/%d\n", first_stop, S.n, moves_after, S.n);
+        CHECK("stop_is_the_only_release: contacts == 0", S.contacts == 0);
+        CHECK("stop_is_the_only_release: the first decision is Release(stop) on every seed (not Stuck)", first_stop == S.n);
+        CHECK("stop_is_the_only_release: from rest the next decision moves (no second stop, no Stuck)", moves_after == S.n);
+        CHECK("stop_is_the_only_release: never a one-tick Stuck", S.stuck == 0);
     }
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;

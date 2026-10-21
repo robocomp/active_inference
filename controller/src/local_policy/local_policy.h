@@ -61,6 +61,10 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_rel_xy = 0, s
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
 // eligible = number of candidates whose P(contact) <= risk_eps (Drive draws from them; Release from ALL v <= 0 ones).
 // Stuck only when returns lie inside the bare hull, or no release candidate has P(contact) < release_risk_max.
+// ★ F2 (2026-10-21): from a MOVING state (|v_now| >= v_min_eff or |w_now| >= w_min_eff) the brake-to-rest command (0, 0)
+//   is a release candidate (its coast sweep, its rest pose's continuability); a Release with v = w = 0 is that stop, and
+//   the next decision is made from rest. So a Stuck while moving means not even stopping is releasable; at rest the stop
+//   is not a candidate and Stuck keeps its meaning "nothing moves it safely from here".
 // Blind also for a non-finite input (NaN/inf anywhere): no prediction can be made.
 struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode; float v = 0, w = 0;
                   float log_p_safe = 0, log_p_cont = 0, progress_m = 0; int eligible = 0; std::string why;

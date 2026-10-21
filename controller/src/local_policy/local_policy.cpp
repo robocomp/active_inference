@@ -104,7 +104,8 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 // progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
 struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{}, plan_end{};
               bool has_cont = false; float cont_v = 0.f, cont_w = 0.f, cont_dur = 0.f;
-              bool elig = false, lpc_done = false; int conts = -1; };
+              bool elig = false, lpc_done = false; int conts = -1;
+              bool stop = false; };   // F2: the brake-to-rest command (0, 0) from a moving state — a release candidate only
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
 // lps_floor: below it only a bound is needed (contact.h) — candidates need exact values only while releasable
@@ -126,6 +127,7 @@ bool eligible(float lps, const PolicyParams& p) { return 1.f - std::exp(lps) <= 
 
 std::string words(float v, float w)
 {
+    if (v == 0.f and w == 0.f) return "stop (brake to rest)";
     const char* lin = v > 0.f ? "forward" : v < 0.f ? "back up" : "turn in place";
     const char* ang = w > 0.f ? "left" : w < 0.f ? "right" : (v == 0.f ? "" : "straight");
     char buf[128];
@@ -340,14 +342,26 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     keep_executable(vs, in.base.v_min_eff);
     keep_executable(ws, in.base.w_min_eff);
 
+    // ★ F2 (2026-10-21 doorway-release spec) — STOPPING IS A RELEASE CANDIDATE. From a MOVING state every candidate first
+    //   carries the coast (latency + wheel braking, ~0.15 m from 0.35 m/s at WheelDecel 0.5): the brake-to-rest command
+    //   (0, 0) is the one motion made of that coast and nothing else, so it is scored like any candidate — its sweep (the
+    //   same latency + decel profile as every rollout, from policy_start) for P(contact), its rest pose for continuability —
+    //   and it enters the RELEASE set only (it makes no progress; Drive never draws it). Stuck then means that not even
+    //   stopping is releasable. At REST the stop is not a candidate: it would be the absence of a decision (no sweep, no
+    //   change), and a Release that changes nothing would hide the one verdict the task layer needs — "nothing moves it
+    //   safely from here". "At rest" is the base's own resolution of motion, its deadband (v_min_eff / w_min_eff, the
+    //   same bound keep_executable() drops commands by and the odometry sign check reads w by): a measured speed the base
+    //   would not execute as a command is not a motion with a coast to remove. No new constant.
+    const bool moving = std::abs(in.v_now) >= in.base.v_min_eff or std::abs(in.w_now) >= in.base.w_min_eff;
     std::vector<Cand> cands;
     for (float v : vs)
         for (float w : ws)
         {
-            if (v == 0.f and w == 0.f) continue;     // standing still is the absence of a decision, not a candidate
-            Cand c{.v = v, .w = w};
+            const bool stop = v == 0.f and w == 0.f;
+            if (stop and not moving) continue;       // at rest, standing still is the absence of a decision (above)
+            Cand c{.v = v, .w = w, .stop = stop};
             c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log1p(-p.release_risk_max), &c.dur);
-            c.elig = eligible(c.lps, p);
+            c.elig = not stop and eligible(c.lps, p);
             if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
             cands.push_back(c);
         }
@@ -581,7 +595,10 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
                   prediction_failed ? (std::string(failed_why) + ")").c_str() : "", words(best->v, best->w).c_str(),
                   1.f - std::exp(best->lps), lpc_now, best->lpc);
     Decision rd = finish(Decision::Mode::Release, *best, buf);
-    if (monitored)
+    // ★ F2: a Release(stop) predicts REST at its end pose, which the brake profile guarantees; it promises no continuability
+    //   gain (its point is that the next decision is made from rest, without the coast), so no release prediction is armed
+    //   — judging it on a gain it never claimed would read every stop as a failed prediction and lay a trap on it.
+    if (monitored and not best->stop)
     {
         // ★ round 4: the release's own prediction — the continuability it buys, judged when its hold completes
         mon->reset();

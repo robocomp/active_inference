@@ -21,6 +21,10 @@
 //   (latency_advances_start); cells are swept as support segments (jamb tips); Release scans only releasable
 //   candidates (P < 1 - risk_eps) and every sweep stops once its result is provably below what its caller needs.
 // ★ Review fix round 3: Stuck iff no release has P(contact) < release_risk_max (0.5) — the wedge is Stuck (best 0.978).
+// ★ F2 (2026-10-21 doorway-release spec): from a moving state the brake-to-rest command is a release candidate
+//   (stop_is_a_release: P(stop) 0.000 vs the least risky motion 0.619 -> Release(stop), then from rest a turn at 0.394);
+//   at rest — including odometry below the deadband — it is not; the wedge at 0.30 m/s is Stuck because the stop
+//   itself reads P = 0.990.
 // ★ Review fix round 2: the shared offset is TRUNCATED once by "nothing touches now" (eps > -sd0*) and the
 //   integrand is the product of per-cell ratios (contact.h). P values rose where a motion deepens cells (the old
 //   per-cell conditioning was optimistic): pressed 0.093 -> 0.170, dense-wall slide 0.069 -> 0.159; no verdict moved.
@@ -332,6 +336,67 @@ int main()
         s.finish(); s.in.v_now = std::numeric_limits<float>::quiet_NaN();
         const auto d = decide(s.in, s.pp); print("nan input", d);
         CHECK("non_finite_input_is_blind", d.mode == Decision::Mode::Blind and d.v == 0.f and d.w == 0.f and d.why == "non-finite input");
+    }
+    { // ★ F2 (2026-10-21 doorway-release spec): STOPPING IS A RELEASE CANDIDATE. A pocket: grown hull 2 cm from the side walls
+      // and the tail wall; the nose wall 1 cm beyond where the robot comes to rest. The robot creeps forward at 0.10 m/s with
+      // 0.10 s of latency, so its coast (latency + brake at d_lin) is 1.5 cm. Every reverse is longer than that coast (the
+      // slowest, -0.17 m/s, backs ~0.15 m) and reaches the tail wall; every in-place turn is rolled out from the moving state,
+      // its wheels coupled (one decelerating, one accelerating), so it ARCS forward while it turns and swings a front corner
+      // into the nose wall. Only the brake-to-rest sweep stays clear. Measured (this file's model): P(stop) = 0.000, the
+      // least risky motion = 0.62 (turn in place right 0.30) -> before F2 this was Stuck (stop was not a candidate).
+        Scene s;
+        const float hx = s.b.support_radius(0.f, V(1.f, 0.f)), hy = s.b.support_radius(0.f, V(0.f, 1.f)), hyb = s.b.support_radius(0.f, V(0.f, -1.f));
+        const float v0 = 0.10f, lat = 0.10f, coast = v0 * lat + v0 * v0 / (2.f * limits().d_lin);
+        const float xs = hx + 0.02f, yn = hy + coast + 0.01f, yt = -(hyb + 0.02f);
+        for (float y = yt; y <= yn; y += 0.02f) { s.ret.push_back({{xs, y}, 0.01f, 1.f}); s.ret.push_back({{-xs, y}, 0.01f, 1.f}); }
+        for (float x = -xs; x <= xs; x += 0.02f) { s.ret.push_back({{x, yn}, 0.01f, 1.f}); s.ret.push_back({{x, yt}, 0.01f, 1.f}); }
+        s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish();
+        s.in.v_now = v0; s.in.latency_s = lat;
+        // independent re-evaluation over the policy's own v <= 0 grid (n_v 7 over [-0.5, 0.5], n_w 11 over [-1.5, 1.5])
+        float least = 1.f;
+        for (int i = 0; i <= 3; ++i)
+            for (int j = 0; j <= 10; ++j)
+            {
+                const float v = -0.5f + float(i) / 6.f, w = j == 5 ? 0.f : -1.5f + 0.3f * float(j);
+                if (i == 3 and j == 5) continue;     // (0, 0): the stop itself
+                least = std::min(least, p_contact_of(s, v, w));
+            }
+        const float p_stop = p_contact_of(s, 0.f, 0.f);
+        std::printf("  stop_is_a_release: P(stop) %.3f, least risky motion %.3f (release_risk_max %.2f)\n", p_stop, least, s.pp.release_risk_max);
+        CHECK("stop_is_a_release: scene — the stop sweep is releasable, no motion is", p_stop < s.pp.release_risk_max and least >= s.pp.release_risk_max);
+        const auto d = decide(s.in, s.pp); print("stop_is_a_release moving", d);
+        CHECK("stop_is_a_release: moving -> Release(stop) v = w = 0, not Stuck",
+              d.mode == Decision::Mode::Release and d.v == 0.f and d.w == 0.f and d.why.find("stop") != std::string::npos);
+        // the next tick, from REST at the stop's end pose: an ordinary decision (the from-rest turn clears the nose wall)
+        Scene r = s; r.finish(); r.in.v_now = 0.f; r.in.latency_s = 0.f;
+        r.in.pose = end_of(s, 0.f, 0.f);
+        const auto dr = decide(r.in, r.pp); print("stop_is_a_release at rest", dr);
+        CHECK("stop_is_a_release: at rest -> a motion (Release or Drive), never another stop",
+              (dr.mode == Decision::Mode::Release or dr.mode == Decision::Mode::Drive) and not (dr.v == 0.f and dr.w == 0.f));
+        // at rest the stop is NOT a candidate, also under odometry noise below the base's deadband
+        Scene q = r; q.finish(); q.in.v_now = 0.5f * q.in.base.v_min_eff; q.in.w_now = -0.5f * q.in.base.w_min_eff; q.in.latency_s = 0.f;
+        q.in.pose = r.in.pose;
+        const auto dq = decide(q.in, q.pp); print("stop_is_a_release sub-deadband noise", dq);
+        CHECK("stop_is_a_release: sub-deadband odometry is rest (no Release(stop))", not (dq.v == 0.f and dq.w == 0.f and dq.mode == Decision::Mode::Release));
+    }
+    { // ★ F2: Stuck while MOVING now means "not even stopping is releasable" — the wedge (nose wall 3 cm past the bare hull)
+      // at 0.30 m/s: the coast alone (0.045 m of braking at d_lin) runs the nose into it
+        Scene s;
+        for (int i = 0; i < 75; ++i)
+        {
+            const float t = -0.6f + 1.2f * float(i) / 74.f;
+            s.ret.push_back({{0.30f, t * 0.45f}, 0.01f, 1.f}); s.ret.push_back({{-0.30f, t * 0.45f}, 0.01f, 1.f});
+            s.ret.push_back({{t * 0.5f, 0.26f}, 0.01f, 1.f}); s.ret.push_back({{t * 0.5f, -0.26f}, 0.01f, 1.f});
+        }
+        for (auto& q : s.ret) if (std::fabs(q.p.x()) < 0.29f and std::fabs(q.p.y()) < 0.25f) q.p.y() = q.p.y() > 0.f ? 0.26f : -0.26f;
+        s.goal.p = {0.f, 3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish(); s.in.v_now = 0.30f;
+        const auto d = decide(s.in, s.pp); print("wedge moving", d);
+        CHECK("wedge moving is stuck (the stop itself is not releasable)", d.mode == Decision::Mode::Stuck and d.v == 0.f and d.w == 0.f
+              and d.why.find("release_risk_max") != std::string::npos and p_contact_of(s, 0.f, 0.f) >= s.pp.release_risk_max);
     }
     { // wedge timing (reviewer's scene): a box so tight nothing can move or gain — sides x = +-0.30, nose/tail
       // y = +-0.26, 300 returns at ~7 mm. Every candidate reads P ~ 1, so no continuation is ever rolled out.
