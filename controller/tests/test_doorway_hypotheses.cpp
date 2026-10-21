@@ -111,14 +111,15 @@ int main()
     //      motion over the age (|v|·age, |w|·age with the range as lever arm) widens the block's covariance, and coverage falls.
     {
         const RelPose a0 = rel(0.f, 1.5f, 0.f, 0.03f, 0.03f);
-        const RelPose a_old = aged_anchor(a0, 0.12, 0.30, 0.6);     // one missed refresh while moving
-        const RelPose a_very = aged_anchor(a0, 3.0, 0.30, 0.6);     // 3 s of motion unseen
+        // fix round 2 (c): aged by the motion ACTUALLY made since the stamp (localiser pose then vs now), not speed x age
+        const RelPose a_old = aged_anchor(a0, 0.036, 0.072);        // one missed refresh while moving (0.12 s at 0.3 m/s, 0.6 rad/s)
+        const RelPose a_very = aged_anchor(a0, 0.9, 1.8);           // 3 s of that motion unseen
         const double c0 = lateral_coverage(lateral_sigma(a0), 0.5 * kDoorW - kHalfBody);
         const double c1 = lateral_coverage(lateral_sigma(a_old), 0.5 * kDoorW - kHalfBody);
         const double c3 = lateral_coverage(lateral_sigma(a_very), 0.5 * kDoorW - kHalfBody);
         CHECK("(I-1) coverage falls continuously with the block's age", c0 >= c1 and c1 > c3 and c1 > 0.5);
         CHECK("(I-1) a parked / stationary block keeps its covariance (no motion, no widening)",
-              lateral_sigma(aged_anchor(a0, 0.9, 0.0, 0.0)) == lateral_sigma(a0));
+              lateral_sigma(aged_anchor(a0, 0.0, 0.0)) == lateral_sigma(a0));
         // the reviewer's case: a right anchor one block stale vs the rtD1c leaf gap (0.52 m, s 0.03) ⇒ the ANCHOR
         const DoorwayLine stale{a_old, kDoorW, 1.0 - lambda0};
         const DoorwayLine leaf{rel(0.35f, 1.4f, 0.3f, 0.02f, 0.02f), 0.52f, 0.03};
@@ -187,11 +188,11 @@ int main()
         AnchorLostBelief lam;
         const auto a = anchor_in_room(rel(0.f, 1.5f, 0.f, 0.03f, 0.03f), {0.f, 0.f}, 0.f);
         const auto b = anchor_in_room(rel(0.01f, 1.5f, 0.005f, 0.03f, 0.03f), {0.f, 0.f}, 0.f);
-        for (int k = 0; k < 100; ++k) lam.observe(a, b, kDoorW, robot_cov, 1.5, 0.05);   // 5 s of continuations
+        for (int k = 0; k < 100; ++k) lam.observe(a, b, kDoorW, robot_cov, 1.5, 0.05, /*seen=*/true);   // 5 s of SEEN continuations
         const double after_cont = lam.lambda;
         CHECK("(I-2 λ) 5 s of confirmed continuations: P(lost) FALLS below its prior", after_cont < lambda0);
         const auto j = anchor_in_room(rel(2.0f, 1.0f, 0.3f, 0.05f, 0.05f), {0.f, 0.f}, 0.f);
-        const double p_jump = lam.observe(a, j, kDoorW, robot_cov, 1.5, 0.05);
+        const double p_jump = lam.observe(a, j, kDoorW, robot_cov, 1.5, 0.05, /*seen=*/true);
         CHECK("(I-2 λ) a 2 m jump: re-initialisation is the MAP and P(lost) RISES", p_jump > 0.5 and lam.lambda > after_cont);
         std::printf("      λ: prior %.2f -> %.4f after continuations -> %.3f after a jump (P(re-init) %.4f)\n", lambda0, after_cont,
                     lam.lambda, p_jump);
@@ -202,6 +203,71 @@ int main()
         // the hazard pulls an old verdict back toward the prior (no belief is final)
         AnchorLostBelief h; h.lambda = 0.999; h.predict(60.0);
         CHECK("(I-2 λ) 60 s without evidence relaxes P(lost) toward the prior", h.lambda < 0.9 and h.lambda > lambda0);
+    }
+
+    // ==== FIX ROUND 2 (re-review of 7ae45582) ======================================================================================
+    // ---- (a) ELAPSED TIME DRIVES ONLY THE HAZARD. One decorrelated look is at most one observation: its weight is
+    //      min(1, dt/τ_view), never dt/τ_view. Reviewer: one frame after a 10 s gap took P(gap) 0.119 -> 0.695 (30 s -> 0.993).
+    {
+        const DoorwayLine anchor{rel(0.f, 1.5f, 0.f, 0.03f, 0.03f), kDoorW, 0.8};
+        const DoorwayLine gap{rel(-0.6f, 1.2f, 0.f, 0.03f, 0.03f), kDoorW, 0.99};
+        const auto c = choose_doorway_line(anchor, gap, kHalfBody);
+        double p3 = 0.0, p30 = 0.0;
+        for (const double dt : {3.0, 10.0, 30.0})
+        {
+            DoorwayBelief b; b.L = -2.0; b.step(c.pi_anchor, c.pi_gap, dt);
+            DoorwayBelief h; h.L = -2.0; h.predict(dt);
+            const double one_obs = b.L - h.L;   // what the frame itself added, after the hazard
+            if (dt == 3.0) p3 = one_obs;
+            if (dt == 30.0) p30 = one_obs;
+            std::printf("      one frame after %.0f s: P(gap) 0.119 -> %.3f (hazard alone %.3f)\n", dt, b.p_gap(), h.p_gap());
+            if (dt == 10.0) CHECK("(r2 a) one frame after a 10 s gap leaves P(gap) below 1/2", b.p_gap() < 0.5);
+        }
+        CHECK("(r2 a) a frame after 30 s weighs no more than one after 3 s (one observation)", std::abs(p30 - p3) < 1e-9);
+        { DoorwayBelief h; h.L = -2.0; h.predict(1e4); CHECK("(r2 a) a long silence relaxes P(gap) to 1/2, never past it", h.p_gap() <= 0.5 + 1e-9 and h.p_gap() > 0.49); }
+        const Eigen::Matrix3d robot_cov = Eigen::Vector3d(1e-4, 1e-4, 1e-4).asDiagonal();
+        const auto a = anchor_in_room(rel(0.f, 1.5f, 0.f, 0.03f, 0.03f), {0.f, 0.f}, 0.f);
+        const auto b = anchor_in_room(rel(0.01f, 1.5f, 0.005f, 0.03f, 0.03f), {0.f, 0.f}, 0.f);
+        AnchorLostBelief l1; l1.observe(a, b, kDoorW, robot_cov, 1.5, 10.0, true);
+        AnchorLostBelief l2; for (int k = 0; k < 200; ++k) l2.observe(a, b, kDoorW, robot_cov, 1.5, 0.05, true);
+        std::printf("      λ: one continuation after 10 s %.2e; 200 over 10 s %.2e\n", l1.lambda, l2.lambda);
+        CHECK("(r2 a) one continuation after 10 s is no more conclusive than 200 over the same 10 s", l1.lambda >= l2.lambda);
+        CHECK("(r2 a) one continuation lowers P(lost) by at most log 2", std::log(l1.lambda / (1 - l1.lambda)) >= std::log(lambda0 / (1 - lambda0)) - std::log(2.0) - 1e-9);
+    }
+    // ---- (b) PREDICTED blocks (owner's unseen_time > 0) move smoothly BY CONSTRUCTION: they carry no evidence about lostness —
+    //      the hazard only. Reviewer: λ fell 0.2 -> 0.002 in 5 s on predictions.
+    {
+        const Eigen::Matrix3d robot_cov = Eigen::Vector3d(1e-4, 1e-4, 1e-4).asDiagonal();
+        const auto a = anchor_in_room(rel(0.f, 1.5f, 0.f, 0.03f, 0.03f), {0.f, 0.f}, 0.f);
+        const auto b = anchor_in_room(rel(0.01f, 1.5f, 0.005f, 0.03f, 0.03f), {0.f, 0.f}, 0.f);
+        AnchorLostBelief l; for (int k = 0; k < 100; ++k) l.observe(a, b, kDoorW, robot_cov, 1.5, 0.05, /*seen=*/false);
+        CHECK("(r2 b) 5 s of PREDICTED continuations leave P(lost) at its prior", std::abs(l.lambda - lambda0) < 1e-9);
+    }
+    // ---- (c) a PARKED / NOT-DRIVABLE block is evidence INTO λ — the owner's own "not seen" — with door_concept's bounded view
+    //      form (a not-seen frame scores log 3 toward lost), one observation per block weighted min(1, span/τ_view). Reviewer: a
+    //      stopped robot kept a 6 s-old parked block at π_A 0.80 and gaps at s 0.5-0.79 never took the line.
+    {
+        AnchorLostBelief l;
+        l.observe_not_seen(0.0, 6.0);   // one parked block, written 6 s before it is read
+        std::printf("      λ after one 6 s-old parked block: %.3f\n", l.lambda);
+        CHECK("(r2 c) a parked block raises P(lost), by at most one observation (log 3)",
+              l.lambda > lambda0 and std::log(l.lambda / (1 - l.lambda)) - std::log(lambda0 / (1 - lambda0)) <= std::log(3.0) + 1e-9);
+        const RelPose parked = aged_anchor(rel(-0.9f, 1.6f, 0.6f, 0.03f, 0.03f), 0.0, 0.0);   // the robot did not move since
+        const DoorwayLine a{parked, kDoorW, 1.0 - l.lambda};
+        const DoorwayLine g{rel(0.f, 0.8f, 0.f, 0.02f, 0.02f), kDoorW, 0.7};
+        DoorwayBelief b; double t = -1.0;
+        for (int k = 0; k < 200; ++k) { const auto c = choose_doorway_line(a, g, kHalfBody); b.step(c.pi_anchor, c.pi_gap, 0.05); if (b.gap() and t < 0.0) t = 0.05 * (k + 1); }
+        std::printf("      parked anchor (λ %.2f) vs gap s=0.70: the gap's line after %.2f s\n", l.lambda, t);
+        CHECK("(r2 c) a parked anchor loses the line to a 0.7 gap within 10 s", t > 0.0 and t <= 10.0);
+        // a stream of not-drivable wait poses (stamped every 50 ms) accumulates as the owner's own view evidence does
+        AnchorLostBelief w; for (int k = 0; k < 120; ++k) w.observe_not_seen(0.05, 0.05);   // 6 s of wait poses
+        std::printf("      λ after 6 s of not-drivable wait poses: %.3f\n", w.lambda);
+        CHECK("(r2 c) 6 s of not-drivable wait poses (2 τ_view: at most log 3 each) raise P(lost) above 1/2", w.lambda > 0.5);
+        // aged by the motion actually made: a stopped robot keeps a block's covariance; a moved one widens it
+        const RelPose base = rel(0.f, 1.5f, 0.f, 0.03f, 0.03f);
+        CHECK("(r2 c) widening grows with the motion actually made",
+              lateral_sigma(aged_anchor(base, 0.0, 0.0)) < lateral_sigma(aged_anchor(base, 0.3, 0.0))
+              and lateral_sigma(aged_anchor(base, 0.3, 0.0)) < lateral_sigma(aged_anchor(base, 0.3, 0.5)));
     }
 
     std::printf("%s (%d failures)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);

@@ -104,6 +104,7 @@ public:
         bool fresh = true;                      // Task 9: false = older than kAnchorStaleMs — wait for it, never drive on it
         std::int64_t age_ms = 0;                // now − its newest stamp
         int unseen_ms = 0;                      // fix round 1: the owner's last sighting this long ago (> 0 = PREDICTED pose)
+        bool drivable = false;                  // Task 3e r2: the owner's drivable mark (false = a wait pose: where to LOOK)
         std::vector<rc::interaction::AnchorLeaf> leaves;   // Task 12 fix A: the swung leaf hypotheses, anchor frame (empty = none)
     };
     // The anchor of a `_cross` affordance (its interaction_node_id, else the anchor latched for that same affordance
@@ -1165,7 +1166,10 @@ private:
     // ── Task 3e ([Policy] Enabled only — rtD1h leg 5): THE ANCHOR'S OWN STATE, per claim (reset_anchor_cross_state) ──────────
     std::int64_t anchor_claim_since_ms_ = 0;                         // when this claim first read its anchor (door_concept's clock)
     std::optional<rc::policy::RoomAnchor> anchor_prev_room_;         // the last block read, room frame (the re-init test's reference)
-    std::int64_t anchor_prev_age_ms_ = 0;                            // ...and how old it was when converted
+    // Task 3e r2 (c): the localiser's room pose over the last kDoorwaySwitchS (door_concept's clock), so a block is put in the room
+    // through the pose the robot had AT ITS STAMP, and aged by the motion actually made since
+    std::deque<std::tuple<std::int64_t, Eigen::Vector2f, float>> policy_pose_ring_;
+    [[nodiscard]] std::optional<ControllerRobotPose> policy_pose_at(std::int64_t stamp_ms) const;
     rc::policy::AnchorLostBelief anchor_lost_;                       // P(the anchor is lost), recursive per block (fix round 1, I-2)
     rc::policy::DoorwayBelief doorway_belief_;                       // P(the gap's line is the door), recursive per cycle (I-2)
     double doorway_belief_t_ = -1.0;                                 // its last update (steady s; < 0 = none this claim)

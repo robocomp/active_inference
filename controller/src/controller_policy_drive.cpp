@@ -687,13 +687,15 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 //   anchor is the door" (its own P(not lost) × its lateral coverage) vs "the gap is the door" (its score × its
                 //   coverage) — a SELECTION, never their average (doorway_hypotheses.h says why the disagreement cannot choose).
                 //   Fix round 1: the anchor's block is AGED by the motion since its stamp (I-1: one missed block widens it, it is
-                //   never zeroed), and the choice is the MAP of a RECURSIVE belief (I-2: evidence accumulates per cycle under a
+                //   never zeroed; r2: the motion actually made, and a parked / not-drivable block raises λ), and the choice is the MAP of a RECURSIVE belief (I-2: evidence accumulates per cycle under a
                 //   switching hazard — inertia without a hysteresis band). The risk mixture and the veto below carry BOTH (F4/3b).
                 const float body_half_w = 0.5f * (bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f))
                                                   + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
                 const double lambda = anchor_owner_p_lost().value_or(anchor_lost_.lambda);   // ⚑ D-B hook: the owner's P(lost)
-                const auto aged = rc::policy::aged_anchor(cp.anchor_pose, double(cp.anchor_age_ms) * 1e-3,
-                                                          odo_valid_ ? odo_v_ : 0.f, odo_valid_ ? odo_w_ : 0.f);
+                // fix round 2 (c): aged by the motion ACTUALLY made since the block's stamp (the localiser's pose then vs now)
+                const ControllerRobotPose then = policy_pose_at(cp.anchor_pose.stamp_ms).value_or(cpose);
+                const auto aged = rc::policy::aged_anchor(cp.anchor_pose, double((cpose.pos - then.pos).norm()),
+                                                          double(std::remainder(cpose.theta - then.theta, 2.f * std::numbers::pi_v<float>)));
                 const rc::policy::DoorwayLine a_line{aged, cp.anchor_width, 1.0 - lambda};
                 const std::optional<rc::policy::DoorwayLine> g_line =
                     cp.on_gap ? std::optional<rc::policy::DoorwayLine>(rc::policy::DoorwayLine{cp.drive_pose, cp.drive_width, cp.gap_score})

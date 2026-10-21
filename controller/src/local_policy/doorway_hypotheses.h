@@ -164,23 +164,31 @@ struct RoomAnchor { Eigen::Vector3d x = Eigen::Vector3d::Zero(); Eigen::Matrix3d
 }
 
 // ─── FIX ROUND 1 (review of 142d8d3a) ───────────────────────────────────────────────────────────────────────────────────────────
-// ⚑ τ_view: the time over which consecutive frames DECORRELATE — door_concept's view-evidence horizon (kAnchorPredictMs, 3 s).
-//   Every per-frame log-ratio below is weighted by dt/τ_view: 20 Hz frames of one scene are not 20 independent looks (the
-//   fractional-count lesson: summed correlated evidence manufactures confidence).
+// ⚑ τ_view: door_concept's PREDICTION HORIZON (kAnchorPredictMs, 3 s), reused as the time over which consecutive frames
+//   decorrelate — a stated level, NOT a measured decorrelation time. Fix round 2 (a): it sets the WEIGHT of one look,
+//   w = min(1, dt/τ_view): 20 Hz frames of one scene are not 20 independent looks (summed correlated evidence manufactures
+//   confidence — the fractional-count lesson), and one decorrelated look is at most ONE observation however long the silence
+//   before it. Elapsed time drives only the switching hazard.
 inline constexpr double kDoorwayViewTauS = 3.0;
+[[nodiscard]] inline double observation_weight(double dt_s)
+{
+    return dt_s > 0.0 ? std::min(1.0, dt_s / kDoorwayViewTauS) : 0.0;
+}
 // ⚑ T_switch: the mean time over which WHICH LINE IS THE DOOR may change within a claim (an anchor captured by an alias, a gap
-//   locking onto a leaf). The switching hazard h = 1 − exp(−dt/T) mixes each belief toward its prior before every update, so no
-//   verdict is final: it bounds the inertia (a reversal is answered within a few τ_view), never sets a decision level.
+//   locking onto a leaf). Stated, not measured. The switching hazard h = 1 − exp(−dt/T) mixes each belief toward its prior before
+//   every update, so no verdict is final: it bounds the inertia (a reversal is answered within a few τ_view), never sets a
+//   decision level.
 inline constexpr double kDoorwaySwitchS = 30.0;
 
-// I-1: A BLOCK'S INFORMATION DECAYS WITH ITS AGE. A block is the opening relative to the robot AT ITS STAMP; read age_s later, the
-// robot has moved by up to |v|·age along and turned |w|·age, which swings a point at range r by r·|w|·age. That motion is
-// unknown to the reader (only bounded by the measured speeds), so it is added to the block's covariance — the coverage term falls
-// continuously with it. A stationary robot keeps the block's covariance: its age is then no reason to distrust it.
-[[nodiscard]] inline rc::interaction::RelPose aged_anchor(const rc::interaction::RelPose& r, double age_s, double v_abs, double w_abs)
+// I-1 / fix round 2 (c): A BLOCK'S INFORMATION DECAYS WITH THE MOTION SINCE ITS STAMP. A block is the opening relative to the
+// robot AT ITS STAMP; it is used relative to the robot NOW, so the error it carries is the motion the robot ACTUALLY made in
+// between — read off the localiser (pose at the stamp vs now: moved_m along, turned_rad in heading, which swings a point at range
+// r by r·turned). That is added to the block's covariance and the coverage term falls with it. A robot that has not moved keeps
+// the block's covariance: its age alone says nothing about the geometry (its lostness is λ's — observe_not_seen).
+[[nodiscard]] inline rc::interaction::RelPose aged_anchor(const rc::interaction::RelPose& r, double moved_m, double turned_rad)
 {
     rc::interaction::RelPose o = r;
-    const double a = std::max(0.0, age_s), dv = std::abs(v_abs) * a, dw = std::abs(w_abs) * a;
+    const double dv = std::abs(moved_m), dw = std::abs(turned_rad);
     const double range = double(r.x.head<2>().norm());
     const double vxy = dv * dv + range * range * dw * dw;
     o.P(0, 0) += float(vxy);
@@ -199,15 +207,17 @@ inline constexpr double kDoorwaySwitchS = 30.0;
 }
 
 // I-2: WHICH LINE IS THE DOOR, as a recursive two-state belief (log-odds L = log P(gap)/P(anchor)): each cycle the switching
-// hazard first, then this cycle's evidence — the gap's frame log-ratio for, the anchor's against — weighted by dt/τ_view. The
-// MAP is L > 0; a tie (no evidence yet) keeps the anchor, the door's owner. The inertia is the accumulated evidence itself.
+// hazard over the elapsed time first, then this cycle's ONE look — the gap's frame log-ratio for, the anchor's against —
+// weighted by observation_weight(dt) ≤ 1. The MAP is L > 0; a tie (no evidence yet) keeps the anchor, the door's owner.
 struct DoorwayBelief
 {
     double L = 0.0;
     void predict(double dt_s)   // the switching hazard alone (a cycle with no gap held: no evidence about it)
     {
         if (not (dt_s > 0.0)) return;
-        const double h = 1.0 - std::exp(-dt_s / kDoorwaySwitchS);
+        // a two-state chain switching at rate 1/T: P(in the other state after dt) = ½(1 − e^(−2dt/T)) — never past ½, so a long
+        // silence relaxes the belief TO ½, it cannot invert it
+        const double h = 0.5 * (1.0 - std::exp(-2.0 * dt_s / kDoorwaySwitchS));
         const double p = p_gap();
         const double q = (1.0 - h) * p + h * (1.0 - p);
         L = std::log(q / (1.0 - q));
@@ -216,17 +226,24 @@ struct DoorwayBelief
     {
         if (not (dt_s > 0.0)) return;
         predict(dt_s);
-        L += (frame_llr(pi_gap) - frame_llr(pi_anchor)) * dt_s / kDoorwayViewTauS;
+        L += (frame_llr(pi_gap) - frame_llr(pi_anchor)) * observation_weight(dt_s);
     }
     [[nodiscard]] bool gap() const { return L > 0.0; }
     [[nodiscard]] double p_gap() const { return 1.0 / (1.0 + std::exp(-L)); }
 };
 
-// I-2 (λ): P(the anchor is lost), recursive per published block. The hazard relaxes it toward the shared prior; each new block's
-// transition from the last is scored under "a tracked belief moves continuously" (Gaussian) vs "a lost belief wanders at the alias
-// scale" (Cauchy) — the two densities p_reinitialised compares — weighted by dt/τ_view, so it FALLS on confirmed continuations
-// and RISES on a jump. observe() returns the single-transition P(re-initialised) under the CURRENT λ (the MAP test that ends
-// `engaged`), computed before λ moves.
+// I-2 (λ): P(the anchor is lost), recursive per published block. The hazard over the elapsed time relaxes it toward the shared
+// prior; then the block, as ONE observation (weight ≤ 1):
+//   • SEEN (the owner saw the door this frame, drivable, this claim): its transition from the last block scored under "a tracked
+//     belief moves continuously" (Gaussian) vs "a lost belief continues (½) or wanders at the alias scale (½, Cauchy)" — it falls
+//     on confirmed continuations (≤ log 2 per observation) and rises on a jump;
+//   • PREDICTED (drivable, unseen_time > 0): odometry carries it smoothly BY CONSTRUCTION — a continuation says nothing about
+//     lostness: hazard only (fix round 2 (b));
+//   • NOT SEEN as the owner says so (a not-drivable wait pose, or a block parked by a claim that ended): observe_not_seen —
+//     door_concept's own view evidence for a frame that did not see the door (p_view 0 ⇒ log 3 toward lost), weighted by the span
+//     it stands for (fix round 2 (c)).
+// observe() returns the single-transition P(re-initialised) under the CURRENT λ (the MAP test that ends `engaged`), computed
+// before λ moves.
 struct AnchorLostBelief
 {
     double lambda = kDoorwayAnchorLostPrior;
@@ -237,7 +254,7 @@ struct AnchorLostBelief
         lambda = (1.0 - h) * lambda + h * kDoorwayAnchorLostPrior;
     }
     double observe(const RoomAnchor& prev, const RoomAnchor& now, double width, const Eigen::Matrix3d& robot_cov, double range_m,
-                   double dt_s)
+                   double dt_s, bool seen)
     {
         predict(dt_s);
         Eigen::Vector3d nu = now.x - prev.x;
@@ -248,10 +265,31 @@ struct AnchorLostBelief
         const auto ll = disagreement_loglik(nu, prev.P + now.P + Sr, width);
         if (not ll.has_value()) return 0.0;
         const double p_re = p_reinitialised(prev, now, width, robot_cov, range_m, lambda);
-        const double lam = std::clamp(lambda, 1e-12, 1.0 - 1e-12);
-        const double logit = std::log(lam / (1.0 - lam)) + (ll->l_other - ll->l_same) * std::max(0.0, dt_s) / kDoorwayViewTauS;
-        lambda = 1.0 / (1.0 + std::exp(-logit));
+        // A LOST belief is not a random walk: door_concept keeps TRACKING whatever it has locked onto (an alias continues as
+        // smoothly as the door). So under "lost" a transition continues with ½ and wanders at the alias scale with ½ — the
+        // mixture door_concept's own view model uses (½U + ½Beta) — and a continuation can lower λ by at most log 2 per
+        // observation, while a jump the Gaussian cannot explain still raises it decisively.
+        if (seen)
+        {
+            const double m = std::max(ll->l_same, ll->l_other);
+            const double l_lost = m + std::log(0.5 * std::exp(ll->l_same - m) + 0.5 * std::exp(ll->l_other - m));
+            add_llr((l_lost - ll->l_same) * observation_weight(dt_s));
+        }
         return p_re;
+    }
+    // dt_s: time since the previous update (the hazard); span_s: the time this block stands for unseen (its weight)
+    void observe_not_seen(double dt_s, double span_s)
+    {
+        predict(dt_s);
+        add_llr(std::log(3.0) * observation_weight(span_s));
+    }
+
+private:
+    void add_llr(double d)
+    {
+        const double lam = std::clamp(lambda, 1e-12, 1.0 - 1e-12);   // log of an exact 0/1: numerics, not a model level
+        const double logit = std::log(lam / (1.0 - lam)) + d;
+        lambda = 1.0 / (1.0 + std::exp(-logit));
     }
 };
 }  // namespace rc::policy

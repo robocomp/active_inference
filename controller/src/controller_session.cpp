@@ -3465,6 +3465,7 @@ ControllerSession::read_cross_anchor(std::uint64_t affordance_id, const std::str
                               .fresh = fresh,
                               .age_ms = age,
                               .unseen_ms = std::max(0, unseen),
+                              .drivable = node.has_value() and rc::interaction::anchor_drivable(*graph_, node.value()),
                               .leaves = rc::interaction::read_anchor_leaves(*graph_, id)};
 }
 
@@ -3523,13 +3524,28 @@ void ControllerSession::reset_anchor_cross_state()
 //       the MAP (P > 1/2, under the anchor's CURRENT P(lost) as prior) `engaged` ends — the wait turns toward the new pose.
 //   (c) Fix round 1 (I-2): P(lost) itself is RECURSIVE (rc::policy::AnchorLostBelief): every newer block moves it — it falls on
 //       a confirmed continuation, rises on a jump, relaxes toward the prior by the switching hazard — and the goal line reads it.
+std::optional<ControllerRobotPose> ControllerSession::policy_pose_at(std::int64_t stamp_ms) const
+{
+    if (policy_pose_ring_.empty()) return std::nullopt;
+    // the nearest recorded cycle (the ring is in time order); a stamp older than the ring gets its oldest pose — the motion then
+    // counted is a LOWER bound, stated
+    const auto it = std::ranges::min_element(policy_pose_ring_, {}, [&](const auto &e) { return std::abs(std::get<0>(e) - stamp_ms); });
+    return ControllerRobotPose{.pos = std::get<1>(*it), .theta = std::get<2>(*it)};
+}
+
 void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
 {
-    if (not anchor_cross_.has_value() or not policy_enabled()) return;
-    auto &a = *anchor_cross_;
+    if (not policy_enabled()) return;
     const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
+    policy_pose_ring_.emplace_back(now, robot_pose.pos, robot_pose.theta);
+    while (not policy_pose_ring_.empty()
+           and double(now - std::get<0>(policy_pose_ring_.front())) * 1e-3 > rc::policy::kDoorwaySwitchS)
+        policy_pose_ring_.pop_front();
+    if (not anchor_cross_.has_value()) return;
+    auto &a = *anchor_cross_;
     if (anchor_claim_since_ms_ == 0) anchor_claim_since_ms_ = now;
-    if (a.fresh and a.pose.stamp_ms < anchor_claim_since_ms_)
+    const bool parked = a.pose.stamp_ms < anchor_claim_since_ms_;
+    if (a.fresh and parked)
     {
         a.fresh = false;
         if (not anchor_parked_logged_)
@@ -3538,40 +3554,44 @@ void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
                          anchor_claim_since_ms_ - a.pose.stamp_ms);
         anchor_parked_logged_ = true;
     }
-    else anchor_parked_logged_ = false;
+    else if (not parked) anchor_parked_logged_ = false;
     if (not a.pose.x.allFinite() or not a.pose.P.allFinite()) return;
-    // only a block written since the last one (a different stamp) by a live owner: an old block is relative to the robot AT ITS
-    // stamp, so converting it with the current pose would invent a jump
-    if (a.age_ms > rc::interaction::kAnchorStaleMs) return;
+    // ONE observation per published block (fix round 2): the same stamp read again is the same look
     if (anchor_prev_room_.has_value() and anchor_prev_room_->stamp_ms == a.pose.stamp_ms) return;
-    const auto cur = rc::policy::anchor_in_room(a.pose, robot_pose.pos, robot_pose.theta);
-    if (anchor_prev_room_.has_value())
+    // put the block in the room through the pose the robot had AT ITS STAMP (fix round 2 (c)): the block is relative to it
+    const ControllerRobotPose then = policy_pose_at(a.pose.stamp_ms).value_or(robot_pose);
+    const auto cur = rc::policy::anchor_in_room(a.pose, then.pos, then.theta);
+    const double dt = anchor_prev_room_.has_value() ? std::max<std::int64_t>(0, a.pose.stamp_ms - anchor_prev_room_->stamp_ms) * 1e-3 : 0.0;
+    const Eigen::Matrix3d robot_cov = Eigen::Vector3d(double(policy_pose_xy_std_) * policy_pose_xy_std_,
+                                                      double(policy_pose_xy_std_) * policy_pose_xy_std_,
+                                                      double(policy_pose_theta_std_) * policy_pose_theta_std_).asDiagonal();
+    const double range = a.pose.x.head<2>().norm();
+    const double before = anchor_lost_.lambda;
+    double p = 0.0;   // P(this block is a re-initialisation of the last one), under the current λ
+    if (parked or not a.drivable)
     {
-        // the localiser's pose sigma, and the motion each block's robot frame is behind the pose it is converted with (a block
-        // is relative to the robot at its stamp; the conversion uses this cycle's pose): |v|·age along, |w|·age in heading
-        const double ages = double(a.age_ms + anchor_prev_age_ms_) * 1e-3;
-        const double dv = odo_valid_ ? double(std::abs(odo_v_)) * ages : 0.0, dw = odo_valid_ ? double(std::abs(odo_w_)) * ages : 0.0;
-        Eigen::Matrix3d robot_cov = Eigen::Vector3d(double(policy_pose_xy_std_) * policy_pose_xy_std_ + dv * dv,
-                                                    double(policy_pose_xy_std_) * policy_pose_xy_std_ + dv * dv,
-                                                    double(policy_pose_theta_std_) * policy_pose_theta_std_ + dw * dw).asDiagonal();
-        const double range = a.pose.x.head<2>().norm();
-        const double before = anchor_lost_.lambda;
-        const double dt = std::max<std::int64_t>(0, a.pose.stamp_ms - anchor_prev_room_->stamp_ms) * 1e-3;
-        const double p = anchor_lost_.observe(*anchor_prev_room_, cur, a.width_m, robot_cov, range, dt);
-        if (p > 0.5)   // the MAP of {continuation, re-initialisation}
-        {
-            const Eigen::Vector3d d = cur.x - anchor_prev_room_->x;
-            std::println("[anchor] cross: {} RE-INITIALISED ({:.2f} m, {:+.1f} deg from its last block; P {:.3f}) — P(anchor lost) "
-                         "{:.3f} -> {:.3f}{}", a.name, d.head<2>().norm(), std::remainder(d.z(), 2.0 * std::numbers::pi) * 57.2958, p,
-                         before, anchor_lost_.lambda,
-                         anchor_cross_engaged_ and not a.fresh and not door_passage_.clearing()
-                             ? "; a new belief to LOOK for — no longer engaged, turning toward it" : "");
-            // past the room switch the carried pose IS the crossing (Task 13): nothing to turn toward there
-            if (not a.fresh and not door_passage_.clearing()) anchor_cross_engaged_ = false;
-        }
+        // NOT SEEN, by the owner's own word (a wait pose) or a block of a claim that ended: evidence INTO λ — one observation
+        // weighted by the span it stands for (since the last block; or, first read, since it was written)
+        if (anchor_prev_room_.has_value())
+            p = rc::policy::p_reinitialised(*anchor_prev_room_, cur, a.width_m, robot_cov, range, anchor_lost_.lambda);
+        anchor_lost_.observe_not_seen(dt, anchor_prev_room_.has_value() ? dt : std::max<std::int64_t>(0, now - a.pose.stamp_ms) * 1e-3);
+    }
+    else if (a.unseen_ms > 0)
+        anchor_lost_.predict(dt);   // PREDICTED: odometry carries it smoothly by construction — no evidence (fix round 2 (b))
+    else if (anchor_prev_room_.has_value())
+        p = anchor_lost_.observe(*anchor_prev_room_, cur, a.width_m, robot_cov, range, dt, /*seen=*/true);
+    if (p > 0.5)   // the MAP of {continuation, re-initialisation}
+    {
+        const Eigen::Vector3d d = cur.x - anchor_prev_room_->x;
+        std::println("[anchor] cross: {} RE-INITIALISED ({:.2f} m, {:+.1f} deg from its last block; P {:.3f}) — P(anchor lost) "
+                     "{:.3f} -> {:.3f}{}", a.name, d.head<2>().norm(), std::remainder(d.z(), 2.0 * std::numbers::pi) * 57.2958, p,
+                     before, anchor_lost_.lambda,
+                     anchor_cross_engaged_ and not a.fresh and not door_passage_.clearing()
+                         ? "; a new belief to LOOK for — no longer engaged, turning toward it" : "");
+        // past the room switch the carried pose IS the crossing (Task 13): nothing to turn toward there
+        if (not a.fresh and not door_passage_.clearing()) anchor_cross_engaged_ = false;
     }
     anchor_prev_room_ = cur;
-    anchor_prev_age_ms_ = a.age_ms;
 }
 
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
@@ -3593,7 +3613,7 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         reset_anchor_cross_state();
     }
     anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name, /*accept_stale=*/true);
-    note_anchor_block(step.robot_pose);   // Task 3e (policy only): a parked block is not this claim's; a re-init ends `engaged`
+    note_anchor_block(step.robot_pose);   // (records the pose ring every cycle of a cross claim, anchor or not)   // Task 3e (policy only): a parked block is not this claim's; a re-init ends `engaged`
     if (anchor_cross_.has_value())
     {
         anchor_last_reading_ = anchor_cross_;
