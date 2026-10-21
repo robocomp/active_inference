@@ -284,16 +284,26 @@ public:
         //   entered `open` from a satisfied approach and waited for that offer 7 min (until the mission timeout), with the door
         //   measured open (P(shut) 0.00, phi 1.57). Not on offer (neither Offered nor being executed by us) while the door is
         //   MEASURED more likely open than shut (door_open_prob known — not its -1 sentinel — and > 1/2: the MAP of the door's
-        //   own open/shut belief, the same evidence ruling 3 uses above) ⇒ the step's goal holds: opened, on to `cross`. An
+        //   own open/shut belief, the same evidence ruling 3 uses above) ⇒ the step's goal holds: on to `cross`. An
         //   `open` that IS on offer is door_concept believing the door shut, and it is taken (unchanged). A protocol fix:
         //   both drivers take it.
-        if (step_ == Step::Open and not seen_executing_)
+        // ★ Fix round 1 (I-3): the skip does NOT set opened_ — nothing was opened. opened_ makes a re-offered `open` "the
+        //   flicker of a door we just opened" and ignores it; here a re-offer is door_concept's own MAP that the door is SHUT
+        //   (pushed to), so the "back to open when the door turns out shut" rule below must stay armed.
+        // ★ M-4: the door node carries no stamp, so a door_open_prob could be a dead owner's last word. Its owner is LIVE while it
+        //   holds a standing offer for this door (approach or cross offered / being executed) — the same agent writes both.
+        const auto owner_live = [&]
+        {
+            for (Step s : {Step::Approach, Step::Cross})
+                if (const State st = state_of(G, name_of(s)); st == State::Offered or st == State::Executing) return true;
+            return false;
+        };
+        if (step_ == Step::Open and not seen_executing_ and owner_live())
             if (const State so = state_of(G, name_of(Step::Open)); so != State::Offered and so != State::Executing)
                 if (const auto dn = G.get_node(door_); dn.has_value())
                     if (const auto po = G.get_attrib_by_name<door_open_prob_att>(*dn); po.has_value() and *po >= 0.f and *po > 0.5f)
                     {
-                        opened_ = true;
-                        reached_door_ = true;   // as a satisfied `open`: no falling back to it at the door
+                        reached_door_ = true;   // as a satisfied `open`: the robot is at the door (no falling back to `open`)
                         step_ = Step::Cross;
                         seen_executing_ = false;
                         attempts_ = 0;

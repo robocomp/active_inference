@@ -405,13 +405,60 @@ int main()
         const auto out = p.update(*G, nullptr, "room_1");
         if (p_open > 0.5f)
         {
-            CHECK(p.view().step == Step::Cross and p.view().opened);
+            CHECK(p.view().step == Step::Cross and p.view().reached_door);
             CHECK(out.required == "aff_door_8_cross");
             offered(*G, "aff_door_8_cross");                  // and it is taken as soon as it is offered
             CHECK(p.update(*G, nullptr, "room_1").required == "aff_door_8_cross");
         }
         else
-            CHECK(p.view().step == Step::Open and not p.view().opened);
+            CHECK(p.view().step == Step::Open);
+    }
+    // ── Task 3e fix round 1 (I-3): the measured-open skip is NOT `open` succeeding — it must not latch opened_. A later re-offer
+    //    of `open` is door_concept's own MAP that the door is shut (it may have closed): the passage goes back to `open`, it does
+    //    not wait at the door for a `cross` that cannot come.
+    {
+        auto G = make_graph(19);
+        DoorPassage p;
+        p.set_clock(clock);
+        DSR::Node door = DSR::Node::create<door_node_type>("door_2");
+        G->add_or_modify_attrib_local<door_open_prob_att>(door, 0.95f);
+        G->insert_node(door);
+        p.start("door_2", Step::Cross);
+        offered(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");                      // -> open
+        offered(*G, "aff_door_2_approach");
+        p.update(*G, nullptr, "room_1");                      // open not offered, door measured open -> cross
+        CHECK(p.view().step == Step::Cross and not p.view().opened);
+        p.update(*G, nullptr, "room_1");                      // a cycle on cross (its room latched)
+        if (auto dn = G->get_node("door_2"); dn.has_value())  // the door is pushed shut: door_concept measures it and offers `open`
+        { G->add_or_modify_attrib_local<door_open_prob_att>(*dn, 0.05f); G->update_node(*dn); }
+        offered(*G, "aff_door_2_open");
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open and out.required == "aff_door_2_open");
+    }
+    // ── M-4: the measured-open evidence must come from a LIVE owner. The door node carries no stamp, so liveness is read off the
+    //    owner's standing offers for this door (approach / cross offered or executing): none ⇒ door_open_prob may be a dead
+    //    agent's last word, and the step waits as before.
+    {
+        auto G = make_graph(20);
+        DoorPassage p;
+        p.set_clock(clock);
+        DSR::Node door = DSR::Node::create<door_node_type>("door_4");
+        G->add_or_modify_attrib_local<door_open_prob_att>(door, 0.95f);
+        G->insert_node(door);
+        p.start("door_4", Step::Cross);
+        offered(*G, "aff_door_4_approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_4_approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_4_approach");                 // completed, and nothing re-offered: no standing offer
+        p.update(*G, nullptr, "room_1");
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open);
     }
     // …and an `open` that IS on offer is a shut-door belief: it is taken, never skipped by the measured-open rule
     {

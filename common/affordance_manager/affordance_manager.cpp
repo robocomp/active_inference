@@ -961,6 +961,13 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (release_execution_claim(graph))
             std::print("[aff-select] '{}' is out of this contest (required '{}', room scope '{}') — its claim released: an "
                        "Executing node must have a driver\n", was, required_name_, room_scope_);
+        // Fix round 1 (M-2): nothing was released (the node is gone, or no longer Executing): still no claim of ours to keep
+        if (current_affordance_id_ != 0)
+        {
+            current_affordance_id_ = 0;
+            current_affordance_name_.clear();
+            reset_observation();
+        }
     }
 
     if (current_affordance_id_ != 0)
@@ -1346,6 +1353,12 @@ bool AffordanceManager::complete_claim(const std::shared_ptr<DSR::DSRGraph> &gra
     const bool active = graph->get_attrib_by_name<active_att>(node).value_or(false);
     const bool pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
     if (decode_protocol_state(active, pending) != ProtocolState::Executing) return false;
+    // Fix round 1 (M-1): Executing is not enough — it must be OUR claim: one we abandoned (clear_current), the journal's open one,
+    // or one our executing edge names. A node another consumer is driving is never ours to complete, whatever it is called.
+    const bool ours = node_id == abandoned_claim_id_ or node_id == open_claim_id_
+                      or [&] { const auto me = own_agent_node_id(graph);
+                               return me.has_value() and graph->get_edge(me.value(), node_id, "executing").has_value(); }();
+    if (not ours) return false;
     // The journal: this claim's End carries its outcome when it is the open one (the current claim's Start came after it
     // only if the claim moved, in which case note_claim already ended it "preempted").
     if (open_claim_id_ == node_id) end_claim(std::string(rc::affordance::to_string(outcome)));
@@ -1358,6 +1371,18 @@ bool AffordanceManager::complete_claim(const std::shared_ptr<DSR::DSRGraph> &gra
     graph->add_or_modify_attrib_local<active_att>(node, false);
     graph->update_node(node);
     if (abandoned_claim_id_ == node_id) abandoned_claim_id_ = 0;
+    // Fix round 1 (M-1): remembered as the last completed request, as mark_reached remembers one — from the node's own target
+    // (we hold no claimed pose for a claim that is not current), so the just-completed rule cannot hand it straight back.
+    last_completed_id_ = node_id;
+    if (const auto t = read_target(graph, node); t.has_value())
+    {
+        last_completed_x_ = t->room_pos.x();
+        last_completed_y_ = t->room_pos.y();
+        last_completed_yaw_ = t->yaw_rad;
+        last_completed_pose_known_ = true;
+    }
+    else last_completed_pose_known_ = false;
+    last_outcome_ = outcome;
     return true;
 }
 

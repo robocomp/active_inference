@@ -431,6 +431,75 @@ void selector_releases_a_claim_its_filter_excludes(TestFailure &failure)
     (void)controller.select_target(graph);
     expect_protocol_state(graph, "aff_e_look", false, true, failure);
 }
+
+// ★ Task 3e fix round 1 (M-1): complete_claim completes only OUR claim — a node another consumer is executing is not ours, however
+// it is named; and a completion by name is remembered as the last completed request (the just-completed rule sees it).
+void complete_claim_checks_ownership(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    rc::AffordanceManager x{"aff_f_x"};
+    rc::AffordanceManager y{"aff_f_y"};
+    rc::AffordanceManager controller, other_consumer;
+    failure.expect(x.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.5f), "x publish failed");
+    failure.expect(y.publish_target(graph, room_id, 2.f, 1.f, 0.f, 0.5f), "y publish failed");
+    other_consumer.set_required_name("aff_f_x");
+    const auto ox = other_consumer.select_target(graph);
+    failure.expect(ox.has_value() and ox->node_name == "aff_f_x", "the other consumer must claim x");
+    controller.set_required_name("aff_f_y");
+    failure.expect(controller.select_target(graph).has_value(), "the controller must claim y");
+    failure.expect(not controller.complete_claim(graph, ox.has_value() ? ox->node_id : 0, rc::affordance::Outcome::Unreachable),
+                   "a node another consumer executes is not ours to complete");
+    expect_protocol_state(graph, "aff_f_x", true, true, failure);
+    // ours, abandoned, completed by name while y is current: remembered as the last completed request
+    const auto yid = graph->get_node("aff_f_y").has_value() ? graph->get_node("aff_f_y")->id() : 0;
+    controller.clear_current();
+    controller.set_required_name("");
+    failure.expect(controller.complete_claim(graph, yid, rc::affordance::Outcome::Satisfied), "our abandoned claim is ours to complete");
+    expect_protocol_state(graph, "aff_f_y", false, false, failure);
+    other_consumer.mark_reached(graph, rc::affordance::Outcome::Satisfied);   // x done: out of the way
+    rc::AffordanceManager z{"aff_f_z"};
+    failure.expect(z.publish_target(graph, room_id, 3.f, 1.f, 0.f, 0.1f), "z publish failed");   // a weaker alternative
+    failure.expect(y.publish_target(graph, room_id, 2.f, 1.f, 0.f, 0.5f), "y re-publish failed");   // the same request, re-offered
+    const auto next = controller.select_target(graph);
+    failure.expect(next.has_value() and next->node_name == "aff_f_z",
+                   "the request just completed by name must not be handed straight back (just-completed rule)");
+}
+
+// ★ Task 3e fix round 1 (M-2, M-3): the release covers EVERY filter — the pragmatic filter of the open contest and the zero-gain
+// filter — and a current claim whose node is GONE is forgotten (no stale current id survives the selection).
+void selector_release_every_filter_and_missing_node(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    rc::AffordanceManager prag{"aff_g_cross"};
+    rc::AffordanceManager epi{"aff_g_look"};
+    rc::AffordanceManager controller;
+    failure.expect(prag.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.5f), "pragmatic publish failed");
+    if (auto n = graph->get_node("aff_g_cross"); n.has_value())
+    { graph->add_or_modify_attrib_local<aff_kind_att>(n.value(), std::string("cross")); graph->update_node(n.value()); }
+    controller.set_required_name("aff_g_cross");
+    failure.expect(controller.select_target(graph).has_value(), "the required pragmatic node must be claimed");
+    controller.set_required_name("");   // the passage ended without completing it: the open contest drops pragmatic nodes
+    (void)controller.select_target(graph);
+    expect_protocol_state(graph, "aff_g_cross", false, true, failure);
+    failure.expect(controller.current_name().empty(), "the excluded pragmatic claim is no longer current");
+
+    failure.expect(epi.publish_target(graph, room_id, 1.f, 2.f, 0.f, 0.7f), "look publish failed");
+    const auto l = controller.select_target(graph);
+    failure.expect(l.has_value() and l->node_name == "aff_g_look", "the look must be claimed");
+    if (auto n = graph->get_node("aff_g_look"); n.has_value())   // its gain falls to 0 while executing: out of the open contest
+    { graph->add_or_modify_attrib_local<epistemic_gain_att>(n.value(), 0.f); graph->update_node(n.value()); }
+    (void)controller.select_target(graph);
+    expect_protocol_state(graph, "aff_g_look", false, true, failure);
+
+    // missing node: claimed, then deleted by its producer — the selection forgets it
+    if (auto n = graph->get_node("aff_g_look"); n.has_value())
+    { graph->add_or_modify_attrib_local<epistemic_gain_att>(n.value(), 0.9f); graph->update_node(n.value()); }
+    failure.expect(controller.select_target(graph).has_value(), "the look must be claimed again");
+    failure.expect(controller.current_name() == "aff_g_look", "the look is current");
+    if (auto n = graph->get_node("aff_g_look"); n.has_value()) graph->delete_node(n->id());
+    (void)controller.select_target(graph);
+    failure.expect(controller.current_name().empty(), "a current claim whose node is gone must be forgotten");
+}
 } // namespace
 
 int main()
@@ -447,6 +516,8 @@ int main()
         consumer_release_frees_its_claim(failure);
         hand_back_completes_the_named_claim(failure);
         selector_releases_a_claim_its_filter_excludes(failure);
+        complete_claim_checks_ownership(failure);
+        selector_release_every_filter_and_missing_node(failure);
     }
     catch (const std::exception &e)
     {
