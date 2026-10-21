@@ -206,11 +206,11 @@ int main()
     }
 
     // ── (b) OPEN leaf: s, w and the preferred angle unbiased, recess on and off ──────────────────────────────────────────
-    std::println("(b) open leaf, phi 0.6 / 1.2, d 0 / 0.12: s, w within 2 σ; the frame's preferred phi within 0.02 rad");
+    std::println("(b) open leaf, phi 0.6 / 1.2, d 0 / ±0.12: s, w within 2 σ; the frame's preferred phi within 0.02 rad");
     {
         float worst_s = 0.f, worst_w = 0.f, worst_phi = 0.f;
         for (const float phi : {0.6f, 1.2f})
-            for (const float d_true : {0.0f, 0.12f})
+            for (const float d_true : {0.0f, 0.12f, -0.12f})   // −0.12: the tapes' room-side sign
                 for (const float swing : {+1.f, -1.f})
                 {
                     auto p = tape_params();

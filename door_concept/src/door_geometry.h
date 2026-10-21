@@ -77,9 +77,10 @@ struct Aperture
     // ★THE LEAF PLANE'S OFFSET from the wall line, along across_u (m; Task 5b fix round 1). The wall line is the room
     // polygon's face, which room_concept traced from free space; the leaf hangs at some other depth — inside the wall's
     // thickness, and displaced by the polygon's own registration error (tourR1/R2: DOOR_0's shut leaf 0.10-0.15 m on the
-    // ROOM side of the line). It is a DOF of the belief (DoorBeliefState::d). The leaf, the frame probe and the leaf
-    // channel's rays are rendered on the plane through plane_O(); the published APERTURE (centre_xy, the RT edge, merge,
-    // identity, the band prior) stays on the wall line, so those contracts are untouched. 0 ⇒ the pre-5b geometry, exactly.
+    // ROOM side of the line). It is a DOF of the belief (DoorBeliefState::d). The LEAF is rendered on the plane through
+    // plane_O() (leaf_pose: the silhouette, the leaf contour, the fit's SDF, the leaf channel's rays, the anchor's leaf
+    // hypotheses); the doorway FRAME probe (the jambs and lintel are the wall's) and the published APERTURE (centre_xy, the
+    // RT edge, merge, identity, the band prior) stay on the wall line. 0 ⇒ the pre-5b geometry, exactly.
     float depth = 0.0f;
 
     Eigen::Vector2f across_u() const { return {-wall_u.y(), wall_u.x()}; }

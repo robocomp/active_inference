@@ -113,6 +113,10 @@ inline PreBeliefGeometry pre_belief_geometry(DoorState& ms)
     g.aperture.wall_O = g.leaf_pose.hinge_xy;
     g.aperture.s = 0.0f; g.aperture.w = ms.w; g.aperture.h = ms.h;
     g.aperture.floor_z = ms.cz; g.aperture.thickness = ms.thickness;
+    // ★Task 5b: the box an ADOPTED node is seeded from is the room→door RT edge (DoorFitter::ensure_instance), and that
+    // edge carries the APERTURE (door_scene_graph.cpp keys everything it writes on ap_cx/ap_cy), not the published leaf
+    // centre — so ap = the box centre is right even when the belief's leaf plane d ≠ 0; the pre-belief leaf sits on the
+    // line (d's prior mean, 0) until the first fit re-authors it.
     ms.ap_cx = ms.cx; ms.ap_cy = ms.cy; ms.ap_yaw = ms.yaw;
     return g;
 }
