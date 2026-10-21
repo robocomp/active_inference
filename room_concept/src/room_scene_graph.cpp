@@ -1612,6 +1612,9 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     {
         room_concept_->set_map_layout(recall_int);
         room_concept_->adopt_map_layout_as_given();
+        // The robot is standing in the passage it just crossed, with the crossing's own probability: the lost belief
+        // is reset with that mass on "the view is the doorway's, not this room's" (note_passage_handover, Task R1).
+        room_concept_->note_passage_handover(p_cross);
         std::string reason;
         promote_startup_proto(reason, true);
         recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner

@@ -553,4 +553,14 @@ namespace rc::reloc
         res.duration_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return res;
     }
+
+    std::vector<Eigen::Vector2f> polish_points(const std::vector<Eigen::Vector2f>& pts_all, const Params& p)
+    {
+        return subsample(pts_all, 4 * p.max_points);   // the same set search() polishes and scores its modes on
+    }
+
+    float log_evidence(const Mode& m)
+    {
+        return m.log_lik + 0.5f * log_det3(m.cov);      // the same Laplace evidence search() weighs modes by
+    }
 } // namespace rc::reloc

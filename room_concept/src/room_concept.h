@@ -325,6 +325,15 @@ public:
     /// while searching). Pose, window and covariance carry over. Localiser thread (the scene graph's promotion).
     void adopt_map_layout_as_given();
     bool map_layout_adopted() const { return map_layout_adopted_; }
+    /// A crossing handed the robot to a new GIVEN room (a recall): reset the lost belief with `p_in_passage` (the
+    /// crossing's p_cross) on MISMATCH — the doorway's view is not this room's. Why: relocalisation_step (Task R1).
+    void note_passage_handover(float p_in_passage)
+    {
+        handover_passage_q_.store(std::isfinite(p_in_passage) ? std::clamp(p_in_passage, 0.f, 1.f)
+                                                              : std::numeric_limits<float>::quiet_NaN(),
+                                  std::memory_order_relaxed);
+        belief_reset_requested_.store(true, std::memory_order_relaxed);
+    }
     /// An ACCEPTED refinement edit (layout_refiner.h): the given room becomes `L` (INTERNAL frame) — same frame,
     /// same gauge, the SDF the localiser solves against is rebuilt; nothing else changes. Localiser thread.
     void refine_given_layout(const std::vector<Eigen::Vector2f>& L);
@@ -730,6 +739,8 @@ private:
    std::array<double, 3> belief_{1.0, 0.0, 0.0};
    bool  belief_init_       = false;
    std::atomic<bool>  belief_reset_requested_{false};   ///< a new given room was adopted: reset the lost belief next frame
+   /// p_cross of the last hand-over (note_passage_handover), consumed with the reset above; NaN = ordinary reset.
+   std::atomic<float> handover_passage_q_{std::numeric_limits<float>::quiet_NaN()};
    std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)
    float lost_logodds_      = std::numeric_limits<float>::quiet_NaN();   // logit P(LOST) — for the logs
    float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params
@@ -757,6 +768,11 @@ private:
    /// Fire the search from the lost belief and fold its outcome back into the belief.
    void  relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost);
    bool  last_search_moved_ = false;
+   bool  last_search_held_ = false;   ///< msprt_decide → Hold: nothing decisive, the held pose alive; rivals carry it
+   /// A held episode is open: its rivals accumulate what the search could not decide; re-searching would re-seed them
+   /// and discard that. Ends when they resolve or empty, or P(lost) falls under ½ (relocalisation_step).
+   bool  reloc_hold_open_ = false;
+   std::uint64_t reloc_searches_ = 0;   ///< mixture searches fired by the lost belief (diagnostic; reloc_selftest K)
    /// Commit a relocalised pose as a DISCRETE JUMP: model tensors, the prediction base (last_update_result —
    /// the next frame predicts from it, not from the tensors), smoothing, last-good pose, window and stride
    /// state, and the publisher's clamp-release epoch. Every relocalisation that moves the pose goes through here.

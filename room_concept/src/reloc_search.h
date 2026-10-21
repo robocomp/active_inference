@@ -36,7 +36,10 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace rc::reloc
@@ -142,4 +145,42 @@ namespace rc::reloc
     Mode polish(const std::vector<Eigen::Vector2f>& polygon,
                 const std::vector<Eigen::Vector2f>& pts_robot,
                 const Eigen::Vector3f& start, const Params& p, float extent);
+
+    /// The point subset search() polishes and scores its modes on. A caller scoring a hypothesis of its own
+    /// (the KEEP hypothesis) against the search's modes must use THIS set: evidences over different point
+    /// sets are not comparable (09-16 lesson — 150 vs 360 points read as "the polish stops 14–50 nats short").
+    std::vector<Eigen::Vector2f> polish_points(const std::vector<Eigen::Vector2f>& pts_all, const Params& p);
+
+    /// Laplace log-evidence ℓ* + ½ log|Σ| of a polished mode — the unnormalised weight search() uses.
+    float log_evidence(const Mode& m);
+
+    /// ── WHICH HYPOTHESIS MAY THE POSE BECOME? (multi-hypothesis SPRT, 2026-10-21) ─────────────────────
+    /// `log_post` are unnormalised log-posteriors of K mutually exclusive pose hypotheses; `keep` indexes the
+    /// one the localiser already holds. The pose moves to `top` (the MAP) only when the posterior SAYS so:
+    ///   • `top` is ACCEPTED — its odds against all the others together pass log((1−α)/α), the bound the rival
+    ///     SPRT already uses (α = the hazard); or
+    ///   • `keep` is REJECTED — its own posterior is ≤ α. Holding a pose the scan has rejected is the one choice
+    ///     known to be wrong, so the MAP is committed (with the mixture's spread as its covariance, at the call
+    ///     site) even when it is not decisive among the remaining modes.
+    /// Otherwise HOLD: no hypothesis is decisive and the held one is still alive, so the decision is deferred to
+    /// the evidence of the following scans (the rivals). A 180° twin that explains the scan exactly as well as
+    /// the held pose can therefore never take it — which a per-search "move to the top mode" did on a coin flip.
+    /// No new constant: α is the hazard. `keep` < 0 means the held pose has no basin of its own (its polish
+    /// left it), i.e. it is rejected by the scan itself.
+    enum class Decision { Keep, Move, Hold };
+    inline Decision msprt_decide(const std::vector<double>& log_post, int top, int keep, double alpha)
+    {
+        if (top < 0 or top >= static_cast<int>(log_post.size())) return Decision::Keep;
+        if (top == keep) return Decision::Keep;
+        double hi = -std::numeric_limits<double>::infinity();
+        for (const double l : log_post) hi = std::max(hi, l);
+        if (not std::isfinite(hi)) return Decision::Keep;
+        double z = 0.0;
+        for (const double l : log_post) z += std::exp(l - hi);
+        const auto post = [&](int k) { return std::exp(log_post[static_cast<std::size_t>(k)] - hi) / z; };
+        const double a = std::clamp(alpha, 1e-12, 0.5);
+        if (post(top) >= 1.0 - a) return Decision::Move;
+        if (keep < 0 or post(keep) <= a) return Decision::Move;
+        return Decision::Hold;
+    }
 } // namespace rc::reloc

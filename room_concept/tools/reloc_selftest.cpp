@@ -65,6 +65,11 @@ namespace rc
         static float& track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
         static void  relocalise(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts, float s, float p)
         { r.relocalise_from_belief(pts, s, p); }
+        static bool  held(RoomConcept& r) { return r.last_search_held_; }
+        static bool  hold_open(RoomConcept& r) { return r.reloc_hold_open_; }
+        static std::uint64_t searches(RoomConcept& r) { return r.reloc_searches_; }
+        static double lost(RoomConcept& r) { return r.belief_[RoomConcept::kLost]; }
+        static void  plain_reset(RoomConcept& r) { r.belief_reset_requested_.store(true); }   // the pre-R1 hand-over
     };
 }
 
@@ -627,6 +632,133 @@ int main()
                     right, runs, stayed, runs, static_cast<unsigned long long>(epochs_max), gate_violations);
     }
 
+    int r1_failures = 0;
+    // I (Task R1): A SYMMETRIC TIE NEVER TAKES A LIVE POSE. Symmetric rectangle, the held pose AT the truth, but its
+    //    covariance inflated to metres (live rtD1g2: σ 1.9–4.3 m once the pose clamp carried its backlog into it), so
+    //    the continuity prior can no longer tell the truth's mode from its 180° twin. The scan cannot either (the
+    //    room is symmetric: ℓ is identical at both). Before R1 the top mode was a coin flip and was committed; now
+    //    the held pose is a hypothesis and an undecided posterior holds it. Expect 0 flips; the twin is carried.
+    {
+        const auto& room = all_rooms[0];
+        std::mt19937 rng(8080);
+        int flips = 0, held = 0, kept = 0, runs = 30;
+        for (int run = 0; run < runs; ++run)
+        {
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
+            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+            Acc::reset(rcn);
+            rcn.current_covariance = Eigen::Vector3f(100.f, 100.f, 100.f).asDiagonal();   // σ 10 m / 10 rad: no continuity left
+            const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
+            Acc::relocalise(rcn, to3(scan), 0.3f, 0.5f);
+            const auto st = rcn.get_current_state();
+            const Eigen::Vector3f now(st[2], st[3], st[4]);
+            if (near(now, room.symmetries.front()(truth), 0.30f, 10.f)) ++flips;
+            if (Acc::held(rcn)) ++held;
+            if (near(now, truth, 0.30f, 10.f)) ++kept;
+        }
+        const bool pass = flips == 0 and kept == runs;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  I symmetric tie, live pose, covariance inflated      flips to the twin %d/%d (expect 0), pose kept %d/%d, "
+                    "held %d — %s\n", flips, runs, kept, runs, held, pass ? "PASS" : "FAIL");
+    }
+
+    // J (Task R1): A GENUINE KIDNAP STILL MOVES under the same inflated covariance. The held pose is metres from the
+    //    truth and the scan rejects it (its polish leaves its basin), so the MAP mode is committed — the truth or its
+    //    twin in the symmetric room, the truth in the others.
+    for (int room_idx = 0; room_idx < 3; ++room_idx)
+    {
+        const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
+        std::mt19937 rng(9090u + static_cast<unsigned>(room_idx));
+        int right = 0, runs = 20;
+        for (int run = 0; run < runs; ++run)
+        {
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f stale = random_pose(room.poly, rng, 0.8f);
+            Eigen::Vector3f truth = random_pose(room.poly, rng, 0.8f);
+            while ((truth.head<2>() - stale.head<2>()).norm() < 1.5f) truth = random_pose(room.poly, rng, 0.8f);
+            rcn.set_robot_pose(stale.x(), stale.y(), stale.z(), false);
+            Acc::reset(rcn);
+            rcn.current_covariance = Eigen::Vector3f(4.f, 4.f, 4.f).asDiagonal();
+            const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
+            Acc::relocalise(rcn, to3(scan), 0.4f, 0.9f);
+            for (int f = 0; f < 20; ++f)   // a HELD episode is the rivals' to resolve on the following scans
+                Acc::step(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
+            const auto st = rcn.get_current_state();
+            if (near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f)) ++right;
+        }
+        const bool pass = right >= runs - 1;   // F's own tally tolerates the odd search miss; the decision rule must not add misses
+        r1_failures += pass ? 0 : 1;
+        std::printf("  J kidnap, covariance inflated %-23s moved to the truth (or its twin) %d/%d — %s\n",
+                    room.name.c_str(), right, runs, pass ? "PASS" : "FAIL");
+    }
+
+    // K (Task R1): THE HAND-OVER THROUGH A DOOR. Live, every recall was followed by a misfit transient (the 360° scan
+    //    still sees the room just left through the doorway; the door weights and the prediction statistic lag the room
+    //    swap): rtD1g2 recall 1, s = 2.52 → 2.71 for 600 ms, 0.59 for 200 ms, then ~0.06. With the plain reset that split
+    //    LOST/MISMATCH 50/50 and searched within one frame. With the crossing's p_cross on MISMATCH it must not search;
+    //    a kidnap AFTER the hand-over must still be found (at the hazard's pace), and both arms run the real
+    //    relocalisation_step (the belief reset is consumed there).
+    {
+        const auto& room = all_rooms[0];
+        auto run_arm = [&](bool passage, bool kidnap_after, int* frames_to_fire)
+        {
+            std::mt19937 rng(5150);
+            std::normal_distribution<float> nz(0.f, 0.30f);
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f truth(-1.5f, 0.5f, 0.3f);
+            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+            const auto pts = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
+            float ph = 0.f;
+            auto frame = [&](float s)
+            {
+                rc::RoomConcept::UpdateResult r;
+                r.ok = true; r.sdf_mse = s; r.pred_sdf_median = s;
+                ph += 0.05f;   // the robot is driving: every frame is a new view (view_change ≈ 1)
+                r.robot_pose = Eigen::Affine2f::Identity();
+                r.robot_pose.translation() = truth.head<2>() + Eigen::Vector2f(0.3f * std::cos(ph), 0.3f * std::sin(ph));
+                r.robot_pose.linear() = Eigen::Rotation2Df(truth.z() + ph).toRotationMatrix();
+                Acc::step8(rcn, r, pts);
+            };
+            for (int f = 0; f < 300; ++f) frame(0.034f * std::exp(nz(rng)));   // tracking: the emission is learnt
+            if (passage) rcn.note_passage_handover(0.97f);
+            else Acc::plain_reset(rcn);
+            const auto s0 = Acc::searches(rcn);
+            if (kidnap_after)
+            {
+                // The worst case for the passage prior: the misfit NEVER clears after the hand-over (a wrong recall, or
+                // a kidnap in the doorway). The search must still come, at the pace the hazard allows.
+                *frames_to_fire = -1;
+                for (int f = 0; f < 4000 and *frames_to_fire < 0; ++f)
+                {
+                    frame(0.40f * std::exp(nz(rng)));
+                    if (Acc::searches(rcn) != s0) *frames_to_fire = f + 1;
+                }
+                return Acc::searches(rcn) - s0;
+            }
+            for (int f = 0; f < 13; ++f) frame(2.6f);                 // the doorway transient (rtD1g2 recall 1)
+            for (int f = 0; f < 5; ++f) frame(0.59f);
+            for (int f = 0; f < 40; ++f) frame(0.06f * std::exp(-f / 20.f) + 0.03f);
+            for (int f = 0; f < 200; ++f) frame(0.034f * std::exp(nz(rng)));
+            return Acc::searches(rcn) - s0;
+        };
+        int dummy = 0, fire = -1;
+        const auto with_passage = run_arm(true, false, &dummy);
+        const auto plain        = run_arm(false, false, &dummy);
+        run_arm(true, true, &fire);
+        const bool pass = with_passage == 0 and plain > 0 and fire > 0;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  K hand-over doorway transient                       searches: with the passage %llu (expect 0), "
+                    "plain reset %llu (expect >0: the live defect); a misfit that never clears after the hand-over "
+                    "searched after %d frames (expect >0, finite) — %s\n",
+                    static_cast<unsigned long long>(with_passage), static_cast<unsigned long long>(plain), fire,
+                    pass ? "PASS" : "FAIL");
+    }
+    if (r1_failures > 0) std::printf("\n  Task R1 cases: %d FAILED\n", r1_failures);
+
     // D / E: healthy residual stream with turn spikes, then a kidnap.
     {
         std::mt19937 rng(99);
@@ -655,5 +787,5 @@ int main()
         std::printf("  %-52s fired in %.1f frames on average, missed %d/20\n", "E kidnap (s -> 0.40 m)",
                     kidnaps > 0 ? static_cast<double>(kidnap_delay_sum) / kidnaps : std::nan(""), missed);
     }
-    return 0;
+    return r1_failures > 0 ? 1 : 0;
 }
