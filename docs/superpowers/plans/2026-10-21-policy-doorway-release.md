@@ -125,3 +125,13 @@ reader), cost-to-go input, tests.
 - [ ] Also (from F4): the cross goal line and the trap veto must come from the anchor opening with the gap weighted by its score (today a phantom gap still sets the goal line).
 - [ ] Implement: returns explained by the door's leaf hypothesis are removed from the residual's unexplained mass and
   the leaf enters as a known obstacle (segment + σ) in free/extra; tests + scenarios green; commit by pathspec.
+
+### Task 3c: an occupied OBJECT standpoint is handed back, never re-sited (ruling 2026-10-21, rtD1d leg 4)
+The controller moved door_concept's servo standpoint 0.44 m then 0.58 m on single LiDAR returns within ~0.62 m — to
+2.09 m from the door, beyond the producer's 2.00 m reach band — so the approach could never complete (approach_timeout ×2).
+**Files:** the standpoint repair/occupied check in the controller (find "standpoint … occupied" / the servo standpoint
+re-siting), tests.
+- [ ] Failing tests: an object (door) standpoint with a stray return nearby is NOT moved; one genuinely occupied is handed
+  back Unreachable to the producer (as Reach standpoints already are); "occupied" = the occupancy belief with existence
+  weights (P(body fits)), not any return within a disc — one stray hit is weak evidence.
+- [ ] Implement; tests + scenarios green; commit by pathspec.
