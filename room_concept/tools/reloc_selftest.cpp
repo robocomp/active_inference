@@ -66,9 +66,9 @@ namespace rc
         static float& track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
         static void  relocalise(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts, float s, float p)
         { r.relocalise_from_belief(pts, s, p); }
-        static bool  held(RoomConcept& r) { return r.last_search_held_; }
-        static bool  hold_open(RoomConcept& r) { return r.reloc_hold_open_; }
-        static std::uint64_t searches(RoomConcept& r) { return r.reloc_searches_; }
+        static bool  held(RoomConcept& r) { return r.rt_.last_search_held; }
+        static bool  hold_open(RoomConcept& r) { return r.rt_.hold_open; }
+        static std::uint64_t searches(RoomConcept& r) { return r.rt_.searches; }
         static double lost(RoomConcept& r) { return r.belief_[RoomConcept::kLost]; }
         static void  plain_reset(RoomConcept& r) { r.belief_reset_requested_.store(true); }   // the pre-R1 hand-over
     };
@@ -672,7 +672,7 @@ int main()
     {
         const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
         std::mt19937 rng(9090u + static_cast<unsigned>(room_idx));
-        int right = 0, runs = 20;
+        int right = 0, runs = 20, ftc_sum = 0;
         for (int run = 0; run < runs; ++run)
         {
             rc::RoomConcept rcn;
@@ -685,79 +685,275 @@ int main()
             rcn.current_covariance = Eigen::Vector3f(4.f, 4.f, 4.f).asDiagonal();
             const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
             Acc::relocalise(rcn, to3(scan), 0.4f, 0.9f);
+            // Frames to correct (I-5): 0 = the search itself committed it; k = the k-th following scan (rivals).
+            auto is_right = [&] { const auto q = rcn.get_current_state();
+                                  return near_or_twin(room, Eigen::Vector3f(q[2], q[3], q[4]), truth, 0.30f, 10.f); };
+            int ftc = is_right() ? 0 : -1;
             for (int f = 0; f < 20; ++f)   // a HELD episode is the rivals' to resolve on the following scans
+            {
                 Acc::step(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
-            const auto st = rcn.get_current_state();
-            if (near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f)) ++right;
+                if (ftc < 0 and is_right()) ftc = f + 1;
+            }
+            if (is_right()) { ++right; ftc_sum += std::max(ftc, 0); }
         }
         const bool pass = right >= runs - 1;   // F's own tally tolerates the odd search miss; the decision rule must not add misses
         r1_failures += pass ? 0 : 1;
-        std::printf("  J kidnap, covariance inflated %-23s moved to the truth (or its twin) %d/%d — %s\n",
-                    room.name.c_str(), right, runs, pass ? "PASS" : "FAIL");
+        std::printf("  J kidnap, covariance inflated %-23s moved to the truth (or its twin) %d/%d, frames to correct %.2f — %s\n",
+                    room.name.c_str(), right, runs, right > 0 ? static_cast<double>(ftc_sum) / right : std::nan(""),
+                    pass ? "PASS" : "FAIL");
     }
 
-    // K (Task R1): THE HAND-OVER THROUGH A DOOR. Live, every recall was followed by a misfit transient (the 360° scan
-    //    still sees the room just left through the doorway; the door weights and the prediction statistic lag the room
-    //    swap): rtD1g2 recall 1, s = 2.52 → 2.71 for 600 ms, 0.59 for 200 ms, then ~0.06. With the plain reset that split
-    //    LOST/MISMATCH 50/50 and searched within one frame. With the crossing's p_cross on MISMATCH it must not search;
-    //    a kidnap AFTER the hand-over must still be found (at the hazard's pace), and both arms run the real
-    //    relocalisation_step (the belief reset is consumed there).
+    // K (Task R1/R1b): THE HAND-OVER THROUGH A DOOR, GEOMETRY ROUTE. Live, every recall was followed by a misfit
+    //    transient (rtD1g2 recall 1: s = 2.52 → 2.71 for 600 ms, 0.59 for 200 ms, then ~0.06). The robot enters a 6 × 4
+    //    room through a 1 m door in its bottom wall, centre 0.06 m past the line at the hand-over (the R1b centre rule),
+    //    at 0.3 m/s. Arms, all through the real relocalisation_step:
+    //      passage — the doorway term tempers the transient while the body is in the mouth: expect 0 searches;
+    //      plain   — the pre-R1 reset: expect a search (the live defect);
+    //      wrong   — a WRONG recall (the misfit never clears): the search must come once the body has left the mouth,
+    //                i.e. within a time set by the geometry, not by the hazard (reviewer I-2).
     {
         const auto& room = all_rooms[0];
-        auto run_arm = [&](bool passage, bool kidnap_after, int* frames_to_fire)
+        rc::passage::Passage pg;
+        pg.centre = {1.0f, -2.f}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
+        pg.r_body = 0.24f; pg.body_w = 0.46f; pg.body_l = 0.48f; pg.sig_s = 0.03f; pg.sig_t = 0.03f; pg.s = 0.06f; pg.u = 0.f;
+        const float th_in = rc::passage::heading_along(pg.n_in);
+        auto run_arm = [&](int arm, int* frames_to_fire, float* depth_at_fire)
         {
             std::mt19937 rng(5150);
             std::normal_distribution<float> nz(0.f, 0.30f);
             rc::RoomConcept rcn;
             rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f truth(-1.5f, 0.5f, 0.3f);
-            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-            const auto pts = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
-            float ph = 0.f;
-            auto frame = [&](float s)
+            const Eigen::Vector3f at(1.0f, -1.0f, th_in);
+            rcn.set_robot_pose(at.x(), at.y(), at.z(), false);
+            const auto pts = to3(synth_scan(room.poly, Eigen::Vector3f(1.0f, -1.0f, th_in), 360, 0.02f, 0.30f, rng));
+            auto frame = [&](const Eigen::Vector3f& p, float s)
             {
                 rc::RoomConcept::UpdateResult r;
                 r.ok = true; r.sdf_mse = s; r.pred_sdf_median = s;
-                ph += 0.05f;   // the robot is driving: every frame is a new view (view_change ≈ 1)
                 r.robot_pose = Eigen::Affine2f::Identity();
-                r.robot_pose.translation() = truth.head<2>() + Eigen::Vector2f(0.3f * std::cos(ph), 0.3f * std::sin(ph));
-                r.robot_pose.linear() = Eigen::Rotation2Df(truth.z() + ph).toRotationMatrix();
+                r.robot_pose.translation() = p.head<2>();
+                r.robot_pose.linear() = Eigen::Rotation2Df(p.z()).toRotationMatrix();
+                r.covariance = Eigen::Vector3f(9e-4f, 9e-4f, 1e-4f).asDiagonal();
+                r.pred_x = p.x(); r.pred_y = p.y(); r.pred_theta = p.z();
+                rcn.set_robot_pose(p.x(), p.y(), p.z(), false);
                 Acc::step8(rcn, r, pts);
             };
-            for (int f = 0; f < 300; ++f) frame(0.034f * std::exp(nz(rng)));   // tracking: the emission is learnt
-            if (passage) rcn.note_passage_handover(0.97f);
-            else Acc::plain_reset(rcn);
-            const auto s0 = Acc::searches(rcn);
-            if (kidnap_after)
+            float ph = 0.f;
+            for (int f = 0; f < 300; ++f)   // tracking somewhere in the room: the emission is learnt
             {
-                // The worst case for the passage prior: the misfit NEVER clears after the hand-over (a wrong recall, or
-                // a kidnap in the doorway). The search must still come, at the pace the hazard allows.
-                *frames_to_fire = -1;
-                for (int f = 0; f < 4000 and *frames_to_fire < 0; ++f)
-                {
-                    frame(0.40f * std::exp(nz(rng)));
-                    if (Acc::searches(rcn) != s0) *frames_to_fire = f + 1;
-                }
+                ph += 0.05f;
+                frame({1.0f + 0.3f * std::cos(ph), -0.5f + 0.3f * std::sin(ph), th_in + ph}, 0.034f * std::exp(nz(rng)));
+            }
+            Eigen::Vector3f p(1.0f, -2.f + 0.06f, th_in);
+            frame(p, 0.034f);
+            if (arm != 1) rcn.note_passage_handover(pg); else Acc::plain_reset(rcn);
+            const auto s0 = Acc::searches(rcn);
+            *frames_to_fire = -1;
+            auto advance = [&](float s)
+            {
+                p.y() += 0.015f;   // 0.3 m/s at 20 Hz, straight in
+                frame(p, s);
+                if (*frames_to_fire < 0 and Acc::searches(rcn) != s0)
+                { *frames_to_fire = 0; *depth_at_fire = p.y() + 2.f; }
+            };
+            if (arm == 2)
+            {
+                int f = 0;
+                for (; f < 400 and *frames_to_fire < 0; ++f) advance(0.40f * std::exp(nz(rng)));
+                if (*frames_to_fire == 0) *frames_to_fire = f;
                 return Acc::searches(rcn) - s0;
             }
-            for (int f = 0; f < 13; ++f) frame(2.6f);                 // the doorway transient (rtD1g2 recall 1)
-            for (int f = 0; f < 5; ++f) frame(0.59f);
-            for (int f = 0; f < 40; ++f) frame(0.06f * std::exp(-f / 20.f) + 0.03f);
-            for (int f = 0; f < 200; ++f) frame(0.034f * std::exp(nz(rng)));
+            // The doorway view: the body still in the mouth (centre 0.06 → 0.18 m in), the scan's back half through the
+            // door. (The live 0.6–1.7 s tail of 2.5 m after the mouth was the unweighted pred median and the misplaced
+            // door list, fixed at the source in R1b — case O measures those statistics through update().)
+            for (int f = 0; f < 8; ++f) advance(2.6f);
+            for (int f = 0; f < 40; ++f) advance(0.06f * std::exp(-f / 20.f) + 0.03f);
             return Acc::searches(rcn) - s0;
         };
-        int dummy = 0, fire = -1;
-        const auto with_passage = run_arm(true, false, &dummy);
-        const auto plain        = run_arm(false, false, &dummy);
-        run_arm(true, true, &fire);
-        const bool pass = with_passage == 0 and plain > 0 and fire > 0;
+        int fire_p = -1, fire_pl = -1, fire_w = -1;
+        float d_p = 0.f, d_pl = 0.f, d_w = 0.f;
+        const auto with_passage = run_arm(0, &fire_p, &d_p);
+        const auto plain        = run_arm(1, &fire_pl, &d_pl);
+        run_arm(2, &fire_w, &d_w);
+        // Geometry-set: the doorway term Φ((r_body − d)/σ_s) has fallen — within a few σ_s of the body leaving the mouth.
+        const bool pass = with_passage == 0 and plain > 0 and fire_w > 0 and d_w > pg.r_body - 3.f * pg.sig_s
+                          and d_w < pg.r_body + 0.25f;
         r1_failures += pass ? 0 : 1;
-        std::printf("  K hand-over doorway transient                       searches: with the passage %llu (expect 0), "
-                    "plain reset %llu (expect >0: the live defect); a misfit that never clears after the hand-over "
-                    "searched after %d frames (expect >0, finite) — %s\n",
-                    static_cast<unsigned long long>(with_passage), static_cast<unsigned long long>(plain), fire,
-                    pass ? "PASS" : "FAIL");
+        std::printf("  K hand-over through the door (geometry route)       searches: with the passage %llu (expect 0), "
+                    "plain reset %llu (expect >0: the live defect); WRONG recall searched after %d frames at depth %.2f m "
+                    "(expect within a few σ of r_body %.2f m) — %s\n",
+                    static_cast<unsigned long long>(with_passage), static_cast<unsigned long long>(plain), fire_w, d_w,
+                    pg.r_body, pass ? "PASS" : "FAIL");
     }
+
+    // M (Task R1b, reviewer I-1): THE DOOR ANCHOR PICKS THE TWIN THAT CAME THROUGH THE DOOR. Symmetric room, door off
+    //    centre in the bottom wall; the robot just came in. The tracker has diverged (the held pose is 3–4 m off with a
+    //    2 cm σ — rtD1g2's state at its three w=0.50 moves), so continuity says nothing about the truth or its twin and
+    //    the scan cannot separate them. Expect: the committed pose is the TRUTH every time (not merely truth-or-twin).
+    {
+        const auto& room = all_rooms[0];
+        rc::passage::Passage pg;
+        pg.centre = {1.2f, -2.f}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
+        pg.r_body = 0.24f; pg.body_w = 0.46f; pg.body_l = 0.48f; pg.sig_s = 0.03f; pg.sig_t = 0.03f; pg.s = 0.06f;
+        auto run_arm = [&](bool anchor)
+        {
+            std::mt19937 rng(6060);
+            std::uniform_real_distribution<float> uj(-0.15f, 0.15f);
+            int truth_n = 0, twin_n = 0, runs = 20;
+            for (int run = 0; run < runs; ++run)
+            {
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(room.poly);
+                const float th = rc::passage::heading_along(pg.n_in) + 0.5f * uj(rng);
+                const Eigen::Vector3f truth(1.2f + uj(rng), -2.f + 0.35f + uj(rng), th);   // a few frames in
+                // The hand-over frame (consumes the reset) at the crossing point, then the tracker's divergence.
+                rcn.set_robot_pose(1.2f, -1.94f, th, false);
+                rc::RoomConcept::UpdateResult r;
+                r.ok = true; r.sdf_mse = 0.03f; r.pred_sdf_median = 0.03f;
+                r.robot_pose = Eigen::Affine2f::Identity();
+                r.robot_pose.translation() = Eigen::Vector2f(1.2f, -1.94f);
+                r.robot_pose.linear() = Eigen::Rotation2Df(th).toRotationMatrix();
+                r.covariance = Eigen::Vector3f(9e-4f, 9e-4f, 1e-4f).asDiagonal();
+                r.pred_x = 1.2f; r.pred_y = -1.94f; r.pred_theta = th;
+                if (anchor) rcn.note_passage_handover(pg); else Acc::plain_reset(rcn);
+                const auto pts0 = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
+                Acc::step8(rcn, r, pts0);
+                // The robot drove to `truth` (odometry: a straight step), and the tracker diverged meanwhile.
+                r.pred_x = truth.x(); r.pred_y = truth.y(); r.pred_theta = truth.z();
+                r.robot_pose.translation() = truth.head<2>();
+                Acc::step8(rcn, r, pts0);
+                rcn.set_robot_pose(-1.5f, 0.8f, th + 1.2f, false);
+                rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
+                Acc::relocalise(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)), 0.4f, 0.5f);
+                const auto st = rcn.get_current_state();
+                const Eigen::Vector3f now(st[2], st[3], st[4]);
+                if (near(now, truth, 0.30f, 10.f)) ++truth_n;
+                else if (near(now, room.symmetries.front()(truth), 0.30f, 10.f)) ++twin_n;
+            }
+            return std::pair{truth_n, twin_n};
+        };
+        const auto [t_a, w_a] = run_arm(true);
+        const auto [t_n, w_n] = run_arm(false);
+        const bool pass = t_a == 20 and w_a == 0;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  M door anchor, tracker diverged, symmetric twins    with the anchor: truth %d / twin %d of 20 (expect 20/0); "
+                    "without: truth %d / twin %d (the coin flip) — %s\n", t_a, w_a, t_n, w_n, pass ? "PASS" : "FAIL");
+    }
+
+    // N (Task R1b, reviewer I-4): A HELD EPISODE WHOSE RIVALS ARE ALL WRONG ENDS. The pose is right, the carried rivals
+    //    are not the truth; their ratios must fall past the LOWER SPRT bound and be dropped, which closes the episode.
+    {
+        const auto& room = all_rooms[2];
+        std::mt19937 rng(7070);
+        int closed = 0, runs = 10, frames_sum = 0;
+        for (int run = 0; run < runs; ++run)
+        {
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
+            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+            Acc::rivals(rcn).clear();
+            Acc::rivals(rcn).push_back({random_pose(room.poly, rng, 0.8f), 0.f});
+            Acc::rivals(rcn).push_back({random_pose(room.poly, rng, 0.8f), 0.f});
+            Acc::set_ref(rcn, truth);
+            int f = 0;
+            for (; f < 60 and not Acc::rivals(rcn).empty(); ++f)
+                Acc::step(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
+            if (Acc::rivals(rcn).empty()) { ++closed; frames_sum += f; }
+        }
+        const bool pass = closed == runs;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  N held episode, truth not among the rivals          rivals rejected (episode closed) %d/%d, after %.1f frames — %s\n",
+                    closed, runs, closed > 0 ? static_cast<double>(frames_sum) / closed : std::nan(""), pass ? "PASS" : "FAIL");
+    }
+    // O (Task R1b): THE DOORWAY STATISTICS THROUGH update(). Two rooms joined by a 1 m door: the model is the 6 × 4
+    //    room (y ∈ [−2, 2]); the world adds the room behind the door (y ∈ [−6, −2]). The robot stands just inside,
+    //    centre 0.15 m past the door line, so its scan's back half goes through the door. The lost belief reads
+    //    s = max(sdf_mse, pred_sdf_median). Arms: the door list CORRECT (ideal); the list MISPLACED 4.4 m (live, for
+    //    ~1 s after every recall) without a passage; the same misplaced list WITH the passage of the crossing (R1b).
+    //    Expect: with the passage, s as in the ideal arm; misplaced alone, s of the doorway view (the live defect).
+    {
+        const auto& room = all_rooms[0];
+        struct Seg { Eigen::Vector2f a, b; };
+        const std::vector<Seg> world{{{-3.f, -6.f}, {3.f, -6.f}}, {{3.f, -6.f}, {3.f, 2.f}}, {{3.f, 2.f}, {-3.f, 2.f}},
+                                     {{-3.f, 2.f}, {-3.f, -6.f}}, {{-3.f, -2.f}, {0.7f, -2.f}}, {{1.7f, -2.f}, {3.f, -2.f}}};
+        auto scan_world = [&](const Eigen::Vector3f& pose, std::mt19937& rng)
+        {
+            std::normal_distribution<float> nz(0.f, 0.02f);
+            std::vector<Eigen::Vector3f> out;
+            for (int i = 0; i < 360; ++i)
+            {
+                const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / 360.f;
+                const float wd = pose.z() + bearing;
+                const Eigen::Vector2f dir(std::cos(wd), std::sin(wd));
+                float best = std::numeric_limits<float>::max();
+                for (const auto& sg : world)
+                {
+                    const Eigen::Vector2f e = sg.b - sg.a;
+                    const float den = dir.x() * e.y() - dir.y() * e.x();
+                    if (std::abs(den) < 1e-9f) continue;
+                    const Eigen::Vector2f w = sg.a - pose.head<2>();
+                    const float sp = (w.x() * e.y() - w.y() * e.x()) / den;
+                    const float t = (w.x() * dir.y() - w.y() * dir.x()) / den;
+                    if (sp > 1e-4f and t >= 0.f and t <= 1.f) best = std::min(best, sp);
+                }
+                if (best == std::numeric_limits<float>::max()) continue;
+                const float r = best + nz(rng);
+                out.emplace_back(r * std::cos(bearing), r * std::sin(bearing), 0.f);
+            }
+            return out;
+        };
+        rc::passage::Passage pg;
+        pg.centre = {1.2f, -2.f}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
+        pg.r_body = 0.24f; pg.sig_s = 0.03f; pg.sig_t = 0.03f; pg.s = 0.15f; pg.door_id = 77;
+        int n_pred_seen = 0;
+        auto run_arm = [&](int arm)   // 0 ideal, 1 misplaced, 2 misplaced + passage
+        {
+            std::mt19937 rng(4040);
+            rc::RoomConcept rcn;
+            rcn.set_polygon_room(room.poly);
+            Eigen::Vector3f at(1.2f, -1.85f, rc::passage::heading_along(pg.n_in));
+            rcn.set_robot_pose(at.x(), at.y(), at.z(), false);
+            rc::DoorAperture d;
+            d.id = 77; d.name = "door_1"; d.p_open = 1.f; d.prior_closed = 0.f;
+            const Eigen::Vector2f off = arm == 0 ? Eigen::Vector2f::Zero() : Eigen::Vector2f(-0.6f, 4.36f);
+            d.a = Eigen::Vector2f(0.7f, -2.f) + off; d.b = Eigen::Vector2f(1.7f, -2.f) + off;
+            rcn.set_door_apertures({d});
+            if (arm == 2) rcn.note_passage_handover(pg);
+            std::int64_t ts = 1000;
+            std::vector<float> s_hist;
+            int n_pred = 0;
+            for (int f = 0; f < 40; ++f)   // past the tracking warm-up, so the prediction statistic is computed too
+            {
+                at.y() += 0.01f;   // driving in at 0.2 m/s, the door behind (the odometry says so too)
+                const auto pts = scan_world(at, rng);
+                ts += 50;
+                std::vector<rc::OdometryReading> odom;
+                for (std::int64_t t = ts - 100; t <= ts; t += 10)
+                {
+                    rc::OdometryReading o;
+                    o.source_ts_ms = t; o.recv_ts_ms = t; o.var_adv = 1e-4f; o.var_side = 1e-4f; o.adv = 0.26f;   // over-reports 30%: some frames must solve
+                    odom.push_back(o);
+                }
+                const auto res = rcn.update(rc::LidarData{pts, ts}, {}, odom);
+                Acc::step8(rcn, res, pts);
+                if (f >= 2) s_hist.push_back(std::max(res.sdf_mse, std::isfinite(res.pred_sdf_median) ? res.pred_sdf_median : 0.f));
+                if (f >= 2 and std::isfinite(res.pred_sdf_median) and res.iterations_used > 0) ++n_pred;   // a solve frame
+                if (std::getenv("RELOC_O_TRACE")) std::printf("    O arm%d f%d it=%d mse=%.3f pred=%.3f\n", arm, f, res.iterations_used, res.sdf_mse, res.pred_sdf_median);
+            }
+            if (arm == 2) n_pred_seen = n_pred;
+            std::ranges::sort(s_hist);
+            return s_hist.empty() ? std::nanf("") : s_hist[s_hist.size() / 2];
+        };
+        const float s_ideal = run_arm(0), s_mis = run_arm(1), s_fix = run_arm(2);
+        const bool pass = s_fix <= 2.f * s_ideal + 0.02f and s_mis > 3.f * s_fix and n_pred_seen > 0;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  O doorway statistics through update()               median s: door list correct %.3f m, misplaced %.3f m "
+                    "(the live defect), misplaced + the crossing's passage %.3f m (expect ≈ correct); frames with a separate "
+                    "prediction statistic %d (expect >0) — %s\n",
+                    s_ideal, s_mis, s_fix, n_pred_seen, pass ? "PASS" : "FAIL");
+    }
+
     // L (Task R1b): THE DOORWAY PAUSE. rtD1g2's missed hand-over, replayed through the real crossing test
     //    (rc::crossing::evaluate) and its decision level (ProtoRoom.BirthProb): the robot drives through a 1 m door,
     //    STOPS with its centre 0.17 m past the line for 1.5 s, then continues. Live, the localiser's own σ stayed

@@ -282,8 +282,12 @@ namespace rc
         // Record the decision variable whether or not we early-exit — on an Adam frame this is the
         // value that TRIGGERED optimization (it exceeded the trust threshold). update() reads it back.
         last_early_exit_metric_ = mean_sdf_pred;
-        // Same points, same pose, median instead of mean — see last_pred_sdf_median_.
-        last_pred_sdf_median_ = median_abs_sdf(sdf_pred);
+        // Same points, same pose, median instead of mean — see last_pred_sdf_median_. ★ AND THE SAME DOOR WEIGHTS
+        // (Task R1b): this median was the one statistic left unweighted, and it is half of the lost belief's s
+        // (max(sdf_mse, pred_sdf_median)). Live rtD1g2 recall 1: pred 2.52–2.71 m for 600 ms after the hand-over
+        // while the door-weighted post-fit median read 0.08–0.11 m — the returns seen back through the door just
+        // used, counted against the room the robot had entered. P(lost) 0.501 and a search followed.
+        last_pred_sdf_median_ = weighted_median_abs_sdf(sdf_pred, door_point_weights(scan_pts));
         // MEASURE ONLY: the diagnostics above are the point; the decision below is not ours to take while
         // the layout is still being estimated (there is no fixed map to trust the prediction against).
         if (measure_only) return std::nullopt;
@@ -743,6 +747,40 @@ namespace rc
             debug_log_ << '\n';
             debug_log_.flush();
         }
+    }
+
+    // Moved out of room_concept.h (Task R1b, file-length lint); the doc comments stay with the declarations.
+    float RoomConcept::median_abs_sdf(const Eigen::VectorXf &sdf_vals)
+    {
+        if (sdf_vals.size() == 0) return std::numeric_limits<float>::quiet_NaN();
+        std::vector<float> a(static_cast<std::size_t>(sdf_vals.size()));
+        for (Eigen::Index i = 0; i < sdf_vals.size(); ++i) a[static_cast<std::size_t>(i)] = std::abs(sdf_vals(i));
+        const auto mid = a.begin() + static_cast<std::ptrdiff_t>((a.size() - 1) / 2);
+        std::nth_element(a.begin(), mid, a.end());
+        return *mid;
+    }
+
+    float RoomConcept::weighted_median_abs_sdf(const Eigen::VectorXf &sdf_vals, const Eigen::VectorXf &weights)
+    {
+        if (weights.size() == 0 or weights.size() != sdf_vals.size())
+            return median_abs_sdf(sdf_vals);
+        std::vector<std::pair<float, float>> v;
+        v.reserve(static_cast<size_t>(sdf_vals.size()));
+        double total = 0.0;
+        for (Eigen::Index i = 0; i < sdf_vals.size(); ++i)
+        {
+            const float aa = std::abs(sdf_vals(i)), wa = weights(i);
+            if (wa > 0.f and std::isfinite(aa)) { v.emplace_back(aa, wa); total += wa; }
+        }
+        if (v.empty() or total <= 0.0) return median_abs_sdf(sdf_vals);   // every return discounted
+        std::sort(v.begin(), v.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
+        double acc = 0.0;
+        for (const auto &[val, wt] : v)
+        {
+            acc += wt;
+            if (acc >= 0.5 * total) return val;
+        }
+        return v.back().first;
     }
 
 } // namespace rc

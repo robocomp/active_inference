@@ -39,6 +39,7 @@
 
 #include <atomic>
 #include "room_concept.h"                  // rc::RoomConcept (+ UpdateResult)
+#include "door_crossing.h"                  // rc::crossing::Crossing (the last hand-over's crossing)
 #include "epistemic_controller.h"
 #include "room_config.h"             // rc::RoomConfig (shared config)
 #include "object_anchor_source.h"    // rc::ObjectAnchorSource (validated objects → SE(2) landmarks)
@@ -306,6 +307,10 @@ private:
     bool room_rt_retired_ = false;
     void mark_room_rt_not_current();
     std::string     proto_door_;                                    ///< the aperture it was born through
+    rc::crossing::Crossing last_crossing_;                          ///< the crossing that triggered the last birth (R1b)
+    float           last_crossing_p_open_ = -1.f;                   ///< its door's p_open
+    std::uint64_t   last_crossing_door_id_ = 0;                     ///< its door node
+    std::optional<bool> published_is_lost_;                         ///< last `is_lost` written on the room node
 
     // ── THE EXPERIMENT'S OWN RECORD: tmp/proto_room.csv, ONE ROW PER POSE UPDATE ────────────────────
     // The run is driven by hand on a joystick, so nothing that only reaches the terminal is observed.

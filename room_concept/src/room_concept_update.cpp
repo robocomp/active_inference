@@ -282,7 +282,30 @@ namespace rc
         // right, because these weights are detached constants AT that point by contract.
         // Empty snapshot (every door shut, or none known) ⇒ empty here ⇒ no cost at all downstream.
         doors_robot_.clear();
-        if (const auto doors_room = door_apertures(); not doors_room.empty() and not window_mgr_.empty())
+        auto doors_room = door_apertures();
+        // ★ THE DOOR JUST CROSSED, WHERE THE CROSSING MEASURED IT (Task R1b). The 1 Hz door list resolves each door
+        //   through the graph's CURRENT room frame, and right after a hand-over that frame is not yet consistent: live
+        //   rtD1g2 put the crossed door 4.3–4.6 m off for ~1 s after each recall (door_filter.csv +375/+618/+611 ms),
+        //   the per-beam weights then discounted the wrong beams and the post-fit median jumped to 2.6 m. The crossing
+        //   measured that door in the INTERNAL frame, which is continuous through the doorway, so its geometry is kept
+        //   for the whole visit; door_concept's live belief (p_open, prior_closed) still rules whether it is open.
+        if (rt_.passage.has_value())
+        {
+            const auto& pg = *rt_.passage;
+            const Eigen::Vector2f a = pg.centre - 0.5f * pg.width * pg.tangent, b = pg.centre + 0.5f * pg.width * pg.tangent;
+            bool found = false;
+            for (auto& d : doors_room)
+                if (pg.door_id != 0 and d.id == pg.door_id) { d.a = a; d.b = b; found = true; }
+            if (not found)
+            {
+                DoorAperture d;
+                d.a = a; d.b = b; d.id = pg.door_id; d.name = "passage";
+                d.p_open = pg.p_open;
+                d.prior_closed = pg.p_open < 0.f ? 0.5f : 1.f - std::clamp(pg.p_open, 0.f, 1.f);
+                doors_room.push_back(std::move(d));
+            }
+        }
+        if (not doors_room.empty() and not window_mgr_.empty())
         {
             const Eigen::Vector3f& npa = window_mgr_.newest().pose;
             const Eigen::Rotation2Df R_inv(-npa[2]);

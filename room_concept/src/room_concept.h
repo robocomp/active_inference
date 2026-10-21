@@ -41,6 +41,7 @@
 #include "wheel_noise_learner.h"
 #include "rest_density_learner.h"
 #include "reloc_search.h"
+#include "reloc_runtime.h"
 #include "surprise.h"
 #include "motion_noise_vc.h"
 #include "motion_noise_innov.h"
@@ -325,15 +326,10 @@ public:
     /// while searching). Pose, window and covariance carry over. Localiser thread (the scene graph's promotion).
     void adopt_map_layout_as_given();
     bool map_layout_adopted() const { return map_layout_adopted_; }
-    /// A crossing handed the robot to a new GIVEN room (a recall): reset the lost belief with `p_in_passage` (the
-    /// crossing's p_cross) on MISMATCH — the doorway's view is not this room's. Why: relocalisation_step (Task R1).
-    void note_passage_handover(float p_in_passage)
-    {
-        handover_passage_q_.store(std::isfinite(p_in_passage) ? std::clamp(p_in_passage, 0.f, 1.f)
-                                                              : std::numeric_limits<float>::quiet_NaN(),
-                                  std::memory_order_relaxed);
-        belief_reset_requested_.store(true, std::memory_order_relaxed);
-    }
+    /// A recall hand-over through `p`: its doorway term and door anchor enter the relocaliser (passage_prior.h).
+    void note_passage_handover(const rc::passage::Passage& p);
+    /// The pose is undecided: P(lost) ≥ ½ or a held episode is open (published as the room's `is_lost`).
+    bool pose_undecided() const { return pose_undecided_.load(std::memory_order_relaxed); }
     /// An ACCEPTED refinement edit (layout_refiner.h): the given room becomes `L` (INTERNAL frame) — same frame,
     /// same gauge, the SDF the localiser solves against is rebuilt; nothing else changes. Localiser thread.
     void refine_given_layout(const std::vector<Eigen::Vector2f>& L);
@@ -739,8 +735,9 @@ private:
    std::array<double, 3> belief_{1.0, 0.0, 0.0};
    bool  belief_init_       = false;
    std::atomic<bool>  belief_reset_requested_{false};   ///< a new given room was adopted: reset the lost belief next frame
-   /// p_cross of the last hand-over (note_passage_handover), consumed with the reset above; NaN = ordinary reset.
-   std::atomic<float> handover_passage_q_{std::numeric_limits<float>::quiet_NaN()};
+   std::mutex passage_mutex_;                   ///< guards rt_.pending_passage (note_passage_handover)
+   rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)
+   std::atomic<bool> pose_undecided_{false};
    std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)
    float lost_logodds_      = std::numeric_limits<float>::quiet_NaN();   // logit P(LOST) — for the logs
    float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params
@@ -768,11 +765,6 @@ private:
    /// Fire the search from the lost belief and fold its outcome back into the belief.
    void  relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost);
    bool  last_search_moved_ = false;
-   bool  last_search_held_ = false;   ///< msprt_decide → Hold: nothing decisive, the held pose alive; rivals carry it
-   /// A held episode is open: its rivals accumulate what the search could not decide; re-searching would re-seed them
-   /// and discard that. Ends when they resolve or empty, or P(lost) falls under ½ (relocalisation_step).
-   bool  reloc_hold_open_ = false;
-   std::uint64_t reloc_searches_ = 0;   ///< mixture searches fired by the lost belief (diagnostic; reloc_selftest K)
    /// Commit a relocalised pose as a DISCRETE JUMP: model tensors, the prediction base (last_update_result —
    /// the next frame predicts from it, not from the tensors), smoothing, last-good pose, window and stride
    /// state, and the publisher's clamp-release epoch. Every relocalisation that moves the pose goes through here.
@@ -791,6 +783,12 @@ private:
    bool            rival_ref_valid_ = false;
    /// Move rivals with the robot's motion, score them against the committed pose, switch when SPRT passes.
    void step_rival_modes(const std::vector<Eigen::Vector3f>& lidar_points);
+   /// Carry the door anchor (passage_prior.h) by this frame's odometry increment.
+   void step_door_anchor(const UpdateResult& res);
+   using ModePosterior = rc::reloc::ModePosterior;   ///< a lost search's posterior (room_concept_reloc_modes.cpp)
+   ModePosterior mode_posterior(rc::reloc::Result& res, const std::vector<Eigen::Vector2f>& poly,
+                                const std::vector<Eigen::Vector2f>& pts2, const Eigen::Vector3f& incumbent,
+                                const rc::reloc::Params& rp, const Eigen::Matrix3f& basin);
    // Likelihood raster for the current room polygon, rebuilt when the polygon changes.
    rc::reloc::LikelihoodRaster reloc_raster_;
    std::vector<Eigen::Vector2f> reloc_raster_poly_;
@@ -1510,15 +1508,7 @@ private:
     /// being compared as though the units matched. See UpdateResult::sdf_mse.
     /// The LOWER median for an even count, as torch::median returned — every reported sdf_mse
     /// series (and every threshold calibrated against it) was produced that way.
-    static float median_abs_sdf(const Eigen::VectorXf &sdf_vals)
-    {
-        if (sdf_vals.size() == 0) return std::numeric_limits<float>::quiet_NaN();
-        std::vector<float> a(static_cast<std::size_t>(sdf_vals.size()));
-        for (Eigen::Index i = 0; i < sdf_vals.size(); ++i) a[static_cast<std::size_t>(i)] = std::abs(sdf_vals(i));
-        const auto mid = a.begin() + static_cast<std::ptrdiff_t>((a.size() - 1) / 2);
-        std::nth_element(a.begin(), mid, a.end());
-        return *mid;
-    }
+    static float median_abs_sdf(const Eigen::VectorXf &sdf_vals);   // room_concept_early_exit.cpp
 
     /// ── THE SAME MEDIAN, WITH THE DOOR WEIGHTS ──────────────────────────────────────────────────
     /// A beam that went through an open doorway measured the next room; it must not inflate the
@@ -1530,28 +1520,7 @@ private:
     /// door contributes half, and nothing anywhere decides whether a door is "open enough".
     /// Empty or mismatched weights fall back to the plain median, so a room with no open door
     /// reports precisely what it reported before.
-    static float weighted_median_abs_sdf(const Eigen::VectorXf &sdf_vals, const Eigen::VectorXf &weights)
-    {
-        if (weights.size() == 0 or weights.size() != sdf_vals.size())
-            return median_abs_sdf(sdf_vals);
-        std::vector<std::pair<float, float>> v;
-        v.reserve(static_cast<size_t>(sdf_vals.size()));
-        double total = 0.0;
-        for (Eigen::Index i = 0; i < sdf_vals.size(); ++i)
-        {
-            const float aa = std::abs(sdf_vals(i)), wa = weights(i);
-            if (wa > 0.f and std::isfinite(aa)) { v.emplace_back(aa, wa); total += wa; }
-        }
-        if (v.empty() or total <= 0.0) return median_abs_sdf(sdf_vals);   // every return discounted
-        std::sort(v.begin(), v.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
-        double acc = 0.0;
-        for (const auto &[val, wt] : v)
-        {
-            acc += wt;
-            if (acc >= 0.5 * total) return val;
-        }
-        return v.back().first;
-    }
+    static float weighted_median_abs_sdf(const Eigen::VectorXf &sdf_vals, const Eigen::VectorXf &weights);   // early_exit.cpp
 
     // Fit metric at the model's CURRENT pose.
     static float compute_sdf_median_abs(const ScanPoints &points_xyz, const Model &m)

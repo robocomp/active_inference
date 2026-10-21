@@ -385,6 +385,14 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         }
         if (params_->PROTO_ROOM_ENABLED or startup_proto_)
             step_proto_room(res);   // crossing evidence → recovery weighting, the crossing proto's birth, the CSV row
+        // `is_lost` on the agent's room: the pose is undecided (P(lost) ≥ ½ or a held relocalisation episode). Written
+        // on change only — an attribute rewritten every frame grows the CRDT without bound. (Task R1b, reviewer I-3.)
+        if (const bool lost = room_concept_->pose_undecided(); published_is_lost_ != lost)
+            if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
+            {
+                G_->add_or_modify_attrib_local<is_lost_att>(rn.value(), lost);
+                if (G_->update_node(rn.value())) published_is_lost_ = lost;
+            }
         if (write_rt)
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
@@ -1068,6 +1076,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //   The room left behind keeps its node, polygon and walls exactly as promoted: nothing edits it from here on.
     //   Out of a GIVEN room (MapMode given/last) as well: the room left behind is the surveyed layout, the new one is
     //   learnt the same way (2026-10-11). The branch below is kept only for a fleet without the start-up survey.
+    last_crossing_ = best;
+    last_crossing_p_open_ = best_ap->p_open;
+    last_crossing_door_id_ = best_ap->id;
     if (params_->STARTUP_PROTO_ENABLED)
     {
         rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross,
@@ -1616,9 +1627,17 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     {
         room_concept_->set_map_layout(recall_int);
         room_concept_->adopt_map_layout_as_given();
-        // The robot is standing in the passage it just crossed, with the crossing's own probability: the lost belief
-        // is reset with that mass on "the view is the doorway's, not this room's" (note_passage_handover, Task R1).
-        room_concept_->note_passage_handover(p_cross);
+        // The robot is standing in the passage it just crossed: its geometry tempers the lost belief while the body is
+        // in it and anchors the relocaliser's prior (passage_prior.h, Task R1b). n_out of the room left = into this one.
+        rc::passage::Passage pg;
+        pg.centre = last_crossing_.centre;   pg.n_in  = last_crossing_.n_out;   pg.tangent = last_crossing_.tangent;
+        pg.width  = last_crossing_.span_w;   pg.p_open = last_crossing_p_open_;
+        pg.r_body = 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+        pg.body_w = params_->ROBOT_WIDTH;    pg.body_l = params_->ROBOT_LENGTH;
+        pg.sig_s  = last_crossing_.sig_s;    pg.sig_t  = last_crossing_.sig_t;
+        pg.s      = last_crossing_.s;        pg.u      = last_crossing_.u;
+        pg.door_id = last_crossing_door_id_;
+        room_concept_->note_passage_handover(pg);
         std::string reason;
         promote_startup_proto(reason, true);
         recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner
@@ -1644,6 +1663,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     // room, the frozen published frame, a fresh free-space accumulator and an explorer with no history. Shared by
     // the first room (birth_startup_proto) and every room entered through a door after it (rearm_after_crossing).
     dsr_room_id_       = room_id;
+    published_is_lost_.reset();   // a new room node: `is_lost` is written on it afresh
     room_node_created_ = true;
     stable_frames_     = 0;
     published_polygon_verts_ = 0;

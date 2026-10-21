@@ -165,86 +165,14 @@ namespace rc
         }
         const bool with_prior = search_trigger_ == "lost" and not res.modes.empty() and std::isfinite(pending_episode_p_lost_);
 
-        // ★ THE MODES ARE A POSTERIOR, NOT A LIKELIHOOD (2026-10-18). The search weighs each mode by how well it
-        //   explains the scan alone. In a symmetric room (live: room_2 promoted as a 4-vertex rectangle) the true
-        //   pose and its 180° twin explain it EQUALLY (w = 0.50 each), so the top was a coin toss and the pose
-        //   flipped 34 times in 200 s, dragging both doors to the mirrored side. A lost search still has a prior:
-        //   P(lost) of being anywhere in the room (uniform over area × 2π) and 1 − P(lost) of being where tracking
-        //   left it, under its covariance + the hypothesis' own + the likelihood's basin.
-        // ★ AND THE HELD POSE IS ONE OF THE HYPOTHESES (2026-10-21, Task R1). The prior alone did not stop the coin
-        //   flip: it only says which mode is NEAR the pose, and when no mode is (the incumbent off its basin, or its
-        //   covariance inflated to metres — live rtD1g2, σ 1.9–4.3 m after the pose clamp carried its backlog into
-        //   it) every mode gets the same uniform floor and the twins tie again (w 0.503/0.497, 0.506/0.494,
-        //   0.500/0.500 — all three moved). So KEEP is scored like any mode — the incumbent polished on the search's
-        //   own point set, Laplace evidence × the same prior — and the pose moves only when msprt_decide says the
-        //   posterior moves it (rc::reloc::msprt_decide: the top is decisive, or the held pose is rejected).
         std::vector<double> log_post;
         int top_idx = res.modes.empty() ? -1 : 0, keep_idx = -1;
         bool keep_travelled = false;   // the held hypothesis' own optimum is off the incumbent by more than ℓ's basin
         if (with_prior)
         {
-            const double pl = std::clamp(static_cast<double>(pending_episode_p_lost_), 1e-9, 1.0 - 1e-9);
-            double area2 = 0.0;
-            for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
-                area2 += static_cast<double>(poly[j].x()) * poly[i].y() - static_cast<double>(poly[i].x()) * poly[j].y();
-            const double log_uniform = -std::log(std::max(0.5 * std::abs(area2), 1e-6) * 2.0 * M_PI);
-            const Eigen::Matrix3f S_inc = current_covariance.allFinite() ? Eigen::Matrix3f(current_covariance + basin) : basin;
-            const auto log_prior = [&](const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov)
-            {
-                Eigen::Vector3f d = pose - incumbent;
-                d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
-                const Eigen::Matrix3f S = S_inc + cov;
-                const Eigen::LDLT<Eigen::Matrix3f> ldlt(S);
-                const double maha = d.dot(ldlt.solve(d));
-                const double logdet = ldlt.vectorD().array().abs().max(1e-30f).log().sum();
-                const double log_near = std::isfinite(maha) ? -0.5 * maha - 0.5 * (3.0 * std::log(2.0 * M_PI) + logdet)
-                                                            : -std::numeric_limits<double>::infinity();
-                const double a = std::log(1.0 - pl) + log_near, b = std::log(pl) + log_uniform;
-                const double hi = std::max(a, b);
-                return hi + std::log(std::exp(a - hi) + std::exp(b - hi));
-            };
-            for (const auto& m : res.modes)
-                log_post.push_back(static_cast<double>(rc::reloc::log_evidence(m)) + log_prior(m.pose, m.cov));
-
-            // KEEP = the incumbent's own basin: its polish on the SAME points the modes were scored on, provided the
-            // polish stayed inside the incumbent's basin. A polish that travelled out of it means the scan itself
-            // rejects the held pose (a stale pose metres away polishes into whatever mode is downhill — reloc_selftest F).
-            const auto keep = rc::reloc::polish(poly, rc::reloc::polish_points(pts2, rp), incumbent, rp, reloc_raster_.extent());
-            Eigen::Matrix3f S_travel = basin + keep.cov;
-            if (current_covariance.allFinite()) S_travel += current_covariance;
-            const bool keep_alive = keep.pose.allFinite() and std::isfinite(keep.log_lik)
-                                    and chi2_of(keep.pose - incumbent, S_travel) < rp.chi2_merge;
-            // Alive but TRAVELLED: the incumbent's covariance admits its basin's optimum, yet that optimum is further
-            // from the point estimate than ℓ's own basin — with an inflated covariance a hypothesis metres wide. Then
-            // keeping the hypothesis means taking its optimum, not the stale point (reloc_selftest J).
-            keep_travelled = keep_alive and chi2_of(keep.pose - incumbent, basin + keep.cov) >= rp.chi2_merge;
-            if (keep_alive)
-            {
-                for (std::size_t k = 0; k < res.modes.size() and keep_idx < 0; ++k)
-                    if (chi2_of(res.modes[k].pose - keep.pose, res.modes[k].cov + keep.cov) < rp.chi2_merge)
-                        keep_idx = static_cast<int>(k);   // the held pose IS this mode
-                if (keep_idx < 0)
-                {
-                    res.modes.push_back(keep);
-                    log_post.push_back(static_cast<double>(rc::reloc::log_evidence(keep)) + log_prior(keep.pose, keep.cov));
-                    keep_idx = static_cast<int>(res.modes.size()) - 1;
-                }
-            }
-            const double hi = *std::ranges::max_element(log_post);
-            double z = 0.0;
-            for (const double l : log_post) z += std::exp(l - hi);
-            res.entropy = 0.f;
-            float sw2 = 0.f;
-            for (std::size_t k = 0; k < res.modes.size(); ++k)
-            {
-                auto& m = res.modes[k];
-                m.log_weight = static_cast<float>(log_post[k] - hi - std::log(z));
-                m.weight = std::exp(m.log_weight);
-                if (m.weight > 0.f) res.entropy -= m.weight * m.log_weight;
-                sw2 += m.weight * m.weight;
-            }
-            res.ess = sw2 > 0.f ? 1.f / sw2 : 0.f;
-            top_idx = static_cast<int>(std::ranges::max_element(log_post) - log_post.begin());
+            auto mp = mode_posterior(res, poly, pts2, incumbent, rp, basin);   // the ★ notes are there
+            log_post = std::move(mp.log_post);
+            top_idx = mp.top_idx; keep_idx = mp.keep_idx; keep_travelled = mp.keep_travelled;
         }
         ep.n_evals = res.n_evals; ep.duration_ms = res.duration_ms;
         ep.n_modes = static_cast<int>(res.modes.size()); ep.mode_entropy = res.entropy; ep.ess = res.ess;
@@ -309,7 +237,7 @@ namespace rc
         // to a tracking-sized residual; in a changed view NO pose does. The comparison uses the learnt tracking
         // emission against the broad one — the same two densities the lost belief runs on, no new constant.
         last_search_moved_ = false;
-        last_search_held_  = false;
+        rt_.last_search_held  = false;
         if (not last_search_confirmed_incumbent_ and not explains_like_tracking(top.median_abs))
         {
             ep.success = false;
@@ -330,20 +258,25 @@ namespace rc
         if (decision == rc::reloc::Decision::Hold)
         {
             ep.success = false;
-            last_search_held_ = true;
+            rt_.last_search_held = true;
             const auto& held = res.modes[static_cast<std::size_t>(keep_idx)];
-            if (keep_travelled)
+            // The held hypothesis carries the whole mixture's spread about it — an undecided twin metres away is metres
+            // of variance, which is what the pose honestly is until the rivals decide. Published in BOTH branches
+            // (reviewer I-3: the untravelled hold kept a ~0.3 m σ with a twin 3–6 m away at ~50%).
+            Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
+            for (const auto& m : res.modes)
             {
-                // The held hypothesis is taken at its own optimum, with the whole mixture's spread about it — the
-                // undecided twin is metres of variance, which is what the pose honestly is until the rivals decide.
-                Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
-                for (const auto& m : res.modes)
-                {
-                    Eigen::Vector3f d = m.pose - held.pose;
-                    d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
-                    cov += m.weight * (m.cov + d * d.transpose());
-                }
-                commit_relocalised_pose(held.pose, cov);
+                Eigen::Vector3f d = m.pose - held.pose;
+                d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+                cov += m.weight * (m.cov + d * d.transpose());
+            }
+            ep.cov_xx = cov(0, 0); ep.cov_yy = cov(1, 1); ep.cov_tt = cov(2, 2);
+            if (keep_travelled)
+                commit_relocalised_pose(held.pose, cov);   // taken at its own optimum
+            else
+            {
+                current_covariance = cov;                  // same pose, honest spread; the window keeps its slots
+                if (last_update_result.ok) last_update_result.covariance = cov;
             }
             rivals_.clear();
             const double l_keep = log_post[static_cast<std::size_t>(keep_idx)];
@@ -451,33 +384,29 @@ namespace rc
         if (belief_reset_requested_.exchange(false, std::memory_order_relaxed))
         {
             reset_lost_belief();
-            // ★ A HAND-OVER THROUGH A DOOR (note_passage_handover). The robot is standing in the passage it just used,
-            //   so the next frames' view is the doorway's, which the new room does not explain: that is MISMATCH by
-            //   definition (pose right, view not the map's), and the crossing's own p_cross is its probability. LOST
-            //   keeps the hazard — the crossing is evidence FOR the pose (it was computed from it), never against.
-            //   The plain reset put h on both, so the first doorway frame split them 50/50 and the ≥ ½ rule fired a
-            //   search on the tie (rtD1e/f/g2: s 0.28–2.75 m in the first frames — the 360° scan sees the room just
-            //   left through the door, and the door weights / prediction statistic lag the room swap — P(lost)
-            //   0.500–0.503, a search 60–220 ms after every recall; in rtD1e it moved a pose 0.04 m from the truth
-            //   4.40 m / 179° to the twin, in rtD1f its rivals switched 2.85 m / 180° 1.1 s later). With p_cross on
-            //   MISMATCH the spike leaves P(lost) ≈ h; a misfit that never clears still searches, at the hazard's
-            //   pace (reloc_selftest K: 357 frames driving), and one healthy frame hands MISMATCH back to TRACKING.
-            if (const float q = handover_passage_q_.exchange(std::numeric_limits<float>::quiet_NaN(),
-                                                             std::memory_order_relaxed); std::isfinite(q))
+            // ★ A HAND-OVER THROUGH A DOOR (note_passage_handover; passage_prior.h). What the crossing knows enters the
+            //   model as GEOMETRY, frame by frame: the doorway term tempers the misfit while the body is in the passage
+            //   and expires as it leaves; the door anchor is a component of the search's prior. Measured on the plain
+            //   reset (rtD1e/f/g2): s 0.28–2.75 m in the first frames (the 360° scan sees the room just left through the
+            //   door; door weights / prediction statistic lag the room swap), P(lost) 0.500–0.503 and a search 60–220 ms
+            //   after every recall; in rtD1e it moved a pose 0.04 m from the truth 4.40 m / 179° to the twin. (8ce48e5e
+            //   seeded MISMATCH with p_cross instead; reviewer I-2: that hid a WRONG recall for a hazard-set ~18 s.)
             {
-                const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
-                const double m = static_cast<double>(q);
-                belief_ = {(1.0 - h) * (1.0 - m), h, (1.0 - h) * m};
-                lost_logodds_ = static_cast<float>(std::log(h / (1.0 - h)));
-                p_track_display_.store(static_cast<float>(belief_[kTrack]), std::memory_order_relaxed);
+                std::scoped_lock lk(passage_mutex_);
+                rt_.passage = std::exchange(rt_.pending_passage, std::nullopt);
             }
-            reloc_hold_open_ = false;
+            rt_.door_anchor.reset();
+            rt_.door_anchor_frames = 0;
+            if (rt_.passage.has_value())
+                rt_.door_anchor = rc::passage::anchor_at_handover(*rt_.passage);
+            rt_.hold_open = false;
             belief_prev_pose_valid_ = false;
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
             rival_ref_valid_ = false;
         }
         if (params.reloc_enabled and map_guided_checks_allowed() and not searching())
         {
+            step_door_anchor(res);
             // Rivals first: they are scored on THIS scan against the pose update() just committed.
             step_rival_modes(lidar_points);
 
@@ -509,31 +438,43 @@ namespace rc
                 belief_prev_pose_ = pose;
                 belief_prev_pose_valid_ = true;
             }
-            const float p_lost = update_lost_belief(s, outside_prob(), view_change);
+            // The passage just used is a doorway of THIS room too, whatever the graph's parenting says yet (live: the
+            // crossed door hangs from the room left behind for a while, so the scene graph's doorway term read exactly
+            // 0 right after every recall). Two independent reasons the room does not owe the view combine as a union.
+            float outside = outside_prob();
+            rt_.passage_term = 0.f;
+            if (rt_.passage.has_value())
+            {
+                rt_.passage_term = rc::passage::doorway_term(*rt_.passage, res.robot_pose.translation(),
+                                                          res.covariance.topLeftCorner<2, 2>());
+                outside = 1.f - (1.f - outside) * (1.f - rt_.passage_term);
+            }
+            const float p_lost = update_lost_belief(s, outside, view_change);
             // A HELD episode (msprt_decide → Hold) is carried by its rivals: step_rival_modes above scores them on
             // every scan and switches the moment one is decisive. It ends when they resolve or empty, or when the
             // belief itself says the episode is over (P(lost) back under ½ — the same decision as the trigger).
             if (rivals_.empty() or p_lost < 0.5f)
-                reloc_hold_open_ = false;
-            if (p_lost >= 0.5f and not reloc_hold_open_)   // ⚠ the equal-cost Bayes decision, flagged
+                rt_.hold_open = false;
+            if (p_lost >= 0.5f and not rt_.hold_open)   // ⚠ the equal-cost Bayes decision, flagged
                 relocalise_from_belief(lidar_points, s, p_lost);
+            pose_undecided_.store(belief_[kLost] >= 0.5 or rt_.hold_open, std::memory_order_relaxed);
         }
         else
         {
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
             rival_ref_valid_ = false;
-            reloc_hold_open_ = false;
+            rt_.hold_open = false;
             reset_lost_belief();
+            pose_undecided_.store(false, std::memory_order_relaxed);
         }
-    }
-
-    void RoomConcept::publish_rival_snapshot()
-    {
-        std::vector<rc::reloc::PoseHypothesis> snap;
-        snap.reserve(rivals_.size());
-        for (const auto& rv : rivals_) snap.push_back({rv.pose, rv.llr});
-        std::scoped_lock lk(rival_snapshot_mutex_);
-        rival_snapshot_ = std::move(snap);
+        // The prediction of the NEXT frame is built on the pose as it stands now (after any commit above): the door
+        // anchor's odometry increment is measured against it (step_door_anchor).
+        if (model_ != nullptr and model_->has_state())
+        {
+            const auto st = model_->get_state();
+            rt_.anchor_prev_est = Eigen::Vector3f(st[2], st[3], st[4]);
+            rt_.anchor_prev_valid = true;
+        }
     }
 
     void RoomConcept::reset_lost_belief()
@@ -647,18 +588,18 @@ namespace rc
     {
         qWarning().noquote() << QString("[reloc] P(lost)=%1 at s=%2 m — mixture search").arg(p_lost, 0, 'f', 3).arg(s, 0, 'f', 3);
         search_trigger_ = "lost";
-        ++reloc_searches_;
+        ++rt_.searches;
         pending_episode_p_lost_ = p_lost;
         const bool ran = grid_search_initial_pose(lidar_points, 0.5f, static_cast<float>(M_PI_4));
         pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();
         if (ran and last_search_moved_)
             reset_lost_belief();
-        else if (ran and last_search_held_)
+        else if (ran and rt_.last_search_held)
         {
             // HELD: the search found hypotheses that explain the view, none decisive, the held pose still alive. The
             // belief keeps P(lost) as it is (the search neither confirmed nor refuted the pose); the open episode is
             // now the rivals' (relocalisation_step does not re-search while it is open).
-            reloc_hold_open_ = true;
+            rt_.hold_open = true;
         }
         else if (ran and last_search_confirmed_incumbent_)
         {
@@ -679,102 +620,6 @@ namespace rc
         }
         else
             set_belief_mismatch();        // nothing explains this view better: not lost, the view changed
-    }
-
-    void RoomConcept::step_rival_modes(const std::vector<Eigen::Vector3f>& lidar_points)
-    {
-        if (rivals_.empty() or model_ == nullptr or not model_->has_state() or lidar_points.empty())
-            return;
-        const auto st = model_->get_state();
-        const Eigen::Vector3f cur(st[2], st[3], st[4]);
-        if (not rival_ref_valid_)
-        {
-            rival_ref_pose_ = cur;
-            rival_ref_valid_ = true;
-        }
-        // Robot-frame motion since the last step is hypothesis-independent: every mode moved the same way
-        // relative to itself. Δ = ref⁻¹ ∘ cur, then rival ← rival ∘ Δ.
-        const float cr = std::cos(rival_ref_pose_.z()), sr = std::sin(rival_ref_pose_.z());
-        const Eigen::Vector2f dw = cur.head<2>() - rival_ref_pose_.head<2>();
-        const Eigen::Vector2f d_robot(cr * dw.x() + sr * dw.y(), -sr * dw.x() + cr * dw.y());
-        const float dth = std::remainder(cur.z() - rival_ref_pose_.z(), 2.f * static_cast<float>(M_PI));
-        for (auto& rv : rivals_)
-        {
-            const float c = std::cos(rv.pose.z()), s = std::sin(rv.pose.z());
-            rv.pose.x() += c * d_robot.x() - s * d_robot.y();
-            rv.pose.y() += s * d_robot.x() + c * d_robot.y();
-            rv.pose.z()  = std::remainder(rv.pose.z() + dth, 2.f * static_cast<float>(M_PI));
-        }
-        rival_ref_pose_ = cur;
-
-        const auto poly = current_room_polygon();
-        if (poly.size() < 3)
-            return;
-        const auto rp = reloc_params();
-        if (poly != reloc_raster_poly_ or not reloc_raster_.valid())
-        {
-            reloc_raster_.build(poly, rp);
-            reloc_raster_poly_ = poly;
-        }
-        std::vector<Eigen::Vector2f> pts2;
-        const int stride = std::max(1, static_cast<int>(lidar_points.size()) / std::max(1, rp.max_points));
-        pts2.reserve(lidar_points.size() / static_cast<std::size_t>(stride) + 1);
-        for (std::size_t i = 0; i < lidar_points.size(); i += static_cast<std::size_t>(stride))
-            pts2.emplace_back(lidar_points[i].x(), lidar_points[i].y());
-
-        const float extent = reloc_raster_.extent();
-        const float ll_cur = rc::reloc::log_likelihood(poly, pts2, cur, rp, extent);
-        for (auto& rv : rivals_)
-            rv.llr += rc::reloc::log_likelihood(poly, pts2, rv.pose, rp, extent) - ll_cur;
-        // A mode carried out of the room cannot be the robot.
-        std::erase_if(rivals_, [&](const RivalMode& rv)
-            { return not std::isfinite(rv.llr) or not rc::reloc::inside_polygon(poly, rv.pose.head<2>()); });
-        publish_rival_snapshot();
-        if (rivals_.empty())
-            return;
-
-        // Wald's SPRT: switch when the accumulated ratio passes log((1−α)/α), α = the hazard. A symmetric twin
-        // (ratio ≡ 0) never passes; after a switch the old pose needs the same margin to come back, so noise
-        // around a near-tie cannot flip-flop the published pose.
-        const double alpha = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.5);
-        const float bound = static_cast<float>(std::log((1.0 - alpha) / alpha));
-        const auto best = std::ranges::max_element(rivals_, {}, &RivalMode::llr);
-        if (best->llr <= bound)
-            return;
-        // Same explain-away as the search: a rival that out-scores the pose but still leaves a misfit tracking
-        // would not produce is a warp of an unexplained view, not the robot's pose.
-        float rival_med = std::numeric_limits<float>::quiet_NaN();
-        rc::reloc::log_likelihood(poly, pts2, best->pose, rp, extent, &rival_med);
-        if (not explains_like_tracking(rival_med))
-            return;
-
-        SearchEpisode ep;
-        ep.ts_ms = last_update_result.timestamp_ms;
-        ep.trigger = "mode_switch";
-        ep.stage = 10;
-        ep.n_lidar = static_cast<int>(lidar_points.size());
-        ep.incumbent_x = cur.x(); ep.incumbent_y = cur.y(); ep.incumbent_theta = cur.z();
-        ep.best_x = best->pose.x(); ep.best_y = best->pose.y(); ep.best_theta = best->pose.z();
-        ep.jump_m = (best->pose.head<2>() - cur.head<2>()).norm();
-        ep.jump_rad = std::abs(std::remainder(best->pose.z() - cur.z(), 2.f * static_cast<float>(M_PI)));
-        ep.top_weight = static_cast<float>(1.0 / (1.0 + std::exp(-static_cast<double>(best->llr))));
-        ep.n_modes = static_cast<int>(rivals_.size()) + 1;
-        ep.success = true;
-        write_search_episode(ep);
-        qWarning().noquote() << QString("[reloc] mode switch: rival out-explained the pose by %1 nats (bound %2) — "
-                                        "moving %3 m / %4°")
-            .arg(best->llr, 0, 'f', 1).arg(bound, 0, 'f', 1).arg(ep.jump_m, 0, 'f', 2).arg(ep.jump_rad * 57.2958f, 0, 'f', 0);
-
-        const Eigen::Vector3f new_pose = best->pose;
-        const float llr = best->llr;
-        rivals_.erase(best);
-        for (auto& rv : rivals_) rv.llr -= llr;          // ratios are now against the new pose
-        rivals_.push_back({cur, -llr});                  // the old pose becomes a rival, needing the same margin back
-
-        commit_relocalised_pose(new_pose, current_covariance);
-        rival_ref_pose_ = new_pose;
-        reset_lost_belief();
-        publish_rival_snapshot();
     }
 
 } // namespace rc
