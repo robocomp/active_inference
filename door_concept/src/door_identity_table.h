@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdint>
 #include <chrono>
 #include <utility>
 #include <cmath>
@@ -59,12 +60,17 @@ struct IdentityRow
     std::optional<RestorePose> pose;                 ///< absent ⇒ identity only, not restorable
     std::optional<float>       exist_logodds;        ///< the existence belief when written; absent ⇒ unknown
     std::optional<LeafMemory>  leaf;
+    /// Task D-C: wall-clock ms (system clock, epoch) at which the door was last DETECTED — the age of `exist_logodds`.
+    /// Absent ⇒ unknown age (a 17-column row): the remembered belief is not trusted beyond its identity (see
+    /// restore_existence_prior).
+    std::optional<std::int64_t> seen_wall_ms;
 };
 
 inline constexpr std::string_view kIdentityHeader =
-    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma";
+    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms";
 inline constexpr std::size_t kIdentityColsOld  = 4;
-inline constexpr std::size_t kIdentityColsFull = 17;
+inline constexpr std::size_t kIdentityCols17   = 17;   ///< 2026-10-20 .. 10-21: no seen_ms column (age unknown)
+inline constexpr std::size_t kIdentityColsFull = 18;
 
 /// A transform read before the room existed resolves to |t| ~ 1e13 m (try35): not a place.
 inline constexpr float kIdentityMaxPlaceM = 1.0e3f;
@@ -84,6 +90,13 @@ inline bool num(std::string_view v, float& out)
     if (v.empty()) return false;
     const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
     return ec == std::errc{} and p == v.data() + v.size() and std::isfinite(out);
+}
+inline bool num_i64(std::string_view v, std::int64_t& out)
+{
+    while (not v.empty() and (v.back() == '\r' or v.back() == ' ')) v.remove_suffix(1);
+    if (v.empty()) return false;
+    const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
+    return ec == std::errc{} and p == v.data() + v.size();
 }
 inline std::vector<std::string_view> split(std::string_view line)
 {
@@ -112,15 +125,15 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
         if (line.empty() or line == "\r") continue;
         const auto c = detail::split(line);
         float x = 0.f, y = 0.f;
-        if ((c.size() != kIdentityColsOld and c.size() != kIdentityColsFull) or c[0].empty()
+        if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityColsFull) or c[0].empty()
             or not c[1].starts_with("door_") or not detail::num(c[2], x) or not detail::num(c[3], y)
             or std::hypot(x, y) > kIdentityMaxPlaceM)
         {
             ++out.malformed;
             continue;
         }
-        IdentityRow r{std::string(c[0]), std::string(c[1]), Eigen::Vector2f(x, y), {}, {}, {}};
-        if (c.size() == kIdentityColsFull)
+        IdentityRow r{std::string(c[0]), std::string(c[1]), Eigen::Vector2f(x, y), {}, {}, {}, {}};
+        if (c.size() >= kIdentityCols17)
         {
             // Each group is all-or-nothing: half a pose is no pose.
             if (RestorePose p; detail::num(c[4], p.yaw) and detail::num(c[5], p.width) and detail::num(c[6], p.height)
@@ -137,6 +150,8 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
                 m.open_dir = {ox, oy};
                 r.leaf = m;
             }
+            if (std::int64_t t = 0; c.size() == kIdentityColsFull and detail::num_i64(c[17], t) and t > 0)
+                r.seen_wall_ms = t;
         }
         out.rows.push_back(std::move(r));
     }
@@ -166,6 +181,8 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
         f << ','; opt(hl, hl ? i.leaf->swing_llr : 0.f);
         f << ','; opt(hl, hl ? i.leaf->phi : 0.f);
         f << ','; opt(hl, hl ? i.leaf->phi_sigma : 0.f);
+        f << ',';
+        if (i.seen_wall_ms.has_value() and *i.seen_wall_ms > 0) f << *i.seen_wall_ms;
         f << '\n';
     }
 }
@@ -263,7 +280,10 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
             t.pose = row.pose;
     }
     if (row.exist_logodds.has_value())
+    {
         t.exist_logodds = row.exist_logodds;   // the belief as it is now: it is already a posterior
+        t.seen_wall_ms  = row.seen_wall_ms;    // …and its age goes with it (Task D-C)
+    }
     if (row.leaf.has_value())
     {
         if (t.leaf.has_value())
@@ -302,6 +322,7 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
             r.pose.reset();
             r.leaf.reset();
             r.exist_logodds.reset();
+            r.seen_wall_ms.reset();
             ++n;
         }
     return n;
@@ -313,9 +334,32 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
 /// REMOVED for absence that a new detection brings back: its shape is remembered but its existence restarts from
 /// BirthLogodds, because the last thing known about it was evidence AGAINST it. A restored door was alive when its room
 /// was left — the last thing known is the belief it then held — so that belief is the prior, not a fresh birth's.
-inline float restore_existence_prior(const IdentityRow& r, float default_L)
+///
+/// ★Task D-C (rtD1i door_5): A REMEMBERED BELIEF DECAYS TOWARD THE BIRTH PRIOR WITH THE TIME SINCE THE DOOR WAS LAST SEEN.
+///  door_5 came back three times at L = −4 (P 0.02) — already below the removal bound — because one bad visit (a shut door
+///  read as open, then refuted by the image) wrote −4 and the memory held it as a frozen posterior. A memory is evidence
+///  with an AGE: with probability 1 − e^{−h·Δt} the scene the evidence was about has changed since (the door state was
+///  redrawn from the prior), so P = e^{−h·Δt}·P_mem + (1 − e^{−h·Δt})·P_birth — the standard change-point (hazard) mixture,
+///  in probability, not in log-odds.
+///  THE HAZARD'S SOURCE: h = kLeafMoveHyperShape / kLeafMoveHyperTimeS = 1/600 s (door_leaf_channel.h), the hyperprior of
+///  the one scene-change rate this agent models — an uncommanded leaf move per 10-min run length. The existence channels
+///  are conditioned on the leaf (silhouette, contour and frame are all rendered at φ), so an existence verdict is only as
+///  current as the leaf state it was formed under. Not a new constant: the leaf channel's own.
+///  Δt unknown (a 17-column row, or no stamp) ⇒ the memory's age is unknown ⇒ survival 0 ⇒ the birth prior: the row is
+///  still an identity (name + place), but carries no existence belief.
+inline constexpr double kRememberedExistenceHazardPerS = 1.0 / 600.0;   // = kLeafMoveHyperShape / kLeafMoveHyperTimeS
+inline float restore_existence_prior(const IdentityRow& r, float default_L, std::int64_t now_wall_ms)
 {
-    return r.exist_logodds.has_value() and std::isfinite(*r.exist_logodds) ? *r.exist_logodds : default_L;
+    if (not r.exist_logodds.has_value() or not std::isfinite(*r.exist_logodds))
+        return default_L;
+    if (not r.seen_wall_ms.has_value())
+        return default_L;
+    const double dt_s = std::max<double>(0.0, static_cast<double>(now_wall_ms - *r.seen_wall_ms) * 1e-3);
+    const double surv = std::exp(-kRememberedExistenceHazardPerS * dt_s);
+    const double p_mem = 1.0 / (1.0 + std::exp(-static_cast<double>(*r.exist_logodds)));
+    const double p_birth = 1.0 / (1.0 + std::exp(-static_cast<double>(default_L)));
+    const double p = surv * p_mem + (1.0 - surv) * p_birth;
+    return static_cast<float>(std::log(p / (1.0 - p)));
 }
 
 /// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door
@@ -350,6 +394,10 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, float prior_L, flo
     inst.existence.set_max(max_L);
     inst.existence.set(prior_L);
     inst.existence_seeded = true;
+    // Task D-C: the removal decision weighs what the data do SINCE this entry (DoorFitState::existence_entry_L), and the
+    // door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
+    inst.existence_entry_L = inst.existence.logodds();
+    inst.last_detection_wall_ms = r.seen_wall_ms.value_or(0);
     inst.matched_frames   = std::max(inst.matched_frames, kFitWithoutFreshDataFrames);
     inst.seed_wh_from_box = true;
     if (r.leaf.has_value())

@@ -5,6 +5,7 @@
 // Build + run:
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_identity_table.cpp -o /tmp/test_door_identity_table && /tmp/test_door_identity_table
 #include <clocale>
+#include <cstdint>
 #include <cmath>
 #include <print>
 #include <sstream>
@@ -22,6 +23,7 @@ static int fails = 0;
 #define CHECK(c) do { if (not (c)) { ++fails; std::print("FAIL {}:{}  {}\n", __FILE__, __LINE__, #c); } } while (0)
 static bool near(float a, float b, float tol = 1e-5f) { return std::abs(a - b) <= tol; }
 
+static constexpr std::int64_t kNowMs = 1'792'612'380'153;   // a real wall-clock stamp (rtD1i): 13 digits, not a float
 static IdentityRow full_row(std::string room, std::string name, float x, float y)
 {
     IdentityRow r;
@@ -29,6 +31,7 @@ static IdentityRow full_row(std::string room, std::string name, float x, float y
     r.pose = RestorePose{3.10f, 0.95f, 2.13f, 0.05f};
     r.exist_logodds = 4.0f;
     r.leaf = LeafMemory{{-0.09f, 4.61f}, {0.0f, -1.0f}, 19.7f, 9.3f, 0.031f, 0.12f};
+    r.seen_wall_ms = kNowMs;   // seen just now
     return r;
 }
 
@@ -62,6 +65,7 @@ int main()
             CHECK(a.pose.has_value() and near(a.pose->yaw, 3.10f) and near(a.pose->width, 0.95f)
                   and near(a.pose->height, 2.13f) and near(a.pose->depth, 0.05f));
             CHECK(a.exist_logodds.has_value() and near(*a.exist_logodds, 4.0f));
+            CHECK(a.seen_wall_ms.has_value() and *a.seen_wall_ms == kNowMs);   // Task D-C: the age, exactly (int64)
             CHECK(a.leaf.has_value() and near(a.leaf->hinge_xy.x(), -0.09f) and near(a.leaf->open_dir.y(), -1.0f)
                   and near(a.leaf->hinge_llr, 19.7f) and near(a.leaf->swing_llr, 9.3f)
                   and near(a.leaf->phi, 0.031f) and near(a.leaf->phi_sigma, 0.12f));
@@ -155,11 +159,54 @@ int main()
     }
     // 3f. Existence prior: remembered L when written, the stated default otherwise.
     {
-        CHECK(near(restore_existence_prior(table[0], 1.0f), 4.0f));
+        CHECK(near(restore_existence_prior(table[0], 1.0f, kNowMs), 4.0f, 1e-3f));   // seen just now: the memory itself
         IdentityRow r = table[0]; r.exist_logodds.reset();
-        CHECK(near(restore_existence_prior(r, 1.0f), 1.0f));
+        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs), 1.0f));
         r.exist_logodds = std::numeric_limits<float>::quiet_NaN();
-        CHECK(near(restore_existence_prior(r, 1.0f), 1.0f));
+        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs), 1.0f));
+    }
+    // 3g. Task D-C (rtD1i door_5): a remembered belief DECAYS toward the birth prior with the time since the door was last
+    //     seen, at the leaf channel's change hazard h = 1/600 s (P = e^{-hΔt}·P_mem + (1 − e^{-hΔt})·P_birth). door_5 left
+    //     at L = −4 and was restored 132 s later at −4, below the removal bound logit(0.12) = −1.99; now it enters above it.
+    {
+        IdentityRow r = table[0];
+        r.exist_logodds = -4.0f;
+        r.seen_wall_ms = kNowMs - 132'000;
+        const float L132 = restore_existence_prior(r, 1.0f, kNowMs);
+        const double s = std::exp(-132.0 / 600.0), pm = 1.0 / (1.0 + std::exp(4.0)), pb = 1.0 / (1.0 + std::exp(-1.0));
+        const double p = s * pm + (1.0 - s) * pb;
+        std::print("remembered L -4 seen 132 s ago -> prior L {:.3f} (closed form {:.3f}); removal bound {:.3f}\n",
+                   L132, std::log(p / (1.0 - p)), std::log(0.12 / 0.88));
+        CHECK(near(L132, static_cast<float>(std::log(p / (1.0 - p))), 1e-4f));
+        CHECK(L132 > std::log(0.12f / 0.88f));
+        // monotone in the age, between the memory (Δt = 0) and the birth prior (Δt → ∞)
+        float prev = restore_existence_prior(r, 1.0f, kNowMs - 132'000);
+        CHECK(near(prev, -4.0f, 1e-3f));
+        for (const std::int64_t age_s : {10, 60, 300, 1200, 7200})
+        {
+            const float L = restore_existence_prior(r, 1.0f, kNowMs - 132'000 + age_s * 1000);
+            CHECK(L > prev);
+            prev = L;
+        }
+        CHECK(near(prev, 1.0f, 2e-3f));
+        // a clock that went backwards (a stamp from the future) is age 0, never a negative age
+        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs - 200'000), -4.0f, 1e-3f));
+        // no stamp (a 17-column row written before the column existed) ⇒ unknown age ⇒ the birth prior
+        r.seen_wall_ms.reset();
+        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs), 1.0f));
+        // a 17-column row parses (no seen_ms) and an 18-column one carries it; upsert carries the stamp with the belief
+        std::stringstream old17;
+        old17 << "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma\n"
+              << "room_1,door_5,0.88,2.65,-3.2,1.0,2.1,0.1,-4,,,,,,,,\n";
+        const auto p17 = parse_identity_table(old17);
+        CHECK(p17.malformed == 0 and p17.rows.size() == 1);
+        if (p17.rows.size() == 1)
+            CHECK(p17.rows[0].exist_logodds.has_value() and not p17.rows[0].seen_wall_ms.has_value());
+        std::vector<IdentityRow> t{full_row("room_1", "door_5", 0.88f, 2.65f)};
+        auto w = full_row("", "door_5", 0.88f, 2.65f);
+        w.exist_logodds = -4.0f; w.seen_wall_ms = kNowMs + 5000;
+        upsert_row(t, "room_1", w, 1.45f, 0.02f);
+        CHECK(t.size() == 1 and t[0].seen_wall_ms == kNowMs + 5000 and near(*t[0].exist_logodds, -4.0f));
     }
 
     // ── 4. Stale rows: a FRESH entry of room_1 strips its restore data; a later recall restores only doors seen since ──
@@ -218,7 +265,8 @@ int main()
     //      process_door_node runs run_inference and the pragmatic affordances (which need a fitted aperture) appear.
     {
         struct FakeModel { State s; const State& state() const { return s; } void set_state(const State& x) { s = x; } };
-        struct FakeExist { float L = 0.f, mx = 4.f; void set_max(float m) { mx = m; } void set(float l) { L = std::clamp(l, -mx, mx); } };
+        struct FakeExist { float L = 0.f, mx = 4.f; void set_max(float m) { mx = m; } void set(float l) { L = std::clamp(l, -mx, mx); }
+                           float logodds() const { return L; } };
         struct FakeInst
         {
             FakeModel model; FakeExist existence; bool existence_seeded = false; int matched_frames = 0;
@@ -226,19 +274,21 @@ int main()
             std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
             float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
             std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
+            float existence_entry_L = 1.f; std::int64_t last_detection_wall_ms = 0;
         } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
         CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
         const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);
-        seed_restored_instance(inst, r, restore_existence_prior(r, 1.0f), 4.0f, std::chrono::steady_clock::now());
+        seed_restored_instance(inst, r, restore_existence_prior(r, 1.0f, kNowMs), 4.0f, std::chrono::steady_clock::now());
         CHECK(near(inst.model.s.ap_cx, -0.57f) and near(inst.model.s.ap_cy, 4.61f) and near(inst.model.s.cx, -0.57f));
         CHECK(near(inst.model.s.ap_yaw, 3.10f) and near(inst.model.s.w, 0.95f) and near(inst.model.s.h, 2.13f));
-        CHECK(inst.existence_seeded and near(inst.existence.L, 4.0f));
+        CHECK(inst.existence_seeded and near(inst.existence.L, 4.0f, 1e-3f));
+        CHECK(near(inst.existence_entry_L, inst.existence.L) and inst.last_detection_wall_ms == kNowMs);   // Task D-C
         CHECK(fitted_this_cycle(false, inst.matched_frames));               // fitted with no fresh mask
         CHECK(inst.seed_wh_from_box and inst.leaf_side_hint.has_value() and not inst.phi_from_command);
         // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.
         IdentityRow id_only; id_only.room = "room_1"; id_only.name = "door_5"; id_only.xy = {2.f, -3.f};
         FakeInst j;
-        seed_restored_instance(j, id_only, restore_existence_prior(id_only, 1.0f), 4.0f, std::chrono::steady_clock::now());
+        seed_restored_instance(j, id_only, restore_existence_prior(id_only, 1.0f, kNowMs), 4.0f, std::chrono::steady_clock::now());
         CHECK(near(j.model.s.ap_cx, 2.f) and near(j.existence.L, 1.0f) and not j.leaf_side_hint.has_value());
     }
 

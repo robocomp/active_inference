@@ -706,6 +706,26 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     // ρ 0 so no second correlation discount is applied on top (the review's double counting).
     policy.frame_correlation = 0.0f;
 
+    // ★Task D-C (rtD1i door_5): REMOVAL IS DECIDED ON THE EVIDENCE GATHERED SINCE ENTRY, NOT ON THE PRIOR THE DOOR ENTERED
+    // WITH. A door restored from memory came back at its remembered L = −4, already below the removal bound (−1.99), so the
+    // shared debounce counted P(detect)-weighted looks as "sustained condemnation" although the data since the restore were
+    // net POSITIVE (L −4.00 → −3.04, +0.96 nats) — the prior alone completed the remove streak. The Wald/SPRT reading of
+    // the same decision: the test starts at entry and decides on what the data since entry did to the belief; the prior
+    // enters once, in the posterior, and cannot by itself execute a removal. So a door that ENTERED below the bound is
+    // condemned only while the data have pushed it further down (L < existence_entry_L); otherwise the decision sees the
+    // belief AT the bound (not condemned: the shared policy resets the streak, as for any belief above it).
+    // A door that entered at or above the bound (every fresh birth: Existence.BirthLogodds = +1) is decided exactly as
+    // before — for it, "below the bound" already means "pushed down by data".
+    const float L_bound = [&] { const float p = std::clamp(policy.removal_prob, 1e-3f, 0.5f); return std::log(p / (1.0f - p)); }();
+    const auto decide = [&](rc::DoorFitState& inst, float look)
+    {
+        if (not (inst.existence_entry_L < L_bound) or inst.existence.logodds() < inst.existence_entry_L)
+            return rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, look);
+        rc::exist::ExistenceBelief at_bound = inst.existence;
+        at_bound.set(std::max(inst.existence.logodds(), L_bound));
+        return rc::exist::decide_removal(at_bound, inst.existence_debounce, policy, look);
+    };
+
     // ★ONE PreparedFrame (blur + Sobel + whole-frame gradient reference) per cycle, shared by every door's
     // leaf contour AND its aperture frame. The one-shot contour_edge_support(img, ...) recomputed all of it
     // per door for a result identical every time; the arithmetic of the score is unchanged.
@@ -748,6 +768,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         {
             inst.existence.set(cfg.exist_birth_logodds);
             inst.existence_seeded = true;
+            inst.existence_entry_L = inst.existence.logodds();
         }
 
         // ── ROOM-CONTAINMENT PRIOR: THE WALL BAND (door_room_band.h) ────────────────────────────────────
@@ -801,7 +822,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         {
             inst.existence.set(inst.existence.logodds() - cfg.exist_short_gain);
             // Same as the room prior: a categorical fact about what a door IS, so it needs no visibility.
-            if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, 1.0f).remove)
+            if (decide(inst, 1.0f).remove)
                 to_remove.push_back(id);
             continue;   // too short to be a door → no amount of silhouette agreement makes it one
         }
@@ -991,7 +1012,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             integrate_image_geometry(/*leaf_visible=*/false);
             // The wall-band prior needs no look: an off-band door advances its debounce here too (a door the
             // sensor can never reach — behind a wall — is exactly the case that prior exists for).
-            if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, prior_look).remove)
+            if (decide(inst, prior_look).remove)
                 to_remove.push_back(id);
             continue;
         }
@@ -1248,7 +1269,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // forever once the robot looks away; the shared policy lets confidence discharge the repetition.
         // Either the look (p_detect) or the wall-band prior (1 − π) can resolve this cycle: probabilistic OR.
         const float cycle_look = 1.0f - (1.0f - p_detect) * (1.0f - prior_look);
-        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, cycle_look);
+        const auto verdict = decide(inst, cycle_look);
         if (verdict.remove)
             to_remove.push_back(id);
         if (verdict.stalled)

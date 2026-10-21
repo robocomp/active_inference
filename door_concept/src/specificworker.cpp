@@ -1867,6 +1867,8 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
         row.pose = rc::door::RestorePose{s.ap_yaw, s.w, s.h, s.thickness};
     if (inst.existence_seeded)
         row.exist_logodds = inst.existence.logodds();
+    if (inst.last_detection_wall_ms > 0)
+        row.seen_wall_ms = inst.last_detection_wall_ms;   // Task D-C: the remembered belief's age
     const Eigen::Vector2f open = inst.leaf.swing * inst.aperture.across_u();
     if (inst.leaf_pose.hinge_xy.allFinite() and open.allFinite() and std::isfinite(inst.phi_est)
         and std::isfinite(inst.phi_sigma) and std::isfinite(inst.hinge_llr) and std::isfinite(inst.swing_llr))
@@ -3482,7 +3484,8 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
     for (const auto& r : d.restore)
     {
         const auto names = reserved_names();
-        const float prior_L = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds);
+        // Task D-C: the remembered belief, decayed toward BirthLogodds by the time since the door was last seen.
+        const float prior_L = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds, static_cast<std::int64_t>(rc::provenance::now_ms()));
         // Door node origin = aperture centre on the floor, yaw = the aperture's (write_rt_pose's room-frame form).
         const auto id = scene_graph_->create_door_copy(room.value(), r.pose->width, r.pose->depth, r.pose->height,
                                                        std::nullopt, r.leaf.has_value() ? std::optional<float>(r.leaf->phi) : std::nullopt,
@@ -3521,7 +3524,11 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
                    "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
                    n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, prior_L,
-                   inst.existence.p_exists(), r.exist_logodds.has_value() ? "remembered" : "default BirthLogodds",
+                   inst.existence.p_exists(),
+                   not r.exist_logodds.has_value() ? "default BirthLogodds"
+                   : r.seen_wall_ms.has_value() ? std::format("remembered L={:.2f}, seen {:.0f} s ago, decayed toward BirthLogodds",
+                                                              *r.exist_logodds, 1e-3 * double(static_cast<std::int64_t>(rc::provenance::now_ms()) - *r.seen_wall_ms))
+                                                : std::string("remembered with no age: BirthLogodds"),
                    r.leaf.has_value() ? "yes" : "no");
     }
 }
@@ -3611,7 +3618,7 @@ void SpecificWorker::step_remembered_looks()
         if (it == looks_.end())
         {
             // The prior: what memory says (the row's existence when written; BirthLogodds for an identity-only row).
-            const float L0 = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds);
+            const float L0 = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds, static_cast<std::int64_t>(rc::provenance::now_ms()));
             it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(1.0f / (1.0f + std::exp(-L0)), pol), {}, false}).first;
             it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");
             std::print("door_concept: [look] '{}' remembered in '{}' at ({:.2f},{:.2f}) is not in the graph — offering a "

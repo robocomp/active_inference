@@ -299,6 +299,13 @@ struct DoorFitState
     // Task 5b item 4: the silhouette's evidence pooled by the same view model (door_view_pool.h add_logodds).
     door::ViewPool silhouette_view_pool{};
     bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
+    // Task D-C: the log-odds the belief ENTERED with (birth seed, adoption or restore). Removal is decided on what the data
+    // did since entry, not on the prior the door entered with (DoorCore::update_existence): a door restored below the
+    // removal bound must be pushed further down by data before it can be condemned.
+    float existence_entry_L = 1.0f;
+    // Task D-C: wall-clock ms (the cycle's t_wall_ms) of the last fresh detection; restored from the identity row's
+    // seen_ms. Written to the row so a remembered belief carries its age (restore_existence_prior). 0 = never.
+    std::int64_t last_detection_wall_ms = 0;
     // Accumulated LOOKS (Σ p_detect) whose decision says "remove" — NOT a count of cycles. A cycle in which
     // the door could not have been resolved (p_detect → 0) correctly leaves L untouched, and must leave the
     // debounce untouched too, or the door is condemned by evidence gathered once and executed later while

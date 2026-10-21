@@ -374,6 +374,7 @@ DoorObservation DoorFit::observe(rc::DoorFitState& inst)
             const auto& slice = selected_mask.value();
             // YOLO fired for this door on a fresh frame → detection is alive.
             inst.frames_since_detection = 0;
+            inst.last_detection_wall_ms = t_wall_ms_;   // Task D-C: the age of what the identity row will remember
             inst.last_mask_confidence = slice.confidence;
             inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
             inst.last_motion_var  = slice.motion_var;     // AI2 ego-motion / range / truncation channels

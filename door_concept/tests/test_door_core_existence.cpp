@@ -389,6 +389,60 @@ int main()
         CHECK(not L.empty() and L.back() > L_remove);
     }
 
+    // ── 9. Task D-C (rtD1i door_5): a door RESTORED below the removal bound is removed only by data that push it further
+    //    down. It entered at L0 = −3.5 (a remembered −4 decayed by the hazard, door_identity_table.h) and the parked looks
+    //    that follow are net POSITIVE (the door is lit, pooled by view to one observation): the old rule counted those looks
+    //    as sustained condemnation (the prior alone sat below logit(RemovalProb)) and removed it; now it must survive. The
+    //    same restored door then truly ABSENT from new views (the sweep) is still removed.
+    for (const bool absent_after : {false, true})
+    {
+        DoorCoreConfig cfg;
+        ExistWorld w;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        std::vector<rc::door::DoorDecision> removes;
+        std::vector<double> Ls;
+        core.connect(&w, {.decision = [&](const rc::door::DoorDecision& d)
+                          {
+                              if (d.kind == static_cast<std::uint16_t>(K::Remove)) removes.push_back(d);
+                              if (d.kind == static_cast<std::uint16_t>(K::Existence)) Ls.push_back(d.a);
+                          }, .diag = {}});
+        int c = 0;
+        for (; c < 40; ++c)   // born and fitted, parked square-on
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c + 1), c + 1, Phase::Present));
+        CHECK(w.st.size() == 1);
+        if (w.st.size() != 1) continue;
+        auto& inst = w.st.begin()->second;
+        // the restore (rc::door::seed_restored_instance's existence half): the remembered prior, the debounce afresh
+        inst.existence.set(-3.5f);
+        inst.existence_entry_L = inst.existence.logodds();
+        inst.existence_debounce = {};
+        inst.silhouette_view_pool = {};
+        inst.image_view_pool = {};
+        const double L_entry = inst.existence.logodds();
+        Ls.clear();
+        for (int k = 0; k < 240; ++k, ++c)
+        {
+            float rx = 1.0f;
+            if (absent_after) { const int q = k % 12; rx = 1.0f + 1.5f * (q < 6 ? (static_cast<float>(q) / 3.0f - 1.0f) : (1.0f - static_cast<float>(q - 6) / 3.0f)); }
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c + 1), c + 1, absent_after ? Phase::Absent : Phase::Present,
+                                        false, kWallY, rx));
+            if (not removes.empty()) break;
+        }
+        double L_min = 1e9, L_max = -1e9;
+        for (const double v : Ls) { L_min = std::min(L_min, v); L_max = std::max(L_max, v); }
+        std::print("restored at L {:.2f} then {}: {} REMOVE, L range [{:.2f}, {:.2f}] (bound {:.2f})\n", L_entry,
+                   absent_after ? "absent from new views" : "lit, parked", removes.size(), L_min, L_max, L_remove);
+        if (absent_after)
+            CHECK(removes.size() == 1);                       // data against it since entry ⇒ removed
+        else
+        {
+            CHECK(L_min >= L_entry - 1e-6);                   // the data since entry are net positive …
+            CHECK(removes.empty());                           // … so the remembered prior alone does not remove it
+        }
+    }
+
     // ── 11. Task D-C (rtD1i door_5, visit 1): A DOOR HIDDEN BEHIND A PARTITION IS NOT SEEN, SO IT IS NOT ABSENT. DOOR_0's
     //     hinge jamb stands 7 cm from the corner where a partition meets its wall; rc::occlusion::walls_block skipped every
     //     edge within 0.30 m of a sample as "the target's own wall", so both faces of the partition were skipped for the
