@@ -84,8 +84,10 @@ public:
     /// After SemanticProbField::refresh().
     void capture_semantic(const rc::SemanticProbField& f, bool refreshed_ok);
     /// The existence update is about to score the images: which frames (nullptr = not used this cycle).
+    /// `rgb_cols/rows` = the RGB frame's size whenever the ingestor holds one (0 if empty): the depth checks scale by it
+    /// even when the RGB half is not used, so the depth crop must too.
     void note_images(const cv::Mat* bgr, std::uint64_t rgb_stamp_ms, float frame_ref,
-                     const cv::Mat* depth, std::uint64_t depth_stamp_ms);
+                     const cv::Mat* depth, std::uint64_t depth_stamp_ms, int rgb_cols, int rgb_rows);
     /// A closed polygon (full RGB frame pixels) whose BOUNDARY a check samples (the leaf quad / its controls), with the
     /// extra reach of that check beyond the boundary, and which image(s) the check reads there. Recorded as short
     /// chunks along each edge, not the polygon's box: the checks never read the interior.
@@ -126,6 +128,7 @@ private:
     const cv::Mat* depth_ = nullptr;
     std::uint64_t rgb_stamp_ = 0, depth_stamp_ = 0;
     float frame_ref_ = 0.f;
+    int rgb_cols_ = 0, rgb_rows_ = 0;
     std::vector<Rect> rois_rgb_, rois_depth_;
 };
 

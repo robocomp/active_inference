@@ -226,6 +226,24 @@ int main()
         check(v.size() == 2 and v[0].name == "table" and v[1].name == "x", "keep_foreign drops exactly the own rows");
         check(created_by(own_id(77), kAgent) and not created_by(foreign_id(77), kAgent), "created_by on the low 12 bits");
     }
+    // bpearl: the robot-frame plane alone (pump() returned false — a room switch with the anchor in flight) is recorded
+    {
+        const std::vector<Vec3f> room_pts{{1, 2, 0}}, robot_pts{{0.5f, 1.f, 0.1f}, {0.6f, 1.1f, 0.1f}};
+        check(not make_bpearl_sweep(false, room_pts, Vec3f::Zero(), false, robot_pts, Vec3f::Zero(), 7).has_value(),
+              "no plane fresh: nothing recorded");
+        const auto b = make_bpearl_sweep(false, room_pts, Vec3f::Zero(), true, robot_pts, Vec3f(0, 0, 0.3f), 1234);
+        check(b.has_value() and not b->room_fresh and b->pts_room.empty() and b->robot_fresh
+              and b->pts_robot == robot_pts and b->robot_stamp_ms == 1234 and b->origin_robot == Vec3f(0, 0, 0.3f),
+              "robot-plane-only sweep recorded (room plane left empty)");
+        DoorCycleInput in; in.cycle = 1; in.bpearl = b;
+        std::ostringstream o(std::ios::binary);
+        check(write(o, in), "serialise robot-only sweep");
+        std::istringstream i(o.str(), std::ios::binary);
+        const auto back = read_input(i);
+        check(back.has_value() and back->bpearl == b, "robot-only sweep round-trips");
+        const auto both = make_bpearl_sweep(true, room_pts, Vec3f::Zero(), true, robot_pts, Vec3f::Zero(), 9);
+        check(both.has_value() and both->room_fresh and both->pts_room == room_pts and both->robot_fresh, "both planes recorded");
+    }
     // self-requested vs another agent's deletion of OUR node (ruling, Task 3)
     {
         InputLatch l(kAgent);
@@ -239,11 +257,10 @@ int main()
         check(not l.node_deleted(own_id(900), 11), "late echo of a self-requested delete: not latched");
         check(l.node_deleted(own_id(901), 12), "own node deleted by another agent: latched");
         check(l.node_deleted(foreign_id(902), 13), "foreign delete: latched");
-        { InputLatch::SelfScope s2(l); check(l.node_deleted(foreign_id(903), 14), "foreign delete inside our scope: still latched"); }
+        { InputLatch::SelfScope s2(l); check(not l.node_deleted(foreign_id(903), 14), "foreign node deleted BY US (in scope): dropped"); }
         DoorCycleInput in;
         l.begin_cycle(in); l.end_cycle();
-        const std::vector<DoorEvent> want{{12, NodeDeleted{own_id(901), true}}, {13, NodeDeleted{foreign_id(902), false}},
-                                          {14, NodeDeleted{foreign_id(903), false}}};
+        const std::vector<DoorEvent> want{{12, NodeDeleted{own_id(901), true}}, {13, NodeDeleted{foreign_id(902), false}}};
         check(in.events == want, "deletion events: by_other_agent exactly on the own id nobody here asked to delete");
     }
 

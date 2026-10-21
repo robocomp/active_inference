@@ -1234,8 +1234,12 @@ void SpecificWorker::compute()
         //   would fall back to the room route in the doorway. Keep it alive; only the re-init waits for a room.
         if (passage_anchor_.has_value())
         {
-            if (lidar_ingestor_ and lidar_ingestor_->pump())   // the room-frame sweep fails here; the robot-frame one does not
+            if (lidar_ingestor_)   // the room-frame sweep fails here; the robot-frame one does not
+            {
+                lidar_ingestor_->pump();
+                // ★After EVERY pump: pump() reports room freshness only; the robot-frame sweep can be fresh alone.
                 input_snapshot_.capture_bpearl(*G, inner_eigen_.get(), *lidar_ingestor_);
+            }
             if (mask_ingestor_)
             {
                 mask_ingestor_->refresh();
@@ -1261,7 +1265,7 @@ void SpecificWorker::compute()
     refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
     // Low LiDAR sweep in the ROOM frame — the hinge branch's evidence. Main thread (reads the graph).
     const bool lidar_pumped = lidar_ingestor_ and lidar_ingestor_->pump();
-    if (lidar_pumped)
+    if (lidar_ingestor_)   // after EVERY pump: its return omits the robot-frame plane (make_bpearl_sweep)
         input_snapshot_.capture_bpearl(*G, inner_eigen_.get(), *lidar_ingestor_);
     if (lidar_pumped and lidar_ingestor_->bpearl_fresh())
         fitter_->set_leaf_points(lidar_ingestor_->sweep_bpearl_room(),
@@ -2404,7 +2408,9 @@ void SpecificWorker::update_existence_beliefs()
         input_snapshot_.note_images(not rgb_prep.gx.empty() ? &rgb_ingestor_->frame() : nullptr,
                                     rgb_ingestor_ ? rgb_ingestor_->stamp_ms() : 0, rgb_prep.frame_ref,
                                     depth_used ? &depth_ingestor_->frame() : nullptr,
-                                    depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0);
+                                    depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0,
+                                    rgb_ingestor_ ? rgb_ingestor_->frame().cols : 0,
+                                    rgb_ingestor_ ? rgb_ingestor_->frame().rows : 0);
     }
 
     std::vector<std::uint64_t> to_remove;

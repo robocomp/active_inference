@@ -42,6 +42,23 @@ void keep_foreign(std::vector<Row>& rows, std::uint32_t agent_id)
     std::erase_if(rows, [agent_id](const Row& r) { return not is_foreign(r.id, agent_id); });
 }
 
+/// What a ConceptLidarIngestor::pump() staged, as recorded: nullopt when NEITHER bpearl plane is fresh. ★The two planes
+/// are independent: pump() returns helios|bpearl ROOM freshness only, while the ROBOT-frame sweep (what the passage
+/// anchor reads mid room-switch, when the room-frame one fails) can be fresh alone — so this is asked after EVERY pump,
+/// whatever pump() returned. The room←robot transform at the capture is filled by the adapter.
+[[nodiscard]] inline std::optional<core::BpearlSweep> make_bpearl_sweep(
+    bool room_fresh, const std::vector<core::Vec3f>& pts_room, const core::Vec3f& origin_room,
+    bool robot_fresh, const std::vector<core::Vec3f>& pts_robot, const core::Vec3f& origin_robot, std::int64_t robot_stamp_ms)
+{
+    if (not (room_fresh or robot_fresh)) return std::nullopt;
+    core::BpearlSweep b;
+    b.room_fresh = room_fresh;
+    if (room_fresh) { b.pts_room = pts_room; b.origin_room = origin_room; }
+    b.robot_fresh = robot_fresh;
+    if (robot_fresh) { b.pts_robot = pts_robot; b.origin_robot = origin_robot; b.robot_stamp_ms = robot_stamp_ms; }
+    return b;
+}
+
 class InputLatch
 {
 public:
@@ -64,8 +81,12 @@ public:
     };
     /// A node deleted. Foreign ids are latched; an own id is latched with by_other_agent = true unless door_concept
     /// requested the deletion (in a SelfScope now, or seen deleted in one before). Returns whether it was latched.
+    /// ★A FOREIGN-created node deleted INSIDE a SelfScope was deleted BY US (e.g. the startup sweep reaping a door node
+    /// of a name we own): the core issues that delete itself, so it is dropped like any self-requested delete.
     bool node_deleted(std::uint64_t id, std::int64_t t_ns)
     {
+        if (is_foreign(id, agent_id_) and in_self())
+            return false;
         if (is_foreign(id, agent_id_))
         {
             pending_.push_back({t_ns, core::NodeDeleted{id, false}});

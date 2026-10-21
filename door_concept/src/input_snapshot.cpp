@@ -386,27 +386,21 @@ void InputSnapshot::capture_masks(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, D
 
 void InputSnapshot::capture_bpearl(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, const rc::ConceptLidarIngestor& l)
 {
-    if (not in_cycle_ or not (l.bpearl_fresh() or l.bpearl_robot_fresh())) return;
-    core::BpearlSweep b;
-    b.room_fresh = l.bpearl_fresh();
-    if (b.room_fresh)
-    {
-        b.pts_room = l.sweep_bpearl_room();
-        b.origin_room = l.origin_bpearl_room();
-    }
-    b.robot_fresh = l.bpearl_robot_fresh();
+    if (not in_cycle_) return;
+    auto sweep = make_bpearl_sweep(l.bpearl_fresh(), l.sweep_bpearl_room(), l.origin_bpearl_room(),
+                                   l.bpearl_robot_fresh(), l.sweep_bpearl_robot(), l.origin_bpearl_robot(),
+                                   l.bpearl_robot_stamp_ms());
+    if (not sweep.has_value()) return;
+    auto& b = sweep.value();
     if (b.robot_fresh)
     {
-        b.pts_robot = l.sweep_bpearl_robot();
-        b.origin_robot = l.origin_bpearl_robot();
-        b.robot_stamp_ms = l.bpearl_robot_stamp_ms();
         std::string robot;
         if (const auto robots = G.get_nodes_by_type("robot"); not robots.empty()) robot = robots.front().name();
         if (b.robot_stamp_ms > 0)   // check_anchor_ray_frames: room←robot at the capture stamp, Interpolated
             b.room_T_robot_capture = tf(inner, rc::room::current_room_frame(G), robot,
                                         static_cast<std::uint64_t>(b.robot_stamp_ms), DSR::RT_API::TimeQuery::Interpolated);
     }
-    cur_.bpearl = std::move(b);
+    cur_.bpearl = std::move(sweep);
 }
 
 void InputSnapshot::capture_semantic(const rc::SemanticProbField& f, bool refreshed_ok)
@@ -441,9 +435,11 @@ void InputSnapshot::capture_semantic(const rc::SemanticProbField& f, bool refres
 }
 
 void InputSnapshot::note_images(const cv::Mat* bgr, std::uint64_t rgb_stamp_ms, float frame_ref,
-                                const cv::Mat* depth, std::uint64_t depth_stamp_ms)
+                                const cv::Mat* depth, std::uint64_t depth_stamp_ms, int rgb_cols, int rgb_rows)
 {
     if (not in_cycle_) return;
+    rgb_cols_ = rgb_cols;
+    rgb_rows_ = rgb_rows;
     rgb_ = (bgr != nullptr and not bgr->empty()) ? bgr : nullptr;
     depth_ = (depth != nullptr and not depth->empty()) ? depth : nullptr;
     rgb_stamp_ = rgb_stamp_ms;
@@ -543,8 +539,10 @@ void InputSnapshot::end_cycle()
         d.width = depth_->cols; d.height = depth_->rows;
         d.stamp_ms = depth_stamp_;
         // ROIs are in RGB pixels; the depth reads are scaled by depth/rgb (contour_depth_support's depth_scale_*).
-        const double sx = rgb_ != nullptr and rgb_->cols > 0 ? double(depth_->cols) / rgb_->cols : 1.0;
-        const double sy = rgb_ != nullptr and rgb_->rows > 0 ? double(depth_->rows) / rgb_->rows : 1.0;
+        // ★The SAME scale the live checks use (depth_scale_* = depth / RGB frame size, 1 when the RGB frame is empty),
+        //  from the RGB frame's size passed by note_images even on a cycle whose RGB half did not run.
+        const double sx = rgb_cols_ > 0 ? double(depth_->cols) / rgb_cols_ : 1.0;
+        const double sy = rgb_rows_ > 0 ? double(depth_->rows) / rgb_rows_ : 1.0;
         for (const auto& r : rois_depth_)
         {
             const int x0 = int(std::floor(r.x0 * sx)) - kRoiMarginPx, y0 = int(std::floor(r.y0 * sy)) - kRoiMarginPx;
