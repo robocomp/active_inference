@@ -305,6 +305,9 @@ bool PosePublisher::maybe_publish_corrected_pose()
     // the base the NEXT prediction will be built on. It is what the next frame's measured-motion
     // difference must reference -- never the clamped pose, which no predictor ever sees.
     const Eigen::Affine2f est_pre_clamp = loc_res->robot_pose;
+    loc_res->estimate_pose       = loc_res->robot_pose;    // the crossing test's input (update_result.h, Task R1b)
+    loc_res->estimate_covariance = loc_res->covariance;
+    loc_res->estimate_valid      = true;
 
     // ★ RELOCALISATION IS NOT MOTION. A committed relocalisation (a search that moved the pose, a rival-mode
     //   switch) is a discrete change of belief about WHERE the robot is, not a correction the robot could have

@@ -6,7 +6,7 @@
 // door look identical from the SDF misfit alone (both read "the map no longer fits"), so the misfit is
 // NOT used here at all. This asks a purely geometric question about the belief we already hold:
 //
-//   p_geom  = P(footprint past the aperture line) · P(centre within the aperture span)
+//   p_geom  = P(body centre past the aperture line) · P(centre within the aperture span)
 //   p_cross : logit(p_cross) = logit(p_open) + logit(p_geom)
 //
 //   · p_open — door_concept's own marginalised belief that the leaf leaves a passable gap. A robot the
@@ -15,10 +15,10 @@
 //     door_open_prob is a weak belief: measured 2026-09-14 on the live apartamento it never rose above 0.14
 //     (the leaf-angle posterior is nearly flat — see door_concept). A cap would make the proto-room
 //     unreachable. Two independent pieces of evidence about the same binary question add in log-odds: a
-//     confident "the footprint is past the line" outweighs a lukewarm door belief, while a door believed
+//     confident "the centre is past the line" outweighs a lukewarm door belief, while a door believed
 //     firmly SHUT (logit ≪ 0) still vetoes a pose that claims to be through it.
 //   · past the line — s is the signed distance of the robot centre beyond the aperture, measured AWAY
-//     from the room interior; the whole footprint is past once s > r_body. σ_s is the pose covariance
+//     from the room interior; the robot is in the next room once its centre is past (s > 0; R1b). σ_s is the pose covariance
 //     projected on the aperture normal, so an uncertain pose gives a soft answer, not a confident one.
 //   · within the span — the lateral offset along the aperture must lie inside it, under the pose
 //     covariance projected on the aperture tangent. Without this a robot beside the wall, outside the
@@ -105,7 +105,7 @@ namespace rc::crossing
     {
         float p_cross  = 0.f;   ///< logit-sum of p_open and p_geom = P(past)·P(within span)
         float p_geom   = 0.f;   ///< P(past) · P(within span), the pose's own answer
-        float p_past   = 0.f;   ///< P(footprint past the aperture line), no p_open, no span
+        float p_past   = 0.f;   ///< P(body centre past the aperture line), no p_open, no span
         float p_span   = 0.f;   ///< P(centre within the aperture span), the other half of p_geom
         float s        = 0.f;   ///< signed distance of the robot centre past the line (m)
         float u        = 0.f;   ///< lateral offset from the aperture centre along a→b (m)
@@ -149,7 +149,15 @@ namespace rc::crossing
         const float sig_s = std::sqrt(c.n_out.dot(cov_xy * c.n_out) + 1e-8f);
         const float sig_t = std::sqrt(c.tangent.dot(cov_xy * c.tangent) + 1e-8f);
         const float half = 0.5f * w;
-        c.p_past = phi((c.s - r_body) / sig_s);
+        // ★ WHICH SIDE OF THE DOOR LINE IS THE BODY CENTRE ON (2026-10-21, Task R1b). Rooms partition the floor at
+        //   the door line, so "which room is the robot in" is the side its CENTRE is on, under the pose's own
+        //   covariance — not "is the whole footprint past". The footprint rule (Φ((s − r_body)/σ)) left a robot that
+        //   PAUSED straddling the doorway in the room behind it: live rtD1g2, centre 0.175 m past for 1.5 s (needs
+        //   > r_body 0.247), the old room then had to explain a view that was mostly the next room's (median |SDF|
+        //   ~1 m), the tracker was dragged back 2–4 m into it, and the hand-over never came. The centre test hands
+        //   over as soon as the sensor itself has passed the mouth — exactly when the room left behind stops owing
+        //   the view (DoorApertures::weight's doorway branch switches there too). r_body stays the doorway term's.
+        c.p_past = phi(c.s / sig_s);
         const float p_span = phi((half - c.u) / sig_t) * phi((half + c.u) / sig_t);
         c.p_geom  = c.p_past * p_span;
         // ★ CONJUNCTION, NOT A LOGIT SUM (2026-10-13). "Crossed through this door" = door passable AND footprint

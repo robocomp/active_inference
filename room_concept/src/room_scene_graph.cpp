@@ -882,9 +882,13 @@ void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
 void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& res, ProtoRow& row)
 {
 
-    const Eigen::Vector2f xy = res.robot_pose.translation();
-    const Eigen::Matrix2f cov_xy = res.covariance.topLeftCorner<2, 2>();
-    // The WHOLE footprint must be past the line: half the larger body dimension.
+    // ★ THE LOCALISER'S ESTIMATE, NOT THE PUBLISHED ONE (Task R1b). The publisher's clamp folds its backlog into the
+    //   published σ (rtD1g2: 0.03 → 1.9–4.3 m in 200 ms with the robot paused in the doorway), which drove p_past to
+    //   ½ and outside_prob 1 → 0.2: the crossing evidence destroyed by publication lag, not by pose uncertainty.
+    const Eigen::Vector2f xy = res.estimate_valid ? Eigen::Vector2f(res.estimate_pose.translation())
+                                                  : Eigen::Vector2f(res.robot_pose.translation());
+    const Eigen::Matrix2f cov_xy = (res.estimate_valid ? res.estimate_covariance : res.covariance).topLeftCorner<2, 2>();
+    // Half the larger body dimension: the doorway term (body front at the mouth) and the post-birth outside test.
     const float r_body = 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
 
     // ── After birth: how far outside are we? Only the crossed line matters now — the robot may walk

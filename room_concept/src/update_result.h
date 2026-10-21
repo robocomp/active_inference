@@ -31,6 +31,13 @@ namespace rc::loc
         // Set when the SDF optimization produced a non-finite pose and this result is a dead-reckoned
         // FALLBACK, not a fix. Consumers must treat it as such (its covariance is inflated to match).
         bool diverged = false;
+        /// The LOCALISER's own estimate, before the publisher's kinematic clamp rewrote robot_pose/covariance in this
+        /// copy (pose_publisher.cpp). The clamp's carry is publication LAG folded into σ — measured live (rtD1g2) at
+        /// 1.9–4.3 m while the estimate's own σ was ~3 cm — so a consumer asking "where is the robot" (the crossing
+        /// test) reads these, not the published pair. Valid only when the publisher filled them.
+        bool            estimate_valid = false;
+        Eigen::Affine2f estimate_pose = Eigen::Affine2f::Identity();
+        Eigen::Matrix3f estimate_covariance = Eigen::Matrix3f::Identity();
         float final_loss = 0.f;      // Scaled loss (for optimization)
         // MEDIAN |SDF| IN METRES — despite the name, which is legacy and kept only because two public
         // config keys (SymmetryGoodFitMse, StableSdfMseMax) are named after it. It is NOT a mean and

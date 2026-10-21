@@ -39,6 +39,7 @@
 #include "reloc_search.h"
 #include "room_concept.h"
 #include "epistemic_planner.h"
+#include "door_crossing.h"
 
 namespace rc
 {
@@ -756,6 +757,51 @@ int main()
                     "searched after %d frames (expect >0, finite) — %s\n",
                     static_cast<unsigned long long>(with_passage), static_cast<unsigned long long>(plain), fire,
                     pass ? "PASS" : "FAIL");
+    }
+    // L (Task R1b): THE DOORWAY PAUSE. rtD1g2's missed hand-over, replayed through the real crossing test
+    //    (rc::crossing::evaluate) and its decision level (ProtoRoom.BirthProb): the robot drives through a 1 m door,
+    //    STOPS with its centre 0.17 m past the line for 1.5 s, then continues. Live, the localiser's own σ stayed
+    //    ~3 cm while the pose clamp's carry inflated the PUBLISHED σ to 1.9–4.3 m during the pause, and the crossing
+    //    test (which read the published σ, and asked for the whole footprint past the line) never got past 0.83.
+    //    Expect: the localiser estimate's covariance in, ONE hand-over, on the first frames with the centre past the
+    //    line (never before it), and no dependence on the clamp's inflation.
+    {
+        rc::DoorAperture ap;
+        ap.a = {-0.5f, 0.f}; ap.b = {0.5f, 0.f}; ap.p_open = 1.f; ap.name = "door_fixture";
+        // The room left behind lies at y < 0; the door line is its top wall. Counter-clockwise.
+        const std::vector<Eigen::Vector2f> room_left{{-3.f, -4.f}, {3.f, -4.f}, {3.f, 0.f}, {-3.f, 0.f}};
+        const float r_body = 0.5f * std::max(0.46f, 0.48f);
+        const float birth = 0.95f;   // ProtoRoom.BirthProb (room_config.h)
+        struct F { float y; float sig_est; float sig_pub; };
+        std::vector<F> traj;
+        for (float y = -0.6f; y < 0.17f; y += 0.015f) traj.push_back({y, 0.03f, 0.03f});              // approach
+        for (int k = 0; k < 30; ++k) traj.push_back({0.17f, 0.03f, k < 10 ? 0.03f : 0.25f + 0.13f * k});   // pause
+        for (float y = 0.17f; y < 1.2f; y += 0.015f) traj.push_back({y, 0.03f, 0.03f});              // continue
+        int handovers = 0, first = -1, before_line = 0, handovers_published = 0;
+        bool born = false, born_pub = false;
+        for (std::size_t i = 0; i < traj.size(); ++i)
+        {
+            const auto& f = traj[i];
+            const Eigen::Vector2f xy(0.05f, f.y);
+            const auto c = rc::crossing::evaluate(ap, room_left, xy, Eigen::Matrix2f::Identity() * f.sig_est * f.sig_est, r_body);
+            if (not born and c.p_cross >= birth)
+            {
+                born = true; ++handovers; first = static_cast<int>(i);
+                if (f.y <= 0.f) ++before_line;
+            }
+            // The pre-R1b consumer: the PUBLISHED (clamp-inflated) σ and the whole footprint past the line.
+            const float sp = f.sig_pub;
+            const float p_old = rc::crossing::phi((c.s - r_body) / sp) * c.p_span;
+            if (not born_pub and f.y <= 0.17f and p_old >= birth) { born_pub = true; ++handovers_published; }
+        }
+        const float y_first = first >= 0 ? traj[static_cast<std::size_t>(first)].y : std::nan("");
+        const bool pass = handovers == 1 and before_line == 0 and y_first > 0.f and y_first < 0.17f
+                          and handovers_published == 0;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  L doorway pause (centre stops 0.17 m past the line) hand-overs %d (expect 1) at centre %.3f m past "
+                    "(expect (0, 0.17)), before the line %d (expect 0); the old footprint rule on the published σ handed "
+                    "over %d times during the pause (the live defect: 0) — %s\n",
+                    handovers, y_first, before_line, handovers_published, pass ? "PASS" : "FAIL");
     }
     if (r1_failures > 0) std::printf("\n  Task R1 cases: %d FAILED\n", r1_failures);
 
