@@ -79,6 +79,7 @@ struct DoorDecision
     std::string   name;
     double a = 0, b = 0, c = 0, d = 0;
     std::string   note;
+    bool operator==(const DoorDecision&) const = default;   // DoorCycleOutput carries these (core/door_cycle_io.h)
 };
 
 class DoorDecisionLog

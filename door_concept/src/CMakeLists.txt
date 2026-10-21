@@ -35,6 +35,8 @@ LIST(APPEND SOURCES
   ../src/door_model.cpp
   ../src/door_belief.cpp
   ../src/epistemic_planner.cpp
+  # The DSR-free DoorCore (src/core/: NO DSR / Qt / Ice / media includes — tests/test_door_cycle_io.cpp enforces it).
+  ../src/core/door_cycle_io.cpp
   # The robot-relative copy of a door hung from the robot while its affordance executes.
   ../../common/interaction_anchor/interaction_anchor.cpp
 )
