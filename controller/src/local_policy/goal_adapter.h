@@ -238,7 +238,7 @@ class TurnSignBelief
 public:
     static constexpr float kPrior = 0.01f, kOnset = 1e-6f;
     void update(float theta_odo, float disp_odo, float dyaw_pose, float dp_pose, float sigma_odo_yaw, float sigma_pose_yaw,
-                float sigma_p, float sigma_corr)
+                float sigma_p, float sigma_corr, float dt = 0.f)
     {
         p_ = p_ + (1.f - p_) * kOnset;                                     // onset only; no repair
         const float sn2 = sigma_odo_yaw * sigma_odo_yaw + 2.f * sigma_pose_yaw * sigma_pose_yaw;
@@ -253,6 +253,8 @@ public:
         const float ls = lik(-theta_odo), lnot = lik(theta_odo);
         last_llr_ = std::log(std::max(ls, 1e-30f)) - std::log(std::max(lnot, 1e-30f));
         last_p_corr_ = pi;
+        if (probing_)   // the probe's own evidence, and what it was built to give (its expected |LLR| under either sign)
+        { probe_llr_ += last_llr_; probe_expected_ += 2.f * theta_odo * theta_odo / sn2; probe_time_ += std::max(dt, 0.f); }
         const double L = std::log(double(p_) / (1.0 - double(p_))) + double(last_llr_);
         p_ = float(1.0 / (1.0 + std::exp(-std::clamp(L, -60.0, 60.0))));
     }
@@ -270,15 +272,28 @@ public:
             const double lo = std::max(s0, t_a), hi = std::min(s1, t_b);
             if (hi > lo) { turn += double(hist[i].w) * (hi - lo); disp += double(hist[i].v) * (hi - lo); }
         }
-        update(float(turn), float(disp), dyaw_pose, dp_pose, sigma_odo_yaw, sigma_pose_yaw, sigma_p, sigma_corr);
+        update(float(turn), float(disp), dyaw_pose, dp_pose, sigma_odo_yaw, sigma_pose_yaw, sigma_p, sigma_corr, float(dt));
     }
     [[nodiscard]] bool flipped() const { return p_ > 0.5f; }
+    // ★ (ruling, re-review) THE PROBE'S ANSWER. A probe turn is built to give about +E of evidence if the sign is flipped and -E if
+    //   it is not, E = its expected |LLR| = sum over its intervals of 2 theta^2 / sigma_n^2 (the likelihood above, without the
+    //   correction component). Once at least one probe HORIZON has been observed (expected evidence scaled to one horizon) and the
+    //   probe's own accumulated evidence reaches +E, the probe has answered "flipped": one more probe buys nothing — EMERGENCY.
+    //   Under a sound sign the probe's evidence is negative and this never holds, so a false Blind still ends by the probe.
+    void set_probing(bool on) { if (on != probing_) { probing_ = on; probe_llr_ = probe_expected_ = probe_time_ = 0.f; } }
+    [[nodiscard]] bool probe_decisive(float horizon_s) const
+    {
+        if (not probing_ or not (probe_time_ >= horizon_s) or not (probe_expected_ > 0.f)) return false;
+        return flipped() and probe_llr_ >= probe_expected_ * horizon_s / probe_time_;
+    }
+    [[nodiscard]] float probe_llr() const { return probe_llr_; }
     [[nodiscard]] float p_flipped() const { return p_; }
     [[nodiscard]] float last_llr() const { return last_llr_; }
     [[nodiscard]] float last_p_correction() const { return last_p_corr_; }
     void reset() { *this = TurnSignBelief{}; }
 private:
     float p_ = kPrior, last_llr_ = 0.f, last_p_corr_ = 0.f;
+    bool probing_ = false; float probe_llr_ = 0.f, probe_expected_ = 0.f, probe_time_ = 0.f;
 };
 
 // ★ GOAL IDENTITY — a goal that moved by less than its OWN tolerance is the same goal (its meaning of "there" did not

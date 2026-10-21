@@ -243,6 +243,22 @@ int main()
         CHECK("3d r1: a false Blind ... stays Blind while held", blind_before);
         CHECK("3d r1: ... and the probe turn (w_min_eff 0.1 rad/s) ends it within one plan horizon (10 intervals)", not fb.flipped() and probe <= 10);
         // while the belief is certain the probe stops (it would buy nothing): confirmed at P(S) >= 1 - prior
+        // (ruling) a TRUE flip must not probe for ever: once the probe's OWN evidence reaches what one probe horizon is built to give
+        // (E = sum 2 theta^2 / sigma_n^2 over the probe intervals, scaled to one horizon) the probe has answered "flipped" —
+        // EMERGENCY. Stated time: one probe horizon (1 s = 10 intervals here) plus noise.
+        {
+            const float h = 1.0f; TurnSignBelief tf = held; tf.set_probing(true); int k = 0;
+            for (; k < 100 and not tf.probe_decisive(h); ++k)
+            { const float th = (k / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; tf.update(th, 0.f, -th + sn * nz(rng), 0.f, sy, st, sp, sc, dt); }
+            std::printf("   3d ruling: a true flip's probe is decisive after %d intervals (%.1f s)\n", k, k * dt);
+            CHECK("3d ruling: a true flip — the probe becomes decisive (EMERGENCY) within 2 horizons", tf.probe_decisive(h) and k <= 20);
+            TurnSignBelief ff;                                        // a false Blind from a burst, then probed
+            for (int j = 0; j < 2; ++j) ff.update(w * dt, 0.f, -w * dt, 0.f, sy, st, sp, sc, dt);
+            ff.set_probing(true); bool ever = false;
+            for (int j = 0; j < 40 and ff.flipped(); ++j)
+            { const float th = (j / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; ff.update(th, 0.f, th + sn * nz(rng), 0.f, sy, st, sp, sc, dt); ever = ever or ff.probe_decisive(h); }
+            CHECK("3d ruling: a false Blind is never declared an emergency, and the probe still ends it", not ever and not ff.flipped());
+        }
         // a TRUE flip under the same probe stays Blind: the probe's turns contradict the odometry again (alternating directions)
         TurnSignBelief tp = held;
         for (int k = 0; k < 40; ++k) { const float th = (k / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; tp.update(th, 0.f, -th + sn * nz(rng), 0.f, sy, st, sp, sc); }

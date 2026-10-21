@@ -82,6 +82,7 @@ void ControllerSession::policy_reset()
     policy_prev_pose_p_.reset();
     policy_odo_hist_.clear();
     policy_clock_prev_ms_ = 0;      // Task 3d fix round 1 (M-1): a reset clock has no previous tick
+    policy_sign_emergency_ = false; // (ruling) an operator reset ends the emergency with the belief
     policy_probe_t0_ = -1.0;
     policy_leaf_ = {};
     policy_leaf_room_.clear();
@@ -419,6 +420,22 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //   model clears BOTH directions (local_policy.h sign_probe) — the turn's evidence settles the sign either way: a false Blind
     //   ends, a true flip stays Blind. The probe alternates direction every horizon so the net rotation stays ~0. No safe probe:
     //   held, and reported. Any of these interrupts the Navigator's plan (a hold).
+    if (sign_blind and (policy_sign_emergency_ or policy_sign_.probe_decisive(pp.horizon_s)))
+    {
+        // ★ (ruling) EMERGENCY HOLD — the probe's own evidence has answered "flipped" (goal_adapter.h probe_decisive): one more
+        //   probe buys nothing. Stop, report once per entry, hand the goal back (Unreachable every tick: the hand-back sites and the
+        //   no-route clock read the verdict), and stay until the belief drops (an operator fix: policy_reset() / a restart).
+        if (not policy_sign_emergency_)
+            std::println("[policy] EMERGENCY: odometry turn sign flipped (P={:.4f}) — the probe confirmed it; goal '{}' handed back, robot "
+                         "held until the base/bridge sign is fixed", policy_sign_.p_flipped(), who);
+        policy_sign_emergency_ = true;
+        policy_sign_.set_probing(false);
+        policy_probe_t0_ = -1.0;
+        hold(std::format("EMERGENCY — odometry turn sign flipped (P={:.4f}), confirmed by the probe: held", policy_sign_.p_flipped()));
+        out.verdict = PolicyVerdict::Unreachable;
+        return out;
+    }
+    if (not sign_blind) { policy_sign_emergency_ = false; policy_sign_.set_probing(false); }
     if (sign_blind)
     {
         const std::string head = std::format("Blind — odometry turn sign contradicts the pose (P(flipped) {:.2f}: robot_current_angular_speed "
@@ -428,6 +445,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         {
             if (policy_probe_t0_ < 0.0 or now_s - policy_probe_t0_ >= pp.horizon_s) { policy_probe_t0_ = now_s; policy_probe_sign_ = -policy_probe_sign_; }
             const float w = policy_probe_sign_ * *wp;
+            policy_sign_.set_probing(true);   // its evidence is the probe's own (probe_decisive)
             const std::string why = head + std::format("; probing in place at w {:+.2f} rad/s to settle it", w);
             if (why.substr(0, 40) != policy_last_why_.substr(0, 40)) std::println("[policy] {}: {}", who, why);
             policy_last_why_ = why; policy_last_mode_ = -1;
@@ -443,6 +461,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         if (why.substr(0, 40) != policy_last_why_.substr(0, 40)) std::println("[policy] {}: {}", who, why);
         policy_last_why_ = why; policy_last_mode_ = -1;
         policy_probe_t0_ = -1.0;
+        policy_sign_.set_probing(false);
         hold(why);
         return out;
     }
@@ -809,7 +828,10 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     // (Blind / stale / frame wait / no map) neither starts nor advances the clock (policy_tick_gate.h advance_no_route_clock)
     {
         using O = rc::policy::NoRouteObs;
-        const O obs = not tick.field_evaluated ? O::NotEvaluated : std::isfinite(tick.field_m) ? O::Finite : O::Infinite;
+        // an Unreachable VERDICT on a tick that evaluated no field (the turn-sign EMERGENCY) is a statement, not an absence of
+        // evidence: the clock runs on it like on a non-finite field
+        const O obs = not tick.field_evaluated ? (tick.verdict == PolicyVerdict::Unreachable ? O::Infinite : O::NotEvaluated)
+                    : std::isfinite(tick.field_m) ? O::Finite : O::Infinite;
         no_route_since_ms_ = rc::policy::advance_no_route_clock(no_route_since_ms_, now, policy_clock_prev_ms_, obs,
                                                                 tick.verdict == PolicyVerdict::Unreachable, tick.stuck, policy_unreach_latch_);
         policy_clock_prev_ms_ = now;
