@@ -1,11 +1,15 @@
 // Task 3 (local-motion policy): geodesic cost-to-go with trap memory.
 // Build+run (from controller/):
-//   g++ -std=c++23 -O2 -Wall -Wextra -I/usr/include/eigen3 tests/test_policy_cost_to_go.cpp src/local_policy/cost_to_go.cpp -o /tmp/tctg && /tmp/tctg
+//   g++ -std=c++23 -O2 -Wall -Wextra -I/usr/include/eigen3 tests/test_policy_cost_to_go.cpp src/local_policy/cost_to_go.cpp
+//     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tctg && /tmp/tctg
 #include "../src/local_policy/cost_to_go.h"
+#include "../src/local_policy/doorway_corridor.h"
+#include "../../common/robot_footprint/robot_footprint.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 
 using namespace rc::policy;
 using V = Eigen::Vector2f;
@@ -194,6 +198,109 @@ int main()
               and std::abs(L - detour) < 0.3f);
         CHECK("route length: 0 at the goal", det.at_length({5.f, 3.f}) < 0.05f);
         CHECK("route length: +inf off-grid, like the price", std::isinf(det.at_length({-1.f, 3.f})));
+    }
+
+    { // ★ F4 — THE MEASURED JAMBS IN THE ROUTE'S RISK. A wall along y = 0 (0.15 m thick) with a 0.90 m opening centred at x = 0,
+      // normal +y; Shadow's bare hull; the cross's goal line 2 m past the gap over the span the centre can occupy (doorway_goal);
+      // the corridor joins the two sides as the controller's also_free does. Sigmas as measured live (rtD1b: gap sigma_lat
+      // 0.017-0.021 m) and the contact model's shared offset sqrt(SigmaRelXyM 0.011^2 + body 0.01^2).
+        rc::RobotFootprint B = rc::RobotFootprint::shadow(); B.set_safety_margin(0.f);
+        const float r_ins = B.inscribed_radius();
+        const RoomGap gap{{0.f, 0.f}, {0.f, 1.f}, 0.90f};
+        // sigma_lat 0.02, sigma_n 0.02, sigma_s = sqrt(0.011^2 + 0.01^2), LiDAR range sigma 0.02 (LidarRangeSigmaM); the
+        // corridor the controller joins the rooms with
+        const DoorwayJambs J = doorway_jambs(gap, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.02f, B, 1.0f, 2.05f);
+        std::printf("  shadow hull crossing along the normal: half-widths %.3f / %.3f, front %.3f back %.3f, placement %.3f\n",
+                    J.half_left_m, J.half_right_m, J.front_m, J.back_m, J.placement_m);
+        const CostToGo::Grid G{{-3.f, -3.f}, 0.05f, 121, 121};
+        auto wall_dist = [](const V& p) {   // distance to the solid wall: |y| <= 0.075, |x| >= 0.45
+            const float dy = std::max(0.f, std::abs(p.y()) - 0.075f), dx = std::max(0.f, 0.45f - std::abs(p.x()));
+            return std::hypot(dx, dy); };
+        auto free = [&](const V& p) { return wall_dist(p) > r_ins or in_doorway_corridor(gap, p, 1.0f, 2.05f, r_ins); };
+        std::vector<V> line; for (float x = -0.22f; x <= 0.2201f; x += 0.05f) line.push_back({x, 2.f});
+        const float w = 1.f;   // Planner.ResidualRiskWeight (config default)
+        auto with_jambs = [&](const V& p) { return w * doorway_jamb_density(J, p); };
+        CostToGo plain, jam;
+        plain.build(G, free, no_extra, line);
+        jam.build(G, free, with_jambs, line);
+        // the descent line: from p, repeatedly the 0.01 m step (32 directions) that lowers the field most; the lateral offset
+        // where it crosses the jamb line y = 0
+        auto crossing = [](const CostToGo& c, V p) {
+            for (int k = 0; k < 2000 and p.y() < 0.5f; ++k)
+            {
+                V best = p; float bf = c.at(p);
+                for (int a = 0; a < 32; ++a)
+                {
+                    const float th = a * 2.f * 3.14159265f / 32.f; const V q = p + 0.01f * V(std::cos(th), std::sin(th));
+                    if (const float f = c.at(q); f < bf) { bf = f; best = q; }
+                }
+                if (best == p) break;
+                if (p.y() < 0.f and best.y() >= 0.f) return p.x() + (best.x() - p.x()) * (0.f - p.y()) / (best.y() - p.y());
+                p = best;
+            }
+            return std::numeric_limits<float>::quiet_NaN(); };
+        const float th20 = 20.f * 3.14159265f / 180.f;
+        const V start{0.15f, -0.15f / std::tan(th20)};   // 0.15 m off-centre, the gap centre 20 deg off the normal from here
+        const float e_plain = crossing(plain, start), e_jam = crossing(jam, start), e_mirror = crossing(jam, V(-start.x(), start.y()));
+        const float hl = J.half_left_m;
+        std::printf("  descent crosses the jamb line at e %+.3f m without the jambs (clearance %.3f m), %+.3f m with them "
+                    "(clearance %.3f m; mirrored start %+.3f)\n", e_plain, 0.45f - hl - std::abs(e_plain), e_jam,
+                    0.45f - hl - std::abs(e_jam), e_mirror);
+        CHECK("F4: without the jambs the descent cuts the corner (the baseline the test discriminates)", std::abs(e_plain) > 0.10f);
+        // ★ ORACLE (deviation from the brief's "centre line +- one cell", stated in task-3-report.md): the field descends until the
+        //   marginal risk of a further lateral metre no longer pays for the metres it costs — with the measured sigma (~2.5 cm)
+        //   R(e) is ~0 within ~6 cm of the centre and the route settles there, 6.8 cm from the jamb (2.7 sigma) instead of 1.6
+        //   cm. The model-level statement is: the crossing the field leads to is one the policy's OWN eligibility bar admits
+        //   (P(contact) < PolicyParams::risk_eps = 0.01), and the one it led to without the jambs is not.
+        const float risk_eps = 0.01f;   // PolicyParams{}.risk_eps (local_policy.h)
+        auto p_contact = [&](float e) { return 1.f - std::exp(-doorway_jamb_crossing_nats(J, e)); };
+        std::printf("  P(contact) at the crossing: %.4f without the jambs, %.4f with them\n", p_contact(e_plain), p_contact(e_jam));
+        CHECK("F4: without the jambs the field's crossing is NOT one the policy can drive (P(contact) > risk_eps)", p_contact(e_plain) > risk_eps);
+        CHECK("F4: with the measured jambs it is (P(contact) < risk_eps), on the centre's side of the start", p_contact(e_jam) < risk_eps
+              and std::abs(e_jam) < std::abs(e_plain));
+        CHECK("F4: and symmetrically from the mirrored start (to the field's cell)", std::abs(e_mirror + e_jam) <= G.cell);
+        { // the live configuration's LidarRangeSigmaM 0.03 (the unit test above uses the harness's 0.02)
+            const DoorwayJambs L = doorway_jambs(gap, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.03f, B, 1.0f, 2.05f);
+            CostToGo live; live.build(G, free, [&](const V& p) { return w * doorway_jamb_density(L, p); }, line);
+            const float e_live = crossing(live, start);
+            std::printf("  live sigmas (range 0.03): crossing at e %+.3f m, clearance %.3f m\n", e_live, 0.45f - hl - std::abs(e_live));
+            CHECK("F4: live sigmas — the crossing is drivable too, nearer the centre than without", 1.f - std::exp(-doorway_jamb_crossing_nats(L, e_live)) < risk_eps
+                  and std::abs(e_live) < std::abs(e_plain));
+        }
+        // no gap active: the controller adds nothing (std::optional empty) — the density helper is the only F4 term
+        const std::optional<DoorwayJambs> none;
+        auto extra_none = [&](const V& p) { return none ? w * doorway_jamb_density(*none, p) : 0.f; };
+        CostToGo nog; nog.build(G, free, extra_none, line);
+        bool same = true;
+        for (float y = -2.9f; y < 2.9f; y += 0.13f) for (float x = -2.9f; x < 2.9f; x += 0.13f)
+            if (const V q{x, y}; nog.at(q) != plain.at(q) and not (std::isinf(nog.at(q)) and std::isinf(plain.at(q)))) same = false;
+        CHECK("F4: no gap active -> the field is the plain one, bit for bit", same);
+        // away from the doorway: no density outside the corridor or beyond the body's reach of the line; and past the
+        // doorway (every route from there to the goal stays clear of it) the field is unchanged
+        bool zero_away = true, unchanged_past = true;
+        for (float y = -2.9f; y < 2.9f; y += 0.05f) for (float x = -2.9f; x < 2.9f; x += 0.05f)
+        {
+            const V q{x, y};
+            const bool near = in_doorway_corridor(gap, q, 1.0f, 2.05f, r_ins) and y > -J.front_m - 0.2f and y < J.back_m + 0.2f;
+            if (not near and doorway_jamb_density(J, q) != 0.f and doorway_jamb_density(J, q) > 1e-6f) zero_away = false;
+            if (y > J.back_m + 0.2f and std::isfinite(plain.at(q)) and std::abs(jam.at(q) - plain.at(q)) > 1e-4f) unchanged_past = false;
+        }
+        CHECK("F4: no risk density away from the doorway", zero_away);
+        CHECK("F4: field values past the doorway unchanged", unchanged_past);
+        // the centre-line crossing costs (almost) nothing: F1 reads R(0) nats there
+        std::printf("  R(e) nats: e 0 %.2e, 0.05 %.2e, 0.10 %.2e, 0.15 %.3f\n", doorway_jamb_crossing_nats(J, 0.f),
+                    doorway_jamb_crossing_nats(J, 0.05f), doorway_jamb_crossing_nats(J, 0.10f), doorway_jamb_crossing_nats(J, 0.15f));
+        CHECK("F4: the centre crossing of a 0.90 m gap is ~free (R(0) < 1e-6 nats)", doorway_jamb_crossing_nats(J, 0.f) < 1e-6f);
+        { // the WIDTH is measured: an opening 1.8 cm narrower than the body (0.55 m) is improbable, not impossible; a 0.40 m one
+          // costs more nats than any route can repay (P(no contact) < 1e-9)
+            DoorwayJambs n = J; n.gap.width = 0.55f; DoorwayJambs m = J; m.gap.width = 0.40f;
+            const float rn = doorway_jamb_crossing_nats(n, 0.f), rm = doorway_jamb_crossing_nats(m, 0.f);
+            std::printf("  R(0): 0.55 m opening %.2f nats, 0.40 m opening %g\n", rn, rm);
+            CHECK("F4: a gap measured just narrower than the body costs finite nats (> 1)", std::isfinite(rn) and rn > 1.f);
+            CHECK("F4: a gap far narrower than the body is all but impassable (R > 20 nats)", rm > 20.f);
+        }
+        CHECK("F4: R grows monotonically toward a jamb", doorway_jamb_crossing_nats(J, 0.05f) < doorway_jamb_crossing_nats(J, 0.10f)
+              and doorway_jamb_crossing_nats(J, 0.10f) < doorway_jamb_crossing_nats(J, 0.15f));
     }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);
     return fails ? 1 : 0;

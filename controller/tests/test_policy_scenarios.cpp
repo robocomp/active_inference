@@ -25,7 +25,8 @@
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tps && /tmp/tps
 //   Env: ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
-//     UnseenContact hypotheses from the returns (ON by default, ruling D3).
+//     UnseenContact hypotheses from the returns (ON by default, ruling D3); NO_JAMBS=1 drops F4's measured jambs from a
+//     Doorway's field.
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/navigator.h"
@@ -80,6 +81,8 @@ struct Options
     float v0 = 0.f, w0 = 0.f;
     // F1 scenario (a): the live base's measured wheel deceleration (Policy.WheelDecelMps2 0.5) for plant AND policy; 0 = limits()
     float d_lin = 0.f;
+    // F4 DIAGNOSTIC (NOT the brief's configuration): NO_JAMBS=1 drops the measured jambs from a Doorway's field (A/B)
+    bool no_jambs = std::getenv("NO_JAMBS") != nullptr;
 };
 
 struct ScenarioResult
@@ -181,7 +184,21 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     UnseenContact unseen;
     const MapFree mapfree(world, opt.grid);
     Navigator nav;
-    nav.set_goal(goal, mapfree.grid, [&mapfree](const V2& c) { return mapfree(c); }, [](const V2&) { return 0.f; }, goal_points(goal),
+    // ★ F4 — as the controller does: a Doorway's measured jambs enter the field's per-metre density over its corridor
+    //   (residual_risk_weight 1, the config default). The gap's sigmas as the [gap] detector states them for a LiDAR range
+    //   sigma sigma_r (doorway_gap.h doorway_gap_meas_cov: each axis sigma_r / sqrt 2), the contact model's shared offset
+    //   from the relative sigma the policy is given below (0.01) and PolicyInput's body-geometry sigma.
+    std::optional<DoorwayJambs> jambs;
+    if (goal.kind == Goal::Kind::Doorway and not opt.no_jambs)
+    {
+        rc::RobotFootprint bare = B; bare.set_safety_margin(0.f);
+        const float sg = sigma_r() * 0.70710678f;
+        jambs = doorway_jambs(RoomGap{goal.p, goal.normal.normalized(), goal.width}, sg, sg,
+                              std::hypot(0.01f, PolicyInput{}.body_geometry_sigma_m), sigma_r(), bare, 1.0f,
+                              kThroughS + 2.f * goal.tol_xy + 0.05f);
+    }
+    nav.set_goal(goal, mapfree.grid, [&mapfree](const V2& c) { return mapfree(c); },
+                 [jambs](const V2& c) { return jambs ? doorway_jamb_density(*jambs, c) : 0.f; }, goal_points(goal),
                  B.circumscribed_radius());
     // ★ Live fix 2 ruling 2 — as the controller does: a Doorway's measured opening (at least the body's width) vetoes traps
     if (goal.kind == Goal::Kind::Doorway)

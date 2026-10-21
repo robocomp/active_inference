@@ -87,7 +87,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                                                              ControllerObstacleTracker &obstacle_tracker,
                                                              ControllerMotionCommander &motion_commander, std::uint64_t now_ms,
                                                              std::function<bool(const Eigen::Vector2f &)> also_free,
-                                                             std::function<bool(const Eigen::Vector2f &, float)> trap_veto)
+                                                             std::function<bool(const Eigen::Vector2f &, float)> trap_veto,
+                                                             std::optional<rc::policy::DoorwayJambs> jambs)
 {
     using rc::policy::Decision;
     PolicyTick out;
@@ -184,8 +185,14 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     const float r_ins = body.inscribed_radius();
     auto free_fn = [this, r_ins, also_free](const Eigen::Vector2f &p)
     { return rc::policy::field_free_from_distance(grid_planner_.distance_at(p), grid_planner_.cell_size(), r_ins) or (also_free and also_free(p)); };
-    auto extra_fn = [this](const Eigen::Vector2f &p)
-    { return std::max(0.f, grid_planner_.params.residual_risk_weight) * grid_planner_.body_risk_at(p); };
+    // ★ F4: with a measured opening, its jambs' contact risk joins the density over the doorway's corridor — the SAME weight
+    //   turns its nats into metres, so F1's route surprisal reads it as nats too (a crossing at offset e adds R(e) nats:
+    //   ~0 on the centre line of a passable opening, so a passable door does not lean Unreachable; see doorway_corridor.h)
+    auto extra_fn = [this, jambs](const Eigen::Vector2f &p)
+    {
+        const float w = std::max(0.f, grid_planner_.params.residual_risk_weight);
+        return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_jamb_density(*jambs, p) : 0.f));
+    };
     const bool new_goal = not policy_goal_.has_value() or policy_goal_who_ != who or not rc::policy::same_goal(*policy_goal_, spec);
     if (new_goal)
     {
@@ -566,6 +573,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             rc::policy::GoalSpec spec;
             std::function<bool(const Eigen::Vector2f &)> corridor;
             std::function<bool(const Eigen::Vector2f &, float)> veto;
+            std::optional<rc::policy::DoorwayJambs> jambs;
             if (cp.drive)
             {
                 const auto gap = rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose);
@@ -579,6 +587,16 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 const float body_w = bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)) + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f));
                 veto = [gap, back, ahead, r_ins, body_w](const Eigen::Vector2f &c, float r)
                 { return rc::policy::disc_meets_doorway_corridor(gap, c, r, back, ahead, r_ins, body_w); };
+                // ★ F4: the measured jambs in the route's risk — the opening's along-wall / along-normal sigmas from the pose
+                //   driven on (the gap's, or the anchor's while no gap is held), and the contact model's shared offset
+                //   (sigma_rel_xy with the body-geometry sigma PolicyInput carries), the same sigma the policy's rollouts use;
+                //   each jamb edge measured with the LiDAR's range sigma (the [gap] detector's own)
+                const auto geo = rc::anchor_cross_geometry(cp.drive_pose);
+                const float sigma_n = std::sqrt(std::max(0.f, geo.n.dot(cp.drive_pose.P.topLeftCorner<2, 2>() * geo.n)));
+                const float g_body = rc::policy::PolicyInput{}.body_geometry_sigma_m;
+                const float sigma_s = std::hypot(params_ != nullptr ? params_->policy_sigma_rel_xy_m : 0.f, g_body);
+                const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+                jambs = rc::policy::doorway_jambs(gap, geo.sigma_lat, sigma_n, sigma_s, sigma_r, bare, back, ahead);
             }
             else
             {
@@ -587,7 +605,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                                                 gp.tol_yaw);
             }
             const auto tick = policy_tick(spec, who + (cp.drive ? "" : " (waiting)"), cpose, obstacle_tracker, motion_commander, now,
-                                          corridor, veto);
+                                          corridor, veto, jambs);
             // F1: a Stuck is a hold; the crossing is handed back only on the Unreachable verdict (trapped field / belief)
             if (tick.verdict == PolicyVerdict::Unreachable)
                 cross_hand_back(std::format("the local policy cannot drive it ({})", tick.why), /*timed_out=*/false, motion_commander);

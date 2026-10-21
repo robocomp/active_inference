@@ -205,11 +205,13 @@ public:
                         float field_m = std::numeric_limits<float>::infinity();    // priced cost-to-go at the robot
                         float route_m = std::numeric_limits<float>::infinity(); };  // the cheapest route's metres (Live fix 3)
     // `also_free`: space the planner's map does not hold but the goal may be reached through (a doorway's measured corridor,
-    // goal_adapter.h in_doorway_corridor); empty = the map alone.
+    // goal_adapter.h in_doorway_corridor); empty = the map alone. `jambs` (F4): the measured opening's jambs, whose contact
+    // risk is added to the field's per-metre density over the corridor (doorway_corridor.h doorway_jamb_density); nullopt = none.
     PolicyTick policy_tick(const rc::policy::GoalSpec &spec, const std::string &who, const ControllerRobotPose &robot_pose,
                            ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                            std::uint64_t now_ms, std::function<bool(const Eigen::Vector2f &)> also_free = {},
-                           std::function<bool(const Eigen::Vector2f &, float)> trap_veto = {});
+                           std::function<bool(const Eigen::Vector2f &, float)> trap_veto = {},
+                           std::optional<rc::policy::DoorwayJambs> jambs = std::nullopt);
     // The policy's state belongs to one goal owner: dropped on Stop / abort and when the owner ends.
     void policy_reset();
     // review I1: a cycle in which the policy did NOT drive although it owns the base (Pause / Halt / a no-step or hold / the
