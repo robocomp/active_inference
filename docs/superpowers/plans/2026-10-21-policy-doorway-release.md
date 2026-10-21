@@ -113,3 +113,14 @@ near field (`Enabled = false`, `NearFieldClearance = true`); (C) local policy wi
 Report per arm: crossings completed / 6, time per crossing, contacts (bridge/bumper), stuck/hand-back events, minimum
 measured jamb clearance in the doorway. The old chain is NOT removed whatever the result (user, 2026-10-21); the
 result decides the default and whether a hybrid (route tracker + policy in narrow passages) is worth designing.
+
+### Task 3b: the door leaf is a KNOWN obstacle, not unexplained residual (ruling 2026-10-21, rtD1c leg 5)
+The open leaf is priced as hundreds of unexplained residual cells (density up to 1240 m/m) and can disconnect the
+cross goal's free mask (rtD1c: field infinite ~105 s). door_concept already models it (MAP hinge, free edge, φ, σ).
+**Files:** controller residual/field wiring (`controller_policy_drive.cpp` extra_fn/free_fn sources, the residual
+reader), cost-to-go input, tests.
+- [ ] Failing tests: an open leaf modelled by the door (hinge, free edge, φ, σ) + residual returns on it → the field
+  routes around the free edge and stays finite from the near side; the leaf's cells no longer count as unexplained
+  risk; a leaf with large σ_φ is priced by its swept uncertainty.
+- [ ] Implement: returns explained by the door's leaf hypothesis are removed from the residual's unexplained mass and
+  the leaf enters as a known obstacle (segment + σ) in free/extra; tests + scenarios green; commit by pathspec.
