@@ -39,26 +39,24 @@
 //     the coast; at 0.35 m/s, WheelDecel 0.5 (coast ~0.16 m) w ~ 0.04.
 //   · Release(stop), a continued plan, Blind, Arrived, a sensing contradiction, a frozen pose: nothing.
 //
-// PRIOR (fix round 1, I2): from the route's own risk. The planner prices the residual belief per metre as
-//   residual_risk_weight x R_body (nats of doubt the body covers — grid_planner.h), so the priced field minus its length is
-//   weight x the integral of R_body over the route. Independent body placements along the route are one body length apart
-//   (2 r_body, the circumscribed diameter), so the route's surprisal is R = (priced - length) / (weight x 2 r_body) nats and
-//   P(route free) = e^-R. On top, the base rate of what the map cannot hold — UnseenContact::kPriorBlocked = 0.01, "the
-//   fraction of commanded motions blocked by something the LiDAR cannot see" — so P(U) = 1 - (1 - 0.01) e^-R. It is
-//   evaluated at the robot's place every tick (and so holds from the moment of a reset — C1).
+// PRIOR: the base rate of what the map cannot hold — UnseenContact::kPriorBlocked = 0.01, "the fraction of commanded motions
+//   blocked by something the LiDAR cannot see": L0 = logit(0.01) = -4.6, from the reset on, the same at every place; then the
+//   claims and counts speak. (Fix round 2, live rtD1c: a prior from the planner's price, (priced - length) / (weight x body
+//   length), summed correlated residual-cell log-odds as independent nats — 22.95 / 81.65 / 5.15 nats — and handed goals
+//   back on their first tick. A per-blob existence prior is PARKED.)
 //
 // PLACE: the cost-to-go field's cells; each keeps the sum of the evidence gathered in it, and
 //   L(here) = prior(here) + sum_cells exp(-|cell - here| / cell) x evidence(cell)
 //   (M2: the kernel is NOT normalised — evidence gathered in this cell counts once, a neighbour's at e^-1 — and the prior is
-//   added once, not per cell). Distance FROM the place, not travelled: a dither returning to a cell recalls it. Cells beyond
+//   added once, not per cell). Evidence is folded only while the goal's remaining time is finite (fix round 2). Distance FROM the place, not travelled: a dither returning to a cell recalls it. Cells beyond
 //   10 cell lengths (weight e^-10 = 4.5e-5) are skipped in the sum (M1; they are kept, the robot may come back).
 //   FROZEN POSE (rtD1b: the pose did not move for 3 ticks at 0.34 m/s): identical to the last sample while the base moves above
 //   its deadband — not an observation.
 //
 // DECISION (the objective's own terms). Waiting for the next observation costs P(U) x dt_obs (wasted if this is a trap);
 //   handing back forfeits P(R) x T (the goal's remaining time). Hand back iff L > bar = log(T / dt_obs). dt_obs is the
-//   measured interval BETWEEN OBSERVATIONS (I1) — independent of the tick rate; before a second observation, the current
-//   decision's committed plan duration (the time to the next decision it promises); before any, no bar (+inf). The progress
+//   measured interval BETWEEN OBSERVATIONS (I1) — independent of the tick rate; (fix round 2) before a second observation there
+//   is no bar (+inf) — no decision on an interval not yet measured. The progress
 //   scale of the score cancels: both terms are times.
 #pragma once
 #include <algorithm>
@@ -82,21 +80,17 @@ public:
         has_pose_ = true; last_pose_ = pose; here_ = key(pose.p);
         return not frozen;
     }
-    // An observation was made at now_s; `expected_s` = the time to the next one it promises (its plan's duration; 0 = none)
-    void observed(double now_s, float expected_s)
+    // An observation (a decision) was made at now_s. ★ Fix round 2 (live rtD1c): the bar is priced only on a MEASURED interval
+    //   between two observations — the first observation's own plan duration made the bar finite on tick 1, and a goal was
+    //   handed back before the robot had moved
+    void observed(double now_s)
     {
-        dt_obs_ = has_obs_ ? float(now_s - last_obs_t_) : expected_s;
+        dt_obs_ = has_obs_ ? float(now_s - last_obs_t_) : 0.f;
         has_obs_ = true; last_obs_t_ = now_s;
     }
     // An interruption (Pause / Halt / a hold): the places are kept, the next interval is a gap, not an observation interval
     void interrupt() { has_obs_ = false; }
 
-    // The prior at the robot's place from the route's surprisal R (nats) — see PRIOR
-    void set_route_surprisal(float R)
-    {
-        const float Rc = std::max(R, 0.f);   // log P(U)/P(R) = log(1 - k e^-R) - log(k e^-R)
-        prior_ = std::log(1.f - kFreeBase * std::exp(-Rc)) - std::log(kFreeBase) + Rc;
-    }
     float prior() const { return prior_; }
 
     // COUNT evidence: no escape among n effective options
@@ -116,7 +110,12 @@ public:
         return lin + r_ * rot;
     }
     float exposure(float v_now, float w_now, float latency_s, const BaseLimits& b) const { return std::exp(-coast_m(v_now, w_now, latency_s, b) / cell_); }
-    void add(const Eigen::Vector2f& at, float nats) { if (nats != 0.f and std::isfinite(nats)) cells_[key(at)] += nats; }
+    // Fold evidence into the place `at`, gathered while the goal's remaining time was T_goal. ★ Fix round 2 (live rtD1c): at
+    //   T = inf (the field is infinite at the robot — a statement about the MAP, not about the robot's options; the no-route
+    //   clock reports it) nothing is folded: 105 s of releases against an infinite cross field stored ~17.9 nats that were
+    //   released against the finite route in one tick
+    void add(const Eigen::Vector2f& at, float nats, float T_goal)
+    { if (std::isfinite(T_goal) and nats != 0.f and std::isfinite(nats)) cells_[key(at)] += nats; }
 
     float log_odds() const
     {

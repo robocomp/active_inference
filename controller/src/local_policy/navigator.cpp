@@ -132,16 +132,6 @@ float Navigator::remaining_time(const Pose2& at, const BaseLimits& b) const
     return T;
 }
 
-// F1 (fix round 1, I2): the route's surprisal (nats) from the robot's place — the priced field minus its length is
-// residual_risk_weight x the integral of the body's nats of doubt over the route; one independent body placement per body
-// length (the circumscribed diameter) — reachability_belief.h PRIOR
-float Navigator::route_surprisal(const Eigen::Vector2f& at) const
-{
-    if (goal_.kind == Goal::Kind::Heading or not (route_risk_weight_ > 0.f) or not (trap_r_ > 0.f)) return 0.f;
-    const float priced = field_.at(at), length = field_.at_length(at);
-    if (not (std::isfinite(priced) and std::isfinite(length))) return 0.f;
-    return std::max(0.f, priced - length) / (route_risk_weight_ * 2.f * trap_r_);
-}
 
 // F1 (fix round 1): P(no option really shortens the goal's remaining time | the best measured shortening D, resolution sig).
 // Two hypotheses, equal prior: NONE — the true best shortening is 0 and D ~ N(0, sig^2); SOME — it is s, uniform on (0, T] (an
@@ -187,7 +177,6 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     //   answer to it (the field now detours) — the belief restarts on the new route (measured round 0: kept, a dead end's
     //   evidence handed dead_end_release back before its detour)
     if (s.trap) { belief_.reset(grid_.cell, trap_r_); claim_ = Claim{}; }
-    belief_.set_route_surprisal(route_surprisal(in.pose.p));
     // ★ A CLAIM is judged whenever its plan ENDS — completed, completed early, or replaced because its remaining sweep turned
     //   risky — against what the plan predicted for the time that actually ELAPSED: D(el) = T0 - T(the plan rolled out to el,
     //   as decide() predicts its holds: the latency coast, phase 1 from the claim's velocity, phase 2 entered while moving).
@@ -202,7 +191,8 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
         {
             const float el = float(in.now_s - claim_.t0);
             const float D = claim_.T0 - remaining_time(predicted_pose(claim_, el), in.base);
-            const float r = claim_.T0 - remaining_time(in.pose, in.base);     // realized shortening of the remaining time
+            const float T_now = remaining_time(in.pose, in.base);
+            const float r = claim_.T0 - T_now;     // realized shortening of the remaining time
             const float sd = in.pose_drift_sigma_m > 0.f and in.pose_drift_time_s > 0.f
                            ? in.pose_drift_sigma_m * std::sqrt(2.f * (1.f - std::exp(-el / in.pose_drift_time_s))) : 0.f;
             // the ProgressMonitor's resolution, in time: field resolution over the displacement (+) pose drift, at v_max;
@@ -211,7 +201,7 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
                                   : std::hypot(field_.resolution_m((in.pose.p - claim_.at.p).norm()), sd) / std::max(in.base.v_max, 1e-3f);
             const float res_yaw = goal_heading(in.pose) ? in.sigma_rel_yaw / std::max(in.base.w_max, 1e-3f) : 0.f;
             const float ev = ReachabilityBelief::claim(D, r, std::hypot(res_route, res_yaw));
-            belief_.add(claim_.at.p, ev);
+            belief_.add(claim_.at.p, ev, std::isfinite(claim_.T0) ? T_now : INFINITY);   // round 2: nothing gathered at T = inf
         }
         claim_ = Claim{};
     }
@@ -219,7 +209,7 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     const bool is_stop = d.mode == M::Release and d.v == 0.f and d.w == 0.f;
     if (fresh and s.replanned and not d.sensing_contradiction and not is_stop and (d.mode == M::Drive or d.mode == M::Release or d.mode == M::Stuck))
     {
-        belief_.observed(in.now_s, d.mode == M::Stuck ? 0.f : d.plan_dur1 + (d.plan_has_cont ? d.plan_dur2 : 0.f));
+        belief_.observed(in.now_s);
         if (d.mode == M::Drive)
         {
             // the CLAIM: its committed plan (judged against its own rollout when it ends, above); a back-up or a realignment
@@ -241,9 +231,10 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
             const float sig = std::hypot(goal_.kind == Goal::Kind::Heading ? 0.f
                                              : field_.resolution_m(std::isfinite(Db) ? std::abs(Db) * in.base.v_max : 0.f) / std::max(in.base.v_max, 1e-3f),
                                          goal_heading(in.pose) ? in.sigma_rel_yaw / std::max(in.base.w_max, 1e-3f) : 0.f);
-            const float none = no_shortening(Db, sig, remaining_time(in.pose, in.base));
+            const float T_here = remaining_time(in.pose, in.base);
+            const float none = no_shortening(Db, sig, T_here);
             const float ev = none * belief_.exposure(in.v_now, in.w_now, in.latency_s, in.base) * ReachabilityBelief::no_escape(d.n_effective);
-            belief_.add(in.pose.p, ev);
+            belief_.add(in.pose.p, ev, T_here);   // round 2: at T = inf (no route on the map) the count says nothing about the place
         }
     }
     const float T = remaining_time(in.pose, in.base);
@@ -252,7 +243,7 @@ Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
     s.hand_back = d.mode != M::Arrived and not s.unreachable and s.unreach_L > s.unreach_bar;
     // A hand back is the verdict on THIS attempt: the same goal asked again (the passage re-claims a crossing at once — rtD1b)
     // is a new attempt and starts from the route's prior, which holds from the reset on (C1)
-    if (s.hand_back) { belief_.reset(grid_.cell, trap_r_); belief_.set_route_surprisal(route_surprisal(in.pose.p)); claim_ = Claim{}; }
+    if (s.hand_back) { belief_.reset(grid_.cell, trap_r_); claim_ = Claim{}; }
     return s;
 }
 

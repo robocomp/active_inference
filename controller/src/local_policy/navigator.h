@@ -114,8 +114,9 @@ public:
     double last_build_ms() const { return last_build_ms_; }
     int failed_predictions() const { return failed_predictions_; }   // since set_goal
     const ReachabilityBelief& reachability() const { return belief_; }
-    // F1 (I2): the planner's residual_risk_weight (grid_planner.h) — converts the field's priced-minus-length into nats of
-    // route doubt for the reachability prior; 1 = the planner's default
+    // F1: the planner's residual_risk_weight. ★ PARKED (fix round 2, live rtD1c): the route-price prior it fed summed correlated
+    //   residual log-odds as independent nats and handed goals back on tick 1; the belief now starts at the base rate. Kept for
+    //   a per-blob existence prior.
     void set_route_risk_weight(float w) { route_risk_weight_ = w; }
     const Plan& plan() const { return plan_; }
 
@@ -133,7 +134,6 @@ private:
     float route_risk_weight_ = 1.f;
     std::optional<float> goal_heading(const Pose2& at) const;
     float remaining_time(const Pose2& at, const BaseLimits& b) const;
-    float route_surprisal(const Eigen::Vector2f& at) const;
     void build();
     Goal goal_{.kind = Goal::Kind::Place, .yaw = {}};
     CostToGo::Grid grid_{{0.f, 0.f}, 0.05f, 0, 0};

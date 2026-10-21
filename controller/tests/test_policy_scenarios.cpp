@@ -730,7 +730,7 @@ int main()
     //      +4.3 each) at one cell — two decisions there whose eligible options, over two steps, shorten T by nothing. Claims are
     //      honest here (the policy sees the box: its plans predict stopping short of it and deliver exactly that), so they carry
     //      ~nothing. The SECONDS are how long the policy takes to park where no safe option shortens T, which the model does not
-    //      predict: measured (fix round 1, 20 seeds, 240 s limit) 19/20 handed back, median 76.2 s, max 194.3 s; within 60 s: 9/20.
+    //      predict: measured (fix round 1, 20 seeds, 240 s limit) 19/20 handed back, median 76.2 s, max 194.3 s; within 60 s: 9/20. Fix round 2 (base-rate prior, no T = inf evidence, no bar before a measured interval): 19/20, median 50.5 s, max 193.4 s.
     //      Ruled acceptable (fix round 1): guard >= 19/20 within 240 s, 0 contacts, never reached (no false progress).
     if (want("blocked_doorway"))
     {

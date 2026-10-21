@@ -4,6 +4,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <optional>
 
@@ -57,9 +58,10 @@ inline bool disc_meets_doorway_corridor(const RoomGap& g, const Eigen::Vector2f&
 //   averaged over it — a gap measured a centimetre narrower than the body is then improbable, not impossible. The body is ON the jamb line while its centre's progress s
 //   (along the normal, 0 = the line) is in [-front, back]; known to sigma_n (the gap's along-normal sigma, sigma_s):
 //     q(s) = Phi((s + front)/sigma_n) - Phi((s - back)/sigma_n),   integral of q over s = front + back.
-//   DENSITY (nats per metre, in the convention extra_fn and F1 share — GridPlanner::body_risk_at, Navigator::route_surprisal:
+//   DENSITY (nats per metre, in the convention extra_fn and F1 share — GridPlanner::body_risk_at:
 //   one independent body placement per `placement_m` of travel): R(e) q(s) placement_m / (front + back), so that a crossing
-//   at offset e accrues exactly R(e) nats in F1's reading and residual_risk_weight x R(e) x placement_m metres in the field.
+//   at offset e accrues exactly R(e) nats in F1's reading (F1's route-price prior is PARKED since F1 fix round 2) and
+//   residual_risk_weight x R(e) x placement_m metres in the field.
 //   Over the doorway's corridor only (in_doorway_corridor: the strip the measured opening adds; outside it the planner's map
 //   and its distance field speak). No gate: R is a continuous function of e and W; P(no contact) = 0 to double precision (a
 //   gap measured narrower than the body by many sigma) is +inf, which the field reads as impassable — what that measurement says.
@@ -143,19 +145,37 @@ inline float doorway_jamb_density(const DoorwayJambs& j, const Eigen::Vector2f& 
 //   controller's [gap] measurement are two hypotheses about where the jambs are; the gap enters with the weight its own
 //   score gives it (doorway_gap.h: the product of its location, width and fit agreements with the anchor, in [0, 1]),
 //   p_gap = score — the [gap] detector locked onto an open LEAF at score 0.03-0.3 and reported 0.40-0.52 m against an
-//   0.87 m door, and a 0.03-score phantom must not replace the anchor's geometry. Per place, the body is contact-free with
-//   probability p_gap e^{-n_gap(p)} + (1 - p_gap) e^{-n_anchor(p)} (n = the cell's nats, doorway_jamb_cell_nats); the
-//   density is that mixture's -log, so a phantom that closes the opening costs at most -log(1 - p_gap) over the anchor's
-//   (it cannot make the field impassable), and a reliable gap (score ~1) is the geometry. No gap: the anchor's, exactly.
+//   0.87 m door, and a 0.03-score phantom must not replace the anchor's geometry.
+//   ⚑ The score is used AS P(the gap is the door). It is an UNCALIBRATED stand-in: a product of agreements with the anchor
+//   itself (location under the anchor's covariance, width against the anchor's width, body fit), so it is benignly
+//   circular — it can only say how much the measurement agrees with the hypothesis it competes with — and nothing has
+//   checked that a score of 0.3 is right 30 % of the time.
+//   Per place, the body is contact-free with probability p_gap P_gap(p) + (1 - p_gap) P_anchor(p). Under a hypothesis, a
+//   cell inside its corridor has P = e^{-n} (n = the cell's nats, doorway_jamb_cell_nats); a cell OUTSIDE its corridor is
+//   what the planner's map says it is — free floor (P = 1) where `map_free` admits it, and wall / leaf (P = 0) where it does
+//   not (fix round 1, I-1: the corridor union also_free admits the phantom's strip; under the anchor that strip runs
+//   through solid, so it must cost -log p_gap there, ~3.5 nats at score 0.03, not -log(1 - p_gap)). The density is that
+//   mixture's -log: a phantom that closes the opening costs at most -log(1 - p_gap) over the anchor's, and a phantom's
+//   strip through solid costs at least -log p_gap; a reliable gap (score ~1) is the geometry. No gap: the anchor's, exactly.
+//   `map_free`: the planner's own free test WITHOUT the corridors (empty = every cell counts as map-free: the pre-fix
+//   behaviour, kept for callers that have no map).
 struct DoorwayRisk { DoorwayJambs anchor; std::optional<DoorwayJambs> gap; float p_gap = 0.f; };
-inline float doorway_risk_density(const DoorwayRisk& r, const Eigen::Vector2f& p)
+inline float doorway_risk_density(const DoorwayRisk& r, const Eigen::Vector2f& p,
+                                  const std::function<bool(const Eigen::Vector2f&)>& map_free = {})
 {
     const float pg = std::clamp(r.p_gap, 0.f, 1.f);   // a weight: a probability by construction (score in [0,1])
     if (not r.gap.has_value() or not (pg > 0.f)) return doorway_jamb_density(r.anchor, p);
     const float span = r.anchor.front_m + r.anchor.back_m;   // the same body under both hypotheses
     if (not (span > 0.f)) return 0.f;
-    const double na = doorway_jamb_cell_nats(r.anchor, p), ng = doorway_jamb_cell_nats(*r.gap, p);
-    const double pnc = double(pg) * std::exp(-ng) + (1.0 - pg) * std::exp(-na);
+    const bool on_map = not map_free or map_free(p);
+    // P(contact-free here | hypothesis): its corridor's jamb risk inside it; the map outside it
+    const auto p_free = [&](const DoorwayJambs& j) -> double
+    {
+        if (in_doorway_corridor(j.gap, p, j.corridor_back_m, j.corridor_ahead_m, j.inscribed_radius_m))
+            return std::exp(-double(doorway_jamb_cell_nats(j, p)));
+        return on_map ? 1.0 : 0.0;
+    };
+    const double pnc = double(pg) * p_free(*r.gap) + (1.0 - pg) * p_free(r.anchor);
     return pnc > 0.0 ? float(-std::log(pnc) * r.anchor.placement_m / span) : std::numeric_limits<float>::infinity();
 }
 // The space the opening adds to the planner's map: either hypothesis's corridor (a mask, not a cost — the risk prices it).

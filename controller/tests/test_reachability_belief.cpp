@@ -28,14 +28,11 @@ int main()
     const Pose2 P0 = at(0.012f, 0.012f);
     const float kPrior0 = std::log(0.01f / 0.99f);
 
-    // 1. PRIOR from the route's surprisal R: P(U) = 1 - 0.99 e^-R; present from the reset on (C1)
+    // 1. PRIOR: the base rate logit(0.01), present from the reset on (C1; the route-price prior was dropped in fix round 2)
     {
         RB rb; rb.reset(kCell, kR);
         rb.tick(P0, 0.f, 0.f, b);
         CHECK("prior at reset = logit(0.01) (UnseenContact::kPriorBlocked, a route without doubt)", near(rb.log_odds(), kPrior0));
-        rb.set_route_surprisal(2.f);
-        const float pu = 1.f - 0.99f * std::exp(-2.f);
-        CHECK("prior with 2 nats of route doubt = logit(1 - 0.99 e^-2)", near(rb.log_odds(), std::log(pu / (1.f - pu)), 1e-3f));
     }
     // 2. CLAIM likelihood: continuous, no clamp
     {
@@ -59,7 +56,7 @@ int main()
     // 4. PLACE kernel: one cell away e^-1, recalled on return, heading not part of the place, cells beyond 10 cell lengths skipped
     {
         RB rb; rb.reset(kCell, kR);
-        rb.tick(P0, 0.f, 0.f, b); rb.add(P0.p, 3.f);
+        rb.tick(P0, 0.f, 0.f, b); rb.add(P0.p, 3.f, 2.f);
         rb.tick(at(P0.p.x() + kCell, P0.p.y()), 0.f, 0.f, b);
         CHECK("one cell away: prior + e^-1 x evidence", near(rb.log_odds(), kPrior0 + 3.f * std::exp(-1.f)));
         rb.tick(at(P0.p.x() + 11.f * kCell, P0.p.y()), 0.f, 0.f, b);
@@ -82,15 +79,41 @@ int main()
         RB rb; rb.reset(kCell, kR);
         rb.tick(P0, 0.f, 0.f, b);
         CHECK("no observation yet: no bar (+inf)", std::isinf(rb.bar(2.f)));
-        rb.observed(10.0, 1.0f);
-        CHECK("first observation: priced on its plan's duration", near(rb.bar(2.f), std::log(2.f / 1.f)));
-        rb.observed(10.5, 1.0f);
+        rb.observed(10.0);
+        CHECK("first observation: still no bar (fix round 2)", std::isinf(rb.bar(2.f)));
+        rb.observed(10.5);
         CHECK("then on the measured interval between observations (0.5 s), whatever the tick rate", near(rb.bar(2.f), std::log(2.f / 0.5f)));
-        rb.interrupt(); rb.observed(100.0, 0.8f);
-        CHECK("after an interruption the gap does not price the bar", near(rb.dt_obs(), 0.8f));
+        rb.interrupt(); rb.observed(100.0);
+        CHECK("after an interruption the gap does not price the bar (none until the next measured interval)", std::isinf(rb.bar(2.f)));
         CHECK("a goal with no finite remaining time: never", not rb.hand_back(INFINITY));
         // C1: a Heading goal 90 deg from done has T = (pi/2) / w_max ~ 1.05 s, NOT ~0 — the prior alone (-4.6) never clears it
         CHECK("C1: a turn owed (T 1.05 s, plan 1 s) is far below the prior: no hand back from the prior", not rb.hand_back(1.05f));
+    }
+    // 7. FIX ROUND 2 (live rtD1c): the three ways a goal was handed back without evidence about the place
+    {
+        // (1) the prior alone cannot hand back: the belief starts at the base rate (no planner-price route prior — rtD1c handed
+        //     goals back on tick 1 with "priors" of 22.95 / 81.65 / 5.15 nats from summed, correlated residual log-odds)
+        RB rb; rb.reset(kCell, kR);
+        rb.tick(P0, 0.f, 0.f, b);
+        rb.observed(0.0); rb.observed(1.0);
+        CHECK("round 2 (1): the prior is the base rate logit(0.01), whatever the route", near(rb.log_odds(), kPrior0));
+        CHECK("round 2 (1): the prior alone does not hand back a 0.5 s goal", not rb.hand_back(0.5f));
+        // (2) no decision before a MEASURED interval: the first observation has no bar (rtD1c: bar finite on tick 1)
+        RB r2; r2.reset(kCell, kR);
+        r2.tick(P0, 0.f, 0.f, b);
+        r2.add(P0.p, 50.f, 2.f);
+        r2.observed(0.0);
+        CHECK("round 2 (2): one observation — no bar, no hand back, whatever L", std::isinf(r2.bar(2.f)) and not r2.hand_back(2.f));
+        r2.observed(0.5);
+        CHECK("round 2 (2): the second observation prices the bar on the measured interval", near(r2.bar(2.f), std::log(2.f / 0.5f)));
+        // (3) evidence gathered at T = inf (an infinite field: a statement about the map) is not folded, so it cannot be released
+        //     when the field turns finite (rtD1c: ~17.9 nats stored over 105 s of an infinite cross field, released in one tick)
+        RB r3; r3.reset(kCell, kR);
+        r3.tick(P0, 0.f, 0.f, b);
+        r3.add(P0.p, 17.9f, INFINITY);
+        CHECK("round 2 (3): evidence at T = inf is not folded", near(r3.log_odds(), kPrior0));
+        r3.add(P0.p, 1.f, 2.f);
+        CHECK("round 2 (3): evidence at a finite T is", near(r3.log_odds(), kPrior0 + 1.f));
     }
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;
