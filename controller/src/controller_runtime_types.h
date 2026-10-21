@@ -159,6 +159,10 @@ struct ControllerParams
     float band_window_m = 4.0f;
     // Run the band every N control cycles. 1 = every cycle.
     int   band_period_cycles = 1;
+    // [Route] NearFieldClearance (Task 6, 2026-10-21, user — the B arm of the spline / spline+near-field / policy A/B):
+    // the band's clearance field near the robot becomes the EXPECTED clearance to the local policy's FITTED surfaces
+    // (near_field_clearance.h), joined to the live ESDF by a model weight. false = the old field, byte-identical.
+    bool  route_near_field_clearance = false;
     // Route optimiser: speed (0) <-> safety (1). Trades PRECISION between the clearance preference and
     // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.

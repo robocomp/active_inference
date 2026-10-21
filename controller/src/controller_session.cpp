@@ -7,6 +7,8 @@
 #include "residual_risk.h"
 #include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
+#include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
+#include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
 
 #include <algorithm>
 #include <array>
@@ -5598,7 +5600,8 @@ ControllerSession::DrivenCurve ControllerSession::driven_curve() const
 
 void ControllerSession::step_route_band(const DrivenCurve &curve,
                                         const ControllerRobotPose &robot_pose,
-                                        rc::TrajectoryController &path_controller)
+                                        rc::TrajectoryController &path_controller,
+                                        ControllerObstacleTracker *obstacle_tracker)
 {
     // Truncate the diagnostic FIRST, before any early return. Otherwise a run with the band OFF never
     // opens the file, archive_on_stop copies the PREVIOUS run's rows under this run's stamp, and the
@@ -5700,16 +5703,52 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     const Eigen::Matrix2f R = pose.linear();
     const Eigen::Matrix2f Rt = R.transpose();
     const Eigen::Vector2f t = pose.translation();
-    auto distance = [&path_controller, Rt, t](const Eigen::Vector2f &p) -> float
+    std::function<float(const Eigen::Vector2f &)> distance = [&path_controller, Rt, t](const Eigen::Vector2f &p) -> float
     {
         const Eigen::Vector2f r = Rt * (p - t);
         return path_controller.clearance_at(r.x(), r.y());
     };
-    auto gradient = [&path_controller, Rt, t, R](const Eigen::Vector2f &p) -> Eigen::Vector2f
+    std::function<Eigen::Vector2f(const Eigen::Vector2f &)> gradient = [&path_controller, Rt, t, R](const Eigen::Vector2f &p) -> Eigen::Vector2f
     {
         const Eigen::Vector2f r = Rt * (p - t);
         return R * path_controller.clearance_gradient_at(r.x(), r.y());
     };
+    // ── [Route] NearFieldClearance (Task 6, 2026-10-21, user: the B arm) ─────────────────────────────────────────────
+    // ★ WHY: in a narrow passage the raw ESDF gives the near part of the spline no traction — in a 0.90 m doorway the margin
+    //   is 1-3 cm a side, the size of the return noise, and the min-distance gradient flips between the jambs. Near the robot
+    //   the field becomes the EXPECTED clearance to the local policy's FITTED surfaces (the same denoise_returns model its
+    //   contact probability uses — one obstacle model, no second fit), joined to this ESDF by a weight from the model
+    //   (near_field_clearance.h). The optimiser is unchanged; it is handed a better field. Off: nothing here runs.
+    // The near model's coverage R = the body's circumscribed radius + the route look-ahead the band deforms (to the end of
+    // its window, lead + span control points at h); sigma_far = the ESDF's cell. Returns: the policy's contact band, room
+    // frame, sigma = Lidar range sigma (controller_policy_drive.cpp builds the policy's set the same way), within R plus one
+    // denoising neighbourhood so the fits of the surfaces at the coverage edge see their whole support.
+    if (params_->route_near_field_clearance and obstacle_tracker != nullptr)
+    {
+        const float R_near = approach_body_.circumscribed_radius() + static_cast<float>(freeze_after - i_robot) * h;
+        const float reach = R_near + rc::policy::kDenoiseRadiusM;
+        std::vector<rc::policy::Return> returns;
+        if (auto *buf = obstacle_tracker->contact_buffer(); buf != nullptr)
+        {
+            const auto [cloud_opt] = buf->read_last();
+            if (cloud_opt.has_value())
+            {
+                const auto &[xs, ys, zs] = cloud_opt.value();
+                const std::size_t n = std::min(xs.size(), ys.size());
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const Eigen::Vector2f q(xs[i], ys[i]);
+                    if (not q.allFinite() or (q - robot_pose.pos).squaredNorm() > reach * reach) continue;
+                    returns.push_back({.p = q, .sigma = params_->lidar_range_sigma_m, .p_exist = 1.f});
+                }
+            }
+        }
+        auto nf = std::make_shared<rc::NearFieldClearance>(robot_pose.pos, R_near, path_controller.params.grid_resolution,
+                                                           distance, gradient);
+        nf->set_surfaces(rc::policy::denoise_returns(returns));
+        distance = [nf](const Eigen::Vector2f &p) { return nf->distance(p); };
+        gradient = [nf](const Eigen::Vector2f &p) { return nf->gradient(p); };
+    }
 
     rc::RouteOptimizerReport rep;
     if (on_mission)
@@ -6248,7 +6287,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the
     // same age as everything else here and self-guarding on cycle 1, where the field is empty and every
     // query returns esdf_unknown_distance ⇒ no deficit ⇒ no force ⇒ the polygon does not move.
-    step_route_band(driven_curve(), robot_pose, path_controller);
+    step_route_band(driven_curve(), robot_pose, path_controller, &obstacle_tracker);
 
     // ── SESSION ODOMETER ────────────────────────────────────────────────────────────────────────
     // Metres actually driven since the agent started — every mission, target and affordance, not per

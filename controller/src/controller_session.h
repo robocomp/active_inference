@@ -1233,7 +1233,9 @@ private:
     };
     [[nodiscard]] DrivenCurve driven_curve() const;
 
-    void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller);
+    // obstacle_tracker: the policy's contact returns, read only when [Route] NearFieldClearance is on (Task 6).
+    void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+                         ControllerObstacleTracker *obstacle_tracker = nullptr);
     // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
     // return in step_route_band: a disabled run that never opens the file leaves the previous run's
     // rows at the fixed path for archive_on_stop to copy under this run's stamp.

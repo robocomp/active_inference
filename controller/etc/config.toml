@@ -943,6 +943,13 @@ overlay_csv_path = "overlay_lag_eval.csv"
 # producer's dedicated media domain (isolated from Agent.domain = 0). The
 # subscriber is created lazily, only once that node + descriptor exist.
 
+[Route]
+# Task 6 (2026-10-21, user) — the B arm of the three-arm A/B: spline (A, false) / spline + structured near field (B, true) /
+# local policy ([Policy] Enabled). true: the band's clearance field near the robot is the EXPECTED clearance to the local
+# policy's FITTED surfaces (contact.h denoise_returns), joined to the live ESDF by a weight from the model — no switch
+# radius (near_field_clearance.h). Needs Controller.BandEnabled = true (it is the band's field). false = unchanged.
+NearFieldClearance = false
+
 [Lidar]
 # Stream watchdog. No fresh sweep for this long while operating => LOCAL EMERGENCY HOLD: the robot is
 # stopped, Fsm=Emergency is published (a red agent node, visible without reading this process's

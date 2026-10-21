@@ -43,6 +43,7 @@ LIST(APPEND SOURCES
   ../src/route_spline.cpp
   ../src/route_follower.cpp
   ../src/route_optimizer.cpp
+  ../src/near_field_clearance.cpp
   ../src/grid_planner.cpp
   ../src/trajectory_controller.cpp
   ../src/trackers/plain_tracker.cpp
