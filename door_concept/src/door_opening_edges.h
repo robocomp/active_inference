@@ -94,6 +94,11 @@ struct WallRegistration
     float eps = 0.f, eps_var = 0.f;
     float depth = 0.f, depth_var = 0.f;
     int   n_inliers = 0;
+    // ★ WHY: `not ok` has two meanings the caller must tell apart. The wall window beside the aperture was NOT SEEN (the
+    //   robot turned away: no return of this sweep reaches the window) says nothing about the registration held from an
+    //   earlier sweep; the window WAS in the sweep's field of view and the wall still did not register contradicts it.
+    //   Set whenever the window is within the sweep's own coverage (true whenever ok).
+    bool  wall_in_view = false;
 };
 
 namespace detail
@@ -102,6 +107,35 @@ inline Eigen::Vector2f rot2(const Eigen::Vector2f& v, float a)
 {
     const float c = std::cos(a), s = std::sin(a);
     return {c * v.x() - s * v.y(), s * v.x() + c * v.y()};
+}
+// ★ Is the wall window [c - half_len·u, c + half_len·u] within the sweep's own field of view from `o`? Derived from the
+//   sweep's geometry, not from a sensor model: the window subtends an azimuth sector from the sensor; it is in view iff the
+//   sweep has at least kRegMinInliers returns (the registration's own evidence floor) inside that sector whose horizontal
+//   range reaches the window (less the registration's own across search range, kRegDepthMaxM) — rays that went that way
+//   and travelled far enough to meet a wall there. A sweep blind that way (robot turned, dome elevation, range) has none.
+inline bool window_in_view(const Eigen::Vector2f& o, const Eigen::Vector2f& c, const Eigen::Vector2f& u, float half_len,
+                           const std::vector<Eigen::Vector3f>& pts)
+{
+    const Eigen::Vector2f e0 = c - half_len * u, d = 2.f * half_len * u;
+    const float l2 = d.squaredNorm();
+    const float t = l2 > 0.f ? std::clamp((o - e0).dot(d) / l2, 0.f, 1.f) : 0.f;
+    const float dist = (o - e0 - t * d).norm();
+    const float dmin = std::max(0.f, dist - kRegDepthMaxM);
+    const float bearing = std::atan2((c - o).y(), (c - o).x());
+    const auto wrap = [](float a) { return std::remainder(a, 2.f * std::numbers::pi_v<float>); };
+    float half_sector = 0.f;
+    for (const Eigen::Vector2f& e : {e0, Eigen::Vector2f(e0 + d)})
+        half_sector = std::max(half_sector, std::abs(wrap(std::atan2((e - o).y(), (e - o).x()) - bearing)));
+    const bool surrounds = dist < 1e-4f;   // the sensor on the window: it subtends every azimuth
+    int n = 0;
+    for (const auto& p : pts)
+    {
+        const Eigen::Vector2f q = p.head<2>() - o;
+        if (q.norm() < dmin) continue;
+        if (surrounds or std::abs(wrap(std::atan2(q.y(), q.x()) - bearing)) <= half_sector)
+            if (++n >= kRegMinInliers) return true;
+    }
+    return false;
 }
 // True iff q lies nearer some segment of `walls` than `d_door` (its distance to the door's wall line).
 inline bool nearer_other_wall(const Eigen::Vector2f& q, float d_door, const std::vector<std::array<Eigen::Vector2f, 2>>& walls)
@@ -132,6 +166,7 @@ inline bool nearer_other_wall(const Eigen::Vector2f& q, float d_door, const std:
     WallRegistration out;
     const Eigen::Vector2f u = ap.wall_u, n = ap.across_u(), c = ap.centre_xy(), o = origin.head<2>();
     const float half_len = 0.5f * ap.w + kRegWindowM;
+    out.wall_in_view = detail::window_in_view(o, c, u, half_len, pts);
     // Candidates: anything that could be the wall under a rotation up to kRegYawMaxRad about the sensor.
     const float reach = (c - o).norm() + half_len;
     const float across_max = kRegDepthMaxM + reach * std::sin(kRegYawMaxRad);
@@ -224,6 +259,7 @@ inline bool nearer_other_wall(const Eigen::Vector2f& q, float d_door, const std:
     const double ma = sa / m, vaa = std::max(1e-6, saa / m - ma * ma);
     const double s2 = double(kRegSigmaRM) * kRegSigmaRM;
     out.ok        = true;
+    out.wall_in_view = true;
     out.eps       = eps;
     out.depth     = static_cast<float>(sr / m);
     out.eps_var   = static_cast<float>(s2 / (m * vaa));

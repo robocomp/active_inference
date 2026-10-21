@@ -960,9 +960,11 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         reg_sweep = rc::door::register_sweep(inst.ai2_belief.aperture(), leaf_origin, *leaf_pts, nz.room_walls);
         inst.dbg_reg = reg_sweep.reg;
         // The model's copy (M-6) holds the last registration while nothing contradicts it — and is RESET when a sweep of
-        // this door arrived and the wall did NOT register (fix round 2): the wall stopped being registrable, so an old
-        // offset is no longer evidence. No sweep this cycle ⇒ held (nothing looked).
-        inst.wall_reg = reg_sweep.reg.ok ? reg_sweep.reg : door::WallRegistration{};
+        // this door arrived, its field of view COVERED the wall window beside the aperture, and the wall did NOT register
+        // (fix round 2): the wall stopped being registrable, so an old offset is no longer evidence. ★ A sweep that does not
+        // cover the window (robot turned away) looked at nothing about it ⇒ held, like no sweep at all.
+        if (reg_sweep.reg.ok or reg_sweep.reg.wall_in_view)
+            inst.wall_reg = reg_sweep.reg.ok ? reg_sweep.reg : door::WallRegistration{};
     }
     // ★Task 5b: THE FIELD RUNS IN THE WALL-REGISTERED FRAME, the leaf plane's depth d in the ROOM frame. Registration moved
     // the sweep by reg.depth along across_u so the wall it sees lies on the polygon line; d is measured from that line in

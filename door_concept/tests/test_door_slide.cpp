@@ -330,6 +330,31 @@ int main()
                           reg.eps, eps, reg2.depth));
     }
 
+    std::print("\n(d2) wall_in_view: out-of-view keeps a held registration, in-view-without-wall resets it\n");
+    {
+        Scene sc;
+        const auto b = make_belief(S_TRUE, 0.01f, 1.5f);
+        const V3 o(1.2f, 3.4f, 0.67f);
+        const auto c = scan(sc, o, rng, 0.f, V2(0.f, 0.f));
+        const auto ap = b.aperture();
+        const auto good = rc::door::register_to_wall(ap, c.origin, c.pts);
+        check(good.ok and good.wall_in_view, "a full sweep registers and reports the wall in view");
+        const V2 cen = ap.centre_xy();
+        const float bearing = std::atan2(cen.y() - c.origin.y(), cen.x() - c.origin.x());
+        // (i) the robot turned away: only returns well off the window's bearing remain.
+        std::vector<V3> away, shifted;
+        for (const auto& p : c.pts)
+        {
+            const float az = std::atan2(p.y() - c.origin.y(), p.x() - c.origin.x());
+            if (std::abs(std::remainder(az - bearing, 2.f * std::numbers::pi_v<float>)) > 2.0f) away.push_back(p);
+            else { V3 q = p; q.head<2>() += 1.5f * ap.across_u(); shifted.push_back(q); }   // (ii) wall far off the search band
+        }
+        const auto r_away = rc::door::register_to_wall(ap, c.origin, away);
+        check(not r_away.ok and not r_away.wall_in_view, "sweep not covering the window: not registered, NOT in view (held)");
+        const auto r_none = rc::door::register_to_wall(ap, c.origin, shifted);
+        check(not r_none.ok and r_none.wall_in_view, "sweep covering the window with no wall returns: not registered, in view (reset)");
+    }
+
     std::print("\n(e) a SHUT door with a second opening 1.3 m along the same wall\n");
     {
         Scene sc; sc.phi = 0.0f; sc.second_hole = true; sc.corner_x = -1.f;
