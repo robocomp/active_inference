@@ -33,7 +33,7 @@ int main()
     std::vector<DoorDecision> want;
     for (int i = 0; i < 200; ++i)
         want.push_back({.cycle = std::uint64_t(1000 + i), .t_ms = -5 + 100 * std::int64_t(i),
-                        .kind = std::uint16_t(1 + i % int(DoorDecisionKind::kCount)), .door_id = std::uint64_t(i) * 7919u,
+                        .kind = std::uint16_t(1 + i % int(kCount)), .door_id = std::uint64_t(i) * 7919u,
                         .name = (i % 3 == 0) ? "door_" + std::to_string(i) : "",
                         .a = 0.1 * i + 1e-9, .b = -9.2e-05 * i, .c = std::numeric_limits<double>::quiet_NaN(),
                         .d = 0.260417 * i, .note = (i % 5 == 0) ? "a,b\nc \"q\"" : "x"});

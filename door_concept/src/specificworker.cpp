@@ -148,7 +148,8 @@ float footprint_overlap_ratio(const rc::DoorState& a, const rc::DoorState& b)
 // "create then remove" churn can be diagnosed from a file, not stdout. seq gives ordering.
 rc::door::DoorDecisionLog* g_decisions = nullptr;   // the worker's decision log while enabled (set in initialize())
 
-void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const std::string& note)
+void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const std::string& note,
+                       const std::string& name = {})
 {
     // The same lifecycle events into the binary decision log (decision_log.h), with the position as raw doubles.
     if (g_decisions != nullptr and g_decisions->enabled())
@@ -158,7 +159,7 @@ void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const
             {"BIRTH", K::Birth}, {"SUPPRESS", K::Suppress}, {"MERGE", K::Merge}, {"REMOVE", K::Remove},
             {"REACQUIRE", K::Reacquire}, {"RELEASE", K::Release}, {"RESTORE", K::Restore}};
         if (const auto k = kinds.find(ev); k != kinds.end())
-            g_decisions->record(k->second, id, {}, x, y, 0, 0, note);
+            g_decisions->record(k->second, id, name, x, y, 0, 0, note);
     }
     static std::ofstream f = [] { std::ofstream o; rc::diag::open_rotating(o, "etc/door_events.csv");
                                    o << "seq,event,id,x,y,note\n"; return o; }();
@@ -1124,7 +1125,7 @@ void SpecificWorker::compute()
             process_door_node(node);
 
     // Decision log: each instance's leaf-angle posterior as it stands after this cycle's fitting.
-    if (decision_log_.enabled())
+    if (decision_log_.enabled() and fitter_)
         for (const auto& [door_id, inst] : fitter_->instances())
             if (not inst.is_bearing_hypothesis)
                 decision_log_.record(rc::door::DoorDecisionKind::Phi, door_id, inst.node_name, inst.phi_est,
@@ -1180,6 +1181,7 @@ void SpecificWorker::retire_instance(std::uint64_t id)
 {
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
     {
+        log_instance_teardown(it->second, "retire");
         it->second.affordance.remove();
         // ★ALL FOUR, or the pragmatic ones leak. Deleting the door node drops its RT edge but NOT its
         // affordance children, and rc::owned::remove_stale_affordances only runs at startup and shutdown
@@ -1219,7 +1221,7 @@ void SpecificWorker::merge_overlapping_instances()
             std::print("door_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
                        drop, keep, ratio);
             log_tracker_event("MERGE", drop, dropped.model.state().cx, dropped.model.state().cy,
-                              std::format("into {} overlap {:.2f}", keep, ratio));
+                              std::format("into {} overlap {:.2f}", keep, ratio), dropped.node_name);
             retire_instance(drop);
         });
 }
@@ -1685,7 +1687,8 @@ void SpecificWorker::run_instance_tracker()
                            it != fitter_->instances().end() ? it->second.node_name : std::string{"?"},
                            by, phi_deg);
                 log_tracker_event("SUPPRESS", explainer, c.x(), c.y(),
-                                  std::format("{} phi {:.0f}deg", by, phi_deg));
+                                  std::format("{} phi {:.0f}deg", by, phi_deg),
+                                  it != fitter_->instances().end() ? it->second.node_name : std::string{});
                 continue;
             }
         }
@@ -1708,7 +1711,8 @@ void SpecificWorker::run_instance_tracker()
                 }
                 std::print("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — claimed by "
                            "id={} ({:.2f} m away)\n", slice, c.x(), c.y(), claimer, dist);
-                log_tracker_event("SUPPRESS", claimer, c.x(), c.y(), std::format("claimer {:.2f}m", dist));
+                log_tracker_event("SUPPRESS", claimer, c.x(), c.y(), std::format("claimer {:.2f}m", dist),
+                                  fitter_->instances().contains(claimer) ? fitter_->instances().at(claimer).node_name : std::string{});
                 continue;
             }
         }
@@ -1755,7 +1759,7 @@ void SpecificWorker::run_instance_tracker()
             if (revive != nullptr)
             {
                 fitter_->note_reacquire(new_id, *revive);
-                log_tracker_event("REACQUIRE", new_id, c.x(), c.y(), preferred_name);
+                log_tracker_event("REACQUIRE", new_id, c.x(), c.y(), preferred_name, preferred_name);
                 forget_ghost(Eigen::Vector2f(c.x(), c.y()));   // consumed — the door is alive again
             }
             // Materialise the DoorInstance NOW, at birth — do not wait for the freshly inserted DSR node
@@ -1776,7 +1780,8 @@ void SpecificWorker::run_instance_tracker()
                 // aperture is refined by the later upserts anyway.
                 note_identity(nopt->name(), Eigen::Vector2f(c.x(), c.y()));
             }
-            log_tracker_event("BIRTH", new_id, c.x(), c.y(), "");
+            log_tracker_event("BIRTH", new_id, c.x(), c.y(), "",
+                              fitter_->instances().contains(new_id) ? fitter_->instances().at(new_id).node_name : std::string{});
         }
     }
 
@@ -1951,11 +1956,15 @@ void SpecificWorker::load_identities()
     auto parsed = rc::door::parse_identity_table(f);
     if (parsed.unkeyed_format)
     {
+        decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, 0, 0, 1.0);
         std::print("door_concept: [identity] etc/door_identities.csv has the old un-keyed format — ignored "
                    "(rewritten room-keyed on the next save)\n");
         return;
     }
     identities_ = std::move(parsed.rows);
+    decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, double(identities_.size()), double(parsed.malformed));
+    for (const auto& i : identities_)   // spec 6.6: the table content at load is an explicit event
+        decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, i.name, i.xy.x(), i.xy.y(), i.pose.has_value() ? 1.0 : 0.0, 0, i.room);
     if (not identities_.empty())
     {
         std::print("door_concept: [identity] loaded {} remembered door face(s) ({} dropped as malformed):",
@@ -2870,8 +2879,9 @@ void SpecificWorker::update_existence_beliefs()
             // Retain the identity before deleting the node: a door that comes back at the same place is the SAME
             // door, and must resume its accumulated belief instead of being re-born as door_N+1 (see remember_ghost).
             remember_ghost(it->second);
+            log_instance_teardown(it->second, "existence remove");
             log_tracker_event("REMOVE", id, it->second.model.state().cx, it->second.model.state().cy,
-                              std::format("logodds {:.2f}", L));
+                              std::format("logodds {:.2f}", L), it->second.node_name);
             // Shadow-mode death record (§4.2), taken BEFORE teardown while the state that justified
             // the kill is readable. Low p_detect here ⇒ our removal bug, not a classifier phantom.
             log_phantom_event("DEATH", id, it->second.node_name,
@@ -2973,7 +2983,10 @@ void SpecificWorker::publish_door_intentions(rc::DoorInstance& inst,
     // when the expected information gain falls below threshold), so it runs unconditionally rather
     // than being gated on the legacy coverage-deficit proxy.
     if (auto node_opt = G->get_node(node_id); node_opt.has_value())
+    {
         step_epistemic(inst, node_opt.value());
+        log_epistemic_transition(inst);
+    }
 }
 
 // ─── Initialisation helpers ──────────────────────────────────────────────────
@@ -3263,6 +3276,39 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
         st.crossing_known = true;
     }
     return st;
+}
+
+// Decision log: the instance is being torn down — every affordance still offered is withdrawn WITH it (the node goes with
+// the door), and the per-door transition memory is dropped so it cannot grow for ever.
+void SpecificWorker::log_instance_teardown(const rc::DoorInstance& inst, const char* why)
+{
+    if (decision_log_.enabled())
+    {
+        using K = rc::door::DoorDecisionKind;
+        const std::pair<const char*, const rc::pragmatic::PragmaticAffordance*> pr[] = {
+            {"approach", &inst.aff_approach}, {"open", &inst.aff_open}, {"cross", &inst.aff_cross}, {"close", &inst.aff_close}};
+        for (const auto& [kind, aff] : pr)
+            if (aff->is_offered())
+                decision_log_.record(K::AffWithdrawn, inst.node_id, inst.node_name, aff->epoch(), aff->last_p(), 0, 0,
+                                     std::string(kind) + ":" + why);
+        if (inst.affordance.node_id() != 0)
+            decision_log_.record(K::AffWithdrawn, inst.node_id, inst.node_name, 0, 0, 0, 0, std::string("epistemic:") + why);
+    }
+    for (const char* k : {"approach", "open", "cross", "close", "epistemic"})
+        aff_seen_.erase({inst.node_id, k});
+}
+
+// Decision log: the epistemic aff_door_N (ObjectAffordance) offered / withdrawn, seen after step_epistemic.
+void SpecificWorker::log_epistemic_transition(const rc::DoorInstance& inst)
+{
+    if (not decision_log_.enabled())
+        return;
+    auto& seen = aff_seen_[{inst.node_id, "epistemic"}];
+    const bool offered = inst.affordance.node_id() != 0;
+    if (offered != seen.offered)
+        decision_log_.record(offered ? rc::door::DoorDecisionKind::AffOffered : rc::door::DoorDecisionKind::AffWithdrawn,
+                             inst.node_id, inst.node_name, 0, 0, 0, 0, "epistemic");
+    seen.offered = offered;
 }
 
 // Decision log: an affordance's state TRANSITIONS, once each, as seen right after the cycle's update(). OFFERED/WITHDRAWN
@@ -3610,9 +3656,20 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
 // asked, not that the world changed; that stays a perceptual question, answered by door_open_prob from
 // the image. Wiring a protocol event into a belief is the mistake the affordance work spent a month
 // removing.
-bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open,
-                                             const std::string& provider_id,
+// The single request path, wrapped so the decision log sees EVERY request, including the ones refused locally.
+bool SpecificWorker::request_door_actuation(rc::DoorInstance& inst, bool open, const std::string& provider_id,
                                              const std::string& purpose, std::string& why)
+{
+    const bool sent = request_door_actuation_impl(inst, open, provider_id, purpose, why);
+    decision_log_.record(rc::door::DoorDecisionKind::ActuatorRequest, inst.node_id, inst.node_name, open ? 1.0 : 0.0, sent ? 1.0 : 0.0,
+                         double(inst.actuation_requests), 0,
+                         purpose + "|" + (sent ? inst.actuation_note : why));
+    return sent;
+}
+
+bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool open,
+                                                  const std::string& provider_id,
+                                                  const std::string& purpose, std::string& why)
 {
     why.clear();
     if (cfg_.door_control_endpoint.empty())
@@ -4130,13 +4187,14 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
             // the existence belief that justified this door is still perfectly valid, we are simply no
             // longer the agent looking at that room.
             log_tracker_event("RELEASE", id, inst.model.state().cx, inst.model.state().cy,
-                              std::format("room {} -> {}", old_room, new_room));
+                              std::format("room {} -> {}", old_room, new_room), inst.node_name);
         }
         for (const auto id : leaving)
         {
             if (not old_room_lives) { retire_instance(id); continue; }
             if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
             {
+                log_instance_teardown(it->second, "release room");
                 it->second.affordance.remove();
                 it->second.aff_approach.remove();
                 it->second.aff_open.remove();
@@ -4203,10 +4261,15 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
     }
     // ★FRESH ENTRY (controller ruling 2026-10-20): the table outlives ltsm's memory, so rows of a room of this name from
     //  an older run must not be restorable later as confident phantoms. Names and places stay (identity only).
+    std::vector<std::string> strippable;   // decision log: which rows lose their restorable data
+    for (const auto& i : identities_)
+        if (i.room == room->name() and (i.pose.has_value() or i.leaf.has_value() or i.exist_logodds.has_value()))
+            strippable.push_back(i.name);
     if (const int n = rc::door::strip_restorable(identities_, room->name()); n > 0)
     {
         save_identities();
-        decision_log_.record(rc::door::DoorDecisionKind::IdentityForget, 0, {}, 0, 0, 0, double(n), "strip_restorable " + room->name());
+        for (const auto& nm : strippable)
+            decision_log_.record(rc::door::DoorDecisionKind::IdentityStrip, 0, nm, 0, 0, 0, 0, room->name());
         std::print("door_concept: [restore] '{}' entered FRESH ({}) — {} remembered row(s) reduced to identity only; "
                    "only doors fitted from now on can be restored on a later recall\n",
                    room->name(), first_resolution ? "first room resolved" : "no ltsm recall announced it", n);
@@ -4254,6 +4317,8 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
     }
     const auto d = rc::door::plan_restore(identities_, room->name(), recalled, live, cfg_.exist_reacquire_radius_m);
     for (const auto& k : d.skipped)
+        decision_log_.record(rc::door::DoorDecisionKind::RestoreSkip, 0, k.name, double(static_cast<int>(k.reason)), 0, 0, 0, room->name());
+    for (const auto& k : d.skipped)
         std::print("door_concept: [restore] '{}' in '{}' NOT restored: {}\n", k.name, room->name(), rc::door::to_string(k.reason));
 
     for (const auto& r : d.restore)
@@ -4292,7 +4357,9 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         //  absence, a restored door was ALIVE when left — see rc::door::restore_existence_prior.
         // Fitted without a fresh detection (as the carried door is), at the remembered pose and size, with its leaf memory.
         rc::door::seed_restored_instance(inst, r, prior_L, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
-        log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()));
+        log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()), n->name());
+        if (n->name() != r.name)
+            decision_log_.record(rc::door::DoorDecisionKind::RestoreRename, id, r.name, 0, 0, 0, 0, n->name());
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
                    "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
                    n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, prior_L,
@@ -4409,6 +4476,7 @@ void SpecificWorker::step_remembered_looks()
             {
                 e.ruled_out = true;
                 e.aff.remove();
+                decision_log_.record(rc::door::DoorDecisionKind::LookDrop, 0, r.name, e.ev.p_exists(), 0, 0, 0, "ruled out");
                 std::print("door_concept: [look] '{}' RULED OUT this visit — absent where it should have been visible "
                            "(P(exists)={:.3f}); not offered again until the room is re-entered\n", r.name, e.ev.p_exists());
                 continue;
@@ -4654,7 +4722,10 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     for (auto& [nm, e] : looks_)
         if (e.aff.node_id() == id)
+        {
             e.aff.on_node_deleted(id);
+            decision_log_.record(rc::door::DoorDecisionKind::LookDrop, 0, nm, 0, 0, 0, 0, "node deleted by another agent");
+        }
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [door_id, inst] : fitter_->instances())
     {
@@ -4667,6 +4738,12 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         inst.aff_open.on_node_deleted(id);
         inst.aff_cross.on_node_deleted(id);
         inst.aff_close.on_node_deleted(id);
+        // Decision log: an affordance node deleted by somebody else is a withdrawal the producer now believes in.
+        log_affordance_transitions(inst, "approach", inst.aff_approach);
+        log_affordance_transitions(inst, "open", inst.aff_open);
+        log_affordance_transitions(inst, "cross", inst.aff_cross);
+        log_affordance_transitions(inst, "close", inst.aff_close);
+        log_epistemic_transition(inst);
     }
 
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
@@ -4674,6 +4751,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         // ★ THE DOOR'S AFFORDANCES GO WITH IT. They are not RT children (nobody else's sweep reaches them), so a door
         //   deleted by another agent — ltsm evicting the room it was in (2026-10-12, live: aff_door_19, _approach,
         //   _cross left floating after room_1 was removed) — left them in the graph with nothing alive behind them.
+        log_instance_teardown(it->second, "node deleted by another agent");
         it->second.affordance.remove();
         it->second.aff_approach.remove();
         it->second.aff_open.remove();

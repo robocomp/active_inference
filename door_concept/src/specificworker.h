@@ -398,6 +398,11 @@ private:
     struct AffSeen { bool offered = false, claimed = false; };
     std::map<std::pair<std::uint64_t, std::string>, AffSeen> aff_seen_;
     bool consume_completion_logged(const rc::DoorInstance& inst, const char* kind, rc::pragmatic::PragmaticAffordance& aff);
+    void log_instance_teardown(const rc::DoorInstance& inst, const char* why);
+    void log_epistemic_transition(const rc::DoorInstance& inst);
+    void record_anchor_state(const PassageAnchor& pa, std::string note);
+    bool request_door_actuation_impl(rc::DoorInstance& inst, bool open, const std::string& provider_id,
+                                     const std::string& purpose, std::string& why);
     void log_affordance_transitions(const rc::DoorInstance& inst, const char* kind, const rc::pragmatic::PragmaticAffordance& aff);
     std::uint64_t anchor_log_rows_ = 0;   // final review I-4: flush every kAnchorRecordFlushEvery rows
     rc::door::rec::Recorder anchor_frames_;   // Task 8 fix 3: etc/anchor_frames.bin, every measured anchor cycle (replay_anchor_frames)

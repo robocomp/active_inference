@@ -15,6 +15,7 @@
 // Field meaning per kind (a,b,c,d) is documented at DoorDecisionKind. No locale is involved (binary), so the
 // es_ES decimal-comma trap of CLAUDE.md cannot apply; the test runs under es_ES anyway.
 #pragma once
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -22,6 +23,12 @@
 #include <string>
 #include <vector>
 #include "../../common/diag_log/rotating_csv.h"
+
+static_assert(std::endian::native == std::endian::little, "DDEC v1 stores little-endian native; add byte swaps first");
+
+// ★READING THE STREAMS. They are NOT cycle-aligned: Existence is logged only on cycles that carry a fresh mask frame
+// (when the old code decides), Phi on every cycle, the rest when they happen. t_ms is steady_clock milliseconds since its
+// epoch (boot), so DoorCycleInput must carry the cycle's steady time for the replay to reproduce it.
 
 namespace rc::door
 {
@@ -45,8 +52,23 @@ enum class DoorDecisionKind : std::uint16_t
     AffOffered, AffWithdrawn, AffExecuting, AffCompleted,
     // passage anchor: a=x, b=y, c=yaw (robot frame), d=epoch; note = door / reason
     AnchorHung, AnchorRemoved,
-    kCount = AnchorRemoved
+    // (appended; values of the kinds above are stable)
+    // actuator request, incl. refused locally: a=1 open/0 close, b=1 sent / 0 refused, c=requests so far; note=purpose|why-or-state
+    ActuatorRequest,
+    // identity table LOAD (spec 6.6): a=rows, b=malformed, c=1 if the file was the old un-keyed format (ignored)
+    // and one row per loaded face: name, a=x, b=y, c=1 if restorable (has a pose); note=room
+    IdentityLoad,
+    // a remembered row lost its restorable data on a FRESH entry: name, note=room
+    IdentityStrip,
+    // plan_restore skipped a remembered row: name; a = SkipReason (0 NoPose, 1 NameLive, 2 PlaceLive); note=room
+    RestoreSkip,
+    // a restored door got another name than the row's (DSR names unique): id=node, name=row name, note=assigned name
+    RestoreRename,
+    // passage-anchor state change other than hang/remove (park, re-init, relink, mode, leaf): a,b,c = pose x,y,yaw, d=epoch; note=what
+    AnchorState,
+    kCount_   // sentinel: keep LAST; kCount = number of kinds
 };
+inline constexpr std::uint16_t kCount = static_cast<std::uint16_t>(DoorDecisionKind::kCount_) - 1;
 
 struct DoorDecision
 {

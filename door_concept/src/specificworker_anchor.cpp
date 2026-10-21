@@ -259,6 +259,12 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     return true;
 }
 
+void SpecificWorker::record_anchor_state(const PassageAnchor& pa, std::string note)
+{
+    decision_log_.record(rc::door::DoorDecisionKind::AnchorState, pa.door_id, pa.door_name, pa.pose.x.x(), pa.pose.x.y(),
+                         pa.pose.x.z(), pa.linked_epoch, std::move(note));
+}
+
 void SpecificWorker::remove_passage_anchor(std::string_view why)
 {
     if (not passage_anchor_.has_value())
@@ -311,6 +317,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     const auto r = anchor_from_room(inst, &near_sign);   // Task 21: the robot's near side, not the belief's
     if (not r.has_value())
     {
+        record_anchor_state(pa, "retry kept: no room transform");
         std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry; no room transform: belief kept\n", pa.door_name, kind);
         return;
     }
@@ -319,6 +326,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     // anchor is born near-side and the latched side holds for the attempt).
     if (std::abs(rc::interaction::wrap_pi(r->x.z() - pa.pose.x.z())) > float(M_PI_2))
     {
+        record_anchor_state(pa, "retry re-initialised: far side");
         std::print("door_concept: [anchor] {}@robot re-claimed for {} — the belief was on the far side: RE-INITIALISED on the "
                    "robot's near side\n", pa.door_name, kind);
         pa.pose = r.value();
@@ -361,6 +369,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.init_pose = r.value();   // Task 11 fix 4: nothing seen since this retry ⇒ the room's initialisation is the wait pose
     pa.init_pose.stamp_ms = pa.pose.stamp_ms;
     pa.mode = rc::door::AnchorPublish::None;
+    record_anchor_state(pa, "retry fused");
     std::print("door_concept: [anchor] {}@robot re-claimed for {} — a retry: belief broadened by σ_model and fused with the room "
                "init (room − belief {:.2f} m / {:+.1f}°, weight P(out of the doorway band) {:.2f}, Mahalanobis² {:.1f}, view log-odds {:+.1f} ⇒ P(belief lost) {:.2f}): "
                "moved {:.3f} m / {:+.1f}°, σ_lat {:.3f} m\n",
@@ -385,7 +394,9 @@ void SpecificWorker::relink_passage_anchor(std::uint64_t new_door_id, std::strin
     auto& pa = *passage_anchor_;
     if (new_door_id == 0 or new_door_id == pa.door_id)
         return;
-    if (not pa.anchor->relink(*G, new_door_id))
+    const bool relinked = pa.anchor->relink(*G, new_door_id);
+    record_anchor_state(pa, std::format("relink to {} {}: {}", new_door_id, relinked ? "ok" : "FAILED", why));
+    if (not relinked)
         std::print("door_concept: [anchor] relink of {}@robot to {} FAILED ({}) — keeping the old link\n",
                    pa.door_name, new_door_id, why);
     else
@@ -542,6 +553,7 @@ void SpecificWorker::step_passage_anchor()
         if (outcome != rc::affordance::Outcome::Satisfied)
         {
             pa.retry = true;
+            record_anchor_state(pa, std::string("parked: ") + std::string(why));
             std::print("door_concept: [anchor] {}@robot PARKED — {}: kept, predicted and corrected for this door's next "
                        "cross claim (a retry: the belief is not re-initialised)\n", pa.door_name, why);
         }
@@ -594,6 +606,7 @@ void SpecificWorker::step_passage_anchor()
                 // The first claim on the door re-identified after a room switch: a new passage's start.
                 if (const auto r = anchor_from_room(*inst, &pa.axis_sign); r.has_value())
                 {
+                    record_anchor_state(pa, "re-initialised: first claim after relink");
                     std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: first {} claim after "
                                "the room-switch relink\n", pa.door_name, aff->kind());
                     pa.pose = r.value();
@@ -613,6 +626,7 @@ void SpecificWorker::step_passage_anchor()
                         retry_broad_prior(*inst, pa, aff->kind());
                     else if (const auto r = anchor_from_room(*inst, &pa.axis_sign); r.has_value())
                     {
+                        record_anchor_state(pa, std::format("re-initialised: epoch {} -> {}", pa.linked_epoch, epoch));
                         std::print("door_concept: [anchor] {}@robot RE-INITIALISED from the room: {} epoch {} → {}\n",
                                    pa.door_name, aff->kind(), pa.linked_epoch, epoch);
                         pa.pose = r.value();
@@ -626,8 +640,11 @@ void SpecificWorker::step_passage_anchor()
                     retry_broad_prior(*inst, pa, aff->kind());
             }
             else
+            {
+                record_anchor_state(pa, std::format("serves {} epoch {}: belief kept", aff->kind(), epoch));
                 std::print("door_concept: [anchor] {}@robot now serves {} (epoch {}) — same anchor, belief kept\n",
                            pa.door_name, aff->kind(), epoch);
+            }
             pa.linked_aff   = aff->node_id();
             pa.linked_epoch = epoch;
         }
@@ -964,6 +981,7 @@ void SpecificWorker::step_passage_anchor()
         : pa.mode;
     if (mode != pa.mode)
     {
+        record_anchor_state(pa, std::format("publish mode {} -> {}", static_cast<int>(pa.mode), static_cast<int>(mode)));
         if (mode == rc::door::AnchorPublish::Predicted)
             std::print("door_concept: [anchor] {}@robot PREDICTED — not seen now, the cross is claimed: publishing the last seen "
                        "pose carried by odometry (for ≤ {} ms of unseen time OUTSIDE the doorway band; P(in band) now {:.2f})\n",
@@ -1032,6 +1050,7 @@ void SpecificWorker::step_passage_anchor()
         if (not al.empty() != pa.leaf_published)
         {
             pa.leaf_published = not al.empty();
+            record_anchor_state(pa, al.empty() ? "leaf withdrawn" : "leaf carried");
             if (not al.empty())
                 std::print("door_concept: [anchor] {}@robot carries its leaf: MAP hinge ({:+.2f},{:+.2f}) free edge ({:+.2f},{:+.2f}) "
                            "[anchor frame], phi {:.0f} deg σ {:.1f} deg, P(MAP) {:.2f} (hinge log-odds {:+.1f}, swing {:+.1f})\n",
