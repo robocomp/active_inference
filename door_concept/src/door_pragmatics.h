@@ -63,6 +63,7 @@
 #include "door_geometry.h"
 #include "door_passability.h"  // clear_width, passable_prob
 #include "door_standpoint.h"   // the poses + which side of the aperture to stand on
+#include "door_approach_pose.h" // kApproachCompleteProb — the approach contract's completion level
 
 namespace rc::door
 {
@@ -112,6 +113,7 @@ struct InteractionState
     float approach_standoff_m = 0.0f; // middle of the actuation band [safe_standoff, reach] — the stand-off
     float robot_range_m = 0.0f;       // |robot - aperture centre| (m)
     float range_sigma_m = 0.0f;       // σ of that range (door Σ projected + pose chain, floored)
+    float pose_sigma_m  = 0.0f;   // D-A: the localisation part of range_sigma_m alone (floored) — the approach's ARRIVAL scatter
     float safe_standoff_m = 0.0f;     // near edge of the actuation band = the leaf's swept arc + the body
     float clear_width_m = 0.0f;       // along-wall clear span at the MODAL phi (diagnostic only)
 };
@@ -157,7 +159,7 @@ inline rc::affordance::Contract approach_contract(const DoorPragmaticCfg& p)
     return rc::affordance::Contract::servo()
         .center("door_roi_offset")
         .valid ("door_roi_valid")
-        .until ("door_reach_prob", GE, 0.90f)
+        .until ("door_reach_prob", GE, kApproachCompleteProb)   // ONE value, read by the pose solver too (door_approach_pose.h)
         .still (0.10f, 0.15f)
         .stable(2).timeout_s(p.approach_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }

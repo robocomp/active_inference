@@ -48,6 +48,10 @@ struct DoorInstance : DoorFitState
     rc::door::ApproachMemory approach_memory;
     Eigen::Vector2f approach_offered_xy{0.0f, 0.0f};
     bool approach_offered_valid = false;
+    Eigen::Vector2f approach_claimed_xy{0.0f, 0.0f};   // M-3: the pose the consumer claimed (its own, after repairs)
+    bool approach_claimed_valid = false;
+    std::string approach_room;                         // the room and side the offer was solved in (the refusal's key)
+    float approach_side = 1.0f;
 };
 
 }  // namespace rc
