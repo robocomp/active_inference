@@ -264,6 +264,9 @@ struct AnchorLostBelief
         Sr(1, 1) += range_m * range_m * robot_cov(2, 2);
         const auto ll = disagreement_loglik(nu, prev.P + now.P + Sr, width);
         if (not ll.has_value()) return 0.0;
+        // ★ TWO DIFFERENT QUESTIONS, TWO LIKELIHOOD PAIRS. p_re answers "is THIS transition a re-initialisation?" — a jump vs a
+        //   continuation: the Gaussian-vs-Cauchy pair (door_concept's belief_lost). The λ update below answers "is the BELIEF lost?"
+        //   — and a lost belief also continues (it tracks its alias), so its likelihood is the ½ continue + ½ wander mixture.
         const double p_re = p_reinitialised(prev, now, width, robot_cov, range_m, lambda);
         // A LOST belief is not a random walk: door_concept keeps TRACKING whatever it has locked onto (an alias continues as
         // smoothly as the door). So under "lost" a transition continues with ½ and wanders at the alias scale with ½ — the

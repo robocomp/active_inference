@@ -1158,10 +1158,10 @@ private:
     std::uint64_t anchor_spin_since_ms_ = 0;
     bool anchor_backoff_logged_ = false;                             // the jamb-deadlock backoff: log on change
     bool anchor_turn_room_logged_ = false;                           // try101: the servo's turn is making its room (log on change)
-    bool anchor_leaf_logged_ = false;
+    bool anchor_leaf_logged_ = false;                                // Task 12 fix A: the anchor carries a leaf — log on change
     bool anchor_carried_logged_ = false;                             // Task 13: driving on the carried pose past the switch (log on change)
     bool anchor_through_ = false;                                    // Task 12 Fix E: the servo reached `through` in this claim
-    std::optional<ControllerTargetInfo> clearing_target_;                // Task 12 Fix E: the cross being executed, kept past the room switch                                // Task 12 fix A: the anchor carries a leaf — log on change
+    std::optional<ControllerTargetInfo> clearing_target_;                // Task 12 Fix E: the cross being executed, kept past the room switch
     bool anchor_predicted_logged_ = false;                           // fix round 1: driving on a PREDICTED anchor: log on change
     // ── Task 3e ([Policy] Enabled only — rtD1h leg 5): THE ANCHOR'S OWN STATE, per claim (reset_anchor_cross_state) ──────────
     std::int64_t anchor_claim_since_ms_ = 0;                         // when this claim first read its anchor (door_concept's clock)
@@ -1170,6 +1170,8 @@ private:
     // through the pose the robot had AT ITS STAMP, and aged by the motion actually made since
     std::deque<std::tuple<std::int64_t, Eigen::Vector2f, float>> policy_pose_ring_;
     [[nodiscard]] std::optional<ControllerRobotPose> policy_pose_at(std::int64_t stamp_ms) const;
+    bool anchor_prev_covered_ = false;                               // the last block was placed through a recorded pose
+    std::int64_t anchor_uncovered_logged_stamp_ = 0;                 // the last uncovered stamp logged (one line per block)
     rc::policy::AnchorLostBelief anchor_lost_;                       // P(the anchor is lost), recursive per block (fix round 1, I-2)
     rc::policy::DoorwayBelief doorway_belief_;                       // P(the gap's line is the door), recursive per cycle (I-2)
     double doorway_belief_t_ = -1.0;                                 // its last update (steady s; < 0 = none this claim)

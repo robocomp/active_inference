@@ -3510,6 +3510,8 @@ void ControllerSession::reset_anchor_cross_state()
     policy_goal_line_known_ = false;
     doorway_belief_ = {};
     doorway_belief_t_ = -1.0;
+    policy_pose_ring_.clear();                       // poses recorded for an earlier claim never serve this one
+    anchor_uncovered_logged_stamp_ = 0;
 }
 
 // ★ Task 3e (2) — rtD1h leg 5 attempt 2. ([Policy] Enabled only: the old chain's servo path is unchanged for the A/B.)
@@ -3558,7 +3560,17 @@ void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
     if (not a.pose.x.allFinite() or not a.pose.P.allFinite()) return;
     // ONE observation per published block (fix round 2): the same stamp read again is the same look
     if (anchor_prev_room_.has_value() and anchor_prev_room_->stamp_ms == a.pose.stamp_ms) return;
-    // put the block in the room through the pose the robot had AT ITS STAMP (fix round 2 (c)): the block is relative to it
+    // put the block in the room through the pose the robot had AT ITS STAMP (fix round 2 (c)): the block is relative to it.
+    // A stamp older than the ring (this claim's poses only) has no recorded pose: its placement is unreliable, so it gets no
+    // re-initialisation test and no transition evidence — it still counts as not-seen evidence when it is one.
+    const bool covered = not policy_pose_ring_.empty() and a.pose.stamp_ms >= std::get<0>(policy_pose_ring_.front());
+    if (not covered and anchor_uncovered_logged_stamp_ != a.pose.stamp_ms)
+    {
+        anchor_uncovered_logged_stamp_ = a.pose.stamp_ms;
+        std::println("[anchor] cross: {}'s block (stamped {} ms ago) predates this claim's pose record — placed through the oldest "
+                     "pose, no re-initialisation test on it", a.name, now - a.pose.stamp_ms);
+    }
+    const bool comparable = covered and anchor_prev_room_.has_value() and anchor_prev_covered_;
     const ControllerRobotPose then = policy_pose_at(a.pose.stamp_ms).value_or(robot_pose);
     const auto cur = rc::policy::anchor_in_room(a.pose, then.pos, then.theta);
     const double dt = anchor_prev_room_.has_value() ? std::max<std::int64_t>(0, a.pose.stamp_ms - anchor_prev_room_->stamp_ms) * 1e-3 : 0.0;
@@ -3572,14 +3584,16 @@ void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
     {
         // NOT SEEN, by the owner's own word (a wait pose) or a block of a claim that ended: evidence INTO λ — one observation
         // weighted by the span it stands for (since the last block; or, first read, since it was written)
-        if (anchor_prev_room_.has_value())
+        if (comparable)
             p = rc::policy::p_reinitialised(*anchor_prev_room_, cur, a.width_m, robot_cov, range, anchor_lost_.lambda);
         anchor_lost_.observe_not_seen(dt, anchor_prev_room_.has_value() ? dt : std::max<std::int64_t>(0, now - a.pose.stamp_ms) * 1e-3);
     }
     else if (a.unseen_ms > 0)
         anchor_lost_.predict(dt);   // PREDICTED: odometry carries it smoothly by construction — no evidence (fix round 2 (b))
-    else if (anchor_prev_room_.has_value())
+    else if (comparable)
         p = anchor_lost_.observe(*anchor_prev_room_, cur, a.width_m, robot_cov, range, dt, /*seen=*/true);
+    else
+        anchor_lost_.predict(dt);
     if (p > 0.5)   // the MAP of {continuation, re-initialisation}
     {
         const Eigen::Vector3d d = cur.x - anchor_prev_room_->x;
@@ -3592,6 +3606,7 @@ void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
         if (not a.fresh and not door_passage_.clearing()) anchor_cross_engaged_ = false;
     }
     anchor_prev_room_ = cur;
+    anchor_prev_covered_ = covered;
 }
 
 bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
@@ -3613,7 +3628,9 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         reset_anchor_cross_state();
     }
     anchor_cross_ = read_cross_anchor(step.target.node_id, step.target.node_name, /*accept_stale=*/true);
-    note_anchor_block(step.robot_pose);   // (records the pose ring every cycle of a cross claim, anchor or not)   // Task 3e (policy only): a parked block is not this claim's; a re-init ends `engaged`
+    // Task 3e (policy only): records the pose ring every cycle of a cross claim; a parked block is not this claim's; a re-init
+    // ends `engaged`
+    note_anchor_block(step.robot_pose);
     if (anchor_cross_.has_value())
     {
         anchor_last_reading_ = anchor_cross_;
