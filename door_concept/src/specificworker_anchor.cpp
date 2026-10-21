@@ -768,22 +768,26 @@ void SpecificWorker::step_passage_anchor()
     // ── Task D-B (rtD1h leg 5): THE LOST CHECK ON EVERY CYCLE OF A CLAIMED CROSS (door_anchor_open.h AnchorLostMode) ────────
     //    The retry's belief_lost / retry_reinit ran only when the controller retried: rtD1h leg 5's anchor sat on an alias
     //    1.4 m / 84° off from its FIRST update for 46 s, published as drivable, while the room-frame door was right to 7 cm.
-    //    Now a two-mode filter runs every cycle the cross is claimed: the room initialisation (the same anchor_from_room the
-    //    creation and the retry use) mixes into the tracker's prior by the IMM weight BEFORE the update, the room channel and
-    //    the view evidence update P(lost) AFTER it, and the PUBLISHED pose is the two modes combined. Not past the room switch
-    //    (crossing_through: the room init is the next room's), not while parked (no cross claim; the retry fuses as before).
+    //    Now a two-mode filter (door_anchor_open.h AnchorLostMode): its transitions happen at UPDATES (the prior's reach of an
+    //    alias) and its view evidence per NEW view — on every update, claimed or not, so the mode is current whenever the
+    //    check runs. While the cross is claimed (not past the room switch: crossing_through's room init is the next room's)
+    //    the room initialisation (the same anchor_from_room the creation and the retry use) mixes into the tracker's prior by
+    //    the IMM weight BEFORE the update, its disagreement is scored ONCE as a snapshot AFTER it, and the PUBLISHED pose — and
+    //    its P(door in view) — are the two modes combined.
     const bool lost_active = inst != nullptr and crs and not pa.crossing_through;
-    const double lost_dt_s = pa.lost_stamp_ms > 0 ? 1e-3 * double(now - pa.lost_stamp_ms) : 0.0;
-    pa.lost_stamp_ms = now;
     std::optional<rc::interaction::RelPose> lost_room;
-    float lost_w = 0.f;
     if (lost_active)
     {
         float side_unused = pa.axis_sign;   // the room init's own near side (Task 21), not written back
         lost_room = anchor_from_room(*inst, &side_unused, false);
-        if (lost_room.has_value())
-            lost_w = rc::door::lost_mode_mix(pa.lost, pa.pose, &pa.bias, lost_room.value(), lost_dt_s, cfg_.pragmatic.cross_timeout_s);
     }
+    // A capture this cycle ⇒ an update: the mode's transition and the IMM mixing come first (the rays are then selected
+    // around the mixed prior).
+    float lost_w = 0.f;
+    if ((lidar_ingestor_ and lidar_ingestor_->bpearl_robot_stamp_ms() > pa.last_lidar_stamp)
+        or (mask_ingestor_ and mask_ingestor_->packet().valid and mask_ingestor_->packet().frame_id != pa.last_mask_frame))
+        lost_w = rc::door::lost_mode_predict(pa.lost, pa.pose, &pa.bias, lost_room.has_value() ? &lost_room.value() : nullptr,
+                                             pa.clear_width);
 
     // ── UPDATE: bpearl rays + the door mask, in the ROBOT frame OF NOW, each capture used once ──────────────
     // ★ STEP 0 (Task 7) — ONE EPOCH. The anchor is predicted to `now`; a sweep is restaged at its CAPTURE stamp and a
@@ -947,18 +951,14 @@ void SpecificWorker::step_passage_anchor()
     //    A new frame replaces it (no door slice ⇒ no points: the camera looked and saw none). Its camera term is
     //    recomputed at the CURRENT posterior every measured cycle, so the published p_view stays the published pose's.
     if (new_mask_frame) rc::door::hold_mask_frame(pa.cam_hold, mask_pts, mask_stamp);
-    double view_step = 0.0;   // this cycle's visibility evidence, shared by the retry's record and the lost mode (Task D-B)
     if (measured)
     {
         ev.p_cam  = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, pa.pose);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
         // Task 17 add-on: a measured frame is a frame the belief predicted the doorway in — its p_view is evidence about it.
         if (pa.view_llr_stamp_ms > 0)
-        {
-            view_step = rc::door::view_lost_llr_step(ev.p_view, 1e-3 * double(now - pa.view_llr_stamp_ms),
-                                                     1e-3 * double(rc::interaction::kAnchorPredictMs));
-            pa.view_lost_llr += view_step;
-        }
+            pa.view_lost_llr += rc::door::view_lost_llr_step(ev.p_view, 1e-3 * double(now - pa.view_llr_stamp_ms),
+                                                             1e-3 * double(rc::interaction::kAnchorPredictMs));
         // ★ Task 11 fix 2 (fix round 1): the anchor's own beams as evidence about the LEAF ANGLE, at the POSTERIOR it is
         //   about to publish, tempered by that posterior's p_view — scored under the swung leaf over door_concept's own φ
         //   grid, for the believed jamb and the other (rc::door::anchor_phi_loglik), and handed to the door's estimate_phi,
@@ -988,15 +988,24 @@ void SpecificWorker::step_passage_anchor()
         }
     }
     pa.view_llr_stamp_ms = now;   // every cycle: unmeasured time passes and carries no evidence (Task 17 add-on)
-    // Task D-B, step 2: this cycle's evidence on the lost mode, and the pose to PUBLISH — the two modes combined (an alias the
-    // beams keep returning to is the room's initialisation in what the controller reads once P(lost) has risen).
+    // Task D-B, step 2: this update's view evidence on the lost mode (a NEW view counts), the room snapshot, and the pose to
+    // PUBLISH — the two modes combined, with the combined P(door in view) (I4: a pose that is mostly the room's is not "seen"
+    // because the TRACKER sees something).
+    if (measured) rc::door::lost_mode_view(pa.lost, pa.pose, ev.p_view, pa.clear_width);
     rc::interaction::RelPose published = pa.pose;
+    float p_view_pub = ev.p_view;
     if (lost_room.has_value())
     {
-        const auto le = rc::door::lost_mode_observe(pa.lost, pa.pose, lost_room.value(), pa.clear_width, view_step, lost_dt_s,
-                                                    1e-3 * double(rc::interaction::kAnchorPredictMs));
+        const auto le = rc::door::lost_mode_posterior(pa.lost, pa.pose, lost_room.value(), pa.clear_width);
         published = rc::door::lost_mode_output(pa.pose, lost_room.value(), pa.lost.p);
         published.stamp_ms = now;
+        if (measured)
+        {
+            const auto vr = rc::door::door_view(lost_room.value(), pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max, lidar_origin,
+                                                rays, mask_pts, cam, pa.p_open_belief, leaf, kFloorBandM);
+            const float pc_room = rc::door::held_camera_view(pa.cam_hold, now, rc::interaction::kAnchorStaleMs, cam, pa.width, lost_room.value());
+            p_view_pub = rc::door::anchor_view_mixture(ev.p_view, rc::door::combine_view(vr.p_lidar, pc_room), pa.lost.p);
+        }
         // Logged per tenth of P(lost) — a LOG quantisation, not a decision: the filter and the output are continuous.
         if (const int decile = int(std::floor(10.f * pa.lost.p)); decile != pa.lost_logged_decile)
         {
@@ -1006,8 +1015,9 @@ void SpecificWorker::step_passage_anchor()
             record_anchor_state(pa, std::format("lost P {:.2f} (d2 {:.1f}, room log-ratio {:+.1f}, mix {:.2f}): published ({:+.3f},{:+.3f},{:+.3f})",
                                                 pa.lost.p, le.d2, le.room_llr, lost_w, published.x.x(), published.x.y(), published.x.z()));
             std::print("door_concept: [anchor] {}@robot P(lost) {:.2f} — Mahalanobis² {:.1f} to the room init (log-ratio {:+.1f}), "
-                       "view {:+.2f}; tracker ({:+.2f},{:+.2f},{:+.2f}), published {:.2f} m / {:+.1f}° from it toward the room\n",
-                       pa.door_name, pa.lost.p, le.d2, le.room_llr, view_step, pa.pose.x.x(), pa.pose.x.y(), pa.pose.x.z(),
+                       "filtered mode log-odds {:+.2f}; tracker ({:+.2f},{:+.2f},{:+.2f}), published {:.2f} m / {:+.1f}° from it toward the room\n",
+                       pa.door_name, pa.lost.p, le.d2, le.room_llr, std::log(std::max(1e-12f, pa.lost.q()) / std::max(1e-12f, 1.f - pa.lost.q())),
+                       pa.pose.x.x(), pa.pose.x.y(), pa.pose.x.z(),
                        dv.head<2>().norm(), dv.z() * 57.2958f);
         }
     }
@@ -1040,13 +1050,13 @@ void SpecificWorker::step_passage_anchor()
     // ── WRITE (Task 7, fix 3): only on a cycle whose update consumed evidence of a door IN VIEW ─────────────────
     // Between observations the belief is predicted (above) but not published; the edge then ages past
     // kAnchorStaleMs and the controller drops back to the room route. The anchor node itself stays.
-    const bool publish = measured and ev.p_view >= kPublishViewLevel;
+    const bool publish = measured and p_view_pub >= kPublishViewLevel;   // Task D-B (I4): the PUBLISHED pose's view
     if (measured and publish != pa.publishing)   // a transition is judged on a MEASURED cycle only
     {
         pa.publishing = publish;
         std::print("door_concept: [anchor] {}@robot {} publishing — P(door in view) {:.2f} (p_lidar {:.2f} = opening {:.2f} · "
                    "P(door) {:.2f} · walls {:.2f}; p_cam {:.2f})\n",
-                   pa.door_name, publish ? "RESUMED" : "PAUSED", ev.p_view, ev.p_lidar, ev.lidar_open, ev.lidar_door,
+                   pa.door_name, publish ? "RESUMED" : "PAUSED", p_view_pub, ev.p_lidar, ev.lidar_open, ev.lidar_door,
                    ev.lidar_wall, ev.p_cam);
     }
     // ── Fix round 1 (user-approved): the softer rule near the door — while the CROSS is claimed and the doorway has been
@@ -1159,8 +1169,13 @@ void SpecificWorker::step_passage_anchor()
         }
         pa.anchor->set_leaves(*G, al);
     }
-    // Task D-B: the lost belief on the anchor node, obj_exist_prob = 1 − P(lost) (Anchor::set_lost_prob; written on a change).
-    if (wrote) pa.anchor->set_lost_prob(*G, pa.lost.p);
+    // Task D-B: the lost belief on the anchor node, obj_exist_prob = 1 − P(lost) (Anchor::set_lost_prob; written on a change) —
+    // ONLY while the check runs (I3); otherwise the attribute is REMOVED: "not stated", never a stale number.
+    if (wrote)
+    {
+        if (lost_room.has_value()) pa.anchor->set_lost_prob(*G, pa.lost.p);
+        else pa.anchor->clear_lost_prob(*G);
+    }
     const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)
     {

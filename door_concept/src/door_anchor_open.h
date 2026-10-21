@@ -270,24 +270,12 @@ struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; double view_llr = 0.0
                                               float width, double view_llr = 0.0)
 {
     LostEvidence o;
-    Eigen::Vector3d nu = (room.x - belief.x).cast<double>();
-    nu.z() = std::remainder(nu.z(), 2.0 * M_PI);
-    const Eigen::Matrix3d S = (belief.P + room.P).cast<double>();
-    const double wl = std::max(1e-3, double(width));
-    const Eigen::Matrix3d SL = S + Eigen::Vector3d(wl * wl, wl * wl, M_PI * M_PI / 4.0).asDiagonal().toDenseMatrix();
-    const Eigen::LLT<Eigen::Matrix3d> llt(S), lltL(SL);
-    if (llt.info() != Eigen::Success or lltL.info() != Eigen::Success or not nu.allFinite()) return o;
-    o.d2 = nu.dot(llt.solve(nu));
-    const double dL2 = nu.dot(lltL.solve(nu));
-    const auto logdet = [](const Eigen::LLT<Eigen::Matrix3d>& c) { double l = 0; for (int i = 0; i < 3; ++i) l += 2.0 * std::log(c.matrixL()(i, i)); return l; };
-    const double k = 3.0, v = kAnchorLostDof;
-    const double l_right = -0.5 * o.d2 - 0.5 * k * std::log(2.0 * M_PI) - 0.5 * logdet(llt);
-    const double l_lost  = std::lgamma(0.5 * (v + k)) - std::lgamma(0.5 * v) - 0.5 * k * std::log(v * M_PI) - 0.5 * logdet(lltL)
-                         - 0.5 * (v + k) * std::log1p(dL2 / v);
-    o.room_llr = l_lost - l_right;
+    // Task D-B: the right/lost likelihood ratio is alias_log_ratio (door_anchor_update.h) — the same model the update uses to
+    // test its own fit against its prior.
+    o.room_llr = alias_log_ratio((room.x - belief.x).cast<double>(), (belief.P + room.P).cast<double>(), double(width), &o.d2);
     // The room disagreement and the belief's own visibility are independent evidence: their log-ratios add.
     o.view_llr = std::isfinite(view_llr) ? view_llr : 0.0;
-    const double a = std::log(kAnchorLostPrior) + l_lost + o.view_llr, b = std::log(1.0 - kAnchorLostPrior) + l_right;
+    const double a = std::log(kAnchorLostPrior) + o.room_llr + o.view_llr, b = std::log(1.0 - kAnchorLostPrior);
     o.p_lost = float(1.0 / (1.0 + std::exp(b - a)));
     return o;
 }
@@ -310,71 +298,95 @@ struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; double view_llr = 0.0
     return out;
 }
 
-// ─── Task D-B (rtD1h leg 5): THE LOST CHECK RUNS ON EVERY CYCLE OF A CLAIMED CROSS, AS A TWO-MODE FILTER ───────────────────
-// rtD1h leg 5: the anchor was hung correctly from the room at (−0.10, +1.95, +0.06) and its FIRST update put it on an alias
-// 1.4 m / 84° away (anchor_frames.bin t 445.28 s: prior σ (0.31, 0.20, 0.10) → posterior (−0.62, +0.63, +1.53), σ 2 cm), the
-// beams held it there, and the belief_lost test that would have caught it (Mahalanobis² 88 ⇒ P(lost) 1.00) ran only at the
-// controller's retry, 46 s later. The test itself was right; it ran on the wrong clock.
-// ★ WHY NOT JUST CALL retry_reinit EVERY CYCLE. belief_lost is a SNAPSHOT: the same room initialisation compared with the same
-//   belief, re-applied every cycle, counts one disagreement 10 times a second — a correct anchor 3σ from a room error it
-//   cannot see would be dragged onto the room (the frame the anchor exists to be independent of). And an alias that is a
-//   persistent attractor of the beams comes straight back after each re-init, so the published pose would flicker.
-// The model: WHAT THE BEAMS TRACK is a persistent two-mode latent — `right` (the opening) or `lost` (an alias: under it the
-// beams say nothing about the opening, whose pose is then the room initialisation's, σ_model-wide) — an interacting-
-// multiple-model filter with:
-//   TRANSITIONS  a Markov chain with stationary P(lost) = ⚑ kAnchorLostPrior and mixing time T = the cross contract's own
-//                timeout (DoorAffordance.CrossTimeoutS, 40 s): kAnchorLostPrior is a PER-ATTEMPT statement (P(lost) at a retry)
-//                and an attempt is bounded by that contract. Over dt: p⁻ = π + (p − π)·e^(−dt/T), in PROBABILITY space — so a
-//                long-correct anchor's P(lost) cannot sink without bound (an alias arriving late is believed as fast as one
-//                arriving early). ★ Not τ (kAnchorPredictMs, the evidence horizon): mixing every 3 s holds a correct, seen
-//                anchor at P(lost) ≈ 0.04, and the moment-matched output then carries 4 % of the room's σ_model-wide P0 — the
-//                published σ of a correct anchor went 1.3 → 7.5 cm in test (16b). With T the cross timeout it is ≈ 0.003.
-//   EVIDENCE     the room channel (belief_lost's room_llr) and the belief's own visibility (view_lost_llr_step), both
-//                TIME-weighted (·dt/τ: consecutive cycles share the room initialisation and the view) — no count, no level.
-//   MIXING       (IMM) the right-mode tracker's prior for the next update is the mixture of itself and the room init with
-//                w = P(lost now | right next) = p·(1 − π)(1 − e^(−dt/T)) / (1 − p⁻): ≈ 0 while the anchor is right, → 1 only
-//                as P(lost) → 1, so the beams get the room's prior back exactly when they have lost the opening.
-//   OUTPUT       what is published is the two modes combined, moment-matched: (1 − p)·tracker + p·room init
-//                (retry_reinit with no band fusion) — an alias the beams keep returning to is never what the controller
-//                sees once P(lost) has risen; its covariance carries the disagreement.
-// Detection time is the model's own: (logit(p) − logit(p⁻)) / (room_llr / τ) — rtD1h's alias (room_llr ≈ +35 nats) is believed
-// in ~5 cycles. The retry's one-shot fusion (retry_broad_prior: band-weighted, snapshot) is unchanged; every re-init resets
-// the mode to its prior.
+// ─── Task D-B (rtD1h leg 5): THE LOST CHECK ON EVERY CYCLE OF A CLAIMED CROSS — a two-mode filter ───────────────────────
+// rtD1h leg 5: hung correctly from the room, the anchor's FIRST update put it on an alias 1.4 m / 84° off and the beams held
+// it; belief_lost (Mahalanobis² 88 ⇒ P(lost) 1.00) ran only at the controller's retry, 46 s later. (The jump itself is the
+// update's — the update now tests its own fit against its prior, alias_log_ratio in door_anchor_update.h; this is the
+// check that an alias that gets in anyway cannot survive.)
+// WHAT THE BEAMS TRACK is a latent with two modes — `right` (the opening) or `lost` (an alias: the beams then say nothing
+// about the opening, whose pose is the room initialisation's, σ_model-wide):
+//   TRANSITIONS  happen at UPDATES, not with time: a tracker can be captured by an alias only where its prior reaches one.
+//                Per update, h = P(the prior puts the opening outside its own basin) = 1 − Π_axes P(|z| < ½ a_i / σ_i), σ the
+//                prior's marginal σ in anchor axes and a the ALIAS SCALE belief_lost already uses (Σ_L: one opening width
+//                along and across the wall, a quarter turn in yaw); ⚑ the basin = half that scale (a definition). The chain
+//                is symmetric (a lost tracker re-acquires the opening on the same terms). rtD1h's hang prior (0.31, 0.20,
+//                0.10) gives h ≈ 0.18 (test 16d); a converged tracker (σ 2 cm, 1°) gives h ≈ 0 — so a seen, correct anchor's P(lost)
+//                cannot creep up with time and a parked one changes nothing (lost_hazard).
+//   EVIDENCE     (i) the belief's own visibility, per MEASURED frame, weighted by how NEW the view is: (1 − ρ) with
+//                ρ = e^(−Δ/ℓ), Δ how far the doorway moved in the robot frame since the last measured frame and ℓ half the
+//                opening — the view-decorrelation transport_bias uses. A parked robot re-reading one view adds nothing.
+//                (ii) the room disagreement (belief_lost's room channel) as a SNAPSHOT: the current innovation scored ONCE on
+//                top of the filtered mode, never fed back into the recursion — it is one comparison of one belief with one
+//                room initialisation, however many cycles look at it.
+//   MIXING       (IMM) before each update the tracker's prior is mixed with the room initialisation at w = P(lost then |
+//                right now) = p·h / (p·h + (1 − p)(1 − h)), p the last posterior: 0 for a converged tracker, → 1 as P(lost)
+//                → 1 while the prior can still reach the opening.
+//   OUTPUT       published = the two modes combined, moment-matched — (1 − p)·tracker + p·room init (retry_reinit with no band
+//                fusion). Its P(door in view) is combined the same way (anchor_view_mixture): a pose that is mostly the
+//                room's is not "seen" because the TRACKER sees something.
+// Every re-init resets the mode (q = 0: the tracker IS the room initialisation then); the retry's one-shot fusion is unchanged.
 struct AnchorLostMode
 {
-    float p = float(kAnchorLostPrior);   // P(the beams track an alias), after this cycle's evidence
-    float p_pred = float(kAnchorLostPrior);   // p⁻: the transition's prediction this cycle (set by lost_mode_mix)
+    double q_logodds = -std::numeric_limits<double>::infinity();   // the filtered mode WITHOUT the room snapshot (log-odds)
+    float  p = 0.f;                                                 // the posterior: filtered mode + this cycle's room snapshot
+    Eigen::Vector3f last_view = Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());   // pose at the last measured frame
+    [[nodiscard]] float q() const { return std::isfinite(q_logodds) ? float(1.0 / (1.0 + std::exp(-q_logodds))) : (q_logodds > 0 ? 1.f : 0.f); }
 };
+inline double logit_of(double p) { return p <= 0.0 ? -std::numeric_limits<double>::infinity() : p >= 1.0 ? std::numeric_limits<double>::infinity() : std::log(p / (1.0 - p)); }
+inline double sigmoid_of(double l) { return std::isfinite(l) ? 1.0 / (1.0 + std::exp(-l)) : (l > 0 ? 1.0 : 0.0); }
 
-// Step 1, before the update: the transition over dt (mixing time mix_s = T) and the IMM mixing of the tracker's prior with the room initialisation.
-// The bias factor's share of P scales with the tracker's weight (P − L Lᵀ ⪰ 0 is kept: P_new ⪰ (1 − w)·P_old). Returns w.
-inline float lost_mode_mix(AnchorLostMode& m, rc::interaction::RelPose& tracker, AnchorBias* bias,
-                           const rc::interaction::RelPose& room, double dt_s, double mix_s)
+// The per-update capture hazard h of a prior (see TRANSITIONS): alias_hazard (door_anchor_update.h), the same one the update
+// weighs its own fit with.
+[[nodiscard]] inline double lost_hazard(const rc::interaction::RelPose& prior, float width)
 {
-    const double pi = kAnchorLostPrior;
-    const double a = (dt_s > 0.0 and mix_s > 0.0) ? -std::expm1(-dt_s / mix_s) : 0.0;   // 1 − e^(−dt/T)
+    return alias_hazard(prior.P, prior.x.z(), width);
+}
+
+// Step 1, before the update: the transition at this update and the IMM mixing of the tracker's prior with the room
+// initialisation (when there is one this cycle). The bias factor's share of P scales with the tracker's weight
+// (P − L Lᵀ ⪰ 0 is kept: P_new ⪰ (1 − w)·P_old). Returns w.
+inline float lost_mode_predict(AnchorLostMode& m, rc::interaction::RelPose& tracker, AnchorBias* bias,
+                               const rc::interaction::RelPose* room, float width)
+{
+    const double h = lost_hazard(tracker, width);
+    // the filtered mode, one transition
+    const double q = m.q();
+    m.q_logodds = logit_of(q * (1.0 - h) + (1.0 - q) * h);
+    if (room == nullptr) return 0.f;
     const double p = std::clamp(double(m.p), 0.0, 1.0);
-    const double p_pred = pi + (p - pi) * (1.0 - a);
-    m.p_pred = float(p_pred);
-    const double w = (1.0 - p_pred) > 0.0 ? std::clamp(p * (1.0 - pi) * a / (1.0 - p_pred), 0.0, 1.0) : 1.0;
-    tracker = retry_reinit(tracker, room, Eigen::Matrix3f::Zero(), 0.f, float(w));
+    const double den = p * h + (1.0 - p) * (1.0 - h);
+    const double w = den > 0.0 ? std::clamp(p * h / den, 0.0, 1.0) : 1.0;
+    tracker = retry_reinit(tracker, *room, Eigen::Matrix3f::Zero(), 0.f, float(w));
     if (bias != nullptr) bias->L *= float(std::sqrt(1.0 - w));
     return float(w);
 }
 
-// Step 2, after the update: this cycle's evidence on the predicted mode, the room channel ·dt/τ (tau_s = kAnchorPredictMs, the
-// evidence horizon). `view_step` = view_lost_llr_step (already ·dt/τ).
-inline LostEvidence lost_mode_observe(AnchorLostMode& m, const rc::interaction::RelPose& tracker, const rc::interaction::RelPose& room,
-                                      float width, double view_step, double dt_s, double tau_s)
+// Step 2, after a MEASURED update: the frame's visibility evidence on the filtered mode, weighted by the view's novelty.
+inline double lost_mode_view(AnchorLostMode& m, const rc::interaction::RelPose& tracker, float p_view, float width)
+{
+    double novelty = 1.0;
+    if (m.last_view.allFinite())
+    {
+        const float ell = 0.5f * std::max(width, 1e-3f);
+        // Δ: how far the doorway moved in the robot frame (a turn moves it by its lever) — transport_bias's measure.
+        novelty = -std::expm1(-double((tracker.x.head<2>() - m.last_view.head<2>()).norm()) / double(ell));
+    }
+    m.last_view = tracker.x;
+    if (not std::isfinite(p_view)) return 0.0;
+    const double pv = std::clamp(double(p_view), 0.0, 1.0);
+    const double step = novelty * std::log((1.0 + 2.0 * (1.0 - pv)) / (1.0 + 2.0 * pv));
+    if (std::isfinite(m.q_logodds)) m.q_logodds += step;   // q = 0 or 1 exactly: evidence cannot move a certainty
+    return step;
+}
+
+// Step 3, every cycle with a room initialisation: the posterior = the filtered mode + the room SNAPSHOT (once, not recursed).
+inline LostEvidence lost_mode_posterior(AnchorLostMode& m, const rc::interaction::RelPose& tracker, const rc::interaction::RelPose& room,
+                                        float width)
 {
     LostEvidence e = belief_lost(tracker, room, width);
-    const double pp = std::clamp(double(m.p_pred), 1e-12, 1.0 - 1e-12);
-    double l = std::log(pp / (1.0 - pp));
-    if (dt_s > 0.0 and tau_s > 0.0 and std::isfinite(e.room_llr)) l += e.room_llr * dt_s / tau_s;
-    if (std::isfinite(view_step)) l += view_step;
-    m.p = float(1.0 / (1.0 + std::exp(-l)));
+    const double l = m.q_logodds + (std::isfinite(e.room_llr) ? e.room_llr : 0.0);
+    m.p = float(sigmoid_of(std::isnan(l) ? m.q_logodds : l));
     e.p_lost = m.p;
-    e.view_llr = view_step;
     return e;
 }
 
@@ -383,6 +395,12 @@ inline LostEvidence lost_mode_observe(AnchorLostMode& m, const rc::interaction::
                                                                float p_lost)
 {
     return retry_reinit(tracker, room, Eigen::Matrix3f::Zero(), 0.f, p_lost);
+}
+// ...and its P(door in view): the mixture's — the tracker's view where the tracker is right, the room init's where it is lost.
+[[nodiscard]] inline float anchor_view_mixture(float p_view_tracker, float p_view_room, float p_lost)
+{
+    const float p = std::clamp(p_lost, 0.f, 1.f);
+    return (1.f - p) * p_view_tracker + p * p_view_room;
 }
 
 // Task 12 fix round 1 (I-3): a frame is evidence about the LEAF (its φ curve, the hinge and swing log-odds) only when its pose is

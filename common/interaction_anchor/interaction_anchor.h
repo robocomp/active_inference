@@ -110,6 +110,8 @@ public:
     // obj_exist_prob = 1 − P(lost) (an existing attribute: "the object exists where this copy says"). Written only on a change.
     // See read_anchor_lost_prob for the contract.
     bool set_lost_prob(DSR::DSRGraph& G, float p_lost);
+    // ...and its removal: the owner is not running the check this cycle (I3) — absent means "not stated", never a stale value.
+    bool clear_lost_prob(DSR::DSRGraph& G);
     void remove(DSR::DSRGraph& G);                               // node, edge, and the affordance's link
     [[nodiscard]] std::uint64_t id() const { return id_; }
     [[nodiscard]] std::uint64_t object_id() const { return object_id_; }

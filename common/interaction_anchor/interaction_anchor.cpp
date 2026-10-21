@@ -223,6 +223,15 @@ bool Anchor::set_lost_prob(DSR::DSRGraph& G, float p_lost)
     return G.update_node(n.value());
 }
 
+bool Anchor::clear_lost_prob(DSR::DSRGraph& G)
+{
+    auto n = G.get_node(id_);
+    if (not n.has_value()) return false;
+    if (not G.get_attrib_by_name<obj_exist_prob_att>(n.value()).has_value()) return true;
+    G.remove_attrib_local<obj_exist_prob_att>(n.value());
+    return G.update_node(n.value());
+}
+
 std::optional<float> read_anchor_lost_prob(DSR::DSRGraph& G, std::uint64_t anchor_id)
 {
     const auto n = G.get_node(anchor_id);

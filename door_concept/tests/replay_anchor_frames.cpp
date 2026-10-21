@@ -47,7 +47,6 @@
 //                    evidence after it, the two modes' combination as the scored pose) — the room init each cycle is the
 //                    chain's first record (a fresh anchor's prior is the room init) carried through the TRUE robot pose.
 //                    Prints a LOST row per frame: P(lost), the room channel, the mixing weight, tracker vs published pose.
-//   --lost-mix-s T   the lost mode's mixing time (default 40 s = DoorAffordance.CrossTimeoutS).
 //   --lost-no-feedback  diagnosis: the mode's output only, the tracker never mixed (see lost_no_feedback).
 // The held camera term is replayed as live (the last mask frame for kAnchorStaleMs, carried by the step motion), so the
 // chained p_view is the one that would be PUBLISHED. ⚠ The rays are the ones select_anchor_rays kept AT THE LIVE PRIOR: a
@@ -225,7 +224,6 @@ void print_leg(const LegStats& s, int k)
 // brought back into each later frame's robot frame by the true pose then; its P0 is the first record's, carried in anchor
 // axes. So the replayed room init holds the live room-frame error at the hang and no later localisation noise (stated).
 bool lost_check = false;
-double lost_mix_s = 40.0;   // DoorAffordance.CrossTimeoutS (door_config.h default)
 bool lost_no_feedback = false;   // --lost-no-feedback: the mode's OUTPUT only — the tracker is never mixed (diagnosis: the
                                  // records' rays were selected at the LIVE prior, so a tracker the mixing moves is scored on
                                  // rays chosen for somewhere else; this isolates what the output alone does)
@@ -240,7 +238,6 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
     bool lost_ok = false;                       // an opening in the world for this chain (its first record + the truth)
     Eigen::Vector3d open_world = Eigen::Vector3d::Zero();   // x, y, yaw of the room init's opening, world
     Eigen::Matrix3f P0_axes = Eigen::Matrix3f::Zero();       // its P0 in anchor axes
-    std::int64_t lost_stamp = 0;
     const auto room_init_at = [&](std::int64_t t) -> std::optional<rc::interaction::RelPose>
     {
         if (not lost_ok) return std::nullopt;
@@ -280,7 +277,6 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             hold = {};
             lost_mode = {};
             lost_ok = false;
-            lost_stamp = f.t_ms;
             if (lost_check)
                 if (const auto g = gt_at(gt, f.t_ms); g.has_value())
                 {
@@ -345,15 +341,14 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
             (void)Qm;
         }
         staged:
-        const double lost_dt = 1e-3 * double(f.t_ms - lost_stamp);
-        lost_stamp = f.t_ms;
         const auto room_now = lost_check ? room_init_at(f.t_ms) : std::nullopt;
         float lost_w = 0.f;
-        if (room_now.has_value())
+        if (lost_check)   // every record is an update: the mode's transition, and the IMM mixing when a room init exists
         {
             rc::interaction::RelPose x_mixed = x;
             rc::door::AnchorBias b_mixed = bias;
-            lost_w = rc::door::lost_mode_mix(lost_mode, x_mixed, no_bias ? nullptr : &b_mixed, room_now.value(), lost_dt, lost_mix_s);
+            lost_w = rc::door::lost_mode_predict(lost_mode, x_mixed, no_bias ? nullptr : &b_mixed,
+                                                 room_now.has_value() ? &room_now.value() : nullptr, wk_lost(f));
             if (not lost_no_feedback) { x = x_mixed; bias = b_mixed; }
         }
         rc::door::AnchorStaging st = f.staging;   // v2: the record's budgeted sets; v1: empty, its pre-budget rays are staged
@@ -374,11 +369,10 @@ int chain(const std::vector<rc::door::rec::Frame>& frames, double scale, bool fr
         ev.p_cam = rc::door::held_camera_view(hold, f.t_ms, rc::interaction::kAnchorStaleMs, f.cam, wk, post);
         ev.p_view = rc::door::combine_view(ev.p_lidar, ev.p_cam);
         x = post;
+        if (lost_check) rc::door::lost_mode_view(lost_mode, x, ev.p_view, wk_lost(f));
         if (room_now.has_value())
         {
-            const double tau = 1e-3 * double(rc::interaction::kAnchorPredictMs);
-            const auto le = rc::door::lost_mode_observe(lost_mode, x, room_now.value(), wk_lost(f),
-                                                        rc::door::view_lost_llr_step(ev.p_view, lost_dt, tau), lost_dt, tau);
+            const auto le = rc::door::lost_mode_posterior(lost_mode, x, room_now.value(), wk_lost(f));
             post = rc::door::lost_mode_output(x, room_now.value(), lost_mode.p);   // what would be PUBLISHED
             const auto gt_t = gt_error(gt, f.t_ms, x), gt_o = gt_error(gt, f.t_ms, post);
             if (k % std::size_t(every) == 0)
@@ -484,7 +478,6 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--freeze") == 0) freeze = true;
         else if (std::strcmp(argv[i], "--lost-check") == 0) lost_check = true;
         else if (std::strcmp(argv[i], "--lost-no-feedback") == 0) lost_no_feedback = true;
-        else if (std::strcmp(argv[i], "--lost-mix-s") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) lost_mix_s = v; }
         else if (std::strcmp(argv[i], "--time-scale") == 0 and i + 1 < argc) { if (num(argv[++i], v) and v > 0) scale = v; }
         else if (std::strcmp(argv[i], "--from") == 0 and i + 1 < argc) { if (num(argv[++i], v)) from_s = v; }
         else if (std::strcmp(argv[i], "--to") == 0 and i + 1 < argc) { if (num(argv[++i], v)) to_s = v; }

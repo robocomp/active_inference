@@ -421,8 +421,7 @@ private:
         bool  leaf_published = false;
         bool  crossing_through = false;
         double view_lost_llr = 0.0;                       // Task 17 add-on: the belief's own visibility evidence (view_lost_llr_step)
-        rc::door::AnchorLostMode lost;                    // Task D-B: P(the beams track an alias), every cycle of a claimed cross
-        std::int64_t lost_stamp_ms = 0;                   // ...its clock (system ms, as view_llr_stamp_ms)
+        rc::door::AnchorLostMode lost;                    // Task D-B: P(the beams track an alias): filtered at updates, published while the cross is claimed
         int lost_logged_decile = -1;                      // ...logged per tenth (a log quantisation, not a decision)
         std::int64_t view_llr_stamp_ms = 0;                   // Task 12 Fix E: a room switch came during the cross — still crossing                     // Task 12 fix A: the anchor carries the leaf (logs the transitions)
         rc::door::CameraViewHold cam_hold;                // Task 8 fix 1: the last mask frame, held kAnchorStaleMs (odometry-carried)
