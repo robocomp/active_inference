@@ -3,6 +3,7 @@
  */
 
 #include "door_fitter.h"
+#include "core/door_core.h"   // point_in_polygon — the containment rule, shared with the birth test
 #include "door_standpoint.h"
 #include "door_phi_posterior.h"   // the phi channel as pure functions (tested offline)
 #include "door_opening_edges.h"   // try96: wall registration, the opening's through-span, the registration offset
@@ -154,22 +155,14 @@ void DoorFitter::refresh_geometry(DoorInstance& inst)
     else
     {
         // Pre-belief (a node adopted from the graph, or a fresh birth before its first mask): the only
-        // geometry we have is the published box, so derive the leaf pose from that. Identical result.
-        // The wall frame is not resolved yet, so the aperture is seeded as the box itself (u = the box's
-        // own heading, near edge at s = 0); run_inference re-authors it properly on the first fit.
-        inst.leaf_pose = door::leaf_pose_from_box(ms.cx, ms.cy, ms.cz, ms.yaw, ms.w, ms.h, ms.thickness);
-        inst.leaf      = {};
-        inst.aperture  = {};
-        inst.aperture.wall_u = inst.leaf_pose.ex;
-        inst.aperture.wall_O = inst.leaf_pose.hinge_xy;
-        inst.aperture.s = 0.0f; inst.aperture.w = ms.w; inst.aperture.h = ms.h;
-        inst.aperture.floor_z = ms.cz; inst.aperture.thickness = ms.thickness;
-        ms.ap_cx = ms.cx; ms.ap_cy = ms.cy; ms.ap_yaw = ms.yaw;
+        // geometry we have is the published box (door_model.h pre_belief_geometry — shared with the DoorCore's
+        // replay world, which must build a newborn exactly like this).
+        const PreBeliefGeometry g = pre_belief_geometry(ms);
+        inst.leaf_pose = g.leaf_pose;
+        inst.leaf      = g.leaf;
+        inst.aperture  = g.aperture;
     }
-    ms.cx  = inst.leaf_pose.centre_xy.x();
-    ms.cy  = inst.leaf_pose.centre_xy.y();
-    ms.yaw = inst.leaf_pose.yaw();
-    ms.phi = inst.leaf.phi;
+    read_back_leaf(ms, inst.leaf_pose, inst.leaf);
     inst.model.set_state(ms);
 }
 
@@ -849,32 +842,7 @@ std::optional<Eigen::Matrix4d> DoorFitter::room_T_zed_matrix(std::uint64_t pose_
     return to_mat4(rtb.value()) * to_mat4(btz.value());
 }
 
-void DoorFitter::update_ego_motion()
-{
-    const auto M = room_T_zed_matrix();   // camera→room (ts=0 = current robot pose)
-    const auto now = std::chrono::steady_clock::now();
-    if (not M.has_value())
-    {
-        have_prev_cam_ = false;           // pose chain unavailable → can't judge motion; reset baseline
-        return;
-    }
-    const Eigen::Vector3f pos(static_cast<float>(M->coeff(0, 3)),
-                              static_cast<float>(M->coeff(1, 3)),
-                              static_cast<float>(M->coeff(2, 3)));
-    const Eigen::Vector3f fwd(static_cast<float>(M->coeff(0, 1)),   // zed +y is the depth/forward axis
-                              static_cast<float>(M->coeff(1, 1)),
-                              static_cast<float>(M->coeff(2, 1)));
-    if (have_prev_cam_)
-    {
-        const float dt = std::max(1e-3f, std::chrono::duration<float>(now - prev_cam_tp_).count());
-        ego_lin_mps_ = (pos - prev_cam_pos_).norm() / dt;
-        const float fa = prev_cam_fwd_.norm(), fb = fwd.norm();
-        const float cang = (fa > 1e-6f and fb > 1e-6f)
-            ? std::clamp(prev_cam_fwd_.dot(fwd) / (fa * fb), -1.0f, 1.0f) : 1.0f;
-        ego_ang_radps_ = std::acos(cang) / dt;
-    }
-    prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
-}
+// (update_ego_motion moved to the DoorCore: core/sensing.h EgoMotion — set_ego_motion() receives its value.)
 
 // Combined ego-motion magnitude (m/s): the per-mask corruption speed OR'd with the robot's own measured speed
 // (linear + a lever-arm conversion of angular), so it works whether or not the producer populated motion_dotd.
@@ -1643,20 +1611,7 @@ float DoorFitter::door_view_obliquity(const DoorInstance& inst) const
     return std::clamp(std::abs(r.dot(inst.leaf_pose.ey)), 0.0f, 1.0f);   // ey = the leaf's face normal
 }
 
-bool DoorFitter::frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const
-{
-    if (sl.trunc_frac > cfg_.ai2_trunc_gate_frac)
-        return false;
-    if (not cfg_.ai2_motion_confirm_only)
-        return true;
-    const bool moving = ego_lin_mps_   > cfg_.ai2_still_lin_mps
-                     or ego_ang_radps_ > cfg_.ai2_still_ang_radps
-                     or std::abs(sl.motion_dotd) > cfg_.ai2_still_dotd;
-    if (not moving)
-        return true;
-    return cfg_.ai2_moving_update_center_radius >= 0.0f
-       and sl.centroid_radius <= cfg_.ai2_moving_update_center_radius;
-}
+// (frame_admissible moved with the birth rule to the DoorCore: DoorCore::frame_admissible.)
 
 bool DoorFitter::confirm_only(const DoorInstance& inst) const
 {
@@ -1684,36 +1639,8 @@ float DoorFitter::aperture_band_offset(const DoorInstance& inst) const
 
 bool DoorFitter::point_in_room(const Eigen::Vector2f& q, float margin_m) const
 {
-    const std::size_t n = room_polygon_.size();
-    if (n < 3)
-        return true;                       // no trusted polygon → unknown room → impose no prior
-
-    // Ray-cast parity test (even-odd rule) for strict interior.
-    bool inside = false;
-    for (std::size_t i = 0, j = n - 1; i < n; j = i++)
-    {
-        const Eigen::Vector2f& a = room_polygon_[i];
-        const Eigen::Vector2f& b = room_polygon_[j];
-        if (((a.y() > q.y()) != (b.y() > q.y())) and
-            (q.x() < (b.x() - a.x()) * (q.y() - a.y()) / (b.y() - a.y() + 1e-12f) + a.x()))
-            inside = not inside;
-    }
-    if (inside)
-        return true;
-    if (margin_m <= 0.0f)
-        return false;
-
-    // Outside the polygon: accept only if within margin_m of the boundary (wall-hugging door, centroid noise).
-    float best2 = std::numeric_limits<float>::max();
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const Eigen::Vector2f& a = room_polygon_[i];
-        const Eigen::Vector2f ab = room_polygon_[(i + 1) % n] - a;
-        const float len2 = ab.squaredNorm();
-        const float t = (len2 > 1e-8f) ? std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;
-        best2 = std::min(best2, (q - (a + t * ab)).squaredNorm());
-    }
-    return best2 <= margin_m * margin_m;
+    // ONE rule for the containment prior: the DoorCore's birth test and this one (core/door_core.cpp).
+    return rc::door::core::point_in_polygon(room_polygon_, q, margin_m);
 }
 
 void DoorFitter::compute_projected_roi(DoorInstance& inst)

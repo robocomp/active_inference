@@ -19,6 +19,7 @@
 #include <QDebug>
 
 #include "door_model.h"   // rc::DoorModel statics (TOP_THICKNESS, LEG_RADIUS)
+#include "core/door_core.h"   // allocate_door_name — the naming rule, shared with the replay
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
@@ -104,39 +105,14 @@ DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, cons
 std::string DoorSceneGraph::next_door_name(std::string_view preferred_name,
                                            std::span<const std::string> reserved_names) const
 {
-    // Auto-name: the LOWEST "door_<N>" (N >= 1) that is neither LIVE nor REMEMBERED (2026-10-12, was one past the
-    // highest — names only ever grew: door_40 after a few crossings). Doors are generic `object` nodes named
-    // "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
-    std::set<int> taken;
-    const auto take = [&](std::string_view nm)
-    {
-        if (not nm.starts_with("door_")) return;
-        int v = 0;
-        const std::string_view digits = nm.substr(5);   // "door_" = 5 chars
-        if (const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), v);
-            ec == std::errc{} and p == digits.data() + digits.size())
-            taken.insert(v);
-    };
-    bool preferred_free = not preferred_name.empty();
+    // Doors are generic `object` nodes named "door_*" (schema migration), so scan get_nodes_by_type("object") +
+    // name-prefix filter. The rule itself is pure (core/door_core.h allocate_door_name) so the replay allocates the
+    // same name from a recorded snapshot.
+    std::vector<std::string> graph_names;
     for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("door_", 0) == 0)
-        {
-            if (n.name() == preferred_name) preferred_free = false;   // still occupied → don't collide
-            take(n.name());
-        }
-    // A number a GHOST or a stored identity still holds is not free either. Recycling it was the identity defect:
-    // `door_1` died, its number went straight to a different door across the room, and when THAT one died it
-    // overwrote the original's ghost — so the real door_1 came back as door_3. Reserved names never mark
-    // `preferred_name` occupied, since that ghost is precisely the one being consumed here.
-    for (const auto& nm : reserved_names)
-        take(nm);
-    // RE-ACQUISITION: a door that flickered out and came back keeps its name, so downstream consumers see the
-    // same object rather than a fresh one. (The DSR id necessarily changes — the old node was deleted.)
-    if (preferred_free)
-        return std::string(preferred_name);
-    int n = 1;
-    while (taken.contains(n)) ++n;
-    return "door_" + std::to_string(n);
+            graph_names.push_back(n.name());
+    return rc::door::core::allocate_door_name(preferred_name, graph_names, reserved_names);
 }
 
 std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,

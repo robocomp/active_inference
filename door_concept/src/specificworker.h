@@ -52,6 +52,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "door_scene_graph.h" // rc::DoorSceneGraph (DSR node/RT I/O)
 #include "door_fitter.h"
+#include "core/door_core.h"   // rc::door::core::DoorCore — the DSR-free decision core (tracker slice)
 #include "door_bearing_range.h"   // rc::door::ResidualField / range_along_bearing (bearing → range cascade)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::DoorFitter (active-inference core)
 #include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
@@ -137,9 +138,35 @@ private:
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
     void process_door_node(const DSR::Node& node);
-    void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
+    // The tracker slice (birth / associate / merge) lives in the DSR-free DoorCore (src/core/door_core.h, Task 4 of the
+    // door-core replay plan); this runs it on the cycle's input and keeps the old code it interleaves with.
+    void run_tracker_slice();
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
-    void merge_overlapping_instances();   // collapse two instances on the same door (seat-footprint overlap)
+
+    // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), ghosts, identities, the room, and
+    // the graph writes a birth / merge makes. Nested so it reaches the private members it reads and acts on.
+    class CoreWorld final : public rc::door::core::TrackerWorld
+    {
+    public:
+        explicit CoreWorld(SpecificWorker& w) : w_(w) {}
+        std::uint64_t room_id() const override;
+        std::vector<Eigen::Vector2f> room_polygon() const override;
+        std::vector<rc::door::core::TrackedDoor> doors() const override;
+        std::optional<rc::door::core::GhostMatch> match_ghost(const Eigen::Vector2f& xy) const override;
+        std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
+        std::vector<std::string> reserved_names() const override;
+        void retire(std::uint64_t id) override;
+        void set_assigned_mask(std::uint64_t id, int slice) override;
+        void after_association(const rc::door::core::TrackerCycleInfo& info) override;
+        std::uint64_t create_door(const rc::door::core::BirthRequest& r) override;
+        void reacquire(std::uint64_t new_id, const rc::door::core::GhostMatch& g) override;
+        void forget_ghost(const Eigen::Vector2f& xy) override;
+        std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Eigen::Vector3f& centroid) override;
+    private:
+        SpecificWorker& w_;
+    };
+    CoreWorld core_world_{*this};
+    std::unique_ptr<rc::door::core::DoorCore> core_;   // built in initialize(), once the config is loaded
     // NBV decision monitor → etc/door_nbv_log.csv (where the door is vs where we told the robot to stand).
     void log_nbv_decision(const rc::DoorInstance& inst, const rc::nbv::Plan& plan,
                           const rc::EpistemicProposal& prop);
@@ -585,12 +612,7 @@ private:
     void log_detect_probe();
     std::ofstream detect_probe_csv_;
     std::unique_ptr<rc::DoorSceneGraph>               scene_graph_;     // DSR node/RT I/O
-    rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
-    // Last mask frame_id that CONTRIBUTED birth evidence. Agents feed the tracker every compute cycle on
-    // purpose (a candidate with no matching detection expires), but persisting a candidate and accruing
-    // evidence into it are different things — conflating them made birth_frames count COMPUTE CYCLES. See
-    // common/instance_tracker/birth_evidence.h rule 1.
-    long  last_birth_mask_frame_ = -1;
+    // (the InstanceTracker and the last-birth-mask-frame counter moved into the DoorCore — core/door_core.h)
     int   exist_last_mask_frame_ = -1;    // (rc::BearingHypothesisStager removed with bearing-birth — see common/peripheral_channel)
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate

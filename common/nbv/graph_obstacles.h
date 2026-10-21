@@ -30,6 +30,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "viewpoint_score.h"
+#include "identified_obstacle.h"   // IdentifiedObstacle + identified_obstacle(): the pure footprint arithmetic
 #include "../room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 #include "../interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor — a robot-relative copy is not an obstacle
 
@@ -60,14 +61,8 @@ namespace rc::nbv
 //
 // z1 <= z0 means UNKNOWN vertical extent (no height_m published). Callers must read that as "spans every
 // height" so an unsized node keeps its old, purely-2-D behaviour rather than silently ceasing to claim.
-struct IdentifiedObstacle
-{
-    Obstacle      fp{};
-    std::string   name;
-    std::uint64_t id = 0;
-    float         z0 = 0.0f;   // base, room frame (m)
-    float         z1 = 0.0f;   // top; <= z0 ⇒ height unknown ⇒ treat as unbounded
-};
+// IdentifiedObstacle and its footprint arithmetic live in identified_obstacle.h (pure: door_concept's DoorCore
+// rebuilds the same obstacles from a recorded snapshot).
 
 inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::DSRGraph& G,
                                                                           DSR::InnerEigenAPI* inner_eigen,
@@ -88,25 +83,15 @@ inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::D
             // obstacle at the robot's own pose. The original is already in this list.
             if (rc::interaction::is_anchor(G, n))
                 continue;
-            const auto w = G.get_attrib_by_name<width_m_att>(n);
-            const auto d = G.get_attrib_by_name<depth_m_att>(n);
-            if (not (w.has_value() and d.has_value()))
-                continue;
-            if (not (w.value() > 0.0f and d.value() > 0.0f))
+            const std::optional<float> w = G.get_attrib_by_name<width_m_att>(n);
+            const std::optional<float> d = G.get_attrib_by_name<depth_m_att>(n);
+            if (not has_footprint(w, d))
                 continue;
             const auto tr = inner_eigen->get_transformation_matrix(room_frame, n.name(), 0);
             if (not tr.has_value())   // ALWAYS check: a missing node/edge in the RT chain returns nullopt
                 continue;
-            const auto& M = tr.value();
-            // Vertical band: origin is the BASE by fleet convention, top = base + height_m. A node with no
-            // height_m leaves z1 == z0, which every consumer reads as "unknown ⇒ spans all heights".
-            const float z0 = static_cast<float>(M(2, 3));
-            const auto  hm = G.get_attrib_by_name<height_m_att>(n);
-            const float z1 = (hm.has_value() and hm.value() > 0.0f) ? z0 + hm.value() : z0;
-            obs.push_back({{static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
-                            w.value(), d.value(),
-                            std::atan2(static_cast<float>(M(1, 0)), static_cast<float>(M(0, 0)))},
-                           n.name(), n.id(), z0, z1});
+            const std::optional<float> hm = G.get_attrib_by_name<height_m_att>(n);
+            obs.push_back(identified_obstacle(n.name(), n.id(), w.value(), d.value(), hm, tr.value().matrix()));
         }
     return obs;
 }

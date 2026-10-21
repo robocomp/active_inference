@@ -37,6 +37,7 @@ LIST(APPEND SOURCES
   ../src/epistemic_planner.cpp
   # The DSR-free DoorCore (src/core/: NO DSR / Qt / Ice / media includes — tests/test_door_cycle_io.cpp enforces it).
   ../src/core/door_cycle_io.cpp
+  ../src/core/door_core.cpp      # the DoorCore: the tracker slice (Task 4); reads only DoorCycleInput
   # The adapter that records each cycle's DoorCycleInput (DoorConcept.RecordInputs, default off).
   ../src/input_snapshot.cpp
   # The robot-relative copy of a door hung from the robot while its affordance executes.

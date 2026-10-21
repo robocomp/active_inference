@@ -189,7 +189,7 @@ void InputSnapshot::on_identity_load(const std::string& identity_path, const std
 void InputSnapshot::begin_cycle(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, DSR::RT_API* rt, std::uint64_t cycle,
                                 std::int64_t t_steady_ns, std::int64_t t_wall_ms, const rc::MaskIngestor* masks)
 {
-    if (not recording()) return;
+    if (not (core_active_ or recording())) return;
     cur_ = {};
     cur_.cycle = cycle;
     cur_.t_steady_ns = t_steady_ns;
@@ -508,8 +508,9 @@ void InputSnapshot::end_cycle()
     if (not semantic_touched_)   // not refreshed this cycle: the field the code holds is whatever the last refresh left
         cur_.semantic_state = last_semantic_valid_ ? core::SemanticState::Unchanged : core::SemanticState::Invalid;
 
-    // ── images: only if a check sampled them this cycle, cropped to what it sampled ─────────────────────────────────
-    if (not rois_rgb_.empty() and rgb_ != nullptr)
+    // ── images: only if a check sampled them this cycle, cropped to what it sampled — and only for the TAPE ────────────
+    const bool rec = recording();
+    if (rec and not rois_rgb_.empty() and rgb_ != nullptr)
     {
         core::ImageFrame g;
         g.format = core::PixelFormat::Gray8;
@@ -532,7 +533,7 @@ void InputSnapshot::end_cycle()
         }
         if (not g.patches.empty()) cur_.rgb_gray = std::move(g);
     }
-    if (not rois_depth_.empty() and depth_ != nullptr and depth_->type() == CV_32FC1)
+    if (rec and not rois_depth_.empty() and depth_ != nullptr and depth_->type() == CV_32FC1)
     {
         core::ImageFrame d;
         d.format = core::PixelFormat::DepthF32;   // DepthIngestor's decoded frame (metres, NaN = no return)
@@ -559,7 +560,8 @@ void InputSnapshot::end_cycle()
         if (not d.patches.empty()) cur_.depth = std::move(d);
     }
 
-    recorder_.record(std::move(cur_));   // after the cycle (actuator transcript complete); MOVED to the writer thread
+    if (rec)
+        recorder_.record(std::move(cur_));   // after the cycle (actuator transcript complete); MOVED to the writer thread
     latch_.end_cycle();
     in_cycle_ = false;
     rgb_ = depth_ = nullptr;

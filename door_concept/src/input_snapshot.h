@@ -4,8 +4,10 @@
 // record to DoorInputRecorder AFTER the cycle (so the actuator transcript is complete).
 //
 // ★RECORDED ALONGSIDE, NOTHING CHANGES. Today's decision logic keeps reading the graph exactly as before; this class
-//   only READS (the same reads the enumeration in task-2-report.md §1a lists) and never writes the graph. With
-//   DoorConcept.RecordInputs = false (the default) every method returns at its first line.
+//   only READS (the same reads the enumeration in task-2-report.md §1a lists) and never writes the graph.
+// ★SINCE TASK 4 IT ALSO FEEDS THE DoorCore (enable_for_core): the input is built EVERY cycle and read by the core
+//   mid-cycle through current(). With DoorConcept.RecordInputs = false (the default) nothing is latched, cropped or
+//   written — only the input is filled.
 // ★WHERE EACH PART IS TAKEN. The graph part (rooms, walls, objects, robot, camera, affordance flags, executing edges)
 //   at the TOP of compute(), right after the decision-log clock; the media parts at the point the old code consumes
 //   them — the mask packet after MaskIngestor::refresh() (and at the top, if a refresh between cycles changed it), the
@@ -57,6 +59,13 @@ public:
     }
     /// Recording right now (armed, file open, cap not reached).
     [[nodiscard]] bool recording() const { return armed_ and recorder_.enabled(); }
+    /// ★BUILD THE INPUT EVERY CYCLE, recording or not (Task 4): the DoorCore reads ONLY the DoorCycleInput, so the
+    /// snapshot is no longer a recording-only instrument — it is the adapter's graph/media → input half. Recording
+    /// (the latch, the image crops, the tape) stays behind DoorConcept.RecordInputs; this only fills `current()`.
+    void enable_for_core(std::uint32_t agent_id) { core_active_ = true; agent_id_ = agent_id; }
+    /// The input being built this cycle (valid between begin_cycle and end_cycle; the core reads it mid-cycle, after
+    /// the captures its slice needs).
+    [[nodiscard]] const core::DoorCycleInput& current() const { return cur_; }
     void close() { recorder_.close(); }
     [[nodiscard]] const DoorInputRecorder& recorder() const { return recorder_; }
 
@@ -109,6 +118,7 @@ private:
     static constexpr int kEdgeChunkPx = 32;   // an edge is recorded as boxes this long (+ margin) — see note_roi
 
     bool armed_ = false;
+    bool core_active_ = false;   // enable_for_core: build cur_ every cycle even when not recording
     std::uint32_t agent_id_ = 0;
     InputLatch latch_;
     DoorInputRecorder recorder_;

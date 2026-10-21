@@ -87,4 +87,44 @@ private:
     DoorModelParams  params_;
 };
 
+// ─── Pre-belief geometry: the two pure halves of DoorFitter::refresh_geometry ─────────────────────────────
+// ★WHY THEY ARE HERE (door_concept DoorCore, 2026-10-21). The tracker's birth rule — now in the DSR-free
+// src/core/door_core — tests a NEWBORN door's swept arc and aperture in the same cycle it is born, before any belief
+// exists; the replay tool must build that newborn's geometry exactly as ensure_instance does. One definition, used by
+// refresh_geometry (live) and by the core's replay world, so the two cannot disagree about where a fresh door is.
+
+// The geometry a door has before its belief exists (a node adopted from the graph, or a fresh birth before its first
+// mask): only the published box, so the leaf pose comes from that box and the aperture is seeded as the box itself
+// (u = the box's own heading, near edge at s = 0); run_inference re-authors it on the first fit. Writes the aperture
+// read-back (ap_cx, ap_cy, ap_yaw) into `ms`.
+struct PreBeliefGeometry
+{
+    door::Aperture  aperture{};
+    door::LeafState leaf{};
+    door::LeafPose  leaf_pose{};
+};
+inline PreBeliefGeometry pre_belief_geometry(DoorState& ms)
+{
+    PreBeliefGeometry g;
+    g.leaf_pose = door::leaf_pose_from_box(ms.cx, ms.cy, ms.cz, ms.yaw, ms.w, ms.h, ms.thickness);
+    g.leaf      = {};
+    g.aperture  = {};
+    g.aperture.wall_u = g.leaf_pose.ex;
+    g.aperture.wall_O = g.leaf_pose.hinge_xy;
+    g.aperture.s = 0.0f; g.aperture.w = ms.w; g.aperture.h = ms.h;
+    g.aperture.floor_z = ms.cz; g.aperture.thickness = ms.thickness;
+    ms.ap_cx = ms.cx; ms.ap_cy = ms.cy; ms.ap_yaw = ms.yaw;
+    return g;
+}
+
+// The room-frame LEAF read-back every branch of refresh_geometry ends with: DoorState's leaf centre/yaw/phi follow
+// the leaf pose.
+inline void read_back_leaf(DoorState& ms, const door::LeafPose& leaf_pose, const door::LeafState& leaf)
+{
+    ms.cx  = leaf_pose.centre_xy.x();
+    ms.cy  = leaf_pose.centre_xy.y();
+    ms.yaw = leaf_pose.yaw();
+    ms.phi = leaf.phi;
+}
+
 }  // namespace rc

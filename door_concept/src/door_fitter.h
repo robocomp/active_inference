@@ -221,20 +221,18 @@ public:
     // the transform the silhouette uses, for the remembered-door look's absence channel.
     std::optional<Eigen::Matrix4d> camera_in_room() const { return room_T_zed_matrix(); }
 
-    // Robot/camera ego-motion (room frame), from the transform chain — producer-independent. Call once per
-    // compute cycle; run_inference then gates the pose/shape update to STILLNESS ("be-still-to-update").
-    void  update_ego_motion();
+    // Robot/camera ego-motion (room frame) — computed ONCE per cycle by the DoorCore (core/sensing.h EgoMotion, moved
+    // from here: the birth gate and this fit gate must read one value) and handed over each cycle; run_inference then
+    // gates the pose/shape update to STILLNESS ("be-still-to-update").
+    void  set_ego_motion(float lin_mps, float ang_radps) { ego_lin_mps_ = lin_mps; ego_ang_radps_ = ang_radps; }
     float ego_lin_mps() const   { return ego_lin_mps_; }
     float ego_ang_radps() const { return ego_ang_radps_; }
     // True when this frame must be CONFIRMATION-ONLY (no pose/shape change): robot linear/angular speed above
     // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
     // (A/B FALLBACK path only — the hard gate; used when cfg.ai2_motion_confirm_only is true.)
-    // The SAME admissibility, evaluated on a RAW mask slice that has no instance yet: may this frame move
-    // geometry? Birth is gated on it, so a frame the fit would REFUSE can never create an object.
-    // ★A frame that may not MOVE an existing belief must not CREATE one — see
-    // common/instance_tracker/birth_evidence.h rule 2. Mirrors this agent's own `gated` computation; the
-    // instance-only parts of that gate (anything read off a fitted projection) cannot apply pre-birth.
-    bool  frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const;
+    // ★Its pre-birth twin, frame_admissible (the SAME admissibility on a raw slice with no instance yet — a frame the
+    // fit would REFUSE can never create an object), moved with the birth rule into the DoorCore
+    // (core/door_core.h DoorCore::frame_admissible). Keep the two in step.
     bool  confirm_only(const DoorInstance& inst) const;
     // PIXEL-LEVEL silhouette existence evidence: project the panel face into the ZED and split the predicted
     // samples into occupancy / absence / occluded / out-of-frustum. See DoorSilhouette + DoorInstance::existence.
@@ -366,13 +364,9 @@ private:
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::vector<Eigen::Vector2f>   room_polygon_;       // room-frame delimiting polygon (containment prior)
     Eigen::Vector2f                room_interior_ = Eigen::Vector2f::Zero();   // a known-interior point (centroid)
-    // Ego-motion state (camera pose deltas → robot speed), updated once per cycle in update_ego_motion().
+    // Ego-motion (camera pose deltas → robot speed), set once per cycle from the DoorCore (set_ego_motion).
     float           ego_lin_mps_   = 0.0f;
     float           ego_ang_radps_ = 0.0f;
-    Eigen::Vector3f prev_cam_pos_  = Eigen::Vector3f::Zero();
-    Eigen::Vector3f prev_cam_fwd_  = Eigen::Vector3f::UnitY();
-    bool            have_prev_cam_ = false;
-    std::chrono::steady_clock::time_point prev_cam_tp_{};
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
     std::ofstream                  phi_trace_csv_;      // one row per estimate_phi() call (ai2 path + "_phi")
     std::ofstream                  phi_curve_csv_;      // one row per HYPOTHESIS (leaf-tracker forensics)
