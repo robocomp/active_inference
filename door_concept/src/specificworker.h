@@ -61,6 +61,7 @@
 #include "door_model.h"
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
 #include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
+#include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
 #include <map>
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
@@ -390,6 +391,14 @@ private:
     };
     std::optional<PassageAnchor> passage_anchor_;
     std::ofstream anchor_log_;
+    // Decision log (decision_log.h). dec_cycle_ counts compute() cycles that got past the graph guard.
+    rc::door::DoorDecisionLog decision_log_;
+    std::uint64_t dec_cycle_ = 0;
+    // Affordance state seen last cycle per (door id, kind), so a TRANSITION is logged exactly once.
+    struct AffSeen { bool offered = false, claimed = false; };
+    std::map<std::pair<std::uint64_t, std::string>, AffSeen> aff_seen_;
+    bool consume_completion_logged(const rc::DoorInstance& inst, const char* kind, rc::pragmatic::PragmaticAffordance& aff);
+    void log_affordance_transitions(const rc::DoorInstance& inst, const char* kind, const rc::pragmatic::PragmaticAffordance& aff);
     std::uint64_t anchor_log_rows_ = 0;   // final review I-4: flush every kAnchorRecordFlushEvery rows
     rc::door::rec::Recorder anchor_frames_;   // Task 8 fix 3: etc/anchor_frames.bin, every measured anchor cycle (replay_anchor_frames)
     void step_passage_anchor();

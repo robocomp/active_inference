@@ -375,6 +375,9 @@ struct DoorConfig
     // flushed per row: both flush every kAnchorRecordFlushEvery records and at close.
     bool  anchor_frame_record = false;
     bool  anchor_log = false;
+    // ★DecisionLog: etc/door_decisions.bin ("DDEC" v1, decision_log.h) — every tracker/existence/φ/identity/room-switch/
+    // affordance/anchor decision with its numbers, the reference the DoorCore replay must reproduce. Default OFF.
+    bool  decision_log = false;
 
     // ── Multi-instance birth/associate/death tracker (shared rc::InstanceTracker) ──────────────────
     // "door" masks are associated to instances by a covariance-gated 1-to-1 (cov from the belief Σ),

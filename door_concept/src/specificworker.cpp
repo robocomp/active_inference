@@ -146,8 +146,20 @@ float footprint_overlap_ratio(const rc::DoorState& a, const rc::DoorState& b)
 
 // Tracker lifecycle event log (etc/door_events.csv) — makes birth/merge/prune/suppress visible so the
 // "create then remove" churn can be diagnosed from a file, not stdout. seq gives ordering.
+rc::door::DoorDecisionLog* g_decisions = nullptr;   // the worker's decision log while enabled (set in initialize())
+
 void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const std::string& note)
 {
+    // The same lifecycle events into the binary decision log (decision_log.h), with the position as raw doubles.
+    if (g_decisions != nullptr and g_decisions->enabled())
+    {
+        using K = rc::door::DoorDecisionKind;
+        static const std::unordered_map<std::string_view, K> kinds{
+            {"BIRTH", K::Birth}, {"SUPPRESS", K::Suppress}, {"MERGE", K::Merge}, {"REMOVE", K::Remove},
+            {"REACQUIRE", K::Reacquire}, {"RELEASE", K::Release}, {"RESTORE", K::Restore}};
+        if (const auto k = kinds.find(ev); k != kinds.end())
+            g_decisions->record(k->second, id, {}, x, y, 0, 0, note);
+    }
     static std::ofstream f = [] { std::ofstream o; rc::diag::open_rotating(o, "etc/door_events.csv");
                                    o << "seq,event,id,x,y,note\n"; return o; }();
     static int seq = 0;
@@ -251,6 +263,8 @@ void SpecificWorker::request_shutdown()
     // Flush the diagnostics' tails (up to 63 buffered rows each): exit is std::_Exit and this worker is never
     // deleted, so no ofstream destructor runs. Same thread as compute() (Qt timer), so no write can race this.
     anchor_frames_.close();
+    g_decisions = nullptr;
+    decision_log_.close();
     if (anchor_log_.is_open()) anchor_log_.close();
 
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
@@ -343,6 +357,13 @@ void SpecificWorker::initialize()
     // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
     // log_phantom_event(). Truncating: one file per run.
     phantom_log_.open("etc/door_phantom_events.csv");
+    if (cfg_.decision_log)
+    {
+        if (decision_log_.open("etc/door_decisions.bin"))
+            g_decisions = &decision_log_;
+        else
+            std::print("door_concept: could NOT open etc/door_decisions.bin — the decision log is off this run\n");
+    }
     // Task 8 fix 3: the interaction anchor's measured cycles, truncated here (one file per run; replay_anchor_frames).
     // Final review I-4: a development instrument, DoorConcept.AnchorFrameRecord (default off).
     if (cfg_.anchor_frame_record and not anchor_frames_.open("etc/anchor_frames.bin"))
@@ -1050,6 +1071,10 @@ void SpecificWorker::compute()
     if (not G or not rt_api_)
         return;
 
+    // The decision log's clock: one tick per compute() that got past the graph guard (the cycle the replay will step).
+    decision_log_.set_clock(++dec_cycle_, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now().time_since_epoch()).count());
+
     // Which room are we in? Follows ltsm_agent's `current` edge and LETS GO of a room we have left.
     // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
     // write are all parented by it.
@@ -1097,6 +1122,13 @@ void SpecificWorker::compute()
             and not rc::interaction::is_anchor(*G, node)    // nor is the passage door's robot-relative copy
             and not held_doors_.contains(node.id()))        // nor a door HELD in the room left behind (release_room)
             process_door_node(node);
+
+    // Decision log: each instance's leaf-angle posterior as it stands after this cycle's fitting.
+    if (decision_log_.enabled())
+        for (const auto& [door_id, inst] : fitter_->instances())
+            if (not inst.is_bearing_hypothesis)
+                decision_log_.record(rc::door::DoorDecisionKind::Phi, door_id, inst.node_name, inst.phi_est,
+                                   inst.phi_sigma, inst.phi_measured ? 1.0 : 0.0, inst.phi_support);
 
     // ── The three PRAGMATIC affordances: approach / open / cross ──────────────────────────────────
     // ★DELIBERATELY OUTSIDE the loop above. process_door_node() bails early on a stale or young
@@ -1973,8 +2005,13 @@ void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weig
     //   ⚠ SUPERSEDED 2026-10-21 (tourP9): the OLDEST name of the hole wins, and the place moves by the writer's P(exists)
     //   — see rc::door::upsert_row. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
     const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
+    const std::string dec_name = row.name;
+    const Eigen::Vector2f dec_xy = row.xy;
     if (rc::door::upsert_row(identities_, room, std::move(row), same_hole, weight))
+    {
+        decision_log_.record(rc::door::DoorDecisionKind::IdentityUpsert, 0, dec_name, dec_xy.x(), dec_xy.y(), width_m, weight, room);
         save_identities();
+    }
 }
 
 // What a FITTED door leaves behind to be restored from: its aperture pose and size (room frame), its existence belief,
@@ -2009,6 +2046,7 @@ void SpecificWorker::forget_identity(const std::string& name, const Eigen::Vecto
     if (n > 0)
     {
         std::print("door_concept: [identity] {} removed for absence — {} remembered row(s) forgotten in {}\n", name, n, room);
+        decision_log_.record(rc::door::DoorDecisionKind::IdentityForget, 0, name, ap.x(), ap.y(), width_m, double(n), room);
         save_identities();
     }
 }
@@ -2693,6 +2731,12 @@ void SpecificWorker::update_existence_beliefs()
             force_row.insert(id);
         last_L[id] = L;
     }
+    // Decision log: the existence belief of every door after this fresh-mask update (the input of the REMOVE below).
+    if (decision_log_.enabled())
+        for (const auto& [id, inst] : fitter_->instances())
+            if (not inst.is_bearing_hypothesis)
+                decision_log_.record(rc::door::DoorDecisionKind::Existence, id, inst.node_name, inst.existence.logodds(),
+                                   inst.existence.p_exists(), inst.model.state().cx, inst.model.state().cy);
     for (const auto id : to_remove)     // the removal cycle itself, always
         force_row.insert(id);
     for (const auto& [id, inst] : fitter_->instances())
@@ -3221,6 +3265,37 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     return st;
 }
 
+// Decision log: an affordance's state TRANSITIONS, once each, as seen right after the cycle's update(). OFFERED/WITHDRAWN
+// follow is_offered() (the node exists), EXECUTING follows claimed() (the consumer took it). a = the epoch on our node,
+// b = P(precondition) last measured, c = P(claimed epoch) unused (0). Pure observation — decides nothing.
+void SpecificWorker::log_affordance_transitions(const rc::DoorInstance& inst, const char* kind,
+                                                const rc::pragmatic::PragmaticAffordance& aff)
+{
+    if (not decision_log_.enabled())
+        return;
+    auto& seen = aff_seen_[{inst.node_id, kind}];
+    using K = rc::door::DoorDecisionKind;
+    const bool offered = aff.is_offered(), claimed = aff.claimed();
+    if (offered and not seen.offered)
+        decision_log_.record(K::AffOffered, inst.node_id, inst.node_name, aff.epoch(), aff.last_p(), 0, 0, kind);
+    if (claimed and not seen.claimed)
+        decision_log_.record(K::AffExecuting, inst.node_id, inst.node_name, aff.epoch(), aff.last_p(), 0, 0, kind);
+    if (not offered and seen.offered)
+        decision_log_.record(K::AffWithdrawn, inst.node_id, inst.node_name, aff.epoch(), aff.last_p(), 0, 0, kind);
+    seen = {offered, claimed};
+}
+
+// consume_completion() + the decision-log row (a = epoch, b = P(precondition), c = the outcome code).
+bool SpecificWorker::consume_completion_logged(const rc::DoorInstance& inst, const char* kind,
+                                               rc::pragmatic::PragmaticAffordance& aff)
+{
+    if (not aff.consume_completion())
+        return false;
+    decision_log_.record(rc::door::DoorDecisionKind::AffCompleted, inst.node_id, inst.node_name, aff.epoch(), aff.last_p(),
+                       static_cast<double>(static_cast<int>(aff.outcome())), 0, kind);
+    return true;
+}
+
 void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
 {
     if (not G or not scene_graph_)
@@ -3289,6 +3364,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
                                  st.range_sigma_m, inst.aperture.w);
         inst.aff_approach.update(o);
+        log_affordance_transitions(inst, "approach", inst.aff_approach);
     }
 
     // ── open ─────────────────────────────────────────────────────────────────────────────────────
@@ -3321,6 +3397,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.value    = pg.value_open;
         o.contract = rc::door::open_contract(pg);
         inst.aff_open.update(o);
+        log_affordance_transitions(inst, "open", inst.aff_open);
     }
 
     // ── cross ────────────────────────────────────────────────────────────────────────────────────
@@ -3359,6 +3436,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.robot_range_m,
                                  std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m);
         inst.aff_cross.update(o);
+        log_affordance_transitions(inst, "cross", inst.aff_cross);
     }
 
     // ── close ────────────────────────────────────────────────────────────────────────────────────
@@ -3387,6 +3465,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.value    = pg.value_open;
         o.contract = rc::door::close_contract(pg);
         inst.aff_close.update(o);
+        log_affordance_transitions(inst, "close", inst.aff_close);
     }
 
     if (const bool has_any = inst.aff_approach.is_offered() or inst.aff_open.is_offered()
@@ -3469,10 +3548,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             std::print("door_concept: [close] {} claimed but the request was refused LOCALLY: {}\n", inst.node_name, why);
         }
     }
-    if (inst.aff_close.consume_completion())
+    if (consume_completion_logged(inst, "close", inst.aff_close))
         std::print("door_concept: [close] {} finished, outcome = {} (P(passable) is now {:.2f})\n", inst.node_name,
                    rc::affordance::to_string(inst.aff_close.outcome()), st.p_open);
-    if (inst.aff_open.consume_completion())
+    if (consume_completion_logged(inst, "open", inst.aff_open))
         std::print("door_concept: [open] {} finished, outcome = {} (P(passable) is now {:.2f}{})\n",
                    inst.node_name, rc::affordance::to_string(inst.aff_open.outcome()),
                    st.p_open, st.p_open_known ? "" : ", unmeasured");
@@ -3510,14 +3589,14 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                    rc::door::through_pose(inst.aperture, inst.cross_side_latched, inst.cross_standoff_m).x,
                    rc::door::through_pose(inst.aperture, inst.cross_side_latched, inst.cross_standoff_m).y);
     }
-    if (inst.aff_cross.consume_completion())
+    if (consume_completion_logged(inst, "cross", inst.aff_cross))
     {
         std::print("door_concept: [cross] {} finished, outcome = {} (progress {:+.2f})\n",
                    inst.node_name, rc::affordance::to_string(inst.aff_cross.outcome()),
                    st.crossing_progress);
         inst.cross_side0 = std::numeric_limits<float>::quiet_NaN();
     }
-    if (inst.aff_approach.consume_completion())
+    if (consume_completion_logged(inst, "approach", inst.aff_approach))
         std::print("door_concept: [approach] {} finished, outcome = {} (P(reach)={:.2f})\n",
                    inst.node_name, rc::affordance::to_string(inst.aff_approach.outcome()), st.p_reach);
 }
@@ -3763,6 +3842,7 @@ void SpecificWorker::step_room_following()
             if (const auto room = rc::room::current_room(*G); room.has_value())
             {
                 room_node_id_ = *room;
+                decision_log_.record(rc::door::DoorDecisionKind::RoomSwitch, room_node_id_, {}, 0.0, 0.0, 0.0, 0.0, "first resolution");
                 enter_room_memory(room_node_id_, true);
             }
         }
@@ -3793,6 +3873,7 @@ void SpecificWorker::step_room_following()
     {
         room_node_id_ = *current;
         std::print("door_concept: [room] following `current` → room node {}\n", room_node_id_);
+        decision_log_.record(rc::door::DoorDecisionKind::RoomSwitch, room_node_id_, {}, 0.0, 0.0, 0.0, 0.0, "follow current");
         enter_room_memory(room_node_id_, true);
         return;
     }
@@ -3950,6 +4031,8 @@ void SpecificWorker::step_entry_mirrors()
 
 void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)
 {
+    decision_log_.record(rc::door::DoorDecisionKind::RoomSwitch, new_room, {}, double(old_room),
+                       fitter_ ? double(fitter_->instances().size()) : 0.0);
     std::print("door_concept: [room] LET GO — `current` moved {} → {}. Releasing {} door(s) that belong "
                "to the room we have left; the new room's doors will be re-earned from scratch.\n",
                old_room, new_room, fitter_ ? fitter_->instances().size() : 0u);
@@ -4012,6 +4095,8 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     //   lost yet, so there is nothing to recreate here. It is HELD below, and when ltsm deletes it the carry happens
     //   then (step_room_following). Without this, room_1 was re-entered with no door_1 and "cross door_1" failed.
     carry_pending_room_ = (adopt_mirror == 0 and old_room_lives) ? new_room : 0;
+    decision_log_.record(rc::door::DoorDecisionKind::CarryPending, new_room, {}, double(carry_pending_room_ != 0),
+                       old_room_lives ? 1.0 : 0.0, double(adopt_mirror));
     // ★ OUR OWN MIRROR OF IT, NOW. Both rooms are live at this instant, so each held door's pose in the new room is a
     //   direct chain; after the switch the door is no longer fitted and its memo is never refreshed again.
     if (carry_pending_room_ != 0 and inner_eigen_ and fitter_)
@@ -4121,6 +4206,7 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
     if (const int n = rc::door::strip_restorable(identities_, room->name()); n > 0)
     {
         save_identities();
+        decision_log_.record(rc::door::DoorDecisionKind::IdentityForget, 0, {}, 0, 0, 0, double(n), "strip_restorable " + room->name());
         std::print("door_concept: [restore] '{}' entered FRESH ({}) — {} remembered row(s) reduced to identity only; "
                    "only doors fitted from now on can be restored on a later recall\n",
                    room->name(), first_resolution ? "first room resolved" : "no ltsm recall announced it", n);
@@ -4223,6 +4309,7 @@ void SpecificWorker::drop_looks(const char* why)
         if (e.aff.node_id() != 0)
         {
             e.aff.remove();
+            decision_log_.record(rc::door::DoorDecisionKind::LookDrop, 0, nm, 0, 0, 0, 0, why);
             std::print("door_concept: [look] aff_door_look_{} withdrawn — {}\n", nm, why);
         }
     looks_.clear();
@@ -4267,6 +4354,7 @@ void SpecificWorker::step_remembered_looks()
         if (it->second.aff.node_id() != 0)
         {
             it->second.aff.remove();
+            decision_log_.record(rc::door::DoorDecisionKind::LookDrop, 0, it->first, 0, 0, 0, 0, "re-born at its hole");
             std::print("door_concept: [look] aff_door_look_{} withdrawn — the door is live again (re-born at its hole)\n",
                        it->first);
         }
@@ -4344,6 +4432,8 @@ void SpecificWorker::step_remembered_looks()
         const bool fresh = e.aff.node_id() == 0;
         e.aff.update(tgt);
         if (fresh and e.aff.node_id() != 0)
+            decision_log_.record(rc::door::DoorDecisionKind::LookOffer, 0, r.name, plan.pos.x(), plan.pos.y(), plan.eig, plan.yaw);
+        if (fresh and e.aff.node_id() != 0)
             std::print("door_concept: [look] aff_door_look_{} OFFERED at ({:.2f},{:.2f}) yaw={:.2f} — EIG {:.3f} nats "
                        "(p_detect {:.2f}, visible {:.2f})\n", r.name, plan.pos.x(), plan.pos.y(), plan.yaw, plan.eig,
                        plan.p_detect, plan.visible_frac);
@@ -4356,6 +4446,9 @@ void SpecificWorker::step_remembered_looks()
 void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t adopt_mirror,
                                           const std::optional<EntryMirror>& adopted_from)
 {
+    decision_log_.record(rc::door::DoorDecisionKind::CarryInstall, adopt_mirror,
+                       adopted_from.has_value() ? adopted_from->name : std::string{}, double(new_room),
+                       adopted_from.has_value() and adopted_from->has_leaf ? 1.0 : 0.0);
     // A door recreated just above was inserted while room_node_id_ still named the room LEFT: our own node-added slot
     // already built an instance for it against that (deleted) room, which reads its RT as (0,0) and makes the
     // adoption below see "already exists" and skip (live try25: no leaf memory, the door lost, a phantom picked

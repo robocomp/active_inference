@@ -193,6 +193,8 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
             "Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov");
     out.anchor_frame_record           = getb("DoorConcept.AnchorFrameRecord", false,
             "Record every measured interaction-anchor cycle to etc/anchor_frames.bin (replay_anchor_frames; ≤ 200 MB/run). Development instrument, default off");
+    out.decision_log                  = getb("DoorConcept.DecisionLog", false,
+            "Write etc/door_decisions.bin: the binary per-cycle decision log (decision_log.h) the DoorCore replay is checked against. Default off");
     out.anchor_log                    = getb("DoorConcept.AnchorLog", false,
             "Write etc/anchor_log.csv, one row per cycle while an interaction anchor exists. Development instrument, default off");
 

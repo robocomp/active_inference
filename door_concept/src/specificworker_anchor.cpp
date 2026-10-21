@@ -246,6 +246,9 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
                passage_anchor_->linked_epoch, p.x.x(), p.x.y(), p.x.z(),
                std::sqrt(std::max(0.0f, p.P(0, 0) + p.P(1, 1))));
 
+    decision_log_.record(rc::door::DoorDecisionKind::AnchorHung, inst.node_id, inst.node_name, p.x.x(), p.x.y(), p.x.z(),
+                       passage_anchor_->linked_epoch, aff.kind());
+
     if (cfg_.anchor_log and not anchor_log_.is_open())   // final review I-4: DoorConcept.AnchorLog (default off)
     {
         anchor_log_.open("etc/anchor_log.csv", std::ios::out | std::ios::trunc);
@@ -263,6 +266,8 @@ void SpecificWorker::remove_passage_anchor(std::string_view why)
     if (passage_anchor_->anchor.has_value() and G)
         passage_anchor_->anchor->remove(*G);   // the affordance's link first, then the node (its RT edge goes with it)
     std::print("door_concept: [anchor] {}@robot REMOVED — {}\n", passage_anchor_->door_name, why);
+    decision_log_.record(rc::door::DoorDecisionKind::AnchorRemoved, passage_anchor_->door_id, passage_anchor_->door_name,
+                       0, 0, 0, passage_anchor_->linked_epoch, std::string(why));
     passage_anchor_.reset();
 }
 
@@ -1041,6 +1046,8 @@ void SpecificWorker::step_passage_anchor()
     if (not alive)
     {
         std::print("door_concept: [anchor] {}@robot vanished from the graph — forgetting it\n", pa.door_name);
+        decision_log_.record(rc::door::DoorDecisionKind::AnchorRemoved, passage_anchor_->door_id, passage_anchor_->door_name,
+                           0, 0, 0, passage_anchor_->linked_epoch, "vanished from the graph");
         passage_anchor_.reset();   // nothing left to remove; a fresh claim re-creates it
         return;
     }
