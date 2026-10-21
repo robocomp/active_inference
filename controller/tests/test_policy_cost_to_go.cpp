@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <optional>
 
 using namespace rc::policy;
@@ -296,6 +297,54 @@ int main()
             CHECK("F4 mixture: ...and the field at the robot within -log(1 - 0.03) x placement of the anchor's",
                   std::abs(cl.at(st) - ca.at(st)) <= -std::log(1.f - 0.03f) * A.placement_m + 0.02f);
             CHECK("F4 mixture: no gap = the anchor's jambs exactly", doorway_risk_density(anchor_only, V(0.1f, 0.f)) == doorway_jamb_density(A, V(0.1f, 0.f)));
+            { // ★ fix round 1, I-1: a NON-parallel phantom (normal 30 deg off the door's), 0.62 m wide (a 14 cm strip: on a 5 cm grid a 6 cm
+              // slanted strip has no 8-connected path, so 0.62 makes the leak testable), score
+              // 0.03, centred in the WALL 2 m east of the door, its strip a 0.8 m SHORTCUT to the goal line from the east start. also_free admits its
+              // strip, which runs through solid; under the anchor that strip is wall (contact-free probability 0), so it costs
+              // >= -log 0.03 nats there and the field must still descend through the anchor's opening.
+                const RoomGap slant{{2.0f, 0.f}, {-0.5f, 0.8660254f}, 0.62f};   // normal 30 deg off the door's, pointing back toward it
+                const DoorwayJambs Gx = doorway_jambs(slant, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.03f, B, 1.0f, 2.05f);
+                const DoorwayRisk phantom{A, Gx, 0.03f};
+                auto map87 = [&](const V& p) { const float dy = std::max(0.f, std::abs(p.y()) - 0.075f), dx = std::max(0.f, 0.435f - std::abs(p.x()));
+                                               return std::hypot(dx, dy) > r_ins; };
+                auto freex = [&](const V& p) { return map87(p) or in_doorway_risk_corridor(phantom, p); };
+                const std::function<bool(const V&)> mf = map87;
+                CostToGo fixed, leaky;
+                fixed.build(G, freex, [&](const V& p) { return w * doorway_risk_density(phantom, p, mf); }, l87);
+                leaky.build(G, freex, [&](const V& p) { return w * doorway_risk_density(phantom, p); }, l87);   // no map: pre-fix
+                const V east{2.6f, -0.8f}, in_wall{2.0f, 0.f};
+                const float d_wall = doorway_risk_density(phantom, in_wall, mf);
+                // the Dijkstra route itself: from the start's cell, always to the cheapest of the 8 neighbouring cells (the field
+                // is a priced distance, so this ends at the goal); the x where it first reaches y >= 0
+                auto route_cross = [&](const CostToGo& c, V p) {
+                    p = {std::round(p.x() / G.cell) * G.cell, std::round(p.y() / G.cell) * G.cell};
+                    for (int k = 0; k < 400; ++k)
+                    {
+                        V best = p; float bf = c.at(p);
+                        for (int dj = -1; dj <= 1; ++dj) for (int di = -1; di <= 1; ++di)
+                            if (const V q = p + G.cell * V(float(di), float(dj)); c.at(q) < bf) { bf = c.at(q); best = q; }
+                        if (best == p) break;
+                        if (p.y() < 0.f and best.y() >= -1e-4f) return best.x();
+                        p = best;
+                    }
+                    return std::numeric_limits<float>::quiet_NaN(); };
+                const float xf = route_cross(fixed, east), xl = route_cross(leaky, east);
+                std::printf("  slanted phantom (score 0.03): density in the wall %.2f nats/m (pre-fix %.3f); route from (2.6,-0.8) "
+                            "crosses y=0 at x %+.3f (pre-fix %+.3f)\n", d_wall, doorway_risk_density(phantom, in_wall), xf, xl);
+                CHECK("F4 I-1: the phantom's strip through solid costs >= -log(score) nats (no near-free strip)",
+                      d_wall >= -std::log(0.03f) * A.placement_m / (A.front_m + A.back_m) - 1e-3f);
+                CHECK("F4 I-1: the field descends through the ANCHOR's opening, not the phantom's strip",
+                      std::abs(xf) < 0.435f - r_ins + G.cell);
+                // the anchor alone on the map + its corridor: the field the phantom must not undercut
+                CostToGo base; base.build(G, [&](const V& p) { return map87(p) or in_doorway_corridor(door, p, 1.0f, 2.05f, r_ins); },
+                                          [&](const V& p) { return w * doorway_jamb_density(A, p); }, l87);
+                std::printf("  field at the start: anchor alone %.3f, with the phantom %.3f, pre-fix %.3f (route x %+.3f)\n",
+                            base.at(east), fixed.at(east), leaky.at(east), xl);
+                CHECK("F4 I-1: the phantom does not undercut the anchor's field at the start (within -log(1-0.03) x placement)",
+                      fixed.at(east) >= base.at(east) - 0.05f);
+                CHECK("F4 I-1: (discriminating) without the map test the strip was a shortcut (> 0.3 m cheaper)",
+                      leaky.at(east) < base.at(east) - 0.3f);
+            }
             const DoorwayJambs Gs = doorway_jambs(RoomGap{{0.10f, 0.f}, {0.f, 1.f}, 0.87f}, 0.02f, 0.02f, std::hypot(0.011f, 0.01f), 0.03f, B, 1.0f, 2.05f);
             const DoorwayRisk sure{A, Gs, 0.99f};
             CostToGo cs; cs.build(G, free87, [&](const V& p) { return w * doorway_risk_density(sure, p); }, l87);

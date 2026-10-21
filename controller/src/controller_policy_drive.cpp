@@ -191,7 +191,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     auto extra_fn = [this, jambs](const Eigen::Vector2f &p)
     {
         const float w = std::max(0.f, grid_planner_.params.residual_risk_weight);
-        return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_risk_density(*jambs, p) : 0.f));
+        return w * (grid_planner_.body_risk_at(p) + (jambs ? rc::policy::doorway_risk_density(*jambs, p, [&](const Eigen::Vector2f &q) { return rc::policy::field_free_from_distance(grid_planner_.distance_at(q), grid_planner_.cell_size(), jambs->anchor.inscribed_radius_m); }) : 0.f));
     };
     const bool new_goal = not policy_goal_.has_value() or policy_goal_who_ != who or not rc::policy::same_goal(*policy_goal_, spec);
     if (new_goal)
