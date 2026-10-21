@@ -291,6 +291,8 @@ struct DoorFitState
     // Task 5b D4: the image-geometry channel's evidence pooled by view novelty (door_view_pool.h) — the view being pooled,
     // its mean verdict and what it has contributed to `existence` so far.
     door::ViewPool image_view_pool{};
+    // Task 5b item 4: the silhouette's evidence pooled by the same view model (door_view_pool.h add_logodds).
+    door::ViewPool silhouette_view_pool{};
     bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
     // Accumulated LOOKS (Σ p_detect) whose decision says "remove" — NOT a count of cycles. A cycle in which
     // the door could not have been resolved (p_detect → 0) correctly leaves L untouched, and must leave the

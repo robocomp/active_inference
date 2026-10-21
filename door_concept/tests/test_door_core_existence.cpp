@@ -201,13 +201,13 @@ struct Run
 };
 
 // `present` cycles with the door lit, then `absent` cycles without; `repeat_at` > 0 re-sends that cycle's frame id.
-// rho: Existence.FrameCorrelation for this run. Sections 1-7 test the slice's mechanics with independent looks (rho 0, the
-// pre-item-4 door); section 8 runs the measured default and shows what the shared weighting changes.
+// sweep: the robot walks a triangle wave x ∈ 1 ± 1.5 m (period 12 frames) — every few frames a NEW view of the door, so
+// evidence is from new looks, not one look repeated (Task 5b item 4: the existence channels pool the looks of one view —
+// door_view_pool.h — so a parked robot's repeats are one observation). false = parked.
 static Run run(int present, int absent, bool turned_away = false, int repeat_at = -1, ExistWorld* out_world = nullptr,
-               float rho = 0.0f)
+               bool sweep = true)
 {
     DoorCoreConfig cfg;
-    cfg.door.exist_frame_correlation = rho;
     ExistWorld local;
     ExistWorld& w = out_world ? *out_world : local;
     w.cfg = cfg.door;
@@ -226,7 +226,13 @@ static Run run(int present, int absent, bool turned_away = false, int repeat_at 
         const bool repeat = c == repeat_at;
         if (not repeat) ++frame;
         const Phase ph = c <= present ? Phase::Present : Phase::Absent;
-        const auto out = core.step(cycle_input(static_cast<std::uint64_t>(c), frame, ph, turned_away and c > present));
+        float rx = 1.0f;
+        if (sweep)
+        {
+            const int k = c % 12;
+            rx = 1.0f + 1.5f * (k < 6 ? (static_cast<float>(k) / 3.0f - 1.0f) : (1.0f - static_cast<float>(k - 6) / 3.0f));
+        }
+        const auto out = core.step(cycle_input(static_cast<std::uint64_t>(c), frame, ph, turned_away and c > present, kWallY, rx));
         for (const auto& d : out.decisions)
         {
             if (d.kind == static_cast<std::uint16_t>(K::Existence)) r.exist.push_back(d);
@@ -250,7 +256,7 @@ int main()
     // ── 1. present → absent: L to the clamp, then down, then ONE removal through the world ──────────────────────────
     {
         ExistWorld w;
-        const Run r = run(40, 80, false, -1, &w);
+        const Run r = run(40, 200, false, -1, &w);   // 200: the sweep spends most frames off-centre (P(detect) ≈ 0.03-0.3)
         const auto L = L_of(r);
         std::print("birth at cycle {}, {} Existence rows, {} REMOVE\n", r.birth_cycle, r.exist.size(), r.removes.size());
         CHECK(r.birth_cycle > 0);
@@ -320,11 +326,10 @@ int main()
 
     // ── 7. Task 5b: a shut door 0.12 m OFF the polygon's wall line on the room side (the tapes' DOOR_0), seen obliquely ──
     //    The fit must put the leaf's plane there (DoorBeliefState::d ≈ −0.12, out of the room is +) without stretching w,
-    //    and the silhouette — rendered on that plane — must read the leaf OCCUPIED: occ ≫ free on its rows, L at the clamp.
+    //    and the silhouette — rendered on that plane — must read the leaf OCCUPIED: occ ≫ free on its rows, L confirmed.
     for (const float robot_x : {1.0f, -1.0f})
     {
         DoorCoreConfig cfg;
-        cfg.door.exist_frame_correlation = 0.0f;   // a parked camera: "L at the clamp" is the independent-looks statement
         ExistWorld w;
         w.cfg = cfg.door;
         DoorCore core(cfg);
@@ -346,7 +351,8 @@ int main()
         // there, 0.03 oblique) — the field sees the plane only through d, not as a quantity of its own (report, concerns).
         CHECK(std::abs(b.recess() + 0.12f) <= 3.0f * sd_d);
         CHECK(std::abs(b.state().w - 1.0f) <= 2.0f * sd_w + 0.01f);
-        CHECK(not L.empty() and L.back() >= dcfg.exist_max_logodds - 1e-3);
+        // a parked camera's looks pool to ONE observation (door_view_pool.h): confirmed above the birth seed, not to the clamp
+        CHECK(not L.empty() and L.back() > dcfg.exist_birth_logodds);
         // the silhouette's own counts on every forced CSV row: sil_occ (col 11) ≫ sil_free (col 12)
         const auto col = [](const std::string& line, int k)
         {
@@ -369,12 +375,13 @@ int main()
     }
 
     // ── 8. Task 5b item 4: a PARKED robot's repeated looks are one look repeated (Existence.FrameCorrelation, measured
-    //    0.747 on tourR1+R2, and ExistenceBelief::note_viewpoint — the shared mechanism hood and fridge use): the parked
-    //    absence that removes the door when every look counts (section 1, rho 0) must NOT remove it from one unchanging
-    //    view at the measured rho, and L stays above the removal boundary.
+    //    0.78 on tourR1+R2 parked pairs; the looks of one view are pooled, door_view_pool.h — a moving phantom is
+    //    removed: tests/test_door_existence_moving_phantom.cpp): the parked
+    //    absence that removes the door from NEW views (section 1, the sweep) must NOT remove it from one unchanging view,
+    //    and L stays above the removal boundary.
     {
         ExistWorld w;
-        const Run r = run(40, 80, false, -1, &w, rc::DoorConfig{}.exist_frame_correlation);
+        const Run r = run(40, 80, false, -1, &w, /*sweep=*/false);
         const auto L = L_of(r);
         std::print("parked absence: {} REMOVE, L last {:.3f} (removal boundary {:.3f})\n", r.removes.size(),
                    L.empty() ? -99.0 : L.back(), L_remove);

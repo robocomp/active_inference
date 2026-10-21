@@ -81,6 +81,46 @@ struct ViewPool
         counted = c;                      // assumed realised in full until commit() says otherwise
         return pending;
     }
+    // The same pooling for a channel whose per-look evidence is ALREADY a log-odds increment (the silhouette: P(detect)·the
+    // mask's log-likelihood ratio — door_existence.cpp): the view's contribution is the MEAN increment of its looks, one
+    // observation's worth, instead of llr·tanh(mean verdict). Task 5b item 4, fix round I-2: both existence channels pool
+    // by the SAME view model at the SAME scale, so neither can out-run the other on a gradual approach (a silhouette
+    // damped by a growing run length while the image channel renewed at (1 − s) per frame walked tourR1's DOOR_1, read
+    // occupied 150/30 by the silhouette, to the floor).
+    float add_logodds(const Eigen::Vector2f& obs, const Eigen::Vector2f& tgt, float R, float dL_look)
+    {
+        const Eigen::Vector2f dv = obs - tgt;
+        const float d = dv.norm();
+        if (not std::isfinite(dL_look) or not std::isfinite(d) or d < 1e-3f)
+            return 0.0f;
+        const float b  = std::atan2(dv.y(), dv.x());
+        const float Rr = std::max(R, 1e-3f);
+        float s = 0.0f;
+        if (have)
+        {
+            const float half = std::max(std::atan2(Rr, d), 1e-3f);
+            const float db = std::remainder(b - bearing, 2.0f * std::numbers::pi_v<float>);
+            const float dr = d - range;
+            s = std::exp(-std::min((db / half) * (db / half) + (dr / Rr) * (dr / Rr), 60.0f));
+        }
+        last_s = s;
+        const float n_old = s * n;
+        n = n_old + 1.0f;
+        mean = (n_old * mean + dL_look) / n;
+        if (have)
+        {
+            bearing += std::remainder(b - bearing, 2.0f * std::numbers::pi_v<float>) / n;
+            range   += (d - range) / n;
+        }
+        else
+        {
+            bearing = b; range = d; have = true;
+        }
+        pending = mean - s * counted;
+        counted = mean;
+        return pending;
+    }
+
     // After integrating add()'s ΔL: what it actually changed L by (after the clamp). Without a call, the full ΔL is assumed.
     void commit(float realized_dL) { counted += realized_dL - pending; pending = realized_dL; }
 };

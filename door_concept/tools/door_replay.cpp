@@ -591,11 +591,12 @@ int main(int argc, char** argv)
                         }
                         std::println("TRACE {} cycle {} L {:+.2f} | s {:.3f} w {:.3f} h {:.3f} d {:+.3f}±{:.3f} phi {:.3f}±{:.3f} | "
                                      "since_det {} mask {} px {} | sil occ {:.1f} free {:.1f} free_eff {:.2f} p_det {:.3f} | edge dL {:+.2f} "
-                                     "frame exc {:+.2f} (true {:.1f} ctrl {:.1f})",
+                                     "frame exc {:+.2f} (true {:.1f} ctrl {:.1f}) | robot {:.3f} {:.3f}",
                                      st->node_name, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
                                      st->phi_est, st->phi_sigma, st->frames_since_detection, st->assigned_mask_idx, mask_px,
                                      st->dbg_sil_occ, st->dbg_sil_free, st->dbg_sil_free_eff, st->dbg_sil_pdetect,
-                                     st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl);
+                                     st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl,
+                                     in->robot.room_T_body ? (*in->robot.room_T_body)(0, 3) : 0.0, in->robot.room_T_body ? (*in->robot.room_T_body)(1, 3) : 0.0);
                     }
         }
         world.end_cycle();

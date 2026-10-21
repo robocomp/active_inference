@@ -669,8 +669,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     policy.logodds_max   = cfg.exist_max_logodds;
     policy.removal_prob  = cfg.exist_removal_prob;
     policy.remove_frames = static_cast<float>(cfg.exist_remove_frames);
-    // Task 5b item 4: the SHARED correlated-observation weighting (rc::exist::ExistenceBelief), measured for the door.
-    policy.frame_correlation = cfg.exist_frame_correlation;
+    // Task 5b item 4 (fix round I-2): both channels are pooled by view (door_view_pool.h); the shared belief is armed with
+    // ρ 0 so no second correlation discount is applied on top (the review's double counting).
+    policy.frame_correlation = 0.0f;
 
     // ★ONE PreparedFrame (blur + Sobel + whole-frame gradient reference) per cycle, shared by every door's
     // leaf contour AND its aperture frame. The one-shot contour_edge_support(img, ...) recomputed all of it
@@ -714,17 +715,6 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         {
             inst.existence.set(cfg.exist_birth_logodds);
             inst.existence_seeded = true;
-        }
-        // ★Task 5b item 4: VIEWPOINT NOVELTY for the shared correlated-observation weighting (as hood / refrigerator): a
-        // run of looks from one camera pose is one observation repeated — rho_eff = rho·max(ambiguity, stationarity), the
-        // stationarity a Gaussian in the door's own angular half-size (ExistenceBelief::note_viewpoint). Before this the
-        // door had rho 0 and no viewpoint, so a parked robot's every miss counted as a new one (the removal in the parked
-        // test, and the silhouette's part in tourR2 door_2's walk to the floor).
-        if (room_T_zed.has_value())
-        {
-            const Eigen::Vector2f c = inst.aperture.centre_xy();
-            inst.existence.note_viewpoint(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)),
-                                          c.x(), c.y(), 0.5f * std::hypot(inst.aperture.w, inst.aperture.h));
         }
 
         // ── ROOM-CONTAINMENT PRIOR: THE WALL BAND (door_room_band.h) ────────────────────────────────────
@@ -942,7 +932,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             { inst.dbg_edge_delta = 0.0f; return; }
             const float llr = rc::exist::contour_evidence(1e9f, n, sm).log_odds_delta;   // one confident observation
             const Eigen::Vector2f cam(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)));
-            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), 0.5f * inst.aperture.w, verdict, llr);
+            // The view's scale is the door's half-DIAGONAL, the same as the silhouette's pool (add_logodds below): "a new
+            // view" is one question about one object, and two channels judging it at different scales let the one that
+            // sees novelty sooner (the narrower) out-run the other — measured, tourR1 DOOR_1 at RecessPriorStd 0.2:
+            // the image channel at 0.5·w walked a door the silhouette read occupied (150/30) to the floor in 13 frames.
+            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(),
+                                                      0.5f * std::hypot(inst.aperture.w, inst.aperture.h), verdict, llr);
             const float L0 = inst.existence.logodds();
             inst.existence.integrate(1.0f, dL);
             inst.image_view_pool.commit(inst.existence.logodds() - L0);   // what the view really moved L (the clamp)
@@ -1114,11 +1109,29 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // refrigerator_existence.cpp: the old form left a positive push at p_detect -> 0, which is the
         // ratchet that makes a phantom immortal. A probe that could not resolve the object is a HOLD.
         ev.log_odds_delta = p_detect * d_full;
+        // ★Task 5b item 4: the looks of ONE view are one observation repeated; a NEW view is a new one. The silhouette is
+        // pooled by the same view model and scale as the image channel (door_view_pool.h add_logodds: the view's
+        // contribution is the mean increment of its looks, renewed in proportion to the novelty of each new look). Before
+        // this the door counted a parked robot's every miss as a new one. Measured on tourR1+R2: parked look pairs
+        // P(miss | miss) 0.784 vs P(miss) 0.024 — ρ 0.78, near the ρ = 1 this pooling assumes for one view (no config key:
+        // the pooling has no ρ to set).
+        bool pooled_sil = false;
+        if (room_T_zed.has_value())
+        {
+            const Eigen::Vector2f cam(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)));
+            ev.log_odds_delta = inst.silhouette_view_pool.add_logodds(cam, inst.aperture.centre_xy(),
+                                                                      0.5f * std::hypot(inst.aperture.w, inst.aperture.h),
+                                                                      ev.log_odds_delta);
+            pooled_sil = true;
+        }
+        const float L_before_sil = inst.existence.logodds();
         // p_detect is passed EXPLICITLY: log_odds_delta already carries it, but the second argument is also
         // what the frame-correlation weighting reads (rho_eff = rho*(1-p_detect)). Defaulting it to 1.0 told
         // the belief every miss was a maximally-unambiguous look, so consecutive correlated misses counted as
-        // independent. Inert while Existence.FrameCorrelation is 0, but wrong the moment it is measured.
+        // independent. (Task 5b item 4: the silhouette is pooled by view above; the belief itself is armed with ρ 0, so
+        // this p_detect no longer feeds a second correlation discount.)
         inst.existence.integrate(ev, p_detect);
+        if (pooled_sil) inst.silhouette_view_pool.commit(inst.existence.logodds() - L_before_sil);   // what it REALLY moved L
 
         // ── RGB CONTOUR CHANNEL: an INDEPENDENT sensor, integrated separately ────────────────────────
         //
