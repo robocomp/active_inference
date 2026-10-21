@@ -174,6 +174,9 @@ rc::DoorBeliefParams DoorFit::make_belief_params() const
     p.tpl_w              = cfg_.door_prior_w_m;
     p.tpl_h              = cfg_.door_prior_h_m;
     p.gn_iters           = cfg_.ai2_gn_iters;
+    // Task 5b: the leaf hangs somewhere inside the wall's thickness T beyond the room-side face (the same T the wall band
+    // and associate_wall use) — the across-wall nuisance every mask frame marginalises (DoorBeliefParams::leaf_plane_std).
+    p.leaf_plane_std     = room_band().wall_thickness_m;
     // ── Leaf articulation (openable door, M0) ──
     // The ONE place the leaf state is authored, so the M0 pin cannot drift. With Openable.Enabled false
     // phi is the literal 0.0f, which makes every geometry consumer reduce EXACTLY to the wall-plane

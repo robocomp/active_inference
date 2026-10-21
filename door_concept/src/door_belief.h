@@ -122,6 +122,21 @@ struct DoorBeliefParams
     // so one over-segmented mask only nudges w,h — the fix for the live w→1.12 m drift. Continuous, no gate.
     float common_mode_wh_std = 0.35f;
 
+    // ★THE LEAF PLANE'S ACROSS-WALL POSITION IS A NUISANCE, MARGINALISED PER FRAME (Task 5b, D1 + D2). The leaf is drawn on
+    // the room-side polygon FACE, but a real leaf hangs INSIDE the wall's thickness (door_room_band.h: the aperture lies in
+    // [0, T] beyond the face). Measured on both recorded tours: the shut DOOR_0 leaf's mask points sit 0.10-0.15 m beyond
+    // the face. That shared residual is not explained by any DOF of [s, w, h], and Gauss-Newton turned it into motion along
+    // whatever DOF had the faintest lever on it: w through −sin φ at φ = 0.03 (tourR2 door_2: w 1.01 → 2.51 m in one frame,
+    // 36 σ, then removed for a silhouette 2.5 m wide), s through float noise in the finite-difference Jacobian (tourR1
+    // door_4: 3.66 m in one first update, landing where it explained none of its own points). The generative statement is
+    // that every point of a frame shares one across offset n ~ N(0, leaf_plane_std²); accumulate_extra marginalises it
+    // EXACTLY (Schur complement of the [θ, n] normal equations), so an across residual is explained by n and only what n
+    // cannot explain — the jambs, the lintel, the leaf's along-wall extent — informs [s, w, h]. No gate: n absorbs exactly
+    // the information it can explain, continuously. Authored by DoorFit::make_belief_params from Existence.WallThicknessM.
+    // The fit is insensitive to the value (n's data information is ~1e7 against a prior of 1/σ² ~ 25; tourR2 keeps door_2
+    // for every σ in 0.03-0.5 m), so this is the physical T, not a tuned number. 0 disables (the pre-5b fit).
+    float leaf_plane_std = 0.20f;
+
     // Optimiser
     int   gn_iters = 4;
     float fd_eps   = 1e-3f;
@@ -482,8 +497,12 @@ public:
     // Fixed template prior on w,h folded into the SAME GN normal equations as the data (engine detects this
     // hook via a C++23 requires). Pulls w→tpl_w, h→tpl_h with precision 1/prior_{w,h}_std² each frame; s is
     // untouched (it carries only the broad temporal prior). This is what makes the strong size prior stick.
+    // It first marginalises the leaf plane's across-wall offset out of the frame's data block (Task 5b; see
+    // DoorBeliefParams::leaf_plane_std and marginalise_leaf_plane).
     void accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                           Eigen::Matrix<float, 3, 3>& Id, Eigen::Matrix<float, 3, 1>& bd) const;
+    void marginalise_leaf_plane(const DoorBeliefState& s, const DoorFrame& frame,
+                                Eigen::Matrix<float, 3, 3>& Id, Eigen::Matrix<float, 3, 1>& bd) const;
 
     // Mean per-point mixture NEGATIVE LOG-LIKELIHOOD of `pts` (includes clutter) — the multi-instance
     // ASSOCIATION evidence. A far / wrong-instance slice (all points → flat clutter) → tiny likelihood →
