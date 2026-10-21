@@ -39,6 +39,7 @@ LIST(APPEND SOURCES
   ../src/core/door_cycle_io.cpp
   ../src/core/door_core.cpp      # the DoorCore: the tracker slice (Task 4) + the fit loop; reads only DoorCycleInput
   ../src/core/door_fit.cpp       # the per-door fit (Task 4b): observe / run_inference / phi / ROI / chain cov
+  ../src/core/door_existence.cpp # the existence slice (Task 5): silhouette / image geometry / P(detect) / removal
   # The adapter that records each cycle's DoorCycleInput (DoorConcept.RecordInputs, default off).
   ../src/input_snapshot.cpp
   # The robot-relative copy of a door hung from the robot while its affordance executes.

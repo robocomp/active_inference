@@ -11,7 +11,11 @@
 // ★AND THE FIT (Task 4b): observe → run_inference → estimate_phi for every door the world offers, after the births —
 // where compute() ran process_door_node — then one Phi decision per door (door_fit.h). The beliefs it builds are the
 // ones the tracker associates with on the next cycle: step() produces each door's belief from the input alone.
-// ★WHAT IS NOT IN IT YET, AND HOW IT GETS IN. Existence (Task 5), identity / room following / carry / restore / look
+// ★AND EXISTENCE (Task 5): once per NEW mask frame, each door's existence belief from the silhouette, the image
+// geometry, P(detect) and the two priors; the Existence decision rows; the shared removal decision and its REMOVE rows
+// (door_existence.h). The removal's graph half (ghost, identity, affordances, node) stays the world's: before_remove /
+// remove_door.
+// ★WHAT IS NOT IN IT YET, AND HOW IT GETS IN. Identity / room following / carry / restore / look
 // (Task 6), affordances and the anchor (Task 7). The tracker and the fit read the state those slices own (which room,
 // the room polygon, ghosts, identities) and act on it (retire a merged door, hand a slice to a door, create and adopt a
 // newborn, publish a fitted door). They do both ONLY through TrackerWorld below: live, SpecificWorker implements it over
@@ -22,7 +26,7 @@
 // state and the interface shrinks.
 //
 // ★ONE CALL, IN THE ORDER THE OLD CODE RAN. step() = merge → associate → TrackerWorld::after_association() (live: the
-// semantic/image pumps and the existence update, which ran between association and birth) → births → the fit of each
+// semantic/image pumps) → the existence update (Task 5; it ran there, between association and birth) → births → the fit of each
 // door (begin_fit / fit / after_fit: live, after_fit is the old publish_door_cycle) → the Phi decisions. Effects on the
 // world are made SYNCHRONOUSLY at the point the old code made them (a newborn is created and adopted before the next
 // birth is judged: a second birth in the same cycle is tested against the first one's swept arc), and decisions reach
@@ -39,11 +43,13 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 #include <Eigen/Dense>
 #include "door_cycle_io.h"
 #include "sensing.h"
 #include "door_fit.h"
+#include "door_existence.h"   // the existence slice (Task 5): probes, SemanticField, ImageSource
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -134,8 +140,8 @@ public:
     // ── act ──
     virtual void retire(std::uint64_t id) = 0;                           // a merged duplicate: affordances + fit + node
     virtual void set_assigned_mask(std::uint64_t id, int slice) = 0;     // -1 = none this cycle
-    /// The old code between association and births (live: semantic/RGB/depth pumps, actuation UI, detect probe,
-    /// update_existence_beliefs — which may retire doors). The cycle's tracker numbers are final at this point.
+    /// The old code between association and births (live: semantic/RGB/depth pumps, actuation UI, detect probe). The
+    /// cycle's tracker numbers are final at this point. The core's existence update (which may remove doors) follows it.
     virtual void after_association(const TrackerCycleInfo& info) = 0;
     /// Create the door node; 0 = the insert failed (nothing else happens for that birth). ★Live, the insert ALSO builds
     /// the instance (modify_node_slot runs synchronously inside it → ensure_instance, pre-belief box at (0, 0), no seed);
@@ -156,6 +162,18 @@ public:
     virtual rc::DoorFitState* begin_fit(std::uint64_t) { return nullptr; }
     /// A door the fit updated this cycle (live: publish_door_cycle — persist the belief, convergence, the epistemic step).
     virtual void after_fit(std::uint64_t, const DoorObservation&, float /*free_energy*/) {}
+    // ── the existence slice (Task 5) ──
+    /// Right after after_association (where the worker pumps its RGB / depth ingestors): hand the frames the existence
+    /// checks score. Live: the ingestors' frames (ImageSource::stage_live). A replay stages nothing — the core already
+    /// applied the tape's recorded patches (observe_media).
+    virtual void stage_images(ImageSource&) {}
+    /// An existence REMOVE is about to be decided for this door (its REMOVE decision follows this call): the world's
+    /// half that ran BEFORE the old REMOVE row — live, remember_ghost (and the stored identity it forgets) and the
+    /// affordance-withdrawal decision rows.
+    virtual void before_remove(std::uint64_t /*id*/) {}
+    /// Remove the door (after its REMOVE decision; also for an id the core no longer holds): live, the phantom DEATH
+    /// record, the affordance nodes, forget the fit state, delete the node. The world must stop lending its fit state.
+    virtual void remove_door(std::uint64_t id, float logodds) = 0;
 };
 
 /// The tracker's view of one fit state (what CoreWorld::doors() built off rc::DoorInstance, field for field).
@@ -173,6 +191,10 @@ struct DoorCoreSinks
 {
     std::function<void(const rc::door::DoorDecision&)> decision;
     std::function<void(const DiagRow&)> diag;   // stream "stdout" (line ends in '\n') or a CSV file name
+    /// The input recorder's image hooks (live: InputSnapshot::note_images / note_roi), called where the old existence
+    /// update called them. Unset ⇒ nothing is noted.
+    std::function<void(const ImageUseNote&)> image_use;
+    std::function<void(const ImageRoiNote&)> image_roi;
 };
 
 class DoorCore
@@ -189,7 +211,8 @@ public:
     /// whose decision step does not run (no room) — see sensing.h.
     void observe_media(const DoorCycleInput& in);
 
-    /// One cycle of the slices the core owns: the tracker (Task 4) and the fit (Task 4b). Requires connect().
+    /// One cycle of the slices the core owns: the tracker (Task 4), the existence update (Task 5, between the association
+    /// and the births, where the old code ran it) and the fit (Task 4b). Requires connect().
     DoorCycleOutput step(const DoorCycleInput& in);
 
     /// The fit: its per-door functions are called by the world too (ensure_instance → init_instance, note_reacquire),
@@ -219,6 +242,8 @@ private:
     void associate(const DoorCycleInput& in, DoorCycleOutput& out);
     void births(const DoorCycleInput& in, DoorCycleOutput& out);
     void fit_doors(DoorCycleOutput& out);
+    /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
+    void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 
     DoorCoreConfig cfg_;
     TrackerWorld*  world_ = nullptr;
@@ -228,6 +253,8 @@ private:
     LeafSweep  leaf_sweep_;
     EgoMotion  ego_;
     std::vector<rc::exclusion::Claim> claims_;
+    SemanticField semantic_;   // the graded door posterior (the input's semantic plane after the worker's refresh)
+    ImageSource   images_;     // the RGB / depth frames the existence checks score
     DoorFit fit_{cfg_.door};   // after cfg_ (it keeps a reference to it)
 
     rc::InstanceTracker tracker_;
@@ -235,6 +262,11 @@ private:
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)
     std::uint64_t create_seq_ = 0;
+    // the existence slice's own state (were exist_last_mask_frame_ and three function statics in SpecificWorker)
+    int  exist_last_mask_frame_ = -1;   // integrate once per NEW mask frame
+    bool exist_warned_ = false;         // the "no mask_pixels_xy" warning, once
+    int  ex_dbg_ = 0;                   // the readout's throttle counter (= the existence CSV's cycle column)
+    std::unordered_map<std::uint64_t, float> last_L_;   // last L per door (forces a readout row on |ΔL| > 1)
 
     // this cycle
     std::vector<rc::DetectionView> dets_;

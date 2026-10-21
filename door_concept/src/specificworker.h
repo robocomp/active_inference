@@ -163,6 +163,10 @@ private:
         std::vector<std::uint64_t> fit_targets() override;
         rc::DoorFitState* begin_fit(std::uint64_t id) override;
         void after_fit(std::uint64_t id, const rc::door::core::DoorObservation& obs, float free_energy) override;
+        // the existence slice (Task 5): the frames it scores, and the graph half of its removals
+        void stage_images(rc::door::core::ImageSource& images) override;
+        void before_remove(std::uint64_t id) override;
+        void remove_door(std::uint64_t id, float logodds) override;
     private:
         SpecificWorker& w_;
         std::unordered_map<std::uint64_t, DSR::Node> fit_nodes_;   // this cycle's door nodes, by id (fit_targets)
@@ -173,7 +177,8 @@ private:
     void log_nbv_decision(const rc::DoorInstance& inst, const rc::nbv::Plan& plan,
                           const rc::EpistemicProposal& prop);
     int  nbv_obstacle_count_ = 0;   // obstacles fed to the last plan (0 ⇒ the walls never reached it)
-    void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
+    // (update_existence_beliefs — continuous existence log-odds → evidence-based removal — moved into the DoorCore:
+    //  src/core/door_existence.cpp; its graph half is CoreWorld::before_remove / remove_door.)
 
     // ── The three PRAGMATIC door affordances: approach / open / cross ─────────────────────────────
     // Siblings of the epistemic `aff_door_N` under the same door node, and a different KIND of offer:
@@ -615,7 +620,8 @@ private:
     std::ofstream detect_probe_csv_;
     std::unique_ptr<rc::DoorSceneGraph>               scene_graph_;     // DSR node/RT I/O
     // (the InstanceTracker and the last-birth-mask-frame counter moved into the DoorCore — core/door_core.h)
-    int   exist_last_mask_frame_ = -1;    // (rc::BearingHypothesisStager removed with bearing-birth — see common/peripheral_channel)
+    // (exist_last_mask_frame_ is the DoorCore's now — the existence slice integrates once per new mask frame there.)
+    // (rc::BearingHypothesisStager removed with bearing-birth — see common/peripheral_channel)
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate
 

@@ -16,8 +16,10 @@
 //      cycle — the worker's second graph walk is gone).
 //
 // Build + run (from door_concept/):
-//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_core_fit.cpp src/core/door_core.cpp src/core/door_fit.cpp \
-//       src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp -lzstd -o /tmp/test_door_core_fit && /tmp/test_door_core_fit
+//   g++ -std=c++23 -O1 -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_core_fit.cpp src/core/door_core.cpp src/core/door_fit.cpp \
+//       src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp \
+//       ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
+//       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_core_fit && /tmp/test_door_core_fit
 #include <chrono>
 #include <clocale>
 #include <cmath>
@@ -91,6 +93,7 @@ struct FitWorld final : TrackerWorld
     rc::DoorFitState* begin_fit(std::uint64_t id) override
     { const auto it = st.find(id); return it == st.end() ? nullptr : &it->second; }
     void after_fit(std::uint64_t, const DoorObservation&, float) override { ++after_fit_calls; }
+    void remove_door(std::uint64_t id, float) override { st.erase(id); }   // (the existence slice's removal)
 };
 
 // The door: an aperture in the top wall (y = 5), centred at x = 1.0, 1.0 m wide, 2.1 m tall; the robot stands still at

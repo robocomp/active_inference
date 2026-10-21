@@ -147,6 +147,7 @@ void DoorCore::observe_media(const DoorCycleInput& in)
 {
     masks_.apply(in.masks);
     leaf_sweep_.apply(in.bpearl);
+    images_.apply(in.rgb_gray, in.depth);   // a tape's recorded frames (live: nullopt here — the world stages them)
     set_cycle_views(in);
 }
 
@@ -206,6 +207,12 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     merge(out);                 // enforce physical exclusion before associating/birthing this cycle
     associate(in, out);
     world_->after_association(info_);
+    // The existence update, where the old run_instance_tracker ran it (the tail of after_association): the semantic
+    // field the worker refreshed there (recorded into the input by then), the frames it pumped there, then the update.
+    semantic_.apply(in.semantic_state, in.semantic);
+    world_->stage_images(images_);
+    if (cfg_.door.exist_enabled)
+        update_existence(in, out);
     births(in, out);
     fit_doors(out);
     return out;

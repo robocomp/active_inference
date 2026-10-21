@@ -12,8 +12,10 @@
 //   5. The core is DSR / Qt / Ice / media free (the include scan of tests/test_door_cycle_io.cpp, run over src/core).
 //
 // Build + run (from door_concept/):
-//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_core_tracker.cpp src/core/door_core.cpp src/core/door_fit.cpp \
-//       src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp -lzstd -o /tmp/test_door_core_tracker && /tmp/test_door_core_tracker
+//   g++ -std=c++23 -O1 -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_core_tracker.cpp src/core/door_core.cpp src/core/door_fit.cpp \
+//       src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp \
+//       ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
+//       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_core_tracker && /tmp/test_door_core_tracker
 #include <clocale>
 #include <filesystem>
 #include <fstream>
@@ -52,6 +54,7 @@ struct FakeWorld final : TrackerWorld
     void set_assigned_mask(std::uint64_t id, int slice) override
     { for (auto& d : live) if (d.id == id) d.assigned_mask_idx = slice; }
     void after_association(const TrackerCycleInfo&) override { ++after_assoc; }
+    void remove_door(std::uint64_t, float) override {}   // (the existence slice: no fit states here, nothing to remove)
     std::uint64_t create_door(const BirthRequest&) override { ++created; return next_id++; }
     void reacquire(std::uint64_t, const GhostMatch&) override {}
     void forget_ghost(const Vec2f&) override {}
