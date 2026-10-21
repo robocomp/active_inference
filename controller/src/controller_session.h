@@ -220,6 +220,9 @@ public:
                            std::optional<rc::policy::DoorwayRisk> jambs = std::nullopt);
     // The policy's state belongs to one goal owner: dropped on Stop / abort and when the owner ends.
     void policy_reset();
+    // ★ Task 3d fix round 2 (CRITICAL-2): the operator's explicit acknowledgement (Stop) — the ONLY thing besides a restart that
+    //   clears the turn-sign EMERGENCY and the turn-sign belief (policy_reset() keeps both: the hand-back itself runs it)
+    void operator_clear_turn_sign_fault();
     // review I1: a cycle in which the policy did NOT drive although it owns the base (Pause / Halt / a no-step or hold / the
     // LiDAR-stall hold): the next tick drops the committed plan and the pending prediction unjudged.
     void policy_interrupt() { policy_gate_.on_hold(); }
@@ -418,7 +421,7 @@ private:
     float policy_pose_xy_std_ = 0.f;                             // Task 3d: room_concept's published pose xy std (0 = none)
     float policy_pose_theta_std_ = 0.f, policy_prev_theta_std_ = 0.f;   // Task 3d r1: its published heading std (now / interval start)
     double policy_probe_t0_ = -1.0; float policy_probe_sign_ = -1.f;    // Task 3d r1: the turn-sign probe's phase
-    bool policy_sign_emergency_ = false;                                // Task 3d ruling: the probe confirmed a flipped sign
+    rc::policy::TurnSignSafety policy_sign_safety_;                     // Task 3d r2: the latched turn-sign EMERGENCY (operator-cleared)
     std::uint64_t policy_clock_prev_ms_ = 0;                     // Task 3d: the last tick the no-route clock saw
     std::optional<float> policy_prev_yaw_;                       // review fix 2.2: the pose's last (time, heading) for I5
     std::optional<double> policy_prev_pose_t_;

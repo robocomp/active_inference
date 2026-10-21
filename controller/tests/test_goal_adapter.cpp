@@ -251,7 +251,8 @@ int main()
             for (; k < 100 and not tf.probe_decisive(h); ++k)
             { const float th = (k / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; tf.update(th, 0.f, -th + sn * nz(rng), 0.f, sy, st, sp, sc, dt); }
             std::printf("   3d ruling: a true flip's probe is decisive after %d intervals (%.1f s)\n", k, k * dt);
-            CHECK("3d ruling: a true flip — the probe becomes decisive (EMERGENCY) within 2 horizons", tf.probe_decisive(h) and k <= 20);
+            // stated time (fix round 2, measured over 200 seeds in the reviewer's harness: worst 24 intervals = 2.4 s): <= 3 horizons
+            CHECK("3d ruling: a true flip — the probe becomes decisive (EMERGENCY) within 3 horizons", tf.probe_decisive(h) and k <= 30);
             TurnSignBelief ff;                                        // a false Blind from a burst, then probed
             for (int j = 0; j < 2; ++j) ff.update(w * dt, 0.f, -w * dt, 0.f, sy, st, sp, sc, dt);
             ff.set_probing(true); bool ever = false;
@@ -263,6 +264,46 @@ int main()
         TurnSignBelief tp = held;
         for (int k = 0; k < 40; ++k) { const float th = (k / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; tp.update(th, 0.f, -th + sn * nz(rng), 0.f, sy, st, sp, sc); }
         CHECK("3d r1: a TRUE flip under alternating probe turns stays Blind", tp.flipped());
+    }
+
+    // ---- 4e. Task 3d fix round 2 (re-review): CRITICAL-1 float saturation; M-2 parked jitter diffusion
+    {
+        const float dt = 0.1f, sy = 0.013f * std::sqrt(dt), sp = 0.006f, sc = 0.064f;
+        std::mt19937 rng(3); std::normal_distribution<float> nz(0.f, 1.f);
+        // CRITICAL-1: the rtD1e yaw-only correction at an UN-inflated heading std (0.0086) Blinds (the probe's job); the state
+        // must not saturate — the probe under a SOUND sign must end it, however many contradicting intervals came first
+        for (int n : {4, 20})
+        {
+            const float st = 0.0086f, sn = std::sqrt(sy * sy + 2.f * st * st);
+            TurnSignBelief r; for (int k = 0; k < n; ++k) r.update(-0.02f, 0.f, +0.048f, 0.f, sy, st, sp, sc, dt);
+            r.set_probing(true); int j = 0; bool dec = false;
+            for (; j < 5000 and r.flipped(); ++j) { const float th = (j / 10 % 2 ? -1.f : 1.f) * 0.1f * dt; r.update(th, 0.f, th + sn * nz(rng), 0.f, sy, st, sp, sc, dt); dec = dec or r.probe_decisive(1.f); }
+            std::printf("   3d r2: yaw-only x%d ended by the sound-sign probe after %d intervals\n", n, j);
+            CHECK("3d r2 C-1: no saturation — the sound-sign probe ends a deep false Blind", not r.flipped() and j < 5000);
+            CHECK("3d r2 C-1: ... and never declares it an emergency", not dec);
+        }
+        // M-2: parked, sound sign — odometry turn jitter (uncorrelated with the pose) must not diffuse the belief up to Blind
+        for (float wn : {0.002f, 0.01f})
+        {
+            int hits = 0;
+            for (int s = 0; s < 20; ++s)
+            {
+                std::mt19937 r2(100 + s); TurnSignBelief c; const float st = 0.0086f, sn = std::sqrt(sy * sy + 2.f * st * st);
+                for (long k = 0; k < 100000 and not c.flipped(); ++k) c.update(wn * dt * nz(r2), 0.f, sn * nz(r2), 0.f, sy, st, sp, sc, dt);
+                hits += c.flipped();
+            }
+            std::printf("   3d r2 M-2: parked jitter %.3f rad/s: %d/20 runs Blind within 100000 intervals (2.8 h)\n", wn, hits);
+            CHECK("3d r2 M-2: parked jitter never diffuses to Blind (2.8 h x 20 runs)", hits == 0);
+        }
+        // I-1: a TRUE flip, then held (exact zero turn, and parked jitter): stays Blind BY THE MODEL
+        {
+            const float st = 0.0086f, sn = std::sqrt(sy * sy + 2.f * st * st);
+            TurnSignBelief f; for (int k = 0; k < 3; ++k) f.update(0.04f, 0.f, -0.04f + sn * nz(rng), 0.f, sy, st, sp, sc, dt);
+            TurnSignBelief a = f, b = f;
+            for (long k = 0; k < 200000; ++k) { a.update(0.f, 0.f, sn * nz(rng), 0.f, sy, st, sp, sc, dt); b.update(0.001f * nz(rng), 0.f, sn * nz(rng), 0.f, sy, st, sp, sc, dt); }
+            CHECK("3d r2 I-1: a true flip stays Blind through 200000 held intervals (zero turn)", a.flipped());
+            CHECK("3d r2 I-1: ... and through 200000 parked-jitter intervals", b.flipped());
+        }
     }
 
     // ---- 4d'. TIME-ALIGNED (review fix 2.2, kept): the pose's heading change over [t_a, t_b] (its own time base) against the

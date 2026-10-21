@@ -214,6 +214,19 @@ int main()
         since = advance_no_route_clock(since, 1150, 1100, O::Finite, false, false, l);
         CHECK("3d clock: a finite field resets it", since == 0);
     }
+    // ---- Task 3d fix round 2 (CRITICAL-2): the turn-sign EMERGENCY is a latched SAFETY state — entered once (the goal handed back
+    //      once), then held idle across policy resets and goal changes, cleared ONLY by an explicit operator command / restart
+    {
+        using T = TurnSignSafety::Tick;
+        TurnSignSafety e;
+        CHECK("3d r2 safety: not decisive -> normal", e.on_tick(false) == T::Normal);
+        CHECK("3d r2 safety: decisive -> ENTERED (the goal is handed back once)", e.on_tick(true) == T::Entered);
+        CHECK("3d r2 safety: the next tick -> HELD (no per-tick hand back)", e.on_tick(true) == T::Held);
+        CHECK("3d r2 safety: still HELD when the belief no longer says decisive (no self-clearing)", e.on_tick(false) == T::Held);
+        // (a policy reset / a new goal does not touch it: TurnSignSafety has no reset path but the operator's)
+        e.operator_clear();
+        CHECK("3d r2 safety: cleared only by the operator", e.on_tick(false) == T::Normal and not e.active());
+    }
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);
     return fails == 0 ? 0 : 1;
 }

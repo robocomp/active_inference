@@ -104,4 +104,27 @@ inline std::uint64_t advance_no_route_clock(std::uint64_t since_ms, std::uint64_
     }
     return since_ms;
 }
+// ★ Task 3d fix round 2 (CRITICAL-2) — THE TURN-SIGN EMERGENCY IS A LATCHED SAFETY STATE. Entered when the probe confirms a flipped
+//   odometry sign (goal_adapter.h TurnSignBelief::probe_decisive). Its ENTRY tick hands the active goal back ONCE; every later tick
+//   holds idle — no per-tick Unreachable (which re-entered the hand-back sites every tick: explorer cells poisoned, cross_hand_back
+//   flooded, mission waypoints skipped to "completed"). It survives policy_reset() and goal changes — the hand-back itself runs
+//   them (mission skip -> stop -> reset; the 5-s clock -> no target -> reset; a failed move order -> reset), and a reset that
+//   cleared it drove a mirrored world again. Only an explicit OPERATOR command (Stop: SpecificWorker::abort_all) or a restart
+//   clears it.
+class TurnSignSafety
+{
+public:
+    enum class Tick { Normal, Entered, Held };
+    Tick on_tick(bool decisive)
+    {
+        if (active_) return Tick::Held;
+        if (not decisive) return Tick::Normal;
+        active_ = true;
+        return Tick::Entered;
+    }
+    void operator_clear() { active_ = false; }
+    bool active() const { return active_; }
+private:
+    bool active_ = false;
+};
 }  // namespace rc::policy

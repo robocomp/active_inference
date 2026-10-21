@@ -494,7 +494,11 @@ int main()
         s.finish();
         const auto w = sign_probe(s.in, s.pp);
         CHECK("3d probe: open space — a probe turn at w_min_eff", w.has_value() and std::abs(*w - s.in.base.w_min_eff) < 1e-6f);
-        Scene t; t.ret = wall_y(0.240f, -1.f, 1.f); auto back = wall_y(-0.240f, -1.f, 1.f);   // 1 cm from nose and tail (half-length 0.230) t.ret.insert(t.ret.end(), back.begin(), back.end());
+        // a pocket 1 cm from nose and tail (the hull's half-length 0.230): both walls really in the returns (fix round 2: the back
+        // wall's insert had been swallowed by a comment)
+        Scene t; t.ret = wall_y(0.240f, -1.f, 1.f); auto back = wall_y(-0.240f, -1.f, 1.f);
+        t.ret.insert(t.ret.end(), back.begin(), back.end());
+        CHECK("3d probe: the pocket really has both walls", t.ret.size() == 2 * back.size());
         t.goal.p = {0.f, 3.f};
         V g2 = t.goal.p; t.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g2, 1));
         t.finish();

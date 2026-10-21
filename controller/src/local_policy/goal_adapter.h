@@ -226,9 +226,12 @@ struct OdoSample { double t = 0.0; float w = 0.f, v = 0.f; };   // odometry turn
 //       under both signs; pi = P(correction | translation residual e = |dp_pose| - |odometry displacement|), equal priors:
 //       N(e; 0, sigma_p^2 + sigma_corr^2) vs N(e; 0, sigma_p^2) (sigma_p: odometry displacement sigma; sigma_corr: the published
 //       pose xy std, else the drift sigma).
-//   No deadband gate (review M-2): an interval's evidence is ~2 theta dyaw / sigma_n^2, so a turn below the base's deadband
-//     (|theta| ~ 0.001 rad per interval) is worth ~0.15 nats against the onset floor logit(1e-6) = -13.8 — noise cannot walk it
-//     to Blind (under not-S the expected evidence is -2 theta^2 / sigma_n^2 < 0: it drifts AWAY from S).
+//   No deadband gate (review M-2), and no diffusion (fix round 2): the odometry's turn is a measurement with noise sigma_o (its
+//     relative heading sigma over the interval); the evidence uses the posterior mean of the true turn, theta (1 - sigma_o^2 /
+//     theta^2)^+, so a turn not resolved above its own noise says ~nothing. Without it, parked jitter gave zero-mean evidence of
+//     nonzero variance and (no repair) the log-odds diffused up to Blind (20/20 parked runs within 2.8 h).
+//   The state is the LOG-ODDS in double (fix round 2, CRITICAL-1): a float probability saturated at 1.0f and no evidence could
+//     bring it back.
 //   BLIND iff P(S) > 1/2 — STATED (review I-2), not derived: a missed flip costs driving a mirrored world (its contact risk is not
 //     in the policy's model), a false Blind costs one probe turn; with no model of the first the MAP bar is kept and flagged.
 //   While Blind the policy keeps PROBING (if the contact model clears it): any probe can still reverse the belief — stopping at
@@ -240,9 +243,23 @@ public:
     void update(float theta_odo, float disp_odo, float dyaw_pose, float dp_pose, float sigma_odo_yaw, float sigma_pose_yaw,
                 float sigma_p, float sigma_corr, float dt = 0.f)
     {
-        p_ = p_ + (1.f - p_) * kOnset;                                     // onset only; no repair
+        // onset only, no repair, IN LOG-ODDS (fix round 2, CRITICAL-1: a float p saturated at 1.0f after a few strong intervals and
+        // the logit re-pinned at the clamp for ever — no evidence could bring it back). p' = p + (1 - p) h  <=>
+        // L' = L + log1p(h e^-L) - log1p(-h), stable at any L (evaluated as log(h) - L for a very negative L)
+        {
+            const double x = std::log(double(kOnset)) - L_;
+            L_ = (x > 30.0 ? std::log(double(kOnset)) + std::log1p(std::exp(-x)) : L_ + std::log1p(std::exp(x))) - std::log1p(-double(kOnset));
+        }
         const float sn2 = sigma_odo_yaw * sigma_odo_yaw + 2.f * sigma_pose_yaw * sigma_pose_yaw;
         if (not (sn2 > 0.f)) return;
+        // (fix round 2, M-2) the odometry's turn is a MEASUREMENT with its own noise sigma_odo_yaw (the relative heading sigma over
+        // the interval, already in sigma_n): the evidence uses the posterior mean of the TRUE turn under the empirical-Bayes prior
+        // N(0, max(0, theta^2 - sigma_o^2)) — theta (1 - sigma_o^2 / theta^2)^+ (positive-part James-Stein). A turn not resolved
+        // above its own noise says ~nothing (parked jitter: zero-mean evidence, nonzero variance, and with no repair the log-odds
+        // DIFFUSED up to Blind — measured 20/20 parked runs within 2.8 h); the probe (0.01 rad per interval vs sigma_o 0.004) still
+        // resolves.
+        const float so2 = sigma_odo_yaw * sigma_odo_yaw;
+        theta_odo = theta_odo * std::max(0.f, 1.f - so2 / std::max(theta_odo * theta_odo, 1e-20f));
         const float e = std::abs(dp_pose) - std::abs(disp_odo);
         const float pn2 = std::max(sigma_p * sigma_p, 1e-12f), pc2 = pn2 + sigma_corr * sigma_corr;
         const float lc = -0.5f * e * e / pc2 - 0.5f * std::log(pc2), ln = -0.5f * e * e / pn2 - 0.5f * std::log(pn2);
@@ -255,8 +272,7 @@ public:
         last_p_corr_ = pi;
         if (probing_)   // the probe's own evidence, and what it was built to give (its expected |LLR| under either sign)
         { probe_llr_ += last_llr_; probe_expected_ += 2.f * theta_odo * theta_odo / sn2; probe_time_ += std::max(dt, 0.f); }
-        const double L = std::log(double(p_) / (1.0 - double(p_))) + double(last_llr_);
-        p_ = float(1.0 / (1.0 + std::exp(-std::clamp(L, -60.0, 60.0))));
+        L_ += double(last_llr_);
     }
     // TIME-ALIGNED (review fix 2.2): the pose's change over [t_a, t_b] in the POSE's time base against the odometry INTEGRATED
     // over the same interval (samples held until the next). An interval the history does not cover judges nothing.
@@ -274,7 +290,8 @@ public:
         }
         update(float(turn), float(disp), dyaw_pose, dp_pose, sigma_odo_yaw, sigma_pose_yaw, sigma_p, sigma_corr, float(dt));
     }
-    [[nodiscard]] bool flipped() const { return p_ > 0.5f; }
+    [[nodiscard]] bool flipped() const { return L_ > 0.0; }
+    [[nodiscard]] double log_odds() const { return L_; }
     // ★ (ruling, re-review) THE PROBE'S ANSWER. A probe turn is built to give about +E of evidence if the sign is flipped and -E if
     //   it is not, E = its expected |LLR| = sum over its intervals of 2 theta^2 / sigma_n^2 (the likelihood above, without the
     //   correction component). Once at least one probe HORIZON has been observed (expected evidence scaled to one horizon) and the
@@ -287,12 +304,13 @@ public:
         return flipped() and probe_llr_ >= probe_expected_ * horizon_s / probe_time_;
     }
     [[nodiscard]] float probe_llr() const { return probe_llr_; }
-    [[nodiscard]] float p_flipped() const { return p_; }
+    [[nodiscard]] float p_flipped() const { return float(1.0 / (1.0 + std::exp(-L_))); }
     [[nodiscard]] float last_llr() const { return last_llr_; }
     [[nodiscard]] float last_p_correction() const { return last_p_corr_; }
     void reset() { *this = TurnSignBelief{}; }
 private:
-    float p_ = kPrior, last_llr_ = 0.f, last_p_corr_ = 0.f;
+    double L_ = std::log(double(kPrior) / (1.0 - double(kPrior)));   // the state IS the log-odds (fix round 2)
+    float last_llr_ = 0.f, last_p_corr_ = 0.f;
     bool probing_ = false; float probe_llr_ = 0.f, probe_expected_ = 0.f, probe_time_ = 0.f;
 };
 

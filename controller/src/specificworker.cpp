@@ -2172,6 +2172,7 @@ void SpecificWorker::abort_all(const char *source)
 	session_.mission().set_click_target(std::nullopt);
 	clear_manual_target();
 	session_.abort(path_controller_, motion_commander_);
+	session_.operator_clear_turn_sign_fault();   // Task 3d fix round 2: Stop is the operator's explicit acknowledgement
 	display_.clear_robot_trajectory();
 	driving_enabled_ = false;
 	paused_ = false;
