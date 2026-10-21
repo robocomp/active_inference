@@ -121,3 +121,15 @@ present — state which run). Commit.
 ### Task 10: Live check after the extraction
 Run one three-room tour with recording ON; compare its decision stream behaviour with tourR1/R2 (same failure classes, no
 new ones); record in the ledger. Then the door defects are fixed one by one against the recordings (separate plan).
+
+### Task 5b: the tour-blocking door defects, fixed against the tapes (ruling 2026-10-21; before Tasks 6–10)
+Defects (all on recorded tapes): (D1) tourR2 door_2 born at cycle 3601, REMOVED at 3629 by existence (L −4.00;
+silhouette free≫occ) although DOOR_0 is a real door; (D2) a single all-clutter frame moves a door's aperture by up to
+~7 m (bistable first belief update, tourR1 door_4); (D3) the main door (DOOR_1) is born as `door_4` instead of its
+remembered `door_1` (tourR2; also P7/P9/P10) — name drift on the identity match.
+- [ ] Phase 1 (systematic debugging, replay `--trace`): root cause of each, and whether D1 is caused by D2 (the fitted
+  aperture away from the real door ⇒ the silhouette sees free space where it predicts the door). Evidence in the report.
+- [ ] Per defect: a tape regression test that FAILS today (tourR2 door_2 must NOT be removed; the first update must not
+  jump by more than its own posterior predicts; the main door keeps `door_1`), the model-level fix (CLAUDE.md: no
+  thresholds — the probabilistic model), then: all other decisions on both tapes unchanged except the named ones
+  (list every changed decision with its reason). Unit tests + door tests green; build; commit per defect.
