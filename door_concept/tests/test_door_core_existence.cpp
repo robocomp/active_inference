@@ -21,6 +21,7 @@
 //       src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_core_existence && /tmp/test_door_core_existence
+#include <charconv>
 #include <clocale>
 #include <cmath>
 #include <print>
@@ -109,11 +110,11 @@ static Mat4d pose(double x, double y, double z, bool turned_away)
     return T;
 }
 
-// The door's projected pixel box from (1, kRobotY, 1.2) looking +y (the pinhole the core uses).
-static void door_pixels(std::vector<Vec2f>& px)
+// The door's projected pixel box from (robot_x, kRobotY, 1.2) looking +y (the pinhole the core uses), the leaf at leaf_y.
+static void door_pixels(std::vector<Vec2f>& px, float leaf_y = kWallY, float robot_x = 1.0f)
 {
-    const float Y = kWallY - kRobotY;
-    const float c0 = kW / 2 + kF * (kDoorX - 0.5f - 1.0f) / Y, c1 = kW / 2 + kF * (kDoorX + 0.5f - 1.0f) / Y;
+    const float Y = leaf_y - kRobotY;
+    const float c0 = kW / 2 + kF * (kDoorX - 0.5f - robot_x) / Y, c1 = kW / 2 + kF * (kDoorX + 0.5f - robot_x) / Y;
     const float r0 = kH / 2 - kF * (2.1f - 1.2f) / Y, r1 = kH / 2 - kF * (0.0f - 1.2f) / Y;
     for (float r = r0; r < r1; r += 3.0f)
         for (float c = c0; c < c1; c += 3.0f)
@@ -122,14 +123,17 @@ static void door_pixels(std::vector<Vec2f>& px)
 
 enum class Phase { Present, Absent };
 
-static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, Phase phase, bool turned_away = false)
+// leaf_y: where the leaf really is (Task 5b: the wall line is the room polygon's face, the leaf may stand off it); robot_x:
+// the robot's x (1 = square-on; off it the view is oblique and a plane at the wrong depth projects to the wrong pixels).
+static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, Phase phase, bool turned_away = false,
+                                  float leaf_y = kWallY, float robot_x = 1.0f, bool sweep = false)
 {
     DoorCycleInput in;
     in.cycle = cycle;
     in.t_steady_ns = static_cast<std::int64_t>(cycle) * 100'000'000;   // 10 Hz
     in.t_wall_ms = 1'700'000'000'000 + static_cast<std::int64_t>(cycle) * 100;
     in.robot.present = true;
-    in.robot.room_T_body = pose(1.0, kRobotY, 0.0, turned_away);
+    in.robot.room_T_body = pose(robot_x, kRobotY, 0.0, turned_away);
     in.robot.body_T_zed = pose(0.0, 0.0, 1.2, false);
     in.camera.present = true;
     in.camera.width = kW; in.camera.height = kH; in.camera.focal_x = kF; in.camera.focal_y = kF;
@@ -144,16 +148,16 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, Phase phase
             for (int j = 0; j <= 21; ++j)
             {
                 const float jitter = 0.004f * static_cast<float>(((i * 7 + j * 13) % 5) - 2);
-                p.support_points.emplace_back(kDoorX - 0.5f + 0.05f * static_cast<float>(i), kWallY + jitter,
+                p.support_points.emplace_back(kDoorX - 0.5f + 0.05f * static_cast<float>(i), leaf_y + jitter,
                                               0.1f * static_cast<float>(j));
             }
         MaskSlice s;
         s.label = "door"; s.class_id = 1000.f; s.confidence = 0.9f;
-        s.centroid = {kDoorX, kWallY, 1.05f}; s.bbox_min = {kDoorX - 0.5f, kWallY - 0.01f, 0.0f};
-        s.bbox_max = {kDoorX + 0.5f, kWallY + 0.01f, 2.1f};
+        s.centroid = {kDoorX, leaf_y, 1.05f}; s.bbox_min = {kDoorX - 0.5f, leaf_y - 0.01f, 0.0f};
+        s.bbox_max = {kDoorX + 0.5f, leaf_y + 0.01f, 2.1f};
         s.support_begin = 0; s.support_end = p.support_points.size();
-        s.trunc_frac = 0.0f; s.range = kWallY - kRobotY; s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
-        door_pixels(p.mask_pixels);
+        s.trunc_frac = 0.0f; s.range = leaf_y - kRobotY; s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
+        door_pixels(p.mask_pixels, leaf_y, robot_x);
         s.pixel_begin = 0; s.pixel_end = p.mask_pixels.size();
         p.slices.push_back(s);
     }
@@ -168,6 +172,23 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, Phase phase
         p.slices.push_back(s);
     }
     in.masks = std::move(p);
+    if (sweep and phase == Phase::Present)
+    {
+        // the low LiDAR (as test_door_core_fit): rays stop on the wall beside the doorway and on the SHUT leaf inside it —
+        // the WALL at the leaf's plane too: the polygon line is off the real wall (tourR2's DOOR_0 wall registered 5-7 cm
+        // into the room, its leaf 0.10-0.15 m), which is what the LiDAR registration measures and the mask fit's d carries
+        BpearlSweep b;
+        b.room_fresh = true;
+        b.origin_room = {robot_x, kRobotY, 0.35f};
+        for (int k = 0; k <= 80; ++k)
+        {
+            const float x = kDoorX - 2.0f + 0.05f * static_cast<float>(k);
+            const bool in_aperture = x > kDoorX - 0.48f and x < kDoorX + 0.48f;
+            for (const float z : {0.4f, 0.8f})
+                b.pts_room.emplace_back(x, leaf_y, z);
+        }
+        in.bpearl = std::move(b);
+    }
     return in;
 }
 
@@ -291,6 +312,55 @@ int main()
         CHECK(a.exist == b.exist);
         CHECK(a.removes == b.removes);
         CHECK(a.csv == b.csv);
+    }
+
+    // ── 7. Task 5b: a shut door 0.12 m OFF the polygon's wall line on the room side (the tapes' DOOR_0), seen obliquely ──
+    //    The fit must put the leaf's plane there (DoorBeliefState::d ≈ −0.12, out of the room is +) without stretching w,
+    //    and the silhouette — rendered on that plane — must read the leaf OCCUPIED: occ ≫ free on its rows, L at the clamp.
+    for (const float robot_x : {1.0f, -1.0f})
+    {
+        DoorCoreConfig cfg;
+        ExistWorld w;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        std::vector<std::string> csv;
+        std::vector<double> L;
+        core.connect(&w, {.decision = [&](const rc::door::DoorDecision& d)
+                          { if (d.kind == static_cast<std::uint16_t>(K::Existence)) L.push_back(d.a); },
+                          .diag = [&](const DiagRow& d) { if (d.stream == "door_existence_log.csv") csv.push_back(d.line); }});
+        for (int c = 1; c <= 60; ++c)
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c), c, Phase::Present, false, kWallY - 0.12f, robot_x, true));
+        CHECK(w.st.size() == 1);
+        if (w.st.size() != 1) continue;
+        const auto& b = w.st.begin()->second.ai2_belief;
+        const float sd_d = b.recess_sd(), sd_w = std::sqrt(b.covariance()(1, 1));
+        std::print("door off the line, robot x {:+.0f}: d {:+.3f}±{:.3f} (truth -0.12), w {:.3f}±{:.3f} (truth 1.00), phi {:.3f}, L {:.2f}\n",
+                   robot_x, b.recess(), sd_d, b.state().w, sd_w, b.params().leaf.phi, L.empty() ? -99.0 : L.back());
+        // 3 σ, not 2: square-on, the low LiDAR's leaf angle shares the off-line returns with d for a while (phi 0.11 rad
+        // there, 0.03 oblique) — the field sees the plane only through d, not as a quantity of its own (report, concerns).
+        CHECK(std::abs(b.recess() + 0.12f) <= 3.0f * sd_d);
+        CHECK(std::abs(b.state().w - 1.0f) <= 2.0f * sd_w + 0.01f);
+        CHECK(not L.empty() and L.back() >= dcfg.exist_max_logodds - 1e-3);
+        // the silhouette's own counts on every forced CSV row: sil_occ (col 11) ≫ sil_free (col 12)
+        const auto col = [](const std::string& line, int k)
+        {
+            std::size_t a = 0;
+            for (int i = 0; i < k; ++i) a = line.find(',', a) + 1;
+            double v = 0.0;
+            std::from_chars(line.data() + a, line.data() + line.find(',', a), v);
+            return v;
+        };
+        int n_rows = 0, n_occ = 0;
+        for (const auto& line : csv)
+        {
+            const double occ = col(line, 10), fr = col(line, 11);
+            if (occ + fr <= 0.0) continue;
+            ++n_rows;
+            n_occ += occ >= 5.0 * fr ? 1 : 0;
+            std::print("    sil_occ {:.1f} sil_free {:.1f}\n", occ, fr);
+        }
+        CHECK(n_rows > 0 and n_occ == n_rows);
     }
 
     // ── 6. ImageSource: patches + the recorded frame_ref reproduce the full frame inside the patch ──────────────────

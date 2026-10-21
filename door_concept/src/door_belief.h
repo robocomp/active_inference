@@ -42,11 +42,15 @@ struct DoorBeliefState
     float s = 0.0f;    // along-wall offset of the door's near edge from the wall corner O (m)
     float w = 0.70f;   // panel width  (m, along the wall)
     float h = 2.00f;   // panel height (m, vertical; base pinned to the floor)
+    // ★Task 5b fix round 1: the LEAF PLANE's depth beyond the wall line (m, positive = OUT of the room, i.e. along
+    // −across_u, which associate_wall points INTO the room). A per-door state, estimated with s, w, h; see
+    // DoorBeliefParams::recess_prior_m for its prior and door::Aperture::depth for who renders it.
+    float d = 0.0f;
 
-    Eigen::Matrix<float, 3, 1> vec() const
-    { return (Eigen::Matrix<float, 3, 1>() << s, w, h).finished(); }
-    static DoorBeliefState from_vec(const Eigen::Matrix<float, 3, 1>& v)
-    { return {v(0), v(1), v(2)}; }
+    Eigen::Matrix<float, 4, 1> vec() const
+    { return (Eigen::Matrix<float, 4, 1>() << s, w, h, d).finished(); }
+    static DoorBeliefState from_vec(const Eigen::Matrix<float, 4, 1>& v)
+    { return {v(0), v(1), v(2), v(3)}; }
 };
 
 struct DoorBeliefParams
@@ -60,7 +64,7 @@ struct DoorBeliefParams
     float floor_std = 0.03f;                 // floor-height uncertainty (m) → published z covariance
 
     // ── Leaf articulation (openable door, M0) ────────────────────────────────────────────────────
-    // The hinged panel's opening angle + which aperture edge it hangs from. NOT part of theta: N stays 3
+    // The hinged panel's opening angle + which aperture edge it hangs from. NOT part of theta (theta is [s, w, h, d]; d, the leaf plane's depth, since Task 5b)
     // and the shared inference engine is untouched. M0 pins phi = 0 (leaf flush in the aperture, so every
     // geometry consumer reduces exactly to the old wall-plane behaviour); phi becomes a fitted DOF in M1
     // and hinge/swing become discrete hypotheses in M2. Authored by DoorFitter::make_belief_params.
@@ -122,20 +126,29 @@ struct DoorBeliefParams
     // so one over-segmented mask only nudges w,h — the fix for the live w→1.12 m drift. Continuous, no gate.
     float common_mode_wh_std = 0.35f;
 
-    // ★THE LEAF PLANE'S ACROSS-WALL POSITION IS A NUISANCE, MARGINALISED PER FRAME (Task 5b, D1 + D2). The leaf is drawn on
-    // the room-side polygon FACE, but a real leaf hangs INSIDE the wall's thickness (door_room_band.h: the aperture lies in
-    // [0, T] beyond the face). Measured on both recorded tours: the shut DOOR_0 leaf's mask points sit 0.10-0.15 m beyond
-    // the face. That shared residual is not explained by any DOF of [s, w, h], and Gauss-Newton turned it into motion along
-    // whatever DOF had the faintest lever on it: w through −sin φ at φ = 0.03 (tourR2 door_2: w 1.01 → 2.51 m in one frame,
-    // 36 σ, then removed for a silhouette 2.5 m wide), s through float noise in the finite-difference Jacobian (tourR1
-    // door_4: 3.66 m in one first update, landing where it explained none of its own points). The generative statement is
-    // that every point of a frame shares one across offset n ~ N(0, leaf_plane_std²); accumulate_extra marginalises it
-    // EXACTLY (Schur complement of the [θ, n] normal equations), so an across residual is explained by n and only what n
-    // cannot explain — the jambs, the lintel, the leaf's along-wall extent — informs [s, w, h]. No gate: n absorbs exactly
-    // the information it can explain, continuously. Authored by DoorFit::make_belief_params from Existence.WallThicknessM.
-    // The fit is insensitive to the value (n's data information is ~1e7 against a prior of 1/σ² ~ 25; tourR2 keeps door_2
-    // for every σ in 0.03-0.5 m), so this is the physical T, not a tuned number. 0 disables (the pre-5b fit).
-    float leaf_plane_std = 0.20f;
+    // ★THE LEAF PLANE'S DEPTH IS A STATE OF THE DOOR (Task 5b, D1 + D2; fix round 1). The model used to draw the leaf ON
+    // the room polygon's wall line. On both recorded tours the shut DOOR_0 leaf's mask points sit 0.10-0.15 m off that
+    // line — on the ROOM side of it (associate_wall's normal points into the room; the camera sat at +2.7 m along it).
+    // No DOF of [s, w, h] explains a shared across-wall offset, and Gauss-Newton turned it into motion along whatever DOF
+    // had the faintest lever on it: w through −sin φ at φ = 0.03 (tourR2 door_2: w 1.01 → 2.51 m in one frame, 36 σ, then
+    // removed for a silhouette 2.5 m wide), s through float noise in the finite-difference Jacobian (tourR1 door_4: a
+    // 3.66 m first update that explained none of its own points). The leaf hangs at ONE depth: d is the fourth DOF of
+    // the belief, estimated by the same Gauss-Newton as s, w, h, with no process noise (a doorway does not move in its
+    // wall); a frame's shared across error is the SAME common mode its s already carries (pose chain + range + motion,
+    // plus the leaf angle's lever, common_mode_inv_diag). Every consumer renders the leaf on that plane (Aperture::depth).
+    // ★THE PRIOR IS N(0, T²/12 + σ_b²) — GAUSSIAN, UNBOUNDED, CENTRED ON THE LINE — not a [0, T] support, and the data say why.
+    //   · Centred on the line: room_concept traces the polygon from FREE SPACE, and at a shut doorway the first thing free
+    //     space meets is the leaf, so the line passes through the leaf, not in front of a recess. Measured: tourR1/R2 DOOR_0
+    //     −0.10..−0.15 m (room side), the synthetic fixtures ≈ 0. A T/2 mean (the leaf mid-wall behind the face) was tried
+    //     and is 2 σ from DOOR_0; started there, the low LiDAR's leaf angle took the offset as a swing (φ 0.20 on a shut
+    //     door in test_door_core_fit) before the masks could move d.
+    //   · The spread: where in the wall's thickness T the leaf hangs relative to the wall beside it (uniform: T²/12) plus the
+    //     polygon's own registration error σ_b (Existence.BoundarySigmaM, 0.10 m) — the same T and σ_b as the wall band.
+    //   · Unbounded: d is measured from a line that carries registration error, so no physical bound applies to it; a bounded
+    //     parameter would pin at its bound and leave the rest of the offset to the levers again — D1 re-created.
+    // Authored by DoorFit::make_belief_params.
+    float recess_prior_m   = 0.0f;   // prior mean of d (m)
+    float recess_prior_std = 0.0f;   // prior σ of d (m); 0 ⇒ d is pinned at its prior (the pre-5b leaf on the line)
 
     // Optimiser
     int   gn_iters = 4;
@@ -155,7 +168,7 @@ struct DoorFrame
 class DoorBelief
 {
 public:
-    static constexpr int N = 3;
+    static constexpr int N = 4;   // [s, w, h, d] — d the leaf plane's depth (Task 5b)
     using State = DoorBeliefState;
     using Frame = DoorFrame;
 
@@ -164,7 +177,10 @@ public:
     { Sigma_.setZero(); Sigma_.diagonal() = prior_cov_diag(); }
 
     const DoorBeliefState&             state()      const { return state_; }
-    const Eigen::Matrix<float, 3, 3>&  covariance() const { return Sigma_; }
+    // The posterior over [s, w, h] — what every consumer outside the belief reads (the RT covariance, the planner, the
+    // along-wall channel's s); the leaf plane's depth d is the belief's own (covariance_full, recess_sd).
+    Eigen::Matrix<float, 3, 3>         covariance() const { return Sigma_.topLeftCorner<3, 3>(); }
+    const Eigen::Matrix<float, 4, 4>&  covariance_full() const { return Sigma_; }
     const DoorBeliefParams&            params()     const { return params_; }
     void set_state(const DoorBeliefState& s) { state_ = s; }
     void set_params(const DoorBeliefParams& p) { params_ = p; }
@@ -201,15 +217,19 @@ public:
         a.wall_O = params_.wall_O; a.wall_u = params_.wall_u;
         a.s = s.s; a.w = s.w; a.h = s.h;
         a.floor_z = params_.floor_z; a.thickness = params_.thickness;
+        a.depth = -s.d;   // d is OUT of the room; across_u points INTO it (associate_wall)
         return a;
     }
+    // The leaf plane's depth beyond the wall line (m) and its posterior σ (Task 5b).
+    float recess()    const { return state_.d; }
+    float recess_sd() const { return std::sqrt(std::max(0.0f, Sigma_(3, 3))); }
     door::Aperture aperture()   const { return aperture_at(state_); }
     door::LeafPose leaf_pose_at(const DoorBeliefState& s) const { return door::leaf_pose(aperture_at(s), params_.leaf); }
     door::LeafPose leaf_pose()  const { return leaf_pose_at(state_); }
     // ★M1: phi is no longer a pinned construction constant. It is estimated per cycle (DoorFitter::
     // estimate_phi) from silhouette agreement, with the robot's OWN actuation command as its prior —
     // so a door the robot asked to be opened is ANTICIPATED rather than experienced as the object
-    // disappearing. It stays outside theta: the belief remains 3-DOF [s, w, h] and the shared inference
+    // disappearing. It stays outside theta: the belief is [s, w, h, d] (d since Task 5b) and the shared inference
     // engine is untouched, exactly as door_geometry.h's header anticipated.
     void  set_leaf_phi(float phi) { params_.leaf.phi = phi; }
     void  set_leaf_hinge(door::HingeSide h) { params_.leaf.hinge = h; }
@@ -222,9 +242,9 @@ public:
         if (not std::isfinite(ds) or not std::isfinite(var) or not (var > 0.f)) return;
         const float S = Sigma_(0, 0) + var;
         if (not (S > 0.f)) return;
-        const Eigen::Matrix<float, 3, 1> K = Sigma_.col(0) / S;
-        state_.s += K(0) * ds; state_.w += K(1) * ds; state_.h += K(2) * ds;
-        const Eigen::Matrix<float, 3, 3> Sn = Sigma_ - K * Sigma_.row(0);
+        const Eigen::Matrix<float, N, 1> K = Sigma_.col(0) / S;
+        state_ = DoorBeliefState::from_vec(state_.vec() + K * ds);
+        const Eigen::Matrix<float, N, N> Sn = Sigma_ - K * Sigma_.row(0);
         Sigma_ = 0.5f * (Sn + Sn.transpose());
     }
     // try96 (door_opening_edges.h): the LiDAR's along-wall measurement observes s PLUS the scan's registration offset b,
@@ -232,26 +252,28 @@ public:
     // association update of the augmented [s, w, h, b] with H = [1 0 0 1], innovation `nu`, measurement variance `R` and
     // association weight `beta` ∈ [0, 1] (the PDA covariance: shrunk by β·KSKᵀ, re-grown by β(1−β)·Kν²Kᵀ). Writes Σ,
     // the state, and the caller's bias / Pb / c back.
-    void  fuse_along_wall(float nu, float R, float beta, float& bias, float& Pb, Eigen::Vector3f& c)
+    void  fuse_along_wall(float nu, float R, float beta, float& bias, float& Pb, Eigen::Matrix<float, 4, 1>& c)
     {
         if (not std::isfinite(nu) or not std::isfinite(R) or not (beta > 0.f)) return;
-        Eigen::Matrix4f A = Eigen::Matrix4f::Zero();
-        A.topLeftCorner<3, 3>() = Sigma_;
-        A.block<3, 1>(0, 3) = c;
-        A.block<1, 3>(3, 0) = c.transpose();
-        A(3, 3) = Pb;
-        const Eigen::Vector4f H(1.f, 0.f, 0.f, 1.f);
+        using MA = Eigen::Matrix<float, N + 1, N + 1>;
+        using VA = Eigen::Matrix<float, N + 1, 1>;
+        MA A = MA::Zero();
+        A.topLeftCorner<N, N>() = Sigma_;
+        A.block<N, 1>(0, N) = c;
+        A.block<1, N>(N, 0) = c.transpose();
+        A(N, N) = Pb;
+        VA H = VA::Zero(); H(0) = 1.f; H(N) = 1.f;
         const float S = H.dot(A * H) + std::max(0.f, R);
         if (not (S > 0.f)) return;
-        const Eigen::Vector4f K = A * H / S;
+        const VA K = A * H / S;
         const float bw = std::min(1.f, beta);
-        state_.s += bw * K(0) * nu; state_.w += bw * K(1) * nu; state_.h += bw * K(2) * nu;
-        bias += bw * K(3) * nu;
-        Eigen::Matrix4f An = A - bw * S * (K * K.transpose()) + bw * (1.f - bw) * nu * nu * (K * K.transpose());
+        state_ = DoorBeliefState::from_vec(state_.vec() + bw * nu * K.head<N>());
+        bias += bw * K(N) * nu;
+        MA An = A - bw * S * (K * K.transpose()) + bw * (1.f - bw) * nu * nu * (K * K.transpose());
         An = 0.5f * (An + An.transpose());
-        Sigma_ = An.topLeftCorner<3, 3>();
-        c = An.block<3, 1>(0, 3);
-        Pb = std::max(0.f, An(3, 3));
+        Sigma_ = An.topLeftCorner<N, N>();
+        c = An.block<N, 1>(0, N);
+        Pb = std::max(0.f, An(N, N));
     }
 
     // ★try96: THE MASK SEES THE SAME REGISTRATION OFFSET. Camera and LiDAR are registered to the room by ONE pose, so a mask
@@ -261,46 +283,50 @@ public:
     // and its cross-covariance c with [s, w, h] are updated with it. Without this a persistent mask-vs-LiDAR conflict (a
     // wrong leaf model, which is not a pose error) would be absorbed into b and the LiDAR would lose every argument to the
     // mask (test_door_phi_stability (g)). The caller removes the pose chain from the frame's common mode: b carries it.
-    float update_sharing_offset(const DoorFrame& frame, float& bias, float& Pb, Eigen::Vector3f& c)
+    float update_sharing_offset(const DoorFrame& frame, float& bias, float& Pb, Eigen::Matrix<float, 4, 1>& c)
     {
-        const Eigen::Matrix<float, 3, 1> x0 = state_.vec();
-        Eigen::Matrix<float, 3, 3> Sp = Sigma_;
+        using MN = Eigen::Matrix<float, N, N>;
+        using MA = Eigen::Matrix<float, N + 1, N + 1>;
+        using VA = Eigen::Matrix<float, N + 1, 1>;
+        const Eigen::Matrix<float, N, 1> x0 = state_.vec();
+        MN Sp = Sigma_;
         if (Sp.isZero()) Sp.diagonal() = prior_cov_diag();
         Sp.diagonal() += process_noise_diag();                 // the engine's own predict step (F = I)
         const float e = update(frame);
         if (not (Pb > 1e-10f)) return e;                       // no offset to share: the engine's result stands
-        const Eigen::Matrix<float, 3, 3> L1 = Sigma_.inverse(), L0 = Sp.inverse();
-        Eigen::Matrix<float, 3, 3> J = L1 - L0;
+        const MN L1 = Sigma_.inverse(), L0 = Sp.inverse();
+        MN J = L1 - L0;
         J = 0.5f * (J + J.transpose());
-        const Eigen::Matrix<float, 3, 1> g = L1 * state_.vec() - L0 * x0;
-        for (int i = 0; i < 3; ++i)
+        const Eigen::Matrix<float, N, 1> g = L1 * state_.vec() - L0 * x0;
+        for (int i = 0; i < N; ++i)
         {
             const float lim = 0.99f * std::sqrt(std::max(0.f, Sp(i, i) * Pb));
             c(i) = std::clamp(c(i), -lim, lim);
         }
-        Eigen::Matrix4f A = Eigen::Matrix4f::Zero();
-        A.topLeftCorner<3, 3>() = Sp;
-        A.block<3, 1>(0, 3) = c;
-        A.block<1, 3>(3, 0) = c.transpose();
-        A(3, 3) = Pb;
-        Eigen::Matrix<float, 3, 4> H = Eigen::Matrix<float, 3, 4>::Zero();
-        H(0, 0) = 1.f; H(0, 3) = 1.f; H(1, 1) = 1.f; H(2, 2) = 1.f;
-        const Eigen::Matrix4f Lam = A.inverse();
-        Eigen::Vector4f xa; xa << x0, bias;
-        const Eigen::Matrix4f Lam1 = Lam + H.transpose() * J * H;
-        const Eigen::Vector4f eta1 = Lam * xa + H.transpose() * g;
-        Eigen::Matrix4f A1 = Lam1.inverse();
+        MA A = MA::Zero();
+        A.topLeftCorner<N, N>() = Sp;
+        A.block<N, 1>(0, N) = c;
+        A.block<1, N>(N, 0) = c.transpose();
+        A(N, N) = Pb;
+        // the mask measures [s + b, w, h, d]: H is the identity on [s, w, h, d] with b added to s
+        Eigen::Matrix<float, N, N + 1> H = Eigen::Matrix<float, N, N + 1>::Zero();
+        H.leftCols<N>().setIdentity(); H(0, N) = 1.f;
+        const MA Lam = A.inverse();
+        VA xa; xa << x0, bias;
+        const MA Lam1 = Lam + H.transpose() * J * H;
+        const VA eta1 = Lam * xa + H.transpose() * g;
+        MA A1 = Lam1.inverse();
         if (not A1.allFinite()) return e;
         A1 = 0.5f * (A1 + A1.transpose());
-        const Eigen::Vector4f x1 = A1 * eta1;
+        const VA x1 = A1 * eta1;
         if (not x1.allFinite()) return e;
-        DoorBeliefState st = DoorBeliefState::from_vec(x1.head<3>());
+        DoorBeliefState st = DoorBeliefState::from_vec(x1.head<N>());
         apply_constraints(st);
         state_ = st;
-        Sigma_ = A1.topLeftCorner<3, 3>();
-        c = A1.block<3, 1>(0, 3);
-        Pb = std::max(0.f, A1(3, 3));
-        bias = x1(3);
+        Sigma_ = A1.topLeftCorner<N, N>();
+        c = A1.block<N, 1>(0, N);
+        Pb = std::max(0.f, A1(N, N));
+        bias = x1(N);
         return e;
     }
 
@@ -485,24 +511,20 @@ public:
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
     Eigen::Matrix<float, 3, 3> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
-    { return ai::predicted_information<N>(*this, state_, pts, R); }
+    { return ai::predicted_information<N>(*this, state_, pts, R).topLeftCorner<3, 3>(); }
 
     // ── Generative-model hooks (engine interface + SDF API) ───────────────────
     // Single thin-box panel SDF in the wall frame, evaluated at room point p for state s. 0 on the surface;
     // >0 outside; <0 inside.
     float sdf_panel(const Eigen::Vector3f& p, const DoorBeliefState& s) const;
     float sdf_prim (const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const;  // prim==0 → panel
-    Eigen::Matrix<float, 3, 1> sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const;
+    Eigen::Matrix<float, 4, 1> sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const;
     std::array<float, 3> responsibilities(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const;   // [believed leaf, other jamb's leaf, clutter]
     // Fixed template prior on w,h folded into the SAME GN normal equations as the data (engine detects this
     // hook via a C++23 requires). Pulls w→tpl_w, h→tpl_h with precision 1/prior_{w,h}_std² each frame; s is
     // untouched (it carries only the broad temporal prior). This is what makes the strong size prior stick.
-    // It first marginalises the leaf plane's across-wall offset out of the frame's data block (Task 5b; see
-    // DoorBeliefParams::leaf_plane_std and marginalise_leaf_plane).
     void accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
-                          Eigen::Matrix<float, 3, 3>& Id, Eigen::Matrix<float, 3, 1>& bd) const;
-    void marginalise_leaf_plane(const DoorBeliefState& s, const DoorFrame& frame,
-                                Eigen::Matrix<float, 3, 3>& Id, Eigen::Matrix<float, 3, 1>& bd) const;
+                          Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const;
 
     // Mean per-point mixture NEGATIVE LOG-LIKELIHOOD of `pts` (includes clutter) — the multi-instance
     // ASSOCIATION evidence. A far / wrong-instance slice (all points → flat clutter) → tiny likelihood →
@@ -517,7 +539,7 @@ public:
 
     // The wall fixes yaw, so there is no discrete-orientation ambiguity to report: the reported covariance
     // IS the 3×3 posterior Σ over [s,w,h]. Kept as a named accessor so publish/log call sites read cleanly.
-    Eigen::Matrix<float, 3, 3> covariance_reported() const { return Sigma_; }
+    Eigen::Matrix<float, 3, 3> covariance_reported() const { return Sigma_.topLeftCorner<3, 3>(); }
 
     void  apply_constraints(DoorBeliefState& s) const;
     void  canonicalize(DoorBeliefState&) const {}   // wall fixes yaw ⇒ no symmetry fold
@@ -535,10 +557,10 @@ public:
     void  set_leaf_phi_sigma(float sd) { leaf_phi_sigma_ = std::isfinite(sd) ? std::max(0.f, sd) : 0.f; }
     float hinge_prob() const { return p_hinge_; }
     float sigma2()   const { return params_.sigma_base_m * params_.sigma_base_m; }
-    Eigen::Matrix<float, 3, 3> transition() const { return Eigen::Matrix<float, 3, 3>::Identity(); }  // static
-    Eigen::Matrix<float, 3, 1> process_noise_diag() const;
-    Eigen::Matrix<float, 3, 1> prior_cov_diag() const;
-    Eigen::Matrix<float, 3, 1> common_mode_inv_diag(const DoorFrame& frame) const;
+    Eigen::Matrix<float, 4, 4> transition() const { return Eigen::Matrix<float, 4, 4>::Identity(); }  // static
+    Eigen::Matrix<float, 4, 1> process_noise_diag() const;
+    Eigen::Matrix<float, 4, 1> prior_cov_diag() const;
+    Eigen::Matrix<float, 4, 1> common_mode_inv_diag(const DoorFrame& frame) const;
 
     static bool self_test();
 
@@ -551,8 +573,8 @@ private:
 
     DoorBeliefState            state_;
     DoorBeliefParams           params_;
-    Eigen::Matrix<float, 3, 3> Sigma_ = Eigen::Matrix<float, 3, 3>::Identity();
-    Eigen::Matrix<float, 3, 1> prior_mean_ = Eigen::Matrix<float, 3, 1>::Zero();
+    Eigen::Matrix<float, 4, 4> Sigma_ = Eigen::Matrix<float, 4, 4>::Identity();
+    Eigen::Matrix<float, 4, 1> prior_mean_ = Eigen::Matrix<float, 4, 1>::Zero();
 };
 
 }  // namespace rc

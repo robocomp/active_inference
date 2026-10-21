@@ -81,6 +81,10 @@ FrameProbe build_frame_probe(const Aperture& ap, const rc::edges::PointProjector
     const Eigen::Vector3d up(0.0, 0.0, 1.0);
     const auto wall_point = [&](float along, float z) -> Eigen::Vector3d
     {
+        // ★The jambs and the lintel are the WALL's, on the wall line — NOT on the leaf's plane (Aperture::depth, Task 5b fix round 1).
+        // Tried on the leaf plane: DOOR_1's leaf sits 6.5 cm into the room (its mask points include the proud casing) while its
+        // wall registers ON the line (LiDAR reg_depth 0.000), and the frame probe moved there read −15..−30 against +9 on the
+        // line — it removed the main door at tourR1 cycle 3264. The leaf's own contour (leaf_pose) does follow d.
         const Eigen::Vector2f xy = ap.wall_O + along * u2;
         return {xy.x(), xy.y(), z};
     };

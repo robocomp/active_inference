@@ -354,7 +354,7 @@ struct AlongWallState
 {
     bool  init = false;
     float b = 0.f, Pb = 0.f;                    // the registration offset along the wall (m) and its variance
-    Eigen::Vector3f c = Eigen::Vector3f::Zero();   // its cross-covariance with the belief's [s, w, h]
+    Eigen::Matrix<float, 4, 1> c = Eigen::Matrix<float, 4, 1>::Zero();   // its cross-covariance with the belief's [s, w, h, d]
     bool  have_depth = false;
     float last_depth = 0.f;                     // the last frame's visible (across-wall) registration offset
 };
@@ -400,13 +400,13 @@ inline AlongWallResult along_wall_update(rc::DoorBelief& belief, AlongWallState&
     if (runs.empty())
         return res;
     // ── each span as a measurement of s: the aperture contains it, s ∈ [a_right − w, a_left], soft-edged ──
-    const auto& S3 = belief.covariance();
+    const auto& S3 = belief.covariance_full();
     const float s = belief.state().s, w = belief.state().w;
     const float var_w = std::max(0.f, S3(1, 1));
     // The residual rotation's lever arm moves the span along the wall by range·δε.
     const float r_rot = reg.ok ? range_m * range_m * reg.eps_var : 0.f;
     // Cauchy-Schwarz: the mask update re-shapes Σ without b, so keep the joint matrix a covariance.
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < rc::DoorBelief::N; ++i)
     {
         const float lim = std::sqrt(std::max(0.f, S3(i, i) * st.Pb));
         st.c(i) = std::clamp(st.c(i), -lim, lim);

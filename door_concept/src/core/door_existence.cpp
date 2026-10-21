@@ -270,7 +270,7 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
     const auto room_weight = [&](const Eigen::Vector3f& P) -> float
     {
         if (not band_known) return 1.0f;
-        const float a = (Eigen::Vector2f(P.x(), P.y()) - inst.aperture.wall_O).dot(n_out);
+        const float a = (Eigen::Vector2f(P.x(), P.y()) - inst.aperture.plane_O()).dot(n_out);   // from the LEAF's line (5b)
         return 1.0f - rc::door::p_beyond_far_face(a, r0, band.sigma_m);
     };
 

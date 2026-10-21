@@ -36,6 +36,7 @@
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/door_replay
 //   /tmp/door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--clock-jitter-ms J]
+//       [--trace NAME]   (one line per cycle for that door: its fit, its detection state and every existence channel)
 // Exit: 0 = the tracker kinds, the Phi rows, the Existence rows and the REMOVEs are equal; 1 = mismatches (listed);
 // 2 = usage / unreadable input.
 #include <charconv>
@@ -409,7 +410,7 @@ int main(int argc, char** argv)
     if (std::setlocale(LC_ALL, "es_ES.UTF-8") == nullptr) std::setlocale(LC_ALL, "");
     if (argc < 3)
     {
-        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR]");
+        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--trace NAME]");
         return 2;
     }
     std::uint64_t until = ~0ull;
@@ -420,6 +421,10 @@ int main(int argc, char** argv)
     // read moves — which is what separates a pre-4b tape (mid-cycle clocks) from this core (cycle-top clock). The decision
     // stamps move with it, so with J > 0 the Phi comparison ignores t_ms.
     double jitter_ms = 0.0;
+    // --trace NAME: one line per stepped cycle for that door — its fit [s, w, h, d], the leaf angle, the detection state and
+    // every existence channel the core computed this cycle (Task 5b: the silhouette's occupancy vs absence, P(detect), the
+    // image-geometry delta). A diagnostic only: it reads the world's fit states after the step and changes nothing.
+    std::string trace_door;
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -427,6 +432,7 @@ int main(int argc, char** argv)
         else if (a == "--verbose") verbose = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
+        else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
     }
 
     // the recorded decisions (the reference) — every kind, indexed by cycle; the tracker kinds kept apart
@@ -531,6 +537,26 @@ int main(int argc, char** argv)
                 if (d.kind == static_cast<std::uint16_t>(K::Existence)) got_exist.push_back(d);
                 if (d.kind == static_cast<std::uint16_t>(K::Remove)) got_remove.push_back(d);
             }
+            if (not trace_door.empty())
+                for (const auto& [id, st] : world.fit_states())
+                    if (st != nullptr and st->node_name == trace_door)
+                    {
+                        const auto& b = st->ai2_belief.state();
+                        std::size_t mask_px = 0;   // the pixels of the slice the tracker assigned this cycle (0: none)
+                        if (in->masks and st->frames_since_detection == 0 and st->assigned_mask_idx >= 0
+                            and static_cast<std::size_t>(st->assigned_mask_idx) < in->masks->slices.size())
+                        {
+                            const auto& sl = in->masks->slices[static_cast<std::size_t>(st->assigned_mask_idx)];
+                            mask_px = sl.pixel_end - sl.pixel_begin;
+                        }
+                        std::println("TRACE {} cycle {} L {:+.2f} | s {:.3f} w {:.3f} h {:.3f} d {:+.3f}±{:.3f} phi {:.3f}±{:.3f} | "
+                                     "since_det {} mask {} px {} | sil occ {:.1f} free {:.1f} free_eff {:.2f} p_det {:.3f} | edge dL {:+.2f} "
+                                     "frame exc {:+.2f} (true {:.1f} ctrl {:.1f})",
+                                     trace_door, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
+                                     st->phi_est, st->phi_sigma, st->frames_since_detection, st->assigned_mask_idx, mask_px,
+                                     st->dbg_sil_occ, st->dbg_sil_free, st->dbg_sil_free_eff, st->dbg_sil_pdetect,
+                                     st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl);
+                    }
         }
         world.end_cycle();
     }

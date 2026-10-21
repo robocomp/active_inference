@@ -73,7 +73,8 @@ inline constexpr std::string_view kAi2CsvHeader =
     // alone cannot show.
     "leaf_pts,w_sdf,w_mask,w_edge,phi_sigma,phi_measured,off_plane,phi_cv,"
     "ray_hit0,ray_expl0,ray_signed0,"
-    "phi_ninf,phi_beta,phi_lat\n";
+    "phi_ninf,phi_beta,phi_lat,"
+    "recess,std_recess\n";   // Task 5b: the leaf plane's depth beyond the wall line (DoorBeliefState::d) and its σ
 inline constexpr std::string_view kPhiCsvHeader =
     // ★try96: s per cycle (it was logged only on the rare mask frames, so the slide had no trace) and the along-wall
     //   channel. loglik stays the LAST column (a ;-separated list), so the new ones go in front of it, by name.

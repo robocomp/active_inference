@@ -174,9 +174,14 @@ rc::DoorBeliefParams DoorFit::make_belief_params() const
     p.tpl_w              = cfg_.door_prior_w_m;
     p.tpl_h              = cfg_.door_prior_h_m;
     p.gn_iters           = cfg_.ai2_gn_iters;
-    // Task 5b: the leaf hangs somewhere inside the wall's thickness T beyond the room-side face (the same T the wall band
-    // and associate_wall use) — the across-wall nuisance every mask frame marginalises (DoorBeliefParams::leaf_plane_std).
-    p.leaf_plane_std     = room_band().wall_thickness_m;
+    // Task 5b: the leaf plane's depth d beyond the wall line: mean 0 (the free-space polygon closes ON a shut leaf), variance
+    // T²/12 + σ_b² (where in the wall's thickness T the leaf hangs relative to the wall beside it, plus the polygon's
+    // registration error σ_b — the same T and σ_b as the wall band). See DoorBeliefParams::recess_prior_m.
+    {
+        const auto band = room_band();
+        p.recess_prior_m   = 0.0f;
+        p.recess_prior_std = std::sqrt(band.wall_thickness_m * band.wall_thickness_m / 12.0f + band.sigma_m * band.sigma_m);
+    }
     // ── Leaf articulation (openable door, M0) ──
     // The ONE place the leaf state is authored, so the M0 pin cannot drift. With Openable.Enabled false
     // phi is the literal 0.0f, which makes every geometry consumer reduce EXACTLY to the wall-plane
@@ -546,6 +551,7 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
             s0.s = (centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w;   // not clamped to the run: see apply_constraints
+            s0.d = p.recess_prior_m;   // 0: see DoorBeliefParams::recess_prior_m
         }
         else
             s0.s = centroid_xy.x() - 0.5f * s0.w;
@@ -746,7 +752,8 @@ void DoorFit::log_ai2_csv(const rc::DoorFitState& inst, int npts, float R, bool 
         << inst.dbg_leaf_off_plane << ',' << inst.dbg_phi_cv << ','
         << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ','
         << inst.dbg_ray_signed0 << ','
-        << inst.dbg_phi_ninf << ',' << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << '\n';
+        << inst.dbg_phi_ninf << ',' << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << ','
+        << inst.ai2_belief.recess() << ',' << inst.ai2_belief.recess_sd() << '\n';
     diag_({"ai2_log.csv", row.str()});
 }
 
@@ -951,6 +958,18 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         reg_sweep = rc::door::register_sweep(inst.ai2_belief.aperture(), leaf_origin, *leaf_pts, nz.room_walls);
         inst.dbg_reg = reg_sweep.reg;
     }
+    // ★Task 5b: THE FIELD RUNS IN THE WALL-REGISTERED FRAME, the leaf plane's depth d in the ROOM frame. Registration moved
+    // the sweep by reg.depth along across_u so the wall it sees lies on the polygon line; d is measured from that line in
+    // the room frame (the mask's frame), so the part of d that is the wall's own registration offset is already undone in
+    // the sweep. In the registered frame the leaf stands d + reg.depth beyond the wall line (reg.depth > 0 is INTO the
+    // room, d > 0 out of it). One plane, expressed in the frame each sensor is in — not a second estimate.
+    rc::DoorBelief field_belief = inst.ai2_belief;
+    if (reg_sweep.reg.ok)
+    {
+        rc::DoorBeliefState st = field_belief.state();
+        st.d += reg_sweep.reg.depth;
+        field_belief.set_state(st);
+    }
     if (leaf_pts and not leaf_pts->empty() and inst.ai2_initialized)
     {
         // ★SELECT BY THE PATH, NOT BY THE ENDPOINT — a slab through the aperture plus the jamb band; see
@@ -963,7 +982,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         // that stops within that of where a SHUT leaf would be is explained by one. On a closed door this
         // ratio should be near 1; anything near 0 says the selection is not looking at the leaf.
         {
-            const auto ex = inst.ai2_belief.phi_ray_explain(rays, 0.0f, 3.0f * rays.robust_c_m);
+            const auto ex = field_belief.phi_ray_explain(rays, 0.0f, 3.0f * rays.robust_c_m);
             inst.dbg_ray_hit0     = ex.n_hit;
             inst.dbg_ray_expl0    = ex.n_explained;
             inst.dbg_ray_signed0  = ex.mean_signed_m;
@@ -997,7 +1016,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     std::vector<std::pair<float, float>> ll_this, ll_other, ll_swing, ll_both;
     if (not rays.endpoints.empty())
     {
-        auto fr = inst.ai2_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
+        auto fr = field_belief.phi_field_loglik(rays, PHI_MIN, PHI_MAX, NSTEP, nz);
         inst.dbg_phi_ninf  = fr.n_inf;
         inst.dbg_phi_beta  = fr.beta;
         inst.dbg_phi_lat   = fr.lat_map;

@@ -1,5 +1,5 @@
 /*
- * door_belief.cpp  —  AI2 door belief (single wall-anchored thin panel; state θ=[s,w,h] in the wall frame).
+ * door_belief.cpp  —  AI2 door belief (single wall-anchored thin panel; state θ=[s,w,h,d] in the wall frame; d = the leaf plane's depth off the wall line, Task 5b).
  */
 
 #include "door_belief.h"
@@ -109,14 +109,14 @@ float DoorBelief::clutter_fraction(const std::vector<Eigen::Vector3f>& pts, floa
 }
 
 // ─── Jacobian (central finite difference over the 3 DOFs [s,w,h]) ────────────────
-Eigen::Matrix<float, 3, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const
+Eigen::Matrix<float, 4, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const
 {
-    Eigen::Matrix<float, 3, 1> J;
-    const Eigen::Matrix<float, 3, 1> base = s.vec();
+    Eigen::Matrix<float, 4, 1> J;
+    const Eigen::Matrix<float, 4, 1> base = s.vec();
     const float e = params_.fd_eps;
-    for (int j = 0; j < 3; ++j)
+    for (int j = 0; j < N; ++j)
     {
-        Eigen::Matrix<float, 3, 1> vp = base, vm = base;
+        Eigen::Matrix<float, 4, 1> vp = base, vm = base;
         vp(j) += e; vm(j) -= e;
         J(j) = (sdf_prim(p, DoorBeliefState::from_vec(vp), prim) -
                 sdf_prim(p, DoorBeliefState::from_vec(vm), prim)) / (2.0f * e);
@@ -124,58 +124,10 @@ Eigen::Matrix<float, 3, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, co
     return J;
 }
 
-// ─── The leaf plane's across-wall offset, marginalised (see DoorBeliefParams::leaf_plane_std) ────────────
-// The frame's points share ONE across offset n of the leaf plane from the polygon face. With n as a fourth parameter the
-// Gauss-Newton normal equations of the frame are [[Id, i], [iᵀ, Inn + 1/σn²]] · [δθ; δn] = [bd; bn], with
-// i = Σ w J_θ J_n, Inn = Σ w J_n², bn = −Σ w J_n d. Marginalising n (the Schur complement) leaves
-//     Id ← Id − i iᵀ / (Inn + 1/σn²),     bd ← bd − i · bn / (Inn + 1/σn²),
-// which the engine then saturates and solves exactly as before. J_n = ∂sdf/∂n is the derivative under a shift of the leaf
-// by +δ along the wall normal, i.e. of the point by −δ. The data block is RE-ACCUMULATED here in double: the Schur term
-// can cancel the data information almost exactly (tourR1 door_4: Id_ss 0.0091 from 22k points whose ∂sdf/∂s is pure
-// rounding, all of it collinear with J_n), and that difference must not be taken in float. Same points, same
-// responsibilities, same 1e-6 weight floor as the engine's own loop (recursive_laplace.h).
-void DoorBelief::marginalise_leaf_plane(const DoorBeliefState& s, const DoorFrame& frame,
-                                        Eigen::Matrix<float, 3, 3>& Id, Eigen::Matrix<float, 3, 1>& bd) const
-{
-    const float sn = params_.leaf_plane_std;
-    if (not (sn > 0.0f) or frame.points.empty())
-        return;
-    const Eigen::Vector3f n3(-params_.wall_u.y(), params_.wall_u.x(), 0.0f);
-    const float e = params_.fd_eps;
-    Eigen::Matrix3d I  = Eigen::Matrix3d::Zero();
-    Eigen::Vector3d b  = Eigen::Vector3d::Zero(), i_tn = Eigen::Vector3d::Zero();
-    double i_nn = 0.0, b_n = 0.0;
-    for (std::size_t k = 0; k < frame.points.size(); ++k)
-    {
-        const float R = (k < frame.R.size() and frame.R[k] > 0.0f) ? frame.R[k] : sigma2();
-        const Eigen::Vector3f& p = frame.points[k];
-        const auto r = responsibilities(p, s, R);
-        for (int prim = 0; prim < n_prims(); ++prim)
-        {
-            const float w = r[prim] / R;
-            if (w < 1e-6f) continue;
-            const double d  = sdf_prim(p, s, prim);
-            const Eigen::Vector3d J = sdf_jacobian(p, s, prim).cast<double>();
-            const double Jn = (sdf_prim(p - e * n3, s, prim) - sdf_prim(p + e * n3, s, prim)) / (2.0 * e);
-            I    += w * (J * J.transpose());
-            b    += -w * d * J;
-            i_tn += w * Jn * J;
-            i_nn += w * Jn * Jn;
-            b_n  += -w * Jn * d;
-        }
-    }
-    const double den = i_nn + 1.0 / (static_cast<double>(sn) * sn);
-    Id = (I - i_tn * i_tn.transpose() / den).cast<float>();
-    bd = (b - i_tn * (b_n / den)).cast<float>();
-}
-
 // ─── Fixed template prior on w,h (non-drifting; folded into the GN normal equations each frame) ──
-// Called by the engine right after its data loop, so Id/bd hold the frame's data block only: the leaf plane is
-// marginalised out of that block first, and the template prior (not a function of n) is added after.
-void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
-                                  Eigen::Matrix<float, 3, 3>& Id, Eigen::Matrix<float, 3, 1>& bd) const
+void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& /*frame*/,
+                                  Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const
 {
-    marginalise_leaf_plane(s, frame, Id, bd);
     // GN normal-equation contribution of a residual r=(x−x0) with unit Jacobian and precision iw:
     //   Id += iw · JJᵀ = iw (on the diagonal),   bd += −iw · J · r = −iw·(x − x0).
     const float iw = 1.0f / std::max(1e-9f, params_.prior_w_std * params_.prior_w_std);
@@ -199,23 +151,28 @@ void DoorBelief::apply_constraints(DoorBeliefState& s) const
 }
 
 // ─── Engine hooks: prior cov, process noise, common-mode ─────────────────────────
-Eigen::Matrix<float, 3, 1> DoorBelief::prior_cov_diag() const
+// d's σ is floored at 0.1 mm: recess_prior_std 0 means "pinned at the prior", and Σ must stay invertible (P0 = Σ⁻¹).
+Eigen::Matrix<float, 4, 1> DoorBelief::prior_cov_diag() const
 {
-    return (Eigen::Matrix<float, 3, 1>() <<
+    const float sd_d = std::max(1e-4f, params_.recess_prior_std);
+    return (Eigen::Matrix<float, 4, 1>() <<
             params_.prior_s_std * params_.prior_s_std,
             params_.prior_w_std * params_.prior_w_std,
-            params_.prior_h_std * params_.prior_h_std).finished();
+            params_.prior_h_std * params_.prior_h_std,
+            sd_d * sd_d).finished();
 }
 
-Eigen::Matrix<float, 3, 1> DoorBelief::process_noise_diag() const
+// d: no process noise — a doorway's leaf does not move in its wall (the same statement process_std_s = 0 makes for s).
+Eigen::Matrix<float, 4, 1> DoorBelief::process_noise_diag() const
 {
-    return (Eigen::Matrix<float, 3, 1>() <<
+    return (Eigen::Matrix<float, 4, 1>() <<
             params_.process_std_s * params_.process_std_s,
             params_.process_std_w * params_.process_std_w,
-            params_.process_std_h * params_.process_std_h).finished();
+            params_.process_std_h * params_.process_std_h,
+            0.0f).finished();
 }
 
-Eigen::Matrix<float, 3, 1> DoorBelief::common_mode_inv_diag(const DoorFrame& frame) const
+Eigen::Matrix<float, 4, 1> DoorBelief::common_mode_inv_diag(const DoorFrame& frame) const
 {
     // Task 15: + the leaf's angle uncertainty, carried into where the mask says the aperture is (see set_leaf_phi_sigma).
     const float leaf_s = 0.5f * state_.w * std::abs(std::sin(params_.leaf.phi)) * leaf_phi_sigma_;
@@ -224,10 +181,16 @@ Eigen::Matrix<float, 3, 1> DoorBelief::common_mode_inv_diag(const DoorFrame& fra
     // Task 17 add-on: the mask reads the WIDTH through the leaf panel as well — its along-wall extent w·cos φ moves by
     // w·|sin φ|·δφ under an angle error — so the same leaf-angle uncertainty enters the width's common mode (try78: σ_w 5 mm).
     const float leaf_w = state_.w * std::abs(std::sin(params_.leaf.phi)) * leaf_phi_sigma_;
-    return (Eigen::Matrix<float, 3, 1>() <<
+    // Task 5b: the leaf plane's depth d. A frame's points share the SAME pose-chain / range / motion error across the wall as
+    // along it (frame.chain_cov_s, common_mode_s_std: one registration), and an angle error δφ moves the leaf's mean
+    // across-wall position by (w/2)·|cos φ|·δφ — so at a poorly known φ a frame cannot say where the plane is.
+    const float leaf_n = 0.5f * state_.w * std::abs(std::cos(params_.leaf.phi)) * leaf_phi_sigma_;
+    const float n2 = params_.common_mode_s_std * params_.common_mode_s_std + leaf_n * leaf_n;
+    return (Eigen::Matrix<float, 4, 1>() <<
             1.0f / std::max(1e-9f, s2 + frame.chain_cov_s),
             1.0f / std::max(1e-9f, wh2 + leaf_w * leaf_w),
-            1.0f / std::max(1e-9f, wh2)).finished();
+            1.0f / std::max(1e-9f, wh2),
+            1.0f / std::max(1e-9f, n2 + frame.chain_cov_s)).finished();
 }
 
 // ─── Self-test ───────────────────────────────────────────────────────────────────
@@ -571,7 +534,7 @@ DoorBelief::phi_field_likelihood(const rc::ai::LidarRays& rays, float phi_min, f
                 const Eigen::Vector3f n3(n2.x(), n2.y(), 0.0f);
                 L.centre_xy += depth * n2;
                 L.hinge_xy  += depth * n2;
-                const Eigen::Vector2f wallO = ap.wall_O + depth * n2;
+                const Eigen::Vector2f wallO = ap.wall_O + depth * n2;   // the WALL stays on the polygon line; the leaf L hangs on its own plane (Aperture::depth, 5b)
                 const Eigen::Vector3f wallP(wallO.x(), wallO.y(), 0.0f);
 
                 double acc = 0.0;
@@ -773,7 +736,7 @@ DoorBelief::phi_field_loglik(const rc::ai::LidarRays& rays, float phi_min, float
     for (int di = 0; di < dn; ++di)
     {
         const float depth = grid(nz.depth_lo, nz.depth_hi, dn, di);
-        const Eigen::Vector2f wallO = ap0.wall_O + depth * n2;
+        const Eigen::Vector2f wallO = ap0.wall_O + depth * n2;   // the wall on the polygon line (the leaf: Aperture::depth, 5b)
         const Eigen::Vector3f wallP(wallO.x(), wallO.y(), 0.0f);
         for (int i = 0; i < M; ++i)
         {
