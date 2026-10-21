@@ -463,6 +463,7 @@ bool MaskIngestor::refresh()
     }
 
     masks_packet_ = std::move(packet);
+    applied_transform_ = use_cam ? std::optional<Eigen::Matrix4d>{T_tgt_src} : std::nullopt;
     last_masks_frame_seen_ = frame_id;
     // Stamp liveness ONLY on the fresh-frame success path (wall clock, never the source stamp) — a producer
     // republishing an old mask_frame_id must read as NOT live, which is exactly the stall we want to detect.

@@ -62,6 +62,7 @@
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
 #include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
 #include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
+#include "input_snapshot.h"        // rc::door::InputSnapshot (DoorCycleInput recording, default off)
 #include <map>
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
@@ -394,6 +395,17 @@ private:
     // Decision log (decision_log.h). dec_cycle_ counts compute() cycles that got past the graph guard.
     rc::door::DoorDecisionLog decision_log_;
     std::uint64_t dec_cycle_ = 0;
+    // Input recording (input_snapshot.h, DoorConcept.RecordInputs, default off): one DoorCycleInput per compute()
+    // cycle, written AFTER the cycle so the actuator transcript is complete. The old logic still reads the graph.
+    rc::door::InputSnapshot input_snapshot_;
+    void open_input_recording();
+    std::vector<std::uint64_t> own_node_ids() const;   // our object/affordance node ids (sweep diffs; recording only)
+    // The ActuatorPort: every DoorActuator call goes through these, so each call + reply lands in the transcript.
+    const rc::DoorActuator::Caps& actuator_refresh_caps();
+    std::optional<rc::DoorActuator::Pending> actuator_request(const std::string& door_name, const Eigen::Vector2f& xy_m,
+        float yaw, float width_m, bool open, const Eigen::Matrix4d& world_T_room, const std::string& purpose,
+        const std::string& provider_id);
+    void actuator_poll(rc::DoorActuator::Pending& p);
     // Affordance state seen last cycle per (door id, kind), so a TRANSITION is logged exactly once.
     struct AffSeen { bool offered = false, claimed = false; };
     std::map<std::pair<std::uint64_t, std::string>, AffSeen> aff_seen_;

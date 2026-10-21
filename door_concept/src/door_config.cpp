@@ -195,6 +195,12 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
             "Record every measured interaction-anchor cycle to etc/anchor_frames.bin (replay_anchor_frames; ≤ 200 MB/run). Development instrument, default off");
     out.decision_log                  = getb("DoorConcept.DecisionLog", false,
             "Write etc/door_decisions.bin: the binary per-cycle decision log (decision_log.h) the DoorCore replay is checked against. Default off");
+    out.record_inputs                 = getb("DoorConcept.RecordInputs", false,
+            "Record every compute() cycle's DoorCycleInput (DCIN v1) for the DoorCore replay (input_snapshot.h). Default off");
+    out.record_inputs_path            = gets("DoorConcept.RecordInputsPath", out.record_inputs_path,
+            "Where RecordInputs writes (rotated per run, the 3 previous kept)");
+    out.record_max_mb                 = geti("DoorConcept.RecordMaxMB", out.record_max_mb,
+            "RecordInputs size cap (MB): at the cap the recording STOPS, with a log line");
     out.anchor_log                    = getb("DoorConcept.AnchorLog", false,
             "Write etc/anchor_log.csv, one row per cycle while an interaction anchor exists. Development instrument, default off");
 

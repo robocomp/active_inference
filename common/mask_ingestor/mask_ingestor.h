@@ -209,6 +209,10 @@ public:
 
     // The most recently ingested packet (read-only).
     const MasksPacket& packet() const { return masks_packet_; }
+    // The tgt<-src transform the LAST successful ingest applied to the camera-frame points (nullopt when that frame
+    // came in the legacy room-frame arrays, or nothing was ingested yet). Read-only bookkeeping for consumers that
+    // record their inputs (door_concept's DoorCycleInput: the replay must not ask cortex for it again).
+    [[nodiscard]] const std::optional<Eigen::Matrix4d>& applied_transform() const { return applied_transform_; }
     // Mutable access for a consumer that post-processes the freshly-refreshed packet in place (e.g. splitting
     // an L-shaped mask into two sub-slices). All packet() readers then see the modified packet this cycle.
     MasksPacket& mutable_packet() { return masks_packet_; }
@@ -230,6 +234,7 @@ private:
 
     std::shared_ptr<DSR::DSRGraph> G_;
     MasksPacket                    masks_packet_;
+    std::optional<Eigen::Matrix4d> applied_transform_;   // see applied_transform()
     int                            last_masks_frame_seen_ = -1;
     std::int64_t                   last_fresh_wall_ms_    = 0;   // wall-clock ms of the last NEW-frame ingest (0 = never)
 

@@ -74,6 +74,11 @@ public:
     // Computed once per refresh, not per door: it is a property of the frame.
     [[nodiscard]] float background_mean() const noexcept { return bg_mean_; }
 
+    // The raw followed-class plane at native resolution (pw x ph), as last refreshed — read by the input recorder.
+    [[nodiscard]] const std::vector<float>& plane() const noexcept { return plane_; }
+    [[nodiscard]] int pw() const noexcept { return pw_; }
+    [[nodiscard]] int ph() const noexcept { return ph_; }
+
     [[nodiscard]] int frame_w() const noexcept { return frame_w_; }
     [[nodiscard]] int frame_h() const noexcept { return frame_h_; }
 

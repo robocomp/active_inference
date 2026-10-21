@@ -60,6 +60,7 @@
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the recorded cycle's wall clock
 
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
 #include <QTimer>
@@ -266,6 +267,7 @@ void SpecificWorker::request_shutdown()
     anchor_frames_.close();
     g_decisions = nullptr;
     decision_log_.close();
+    input_snapshot_.close();   // flush the input tape (records are whole on disk already; this closes the file)
     if (anchor_log_.is_open()) anchor_log_.close();
 
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
@@ -381,6 +383,10 @@ void SpecificWorker::initialize()
         qWarning() << "door_concept: DSR graph not available in initialize()";
         return;
     }
+    // Input recording: latch from here (the startup sweep and the identity load below are its first events); the
+    // file itself is opened at the end of initialize(), once the effective config has been published.
+    if (cfg_.record_inputs)
+        input_snapshot_.arm(static_cast<std::uint32_t>(agent_id));
 
     // ★THE WHOLE PRESENCE PROTOCOL IS SHARED (common/concept_presence). The 134 lines that used to sit here
     // were byte-identical across hood/refrigerator/table and differed elsewhere only in comment wording — while
@@ -405,9 +411,17 @@ void SpecificWorker::initialize()
             // One-shot, POST-SYNC: leftovers from a crashed previous run. The initialize() sweep can run before
             // those nodes arrive from the persistent DSR server, and this fires before the first compute().
             .on_first_operating = [this] {
+                const auto before = input_snapshot_.armed() ? own_node_ids() : std::vector<std::uint64_t>{};
                 remove_stale_affordance_nodes();
                 // Anchors a SIGKILLed previous run left hanging from the robot (they may sync in after initialize()).
                 if (G) rc::interaction::sweep_stale(*G, agent_id);
+                if (input_snapshot_.armed())
+                {
+                    const auto after = own_node_ids();
+                    std::vector<std::uint64_t> removed;
+                    std::ranges::set_difference(before, after, std::back_inserter(removed));
+                    input_snapshot_.on_owned_swept("first-Operating sweep", std::move(removed));
+                }
             },
             .on_optional_peer_lost  = [this](const std::string &name, std::uint32_t id)
                                       { on_optional_peer_lost(name, id); },
@@ -430,10 +444,18 @@ void SpecificWorker::initialize()
     // del_node_signal synchronously, and del_node_slot dereferences fitter_ — which does not exist yet.
     // Connecting after this sweep (and after fitter_ is built) both avoids that null-deref SIGSEGV and
     // skips a pointless self-notification for our own cleanup deletions.
+    const auto own_before_sweep = input_snapshot_.armed() ? own_node_ids() : std::vector<std::uint64_t>{};
     remove_owned_door_nodes();
     // …and any passage anchor (`door_N@robot`) of ours a crashed run left under the robot, with the links our
     // affordances still hold to it. Again once on the first Operating entry (post-sync), like the affordances.
     rc::interaction::sweep_stale(*G, agent_id);
+    if (input_snapshot_.armed())
+    {
+        const auto after = own_node_ids();
+        std::vector<std::uint64_t> removed;
+        std::ranges::set_difference(own_before_sweep, after, std::back_inserter(removed));
+        input_snapshot_.on_owned_swept("startup stale-sweep", std::move(removed));
+    }
 
     // Resolve room node
     if (const auto room = rc::room::current_room(*G); room.has_value())
@@ -492,6 +514,10 @@ void SpecificWorker::initialize()
     // DoorControl client. The endpoint is config, not compiled in: the provider is whatever can move a
     // door here — a Webots supervisor today, home automation or a person tomorrow.
     door_actuator_.configure(cfg_.door_control_endpoint);
+    // Input recording (spec §6.6): the identity table + learned registration exactly as loaded, and the room entered.
+    input_snapshot_.on_identity_load("etc/door_identities.csv", "etc/door_world_registration.csv",
+        room_node_id_ != 0 ? std::optional<std::uint64_t>{room_node_id_} : std::nullopt,
+        room_node_id_ != 0 ? rc::room::name_of(*G, room_node_id_) : std::string{});
     door_registration_.load("etc/door_world_registration.csv");   // solved per request, per room
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: a door
@@ -687,6 +713,10 @@ void SpecificWorker::initialize()
         // from the one anybody had ever tested.
         const auto fire = [this](bool open)
         {
+            // Input recording: the press itself is the event (the core redoes the target resolution next cycle).
+            if (input_snapshot_.armed())
+                input_snapshot_.on_ui_request(open, door_actuation_pick_ and door_actuation_pick_->currentIndex() > 0
+                                                        ? door_actuation_pick_->currentText().toStdString() : std::string{});
             const auto target = nearest_door_for_actuation();
             if (not target.has_value())
             {
@@ -749,6 +779,110 @@ void SpecificWorker::initialize()
     rc::cfg::exempt_generated_prefixes();
     rc::cfg::registry().declare_complete("door_concept");
     rc::cfg::Reader(configLoader, "door_concept").publish("etc/config_effective.csv");
+    open_input_recording();
+}
+
+// DoorConcept.RecordInputs: open the DCIN tape (rotating the previous run's) with this run's effective config as the
+// header's configuration snapshot (spec §3.1 "configuration snapshot (once per file)").
+void SpecificWorker::open_input_recording()
+{
+    if (not input_snapshot_.armed())
+        return;
+    rc::door::core::DoorRecordingHeader h;
+    h.agent_id = static_cast<std::uint64_t>(agent_id);
+    h.agent_name = "door_concept";
+    {
+        std::ifstream f("etc/config_effective.csv", std::ios::binary);
+        std::ostringstream ss;
+        if (f) ss << f.rdbuf();
+        h.config_text = ss.str();
+    }
+    h.start_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+    h.start_wall_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
+    h.note = "door_concept live recording; config_text = etc/config_effective.csv";
+    const auto max_bytes = static_cast<std::uint64_t>(std::max(0, cfg_.record_max_mb)) << 20;
+    if (input_snapshot_.open(cfg_.record_inputs_path, h, max_bytes))
+        std::print("door_concept: [record] recording every cycle's inputs to {} (cap {} MB)\n",
+                   cfg_.record_inputs_path, cfg_.record_max_mb);
+    else
+        std::print("door_concept: [record] could NOT open {} — input recording is off this run\n", cfg_.record_inputs_path);
+}
+
+// Our own object/affordance node ids (sorted), for the sweep diffs the recording logs as OwnedNodesSwept.
+std::vector<std::uint64_t> SpecificWorker::own_node_ids() const
+{
+    std::vector<std::uint64_t> ids;
+    if (not G) return ids;
+    for (const char* type : {"object", "affordance"})
+        for (const auto& n : G->get_nodes_by_type(type))
+            if (rc::door::core::created_by(n.id(), static_cast<std::uint32_t>(agent_id)))
+                ids.push_back(n.id());
+    std::ranges::sort(ids);
+    return ids;
+}
+
+// ─── The ActuatorPort (ruling: an injected SYNCHRONOUS port) ─────────────────────────────────────────────────────
+// Every DoorActuator call goes through one of these three, so each call and its reply land in the recorded input's
+// transcript (in a cycle → that cycle; from a strip-button callback → the next). Behaviour is the bare call's.
+namespace
+{
+rc::door::core::ActuatorPending to_core(const rc::DoorActuator::Pending& p)
+{ return {p.id, p.door_name, p.opening, p.state, p.settled}; }
+
+rc::door::core::ActuatorCaps to_core(const rc::DoorActuator::Caps& c)
+{
+    rc::door::core::ActuatorCaps o;
+    o.available = c.available; o.continuous_angle = c.continuous_angle; o.requires_human = c.requires_human;
+    o.typical_latency_s = c.typical_latency_s; o.n_doors = c.n_doors; o.note = c.note;
+    for (const auto& d : c.doors) o.doors.push_back({d.id, d.xy_mm, d.angle});
+    return o;
+}
+}  // namespace
+
+const rc::DoorActuator::Caps& SpecificWorker::actuator_refresh_caps()
+{
+    const auto& c = door_actuator_.refresh_caps();
+    if (input_snapshot_.armed())
+    {
+        rc::door::core::ActuatorCall call;
+        call.kind = rc::door::core::ActuatorCallKind::RefreshCaps;
+        call.caps = to_core(c);
+        input_snapshot_.on_actuator_call(std::move(call));
+    }
+    return c;
+}
+
+std::optional<rc::DoorActuator::Pending> SpecificWorker::actuator_request(const std::string& door_name,
+    const Eigen::Vector2f& xy_m, float yaw, float width_m, bool open, const Eigen::Matrix4d& world_T_room,
+    const std::string& purpose, const std::string& provider_id)
+{
+    auto reply = door_actuator_.request(door_name, xy_m, yaw, width_m, open, world_T_room, purpose, provider_id);
+    if (input_snapshot_.armed())
+    {
+        rc::door::core::ActuatorCall call;
+        call.kind = rc::door::core::ActuatorCallKind::Request;
+        call.door_name = door_name; call.xy_m = xy_m; call.yaw = yaw; call.width_m = width_m; call.open = open;
+        call.world_T_room = world_T_room; call.purpose = purpose; call.provider_id = provider_id;
+        if (reply.has_value()) call.pending = to_core(reply.value());
+        input_snapshot_.on_actuator_call(std::move(call));
+    }
+    return reply;
+}
+
+void SpecificWorker::actuator_poll(rc::DoorActuator::Pending& p)
+{
+    std::optional<rc::door::core::ActuatorPending> in;
+    if (input_snapshot_.armed()) in = to_core(p);
+    door_actuator_.poll(p);
+    if (in.has_value())
+    {
+        rc::door::core::ActuatorCall call;
+        call.kind = rc::door::core::ActuatorCallKind::Poll;
+        call.poll_in = std::move(in);
+        call.pending = to_core(p);
+        input_snapshot_.on_actuator_call(std::move(call));
+    }
 }
 
 // ─── Door actuation ──────────────────────────────────────────────────────────
@@ -802,7 +936,7 @@ void SpecificWorker::refresh_door_actuation_ui()
     // comes up later must still be picked up without restarting this agent.
     static int tick = 0;
     if (++tick % 120 == 0 or door_actuator_.caps().note == "not connected yet")
-        door_actuator_.refresh_caps();
+        actuator_refresh_caps();
     const auto& c = door_actuator_.caps();
 
     // Keep the picker in step with what the provider advertises, without disturbing a live selection.
@@ -841,7 +975,7 @@ void SpecificWorker::refresh_door_actuation_ui()
 
     if (door_pending_.has_value() and not door_pending_->settled)
     {
-        door_actuator_.poll(*door_pending_);
+        actuator_poll(*door_pending_);
         if (door_act_state_)
             door_act_state_->setText(QString::fromStdString(door_pending_->door_name + ": "
                                                             + door_pending_->state));
@@ -1073,8 +1207,15 @@ void SpecificWorker::compute()
         return;
 
     // The decision log's clock: one tick per compute() that got past the graph guard (the cycle the replay will step).
-    decision_log_.set_clock(++dec_cycle_, std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::steady_clock::now().time_since_epoch()).count());
+    // ONE steady read feeds both the DDEC stamp and the recorded input (DoorCycleInput::t_ms() == the DDEC stamp).
+    const std::int64_t cycle_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch()).count();
+    decision_log_.set_clock(++dec_cycle_, cycle_ns / 1'000'000);
+    // Input recording (DoorConcept.RecordInputs, default off): the graph snapshot NOW, the media parts where the code
+    // below consumes them, and the record written when this cycle ends (any return path) — after the actuator calls.
+    input_snapshot_.begin_cycle(*G, inner_eigen_.get(), rt_api_.get(), dec_cycle_, cycle_ns,
+                                static_cast<std::int64_t>(rc::provenance::now_ms()), mask_ingestor_.get());
+    struct EndRecordedCycle { rc::door::InputSnapshot& s; ~EndRecordedCycle() { s.end_cycle(); } } end_recorded_cycle{input_snapshot_};
 
     // Which room are we in? Follows ltsm_agent's `current` edge and LETS GO of a room we have left.
     // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
@@ -1087,8 +1228,13 @@ void SpecificWorker::compute()
         //   would fall back to the room route in the doorway. Keep it alive; only the re-init waits for a room.
         if (passage_anchor_.has_value())
         {
-            if (lidar_ingestor_) lidar_ingestor_->pump();   // the room-frame sweep fails here; the robot-frame one does not
-            if (mask_ingestor_) mask_ingestor_->refresh();
+            if (lidar_ingestor_ and lidar_ingestor_->pump())   // the room-frame sweep fails here; the robot-frame one does not
+                input_snapshot_.capture_bpearl(*G, inner_eigen_.get(), *lidar_ingestor_);
+            if (mask_ingestor_)
+            {
+                mask_ingestor_->refresh();
+                input_snapshot_.capture_masks(*G, inner_eigen_.get(), rt_api_.get(), *mask_ingestor_);
+            }
             step_passage_anchor();
         }
         return;
@@ -1108,12 +1254,16 @@ void SpecificWorker::compute()
 
     refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
     // Low LiDAR sweep in the ROOM frame — the hinge branch's evidence. Main thread (reads the graph).
-    if (lidar_ingestor_ and lidar_ingestor_->pump() and lidar_ingestor_->bpearl_fresh())
+    const bool lidar_pumped = lidar_ingestor_ and lidar_ingestor_->pump();
+    if (lidar_pumped)
+        input_snapshot_.capture_bpearl(*G, inner_eigen_.get(), *lidar_ingestor_);
+    if (lidar_pumped and lidar_ingestor_->bpearl_fresh())
         fitter_->set_leaf_points(lidar_ingestor_->sweep_bpearl_room(),
                                  lidar_ingestor_->origin_bpearl_room());
 
     fitter_->update_ego_motion();   // robot/camera speed → "be-still-to-update" gate (once per cycle)
     mask_ingestor_->refresh();
+    input_snapshot_.capture_masks(*G, inner_eigen_.get(), rt_api_.get(), *mask_ingestor_);
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
 
     // Doors are generic `object` nodes named "door_*" (schema migration); filter by name prefix.
@@ -1572,7 +1722,8 @@ void SpecificWorker::run_instance_tracker()
     // Refresh the graded posterior ONCE per cycle, before any door samples it: it is a property of the
     // frame, not of a door, and re-reading it per instance would let two doors in the same cycle be
     // judged against different frames.
-    semantic_field_.refresh(G.get(), rc::door_semantic_class_id());
+    const bool semantic_ok = semantic_field_.refresh(G.get(), rc::door_semantic_class_id());
+    input_snapshot_.capture_semantic(semantic_field_, semantic_ok);
     // One RGB frame per cycle, deep-copied out of the loaned SHM view by the ingestor.
     if (rgb_ingestor_)
         rgb_ingestor_->pump();
@@ -2238,6 +2389,17 @@ void SpecificWorker::update_existence_beliefs()
     rc::edges::PreparedFrame rgb_prep;
     if (cfg_.rgb_contour_check and rgb_ingestor_ and not rgb_ingestor_->frame().empty())
         rgb_prep = rc::edges::prepare_frame(rgb_ingestor_->frame());
+    // Input recording: the frames the checks below may score this cycle (cropped at the end of the cycle to the ROIs
+    // they actually sample — note_roi calls below). Same conditions as the reads.
+    if (input_snapshot_.in_cycle())
+    {
+        const bool depth_used = depth_ingestor_ and not depth_ingestor_->frame().empty()
+            and ((cfg_.rgb_contour_check and cfg_.contour_depth_check) or (cfg_.frame_contour_check and cfg_.frame_depth_check));
+        input_snapshot_.note_images(not rgb_prep.gx.empty() ? &rgb_ingestor_->frame() : nullptr,
+                                    rgb_ingestor_ ? rgb_ingestor_->stamp_ms() : 0, rgb_prep.frame_ref,
+                                    depth_used ? &depth_ingestor_->frame() : nullptr,
+                                    depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0);
+    }
 
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
@@ -2354,6 +2516,13 @@ void SpecificWorker::update_existence_beliefs()
                 ctl.push_back(c.px);
             edge = rc::edges::contour_edge_support(rgb_prep, sil.contour.face.px, ctl);
         }
+        if (input_snapshot_.in_cycle() and sil.contour.face.valid())   // the leaf quad + its controls: RGB and depth reads
+        {
+            const bool rgb_read   = cfg_.rgb_contour_check and not rgb_prep.gx.empty();
+            const bool depth_read = cfg_.rgb_contour_check and cfg_.contour_depth_check;
+            input_snapshot_.note_roi(sil.contour.face.px, 0, rgb_read, depth_read);
+            for (const auto& c : sil.contour.controls) input_snapshot_.note_roi(c.px, 0, rgb_read, depth_read);
+        }
         // ── THE METRIC HALF ─────────────────────────────────────────────────────────────────────────
         // The RGB check confirms "a rectangular thing with these borders is here" — its own header says
         // so, and a poster, a door-shaped panel or a cupboard front all pass it. Depth is the observable
@@ -2415,6 +2584,14 @@ void SpecificWorker::update_existence_beliefs()
                 fdp.depth_scale_y = (fr > 0) ? static_cast<float>(fdimg->rows) / fr : 1.0f;
             }
             frame = rc::door::score_frame(probe, rgb_prep.valid() ? &rgb_prep : nullptr, fdimg, fdp);
+            if (input_snapshot_.in_cycle())   // the aperture frame's samples, their controls, and the depth read windows
+                for (const auto& smp : probe.samples)
+                {
+                    const int reach = static_cast<int>(std::ceil(std::max(0.0f, smp.side_window_px)));
+                    input_snapshot_.note_roi(smp.px, reach, rgb_prep.valid(), fdimg != nullptr);
+                    for (const auto& c : smp.ctl)   // the controls are the RGB half's null only (score_frame)
+                        if (c.w > 0.0f) input_snapshot_.note_roi(c.px, 0, rgb_prep.valid(), false);
+                }
         }
         inst.dbg_frame_excess = frame.excess;  inst.dbg_frame_true = frame.s_true; inst.dbg_frame_ctrl = frame.s_control;
         inst.dbg_frame_depth  = frame.depth_verdict; inst.dbg_frame_vis = frame.vis_frac;
@@ -3742,7 +3919,7 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
     if (not operator_pick and have_tf)
     {
         if (door_actuator_.caps().doors.empty())
-            door_actuator_.refresh_caps();   // the strip UI normally refreshes these; a headless run may not have
+            actuator_refresh_caps();   // the strip UI normally refreshes these; a headless run may not have
         if (const auto m = rc::nearest_provider_door(door_actuator_.caps().doors, ours_world); m.has_value())
         {
             if (m->dist_m > cfg_.pragmatic.actuation_match_max_m)
@@ -3778,8 +3955,8 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
                  "[{}]", open ? "OPEN" : "CLOSE", inst.node_name, chosen_id.empty() ? "(by place)" : chosen_id,
                  id_reason, ours_world.x(), ours_world.y(), have_tf ? tf_source : "no transform");
 
-    door_pending_ = door_actuator_.request(inst.node_name, xy, yaw, width_m, open, world_T_room,
-                                            purpose, chosen_id);
+    door_pending_ = actuator_request(inst.node_name, xy, yaw, width_m, open, world_T_room,
+                                     purpose, chosen_id);
     if (not door_pending_.has_value())
     { why = "no provider"; return false; }
     ++inst.actuation_requests;
@@ -4700,6 +4877,7 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
     if (held_doors_.contains(id))
         return;   // a door of the room left behind: HELD there, not this room's (try106: re-adopted against the wrong room)
 
+    input_snapshot_.on_door_upserted(*G, inner_eigen_.get(), node_opt.value());   // recorded if FOREIGN (latch)
     fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }
 
@@ -4720,6 +4898,7 @@ void SpecificWorker::poll_affordance_protocol()
 }
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
+    input_snapshot_.on_node_deleted(id);   // recorded if FOREIGN (latch); delivered in the next cycle's input
     for (auto& [nm, e] : looks_)
         if (e.aff.node_id() == id)
         {
