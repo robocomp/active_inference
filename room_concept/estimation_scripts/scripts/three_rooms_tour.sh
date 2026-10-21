@@ -13,8 +13,9 @@ echo stop > $B/controller/remote_cmd.txt
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
 python3 scripts/door.py close; python3 scripts/door.py close DOOR_0
-for i in $(seq 1 150); do grep -a -q "created instance for node 'door_2'" $L/door_concept.log 2>/dev/null && break; sleep 2; done
-grep -a -q "created instance for node 'door_2'" $L/door_concept.log || echo "WARN: 'door_2' not born yet in 300 s (leg 1 explores first)"
+# ★ No wait for door_2 here (tour3A, 10-21): the controller is not armed until leg 1's `run`, so waiting HELD the robot
+#   at the start pose for 300 s, where the shut DOOR_0 is not detected at all — leg 1's explore step is what finds it.
+sleep 20   # let the fleet settle (presence, first room estimate)
 sleep 5
 room_now() { grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}'; }
 DOORS=(door_2 door_2 door_1 door_1 door_2 door_2)
