@@ -153,6 +153,8 @@ void SpecificWorker::request_shutdown()
     // Drop the LiDAR media subscriber BEFORE tearing down the graph/inner_eigen it reads (it holds a raw
     // pointer to both). Mirrors bottle_concept.
     lidar_ingestor_.reset();
+    rgb_ingestor_.reset();
+    depth_ingestor_.reset();
 
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
     // destruct later with the rest of the object can fault inside DSR. Mirrors bottle_concept.
@@ -284,6 +286,10 @@ void SpecificWorker::initialize()
     // > 0. Subscriber is brought up lazily on the compute/main thread once the lidar3D node + descriptor exist.
     lidar_ingestor_ = std::make_unique<rc::ConceptLidarIngestor>(G, inner_eigen_.get(),
         [this] { return rc::LidarGates{cfg_.lidar_precision, cfg_.free_space_precision, cfg_.lidar_bpearl_precision}; });
+    // ZED RGB + depth for the classifier-free contour existence channel (as chair_concept). Dormant (no DDS
+    // participant) while TableModel.ExistenceContourCheck is off; brought up lazily on the compute thread.
+    rgb_ingestor_   = std::make_unique<rc::RgbIngestor>(G, &cfg_.existence_contour_check, "zed");
+    depth_ingestor_ = std::make_unique<rc::DepthIngestor>(G, &cfg_.existence_contour_check, "zed");
 
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
@@ -480,6 +486,9 @@ void SpecificWorker::compute()
         }
     }
 
+    if (rgb_ingestor_)   rgb_ingestor_->pump();
+    if (depth_ingestor_) depth_ingestor_->pump();
+
     const auto table_nodes = G->get_nodes_by_type("object");
     for (const auto& node : table_nodes)
         if (node.name().starts_with("table"))
@@ -496,6 +505,11 @@ void SpecificWorker::compute()
     // Evidence-based removal: each existence channel integrates on its OWN sensor cadence (silhouette/mask on a
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
+    if (cfg_.existence_removal_enabled)
+        existence_->set_camera_frames(rgb_ingestor_   ? &rgb_ingestor_->frame()   : nullptr,
+                                      rgb_ingestor_   ? rgb_ingestor_->stamp_ms() : 0,
+                                      depth_ingestor_ ? &depth_ingestor_->frame() : nullptr,
+                                      depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0);
     if (cfg_.existence_removal_enabled)
         existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_,
             [this](std::uint64_t id, const rc::TableInstance& inst)

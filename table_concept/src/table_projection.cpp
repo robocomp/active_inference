@@ -11,9 +11,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <utility>
 #include <unordered_set>
 #include <vector>
+
+#include "table_contour.h"   // rc::table_contour_set — the tabletop slab's outline + its slid null
 
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion::walls_block — shared with door/refrigerator
 #include "../../common/rt_query_probe/rt_query_probe.h"
@@ -330,6 +336,53 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     if (out.n_detectable > 0)
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
     return out;
+}
+
+// ── CONTOUR channel geometry (common/contour_edge) ───────────────────────────────────────────────────
+// The shape and why it is that shape: table_contour.h. This wrapper owns only what the shape cannot know —
+// the extrinsic pinned to the frame's capture stamp, the near clip, and the intrinsics-to-delivered-frame
+// scale (as chair_concept's compute_contour_set).
+rc::edges::ContourSet TableProjection::compute_contour_set(const TableInstance& inst, std::uint64_t stamp_ms,
+                                                           int frame_cols, int frame_rows)
+{
+    rc::edges::ContourSet none;
+    if (not inner_eigen_)
+        return none;
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return none;
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return none;
+    }
+    const auto Mopt = room_T_zed_matrix(stamp_ms);
+    if (not Mopt.has_value())
+        return none;
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+    const float W = static_cast<float>(camera_api_->get_width());
+    const float H = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or H <= 0.f)
+        return none;
+    const float sx = (frame_cols > 0) ? static_cast<float>(frame_cols) / W : 1.0f;
+    const float sy = (frame_rows > 0) ? static_cast<float>(frame_rows) / H : 1.0f;
+
+    const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
+    {
+        const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
+        if (Pc.y() <= 0.20) return std::nullopt;                      // behind / at the image plane
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+        if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
+        rc::edges::ProjectedVertex v;
+        v.px = cv::Point2f(static_cast<float>(uv.x()) * sx, static_cast<float>(uv.y()) * sy);
+        v.depth_m = static_cast<float>(Pc.y());                       // ZED depth = forward coordinate, not the norm
+        return v;
+    };
+
+    const auto& s = inst.ai2_belief.state();
+    rc::TableSlab slab;
+    slab.cx = s.cx; slab.cy = s.cy; slab.yaw = s.yaw; slab.w = s.w; slab.d = s.h;
+    slab.z_top = s.H; slab.thickness = inst.ai2_belief.params().top_thickness; slab.round = inst.subtype == "round";
+    return rc::table_contour_set(slab, Eigen::Vector2d(Mopt.value().coeff(0, 3), Mopt.value().coeff(1, 3)), project);
 }
 
 }  // namespace rc

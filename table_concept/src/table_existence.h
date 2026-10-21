@@ -21,6 +21,7 @@
 #include <memory>
 
 #include <dsr/api/dsr_api.h>
+#include <opencv2/core.hpp>
 
 #include "table_config.h"      // rc::TableConfig
 #include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope / p_detect
@@ -59,11 +60,20 @@ public:
     // by, or the robot goes somewhere its own removal test does not trust. See update_and_remove.
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
 
+    // ZED RGB + depth for the classifier-free contour channel, borrowed for THIS cycle only (the ingestors
+    // own them). Each plane carries its own capture stamp; a plane is scored only on a frame not yet scored.
+    void set_camera_frames(const cv::Mat* rgb, std::uint64_t rgb_stamp_ms,
+                           const cv::Mat* depth, std::uint64_t depth_stamp_ms)
+    { rgb_ = rgb; rgb_stamp_ms_ = rgb_stamp_ms; depth_ = depth; depth_stamp_ms_ = depth_stamp_ms; }
+
 private:
     const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     std::shared_ptr<DSR::DSRGraph> G_;
     const TableConfig&             cfg_;
     rc::detect::DetectorEnvelope   det_env_{};
+    const cv::Mat* rgb_   = nullptr;   std::uint64_t rgb_stamp_ms_   = 0;
+    const cv::Mat* depth_ = nullptr;   std::uint64_t depth_stamp_ms_ = 0;
+    std::uint64_t contour_last_rgb_ms_ = 0, contour_last_depth_ms_ = 0;   // stamps already scored
 };
 
 }  // namespace rc

@@ -28,6 +28,11 @@ LIST(APPEND SOURCES
   ../src/table_model.cpp
   ../src/table_belief.cpp
   ../src/epistemic_planner.cpp
+  ../../common/rgb_ingestor/rgb_ingestor.cpp
+  ../../common/rgb_ingestor/depth_ingestor.cpp
+  ../../common/contour_edge/contour_edge_check.cpp
+  ../../common/contour_edge/contour_edge_project.cpp
+  ../../common/contour_edge/contour_depth_check.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.
@@ -35,3 +40,9 @@ LIST(APPEND SOURCES
 # away from libdsr's default alignment (144) → get_transformation_matrix overruns the caller's stack
 # slot → 0x17ff… SIGBUS in whatever agent shares the graph. Match libdsr's default. (See crash notes.)
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
+
+# OpenCV — the classifier-free contour existence channel (common/contour_edge) + the shared ZED RGB/depth
+# ingestors (as chair_concept).
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
+LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})

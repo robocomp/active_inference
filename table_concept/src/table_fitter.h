@@ -136,6 +136,8 @@ public:
     // TableProjection; see rc::SilhouetteExistence in table_projection.h. Called from update_existence.
     SilhouetteExistence compute_silhouette_existence(const TableInstance& inst)
     { return projection_->compute_silhouette_existence(inst); }
+    rc::edges::ContourSet compute_contour_set(const TableInstance& inst, std::uint64_t stamp_ms, int cols, int rows)
+    { return projection_->compute_contour_set(inst, stamp_ms, cols, rows); }
 
     // Unassigned peripheral detections this cycle, for the ai2 log. Set by the worker after
     // process_ricoh_bearings; the fitter owns the CSV, so the count has to reach it.

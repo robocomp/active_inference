@@ -172,6 +172,11 @@ struct TableInstance
     // of the last one. The controller hill-climbs these during the micro-search.
     int   frames_since_detection = 100000;   // cycles since last fresh table mask (0 = just detected)
     float last_mask_confidence   = 0.0f;     // YOLO confidence of the last table detection
+    // This table's detection GRADE: running mean of logit(YOLO confidence) over its ZED masks. Read by the
+    // absence channel — a table YOLO only just clears the cutoff on is EXPECTED to be missed, so its miss is
+    // weak evidence of removal (table_existence.cpp, p_clear). n = 0 ⇒ no grade yet ⇒ geometry alone.
+    float score_logit_mean       = 0.0f;
+    int   score_n                = 0;
     bool  detection_alive        = false;    // frames_since_detection < threshold
 
     // ── Existence log-odds (removal) ──────────────────────────────────────────────────────────────
@@ -272,6 +277,10 @@ struct TableInstance
     // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
     // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
     float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;
+    // Contour channel, this cycle. *_n = 0 means NOT MEASURED, never "refuted".
+    float dbg_ct_edge_excess = 0.0f, dbg_ct_depth_verdict = 0.0f, dbg_ct_depth_bias_m = 0.0f, dbg_ct_dL = 0.0f;
+    int   dbg_ct_edge_n = 0, dbg_ct_depth_n = 0;
+    float dbg_ex_pclear  = 1.0f;   // P(score clears the cutoff | grade), already folded into dbg_ex_pdetect
 
     // ── Predicted in-image table ROI (current model projected through the camera extrinsic) ───────
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the frame)

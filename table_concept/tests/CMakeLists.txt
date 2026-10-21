@@ -26,3 +26,15 @@ add_executable(shape_asymmetry
 target_include_directories(shape_asymmetry PRIVATE ../src ../../common)
 target_link_libraries(shape_asymmetry PRIVATE Eigen3::Eigen)
 target_compile_options(shape_asymmetry PRIVATE -O2)
+
+# The contour existence channel (table_contour.h + common/contour_edge) against a ray-cast synthetic
+# scene: confirms a present table, refutes a blank floor, survives pose error and a floor-coloured top.
+find_package(OpenCV REQUIRED COMPONENTS core imgproc)
+add_executable(contour_test
+    contour_test.cpp
+    ../../common/contour_edge/contour_edge_check.cpp
+    ../../common/contour_edge/contour_edge_project.cpp
+    ../../common/contour_edge/contour_depth_check.cpp)
+target_include_directories(contour_test PRIVATE ../src ../../common ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(contour_test PRIVATE Eigen3::Eigen ${OpenCV_LIBS})
+target_compile_options(contour_test PRIVATE -O2)

@@ -26,6 +26,7 @@
 
 #include "table_instance.h"      // rc::TableInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"
+#include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet
 
 namespace rc {
 
@@ -94,6 +95,10 @@ public:
     // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
     void compute_projected_roi(TableInstance& inst);
     SilhouetteExistence compute_silhouette_existence(const TableInstance& inst);
+    // The tabletop slab's outline in a frame of frame_cols×frame_rows, pinned to that frame's capture stamp,
+    // plus its null slid along the floor. Empty face ⇒ NOT MEASURED.
+    rc::edges::ContourSet compute_contour_set(const TableInstance& inst, std::uint64_t stamp_ms,
+                                              int frame_cols, int frame_rows);
 
     // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central"
     // (looking AT the table) → central_frac → p_detect → removal. Set once from config (default 0.25).

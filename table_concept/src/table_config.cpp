@@ -329,6 +329,14 @@ TableConfig load_table_config(const ConfigLoader& cfg)
             "let LiDAR confirm as well as hold up; removal stays with the one sensor that reads a label", rc::cfg::experiment);
     out.existence_absence_envelope    = getb("TableModel.ExistenceAbsenceEnvelope", true,
             "weight absence by the detector envelope, so point-blank blindness cannot delete a real table", rc::cfg::experiment);
+    out.existence_score_grade         = getb("TableModel.ExistenceScoreGrade", out.existence_score_grade,
+            "weight absence by P(this table's YOLO score clears the cutoff), from its own score history", rc::cfg::experiment);
+    out.existence_score_cutoff        = getf("TableModel.ExistenceScoreCutoff", out.existence_score_cutoff,
+            "retina's Yolo.conf_thresh (must match): a score below it is published as no mask");
+    out.existence_score_view_sigma    = getf("TableModel.ExistenceScoreViewSigma", out.existence_score_view_sigma,
+            "how much a table's logit YOLO score moves with the viewpoint (measured ~0.5 in a turn)");
+    out.existence_contour_check       = getb("TableModel.ExistenceContourCheck", out.existence_contour_check,
+            "score the tabletop's projected outline against ZED RGB edges + depth (YOLO-blind rescue)", rc::cfg::experiment);
 
     std::print("table_concept: configuration loaded.\n");
     // Peripheral (ricoh) existence confirmation — see table_config.h. OFF by default.
