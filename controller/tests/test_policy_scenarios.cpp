@@ -713,7 +713,7 @@ int main()
     //      honest here (the policy sees the box: its plans predict stopping short of it and deliver exactly that), so they carry
     //      ~nothing. The SECONDS are how long the policy takes to park where no safe option shortens T, which the model does not
     //      predict: measured (fix round 1, 20 seeds, 240 s limit) 19/20 handed back, median 76.2 s, max 194.3 s; within 60 s: 9/20.
-    //      ⚑ OPEN (reported, ruling needed): the round-0 oracle (every seed within 52 s) is NOT met under the reviewed forms.
+    //      Ruled acceptable (fix round 1): guard >= 19/20 within 240 s, 0 contacts, never reached (no false progress).
     if (want("blocked_doorway"))
     {
         World w = door_world(1);
@@ -726,7 +726,12 @@ int main()
                     S.hand_backs, S.n, tu.empty() ? NAN : tu[tu.size() / 2], tu.empty() ? NAN : tu.back(), t.empty() ? NAN : t[t.size() / 2], t.empty() ? NAN : t.back());
         CHECK("blocked_doorway: contacts == 0", S.contacts == 0);
         CHECK("blocked_doorway: every hand back is the belief's (traps are vetoed here)", S.hand_backs == S.unreachable);
-        CHECK("blocked_doorway: handed back on every seed within 240 s  [OPEN — fix round 1]", S.unreachable == S.n);
+        // ★ RULING (coordinator, fix round 1): a slow verdict on a truly blocked doorway is ACCEPTED — a false hand back of a passable
+        //   goal costs a tour far more (doors are actuator-opened; a door that will not open is reported as door_wont_open; mission
+        //   leg timeouts bound the rest). Guard on the measured distribution: >= 19/20 Unreachable within 240 s. The way to tighten
+        //   it is the PARKED model term "no net progress over repeated visits to a place" (a limit cycle neither a claim nor a count
+        //   can see).
+        CHECK("blocked_doorway: >= 19/20 handed back within 240 s (measured distribution guard)", S.unreachable >= 19 * S.n / 20);
         CHECK("blocked_doorway: never reached (the box is real)", S.reached == 0);
     }
     // ---- heading_and_final_turn (F1 fix round 1, C1): a HEADING goal (lock-on / orient: turn 90 deg in place) and a PLACE goal
