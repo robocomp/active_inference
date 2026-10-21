@@ -310,6 +310,7 @@ private:
     rc::crossing::Crossing last_crossing_;                          ///< the crossing that triggered the last birth (R1b)
     float           last_crossing_p_open_ = -1.f;                   ///< its door's p_open
     std::uint64_t   last_crossing_door_id_ = 0;                     ///< its door node
+    float           last_crossing_heading_ = 0.f, last_crossing_sig_heading_ = 0.f;   ///< the estimate's yaw then
     std::optional<bool> published_is_lost_;                         ///< last `is_lost` written on the room node
 
     // ── THE EXPERIMENT'S OWN RECORD: tmp/proto_room.csv, ONE ROW PER POSE UPDATE ────────────────────

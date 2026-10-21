@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <vector>
 
 namespace rc::passage
 {
@@ -39,6 +41,9 @@ namespace rc::passage
         float s       = 0.f;                 ///< centre depth past the line at the crossing (m)
         float u       = 0.f;                 ///< centre offset along the aperture at the crossing (m)
         std::uint64_t door_id = 0;           ///< the door node crossed (0 unknown)
+        /// The localiser's (pre-clamp) heading at the crossing and its σ. NaN = unknown: forward and reversed equally.
+        float heading = std::numeric_limits<float>::quiet_NaN();
+        float sig_heading = 0.f;
     };
 
     inline float phi(float z) { return 0.5f * std::erfc(-z / std::sqrt(2.0f)); }
@@ -59,16 +64,21 @@ namespace rc::passage
     /// The heading whose body +y axis (forward, rc convention) points along `dir`.
     inline float heading_along(const Eigen::Vector2f& dir) { return std::atan2(-dir.x(), dir.y()); }
 
-    struct Anchor { Eigen::Vector3f pose = Eigen::Vector3f::Zero(); Eigen::Matrix3f cov = Eigen::Matrix3f::Identity(); };
+    struct Anchor { Eigen::Vector3f pose = Eigen::Vector3f::Zero(); Eigen::Matrix3f cov = Eigen::Matrix3f::Identity(); float w = 1.f; };
 
-    /// The anchor at the hand-over, in the (tangent, normal, yaw) frame rotated into the internal one.
-    inline Anchor anchor_at_handover(const Passage& p)
+    /// The anchor at the hand-over: TWO components, the body driving through the door FORWARD (heading along n_in) or
+    /// BACKING through it (heading along −n_in). ★ Reviewer on 2c353ae3: one component at heading_along(n_in) put a
+    /// reversed crossing (a doorway backoff re-crossing into the room left — a recall) ~8σ off in yaw, every mode on the
+    /// kidnap floor, and a wrong incumbent held ~1000× more stubbornly. The weight of each is the probability, under the
+    /// localiser's own heading at the crossing, that the body faced that way: P(|θ − θ_in| < π/2), Gaussian in θ.
+    inline std::vector<Anchor> anchor_at_handover(const Passage& p)
     {
         Anchor a;
         const float half = 0.5f * p.width;
         const float u = std::clamp(p.u, -half, half);
         const Eigen::Vector2f xy = p.centre + p.tangent * u + p.n_in * std::max(p.s, 0.f);
-        a.pose = {xy.x(), xy.y(), heading_along(p.n_in)};
+        const float th_in = heading_along(p.n_in);
+        a.pose = {xy.x(), xy.y(), th_in};
         // Free play of the centre along the aperture: uniform over the part of the span the body fits in (variance
         // L²/12 of a uniform); the crossing's own σ adds to it. Along the normal: the crossing's σ.
         const float play = std::max(0.f, p.width - p.body_w);
@@ -83,7 +93,18 @@ namespace rc::passage
         a.cov.setZero();
         a.cov.topLeftCorner<2, 2>() = S;
         a.cov(2, 2) = var_th;
-        return a;
+        float p_fwd = 0.5f;
+        if (std::isfinite(p.heading))
+        {
+            const float mu = std::remainder(p.heading - th_in, 2.f * static_cast<float>(M_PI));
+            const float sg = std::max(p.sig_heading, 1e-3f);   // 1e-3: numerical (a zero σ is a legal input)
+            const float h = 0.5f * static_cast<float>(M_PI);
+            p_fwd = std::clamp(phi((h - mu) / sg) - phi((-h - mu) / sg), 0.f, 1.f);
+        }
+        Anchor b = a;
+        b.pose.z() = std::remainder(th_in + static_cast<float>(M_PI), 2.f * static_cast<float>(M_PI));
+        a.w = p_fwd; b.w = 1.f - p_fwd;
+        return {a, b};
     }
 
     /// Carry the anchor by one odometry increment `u` = (dx, dy, dθ) in the ROBOT frame, with its covariance `Su`

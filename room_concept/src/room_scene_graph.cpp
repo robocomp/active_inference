@@ -1079,6 +1079,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     last_crossing_ = best;
     last_crossing_p_open_ = best_ap->p_open;
     last_crossing_door_id_ = best_ap->id;
+    last_crossing_heading_ = std::atan2((res.estimate_valid ? res.estimate_pose : res.robot_pose).linear()(1, 0),
+                                        (res.estimate_valid ? res.estimate_pose : res.robot_pose).linear()(0, 0));
+    last_crossing_sig_heading_ = std::sqrt(std::max(0.f, (res.estimate_valid ? res.estimate_covariance : res.covariance)(2, 2)));
     if (params_->STARTUP_PROTO_ENABLED)
     {
         rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross,
@@ -1637,6 +1640,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
         pg.sig_s  = last_crossing_.sig_s;    pg.sig_t  = last_crossing_.sig_t;
         pg.s      = last_crossing_.s;        pg.u      = last_crossing_.u;
         pg.door_id = last_crossing_door_id_;
+        pg.heading = last_crossing_heading_;  pg.sig_heading = last_crossing_sig_heading_;   // forward or backing through
         room_concept_->note_passage_handover(pg);
         std::string reason;
         promote_startup_proto(reason, true);

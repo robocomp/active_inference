@@ -64,17 +64,25 @@ namespace rc
             // LOST is not KIDNAPPED. With the tracker lost, odometry still carries the door anchor (passage_prior.h),
             // unless the robot was carried off since the hand-over: the hazard h per frame, over the frames since.
             double b = std::log(pl) + log_uniform;
-            if (rt_.door_anchor.has_value())
+            if (not rt_.door_anchor.empty())
             {
                 const double h = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
                 const double p_kid = 1.0 - std::pow(1.0 - h, static_cast<double>(rt_.door_anchor_frames + 1));
-                Eigen::Vector3f da = pose - rt_.door_anchor->pose;
-                da.z() = std::remainder(da.z(), 2.f * static_cast<float>(M_PI));
-                const Eigen::LDLT<Eigen::Matrix3f> la(Eigen::Matrix3f(rt_.door_anchor->cov + basin + cov));
-                const double ma = da.dot(la.solve(da));
-                const double lda = la.vectorD().array().abs().max(1e-30f).log().sum();
-                const double log_door = std::isfinite(ma) ? -0.5 * ma - 0.5 * (3.0 * std::log(2.0 * M_PI) + lda)
-                                                          : -std::numeric_limits<double>::infinity();
+                // log Σ_c w_c N(pose; anchor_c) — forward and reversed through the door (passage_prior.h).
+                double log_door = -std::numeric_limits<double>::infinity();
+                for (const auto& an : rt_.door_anchor)
+                {
+                    if (not (an.w > 0.f)) continue;
+                    Eigen::Vector3f da = pose - an.pose;
+                    da.z() = std::remainder(da.z(), 2.f * static_cast<float>(M_PI));
+                    const Eigen::LDLT<Eigen::Matrix3f> la(Eigen::Matrix3f(an.cov + basin + cov));
+                    const double ma = da.dot(la.solve(da));
+                    const double lda = la.vectorD().array().abs().max(1e-30f).log().sum();
+                    if (not std::isfinite(ma)) continue;
+                    const double lc = std::log(static_cast<double>(an.w)) - 0.5 * ma - 0.5 * (3.0 * std::log(2.0 * M_PI) + lda);
+                    const double hm = std::max(log_door, lc);
+                    log_door = hm + std::log(std::exp(log_door - hm) + std::exp(lc - hm));
+                }
                 const double x1 = std::log1p(-p_kid) + log_door, x2 = std::log(p_kid) + log_uniform;
                 const double hx = std::max(x1, x2);
                 b = std::log(pl) + hx + std::log(std::exp(x1 - hx) + std::exp(x2 - hx));
@@ -134,7 +142,7 @@ namespace rc
         // built on (pred[k] − est[k−1], the publisher's measured-motion identity), in the robot frame of est[k−1], with
         // the selected motion prior's covariance rotated into that frame. Never the tracker's correction: the anchor
         // exists for the frames in which the tracker cannot be trusted.
-        if (not rt_.door_anchor.has_value() or not rt_.anchor_prev_valid)
+        if (rt_.door_anchor.empty() or not rt_.anchor_prev_valid)
             return;
         const Eigen::Vector3f& b = rt_.anchor_prev_est;
         const float c = std::cos(b.z()), sn = std::sin(b.z());
@@ -150,7 +158,7 @@ namespace rc
         }
         if (u.allFinite())
         {
-            rc::passage::propagate(*rt_.door_anchor, u, Su);
+            for (auto& an : rt_.door_anchor) rc::passage::propagate(an, u, Su);
             ++rt_.door_anchor_frames;
         }
     }

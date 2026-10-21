@@ -7,16 +7,14 @@
 // NOT used here at all. This asks a purely geometric question about the belief we already hold:
 //
 //   p_geom  = P(body centre past the aperture line) · P(centre within the aperture span)
-//   p_cross : logit(p_cross) = logit(p_open) + logit(p_geom)
+//   p_cross = p_open · p_geom   (a CONJUNCTION since 2026-10-13 — see evaluate(); the logit sum below is history)
 //
 //   · p_open — door_concept's own marginalised belief that the leaf leaves a passable gap. A robot the
 //     pose says is "past" a SHUT door is a robot whose pose is wrong, and p_open is what says so.
-//   ★FUSED AS EVIDENCE, NOT MULTIPLIED IN AS A CAP. A product p_open·p_geom can never exceed p_open, and
-//     door_open_prob is a weak belief: measured 2026-09-14 on the live apartamento it never rose above 0.14
-//     (the leaf-angle posterior is nearly flat — see door_concept). A cap would make the proto-room
-//     unreachable. Two independent pieces of evidence about the same binary question add in log-odds: a
-//     confident "the centre is past the line" outweighs a lukewarm door belief, while a door believed
-//     firmly SHUT (logit ≪ 0) still vetoes a pose that claims to be through it.
+//   ★ HISTORY: until 2026-10-13 the two were FUSED in log-odds (fuse(), kept below), because door_open_prob never
+//     rose above 0.14 then and a product would have capped the birth. That let a confident open door outvote a
+//     confident "not past" (try35: a room born 3.5 m from its door); p_open now reaches ≈1 for an open door, so the
+//     honest conjunction is used (evaluate()).
 //   · past the line — s is the signed distance of the robot centre beyond the aperture, measured AWAY
 //     from the room interior; the robot is in the next room once its centre is past (s > 0; R1b). σ_s is the pose covariance
 //     projected on the aperture normal, so an uncertain pose gives a soft answer, not a confident one.
@@ -103,7 +101,7 @@ namespace rc::crossing
 
     struct Crossing
     {
-        float p_cross  = 0.f;   ///< logit-sum of p_open and p_geom = P(past)·P(within span)
+        float p_cross  = 0.f;   ///< p_open · p_geom, p_geom = P(centre past)·P(within span)
         float p_geom   = 0.f;   ///< P(past) · P(within span), the pose's own answer
         float p_past   = 0.f;   ///< P(body centre past the aperture line), no p_open, no span
         float p_span   = 0.f;   ///< P(centre within the aperture span), the other half of p_geom
@@ -122,7 +120,7 @@ namespace rc::crossing
     // EVERY aperture evaluated, EVERY cycle — not just the winner. A proto-room that is not born is
     // diagnosed by which FACTOR fell short (p_open vs p_past vs p_span), and the call site sees only
     // the argmax, which cannot show that. The terms are fused in log-odds, so the row carries each one
-    // separately: logit(p_cross) = logit(p_open) + logit(p_geom), p_geom = p_past · p_span.
+    // separately: p_cross = p_open · p_geom, p_geom = p_past · p_span.
     // Truncated once per process run, like tmp/door_filter.csv.
     // ★WRITTEN THROUGH THE CLASSIC LOCALE. These machines run LANG=es_ES.UTF-8 and Qt calls
     // setlocale(LC_ALL,"") at startup; an un-imbued stream can emit a COMMA decimal separator into a

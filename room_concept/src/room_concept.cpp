@@ -456,6 +456,8 @@ namespace rc
                 rerun_logger_.log_frame(std::move(rf));
             }
 
+                // A held relocalisation episode: the published σ carries the mixture's spread (Task R1b, room_concept_reloc).
+                res.covariance += rt_.held_spread;
                 // ===== 7. PUBLISH RESULT =====
                 {
                     std::lock_guard lock(result_mutex_);
@@ -538,7 +540,7 @@ namespace rc
         // The passage of the previous hand-over belonged to the room being left (Task R1b): a recall re-supplies its own
         // through note_passage_handover after this call; a room born to be surveyed has none.
         rt_.passage.reset();
-        rt_.door_anchor.reset();
+        rt_.door_anchor.clear();
         // ★ OUT OF A ROOM THIS RUN LEARNT (2026-10-11, door crossing): its map layout was ADOPTED as the given room and
         //   plain SLAM kept running as its shadow. Both flags are released here — while map_layout_adopted_ stays set,
         //   the old room's layout keeps overwriting the derived polygon every frame and the new room is never learnt.

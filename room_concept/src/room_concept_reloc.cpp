@@ -271,13 +271,11 @@ namespace rc
                 cov += m.weight * (m.cov + d * d.transpose());
             }
             ep.cov_xx = cov(0, 0); ep.cov_yy = cov(1, 1); ep.cov_tt = cov(2, 2);
+            // Taken at its own optimum when it travelled; otherwise the pose stays and the spread is PUBLISHED on every
+            // frame the episode stays open (relocalisation_step → rt_.held_spread → run()), not written into the
+            // tracker's covariance once (reviewer: later held frames went back to cm σ while the twin pended).
             if (keep_travelled)
-                commit_relocalised_pose(held.pose, cov);   // taken at its own optimum
-            else
-            {
-                current_covariance = cov;                  // same pose, honest spread; the window keeps its slots
-                if (last_update_result.ok) last_update_result.covariance = cov;
-            }
+                commit_relocalised_pose(held.pose, cov);
             rivals_.clear();
             const double l_keep = log_post[static_cast<std::size_t>(keep_idx)];
             for (std::size_t k = 0; k < res.modes.size(); ++k)
@@ -395,7 +393,7 @@ namespace rc
                 std::scoped_lock lk(passage_mutex_);
                 rt_.passage = std::exchange(rt_.pending_passage, std::nullopt);
             }
-            rt_.door_anchor.reset();
+            rt_.door_anchor.clear();
             rt_.door_anchor_frames = 0;
             if (rt_.passage.has_value())
                 rt_.door_anchor = rc::passage::anchor_at_handover(*rt_.passage);
@@ -457,6 +455,30 @@ namespace rc
                 rt_.hold_open = false;
             if (p_lost >= 0.5f and not rt_.hold_open)   // ⚠ the equal-cost Bayes decision, flagged
                 relocalise_from_belief(lidar_points, s, p_lost);
+            // RETIRE THE DOOR ANCHOR once its window is over: the body has left the passage (doorway term past ½) AND
+            // tracking has recovered (P(track) past ½) — the same equal-cost decision as the trigger, both flagged.
+            // Its information is about the hand-over; carried for minutes by odometry that over-reports rotation ~41%
+            // on Shadow (memory: command-prior-over-rotates-shadow), it would become a biased prior, not a helpful one.
+            if (not rt_.door_anchor.empty() and rt_.passage_term < 0.5f and belief_[kTrack] >= 0.5)
+                rt_.door_anchor.clear();
+            // A HELD episode publishes its mixture spread on EVERY frame it stays open (added to the next published
+            // covariance in run()): Σ_k w_k d_k d_kᵀ over the held pose (d = 0) and its rivals, w from the carried odds.
+            rt_.held_spread.setZero();
+            if (rt_.hold_open and not rivals_.empty() and model_ != nullptr and model_->has_state())
+            {
+                const auto st = model_->get_state();
+                const Eigen::Vector3f cur(st[2], st[3], st[4]);
+                double hi = 0.0;
+                for (const auto& rv : rivals_) hi = std::max(hi, static_cast<double>(rv.llr));
+                double z = std::exp(-hi);
+                for (const auto& rv : rivals_) z += std::exp(static_cast<double>(rv.llr) - hi);
+                for (const auto& rv : rivals_)
+                {
+                    Eigen::Vector3f d = rv.pose - cur;
+                    d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+                    rt_.held_spread += static_cast<float>(std::exp(static_cast<double>(rv.llr) - hi) / z) * (d * d.transpose());
+                }
+            }
             pose_undecided_.store(belief_[kLost] >= 0.5 or rt_.hold_open, std::memory_order_relaxed);
         }
         else
@@ -464,6 +486,7 @@ namespace rc
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
             rival_ref_valid_ = false;
             rt_.hold_open = false;
+            rt_.held_spread.setZero();
             reset_lost_belief();
             pose_undecided_.store(false, std::memory_order_relaxed);
         }

@@ -19,7 +19,8 @@ namespace rc::reloc
         std::uint64_t searches = 0;                              ///< searches fired by the lost belief (diagnostic)
         std::optional<rc::passage::Passage> pending_passage;     ///< set by note_passage_handover, consumed with the reset
         std::optional<rc::passage::Passage> passage;             ///< the passage of the last hand-over
-        std::optional<rc::passage::Anchor>  door_anchor;         ///< carried by odometry since that hand-over
+        std::vector<rc::passage::Anchor>    door_anchor;         ///< forward / reversed components, carried by odometry
+        Eigen::Matrix3f held_spread = Eigen::Matrix3f::Zero();   ///< while a held episode is open: Σ w_k d_k d_kᵀ
         int   door_anchor_frames = 0;                            ///< frames since: the kidnap hazard's exposure
         Eigen::Vector3f anchor_prev_est = Eigen::Vector3f::Zero();   ///< the pose the next prediction is built on
         bool  anchor_prev_valid = false;

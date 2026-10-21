@@ -67,6 +67,9 @@ namespace rc
         static void  relocalise(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts, float s, float p)
         { r.relocalise_from_belief(pts, s, p); }
         static bool  held(RoomConcept& r) { return r.rt_.last_search_held; }
+        static bool  anchor_alive(RoomConcept& r) { return not r.rt_.door_anchor.empty(); }
+        static Eigen::Matrix3f held_spread(RoomConcept& r) { return r.rt_.held_spread; }
+        static void  set_hold_open(RoomConcept& r) { r.rt_.hold_open = true; r.rt_.last_search_held = true; }
         static bool  hold_open(RoomConcept& r) { return r.rt_.hold_open; }
         static std::uint64_t searches(RoomConcept& r) { return r.rt_.searches; }
         static double lost(RoomConcept& r) { return r.belief_[RoomConcept::kLost]; }
@@ -795,7 +798,7 @@ int main()
         rc::passage::Passage pg;
         pg.centre = {1.2f, -2.f}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
         pg.r_body = 0.24f; pg.body_w = 0.46f; pg.body_l = 0.48f; pg.sig_s = 0.03f; pg.sig_t = 0.03f; pg.s = 0.06f;
-        auto run_arm = [&](bool anchor)
+        auto run_arm = [&](bool anchor, bool reverse)
         {
             std::mt19937 rng(6060);
             std::uniform_real_distribution<float> uj(-0.15f, 0.15f);
@@ -804,7 +807,8 @@ int main()
             {
                 rc::RoomConcept rcn;
                 rcn.set_polygon_room(room.poly);
-                const float th = rc::passage::heading_along(pg.n_in) + 0.5f * uj(rng);
+                // reverse: the robot BACKED through the door (a doorway backoff re-crossing into the room it left).
+                const float th = rc::passage::heading_along(pg.n_in) + (reverse ? kPi : 0.f) + 0.5f * uj(rng);
                 const Eigen::Vector3f truth(1.2f + uj(rng), -2.f + 0.35f + uj(rng), th);   // a few frames in
                 // The hand-over frame (consumes the reset) at the crossing point, then the tracker's divergence.
                 rcn.set_robot_pose(1.2f, -1.94f, th, false);
@@ -815,12 +819,16 @@ int main()
                 r.robot_pose.linear() = Eigen::Rotation2Df(th).toRotationMatrix();
                 r.covariance = Eigen::Vector3f(9e-4f, 9e-4f, 1e-4f).asDiagonal();
                 r.pred_x = 1.2f; r.pred_y = -1.94f; r.pred_theta = th;
-                if (anchor) rcn.note_passage_handover(pg); else Acc::plain_reset(rcn);
+                auto pgr = pg;
+                pgr.heading = th; pgr.sig_heading = 0.05f;   // the pre-clamp heading at the crossing
+                if (anchor) rcn.note_passage_handover(pgr); else Acc::plain_reset(rcn);
                 const auto pts0 = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
                 Acc::step8(rcn, r, pts0);
-                // The robot drove to `truth` (odometry: a straight step), and the tracker diverged meanwhile.
+                // The robot drove to `truth` (odometry: a straight step), and the tracker diverged meanwhile — its misfit
+                // never recovered after the doorway, so the anchor's window is still open (it retires only on recovery).
                 r.pred_x = truth.x(); r.pred_y = truth.y(); r.pred_theta = truth.z();
                 r.robot_pose.translation() = truth.head<2>();
+                r.sdf_mse = 0.4f; r.pred_sdf_median = 0.4f;
                 Acc::step8(rcn, r, pts0);
                 rcn.set_robot_pose(-1.5f, 0.8f, th + 1.2f, false);
                 rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
@@ -832,12 +840,14 @@ int main()
             }
             return std::pair{truth_n, twin_n};
         };
-        const auto [t_a, w_a] = run_arm(true);
-        const auto [t_n, w_n] = run_arm(false);
-        const bool pass = t_a == 20 and w_a == 0;
+        const auto [t_a, w_a] = run_arm(true, false);
+        const auto [t_n, w_n] = run_arm(false, false);
+        const auto [t_r, w_r] = run_arm(true, true);
+        const bool pass = t_a == 20 and w_a == 0 and t_r == 20 and w_r == 0;
         r1_failures += pass ? 0 : 1;
         std::printf("  M door anchor, tracker diverged, symmetric twins    with the anchor: truth %d / twin %d of 20 (expect 20/0); "
-                    "without: truth %d / twin %d (the coin flip) — %s\n", t_a, w_a, t_n, w_n, pass ? "PASS" : "FAIL");
+                    "REVERSED crossing: truth %d / twin %d (expect 20/0); without: truth %d / twin %d (the coin flip) — %s\n",
+                    t_a, w_a, t_r, w_r, t_n, w_n, pass ? "PASS" : "FAIL");
     }
 
     // N (Task R1b, reviewer I-4): A HELD EPISODE WHOSE RIVALS ARE ALL WRONG ENDS. The pose is right, the carried rivals
@@ -952,6 +962,82 @@ int main()
                     "(the live defect), misplaced + the crossing's passage %.3f m (expect ≈ correct); frames with a separate "
                     "prediction statistic %d (expect >0) — %s\n",
                     s_ideal, s_mis, s_fix, n_pred_seen, pass ? "PASS" : "FAIL");
+    }
+
+    // P (Task R1b follow-up): THE ANCHOR RETIRES, AND A HELD EPISODE PUBLISHES ITS SPREAD ON EVERY FRAME.
+    //    (a) After a hand-over the robot drives into the room and tracks well: once the doorway term has expired and
+    //        P(track) has recovered, the door anchor (odometry since the door; Shadow's odometry over-reports rotation
+    //        ~41%) is dropped. (b) A held twin keeps the published σ at the mixture's spread on the frames AFTER the
+    //        hold (reviewer: only the hold frame got it).
+    {
+        const auto& room = all_rooms[0];
+        rc::passage::Passage pg;
+        pg.centre = {1.2f, -2.f}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
+        pg.r_body = 0.24f; pg.sig_s = 0.03f; pg.sig_t = 0.03f; pg.s = 0.06f;
+        pg.heading = rc::passage::heading_along(pg.n_in); pg.sig_heading = 0.05f;
+        std::mt19937 rng(1212);
+        rc::RoomConcept rcn;
+        rcn.set_polygon_room(room.poly);
+        Eigen::Vector3f p(1.2f, -1.94f, pg.heading);
+        rcn.set_robot_pose(p.x(), p.y(), p.z(), false);
+        const auto pts = to3(synth_scan(room.poly, Eigen::Vector3f(1.2f, -1.0f, pg.heading), 360, 0.02f, 0.30f, rng));
+        auto frame = [&](float s)
+        {
+            rc::RoomConcept::UpdateResult r;
+            r.ok = true; r.sdf_mse = s; r.pred_sdf_median = s;
+            r.robot_pose = Eigen::Affine2f::Identity();
+            r.robot_pose.translation() = p.head<2>();
+            r.robot_pose.linear() = Eigen::Rotation2Df(p.z()).toRotationMatrix();
+            r.covariance = Eigen::Vector3f(9e-4f, 9e-4f, 1e-4f).asDiagonal();
+            r.pred_x = p.x(); r.pred_y = p.y(); r.pred_theta = p.z();
+            rcn.set_robot_pose(p.x(), p.y(), p.z(), false);
+            Acc::step8(rcn, r, pts);
+        };
+        frame(0.03f);
+        rcn.note_passage_handover(pg);
+        frame(0.03f);
+        const bool alive_at_handover = Acc::anchor_alive(rcn);
+        int retired_at = -1;
+        for (int f = 0; f < 60 and retired_at < 0; ++f)
+        {
+            p.y() += 0.015f;
+            frame(0.03f);
+            if (not Acc::anchor_alive(rcn)) retired_at = f + 1;
+        }
+        const float depth = p.y() + 2.f;
+
+        // (b) a held episode (the twin carried as a rival at even odds, as msprt_decide leaves it), then three frames
+        //     with the misfit still high so the episode stays open.
+        rc::RoomConcept rh;
+        rh.set_polygon_room(room.poly);
+        const Eigen::Vector3f truth(-1.5f, 0.6f, 0.4f);
+        rh.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+        Acc::rivals(rh).clear();
+        Acc::rivals(rh).push_back({room.symmetries.front()(truth), 0.f});
+        Acc::set_ref(rh, truth);
+        Acc::set_hold_open(rh);
+        const auto scan = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
+        const bool held = true;
+        float spread_after = 0.f;
+        for (int f = 0; f < 3; ++f)
+        {
+            rc::RoomConcept::UpdateResult r;
+            r.ok = true; r.sdf_mse = 0.4f; r.pred_sdf_median = 0.4f;
+            r.robot_pose = Eigen::Affine2f::Identity();
+            r.robot_pose.translation() = truth.head<2>();
+            r.robot_pose.linear() = Eigen::Rotation2Df(truth.z()).toRotationMatrix();
+            r.pred_x = truth.x(); r.pred_y = truth.y(); r.pred_theta = truth.z();
+            Acc::step8(rh, r, scan);
+            spread_after = Acc::held_spread(rh).topLeftCorner<2, 2>().trace();
+        }
+        const float twin_d2 = (room.symmetries.front()(truth).head<2>() - truth.head<2>()).squaredNorm();
+        const bool pass = alive_at_handover and retired_at > 0 and depth > pg.r_body and held
+                          and spread_after > 0.1f * twin_d2;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  P anchor retires / held spread published             anchor alive at the hand-over %d, retired after %d "
+                    "frames at depth %.2f m (expect > r_body); held %d, published xy variance 3 frames on %.2f m² (twin %.2f m² "
+                    "away; expect a sizeable share) — %s\n", alive_at_handover ? 1 : 0, retired_at, depth, held ? 1 : 0,
+                    spread_after, twin_d2, pass ? "PASS" : "FAIL");
     }
 
     // L (Task R1b): THE DOORWAY PAUSE. rtD1g2's missed hand-over, replayed through the real crossing test
