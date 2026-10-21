@@ -145,11 +145,13 @@ namespace rc
         static constexpr float kBeyondExtentM = 20.f;
 
     private:
-        /// Door node id -> its aperture segment in the room frame, resolved once. Nothing here
-        /// expires on a timer: a segment is dropped when its door leaves the graph, and re-resolved
-        /// if the door's wall is re-parented (which changes the node's RT edge, not this cache — see
-        /// refresh() for the one case that forces a re-walk).
-        std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> cache_;
+        /// Door node id -> its aperture segment in the room frame, and the door's OWN RT edge (parent → door:
+        /// translation ++ rotation) it was resolved from. Nothing here expires on a timer: a segment is dropped when its
+        /// door leaves the graph, and RE-WALKED when door_concept rewrites that edge (Task R2: it used to be walked once
+        /// per node and reused for the node's whole life, so a door the producer later re-fitted stayed where it was first
+        /// read — live rtD1i, door_5 read vertical 1.1 s after each restore and frozen there for the visit).
+        struct Cached { std::pair<Eigen::Vector2f, Eigen::Vector2f> seg; std::vector<float> rt; };
+        std::unordered_map<std::uint64_t, Cached> cache_;
         long resolves_ = 0;
         Tally tally_;
         /// ★ OCCLUSION HOLDS (2026-10-18). The apertures emitted last refresh, and those whose door node has since

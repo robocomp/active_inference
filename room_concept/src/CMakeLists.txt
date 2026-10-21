@@ -180,6 +180,18 @@ target_include_directories(reloc_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../s
 target_link_libraries(reloc_selftest ${LIBS})
 set_target_properties(reloc_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── door_apertures_selftest ───────────────────────────────────────────────────
+# DoorApertures::refresh on a REAL DSR graph (private DDS domain 73): the aperture cache follows the door's own RT
+# edge (Task R2). EXCLUDE_FROM_ALL. Build and run with:
+#   make -C build door_apertures_selftest && ../bin/door_apertures_selftest
+add_executable(door_apertures_selftest EXCLUDE_FROM_ALL
+  ../tools/door_apertures_selftest.cpp
+)
+target_include_directories(door_apertures_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_compile_definitions(door_apertures_selftest PRIVATE SHADOW_JSON="${CMAKE_CURRENT_LIST_DIR}/../../robot_concept/shadow.json")
+target_link_libraries(door_apertures_selftest ${LIBS})
+set_target_properties(door_apertures_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── corner_gather_test ────────────────────────────────────────────────────────
 # Offline check that the layout-wide explain-away removes a perpendicular face from a wall fit
 # WITHOUT letting a collinear neighbour starve it (see the file header for the two live failures it

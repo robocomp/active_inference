@@ -7,6 +7,7 @@
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_rt_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
 #include <QDebug>
@@ -43,7 +44,31 @@ namespace rc
                                                      const std::string& room_frame)
     {
         std::vector<DoorAperture> out;
-        std::unordered_map<std::uint64_t, std::pair<Eigen::Vector2f, Eigen::Vector2f>> kept;
+        std::unordered_map<std::uint64_t, Cached> kept;
+        // The door's own placement: its parent and the NEWEST block of the parent → door RT edge (what door_concept
+        // writes when it re-fits the aperture). Read through RT_API, never the ts == 0 transform cache: that cache is
+        // what made the re-walk return the old placement in door_apertures_selftest (a rewritten edge, the shared
+        // instance still serving the first transform). RT_API is built only when some door is read at all.
+        std::unique_ptr<DSR::RT_API> rt_api;
+        struct Own { std::uint64_t parent = 0; Eigen::Matrix4d local = Eigen::Matrix4d::Identity(); std::vector<float> key; };
+        const auto own_placement = [&](const DSR::Node& n) -> Own
+        {
+            Own o;
+            const auto par = G.get_attrib_by_name<parent_att>(n);
+            if (not par.has_value()) return o;
+            const auto pn = G.get_node(par.value());
+            if (not pn.has_value()) return o;
+            if (not rt_api) rt_api = G.get_rt_api();
+            const auto e = rt_api->get_edge_RT(pn.value(), n.id());
+            if (not e.has_value()) return o;
+            const auto m = rt_api->get_edge_RT_as_rtmat(e.value());
+            if (not m.has_value() or not m->matrix().allFinite()) return o;
+            o.parent = par.value();
+            o.local = m->matrix();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) o.key.push_back(static_cast<float>(o.local(r, c)));
+            return o;
+        };
         tally_ = Tally{};
         if (room_frame != frame_)   // another room: its doorways are not this one's, held or not
         {
@@ -81,20 +106,45 @@ namespace rc
             const float p_open = measured ? p.value() : -1.f;
             if (p_open > 0.f) ++tally_.believed_open;
 
-            // ── THE EXPENSIVE HALF: walked ONCE per door, not once per cycle ─────────────────────
+            // ── THE EXPENSIVE HALF: walked once per door PLACEMENT, not once per cycle ───────────
+            // Re-walked when the door's own RT edge changed since the walk — door_concept re-fitted the aperture — and
+            // only then: a change of the room frame alone (the hand-over churn) does not re-walk (Task R2).
             auto it = cache_.find(n.id());
+            const auto own = own_placement(n);
+            if (it != cache_.end() and it->second.rt != own.key)
+            {
+                cache_.erase(it);
+                it = cache_.end();
+            }
             if (it == cache_.end())
             {
                 const auto w = G.get_attrib_by_name<width_m_att>(n);
                 if (not w.has_value() or not std::isfinite(w.value()) or w.value() <= 0.f)
                 { ++tally_.no_width; continue; }
 
-                // room <- door, latest (ts == 0). Returns nullopt at any missing link in the chain
-                // rather than throwing, so a door whose wall has gone is simply not an aperture yet —
-                // check the optional, never dereference it (CLAUDE.md, and still true).
-                const auto T = inner.get_transformation_matrix(room_frame, n.name());
-                if (not T.has_value()) { ++tally_.no_transform; continue; }
-                const Eigen::Matrix4d M = T.value().matrix();
+                // room <- door = (room <- parent, latest, ts == 0) ∘ (parent <- door, the edge just read). The cached chain
+                // only ever covers links ABOVE the door, which do not change when door_concept re-fits it; the door's own
+                // link is the fresh read. Every optional is checked (CLAUDE.md): a missing link ⇒ not an aperture yet.
+                Eigen::Matrix4d M;
+                if (own.parent == 0)
+                {
+                    const auto T = inner.get_transformation_matrix(room_frame, n.name());
+                    if (not T.has_value()) { ++tally_.no_transform; continue; }
+                    M = T.value().matrix();
+                }
+                else
+                {
+                    const auto par = G.get_node(own.parent);
+                    if (not par.has_value()) { ++tally_.no_transform; continue; }
+                    Eigen::Matrix4d up = Eigen::Matrix4d::Identity();
+                    if (par->name() != room_frame)
+                    {
+                        const auto T = inner.get_transformation_matrix(room_frame, par->name());
+                        if (not T.has_value()) { ++tally_.no_transform; continue; }
+                        up = T.value().matrix();
+                    }
+                    M = up * own.local;
+                }
                 if (not M.allFinite()) { ++tally_.no_transform; continue; }
 
                 const Eigen::Vector2f c(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)));
@@ -105,18 +155,18 @@ namespace rc
                 const Eigen::Vector2f dir = u.normalized() * (0.5f * w.value());
                 ++resolves_;
                 qInfo().noquote() << QString("[room][doors] aperture resolved for %1: (%2,%3)-(%4,%5), "
-                                             "width %6 m — walked once, reused from here")
+                                             "width %6 m — reused until door_concept rewrites its RT edge")
                                          .arg(QString::fromStdString(n.name()))
                                          .arg((c - dir).x(), 0, 'f', 2).arg((c - dir).y(), 0, 'f', 2)
                                          .arg((c + dir).x(), 0, 'f', 2).arg((c + dir).y(), 0, 'f', 2)
                                          .arg(w.value(), 0, 'f', 2);
-                it = cache_.emplace(n.id(), std::make_pair(c - dir, c + dir)).first;
+                it = cache_.emplace(n.id(), Cached{std::make_pair(c - dir, c + dir), own.key}).first;
             }
 
             kept.insert(*it);
             DoorAperture ap;
-            ap.a = it->second.first;
-            ap.b = it->second.second;
+            ap.a = it->second.seg.first;
+            ap.b = it->second.seg.second;
             ap.p_open = p_open;
             // ★ π FROM THE LEAF ANGLE, NOT FROM PASSABILITY (2026-10-12). door_open_prob is P(clear span >= the
             //   ROBOT's passage width) — the right question for `cross`, the wrong one for a beam: a door ajar at
