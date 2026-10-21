@@ -53,3 +53,14 @@ scenarios (a) off-centre fast doorway → no hand-back, (b) blocked doorway → 
   values away from the doorway unchanged.
 - [ ] Implement; tests + 11 scenarios green; then the controller session runs `round_trips_door1.sh` (3 × 2 legs).
   Commit.
+
+### Task 4: Mission `explore room_X` selects only affordances in room_X (user decision 2026-10-21)
+**Files:** the selection path (`controller_world_model.cpp` `read_target_in_room` / the affordance selector it calls;
+`controller_session.cpp` ~:984-992 where `command_explore_` opens the contest; `specificworker_mission.cpp` explore
+step), tests in `controller/tests/`.
+- [ ] Failing test: with an `explore room_1` order active, offered affordances targeting room_1 (room exploration, a door
+  in room_1, a look at a remembered door of room_1, an object in room_1) are eligible; one whose target is in room_2 is
+  never selected even with the highest gain; with no mission the behaviour is unchanged; cross steps unchanged.
+- [ ] Implement: the explore order carries its room; the contest's candidate set is filtered by target room (resolve
+  the target's room from its RT parent chain / the affordance's object; an unresolvable target is NOT in room_X).
+  Log the excluded candidates once per change in the `[aff-select]` line. Tests green. Commit by pathspec.
