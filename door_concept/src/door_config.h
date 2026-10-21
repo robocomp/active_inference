@@ -110,6 +110,10 @@ struct DoorPragmaticCfg
     float value_cross    = 0.3f;
 
     float approach_timeout_s = 60.0f;
+    // D-A: τ of a hand-back's evidence that its standpoint is blocked (door_approach_pose.h). How long what blocks a
+    // standpoint (a chair, a person, the robot's own map catching up) is expected to stay there — a model parameter, not
+    // a gate: the evidence fades continuously.
+    float approach_refusal_memory_s = 60.0f;
     float open_timeout_s     = 12.0f;   // provider latency + swing time, not a navigation budget
     float cross_timeout_s    = 40.0f;
 

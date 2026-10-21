@@ -13,6 +13,7 @@
 #include "../../common/exclusion/exclusion.h"        // (kept: users of this header relied on it for rc::exclusion)
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/pragmatic_affordance/pragmatic_affordance.h" // rc::pragmatic (SHARED) — approach/open/cross
+#include "door_approach_pose.h"  // rc::door::ApproachMemory — hand-backs as decaying evidence (D-A)
 #include "door_pragmatics.h"   // rc::door::InteractionState — the three preconditions
 
 namespace rc {
@@ -41,6 +42,12 @@ struct DoorInstance : DoorFitState
     // affordances' completion predicates and (b) used to decide what to offer. Held on the instance so
     // the dashboard and the CSV logs read the SAME numbers the decisions were taken on.
     rc::door::InteractionState interaction{};
+
+    // D-A: the approach standpoints the controller handed back (Unreachable / Infeasible), as DECAYING evidence that
+    // they are blocked (door_approach_pose.h), and the pose currently offered (the one a hand-back refers to).
+    rc::door::ApproachMemory approach_memory;
+    Eigen::Vector2f approach_offered_xy{0.0f, 0.0f};
+    bool approach_offered_valid = false;
 };
 
 }  // namespace rc

@@ -2491,10 +2491,24 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         rc::pragmatic::Offer o;
         o.known = located;
         o.p     = 1.0f;
-        // Middle of the actuation band, on the side of the aperture in the robot's own region of the room
-        // (both computed in compute_interaction_state, so the log and the offer cannot disagree).
-        const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, st.approach_standoff_m);
+        // ★D-A: the best standpoint in the actuation band on the robot's side (compute_interaction_state), given the
+        // standpoints the controller has handed back — P(reach)·P(not refused), door_approach_pose.h. With no hand-back
+        // this IS the band's midpoint on the normal (front_pose, as before). A changed pose bumps the epoch by itself.
+        const std::int64_t now_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
+        inst.approach_memory.prune(now_ms, pg.approach_refusal_memory_s);
+        rc::door::ApproachProblem apb;
+        apb.side = st.approach_side;
+        apb.d_min = st.safe_standoff_m;
+        apb.d_max = std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f);
+        apb.sigma = std::max(st.range_sigma_m, pg.pose_sigma_floor_m);
+        apb.needed_w = pg.robot_passage_width_m + pg.passage_margin_m;
+        apb.memory_s = pg.approach_refusal_memory_s;
+        apb.footprint_r = 0.5f * pg.robot_passage_width_m + pg.passage_margin_m;
+        const auto choice = rc::door::choose_approach_pose(inst.aperture, apb, inst.approach_memory, now_ms);
+        const auto& pose = choice.pose;
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
+        inst.approach_offered_xy = {pose.x, pose.y};
+        inst.approach_offered_valid = true;
         o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f);
         o.contract = rc::door::approach_contract(pg);
         o.why      = std::format("a located door can always be approached (P(reach)={:.2f} = P(open) {:.2f} mix of "
@@ -2737,8 +2751,21 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         inst.cross_side0 = std::numeric_limits<float>::quiet_NaN();
     }
     if (consume_completion_logged(inst, "approach", inst.aff_approach))
+    {
+        const auto outcome = inst.aff_approach.outcome();
         std::print("door_concept: [approach] {} finished, outcome = {} (P(reach)={:.2f})\n",
-                   inst.node_name, rc::affordance::to_string(inst.aff_approach.outcome()), st.p_reach);
+                   inst.node_name, rc::affordance::to_string(outcome), st.p_reach);
+        // ★D-A: a hand-back names a standpoint the robot could not use — remember it as decaying evidence; the next offer
+        // re-solves the pose around it (door_approach_pose.h) instead of re-arming the identical one.
+        if ((outcome == rc::affordance::Outcome::Unreachable or outcome == rc::affordance::Outcome::Infeasible)
+            and inst.approach_offered_valid)
+        {
+            inst.approach_memory.refuse(inst.approach_offered_xy, static_cast<std::int64_t>(rc::provenance::now_ms()));
+            std::print("door_concept: [approach] {} standpoint ({:.2f},{:.2f}) handed back — remembered as blocked "
+                       "(decays on {:.0f} s); the next offer is re-solved around it\n", inst.node_name,
+                       inst.approach_offered_xy.x(), inst.approach_offered_xy.y(), cfg_.pragmatic.approach_refusal_memory_s);
+        }
+    }
 }
 
 // ─── ONE request path: ask a provider to move a door ─────────────────────────────────────────────

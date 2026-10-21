@@ -102,6 +102,8 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
                 "");
         pg.approach_timeout_s    = getf("DoorAffordance.ApproachTimeoutS", pg.approach_timeout_s,
                 "");
+        pg.approach_refusal_memory_s = getf("DoorAffordance.ApproachRefusalMemoryS", pg.approach_refusal_memory_s,
+                "D-A: τ (s) of a handed-back approach standpoint's evidence that it is blocked (door_approach_pose.h)");
         pg.open_timeout_s        = getf("DoorAffordance.OpenTimeoutS", pg.open_timeout_s,
                 "provider latency + swing time, not a navigation budget");
         pg.cross_timeout_s       = getf("DoorAffordance.CrossTimeoutS", pg.cross_timeout_s,
