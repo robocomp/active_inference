@@ -51,6 +51,7 @@
  * Every graph access here is on the main thread (compute()), ts==0 on the main-thread-owned inner_eigen_.
  */
 
+#include "door_anchor_leaf_plane.h"   // the anchor's leaf hypotheses on the believed leaf plane (Task 5b)
 #include "specificworker.h"
 
 #include <algorithm>
@@ -1046,6 +1047,10 @@ void SpecificWorker::step_passage_anchor()
                                                          sy * 0.5f * pa.thickness, pa.axis_sign * near, sy, pa.clear_width,
                                                          std::clamp(inst->phi_est, 0.f, phi_max), inst->phi_sigma,
                                                          inst->hinge_llr, inst->swing_llr);
+            // Task 5b: onto the leaf plane door_concept believes in (DoorBeliefState::d, relative to the wall the anchor
+            // registers) — the controller's known-obstacle leaf and this agent's model are one (door_anchor_leaf_plane.h).
+            rc::door::place_leaves_on_plane(al, rc::door::anchor_leaf_plane_y(inst->ai2_belief.recess(), inst->dbg_reg.depth,
+                                                                              inst->dbg_reg.ok, pa.axis_sign));
         }
         if (not al.empty() != pa.leaf_published)
         {
