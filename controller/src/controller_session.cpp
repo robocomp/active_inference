@@ -3504,9 +3504,11 @@ void ControllerSession::reset_anchor_cross_state()
     last_judged_verdict_ = rc::StallVerdict::None;   // a window judged before this claim is not this claim's
     anchor_claim_since_ms_ = 0;                      // Task 3e: the next read stamps the claim's start
     anchor_prev_room_.reset();
-    anchor_lambda_ = rc::policy::kDoorwayAnchorLostPrior;
+    anchor_lost_ = {};
     anchor_parked_logged_ = false;
     policy_goal_line_known_ = false;
+    doorway_belief_ = {};
+    doorway_belief_t_ = -1.0;
 }
 
 // ★ Task 3e (2) — rtD1h leg 5 attempt 2. ([Policy] Enabled only: the old chain's servo path is unchanged for the A/B.)
@@ -3518,8 +3520,9 @@ void ControllerSession::reset_anchor_cross_state()
 //       published it as a wait pose; `engaged` (driven on a sighting in this attempt) made the controller STOP and wait 40 s for
 //       an anchor 90° to its left instead of turning toward it. Each newer block is scored against the last one
 //       (rc::policy::p_reinitialised, the two-hypothesis test door_concept's own belief_lost uses); where re-initialisation is
-//       the MAP (P > 1/2) `engaged` ends — the wait turns toward the new pose — and the anchor's lost belief rises
-//       (anchor_lost_after_reinit), which the goal line's MAP reads.
+//       the MAP (P > 1/2, under the anchor's CURRENT P(lost) as prior) `engaged` ends — the wait turns toward the new pose.
+//   (c) Fix round 1 (I-2): P(lost) itself is RECURSIVE (rc::policy::AnchorLostBelief): every newer block moves it — it falls on
+//       a confirmed continuation, rises on a jump, relaxes toward the prior by the switching hazard — and the goal line reads it.
 void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
 {
     if (not anchor_cross_.has_value() or not policy_enabled()) return;
@@ -3552,15 +3555,15 @@ void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
                                                     double(policy_pose_xy_std_) * policy_pose_xy_std_ + dv * dv,
                                                     double(policy_pose_theta_std_) * policy_pose_theta_std_ + dw * dw).asDiagonal();
         const double range = a.pose.x.head<2>().norm();
-        const double p = rc::policy::p_reinitialised(*anchor_prev_room_, cur, a.width_m, robot_cov, range);
+        const double before = anchor_lost_.lambda;
+        const double dt = std::max<std::int64_t>(0, a.pose.stamp_ms - anchor_prev_room_->stamp_ms) * 1e-3;
+        const double p = anchor_lost_.observe(*anchor_prev_room_, cur, a.width_m, robot_cov, range, dt);
         if (p > 0.5)   // the MAP of {continuation, re-initialisation}
         {
-            const double before = anchor_lambda_;
-            anchor_lambda_ = rc::policy::anchor_lost_after_reinit(anchor_lambda_, p);
             const Eigen::Vector3d d = cur.x - anchor_prev_room_->x;
             std::println("[anchor] cross: {} RE-INITIALISED ({:.2f} m, {:+.1f} deg from its last block; P {:.3f}) — P(anchor lost) "
-                         "{:.2f} -> {:.2f}{}", a.name, d.head<2>().norm(), std::remainder(d.z(), 2.0 * std::numbers::pi) * 57.2958, p,
-                         before, anchor_lambda_,
+                         "{:.3f} -> {:.3f}{}", a.name, d.head<2>().norm(), std::remainder(d.z(), 2.0 * std::numbers::pi) * 57.2958, p,
+                         before, anchor_lost_.lambda,
                          anchor_cross_engaged_ and not a.fresh and not door_passage_.clearing()
                              ? "; a new belief to LOOK for — no longer engaged, turning toward it" : "");
             // past the room switch the carried pose IS the crossing (Task 13): nothing to turn toward there
@@ -4169,7 +4172,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     out.drive_width = drive_width;
     out.anchor_pose = a.pose;
     out.anchor_width = a.width_m;
-    out.anchor_fresh = a.fresh;
+    out.anchor_age_ms = a.age_ms;
     out.gap_score = on_gap ? gap_score_ : 0.f;
     out.drive_name = drive_name;
     out.drive_leaves.assign(drive_leaves.begin(), drive_leaves.end());

@@ -24,12 +24,15 @@
 //   prediction (that sets `engaged`: "driven on a sighting in this attempt — stop and wait for it to be seen again"); door_concept
 //   then re-initialised the anchor 2.17 m away and published it as a wait pose; the engaged branch stood still for 40 s instead of
 //   turning to look. A newer block is scored against the block last driven on (both in the room frame, through the localiser's
-//   pose): continuation ⇒ ν ~ N(0, S + Σ_robot); re-initialisation ⇒ ν ~ Cauchy(0, S + Σ_L), prior kAnchorLostPrior — the same
-//   two-hypothesis model door_concept's own belief_lost uses. P(re-init) > 1/2 (the MAP of those two) ends `engaged`.
+//   pose): continuation ⇒ ν ~ N(0, S + Σ_robot); re-initialisation ⇒ ν ~ Cauchy(0, S + Σ_L), prior = the anchor's CURRENT P(lost)
+//   (AnchorLostBelief) — the two-hypothesis model door_concept's own belief_lost uses. P(re-init) > 1/2 (the MAP) ends `engaged`.
+//
+// ★ FIX ROUND 1 (review of 142d8d3a): no hard zero for a stale block (I-1: aged_anchor — its covariance grows with the motion
+//   over its age), and INERTIA from accumulated evidence, not a hysteresis band (I-2: DoorwayBelief, AnchorLostBelief).
 //
 // ⚑ λ HOOK (Task D-B, door_concept): the owner will publish its anchor's P(lost); until then λ is the controller's own read —
-//   the shared flagged prior, raised by re-initialisations seen this claim (anchor_lost_after_reinit). Pass the owner's value in
-//   DoorwayLine::p_lost when it exists; nothing else changes.
+//   AnchorLostBelief (fix round 1: recursive — falls on confirmed continuations, rises on a jump). Pass the owner's value as the
+//   anchor's credibility (1 − P(lost)) when it exists; nothing else changes.
 #pragma once
 
 #include <Eigen/Dense>
@@ -146,7 +149,7 @@ struct RoomAnchor { Eigen::Vector3d x = Eigen::Vector3d::Zero(); Eigen::Matrix3d
 // (2) P(the newer block is a RE-INITIALISATION, not the continuation of the one driven on). Σ_robot = the localiser's room-frame
 // pose covariance (x, y, θ; its θ variance also swings the anchor by its range — added as range²·var_θ on the position).
 [[nodiscard]] inline double p_reinitialised(const RoomAnchor& driven, const RoomAnchor& now, double width, const Eigen::Matrix3d& robot_cov,
-                                            double range_m)
+                                            double range_m, double prior_lost = kDoorwayAnchorLostPrior)
 {
     Eigen::Vector3d nu = now.x - driven.x;
     nu.z() = std::remainder(nu.z(), 2.0 * std::numbers::pi);
@@ -155,15 +158,100 @@ struct RoomAnchor { Eigen::Vector3d x = Eigen::Vector3d::Zero(); Eigen::Matrix3d
     Sr(1, 1) += range_m * range_m * robot_cov(2, 2);
     const auto ll = disagreement_loglik(nu, driven.P + now.P + Sr, width);
     if (not ll.has_value()) return 0.0;
-    const double a = std::log(kDoorwayAnchorLostPrior) + ll->l_other, b = std::log(1.0 - kDoorwayAnchorLostPrior) + ll->l_same;
+    const double pr = std::clamp(prior_lost, 1e-12, 1.0 - 1e-12);   // log of an exact 0/1 prior: numerics, not a model level
+    const double a = std::log(pr) + ll->l_other, b = std::log(1.0 - pr) + ll->l_same;
     return 1.0 / (1.0 + std::exp(b - a));
 }
 
-// λ after a re-initialisation seen this claim with probability p: the new belief and the one it replaced disagree, so ONE was lost —
-// by symmetry of their (equal) priors, either; the current one is lost with ½ of that mass. No re-init (p = 0) leaves λ as it was.
-[[nodiscard]] inline double anchor_lost_after_reinit(double lambda, double p_reinit)
+// ─── FIX ROUND 1 (review of 142d8d3a) ───────────────────────────────────────────────────────────────────────────────────────────
+// ⚑ τ_view: the time over which consecutive frames DECORRELATE — door_concept's view-evidence horizon (kAnchorPredictMs, 3 s).
+//   Every per-frame log-ratio below is weighted by dt/τ_view: 20 Hz frames of one scene are not 20 independent looks (the
+//   fractional-count lesson: summed correlated evidence manufactures confidence).
+inline constexpr double kDoorwayViewTauS = 3.0;
+// ⚑ T_switch: the mean time over which WHICH LINE IS THE DOOR may change within a claim (an anchor captured by an alias, a gap
+//   locking onto a leaf). The switching hazard h = 1 − exp(−dt/T) mixes each belief toward its prior before every update, so no
+//   verdict is final: it bounds the inertia (a reversal is answered within a few τ_view), never sets a decision level.
+inline constexpr double kDoorwaySwitchS = 30.0;
+
+// I-1: A BLOCK'S INFORMATION DECAYS WITH ITS AGE. A block is the opening relative to the robot AT ITS STAMP; read age_s later, the
+// robot has moved by up to |v|·age along and turned |w|·age, which swings a point at range r by r·|w|·age. That motion is
+// unknown to the reader (only bounded by the measured speeds), so it is added to the block's covariance — the coverage term falls
+// continuously with it. A stationary robot keeps the block's covariance: its age is then no reason to distrust it.
+[[nodiscard]] inline rc::interaction::RelPose aged_anchor(const rc::interaction::RelPose& r, double age_s, double v_abs, double w_abs)
 {
-    const double p = std::clamp(p_reinit, 0.0, 1.0);
-    return (1.0 - p) * std::clamp(lambda, 0.0, 1.0) + p * 0.5;
+    rc::interaction::RelPose o = r;
+    const double a = std::max(0.0, age_s), dv = std::abs(v_abs) * a, dw = std::abs(w_abs) * a;
+    const double range = double(r.x.head<2>().norm());
+    const double vxy = dv * dv + range * range * dw * dw;
+    o.P(0, 0) += float(vxy);
+    o.P(1, 1) += float(vxy);
+    o.P(2, 2) += float(dw * dw);
+    return o;
 }
+
+// One frame's log-ratio for "this measurement's line is the door", from its credibility π ∈ [0,1] — door_concept's bounded view
+// evidence (view_lost_llr_step): right ~ ½U + ½Beta(2,1), not ~ ½U + ½Beta(1,2), so log[(1 + 2π)/(1 + 2(1 − π))] ∈ [−log 3, log 3]
+// and no single frame is decisive.
+[[nodiscard]] inline double frame_llr(double pi)
+{
+    const double p = std::clamp(pi, 0.0, 1.0);
+    return std::log((1.0 + 2.0 * p) / (1.0 + 2.0 * (1.0 - p)));
+}
+
+// I-2: WHICH LINE IS THE DOOR, as a recursive two-state belief (log-odds L = log P(gap)/P(anchor)): each cycle the switching
+// hazard first, then this cycle's evidence — the gap's frame log-ratio for, the anchor's against — weighted by dt/τ_view. The
+// MAP is L > 0; a tie (no evidence yet) keeps the anchor, the door's owner. The inertia is the accumulated evidence itself.
+struct DoorwayBelief
+{
+    double L = 0.0;
+    void predict(double dt_s)   // the switching hazard alone (a cycle with no gap held: no evidence about it)
+    {
+        if (not (dt_s > 0.0)) return;
+        const double h = 1.0 - std::exp(-dt_s / kDoorwaySwitchS);
+        const double p = p_gap();
+        const double q = (1.0 - h) * p + h * (1.0 - p);
+        L = std::log(q / (1.0 - q));
+    }
+    void step(double pi_anchor, double pi_gap, double dt_s)
+    {
+        if (not (dt_s > 0.0)) return;
+        predict(dt_s);
+        L += (frame_llr(pi_gap) - frame_llr(pi_anchor)) * dt_s / kDoorwayViewTauS;
+    }
+    [[nodiscard]] bool gap() const { return L > 0.0; }
+    [[nodiscard]] double p_gap() const { return 1.0 / (1.0 + std::exp(-L)); }
+};
+
+// I-2 (λ): P(the anchor is lost), recursive per published block. The hazard relaxes it toward the shared prior; each new block's
+// transition from the last is scored under "a tracked belief moves continuously" (Gaussian) vs "a lost belief wanders at the alias
+// scale" (Cauchy) — the two densities p_reinitialised compares — weighted by dt/τ_view, so it FALLS on confirmed continuations
+// and RISES on a jump. observe() returns the single-transition P(re-initialised) under the CURRENT λ (the MAP test that ends
+// `engaged`), computed before λ moves.
+struct AnchorLostBelief
+{
+    double lambda = kDoorwayAnchorLostPrior;
+    void predict(double dt_s)
+    {
+        if (not (dt_s > 0.0)) return;
+        const double h = 1.0 - std::exp(-dt_s / kDoorwaySwitchS);
+        lambda = (1.0 - h) * lambda + h * kDoorwayAnchorLostPrior;
+    }
+    double observe(const RoomAnchor& prev, const RoomAnchor& now, double width, const Eigen::Matrix3d& robot_cov, double range_m,
+                   double dt_s)
+    {
+        predict(dt_s);
+        Eigen::Vector3d nu = now.x - prev.x;
+        nu.z() = std::remainder(nu.z(), 2.0 * std::numbers::pi);
+        Eigen::Matrix3d Sr = robot_cov;
+        Sr(0, 0) += range_m * range_m * robot_cov(2, 2);
+        Sr(1, 1) += range_m * range_m * robot_cov(2, 2);
+        const auto ll = disagreement_loglik(nu, prev.P + now.P + Sr, width);
+        if (not ll.has_value()) return 0.0;
+        const double p_re = p_reinitialised(prev, now, width, robot_cov, range_m, lambda);
+        const double lam = std::clamp(lambda, 1e-12, 1.0 - 1e-12);
+        const double logit = std::log(lam / (1.0 - lam)) + (ll->l_other - ll->l_same) * std::max(0.0, dt_s) / kDoorwayViewTauS;
+        lambda = 1.0 / (1.0 + std::exp(-logit));
+        return p_re;
+    }
+};
 }  // namespace rc::policy

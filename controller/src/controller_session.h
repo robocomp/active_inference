@@ -398,7 +398,7 @@ private:
         // weighs the gap against the anchor by it (doorway_corridor.h DoorwayRisk)
         rc::interaction::RelPose anchor_pose;
         float anchor_width = 0.f, gap_score = 0.f;
-        bool anchor_fresh = false;   // Task 3e: the anchor's block is DRIVABLE (owner's mark, within kAnchorStaleMs, this claim's)
+        std::int64_t anchor_age_ms = 0;   // Task 3e r1: how old the anchor's block is (its information decays with the motion since)
         std::string drive_name;
         std::vector<rc::interaction::AnchorLeaf> drive_leaves;
     };
@@ -1166,16 +1166,18 @@ private:
     std::int64_t anchor_claim_since_ms_ = 0;                         // when this claim first read its anchor (door_concept's clock)
     std::optional<rc::policy::RoomAnchor> anchor_prev_room_;         // the last block read, room frame (the re-init test's reference)
     std::int64_t anchor_prev_age_ms_ = 0;                            // ...and how old it was when converted
-    double anchor_lambda_ = rc::policy::kDoorwayAnchorLostPrior;     // P(the anchor is lost): prior, raised by a re-init this claim
+    rc::policy::AnchorLostBelief anchor_lost_;                       // P(the anchor is lost), recursive per block (fix round 1, I-2)
+    rc::policy::DoorwayBelief doorway_belief_;                       // P(the gap's line is the door), recursive per cycle (I-2)
+    double doorway_belief_t_ = -1.0;                                 // its last update (steady s; < 0 = none this claim)
     bool anchor_parked_logged_ = false;                              // a block from before this claim was refused (log on change)
     bool policy_goal_on_gap_logged_ = false;                         // the MAP goal line's last choice (log on change)
     bool policy_goal_line_known_ = false;
     /// Task 3e: book-keeping on this cycle's anchor block — refuse a block written before this claim (a PARKED prediction of the
     /// claim that ended: door_concept parks without clearing its drivable mark — that half is Task D-B), and score a newer block
-    /// against the last one (rc::policy::p_reinitialised): a re-initialisation ends `engaged` and raises anchor_lambda_.
+    /// against the last one (rc::policy::p_reinitialised): a re-initialisation ends `engaged`; every block moves anchor_lost_.
     void note_anchor_block(const ControllerRobotPose &robot_pose);
     /// ⚑ Task D-B HOOK: door_concept's published P(the anchor is lost). Not published yet ⇒ nullopt ⇒ the controller's own
-    /// anchor_lambda_. When D-B lands, read its attribute on the anchor node here; nothing else changes.
+    /// anchor_lost_.lambda. When D-B lands, read its attribute on the anchor node here; nothing else changes.
     [[nodiscard]] std::optional<double> anchor_owner_p_lost() const { return std::nullopt; }
     // Fix round 1: the cross's engaged / wait / spin state belongs to ONE claim — reset when the target (node, epoch)
     // changes (resolve_target_contract) and when a claim of it is handed back (report_unreachable_if_no_route).

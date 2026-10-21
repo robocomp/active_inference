@@ -683,31 +683,42 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 //   (doorway_corridor.h disc_meets_doorway_risk_corridor — fix round 1, I-2: no mean of a bimodal mixture). The
                 //   goal line was the ANCHOR's always; since Task 3e it is the MAP line below (a low-score leaf gap still loses).
                 // ★ Task 3e (1) (rtD1h leg 5: an anchor aliased ~1.9 m / 70° off the door replaced a 0.99-score gap on the true
-                //   opening and pulled the robot back out of the doorway): the goal line is the MAP of the two hypotheses —
-                //   "the anchor is the door" (its own P(not lost) × its lateral coverage) vs "the gap is the door" (its score ×
-                //   its coverage) — a SELECTION, never their average (doorway_hypotheses.h says why the disagreement cannot
-                //   choose). An anchor its owner has not marked drivable this claim is no line to drive on (credibility 0).
-                //   The risk mixture and the veto below still carry BOTH (F4 / 3b), unchanged.
+                //   opening and pulled the robot back out of the doorway): the goal line is the MAP of two hypotheses — "the
+                //   anchor is the door" (its own P(not lost) × its lateral coverage) vs "the gap is the door" (its score × its
+                //   coverage) — a SELECTION, never their average (doorway_hypotheses.h says why the disagreement cannot choose).
+                //   Fix round 1: the anchor's block is AGED by the motion since its stamp (I-1: one missed block widens it, it is
+                //   never zeroed), and the choice is the MAP of a RECURSIVE belief (I-2: evidence accumulates per cycle under a
+                //   switching hazard — inertia without a hysteresis band). The risk mixture and the veto below carry BOTH (F4/3b).
                 const float body_half_w = 0.5f * (bare.support_radius(0.f, Eigen::Vector2f(1.f, 0.f))
                                                   + bare.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
-                const double lambda = anchor_owner_p_lost().value_or(anchor_lambda_);   // ⚑ D-B hook: the owner's P(lost)
-                const rc::policy::DoorwayLine a_line{cp.anchor_pose, cp.anchor_width, cp.anchor_fresh ? 1.0 - lambda : 0.0};
+                const double lambda = anchor_owner_p_lost().value_or(anchor_lost_.lambda);   // ⚑ D-B hook: the owner's P(lost)
+                const auto aged = rc::policy::aged_anchor(cp.anchor_pose, double(cp.anchor_age_ms) * 1e-3,
+                                                          odo_valid_ ? odo_v_ : 0.f, odo_valid_ ? odo_w_ : 0.f);
+                const rc::policy::DoorwayLine a_line{aged, cp.anchor_width, 1.0 - lambda};
                 const std::optional<rc::policy::DoorwayLine> g_line =
                     cp.on_gap ? std::optional<rc::policy::DoorwayLine>(rc::policy::DoorwayLine{cp.drive_pose, cp.drive_width, cp.gap_score})
                               : std::nullopt;
                 const auto choice = rc::policy::choose_doorway_line(a_line, g_line, body_half_w);
-                if (not policy_goal_line_known_ or choice.gap != policy_goal_on_gap_logged_)
+                const double t_now = steady_now_s();
+                const double dt_b = doorway_belief_t_ < 0.0 ? 0.0 : t_now - doorway_belief_t_;
+                // the claim's first cycle has no interval to weigh: the tie (the anchor) until the next one
+                if (g_line.has_value()) doorway_belief_.step(choice.pi_anchor, choice.pi_gap, dt_b);
+                else doorway_belief_.predict(dt_b);
+                doorway_belief_t_ = t_now;
+                const bool on_gap_line = g_line.has_value() and doorway_belief_.gap();
+                if (not policy_goal_line_known_ or on_gap_line != policy_goal_on_gap_logged_)
                 {
                     policy_goal_line_known_ = true;
-                    policy_goal_on_gap_logged_ = choice.gap;
-                    std::println("[policy] cross goal line: the {} (pi_anchor {:.2f} = (1-lambda {:.2f}{}) x coverage {:.2f}; pi_gap {:.2f} "
-                                 "= score {:.2f} x coverage {:.2f}; P(both the same opening) {:.2f}, d2 {:.1f})",
-                                 choice.gap ? "measured GAP" : "ANCHOR", choice.pi_anchor, lambda,
-                                 cp.anchor_fresh ? "" : ", not drivable: 0", choice.c_anchor, choice.pi_gap,
-                                 cp.on_gap ? cp.gap_score : 0.f, choice.c_gap, choice.p_both_right, choice.d2);
+                    policy_goal_on_gap_logged_ = on_gap_line;
+                    std::println("[policy] cross goal line: the {} (P(gap is the door) {:.3f}; this cycle pi_anchor {:.2f} = (1-lambda "
+                                 "{:.3f}) x coverage {:.2f} [block {} ms old]; pi_gap {:.2f} = score {:.2f} x coverage {:.2f}; "
+                                 "P(both the same opening) {:.2f}, d2 {:.1f})",
+                                 on_gap_line ? "measured GAP" : "ANCHOR", doorway_belief_.p_gap(), choice.pi_anchor, lambda,
+                                 choice.c_anchor, cp.anchor_age_ms, choice.pi_gap, cp.on_gap ? cp.gap_score : 0.f, choice.c_gap,
+                                 choice.p_both_right, choice.d2);
                 }
-                spec = choice.gap ? rc::policy::doorway_goal(rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose), gp)
-                                  : rc::policy::doorway_goal(rc::policy::gap_in_room(cp.anchor_pose, cp.anchor_width, cpose), gp);
+                spec = on_gap_line ? rc::policy::doorway_goal(rc::policy::gap_in_room(cp.drive_pose, cp.drive_width, cpose), gp)
+                                   : rc::policy::doorway_goal(rc::policy::gap_in_room(cp.anchor_pose, cp.anchor_width, cpose), gp);
                 // the far side is not in the planner's map: the measured opening's corridor joins the near room to the goal
                 // line (1 m back into the room just left; one field cell past the line)
                 const float back = 1.0f, ahead = gp.past_m + 0.05f;
@@ -739,6 +750,14 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             }
             else
             {
+                // a waiting cycle carries no evidence about which line is the door: the hazard alone, so the next drive cycle
+                // weighs only its own interval (Task 3e r1)
+                if (doorway_belief_t_ >= 0.0)
+                {
+                    const double t_now = steady_now_s();
+                    doorway_belief_.predict(t_now - doorway_belief_t_);
+                    doorway_belief_t_ = t_now;
+                }
                 const float half_len = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
                 spec = rc::policy::heading_goal(cpose.pos, rc::policy::to_policy_pose(cpose).yaw + rc::anchor_wait_aim(cp.pose, half_len),
                                                 gp.tol_yaw);
