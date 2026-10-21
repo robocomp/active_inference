@@ -77,6 +77,16 @@ needs, reading only from `DoorCycleInput`. Adapter calls the core for this slice
   second packet associates; core include-grep passes.
 - [ ] Implement; door tests + new test pass; build; LIVE smoke one leg (decision log shows births as before). Commit.
 
+### Task 4b: Fit slice (added 2026-10-21 by ruling — the plan left the fit in no slice)
+Move the per-door fit (`DoorFitter` observe / `run_inference` / leaf φ estimate / pre-belief geometry / read-back) into
+the core so `step()` produces each door's belief from the input alone. The replay harness drops its fit stand-in (doors
+moved to EXISTENCE positions, `belief=nullptr`) and runs the real fit; Pass 1 and the claimer suppression become
+replayable. Compute foreign claims ONCE per cycle (the core's set; the worker's `foreign_claims_` walk goes, incl. its
+use in `resolve_at_birth` — behaviour-identical). Tests: a synthetic fit test (a mask sequence at a door → pose/φ
+converge as today); tape check: tourR1 and tourR2 tracker decisions still EQUAL with the real fit AND the replayed Phi
+rows equal the recorded Phi rows (bitwise, or 1e-6 where float order unavoidably changes — name the field). Measure
+door_concept CPU from the tape harness (ms per step) and state the live snapshot cost. Build, tests, commit.
+
 ### Task 5: Existence slice
 Move `update_existence_beliefs` (`specificworker.cpp:2144-2848`) into the core (silhouette, contour/depth evidence from
 the input's derived evidence, P(detect), removal). Test: synthetic existence sequence → same L trajectory as a recorded
