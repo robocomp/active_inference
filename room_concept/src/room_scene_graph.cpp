@@ -1509,6 +1509,7 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
         Recall rc_;
         rc_.name = n.name().starts_with("recall_") ? n.name().substr(7) : n.name();
         rc_.room_index = static_cast<std::uint64_t>(G_->get_attrib_by_name<room_id_att>(n).value_or(0));
+        if (const auto ep = G_->get_attrib_by_name<room_explored_p_att>(n); ep.has_value()) rc_.explored_p = ep.value();
         for (std::size_t i = 0; i < xs.size(); ++i) rc_.poly_pub.emplace_back(xs[i], ys[i]);
         // door <- recalled room, planar part of the RT edge (yaw from the rotated x axis, robust to Euler aliasing).
         const auto& rv = r->get();
@@ -1645,6 +1646,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
         std::string reason;
         promote_startup_proto(reason, true);
         recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner
+        note_recall_memory(*recall);   // P(explored) starts from what memory restored (room_explored.h)
         startup_event_ = "recalled";
         qInfo().noquote() << QString("[room][recall] %1 RE-ENTERED through %2 (node id %3): remembered outline (%4 vertices) "
                                      "adopted in its own frame (promotion: %5) — localising against it, not surveying. "
@@ -1674,6 +1676,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     startup_proto_     = true;
     startup_promoted_  = false;
     recalled_visit_    = false;
+    recall_p_mem_      = 0.f;   // a re-entry restores it (note_recall_memory) after this
     layout_pool_.clear();
     layout_finished_   = false;
     pub_gauge_frozen_  = true;
@@ -2130,7 +2133,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
     // what promoted the room) and the legacy wall-map planner below has no input any more (the wall map is not observed
     // after promotion). Building the clearance grid anyway cost ~1/3 of the localiser thread, measured with perf
     // (a radius search per grid cell, every replan), for a plan that could only say "no gain".
-    if (replan and startup_promoted_ and refine_contested_.empty())
+    if (replan and startup_promoted_ and refine_contested_.empty() and not recalled_partial())
     {
         layout_plan_ms_ = now;
         layout_last_plan_ = {};
@@ -2215,10 +2218,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         const auto& map = room_concept_->wall_map_localiser_only();
         const auto poly = room_concept_->explorer_polygon_localiser_only();
         rej_ring_ = rej_furniture_ = rej_refused_ = 0;
-        if (room_concept_->plain_slam_driving() and free_space_)
+        if (recalled_partial() and free_space_) layout_last_plan_ = plan_recalled_rest(grid, robot, ep, standable, deferred);
+        else if (room_concept_->plain_slam_driving() and free_space_)
         {
-            const float footprint = static_cast<float>(M_PI) * 0.25f
-                                  * (params_->ROBOT_WIDTH * params_->ROBOT_WIDTH + params_->ROBOT_LENGTH * params_->ROBOT_LENGTH);
+            const float footprint = footprint_area();
             auto countable = free_space_->countable_mask(fs_published_, 0.40f);   // the outline snap's reach
             // ★ CURIOSITY ABOUT WHAT THE MAP HAS SEEN, NOT ONLY WHAT THE OUTLINE KEPT (2026-10-11, U rooms 3/3 and the
             //   furnished T): the Manhattan outline drawn from the first scan dropped the obliquely seen floor that led
@@ -2877,11 +2880,9 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // TESTING BEHAVIOUR (2026-10-10): after promotion, while the refiner holds CONTESTED cells (edits that nearly pay),
     // the layout explorer runs again with "contested cells a standpoint would see" as the gain — a look that decides
     // an edit. Empty contested set = nothing to test = the pose planner as before.
-    if ((startup_proto_ and not startup_promoted_) or (startup_promoted_ and not refine_contested_.empty()))
-    {
-        dsr_update_layout_affordance(res);
-        return;
-    }
+    // (and a partly remembered room until the explorer is `finished` — room_explored.h; P(explored) from each plan)
+    if (layout_explorer_owns_room()) { dsr_update_layout_affordance(res); publish_plan_explored(); return; }
+    if (not recalled_partial()) publish_explored(1.f);   // nothing left for the explorer: p = 1 (room_explored.h)
     if (!epistemic_) return;
 
     auto& planner = epistemic_->epistemic_planner();

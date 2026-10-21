@@ -366,6 +366,7 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
                    const Admissible& admissible, const GainFn& gain, float min_gain, const Admissible& deferred)
 {
     Plan out;
+    out.price = min_gain;
     const auto [ri, rj] = grid.cell_of(robot);
     out.start = grid.is_free(ri, rj) ? robot : grid.nearest_free(robot);
     if (grid.free_count() == 0) { out.why = "no_feasible"; return out; }
@@ -379,6 +380,10 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
             const bool held = deferred and deferred(v);
             if (not held) ++out.candidates;
             const float g = gain(v);
+            // ★ What is LEFT, for P(explored) (room_explored.h): every standable spot, a deferred one and one below the
+            //   price included — a refusal does not make the unseen seen, and the belief needs the size of what is left.
+            ++out.evaluated;
+            out.best_gain = std::max(out.best_gain, g);
             if (g < min_gain) continue;
             if (held) { ++out.deferred_with_gain; continue; }
             ++out.with_gain;

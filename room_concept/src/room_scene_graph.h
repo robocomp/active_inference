@@ -49,6 +49,7 @@
 #include "layout_refiner.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
 #include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
+#include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
 
 namespace rc
 {
@@ -215,6 +216,7 @@ private:
         std::uint64_t room_index = 0;              ///< its room_id
         std::vector<Eigen::Vector2f> poly_pub;     ///< outline in the remembered room's own (published) frame
         Eigen::Affine2f T_int_recall = Eigen::Affine2f::Identity();
+        std::optional<float> explored_p;           ///< room_explored_p, if memory carried it onto the recall (room_explored.h)
     };
     /// The recall hung from the crossed door `ap`, if ltsm posted one. Reads node/edge attributes only (thread-safe).
     [[nodiscard]] std::optional<Recall> find_recall(const rc::DoorAperture& ap) const;
@@ -262,6 +264,35 @@ private:
     void save_learnt_layout(const std::vector<Eigen::Vector2f>& poly, const char* what);
     std::int64_t  refine_last_ms_ = 0;
     bool          recalled_visit_ = false;   ///< RE-ENTERED from memory: the outline is not re-refined on this visit
+    // ── P(room explored) (room_explored.h, room_scene_graph_explored.cpp) — `room_explored_p` on the room node ──
+    float         recall_p_mem_ = 0.f;              ///< what memory restored for THIS room (0 = a room never seen before)
+    float         explored_p_ = -1.f;               ///< last value written (-1 = none yet on explored_room_id_)
+    std::uint64_t explored_room_id_ = 0;            ///< the node explored_p_ was written on
+    rc::explored::Memory explored_memory_;          ///< by room name: what a re-entry restores within this run
+    /// Write the belief on the room node (nullopt = not assessed: nothing is written). Deduplicated on the value.
+    void publish_explored(std::optional<float> p);
+    /// A re-entry: restore p_mem from the recall (or this agent's record) and give the explorer the remembered outline.
+    void note_recall_memory(const Recall& recall);
+    /// A recalled room memory does not hold completely: the explorer looks for what memory may lack.
+    [[nodiscard]] bool recalled_partial() const { return recalled_visit_ and recall_p_mem_ < 1.f; }
+    /// Who drives afford_room: the layout explorer (proto survey, contested refiner cells, a partly remembered room)
+    [[nodiscard]] bool layout_explorer_owns_room() const
+    {
+        return (startup_proto_ and not startup_promoted_) or (startup_promoted_ and not refine_contested_.empty())
+            or (recalled_partial() and not layout_finished_);
+    }
+    /// P(explored) from the explorer's last plan (its own price; the wall-map EIG plan has none ⇒ not assessed).
+    void publish_plan_explored()
+    {
+        const auto& P = layout_last_plan_;
+        publish_explored(rc::explored::belief(P.evaluated, P.best_gain, P.price, recall_p_mem_));
+    }
+    /// The robot's footprint area, m² — the coverage explorer's price of a trip (plan_coverage's min_gain).
+    [[nodiscard]] float footprint_area() const;
+    /// The coverage plan of a partly remembered room: unseen space in the remembered outline, worth (1 − p_mem) of it.
+    rc::layout::Plan plan_recalled_rest(const rc::layout::FeasibleGrid& grid, const Eigen::Vector2f& robot,
+                                        const rc::layout::ExplorerParams& ep, const rc::layout::Admissible& standable,
+                                        const rc::layout::Admissible& deferred);
     std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
     std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)

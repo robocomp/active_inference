@@ -123,6 +123,9 @@ struct Plan
     int with_gain  = 0;                    ///< of which gain > 0
     int unknowns   = 0;                    ///< termination ledger size
     int deferred_with_gain = 0;            ///< standpoints with gain held back only by a recent refusal (plan_coverage)
+    int evaluated = 0;                     ///< plan_coverage: standpoints scored at all, deferred ones included
+    float best_gain = 0.f;                 ///< plan_coverage: the most ANY of them would reveal (room_explored.h)
+    float price = 0.f;                     ///< plan_coverage: its min_gain, the price of a trip (0 = plan(): none)
     Eigen::Vector2f start{0.f, 0.f};       ///< where the walk started (robot, or nearest feasible cell)
     int reach_cells = -1;                  ///< free cells connected to `start` (filled on "unreachable" only)
     int free_cells  = -1;                  ///< free cells in the whole grid (idem)

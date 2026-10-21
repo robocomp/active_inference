@@ -15,7 +15,8 @@
 //     driven to yet (a manual target has no final facing).
 //   · a passage ref resolves through the LIVE passage_<n> (ltsm passage_live.h), which exists only while the room
 //     beyond is proto; otherwise it is refused (passage_unresolved).
-//   · explored(room) has no graph attribute yet (Phase 0): it is unknown, so it never satisfies an `until`.
+//   · explored(room) is room_concept's `room_explored_p` on the room node (mission_explored.h, Task 5): absent =
+//     never assessed = unknown, which never satisfies an `until`.
 // Everything here runs on the control thread.
 #include "specificworker.h"
 
@@ -29,6 +30,7 @@
 
 #include "../../common/mission/mission_json.h"
 #include "../../common/world_query/door_query.h"
+#include "mission_explored.h"
 
 using rc::mission::LeafState;
 using rc::mission::LeafStatus;
@@ -236,7 +238,8 @@ std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred 
 		const auto prob = w_.G->get_attrib_by_name<door_open_prob_att>(node.value());
 		return prob.has_value() ? std::optional<double>(prob.value()) : std::nullopt;
 	}
-	return std::nullopt;   // explored: no graph attribute yet (Phase 0)
+	if (p.name == "explored") return rc::mission::explored_belief(*w_.G, p.refs.at("room").name);
+	return std::nullopt;
 }
 
 // ── Worker side ──────────────────────────────────────────────────────────────────────────────────────────────────
