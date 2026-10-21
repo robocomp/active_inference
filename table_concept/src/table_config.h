@@ -368,6 +368,23 @@ struct TableConfig
     // false = the historic range-only weighting (A/B). The range keys stay in use for the LiDAR free half.
     bool  existence_absence_envelope = true;
 
+    // Weight silhouette ABSENCE by P(this table's YOLO score clears retina's cutoff | its own grade). A miss means
+    // "no score above Yolo.conf_thresh", so P(miss | present) depends on how far above the cutoff this table
+    // usually scores: the square table at 0.288 (cutoff 0.25) was deleted in ~6 cycles of a turn that only
+    // dipped its score to 0.19-0.25 (retina detect_drops.csv, 2026-10-19). p_clear = Φ((m − logit(thr)) / σ),
+    // m = mean logit score over the table's masks, σ² = σ_view²(1 + 1/n). σ_view is how much the score moves
+    // with the viewpoint (≈0.5 logit in that turn). m is biased high (sub-cutoff scores are never published),
+    // so the correction errs toward removal. ★ExistenceScoreCutoff MUST equal retina's Yolo.conf_thresh.
+    bool  existence_score_grade      = true;
+    float existence_score_cutoff     = 0.25f;
+    float existence_score_view_sigma = 0.5f;
+
+    // CLASSIFIER-FREE CONTOUR channel (common/contour_edge), the YOLO-blind rescue chair/fridge/door already
+    // have. The tabletop slab's projected outline is scored against ZED RGB edges (relative to the same outline
+    // slid sideways along the floor) and ZED depth (a surface at the predicted range, receding past its edge).
+    // Symmetric: holds a table YOLO stops labelling in a turn, refutes one over blank floor.
+    bool  existence_contour_check    = true;
+
     // ── RT-edge covariance upload ─────────────────────────────────────────────────────────────────
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3), mapped from
     // the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are unobservable (large).

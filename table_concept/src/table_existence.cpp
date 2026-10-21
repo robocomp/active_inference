@@ -17,6 +17,9 @@
 #include "table_model.h"                                       // TableModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/dashboard/evidence_monitor.h"           // rc::EvidenceGlobals
+#include "../../common/contour_edge/contour_edge_check.h"     // rc::edges — classifier-free RGB contour check
+#include "../../common/contour_edge/contour_depth_check.h"    // rc::edges — its metric (depth) half
+#include "table_contour.h"                                     // rc::inward_depth_slack_m
 
 namespace rc {
 
@@ -80,6 +83,22 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
     // free-space carves are verified. See rc::exist::RemovalPolicy::confidence_scaled.
     policy.confidence_scaled = true;
 
+
+    // ── CONTOUR channel inputs for this cycle (classifier-free; common/contour_edge) ─────────────────────
+    // Each plane is scored only on a frame it has not scored yet (re-scoring would charge the same look twice),
+    // and the contour is projected at THAT frame's own stamp. The RGB gradient is prepared once per frame.
+    const bool ct_rgb_fresh   = cfg_.existence_contour_check and rgb_ and not rgb_->empty()
+                              and rgb_stamp_ms_ > 0 and rgb_stamp_ms_ != contour_last_rgb_ms_;
+    const bool ct_depth_fresh = cfg_.existence_contour_check and depth_ and not depth_->empty()
+                              and depth_stamp_ms_ > 0 and depth_stamp_ms_ != contour_last_depth_ms_;
+    rc::edges::PreparedFrame ct_prep;
+    if (ct_rgb_fresh)
+    {
+        ct_prep = rc::edges::prepare_frame(*rgb_);
+        contour_last_rgb_ms_ = rgb_stamp_ms_;
+    }
+    if (ct_depth_fresh)
+        contour_last_depth_ms_ = depth_stamp_ms_;
 
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter.instances())
@@ -173,9 +192,23 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
                 // Same envelope instance, so the viewpoint the planner drives to is the argmax of the model
                 // absence is weighted by. At the death geometry it returns ~0.002 instead of 0.83.
                 // roi_fill is refreshed every cycle by compute_projected_roi, including on no-mask cycles.
-                const float p_detect = cfg_.existence_absence_envelope
+                float p_detect = cfg_.existence_absence_envelope
                     ? rc::detect::p_detect(inst.roi_fill, sil.in_fov_frac(), det_env_) * sil.central_frac()
                     : absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
+                // ★The geometry above says whether the camera could SEE the table; it does not say whether YOLO
+                // would SCORE it above the cutoff. That is this table's own grade: a table it always scores just
+                // above the line drops below it from a slightly different view, and that miss is not absence.
+                float p_clear = 1.0f;
+                if (cfg_.existence_score_grade and inst.score_n > 0)
+                {
+                    const float c   = std::clamp(cfg_.existence_score_cutoff, 1e-3f, 1.0f - 1e-3f);
+                    const float sd  = cfg_.existence_score_view_sigma
+                                    * std::sqrt(1.0f + 1.0f / static_cast<float>(inst.score_n));
+                    const float z   = (inst.score_logit_mean - std::log(c / (1.0f - c))) / std::max(sd, 1e-3f);
+                    p_clear = 0.5f * std::erfc(-z / std::sqrt(2.0f));
+                }
+                p_detect *= p_clear;
+                inst.dbg_ex_pclear = p_clear;
                 cycle_p_detect = p_detect;
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
                 // p_detect must scale the SATURATED per-cycle log-odds, NOT the raw pixel count. Scaling the count
@@ -207,6 +240,78 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
                 const float vss = cfg_.verify_surprise_smooth;
                 inst.verify_surprise = (1.0f - vss) * inst.verify_surprise + vss * verify;
                 inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;
+            }
+        }
+
+        // ── CONTOUR channel (classifier-free) — the YOLO-blind rescue, RGB/DEPTH clock ─────────────────────
+        // ★THE ONLY EVIDENCE HERE THAT DOES NOT END AT THE DETECTOR. The silhouette channel above asks whether
+        // YOLO painted "table" on these pixels; when YOLO's score for a table dips under retina's cutoff (the
+        // square table at 0.19-0.25 during a turn, 2026-10-19) "no mask" is charged as absence of the TABLE
+        // rather than of the label, and it was deleted in ~6 cycles. This asks the image itself, as chair,
+        // refrigerator and door do:
+        //   RGB   — is there an intensity boundary along the tabletop's projected outline, more than along the
+        //           same outline slid sideways along the floor? Relative, so it needs a surviving control.
+        //   DEPTH — is there a surface at the depth the belief predicts, with space behind its edge? Absolute,
+        //           and the half that can say "we are looking straight through where the table should be".
+        // Both bounded and dimensionless, so they SUM through one tanh (rc::exist::contour_evidence): two
+        // consequences of the same fact must not each buy a full observation. Symmetric: confirms a table YOLO
+        // has gone blind on, refutes one over blank floor. n_used == 0 ⇒ nothing measured ⇒ HOLD. A table
+        // behind a wall is not measured (compute_contour_set returns an empty face).
+        inst.dbg_ct_edge_n = inst.dbg_ct_depth_n = 0;   // 0 = NOT MEASURED this frame, never "refuted"
+        inst.dbg_ct_dL = 0.0f;
+        if (ct_rgb_fresh or ct_depth_fresh)
+        {
+            float verdict = 0.0f;
+            int   n_used  = 0;
+            if (ct_rgb_fresh and ct_prep.valid())
+            {
+                const auto cs = fitter.compute_contour_set(inst, rgb_stamp_ms_, rgb_->cols, rgb_->rows);
+                if (cs.face.valid())
+                {
+                    std::vector<std::vector<cv::Point>> ctl;
+                    ctl.reserve(cs.controls.size());
+                    for (const auto& cc : cs.controls)
+                        ctl.push_back(cc.px);
+                    const auto es = rc::edges::contour_edge_support(ct_prep, cs.face.px, ctl);
+                    if (es.n_samples > 0 and es.n_controls > 0)   // no control ⇒ the relative statistic has no scale
+                    {
+                        verdict += es.excess;
+                        n_used   = std::max(n_used, es.n_samples);
+                        inst.dbg_ct_edge_excess = es.excess;
+                        inst.dbg_ct_edge_n      = es.n_samples;
+                    }
+                }
+            }
+            if (ct_depth_fresh)
+            {
+                const auto cs = fitter.compute_contour_set(inst, depth_stamp_ms_, depth_->cols, depth_->rows);
+                if (cs.face.valid())
+                {
+                    rc::edges::ContourDepthParams dp;
+                    // σ_d from the belief's OWN position uncertainty, as refrigerator_concept: a poorly known
+                    // table must not be judged against its predicted depth as if it were pinned. (Yaw is left
+                    // out: the 7×7 Σ may be in the symmetry-quotient chart, where index 5 is not yaw.)
+                    const auto& P = inst.ai2_belief.covariance();
+                    // ⊕ the scorer's own prediction error on a horizontal top (table_contour.h).
+                    dp.sigma_depth_m = std::hypot(std::sqrt(std::max(1e-4f, P(0, 0) + P(1, 1))),
+                                                  rc::inward_depth_slack_m(cs.face, dp.offset_px_max));
+                    const auto ds = rc::edges::contour_depth_support(*depth_, cs.face, cs.controls, dp);
+                    if (ds.n_samples > 0)
+                    {
+                        verdict += ds.verdict;
+                        n_used   = std::max(n_used, ds.n_samples);
+                        inst.dbg_ct_depth_verdict = ds.verdict;
+                        inst.dbg_ct_depth_bias_m  = ds.mean_bias_m;
+                        inst.dbg_ct_depth_n       = ds.n_samples;
+                    }
+                }
+            }
+            const rc::exist::Evidence ev_c = rc::exist::contour_evidence(verdict, n_used, sm);
+            if (ev_c.n_reached > 0 and std::isfinite(ev_c.log_odds_delta))
+            {
+                inst.existence.integrate(ev_c, 1.0f);
+                inst.dbg_ct_dL = ev_c.log_odds_delta;
+                integrated = true;
             }
         }
 

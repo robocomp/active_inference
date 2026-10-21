@@ -50,6 +50,8 @@
 #include "table_config.h"      // rc::TableConfig + load_table_config
 #include "table_instance.h"    // rc::TableInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"       // rc::RgbIngestor  — SHARED ZED RGB (contour channel)
+#include "../../common/rgb_ingestor/depth_ingestor.h"     // rc::DepthIngestor — its metric sibling
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                          // rc::ConceptLidarIngestor (YOLO-independent LiDAR)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
@@ -272,6 +274,8 @@ private:
     std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
     std::unique_ptr<rc::ConceptLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
+    std::unique_ptr<rc::RgbIngestor>                    rgb_ingestor_;     // ZED RGB   — contour existence channel
+    std::unique_ptr<rc::DepthIngestor>                  depth_ingestor_;   // ZED depth — its metric half
     std::unique_ptr<rc::TableSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 

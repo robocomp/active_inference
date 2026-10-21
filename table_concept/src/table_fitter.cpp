@@ -276,6 +276,12 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     // A slice assigned to this table ⇒ detection is alive; latch its per-slice R inputs.
     inst.frames_since_detection = 0;
     inst.last_mask_confidence   = slice.confidence;
+    if (slice.confidence > 0.0f and slice.confidence < 1.0f)   // the grade: running mean of logit(score)
+    {
+        const float lg = std::log(slice.confidence / (1.0f - slice.confidence));
+        inst.score_n += 1;
+        inst.score_logit_mean += (lg - inst.score_logit_mean) / static_cast<float>(inst.score_n);
+    }
     inst.dbg_pkt_frame_id       = masks_packet.frame_id;       // provenance of THIS fit (instrumentation)
     inst.dbg_pkt_ts_ms          = masks_packet.timestamp_ms;
     inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
@@ -1053,7 +1059,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  // NBV emission: what the planner proposed THIS cycle (the affordance node holds the
                  // FROZEN pose during a claim, so it cannot answer this). nbv_vfov=0 ⇒ the camera
                  // model was still incomplete when the proposal was made.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn,ex_pclear,score_logit,score_n,ct_edge_excess,ct_edge_n,ct_depth_verdict,ct_depth_bias,ct_depth_n,ct_dL\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1106,7 +1112,10 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              // cycle. It was computed and shown nowhere — the whole peripheral channel was
              // invisible in every agent's log, which is why 'is it producing anything?' could
              // not be answered offline for cabinet/hood, the two it exists for.
-             << ',' << ricoh_dets_ << ',' << ricoh_attention_ << '\n';
+             << ',' << ricoh_dets_ << ',' << ricoh_attention_
+             << ',' << inst.dbg_ex_pclear << ',' << inst.score_logit_mean << ',' << inst.score_n
+             << ',' << inst.dbg_ct_edge_excess << ',' << inst.dbg_ct_edge_n << ',' << inst.dbg_ct_depth_verdict
+             << ',' << inst.dbg_ct_depth_bias_m << ',' << inst.dbg_ct_depth_n << ',' << inst.dbg_ct_dL << '\n';
     ai2_csv_.flush();
 }
 
