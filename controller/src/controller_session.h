@@ -198,6 +198,9 @@ public:
     // input, keeps the Navigator's goal (set_goal only when the goal moved beyond its own tolerance), steps it, sends the
     // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
     enum class PolicyVerdict { Driving, Arrived, Held, Unreachable };
+    // ★ F1 (local_policy/reachability_belief.h): `stuck` is the tick's Stuck decision — a HOLD, never a hand back by itself;
+    //   the verdict is Unreachable when the trapped field disconnects the goal OR the reachability belief hands it back
+    //   (Navigator::Step::hand_back). Every hand-back site reads the verdict, nothing else.
     struct PolicyTick { PolicyVerdict verdict = PolicyVerdict::Held; std::string why; bool stuck = false;
                         float field_m = std::numeric_limits<float>::infinity();    // priced cost-to-go at the robot
                         float route_m = std::numeric_limits<float>::infinity(); };  // the cheapest route's metres (Live fix 3)

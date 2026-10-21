@@ -2288,8 +2288,8 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 			                          : rc::policy::place_goal(g->pos, yaw, rp.pos_tol_m, rp.yaw_tol_rad);
 			const auto rv = relative_motion_.view();
 			const auto tick = session_.policy_tick(spec, std::format("move #{}", rv.id), *pose, obstacle_tracker_, motion_commander_, now_ms);
-			const bool failed = tick.verdict == ControllerSession::PolicyVerdict::Unreachable
-			                    or (tick.verdict == ControllerSession::PolicyVerdict::Held and tick.stuck);
+			// F1: a Stuck is a hold; the move fails only on the Unreachable verdict (trapped field or reachability belief)
+			const bool failed = tick.verdict == ControllerSession::PolicyVerdict::Unreachable;
 			relative_motion_.policy_step(pose->pos, pose->theta, now_ms,
 			                             failed ? std::optional<std::string>("the local policy cannot continue: " + tick.why) : std::nullopt);
 		}

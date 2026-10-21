@@ -39,6 +39,11 @@
 //   it. Never over a goal point: the goal cannot be routed around — the Release itself is the response and the caller's
 //   time budget ends a persistent failure.
 // ★ UNREACHABLE (literal now): the goal is not reachable from the robot on the trapped field (CostToGo::reachable).
+// ★ F1 — UNREACHABLE FROM A PLACE (reachability_belief.h): every step() folds its decision into a per-goal belief that no motion
+//   escapes from the robot's place (a decision that found no escape — Stuck, a no-gain release, a stop — is evidence for it; one
+//   that found an escape, against; motion leaves it behind on the field's cells) and reports Step::hand_back when holding one
+//   more tick costs more than the goal is worth under that belief. A Stuck is no longer a verdict: the caller holds and asks again.
+//   A hand back resets the belief (the same goal asked again is a new attempt); set_goal resets it; interrupt() keeps it.
 // ★ MONITOR CONTRACT: reset on set_goal and when a trap rebuilds the field (old field values are not comparable); any
 //   Release has already cleared the pending prediction inside decide() (review M1).
 #pragma once
@@ -46,6 +51,7 @@
 #include <optional>
 #include <vector>
 #include "local_policy.h"
+#include "reachability_belief.h"
 
 namespace rc::policy
 {
@@ -58,7 +64,11 @@ public:
                   bool trap_vetoed = false;              // Live fix 2: the trap met the caller's veto region (measured corridor)
                   bool replanned = false; float plan_remaining_p = 0.f;
                   bool completed_early = false;          // the previous plan reached its predicted outcome early (success)
-                  bool trap_no_route_evidence = false; };  // a failed prediction where the field could not point the way
+                  bool trap_no_route_evidence = false;   // a failed prediction where the field could not point the way
+                  // ★ F1 (reachability_belief.h): the accumulated belief that no motion escapes from this place — its log-odds
+                  //   at the robot, the hand-back bar log(route / (v_max dt)), and the verdict: hand the goal back iff L > bar.
+                  //   This, not a Stuck tick, is the place-level "Unreachable" the caller hands back on.
+                  float unreach_L = 0.f, unreach_bar = INFINITY; bool hand_back = false; };
     // The committed plan: phase 1 = (v1, w1) for horizon_s then brake, dur1 in all; phase 2 (if has2) = (v2, w2) from rest
     // for horizon_s then brake, dur2 in all. t0 = the decision time it started.
     // round 5: the plan runs PHASE by phase; a phase ends when its hold elapses OR its predicted end state is reached
@@ -87,7 +97,9 @@ public:
     // ★ Task 8 ruling I1 — AN INTERRUPTION IS NOT EVIDENCE. After a Pause / Halt / hold / LiDAR stall the committed plan and
     //   the pending prediction are dropped WITHOUT being judged (the base did not execute them, so their outcome says
     //   nothing about the world): no failed prediction, no trap. Goal, field and traps are kept.
-    void interrupt() { plan_ = Plan{}; monitor_.reset(); }
+    //   F1: the reachability belief is KEPT (it is about places, and an interruption gathered nothing), but the interval to the
+    //   next tick is a gap, not a tick period: the hand-back bar is not priced on it (ReachabilityBelief::interrupt).
+    void interrupt() { plan_ = Plan{}; monitor_.reset(); belief_.interrupt(); claim_ = Claim{}; }
     // ★ Live fix 2 ruling 2 — MEASURED EVIDENCE OVERRIDES A TRAP. veto(c, r) true = a trap disc there contradicts direct
     //   evidence that the body fits (the active Doorway's MEASURED corridor, an opening at least the body's width): the
     //   failed prediction still forces its Release, but no trap is laid (Step::trap_vetoed). Cleared by set_goal.
@@ -101,9 +113,17 @@ public:
     Eigen::Vector2f downhill(const Eigen::Vector2f& p) const;
     double last_build_ms() const { return last_build_ms_; }
     int failed_predictions() const { return failed_predictions_; }   // since set_goal
+    const ReachabilityBelief& reachability() const { return belief_; }
     const Plan& plan() const { return plan_; }
 
 private:
+    Step step_core(PolicyInput in, const PolicyParams& p);   // the plan / decide / trap logic; step() adds the F1 belief
+    ReachabilityBelief belief_;
+    // F1: the escape the committed plan claimed (a Drive / a gaining Release with an armed prediction), folded when judged
+    //   (drive: a Drive's descent claim, dF_pred its predicted descent at its holds' end; else a Release's continuability claim)
+    struct Claim { bool pending = false, drive = false; Eigen::Vector2f at = Eigen::Vector2f::Zero(); float q = 0.f, w = 1.f; int n = 0;
+                   float dF_pred = 0.f; double t0 = 0.0; };
+    Claim claim_;
     void build();
     Goal goal_{.kind = Goal::Kind::Place, .yaw = {}};
     CostToGo::Grid grid_{{0.f, 0.f}, 0.05f, 0, 0};

@@ -24,6 +24,8 @@ void Navigator::set_goal(const Goal& goal, const CostToGo::Grid& grid, std::func
     trap_veto_ = {};
     monitor_.reset();
     plan_ = Plan{};
+    belief_.reset(grid.cell, trap_radius_m);   // F1: a new goal knows nothing about its places
+    claim_ = Claim{};
     build();
 }
 
@@ -110,6 +112,83 @@ bool Navigator::phase_outcome_reached(const PolicyInput& in) const
 }
 
 Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
+{
+    Step s = step_core(in, p);
+    // ★ F1 — fold this tick into the reachability belief (reachability_belief.h derives every likelihood used here).
+    //   An OBSERVATION is a decision decide() made this tick on a fresh pose sample (a continued plan searched nothing; Blind /
+    //   Arrived / a sensing contradiction / Release(stop) say nothing about the place). A decision that found NO escape (Stuck,
+    //   a no-gain release, a repositioning Drive) is folded at once; one that CLAIMED an escape is held as a claim and folded
+    //   when its plan ends, at the place and with the exposure it was claimed with.
+    using M = Decision::Mode;
+    const Decision& d = s.d;
+    const bool fresh = belief_.tick(in.pose, in.v_now, in.w_now, in.now_s, in.base, p.dt);
+    if (claim_.pending and s.replanned)              // the claimed plan ended this tick: judged, completed early, or dropped
+    {
+        // ★ WHEN a claim is judged: by the ProgressMonitor when its plan completes (Decision::judged), or — for a Drive — on
+        //   the Navigator's EARLY completion, which is a per-PHASE success (navigator.h round 5): a "back up, then forward" plan
+        //   completes its forward phase early with a nil NET descent from where the escape was claimed, so the early completion
+        //   is graded on the descent like any judged Drive (below). A plan REPLACED because its remaining sweep turned risky, or
+        //   interrupted, never had the time to deliver: no evidence (measured: judging those read a plan replaced 0.1 s after
+        //   its claim — before the base had moved through the latency — as a failed escape, and handed back jamb_1p6cm_start on
+        //   18 of 20 seeds).
+        // ★ HOW a Drive claim is graded: phi = realized / predicted descent on the field from the claim's place (both read now,
+        //   on the current field), the prediction only if the field resolves it (the monitor's own resolution: the field's over
+        //   the displacement and the pose drift over the elapsed time, at slope 1 m/m). Why graded: under U the robot still
+        //   inches 3-9 cm into sim2d blocked_doorway's blocked face per attempt, which a binary verdict (any descent above the
+        //   resolution = delivered) reads as a full escape. Measured on the final model it is a refinement, not the cure:
+        //   binary 20/20 handed back, median 27.0 s / max 56.0 s; graded 20/20, median 25.3 s / max 45.2 s.
+        int verdict = d.judged;
+        if (verdict == 0 and s.completed_early) verdict = claim_.drive ? 2 : +1;   // 2: judged here, on the descent
+        float nats = 0.f;
+        if (verdict != 0 and claim_.drive)
+        {
+            const float realized = field_.at_length(claim_.at) - field_.at_length(in.pose.p);
+            const double el = in.now_s - claim_.t0;
+            const float sd = in.pose_drift_sigma_m > 0.f and in.pose_drift_time_s > 0.f
+                           ? in.pose_drift_sigma_m * std::sqrt(2.f * (1.f - std::exp(-float(el) / in.pose_drift_time_s))) : 0.f;
+            const float res = std::hypot(field_.resolution_m((in.pose.p - claim_.at).norm()), sd);
+            if (claim_.dF_pred > res and std::isfinite(realized))      // a prediction the field can resolve at all
+            {
+                const float phi = std::clamp(realized / claim_.dF_pred, 0.f, 1.f);
+                nats = claim_.w * (phi * ReachabilityBelief::delivered(claim_.q, claim_.n) + (1.f - phi) * ReachabilityBelief::no_escape(claim_.n));
+            }
+        }
+        else if (verdict > 0) nats = claim_.w * ReachabilityBelief::delivered(claim_.q, claim_.n);
+        else if (verdict < 0) nats = claim_.w * ReachabilityBelief::no_escape(claim_.n);
+        if (fresh) belief_.add(claim_.at, nats);
+        claim_ = Claim{};
+    }
+    const bool is_stop = d.mode == M::Release and d.v == 0.f and d.w == 0.f;
+    if (fresh and s.replanned and not d.sensing_contradiction and not is_stop and (d.mode == M::Drive or d.mode == M::Release or d.mode == M::Stuck))
+    {
+        belief_.set_prior(d.n_candidates);
+        const float w = belief_.exposure(in.v_now, in.w_now, in.latency_s, in.base);
+        // ★ A Drive claims an escape only if its PLAN predicts a descent the field resolves (dF at its holds' end as executed,
+        //   against CostToGo::resolution_m over at least that separation): a Drive scored on a two-step rate whose executed plan
+        //   descends nothing measurable — "back up, then forward" ending behind its start — is a REPOSITIONING decision, and the
+        //   ProgressMonitor would call it "too small to judge" (measured: sim2d blocked_doorway seed 3, those retreats of 0.4 m
+        //   from the blocked face were 26 of 62 Drive decisions and carried no evidence). It is read as finding no escape.
+        const float dF = d.plan_descent1 + d.plan_descent2;
+        const bool resolvable = d.mode == M::Drive and std::isfinite(dF) and dF > field_.resolution_m(std::abs(dF));
+        const bool escape = resolvable or (d.mode == M::Release and d.log_p_cont > d.log_p_cont_now);
+        const float q = 1.f - std::exp(d.log_p_safe);
+        if (not escape) belief_.add(in.pose.p, w * ReachabilityBelief::no_escape(d.n_candidates));
+        else if (d.armed) claim_ = Claim{.pending = true, .drive = d.mode == M::Drive, .at = in.pose.p, .q = q, .w = w, .n = d.n_candidates,
+                                         .dF_pred = d.plan_descent1 + d.plan_descent2, .t0 = in.now_s};
+        else belief_.add(in.pose.p, w * ReachabilityBelief::delivered(q, d.n_candidates));
+    }
+    s.unreach_L = belief_.log_odds();
+    s.unreach_bar = belief_.bar(field_.at_length(in.pose.p), in.base.v_max);
+    // the hold-or-hand-back question is asked of every tick that is not the goal itself
+    s.hand_back = d.mode != M::Arrived and not s.unreachable and s.unreach_L > s.unreach_bar;
+    // A hand back is the verdict on THIS attempt: the caller hands the goal back, and if the same goal is asked for again (the
+    // passage re-claims a crossing at once — rtD1b) that is a new attempt, which starts from the map's word like any new goal;
+    // kept, the evidence would burn every retry on its first tick
+    if (s.hand_back) { belief_.reset(grid_.cell, trap_r_); claim_ = Claim{}; }
+    return s;
+}
+
+Navigator::Step Navigator::step_core(PolicyInput in, const PolicyParams& p)
 {
     Step s;
     in.goal = &goal_; in.field = &field_; in.progress_field = nullptr;   // one field for everything

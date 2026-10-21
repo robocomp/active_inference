@@ -81,7 +81,15 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   float plan_dur1 = 0.f, plan_v2 = 0.f, plan_w2 = 0.f, plan_dur2 = 0.f; bool plan_has_cont = false;
                   // review fix round 5 — each phase's predicted END STATE where its hold ends as executed: the heading
                   // change (rad) and the field descent (m) over that phase (Drive plans; zeros otherwise)
-                  float plan_turn1 = 0.f, plan_descent1 = 0.f, plan_turn2 = 0.f, plan_descent2 = 0.f; };
+                  float plan_turn1 = 0.f, plan_descent1 = 0.f, plan_turn2 = 0.f, plan_descent2 = 0.f;
+                  // F1 (reachability_belief.h): how many candidates this decision searched (0 = none: an early return), and the
+                  // continuability at the start a Release is compared with — a Release with log_p_cont > log_p_cont_now is
+                  // predicted to BUY continuability (an escape); one without is not
+                  int n_candidates = 0; float log_p_cont_now = 0.f;
+                  // F1: the ProgressMonitor's verdict on the PREVIOUS plan's prediction, judged in this decide(): +1 delivered,
+                  // -1 failed, 0 none (nothing pending, not yet due, or too small to judge); and whether THIS decision armed a
+                  // prediction of its own (a monitored Drive with a finite descent, a monitored non-stop Release)
+                  int judged = 0; bool armed = false; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its

@@ -78,6 +78,8 @@ struct Options
     bool unseen = std::getenv("NO_UNSEEN") == nullptr;
     // F2 scenario (c): the base's velocity (and the command in force) at t = 0 — a run that starts MOVING
     float v0 = 0.f, w0 = 0.f;
+    // F1 scenario (a): the live base's measured wheel deceleration (Policy.WheelDecelMps2 0.5) for plant AND policy; 0 = limits()
+    float d_lin = 0.f;
 };
 
 struct ScenarioResult
@@ -96,6 +98,9 @@ struct ScenarioResult
     // F2: the first decision, every Release(stop), and the first decision made after a stop (v = w = 0 at rest)
     std::string first_mode; float first_v = 0.f, first_w = 0.f;
     bool stuck_moving = false;
+    // F1: a Stuck is a HOLD (the controller holds and asks again); the hand back is the reachability belief's (Step::hand_back)
+    int stuck_ticks = 0; bool hand_back = false; float hand_back_L = 0.f, hand_back_bar = 0.f;
+    float first_no_escape_t = -1.f;     // the first decision that found no escape (Stuck / no-gain release / stop)
     int stops = 0; std::string after_stop_mode; float after_stop_v = 0.f, after_stop_w = 0.f;
 };
 
@@ -166,6 +171,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     const auto& B = body();
     sim2d::ContactTester contact(world, B);
     sim2d::Base base; base.lim = limits(); base.latency_s = 0.06f;
+    if (opt.d_lin > 0.f) base.lim.d_lin = opt.d_lin;
     base.rng = &rng; base.jitter_s = kLatencyJitterS; base.slip_sigma = kSlipSigma;
     base.deadband_scale = std::uniform_real_distribution<float>(1.f - kDeadbandSpread, 1.f + kDeadbandSpread)(rng);
     base.v = base.cmd_v = opt.v0; base.w = base.cmd_w = opt.w0;
@@ -252,13 +258,19 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
                         1.f - std::exp(d.log_p_safe), d.log_p_cont, d.progress_m, clear, fnow, d.why.c_str());
 
         if (d.mode == Decision::Mode::Arrived) { res.reached = true; res.why = "arrived"; break; }
-        if (d.mode == Decision::Mode::Stuck or d.mode == Decision::Mode::Blind)
+        if (d.mode == Decision::Mode::Blind) { res.stuck = true; res.why = d.why; break; }
+        if (d.mode == Decision::Mode::Stuck)
         {
-            res.stuck = true; res.why = d.why;
-            // F2: a Stuck from REST (the policy's own deadband test on the odometry it was given) is the place-level verdict
-            res.stuck_moving = std::abs(in.v_now) >= in.base.v_min_eff or std::abs(in.w_now) >= in.base.w_min_eff;
-            break;
+            // ★ F1: a Stuck is one decision, not a verdict — the base holds (d = 0, 0 is sent below) and the next tick decides
+            //   again; the PLACE-level verdict is the reachability belief's hand back (below)
+            res.stuck = true; ++res.stuck_ticks; res.why = d.why;
+            // F2: a Stuck while MOVING (the policy's own deadband test on the odometry it was given) — not even the stop releasable
+            res.stuck_moving = res.stuck_moving or std::abs(in.v_now) >= in.base.v_min_eff or std::abs(in.w_now) >= in.base.w_min_eff;
         }
+        const bool no_escape = st.replanned and (d.mode == Decision::Mode::Stuck
+                               or (d.mode == Decision::Mode::Release and not (d.log_p_cont > d.log_p_cont_now)));
+        if (no_escape and res.first_no_escape_t < 0.f) res.first_no_escape_t = t;
+        if (tr) std::printf("    belief L %+.2f bar %.2f judged %+d armed %d early %d%s\n", st.unreach_L, st.unreach_bar, d.judged, int(d.armed), int(st.completed_early), st.hand_back ? "  HAND BACK" : "");
         if (d.mode == Decision::Mode::Release and not in_release_episode) { in_release_episode = true; ++res.releases; }
         if (tr and st.replanned) std::printf("    (replanned; remaining-plan P was %.3f)\n", st.plan_remaining_p);
         if (tr and st.trap_suppressed_by_goal) std::printf("    no trap: its disc would contain the goal\n");
@@ -271,6 +283,12 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
                                 st.trap->dir.x(), st.trap->dir.y(), best_f);
         }
         if (st.unreachable) { res.unreachable = true; res.why = "goal not reachable on the trapped field"; break; }
+        if (st.hand_back)
+        {
+            res.unreachable = true; res.hand_back = true; res.hand_back_L = st.unreach_L; res.hand_back_bar = st.unreach_bar;
+            char buf[160]; std::snprintf(buf, sizeof buf, "reachability belief: L %.2f > bar %.2f (%s)", st.unreach_L, st.unreach_bar, d.why.c_str());
+            res.why = buf; break;
+        }
 
         // ---- the base: command latency (+ jitter), ramps, deadband (x scale), slip; contact every <= 5 mm
         base.send(t, d.v, d.w);
@@ -379,6 +397,7 @@ static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 
 // ---------------------------------------------------------------- reporting
 struct Summary { int max_failed = 0; std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
+                 int hand_backs = 0, stuck_ticks = 0; std::vector<float> tverdict_after_no_escape;
                  bool traj_ok = true; int total_traps = 0, total_stops = 0, stuck_moving = 0; std::vector<float> tunreach, tstuck; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
@@ -386,7 +405,9 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
     int nseeds = 20;
     if (const char* s = std::getenv("SEEDS")) nseeds = std::max(1, std::atoi(s));
     std::vector<std::future<ScenarioResult>> fut;
-    for (int s = 0; s < nseeds; ++s) fut.push_back(std::async(std::launch::async, fn, unsigned(s)));
+    int first = 0;   // FIRST_SEED=<k> (diagnostic): run seeds k .. k+n-1
+    if (const char* f = std::getenv("FIRST_SEED")) first = std::max(0, std::atoi(f));
+    for (int s = 0; s < nseeds; ++s) fut.push_back(std::async(std::launch::async, fn, unsigned(first + s)));
     Summary S;
     std::printf("== %s\n   seed reached unreach stuck contacts(rel) releases  t_goal  path  geo  max_np  min_clear  traj  why\n", name.c_str());
     for (int s = 0; s < nseeds; ++s)
@@ -401,6 +422,8 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
         if (r.unreachable) S.tunreach.push_back(r.time_s);
         if (r.stuck) S.tstuck.push_back(r.time_s);
         S.stuck_moving += r.stuck_moving;
+        S.hand_backs += r.hand_back; S.stuck_ticks += r.stuck_ticks;
+        if (r.unreachable and r.first_no_escape_t >= 0.f) S.tverdict_after_no_escape.push_back(r.time_s - r.first_no_escape_t);
         S.max_failed = std::max(S.max_failed, r.failed_predictions);
         S.step_ms.insert(S.step_ms.end(), r.step_ms.begin(), r.step_ms.end()); S.returns_max = std::max(S.returns_max, r.returns_max);
         S.build_ms += r.build_ms; S.builds += r.builds; S.goal_truth_clear = std::min(S.goal_truth_clear, r.goal_truth_clear);
@@ -414,7 +437,8 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
                 "max no-progress %.1f s, min true clearance %+.3f m, max path/geodesic %.2f\n",
                 S.reached, S.n, S.unreachable, S.stuck, S.contacts, S.rel_contacts, S.total_releases, S.max_releases, med, mx, S.max_np,
                 S.min_clear, S.max_path_ratio);
-    std::printf("   Release(stop) decisions (F2): %d over all seeds\n", S.total_stops);
+    std::printf("   Release(stop) decisions (F2): %d over all seeds; Stuck ticks held (F1) %d; belief hand backs %d\n", S.total_stops,
+                S.stuck_ticks, S.hand_backs);
     std::printf("   field builds: %d, mean %.1f ms each (grid as stated per world)\n", S.builds, S.builds ? S.build_ms / S.builds : 0.0);
     std::ranges::sort(S.step_ms);
     if (not S.step_ms.empty())
@@ -599,16 +623,21 @@ int main()
     //   (c1) TRAP: nose 6 cm past the rest pose, tail 5 cm behind, walls 0.70 m long (v0 0.10 m/s). No 90 deg turn fits between
     //        the walls, so every run must end in a verdict about the PLACE: the trapped field's Unreachable (15/20) or a Stuck
     //        FROM REST (5/20 — the stop phase now ends at rest, navigator.cpp, and from some rest poses no turn is releasable).
-    //        Never a Stuck while moving. Measured time to the verdict (fix round 1, 20 seeds): median 3.35 s, max 3.90 s.
-    //        ★ This is F1's bounded-time guard: within 1.15 x 3.90 s; once F1 folds the from-rest Stuck into its accumulated
-    //        belief, tighten the verdict oracle to S.unreachable == S.n.
+    //        Never a Stuck while moving. Pre-F1 (fix round 1): 15/20 the trapped field's Unreachable, 5/20 a terminal Stuck from
+    //        rest, verdict max 3.90 s. ★ F1: every seed ends Unreachable (the from-rest Stuck is a decision folded into the belief,
+    //        never a terminal verdict). MODEL-STATED TIME: after the stop phase (~0.15 s to rest) the pocket is closed by the
+    //        decisions from rest that find no escape there — from the prior L0 = -log(N+1), each adds w log(N+1) (w ~ 1 for a
+    //        Stuck, ~0.75 for a 0.3 rad/s turn's coast): 2 of them while the field is untouched (bar log(1.5 / 0.025) = 4.1), 3
+    //        when a failed no-gain release lays a trap that lengthens the route (bar -> 4.9). Between two of them the robot holds a
+    //        release (horizon_s = 1 s) and brakes (<= 0.15 s): <= 0.2 + 2 x 1.15 = 2.5 s. Measured: 0.20 .. 2.35 s (16 by the
+    //        belief, 4 by the trapped field).
     //   (c2) REACH: nose 8 cm past the rest pose, tail 16 cm behind, walls 1.20 m long, v0 0.20 m/s; goal 1.5 m to the left.
     //        Pre-F2 code: Stuck 20/20 on the first tick. With F2: Release(stop) 20/20, then from rest the in-place turn clears the
     //        walls (the 0.318 m corner circle fits) and the robot drives out — reached 20/20, time-to-goal median 5.05 s, max
     //        5.75 s (fix round 1); oracle: median <= 1.15 x 5.05 s.
     if (want("stop_is_the_only_release"))
     {
-        constexpr float kTrapVerdictMaxS = 3.90f;     // (c1)'s measured max time to the place-level verdict (fix round 1)
+        constexpr float kTrapVerdictMaxS = 2.5f;      // (c1)'s model-stated bound on the time to Unreachable (F1, above)
         struct Pocket { const char* name; float v0, gap_nose, gap_tail, half; };
         auto run_pocket = [&](const Pocket& pk, int* first_stop, int* moves_after) {
             const float coast = pk.v0 * 0.06f + pk.v0 * pk.v0 / (2.f * limits().d_lin), nose = 0.23f + coast + pk.gap_nose, tail = -0.23f - pk.gap_tail;
@@ -639,15 +668,14 @@ int main()
             CHECK((n + ": never a Stuck while MOVING (F2: the stop is releasable)").c_str(), S.stuck_moving == 0);
             if (n.ends_with("trap"))
             {
-                // the place-level verdict: the trapped field's Unreachable, or a Stuck FROM REST (nothing moves it safely from
-                // here); F1 will fold the latter into its accumulated belief, after which this must read S.unreachable == S.n
-                auto t = S.tunreach; t.insert(t.end(), S.tstuck.begin(), S.tstuck.end()); std::ranges::sort(t);
+                // ★ F1: the from-rest Stuck is folded into the reachability belief — every seed ends Unreachable (the trapped
+                //   field's, or the belief's hand back), never a terminal Stuck; the bound on the time is TRAP_VERDICT below
+                auto t = S.tunreach; std::ranges::sort(t);
                 const float med = t.empty() ? NAN : t[t.size() / 2], mx = t.empty() ? 1e9f : t.back();
-                std::printf("   verdicts: Unreachable %d, Stuck from rest %d; time to the verdict median %.2f s, max %.2f s (guard 1.15 x %.2f s)\n",
-                            S.unreachable, S.stuck - S.stuck_moving, med, mx, kTrapVerdictMaxS);
-                CHECK((n + ": every seed ends in a place-level verdict (Unreachable, or Stuck from rest)").c_str(),
-                      S.unreachable + (S.stuck - S.stuck_moving) == S.n);
-                CHECK((n + ": the verdict comes within 1.15 x the measured max").c_str(), mx <= 1.15f * kTrapVerdictMaxS);
+                std::printf("   verdicts: Unreachable %d (belief hand backs %d); time to the verdict median %.2f s, max %.2f s (bound %.2f s)\n",
+                            S.unreachable, S.hand_backs, med, mx, kTrapVerdictMaxS);
+                CHECK((n + ": every seed ends Unreachable (F1: a Stuck from rest is folded, not a verdict)").c_str(), S.unreachable == S.n);
+                CHECK((n + ": the verdict comes within the bound").c_str(), mx <= kTrapVerdictMaxS);
             }
             else
             {
@@ -657,6 +685,45 @@ int main()
                 performance_oracle(n, S, 5.05f);
             }
         }
+    }
+    // ---- off_centre_fast_doorway (F1, doorway-release spec scenario (a)): rtD1b's geometry — 0.10 m east of the gap centre,
+    //      yawed 20 deg toward the east casing, 0.45 m before room_2's wall face, entering at 0.35 m/s on the live base's measured
+    //      wheel deceleration (Policy.WheelDecelMps2 0.5: ~0.13 m of coast). Some decisions find even the stop unreleasable
+    //      (Stuck while moving): the coast explains them, the base holds and decides again. Pre-F1 (one Stuck = a hand back) this
+    //      handed the crossing back on the 7 of 20 seeds that hit one. Oracle: crosses on every seed, never handed back, no contact.
+    if (want("off_centre_fast_doorway"))
+    {
+        const World w = door_world(1);
+        Options o{.grid = kDoorGrid, .jumps = {}, .trace_name = "off_centre_fast_doorway", .v0 = 0.35f, .d_lin = 0.5f};
+        const auto S = run_seeds("off_centre_fast_doorway", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.10f, -0.45f), 70.f * kDeg}, doorway(+1), 60.f, seed, o); });
+        std::printf("   Stuck ticks held %d (Stuck while moving on %d seeds), belief hand backs %d\n", S.stuck_ticks, S.stuck_moving, S.hand_backs);
+        CHECK("off_centre_fast_doorway: contacts == 0", S.contacts == 0);
+        CHECK("off_centre_fast_doorway: never handed back (no Unreachable)", S.unreachable == 0);
+        CHECK("off_centre_fast_doorway: crosses on every seed", S.reached == S.n);
+        CHECK("off_centre_fast_doorway: the scene exercises the hold (a Stuck while moving on some seed)", S.stuck_moving > 0);
+    }
+    // ---- blocked_doorway (F1, scenario (b)): DOOR_1 with a box the MAP does not know 0.30 m past room_2's wall face, across the
+    //      whole opening. The field still leads through the gap and the measured opening vetoes every trap in its corridor
+    //      (Live fix 2 ruling 2), so the route-level Unreachable can never come: pre-F1 the robot jockeys at the blocked face and
+    //      dithers stop / turn until the time limit on every seed (no Stuck, no hand back). The belief must hand it back.
+    //      MODEL-STATED: the face starts at the map's prior L0 = -log(N+1) (~ -4.3, N ~ 75 candidates) against
+    //      bar = log(route / (v_max dt)) = log(0.82 / (0.5 x 0.05)) ~ 3.5, so it is handed back once its net evidence exceeds
+    //      ~7.8 nats: two decisions at rest that find no escape there, beyond what its delivered descents hold. The model counts
+    //      decisions; the seconds are the policy's own exploration of the face (it inches 3-9 cm in per attempt, each partly a
+    //      delivered escape). Measured (20 seeds): handed back on every seed, median 25.3 s, max 45.2 s; guard 1.15 x 45.2 s.
+    if (want("blocked_doorway"))
+    {
+        World w = door_world(1);
+        w.boxes.push_back({-0.6f, 0.30f, 0.6f, 0.40f, false});
+        Options o{.grid = kDoorGrid, .jumps = {}, .trace_name = "blocked_doorway"};
+        const auto S = run_seeds("blocked_doorway", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, -1.0f), 90.f * kDeg}, doorway(+1), 60.f, seed, o); });
+        auto t = S.tverdict_after_no_escape; std::ranges::sort(t);
+        auto tu = S.tunreach; std::ranges::sort(tu);
+        std::printf("   hand backs %d/%d; time to the verdict median %.2f s max %.2f s; after the first no-escape decision median %.2f s max %.2f s\n",
+                    S.hand_backs, S.n, tu.empty() ? NAN : tu[tu.size() / 2], tu.empty() ? NAN : tu.back(), t.empty() ? NAN : t[t.size() / 2], t.empty() ? NAN : t.back());
+        CHECK("blocked_doorway: contacts == 0", S.contacts == 0);
+        CHECK("blocked_doorway: handed back on every seed — by the belief (traps are vetoed here)", S.unreachable == S.n and S.hand_backs == S.n);
+        CHECK("blocked_doorway: within 1.15 x the measured max (45.2 s)", not tu.empty() and tu.back() <= 1.15f * 45.2f);
     }
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;

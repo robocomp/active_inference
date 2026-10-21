@@ -290,6 +290,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     {
         // ★ round 4: a completed RELEASE is judged on the continuability it bought
         const float lpc_real = log_p_continuable_cells(in, p, start) - mon->lpc0;
+        d.judged = mon->gain_pred <= 0.f or lpc_real <= 0.f ? -1 : +1;
         if (mon->gain_pred <= 0.f or lpc_real <= 0.f)
         {
             prediction_failed = true;
@@ -315,9 +316,10 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         const float sd = in.pose_drift_sigma_m > 0.f and in.pose_drift_time_s > 0.f
                        ? in.pose_drift_sigma_m * std::sqrt(2.f * (1.f - std::exp(-float(el) / in.pose_drift_time_s))) : 0.f;
         const float res = std::hypot(res_field, slope * sd);
-        if (std::isfinite(realized) and realized > res) mon->reset();              // the plan delivered: forget it
+        if (std::isfinite(realized) and realized > res) { d.judged = +1; mon->reset(); }   // the plan delivered: forget it
         else if (mon->dF_pred > res)
         {
+            d.judged = -1;
             prediction_failed = true;
             std::snprintf(failed_why, sizeof failed_why, "predicted %.3f m in %.2f s, realized %.3f m (resolution %.3f)",
                           mon->dF_pred, mon->tau, std::isfinite(realized) ? realized : -1.f, res);
@@ -365,6 +367,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
             cands.push_back(c);
         }
+    d.n_candidates = int(cands.size());   // F1: what this decision searched (every Drive / Release / Stuck below carries it)
     // ★ one continuation rollout set per candidate end pose, cached (make_conts); its sweeps yield BOTH the continuability
     //   and the second step of the two-step progress (ruling round 4) — no rollout is ever repeated.
     std::vector<Conts> conts;
@@ -468,6 +471,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             mon->pending = true; mon->t0 = in.now_s; mon->tau = p.horizon_s * (best_drive->has_cont ? 2.f : 1.f);
             mon->f0 = pf.at_length(in.pose.p); mon->dF_pred = mon->f0 - pf.at_length(hold_end.p); mon->p0 = in.pose;
             if (not std::isfinite(mon->dF_pred)) mon->reset();
+            d.armed = mon->pending;
         }
         Decision dd = finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
         // ★ round 5: each phase's predicted END STATE (turn and descent), for the Navigator's early completion
@@ -614,6 +618,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
                   prediction_failed ? (std::string(failed_why) + ")").c_str() : "", words(best->v, best->w).c_str(),
                   1.f - std::exp(best->lps), lpc_now, best->lpc);
     Decision rd = finish(Decision::Mode::Release, *best, buf);
+    rd.log_p_cont_now = lpc_now;          // F1: a gain (best->lpc > lpc_now) is an escape; none (pass (b), the stop) is not
     // ★ F2: a Release(stop) predicts REST at its end pose, which the brake profile guarantees; it promises no continuability
     //   gain (its point is that the next decision is made from rest, without the coast), so no release prediction is armed
     //   — judging it on a gain it never claimed would read every stop as a failed prediction and lay a trap on it.
@@ -623,6 +628,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         mon->reset();
         mon->pending = true; mon->release = true; mon->t0 = in.now_s; mon->tau = p.horizon_s;
         mon->lpc0 = lpc_now; mon->gain_pred = best->lpc - lpc_now; mon->p0 = in.pose;
+        rd.armed = true;
     }
     return rd;
 }

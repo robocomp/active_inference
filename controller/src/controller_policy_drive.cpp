@@ -387,11 +387,16 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
 
     // ── act
     const bool moving = d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release;
-    if (st.unreachable)
+    // ★ F1: Unreachable is the trapped field's (st.unreachable) or the reachability belief's (st.hand_back: the place's log-odds
+    //   that no motion escapes exceeds log(route / (v_max dt)) — reachability_belief.h). A Stuck alone is a hold (below).
+    if (st.unreachable or st.hand_back)
     {
         out.verdict = PolicyVerdict::Unreachable;
-        out.why = std::format("the goal is no longer reachable from ({:.2f},{:.2f}) after a trap at ({:.2f},{:.2f})", pose.p.x(),
-                              pose.p.y(), st.trap ? st.trap->c.x() : 0.f, st.trap ? st.trap->c.y() : 0.f);
+        out.why = st.unreachable
+            ? std::format("the goal is no longer reachable from ({:.2f},{:.2f}) after a trap at ({:.2f},{:.2f})", pose.p.x(),
+                          pose.p.y(), st.trap ? st.trap->c.x() : 0.f, st.trap ? st.trap->c.y() : 0.f)
+            : std::format("no motion escapes from ({:.2f},{:.2f}): reachability log-odds {:.2f} > bar {:.2f} (the {:.2f} m route vs "
+                          "one tick) — last decision: {}", pose.p.x(), pose.p.y(), st.unreach_L, st.unreach_bar, route_here, d.why);
         note_why(rc::why::Cause::PolicyHold, std::format("{}: {}", who, out.why));
         note_no_command(); motion_commander.stop_robot();
         policy_sent_.push_back({now_s, 0.f, 0.f});
@@ -409,7 +414,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     else
     {
         out.verdict = d.mode == Decision::Mode::Arrived ? PolicyVerdict::Arrived : PolicyVerdict::Held;
-        // Live fix 2: a sensing contradiction (returns inside the body) is a HOLD, not a stuck verdict — never a hand back
+        // Live fix 2: a sensing contradiction (returns inside the body) is a HOLD, not a stuck verdict — never a hand back.
+        // F1: a Stuck is a HOLD too — the next tick decides again; the hand back is the belief's (above)
         out.stuck = d.mode == Decision::Mode::Stuck and not d.sensing_contradiction;
         out.why = d.why;
         if (d.mode == Decision::Mode::Arrived) note_why(rc::why::Cause::Arrived, std::format("{}: the policy reached the {} goal", who, goal_kind_name(spec.goal.kind)));
@@ -423,14 +429,15 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     if (st.trap_vetoed)
         std::println("[policy] {}: a failed prediction's trap would block the measured doorway corridor — not laid (the Release "
                      "stands)", who);
-    if (mode_i != policy_last_mode_ or st.trap or st.unreachable)
+    if (mode_i != policy_last_mode_ or st.trap or st.unreachable or st.hand_back)
     {
         std::println("[policy] {} -> {} ({}): {} | v {:+.2f} w {:+.2f} P(contact) {:.3f} cont {:.2f} prog {:+.3f} m eligible {} | "
-                     "field {:.2f} m (route {:.2f} m), {} returns + {} unseen, age {:.2f} s{}{}",
+                     "field {:.2f} m (route {:.2f} m), {} returns + {} unseen, age {:.2f} s | reachability L {:+.2f} bar {:.2f}{}{}",
                      who, rc::policy::mode_name(d.mode), goal_kind_name(spec.goal.kind), d.why, d.v, d.w, 1.f - std::exp(d.log_p_safe),
                      d.log_p_cont, d.progress_m, d.eligible, f_here, route_here, n_lidar, returns.size() - n_lidar, returns_age_s,
+                     st.unreach_L, st.unreach_bar,
                      st.trap ? std::format(" | TRAP at ({:.2f},{:.2f}) r {:.2f}", st.trap->c.x(), st.trap->c.y(), st.trap->r) : std::string(),
-                     st.unreachable ? " | UNREACHABLE" : "");
+                     st.unreachable ? " | UNREACHABLE" : st.hand_back ? " | UNREACHABLE (reachability belief)" : "");
         policy_last_mode_ = mode_i;
     }
 
@@ -442,7 +449,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         if (policy_csv_.is_open())
             policy_csv_ << "t_ms,who,goal_kind,mode,v,w,log_p_safe,log_p_cont,progress_m,eligible,replanned,plan_remaining_p,"
                            "prediction_failed,trap,unreachable,world_applied,x,y,yaw,v_meas,w_meas,odo_valid,field_m,n_returns,n_unseen,"
-                           "returns_age_s,latency_s,step_ms,route_m,why\n";
+                           "returns_age_s,latency_s,step_ms,route_m,unreach_L,unreach_bar,hand_back,why\n";
     }
     if (policy_csv_.is_open())
     {
@@ -456,7 +463,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                     << (st.trap ? 1 : 0) << ',' << (st.unreachable ? 1 : 0) << ',' << (st.world_applied ? 1 : 0) << ','
                     << pose.p.x() << ',' << pose.p.y() << ',' << pose.yaw << ',' << v_meas << ',' << w_meas << ',' << (odo_valid_ ? 1 : 0) << ','
                     << f_here << ',' << n_lidar << ',' << (returns.size() - n_lidar) << ',' << returns_age_s << ',' << latency_s << ','
-                    << step_ms << ',' << route_here << ',' << why << '\n';
+                    << step_ms << ',' << route_here << ',' << st.unreach_L << ',' << st.unreach_bar << ',' << (st.hand_back ? 1 : 0) << ','
+                    << why << '\n';
         policy_csv_.flush();
     }
     if (out.why.empty()) out.why = d.why;
@@ -520,7 +528,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         {
             const std::string who = std::format("mission '{}' wp {}", mission_.selected_name(), step.index + 1);
             const auto tick = policy_tick(*step.goal, who, cpose, obstacle_tracker, motion_commander, now);
-            const bool skip = tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck);
+            // F1: a Stuck is a hold; only the Unreachable verdict (trapped field or reachability belief) skips the waypoint
+            const bool skip = tick.verdict == PolicyVerdict::Unreachable;
             if (skip) std::println("[policy] {}: cannot be reached ({}) — skipped", who, tick.why);
             if (tick.verdict == PolicyVerdict::Arrived or skip)
                 step = rc::policy::route_goal_step(policy_route_wps_, policy_route_laps_, policy_route_index_, true, gp.tol_xy, gp.tol_yaw);
@@ -574,7 +583,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             }
             const auto tick = policy_tick(spec, who + (cp.drive ? "" : " (waiting)"), cpose, obstacle_tracker, motion_commander, now,
                                           corridor, veto);
-            if (tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck))
+            // F1: a Stuck is a hold; the crossing is handed back only on the Unreachable verdict (trapped field / belief)
+            if (tick.verdict == PolicyVerdict::Unreachable)
                 cross_hand_back(std::format("the local policy cannot drive it ({})", tick.why), /*timed_out=*/false, motion_commander);
             // ★ Live fix 4 ruling 4: waiting for an anchor never seen, FACING where it was published, for one plan duration
             //   (2 holds) — nothing at this pose changes it: hand the cross back and let the passage reposition (approach).
@@ -701,8 +711,9 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     }
     else if (tick.verdict != PolicyVerdict::Unreachable and not tick.stuck)
         no_route_since_ms_ = 0;
-    // UNREACHABLE / STUCK: handed back through the protocol (a mouse target is dropped by the no-route clock)
-    if (tick.verdict == PolicyVerdict::Unreachable or (tick.verdict == PolicyVerdict::Held and tick.stuck))
+    // UNREACHABLE: handed back through the protocol (a mouse target is dropped by the no-route clock). F1: a Stuck is a hold —
+    // the reachability belief's verdict, not a single Stuck tick, is what hands back
+    if (tick.verdict == PolicyVerdict::Unreachable)
     {
         // a Reach is handed back at once (the producer offers another); any other contract / a mouse target goes through
         // the 5-s no-route clock (report_unreachable_if_no_route), which reports or drops it
