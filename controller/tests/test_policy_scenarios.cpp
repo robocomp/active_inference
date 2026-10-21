@@ -26,12 +26,13 @@
 //   Env: ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3); NO_JAMBS=1 drops F4's measured jambs from a
-//     Doorway's field.
+//     Doorway's field; NO_LEAF=1 drops the door's known leaf from leaf_known_hinge_side (A/B).
 #include "sim2d/sim2d.h"
 #include "../src/local_policy/local_policy.h"
 #include "../src/local_policy/navigator.h"
 #include "../src/local_policy/unseen_contact.h"
 #include "../src/local_policy/doorway_corridor.h"
+#include "../src/local_policy/door_leaf.h"
 
 #include <charconv>
 #include <chrono>
@@ -83,6 +84,9 @@ struct Options
     float d_lin = 0.f;
     // F4 DIAGNOSTIC (NOT the brief's configuration): NO_JAMBS=1 drops the measured jambs from a Doorway's field (A/B)
     bool no_jambs = std::getenv("NO_JAMBS") != nullptr;
+    // Task 3b: the door's leaf as door_concept models it (room frame) with the residual cells it took from the map — a KNOWN
+    // obstacle in the field's density, as the controller's extra_fn adds it (door_leaf.h door_leaf_density); empty = none
+    DoorLeafEvidence leaf = {};
 };
 
 struct ScenarioResult
@@ -199,7 +203,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
                               kThroughS + 2.f * goal.tol_xy + 0.05f);
     }
     nav.set_goal(goal, mapfree.grid, [&mapfree](const V2& c) { return mapfree(c); },
-                 [jambs](const V2& c) { return jambs ? doorway_risk_density(*jambs, c) : 0.f; }, goal_points(goal),
+                 [jambs, &opt, r_ins = B.inscribed_radius()](const V2& c)
+                 { return (jambs ? doorway_risk_density(*jambs, c) : 0.f) + door_leaf_density(opt.leaf, c, r_ins); }, goal_points(goal),
                  B.circumscribed_radius());
     // ★ Live fix 2 ruling 2 — as the controller does: a Doorway's measured opening (at least the body's width) vetoes traps
     if (goal.kind == Goal::Kind::Doorway)
@@ -372,7 +377,7 @@ static World door_world(int leaf, float casing_inner = 0.45f)
         {-1.67f, -2.31f, -1.56f, -1.47f}, {-6.f, -2.42f, -1.15f, -2.31f},
         {-3.17f, 0.f, -3.06f, 4.11f}, {3.06f, 0.f, 3.17f, 4.11f}, {-3.2f, 4.11f, 3.2f, 4.22f},
         {-6.f, -7.f, 6.f, -6.9f}};
-    if (leaf == 1) w.boxes.push_back({-0.525f, -1.15f, -0.475f, -0.20f});
+    if (leaf == 1 or leaf == 3) w.boxes.push_back({-0.525f, -1.15f, -0.475f, -0.20f, leaf == 1});   // 3: explained (Task 3b)
     if (leaf == 2) w.boxes.push_back({-0.525f, 0.f, -0.475f, 0.95f});
     for (int i = 0; i < 10; ++i)
     {
@@ -578,6 +583,50 @@ int main()
             standard_oracles(n, S);
             performance_oracle(n, S, leaf == 1 ? 4.60f : 4.60f, 5.75f);
         }
+    // ---- leaf_known_hinge_side (Task 3b, rtD1c leg 5): the leaf open 90 deg into room_1 is NOT in the planner's map — the
+    //      door explained residual's cells on it (door_leaf.h) — and enters the field as door_concept's KNOWN obstacle (two
+    //      hypotheses: the west hinge P 0.9, the east one 0.1; sigma 2 cm, sigma_phi 3 deg). The robot starts south-west of
+    //      the free edge... beside the leaf on its hinge side, 0.65 m from it, facing away from the door: the straight line to the door
+    //      runs through the leaf. Measured A/B (20 seeds): the leaf mixture priced APART from the cells it took reached 1/20
+    //      (it costs at most -log(0.1) = 2.3 nats/m to cross); coupled (door_leaf.h) 20/20, as with the leaf hard in the map
+    //      (LEAF_IN_MAP=1 NO_LEAF=1: 20/20). NO_LEAF=1 alone (taken and not modelled) is the discriminating failure.
+    if (want("leaf_known_hinge_side"))
+    {
+        // DOOR_1 with room_1's west side opened up to x = -1.80 (the copied scene's hinge-side pocket is 0.585 m for a 0.568 m
+        // body: no room to turn, a test of being boxed, not of the leaf), the leaf explained (in the world, not in the map)
+        World w = door_world(std::getenv("LEAF_IN_MAP") != nullptr ? 1 : 3);   // LEAF_IN_MAP=1 (DIAGNOSTIC): the leaf hard in the map, as before 3b
+        std::erase_if(w.boxes, [](const sim2d::Box& b) { return b.x1 <= -1.10f and b.y1 > -2.32f and b.y0 < -0.23f and b.x0 > -2.f; });
+        w.boxes.push_back({-1.91f, -2.42f, -1.80f, -0.11f});
+        w.boxes.push_back({-1.91f, -0.24f, -0.50f, -0.11f});
+        auto hyp = [](float hinge_x, float p)
+        {
+            LeafHypothesis h;
+            h.hinge = V2(hinge_x, -0.2f); h.dir = V2(0.f, -1.f); h.length = 0.95f; h.p = p;
+            h.pivot = V2(0.f, -0.1f); h.P_xy = Eigen::Matrix2f::Identity() * (0.02f * 0.02f);
+            h.var_psi = 0.01f * 0.01f; h.var_phi = (3.f * kDeg) * (3.f * kDeg);
+            return h;
+        };
+        Options o{.grid = kDoorGrid, .jumps = {}, .trace_name = "leaf_known_hinge_side"};
+        // residual's view of the leaf: its 5 cm cells, every one corroborated by a live return (hard) — taken from the map by
+        // the door's leaf exactly as the controller's sync_world_state does (take_explained_cells)
+        DoorLeaf L; L.hyps = {hyp(-0.5f, 0.9f), hyp(0.5f, 0.1f)};
+        std::vector<V2> cells;
+        for (int i = 0; i <= 19; ++i) cells.push_back(V2(-0.5f, -0.2f - 0.05f * float(i)));
+        const std::vector<float> hard(cells.size(), std::numeric_limits<float>::infinity());
+        std::vector<std::size_t> keep;
+        o.leaf = take_explained_cells(L, cells, 0.05f, hard, B.inscribed_radius(), keep);
+        std::printf("leaf_known_hinge_side: %zu residual cells on the leaf, %zu taken by the door, %zu left in the map\n",
+                    cells.size(), o.leaf.cells.size(), keep.size());
+        if (std::getenv("NO_LEAF") != nullptr) o.leaf = {};   // DIAGNOSTIC A/B: the leaf neither in the map nor modelled
+        auto envf = [](const char* k, float d) { float v = d; if (const char* e = std::getenv(k)) std::from_chars(e, e + std::strlen(e), v); return v; };
+        const Pose2 s{V2(envf("SX", -1.15f), envf("SY", -0.80f)), envf("SYAW", -90.f) * kDeg};   // SX/SY/SYAW: diagnostic
+        sim2d::ContactTester ct(w, B);
+        std::printf("leaf_known_hinge_side start clearance %.4f m\n", ct.clearance(s));
+        const auto S = run_seeds("leaf_known_hinge_side", [&](unsigned seed) { return run_scenario(w, s, doorway(+1), 60.f, seed, o); });
+        standard_oracles("leaf_known_hinge_side", S);
+        std::printf("   belief hand backs %d (a passable door with a known leaf must not lean Unreachable)\n", S.hand_backs);
+        CHECK("leaf_known_hinge_side: 0 belief hand backs", S.hand_backs == 0);
+    }
     // ---- dead_end_release: the map says the 0.8 m passage leads to the goal; a wall it does not know closes it
     if (want("dead_end_release"))
     {
@@ -730,7 +779,7 @@ int main()
     //      +4.3 each) at one cell — two decisions there whose eligible options, over two steps, shorten T by nothing. Claims are
     //      honest here (the policy sees the box: its plans predict stopping short of it and deliver exactly that), so they carry
     //      ~nothing. The SECONDS are how long the policy takes to park where no safe option shortens T, which the model does not
-    //      predict: measured (fix round 1, 20 seeds, 240 s limit) 19/20 handed back, median 76.2 s, max 194.3 s; within 60 s: 9/20. Fix round 2 (base-rate prior, no T = inf evidence, no bar before a measured interval): 19/20, median 50.5 s, max 193.4 s.
+    //      predict: measured (fix round 1, 20 seeds, 240 s limit) 19/20 handed back, median 76.2 s, max 194.3 s; within 60 s: 9/20. Fix round 2 (base-rate prior, no T = inf evidence, no bar before a measured interval): 19/20, median 50.5 s, max 193.4 s. F1 fix round 3 (f438dc31): 20/20 within 240 s, median 34.4 s, max 61.3 s.
     //      Ruled acceptable (fix round 1): guard >= 19/20 within 240 s, 0 contacts, never reached (no false progress).
     if (want("blocked_doorway"))
     {

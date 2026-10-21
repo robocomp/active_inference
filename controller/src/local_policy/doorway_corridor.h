@@ -185,6 +185,28 @@ inline bool in_doorway_risk_corridor(const DoorwayRisk& r, const Eigen::Vector2f
     return in(r.anchor) or (r.gap.has_value() and r.p_gap > 0.f and in(*r.gap));
 }
 
+// ★ Task 3b (rtD1c leg 5) — THE GOAL LINE AND THE TRAP VETO FROM THE SAME TWO HYPOTHESES. The cross's goal line (the
+//   Doorway goal's seed points, goal_adapter.h doorway_goal) and the trap veto (disc_meets_doorway_corridor) are each built
+//   on ONE opening, so the two hypotheses DoorwayRisk mixes have to be reduced to one: the opening's EXPECTED geometry under
+//   the mixture — centre, unit normal and width each the p_gap-weighted mean of the anchor's and the gap's (the gap's normal
+//   taken with the anchor's sense, so the two describe the same direction of travel). A 0.03-score phantom moves the line by
+//   3 % of the distance between them; a score-1 gap is the geometry; no gap is the anchor exactly. No choice between them
+//   (that would be a 0.5 cut): one continuous moment of the mixture the risk already uses.
+inline RoomGap expected_opening(const RoomGap& anchor, const std::optional<RoomGap>& gap, float p_gap)
+{
+    const float p = std::clamp(p_gap, 0.f, 1.f);
+    if (not gap.has_value() or not (p > 0.f)) return anchor;
+    RoomGap o;
+    const Eigen::Vector2f na = anchor.normal.normalized();
+    Eigen::Vector2f ng = gap->normal.normalized();
+    if (ng.dot(na) < 0.f) ng = -ng;   // the same sense of travel (a sign convention, not a level)
+    o.centre = (1.f - p) * anchor.centre + p * gap->centre;
+    const Eigen::Vector2f n = (1.f - p) * na + p * ng;
+    o.normal = n.norm() > 0.f ? Eigen::Vector2f(n.normalized()) : na;
+    o.width = (1.f - p) * anchor.width + p * gap->width;
+    return o;
+}
+
 // The jambs of a measured opening for a body crossing it along its normal. sigma_range_m = the LiDAR range sigma each edge
 // was measured with (Controller lidar_range_sigma_m). `bare` is the BARE hull (any type with
 // support_radius_yaw(yaw, dir_world), inscribed_radius() and circumscribed_radius() — rc::RobotFootprint); back/ahead = the

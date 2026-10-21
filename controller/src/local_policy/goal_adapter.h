@@ -26,8 +26,10 @@
 #include "unseen_contact.h"
 #include "policy_tick_gate.h"
 #include "doorway_corridor.h"
+#include "door_leaf.h"
 #include "../controller_runtime_types.h"
 #include "../../../common/interaction_anchor/relative_pose.h"
+#include "../../../common/interaction_anchor/anchor_leaf.h"
 
 namespace rc::policy
 {
@@ -57,6 +59,37 @@ inline RoomGap gap_in_room(const rc::interaction::RelPose& gap_robot, float widt
     g.normal = (R * Eigen::Vector2f(-std::sin(psi), std::cos(psi))).normalized();
     g.width = width;
     return g;
+}
+
+// ★ Task 3b: door_concept's leaf hypotheses (anchor frame, anchor_leaf.h) in the ROOM frame, with what door_leaf.h needs to
+//   give every centre-line point anchor_leaf_points' covariance there: the anchor's centre (ψ rotates about it), its position
+//   covariance rotated into the room, its yaw variance, the leaf angle's. Empty with no leaf or a non-finite anchor.
+inline DoorLeaf door_leaf_in_room(const rc::interaction::RelPose& anchor_robot, std::span<const rc::interaction::AnchorLeaf> leaves,
+                                  const ControllerRobotPose& robot)
+{
+    DoorLeaf out;
+    if (leaves.empty() or not anchor_robot.x.allFinite() or not anchor_robot.P.allFinite()) return out;
+    const Eigen::Rotation2Df Rr(robot.theta), Ra(anchor_robot.x.z());
+    const Eigen::Matrix2f R = Rr.toRotationMatrix(), RA = R * Ra.toRotationMatrix();
+    const Eigen::Vector2f A = robot.pos + R * anchor_robot.x.head<2>();
+    const Eigen::Matrix2f P = R * anchor_robot.P.topLeftCorner<2, 2>() * R.transpose();
+    for (const auto& l : leaves)
+    {
+        const float len = l.length();
+        if (not (len > 0.f) or not (l.p > 0.f)) continue;
+        LeafHypothesis h;
+        h.hinge = A + RA * l.hinge;
+        h.dir = RA * ((l.tip - l.hinge) / len);
+        h.length = len;
+        h.half_thick = l.half_thick;
+        h.p = l.p;
+        h.pivot = A;
+        h.P_xy = P;
+        h.var_psi = std::max(0.f, anchor_robot.P(2, 2));
+        h.var_phi = l.sigma_phi * l.sigma_phi;
+        out.hyps.push_back(h);
+    }
+    return out;
 }
 
 // A goal and the points its cost-to-go is seeded from.

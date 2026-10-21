@@ -5,6 +5,7 @@
 //     -lfastdds -lfastcdr -lQt5Core && /tmp/tga          (one line)
 #include "../src/local_policy/goal_adapter.h"
 #include "../src/controller_relative_motion.h"
+#include "../src/controller_anchor_servo.h"
 
 #include <cmath>
 #include <cstdio>
@@ -401,6 +402,75 @@ int main()
         const BaseLimits bm = base_limits(in);
         CHECK("limits: the measured wheel decel overrides the capability's (d_lin 0.5, d_rot 0.5/0.259)",
               near(bm.d_lin, 0.5f) and near(bm.d_rot, 0.5f / 0.259f, 1e-4f));
+    }
+
+    // ---- 8. Task 3b (rtD1c leg 5): the cross's GOAL LINE and TRAP VETO from the anchor's opening, the gap weighted by its
+    //         score (doorway_corridor.h expected_opening) — a 0.03-score phantom locked on the leaf must not set the goal line
+    {
+        GoalAdapterParams gp; gp.past_m = 2.5f; gp.inscribed_radius_m = 0.23f;
+        const RoomGap anchor{Eigen::Vector2f(0.f, 0.f), Eigen::Vector2f(0.f, 1.f), 0.87f};
+        // the leaf + the west jamb seen obliquely: 0.62 m (wide enough to veto on its own), its normal 120 deg off the door's
+        const Eigen::Vector2f ng(-std::sin(2.f * kPi / 3.f), std::cos(2.f * kPi / 3.f));
+        const RoomGap phantom{Eigen::Vector2f(-0.45f, -0.6f), ng, 0.62f};
+        const float score = 0.03f;
+        const auto centroid = [](const GoalSpec& g) { Eigen::Vector2f c = Eigen::Vector2f::Zero(); for (const auto& q : g.points) c += q; return Eigen::Vector2f(c / float(g.points.size())); };
+        const GoalSpec ga = doorway_goal(anchor, gp), gph = doorway_goal(phantom, gp);
+        const GoalSpec gm = doorway_goal(expected_opening(anchor, phantom, score), gp);
+        const float d_ph = (centroid(gph) - centroid(ga)).norm(), d_m = (centroid(gm) - centroid(ga)).norm();
+        std::printf("   goal line centroid: phantom's %.2f m from the anchor's; the score-weighted one %.3f m\n", d_ph, d_m);
+        CHECK("3b goal line: a score-0.03 phantom moves it by at most ~its weight x the distance (<= 1.5 x 0.03 x d)", d_m <= 1.5f * score * d_ph);
+        bool past_anchor = true;
+        for (const auto& q : gm.points)
+            past_anchor = past_anchor and std::abs(q.y() - 2.5f) < 0.1f and std::abs(q.x()) <= 0.5f * 0.87f - 0.23f + 0.1f;
+        CHECK("3b goal line: every seed point is past the ANCHOR's opening, inside its lateral span", past_anchor);
+        CHECK("3b goal line: no gap / score 0 = the anchor's exactly",
+              (centroid(doorway_goal(expected_opening(anchor, std::nullopt, 0.9f), gp)) - centroid(ga)).norm() < 1e-6f
+              and (centroid(doorway_goal(expected_opening(anchor, phantom, 0.f), gp)) - centroid(ga)).norm() < 1e-6f);
+        const RoomGap good{Eigen::Vector2f(0.08f, 0.02f), Eigen::Vector2f(0.f, -1.f), 0.85f};   // a reliable gap; opposite sign convention
+        const RoomGap og = expected_opening(anchor, good, 1.f);
+        CHECK("3b goal line: a score-1 gap IS the geometry (its normal taken in the anchor's sense)",
+              (og.centre - good.centre).norm() < 1e-6f and (og.normal - Eigen::Vector2f(0.f, 1.f)).norm() < 1e-6f and near(og.width, 0.85f));
+        // the trap veto on the same opening
+        const float body_w = 0.568f, back = 1.0f, ahead = gp.past_m + 0.05f;
+        const Eigen::Vector2f on_phantom = phantom.centre + 0.5f * phantom.normal;   // in the phantom's strip, off the door
+        const Eigen::Vector2f on_door(0.f, -0.3f);
+        const RoomGap om = expected_opening(anchor, phantom, score);
+        CHECK("3b veto: (baseline) on the phantom alone a trap in its strip would be vetoed",
+              disc_meets_doorway_corridor(phantom, on_phantom, 0.2f, back, ahead, 0.23f, body_w));
+        CHECK("3b veto: score-weighted, a trap in the phantom's strip (on the leaf) is NOT vetoed",
+              not disc_meets_doorway_corridor(om, on_phantom, 0.2f, back, ahead, 0.23f, body_w));
+        CHECK("3b veto: a trap in the door's own corridor still is",
+              disc_meets_doorway_corridor(om, on_door, 0.2f, back, ahead, 0.23f, body_w));
+    }
+
+    // ---- 9. Task 3b: the leaf hypotheses in the ROOM frame — the same points and covariances anchor_leaf_points gives in the
+    //         robot frame, rotated by the robot's pose
+    {
+        const ControllerRobotPose robot{.pos = {1.0f, 2.0f}, .theta = 0.3f};
+        rc::interaction::RelPose a;
+        a.x = Eigen::Vector3f(0.2f, 1.5f, 0.1f);
+        a.P = Eigen::Matrix3f::Zero(); a.P(0, 0) = 0.01f; a.P(1, 1) = 0.02f; a.P(0, 1) = a.P(1, 0) = 0.004f; a.P(2, 2) = 0.003f;
+        auto l = rc::interaction::make_anchor_leaf(-0.435f, -0.06f, 1.f, -1.f, 0.82f, 1.4f, 0.12f);
+        l.p = 0.7f;
+        const std::vector<rc::interaction::AnchorLeaf> ls{l};
+        const DoorLeaf dl = door_leaf_in_room(a, ls, robot);
+        const auto pts = rc::anchor_leaf_points(a, l);
+        const Eigen::Matrix2f R = Eigen::Rotation2Df(robot.theta).toRotationMatrix();
+        bool same = dl.hyps.size() == 1 and not pts.empty();
+        float worst_p = 0.f, worst_c = 0.f;
+        for (std::size_t i = 0; same and i < pts.size(); ++i)
+        {
+            const float r = dl.hyps[0].length * float(i) / float(pts.size() - 1);
+            const Eigen::Vector2f q_room = dl.hyps[0].hinge + r * dl.hyps[0].dir, q_ref = robot.pos + R * pts[i].mean;
+            const Eigen::Matrix2f c_ref = R * pts[i].cov * R.transpose();
+            worst_p = std::max(worst_p, (q_room - q_ref).norm());
+            worst_c = std::max(worst_c, (dl.hyps[0].point_cov(r) - c_ref).cwiseAbs().maxCoeff());
+        }
+        std::printf("   leaf in the room frame vs anchor_leaf_points: worst point %.2e m, worst covariance entry %.2e m^2\n", worst_p, worst_c);
+        CHECK("3b leaf: the room-frame centre line = anchor_leaf_points' means (rotated by the robot pose)", same and worst_p < 1e-5f);
+        CHECK("3b leaf: and its covariance = theirs (P_xy + sigma_psi^2 g g^T + r^2 sigma_phi^2 t t^T)", same and worst_c < 1e-6f);
+        CHECK("3b leaf: probability and half-thickness carried", same and near(dl.hyps[0].p, 0.7f) and near(dl.hyps[0].half_thick, l.half_thick));
+        CHECK("3b leaf: no leaves -> empty", door_leaf_in_room(a, {}, robot).empty());
     }
 
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);

@@ -368,8 +368,40 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                 obstacle_tracker.residual_cells(), obstacle_tracker.residual_cell_size_m(), residual_risk,
                 xs, ys, zs, kPlannerBodyZLo, kPlannerBodyZHi);
         }
+    // ★ Task 3b (rtD1c leg 5) — THE DOOR'S LEAF EXPLAINS ITS OWN RETURNS. While the policy crosses a door whose anchor carries
+    //   the leaf hypotheses, the residual cells the leaf can explain (within its sigma) are TAKEN from the planner's residual
+    //   and priced by the door's mixture instead: under each hypothesis a cell keeps residual's price for the share that
+    //   hypothesis does not explain, and the leaf is one object with its sigma (door_leaf.h take_explained_cells /
+    //   door_leaf_density, added to every policy field this cycle). The leaf's returns stop disconnecting the free mask as
+    //   hundreds of unexplained hard cells, and a seen leaf stays (all but) impassable under every hypothesis. Only in the room
+    //   frame the leaf was taken in (a room switch drops it: policy_reset).
+    std::vector<Eigen::Vector2f> planner_cells;
+    const bool leaf_takes = policy_enabled() and not policy_leaf_.empty() and policy_leaf_room_ == current_room_name_;
+    policy_leaf_evidence_.reset();
+    if (leaf_takes)
+    {
+        const auto &centres = obstacle_tracker.residual_cells();
+        std::vector<std::size_t> keep;
+        auto ev = std::make_shared<rc::policy::DoorLeafEvidence>(rc::policy::take_explained_cells(
+            policy_leaf_, centres, obstacle_tracker.residual_cell_size_m(), residual_risk, approach_body_.inscribed_radius(), keep));
+        std::vector<float> kept_risk;
+        planner_cells.reserve(keep.size());
+        kept_risk.reserve(keep.size());
+        const bool have_risk = residual_risk.size() == centres.size();
+        for (const auto i : keep) { planner_cells.push_back(centres[i]); if (have_risk) kept_risk.push_back(residual_risk[i]); }
+        residual_risk = std::move(kept_risk);   // empty stays empty: "every cell hard", as before
+        if (std::abs(ev->mass - policy_leaf_mass_logged_) > std::max(5.f, 0.25f * policy_leaf_mass_logged_))
+        {
+            std::println("[policy] the door's leaf ({} hypotheses, MAP P {:.2f}) took {} residual cells (explained occupancy {:.0f}) "
+                         "from the planner — priced as the leaf, not as unexplained residual", ev->leaf.hyps.size(),
+                         ev->leaf.hyps.front().p, ev->cells.size(), ev->mass);
+            policy_leaf_mass_logged_ = ev->mass;
+        }
+        policy_leaf_evidence_ = std::move(ev);
+    }
+    else policy_leaf_mass_logged_ = -1.f;
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
-                            {.centres = obstacle_tracker.residual_cells(),
+                            {.centres = leaf_takes ? std::move(planner_cells) : obstacle_tracker.residual_cells(),
                              .cell_size_m = obstacle_tracker.residual_cell_size_m(),
                              .risk_nats = std::move(residual_risk)});
     // One line when the split changes materially — the soft/hard census is what says whether a "no route"
