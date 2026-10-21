@@ -414,6 +414,10 @@ struct DoorConfig
     // The ONE honest decision boundary: remove when P(exists) drops below this. Replaces RemoveLogodds — same
     // quantity, stated as a probability instead of a log-odds so it reads as the decision it is.
     float exist_removal_prob       = 0.12f;  // Existence.RemovalProb
+    // Existence.FrameCorrelation — rho of consecutive same-sign observations (rc::exist::ExistenceBelief, the shared
+    // mechanism hood/fridge use). MEASURED (Task 5b item 4) on tourR1 + tourR2, on cycles with P(detect) > 0.1: 6865
+    // looks, P(miss) 0.0252, P(miss | previous miss) 0.753 ⇒ rho 0.747. 0 ⇒ every look independent (the pre-5b door).
+    float exist_frame_correlation  = 0.747f;
     int   exist_remove_frames      = 15;     // Existence.RemoveFrames — consecutive EVIDENCE cycles the decision must hold
     // Physical sensor rates for the log-likelihood ratio (rc::exist::SensorModel), NOT gates.
     float exist_detection_prob     = 0.85f;  // Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)

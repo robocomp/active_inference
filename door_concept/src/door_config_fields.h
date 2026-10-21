@@ -196,6 +196,8 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)");
     out.exist_max_logodds        = getf("Existence.MaxLogodds", 4.0f,
             "Existence.MaxLogodds — saturation cap (a real door can't earn infinite immunity)");
+    out.exist_frame_correlation  = getf("Existence.FrameCorrelation", 0.747f,
+            "rho of consecutive same-sign existence observations; MEASURED 0.747 on tourR1+R2 (P(miss|miss) 0.753 vs P(miss) 0.025)");
     out.exist_removal_prob       = getf("Existence.RemovalProb", 0.12f,
             "Existence.RemovalProb");
     out.exist_remove_frames      = geti("Existence.RemoveFrames", 15,

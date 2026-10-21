@@ -201,9 +201,13 @@ struct Run
 };
 
 // `present` cycles with the door lit, then `absent` cycles without; `repeat_at` > 0 re-sends that cycle's frame id.
-static Run run(int present, int absent, bool turned_away = false, int repeat_at = -1, ExistWorld* out_world = nullptr)
+// rho: Existence.FrameCorrelation for this run. Sections 1-7 test the slice's mechanics with independent looks (rho 0, the
+// pre-item-4 door); section 8 runs the measured default and shows what the shared weighting changes.
+static Run run(int present, int absent, bool turned_away = false, int repeat_at = -1, ExistWorld* out_world = nullptr,
+               float rho = 0.0f)
 {
     DoorCoreConfig cfg;
+    cfg.door.exist_frame_correlation = rho;
     ExistWorld local;
     ExistWorld& w = out_world ? *out_world : local;
     w.cfg = cfg.door;
@@ -320,6 +324,7 @@ int main()
     for (const float robot_x : {1.0f, -1.0f})
     {
         DoorCoreConfig cfg;
+        cfg.door.exist_frame_correlation = 0.0f;   // a parked camera: "L at the clamp" is the independent-looks statement
         ExistWorld w;
         w.cfg = cfg.door;
         DoorCore core(cfg);
@@ -361,6 +366,20 @@ int main()
             std::print("    sil_occ {:.1f} sil_free {:.1f}\n", occ, fr);
         }
         CHECK(n_rows > 0 and n_occ == n_rows);
+    }
+
+    // ── 8. Task 5b item 4: a PARKED robot's repeated looks are one look repeated (Existence.FrameCorrelation, measured
+    //    0.747 on tourR1+R2, and ExistenceBelief::note_viewpoint — the shared mechanism hood and fridge use): the parked
+    //    absence that removes the door when every look counts (section 1, rho 0) must NOT remove it from one unchanging
+    //    view at the measured rho, and L stays above the removal boundary.
+    {
+        ExistWorld w;
+        const Run r = run(40, 80, false, -1, &w, rc::DoorConfig{}.exist_frame_correlation);
+        const auto L = L_of(r);
+        std::print("parked absence: {} REMOVE, L last {:.3f} (removal boundary {:.3f})\n", r.removes.size(),
+                   L.empty() ? -99.0 : L.back(), L_remove);
+        CHECK(r.removes.empty());
+        CHECK(not L.empty() and L.back() > L_remove);
     }
 
     // ── 6. ImageSource: patches + the recorded frame_ref reproduce the full frame inside the patch ──────────────────

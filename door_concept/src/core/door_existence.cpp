@@ -669,6 +669,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     policy.logodds_max   = cfg.exist_max_logodds;
     policy.removal_prob  = cfg.exist_removal_prob;
     policy.remove_frames = static_cast<float>(cfg.exist_remove_frames);
+    // Task 5b item 4: the SHARED correlated-observation weighting (rc::exist::ExistenceBelief), measured for the door.
+    policy.frame_correlation = cfg.exist_frame_correlation;
 
     // ★ONE PreparedFrame (blur + Sobel + whole-frame gradient reference) per cycle, shared by every door's
     // leaf contour AND its aperture frame. The one-shot contour_edge_support(img, ...) recomputed all of it
@@ -707,11 +709,22 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     for (const auto& [id, instp] : states)
     {
         rc::DoorFitState& inst = *instp;
-        inst.existence.set_max(cfg.exist_max_logodds);
+        rc::exist::arm(inst.existence, policy);      // the clamp and the frame correlation (shared policy)
         if (not inst.existence_seeded)               // seed on first visit (fresh birth OR adopted graph node)
         {
             inst.existence.set(cfg.exist_birth_logodds);
             inst.existence_seeded = true;
+        }
+        // ★Task 5b item 4: VIEWPOINT NOVELTY for the shared correlated-observation weighting (as hood / refrigerator): a
+        // run of looks from one camera pose is one observation repeated — rho_eff = rho·max(ambiguity, stationarity), the
+        // stationarity a Gaussian in the door's own angular half-size (ExistenceBelief::note_viewpoint). Before this the
+        // door had rho 0 and no viewpoint, so a parked robot's every miss counted as a new one (the removal in the parked
+        // test, and the silhouette's part in tourR2 door_2's walk to the floor).
+        if (room_T_zed.has_value())
+        {
+            const Eigen::Vector2f c = inst.aperture.centre_xy();
+            inst.existence.note_viewpoint(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)),
+                                          c.x(), c.y(), 0.5f * std::hypot(inst.aperture.w, inst.aperture.h));
         }
 
         // ── ROOM-CONTAINMENT PRIOR: THE WALL BAND (door_room_band.h) ────────────────────────────────────
