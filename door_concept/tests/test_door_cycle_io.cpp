@@ -12,7 +12,7 @@
 // ★WHY es_ES: these agents run under LANG=es_ES.UTF-8 (CLAUDE.md "Parsing numbers"); a binary format must be immune,
 // and a test that runs in "C" cannot show that it is.
 // Build + run (from door_concept/):
-//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_cycle_io.cpp src/core/door_cycle_io.cpp -o /tmp/test_door_cycle_io && /tmp/test_door_cycle_io
+//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_cycle_io.cpp src/core/door_cycle_io.cpp -lzstd -o /tmp/test_door_cycle_io && /tmp/test_door_cycle_io
 #include <bit>
 #include <clocale>
 #include <cmath>
@@ -328,10 +328,10 @@ int main()
         std::ifstream f(dir / "in.dcin", std::ios::binary);
         char m[4]{}; std::uint32_t v = 0;
         f.read(m, 4); f.read(reinterpret_cast<char*>(&v), 4);
-        CHECK(std::memcmp(m, "DCIN", 4) == 0 and v == 1u);
+        CHECK(std::memcmp(m, "DCIN", 4) == 0 and v == kCycleIoVersion);
         std::ifstream g(dir / "out.dcou", std::ios::binary);
         g.read(m, 4); g.read(reinterpret_cast<char*>(&v), 4);
-        CHECK(std::memcmp(m, "DCOU", 4) == 0 and v == 1u);
+        CHECK(std::memcmp(m, "DCOU", 4) == 0 and v == kCycleIoVersion);
         std::print("round trip: {} inputs ({} B), {} outputs ({} B)\n", ins.size(), fs::file_size(dir / "in.dcin"),
                    outs.size(), fs::file_size(dir / "out.dcou"));
     }
@@ -440,14 +440,89 @@ int main()
     CHECK(created_by((std::uint64_t{777} << 12) | 21u, 21u));
     CHECK(not created_by((std::uint64_t{777} << 12) | 22u, 21u));
 
+    // ── 3d. v2 PACKING: the prediction paths, the pixel modes, the unchanged (nullopt) path, sizes ──────────────────
+    {
+        Rng r(99);
+        auto cloud = [&](std::size_t n) { std::vector<Vec3f> v(n); for (auto& p : v) p = Vec3f(r.f(), r.f() * 5.f, r.f()); return v; };
+        Mat4d T = Mat4d::Identity();
+        T.block<3, 3>(0, 0) = Eigen::AngleAxisd(0.7, Eigen::Vector3d(0.1, 0.2, 1.0).normalized()).toRotationMatrix();
+        T.block<3, 1>(0, 3) = Eigen::Vector3d(1.25, -3.5, 0.3);
+        auto predicted = [&](const std::vector<Vec3f>& src)
+        {
+            std::vector<Vec3f> o;
+            for (const auto& c : src)
+            {
+                const Eigen::Vector4d q = T * Eigen::Vector4d(c.x(), c.y(), c.z(), 1.0);
+                o.emplace_back(float(q.x()), float(q.y()), float(q.z()));
+            }
+            return o;
+        };
+        DoorCycleInput a;
+        a.cycle = 1;
+        MaskPacket m;
+        m.valid = true;
+        m.support_points_cam = cloud(20000);
+        m.support_points = predicted(m.support_points_cam);        // the ingestor's arithmetic: residual all zero
+        m.room_T_zed_capture = T;
+        for (int i = 0; i < 30000; ++i) m.mask_pixels.emplace_back(float(100 + i % 200), float(50 + i / 200));
+        m.mask_pixels[7] = Vec2f(-0.0f, 3.f);                       // -0 must not take the int16 path
+        a.masks = m;
+        BpearlSweep b;
+        b.robot_fresh = b.room_fresh = true;
+        b.pts_robot = cloud(15000);
+        b.pts_room = predicted(b.pts_robot);
+        for (std::size_t i = 0; i < b.pts_room.size(); i += 3)     // NOT exactly predicted (a different path made it)
+            b.pts_room[i].x() = std::nextafter(b.pts_room[i].x(), 1e9f);
+        b.room_T_robot_capture = T;
+        a.bpearl = b;
+        ImageFrame d; d.format = PixelFormat::DepthF32; d.width = 1280; d.height = 720;
+        ImagePatch pa; pa.x0 = 3; pa.y0 = 4; pa.w = 50; pa.h = 40;
+        std::vector<float> depth(50 * 40);
+        for (std::size_t i = 0; i < depth.size(); ++i) depth[i] = i % 17 == 0 ? std::numeric_limits<float>::quiet_NaN() : 2.f + 0.001f * float(i);
+        pa.bytes.resize(depth.size() * 4); std::memcpy(pa.bytes.data(), depth.data(), pa.bytes.size());
+        d.patches.push_back(pa);
+        a.depth = d;
+        DoorCycleInput unchanged;            // the next cycle: nothing new → every big stream nullopt
+        unchanged.cycle = 2;
+        DoorCycleInput no_T = a;             // a derived array whose prediction input is missing → stored explicitly
+        no_T.cycle = 3;
+        no_T.masks->room_T_zed_capture.reset();
+        DoorCycleInput pix_float = a;        // non-integral pixels → the float path
+        pix_float.cycle = 4;
+        pix_float.masks->mask_pixels[0] = Vec2f(10.5f, 3.25f);
+        std::ostringstream o(std::ios::binary);
+        CHECK(write(o, a) and write(o, unchanged) and write(o, no_T) and write(o, pix_float));
+        const std::string bytes = o.str();
+        std::istringstream i(bytes, std::ios::binary);
+        const auto ra = read_input(i), ru = read_input(i), rn = read_input(i), rp = read_input(i);
+        CHECK(ra.has_value() and *ra == a);
+        CHECK(ru.has_value() and *ru == unchanged and not ru->masks and not ru->bpearl and not ru->depth);
+        CHECK(rn.has_value() and *rn == no_T);
+        CHECK(rp.has_value() and *rp == pix_float);
+        if (ra) CHECK(std::bit_cast<std::uint32_t>(ra->masks->mask_pixels[7].x()) == std::bit_cast<std::uint32_t>(-0.0f));
+        const std::size_t raw = (m.support_points.size() + m.support_points_cam.size() + b.pts_robot.size() + b.pts_room.size()) * 12
+                                + m.mask_pixels.size() * 8 + pa.bytes.size();
+        std::ostringstream one(std::ios::binary);
+        (void)write(one, a);
+        std::print("packing: record {} B for {} B of raw arrays ({:.1f}x)\n", one.str().size(), raw, double(raw) / one.str().size());
+        CHECK(one.str().size() * 2 < raw);
+        // a corrupted packed byte is refused (zstd checksum / FNV), never decoded into wrong numbers
+        std::string bad = one.str();
+        bad[bad.size() / 2] = static_cast<char>(bad[bad.size() / 2] ^ 0x5a);
+        std::istringstream bi(bad, std::ios::binary);
+        CHECK(not read_input(bi).has_value());
+    }
+
     // ── 4. refusals ──────────────────────────────────────────────────────────────────────────────────────────────
     {
         const DoorRecordingHeader h{.agent_id = 1, .agent_name = {}, .config_text = {}, .start_steady_ns = 0, .start_wall_ms = 0, .note = {}};
         std::string good = bytes_of([&](std::ostream& s) { (void)write_header(s, h, RecordingKind::Input); });
         std::string bad_magic = good;   bad_magic[0] = 'X';
-        std::string bad_ver   = good;   bad_ver[4]   = 2;
+        std::string bad_ver   = good;   bad_ver[4]   = static_cast<char>(kCycleIoVersion + 1);   // a future version
+        std::string ver0      = good;   ver0[4]      = 0;
         write_file(dir / "m.dcin", bad_magic); CHECK(not read_input_file((dir / "m.dcin").string()).has_value());
         write_file(dir / "v.dcin", bad_ver);   CHECK(not read_input_file((dir / "v.dcin").string()).has_value());
+        write_file(dir / "v0.dcin", ver0);     CHECK(not read_input_file((dir / "v0.dcin").string()).has_value());
         write_file(dir / "g.dcin", good);      CHECK(read_input_file((dir / "g.dcin").string()).has_value());
         const std::string out_head = bytes_of([&](std::ostream& s) { (void)write_header(s, h, RecordingKind::Output); });
         write_file(dir / "o.dcou", out_head);

@@ -559,7 +559,7 @@ void InputSnapshot::end_cycle()
         if (not d.patches.empty()) cur_.depth = std::move(d);
     }
 
-    recorder_.record(cur_);   // after the cycle: the actuator transcript is complete (ruling)
+    recorder_.record(std::move(cur_));   // after the cycle (actuator transcript complete); MOVED to the writer thread
     latch_.end_cycle();
     in_cycle_ = false;
     rgb_ = depth_ = nullptr;

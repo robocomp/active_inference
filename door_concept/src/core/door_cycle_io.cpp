@@ -6,12 +6,15 @@
 // recorded data can be trusted bit for bit.
 #include "door_cycle_io.h"
 
+#include <bit>
+#include <cmath>
 #include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <istream>
 #include <ostream>
 #include <type_traits>
+#include <zstd.h>
 
 namespace rc::door::core
 {
@@ -36,6 +39,7 @@ template <class T> concept EigenFixed = requires { typename T::Scalar; T::RowsAt
 struct Writer
 {
     std::string b;
+    std::uint32_t version = kCycleIoVersion;   // a writer always writes the current version
     template <class T> void raw(const T& x)
     {
         const auto* p = reinterpret_cast<const char*>(&x);
@@ -50,6 +54,7 @@ struct Reader
     const char* p;
     const char* e;
     bool ok = true;
+    std::uint32_t version = kCycleIoVersion;   // the FILE's version (read_header)
     template <class T> void raw(T& x)
     {
         if (not ok or static_cast<std::size_t>(e - p) < sizeof(T)) { ok = false; return; }
@@ -84,14 +89,8 @@ DCIO_FIELDS(MaskSlice, x.label, x.class_id, x.confidence, x.centroid, x.bbox_min
             x.centroid_radius, x.range, x.has_depth, x.azimuth_room_rad, x.source, x.depth_var, x.color_chroma,
             x.color_var, x.color_neff)
 DCIO_FIELDS(RtChainStep, x.parent, x.child, x.T, x.cov, x.inverted)
-DCIO_FIELDS(MaskPacket, x.valid, x.frame_id, x.timestamp_ms, x.slices, x.support_points, x.support_points_cam,
-            x.mask_pixels, x.cam_twist, x.frame_dt_s, x.room_T_zed_capture, x.room_T_robot_capture, x.room_zed_chain,
-            x.ms_since_last_frame)
-DCIO_FIELDS(BpearlSweep, x.room_fresh, x.pts_room, x.origin_room, x.robot_fresh, x.pts_robot, x.origin_robot,
-            x.robot_stamp_ms, x.room_T_robot_capture)
-DCIO_FIELDS(SemanticPlane, x.pw, x.ph, x.frame_w, x.frame_h, x.stamp_ms, x.plane)
+// MaskPacket, BpearlSweep, SemanticPlane, ImageFrame: hand-written below (v2 packs their bulk arrays).
 DCIO_FIELDS(ImagePatch, x.x0, x.y0, x.w, x.h, x.bytes)
-DCIO_FIELDS(ImageFrame, x.format, x.width, x.height, x.stamp_ms, x.frame_ref, x.patches)
 DCIO_FIELDS(AffordanceFlags, x.node_id, x.exists, x.name, x.active, x.epistemic_pending, x.target_epoch, x.target_x,
             x.target_y, x.target_yaw)
 DCIO_FIELDS(ExecutingEdge, x.from, x.to, x.epoch, x.x, x.y, x.yaw)
@@ -262,6 +261,308 @@ template <class T> void Reader::one(T& x)
     else                                                       { fields(*this, x); }
 }
 
+// ═══ v2 PACKING (see the header: lossless transforms + zstd; predictions verified by FNV-64) ═══════════════════════
+constexpr int kZstdLevel = 1;                         // tourR1: levels 1..12 within 2 % of each other; 1 is the fastest
+constexpr std::uint64_t kMaxUnpacked = 1ull << 31;    // one array; a larger claimed size is corruption
+
+std::uint64_t fnv64(const void* data, std::size_t n)
+{
+    std::uint64_t h = 1469598103934665603ull;
+    const auto* b = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+void put_blob(Writer& w, const std::string& raw)
+{
+    ZSTD_CCtx* c = ZSTD_createCCtx();
+    ZSTD_CCtx_setParameter(c, ZSTD_c_compressionLevel, kZstdLevel);
+    ZSTD_CCtx_setParameter(c, ZSTD_c_checksumFlag, 1);            // the frame checks its own content
+    std::string out(ZSTD_compressBound(raw.size()), '\0');
+    const std::size_t n = ZSTD_compress2(c, out.data(), out.size(), raw.data(), raw.size());
+    ZSTD_freeCCtx(c);
+    if (ZSTD_isError(n)) { out.clear(); }                         // cannot happen with a bound-sized buffer
+    else out.resize(n);
+    w.raw(static_cast<std::uint64_t>(out.size()));
+    w.b.append(out);
+}
+
+/// Exactly `expect` bytes or ok = false (wrong content size, bad frame, checksum mismatch).
+bool get_blob(Reader& r, std::string& out, std::uint64_t expect)
+{
+    std::uint64_t clen = 0;
+    r.raw(clen);
+    if (not r.ok or clen > r.left() or expect > kMaxUnpacked) return r.ok = false;
+    const auto fcs = ZSTD_getFrameContentSize(r.p, static_cast<std::size_t>(clen));
+    if (fcs != expect) return r.ok = false;
+    out.assign(static_cast<std::size_t>(expect), '\0');
+    const std::size_t n = ZSTD_decompress(out.data(), out.size(), r.p, static_cast<std::size_t>(clen));
+    if (ZSTD_isError(n) or n != expect) return r.ok = false;
+    r.p += clen;
+    return true;
+}
+
+/// n elements of k 32-bit words: planar per component, delta on the bit pattern (mod 2^32), byte-shuffled.
+std::string pack_words(const std::uint32_t* w, std::size_t n, int k)
+{
+    const std::size_t m = n * static_cast<std::size_t>(k);
+    std::vector<std::uint32_t> d(m);
+    for (int c = 0; c < k; ++c)
+    {
+        std::uint32_t prev = 0;
+        for (std::size_t i = 0; i < n; ++i) { const std::uint32_t v = w[i * k + c]; d[c * n + i] = v - prev; prev = v; }
+    }
+    std::string out(m * 4, '\0');
+    const auto* b = reinterpret_cast<const unsigned char*>(d.data());
+    for (std::size_t j = 0; j < 4; ++j)
+        for (std::size_t i = 0; i < m; ++i) out[j * m + i] = static_cast<char>(b[i * 4 + j]);
+    return out;
+}
+void unpack_words(const std::string& in, std::uint32_t* w, std::size_t n, int k)
+{
+    const std::size_t m = n * static_cast<std::size_t>(k);
+    std::vector<std::uint32_t> d(m);
+    auto* b = reinterpret_cast<unsigned char*>(d.data());
+    for (std::size_t j = 0; j < 4; ++j)
+        for (std::size_t i = 0; i < m; ++i) b[i * 4 + j] = static_cast<unsigned char>(in[j * m + i]);
+    for (int c = 0; c < k; ++c)
+    {
+        std::uint32_t prev = 0;
+        for (std::size_t i = 0; i < n; ++i) { prev += d[c * n + i]; w[i * k + c] = prev; }
+    }
+}
+
+template <class V> constexpr int words_of() { return static_cast<int>(sizeof(V) / 4); }
+
+/// A vector of float-only elements (Vec3f, Vec2f, float): u64 n | blob.
+template <class V> void put_words(Writer& w, const std::vector<V>& v)
+{
+    static_assert(sizeof(V) % 4 == 0);
+    w.raw(static_cast<std::uint64_t>(v.size()));
+    put_blob(w, pack_words(reinterpret_cast<const std::uint32_t*>(v.data()), v.size(), words_of<V>()));
+}
+template <class V> void get_words(Reader& r, std::vector<V>& v)
+{
+    std::uint64_t n = 0;
+    r.raw(n);
+    if (not r.ok or n * sizeof(V) > kMaxUnpacked) { r.ok = false; return; }
+    std::string raw;
+    if (not get_blob(r, raw, n * sizeof(V))) return;
+    v.resize(static_cast<std::size_t>(n));
+    unpack_words(raw, reinterpret_cast<std::uint32_t*>(v.data()), v.size(), words_of<V>());
+}
+
+/// The prediction a derived array is coded against: EXACTLY the producers' arithmetic (MaskIngestor::refresh,
+/// LidarPlaneReader::append_transformed): double 4x4 · (p, 1), each coordinate rounded to float.
+Vec3f predict(const Mat4d& T, const Vec3f& c)
+{
+    const Eigen::Vector4d q = T * Eigen::Vector4d(c.x(), c.y(), c.z(), 1.0);
+    return {static_cast<float>(q.x()), static_cast<float>(q.y()), static_cast<float>(q.z())};
+}
+
+/// `target` coded against T·src: u8 mode | mode 0: words(target) | mode 1: u64 fnv64(target) + words(target ⊕ pred).
+void put_derived(Writer& w, const std::vector<Vec3f>& target, const std::vector<Vec3f>& src, const std::optional<Mat4d>& T)
+{
+    const bool predictable = T.has_value() and not target.empty() and target.size() == src.size();
+    w.raw(static_cast<std::uint8_t>(predictable ? 1 : 0));
+    if (not predictable) { put_words(w, target); return; }
+    w.raw(fnv64(target.data(), target.size() * sizeof(Vec3f)));
+    std::vector<Vec3f> res(target.size());
+    for (std::size_t i = 0; i < target.size(); ++i)
+    {
+        const Vec3f p = predict(*T, src[i]);
+        for (int c = 0; c < 3; ++c)
+            res[i][c] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(target[i][c]) ^ std::bit_cast<std::uint32_t>(p[c]));
+    }
+    put_words(w, res);
+}
+void get_derived(Reader& r, std::vector<Vec3f>& target, const std::vector<Vec3f>& src, const std::optional<Mat4d>& T)
+{
+    std::uint8_t mode = 0;
+    r.raw(mode);
+    if (not r.ok) return;
+    if (mode == 0) { get_words(r, target); return; }
+    if (mode != 1 or not T.has_value()) { r.ok = false; return; }
+    std::uint64_t h = 0;
+    r.raw(h);
+    get_words(r, target);
+    if (not r.ok or target.size() != src.size()) { r.ok = false; return; }
+    for (std::size_t i = 0; i < target.size(); ++i)
+    {
+        const Vec3f p = predict(*T, src[i]);
+        for (int c = 0; c < 3; ++c)
+            target[i][c] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(target[i][c]) ^ std::bit_cast<std::uint32_t>(p[c]));
+    }
+    if (fnv64(target.data(), target.size() * sizeof(Vec3f)) != h) r.ok = false;   // this build predicts differently
+}
+
+/// Mask pixels: u8 mode | mode 1 (every value an exact int16, no -0): u64 n + blob of int16 planar deltas, shuffled;
+/// mode 0: words.
+void put_pixels(Writer& w, const std::vector<Vec2f>& v)
+{
+    const bool small_ints = std::ranges::all_of(v, [](const Vec2f& p)
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            const float f = p[c];
+            if (not (f >= -32768.f and f <= 32767.f) or static_cast<float>(static_cast<std::int16_t>(f)) != f
+                or std::signbit(f) != (f < 0.f))
+                return false;
+        }
+        return true;
+    });
+    w.raw(static_cast<std::uint8_t>(small_ints ? 1 : 0));
+    if (not small_ints) { put_words(w, v); return; }
+    const std::size_t n = v.size();
+    w.raw(static_cast<std::uint64_t>(n));
+    std::vector<std::uint16_t> d(2 * n);
+    for (int c = 0; c < 2; ++c)
+    {
+        std::uint16_t prev = 0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const auto u = static_cast<std::uint16_t>(static_cast<std::int16_t>(v[i][c]));
+            d[c * n + i] = static_cast<std::uint16_t>(u - prev);
+            prev = u;
+        }
+    }
+    std::string raw(4 * n, '\0');
+    const auto* b = reinterpret_cast<const unsigned char*>(d.data());
+    for (std::size_t j = 0; j < 2; ++j)
+        for (std::size_t i = 0; i < 2 * n; ++i) raw[j * 2 * n + i] = static_cast<char>(b[i * 2 + j]);
+    put_blob(w, raw);
+}
+void get_pixels(Reader& r, std::vector<Vec2f>& v)
+{
+    std::uint8_t mode = 0;
+    r.raw(mode);
+    if (not r.ok) return;
+    if (mode == 0) { get_words(r, v); return; }
+    if (mode != 1) { r.ok = false; return; }
+    std::uint64_t n = 0;
+    r.raw(n);
+    if (not r.ok or 4 * n > kMaxUnpacked) { r.ok = false; return; }
+    std::string raw;
+    if (not get_blob(r, raw, 4 * n)) return;
+    std::vector<std::uint16_t> d(2 * n);
+    auto* b = reinterpret_cast<unsigned char*>(d.data());
+    for (std::size_t j = 0; j < 2; ++j)
+        for (std::size_t i = 0; i < 2 * n; ++i) b[i * 2 + j] = static_cast<unsigned char>(raw[j * 2 * n + i]);
+    v.resize(static_cast<std::size_t>(n));
+    for (int c = 0; c < 2; ++c)
+    {
+        std::uint16_t prev = 0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            prev = static_cast<std::uint16_t>(prev + d[c * n + i]);
+            v[i][c] = static_cast<float>(static_cast<std::int16_t>(prev));
+        }
+    }
+}
+
+/// Patch bytes by format: DepthF32 as 32-bit words, anything else as plain bytes. u64 n | blob.
+void put_patch_bytes(Writer& w, const std::vector<std::uint8_t>& v, PixelFormat f)
+{
+    w.raw(static_cast<std::uint64_t>(v.size()));
+    if (f == PixelFormat::DepthF32 and v.size() % 4 == 0)
+        put_blob(w, pack_words(reinterpret_cast<const std::uint32_t*>(v.data()), v.size() / 4, 1));
+    else
+        put_blob(w, std::string(reinterpret_cast<const char*>(v.data()), v.size()));
+}
+void get_patch_bytes(Reader& r, std::vector<std::uint8_t>& v, PixelFormat f)
+{
+    std::uint64_t n = 0;
+    r.raw(n);
+    if (not r.ok or n > kMaxUnpacked) { r.ok = false; return; }
+    std::string raw;
+    if (not get_blob(r, raw, n)) return;
+    v.resize(static_cast<std::size_t>(n));
+    if (f == PixelFormat::DepthF32 and n % 4 == 0)
+    {
+        std::vector<std::uint32_t> w(n / 4);
+        unpack_words(raw, w.data(), w.size(), 1);
+        std::memcpy(v.data(), w.data(), n);
+    }
+    else std::memcpy(v.data(), raw.data(), n);
+}
+
+// ─── the four packed structs: v1 = the original field order, unpacked; v2 = prediction inputs first, packed ──────
+void fields(Writer& w, const MaskPacket& x)
+{
+    if (w.version < 2)
+    { w(x.valid, x.frame_id, x.timestamp_ms, x.slices, x.support_points, x.support_points_cam, x.mask_pixels, x.cam_twist,
+        x.frame_dt_s, x.room_T_zed_capture, x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame); return; }
+    w(x.valid, x.frame_id, x.timestamp_ms, x.slices, x.cam_twist, x.frame_dt_s, x.room_T_zed_capture,
+      x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame);
+    put_words(w, x.support_points_cam);
+    put_derived(w, x.support_points, x.support_points_cam, x.room_T_zed_capture);
+    put_pixels(w, x.mask_pixels);
+}
+void fields(Reader& r, MaskPacket& x)
+{
+    if (r.version < 2)
+    { r(x.valid, x.frame_id, x.timestamp_ms, x.slices, x.support_points, x.support_points_cam, x.mask_pixels, x.cam_twist,
+        x.frame_dt_s, x.room_T_zed_capture, x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame); return; }
+    r(x.valid, x.frame_id, x.timestamp_ms, x.slices, x.cam_twist, x.frame_dt_s, x.room_T_zed_capture,
+      x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame);
+    if (r.ok) get_words(r, x.support_points_cam);
+    if (r.ok) get_derived(r, x.support_points, x.support_points_cam, x.room_T_zed_capture);
+    if (r.ok) get_pixels(r, x.mask_pixels);
+}
+void fields(Writer& w, const BpearlSweep& x)
+{
+    if (w.version < 2)
+    { w(x.room_fresh, x.pts_room, x.origin_room, x.robot_fresh, x.pts_robot, x.origin_robot, x.robot_stamp_ms,
+        x.room_T_robot_capture); return; }
+    w(x.room_fresh, x.origin_room, x.robot_fresh, x.origin_robot, x.robot_stamp_ms, x.room_T_robot_capture);
+    put_words(w, x.pts_robot);
+    put_derived(w, x.pts_room, x.pts_robot, x.room_T_robot_capture);
+}
+void fields(Reader& r, BpearlSweep& x)
+{
+    if (r.version < 2)
+    { r(x.room_fresh, x.pts_room, x.origin_room, x.robot_fresh, x.pts_robot, x.origin_robot, x.robot_stamp_ms,
+        x.room_T_robot_capture); return; }
+    r(x.room_fresh, x.origin_room, x.robot_fresh, x.origin_robot, x.robot_stamp_ms, x.room_T_robot_capture);
+    if (r.ok) get_words(r, x.pts_robot);
+    if (r.ok) get_derived(r, x.pts_room, x.pts_robot, x.room_T_robot_capture);
+}
+void fields(Writer& w, const SemanticPlane& x)
+{
+    w(x.pw, x.ph, x.frame_w, x.frame_h, x.stamp_ms);
+    if (w.version < 2) w(x.plane); else put_words(w, x.plane);
+}
+void fields(Reader& r, SemanticPlane& x)
+{
+    r(x.pw, x.ph, x.frame_w, x.frame_h, x.stamp_ms);
+    if (not r.ok) return;
+    if (r.version < 2) r(x.plane); else get_words(r, x.plane);
+}
+void fields(Writer& w, const ImageFrame& x)
+{
+    w(x.format, x.width, x.height, x.stamp_ms, x.frame_ref);
+    if (w.version < 2) { w(x.patches); return; }
+    w.raw(static_cast<std::uint64_t>(x.patches.size()));
+    for (const auto& p : x.patches) { w(p.x0, p.y0, p.w, p.h); put_patch_bytes(w, p.bytes, x.format); }
+}
+void fields(Reader& r, ImageFrame& x)
+{
+    r(x.format, x.width, x.height, x.stamp_ms, x.frame_ref);
+    if (not r.ok) return;
+    if (r.version < 2) { r(x.patches); return; }
+    std::uint64_t n = 0;
+    r.raw(n);
+    if (not r.ok or n > r.left()) { r.ok = false; return; }
+    x.patches.clear();
+    for (std::uint64_t i = 0; i < n and r.ok; ++i)
+    {
+        ImagePatch p;
+        r(p.x0, p.y0, p.w, p.h);
+        if (r.ok) get_patch_bytes(r, p.bytes, x.format);
+        if (r.ok) x.patches.push_back(std::move(p));
+    }
+}
+
 // ─── framing ────────────────────────────────────────────────────────────────────────────────────────────────────
 template <class T> bool write_record(std::ostream& os, const T& x)
 {
@@ -295,7 +596,7 @@ bool read_exact(std::istream& is, std::string& buf, std::uint64_t n)
     return true;
 }
 
-template <class T> Got read_record_ex(std::istream& is, T& out)
+template <class T> Got read_record_ex(std::istream& is, T& out, std::uint32_t version = kCycleIoVersion)
 {
     std::uint32_t tag = 0;
     std::uint64_t len = 0;
@@ -306,6 +607,7 @@ template <class T> Got read_record_ex(std::istream& is, T& out)
     std::string buf;
     if (not read_exact(is, buf, len)) return Got::Truncated;
     Reader r{buf.data(), buf.data() + buf.size()};
+    r.version = version;
     T x{};
     r.one(x);
     if (not r.ok or r.p != r.e) return Got::Corrupt;   // a record must be consumed EXACTLY: anything else is a mismatch
@@ -313,10 +615,10 @@ template <class T> Got read_record_ex(std::istream& is, T& out)
     return Got::Ok;
 }
 
-template <class T> std::optional<T> read_record(std::istream& is)
+template <class T> std::optional<T> read_record(std::istream& is, std::uint32_t version = kCycleIoVersion)
 {
     T x{};
-    if (read_record_ex(is, x) != Got::Ok) return std::nullopt;
+    if (read_record_ex(is, x, version) != Got::Ok) return std::nullopt;
     return x;
 }
 
@@ -326,7 +628,8 @@ template <class Rec, class T> std::optional<Rec> read_file(const std::string& pa
 {
     std::ifstream f(path, std::ios::binary);
     if (not f.is_open()) return std::nullopt;
-    auto h = read_header(f, kind);
+    std::uint32_t version = 0;
+    auto h = read_header(f, kind, &version);
     if (not h) return std::nullopt;
     Rec rec;
     rec.header = std::move(*h);
@@ -334,7 +637,7 @@ template <class Rec, class T> std::optional<Rec> read_file(const std::string& pa
     {
         const auto at = static_cast<std::uint64_t>(f.tellg());
         T x{};
-        const Got g = read_record_ex(f, x);
+        const Got g = read_record_ex(f, x, version);
         if (g == Got::Ok) { rec.cycles.push_back(std::move(x)); continue; }
         // clean EOF, a truncated tail, or a corrupt record: stop, keep what is whole, and SAY which
         rec.stop = g == Got::Eof ? StopReason::CleanEof : g == Got::Truncated ? StopReason::Truncated : StopReason::Corrupt;
@@ -353,18 +656,21 @@ bool write_header(std::ostream& os, const DoorRecordingHeader& h, RecordingKind 
     return write_record(os, h);
 }
 
-std::optional<DoorRecordingHeader> read_header(std::istream& is, RecordingKind kind)
+std::optional<DoorRecordingHeader> read_header(std::istream& is, RecordingKind kind, std::uint32_t* version)
 {
     char m[4]{};
     std::uint32_t v = 0;
     if (not is.read(m, 4) or not is.read(reinterpret_cast<char*>(&v), sizeof v)) return std::nullopt;
-    if (std::memcmp(m, magic_of(kind), 4) != 0 or v != kCycleIoVersion) return std::nullopt;
-    return read_record<DoorRecordingHeader>(is);
+    if (std::memcmp(m, magic_of(kind), 4) != 0 or v < kCycleIoOldestReadable or v > kCycleIoVersion) return std::nullopt;
+    if (version != nullptr) *version = v;
+    return read_record<DoorRecordingHeader>(is, v);
 }
 
 bool write(std::ostream& os, const DoorCycleInput& x)  { return write_record(os, x); }
 bool write(std::ostream& os, const DoorCycleOutput& x) { return write_record(os, x); }
 std::optional<DoorCycleInput>  read_input(std::istream& is)  { return read_record<DoorCycleInput>(is); }
+std::optional<DoorCycleInput>  read_input(std::istream& is, std::uint32_t version)
+{ return read_record<DoorCycleInput>(is, version); }
 std::optional<DoorCycleOutput> read_output(std::istream& is) { return read_record<DoorCycleOutput>(is); }
 
 std::optional<InputRecording> read_input_file(const std::string& path)

@@ -53,6 +53,10 @@ add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 # two units; the pure-Eigen belief stays OpenCV-free. ⚠common/contour_edge DOES include <opencv2/...>,
 # which breaks the old "nothing under common/ includes OpenCV" invariant hood's CMake notes rely on —
 # any component linking ai_common's contour_edge must therefore pull OpenCV in, as here.
+# zstd — DCIN v2 packs the recorded inputs' bulk arrays losslessly (core/door_cycle_io.cpp; RecordInputs only).
+find_library(ZSTD_LIB zstd REQUIRED)
+LIST(APPEND LIBS ${ZSTD_LIB})
+
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})

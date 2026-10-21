@@ -1,5 +1,5 @@
 // door_cycle_io.h — the DoorCore BOUNDARY: what one compute() cycle of door_concept reads (DoorCycleInput) and what it
-// decides (DoorCycleOutput), plus their versioned binary recordings ("DCIN" v1 / "DCOU" v1).
+// decides (DoorCycleOutput), plus their versioned binary recordings ("DCIN" / "DCOU", v2; v1 still readable).
 //
 // ★WHY IT EXISTS. door_concept's per-cycle logic is being moved into a DSR-free DoorCore driven by ONE plain struct per
 // cycle (docs/superpowers/specs/2026-10-21-door-core-replay-design.md §3.1). This file IS that boundary: every field
@@ -47,7 +47,18 @@
 // (packet()/frame() return the last staged value). A value means it REPLACES the core's copy.
 //
 // FILE LAYOUT (little-endian native; static_assert below):
-//   "DCIN" | u32 version (1) | u64 len | DoorRecordingHeader payload           ("DCOU" for an output file)
+//   "DCIN" | u32 version (2) | u64 len | DoorRecordingHeader payload           ("DCOU" for an output file)
+// ★v2 = v1 + LOSSLESS PACKING OF THE BULK ARRAYS (Task 3 live size: tourR1 wrote 25.4 MB/s, 50 % of it mask support
+//   points, 17 % mask pixels, 17 % the two bpearl planes, 15 % image patches — and none of them ever repeats between
+//   records, so a "same as previous" marker buys nothing). Each bulk array is zstd-compressed after a reversible
+//   transform: point clouds / float planes per component, delta-coded on their 32-bit patterns, byte-shuffled; mask
+//   pixels as int16 deltas when every value is an exact small integer; gray patches as bytes. And two arrays are
+//   stored as the XOR of their bits against a PREDICTION from data already in the record — mask support_points from
+//   support_points_cam through room_T_zed_capture (the ingestor's own arithmetic: residual 0 on 100 % of tourR1's
+//   points), the bpearl room plane from the robot plane through room_T_robot_capture — with an FNV-64 of the true
+//   bits, so a decoder whose prediction differs by one bit reports Corrupt instead of returning wrong data. zstd frames
+//   carry their own checksum. Field ORDER inside MaskPacket/BpearlSweep/ImageFrame differs between v1 and v2 (the
+//   prediction inputs come first); the reader follows the header's version.
 //   then records:  u32 tag 'CYC1' | u64 len | payload
 // A record is read whole or not at all, so a file cut mid-write (SIGKILL, disk full, the size cap) yields every complete
 // record and nothing else. Doubles/floats are stored as raw bits (NaN payloads and -0.0 survive). No locale anywhere.
@@ -74,7 +85,8 @@ using Mat3f = Eigen::Matrix3f;
 using Mat4d = Eigen::Matrix4d;
 using Mat6d = Eigen::Matrix<double, 6, 6>;
 
-inline constexpr std::uint32_t kCycleIoVersion = 1;
+inline constexpr std::uint32_t kCycleIoVersion = 2;     // written
+inline constexpr std::uint32_t kCycleIoOldestReadable = 1;   // read (v1: unpacked arrays)
 
 /// DSR ids carry the generating agent's id in their low bits (cortex core/id_generator.h, agent_id_size = 12).
 inline constexpr int kDsrAgentIdBits = 12;
@@ -578,13 +590,16 @@ enum class RecordingKind : std::uint8_t { Input, Output };   // "DCIN" | "DCOU"
 /// Header: magic + version + the header record. false on a stream error.
 [[nodiscard]] bool write_header(std::ostream& os, const DoorRecordingHeader& h, RecordingKind kind);
 /// nullopt on a wrong magic, a wrong version or a short header.
-[[nodiscard]] std::optional<DoorRecordingHeader> read_header(std::istream& is, RecordingKind kind);
+[[nodiscard]] std::optional<DoorRecordingHeader> read_header(std::istream& is, RecordingKind kind,
+                                                             std::uint32_t* version = nullptr);
 
 /// One record. The writer serialises to a buffer first and issues ONE write, so a record is on disk whole or cut.
 [[nodiscard]] bool write(std::ostream& os, const DoorCycleInput& x);
 [[nodiscard]] bool write(std::ostream& os, const DoorCycleOutput& x);
 /// One record; nullopt at a clean end, on a truncated record, or on a corrupt one (never a half-filled struct).
-[[nodiscard]] std::optional<DoorCycleInput>  read_input(std::istream& is);
+[[nodiscard]] std::optional<DoorCycleInput>  read_input(std::istream& is);   // a v2 (current) record
+/// A record of a file whose header said `version` (read_header's out-parameter).
+[[nodiscard]] std::optional<DoorCycleInput>  read_input(std::istream& is, std::uint32_t version);
 [[nodiscard]] std::optional<DoorCycleOutput> read_output(std::istream& is);
 /// The names the brief asked for: read(std::istream&) for an input record.
 [[nodiscard]] inline std::optional<DoorCycleInput> read(std::istream& is) { return read_input(is); }

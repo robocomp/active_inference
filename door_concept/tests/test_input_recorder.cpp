@@ -12,7 +12,7 @@
 //      and reports Truncated at the offset of the cut one.
 // Runs under the es_ES locale on purpose (CLAUDE.md "Parsing numbers"): a binary tape must be immune to it.
 // Build + run (from door_concept/):
-//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_input_recorder.cpp src/core/door_cycle_io.cpp -o /tmp/test_input_recorder && /tmp/test_input_recorder
+//   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_input_recorder.cpp src/core/door_cycle_io.cpp -lzstd -o /tmp/test_input_recorder && /tmp/test_input_recorder
 #include <clocale>
 #include <cstdio>
 #include <filesystem>
@@ -186,7 +186,9 @@ int main()
                                                                  kCycles / 4 + kCycles / 5));
     check(latch.pending_events() == 0 and latch.pending_calls() == 0 and not latch.identity_load_pending(),
           "latch drained");
+    rec.flush();                                   // the writer thread has written everything queued
     const std::uint64_t full_bytes = rec.bytes();
+    check(rec.records() == std::uint64_t(kCycles), "every queued record written");
     rec.close();
     check(fs::file_size(path) == full_bytes, "bytes() == file size");
 
@@ -270,15 +272,12 @@ int main()
         DoorInputRecorder capped;
         const std::uint64_t cap = full_bytes / 3;   // about a third of the sequence fits
         check(capped.open(cpath, hdr, cap), "open (capped)");
-        std::size_t written = 0;
-        bool refused_once = false;
         for (const auto& in : expect)
-        {
-            if (capped.record(in)) ++written;
-            else { refused_once = true; break; }
-        }
-        check(refused_once and capped.stopped(), "cap reached → stopped");
-        check(not capped.enabled(), "stopped ⇒ closed");
+            if (not capped.record(in)) break;      // asynchronous: refused only once the worker has stopped
+        capped.flush();
+        const std::size_t written = capped.records();
+        check(capped.stopped(), "cap reached → stopped");
+        check(not capped.enabled(), "stopped ⇒ not recording");
         check(not capped.record(expect.front()), "record after the stop is refused");
         check(fs::file_size(cpath) <= cap, std::format("file {} B ≤ cap {} B", fs::file_size(cpath), cap));
         const auto cb = read_input_file(cpath);
@@ -297,6 +296,7 @@ int main()
         DoorInputRecorder r;
         check(r.open(kpath, hdr, 0), "open (killed)");
         for (int i = 0; i < 10; ++i) check(r.record(expect[std::size_t(i)]), "record before the kill");
+        r.flush();
         const std::uint64_t boundary = r.bytes();
         r.close();
         std::ostringstream one(std::ios::binary);
