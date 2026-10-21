@@ -122,6 +122,20 @@ inline double log_phi(double z)
 }
 
 // §2: the door's leaf with the hypothesis-dependent excess of the soft residual cells it explains.
+// ★ Task 3f fix round 1 (I-1): IS THE BODY STILL WITHIN THE DOORWAY'S REACH? The opening (half its width about its centre) or
+//   any leaf hypothesis's sweep (the disc its free edge describes about the hinge, plus the leaf's half thickness), grown by
+//   the body's circumscribed radius: geometry, the set of centres from which the body can touch either. While it is, the
+//   held leaf and the jambs stay priced in EVERY policy field — not only the cross's — so the goal that follows a passage
+//   (an explore standpoint, a mission waypoint) still routes around the leaf the robot just went past.
+[[nodiscard]] inline bool body_within_door_zone(const Eigen::Vector2f& p, float body_circ_r, const Eigen::Vector2f& opening_centre,
+                                                float half_width, const DoorLeaf& leaf)
+{
+    if ((p - opening_centre).norm() < half_width + body_circ_r) return true;
+    for (const auto& h : leaf.hyps)
+        if ((p - h.hinge).norm() < h.length + h.half_thick + body_circ_r) return true;
+    return false;
+}
+
 struct DoorLeafEvidence
 {
     DoorLeaf leaf;

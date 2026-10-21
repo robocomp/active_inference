@@ -450,6 +450,12 @@ private:
     //   explain_residual_by_leaf; hard cells stay occupied), so the leaf's smear stops counting as unexplained belief.
     rc::policy::DoorLeaf policy_leaf_;
     std::string policy_leaf_room_;
+    // Task 3f r1 (I-1): the last cross's leaf and jambs (room frame of policy_held_room_), kept in every policy field while the
+    // body is within the doorway's reach (door_leaf.h body_within_door_zone); policy_held_active_ = this cycle's verdict
+    rc::policy::DoorLeaf policy_held_leaf_;
+    std::optional<rc::policy::DoorwayRisk> policy_held_jambs_;
+    std::string policy_held_room_;
+    bool policy_held_active_ = false;
     // ...and what sync_world_state did with it this cycle: the planner keeps every cell at the price all hypotheses agree on,
     // and this holds each hypothesis's excess, so EVERY policy field this cycle adds door_leaf_density over it (policy_tick
     // extra_fn). Null = no leaf held.
@@ -1176,6 +1182,7 @@ private:
     bool anchor_prev_covered_ = false;                               // the last block was placed through a recorded pose
     rc::policy::BlockFrame anchor_block_frame_;                      // Task 3f (d): the room frame the ring / last block are in
     bool anchor_clearing_released_ = false;                          // Task 3f (c): the clearing was given up — no re-engaging on the gap
+    float switch_sigma_r_ = -1.f;                                    // Task 3f r1 (M-8): room_concept's pose σ at the switch (<0 = not yet)
     std::int64_t anchor_uncovered_logged_stamp_ = 0;                 // the last uncovered stamp logged (one line per block)
     rc::policy::AnchorLostBelief anchor_lost_;                       // P(the anchor is lost), recursive per block (fix round 1, I-2)
     rc::policy::DoorwayBelief doorway_belief_;                       // P(the gap's line is the door), recursive per cycle (I-2)

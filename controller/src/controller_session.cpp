@@ -3516,6 +3516,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_uncovered_logged_stamp_ = 0;
     anchor_clearing_released_ = false;               // Task 3f (c): a given-up clearing belongs to its claim
     policy_clearing_no_route_.reset();
+    switch_sigma_r_ = -1.f;                          // Task 3f r1 (M-8): latched at this claim's own switch
 }
 
 // ★ Task 3e (2) — rtD1h leg 5 attempt 2. ([Policy] Enabled only: the old chain's servo path is unchanged for the A/B.)
@@ -4151,18 +4152,28 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         //   pose driven on with its σ, the switch into the target room judged on room_concept's published pose σ); the MAP
         //   (> ½) is through. The near side must still have been observed in this claim (try89's gate: a claim that never saw
         //   the robot before the door cannot complete). The s ≥ standoff rule above stands; this is a second, earlier exit.
+        // Fix round 1 (I-1): the event is GEOMETRY — the body's rear past the plane by the leaf's reach into the entered room
+        // (each held leaf hypothesis, anchor frame: +y is the far side, since the robot's anchor-frame y IS s), marginalised by
+        // the hypotheses' P. (M-1) P(through) is kept every clearing cycle, near side seen or not: the passage asks it before
+        // closing a door on a clearing that was given up. (M-8) σ_r = the pose σ latched at the switch.
         double p_through = -1.0;
-        if (progress == rc::CrossProgress::Going and policy_enabled() and door_passage_.clearing() and cross_gate_.near_seen
-            and drive_pose.x.allFinite() and drive_pose.P.allFinite())
+        if (policy_enabled() and door_passage_.clearing() and drive_pose.x.allFinite() and drive_pose.P.allFinite())
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);
             const float sigma_s = std::sqrt(std::max(0.f, g.n.dot(drive_pose.P.topLeftCorner<2, 2>() * g.n)));
             // the body's extent behind its centre along the normal (its support toward −n, robot frame): wholly past = s > it
             const float h = approach_body_.support_radius(0.f, -g.n);
-            // room_concept's pose σ is what the switch was judged on; unpublished (0) ⇒ ours (flagged: no tighter than the pose)
-            const float sigma_r = policy_pose_xy_std_ > 0.f ? policy_pose_xy_std_ : sigma_s;
-            p_through = rc::policy::p_through_given_switch(g.s, sigma_s, h, sigma_r);
-            if (p_through > 0.5) progress = rc::CrossProgress::Through;
+            if (switch_sigma_r_ < 0.f)   // the first clearing cycle: the σ room_concept published with the switched pose
+                switch_sigma_r_ = policy_pose_xy_std_;
+            // unpublished (0) ⇒ ours (flagged: the switch then claims no more than the pose does)
+            const float sigma_r = switch_sigma_r_ > 0.f ? switch_sigma_r_ : sigma_s;
+            std::vector<rc::policy::LeafReach> reach;
+            reach.reserve(a.leaves.size());
+            for (const auto &l : a.leaves)
+                reach.push_back({std::max(0.0, double(std::max(l.tip.y(), l.hinge.y())) + double(l.half_thick)), double(l.p)});
+            p_through = rc::policy::p_through_past_leaf(g.s, sigma_s, h, sigma_r, reach);
+            door_passage_.note_through_p(p_through);
+            if (progress == rc::CrossProgress::Going and cross_gate_.near_seen and p_through > 0.5) progress = rc::CrossProgress::Through;
         }
         if (progress == rc::CrossProgress::NotACrossing)
         {
@@ -4183,7 +4194,8 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
             {
                 if (p_through > 0.5)
                     std::println("[anchor] cross: {} is {:.2f} m behind along its normal — THROUGH the doorway, in the new room: "
-                                 "P(body wholly past | s, room switch) {:.3f} (Task 3f; standoff {:.2f} m not needed){}", drive_name,
+                                 "P(body past the plane and the leaf's sweep | s, room switch) {:.3f} (Task 3f; standoff {:.2f} m not "
+                                 "needed){}", drive_name,
                                  g.s, p_through, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
                 else
                 std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — THROUGH the doorway, "
@@ -6193,7 +6205,7 @@ void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &af
     // reachability fallback now engages on the cycle after a failure and drives to the closest reachable pose;
     // a target with NOTHING closer reachable is reported Unreachable by the repair stage at once. This 5 s clock
     // is the LAST resort only — for a hold neither of those resolves (e.g. the flood fill cannot leave the cell).
-    if (no_route_since_ms_ != 0 and time_source() - no_route_since_ms_ > 5000)
+    if (no_route_since_ms_ != 0 and time_source() - no_route_since_ms_ > rc::policy::kNoRouteReportMs)
     {
         // A MOUSE target has no producer to report to: mark_reached on it is a no-op, so the click outranked
         // every affordance for ever (2026-10-10 live: a focus-click at (11.46,3.25), outside the grid, parked

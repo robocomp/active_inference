@@ -12,13 +12,16 @@
 //     circumscribed radius plus a field cell (so a goal point is never off the grid it seeds, and the doorway corridor that
 //     joins the door to its goal line — inside the convex box of robot and goal — is on it too).
 // (2) A cell OUTSIDE the planner's extent is UNSEEN, not "outside the world": the planner's raster says nothing about it.
-//     · Its distance to the nearest KNOWN obstacle is at least the distance to the planner's box plus the box border's own
-//       distance value (extended_distance): the planner's border cells are its outside-room margin, so a cell beside the
-//       box is as close to a wall as the box lets it be — continuous with the EDT inside, never a free strip hugging a wall.
-//     · Its PRICE is the honest prior for unseen space — residual_risk.h's surprisal −log Pr(θ < ½) at the Beta(1,1) prior
-//       (no hits, no misses): ln 2 nats per planner cell, summed over the cells the body covers there (the A*'s own per-cell
-//       convention, GridPlanner::body_risk_at), turned into metres per metre by the same residual_risk_weight. Not free (0)
-//       — that would invent seen free space; not a wall (+inf) — nothing was seen there.
+//     · Its distance to the nearest KNOWN obstacle (extended_distance) = the box border's EDT value plus the way out to it —
+//       an UPPER bound on the true clearance (an unseen obstacle beyond the box can only make it smaller), continuous with the
+//       EDT inside: the planner's border cells are its outside-room margin, so a cell beside the box is as close to a wall
+//       as the box lets it be, never a free strip hugging a wall. The price below, and the contact model's returns, carry
+//       what the bound cannot.
+//     · Its PRICE is the honest prior for unseen space — residual_risk.h's surprisal −log Pr(θ < ½) at a SYMMETRIC prior with
+//       no evidence (residual's Jeffreys Beta(½,½); any symmetric Beta gives Pr(θ < ½) = ½): ln 2 nats per planner cell,
+//       summed over the cells the body covers there (the A*'s own per-cell convention, GridPlanner::body_risk_at), turned
+//       into metres per metre by the same residual_risk_weight. Not free (0) — that would invent seen free space; not a
+//       wall (+inf) — nothing was seen there.
 //     The robot's contact model (returns) still judges every motion into it; the price only orders the routes.
 #pragma once
 
@@ -62,7 +65,7 @@ struct PlannerExtent
 }
 
 // (2) the distance to the nearest known obstacle, extended past the planner's box: inside it the planner's EDT; outside, the
-// EDT at the nearest point of the box plus the way out to p (a lower bound on the true distance: nothing is known beyond).
+// EDT at the nearest point of the box plus the way out to p — an UPPER bound on the true clearance (nothing is known beyond).
 [[nodiscard]] inline float extended_distance(const PlannerExtent& ext, const Eigen::Vector2f& p,
                                              const std::function<float(const Eigen::Vector2f&)>& distance_in)
 {
@@ -72,7 +75,8 @@ struct PlannerExtent
 }
 
 // (2) the price of standing on unseen space, as a cost-to-go DENSITY (metres per metre): ln 2 nats per planner cell under
-// the body (its area / cell²), times the weight that turns the planner's nats into metres.
+// the body (its area / cell²) — −log Pr(θ < ½) = ln 2 at any symmetric no-evidence Beta (residual's Jeffreys Beta(½,½)) —
+// times the weight that turns the planner's nats into metres.
 [[nodiscard]] inline float unseen_prior_density(float body_area_m2, float planner_cell_m, float risk_weight)
 {
     if (not (body_area_m2 > 0.f) or not (planner_cell_m > 0.f)) return 0.f;

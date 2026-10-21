@@ -191,6 +191,84 @@ int main()
         CHECK(p.take_finished());
     }
 
+    // ── Task 3f r1 (M-1): a clearing GIVEN UP while the session's posterior says the body may straddle the doorway is NOT
+    //    through: the passage must not go on to close the door on the robot. With P(through) > 1/2 it closes as before. ──
+    for (const double p_thr : {0.20, 0.90})
+    {
+        auto G = make_graph(p_thr < 0.5 ? 6 : 7);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_6", Step::Close);
+        const std::string a = "aff_door_6_";
+        offered(*G, a + "approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, a + "approach");
+        p.update(*G, nullptr, "room_1");
+        satisfied(*G, a + "approach");
+        p.update(*G, nullptr, "room_1");
+        offered(*G, a + "cross");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, a + "cross");
+        p.note_anchor(/*engaged=*/true, /*through=*/false);
+        p.update(*G, nullptr, "room_1");
+        p.update(*G, nullptr, "room_2");
+        CHECK(p.clearing());
+        p.note_through_p(p_thr);
+        p.note_anchor(/*engaged=*/false, /*through=*/false);   // cross_hand_back while clearing: given up
+        const auto out = p.update(*G, nullptr, "room_2");
+        CHECK(not p.clearing());
+        if (p_thr < 0.5)
+        {
+            CHECK(p.view().step == Step::Done);
+            CHECK(out.event.has_value() and out.event->find("NOT through") != std::string::npos);
+        }
+        else
+            CHECK(p.view().step == Step::Close);
+    }
+
+    // ── Task 3f r1 (M-8): the switch counts only INTO a room this door leads to. ltsm's passage node matches door_8 (in room_8,
+    //    the far face) and door_7 (in room_7, where the cross begins): a relocaliser jump to room_9 is not a switch. ────────
+    {
+        auto G = make_graph(8);
+        auto add = [&](const std::string &name, auto type_tag) {
+            DSR::Node n = DSR::Node::create<decltype(type_tag)>(name);
+            G->insert_node(n);
+            return G->get_node(name)->id();
+        };
+        const auto r7 = add("room_7", room_node_type{}), r8 = add("room_8", room_node_type{}), r9 = add("room_9", room_node_type{});
+        (void)r9;
+        const auto d7 = add("door_7", object_node_type{}), d8 = add("door_8", object_node_type{});
+        const auto ps = add("passage_7", metaconcept_node_type{});
+        auto edge = [&](std::uint64_t from, std::uint64_t to, auto type_tag) {
+            auto e = DSR::Edge::create<decltype(type_tag)>(from, to);
+            G->insert_or_assign_edge(e);
+        };
+        edge(r7, d7, RT_edge_type{});
+        edge(r8, d8, RT_edge_type{});
+        edge(ps, d7, match_edge_type{});
+        edge(ps, d8, match_edge_type{});
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_7", Step::Cross);
+        const std::string a = "aff_door_7_";
+        offered(*G, a + "approach");
+        p.update(*G, nullptr, "room_7");
+        executing(*G, a + "approach");
+        p.update(*G, nullptr, "room_7");
+        satisfied(*G, a + "approach");
+        p.update(*G, nullptr, "room_7");
+        offered(*G, a + "cross");
+        p.update(*G, nullptr, "room_7");
+        executing(*G, a + "cross");
+        p.note_anchor(/*engaged=*/true, /*through=*/false);
+        p.update(*G, nullptr, "room_7");
+        p.update(*G, nullptr, "room_9");   // a jump into a room door_7 does not lead to
+        CHECK(not p.clearing());
+        CHECK(p.view().step == Step::Cross);
+        p.update(*G, nullptr, "room_8");   // the far face's room: the switch through this door
+        CHECK(p.clearing());
+    }
+
 
     // ── Live fix 1 (+ review): the fallback to `approach` after reaching the door needs EVIDENCE the robot is out of
     //    position — its measured distance from door_concept's approach standpoint beyond the arrival tolerance — and a last

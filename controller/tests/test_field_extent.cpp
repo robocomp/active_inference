@@ -8,6 +8,7 @@
 // goal line 2.84 m past the door — beyond the raster.
 #include "../src/local_policy/cost_to_go.h"
 #include "../src/local_policy/cross_through.h"
+#include "../src/local_policy/door_leaf.h"
 #include "../src/local_policy/field_extent.h"
 #include "../src/local_policy/policy_tick_gate.h"
 
@@ -126,6 +127,56 @@ int main()
         std::printf("   vague pose s 0.2 +- 0.3: no switch %.3f, vague switch %.3f, sharp switch %.3f\n", p_none, p_vague, p_sharp);
         CHECK("switch_is_evidence_weighted_by_its_sigma", p_sharp > p_vague and p_vague >= p_none - 1e-9 and p_vague - p_none < 0.05);
         CHECK("p_nonfinite_s_judges_nothing", p_through_given_switch(std::numeric_limits<double>::quiet_NaN(), 0.05, h, 0.05) == 0.0);
+    }
+
+    // ── fix round 1 (I-1): THROUGH = CLEAR OF THE LEAF'S SWEEP. A leaf 0.85 m long swung 90° INTO the entered room reaches
+    //    0.87 m past the plane (+ half thickness): `through` must wait until the body's rear is past it; a leaf opening into
+    //    the room LEFT reaches nothing past the plane and leaves the event at the body's own extent.
+    {
+        const double h = 0.284, ss = 0.05, sr = 0.06;
+        const LeafReach into_entered[] = {{0.85 * std::sin(1.57) + 0.02, 1.0}};
+        const LeafReach into_left[] = {{0.0, 1.0}};
+        CHECK("leaf_into_entered_room: not through at s 0.32 (where the bare body was)",
+              p_through_past_leaf(0.32, ss, h, sr, into_entered) < 0.5 and p_through_given_switch(0.32, ss, h, sr) > 0.5);
+        CHECK("leaf_into_entered_room: not through just short of h + d", p_through_past_leaf(h + 0.87 - 0.05, ss, h, sr, into_entered) < 0.5);
+        CHECK("leaf_into_entered_room: through once past h + d", p_through_past_leaf(h + 0.87 + 0.05, ss, h, sr, into_entered) > 0.5);
+        CHECK("leaf_into_room_left: the body's own extent decides",
+              std::abs(p_through_past_leaf(0.32, ss, h, sr, into_left) - p_through_given_switch(0.32, ss, h, sr)) < 1e-12);
+        // a mixture: 70 % the leaf swings into the entered room, 30 % into the room left — at s past h but inside the sweep,
+        // P = 0.3 · P(past h) ≈ 0.3 < 1/2: still not through
+        const LeafReach mix[] = {{0.87, 0.7}, {0.0, 0.3}};
+        const double pm = p_through_past_leaf(0.5, ss, h, sr, mix);
+        std::printf("   mixture 70/30 at s 0.50: P(through) %.3f\n", pm);
+        CHECK("leaf_mixture_marginalised_by_P", std::abs(pm - 0.3 * p_through_given_switch(0.5, ss, h, sr)
+                                                         - 0.7 * p_through_given_switch(0.5, ss, h + 0.87, sr)) < 1e-9 and pm < 0.5);
+        CHECK("no_leaf_hypotheses: the bare event", std::abs(p_through_past_leaf(0.32, ss, h, sr, {}) - p_through_given_switch(0.32, ss, h, sr)) < 1e-12);
+    }
+    // ── fix round 1 (I-1): THE NEXT GOAL'S FIELD STILL CONTAINS THE LEAF while the body is within its reach. The passage has
+    //    ended; the next goal (an explore standpoint 1.5 m to the robot's right, beyond the leaf) is priced with the held leaf.
+    {
+        LeafHypothesis lh;
+        lh.hinge = V(0.25f, kDoorY);          // hinge on the right jamb, swung 90° into room_2
+        lh.dir = V(0.f, 1.f);
+        lh.length = 0.85f;
+        lh.p = 1.f;
+        lh.pivot = V(-0.2f, kDoorY);
+        DoorLeaf leaf;
+        leaf.hyps.push_back(lh);
+        std::vector<float> no_risk;
+        const DoorLeafEvidence ev = explain_residual_by_leaf(leaf, {}, 0.05f, no_risk, kRins);
+        const V robot_in(-0.2f, kDoorY + 0.45f), robot_far(-0.2f, kDoorY + 1.60f + kCirc);
+        CHECK("held_leaf_zone: a body 0.45 m past the plane is within the leaf's reach",
+              body_within_door_zone(robot_in, kCirc, V(-0.2f, kDoorY), 0.45f, leaf));
+        CHECK("held_leaf_zone: released once outside the sweep and the opening",
+              not body_within_door_zone(robot_far, kCirc, V(-0.2f, kDoorY), 0.45f, leaf));
+        const V next_goal(1.3f, kDoorY + 0.45f);
+        const CostToGo::Grid g = field_grid(kExt, std::span<const V>(&next_goal, 1), robot_in, kCirc + kFieldCell, kFieldCell);
+        auto free = [](const V& p) { return free_of(extended_distance(kExt, p, planner_distance)) or corridor(p); };
+        CostToGo bare, with_leaf;
+        bare.build(g, free, [](const V&) { return 0.f; }, std::span<const V>(&next_goal, 1));
+        with_leaf.build(g, free, [&](const V& p) { return door_leaf_density(ev, p); }, std::span<const V>(&next_goal, 1));
+        std::printf("   next goal from inside the sweep: field %.2f m without the leaf, %.2f m with it\n", bare.at(robot_in), with_leaf.at(robot_in));
+        CHECK("next_goal_field_contains_the_leaf", with_leaf.at(robot_in) > bare.at(robot_in) + 0.5f);
     }
 
     // ── (c) A CLEARING THE POLICY CANNOT SERVE IS GIVEN UP — bounded, never for ever

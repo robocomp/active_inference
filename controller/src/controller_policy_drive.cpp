@@ -108,6 +108,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
 {
     using rc::policy::Decision;
     PolicyTick out;
+    if (not jambs.has_value() and policy_held_active_) jambs = policy_held_jambs_;   // Task 3f r1 (I-1): the held doorway's jambs
     const double now_s = steady_now_s();
     const auto &prm = params_ != nullptr ? *params_ : ControllerParams{};
     auto hold = [&](const std::string &why)
@@ -244,8 +245,8 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     // ★ Task 3f (b) (tour3A leg 1: the doorway goal line 2.4 m past the door lay beyond the newborn room's planner raster ⇒ the
     //   field was +inf everywhere for 9 min). The field's grid covers the planner's extent ∪ the goal points ∪ the robot
     //   (local_policy/field_extent.h); a cell OUTSIDE the planner's raster is UNSEEN — its distance to a known obstacle is the
-    //   raster's border value plus the way out (extended_distance), its price the honest prior for unseen space: ln 2 nats per
-    //   planner cell the body covers (residual_risk.h's surprisal at the Beta(1,1) prior), not free and not a wall.
+    //   raster's border value plus the way out (extended_distance: an UPPER bound on the clearance), its price the honest prior for unseen space: ln 2 nats per
+    //   planner cell the body covers (residual_risk.h's surprisal at a symmetric no-evidence prior, Jeffreys Beta(½,½)), not free and not a wall.
     const float planner_cell = grid_planner_.cell_size();
     const Eigen::Vector2f ext_lo = grid_planner_.grid_origin() - 0.5f * Eigen::Vector2f::Constant(planner_cell);
     const rc::policy::PlannerExtent ext{ext_lo, ext_lo + planner_cell * Eigen::Vector2f(float(grid_planner_.width()), float(grid_planner_.height()))};
@@ -607,7 +608,27 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
 {
     const std::uint64_t now = time_source();
     const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    policy_leaf_ = {};   // Task 3b: held only while the cross below holds it (no cross: the residual is not explained by a door)
+    // Task 3b: the leaf is held while the cross below holds it — and (Task 3f r1, I-1) after it, while the body is still within
+    // the doorway's reach (door_leaf.h body_within_door_zone): the goal after a passage must still route around the leaf and
+    // the jambs it just went past. Released once outside, or on a room-frame change (the held geometry is the old frame's).
+    policy_leaf_ = {};
+    policy_held_active_ = false;
+    if (policy_held_jambs_.has_value() and policy_held_room_ == current_room_name_
+        and rc::policy::body_within_door_zone(cpose.pos, approach_body_.circumscribed_radius(), policy_held_jambs_->anchor.gap.centre,
+                                              0.5f * policy_held_jambs_->anchor.gap.width, policy_held_leaf_))
+    {
+        policy_leaf_ = policy_held_leaf_;
+        policy_leaf_room_ = current_room_name_;
+        policy_held_active_ = true;
+    }
+    else if (policy_held_jambs_.has_value())
+    {
+        std::println("[policy] the held doorway ({} leaf hypotheses + jambs) is released — the body is outside its reach{}",
+                     policy_held_leaf_.hyps.size(), policy_held_room_ == current_room_name_ ? "" : " (the room frame changed)");
+        policy_held_jambs_.reset();
+        policy_held_leaf_ = {};
+        policy_held_room_.clear();
+    }
     const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
     rc::RobotFootprint bare = approach_body_;
     bare.set_safety_margin(0.f);
@@ -762,6 +783,10 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 rc::policy::DoorwayRisk risk{jambs_of(cp.anchor_pose, cp.anchor_width), std::nullopt, 0.f};
                 if (cp.on_gap) { risk.gap = jambs_of(cp.drive_pose, cp.drive_width); risk.p_gap = cp.gap_score; }
                 jambs = risk;
+                // Task 3f r1 (I-1): held for the goals after this cross while the body is within the doorway's reach
+                policy_held_jambs_ = risk;
+                policy_held_leaf_ = policy_leaf_;
+                policy_held_room_ = current_room_name_;
                 corridor = [risk](const Eigen::Vector2f &p) { return rc::policy::in_doorway_risk_corridor(risk, p); };
                 // Live fix 2 ruling 2: the measured opening (at least the body's width) is evidence the body fits there — no
                 // trap may block it; the bare body's full width = its lateral support both sides

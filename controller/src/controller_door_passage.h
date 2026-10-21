@@ -93,6 +93,8 @@ public:
         clearing_ = false;
         anchored_ = false;
         through_ = false;
+        p_through_ = -1.0;
+        target_ignored_logged_.clear();
         last_open_sp_.reset();
         last_event_ = std::format("[door-passage] {}: started", door_);
     }
@@ -162,6 +164,13 @@ public:
         std::scoped_lock lk(m_);
         anchored_ = engaged;
         through_ = through;
+    }
+    /// Task 3f r1 (M-1): the session's posterior P(through) while clearing ([Policy]; never set by the old chain). A clearing
+    /// that ends without `through` and with this ≤ ½ may leave the body straddling the doorway: the passage does not close.
+    void note_through_p(double p)
+    {
+        std::scoped_lock lk(m_);
+        p_through_ = p;
     }
     /// True while the cross goes on past a room switch on the anchor: the session drives the servo on the latched anchor and
     /// selects nothing.
@@ -385,7 +394,23 @@ public:
         //   (s ≥ AnchorCrossStandoffM along its normal). Without an anchor (the room route), or if the anchor is lost while
         //   clearing, the old rule: from the switch on the cross standpoint is a pose in the room just left — the passage
         //   moves on. rc::anchor_cross_end is the decision, pure (tests/test_anchor_servo.cpp).
-        const bool switched = step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_;
+        // Task 3f r1 (M-8): a switch counts only INTO a room this door leads to (target_rooms; unknown ⇒ any other room). A
+        // relocaliser jump into a third room (rtD1e: 4.4 m / 179° at a hand-over) is not the robot through this door.
+        bool switched = step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_;
+        if (switched)
+        {
+            const auto targets = target_rooms(G);
+            if (not targets.empty() and std::ranges::find(targets, room_frame) == targets.end())
+            {
+                switched = false;
+                if (target_ignored_logged_ != room_frame)
+                {
+                    target_ignored_logged_ = room_frame;
+                    std::println("[door-passage] {}: the room changed {} -> {}, which this door does not lead to ({}) — not a "
+                                 "switch through it", door_, cross_room_, room_frame, targets.front());
+                }
+            }
+        }
         if (step_ == Step::Cross and (switched or clearing_)
             and rc::anchor_cross_end(anchored_, switched or clearing_, through_) == rc::AnchorCrossEnd::Continue)
         {
@@ -402,7 +427,19 @@ public:
         if (step_ == Step::Cross and (switched or clearing_))
         {
             const bool was_through = clearing_ and through_;
+            // Task 3f r1 (M-1): a clearing GIVEN UP (no route / Unreachable / anchor gone) with the session's own posterior
+            // saying the body may still straddle the doorway: not through — never close the door on it; the passage ends here
+            const bool may_straddle = clearing_ and not through_ and p_through_ >= 0.0 and not (p_through_ > 0.5);
             clearing_ = false;
+            if (may_straddle)
+            {
+                finish();
+                out.event = std::format("[door-passage] {}: the clearing was given up past the room switch {} -> {} — NOT through "
+                                        "(P(through) {:.3f}: the body may straddle the doorway) — door left open, passage DONE",
+                                        door_, cross_room_, room_frame, p_through_);
+                last_event_ = *out.event;
+                return out;
+            }
             if (static_cast<int>(stop_after_) >= static_cast<int>(Step::Close))
             {
                 step_ = Step::Close;
@@ -677,6 +714,33 @@ private:
     bool clearing_ = false;        // Task 12 Fix E: crossing on past the room switch, on the anchor
     bool anchored_ = false;        // the session: the cross is being driven on an anchor
     bool through_ = false;         // the session: the servo reached `through`
+    double p_through_ = -1.0;      // Task 3f r1 (M-1): the session's P(through) while clearing; < 0 = not computed (old chain)
+    std::string target_ignored_logged_;   // Task 3f r1 (M-8): the non-target room a switch was last ignored for (log once)
+    // ★ Task 3f r1 (M-8): THE ROOMS THIS DOOR LEADS TO. ltsm's passage node (`metaconcept`, passage_live.h) holds a `match` edge
+    //   to each of the doorway's two faces, one door node per room; the faces other than this door hang (RT chain) from the
+    //   rooms on the far side. Empty = no passage node names this door yet (the far face not born): every other room counts,
+    //   as before — the controller holds no other map of which rooms a door joins.
+    std::vector<std::string> target_rooms(DSR::DSRGraph& G) const
+    {
+        std::vector<std::string> rooms;
+        const auto door = G.get_node(door_);
+        if (not door.has_value()) return rooms;
+        for (const auto& in : G.get_edges_to_id(door->id()))
+        {
+            if (in.type() != "match") continue;
+            const auto passage = G.get_node(in.from());
+            if (not passage.has_value()) continue;
+            for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(passage.value(), "match"))
+            {
+                if (e.to() == door->id()) continue;
+                const auto rid = rc::world::room_of(G, e.to());
+                if (rid == 0) continue;
+                if (const auto room = G.get_node(rid); room.has_value() and std::ranges::find(rooms, room->name()) == rooms.end())
+                    rooms.push_back(room->name());
+            }
+        }
+        return rooms;
+    }
 public:
     static constexpr int kMaxCrossUnreachable = 3;   // ⚑ flagged decision level (Task 9 fix round 1)
 };
