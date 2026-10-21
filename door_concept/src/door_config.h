@@ -488,6 +488,9 @@ struct DoorConfig
     float door_prior_h_m   = 2.10f;   // height prior mean (m)
     float door_prior_h_std = 0.08f;   // height prior std (m) — strong
     float door_prior_s_std = 0.60f;   // along-wall offset prior std (m) — broad (the fit localises s)
+    // Task 5b: prior σ of the leaf plane's depth d off the wall line (m). < 0 (default) ⇒ derived from the wall band,
+    // sqrt(T²/12 + σ_b²) (DoorFit::make_belief_params); set only to probe the model's sensitivity to it.
+    float door_recess_prior_std = -1.0f;
     float door_thickness_m = 0.05f;   // fixed panel thickness (m, across the wall)
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
     // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a door; a ricoh LiDAR-depth slice

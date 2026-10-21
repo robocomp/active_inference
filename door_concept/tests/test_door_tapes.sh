@@ -8,10 +8,15 @@
 #       (≥ 20000 px — a smaller slice is the detector boxing part of the leaf) occ > free, and the median occ/free ≥ 2.
 #   D2  both tapes: no mask update moves the aperture by more than 3 σ of what it predicted before the update — the first
 #       update against the birth seed (Door.PriorAlongWallStd 0.60 m), every later one against the previous row's σ.
+#   D4  the image-geometry existence channel (leaf contour + depth + doorway frame) is pooled by view novelty
+#       (door_view_pool.h): with the model's own prior no door on these tapes — every one is a real door after D1/D2 —
+#       reaches the −4 floor (it walked tourR1 door_4 there for 45 cycles), nor with Door.RecessPriorStd 0.1, 0.2, 0.3;
+#       and the DECISIONS do not move for 0.03, 0.1, 0.2, 0.3. (At 0.03 the prior pins the leaf 4 σ from where it is —
+#       a mis-specified model — and tourR2's door_2 still reaches the floor, without a removal: printed, not asserted.)
 #   D3  NOT A DEFECT, asserted so it stays documented: tourR2's births carry the names the identity table loaded for those
 #       apertures (door_4 IS DOOR_1's remembered name in the 4-row table .bak_tourP9; door_2 is DOOR_0's).
 # The tapes are 1.5 GB each and live outside the repo: DOOR_TAPES (default: the main checkout's crossing dir). Missing
-# tapes ⇒ SKIPPED (exit 0). Each replay takes ~2-3 min; both run in parallel.
+# tapes ⇒ SKIPPED (exit 0). Each replay takes ~2-4 min; all ten run in parallel (~10 cores).
 # Run (from anywhere):  door_concept/tests/test_door_tapes.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,9 +33,14 @@ g++ -std=c++23 -O2 -w -I/usr/include/eigen3 -I/usr/include/opencv4 tools/door_re
     src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp \
     src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
     ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc -o "$OUT/door_replay" || { echo "BUILD FAIL"; exit 2; }
-mkdir -p "$OUT/tourR1" "$OUT/tourR2"
-"$OUT/door_replay" "$TAPES/tourR1/door_inputs.bin" "$TAPES/tourR1/door_decisions.bin" --csv "$OUT/tourR1" > "$OUT/tourR1.txt" 2>&1 &
-"$OUT/door_replay" "$TAPES/tourR2/door_inputs.bin" "$TAPES/tourR2/door_decisions.bin" --csv "$OUT/tourR2" --trace door_2 > "$OUT/tourR2.txt" 2>&1 &
+for t in tourR1 tourR2; do
+    mkdir -p "$OUT/$t"
+    "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --csv "$OUT/$t" --trace '*' > "$OUT/$t.txt" 2>&1 &
+    for sd in 0.03 0.1 0.2 0.3; do
+        "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --recess-prior-std $sd --trace '*' \
+            > "$OUT/$t@$sd.txt" 2>&1 &
+    done
+done
 wait
 python3 -I - "$OUT" <<'EOF'
 import csv, math, re, statistics, sys
@@ -58,25 +68,43 @@ def decisions(txt):
         elif s.startswith("replay"): rep.append(key)
     return ref, rep
 
-for tape in ("tourR1", "tourR2"):
-    txt = f"{out}/{tape}.txt"
+def floor_check(tape, txt, assert_floor=True):
+    """D4: the lowest L every door reached; a real door at the -4 floor FAILS."""
+    low = {}
+    for line in open(txt):
+        m = re.match(r"TRACE (\S+) cycle (\d+) L (\S+)", line)
+        if m: low[m.group(1)] = min(low.get(m.group(1), 9.0), float(m.group(3)))
+    print(f"{tape} D4 lowest L per door: " + ", ".join(f"{d} {v:+.2f}" for d, v in sorted(low.items())))
+    if not low: fails.append(f"D4 {tape}: no TRACE rows (did --trace run?)")
+    for d, v in low.items():
+        if v <= -3.99 and assert_floor: fails.append(f"D4 {tape}: {d}, a real door, reached the L floor ({v:+.2f})")
+
+def decision_check(tape, txt, label):
     ref, rep = decisions(txt)
-    if not ref: fails.append(f"{tape}: the replay printed no decisions (did it run?)")
+    if not ref: fails.append(f"{label}: the replay printed no decisions (did it run?)")
     gone = [k for k in ref if k not in rep]
     new = [k for k in rep if k not in ref]
     for k in gone:
         why = ALLOWED.get((tape, k[2], k[1], k[3]))
-        print(f"{tape} decision no longer taken: {k[0][:110]}  — {why or 'NOT ALLOWED'}")
-        if not why: fails.append(f"{tape}: decision changed: {k[0][:110]}")
+        print(f"{label} decision no longer taken: {k[0][:110]}  — {why or 'NOT ALLOWED'}")
+        if not why: fails.append(f"{label}: decision changed: {k[0][:110]}")
     for k in new:
-        print(f"{tape} NEW decision: {k[0][:110]}")
-        fails.append(f"{tape}: new decision: {k[0][:110]}")
+        print(f"{label} NEW decision: {k[0][:110]}")
+        fails.append(f"{label}: new decision: {k[0][:110]}")
     for (t, kind, cyc, name), why in ALLOWED.items():
         if t == tape and not any(k[2] == kind and k[1] == cyc and k[3] == name for k in gone):
-            fails.append(f"{tape}: the allowed change {kind} {name} @{cyc} did not happen ({why[:40]}…)")
+            fails.append(f"{label}: the allowed change {kind} {name} @{cyc} did not happen ({why[:40]}…)")
+    return ref, rep
+
+for tape in ("tourR1", "tourR2"):
+    for sd in ("0.03", "0.1", "0.2", "0.3"):
+        decision_check(tape, f"{out}/{tape}@{sd}.txt", f"{tape} (RecessPriorStd {sd})")
+        floor_check(f"{tape} (RecessPriorStd {sd})", f"{out}/{tape}@{sd}.txt", assert_floor=(sd != "0.03"))
+    txt = f"{out}/{tape}.txt"
+    floor_check(tape, txt)
+    ref, rep = decision_check(tape, txt, tape)
 
     # D2: per-update jumps against the prior predictive
-    births = {k[3]: k for k in rep if k[2] == "BIRTH"}
     bpos = {}
     for line in open(txt):
         m = re.search(r"cycle (\d+) t \d+ BIRTH id \d+ '([^']+)' a=(\S+) b=(\S+)", line)

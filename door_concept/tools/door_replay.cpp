@@ -36,7 +36,9 @@
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/door_replay
 //   /tmp/door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--clock-jitter-ms J]
-//       [--trace NAME]   (one line per cycle for that door: its fit, its detection state and every existence channel)
+//       [--trace NAME]   (one line per cycle for that door — '*' for every door: its fit, its detection state and every
+//                         existence channel)
+//       [--recess-prior-std S]   (a sensitivity probe: the leaf-plane depth's prior σ, overriding the recorded config)
 // Exit: 0 = the tracker kinds, the Phi rows, the Existence rows and the REMOVEs are equal; 1 = mismatches (listed);
 // 2 = usage / unreadable input.
 #include <charconv>
@@ -425,6 +427,7 @@ int main(int argc, char** argv)
     // every existence channel the core computed this cycle (Task 5b: the silhouette's occupancy vs absence, P(detect), the
     // image-geometry delta). A diagnostic only: it reads the world's fit states after the step and changes nothing.
     std::string trace_door;
+    float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -433,6 +436,11 @@ int main(int argc, char** argv)
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
+        else if (a == "--recess-prior-std" and i + 1 < argc)
+        {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
+            const std::string_view v = argv[++i];
+            std::from_chars(v.data(), v.data() + v.size(), recess_prior_std);
+        }
     }
 
     // the recorded decisions (the reference) — every kind, indexed by cycle; the tracker kinds kept apart
@@ -453,6 +461,11 @@ int main(int argc, char** argv)
     const EffectiveConfig eff(hdr->config_text);
     int cfg_errors = 0;
     DoorCoreConfig cfg{config_from(eff, cfg_errors)};
+    if (recess_prior_std > -1.5f)
+    {
+        cfg.door.door_recess_prior_std = recess_prior_std;
+        std::println("probe: Door.RecessPriorStd overridden to {}", recess_prior_std);
+    }
     std::println("tape: {} (DCIN v{}, agent {} '{}'); config: {} keys from the file, {} at code default, {} parse errors",
                  argv[1], version, hdr->agent_id, hdr->agent_name, eff.n_file, eff.n_default, cfg_errors);
 
@@ -539,7 +552,7 @@ int main(int argc, char** argv)
             }
             if (not trace_door.empty())
                 for (const auto& [id, st] : world.fit_states())
-                    if (st != nullptr and st->node_name == trace_door)
+                    if (st != nullptr and (trace_door == "*" or st->node_name == trace_door))
                     {
                         const auto& b = st->ai2_belief.state();
                         std::size_t mask_px = 0;   // the pixels of the slice the tracker assigned this cycle (0: none)
@@ -552,7 +565,7 @@ int main(int argc, char** argv)
                         std::println("TRACE {} cycle {} L {:+.2f} | s {:.3f} w {:.3f} h {:.3f} d {:+.3f}±{:.3f} phi {:.3f}±{:.3f} | "
                                      "since_det {} mask {} px {} | sil occ {:.1f} free {:.1f} free_eff {:.2f} p_det {:.3f} | edge dL {:+.2f} "
                                      "frame exc {:+.2f} (true {:.1f} ctrl {:.1f})",
-                                     trace_door, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
+                                     st->node_name, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
                                      st->phi_est, st->phi_sigma, st->frames_since_detection, st->assigned_mask_idx, mask_px,
                                      st->dbg_sil_occ, st->dbg_sil_free, st->dbg_sil_free_eff, st->dbg_sil_pdetect,
                                      st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl);

@@ -31,6 +31,7 @@
 #include "door_identity_table.h"   // kFitWithoutFreshDataFrames
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "door_opening_edges.h" // rc::door::AlongWallState — the scan's registration offset (try96)
+#include "door_view_pool.h"     // rc::door::ViewPool — the image channel pooled by view novelty (Task 5b, D4)
 #include "door_leaf_channel.h"  // rc::door::LeafChannel — hinge / swing / φ per viewpoint (try102)
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (shared w/ table/chair)
 
@@ -287,6 +288,9 @@ struct DoorFitState
     // freeze. Removal is a Bayesian decision on P(exists) (should_remove), debounced over consecutive
     // EVIDENCE cycles — no age immunity, and no removal from a view that could not have resolved the door.
     rc::exist::ExistenceBelief existence{};
+    // Task 5b D4: the image-geometry channel's evidence pooled by view novelty (door_view_pool.h) — the view being pooled,
+    // its mean verdict and what it has contributed to `existence` so far.
+    door::ViewPool image_view_pool{};
     bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
     // Accumulated LOOKS (Σ p_detect) whose decision says "remove" — NOT a count of cycles. A cycle in which
     // the door could not have been resolved (p_detect → 0) correctly leaves L untouched, and must leave the

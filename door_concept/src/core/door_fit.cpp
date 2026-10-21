@@ -180,7 +180,9 @@ rc::DoorBeliefParams DoorFit::make_belief_params() const
     {
         const auto band = room_band();
         p.recess_prior_m   = 0.0f;
-        p.recess_prior_std = std::sqrt(band.wall_thickness_m * band.wall_thickness_m / 12.0f + band.sigma_m * band.sigma_m);
+        p.recess_prior_std = cfg_.door_recess_prior_std >= 0.0f
+                           ? cfg_.door_recess_prior_std
+                           : std::sqrt(band.wall_thickness_m * band.wall_thickness_m / 12.0f + band.sigma_m * band.sigma_m);
     }
     // ── Leaf articulation (openable door, M0) ──
     // The ONE place the leaf state is authored, so the M0 pin cannot drift. With Openable.Enabled false

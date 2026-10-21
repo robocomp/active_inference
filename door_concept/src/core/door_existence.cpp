@@ -920,9 +920,20 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             { verdict += frame.verdict(); n = std::max(n, frame.n_samples()); }
             if (n == 0)
             { inst.dbg_edge_delta = 0.0f; return; }   // nothing measured — NOT a refutation
-            const rc::exist::Evidence ev = rc::exist::contour_evidence(verdict, n, sm);
-            inst.existence.integrate(ev, 1.0f);
-            inst.dbg_edge_delta = ev.log_odds_delta;
+            // ★D4 (Task 5b): POOLED BY VIEW NOVELTY (door_view_pool.h). contour_evidence's llr·tanh(v) is the worth of ONE
+            // observation; the frames of one view are that observation repeated, so they pool (mean verdict) instead of
+            // adding a full llr each — which on the tapes walked correct doors from the +4 clamp to the −4 floor in a few
+            // frames. A new view (the camera moved by several of the door's angular half-sizes) is a new observation.
+            // No camera pose ⇒ no viewpoint to pool by ⇒ HOLD (nothing integrated), as for an unmeasured cycle.
+            if (not room_T_zed.has_value())
+            { inst.dbg_edge_delta = 0.0f; return; }
+            const float llr = rc::exist::contour_evidence(1e9f, n, sm).log_odds_delta;   // one confident observation
+            const Eigen::Vector2f cam(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)));
+            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), 0.5f * inst.aperture.w, verdict, llr);
+            const float L0 = inst.existence.logodds();
+            inst.existence.integrate(1.0f, dL);
+            inst.image_view_pool.commit(inst.existence.logodds() - L0);   // what the view really moved L (the clamp)
+            inst.dbg_edge_delta = dL;
         };
 
         // ★"WAS IT LOOKED AT" IS A QUESTION ABOUT THE DOOR, NOT ABOUT ONE GUESS AT ITS HINGE ANGLE.

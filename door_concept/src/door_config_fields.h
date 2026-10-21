@@ -254,6 +254,8 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "height prior std (m) — strong");
     out.door_prior_s_std         = getf("Door.PriorAlongWallStd", 0.60f,
             "along-wall offset prior std (m) — broad (the fit localises s)");
+    out.door_recess_prior_std    = getf("Door.RecessPriorStd", -1.0f,
+            "prior std (m) of the leaf plane's depth off the wall line; < 0 = derived, sqrt(T^2/12 + sigma_b^2) (Task 5b)");
     out.door_thickness_m         = getf("Door.ThicknessM", 0.05f,
             "fixed panel thickness (m, across the wall)");
     out.tracker_nll_cost         = getb("Tracker.NllCost", false,
