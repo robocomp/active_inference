@@ -513,6 +513,52 @@ int main()
         CHECK(not read_input(bi).has_value());
     }
 
+    // ── 3e. the v2 PREDICTION is BUILD-INVARIANT: golden bits (review fix round 3, I-1) ────────────────────────────
+    // Run this test also as   -O3 -march=native   and   -O2 -mfma -ffp-contract=fast   (both build the codec TU with
+    // those flags too): the bits below must not move. Inputs are built from INTEGER arithmetic or literal bit patterns —
+    // an input expression like i*0.0137f-1.3f would itself be fused under -mfma and test the wrong thing.
+    {
+        // (a) ADVERSARIAL: c + T·3 with c = -0.5 + 2^-25 and T = 1/3 rounded up. The exact product is 1 + 2^-54, the
+        //     separately-rounded one is 1, so the double sum lands EXACTLY on the float midpoint 0.5 + 2^-25 (ties to
+        //     even: 0x3f000000) — while a fused multiply-add keeps the 2^-54 and rounds UP (0x3f000001). Row 0 puts the
+        //     product in the 2nd term, row 1 in the 3rd: a contraction at either add flips the bit.
+        const double c = -0.5 + std::ldexp(1.0, -25);
+        const double third_up = std::bit_cast<double>(std::uint64_t{0x3fd5555555555556ULL});
+        Mat4d T = Mat4d::Zero();
+        T(0, 0) = c; T(0, 1) = third_up;
+        T(1, 0) = c; T(1, 2) = third_up;
+        T(3, 3) = 1.0;
+        const Vec3f q = derived_prediction(T, Vec3f(1.f, 3.f, 3.f));
+        CHECK(std::bit_cast<std::uint32_t>(q.x()) == 0x3f000000u);
+        CHECK(std::bit_cast<std::uint32_t>(q.y()) == 0x3f000000u);
+        // (b) 200 ordinary points through a generic rigid transform: an FNV-64 of the 600 output bit patterns.
+        Mat4d R;
+        R << 0.8660254037844387, -0.49999999999999994, 0.0123456789, 1.2345678901234567,
+             0.49999999999999994, 0.8660254037844387, -0.0234567891, -3.3333333333333335,
+            -0.0098765432, 0.0256789012, 0.9996543210, 0.2718281828459045,
+             0, 0, 0, 1;
+        std::uint64_t h = 1469598103934665603ull;
+        for (int i = 0; i < 200; ++i)
+        {
+            std::uint32_t st = 0x9e3779b9u * std::uint32_t(i + 1);
+            auto f = [&](std::uint32_t exp_bias)
+            {
+                st = st * 1664525u + 1013904223u;
+                return std::bit_cast<float>(((st & 1u) << 31) | ((exp_bias + ((st >> 3) & 3u)) << 23) | (st >> 9));
+            };
+            const float px = f(126), py = f(127), pz = f(124);   // sequenced: argument evaluation order is unspecified
+            const Vec3f p(px, py, pz);
+            const Vec3f o = derived_prediction(R, p);
+            for (int k = 0; k < 3; ++k)
+            {
+                const auto b = std::bit_cast<std::uint32_t>(o[k]);
+                for (int j = 0; j < 4; ++j) { h ^= (b >> (8 * j)) & 0xffu; h *= 1099511628211ull; }
+            }
+        }
+        std::print("prediction golden hash 0x{:016x} (expect 0x33c5277413f7a0ef)\n", h);
+        CHECK(h == 0x33c5277413f7a0efULL);
+    }
+
     // ── 4. refusals ──────────────────────────────────────────────────────────────────────────────────────────────
     {
         const DoorRecordingHeader h{.agent_id = 1, .agent_name = {}, .config_text = {}, .start_steady_ns = 0, .start_wall_ms = 0, .note = {}};

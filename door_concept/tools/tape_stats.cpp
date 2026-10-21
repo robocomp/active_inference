@@ -8,6 +8,7 @@
 //   g++ -std=c++23 -O2 -I/usr/include/eigen3 tools/tape_stats.cpp src/core/door_cycle_io.cpp -lzstd -o /tmp/tape_stats
 //   /tmp/tape_stats <door_inputs.bin> [--reencode OUT]
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -41,6 +42,11 @@ int main(int argc, char** argv)
     std::ofstream out;
     if (not reencode.empty())
     {
+        std::error_code ec;
+        if (std::filesystem::exists(reencode, ec) and std::filesystem::equivalent(argv[1], reencode, ec))
+        { std::println("refusing to --reencode onto the input itself ({})", reencode); return 2; }
+        if (std::filesystem::weakly_canonical(argv[1], ec) == std::filesystem::weakly_canonical(reencode, ec))
+        { std::println("refusing to --reencode onto the input itself ({})", reencode); return 2; }
         out.open(reencode, std::ios::binary);
         if (not out or not write_header(out, *hdr, RecordingKind::Input)) { std::println("cannot write {}", reencode); return 1; }
     }

@@ -7,6 +7,7 @@
 #include "door_cycle_io.h"
 
 #include <bit>
+#include <cfloat>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -345,20 +346,14 @@ template <class V> void get_words(Reader& r, std::vector<V>& v)
 {
     std::uint64_t n = 0;
     r.raw(n);
-    if (not r.ok or n * sizeof(V) > kMaxUnpacked) { r.ok = false; return; }
+    if (not r.ok or n > kMaxUnpacked / sizeof(V)) { r.ok = false; return; }   // no n·size overflow
     std::string raw;
     if (not get_blob(r, raw, n * sizeof(V))) return;
     v.resize(static_cast<std::size_t>(n));
     unpack_words(raw, reinterpret_cast<std::uint32_t*>(v.data()), v.size(), words_of<V>());
 }
 
-/// The prediction a derived array is coded against: EXACTLY the producers' arithmetic (MaskIngestor::refresh,
-/// LidarPlaneReader::append_transformed): double 4x4 · (p, 1), each coordinate rounded to float.
-Vec3f predict(const Mat4d& T, const Vec3f& c)
-{
-    const Eigen::Vector4d q = T * Eigen::Vector4d(c.x(), c.y(), c.z(), 1.0);
-    return {static_cast<float>(q.x()), static_cast<float>(q.y()), static_cast<float>(q.z())};
-}
+Vec3f predict(const Mat4d& T, const Vec3f& c) { return derived_prediction(T, c); }
 
 /// `target` coded against T·src: u8 mode | mode 0: words(target) | mode 1: u64 fnv64(target) + words(target ⊕ pred).
 void put_derived(Writer& w, const std::vector<Vec3f>& target, const std::vector<Vec3f>& src, const std::optional<Mat4d>& T)
@@ -441,7 +436,7 @@ void get_pixels(Reader& r, std::vector<Vec2f>& v)
     if (mode != 1) { r.ok = false; return; }
     std::uint64_t n = 0;
     r.raw(n);
-    if (not r.ok or 4 * n > kMaxUnpacked) { r.ok = false; return; }
+    if (not r.ok or n > kMaxUnpacked / 4) { r.ok = false; return; }           // no 4·n overflow
     std::string raw;
     if (not get_blob(r, raw, 4 * n)) return;
     std::vector<std::uint16_t> d(2 * n);
@@ -647,6 +642,43 @@ template <class Rec, class T> std::optional<Rec> read_file(const std::string& pa
 }
 
 }  // namespace
+
+// ═══ THE v2 PREDICTION — BUILD-INVARIANT BY CONSTRUCTION (review fix round 3, I-1) ═════════════════════════════════
+// Only the residual against this function is stored, so encoder and decoder MUST compute the same bits whatever the
+// build: an Eigen product here would not (its vectorised path uses FMA pmadd under __FMA__, its scalar path sums in
+// another order, and -ffp-contract=fast / -ffast-math rewrite either). So: plain scalar IEEE double, a FIXED order
+// ((m0·x + m1·y) + m2·z) + m3, each product forced through a volatile double so it is rounded before the add — a
+// contraction into an FMA is then impossible whatever -ffp-contract / -mfma say (a volatile load cannot be fused).
+// The pragma below turns contraction off for this function as well (belt and braces; GCC honours fp-contract in
+// optimize attributes — tests/test_door_cycle_io.cpp checks golden bits under -O3 -march=native and
+// -O2 -mfma -ffp-contract=fast). -ffast-math (reassociation) and x87 excess precision are refused at compile time.
+// The order matches the producers' (MaskIngestor / LidarPlaneReader, Eigen, SSE2, no FMA) on 100 % of tourR1's mask
+// coordinates, so the mask residual stays all-zero; a different order would cost only compression, never fidelity.
+#if defined(__FAST_MATH__)
+#error "door_cycle_io.cpp: -ffast-math makes the DCIN v2 prediction build-dependent; build this TU without it"
+#endif
+#if !defined(FLT_EVAL_METHOD) || FLT_EVAL_METHOD != 0
+#error "door_cycle_io.cpp: needs FLT_EVAL_METHOD == 0 (SSE2 doubles, no x87 excess precision) for the v2 prediction"
+#endif
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+Vec3f derived_prediction(const Mat4d& T, const Vec3f& c)
+{
+    const double x = c.x(), y = c.y(), z = c.z();
+    float out[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        volatile double p0 = T(i, 0) * x;
+        volatile double p1 = T(i, 1) * y;
+        volatile double p2 = T(i, 2) * z;
+        volatile double s = p0 + p1;
+        s = s + p2;
+        s = s + T(i, 3);
+        out[i] = static_cast<float>(s);
+    }
+    return {out[0], out[1], out[2]};
+}
+#pragma GCC pop_options
 
 bool write_header(std::ostream& os, const DoorRecordingHeader& h, RecordingKind kind)
 {

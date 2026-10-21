@@ -597,9 +597,17 @@ enum class RecordingKind : std::uint8_t { Input, Output };   // "DCIN" | "DCOU"
 [[nodiscard]] bool write(std::ostream& os, const DoorCycleInput& x);
 [[nodiscard]] bool write(std::ostream& os, const DoorCycleOutput& x);
 /// One record; nullopt at a clean end, on a truncated record, or on a corrupt one (never a half-filled struct).
-[[nodiscard]] std::optional<DoorCycleInput>  read_input(std::istream& is);   // a v2 (current) record
+/// ⚠READS A RECORD OF THE CURRENT VERSION (v2) ONLY. Handed a v1 file's records it misreads them as Corrupt (the
+/// field order of the packed structs differs). For a file of unknown version use read_input_file(), or read_header()'s
+/// `version` out-parameter + read_input(is, version).
+[[nodiscard]] std::optional<DoorCycleInput>  read_input(std::istream& is);
 /// A record of a file whose header said `version` (read_header's out-parameter).
 [[nodiscard]] std::optional<DoorCycleInput>  read_input(std::istream& is, std::uint32_t version);
+
+/// The prediction DCIN v2 codes a derived array against (mask support_points from support_points_cam; the bpearl room
+/// plane from the robot plane): T · (p, 1) in IEEE double with a FIXED summation order and no fused multiply-add,
+/// rounded to float. BUILD-INVARIANT by construction (see door_cycle_io.cpp); exposed for the golden-bits test.
+[[nodiscard]] Vec3f derived_prediction(const Mat4d& T, const Vec3f& p);
 [[nodiscard]] std::optional<DoorCycleOutput> read_output(std::istream& is);
 /// The names the brief asked for: read(std::istream&) for an input record.
 [[nodiscard]] inline std::optional<DoorCycleInput> read(std::istream& is) { return read_input(is); }

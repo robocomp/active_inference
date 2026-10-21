@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <format>
 #include <fstream>
 #include <mutex>
@@ -136,7 +137,12 @@ private:
                 q_.pop_front();
                 busy_ = true;
             }
-            if (not stopped_) write_one(in);
+            // ★An exception here (bad_alloc while packing, a stream that throws) must stop the RECORDING, not the agent:
+            //  escaping a std::thread's function is std::terminate.
+            if (not stopped_)
+                try { write_one(in); }
+                catch (const std::exception& e) { stop(std::string("exception while writing cycle ") + std::to_string(in.cycle) + ": " + e.what()); }
+                catch (...) { stop("unknown exception while writing cycle " + std::to_string(in.cycle)); }
             {
                 std::lock_guard lk(m_);
                 busy_ = false;
