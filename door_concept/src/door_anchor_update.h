@@ -1687,6 +1687,14 @@ inline BiasTerms bias_terms(const anchor_detail::Problem& pb, const Eigen::Vecto
 //  κ (a sandwich of cluster scores) — at the prior it read a wrong prior's pull as misfit (a clean doorway 0.35 m off never
 //  corrected), at the fit the alias's clusters were self-consistent (κ = 1, alias kept); and a structure-level Bayes factor
 //  with a Laplace volume term — the Occam factor then refused every informative update, so the tracker froze on odometry.
+// ★Fix round 2 (review: "make P_fit honest with a common mode first"): the sweep's own motion error — the twist's variance over
+//  the capture age plus the revolution's skew (|v|·T/√12, |ω|·T/√12, T = 0.1 s), shared by all its beams — was added to the
+//  bias factor's C and measured on the five rtD1h legs (tools/anchor_replay): it made things WORSE (legs 1, 3, 5 captured
+//  for 87–88° median instead of 25–73°; the correct leg 2's yaw 1.2° → 2.5°, |err|/σ 1.5 → 3.8), because a wider published P
+//  widens the next prior and with it the capture hazard. Not shipped. The measured over-confidence on the correct leg is
+//  |lat err|/σ 1.24, |yaw err|/σ 1.54 (median; 0.67 is calibrated) — the captured legs' 17–130σ are aliases, not a
+//  missing common mode. The fit-vs-prior crossover is test_door_anchor_open (16h): 3σ accepted 0.88–0.96, 4σ 0.20–0.61, 5σ
+//  refused.
 [[nodiscard]] inline double alias_log_ratio(const Eigen::Vector3d& nu_in, const Eigen::Matrix3d& S, double width, double* d2_out = nullptr)
 {
     Eigen::Vector3d nu = nu_in;
@@ -1721,6 +1729,19 @@ inline BiasTerms bias_terms(const anchor_detail::Problem& pb, const Eigen::Vecto
         inside *= sd > 0.0 ? std::erf(half[i] / (sd * M_SQRT2)) : 1.0;
     }
     return std::clamp(1.0 - inside, 0.0, 1.0);
+}
+
+// P(the update's fit is the opening) given its prior: σ(−(logit h + alias_log_ratio)), h the prior's capture hazard and the
+// ratio scored on the fit's displacement under S = P̄ + P_fit (the block in update_door_anchor). `llr_out`: the alias log-ratio.
+[[nodiscard]] inline double fit_is_opening(const rc::interaction::RelPose& prior, const rc::interaction::RelPose& fit, float width,
+                                           double* llr_out = nullptr)
+{
+    const double h = alias_hazard(prior.P, prior.x.z(), width);
+    const double llr = alias_log_ratio((fit.x - prior.x).cast<double>(), (prior.P + fit.P).cast<double>(), double(width));
+    if (llr_out != nullptr) *llr_out = llr;
+    if (not (h > 0.0)) return 1.0;
+    const double lo = std::log(h) - std::log1p(-h) + llr;   // log-odds of "an alias"
+    return std::isfinite(lo) ? 1.0 / (1.0 + std::exp(lo)) : (lo > 0 ? 0.0 : 1.0);
 }
 
 inline Eigen::Matrix3d sym_sqrt(const Eigen::Matrix3d& A)
@@ -1807,14 +1828,6 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     //  fewer in-span rays — by ~0.1 m; the closing Laplace mean is one Newton step and kept most of that wander wherever
     //  the true F ripples at the jamb's ray spacing. Converging on the true F first: frame-0 lateral wander 0.092 →
     //  0.037 m, worst over the turn 0.100 → 0.043 m (test turning_away_does_not_drag_anchor). Cost ~+30 %.
-    const M3d P_prior = P;
-    // One minimisation of F from the prior (the three stages below). `restage`: the prior's spreads and the global leaf search
-    // re-done (they were staged above for the first run; a second run under another κ starts from the same place).
-    const auto optimise = [&](bool restage)
-    {
-    x = pb.xbar;
-    P = P_prior;
-    if (restage) { pb.linearise(x, P); pb.select_leaf_configs(x, true); }
     for (int stage = 0; stage < 3; ++stage)
     {
         if (stage > 0)   // stage 0: staged above, at the prior
@@ -1866,9 +1879,6 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         if (not fresh) pb.derivatives(x, g, H);
         P = (pb.Pinv + psd_information(H, pb.Pinv)).llt().solve(M3d::Identity());
     }
-    };
-    optimise(false);
-
     // ─── Laplace at the measurement model's own σ, with the frame's common mode marginalised ─────────────────
     // H = P̄⁻¹ + I_L (I_L = the data's curvature, PSD part). The rays share one LiDAR extrinsic and one wall, so their
     // lateral/depth evidence carries a common offset b ~ N(0, C), C = σ_c² on (x, y): the data then inform the
@@ -1949,15 +1959,10 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         if (bias != nullptr) bias->L = L0.cast<float>();
         return {prior, AnchorEvidence{}};
     }
-    // ─── Task D-B fix (I5): the fit against the prior — is the fit the opening, or an alias? (alias_log_ratio) ────────────
+    // ─── Task D-B fix (I5): the fit against the prior — is the fit the opening, or an alias? (fit_is_opening) ──────────────
     {
-        const double h = alias_hazard(prior.P, prior.x.z(), width);
-        const M3d S = prior.P.cast<double>() + post.P.cast<double>();
-        double d2 = 0.0;
-        const double llr = alias_log_ratio((post.x - prior.x).cast<double>(), S, double(width), &d2);
-        const double lo = (h > 0.0 ? std::log(h / std::max(1e-300, 1.0 - h)) : -std::numeric_limits<double>::infinity()) + llr;
-        const double q = std::isfinite(lo) ? 1.0 / (1.0 + std::exp(-lo)) : (lo > 0 ? 1.0 : 0.0);   // P(the fit is an alias)
-        const double a = 1.0 - q;
+        double llr = 0.0;
+        const double a = fit_is_opening(prior, post, width, &llr);
         ev.fit_llr = float(llr);
         ev.p_fit = float(a);
         if (a < 1.0)

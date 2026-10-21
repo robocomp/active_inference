@@ -167,7 +167,7 @@ int main(int argc, char** argv)
     std::int64_t last_lidar = 0; int last_mask = -1;
     std::optional<Eigen::Matrix4d> prev_room_T_robot; std::optional<std::uint64_t> prev_room;
     std::int64_t prev_t = 0;
-    std::vector<double> el_t, ey_t, el_o, ey_o;
+    std::vector<double> el_t, ey_t, el_o, ey_o, zl, zy;   // zl/zy: the tracker's |error|/σ on frames whose fit was taken (calibration)
     int frames = 0;
     bool first_printed = false;
     std::int64_t t_hang = 0;
@@ -297,6 +297,12 @@ int main(int argc, char** argv)
         ++frames;
         const auto et = gt_err(gt, now, pose), eo = gt_err(gt, now, out);
         if (et.has_value()) { el_t.push_back(std::abs(et->first)); ey_t.push_back(std::abs(et->second) * 180 / M_PI); }
+        if (et.has_value() and ev.p_fit > 0.99f)
+        {
+            const Eigen::Matrix3f Pa = rc::door::robot_to_anchor_axes(pose.P, pose.x.z());
+            zl.push_back(std::abs(et->first) / std::sqrt(std::max(1e-12f, Pa(0, 0))));
+            zy.push_back(std::abs(et->second) / std::sqrt(std::max(1e-12f, Pa(2, 2))));
+        }
         if (eo.has_value()) { el_o.push_back(std::abs(eo->first)); ey_o.push_back(std::abs(eo->second) * 180 / M_PI); }
         if (not first_printed)
         {
@@ -316,5 +322,11 @@ int main(int argc, char** argv)
     std::print("SUMMARY hang {} frames {} tracker lat_med {:.3f} lat_max {:.3f} yaw_med {:.1f} yaw_max {:.1f} | published lat_med {:.3f} lat_max {:.3f} yaw_med {:.1f} yaw_max {:.1f}\n",
                hang, frames, med(el_t), el_t.empty() ? 0 : std::ranges::max(el_t), med(ey_t), ey_t.empty() ? 0 : std::ranges::max(ey_t),
                med(el_o), el_o.empty() ? 0 : std::ranges::max(el_o), med(ey_o), ey_o.empty() ? 0 : std::ranges::max(ey_o));
+    if (not zl.empty())
+    {
+        const auto frac2 = [](const std::vector<double>& v) { return double(std::ranges::count_if(v, [](double z) { return z <= 2.0; })) / double(v.size()); };
+        std::print("CALIB hang {} frames {} (fit taken): |lat err|/σ median {:.2f}, ≤2σ {:.0f} % | |yaw err|/σ median {:.2f}, ≤2σ {:.0f} %\n",
+                   hang, zl.size(), med(zl), 100 * frac2(zl), med(zy), 100 * frac2(zy));
+    }
     return 0;
 }

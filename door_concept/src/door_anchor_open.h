@@ -325,15 +325,32 @@ struct LostEvidence { double d2 = 0.0; float p_lost = 0.f; double view_llr = 0.0
 //                fusion). Its P(door in view) is combined the same way (anchor_view_mixture): a pose that is mostly the
 //                room's is not "seen" because the TRACKER sees something.
 // Every re-init resets the mode (q = 0: the tracker IS the room initialisation then); the retry's one-shot fusion is unchanged.
+// ★Fix round 2: the state is DOUBLE LOG-ODDS throughout and never passes through a probability — a float q rounded to
+//  exactly 1 after ~17 nats (a few seconds of unseeing views) and logit(1) = +∞ latched P(lost) = 1 for ever; the mirror
+//  underflow at ~−103 silenced the check. −∞ is reachable only as the birth state (q = 0: the tracker IS the room
+//  initialisation) and is left by the first update's hazard.
 struct AnchorLostMode
 {
     double q_logodds = -std::numeric_limits<double>::infinity();   // the filtered mode WITHOUT the room snapshot (log-odds)
-    float  p = 0.f;                                                 // the posterior: filtered mode + this cycle's room snapshot
+    double p_logodds = -std::numeric_limits<double>::infinity();   // the posterior: filtered mode + this cycle's room snapshot
+    float  p = 0.f;                                                 // ...as a probability, for publication / the mixture weights
     Eigen::Vector3f last_view = Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());   // pose at the last measured frame
-    [[nodiscard]] float q() const { return std::isfinite(q_logodds) ? float(1.0 / (1.0 + std::exp(-q_logodds))) : (q_logodds > 0 ? 1.f : 0.f); }
+    [[nodiscard]] double q() const;
 };
 inline double logit_of(double p) { return p <= 0.0 ? -std::numeric_limits<double>::infinity() : p >= 1.0 ? std::numeric_limits<double>::infinity() : std::log(p / (1.0 - p)); }
 inline double sigmoid_of(double l) { return std::isfinite(l) ? 1.0 / (1.0 + std::exp(-l)) : (l > 0 ? 1.0 : 0.0); }
+inline double AnchorLostMode::q() const { return sigmoid_of(q_logodds); }
+// One symmetric transition of a two-state chain with switching probability h, IN LOG-ODDS:
+//   odds⁻ = (q(1 − h) + (1 − q)h) / ((1 − q)(1 − h) + q h), evaluated on the side of 0 the state is on so that ±∞ stay exact.
+inline double lost_transition_logodds(double L, double h)
+{
+    if (not (h > 0.0)) return L;
+    if (h >= 1.0) return -L;
+    const double lh = std::log(h), l1h = std::log1p(-h);
+    const auto lae = [](double a, double b) { if (a < b) std::swap(a, b); return a == -std::numeric_limits<double>::infinity() ? a : a + std::log1p(std::exp(b - a)); };
+    if (L <= 0.0) return lae(L + l1h, lh) - lae(l1h, L + lh);
+    return lae(l1h, -L + lh) - lae(-L + l1h, lh);
+}
 
 // The per-update capture hazard h of a prior (see TRANSITIONS): alias_hazard (door_anchor_update.h), the same one the update
 // weighs its own fit with.
@@ -349,13 +366,10 @@ inline float lost_mode_predict(AnchorLostMode& m, rc::interaction::RelPose& trac
                                const rc::interaction::RelPose* room, float width)
 {
     const double h = lost_hazard(tracker, width);
-    // the filtered mode, one transition
-    const double q = m.q();
-    m.q_logodds = logit_of(q * (1.0 - h) + (1.0 - q) * h);
+    m.q_logodds = lost_transition_logodds(m.q_logodds, h);   // the filtered mode, one transition
     if (room == nullptr) return 0.f;
-    const double p = std::clamp(double(m.p), 0.0, 1.0);
-    const double den = p * h + (1.0 - p) * (1.0 - h);
-    const double w = den > 0.0 ? std::clamp(p * h / den, 0.0, 1.0) : 1.0;
+    // w = p·h / (p·h + (1 − p)(1 − h)) = σ(logit p + logit h), in log-odds
+    const double w = h > 0.0 ? sigmoid_of(m.p_logodds + std::log(h) - std::log1p(-h)) : 0.0;
     tracker = retry_reinit(tracker, *room, Eigen::Matrix3f::Zero(), 0.f, float(w));
     if (bias != nullptr) bias->L *= float(std::sqrt(1.0 - w));
     return float(w);
@@ -384,8 +398,8 @@ inline LostEvidence lost_mode_posterior(AnchorLostMode& m, const rc::interaction
                                         float width)
 {
     LostEvidence e = belief_lost(tracker, room, width);
-    const double l = m.q_logodds + (std::isfinite(e.room_llr) ? e.room_llr : 0.0);
-    m.p = float(sigmoid_of(std::isnan(l) ? m.q_logodds : l));
+    m.p_logodds = m.q_logodds + (std::isfinite(e.room_llr) ? e.room_llr : 0.0);
+    m.p = float(sigmoid_of(m.p_logodds));
     e.p_lost = m.p;
     return e;
 }

@@ -1016,7 +1016,7 @@ void SpecificWorker::step_passage_anchor()
                                                 pa.lost.p, le.d2, le.room_llr, lost_w, published.x.x(), published.x.y(), published.x.z()));
             std::print("door_concept: [anchor] {}@robot P(lost) {:.2f} — Mahalanobis² {:.1f} to the room init (log-ratio {:+.1f}), "
                        "filtered mode log-odds {:+.2f}; tracker ({:+.2f},{:+.2f},{:+.2f}), published {:.2f} m / {:+.1f}° from it toward the room\n",
-                       pa.door_name, pa.lost.p, le.d2, le.room_llr, std::log(std::max(1e-12f, pa.lost.q()) / std::max(1e-12f, 1.f - pa.lost.q())),
+                       pa.door_name, pa.lost.p, le.d2, le.room_llr, pa.lost.q_logodds,
                        pa.pose.x.x(), pa.pose.x.y(), pa.pose.x.z(),
                        dv.head<2>().norm(), dv.z() * 57.2958f);
         }
@@ -1170,12 +1170,10 @@ void SpecificWorker::step_passage_anchor()
         pa.anchor->set_leaves(*G, al);
     }
     // Task D-B: the lost belief on the anchor node, obj_exist_prob = 1 − P(lost) (Anchor::set_lost_prob; written on a change) —
-    // ONLY while the check runs (I3); otherwise the attribute is REMOVED: "not stated", never a stale number.
-    if (wrote)
-    {
-        if (lost_room.has_value()) pa.anchor->set_lost_prob(*G, pa.lost.p);
-        else pa.anchor->clear_lost_prob(*G);
-    }
+    // ONLY while the check runs (I3), with the block it describes; otherwise the attribute is REMOVED at once — also on a cycle
+    // that writes no edge (the claim just ended): "not stated", never a stale number (fix round 2).
+    if (lost_room.has_value()) { if (wrote) pa.anchor->set_lost_prob(*G, pa.lost.p); }
+    else pa.anchor->clear_lost_prob(*G);   // written only on a change
     const bool alive = wrote or G->get_node(pa.anchor->id()).has_value();
     if (not alive)
     {

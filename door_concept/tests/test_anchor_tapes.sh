@@ -7,7 +7,11 @@
 #       fit-vs-prior test (alias_log_ratio) keeps the prior: P(fit) < 0.05 and the pose within 0.2 m / 5° of the truth.
 #   LOST  legs 1, 3, 5 (each had its tracker captured somewhere in the reconstruction) and leg 2 (a correct anchor): the
 #       PUBLISHED pose (the lost check's two modes combined) has median error ≤ 0.10 m / 3° and worst yaw ≤ 20°; leg 2's
-#       P(lost) never reaches 0.5 (a correct anchor is not re-initialised).
+#       P(lost) never reaches 0.5 (a correct anchor is not re-initialised). Reported per leg: the FRACTION of updates with
+#       P(lost) > 0.5 — the time the published pose is mostly the room initialisation's (σ ≈ 0.3 m): the fallback's cost.
+#   ⚠ The replay's room initialisation is TRUTH-CARRIED: the hang's room init fixed in the world and brought into each later
+#     robot frame by the Webots pose (anchor_replay.cpp). It holds the live room-frame error at the hang and NO later
+#     localisation noise or relocalisation jump — live, the room channel is noisier than here.
 # Missing tapes ⇒ SKIPPED (exit 0). ~3–6 min (the legs run in parallel).
 # Run (from anywhere):  door_concept/tests/test_anchor_tapes.sh
 set -u
@@ -48,7 +52,9 @@ for h, name in [(0, "leg 1"), (1, "leg 2"), (2, "leg 3"), (4, "leg 5")]:
     m = re.search(r"SUMMARY .* published lat_med ([\d.]+) lat_max ([\d.]+) yaw_med ([\d.]+) yaw_max ([\d.]+)", txt)
     if not m: check(False, f"{name}: replayed"); continue
     lm, lx, ym, yx = map(float, m.groups())
-    print(f"  {name}: published lat med {lm:.3f} max {lx:.3f} m, yaw med {ym:.1f} max {yx:.1f} deg")
+    pl_all = [float(x) for x in re.findall(r"P\(lost\) ([\d.]+)", txt)]
+    frac = sum(1 for p in pl_all if p > 0.5) / max(1, len(pl_all))
+    print(f"  {name}: published lat med {lm:.3f} max {lx:.3f} m, yaw med {ym:.1f} max {yx:.1f} deg; P(lost) > 0.5 on {100 * frac:.0f} % of {len(pl_all)} updates (room-init fallback)")
     check(lm <= 0.10 and ym <= 3.0 and yx <= 20.0, f"{name}: published median ≤ 0.10 m / 3 deg, worst yaw ≤ 20 deg")
     if h == 1:
         pl = [float(x) for x in re.findall(r"P\(lost\) ([\d.]+)", txt)]

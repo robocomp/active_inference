@@ -7,6 +7,7 @@
 // Build + run (from door_concept/, Q=/usr/include/x86_64-linux-gnu/qt5):
 //   g++ -std=c++23 -O2 -fPIC -I/usr/include/eigen3 -Isrc -I../common -I$Q -I$Q/QtCore tests/test_door_anchor_open.cpp \
 //       src/door_belief.cpp -o build/test_door_anchor_open -lfastdds -lfastcdr -lQt5Core && ./build/test_door_anchor_open
+#include <array>
 #include <clocale>
 #include <cmath>
 #include <format>
@@ -542,6 +543,65 @@ int main()
             const auto r10 = run(room.x + V3(0.05f, 0.f, 0.f), room, 60, 0.3f, 0.035f), r20 = run(room.x + V3(0.05f, 0.f, 0.f), room, 120, 0.3f, 0.0175f);
             std::print("  same 2.1 m path at p_view 0.30: filtered mode {:.4f} in 60 updates, {:.4f} in 120\n", r10.q.back(), r20.q.back());
             check(std::abs(std::log(r10.q.back() / r20.q.back())) < 0.2, "the view evidence is per new view, not per frame");
+        }
+        // (g) fix round 2: no ±∞ LATCH. The mode lives in DOUBLE log-odds; a converged tracker's hazard is exactly 0 (erf
+        //     saturates), so nothing but the evidence moves it — and the evidence must keep moving it both ways.
+        {
+            rc::interaction::RelPose tight = room; tight.P = Eigen::Vector3f(4e-4f, 4e-4f, 3e-4f).asDiagonal();
+            // (g1) a long stretch of views that do not see the doorway (turning, occluded): the mode climbs, stays finite, and
+            //      views that DO see it bring it back.
+            rc::door::AnchorLostMode m;
+            rc::interaction::RelPose t = tight;
+            { rc::interaction::RelPose b = room; rc::door::lost_mode_predict(m, b, nullptr, nullptr, width); }   // born from the room: the first update's hazard
+            for (int k = 0; k < 4000; ++k) { t.x.y() -= 0.05f; rc::door::lost_mode_predict(m, t, nullptr, nullptr, width); rc::door::lost_mode_view(m, t, 0.f, width); }
+            const double high = m.q_logodds;
+            for (int k = 0; k < 20; ++k) { t.x.y() -= 0.05f; rc::door::lost_mode_predict(m, t, nullptr, nullptr, width); rc::door::lost_mode_view(m, t, 1.f, width); }
+            std::print("  4000 unseeing views: mode log-odds {:+.1f}; 20 seeing views later {:+.1f}\n", high, m.q_logodds);
+            check(std::isfinite(high) and high > 100.0, "a long unseeing stretch drives the mode up without latching at +∞");
+            // Each view is bounded (± log 3 × its novelty, here ~0.12 nats per 5 cm), so it comes back at the rate it went up.
+            check(m.q_logodds < high - 1.0, "...and seeing views bring it back (no +∞ latch)");
+            // (g2) many confirming views, then the prior WIDENS (updates refused, odometry) and the beams lock an alias: the
+            //      hazard re-opens the mode and the +34-nat snapshot is believed.
+            rc::door::AnchorLostMode n;
+            rc::interaction::RelPose u = tight;
+            { rc::interaction::RelPose b = room; rc::door::lost_mode_predict(n, b, nullptr, nullptr, width); }
+            for (int k = 0; k < 4000; ++k) { u.x.y() -= 0.05f; rc::door::lost_mode_predict(n, u, nullptr, nullptr, width); rc::door::lost_mode_view(n, u, 1.f, width); }
+            const double low = n.q_logodds;
+            rc::interaction::RelPose wide = u; wide.P = room.P;        // the prior has widened back to σ_model
+            rc::door::lost_mode_predict(n, wide, nullptr, &room, width);
+            rc::interaction::RelPose al = wide; al.x = room.x + V3(-0.52f, -1.32f, 1.47f); al.P = Eigen::Vector3f(5e-4f, 4e-3f, 4e-4f).asDiagonal();
+            const auto e = rc::door::lost_mode_posterior(n, al, room, width);
+            std::print("  4000 confirming views: mode log-odds {:+.1f}; prior widened + alias (room log-ratio {:+.1f}): P(lost) {:.3f}\n", low, e.room_llr, n.p);
+            check(std::isfinite(low) and low < -100.0, "many confirming views drive the mode down without latching at −∞");
+            check(n.p > 0.99f, "...and a widened prior's alias is still believed (no −∞ latch)");
+        }
+        // (h) fix round 2: the update's fit-vs-prior test at the 3–4σ CROSSOVER (fit_is_opening), from the room-initialisation
+        //     prior (σ_model, h = 0.18) — a fit k σ along the wall, k σ across, k σ in yaw, and all three at once.
+        {
+            const Eigen::Matrix3f Pa = Eigen::Vector3f(0.309f * 0.309f, 0.203f * 0.203f, 0.101f * 0.101f).asDiagonal();
+            rc::interaction::RelPose fit; fit.P = rc::door::anchor_axes_to_robot(Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal(), yaw0);
+            const float sig[3] = {0.309f, 0.203f, 0.101f};
+            std::print("  P(fit is the opening) from the room initialisation, by displacement (k σ_model):\n");
+            std::vector<std::array<double, 4>> rows;
+            for (const float k : {1.f, 2.f, 3.f, 3.5f, 4.f, 5.f})
+            {
+                std::array<double, 4> r{};
+                for (int ax = 0; ax < 4; ++ax)
+                {
+                    V3 da = V3::Zero();
+                    if (ax < 3) da(ax) = k * sig[ax]; else da = k * V3(sig[0], sig[1], sig[2]) / std::sqrt(3.f);
+                    V3 d = da; d.head<2>() = Eigen::Rotation2Df(yaw0) * da.head<2>();
+                    fit.x = room.x + d;
+                    r[std::size_t(ax)] = rc::door::fit_is_opening(room, fit, width);
+                }
+                rows.push_back(r);
+                std::print("    k {:.1f}: along {:.3f}  across {:.3f}  yaw {:.3f}  all (same Mahalanobis) {:.3f}\n", k, r[0], r[1], r[2], r[3]);
+            }
+            bool mono = true;
+            for (std::size_t i = 1; i < rows.size(); ++i) for (int a = 0; a < 4; ++a) mono = mono and rows[i][a] <= rows[i - 1][a] + 1e-9;
+            check(mono, "P(fit) falls monotonically with the displacement (continuous, no level)");
+            check(rows[1][0] > 0.95 and rows[1][1] > 0.95 and rows[1][2] > 0.95, "a 2σ correction is accepted (> 0.95) on every axis");
+            check(rows[5][0] < 0.2 and rows[5][1] < 0.2 and rows[5][2] < 0.2, "a 5σ jump is refused (< 0.2) on every axis");
         }
         // (f) the update's own two-hypothesis test and belief_lost are ONE model (alias_log_ratio).
         {
