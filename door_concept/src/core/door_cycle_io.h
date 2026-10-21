@@ -27,6 +27,9 @@
 // nodes NOT created by this agent (created_by() below: the creator is the low agent-id bits of a DSR id, the rule
 // common/affordance_manager/affordance_manager.cpp:620 uses), AND the core ignores upserts/deletes of ids it owns —
 // both sides, so a recording made by a buggy adapter still replays the core's own lifecycle from its own decisions.
+// ★ONE EXCEPTION (ruling, Task 3): a deletion of one of OUR nodes that we did NOT request (ltsm evicting the room we
+// leave and our doors with it — the tourP4 defect) is a foreign act. It is recorded as NodeDeleted{by_other_agent =
+// true}, and the core MUST apply it. Only the deletions door_concept itself requested are left out.
 //
 // ★THE ACTUATOR IS A SYNCHRONOUS PORT, NOT AN EVENT (ruling, Task 2 review). DoorActuator::request/poll/refresh_caps
 // are blocking Ice calls whose replies today's code reads in the same cycle; delaying them a cycle would change
@@ -310,9 +313,15 @@ struct ExecutingEdge
 };
 
 // ═══ EVENTS (asynchronous, latched by the adapter) ════════════════════════════════════════════════════════════════
-// ★Only for nodes NOT created by this agent (see the header note: created_by), and the core ignores ids it owns.
+// ★Only for nodes NOT created by this agent (see the header note: created_by), and the core ignores ids it owns —
+// EXCEPT NodeDeleted{by_other_agent}: one of OUR nodes deleted by somebody else, which the core must apply.
 
-struct NodeDeleted { std::uint64_t id = 0; bool operator==(const NodeDeleted&) const = default; };
+struct NodeDeleted
+{
+    std::uint64_t id = 0;
+    bool by_other_agent = false;                   // true ⇔ the id is OURS and we did not request its deletion
+    bool operator==(const NodeDeleted&) const = default;
+};
 
 /// update_node_signal on an "object" node named door* (modify_node_slot → ensure_instance). The adapter keeps only the
 /// LAST upsert per id per cycle. ⚠`rt_parent` is the RT edge from the node's parent as read; ensure_instance reads

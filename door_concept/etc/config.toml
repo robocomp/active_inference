@@ -190,7 +190,7 @@ AnchorFrameRecord = false   # etc/anchor_frames.bin: every measured anchor cycle
 DecisionLog = false         # etc/door_decisions.bin: binary per-cycle decision log (decision_log.h), the reference for the DoorCore replay
 RecordInputs = false        # DoorCycleInput per compute() cycle (DCIN v1, input_snapshot.h): the tape the DoorCore replay runs over
 RecordInputsPath = "etc/door_inputs.bin"   # rotated per run (3 previous kept)
-RecordMaxMB = 2000          # at the cap recording STOPS (one log line); ~1.5-2.5 MB/s ⇒ ~15-20 min of tour
+RecordMaxMB = 12000         # at the cap recording STOPS (one log line); est. 2-8 MB/s ⇒ a full 40-min tour
 AnchorLog = false           # etc/anchor_log.csv: one row per cycle while an anchor exists
 
 [DoorAffordance]

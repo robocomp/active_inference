@@ -95,7 +95,7 @@ DCIO_FIELDS(ImageFrame, x.format, x.width, x.height, x.stamp_ms, x.frame_ref, x.
 DCIO_FIELDS(AffordanceFlags, x.node_id, x.exists, x.name, x.active, x.epistemic_pending, x.target_epoch, x.target_x,
             x.target_y, x.target_yaw)
 DCIO_FIELDS(ExecutingEdge, x.from, x.to, x.epoch, x.x, x.y, x.yaw)
-DCIO_FIELDS(NodeDeleted, x.id)
+DCIO_FIELDS(NodeDeleted, x.id, x.by_other_agent)
 DCIO_FIELDS(DoorNodeUpserted, x.node, x.rt_parent)
 DCIO_FIELDS(ProviderDoor, x.id, x.xy_mm, x.angle)
 DCIO_FIELDS(ActuatorCaps, x.available, x.continuous_angle, x.requires_human, x.typical_latency_s, x.n_doors, x.note,

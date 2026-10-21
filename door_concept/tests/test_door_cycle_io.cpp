@@ -91,7 +91,7 @@ static DoorEvent rnd_event(Rng& r)
     e.t_steady_ns = r.i64();
     switch (r.upto(4))
     {
-        case 0: e.payload = NodeDeleted{r.u64()}; break;
+        case 0: e.payload = NodeDeleted{r.u64(), r.coin()}; break;
         case 1:
         {
             DoorNodeUpserted u;

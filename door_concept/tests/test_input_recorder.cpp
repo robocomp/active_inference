@@ -125,8 +125,16 @@ int main()
         if (c % 4 == 0)
         {
             check(latch.node_deleted(foreign_id(100 + c), t0 + 1), "foreign delete kept");
-            want_events.push_back({t0 + 1, NodeDeleted{foreign_id(100 + c)}});
-            if (not latch.node_deleted(own_id(200 + c), t0 + 2)) ++own_dropped;   // our own: dropped
+            want_events.push_back({t0 + 1, NodeDeleted{foreign_id(100 + c), false}});
+            {
+                InputLatch::SelfScope self(latch);                                  // door_concept's own delete call
+                if (not latch.node_deleted(own_id(200 + c), t0 + 2)) ++own_dropped;   // self-requested: dropped
+            }
+            if (c % 8 == 0)   // one of OUR nodes deleted by somebody else (ltsm evicting a room: tourP4) — recorded
+            {
+                check(latch.node_deleted(own_id(400 + c), t0 + 2), "own node deleted by another agent latched");
+                want_events.push_back({t0 + 2, NodeDeleted{own_id(400 + c), true}});
+            }
         }
         if (c % 5 == 0)
         {
@@ -200,7 +208,8 @@ int main()
             for (const auto& w : in.walls)   own_absent = own_absent and is_foreign(w.id, kAgent);
             for (const auto& e : in.events)
             {
-                if (const auto* d = std::get_if<NodeDeleted>(&e.payload)) own_absent = own_absent and is_foreign(d->id, kAgent);
+                if (const auto* d = std::get_if<NodeDeleted>(&e.payload))   // own ids only as by_other_agent deletions
+                    own_absent = own_absent and (is_foreign(d->id, kAgent) != d->by_other_agent);
                 if (const auto* u = std::get_if<DoorNodeUpserted>(&e.payload)) own_absent = own_absent and is_foreign(u->node.id, kAgent);
             }
         }
@@ -216,6 +225,26 @@ int main()
         keep_foreign(v, kAgent);
         check(v.size() == 2 and v[0].name == "table" and v[1].name == "x", "keep_foreign drops exactly the own rows");
         check(created_by(own_id(77), kAgent) and not created_by(foreign_id(77), kAgent), "created_by on the low 12 bits");
+    }
+    // self-requested vs another agent's deletion of OUR node (ruling, Task 3)
+    {
+        InputLatch l(kAgent);
+        {
+            InputLatch::SelfScope outer(l);
+            InputLatch::SelfScope inner(l);                                    // nests
+            check(not l.node_deleted(own_id(900), 10), "own delete inside a self scope: not latched");
+        }
+        check(not l.in_self(), "scope closed");
+        check(l.self_deleted().contains(own_id(900)), "self-requested deletion tracked");
+        check(not l.node_deleted(own_id(900), 11), "late echo of a self-requested delete: not latched");
+        check(l.node_deleted(own_id(901), 12), "own node deleted by another agent: latched");
+        check(l.node_deleted(foreign_id(902), 13), "foreign delete: latched");
+        { InputLatch::SelfScope s2(l); check(l.node_deleted(foreign_id(903), 14), "foreign delete inside our scope: still latched"); }
+        DoorCycleInput in;
+        l.begin_cycle(in); l.end_cycle();
+        const std::vector<DoorEvent> want{{12, NodeDeleted{own_id(901), true}}, {13, NodeDeleted{foreign_id(902), false}},
+                                          {14, NodeDeleted{foreign_id(903), false}}};
+        check(in.events == want, "deletion events: by_other_agent exactly on the own id nobody here asked to delete");
     }
 
     // ── 3: the cap ─────────────────────────────────────────────────────────────────────────────────────────────────

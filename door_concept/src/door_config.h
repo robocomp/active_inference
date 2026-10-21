@@ -383,7 +383,7 @@ struct DoorConfig
     // (previous runs rotated beside it); at `record_max_mb` the recording STOPS (the run's start is what matters).
     bool  record_inputs = false;
     std::string record_inputs_path = "etc/door_inputs.bin";
-    int   record_max_mb = 2000;
+    int   record_max_mb = 12000;
 
     // ── Multi-instance birth/associate/death tracker (shared rc::InstanceTracker) ──────────────────
     // "door" masks are associated to instances by a covariance-gated 1-to-1 (cov from the belief Σ),

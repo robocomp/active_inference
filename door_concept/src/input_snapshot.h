@@ -15,6 +15,10 @@
 // ★FOREIGN ONLY (ruling, Task 2 review I-3): object/wall rows and node events of nodes created by THIS agent
 //   (core::created_by) are dropped. The one place own nodes appear is `affordances[]`: our affordance nodes and our
 //   door nodes carry flags the CONTROLLER writes (active / epistemic_pending), which are foreign facts.
+//   And one deletion kind: one of OUR nodes deleted by somebody else (NodeDeleted{by_other_agent}, ruling Task 3).
+//   door_concept's own deletions are told apart by self_scope() (input_latch.h). Strip-button presses are latched as
+//   UiActuationRequest events; the target resolution they do between cycles (nearest_door_for_actuation) is NOT
+//   snapshotted — the core redoes it on the next cycle's snapshot.
 // Main thread only (ts==0 transforms through the main thread's InnerEigenAPI; CLAUDE.md "DSR graph thread-safety").
 #pragma once
 #include <cstdint>
@@ -65,6 +69,8 @@ public:
     /// The startup load: raw text of both files as initialize() reads them, and the room it then enters.
     void on_identity_load(const std::string& identity_path, const std::string& registration_path,
                           std::optional<std::uint64_t> initial_room, const std::string& initial_room_name);
+    /// door_concept's own code is running: deletions it causes are self-requested (input_latch.h). RAII, nests.
+    [[nodiscard]] InputLatch::SelfScope self_scope() { return InputLatch::SelfScope{latch_}; }
     /// One call through the actuator port (in a cycle → that cycle; from a Qt callback → the next one).
     void on_actuator_call(core::ActuatorCall c) { if (armed_ and not recorder_.stopped()) latch_.actuator_call(std::move(c)); }
 

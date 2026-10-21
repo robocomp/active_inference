@@ -245,6 +245,7 @@ void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
         return;
+    const auto self_scope = input_snapshot_.self_scope();
 
     // ★SEVER THE GRAPH CALLBACKS BEFORE ANY TEARDOWN. This agent connects del_node_signal to del_node_slot,
     // and cleanup_owned_nodes() below calls G->delete_node() — from the MAIN thread, where emitter and
@@ -387,6 +388,7 @@ void SpecificWorker::initialize()
     // file itself is opened at the end of initialize(), once the effective config has been published.
     if (cfg_.record_inputs)
         input_snapshot_.arm(static_cast<std::uint32_t>(agent_id));
+    const auto self_scope = input_snapshot_.self_scope();   // initialize()'s deletes are ours
 
     // ★THE WHOLE PRESENCE PROTOCOL IS SHARED (common/concept_presence). The 134 lines that used to sit here
     // were byte-identical across hood/refrigerator/table and differed elsewhere only in comment wording — while
@@ -411,6 +413,7 @@ void SpecificWorker::initialize()
             // One-shot, POST-SYNC: leftovers from a crashed previous run. The initialize() sweep can run before
             // those nodes arrive from the persistent DSR server, and this fires before the first compute().
             .on_first_operating = [this] {
+                const auto self_scope = input_snapshot_.self_scope();
                 const auto before = input_snapshot_.armed() ? own_node_ids() : std::vector<std::uint64_t>{};
                 remove_stale_affordance_nodes();
                 // Anchors a SIGKILLed previous run left hanging from the robot (they may sync in after initialize()).
@@ -713,6 +716,7 @@ void SpecificWorker::initialize()
         // from the one anybody had ever tested.
         const auto fire = [this](bool open)
         {
+            const auto self_scope = input_snapshot_.self_scope();
             // Input recording: the press itself is the event (the core redoes the target resolution next cycle).
             if (input_snapshot_.armed())
                 input_snapshot_.on_ui_request(open, door_actuation_pick_ and door_actuation_pick_->currentIndex() > 0
@@ -1197,6 +1201,8 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
 
 void SpecificWorker::compute()
 {
+    // Input recording: every delete this cycle causes is OURS (input_latch.h — what tells it from another agent's).
+    const auto self_scope = input_snapshot_.self_scope();
     // ★ONE graph walk per cycle for the SHARED mutual-exclusion rule: who else claims room space.
     // Feeds BOTH the birth filter (a candidate on somebody else's object accrues no evidence) and
     // the existence occupancy discount. Main thread — collect_graph_obstacles uses ts==0 (CLAUDE.md).

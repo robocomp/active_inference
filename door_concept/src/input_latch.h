@@ -12,10 +12,18 @@
 // ★OWN NODES ARE NOT RECORDED (ruling, Task 2 review I-3): node events and object rows are kept only for nodes NOT
 // created by this agent (core::created_by — the creator's agent id rides in the low 12 bits of every DSR id). The core
 // mirrors what it wrote; replaying our own deletes back into it would double-apply them.
+// ★…EXCEPT A DELETION OF OURS WE DID NOT REQUEST (ruling, Task 3): ltsm evicting the room we leave deletes our door
+// nodes (tourP4). That is a foreign act and is latched as NodeDeleted{by_other_agent = true}. What tells the two
+// apart is WHO WAS RUNNING: door_concept's own deletes are issued from its own code on the main thread, where Qt's
+// Auto connection resolves to DIRECT, so del_node_signal reaches the slot SYNCHRONOUSLY, inside the delete call,
+// inside a SelfScope (compute(), the startup/first-Operating sweeps, the strip callbacks, shutdown). Another agent's
+// delete arrives from the DDS reader thread, is QUEUED, and runs from the event loop — never inside a SelfScope
+// (nothing here spins the loop). The ids deleted in-scope are kept (self_deleted), so a late echo is dropped too.
 #pragma once
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "core/door_cycle_io.h"
@@ -42,13 +50,38 @@ public:
     [[nodiscard]] std::uint32_t agent_id() const { return agent_id_; }
 
     // ── events ────────────────────────────────────────────────────────────────────────────────────────────────
-    /// A node deleted. Own ids are dropped (returns false).
+    /// door_concept's own code is running (its deletes are self-requested). Nests.
+    void enter_self() { ++self_depth_; }
+    void leave_self() { if (self_depth_ > 0) --self_depth_; }
+    [[nodiscard]] bool in_self() const { return self_depth_ > 0; }
+    struct SelfScope
+    {
+        InputLatch& l;
+        explicit SelfScope(InputLatch& x) : l(x) { l.enter_self(); }
+        ~SelfScope() { l.leave_self(); }
+        SelfScope(const SelfScope&) = delete;
+        SelfScope& operator=(const SelfScope&) = delete;
+    };
+    /// A node deleted. Foreign ids are latched; an own id is latched with by_other_agent = true unless door_concept
+    /// requested the deletion (in a SelfScope now, or seen deleted in one before). Returns whether it was latched.
     bool node_deleted(std::uint64_t id, std::int64_t t_ns)
     {
-        if (not is_foreign(id, agent_id_)) return false;
-        pending_.push_back({t_ns, core::NodeDeleted{id}});
+        if (is_foreign(id, agent_id_))
+        {
+            pending_.push_back({t_ns, core::NodeDeleted{id, false}});
+            return true;
+        }
+        if (in_self())
+        {
+            self_deleted_.insert(id);      // tracked: our own delete call
+            return false;
+        }
+        if (self_deleted_.contains(id))
+            return false;                  // a late echo of a delete we requested
+        pending_.push_back({t_ns, core::NodeDeleted{id, true}});
         return true;
     }
+    [[nodiscard]] const std::unordered_set<std::uint64_t>& self_deleted() const { return self_deleted_; }
     /// A foreign door node appeared/changed. Only the LAST upsert per id per cycle is kept, at the position of its
     /// latest arrival (an earlier upsert of the same id is superseded, not reordered around).
     bool door_upserted(core::DoorNodeUpserted u, std::int64_t t_ns)
@@ -108,6 +141,8 @@ private:
     std::vector<core::ActuatorCall>   pending_calls_;
     std::optional<core::IdentityLoad> identity_load_;
     core::DoorCycleInput*             cycle_ = nullptr;
+    int                               self_depth_ = 0;
+    std::unordered_set<std::uint64_t> self_deleted_;   // ids whose deletion door_concept requested (never reused: DSR ids are unique)
 };
 
 }  // namespace rc::door
